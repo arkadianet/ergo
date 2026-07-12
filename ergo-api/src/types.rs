@@ -184,6 +184,10 @@ pub struct ApiStatus {
     /// and sync fresh). `None` in normal operation.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub sync_wedged: Option<ApiSyncWedged>,
+    /// Shadow-validation status (`[shadow]` — live cross-check against a
+    /// Scala reference node). Present only when the mode is enabled.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub shadow: Option<ApiShadowStatus>,
     /// Monotonic count of unconfirmed-tx ids this node REQUESTED from peers
     /// in response to a tx-typed `Inv` (the
     /// `ergo_node_mempool_tx_requested_total` Prometheus counter source).
@@ -270,6 +274,38 @@ pub struct ApiSyncWedged {
     /// is PUBLISHED (staleness bounded by `snapshot_age_ms`, ~1 s ticks) —
     /// not recomputed per read.
     pub age_ms: u64,
+}
+
+/// Shadow-validation status (`[shadow]`): the outcome of the live
+/// cross-check against the configured Scala reference node. Sourced from
+/// the watch task's shared state at snapshot publish; backs the
+/// `ergo_node_shadow_*` Prometheus series and the `shadowDivergence`
+/// operator event.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct ApiShadowStatus {
+    /// Reference answered on the most recent compare tick.
+    pub reference_reachable: bool,
+    /// Highest height a compare completed at (0 = none yet).
+    pub last_compared_height: u32,
+    /// Confirmed divergences since node start (monotonic).
+    pub divergence_total: u64,
+    /// The ACTIVE confirmed divergence, or `None` when the chains agree.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub diverged: Option<ApiShadowDivergence>,
+}
+
+/// One active shadow divergence: `header_mismatch` (this node and the
+/// reference follow different canonical headers at `height`) or
+/// `tip_stall` (the reference's full-block tip is advancing past ours).
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct ApiShadowDivergence {
+    /// `header_mismatch | tip_stall`.
+    pub kind: String,
+    pub height: u32,
+    /// Our canonical header id at `height` (empty for `tip_stall`).
+    pub ours: String,
+    /// The reference's canonical header id at `height` (empty for `tip_stall`).
+    pub theirs: String,
 }
 
 /// Bootstrap progress for the Mode 2 (UTXO snapshot) consume side.

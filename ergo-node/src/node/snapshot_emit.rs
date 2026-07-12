@@ -194,6 +194,24 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
             age_ms: now.saturating_duration_since(w.since).as_millis() as u64,
         });
 
+    // Shadow-validation outcome (None when the mode is off).
+    let shadow = state.shadow.as_ref().map(|sh| {
+        use std::sync::atomic::Ordering;
+        ergo_api::types::ApiShadowStatus {
+            reference_reachable: !sh.reference_unreachable.load(Ordering::Relaxed),
+            last_compared_height: sh.last_compared_height.load(Ordering::Relaxed),
+            divergence_total: sh.divergence_total.load(Ordering::Relaxed),
+            diverged: sh
+                .snapshot_active()
+                .map(|d| ergo_api::types::ApiShadowDivergence {
+                    kind: d.kind.to_string(),
+                    height: d.height,
+                    ours: d.ours,
+                    theirs: d.theirs,
+                }),
+        }
+    });
+
     let peer_count = state.peer_manager.connected_peers().count() as u32;
     let peers_vec: Vec<&ergo_p2p::peer::PeerInfo> = state.peer_manager.connected_peers().collect();
     // Most-recent peer message: convert each peer's `last_seen` Instant to
@@ -342,6 +360,10 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
                 sync_wedged: sync_wedged
                     .as_ref()
                     .map(|w| (w.stuck_height, w.stuck_block_id.clone())),
+                shadow_diverged: state.shadow.as_ref().and_then(|sh| {
+                    sh.snapshot_active()
+                        .map(|d| (d.kind.to_string(), d.height, d.ours, d.theirs))
+                }),
             },
         );
         for r in tick_reorgs {
@@ -439,6 +461,7 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
         last_block_apply_error,
         block_apply_errors_total,
         sync_wedged,
+        shadow,
         mempool_tx_requested_total: state.mempool_tx_requested_total,
         mempool_peer_tx_admitted_total: state.mempool_peer_tx_admitted_total,
         mempool_peer_tx_rejected_total: state.mempool_peer_tx_rejected_total,
@@ -1047,6 +1070,20 @@ fn build_events_projection(
                     ev.detail = Some(match detail {
                         Some(d) => format!("{status} ({d})"),
                         None => status,
+                    });
+                }
+                K::ShadowDivergence {
+                    kind,
+                    height,
+                    ours,
+                    theirs,
+                } => {
+                    ev.kind = "shadowDivergence".into();
+                    ev.height = Some(height);
+                    ev.detail = Some(if ours.is_empty() {
+                        kind
+                    } else {
+                        format!("{kind} ours={ours} theirs={theirs}")
                     });
                 }
                 K::SyncWedged { height, header_id } => {

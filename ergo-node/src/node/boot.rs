@@ -830,6 +830,69 @@ async fn run_inner_with_backend(
             }
         };
 
+    // Shadow validation (operator workload §D): live cross-check vs a Scala
+    // reference node. Opt-in; the task never touches the apply path — it
+    // reads through its own `ChainStoreReader` and writes only the shared
+    // `ShadowState` the snapshot emitter / event differ project out.
+    let (shadow_state, shadow_task_handle): (
+        Option<Arc<super::shadow_watch::ShadowState>>,
+        Option<JoinHandle<()>>,
+    ) = if config.shadow_config.enabled {
+        match super::shadow_watch::HttpShadowReference::new(
+            &config.shadow_config.reference_url,
+            config.shadow_config.request_timeout_secs,
+        ) {
+            Ok(reference) => {
+                let st = Arc::new(super::shadow_watch::ShadowState::default());
+                let tip_reader = store.reader_handle();
+                let ids_reader = store.reader_handle();
+                let local = super::shadow_watch::LocalChainView {
+                    // Committed full-block tip; 0 (skip-compare floor) on any
+                    // read error — the shadow path never propagates store
+                    // errors into alerts.
+                    tip: move || {
+                        tip_reader
+                            .committed_tip()
+                            .ok()
+                            .flatten()
+                            .map(|(h, _)| h)
+                            .unwrap_or(0)
+                    },
+                    // Canonical best-chain id only: divergence is about the
+                    // chain we FOLLOW, never validated orphans.
+                    header_ids_at: move |h| {
+                        ids_reader
+                            .get_header_id_at_height(h)
+                            .ok()
+                            .flatten()
+                            .map(|id| vec![hex::encode(id)])
+                            .unwrap_or_default()
+                    },
+                };
+                info!(
+                    reference = %config.shadow_config.reference_url,
+                    interval_secs = config.shadow_config.interval_secs,
+                    lag_tolerance = config.shadow_config.lag_tolerance,
+                    "shadow validation enabled"
+                );
+                let task = tokio::spawn(super::shadow_watch::run(
+                    config.shadow_config.clone(),
+                    reference,
+                    local,
+                    st.clone(),
+                ));
+                (Some(st), Some(task))
+            }
+            Err(error) => {
+                // Fail loudly at boot: an enabled shadow that silently can't
+                // watch would be the false comfort this mode exists to kill.
+                return Err(format!("[shadow] reference client failed to build: {error}").into());
+            }
+        }
+    } else {
+        (None, None)
+    };
+
     // 7. Hydrate + recover + build header index.
     //
     // The executor reads through the `StateBackendKind` enum — it is
@@ -1479,6 +1542,7 @@ async fn run_inner_with_backend(
         store,
         coordinator,
         executor,
+        shadow: shadow_state,
         peer_manager,
         registry: PeerRegistry::new(),
         event_tx: event_tx.clone(),
@@ -1756,6 +1820,7 @@ async fn run_inner_with_backend(
         loop_handle,
         api_handle,
         inbound_handle,
+        shadow_task_handle,
         indexer_cancel,
         indexer_task_handle,
         anchor_builder_handle: Some(anchor_builder_handle),

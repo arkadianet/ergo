@@ -46,6 +46,9 @@ tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender   = { workspace = true }
 async-trait        = { workspace = true }
+# Shadow-validation reference client (loopback/LAN Scala node). Same
+# rustls-only dependency policy as the ergo-api webhook sink.
+reqwest            = { workspace = true, features = ["rustls-tls", "json"] }
 thiserror          = { workspace = true }
 sysinfo            = { workspace = true }
 k256               = { workspace = true }

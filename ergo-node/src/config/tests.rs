@@ -1789,3 +1789,67 @@ fn voting_section_unknown_field_rejected() {
         "error: {err}"
     );
 }
+
+// ----- [shadow] section (workstream D) -------------------------------------
+
+#[test]
+fn shadow_section_absent_resolves_disabled_defaults() {
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
+    let cfg = NodeConfig::load(cli).expect("load");
+    assert!(!cfg.shadow_config.enabled);
+    assert_eq!(cfg.shadow_config.reference_url, "http://127.0.0.1:9053");
+    assert_eq!(cfg.shadow_config.interval_secs, 30);
+    assert_eq!(cfg.shadow_config.lag_tolerance, 3);
+    assert_eq!(cfg.shadow_config.stall_gap_threshold, 10);
+    assert_eq!(cfg.shadow_config.request_timeout_secs, 5);
+}
+
+#[test]
+fn shadow_enabled_resolves_and_trims_reference_url() {
+    let toml = write_toml(
+        "[shadow]\n\
+         enabled = true\n\
+         reference_url = \"  http://10.0.0.5:9053  \"\n\
+         interval_secs = 12\n\
+         lag_tolerance = 5\n",
+    );
+    let cli = minimal_cli(Some(&toml));
+    let cfg = NodeConfig::load(cli).expect("load");
+    assert!(cfg.shadow_config.enabled);
+    assert_eq!(cfg.shadow_config.reference_url, "http://10.0.0.5:9053");
+    assert_eq!(cfg.shadow_config.interval_secs, 12);
+    assert_eq!(cfg.shadow_config.lag_tolerance, 5);
+    // Unset knobs keep defaults.
+    assert_eq!(cfg.shadow_config.stall_gap_threshold, 10);
+}
+
+#[test]
+fn shadow_unknown_field_is_a_parse_error() {
+    let toml = write_toml("[shadow]\nenabld = true\n");
+    let cli = minimal_cli(Some(&toml));
+    assert!(NodeConfig::load(cli).is_err(), "deny_unknown_fields");
+}
+
+#[test]
+fn shadow_enabled_rejects_bad_scheme_and_zero_knobs() {
+    for body in [
+        "[shadow]\nenabled = true\nreference_url = \"ws://x:1\"\n",
+        "[shadow]\nenabled = true\ninterval_secs = 0\n",
+        "[shadow]\nenabled = true\nrequest_timeout_secs = 0\n",
+        "[shadow]\nenabled = true\nstall_gap_threshold = 0\n",
+    ] {
+        let toml = write_toml(body);
+        let cli = minimal_cli(Some(&toml));
+        assert!(NodeConfig::load(cli).is_err(), "should reject: {body}");
+    }
+}
+
+#[test]
+fn shadow_disabled_skips_validation() {
+    // A dormant (disabled) section must never brick boot, even when junk.
+    let toml = write_toml("[shadow]\nreference_url = \"ws://junk\"\ninterval_secs = 0\n");
+    let cli = minimal_cli(Some(&toml));
+    let cfg = NodeConfig::load(cli).expect("dormant section loads");
+    assert!(!cfg.shadow_config.enabled);
+}

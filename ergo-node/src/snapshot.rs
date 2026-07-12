@@ -216,6 +216,7 @@ impl NodeSnapshot {
                 last_block_apply_error: None,
                 block_apply_errors_total: 0,
                 sync_wedged: None,
+                shadow: None,
                 mempool_tx_requested_total: 0,
                 mempool_peer_tx_admitted_total: 0,
                 mempool_peer_tx_rejected_total: 0,
@@ -501,6 +502,10 @@ pub struct SnapshotParts<'a> {
     /// `ApiStatus.sync_wedged` and the `HealthStatus::Wedged` overlay in
     /// `build_snapshot`.
     pub sync_wedged: Option<ergo_api::types::ApiSyncWedged>,
+    /// Shadow-validation outcome (`[shadow]`), projected at publish.
+    /// `None` when the mode is off. Drives `ApiStatus.shadow` and the
+    /// `ergo_node_shadow_*` metrics.
+    pub shadow: Option<ergo_api::types::ApiShadowStatus>,
     /// P2: monotonic count of unconfirmed-tx ids requested from peers, for
     /// the `ergo_node_mempool_tx_requested_total` Prometheus counter.
     pub mempool_tx_requested_total: u64,
@@ -564,6 +569,7 @@ fn build_snapshot(p: SnapshotParts<'_>, info: ApiInfo, last_progress_age_ms: u64
         last_block_apply_error: p.last_block_apply_error.clone(),
         block_apply_errors_total: p.block_apply_errors_total,
         sync_wedged: p.sync_wedged.clone(),
+        shadow: p.shadow.clone(),
         mempool_tx_requested_total: p.mempool_tx_requested_total,
         mempool_peer_tx_admitted_total: p.mempool_peer_tx_admitted_total,
         mempool_peer_tx_rejected_total: p.mempool_peer_tx_rejected_total,
@@ -994,6 +1000,7 @@ mod tests {
             last_block_apply_error: None,
             block_apply_errors_total: 0,
             sync_wedged: None,
+            shadow: None,
             mempool_tx_requested_total: 0,
             mempool_peer_tx_admitted_total: 0,
             mempool_peer_tx_rejected_total: 0,

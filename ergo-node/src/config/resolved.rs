@@ -165,6 +165,10 @@ pub struct NodeConfig {
     /// Mempool sort policy string: "cost" | "size" | "min". Validated at
     /// load time — `from_config(sort_policy)` will always succeed.
     pub mempool_sort_policy: String,
+    /// `[shadow]` — shadow validation vs a Scala reference node (operator
+    /// workload §D). Off by default; when enabled, boot spawns the watch
+    /// task and the divergence surfaces (status/metrics/event) go live.
+    pub shadow_config: crate::node::ShadowConfig,
     /// Resolved indexer configuration. Defaults match
     /// `IndexerConfig::default()` (disabled, poll_idle 1000ms,
     /// db_filename "indexer.redb"). When `enabled = false` the node
