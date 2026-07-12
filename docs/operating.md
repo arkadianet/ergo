@@ -381,11 +381,11 @@ divergence fires one event per incident.
 
 Work the list in order; stop at the first decisive answer.
 
-1. **Is it still active?** `curl :9063/api/v1/node/status | jq .shadow`. If `diverged`
+1. **Is it still active?** `curl :9099/api/v1/node/status | jq .shadow`. If `diverged`
    is null again, it was a transient the latch already cleared (deep
    cross-node reorg race). Note it, don't page.
 2. **`tip_stall`: look at OUR apply path first.**
-   `curl -s :9063/api/v1/node/status | jq '.last_block_apply_error, .block_apply_errors_total'` and
+   `curl -s :9099/api/v1/node/status | jq '.last_block_apply_error, .block_apply_errors_total'` and
    `journalctl | grep block_apply`. A rejection loop on one block = WE are
    probably rejecting something valid (reject-valid). Capture the block id
    + rejection reason — that pair is the bug report. Check

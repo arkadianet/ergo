@@ -1028,9 +1028,10 @@ pub struct ApiMinerStats {
 /// One operator event for `GET /api/v1/events` — flat shape with optional
 /// per-kind fields so the feed renders without a type registry. `kind` is
 /// one of `blockApplied` / `reorg` / `peerConnected` / `peerDisconnected` /
-/// `indexerStatus`. Reorg-only fields (`depth`, `dropped_header_ids`) are
-/// best-effort from the node's 32-block committed tail; deeper orphan ids are
-/// not fabricated.
+/// `indexerStatus` / `syncWedged` / `shadowDivergence`. Reorg-only fields
+/// (`depth`, `dropped_header_ids`, `returned_tx_ids`, `returned_txs_total`,
+/// `delivered_by`) are best-effort from the node's 32-block committed tail
+/// and the tip-change enrichment; deeper orphan ids are not fabricated.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiNodeEvent {
@@ -1087,10 +1088,8 @@ pub struct ApiReorgRecord {
     /// True when dropped ids hit the 32-block committed-tail cap.
     pub orphans_truncated: bool,
     /// Rolled-back tx ids returned to the mempool (first 128; see total).
-    #[serde(default)]
     pub returned_tx_ids: Vec<String>,
     /// Uncapped rolled-back tx count.
-    #[serde(default)]
     pub returned_txs_total: u32,
     /// Peer that first delivered the winning tip header, when known.
     #[serde(skip_serializing_if = "Option::is_none", default)]

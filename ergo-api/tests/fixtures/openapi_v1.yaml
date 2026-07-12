@@ -5514,6 +5514,8 @@ components:
       - depth
       - droppedHeaderIds
       - orphansTruncated
+      - returnedTxIds
+      - returnedTxsTotal
       properties:
         deliveredBy:
           type:
