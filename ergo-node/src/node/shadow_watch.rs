@@ -490,6 +490,21 @@ mod tests {
         assert!(state.snapshot_active().is_none());
     }
 
+    /// LIVE smoke vs a real Scala node (dev box :9053) — run explicitly:
+    /// `cargo test -p ergo-node --lib shadow_watch -- --ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn live_reference_smoke() {
+        let r = HttpShadowReference::new("http://127.0.0.1:9053", 5).expect("client");
+        let tip = r.tip_height().await.expect("reference /info");
+        assert!(tip > 1_000_000, "mainnet reference tip sane: {tip}");
+        let ids = r
+            .header_ids_at(tip.saturating_sub(3))
+            .await
+            .expect("reference /blocks/at");
+        assert_eq!(ids.first().map(|s| s.len()), Some(64), "canonical id hex");
+    }
+
     #[tokio::test]
     async fn near_genesis_skips_compare() {
         let reference = FakeReference::new(2, "bb");

@@ -552,6 +552,35 @@ mod tests {
 
     /// The deep-fork wedge is a standing condition re-observed every tick:
     /// it must emit once per distinct stuck tip — no per-tick duplicates —
+    /// A latched shadow divergence emits once per incident identity, stays
+    /// quiet while standing, and re-arms after clearing so a NEW divergence
+    /// (different height or kind) reports again.
+    #[test]
+    fn shadow_divergence_emits_once_per_incident() {
+        let mut ring = EventFeedRing::new();
+        let mut prev = FeedPrev::default();
+        let recent = [blk(100, "aa")];
+        derive_events(&mut ring, &mut prev, obs((100, "aa"), &recent, &[], None));
+
+        let diverged = |kind: &str, h: u32| {
+            let mut o = obs((100, "aa"), &recent, &[], None);
+            o.shadow_diverged = Some((kind.to_string(), h, "oo".into(), "tt".into()));
+            o
+        };
+        derive_events(&mut ring, &mut prev, diverged("header_mismatch", 97));
+        // Standing latch: no duplicate.
+        derive_events(&mut ring, &mut prev, diverged("header_mismatch", 97));
+        assert_eq!(kinds(&ring), vec!["shadow:header_mismatch:97"]);
+
+        // Cleared, then a NEW incident (stall) reports again.
+        derive_events(&mut ring, &mut prev, obs((100, "aa"), &recent, &[], None));
+        derive_events(&mut ring, &mut prev, diverged("tip_stall", 100));
+        assert_eq!(
+            kinds(&ring),
+            vec!["shadow:header_mismatch:97", "shadow:tip_stall:100"]
+        );
+    }
+
     /// and re-arm after recovery so a later wedge on a new tip reports.
     #[test]
     fn sync_wedged_emits_once_per_stuck_tip() {
