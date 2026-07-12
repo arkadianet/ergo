@@ -187,6 +187,10 @@ pub struct TickMemory {
     /// The stall gap (in `stall_gap_threshold` steps) already latched, so a
     /// persistent stall re-fires only as it WORSENS by another full step.
     stall_steps_latched: u32,
+    /// Our tip at the previous tick — S2 requires the gap AND no local
+    /// progress: a node CATCHING UP is behind but advancing, not stalled
+    /// (found live: a days-off dev node false-fired within one tick).
+    last_our_tip: Option<u32>,
 }
 
 /// One comparator tick. Pure with respect to its inputs; all IO is behind
@@ -216,8 +220,13 @@ pub async fn tick<T, H>(
     let our_tip = (local.tip)();
 
     // ----- S2: tip stall (reject-valid class) -----
+    // Stall = the reference pulls ahead while WE make no progress. Gap
+    // alone is catch-up, not divergence.
+    let progressed = memory.last_our_tip.is_some_and(|prev| our_tip > prev);
+    let first_tick = memory.last_our_tip.is_none();
+    memory.last_our_tip = Some(our_tip);
     let gap = ref_tip.saturating_sub(our_tip);
-    if gap > config.stall_gap_threshold {
+    if gap > config.stall_gap_threshold && !progressed && !first_tick {
         let steps = gap / config.stall_gap_threshold.max(1);
         if steps > memory.stall_steps_latched {
             memory.stall_steps_latched = steps;
@@ -480,20 +489,36 @@ mod tests {
         let reference = FakeReference::new(1015, "aa");
         let state = ShadowState::default();
         let mut mem = TickMemory::default();
-        // Gap 15 > threshold 10 → fires immediately (no re-check: the gap IS
-        // already a persistent observation).
+        // Tick 1 establishes the progress baseline — never fires.
+        tick(&cfg(), &reference, &local(1000, "aa"), &state, &mut mem).await;
+        assert_eq!(state.divergence_total.load(Ordering::Relaxed), 0);
+        // Tick 2: gap 15 > threshold 10 AND no local progress → stall.
         tick(&cfg(), &reference, &local(1000, "aa"), &state, &mut mem).await;
         assert_eq!(state.divergence_total.load(Ordering::Relaxed), 1);
         assert_eq!(state.snapshot_active().unwrap().kind, "tip_stall");
         // Same gap: latched, no re-fire.
         tick(&cfg(), &reference, &local(1000, "aa"), &state, &mut mem).await;
         assert_eq!(state.divergence_total.load(Ordering::Relaxed), 1);
-        // Gap doubles past the next step → re-fires once.
+        // Gap doubles past the next step (still no progress) → re-fires once.
         reference.tip.store(1025, Ordering::Relaxed);
         tick(&cfg(), &reference, &local(1000, "aa"), &state, &mut mem).await;
         assert_eq!(state.divergence_total.load(Ordering::Relaxed), 2);
         // We catch back up → latch clears.
         tick(&cfg(), &reference, &local(1024, "aa"), &state, &mut mem).await;
+        assert!(state.snapshot_active().is_none());
+    }
+
+    #[tokio::test]
+    async fn catching_up_is_not_a_stall() {
+        // A node far behind but APPLYING blocks is healthy catch-up — the
+        // false positive the first live soak surfaced within one tick.
+        let reference = FakeReference::new(5000, "aa");
+        let state = ShadowState::default();
+        let mut mem = TickMemory::default();
+        for tip in [1000, 1200, 1400, 1600] {
+            tick(&cfg(), &reference, &local(tip, "aa"), &state, &mut mem).await;
+        }
+        assert_eq!(state.divergence_total.load(Ordering::Relaxed), 0);
         assert!(state.snapshot_active().is_none());
     }
 
