@@ -363,7 +363,7 @@ block-apply path):
 | `header_mismatch` | different canonical header id at a depth-floored height | accept-invalid (we kept a branch the reference refused) |
 | `tip_stall` | the reference's full-block tip advances while ours does not | reject-valid (we refused a block the network accepted) |
 
-Surfaces: `ApiStatus.shadow` on `/status`, `shadowDivergence` on
+Surfaces: `ApiStatus.shadow` on `GET /api/v1/node/status`, `shadowDivergence` on
 `GET /api/v1/events` + the WS bus, and four `/metrics` series
 (`ergo_node_shadow_divergence_total`, `_last_compared_height`,
 `_reference_unreachable`, `_diverged`) — emitted only when the mode is
@@ -381,11 +381,11 @@ divergence fires one event per incident.
 
 Work the list in order; stop at the first decisive answer.
 
-1. **Is it still active?** `curl :9063/status | jq .shadow`. If `diverged`
+1. **Is it still active?** `curl :9063/api/v1/node/status | jq .shadow`. If `diverged`
    is null again, it was a transient the latch already cleared (deep
    cross-node reorg race). Note it, don't page.
 2. **`tip_stall`: look at OUR apply path first.**
-   `jq '.last_block_apply_error, .block_apply_errors_total' /status` and
+   `curl -s :9063/api/v1/node/status | jq '.last_block_apply_error, .block_apply_errors_total'` and
    `journalctl | grep block_apply`. A rejection loop on one block = WE are
    probably rejecting something valid (reject-valid). Capture the block id
    + rejection reason — that pair is the bug report. Check
