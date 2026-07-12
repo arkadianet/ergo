@@ -431,9 +431,10 @@ valuable debugging artifact this node can produce.
 
 ### Runbook: "it looks stuck" — query these first
 
-Symptom → the metrics that decide it (all on `GET /metrics`); the point is
-that no false "height 0 / stalled" signal exists without a companion gauge
-explaining it.
+Symptom → the signals that decide it — Prometheus series on `GET /metrics`
+plus the JSON status fields on `GET /api/v1/node/status` where noted. The
+point is that no false "height 0 / stalled" signal exists without a
+companion gauge explaining it.
 
 | Symptom | Decisive metrics | Reading |
 |---|---|---|

@@ -7,9 +7,10 @@ The node pushes typed events on two surfaces backed by ONE producer chain:
 - **`GET /api/v1/ws`** — the realtime WebSocket bus: subscribe / resume /
   backfill with per-channel filtering.
 
-Both derive from the same snapshot differ, so a consumer can mix them (poll
-to catch up, subscribe to stay current) without seeing contradictory
-histories. This page freezes the vocabulary: kinds, channels, required
+The REST ring and the WebSocket bus are two views over the same
+snapshot-diff producer chain — one differ derives the events, both surfaces
+serve them — so a consumer can mix them (poll to catch up, subscribe to
+stay current) without seeing contradictory histories. This page freezes the vocabulary: kinds, channels, required
 fields, and sequence semantics. Additions are backward-compatible (new kinds
 / new optional fields); renames and removals are breaking and will not
 happen casually.
@@ -66,8 +67,14 @@ WS event payloads use the same field vocabulary as the coarse feed (the
 
 ## Transport limits
 
-- Frames over **64 KiB** are rejected; heartbeat every **15 s** (respond or
-  the socket closes as idle); per-IP socket caps and a per-socket
-  control-frame rate limit answer `rate_limited`.
+- Frames over **64 KiB** are rejected.
+- The server emits a `heartbeat` frame every **15 s**. The client must
+  produce SOME inbound within the idle window of **2× the interval
+  (~30 s)** — a protocol `{"op":"ping"}` frame or a WebSocket-level
+  ping/pong both count — or the server closes the socket with
+  `idle_timeout`. (`{"op":"ping"}` is the idiomatic keepalive: it also
+  returns `pong` with the current `latest_seq`.)
+- Per-IP socket caps and a per-socket control-frame rate limit answer
+  `rate_limited`.
 - Slow consumers are never buffered unboundedly: the per-socket queue drops
   and the socket closes with `slow_consumer` — reconnect and resume.
