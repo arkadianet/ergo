@@ -349,6 +349,26 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
     let tip_changed = match outcome {
         PollOutcome::Initialized(_) | PollOutcome::NoChange => false,
         PollOutcome::Emit(state_diff) => {
+            // Workstream C: a rollback (non-empty `demoted`) captures its
+            // enrichment HERE — the only place the returned-tx set and the
+            // winning tip meet — for the event differ to attach by tip id.
+            if !state_diff.demoted.is_empty() {
+                let cap = crate::node::state::ReorgEnrichment::RETURNED_IDS_CAP;
+                state.last_reorg_enrichment = Some(crate::node::state::ReorgEnrichment {
+                    tip_id: hex::encode(state_diff.new_tip.header_id),
+                    returned_tx_ids: state_diff
+                        .demoted
+                        .iter()
+                        .take(cap)
+                        .map(|d| hex::encode(d.tx_id))
+                        .collect(),
+                    returned_txs_total: state_diff.demoted.len() as u32,
+                    delivered_by: state
+                        .first_deliverer_ring
+                        .get(&state_diff.new_tip.header_id)
+                        .map(|f| f.peer.to_string()),
+                });
+            }
             let mempool_diff: ergo_mempool::types::TxDiff = state_diff.into();
             let mempool_actions = state.mempool.on_tip_change(&mempool_diff);
             let routed = route_mempool_actions(state, mempool_actions);

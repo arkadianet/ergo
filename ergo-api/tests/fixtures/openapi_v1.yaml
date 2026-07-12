@@ -5514,7 +5514,14 @@ components:
       - depth
       - droppedHeaderIds
       - orphansTruncated
+      - returnedTxIds
+      - returnedTxsTotal
       properties:
+        deliveredBy:
+          type:
+          - string
+          - 'null'
+          description: Peer that first delivered the winning tip header, when known.
         depth:
           type: integer
           format: int32
@@ -5532,6 +5539,16 @@ components:
         orphansTruncated:
           type: boolean
           description: True when dropped ids hit the 32-block committed-tail cap.
+        returnedTxIds:
+          type: array
+          items:
+            type: string
+          description: Rolled-back tx ids returned to the mempool (first 128; see total).
+        returnedTxsTotal:
+          type: integer
+          format: int32
+          description: Uncapped rolled-back tx count.
+          minimum: 0
         unixMs:
           type: integer
           format: int64

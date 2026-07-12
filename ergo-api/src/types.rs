@@ -1028,9 +1028,10 @@ pub struct ApiMinerStats {
 /// One operator event for `GET /api/v1/events` — flat shape with optional
 /// per-kind fields so the feed renders without a type registry. `kind` is
 /// one of `blockApplied` / `reorg` / `peerConnected` / `peerDisconnected` /
-/// `indexerStatus`. Reorg-only fields (`depth`, `dropped_header_ids`) are
-/// best-effort from the node's 32-block committed tail; deeper orphan ids are
-/// not fabricated.
+/// `indexerStatus` / `syncWedged` / `shadowDivergence`. Reorg-only fields
+/// (`depth`, `dropped_header_ids`, `returned_tx_ids`, `returned_txs_total`,
+/// `delivered_by`) are best-effort from the node's 32-block committed tail
+/// and the tip-change enrichment; deeper orphan ids are not fabricated.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiNodeEvent {
@@ -1046,6 +1047,15 @@ pub struct ApiNodeEvent {
     pub depth: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dropped_header_ids: Option<Vec<String>>,
+    /// Reorg-only: rolled-back tx ids returned to the mempool (capped 128).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub returned_tx_ids: Option<Vec<String>>,
+    /// Reorg-only: uncapped returned-tx count.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub returned_txs_total: Option<u32>,
+    /// Reorg-only: first deliverer of the winning tip header.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub delivered_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub txs: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1077,6 +1087,13 @@ pub struct ApiReorgRecord {
     pub dropped_header_ids: Vec<String>,
     /// True when dropped ids hit the 32-block committed-tail cap.
     pub orphans_truncated: bool,
+    /// Rolled-back tx ids returned to the mempool (first 128; see total).
+    pub returned_tx_ids: Vec<String>,
+    /// Uncapped rolled-back tx count.
+    pub returned_txs_total: u32,
+    /// Peer that first delivered the winning tip header, when known.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub delivered_by: Option<String>,
 }
 
 /// Envelope for the diagnostics reorg history.
@@ -1448,6 +1465,9 @@ mod tests {
             header_id: Some("new-tip".to_string()),
             depth: Some(2),
             dropped_header_ids: Some(vec!["old-100".to_string(), "old-99".to_string()]),
+            returned_tx_ids: None,
+            returned_txs_total: None,
+            delivered_by: None,
             txs: None,
             size_bytes: None,
             addr: None,
@@ -1480,6 +1500,9 @@ mod tests {
             header_id: None,
             depth: None,
             dropped_header_ids: None,
+            returned_tx_ids: None,
+            returned_txs_total: None,
+            delivered_by: None,
             txs: None,
             size_bytes: None,
             addr: Some("127.0.0.1:9030".to_string()),

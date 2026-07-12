@@ -1937,9 +1937,10 @@ components:
         One operator event for `GET /api/v1/events` — flat shape with optional
         per-kind fields so the feed renders without a type registry. `kind` is
         one of `blockApplied` / `reorg` / `peerConnected` / `peerDisconnected` /
-        `indexerStatus`. Reorg-only fields (`depth`, `dropped_header_ids`) are
-        best-effort from the node's 32-block committed tail; deeper orphan ids are
-        not fabricated.
+        `indexerStatus` / `syncWedged` / `shadowDivergence`. Reorg-only fields
+        (`depth`, `dropped_header_ids`, `returned_tx_ids`, `returned_txs_total`,
+        `delivered_by`) are best-effort from the node's 32-block committed tail
+        and the tip-change enrichment; deeper orphan ids are not fabricated.
       required:
       - seq
       - unixMs
@@ -1949,6 +1950,11 @@ components:
           type:
           - string
           - 'null'
+        deliveredBy:
+          type:
+          - string
+          - 'null'
+          description: 'Reorg-only: first deliverer of the winning tip header.'
         depth:
           type:
           - integer
@@ -1977,6 +1983,20 @@ components:
           minimum: 0
         kind:
           type: string
+        returnedTxIds:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+          description: 'Reorg-only: rolled-back tx ids returned to the mempool (capped 128).'
+        returnedTxsTotal:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: 'Reorg-only: uncapped returned-tx count.'
+          minimum: 0
         seq:
           type: integer
           format: int64

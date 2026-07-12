@@ -225,29 +225,44 @@ impl RealtimeEventBody {
             previous_seq: None,
         }
     }
+}
 
+/// The `reorg` wire payload (§2.5) — grouped so the builder stays within
+/// arity limits and REST/WS carry identical fields.
+pub struct ReorgPayload {
+    pub height: u32,
+    pub header_id: String,
+    pub depth: u32,
+    /// Orphaned tip ids the coarse ring can name (best-effort).
+    pub dropped_header_ids: Vec<String>,
+    /// Rolled-back tx ids returned to the mempool (capped at 128).
+    pub returned_tx_ids: Vec<String>,
+    /// Uncapped returned-tx count.
+    pub returned_txs_total: u32,
+    /// First deliverer of the winning tip header, when known.
+    pub delivered_by: Option<String>,
+}
+
+impl RealtimeEventBody {
     /// `reorg` on the `blocks` channel (§2.5). `dropped_header_ids` is the set
     /// of orphaned tip ids the coarse ring can name (empty when only the new
     /// tip is known — the coarse substrate does not enumerate the dropped
     /// branch; documented as a best-effort guarantee).
-    pub fn reorg(
-        unix_ms: u64,
-        height: u32,
-        header_id: String,
-        depth: u32,
-        dropped_header_ids: Vec<String>,
-    ) -> Self {
+    pub fn reorg(unix_ms: u64, p: ReorgPayload) -> Self {
         RealtimeEventBody {
             emitted_at_unix_ms: unix_ms,
             routes: vec!["blocks".to_string()],
             event: "reorg",
             confirmed: true,
-            height: Some(height),
+            height: Some(p.height),
             data: json!({
-                "height": height,
-                "header_id": header_id,
-                "depth": depth,
-                "dropped_header_ids": dropped_header_ids,
+                "height": p.height,
+                "header_id": p.header_id,
+                "depth": p.depth,
+                "dropped_header_ids": p.dropped_header_ids,
+                "returned_tx_ids": p.returned_tx_ids,
+                "returned_txs_total": p.returned_txs_total,
+                "delivered_by": p.delivered_by,
             }),
             previous_seq: None,
         }

@@ -20,6 +20,12 @@ pub(crate) struct ReorgRecord {
     /// True when the dropped list hit the 32-block committed-tail cap —
     /// deeper orphans may exist but are not named.
     pub orphans_truncated: bool,
+    /// Rolled-back tx ids returned to the mempool (capped; see total).
+    pub returned_tx_ids: Vec<String>,
+    /// Uncapped returned-tx count.
+    pub returned_txs_total: u32,
+    /// First deliverer of the winning tip header, when known.
+    pub delivered_by: Option<String>,
 }
 
 /// Last-N (+ max-age) reorg history for operator postmortem.
@@ -87,6 +93,9 @@ mod tests {
             depth: 1,
             dropped_header_ids: vec!["old".into()],
             orphans_truncated: false,
+            returned_tx_ids: Vec::new(),
+            returned_txs_total: 0,
+            delivered_by: None,
         }
     }
 

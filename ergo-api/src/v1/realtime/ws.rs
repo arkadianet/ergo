@@ -358,10 +358,15 @@ fn project_tick(
             "reorg" => {
                 bus.publish(super::model::RealtimeEventBody::reorg(
                     ev.unix_ms,
-                    ev.height.unwrap_or(0),
-                    ev.header_id.clone().unwrap_or_default(),
-                    ev.depth.unwrap_or(0),
-                    ev.dropped_header_ids.clone().unwrap_or_default(),
+                    super::model::ReorgPayload {
+                        height: ev.height.unwrap_or(0),
+                        header_id: ev.header_id.clone().unwrap_or_default(),
+                        depth: ev.depth.unwrap_or(0),
+                        dropped_header_ids: ev.dropped_header_ids.clone().unwrap_or_default(),
+                        returned_tx_ids: ev.returned_tx_ids.clone().unwrap_or_default(),
+                        returned_txs_total: ev.returned_txs_total.unwrap_or(0),
+                        delivered_by: ev.delivered_by.clone(),
+                    },
                 ));
             }
             "peerConnected" => {
@@ -440,6 +445,9 @@ mod tests {
             header_id: Some(format!("h{height}")),
             depth: None,
             dropped_header_ids: None,
+            returned_tx_ids: None,
+            returned_txs_total: None,
+            delivered_by: None,
             txs: Some(2),
             size_bytes: Some(1234),
             addr: None,
@@ -456,6 +464,9 @@ mod tests {
             header_id: Some(format!("r{height}")),
             depth: Some(2),
             dropped_header_ids: Some(vec![format!("old-{height}"), format!("old-{}", height - 1)]),
+            returned_tx_ids: Some(vec!["aa11".to_string()]),
+            returned_txs_total: Some(3),
+            delivered_by: Some("1.2.3.4:9030".to_string()),
             txs: None,
             size_bytes: None,
             addr: None,
@@ -567,6 +578,10 @@ mod tests {
             ev.data["dropped_header_ids"],
             serde_json::json!(["old-200", "old-199"])
         );
+        // Workstream-C enrichment survives the bridge verbatim.
+        assert_eq!(ev.data["returned_tx_ids"], serde_json::json!(["aa11"]));
+        assert_eq!(ev.data["returned_txs_total"], 3);
+        assert_eq!(ev.data["delivered_by"], "1.2.3.4:9030");
     }
 
     #[test]
@@ -597,6 +612,9 @@ mod tests {
                         header_id: None,
                         depth: None,
                         dropped_header_ids: None,
+                        returned_tx_ids: None,
+                        returned_txs_total: None,
+                        delivered_by: None,
                         txs: None,
                         size_bytes: None,
                         addr: Some("1.2.3.4:9030".into()),
@@ -610,6 +628,9 @@ mod tests {
                         header_id: None,
                         depth: None,
                         dropped_header_ids: None,
+                        returned_tx_ids: None,
+                        returned_txs_total: None,
+                        delivered_by: None,
                         txs: None,
                         size_bytes: None,
                         addr: Some("1.2.3.4:9030".into()),

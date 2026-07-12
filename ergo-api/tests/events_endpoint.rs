@@ -27,6 +27,9 @@ fn event(seq: u64, kind: &str) -> ApiNodeEvent {
         height: matches!(kind, "blockApplied" | "reorg").then_some(100 + seq as u32),
         header_id: matches!(kind, "blockApplied" | "reorg").then(|| format!("{seq:064x}")),
         depth: (kind == "reorg").then_some(2),
+        returned_tx_ids: (kind == "reorg").then(|| vec![format!("tx-{seq}")]),
+        returned_txs_total: (kind == "reorg").then_some(7),
+        delivered_by: (kind == "reorg").then(|| "5.6.7.8:9030".to_string()),
         dropped_header_ids: (kind == "reorg").then(|| {
             vec![
                 format!("old-{seq}"),
@@ -171,6 +174,61 @@ async fn events_returns_full_tail_without_since() {
     assert_eq!(evs[1]["height"], 102);
     assert_eq!(evs[1]["txs"], 3);
     assert!(evs[0].get("height").is_none(), "absent optionals omitted");
+}
+
+#[tokio::test]
+async fn events_reorg_serializes_enrichment_fields() {
+    /// Feed with one reorg event carrying the workstream-C enrichment.
+    /// Everything except `events()` delegates to [`FeedStub`].
+    struct ReorgFeed;
+    impl NodeReadState for ReorgFeed {
+        fn events(&self) -> ApiNodeEvents {
+            ApiNodeEvents {
+                latest_seq: 1,
+                events: vec![event(1, "reorg")],
+            }
+        }
+        fn info(&self) -> ergo_api::types::ApiInfo {
+            FeedStub.info()
+        }
+        fn status(&self) -> ergo_api::types::ApiStatus {
+            FeedStub.status()
+        }
+        fn tip(&self) -> ergo_api::types::ApiTip {
+            FeedStub.tip()
+        }
+        fn sync(&self) -> ergo_api::types::ApiSyncStatus {
+            FeedStub.sync()
+        }
+        fn peers(&self) -> Vec<ergo_api::types::ApiPeer> {
+            FeedStub.peers()
+        }
+        fn mempool_summary(&self) -> ergo_api::types::ApiMempoolSummary {
+            FeedStub.mempool_summary()
+        }
+        fn mempool_transactions(&self) -> ergo_api::types::ApiMempoolTransactions {
+            FeedStub.mempool_transactions()
+        }
+        fn mempool_transaction(
+            &self,
+            tx_id: &str,
+        ) -> Option<ergo_api::types::ApiMempoolTransaction> {
+            FeedStub.mempool_transaction(tx_id)
+        }
+        fn health(&self) -> ergo_api::types::ApiHealth {
+            FeedStub.health()
+        }
+    }
+    let body = get_json(app(Arc::new(ReorgFeed)), "/api/v1/events").await;
+    let ev = &body["events"][0];
+    assert_eq!(ev["kind"], "reorg");
+    assert_eq!(ev["returnedTxIds"], serde_json::json!(["tx-1"]));
+    assert_eq!(ev["returnedTxsTotal"], 7);
+    assert_eq!(ev["deliveredBy"], "5.6.7.8:9030");
+    // Non-reorg kinds omit the reorg-only optionals entirely.
+    let other = get_json(app(Arc::new(FeedStub)), "/api/v1/events").await;
+    assert!(other["events"][0].get("returnedTxIds").is_none());
+    assert!(other["events"][0].get("deliveredBy").is_none());
 }
 
 #[tokio::test]
