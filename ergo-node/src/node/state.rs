@@ -94,6 +94,11 @@ pub(crate) struct NodeState {
     /// enabled): written by the watch task, projected into the snapshot
     /// (status/metrics) and the operator event differ each publish.
     pub(super) shadow: Option<std::sync::Arc<super::shadow_watch::ShadowState>>,
+    /// Enrichment for the most recent rollback (returned txs + winning-tip
+    /// deliverer), recorded by `handle_mempool_tick` and matched BY TIP ID
+    /// to the differ's reorg event. Kept until replaced — a stale record
+    /// simply never matches a later reorg's tip.
+    pub(super) last_reorg_enrichment: Option<ReorgEnrichment>,
     pub(super) mempool_notifier: MempoolNotifier,
     // ---- throughput limiter ----
     // Per-peer sliding-window cap (1000 msg/sec, 2 MB/sec over 10s).
@@ -343,4 +348,28 @@ pub(crate) struct NodeState {
         (u64, usize),
         std::sync::Arc<ergo_api::types::ApiReorgHistory>,
     )>,
+}
+
+/// Mempool/peer facts about one rollback, captured where they exist (the
+/// tip-change diff on the action loop) for the event differ to attach to
+/// the matching `reorg` event (workstream C: returned txs + peer
+/// attribution — only the node knows these, at the moment they happen).
+#[derive(Clone, Debug)]
+pub(crate) struct ReorgEnrichment {
+    /// Hex id of the winning tip the rollback re-applied to.
+    pub(crate) tip_id: String,
+    /// Rolled-back tx ids returned to the mempool (first
+    /// [`Self::RETURNED_IDS_CAP`]; see `returned_txs_total`).
+    pub(crate) returned_tx_ids: Vec<String>,
+    /// Uncapped rolled-back tx count.
+    pub(crate) returned_txs_total: u32,
+    /// Peer that FIRST delivered the winning tip header (best-effort —
+    /// `None` once the deliverer ring evicted it).
+    pub(crate) delivered_by: Option<String>,
+}
+
+impl ReorgEnrichment {
+    /// Bound on ids carried in events/history — a deep reorg can return
+    /// thousands of txs; the event names the first N and counts the rest.
+    pub(crate) const RETURNED_IDS_CAP: usize = 128;
 }

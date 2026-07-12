@@ -337,6 +337,83 @@ RUST_LOG=ergo_mempool=debug,info # mempool admission decisions
 RUST_LOG=ergo_p2p=debug,info     # P2P handshake / disconnect events
 ```
 
+## Shadow validation
+
+Opt-in mode that live cross-checks this node's chain against a Scala
+reference node and alerts on divergence. The reference implementation cannot
+watch itself; this node can watch it — if either implementation ships a
+consensus bug, shadow operators know first, with a machine-readable diff.
+
+```toml
+[shadow]
+enabled = true
+reference_url = "http://127.0.0.1:9053"   # a Scala node you trust
+# interval_secs = 30        # compare cadence
+# lag_tolerance = 3         # compare this many blocks below min(tips)
+# stall_gap_threshold = 10  # reference ahead by more than this AND we
+                            # are not advancing => tip_stall
+# request_timeout_secs = 5
+```
+
+Two signals, both cheap (two reference REST reads per tick, never on the
+block-apply path):
+
+| Signal | Meaning | Consensus-bug class |
+|---|---|---|
+| `header_mismatch` | different canonical header id at a depth-floored height | accept-invalid (we kept a branch the reference refused) |
+| `tip_stall` | the reference's full-block tip advances while ours does not | reject-valid (we refused a block the network accepted) |
+
+Surfaces: `ApiStatus.shadow` on `/status`, `shadowDivergence` on
+`GET /api/v1/events` + the WS bus, and four `/metrics` series
+(`ergo_node_shadow_divergence_total`, `_last_compared_height`,
+`_reference_unreachable`, `_diverged`) — emitted only when the mode is
+enabled, so "absent" and "quiet" stay distinguishable. Alert on
+`increase(ergo_node_shadow_divergence_total[10m]) > 0` and on prolonged
+`_reference_unreachable == 1`.
+
+False-positive discipline is built in: compares run below a lag floor, a
+`header_mismatch` must reproduce on two consecutive ticks, an unreachable
+reference is a gauge (never an event), a node **catching up** is not a
+stall (the stall signal requires no local progress), and a confirmed
+divergence fires one event per incident.
+
+### Divergence fired — who is wrong?
+
+Work the list in order; stop at the first decisive answer.
+
+1. **Is it still active?** `curl :9063/status | jq .shadow`. If `diverged`
+   is null again, it was a transient the latch already cleared (deep
+   cross-node reorg race). Note it, don't page.
+2. **`tip_stall`: look at OUR apply path first.**
+   `jq '.last_block_apply_error, .block_apply_errors_total' /status` and
+   `journalctl | grep block_apply`. A rejection loop on one block = WE are
+   probably rejecting something valid (reject-valid). Capture the block id
+   + rejection reason — that pair is the bug report. Check
+   `sync_wedged` too: a wedge is a different failure (see Troubleshooting)
+   that also presents as a stall.
+3. **`header_mismatch`: ask a third node.** The event names `height`,
+   `ours`, `theirs`. Query any independent node (public explorer, a second
+   Scala node) for the header id at that height:
+   - third party agrees with **them** → our node kept a branch the network
+     refused: treat as an accept-invalid bug in THIS node. Preserve the
+     data dir; file with `ours`/`theirs`/height.
+   - third party agrees with **us** → the *reference* is off-chain: either
+     it is stalled/isolated (check its `/info`) or — the headline case —
+     the reference implementation rejected a valid block. Verify its logs
+     before claiming a Scala consensus bug.
+4. **Reorg context.** `GET /api/v1/diagnostics/reorgs` shows recent
+   tip replacements with depth, orphaned ids, returned txs, and which peer
+   delivered the winning tip — useful to distinguish "wild reorg window"
+   from a genuine split.
+5. **Reference health.** `_reference_unreachable == 1` for more than a few
+   intervals means you are NOT being watched — fix connectivity before
+   trusting the quiet.
+
+Safe defaults: divergence changes nothing about node behavior (observe and
+alert only). Do not wipe the data dir until the evidence (both header ids,
+heights, logs) is preserved — a confirmed divergence data dir is the most
+valuable debugging artifact this node can produce.
+
 ## API security posture
 
 The default posture is **safe by default for a single-host operator**:

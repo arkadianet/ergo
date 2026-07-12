@@ -41,6 +41,14 @@ pub(crate) enum FeedEventKind {
         header_id: String,
         depth: u32,
         dropped_header_ids: Vec<String>,
+        /// Tx ids the rollback returned to the mempool (capped at
+        /// [`super::state::ReorgEnrichment::RETURNED_IDS_CAP`]).
+        returned_tx_ids: Vec<String>,
+        /// Uncapped count of returned txs (honesty for the cap).
+        returned_txs_total: u32,
+        /// Peer that FIRST delivered the winning tip header, when the
+        /// deliverer ring still remembers it.
+        delivered_by: Option<String>,
     },
     PeerConnected {
         addr: String,
@@ -113,6 +121,10 @@ pub(crate) struct FeedObservation<'a> {
     /// Active shadow divergence `(kind, height, ours, theirs)`; `None` =
     /// chains agree or the mode is off.
     pub(crate) shadow_diverged: Option<(String, u32, String, String)>,
+    /// Mempool/peer enrichment for the most recent rollback, recorded on
+    /// the tip-change path (`handle_mempool_tick`). Matched to a detected
+    /// reorg BY TIP ID — a non-matching (stale) enrichment attaches nothing.
+    pub(crate) reorg_enrichment: Option<super::state::ReorgEnrichment>,
 }
 
 fn recent_tail(recent: &[(u32, String, u32, u64)]) -> Vec<(u32, String)> {
@@ -155,15 +167,27 @@ fn dropped_header_ids(prev: &FeedPrev, recent: &[(u32, String, u32, u64)]) -> Ve
 fn push_reorg(
     ring: &mut EventFeedRing,
     reorgs: &mut Vec<super::reorg_history::ReorgRecord>,
-    unix_ms: u64,
+    obs: &FeedObservation<'_>,
     height: u32,
     header_id: String,
     prev: &FeedPrev,
-    recent: &[(u32, String, u32, u64)],
 ) {
-    let dropped_header_ids = dropped_header_ids(prev, recent);
+    let unix_ms = obs.unix_ms;
+    let enrichment = obs.reorg_enrichment.as_ref();
+    let dropped_header_ids = dropped_header_ids(prev, obs.recent);
     let depth = dropped_header_ids.len() as u32;
     let orphans_truncated = dropped_header_ids.len() >= RECENT_BLOCKS_CAP;
+    // Attach the tip-change enrichment ONLY when it demonstrably belongs to
+    // this reorg (same winning tip id) — a stale record attaches nothing.
+    let matched = enrichment.filter(|e| e.tip_id == header_id);
+    let (returned_tx_ids, returned_txs_total, delivered_by) = match matched {
+        Some(e) => (
+            e.returned_tx_ids.clone(),
+            e.returned_txs_total,
+            e.delivered_by.clone(),
+        ),
+        None => (Vec::new(), 0, None),
+    };
     reorgs.push(super::reorg_history::ReorgRecord {
         unix_ms,
         height,
@@ -171,6 +195,9 @@ fn push_reorg(
         depth,
         dropped_header_ids: dropped_header_ids.clone(),
         orphans_truncated,
+        returned_tx_ids: returned_tx_ids.clone(),
+        returned_txs_total,
+        delivered_by: delivered_by.clone(),
     });
     ring.push(
         unix_ms,
@@ -179,6 +206,9 @@ fn push_reorg(
             header_id,
             depth,
             dropped_header_ids,
+            returned_tx_ids,
+            returned_txs_total,
+            delivered_by,
         },
     );
 }
@@ -210,15 +240,7 @@ pub(crate) fn derive_events(
             if !prev.tip_id.is_empty() {
                 if let Some((_, id, ..)) = obs.recent.iter().find(|(h, ..)| *h == prev.tip_height) {
                     if *id != prev.tip_id {
-                        push_reorg(
-                            ring,
-                            &mut reorgs,
-                            obs.unix_ms,
-                            prev.tip_height,
-                            id.clone(),
-                            prev,
-                            obs.recent,
-                        );
+                        push_reorg(ring, &mut reorgs, &obs, prev.tip_height, id.clone(), prev);
                     }
                 }
             }
@@ -248,11 +270,10 @@ pub(crate) fn derive_events(
             push_reorg(
                 ring,
                 &mut reorgs,
-                obs.unix_ms,
+                &obs,
                 obs.tip_height,
                 obs.tip_id.clone(),
                 prev,
-                obs.recent,
             );
         }
 
@@ -458,6 +479,9 @@ mod tests {
                 header_id: "new".into(),
                 depth: 1,
                 dropped_header_ids: vec!["old".into()],
+                returned_tx_ids: Vec::new(),
+                returned_txs_total: 0,
+                delivered_by: None,
             },
         );
         push_n(&mut ring, EventFeedRing::CAP); // fill + force eviction
@@ -504,6 +528,7 @@ mod tests {
             indexer_status: indexer.map(|(s, d)| (s.to_string(), d.map(|x| x.to_string()))),
             sync_wedged: None,
             shadow_diverged: None,
+            reorg_enrichment: None,
         }
     }
 
@@ -552,6 +577,69 @@ mod tests {
 
     /// The deep-fork wedge is a standing condition re-observed every tick:
     /// it must emit once per distinct stuck tip — no per-tick duplicates —
+    /// Reorg enrichment attaches ONLY when the recorded rollback belongs to
+    /// the detected reorg (same winning tip id); a stale record from an
+    /// earlier rollback attaches nothing.
+    #[test]
+    fn reorg_enrichment_attaches_by_tip_id_only() {
+        let mut ring = EventFeedRing::new();
+        let mut prev = FeedPrev::default();
+        let r1 = [blk(10, "A")];
+        derive_events(&mut ring, &mut prev, obs((10, "A"), &r1, &[], None));
+
+        // Tip replaced at the same height WITH a matching enrichment.
+        let r2 = [blk(10, "B")];
+        let mut o = obs((10, "B"), &r2, &[], None);
+        o.reorg_enrichment = Some(super::super::state::ReorgEnrichment {
+            tip_id: "B".to_string(),
+            returned_tx_ids: vec!["t1".into(), "t2".into()],
+            returned_txs_total: 2,
+            delivered_by: Some("9.9.9.9:9030".into()),
+        });
+        derive_events(&mut ring, &mut prev, o);
+        match &ring.latest(usize::MAX)[0].kind {
+            FeedEventKind::Reorg {
+                returned_tx_ids,
+                returned_txs_total,
+                delivered_by,
+                ..
+            } => {
+                assert_eq!(
+                    returned_tx_ids.as_slice(),
+                    ["t1".to_string(), "t2".to_string()]
+                );
+                assert_eq!(*returned_txs_total, 2);
+                assert_eq!(delivered_by.as_deref(), Some("9.9.9.9:9030"));
+            }
+            other => panic!("expected reorg, got {other:?}"),
+        }
+
+        // A SECOND reorg with a STALE enrichment (still tip B) → nothing
+        // attaches to the new tip C's event.
+        let r3 = [blk(10, "C")];
+        let mut o = obs((10, "C"), &r3, &[], None);
+        o.reorg_enrichment = Some(super::super::state::ReorgEnrichment {
+            tip_id: "B".to_string(),
+            returned_tx_ids: vec!["t1".into()],
+            returned_txs_total: 1,
+            delivered_by: None,
+        });
+        derive_events(&mut ring, &mut prev, o);
+        match &ring.latest(usize::MAX)[1].kind {
+            FeedEventKind::Reorg {
+                returned_tx_ids,
+                returned_txs_total,
+                delivered_by,
+                ..
+            } => {
+                assert!(returned_tx_ids.is_empty(), "stale enrichment ignored");
+                assert_eq!(*returned_txs_total, 0);
+                assert!(delivered_by.is_none());
+            }
+            other => panic!("expected reorg, got {other:?}"),
+        }
+    }
+
     /// A latched shadow divergence emits once per incident identity, stays
     /// quiet while standing, and re-arms after clearing so a NEW divergence
     /// (different height or kind) reports again.
@@ -669,6 +757,7 @@ mod tests {
                 header_id,
                 depth,
                 dropped_header_ids,
+                ..
             } => {
                 assert_eq!(*height, 10);
                 assert_eq!(header_id, "B");
@@ -712,6 +801,7 @@ mod tests {
                 header_id,
                 depth,
                 dropped_header_ids,
+                ..
             } => {
                 assert_eq!(*height, 10);
                 assert_eq!(header_id, "B");

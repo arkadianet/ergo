@@ -1949,6 +1949,11 @@ components:
           type:
           - string
           - 'null'
+        deliveredBy:
+          type:
+          - string
+          - 'null'
+          description: 'Reorg-only: first deliverer of the winning tip header.'
         depth:
           type:
           - integer
@@ -1977,6 +1982,20 @@ components:
           minimum: 0
         kind:
           type: string
+        returnedTxIds:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+          description: 'Reorg-only: rolled-back tx ids returned to the mempool (capped 128).'
+        returnedTxsTotal:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: 'Reorg-only: uncapped returned-tx count.'
+          minimum: 0
         seq:
           type: integer
           format: int64

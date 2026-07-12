@@ -27,6 +27,9 @@ fn event(seq: u64, kind: &str) -> ApiNodeEvent {
         height: matches!(kind, "blockApplied" | "reorg").then_some(100 + seq as u32),
         header_id: matches!(kind, "blockApplied" | "reorg").then(|| format!("{seq:064x}")),
         depth: (kind == "reorg").then_some(2),
+        returned_tx_ids: None,
+        returned_txs_total: None,
+        delivered_by: None,
         dropped_header_ids: (kind == "reorg").then(|| {
             vec![
                 format!("old-{seq}"),

@@ -94,6 +94,7 @@ fn make_state_with_backend(
     NodeState {
         store: backend,
         shadow: None,
+        last_reorg_enrichment: None,
         coordinator,
         executor,
         peer_manager,

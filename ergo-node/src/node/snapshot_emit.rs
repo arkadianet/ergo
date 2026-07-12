@@ -364,6 +364,7 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
                     sh.snapshot_active()
                         .map(|d| (d.kind.to_string(), d.height, d.ours, d.theirs))
                 }),
+                reorg_enrichment: state.last_reorg_enrichment.clone(),
             },
         );
         for r in tick_reorgs {
@@ -442,6 +443,9 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
                                 depth: r.depth,
                                 dropped_header_ids: r.dropped_header_ids,
                                 orphans_truncated: r.orphans_truncated,
+                                returned_tx_ids: r.returned_tx_ids,
+                                returned_txs_total: r.returned_txs_total,
+                                delivered_by: r.delivered_by,
                             })
                             .collect(),
                     });
@@ -1027,6 +1031,9 @@ fn build_events_projection(
                 header_id: None,
                 depth: None,
                 dropped_header_ids: None,
+                returned_tx_ids: None,
+                returned_txs_total: None,
+                delivered_by: None,
                 txs: None,
                 size_bytes: None,
                 addr: None,
@@ -1050,12 +1057,18 @@ fn build_events_projection(
                     header_id,
                     depth,
                     dropped_header_ids,
+                    returned_tx_ids,
+                    returned_txs_total,
+                    delivered_by,
                 } => {
                     ev.kind = "reorg".into();
                     ev.height = Some(height);
                     ev.header_id = Some(header_id);
                     ev.depth = Some(depth);
                     ev.dropped_header_ids = Some(dropped_header_ids);
+                    ev.returned_tx_ids = Some(returned_tx_ids);
+                    ev.returned_txs_total = Some(returned_txs_total);
+                    ev.delivered_by = delivered_by;
                 }
                 K::PeerConnected { addr } => {
                     ev.kind = "peerConnected".into();
@@ -1213,6 +1226,9 @@ mod tests {
                 header_id: "new-tip".to_string(),
                 depth: 2,
                 dropped_header_ids: vec!["old-100".to_string(), "old-99".to_string()],
+                returned_tx_ids: vec!["aa11".to_string()],
+                returned_txs_total: 1,
+                delivered_by: Some("1.2.3.4:9030".to_string()),
             },
         );
 
@@ -1229,6 +1245,9 @@ mod tests {
                 "headerId": "new-tip",
                 "depth": 2,
                 "droppedHeaderIds": ["old-100", "old-99"],
+                "returnedTxIds": ["aa11"],
+                "returnedTxsTotal": 1,
+                "deliveredBy": "1.2.3.4:9030",
             })
         );
     }

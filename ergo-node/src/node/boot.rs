@@ -1543,6 +1543,7 @@ async fn run_inner_with_backend(
         coordinator,
         executor,
         shadow: shadow_state,
+        last_reorg_enrichment: None,
         peer_manager,
         registry: PeerRegistry::new(),
         event_tx: event_tx.clone(),
