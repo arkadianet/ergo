@@ -15,3 +15,8 @@ serde           = { workspace = true, features = ["derive"] }
 serde_json      = { workspace = true, features = ["arbitrary_precision"] }
 hex             = { workspace = true }
 num-bigint      = { workspace = true }
+
+[dev-dependencies]
+# PoW oracle for the live-testnet header-JSON parity tests: every
+# committed real header must satisfy its own Autolykos equation.
+ergo-crypto = { workspace = true }

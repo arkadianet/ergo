@@ -19,11 +19,12 @@ pub mod types;
 pub use decode::{
     decode_ad_proofs, decode_block_transactions_with_mode, decode_context_extension,
     decode_context_extension_with_mode, decode_ergo_tree_canonicalize,
-    decode_ergo_tree_canonicalize_with_mode, decode_extension, decode_input,
-    decode_input_with_mode, decode_output_with_mode, decode_registers, decode_registers_with_mode,
-    decode_scala_full_block, decode_scala_header, decode_scala_transaction,
-    decode_scala_transaction_with_mode, DecodeError, DecodeMode, DecodedFullBlock, DESERIALIZE,
-    NON_CANONICAL,
+    decode_ergo_tree_canonicalize_with_mode, decode_extension, decode_header_json, decode_input,
+    decode_input_with_mode, decode_nipopow_proof_json, decode_output_with_mode, decode_registers,
+    decode_registers_with_mode, decode_scala_full_block, decode_scala_header,
+    decode_scala_header_struct, decode_scala_nipopow_proof, decode_scala_popow_header,
+    decode_scala_transaction, decode_scala_transaction_with_mode, DecodeError, DecodeMode,
+    DecodedFullBlock, DESERIALIZE, NON_CANONICAL,
 };
 pub use types::{
     ScalaAdProofs, ScalaAsset, ScalaBlockSection, ScalaBlockTransactions, ScalaDataInput,

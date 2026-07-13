@@ -17,6 +17,9 @@ use ergo_primitives::digest::{Digest32, ModifierId};
 use ergo_primitives::reader::VlqReader;
 use ergo_primitives::writer::VlqWriter;
 use ergo_ser::ad_proofs::{write_ad_proofs, ADProofs};
+use ergo_ser::batch_merkle_proof::{
+    serialize_batch_merkle_proof, BatchMerkleProof, ProofEntry, Side,
+};
 use ergo_ser::block_transactions::{write_block_transactions_with_version, BlockTransactions};
 use ergo_ser::ergo_box::ErgoBoxCandidate;
 use ergo_ser::ergo_tree::{read_ergo_tree, ErgoTree};
@@ -28,8 +31,9 @@ use ergo_ser::token::{Token, TokenId};
 use ergo_ser::transaction::{write_transaction, Transaction};
 
 use crate::types::{
-    ScalaAdProofs, ScalaBlockTransactions, ScalaDataInput, ScalaExtension, ScalaFullBlock,
-    ScalaHeader, ScalaInput, ScalaOutputInput, ScalaTransactionInput,
+    ScalaAdProofs, ScalaBatchMerkleProof, ScalaBlockTransactions, ScalaDataInput, ScalaExtension,
+    ScalaFullBlock, ScalaHeader, ScalaInput, ScalaNipopowProof, ScalaOutputInput, ScalaPopowHeader,
+    ScalaTransactionInput,
 };
 
 pub const NON_CANONICAL: &str = "non_canonical";
@@ -546,6 +550,37 @@ pub fn decode_ergo_tree_canonicalize(hex_str: &str) -> Result<(ErgoTree, Vec<u8>
 /// modifiers by id (like `POST /blocks` sendMinedBlock) don't have
 /// to recompute the digest.
 ///
+/// Thin wrapper over [`decode_scala_header_struct`] +
+/// `ergo_ser::header::serialize_header`; callers that need the decoded
+/// [`ergo_ser::header::Header`] itself (header-follower polling,
+/// merge-mining) should use the struct variant directly.
+pub fn decode_scala_header(h: &ScalaHeader) -> Result<(Vec<u8>, ModifierId), DecodeError> {
+    let header = decode_scala_header_struct(h)?;
+    let (bytes, header_id) = ergo_ser::header::serialize_header(&header)
+        .map_err(|e| (DESERIALIZE, format!("header serialize: {e}")))?;
+    Ok((bytes, header_id))
+}
+
+/// Decode a raw header-JSON string (the body of `/blocks/{id}/header`,
+/// or one element of `/blocks/chainSlice`) into an
+/// [`ergo_ser::header::Header`].
+///
+/// Convenience over `serde_json::from_str::<ScalaHeader>` +
+/// [`decode_scala_header_struct`] for callers that consume the node
+/// REST directly. The decode is faithful iff
+/// `blake2b256(serialize_header(header))` equals the JSON's own `id`
+/// field — callers that ingest untrusted JSON should verify that
+/// (the Scala-oracle tests for this module pin it for real node JSON).
+pub fn decode_header_json(json: &str) -> Result<ergo_ser::header::Header, DecodeError> {
+    let dto: ScalaHeader =
+        serde_json::from_str(json).map_err(|e| (DESERIALIZE, format!("header JSON parse: {e}")))?;
+    decode_scala_header_struct(&dto)
+}
+
+/// Decode a `ScalaHeader` JSON DTO into the internal
+/// [`ergo_ser::header::Header`] — the same struct
+/// `ergo_ser::header::read_header` produces from consensus bytes.
+///
 /// Field mapping (Scala JSON → internal `Header`):
 /// - `parentId` / `adProofsRoot` / `transactionsRoot` / `extensionHash`
 ///   → corresponding `Digest32` / `ModifierId` fields
@@ -562,7 +597,9 @@ pub fn decode_ergo_tree_canonicalize(hex_str: &str) -> Result<(ErgoTree, Vec<u8>
 /// `size`, `id`, `difficulty` are derived fields the indexer
 /// emits and the decoder ignores — they don't appear in the wire
 /// header.
-pub fn decode_scala_header(h: &ScalaHeader) -> Result<(Vec<u8>, ModifierId), DecodeError> {
+pub fn decode_scala_header_struct(
+    h: &ScalaHeader,
+) -> Result<ergo_ser::header::Header, DecodeError> {
     let parent_id_bytes = decode_digest32(&h.parent_id, "header.parentId")?;
     let parent_id = ModifierId::from_bytes(*parent_id_bytes.as_bytes());
     let ad_proofs_root = decode_digest32(&h.ad_proofs_root, "header.adProofsRoot")?;
@@ -621,7 +658,7 @@ pub fn decode_scala_header(h: &ScalaHeader) -> Result<(Vec<u8>, ModifierId), Dec
     // are not interchangeable across versions.
     let solution = decode_scala_pow_solution(&h.pow_solutions, h.version)?;
 
-    let header = ergo_ser::header::Header {
+    Ok(ergo_ser::header::Header {
         version: h.version,
         parent_id,
         ad_proofs_root,
@@ -634,11 +671,7 @@ pub fn decode_scala_header(h: &ScalaHeader) -> Result<(Vec<u8>, ModifierId), Dec
         votes,
         unparsed_bytes,
         solution,
-    };
-
-    let (bytes, header_id) = ergo_ser::header::serialize_header(&header)
-        .map_err(|e| (DESERIALIZE, format!("header serialize: {e}")))?;
-    Ok((bytes, header_id))
+    })
 }
 
 fn decode_scala_pow_solution(
@@ -920,4 +953,117 @@ pub fn decode_ad_proofs(p: &ScalaAdProofs) -> Result<Vec<u8>, DecodeError> {
     let mut w = VlqWriter::new();
     write_ad_proofs(&mut w, &parsed);
     Ok(w.result())
+}
+
+/// Decode a `ScalaBatchMerkleProof` JSON DTO back into the serialized
+/// wire blob that `PoPowHeader.interlinks_proof` carries — the exact
+/// reverse of the `ergo-node` REST encoder
+/// (`api_bridge/nipopow.rs::encode_popow_header`), which deserializes
+/// the blob and hex-encodes its parts:
+///
+/// - `indices[i].digest` is always a 32-byte leaf digest;
+/// - `proofs[i].digest == ""` is Scala's odd-trailing empty sibling
+///   (`EmptyByteArray`) and maps to `ProofEntry.digest = None` — the
+///   wire form (32 zero bytes) is produced by the blob serializer;
+/// - `proofs[i].side` is 0 (left) or 1 (right); anything else is
+///   rejected rather than leniently collapsed the way the wire
+///   deserializer's `Side::from_byte` does, because JSON inputs are
+///   re-serialized and a collapsed side byte would not round-trip.
+fn decode_scala_batch_merkle_proof(p: &ScalaBatchMerkleProof) -> Result<Vec<u8>, DecodeError> {
+    let mut indices = Vec::with_capacity(p.indices.len());
+    for e in &p.indices {
+        let digest = decode_digest32(&e.digest, "interlinksProof.indices.digest")?;
+        indices.push((e.index, *digest.as_bytes()));
+    }
+    let mut proofs = Vec::with_capacity(p.proofs.len());
+    for e in &p.proofs {
+        let digest = if e.digest.is_empty() {
+            None
+        } else {
+            Some(*decode_digest32(&e.digest, "interlinksProof.proofs.digest")?.as_bytes())
+        };
+        let side = match e.side {
+            0 => Side::Left,
+            1 => Side::Right,
+            other => {
+                return Err((
+                    DESERIALIZE,
+                    format!("interlinksProof.proofs.side {other} is neither 0 nor 1"),
+                ));
+            }
+        };
+        proofs.push(ProofEntry { digest, side });
+    }
+    Ok(serialize_batch_merkle_proof(&BatchMerkleProof {
+        indices,
+        proofs,
+    }))
+}
+
+/// Decode a `ScalaPopowHeader` JSON DTO (`/nipopow/popowHeaderById/*`,
+/// `/nipopow/popowHeaderByHeight/*`, and the `prefix`/`suffixHead`
+/// entries of `/nipopow/proof/*`) into the internal
+/// [`ergo_ser::popow_header::PoPowHeader`] — the same struct
+/// `ergo_ser::popow_header::read_popow_header` produces from wire
+/// bytes. Reverse of `ergo-node`'s `api_bridge/nipopow.rs` encoder.
+pub fn decode_scala_popow_header(
+    ph: &ScalaPopowHeader,
+) -> Result<ergo_ser::popow_header::PoPowHeader, DecodeError> {
+    let header = decode_scala_header_struct(&ph.header)?;
+    let mut interlinks = Vec::with_capacity(ph.interlinks.len());
+    for id_hex in &ph.interlinks {
+        let id = decode_digest32(id_hex, "popowHeader.interlinks")?;
+        interlinks.push(ModifierId::from_bytes(*id.as_bytes()));
+    }
+    let interlinks_proof = decode_scala_batch_merkle_proof(&ph.interlinks_proof)?;
+    Ok(ergo_ser::popow_header::PoPowHeader {
+        header,
+        interlinks,
+        interlinks_proof,
+    })
+}
+
+/// Decode a `ScalaNipopowProof` JSON DTO (the `/nipopow/proof/*`
+/// response body) into the internal
+/// [`ergo_ser::popow_proof::NipopowProof`] — the same struct
+/// `ergo_ser::popow_proof::deserialize_nipopow_proof` produces from
+/// Scala wire bytes, so the decoded value feeds the
+/// `ergo-validation::popow` verifiers directly.
+///
+/// `continuous` is copied verbatim from the JSON: the Scala route
+/// (`NipopowApiRoute.scala:69-90`) always builds its served proofs
+/// with `continuous = true`, and the difficulty-header sub-check of
+/// `is_valid` keys off the flag, so forcing it here would turn a
+/// malformed capture into a silently-weaker verification.
+pub fn decode_scala_nipopow_proof(
+    p: &ScalaNipopowProof,
+) -> Result<ergo_ser::popow_proof::NipopowProof, DecodeError> {
+    Ok(ergo_ser::popow_proof::NipopowProof {
+        m: p.m,
+        k: p.k,
+        prefix: p
+            .prefix
+            .iter()
+            .map(decode_scala_popow_header)
+            .collect::<Result<Vec<_>, _>>()?,
+        suffix_head: decode_scala_popow_header(&p.suffix_head)?,
+        suffix_tail: p
+            .suffix_tail
+            .iter()
+            .map(decode_scala_header_struct)
+            .collect::<Result<Vec<_>, _>>()?,
+        continuous: p.continuous,
+    })
+}
+
+/// Decode a raw `/nipopow/proof/*` JSON response body into a
+/// [`ergo_ser::popow_proof::NipopowProof`]. Convenience over
+/// `serde_json::from_str::<ScalaNipopowProof>` +
+/// [`decode_scala_nipopow_proof`], mirroring [`decode_header_json`].
+pub fn decode_nipopow_proof_json(
+    json: &str,
+) -> Result<ergo_ser::popow_proof::NipopowProof, DecodeError> {
+    let dto: ScalaNipopowProof = serde_json::from_str(json)
+        .map_err(|e| (DESERIALIZE, format!("nipopow proof JSON parse: {e}")))?;
+    decode_scala_nipopow_proof(&dto)
 }
