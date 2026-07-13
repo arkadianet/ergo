@@ -11,6 +11,17 @@ fn leaf_hash(data: &[u8]) -> [u8; 32] {
     blake2b256(&input)
 }
 
+/// Public leaf-digest rule for a transaction id in a block's
+/// `transactions_root` tree: `Blake2b256(0x00 ‖ tx_id)`.
+///
+/// Exposed so external inclusion verifiers (the peg-in verifier binds
+/// an attacker-supplied batch-proof leaf to a *recomputed* tx id —
+/// g25-pegmint-packaging §5.2.5) share the exact scorex leaf rule
+/// instead of re-deriving the prefix byte.
+pub fn tx_leaf_digest(tx_id: &[u8; 32]) -> [u8; 32] {
+    leaf_hash(tx_id)
+}
+
 /// Compute hash of a Merkle internal node: Blake2b256(0x01 ++ left ++ right).
 ///
 /// Even-pair reducer. The fixed `[u8; 32]` signature is the
