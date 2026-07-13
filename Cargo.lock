@@ -908,6 +908,7 @@ dependencies = [
 name = "ergo-rest-json"
 version = "0.5.1"
 dependencies = [
+ "ergo-crypto",
  "ergo-primitives",
  "ergo-ser",
  "hex",
