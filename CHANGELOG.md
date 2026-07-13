@@ -16,6 +16,80 @@ infrastructure.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-07-13
+
+The v1 product API release: the complete Rust-native `/api/v1/*` surface (16
+route groups, ~170 endpoints, one OpenAPI spec), shadow validation as a
+production mode, the operator observability wave (typed events, reorg
+introspection, apply-phase metrics), two live accept-invalid consensus fixes,
+and byte-parity completion of the ErgoScript compiler. As always for this
+node: re-verify its verdicts against the Scala reference node before relying
+on it for funds.
+
+### Added
+
+- **The v1 API surface (#168–#185, #188).** Shared primitives — error
+  envelope, opaque cursors, per-IP cost governor, T0/T1/T2 auth tiers
+  (#168); `chain/*` + `transactions/*` reads (#169); `boxes/*` +
+  `tokens/*` + `addresses/*` canonical box shape (#170); `mempool/*` +
+  the O4 depth ring (#171); **real-time WebSocket** `/api/v1/ws` —
+  subscribe/resume/backfill over a fan-out bus (#172); **webhooks** —
+  durable, HMAC-signed, retried delivery (#174) with a production
+  rustls sink + worker (#177); **tx-intelligence** —
+  build/simulate/fee-estimate/status without broadcasting (#178);
+  **script playground** — compile/inspect/execute/cost/simulate/
+  explain/diff with typed cost/depth refusals (#180); **semantic
+  decode** — protocol registry (SigmaUSD + extensible) with
+  `?decode=true` and `POST /boxes/decode` (#181); `light/*` +
+  `stats/*` + `diagnostics` with honest degradation (#182);
+  `POST /batch` bounded read-only multiplexer (#183); operator group —
+  node/network/mining/voting across tiers (#184); `scan/*` +
+  watch-only accounts + tiered secret export (#185); the whole surface
+  registered in OpenAPI (#188).
+- **Shadow validation as a production mode (#193).** `[shadow]` opt-in:
+  live cross-check against a Scala reference node — header-mismatch
+  (accept-invalid class) + tip-stall (reject-valid class) signals with
+  arm/confirm/latch false-positive discipline, `shadowDivergence`
+  operator event, four `ergo_node_shadow_*` metrics, and an operator
+  triage guide (#194, docs).
+- **Operator observability wave.** Typed reorg/mempool events + the
+  dashboard's migration off polling (#190); live apply-phase Prometheus
+  gauges — no more "height 0" false stalls (#192); **reorg
+  introspection completed** — orphaned ids, returned-to-mempool tx ids,
+  winning-tip peer attribution, and a `diagnostics/reorgs` postmortem
+  ring (#187, #190, #194); deep-fork wedge surfaced to operators with
+  recovery UX + configurable `keep_versions` (#187); event vocabulary
+  freeze, symptom→metrics runbook, one recommended dry-run path (#195).
+- **ErgoScript compiler completion.** M6 REST compile endpoints (#165),
+  M7 `@contract` including the 5+-param HashMap-order port — full byte
+  parity vs Scala 6.0.2 (#166, #175).
+- Operator recovery escape hatches `ERGO_BAN_HEADERS` /
+  `ERGO_ASSUME_HEADERS_SYNCED` (#163); library surfaces —
+  `tx_leaf_digest` for external merkle-inclusion checks (#196),
+  JSON→`Header`/`NipopowProof` decoders with live-Scala oracle tests
+  (#198).
+
+### Fixed
+
+- **Consensus (live accept-invalid, both closed):** context-extension
+  values gated with `CheckV6Type` (#176) and the high-bit
+  context-extension entry count rejected (#179) — each verified against
+  the Scala reference.
+- Compiler version-gate parity: the embeddable-type axis (F1) and
+  `fromBigEndianBytes` (F2) adversarial findings (#167).
+- Sync: Scala-parity branch invalidation on full-block apply failure
+  (#162); per-peer message-rate cap raised 100/s → 1000/s — the
+  testnet 431,366 stall's starvation half (#160, #161).
+- v1 cost-governor IP table hard-bounded under active-peer floods
+  (#186); wallet UI token names + balance-aware send picker (#189).
+
+### Changed
+
+- The operator dashboard consumes the push surfaces (WS + events)
+  instead of 2-second `/info` polling (#190).
+- `best_arg_from_levels` refactor in validation scoring
+  (score-identical, #197); internal doc/tracking cleanup (#191).
+
 ## [0.5.1] - 2026-07-05
 
 A release centered on making the operator web UI first-class and on landing the NiPoPoW REST serve surface, plus a continuous fuzz-differential harness and higher peer-connectivity ceilings. As always for this node: re-verify its verdicts against the Scala reference node before relying on it for funds.
