@@ -416,17 +416,32 @@ pub fn max_level_of(header: &Header) -> u32 {
 /// Empty chain returns `0` (level 0 contributes `2^0 * 0 = 0`; no
 /// higher level reaches the m-cutoff).
 pub fn best_arg(chain: &[Header], m: u32) -> u64 {
+    // `max_level_of` is a deterministic function of the header, so
+    // computing each level once and scoring over the vector is
+    // score-identical to the previous per-level recomputation.
+    let levels: Vec<u32> = chain.iter().map(max_level_of).collect();
+    best_arg_from_levels(&levels, m)
+}
+
+/// [`best_arg`] over pre-computed μ-levels instead of headers — the
+/// same KMZ17 Algorithm 4 score for callers that track per-header
+/// levels without retaining full `Header`s (e.g. a light
+/// header-follower scoring its own followed chain against a NiPoPoW
+/// proof). `levels[i]` must be `max_level_of` of the i-th chain
+/// header; the genesis sentinel [`GENESIS_LEVEL`] participates in
+/// every level's count, exactly as the header form does.
+pub fn best_arg_from_levels(levels: &[u32], m: u32) -> u64 {
     let mut best: u64 = 0;
 
-    // Level 0: always included with count = chain.len(). Every header
+    // Level 0: always included with count = levels.len(). Every header
     // is by definition at least level 0; Scala explicitly skips the
     // m-cutoff at level 0 (`NipopowAlgos.scala:101-102`).
-    let level_0_count = chain.len() as u64;
+    let level_0_count = levels.len() as u64;
     best = best.max(level_0_count); // 2^0 * count
 
     let mut level: u32 = 1;
     loop {
-        let count = chain.iter().filter(|h| max_level_of(h) >= level).count() as u64;
+        let count = levels.iter().filter(|&&l| l >= level).count() as u64;
         if count < m as u64 {
             return best;
         }
@@ -669,6 +684,53 @@ mod tests {
         let h = header_from_hex(GENESIS_HEX);
         let score = best_arg(std::slice::from_ref(&h), 2);
         assert_eq!(score, 1);
+    }
+
+    #[test]
+    fn best_arg_from_levels_matches_header_form_on_real_headers() {
+        // The refactor-parity pin: `best_arg` must equal
+        // `best_arg_from_levels` over `max_level_of`-derived levels for
+        // real headers, for several m values.
+        let chain = vec![
+            header_from_hex(GENESIS_HEX),
+            header_from_hex(HEIGHT_2_V1_HEX),
+        ];
+        let levels: Vec<u32> = chain.iter().map(max_level_of).collect();
+        for m in [1u32, 2, 6] {
+            assert_eq!(best_arg(&chain, m), best_arg_from_levels(&levels, m));
+        }
+    }
+
+    #[test]
+    fn best_arg_from_levels_empty_returns_zero() {
+        assert_eq!(best_arg_from_levels(&[], 2), 0);
+    }
+
+    #[test]
+    fn best_arg_from_levels_level_zero_skips_m_cutoff() {
+        // One level-0 header with m=6: level 0 always counts
+        // (2^0 * 1 = 1) even though 1 < m.
+        assert_eq!(best_arg_from_levels(&[0], 6), 1);
+    }
+
+    #[test]
+    fn best_arg_from_levels_scores_superchain_over_length() {
+        // Six level-3 headers with m=2: level 3 passes the cutoff
+        // (count 6 >= 2) and scores 2^3 * 6 = 48, beating the level-0
+        // score of 6. A longer all-level-0 chain of 20 scores only 20.
+        assert_eq!(best_arg_from_levels(&[3; 6], 2), 48);
+        assert_eq!(best_arg_from_levels(&[0; 20], 2), 20);
+    }
+
+    #[test]
+    fn best_arg_from_levels_m_cutoff_stops_at_thin_level() {
+        // Levels [2, 2, 0]: at level 1 and 2 the count is 2 >= m=2
+        // (score 2^2 * 2 = 8); at level 3 the count 0 < m stops the
+        // loop. Max(3, 4, 8) = 8.
+        assert_eq!(best_arg_from_levels(&[2, 2, 0], 2), 8);
+        // Same levels with m=3: count 2 < 3 already at level 1, so
+        // only level 0 contributes.
+        assert_eq!(best_arg_from_levels(&[2, 2, 0], 3), 3);
     }
 
     #[test]
