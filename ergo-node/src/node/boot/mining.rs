@@ -69,7 +69,17 @@ pub(super) fn build_subsystem(
     // can never carry an EIP-27-invalid emission / fee / storage-rent /
     // selected tx that block validation would later reject.
     .with_reemission_rules(super::build_reemission_rules(&config.chain_spec))
-    .with_voting_targets(voting_targets_slot.clone());
+    .with_voting_targets(voting_targets_slot.clone())
+    // Operator-configured custom extension fields (merge-mining / commitment
+    // hook). Pre-validated by `MiningConfig::validate` at startup; re-checked
+    // here so a bad field can never reach a candidate.
+    .with_extension_fields(
+        config
+            .mining_config
+            .resolve_extension_fields()
+            .map_err(|e| -> NodeError { format!("[mining] {e}").into() })?,
+    )
+    .map_err(|e| -> NodeError { format!("[mining] {e}").into() })?;
     let network_prefix = config.chain_spec.network_params.address_prefix;
     // Subscribe to the handle's serve-state-change notifications so the
     // bridge's longpoll wait wakes the instant the served candidate changes
