@@ -460,6 +460,16 @@ fn write_box_bytes(b: &ErgoBox) -> Vec<u8> {
 /// Run the on-loop oracle build directly against the live `StateStore`, under
 /// the regime's reemission settings.
 fn on_loop_build(store: &StateStore, regime: &Regime) -> (Candidate, WorkMessage) {
+    on_loop_build_with_fields(store, regime, &[])
+}
+
+/// `on_loop_build` with operator-configured custom extension fields threaded to
+/// `generate_candidate` — the oracle for the engine-path propagation test.
+fn on_loop_build_with_fields(
+    store: &StateStore,
+    regime: &Regime,
+    custom_extension_fields: &[([u8; 2], Vec<u8>)],
+) -> (Candidate, WorkMessage) {
     let (c, w, _timings) = generate_candidate(
         store,
         BuildMode::Full,
@@ -472,7 +482,7 @@ fn on_loop_build(store: &StateStore, regime: &Regime) -> (Candidate, WorkMessage
         &[],
         &std::collections::BTreeMap::new(),
         &ergo_validation::VotingSettings::mainnet(),
-        &[],
+        custom_extension_fields,
         &mut Vec::new(),
     )
     .expect("on-loop generate_candidate ok")
@@ -650,6 +660,73 @@ fn publish_and_serve_under(regime: &Regime) {
     );
     assert_eq!(served.height, regime.candidate_height());
     assert_eq!(served.pk, MINER_PK);
+}
+
+/// handle → engine → candidate propagation of an operator-configured custom
+/// extension field. Configures the field on the `MiningHandle`
+/// ([`MiningHandle::with_extension_fields`]), runs the engine path
+/// (`build_and_publish`), and proves the published candidate carries it: the
+/// served work `msg` = `blake2b256(header-without-pow)` commits to
+/// `extension_root` (hence the extension fields), so it must equal the on-loop
+/// oracle built WITH the same field — whose candidate provably contains it —
+/// and must DIFFER from a no-field build (the field is load-bearing).
+#[test]
+fn build_and_publish_threads_handle_custom_extension_field() {
+    let regime = Regime::pre_eip27();
+    let (_dir, store, tip) = synced_store(&regime);
+    // Aegis-style commitment: key 0xAE00, 33-byte value (0x01 ‖ 32-byte id).
+    let custom: ([u8; 2], Vec<u8>) = ([0xAE, 0x00], vec![0x01; 33]);
+
+    // On-loop oracle WITH the field — its candidate carries it directly, and its
+    // work.msg is the target the engine path must reproduce. Contrast against the
+    // no-field on-loop msg so the equality below is provably caused by the field.
+    let (oracle_candidate, oracle_work) =
+        on_loop_build_with_fields(&store, &regime, std::slice::from_ref(&custom));
+    assert!(
+        oracle_candidate
+            .extension_fields
+            .contains(&(custom.0.to_vec(), custom.1.clone())),
+        "on-loop candidate must carry the configured custom extension field",
+    );
+    let (_no_field_candidate, no_field_work) = on_loop_build(&store, &regime);
+    assert_ne!(
+        oracle_work.msg, no_field_work.msg,
+        "the custom field must change the candidate's msg (else the test is vacuous)",
+    );
+
+    // Engine path: the field is configured on the HANDLE, which the engine reads
+    // via `custom_extension_fields()` and threads into `generate_candidate`.
+    let handle = handle(&regime)
+        .with_extension_fields(vec![custom.clone()])
+        .expect("valid custom extension field");
+    handle.set_best_tip(BestTip {
+        parent_id: tip,
+        chain_seq: 1,
+        synced: true,
+    });
+    let outcome = build_and_publish(
+        &store.reader_handle(),
+        &handle,
+        &build_intent(tip, regime.parent_height),
+        BuildMode::Full,
+        None,
+        || BUILT_AT_MS,
+        |_, _| Vec::new(),
+        &mut None,
+    )
+    .expect("build_and_publish ok");
+    assert!(
+        matches!(outcome, BuildOutcome::Published { .. }),
+        "engine must publish a candidate for the synced tip, got {outcome:?}",
+    );
+
+    let served = handle
+        .cached_work_if_synced()
+        .expect("synced tip with a published candidate serves work");
+    assert_eq!(
+        served.msg, oracle_work.msg,
+        "engine-published candidate must carry the handle's custom extension field",
+    );
 }
 
 /// Phase-3 wiring oracle: the base-cache path (a `Some(&mut base)` slot) drives
