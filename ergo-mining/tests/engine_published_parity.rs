@@ -472,6 +472,7 @@ fn on_loop_build(store: &StateStore, regime: &Regime) -> (Candidate, WorkMessage
         &[],
         &std::collections::BTreeMap::new(),
         &ergo_validation::VotingSettings::mainnet(),
+        &[],
         &mut Vec::new(),
     )
     .expect("on-loop generate_candidate ok")
@@ -809,6 +810,7 @@ fn build_full_surface<V: ergo_mining::state_view::CandidateStateView>(
         &[],
         &std::collections::BTreeMap::new(),
         &ergo_validation::VotingSettings::mainnet(),
+        &[],
         &mut Vec::new(),
     )
     .expect("generate_candidate ok")
@@ -944,6 +946,7 @@ fn generate_candidate_measures_phase_timings() {
         &[],
         &std::collections::BTreeMap::new(),
         &ergo_validation::VotingSettings::mainnet(),
+        &[],
         &mut Vec::new(),
     )
     .expect("generate_candidate ok")
@@ -1040,6 +1043,7 @@ fn generate_candidate_non_genesis_parent_without_interlinks_errors_without_panic
         &[],
         &std::collections::BTreeMap::new(),
         &ergo_validation::VotingSettings::mainnet(),
+        &[],
         &mut Vec::new(),
     )
     .expect_err("non-genesis parent without interlinks must fail the build");
@@ -1097,6 +1101,7 @@ fn minimal_build_equals_full_build_on_quiet_chain() {
         &[],
         &std::collections::BTreeMap::new(),
         &ergo_validation::VotingSettings::mainnet(),
+        &[],
         &mut Vec::new(),
     )
     .expect("minimal generate_candidate ok")
@@ -1115,6 +1120,7 @@ fn minimal_build_equals_full_build_on_quiet_chain() {
         &[],
         &std::collections::BTreeMap::new(),
         &ergo_validation::VotingSettings::mainnet(),
+        &[],
         &mut Vec::new(),
     )
     .expect("full generate_candidate ok")
@@ -1283,6 +1289,7 @@ fn minimal_build_equals_full_build_on_quiet_chain_post_eip27() {
         &[],
         &std::collections::BTreeMap::new(),
         &ergo_validation::VotingSettings::mainnet(),
+        &[],
         &mut Vec::new(),
     )
     .expect("minimal generate_candidate ok")
@@ -1301,6 +1308,7 @@ fn minimal_build_equals_full_build_on_quiet_chain_post_eip27() {
         &[],
         &std::collections::BTreeMap::new(),
         &ergo_validation::VotingSettings::mainnet(),
+        &[],
         &mut Vec::new(),
     )
     .expect("full generate_candidate ok")
@@ -1388,6 +1396,7 @@ fn offloop_matches_onloop_under(regime: &Regime) {
         &[],
         &std::collections::BTreeMap::new(),
         &ergo_validation::VotingSettings::mainnet(),
+        &[],
         &mut Vec::new(),
     )
     .expect("off-loop generate_candidate ok")
@@ -1515,6 +1524,7 @@ fn generated_candidate_emits_configured_param_votes() {
         &[],
         &targets,
         &ergo_validation::VotingSettings::mainnet(),
+        &[],
         &mut Vec::new(),
     )
     .expect("generate_candidate ok")
@@ -1546,6 +1556,7 @@ fn generated_candidate_emits_neutral_votes_without_targets() {
         &[],
         &std::collections::BTreeMap::new(),
         &ergo_validation::VotingSettings::mainnet(),
+        &[],
         &mut Vec::new(),
     )
     .expect("generate_candidate ok")

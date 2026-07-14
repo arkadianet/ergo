@@ -32,6 +32,7 @@ use crate::candidate::Candidate;
 use crate::emission_rules::MonetarySettings;
 use crate::engine::{BestTip, BuildReason, Template, TemplateIdentity};
 use crate::error::MiningError;
+use crate::extension_builder::validate_custom_extension_fields;
 use crate::reemission::ReemissionSettings;
 use crate::solution::{verify_solution, SolutionOutcome};
 use crate::work_message::{MinerSolution, WorkMessage};
@@ -138,6 +139,12 @@ pub struct MiningHandle {
     /// API read state (so `GET /api/v1/votes` reflects live edits), and the
     /// admin write path — so a runtime change is seen by all three at once.
     voting_targets: Arc<RwLock<std::collections::BTreeMap<u8, i64>>>,
+    /// Operator-configured custom extension fields injected into every
+    /// candidate's extension (the general merge-mining / commitment hook, e.g.
+    /// an Aegis `0xAE00` block commitment). Empty by default; set + validated via
+    /// [`MiningHandle::with_extension_fields`]. `Arc` so every clone of the handle
+    /// shares the one immutable config.
+    custom_extension_fields: Arc<Vec<([u8; 2], Vec<u8>)>>,
     /// Ids of pooled txs whose consensus re-validation failed
     /// during the most recent published Full build (suspected tip-invalid). The
     /// off-loop build worker records them here ([`MiningHandle::record_suspects`])
@@ -192,6 +199,7 @@ impl MiningHandle {
             voting_settings: Arc::new(voting_settings),
             claim_storage_rent: false,
             max_storage_rent_claims: 0,
+            custom_extension_fields: Arc::new(Vec::new()),
             voting_targets: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
             suspects: Arc::new(Mutex::new(Vec::new())),
         }
@@ -227,6 +235,21 @@ impl MiningHandle {
         self.claim_storage_rent = claim_storage_rent;
         self.max_storage_rent_claims = max_storage_rent_claims;
         self
+    }
+
+    /// Install operator-configured custom extension fields, injected into every
+    /// candidate (the general merge-mining / commitment hook). Validated up
+    /// front via [`validate_custom_extension_fields`] (rule 404 size, reserved-
+    /// namespace guard, rule 405 no-duplicates) so a misconfiguration fails at
+    /// boot rather than producing candidates a peer rejects. Off by default;
+    /// builder-style like [`MiningHandle::with_rent_config`].
+    pub fn with_extension_fields(
+        mut self,
+        fields: Vec<([u8; 2], Vec<u8>)>,
+    ) -> Result<Self, MiningError> {
+        validate_custom_extension_fields(&fields)?;
+        self.custom_extension_fields = Arc::new(fields);
+        Ok(self)
     }
 
     /// Install the EIP-27 re-emission validation rules (mainnet only).
@@ -547,6 +570,12 @@ impl MiningHandle {
     /// epoch-boundary detection and the next-epoch parameter recompute.
     pub fn voting_settings(&self) -> &VotingSettings {
         &self.voting_settings
+    }
+
+    /// Operator-configured custom extension fields forwarded to the candidate
+    /// builder (empty unless set via [`MiningHandle::with_extension_fields`]).
+    pub fn custom_extension_fields(&self) -> &[([u8; 2], Vec<u8>)] {
+        &self.custom_extension_fields
     }
 
     /// Resolve the reward pubkey as hex against current state. Unlike the old

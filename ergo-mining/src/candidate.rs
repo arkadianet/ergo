@@ -174,6 +174,11 @@ pub fn generate_candidate<V: CandidateStateView>(
     eligible_rent_boxes: &[ErgoBox],
     voting_targets: &BTreeMap<u8, i64>,
     voting_settings: &VotingSettings,
+    // Operator-configured custom extension fields (validated at config time via
+    // `validate_custom_extension_fields`) — the general merge-mining / commitment
+    // hook. Injected into every candidate's extension alongside interlinks; empty
+    // when the operator has configured none.
+    custom_extension_fields: &[([u8; 2], Vec<u8>)],
     // Side-output: ids of pooled txs whose consensus re-validation
     // failed during selection (suspected tip-invalid). Written only on the Full
     // path that runs mempool selection; left untouched for Minimal builds. The
@@ -360,6 +365,7 @@ pub fn generate_candidate<V: CandidateStateView>(
         candidate_height,
         voting_settings.voting_length,
         &epoch_boundary_fields,
+        custom_extension_fields,
     )?;
 
     // 8. Coinbase: emission tx. Three regimes:
