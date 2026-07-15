@@ -362,10 +362,34 @@ pub(super) fn opcode_pattern(op: u8) -> Option<ArgPattern> {
         // through to ReadError::InvalidData below matches Scala's
         // rejection.
 
-        // 0xB9 VerifyStark (EIP-0045): DEVNET-ONLY. Not registered in mainnet
-        // Scala's ValueSerializer, so a stock node rejects this byte — a block
-        // carrying it only validates on the feature-branch/devnet build. Wire
-        // shape mirrors sigmastate-interpreter#1116 VerifyStarkSerializer: five
+        // 0xB9 VerifyStark (EIP-0045): DEVNET-ONLY, registered UNCONDITIONALLY
+        // (every build on this branch parses it). Safe ONLY because this branch
+        // never follows mainnet.
+        //
+        // CONSENSUS PREMISE (verified vs the reference — corrects an earlier
+        // "a stock Scala node just rejects 0xB9" note that was the trap): Scala's
+        // handling depends on the ErgoTree size bit
+        // (ErgoTreeSerializer.deserializeErgoTree, :196-209, per ergo_tree.rs):
+        //   * has_size: the unknown-opcode ValidationException is CAUGHT and the
+        //     whole tree kept as UnparsedErgoTree; at spend `propositionFromErgoTree`
+        //     yields TrueSigmaProp (ACCEPT/spendable) when the error is an active
+        //     soft-fork, else throws (reject).
+        //   * sizeless: re-raised as a hard SerializerException (reject).
+        // Registering 0xB9 makes THIS branch parse + evaluate it to a concrete
+        // Boolean instead of taking the Unparsed/soft-fork path — so a has_size
+        // 0xB9 tree Scala would soft-fork-ACCEPT, this branch would reject => it
+        // would fork off mainnet. Devnet-only makes that unreachable.
+        //
+        // PRODUCTIONIZATION (before ANY mainnet-following build): do NOT parse
+        // 0xB9 as a real opcode on the mainnet path — either don't compile this arm
+        // (let 0xB9 fall through to the UnparsedErgoTree soft-fork path, matching
+        // Scala), or version-gate so ONLY the activated script version parses it and
+        // every non-activated version yields the SAME Unparsed/TrueSigmaProp
+        // outcome. "Reject on the wrong version" is the one thing that silently
+        // forks the chain (project rule: verify the gate premise against the
+        // reference, not a code comment).
+        //
+        // Wire shape mirrors sigmastate-interpreter#1116 VerifyStarkSerializer: five
         // positional child Values (proofChunks, publicInputs, imageId, vmType,
         // costParams). Byte = Scala newOpCode(73) = LAST_CONSTANT_CODE + 73.
         0xB9 => Some(Five), // VerifyStark (devnet-only, EIP-0045)

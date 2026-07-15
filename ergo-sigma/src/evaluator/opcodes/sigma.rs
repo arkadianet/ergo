@@ -202,12 +202,15 @@ pub(in crate::evaluator) fn eval_calc_sha256(
 //
 // A phased, AOT-costed pure Boolean check that mirrors
 // sigmastate-interpreter#1116 `VerifyStark.eval`. This is NOT a mainnet
-// consensus opcode: a stock Scala node has no serializer for byte 0xB9 and
-// rejects it, so this arm only ever runs on the feature-branch / devnet
-// build. M1 uses a STUB verifier that returns `true` on well-formed input to
-// prove the opcode + cost plumbing end-to-end; M2 replaces the stub with the
-// real BabyBear/Poseidon1/FRI verifier bound to a concrete prover profile, at
-// which point a tampered proof must return `false`.
+// consensus opcode: 0xB9 is unknown to mainnet Scala, so this arm only runs on
+// the feature-branch / devnet build. NB it is NOT true that "Scala just rejects
+// 0xB9" — a has_size tree carrying it is soft-fork-wrapped and can evaluate to
+// TrueSigmaProp (accept); only a sizeless tree hard-rejects. See the consensus
+// premise + productionization requirement at the 0xB9 arm of
+// `opcode_pattern` (ergo-ser opcode/types.rs). M1 used a STUB verifier; M2 wired
+// the real RISC0 succinct verifier (risc0-verifier, Poseidon2/BabyBear — NOT
+// #1116's Poseidon1/Ext16 profile) behind the `stark-verify` feature, at which
+// point a tampered proof returns `false`.
 //
 // Cost model (M3 calibration). The dominant term BASE_COST is calibrated to the
 // REAL RISC0 succinct-STARK verify measured off-node at ~11.8 ms (stark-poc).
