@@ -55,6 +55,16 @@ k256               = { workspace = true }
 zeroize            = { workspace = true }
 ergo-sigma         = { workspace = true }
 
+[features]
+# Build a DEVNET-ONLY node binary that does REAL RISC0 verifyStark (0xB9)
+# verification instead of the M1 stub. Forwards into the sigma evaluator via
+# ergo-validation (which drives block + mempool script validation); cargo feature
+# unification means the whole node then links one ergo-sigma built with real
+# verify. Pulls the risc0-verifier git dep. NEVER enable on a mainnet-following
+# build — 0xB9 is not a mainnet opcode and this build diverges by design (see the
+# 0xB9 arm of `opcode_pattern` in ergo-ser opcode/types.rs).
+stark-verify = ["ergo-validation/stark-verify", "ergo-sigma/stark-verify"]
+
 [dev-dependencies]
 tempfile           = { workspace = true }
 ergo-api           = { workspace = true }
