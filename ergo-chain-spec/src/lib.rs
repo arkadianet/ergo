@@ -53,6 +53,13 @@ pub enum Network {
     Mainnet,
     /// Public testnet.
     Testnet,
+    /// Isolated local devnet. Consensus params (genesis, difficulty, launch,
+    /// address prefix) are IDENTICAL to testnet — it reuses testnet's proven
+    /// values — differing ONLY in a unique P2P magic and an EMPTY seed-peer set,
+    /// so a devnet node connects to nobody and can't handshake a public peer.
+    /// DEVNET-ONLY builds (e.g. `--features stark-verify`) run here so their
+    /// deliberate divergences never touch a public network.
+    Devnet,
 }
 
 impl Network {
@@ -62,6 +69,7 @@ impl Network {
         match self {
             Network::Mainnet => "mainnet",
             Network::Testnet => "testnet",
+            Network::Devnet => "devnet",
         }
     }
 }
@@ -79,6 +87,7 @@ impl std::str::FromStr for Network {
         match s.to_lowercase().as_str() {
             "mainnet" => Ok(Network::Mainnet),
             "testnet" => Ok(Network::Testnet),
+            "devnet" => Ok(Network::Devnet),
             other => Err(format!("unknown network: {other}")),
         }
     }
@@ -113,11 +122,21 @@ impl NetworkParams {
         address_prefix: NetworkPrefix::Testnet,
     };
 
+    /// Isolated devnet identity: a UNIQUE magic so a stray connection to a
+    /// public mainnet/testnet peer fails the handshake (hard isolation, not just
+    /// "don't dial"), with testnet's address prefix since it reuses testnet
+    /// genesis and addresses. Not a public network — never gossiped.
+    pub const DEVNET: NetworkParams = NetworkParams {
+        magic: [0x07, 0x07, 0x07, 0x07],
+        address_prefix: NetworkPrefix::Testnet,
+    };
+
     /// Identity for the given [`Network`].
     pub const fn for_network(net: Network) -> NetworkParams {
         match net {
             Network::Mainnet => Self::MAINNET,
             Network::Testnet => Self::TESTNET,
+            Network::Devnet => Self::DEVNET,
         }
     }
 }
@@ -221,6 +240,9 @@ impl DifficultyParams {
         match net {
             Network::Mainnet => Self::mainnet(),
             Network::Testnet => Self::testnet(),
+            // Devnet reuses testnet's difficulty schedule (difficulty-1 seed,
+            // 45s interval, no EIP-37) — a locally-mineable private chain.
+            Network::Devnet => Self::testnet(),
         }
     }
 }
@@ -458,6 +480,8 @@ impl GenesisParams {
         match net {
             Network::Mainnet => Self::mainnet(),
             Network::Testnet => Self::testnet(),
+            // Devnet starts from the testnet genesis (same state digest / boxes).
+            Network::Devnet => Self::testnet(),
         }
     }
 }
@@ -595,6 +619,24 @@ impl ChainSpec {
         }
     }
 
+    /// Isolated devnet spec: testnet's consensus params verbatim, but a unique
+    /// P2P magic (`NetworkParams::DEVNET`) and EMPTY seed peers
+    /// (`BootstrapParams::devnet`), so the node connects to nobody and can't
+    /// handshake a public peer. For DEVNET-ONLY builds (e.g. `stark-verify`).
+    pub fn devnet() -> Self {
+        Self {
+            network: Network::Devnet,
+            network_params: NetworkParams::DEVNET,
+            difficulty: DifficultyParams::testnet(),
+            voting: VotingParams::testnet(),
+            monetary: MonetaryParams::testnet(),
+            reemission: None,
+            genesis: GenesisParams::testnet(),
+            block_timing: BlockTimingParams::testnet(),
+            bootstrap: BootstrapParams::devnet(),
+        }
+    }
+
     /// Spec for the given [`Network`]. This is the only place that
     /// branches on `Network::Mainnet` vs `Network::Testnet`; downstream
     /// code takes narrow views.
@@ -602,6 +644,7 @@ impl ChainSpec {
         match net {
             Network::Mainnet => Self::mainnet(),
             Network::Testnet => Self::testnet(),
+            Network::Devnet => Self::devnet(),
         }
     }
 
@@ -739,6 +782,18 @@ impl BootstrapParams {
             checkpoint: None,
         }
     }
+
+    /// Isolated devnet defaults: EMPTY seed peers (nothing is appended at config
+    /// load, so the node's only dial target is the operator's dead known-peer and
+    /// it never connects to anything) and no checkpoint (full validation from
+    /// genesis). The empty seed set is the isolation config alone cannot achieve
+    /// on a public network id — see the `stark-verify` devnet.
+    pub fn devnet() -> Self {
+        Self {
+            seed_peers: Vec::new(),
+            checkpoint: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -809,7 +864,7 @@ mod tests {
 
     #[test]
     fn network_roundtrips_through_str() {
-        for net in [Network::Mainnet, Network::Testnet] {
+        for net in [Network::Mainnet, Network::Testnet, Network::Devnet] {
             assert_eq!(net.as_str().parse::<Network>().unwrap(), net);
         }
     }
@@ -872,9 +927,9 @@ mod tests {
 
     #[test]
     fn network_from_str_unknown_errors() {
-        assert!("devnet".parse::<Network>().is_err());
         assert!("".parse::<Network>().is_err());
         assert!("MAINNET\0".parse::<Network>().is_err());
+        assert!("privnet".parse::<Network>().is_err());
     }
 
     // ----- difficulty -----

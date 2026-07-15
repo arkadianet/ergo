@@ -197,6 +197,9 @@ pub fn scala_launch_for_network(net: Network) -> ActiveProtocolParameters {
     match net {
         Network::Mainnet => scala_launch_mainnet(),
         Network::Testnet => scala_launch_testnet(),
+        // Devnet launches with testnet's params (block_version >= 2, Autolykos v2,
+        // so the mining/solution path works and 0xB9 evaluates normally).
+        Network::Devnet => scala_launch_testnet(),
     }
 }
 
