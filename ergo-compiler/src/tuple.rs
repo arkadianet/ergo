@@ -184,6 +184,13 @@ fn map_children<F: FnMut(Expr) -> Expr>(payload: Payload, visit: &mut F) -> Payl
             boxed(*c, visit),
             boxed(*d, visit),
         ),
+        Payload::Five(a, b, c, d, e) => Payload::Five(
+            boxed(*a, visit),
+            boxed(*b, visit),
+            boxed(*c, visit),
+            boxed(*d, visit),
+            boxed(*e, visit),
+        ),
         Payload::ValDef { id, tpe, rhs } => Payload::ValDef {
             id,
             tpe,

@@ -336,6 +336,7 @@ fn map_children(payload: Payload) -> Payload {
         Payload::Two(a, b) => Payload::Two(f(a), f(b)),
         Payload::Three(a, b, c) => Payload::Three(f(a), f(b), f(c)),
         Payload::Four(a, b, c, d) => Payload::Four(f(a), f(b), f(c), f(d)),
+        Payload::Five(a, b, c, d, e) => Payload::Five(f(a), f(b), f(c), f(d), f(e)),
         Payload::ValDef { id, tpe, rhs } => Payload::ValDef {
             id,
             tpe,

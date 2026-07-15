@@ -339,6 +339,9 @@ fn count_payload(node: &IrNode) -> usize {
         Payload::Four(a, b, c, d) => {
             count_nodes(a) + count_nodes(b) + count_nodes(c) + count_nodes(d)
         }
+        Payload::Five(a, b, c, d, e) => {
+            count_nodes(a) + count_nodes(b) + count_nodes(c) + count_nodes(d) + count_nodes(e)
+        }
         Payload::ValDef { rhs, .. } | Payload::FunDef { rhs, .. } => count_nodes(rhs),
         Payload::BlockValue { items, result } => {
             items.iter().map(count_nodes).sum::<usize>() + count_nodes(result)

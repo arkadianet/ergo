@@ -214,6 +214,9 @@ fn push_children<'a>(payload: &'a Payload, stack: &mut Vec<&'a Expr>) {
         Payload::Two(a, b) => stack.extend([a.as_ref(), b.as_ref()]),
         Payload::Three(a, b, c) => stack.extend([a.as_ref(), b.as_ref(), c.as_ref()]),
         Payload::Four(a, b, c, d) => stack.extend([a.as_ref(), b.as_ref(), c.as_ref(), d.as_ref()]),
+        Payload::Five(a, b, c, d, e) => {
+            stack.extend([a.as_ref(), b.as_ref(), c.as_ref(), d.as_ref(), e.as_ref()])
+        }
         Payload::ValDef { rhs, .. } | Payload::FunDef { rhs, .. } => stack.push(rhs),
         Payload::BlockValue { items, result } => {
             stack.extend(items.iter());
@@ -527,6 +530,7 @@ fn fold_direct_const_casts_children(payload: Payload) -> Result<Payload, EmitErr
         Payload::Two(a, b) => Payload::Two(f(a)?, f(b)?),
         Payload::Three(a, b, c) => Payload::Three(f(a)?, f(b)?, f(c)?),
         Payload::Four(a, b, c, d) => Payload::Four(f(a)?, f(b)?, f(c)?, f(d)?),
+        Payload::Five(a, b, c, d, e) => Payload::Five(f(a)?, f(b)?, f(c)?, f(d)?, f(e)?),
         Payload::ValDef { id, tpe, rhs } => Payload::ValDef {
             id,
             tpe,

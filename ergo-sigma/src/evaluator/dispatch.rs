@@ -131,6 +131,13 @@ pub(crate) fn expr_has_deserialize(expr: &Expr) -> bool {
                 || expr_has_deserialize(c)
                 || expr_has_deserialize(d)
         }
+        Payload::Five(a, b, c, d, e) => {
+            expr_has_deserialize(a)
+                || expr_has_deserialize(b)
+                || expr_has_deserialize(c)
+                || expr_has_deserialize(d)
+                || expr_has_deserialize(e)
+        }
         Payload::ValDef { rhs, .. } | Payload::FunDef { rhs, .. } => expr_has_deserialize(rhs),
         Payload::BlockValue { items, result } => {
             items.iter().any(expr_has_deserialize) || expr_has_deserialize(result)
@@ -293,6 +300,9 @@ fn inline_placeholders(expr: &Expr, constants: &[(SigmaType, SigmaValue)]) -> Ex
         Payload::Two(a, b) => Payload::Two(sub_box(a), sub_box(b)),
         Payload::Three(a, b, c) => Payload::Three(sub_box(a), sub_box(b), sub_box(c)),
         Payload::Four(a, b, c, d) => Payload::Four(sub_box(a), sub_box(b), sub_box(c), sub_box(d)),
+        Payload::Five(a, b, c, d, e) => {
+            Payload::Five(sub_box(a), sub_box(b), sub_box(c), sub_box(d), sub_box(e))
+        }
         Payload::ValDef { id, tpe, rhs } => Payload::ValDef {
             id: *id,
             tpe: tpe.clone(),
@@ -862,6 +872,20 @@ fn eval_op(
         // ProveDHTuple(g, h, u, v) — create DHT sigma proposition.
         (0xCE, Payload::Four(g_expr, h_expr, u_expr, v_expr)) => {
             opcodes::sigma::eval_prove_dh_tuple(g_expr, h_expr, u_expr, v_expr, &mut cx)
+        }
+
+        // VerifyStark(proofChunks, publicInputs, imageId, vmType, costParams)
+        // — EIP-0045 native STARK verify. DEVNET-ONLY (byte 0xB9); a stock
+        // node never reaches this arm. See opcodes::sigma::eval_verify_stark.
+        (0xB9, Payload::Five(proof_chunks, public_inputs, image_id, vm_type, cost_params)) => {
+            opcodes::sigma::eval_verify_stark(
+                proof_chunks,
+                public_inputs,
+                image_id,
+                vm_type,
+                cost_params,
+                &mut cx,
+            )
         }
 
         // DecodePoint(bytes) — parse compressed point from first 33 bytes.

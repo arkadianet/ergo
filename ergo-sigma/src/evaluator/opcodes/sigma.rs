@@ -17,6 +17,7 @@
 //! the `bytes[0] == 0x00 → IDENTITY` shortcut and the exact
 //! `EvalError::TypeError` messages from the original arm bodies.
 
+use ergo_primitives::cost::{CostKind, JitCost};
 use ergo_primitives::group_element::GroupElement;
 use ergo_ser::opcode::Expr;
 use ergo_ser::sigma_type::SigmaType;
@@ -195,6 +196,146 @@ pub(in crate::evaluator) fn eval_calc_sha256(
     use sha2::Digest;
     let hash = sha2::Sha256::digest(&bytes);
     Ok(Value::CollBytes(hash.to_vec()))
+}
+
+// ===== 0xB9 VerifyStark (EIP-0045) — DEVNET-ONLY spike =====
+//
+// A phased, AOT-costed pure Boolean check that mirrors
+// sigmastate-interpreter#1116 `VerifyStark.eval`. This is NOT a mainnet
+// consensus opcode: a stock Scala node has no serializer for byte 0xB9 and
+// rejects it, so this arm only ever runs on the feature-branch / devnet
+// build. M1 uses a STUB verifier that returns `true` on well-formed input to
+// prove the opcode + cost plumbing end-to-end; M2 replaces the stub with the
+// real BabyBear/Poseidon1/FRI verifier bound to a concrete prover profile, at
+// which point a tampered proof must return `false`.
+//
+// Cost constants are copied verbatim from #1116 `VerifyStark` (preliminary,
+// pending JMH calibration). They are NOT oracle-anchored against mainnet —
+// there is no mainnet verifyStark — so they carry no consensus-parity claim.
+
+/// Fixed overhead: transcript setup, AIR constraint check, OOD derivation,
+/// DEEP-ALI. #1116 `VerifyStark.BASE_COST`.
+const VERIFY_STARK_BASE_COST: u64 = 5000;
+/// Per-FRI-query cost (iFFT-8 fold + Horner). #1116 `PER_QUERY_COST`.
+const VERIFY_STARK_PER_QUERY_COST: u64 = 50;
+/// Per-query-per-Merkle-layer hash verification. #1116 `PER_MERKLE_LAYER_COST`.
+const VERIFY_STARK_PER_MERKLE_LAYER_COST: u64 = 10;
+
+/// 0xB9 VerifyStark — verify a STARK proof, returning Boolean (EIP-0045).
+///
+/// Evaluation is phased to give an AOT (ahead-of-time) fail-fast guarantee:
+/// the O(1) scalars (`vmType`, `costParams`) are evaluated first and the full
+/// query/Merkle cost is charged BEFORE the heavy proof byte arrays are touched,
+/// so a malicious `costParams` that would blow the block budget is rejected
+/// without materializing proof data.
+pub(in crate::evaluator) fn eval_verify_stark(
+    proof_chunks: &Expr,
+    public_inputs: &Expr,
+    image_id: &Expr,
+    vm_type: &Expr,
+    cost_params: &Expr,
+    cx: &mut EvalCtx<'_>,
+) -> Result<Value, EvalError> {
+    // ---- Phase 1: evaluate the O(1) scalars first (AOT preemptive cost). ----
+    let vm_type_v = match cx.eval_expr(vm_type)? {
+        Value::Int(v) => v,
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "Int for VerifyStark vmType",
+                got: format!("{other:?}"),
+            })
+        }
+    };
+    let costs_v = match cx.eval_expr(cost_params)? {
+        Value::CollInt(v) => v,
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "Coll[Int] for VerifyStark costParams",
+                got: format!("{other:?}"),
+            })
+        }
+    };
+
+    // Fail-fast on corrupted/malicious params (mirrors #1116): a short or
+    // negative param vector, or a negative vmType, is a soft `false` — never
+    // an error, and nothing past this point is charged.
+    if costs_v.len() < 2 || costs_v[0] < 0 || costs_v[1] < 0 || vm_type_v < 0 {
+        return Ok(Value::Bool(false));
+    }
+    let num_queries = costs_v[0] as u64; // Q
+    let merkle_depth = costs_v[1] as u64; // D
+
+    // AOT cost = BASE + Q*PER_QUERY + Q*D*PER_MERKLE_LAYER, in SATURATING u64
+    // arithmetic (Q and D are attacker-controlled). Charge it upfront via
+    // `try_from_jit` — NEVER `from_jit`, which panics above Scala Int.MaxValue.
+    // An over-limit or overflowing cost rejects fail-fast (the
+    // CostLimitException-equivalent) BEFORE any proof byte is read.
+    let aot_cost = VERIFY_STARK_BASE_COST
+        .saturating_add(num_queries.saturating_mul(VERIFY_STARK_PER_QUERY_COST))
+        .saturating_add(
+            num_queries
+                .saturating_mul(merkle_depth)
+                .saturating_mul(VERIFY_STARK_PER_MERKLE_LAYER_COST),
+        );
+    cx.cost.add(JitCost::try_from_jit(aot_cost)?)?;
+
+    // ---- Phase 2: evaluate the heavy byte arrays (cost now secured). ----
+    let chunks_v = match cx.eval_expr(proof_chunks)? {
+        Value::CollGeneric(items, _) => items,
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "Coll[Coll[Byte]] for VerifyStark proofChunks",
+                got: format!("{other:?}"),
+            })
+        }
+    };
+    let public_inputs_v = match cx.eval_expr(public_inputs)? {
+        Value::CollBytes(b) => b,
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "Coll[Byte] for VerifyStark publicInputs",
+                got: format!("{other:?}"),
+            })
+        }
+    };
+    let image_id_v = match cx.eval_expr(image_id)? {
+        Value::CollBytes(b) => b,
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "Coll[Byte] for VerifyStark imageId",
+                got: format!("{other:?}"),
+            })
+        }
+    };
+
+    // ---- Phase 3: charge byte-ingestion, then verify. ----
+    // Anti-padding-spam PerItemCost from #1116 `byteIngestionCost`
+    // (base=10, perChunk=1, chunkSize=1024) over the total ingested bytes.
+    let mut total_bytes: u64 = public_inputs_v.len() as u64 + image_id_v.len() as u64;
+    for chunk in &chunks_v {
+        match chunk {
+            Value::CollBytes(b) => total_bytes = total_bytes.saturating_add(b.len() as u64),
+            other => {
+                return Err(EvalError::TypeError {
+                    expected: "Coll[Byte] element in VerifyStark proofChunks",
+                    got: format!("{other:?}"),
+                })
+            }
+        }
+    }
+    let byte_ingestion = CostKind::PerItem {
+        base: JitCost::from_jit(10),
+        per_chunk: JitCost::from_jit(1),
+        chunk_size: 1024,
+    };
+    let n_bytes = u32::try_from(total_bytes).unwrap_or(u32::MAX);
+    cx.cost.add(byte_ingestion.compute(n_bytes)?)?;
+
+    // M1 STUB verifier: return `true` on well-formed input to demonstrate the
+    // accept path (`sigmaProp(verifyStark(...))` reduces to accept on devnet).
+    // #1116's placeholder returns `false`; M2 wires the real verifier here so a
+    // valid proof returns `true` and a tampered proof returns `false`.
+    Ok(Value::Bool(true))
 }
 
 // 0x9F Exponentiate — `GroupElement ** BigInt` (EC scalar multiplication).

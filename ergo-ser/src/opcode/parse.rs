@@ -117,6 +117,24 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
             Payload::Four(Box::new(a), Box::new(b), Box::new(c), Box::new(d))
         }
 
+        ArgPattern::Five => {
+            // VerifyStark (0xB9, EIP-0045): five positional children in the
+            // #1116 VerifyStarkSerializer order — proofChunks, publicInputs,
+            // imageId, vmType, costParams.
+            let a = parse_expr(r, next, _tree_version)?;
+            let b = parse_expr(r, next, _tree_version)?;
+            let c = parse_expr(r, next, _tree_version)?;
+            let d = parse_expr(r, next, _tree_version)?;
+            let e = parse_expr(r, next, _tree_version)?;
+            Payload::Five(
+                Box::new(a),
+                Box::new(b),
+                Box::new(c),
+                Box::new(d),
+                Box::new(e),
+            )
+        }
+
         ArgPattern::ValUse => {
             // Scala `ValUseSerializer` reads the id via `getUInt.toInt`
             // (ValUseSerializer.scala:13) — NOT `getUIntExact`. A value past

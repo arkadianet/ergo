@@ -674,6 +674,51 @@ fn roundtrip_four_arg_prove_dh() {
 }
 
 #[test]
+fn roundtrip_five_arg_verify_stark() {
+    // VerifyStark (0xB9, EIP-0045, devnet-only): five positional children in
+    // sigmastate-interpreter#1116 VerifyStarkSerializer order — proofChunks
+    // (Coll[Coll[Byte]]), publicInputs (Coll[Byte]), imageId (Coll[Byte]),
+    // vmType (Int), costParams (Coll[Int]). SELF-ORACLE: this pins that OUR
+    // serialize->deserialize is byte-stable for the 5-child shape and that the
+    // child order survives a round-trip; it is NOT byte-parity with Scala (no
+    // mainnet verifyStark bytes exist to anchor against).
+    use crate::sigma_value::CollValue;
+    let byte_coll = |bytes: Vec<u8>| Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SByte)),
+        val: SigmaValue::Coll(CollValue::Bytes(bytes)),
+    };
+    let proof_chunks = Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SColl(Box::new(SigmaType::SByte)))),
+        val: SigmaValue::Coll(CollValue::Values(vec![
+            SigmaValue::Coll(CollValue::Bytes(vec![1, 2, 3])),
+            SigmaValue::Coll(CollValue::Bytes(vec![4, 5])),
+        ])),
+    };
+    let vm_type = Expr::Const {
+        tpe: SigmaType::SInt,
+        val: SigmaValue::Int(0),
+    };
+    let cost_params = Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SInt)),
+        val: SigmaValue::Coll(CollValue::Values(vec![
+            SigmaValue::Int(35), // Q
+            SigmaValue::Int(16), // D
+        ])),
+    };
+    let body = Expr::Op(IrNode {
+        opcode: 0xB9,
+        payload: Payload::Five(
+            Box::new(proof_chunks),
+            Box::new(byte_coll(vec![9, 8, 7])), // publicInputs
+            Box::new(byte_coll(vec![0xAB; 4])), // imageId
+            Box::new(vm_type),
+            Box::new(cost_params),
+        ),
+    });
+    roundtrip(&body, false);
+}
+
+#[test]
 fn roundtrip_property_call() {
     let obj = Expr::Op(IrNode {
         opcode: 0xA7,
@@ -902,11 +947,16 @@ fn parser_parity_audit_against_scala_registered_set() {
         .filter(|&b| opcode_pattern(b).is_some())
         .collect();
 
-    // Known accept-more divergences — currently empty. If this set
-    // grows, a new parser arm was added that Scala's
-    // ValueSerializer.serializers registry does not include — audit
-    // before merging.
-    let known_accept_more: std::collections::BTreeSet<u8> = std::collections::BTreeSet::new();
+    // Known accept-more divergences. If this set grows, a new parser
+    // arm was added that Scala's ValueSerializer.serializers registry
+    // does not include — audit before merging.
+    //
+    // 0xB9 VerifyStark (EIP-0045) is DEVNET-ONLY: sigmastate-interpreter#1116
+    // is unmerged/draft, so mainnet Scala's registry does not include it. Our
+    // feature-branch parser accepts it on purpose; this is a deliberate,
+    // documented divergence, NOT a mainnet-parity regression. It must never
+    // reach a mainnet-following build (see opcode/types.rs `0xB9` note).
+    let known_accept_more: std::collections::BTreeSet<u8> = [0xB9u8].into_iter().collect();
 
     let parser_only: std::collections::BTreeSet<u8> = parser_accepted
         .difference(&scala_registered)

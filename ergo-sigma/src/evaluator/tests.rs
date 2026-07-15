@@ -12788,3 +12788,160 @@ fn sbox_accessor_method_form_costs() {
         "creationInfo body = ExtractCreationInfo(16)"
     );
 }
+
+// ===== verify_stark (0xB9, EIP-0045 devnet-only) =====
+// M1 exercises the STUB verifier: a well-formed call reduces to Boolean `true`,
+// malformed cost params fail-fast to `false`, and a hostile costParams charges
+// its AOT cost BEFORE the proof bytes are touched. These are self-oracle tests
+// (there is no mainnet verifyStark to check against). Real verify (valid->true,
+// tampered->false) is M2.
+
+// ----- helpers -----
+
+/// A valid `Coll[Coll[Byte]]` proofChunks constant.
+fn vs_valid_proof_chunks() -> Expr {
+    use ergo_ser::sigma_value::CollValue;
+    Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SColl(Box::new(SigmaType::SByte)))),
+        val: SigmaValue::Coll(CollValue::Values(vec![
+            SigmaValue::Coll(CollValue::Bytes(vec![1, 2, 3, 4])),
+            SigmaValue::Coll(CollValue::Bytes(vec![5, 6])),
+        ])),
+    }
+}
+
+/// A `Coll[Int]` costParams constant `[q, d]`.
+fn vs_cost_params(q: i32, d: i32) -> Expr {
+    use ergo_ser::sigma_value::CollValue;
+    Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SInt)),
+        val: SigmaValue::Coll(CollValue::Values(vec![
+            SigmaValue::Int(q),
+            SigmaValue::Int(d),
+        ])),
+    }
+}
+
+/// Build a VerifyStark (0xB9) node with the given proofChunks, vmType, and
+/// costParams; publicInputs and imageId are fixed small byte colls.
+fn vs_node(proof_chunks: Expr, vm_type: i32, cost_params: Expr) -> Expr {
+    use ergo_ser::sigma_value::CollValue;
+    let byte_coll = |bytes: Vec<u8>| Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SByte)),
+        val: SigmaValue::Coll(CollValue::Bytes(bytes)),
+    };
+    Expr::Op(IrNode {
+        opcode: 0xB9,
+        payload: Payload::Five(
+            Box::new(proof_chunks),
+            Box::new(byte_coll(vec![9, 8, 7])), // publicInputs
+            Box::new(byte_coll(vec![0xAB; 4])), // imageId
+            Box::new(Expr::Const {
+                tpe: SigmaType::SInt,
+                val: SigmaValue::Int(vm_type),
+            }),
+            Box::new(cost_params),
+        ),
+    })
+}
+
+// ----- happy path -----
+
+#[test]
+fn verify_stark_stub_wellformed_returns_true() {
+    // M1 STUB verifier: well-formed input reduces to Boolean `true` (accept).
+    let node = vs_node(vs_valid_proof_chunks(), 0, vs_cost_params(35, 16));
+    assert_eq!(run_eval(&node), Value::Bool(true));
+}
+
+// ----- error paths -----
+
+#[test]
+fn verify_stark_short_costparams_returns_false() {
+    // costParams shorter than [Q, D] is a soft `false`, never an error.
+    use ergo_ser::sigma_value::CollValue;
+    let short = Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SInt)),
+        val: SigmaValue::Coll(CollValue::Values(vec![SigmaValue::Int(35)])),
+    };
+    let node = vs_node(vs_valid_proof_chunks(), 0, short);
+    assert_eq!(run_eval(&node), Value::Bool(false));
+}
+
+#[test]
+fn verify_stark_negative_query_count_returns_false() {
+    // Q < 0 is a soft `false` — fail-fast before any cost is charged.
+    let node = vs_node(vs_valid_proof_chunks(), 0, vs_cost_params(-1, 16));
+    assert_eq!(run_eval(&node), Value::Bool(false));
+}
+
+#[test]
+fn verify_stark_negative_vmtype_returns_false() {
+    let node = vs_node(vs_valid_proof_chunks(), -1, vs_cost_params(35, 16));
+    assert_eq!(run_eval(&node), Value::Bool(false));
+}
+
+#[test]
+fn verify_stark_aot_cost_charged_before_proof_bytes() {
+    // AOT fail-fast: a hostile costParams=[Q,D] whose cost (BASE + Q*PER_QUERY
+    // + Q*D*PER_MERKLE_LAYER) exceeds the block budget must reject at the
+    // Phase-1 charge, BEFORE proofChunks is evaluated. Proof: proofChunks is a
+    // WRONG-TYPE constant that would raise a TypeError if it were ever reached
+    // (Phase 2). Because the cost charge fires first, the error is CostExceeded,
+    // not TypeError — demonstrating the preemptive AOT guarantee.
+    //
+    // NB: run_eval uses a recording-only (non-enforcing) accumulator, so this
+    // must drive eval_expr with an ENFORCING accumulator whose limit sits below
+    // the AOT cost (Q=1000, D=1000 -> 5000 + 50_000 + 10_000_000 = 10_055_000).
+    let bad_proof_chunks = Expr::Const {
+        tpe: SigmaType::SInt,
+        val: SigmaValue::Int(7),
+    };
+    let node = vs_node(bad_proof_chunks, 0, vs_cost_params(1000, 1000));
+    let ctx = ReductionContext::minimal(0, 0);
+    let mut env = Env::new();
+    let mut depth = 0usize;
+    let mut cost = CostAccumulator::new(ergo_primitives::cost::JitCost::from_jit(100_000));
+    let mut trace = None;
+    let res = eval_expr(
+        &node,
+        &ctx,
+        &[],
+        &mut env,
+        &mut depth,
+        &mut cost,
+        &mut trace,
+    );
+    match res {
+        Err(EvalError::CostExceeded(_)) => {}
+        other => panic!("expected CostExceeded from AOT charge before proof eval, got {other:?}"),
+    }
+}
+
+#[test]
+fn verify_stark_cost_scales_with_query_and_merkle_params() {
+    // The AOT charge is DERIVED from costParams=[Q, D] — the whole point of
+    // preemptive costing. More FRI queries (Q) or deeper Merkle paths (D) must
+    // strictly increase the charged cost. (Robust to whatever fixed per-node /
+    // constant-loading cost the interpreter also charges: only the delta from
+    // Q/D is asserted.)
+    let ctx = ReductionContext::minimal(0, 0);
+    let cost_for = |q: i32, d: i32| {
+        eval_value_and_cost(
+            &vs_node(vs_valid_proof_chunks(), 0, vs_cost_params(q, d)),
+            &ctx,
+        )
+        .1
+    };
+    let base = cost_for(10, 5);
+    assert!(
+        cost_for(100, 5) > base,
+        "more FRI queries must cost more: {} vs {base}",
+        cost_for(100, 5)
+    );
+    assert!(
+        cost_for(10, 50) > base,
+        "deeper Merkle paths must cost more: {} vs {base}",
+        cost_for(10, 50)
+    );
+}

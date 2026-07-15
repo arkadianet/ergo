@@ -283,6 +283,15 @@ fn write_payload(
             write_expr_inner(w, d, sink.as_deref_mut())?;
         }
 
+        Payload::Five(a, b, c, d, e) => {
+            // VerifyStark: five children in the #1116 serializer order.
+            write_expr_inner(w, a, sink.as_deref_mut())?;
+            write_expr_inner(w, b, sink.as_deref_mut())?;
+            write_expr_inner(w, c, sink.as_deref_mut())?;
+            write_expr_inner(w, d, sink.as_deref_mut())?;
+            write_expr_inner(w, e, sink.as_deref_mut())?;
+        }
+
         Payload::ValUse { id } => {
             w.put_u32(*id);
         }

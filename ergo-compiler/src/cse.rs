@@ -1529,6 +1529,9 @@ fn recompose(template: &Payload, it: &mut dyn Iterator<Item = Expr>) -> Payload 
         Payload::Two(_, _) => Payload::Two(boxn(it), boxn(it)),
         Payload::Three(_, _, _) => Payload::Three(boxn(it), boxn(it), boxn(it)),
         Payload::Four(_, _, _, _) => Payload::Four(boxn(it), boxn(it), boxn(it), boxn(it)),
+        Payload::Five(_, _, _, _, _) => {
+            Payload::Five(boxn(it), boxn(it), boxn(it), boxn(it), boxn(it))
+        }
         Payload::ValUse { id } => Payload::ValUse { id: *id },
         Payload::ConstPlaceholder { index } => Payload::ConstPlaceholder { index: *index },
         Payload::TaggedVar { id, tpe } => Payload::TaggedVar {
@@ -1694,6 +1697,7 @@ fn decompose(payload: &Payload) -> (Vec<&Expr>, Vec<u8>) {
         Payload::Two(a, b) => vec![a, b],
         Payload::Three(a, b, c) => vec![a, b, c],
         Payload::Four(a, b, c, d) => vec![a, b, c, d],
+        Payload::Five(a, b, c, d, e) => vec![a, b, c, d, e],
         Payload::ValUse { id } => {
             lw.put_u32(*id);
             Vec::new()

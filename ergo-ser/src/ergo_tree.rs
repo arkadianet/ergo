@@ -392,6 +392,13 @@ fn scan_tree(
                 walk(c, seen, dups, has_box);
                 walk(d, seen, dups, has_box);
             }
+            Payload::Five(a, b, c, d, e) => {
+                walk(a, seen, dups, has_box);
+                walk(b, seen, dups, has_box);
+                walk(c, seen, dups, has_box);
+                walk(d, seen, dups, has_box);
+                walk(e, seen, dups, has_box);
+            }
             Payload::ConcreteCollection { items, .. }
             | Payload::Tuple { items }
             | Payload::SigmaCollection { items } => {
@@ -854,6 +861,7 @@ fn op_root_non_sigma_type(opcode: u8) -> Option<crate::sigma_type::SigmaType> {
         | 0x96 | 0x97                  // And Or (Bool BinAnd/BinOr over Coll[Boolean]; NOT SigmaAnd/Or 0xEA/0xEB)
         | 0xAE | 0xAF                  // Exists ForAll
         | 0xE6                         // OptionIsDefined
+        | 0xB9                         // VerifyStark (EIP-0045, devnet-only) -> SBoolean
         | 0xEC | 0xED | 0xEF | 0xF4 | 0xFF  // BinOr BinAnd LogicalNot BinXor XorOf
         // Numeric / byte-collection-result operators -> never SigmaProp.
         | 0x9B                         // Xor (byte-array)

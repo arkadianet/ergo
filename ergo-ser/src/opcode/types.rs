@@ -67,6 +67,10 @@ pub enum Payload {
     Three(Box<Expr>, Box<Expr>, Box<Expr>),
     /// Four positional sub-expressions (e.g. ProveDHTuple `g, h, u, v`).
     Four(Box<Expr>, Box<Expr>, Box<Expr>, Box<Expr>),
+    /// Five positional sub-expressions (VerifyStark `proofChunks,
+    /// publicInputs, imageId, vmType, costParams` — EIP-0045, devnet-only
+    /// opcode `0xB9`).
+    Five(Box<Expr>, Box<Expr>, Box<Expr>, Box<Expr>, Box<Expr>),
     /// Use of an existing `ValDef`/`FunDef` by binding id.
     ValUse {
         /// Binding id this `ValUse` references.
@@ -243,6 +247,7 @@ pub(super) enum ArgPattern {
     Two,
     Three,
     Four,
+    Five,
     ValUse,
     ConstPlaceholder,
     TaggedVar,
@@ -357,7 +362,14 @@ pub(super) fn opcode_pattern(op: u8) -> Option<ArgPattern> {
         // through to ReadError::InvalidData below matches Scala's
         // rejection.
 
-        // 0xB9..0xC0 reserved
+        // 0xB9 VerifyStark (EIP-0045): DEVNET-ONLY. Not registered in mainnet
+        // Scala's ValueSerializer, so a stock node rejects this byte — a block
+        // carrying it only validates on the feature-branch/devnet build. Wire
+        // shape mirrors sigmastate-interpreter#1116 VerifyStarkSerializer: five
+        // positional child Values (proofChunks, publicInputs, imageId, vmType,
+        // costParams). Byte = Scala newOpCode(73) = LAST_CONSTANT_CODE + 73.
+        0xB9 => Some(Five), // VerifyStark (devnet-only, EIP-0045)
+        // 0xBA..0xC0 reserved
         0xC1 => Some(One), // ExtractAmount
         0xC2 => Some(One), // ExtractScriptBytes
         0xC3 => Some(One), // ExtractBytes
@@ -498,6 +510,7 @@ pub fn opcode_name(op: u8) -> &'static str {
         0xB4 => "Slice",
         0xB5 => "Filter",
         0xB8 => "FlatMap",
+        0xB9 => "VerifyStark",
         0xC1 => "ExtractAmount",
         0xC2 => "ExtractScriptBytes",
         0xC3 => "ExtractBytes",
@@ -731,6 +744,11 @@ fn find_method_matching<F: Fn(u8, u8) -> bool + Copy>(expr: &Expr, flag: F) -> O
             .or_else(|| find(b))
             .or_else(|| find(c))
             .or_else(|| find(d)),
+        Payload::Five(a, b, c, d, e) => find(a)
+            .or_else(|| find(b))
+            .or_else(|| find(c))
+            .or_else(|| find(d))
+            .or_else(|| find(e)),
         Payload::ValDef { rhs, .. } | Payload::FunDef { rhs, .. } => find(rhs),
         Payload::BlockValue { items, result } => {
             items.iter().find_map(find).or_else(|| find(result))

@@ -732,6 +732,13 @@ fn inline_placeholders(expr: &Expr, constants: &[(SigmaType, SigmaValue)]) -> Ex
         Payload::Four(a, b, d, e) => {
             Payload::Four(boxed(a, c), boxed(b, c), boxed(d, c), boxed(e, c))
         }
+        Payload::Five(a, b, d, e, f) => Payload::Five(
+            boxed(a, c),
+            boxed(b, c),
+            boxed(d, c),
+            boxed(e, c),
+            boxed(f, c),
+        ),
         p @ (Payload::ValUse { .. }
         | Payload::TaggedVar { .. }
         | Payload::BoolCollection { .. }
