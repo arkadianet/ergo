@@ -314,8 +314,15 @@ pub(super) fn handle_mining_request(
     // Both `(a) && (b)` give the "applied tip == best-header tip"
     // invariant `last_applied_chain_window_10` relies on.
     let cs = state.store.chain_state_meta();
+    // Genesis-mining exception for an isolated devnet. The `> 0` guard normally
+    // forbids mining a bare-genesis tip: a mainnet/testnet FOLLOWER at genesis
+    // should be SYNCING, not mining. A private devnet is instead meant to be
+    // mined from genesis (Scala's DevNet does the same) — identified here by the
+    // unique devnet P2P magic. Heights + ids still must match, so at genesis this
+    // only fires when genesis IS the consistent applied tip (no fork/gap).
+    let is_devnet = state.magic == ergo_chain_spec::NetworkParams::DEVNET.magic;
     let synced = cs.best_header_height == cs.best_full_block_height
-        && cs.best_full_block_height > 0
+        && (cs.best_full_block_height > 0 || is_devnet)
         && cs.best_header_id == cs.best_full_block_id;
     if !synced {
         let msg = format!(

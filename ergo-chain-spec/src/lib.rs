@@ -235,14 +235,21 @@ impl DifficultyParams {
         }
     }
 
+    /// Devnet schedule: testnet's (difficulty-1 seed, no EIP-37) but a 20s
+    /// target block interval for a snappier local test chain.
+    pub fn devnet() -> Self {
+        Self {
+            desired_interval_ms: 20_000,
+            ..Self::testnet()
+        }
+    }
+
     /// Schedule for the given [`Network`].
     pub fn for_network(net: Network) -> Self {
         match net {
             Network::Mainnet => Self::mainnet(),
             Network::Testnet => Self::testnet(),
-            // Devnet reuses testnet's difficulty schedule (difficulty-1 seed,
-            // 45s interval, no EIP-37) — a locally-mineable private chain.
-            Network::Devnet => Self::testnet(),
+            Network::Devnet => Self::devnet(),
         }
     }
 }
@@ -526,6 +533,14 @@ impl BlockTimingParams {
         }
     }
 
+    /// Devnet: testnet timing but a 20s target interval.
+    pub const fn devnet() -> Self {
+        Self {
+            desired_interval_ms: 20_000,
+            header_chain_diff: 800,
+        }
+    }
+
     /// Sync-tip threshold the headers-chain-synced gate compares
     /// against: `desired_interval_ms * header_chain_diff`. A header
     /// whose timestamp is within this many milliseconds of `now` is
@@ -619,7 +634,8 @@ impl ChainSpec {
         }
     }
 
-    /// Isolated devnet spec: testnet's consensus params verbatim, but a unique
+    /// Isolated devnet spec: testnet's consensus params EXCEPT a 20s target block
+    /// interval (`DifficultyParams`/`BlockTimingParams::devnet`), plus a unique
     /// P2P magic (`NetworkParams::DEVNET`) and EMPTY seed peers
     /// (`BootstrapParams::devnet`), so the node connects to nobody and can't
     /// handshake a public peer. For DEVNET-ONLY builds (e.g. `stark-verify`).
@@ -627,12 +643,12 @@ impl ChainSpec {
         Self {
             network: Network::Devnet,
             network_params: NetworkParams::DEVNET,
-            difficulty: DifficultyParams::testnet(),
+            difficulty: DifficultyParams::devnet(),
             voting: VotingParams::testnet(),
             monetary: MonetaryParams::testnet(),
             reemission: None,
             genesis: GenesisParams::testnet(),
-            block_timing: BlockTimingParams::testnet(),
+            block_timing: BlockTimingParams::devnet(),
             bootstrap: BootstrapParams::devnet(),
         }
     }
