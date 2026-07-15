@@ -209,16 +209,26 @@ pub(in crate::evaluator) fn eval_calc_sha256(
 // real BabyBear/Poseidon1/FRI verifier bound to a concrete prover profile, at
 // which point a tampered proof must return `false`.
 //
-// Cost constants are copied verbatim from #1116 `VerifyStark` (preliminary,
-// pending JMH calibration). They are NOT oracle-anchored against mainnet —
-// there is no mainnet verifyStark — so they carry no consensus-parity claim.
+// Cost model (M3 calibration). The dominant term BASE_COST is calibrated to the
+// REAL RISC0 succinct-STARK verify measured off-node at ~11.8 ms (stark-poc).
+// Anchored to the Scala verifyStark spike's directly-measured ~100-200k JIT for a
+// minimal STARK verify (external reference); 11.8 ms sits at the upper end, so we
+// take ~150k JIT. This corrects #1116's preliminary BASE=5000, which undercharged
+// a real verify by ~9x — an under-cost is a DoS risk (it would allow ~570
+// verifies/block against the 10M-JIT budget instead of a realistic ~66).
+// PROVISIONAL + devnet-only: re-derive via JMH on the Foundation baseline machine
+// before any production use. NOT oracle-anchored to mainnet (no mainnet
+// verifyStark exists). Note: the node already permits 512 KB tx / block
+// (max_transaction_size / max_block_size = 524_288), so the ~218 KiB proof fits
+// with no tx-size change — the EIP's 96->256 KB bump was a mainnet-Scala concern.
 
-/// Fixed overhead: transcript setup, AIR constraint check, OOD derivation,
-/// DEEP-ALI. #1116 `VerifyStark.BASE_COST`.
-const VERIFY_STARK_BASE_COST: u64 = 5000;
-/// Per-FRI-query cost (iFFT-8 fold + Horner). #1116 `PER_QUERY_COST`.
+/// Fixed RISC0 succinct-verify cost, calibrated to the ~11.8 ms measured verify
+/// (~= the Scala spike's ~100-200k JIT). Dominant term; RISC0 verify is ~fixed.
+/// PROVISIONAL — recalibrate on the baseline machine. (Was #1116's preliminary 5000.)
+const VERIFY_STARK_BASE_COST: u64 = 150_000;
+/// Marginal per-FRI-query cost (#1116 `PER_QUERY_COST`). Minor vs BASE for RISC0.
 const VERIFY_STARK_PER_QUERY_COST: u64 = 50;
-/// Per-query-per-Merkle-layer hash verification. #1116 `PER_MERKLE_LAYER_COST`.
+/// Marginal per-query-per-Merkle-layer cost (#1116 `PER_MERKLE_LAYER_COST`).
 const VERIFY_STARK_PER_MERKLE_LAYER_COST: u64 = 10;
 
 /// 0xB9 VerifyStark — verify a STARK proof, returning Boolean (EIP-0045).

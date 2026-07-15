@@ -12896,7 +12896,7 @@ fn verify_stark_aot_cost_charged_before_proof_bytes() {
     //
     // NB: run_eval uses a recording-only (non-enforcing) accumulator, so this
     // must drive eval_expr with an ENFORCING accumulator whose limit sits below
-    // the AOT cost (Q=1000, D=1000 -> 5000 + 50_000 + 10_000_000 = 10_055_000).
+    // the AOT cost (Q=1000, D=1000 -> BASE 150_000 + 50_000 + 10_000_000).
     let bad_proof_chunks = Expr::Const {
         tpe: SigmaType::SInt,
         val: SigmaValue::Int(7),
@@ -12947,6 +12947,26 @@ fn verify_stark_cost_scales_with_query_and_merkle_params() {
         cost_for(10, 50) > base,
         "deeper Merkle paths must cost more: {} vs {base}",
         cost_for(10, 50)
+    );
+}
+
+#[test]
+fn verify_stark_calibrated_cost_dominated_by_verify() {
+    // M3 calibration: the AOT charge is dominated by the fixed verify cost
+    // (BASE_COST = 150_000 JIT, calibrated to the ~11.8 ms real RISC0 verify),
+    // NOT the marginal Q/D terms. A minimal-param verifyStark must therefore
+    // charge at least the calibrated verify floor — pricing the op realistically
+    // against the 10M-JIT block budget (~66 verifies/block) rather than #1116's
+    // ~9x-undercharging BASE=5000. Guards against a regression back to a cheap
+    // BASE that would let a block carry an unvalidatable number of proofs.
+    let ctx = ReductionContext::minimal(0, 0);
+    let (_, cost) = eval_value_and_cost(
+        &vs_node(vs_valid_proof_chunks(), 0, vs_cost_params(1, 1)),
+        &ctx,
+    );
+    assert!(
+        cost >= 150_000,
+        "verifyStark must charge >= the calibrated verify floor (150k JIT); got {cost}"
     );
 }
 
