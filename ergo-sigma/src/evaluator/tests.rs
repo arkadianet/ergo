@@ -12847,6 +12847,10 @@ fn vs_node(proof_chunks: Expr, vm_type: i32, cost_params: Expr) -> Expr {
 
 // ----- happy path -----
 
+// STUB-ONLY: with `stark-verify` on, the real verifier rejects this bogus
+// (non-receipt) proof, so this holds only for the M1 stub. The real-proof oracle
+// tests below cover the `stark-verify` path.
+#[cfg(not(feature = "stark-verify"))]
 #[test]
 fn verify_stark_stub_wellformed_returns_true() {
     // M1 STUB verifier: well-formed input reduces to Boolean `true` (accept).
@@ -12943,5 +12947,101 @@ fn verify_stark_cost_scales_with_query_and_merkle_params() {
         cost_for(10, 50) > base,
         "deeper Merkle paths must cost more: {} vs {base}",
         cost_for(10, 50)
+    );
+}
+
+// ----- oracle parity (real RISC0 proof, `stark-verify` feature) -----
+
+// Real proof vector generated off-node by the RISC0 prover (stark-poc) and
+// verified by risc0-verifier. This is a REAL external oracle, not a self-oracle:
+// a valid STARK proof is an un-forgeable artifact of a genuine sha256(x)=y run.
+#[cfg(feature = "stark-verify")]
+const VS_REAL_PROOF: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/test-vectors/stark/proof_inner.bin"
+));
+#[cfg(feature = "stark-verify")]
+const VS_REAL_JOURNAL: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/test-vectors/stark/journal.bin"
+));
+#[cfg(feature = "stark-verify")]
+const VS_REAL_IMAGE_ID: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/test-vectors/stark/image_id.bin"
+));
+
+/// Build a verifyStark node carrying a raw proof (chunked into Coll[Coll[Byte]]),
+/// journal (publicInputs), and 32-byte image id — mirroring the on-wire shape.
+#[cfg(feature = "stark-verify")]
+fn vs_real_node(proof: &[u8], journal: &[u8], image_id: &[u8], vm_type: i32) -> Expr {
+    use ergo_ser::sigma_value::CollValue;
+    // Chunk the proof (~80 KiB) so multi-chunk reassembly is exercised.
+    let chunks: Vec<SigmaValue> = proof
+        .chunks(80 * 1024)
+        .map(|c| SigmaValue::Coll(CollValue::Bytes(c.to_vec())))
+        .collect();
+    let proof_chunks = Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SColl(Box::new(SigmaType::SByte)))),
+        val: SigmaValue::Coll(CollValue::Values(chunks)),
+    };
+    let byte_const = |b: &[u8]| Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SByte)),
+        val: SigmaValue::Coll(CollValue::Bytes(b.to_vec())),
+    };
+    Expr::Op(IrNode {
+        opcode: 0xB9,
+        payload: Payload::Five(
+            Box::new(proof_chunks),
+            Box::new(byte_const(journal)),
+            Box::new(byte_const(image_id)),
+            Box::new(Expr::Const {
+                tpe: SigmaType::SInt,
+                val: SigmaValue::Int(vm_type),
+            }),
+            Box::new(vs_cost_params(35, 16)),
+        ),
+    })
+}
+
+#[cfg(feature = "stark-verify")]
+#[test]
+fn verify_stark_real_proof_returns_true() {
+    // ORACLE: a genuine RISC0 succinct proof of sha256(x)=y verifies to `true`.
+    let node = vs_real_node(VS_REAL_PROOF, VS_REAL_JOURNAL, VS_REAL_IMAGE_ID, 3);
+    assert_eq!(
+        run_eval(&node),
+        Value::Bool(true),
+        "real RISC0 proof must verify"
+    );
+}
+
+#[cfg(feature = "stark-verify")]
+#[test]
+fn verify_stark_tampered_proof_returns_false() {
+    // Metamorphic: flip one byte of the real receipt -> verify `false`.
+    let mut bad = VS_REAL_PROOF.to_vec();
+    let mid = bad.len() / 2;
+    bad[mid] ^= 0xFF;
+    let node = vs_real_node(&bad, VS_REAL_JOURNAL, VS_REAL_IMAGE_ID, 3);
+    assert_eq!(
+        run_eval(&node),
+        Value::Bool(false),
+        "tampered proof must reject"
+    );
+}
+
+#[cfg(feature = "stark-verify")]
+#[test]
+fn verify_stark_wrong_public_inputs_returns_false() {
+    // Replay/binding: the proof commits a specific journal (y ‖ ctx); different
+    // publicInputs must reject (a proof for statement A can't pass as B).
+    let mut bad_journal = VS_REAL_JOURNAL.to_vec();
+    bad_journal[0] ^= 0xFF;
+    let node = vs_real_node(VS_REAL_PROOF, &bad_journal, VS_REAL_IMAGE_ID, 3);
+    assert_eq!(
+        run_eval(&node),
+        Value::Bool(false),
+        "wrong public inputs must reject"
     );
 }

@@ -21,8 +21,16 @@ indexmap          = { workspace = true }
 thiserror         = { workspace = true }
 ergo_avltree_rust = { workspace = true }
 bytes             = { workspace = true }
+# DEVNET-ONLY (EIP-0045 verifyStark spike). Behind the `stark-verify` feature so
+# the default / mainnet-following node build never pulls this heavy git dep and
+# keeps the M1 stub. See opcodes/sigma.rs `eval_verify_stark`.
+risc0-verifier    = { git = "https://github.com/zkVerify/risc0-verifier", tag = "v0.11.0", optional = true }
+bincode           = { version = "1.3", optional = true }
 
 [features]
+# Real RISC0 STARK verification for the devnet-only verifyStark (0xB9) opcode.
+# OFF by default: eval_verify_stark uses the M1 stub and no risc0 dep is pulled.
+stark-verify = ["dep:risc0-verifier", "dep:bincode"]
 # Per-evaluator-step JIT-cost trace. Adds a thread-local recorder behind the
 # `cost_trace` module that emits human-readable cost breakdowns to stderr —
 # useful for diagnosing cost-divergence bugs against the Scala oracle. No

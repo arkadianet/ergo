@@ -308,13 +308,12 @@ pub(in crate::evaluator) fn eval_verify_stark(
         }
     };
 
-    // ---- Phase 3: charge byte-ingestion, then verify. ----
-    // Anti-padding-spam PerItemCost from #1116 `byteIngestionCost`
-    // (base=10, perChunk=1, chunkSize=1024) over the total ingested bytes.
-    let mut total_bytes: u64 = public_inputs_v.len() as u64 + image_id_v.len() as u64;
+    // ---- Phase 3: charge byte-ingestion, reassemble the proof, then verify. ----
+    // Reassemble the chunked proof (chunking dodges Ergo's per-Coll[Byte] limit).
+    let mut proof_bytes: Vec<u8> = Vec::new();
     for chunk in &chunks_v {
         match chunk {
-            Value::CollBytes(b) => total_bytes = total_bytes.saturating_add(b.len() as u64),
+            Value::CollBytes(b) => proof_bytes.extend_from_slice(b),
             other => {
                 return Err(EvalError::TypeError {
                     expected: "Coll[Byte] element in VerifyStark proofChunks",
@@ -323,6 +322,10 @@ pub(in crate::evaluator) fn eval_verify_stark(
             }
         }
     }
+    // Anti-padding-spam PerItemCost from #1116 `byteIngestionCost`
+    // (base=10, perChunk=1, chunkSize=1024) over the total ingested bytes.
+    let total_bytes: u64 =
+        public_inputs_v.len() as u64 + image_id_v.len() as u64 + proof_bytes.len() as u64;
     let byte_ingestion = CostKind::PerItem {
         base: JitCost::from_jit(10),
         per_chunk: JitCost::from_jit(1),
@@ -331,11 +334,50 @@ pub(in crate::evaluator) fn eval_verify_stark(
     let n_bytes = u32::try_from(total_bytes).unwrap_or(u32::MAX);
     cx.cost.add(byte_ingestion.compute(n_bytes)?)?;
 
-    // M1 STUB verifier: return `true` on well-formed input to demonstrate the
-    // accept path (`sigmaProp(verifyStark(...))` reduces to accept on devnet).
-    // #1116's placeholder returns `false`; M2 wires the real verifier here so a
-    // valid proof returns `true` and a tampered proof returns `false`.
-    Ok(Value::Bool(true))
+    // An invalid or malformed proof is a soft `Bool(false)` — never an error and
+    // never a panic (mirrors #1116's `catch { invalid => false }`).
+    #[cfg(feature = "stark-verify")]
+    let verified = verify_stark_risc0(&proof_bytes, &public_inputs_v, &image_id_v, vm_type_v);
+    #[cfg(not(feature = "stark-verify"))]
+    let verified = {
+        // M1 STUB: no verifier wired without the `stark-verify` feature; accept
+        // well-formed input so the devnet accept-path stays exercisable.
+        let _ = &proof_bytes;
+        true
+    };
+    Ok(Value::Bool(verified))
+}
+
+/// Real RISC0 STARK verification (EIP-0045 verifyStark, `stark-verify` feature,
+/// DEVNET-ONLY). Reassembled `proof` is a bincode `InnerReceipt`, `image_id` a
+/// 32-byte RISC0 image id (= Vk), `public_inputs` the journal, `vm_type` the
+/// RISC0 prover version selector. Any malformed input or verifier panic yields
+/// `false` — deterministic across nodes, never an abort.
+#[cfg(feature = "stark-verify")]
+fn verify_stark_risc0(proof: &[u8], public_inputs: &[u8], image_id: &[u8], vm_type: i32) -> bool {
+    use risc0_verifier::{v3_0, verify, Journal, Proof, Vk};
+
+    let vk_bytes: [u8; 32] = match image_id.try_into() {
+        Ok(b) => b,
+        Err(_) => return false, // image id must be exactly 32 bytes
+    };
+    let inner: risc0_verifier::InnerReceipt = match bincode::deserialize(proof) {
+        Ok(r) => r,
+        Err(_) => return false, // malformed receipt bytes
+    };
+    let vk: Vk = vk_bytes.into();
+    let journal = Journal::new(public_inputs.to_vec());
+    let proof = Proof::new(inner);
+
+    // Isolate any panic from the third-party verifier (same posture as the AVL
+    // verifier): a malformed proof must evaluate to `false`, never abort.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match vm_type {
+        // Spike supports RISC0 prover 3.0 (the profile the poc emits). A
+        // production build would map the full v1.0..=v3.0 verifier registry.
+        3 => verify(&v3_0(), vk, proof, journal).is_ok(),
+        _ => false,
+    }));
+    outcome.unwrap_or(false)
 }
 
 // 0x9F Exponentiate — `GroupElement ** BigInt` (EC scalar multiplication).
