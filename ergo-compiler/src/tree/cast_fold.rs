@@ -34,7 +34,7 @@ pub(crate) fn in_fold_range(w: FoldWidth, v: i64) -> bool {
     }
 }
 
-/// Explicit-cast folds, BOTH directions (recon-transforms.md §7).
+/// Explicit-cast folds, BOTH directions.
 ///
 /// Scala's `buildNode`/`eval` intercepts `Upcast(Constant(v,_), toTpe)` /
 /// `Downcast(Constant(v,_), toTpe)` (`GraphBuilding.scala:514-518`) as a

@@ -5,8 +5,7 @@ use crate::emit::EmitError;
 use super::*;
 
 /// GraphBuilding verdict-parity gate over the emitted body — lambda and
-/// application shapes the FULL Scala compiler rejects (lib.rs D-C5;
-/// adversarial-findings-bindings.md F1/F2).
+/// application shapes the FULL Scala compiler rejects (lib.rs D-C5).
 ///
 /// Oracle-pinned rules:
 /// - **Zero-arg `FuncValue` rejects ANYWHERE** — even as the rhs of an
@@ -32,7 +31,7 @@ use super::*;
 ///   => f(10)}` and the param-unused body variant → `REJECT 0:0
 ///   MatchError`) UNLESS the lambda sits in DEAD code that Scala's schedule
 ///   prunes before the lowering that dies. The exemption is
-///   REACHABILITY-based and transitive (NF-2): a
+///   REACHABILITY-based and transitive: a
 ///   `FuncValue` with an `SFunc` param anywhere inside an unreachable `val`'s
 ///   rhs — direct rhs (`cc { val unused = {(f: Int => Int) => 1};
 ///   sigmaProp(true) }` → OK) OR nested (`cc { val unused = Coll({(f: Int =>
@@ -49,7 +48,7 @@ pub(crate) fn graph_building_lambda_reject(root: &Expr) -> Option<EmitError> {
     // their block result). A higher-order (`SFunc`-param) lambda is exempt from
     // the `MatchError` reject exactly when it sits in DEAD code — Scala's
     // schedule prunes it before the lowering that would `MatchError`
-    // (`crate::inline` §8; NF-2: `{ val unused = Coll({(f: Int => Int) => 1});
+    // (`{ val unused = Coll({(f: Int => Int) => 1});
     // sigmaProp(true) }` → oracle OK). The zero-arg-lambda and multi-arg-apply
     // rejects are EAGER `buildNode`-over-every-bind failures that fire in dead
     // code too (`{ val unused = Coll({() => 1}); ... }` → reject; `{ val f =
@@ -59,7 +58,7 @@ pub(crate) fn graph_building_lambda_reject(root: &Expr) -> Option<EmitError> {
 
     // Walk with a transitively-inherited `dead` flag: once inside a dead
     // `ValDef`'s rhs, every descendant is dead (so a NESTED `SFunc`-param lambda
-    // — not just a direct rhs — is exempt, closing NF-2). A def is dead here iff
+    // — not just a direct rhs — is exempt too). A def is dead here iff
     // it is already in a dead region OR its id did not survive pruning.
     let mut stack: Vec<(&Expr, bool)> = vec![(root, false)];
     while let Some((e, dead)) = stack.pop() {

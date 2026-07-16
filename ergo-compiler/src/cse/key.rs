@@ -28,9 +28,8 @@ pub(crate) enum KeyTag {
 
 /// Structural hash key — span-stripped by construction (our opcode `Expr`
 /// carries no source spans; only the typed AST did). Keys on `(class, ordered
-/// child SymIds, scalar literal bytes)` exactly as the spike §7.1 step 1 / the
-/// cannonQ ExprKey pattern prescribes. `Ord` so it can key a deterministic
-/// `BTreeMap` (never a `HashMap` with random state, per the M5 plan).
+/// child SymIds, scalar literal bytes)`. `Ord` so it can key a deterministic
+/// `BTreeMap` (never a `HashMap` with random state).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) struct ExprKey {
     pub(crate) tag: KeyTag,
@@ -56,7 +55,7 @@ pub(crate) struct ScopeTable {
 #[derive(Debug)]
 pub(crate) enum Node {
     /// A constant leaf — its wire type + value, re-emitted inline at every use
-    /// (constants never hoist, spike §5 P4).
+    /// (constants never hoist).
     Const(SigmaType, SigmaValue),
     /// A whole-tree `Unparsed` body kept verbatim.
     Unparsed(Vec<u8>),
@@ -65,7 +64,7 @@ pub(crate) enum Node {
     /// SCALAR fields and substitutes fresh children from [`ExprKey::children`].
     Op(Payload),
     /// A `FuncValue` (lambda). Unlike a generic op it re-assigns its argument
-    /// ids at materialization (spike §4), so it keeps the arg placeholder
+    /// ids at materialization, so it keeps the arg placeholder
     /// [`SymId`]s (to bind them in the body env) and the body symbol directly
     /// rather than going through the generic child list.
     Func {
@@ -73,7 +72,7 @@ pub(crate) enum Node {
         body: SymId,
         /// The placement scope id of the lambda BODY (a `ScopeId` into
         /// [`super::Interner::scope_parents`]). A lambda opens a schedule scope even
-        /// though it opens no hash-cons scope (spike §1.4): its body's local
+        /// though it opens no hash-cons scope: its body's local
         /// nodes schedule INSIDE it (`Functions.scala:112-134`).
         body_scope: ScopeId,
     },
@@ -88,8 +87,7 @@ pub(crate) enum Node {
 /// branches, `&&`/`||` right arm) AND every lambda body
 /// opens a child scope. Distinct from the hash-cons scope stack (`scopes`,
 /// which lambdas do NOT push): identity is decided by first-build hash-cons
-/// scope, PLACEMENT by this tree (`AstGraph.schedule`, `m5-sched-chaincash.md`
-/// §1).
+/// scope, PLACEMENT by this tree (`AstGraph.schedule`).
 pub(crate) type ScopeId = usize;
 
 /// Everything recorded about one interned symbol.
@@ -105,7 +103,7 @@ pub(crate) struct SymInfo {
     pub(crate) node: Node,
     /// The PLACEMENT scope this symbol was first built in — a node in the
     /// schedule scope tree ([`ScopeId`]). A `ValDef` is materialized in exactly
-    /// this scope (Scala `processAstGraph` per-scope schedule, `m5-sched-*` §1):
+    /// this scope (Scala `processAstGraph` per-scope schedule):
     /// membership in a materialization scope is `sym.scope == that scope`.
     pub(crate) scope: ScopeId,
     /// For an `Op` whose children include thunk sub-scopes (`If` → `[then,

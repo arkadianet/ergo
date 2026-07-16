@@ -10,7 +10,7 @@ use super::*;
 impl Interner {
     /// Intern an expression tree rooted at global scope, returning the root
     /// symbol. Children are interned FIRST, in evaluation order, so a child's
-    /// `SymId` is known before its parent's key is built (spike §7.1 step 1).
+    /// `SymId` is known before its parent's key is built.
     pub fn intern(&mut self, expr: &Expr) -> SymId {
         match expr {
             Expr::Const { tpe, val } => {
@@ -139,7 +139,7 @@ impl Interner {
     /// A block is transparent (no thunk): its items are interned in the current
     /// scope (registering bindings), then the result is returned. This is what
     /// puts a source `val`'s rhs at the block's scope — the E5-vs-E2 first-build
-    /// distinction (spike §6).
+    /// distinction.
     pub(crate) fn intern_block(&mut self, node: &IrNode) -> SymId {
         if let Payload::BlockValue { items, result } = &node.payload {
             for item in items {
@@ -150,7 +150,7 @@ impl Interner {
         self.intern_general(node)
     }
 
-    /// A lambda does NOT push a hash-cons scope (spike §1.4). Each arg id is
+    /// A lambda does NOT push a hash-cons scope. Each arg id is
     /// bound to a fresh unshared placeholder symbol tagged `deps = {arg id}`;
     /// the body is interned in the CURRENT scope. On exit the arg bindings are
     /// restored (lexical shadowing). The lambda node keys on its body symbol +
@@ -340,7 +340,7 @@ impl Interner {
 
     /// Allocate a lambda-argument placeholder: a leaf symbol tagged with its own
     /// arg id, kept OUT of the scope table so it can never be hash-cons shared
-    /// with another lambda's arg (spike §1.4 — fresh placeholder per lambda).
+    /// with another lambda's arg — each lambda gets a fresh placeholder.
     pub(crate) fn alloc_arg(&mut self, arg_id: u32) -> SymId {
         let key = ExprKey {
             tag: KeyTag::Arg,
@@ -396,12 +396,11 @@ impl Interner {
     /// The PLACEMENT scope for a node with transitive bound-var `deps`, built at
     /// `cur_scope`: walk up from `cur_scope`, floating OUT of every enclosing
     /// lambda whose argument the node does not depend on (a lambda-invariant node
-    /// escapes to where it is actually shared — the buy/sell `getX(SELF)` apps,
-    /// `m5-sched-crystalpool.md` finding 2). Stop at the root, a thunk (identity
-    /// boundary), or a lambda whose arg the node depends on. This is the
-    /// deps-based lambda placement (spike §1.4) — NOT the lexical first-build
-    /// scope, which would wrongly pin an invariant app inside the lambda it
-    /// happens to appear in.
+    /// escapes to where it is actually shared — e.g. the buy/sell `getX(SELF)`
+    /// apps). Stop at the root, a thunk (identity boundary), or a lambda whose
+    /// arg the node depends on. This deps-based placement is NOT the lexical
+    /// first-build scope, which would wrongly pin an invariant app inside the
+    /// lambda it happens to appear in.
     pub(crate) fn placement_scope(&self, deps: &BTreeSet<u32>) -> ScopeId {
         let mut s = self.cur_scope;
         loop {

@@ -25,7 +25,7 @@ use super::*;
 /// curId, ...); curId += 1; ValDef(curId, ...)` — TreeBuilding.scala:511-513);
 /// a lambda arg takes the enclosing scope's next id and body ValDefs continue
 /// past it (`varId = defId + 1`, body from `varId + 1` —
-/// TreeBuilding.scala:186-191, recon-scala-pipeline §6). Scala additionally
+/// TreeBuilding.scala:186-191). Scala additionally
 /// REUSES ids across disjoint scopes (each `processAstGraph` restarts its
 /// `curId` from the enclosing `defId`) and skips ids for non-materialized
 /// graph nodes (CSE); the monotonic counter never reuses. This is a

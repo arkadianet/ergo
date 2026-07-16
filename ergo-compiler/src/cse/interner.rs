@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use super::*;
 
-/// The scope-chain hash-cons interner (Phase A of the spike). Owns the scope
+/// The scope-chain hash-cons interner (Phase A). Owns the scope
 /// stack (index 0 = global), the dense symbol table, and the binding
 /// environment that resolves `ValUse` and lambda args.
 pub struct Interner {
@@ -11,7 +11,7 @@ pub struct Interner {
     pub(crate) scopes: Vec<ScopeTable>,
     /// Dense symbol table, indexed by `SymId.0`. Allocation order == source
     /// construction (nodeId) order — the live construction-order graph the
-    /// schedule DFS runs over (F2, `m5-sched-crystalpool.md` §6).
+    /// schedule DFS runs over.
     pub(crate) syms: Vec<SymInfo>,
     /// `ValDef`/lambda-arg id → the symbol it binds. Lookup only.
     pub(crate) bindings: BTreeMap<u32, SymId>,
@@ -20,8 +20,8 @@ pub struct Interner {
     pub(crate) scope_parents: Vec<Option<ScopeId>>,
     /// The kind of each scope frame (parallel to `scope_parents`). Placement
     /// walks up this stack, floating a node OUT of any enclosing lambda whose
-    /// argument it does not depend on (`m5-sched-crystalpool.md` finding 2 / the
-    /// buy/sell `getX(SELF)` apps), and stopping at the root, a thunk (an
+    /// argument it does not depend on (e.g. the buy/sell `getX(SELF)` apps),
+    /// and stopping at the root, a thunk (an
     /// identity boundary a node built inside never leaves), or a lambda whose arg
     /// it does depend on.
     pub(crate) scope_kinds: Vec<ScopeKind>,

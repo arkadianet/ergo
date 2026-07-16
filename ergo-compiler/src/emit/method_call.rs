@@ -86,8 +86,7 @@ impl Scope {
         //     evaluator accepts the pair (oracle: `ccs sigmaProp((arr1 size)
         //     > 0)` → `REJECT 1:12 GraphBuildingException`; `size` is the
         //     sole nullary custom-irBuilder Coll method, the other postfix
-        //     families reject in parity upstream —
-        //     adversarial-findings-methodcalls.md F1).
+        //     families reject in parity upstream).
         if method.owner == "SCollection" && method.name == "size" {
             return Err(EmitError::GraphBuildingReject {
                 class: "GraphBuildingException",
@@ -102,8 +101,7 @@ impl Scope {
         //     `ErgoBox.registers(i)` at compile time (oracle: `cc sigmaProp(
         //     SELF.getReg[Int](-1).isDefined)` → `REJECT 0:0
         //     ArrayIndexOutOfBoundsException`; same for 10 and 100). Out of
-        //     range → reject; IN RANGE → lowering
-        //     (adversarial-findings-methodcalls.md F4): `SELF.getReg[Int](5)`
+        //     range → reject; IN RANGE → lowering: `SELF.getReg[Int](5)`
         //     must emit the SAME bytes as `SELF.R5[Int]` (oracle: both reply
         //     `1000d1e6c6a70504` — body `…c6a70504`,
         //     ExtractRegisterAs). The wire carries the INNER elem type T
@@ -149,7 +147,7 @@ impl Scope {
         }
         // (d) v6 numeric methods over CONSTANT receivers fold at compile time
         //     — Scala's GraphBuilding partially evaluates them, emitting the
-        //     folded constant (adversarial-findings-methodcalls.md F6).
+        //     folded constant.
         //     Oracle-probed fold set ONLY: `toBytes`/`toBits` on
         //     Byte/Short/Int/Long constants (`ccs
         //     sigmaProp(x.toBytes.size == 4)` → const `0e04 0000000a`,

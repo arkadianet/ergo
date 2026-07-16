@@ -5,7 +5,7 @@ use ergo_ser::sigma_type::SigmaType;
 use super::*;
 
 impl Interner {
-    // ----- Phase B: flat usage count (spike §3) -----
+    // ----- Phase B: flat usage count -----
 
     /// **Phase B — emit-time usage counting, FLAT and GLOBAL per SymId.**
     ///
@@ -19,8 +19,8 @@ impl Interner {
     /// tallying each child reference (WITH multiplicity: `x * x` counts `x` twice,
     /// matching Scala's `syms = [x, x]`) reproduces the flat global count.
     ///
-    /// The CRITICAL nuance (spike §3, §1.2): sibling-thunk COPIES of a byte-identical
-    /// subexpression are DISTINCT SymIds (Task 1's scope-chained interning gave them
+    /// The CRITICAL nuance: sibling-thunk COPIES of a byte-identical
+    /// subexpression are DISTINCT SymIds (scope-chained interning gives them
     /// different ids because siblings are never on each other's parent chain), so
     /// each is referenced once and counted once — never merged. That is exactly why
     /// E2's two `HEIGHT+1` copies each land at count 1 (→ no hoist) while E6's single
@@ -86,7 +86,7 @@ impl Interner {
         usage.get(&sym).copied().unwrap_or(0) > 1
     }
 
-    // ----- the 4-predicate admission gate (spike §5, TreeBuilding.scala:503-509) -----
+    // ----- the 4-predicate admission gate (`TreeBuilding.scala:503-509`) -----
 
     /// The class tag of an interned symbol — the node-class discriminant the P2/P3/P4
     /// predicates key on.
@@ -124,7 +124,7 @@ impl Interner {
     /// each occurrence re-segregates into its own pool slot with no dedup
     /// (validated E3: `42` used twice → two `0454` slots).
     ///
-    /// **Type boundary (`m5-sched-small.md` §1.3).** Every
+    /// **Type boundary.** Every
     /// OTHER literal — `GroupElement`/`SigmaProp`/`BigInt`/`UnsignedBigInt`/
     /// `Coll`/`Box`/`AvlTree` — lifts to a `GroupElementConst`-style
     /// `LiftedConst` (`Base.scala:240`, `SigmaDslImpl.scala:539-593` via the
@@ -146,7 +146,7 @@ impl Interner {
     /// `has_many && !IsContextProperty && !IsInternalDef && !IsConstantDef`.
     /// A symbol clearing the gate is materialized as a `ValDef`; a
     /// single-use symbol fails P1 and stays inlined at its one use (this is where
-    /// single-use inlining "falls out free", spike §7.2). Takes the precomputed
+    /// single-use inlining "falls out free"). Takes the precomputed
     /// [`flat_usage`](Self::flat_usage) map.
     ///
     /// Note this is the PURE 4-predicate gate. Lambda-argument placeholder symbols
@@ -165,8 +165,8 @@ impl Interner {
 /// primitive scalar literals produced by the `toRep` fallback
 /// (`GraphBuilding.scala:495-498`) — Int/Byte/Short/Long/Boolean/String. Every
 /// other literal type lifts to a `LiftedConst` (`Base.scala:240`) that P4
-/// structurally cannot see and so hoists as an ordinary node
-/// (`m5-sched-small.md` §1.3). `SString` is `Coll[SByte]` at the value level but
+/// structurally cannot see and so hoists as an ordinary node.
+/// `SString` is `Coll[SByte]` at the value level but
 /// carries its own type code and IS a scalar `Const` in Scala, so it stays here.
 pub(crate) fn is_primitive_scalar_const_type(tpe: &SigmaType) -> bool {
     matches!(

@@ -31,7 +31,6 @@
 //! Opcode bytes come from the `opcode_pattern` dispatch table
 //! (`ergo-ser/src/opcode/types.rs:276-436`), which is the crate's consensus
 //! contract with Scala `ValueSerializer`/`OpCodes.scala` (sigma-state 6.0.2).
-//! Payload shapes follow `dev-docs/ergoscript-compiler-m3-recon/recon-ergoser-ir.md`.
 //!
 //! # Boolean constant wire shape
 //!
@@ -95,7 +94,7 @@ pub(crate) use types::{map_const, map_type};
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EmitError {
     /// A compiler-internal type (`NoType`, `STypeApply`) reached `map_type`.
-    /// The typer must eliminate both before emit (recon-ergoser-ir OQ2).
+    /// The typer must eliminate both before emit.
     #[error("unresolved compiler-internal type reached emit: {0}")]
     UnresolvedType(String),
     /// A typed node with no opcode-IR lowering: a node `ergo-ser` cannot
@@ -631,7 +630,7 @@ mod tests {
 
     #[test]
     fn lowered_singletons_emit_property_call_and_roundtrip() {
-        // (recon-transforms.md §9, D-C7): bare `LastBlockUtxoRootHash`
+        // (D-C7): bare `LastBlockUtxoRootHash`
         // and bare/dotted `groupGenerator` are NOT `IsContextProperty`
         // primitives on the Scala side — both lower to a `PropertyCall`
         // (opcode 0xDB), not the dedicated 0xA6/0x82 leaf. Oracle-confirmed
@@ -1098,8 +1097,7 @@ mod tests {
 
     #[test]
     fn numeric_const_receiver_methods_fold_to_oracle_bytes() {
-        // (adversarial-findings-methodcalls.md F6): Scala's GraphBuilding
-        // partially evaluates v6 numeric methods over CONSTANT receivers at
+        // Scala's GraphBuilding partially evaluates v6 numeric methods over CONSTANT receivers at
         // v3; emit folds the same probed set. Every expected hex below is
         // the CONSTANT segment of an oracle capture:
         //   ccs `x.toBytes` (x=10)        → `0e04 0000000a` (big-endian)
@@ -1141,8 +1139,7 @@ mod tests {
 
     #[test]
     fn get_reg_in_range_literal_lowers_to_extract_register_as() {
-        // (adversarial-findings-methodcalls.md F4): Scala lowers a
-        // CONST-index `getReg[T]` to ExtractRegisterAs at GraphBuilding —
+        // Scala lowers a CONST-index `getReg[T]` to ExtractRegisterAs at GraphBuilding —
         // `cc sigmaProp(SELF.getReg[Int](5).isDefined)` and `cc sigmaProp(
         // SELF.R5[Int].isDefined)` reply IDENTICALLY (`1000d1e6c6a70504`;
         // body `…c6 a7 05 04` = ExtractRegisterAs(SELF, reg 5, Int) — the

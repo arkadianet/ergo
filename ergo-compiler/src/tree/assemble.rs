@@ -31,8 +31,7 @@ pub struct CompileResult {
 /// `true` when `root` is a bare `SigmaPropConstant` — the ONE class Scala's
 /// `fromProposition` routes to `withoutSegregation` (header `0x00`, inline).
 /// The check is on the ROOT node only: a `SigmaPropConstant` nested inside a
-/// larger proposition is just another constant that segregates like any other
-/// (recon-segregation.md §3, last paragraph).
+/// larger proposition is just another constant that segregates like any other.
 pub(crate) fn is_bare_sigma_prop_constant(root: &Expr) -> bool {
     matches!(
         root,

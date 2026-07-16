@@ -3,10 +3,10 @@
 //! Port of `SigmaTyper.assignType` (pinned v6.0.2 worktree
 //! `ergo-core/sigmastate-interpreter-v6.0.2/
 //!   sc/shared/src/main/scala/sigma/compiler/phases/SigmaTyper.scala:53-543`).
-//! Spec: `dev-docs/m2-recon/m2-typer.md` §1.1-1.25, §5, §6 (with the E1
-//! correction from the M2 plan — see below).
+//! See the E1 correction below for the one deliberate deviation from the
+//! reference.
 //!
-//! # Scope (M2 Tasks 5-7 — the complete `assignType` accept surface)
+//! # Scope (the complete `assignType` accept surface)
 //!
 //! Implemented (source order matters, first-match): §1.1 Block (E1-lenient),
 //! §1.2 Tuple, §1.3 ConcreteCollection, §1.4 Ident, §1.5 Select (resolver),

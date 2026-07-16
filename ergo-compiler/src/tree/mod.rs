@@ -361,8 +361,7 @@ pub fn compile(
     // Post-write self-check (lib.rs D-C6): the bytes about to be used to
     // derive addresses must round-trip through our own deserializer. A
     // failure means compile() would hand out a P2S address whose script no
-    // deserializer accepts — funds sent there would be stranded (the F-3
-    // class, adversarial-findings-constants.md).
+    // deserializer accepts — funds sent there would be stranded.
     //
     // The re-read runs under the ACTIVATED-version axis (`tree_version`), NOT
     // the emitted header version (always 0). Scala gates V6-embeddable TYPE
@@ -551,7 +550,7 @@ mod tests {
 
     #[test]
     fn compile_sigmaprop_height_segregated_matches_oracle_bytes() {
-        // The D-C1 flip (M4 Task 2): a non-bare root segregates. Scala's
+        // The D-C1 flip: a non-bare root segregates. Scala's
         // `withSegregation` header 0x10, constants table `01 04c801` (one SInt
         // constant, value 100), body `d191a37300` = BoolToSigmaProp(GT(HEIGHT,
         // ConstPlaceholder(0))). Oracle capture (sigma-state 6.0.2, testnet):
@@ -588,7 +587,7 @@ mod tests {
 
     #[test]
     fn compile_single_use_val_inlines_matching_oracle_bytes() {
-        // M4 Task 9 graduation (recon-targets #2): `{ val x = HEIGHT; x > 5 }`
+        // `{ val x = HEIGHT; x > 5 }`
         // inlines the single-use `val x` and flattens the block to the bare
         // `GT(Height, 5)` — no `BlockValue`/`ValDef`/`ValUse` survives. Oracle
         // (`cc`, sigma-state 6.0.2, testnet): `1001040ad191a37300` (header 0x10,
@@ -600,7 +599,6 @@ mod tests {
 
     #[test]
     fn compile_lsp_test_contract_val_inlines_matching_oracle_bytes() {
-        // M4 Task 9 graduation (recon-targets #46, `corpus:lsp/test_contract.es`):
         // `{ val deadline = SELF.R4[Int].get; sigmaProp(HEIGHT > deadline) }`
         // inlines `deadline` (single use) to `GT(Height, SELF.R4[Int].get)` with
         // no block and ZERO constants. Oracle (`cc`, testnet):
@@ -615,18 +613,16 @@ mod tests {
 
     #[test]
     fn compile_lambda_arg_id_densifies_after_val_inline_matching_oracle_bytes() {
-        // M4 Task 9 review nit (dense id renumbering; `crate::inline::
-        // renumber_dense`): `{ val t = HEIGHT + 1;
+        // `{ val t = HEIGHT + 1;
         // sigmaProp(OUTPUTS.exists({(b: Box) => b.creationInfo._1 < t})) }`
         // inlines the single-use `val t` into the lambda body (cross-lambda
-        // inline, already correct pre-fix), but our M3 emit had allocated the
-        // lambda arg `b` id **2** (following `t`'s id 1) — surviving the
-        // inline as a permanent numbering gap. Scala's post-inline schedule
-        // gives the lambda arg id **1**. Oracle (`cc`, sigma-state 6.0.2,
-        // testnet, captured 2026-07-07,
+        // inline). `crate::inline::renumber_dense` then densifies ids so the
+        // lambda arg `b` gets id **1**, matching Scala's post-inline schedule
+        // rather than leaving a gap where `t`'s inlined id would have been.
+        // Oracle (`cc`, sigma-state 6.0.2, testnet,
         // `test-vectors/ergoscript/compile/compile_seed.json`):
-        // `10010402d1aea5d90101638f8cc77201019aa37300` — note `d90101`
-        // (FuncValue, one arg, id **1**), not the pre-fix `d90102`.
+        // `10010402d1aea5d90101638f8cc77201019aa37300` — `d90101` is
+        // FuncValue, one arg, id **1**.
         let r = ct(
             "{ val t = HEIGHT + 1; sigmaProp(OUTPUTS.exists({(b: Box) => b.creationInfo._1 < t})) }",
         )
@@ -641,8 +637,7 @@ mod tests {
 
     #[test]
     fn compile_inline_then_fold_reaches_sigmaprop_true() {
-        // Pipeline-order pin (M5 Task 4): the constant-through-`val` fold now
-        // comes from CSE + the post-CSE re-fold, not the retired `inline_vals`.
+        // The constant-through-`val` fold comes from CSE + the post-CSE re-fold.
         // `{ val x = 2; sigmaProp(x + 1 == 3) }`: the pre-CSE fold cannot fold
         // `ValUse(x) + 1`, CSE P4-inlines the constant `2` at its use, and the
         // re-fold then collapses `2 + 1 == 3` → `true`. Oracle (`cc`, testnet):
@@ -654,8 +649,8 @@ mod tests {
 
     #[test]
     fn compile_const_through_multiuse_val_folds_after_cse_matching_oracle() {
-        // M5 Task 4 fold-ordering decision, oracle-pinned. The keystone probe for
-        // "does fold run before or after CSE": a MULTI-use constant `val`. Scala
+        // The keystone probe for "does fold run before or after CSE": a
+        // MULTI-use constant `val`. Scala
         // folds `1 + 1` → `2` and threads it through the env so both comparisons
         // are `Const`-adjacent and fold at build time — the whole thing collapses
         // to `true && true` with ZERO constants and ZERO ValDefs. Our pipeline
@@ -675,7 +670,7 @@ mod tests {
 
     #[test]
     fn compile_cast_over_inlined_val_stays_unfolded() {
-        // Pipeline-order pin (M4 Task 9): `fold_direct_const_casts` runs BEFORE
+        // `fold_direct_const_casts` runs BEFORE
         // inline, and Scala's `Downcast(Constant)` fold is an AST-pattern match
         // that never fires over a `ValUse`, so a cast over an inlined `val` keeps
         // its `Downcast` node. `{ val x = 2; sigmaProp(x.toByte < 0.toByte) }`
@@ -687,7 +682,7 @@ mod tests {
 
     #[test]
     fn compile_overflow_in_dead_val_still_rejects() {
-        // Pipeline-order pin (M4 Task 9): a dead `val`'s rhs is folded by the
+        // A dead `val`'s rhs is folded by the
         // fold pass BEFORE pruning (mirroring Scala's eager `buildNode`), so an
         // overflow in an unused `val` still rejects. Oracle (`cc`, testnet):
         // `{ val unused = 300.toByte; sigmaProp(true) }` → REJECT
@@ -700,12 +695,11 @@ mod tests {
 
     #[test]
     fn compile_nested_sfunc_in_dead_val_accepts_nf2() {
-        // NF-2 CLOSED (M4 Task 9): a higher-order (`SFunc`-param) lambda NESTED
-        // inside an unreachable `val`'s rhs is pruned by Scala's schedule before
-        // the lowering that `MatchError`s → oracle ACCEPTs. Previously rejected
-        // (only a direct-rhs unused lambda was exempt).
+        // A higher-order (`SFunc`-param) lambda NESTED inside an unreachable
+        // `val`'s rhs is pruned by Scala's schedule before the lowering that
+        // `MatchError`s → oracle ACCEPTs.
         let r = ct("{ val unused = Coll({(f: Int => Int) => 1}); sigmaProp(true) }")
-            .expect("NF-2: nested SFunc-param lambda in a dead val must compile");
+            .expect("nested SFunc-param lambda in a dead val must compile");
         assert_eq!(hex::encode(&r.tree_bytes), "10010101d17300");
     }
 
@@ -738,8 +732,7 @@ mod tests {
 
     #[test]
     fn compile_height_root_rejects_matching_oracle_probe() {
-        // Oracle (task-1-report.md extra probes): `cc HEIGHT` →
-        // `REJECT 0:0 Exception`.
+        // Oracle: `cc HEIGHT` → `REJECT 0:0 Exception`.
         let err = ct("HEIGHT").expect_err("Int root must reject");
         assert_eq!(err.class(), "Exception");
         assert_eq!(err.pos(), 0);
@@ -796,7 +789,7 @@ mod tests {
         assert_eq!(err.class(), "SerializerException");
     }
 
-    // ----- error paths: GraphBuilding parity gates (lib.rs D-C5, wave 1) -----
+    // ----- error paths: GraphBuilding parity gates (lib.rs D-C5) -----
     // Every oracle fact below: captured 2026-07-07, 3 identical runs,
     // committed as compile_seed.json vectors (except the ACCEPT boundaries
     // that byte-mismatch pending val-inline/pruning — the unused/aliased
@@ -847,7 +840,7 @@ mod tests {
         // Accepts (oracle OK): the multi-arg DEFINITION is fine — unused
         // val, un-applied alias, and both fold-callback forms (direct and
         // val-bound = the D-C4 both-accept class; our trees for these now
-        // TUPLE to the evaluable 1-arg form, ledger D-C4 CLOSED / D-C5).
+        // TUPLE to the evaluable 1-arg form, ledger D-C4/D-C5).
         for src in [
             "{ val unused = {(x: Int, y: Int) => x + y}; sigmaProp(true) }",
             "{ val f = {(x: Int, y: Int) => x + y}; val g = f; sigmaProp(true) }",
@@ -860,7 +853,7 @@ mod tests {
 
     #[test]
     fn compile_fold_slot_multi_arg_lambda_tuples_to_one_arg_funcvalue() {
-        // D-C4 (M4 Task 7): the fold's 2-arg lambda must reach `build_tree` as
+        // D-C4: the fold's 2-arg lambda must reach `build_tree` as
         // a TUPLED 1-arg `FuncValue(STuple)` — the only on-chain-valid shape.
         // (The context-free smoke also byte-matches the oracle in
         // compile_semantic_parity via compile_seed.json; this pins the shape
@@ -921,11 +914,11 @@ mod tests {
 
     #[test]
     fn compile_allzk_anyzk_reject_staging_exception_full_pipeline() {
-        // D-C8 (M4 Task 8 review): `allZK`/`anyZK` typecheck fine (the
+        // D-C8: `allZK`/`anyZK` typecheck fine (the
         // typer's `predefined_env` has both names) but Scala's
         // `SigmaPredef.AllZKFunc`/`AnyZKFunc` register `PredefFuncInfo(
-        // undefined)` as their irBuilder — genuinely unimplemented upstream
-        // (sigmastate-interpreter#543), not a porting gap. The typed tree
+        // undefined)` as their irBuilder — genuinely unimplemented upstream,
+        // not a porting gap. The typed tree
         // keeps the raw `Apply(Ident, args)` shape (byte-identical to the
         // oracle's `tce` residual), and `compiler.compile`'s GraphBuilding
         // stage throws `StagingException` reaching that unbound `Ident` —
@@ -1091,23 +1084,22 @@ mod tests {
 
     #[test]
     fn compile_sigmaprop_height_p2s_and_p2sh_match_oracle_after_segregation() {
-        // Post-D-C1 (M4 Task 2): the oracle tree `100104c801d191a37300`
-        // (header 0x10) and ours are now byte-identical, so the P2S address
-        // MATCHES the oracle capture — the segregation-only gap is closed for
-        // this shape-identical vector.
+        // Post-D-C1: the oracle tree `100104c801d191a37300`
+        // (header 0x10) and ours are byte-identical, so the P2S address
+        // MATCHES the oracle capture.
         let r = ct("sigmaProp(HEIGHT > 100)").expect("compile");
         assert_eq!(r.p2s_address, ORACLE_HGT_P2S);
         // The P2SH address hashes the constant-INLINED proposition
-        // (`d191a304c801`) — segregation-invariant, so it matched before AND
-        // after the flip. Wherever Scala's IR reshapes the proposition itself,
-        // the P2SH diverges (lib.rs D-C7; wave-3 address gate).
+        // (`d191a304c801`) — segregation-invariant, so it matches regardless
+        // of the D-C1 flip. Wherever Scala's IR reshapes the proposition
+        // itself, the P2SH diverges (lib.rs D-C7).
         assert_eq!(r.p2sh_address, ORACLE_HGT_P2SH);
     }
 
-    // ----- oracle parity: Task-11 wave-2 lowerings/folds (lib.rs D-C6) -----
+    // ----- oracle parity: lowerings/folds (lib.rs D-C6) -----
     // Every oracle fact below: TyperOracle cc/ccs verbs, sigma-state 6.0.2,
-    // ORACLE_TREE_VERSION=3, ORACLE_NETWORK=testnet, captured 2026-07-07,
-    // 3 identical runs (committed as compile_seed.json wave-2 vectors).
+    // ORACLE_TREE_VERSION=3, ORACLE_NETWORK=testnet
+    // (committed as compile_seed.json vectors).
     // Our trees stay non-segregated (D-C1), so the ORACLE-comparable byte
     // surface is the P2SH address — it hashes the constant-inlined
     // PROPOSITION, which must be node-for-node identical after the fixes.
@@ -1157,9 +1149,9 @@ mod tests {
 
     #[test]
     fn compile_val_bound_get_reg_index_stays_residual_method_call() {
-        // getReg dynamic→static lowering residual (MEMORY "getReg dynamic-index
-        // plan"), pinned verdict-only (NOT a committed vector). M4 Task 9's `val`
-        // inlining now DOES eliminate `val i` (`crate::inline`), so the index
+        // getReg dynamic→static lowering residual, pinned verdict-only (NOT a
+        // committed vector). `val` inlining (`crate::inline`) DOES eliminate
+        // `val i`, so the index
         // becomes the inlined constant `4` — matching Scala's const-propagation
         // this far. What still diverges is the SECOND half: Scala lowers
         // `getReg[Int](4)` (a now-constant index) to the STATIC
@@ -1264,12 +1256,11 @@ mod tests {
         // (`5 | 3 = 7`, `5 ^ 3 = 6`) — a wrong value would leave a residual
         // `Eq(<byte>, <byte>)` (or fold to `false`), so this pins the value.
         //
-        // **M4 Task 5:** with the cast fold (Task 4: `5.toByte`, `3.toByte`,
+        // With the cast fold (`5.toByte`, `3.toByte`,
         // `7.toByte`/`6.toByte` all fold to bare Byte constants) AND the
-        // pre-existing bitwiseOr/Xor-of-constants fold feeding two equal Byte
+        // bitwiseOr/Xor-of-constants fold feeding two equal Byte
         // constants into the `Eq`, the generic engine's `Const == Const →
         // true` closes it: byte-identical to the oracle (`10010101d17300`).
-        // recon-targets vectors 84/85 graduate out of `DC7_P2SH_MISMATCH_SET`.
         let env = ScriptEnv::new();
         let cv3 = |src| compile(&env, src, 3, NetworkPrefix::Testnet);
         let or = cv3("sigmaProp((5.toByte.bitwiseOr(3.toByte)) == 7.toByte)").expect("compile");
@@ -1280,12 +1271,7 @@ mod tests {
 
     #[test]
     fn compile_cast_chain_keeps_only_innermost_fold_matching_oracle_probe_34() {
-        // The crux regression this task's fold-one-level/keep-chain
-        // invariant exists to pin (M3 numerics N-3 probe 34,
-        // adversarial-findings-numerics.md:137; now committed as an M4
-        // Task 4 `cc` vector in `compile_probes.txt`/`compile_seed.json`,
-        // re-verified via `compile_seed_live_recapture`): a literal cast
-        // CHAIN folds ONLY the cast immediately adjacent to the literal —
+        // A literal cast CHAIN folds ONLY the cast immediately adjacent to the literal —
         // `1.toByte` folds to a bare `Const(Byte, 1)`, but the two outer
         // `.toLong`/`.toBigInt` casts stay real `Upcast` nodes wrapping it,
         // exactly like Scala's `GraphBuilding.scala:514-518` (a
@@ -1405,10 +1391,10 @@ mod tests {
 
     #[test]
     fn compile_sizeof_coll_literal_folds_to_clean_v0_bytes() {
-        // F-3 (adversarial-findings-constants.md): before wave 2 the empty
-        // `Coll[UnsignedBigInt]()` literal put v3-only TYPE code 9 on the v0
-        // wire — bytes our own read_ergo_tree refuses (a stranded-funds
-        // P2S). The SizeOf fold keeps it off the wire, matching Scala's
+        // An empty `Coll[UnsignedBigInt]()` literal's element TYPE code is
+        // v3-only and cannot appear on the v0 wire — bytes our own
+        // `read_ergo_tree` refuses (a stranded-funds P2S). The SizeOf fold
+        // keeps it off the wire, matching Scala's
         // GraphBuilding fold (oracle: `.size == 0` → the fully-folded
         // `10010101d17300`; `.size.toLong == SELF.value` →
         // `10010400d1937e730005c1a7 … pvyEFnLjY1hb7ebaccofdS88Z9v1WwKxUzUB4y9`
@@ -1421,11 +1407,11 @@ mod tests {
             NetworkPrefix::Testnet,
         )
         .expect("compile");
-        // M4 Task 5: the generic const fold now folds `.size` → Int 0 AND the
+        // The generic const fold folds `.size` → Int 0 AND the
         // enclosing `0 == 0` → `sigmaProp(true)`, byte-identical to the oracle
-        // (`10010101d17300`) — recon-targets vector 77 graduates (NF-1 closure:
-        // the SizeOf fold erases the empty `Coll[UnsignedBigInt]()` BEFORE the
-        // v0-data gate, so the F-3 stranded-funds invariant holds too).
+        // (`10010101d17300`). The SizeOf fold erases the empty
+        // `Coll[UnsignedBigInt]()` BEFORE the v0-data gate, so the
+        // stranded-funds invariant above holds here too.
         assert_eq!(hex::encode(&r.tree_bytes), "10010101d17300");
         assert_eq!(reparse(&r.tree_bytes), r.ergo_tree);
         let r = compile(
@@ -1441,9 +1427,9 @@ mod tests {
         assert_eq!(hex::encode(&r.tree_bytes), "10010400d1937e730005c1a7");
         assert_eq!(r.p2sh_address, "pvyEFnLjY1hb7ebaccofdS88Z9v1WwKxUzUB4y9");
         // The `.size` fold covers NON-constant elements too (a `Coll(HEIGHT)`
-        // literal folds to Int 1 regardless of item constancy); M4 Task 5's
-        // `Const == Const → true` then closes the equality, byte-identical to
-        // the oracle (`10010101d17300`) — recon-targets vector 79 graduates.
+        // literal folds to Int 1 regardless of item constancy); the generic
+        // `Const == Const → true` fold then closes the equality,
+        // byte-identical to the oracle (`10010101d17300`).
         let r = ct("sigmaProp(Coll(HEIGHT).size == 1)").expect("compile");
         assert_eq!(hex::encode(&r.tree_bytes), "10010101d17300");
         // Discarded elements are still verdict-checked: children fold BEFORE a
@@ -1455,22 +1441,17 @@ mod tests {
 
     #[test]
     fn compile_v6_embeddable_type_code_under_v0_header_accepts_at_tv3_matching_oracle() {
-        // F1 (m5-adversarial-findings-CAPTURED.md): the post-write self-check
-        // (D-C6) re-reads compile()'s own bytes and refuses to derive an address
-        // for a script no deserializer accepts. It USED to gate V6-embeddable
-        // TYPE codes (`SUnsignedBigInt` = code 9, …) on the emitted HEADER version
-        // (always 0), and so wrongly rejected a header-v0 tree carrying code 9 —
-        // which a `tree_version >= 3` (V6-activated) compile legitimately produces
-        // and which Scala re-parses fine. Scala gates the embeddable set on the
-        // ACTIVATED version (`TypeSerializer.getEmbeddableType` →
-        // `VersionContext.isV6Activated`, `VersionContext.scala:33`; deser under
-        // `withVersions(activatedVersion, treeVersion)`,
-        // `ErgoTreeSerializer.scala:148-154`), NOT the tree header. The self-check
-        // now reads via `read_ergo_tree_with_activated_version(tree_version)` and
-        // ACCEPTS these at tv=3, byte-identical to the oracle (verified live vs
-        // sigma-state 6.0.2, ORACLE_TREE_VERSION=3, 2026-07-07). The earlier
-        // "poisoned type code / strands funds" premise was FALSE — the wrong-axis
-        // header-version gate was the only thing rejecting them.
+        // The post-write self-check (D-C6) re-reads compile()'s own bytes and
+        // refuses to derive an address for a script no deserializer accepts.
+        // Scala gates the V6-embeddable TYPE codes (`SUnsignedBigInt` = code
+        // 9, …) on the ACTIVATED version (`TypeSerializer.getEmbeddableType` →
+        // `VersionContext.isV6Activated`, `VersionContext.scala:33`; deser
+        // under `withVersions(activatedVersion, treeVersion)`,
+        // `ErgoTreeSerializer.scala:148-154`), NOT the tree header (always 0).
+        // The self-check reads via
+        // `read_ergo_tree_with_activated_version(tree_version)` and ACCEPTS
+        // these at tv=3, byte-identical to the oracle (verified live vs
+        // sigma-state 6.0.2, ORACLE_TREE_VERSION=3).
         //
         // All 7 captured blast-radius shapes (bare + val-bound; every target
         // type + Coll/tuple/Option container) accept byte-exact at tv=3:
@@ -1526,7 +1507,7 @@ mod tests {
             assert_eq!(err.class(), "ParserException", "{src}");
         }
 
-        // Sibling GRADUATION (M4 Task 9, unchanged by F1): a VAL-BOUND
+        // A VAL-BOUND
         // `Coll[UnsignedBigInt]()` under `.size` folds the UBI data OFF the wire
         // before the self-check ever sees a code-9 type, so it stays byte- and
         // address-identical to the oracle (`10010400d1937e730005c1a7`).
@@ -1542,7 +1523,6 @@ mod tests {
 
     #[test]
     fn compile_bare_from_big_endian_bytes_rejects_below_tv3_matching_oracle() {
-        // F2 (m5-adversarial-findings-CAPTURED.md) — accept-invalid, SEVERE:
         // the BARE `fromBigEndianBytes[T]` predef (typer/predef_ir
         // `global_deserialize`) builds `MethodCall(Global, m)` DIRECTLY, bypassing
         // the version-scoped SGlobal method table the dotted `Global.<m>` form
@@ -1550,9 +1530,9 @@ mod tests {
         // `isV3OrLaterErgoTreeVersion` (`SGlobalMethods.getMethods`,
         // methods.scala:2001-2021, pinned v6.0.2 — the v5 SGlobal set is just
         // {groupGenerator, xor}); GraphBuilding throws `GraphBuildingException` on
-        // the residual MethodCall under v5 activation. Before F2 we emitted a
-        // SPENDABLE address at tv 0/1/2. Now the emit-time GraphBuilding-parity
-        // gate rejects it — class-exact vs the oracle (ORACLE_TREE_VERSION=0/1/2:
+        // the residual MethodCall under v5 activation. The emit-time
+        // GraphBuilding-parity gate rejects it — class-exact vs the oracle
+        // (ORACLE_TREE_VERSION=0/1/2:
         // `REJECT 0:0 GraphBuildingException`); at tv=3 both accept, byte-identical.
         let src = "sigmaProp(fromBigEndianBytes[Int](Coll[Byte](0.toByte)) > 0)";
         for tv in [0u8, 1, 2] {
@@ -1585,15 +1565,15 @@ mod tests {
         // Oracle capture, line 3: `cce proveDlog(g1)` → the SAME reply as
         // the PK line (tree `0008cd0279be...`, both addresses identical):
         // Scala's IR pipeline constant-folds CreateProveDlog(const) →
-        // SigmaPropConstant at the GraphBuilding stage (task-1-report.md
-        // Concern 1; g1 = the generator = the PK test key).
+        // SigmaPropConstant at the GraphBuilding stage (g1 = the generator =
+        // the PK test key).
         //
-        // **M4 Task 3 flip:** `crate::lower`'s D-C2 fold now runs BEFORE
+        // `crate::lower`'s D-C2 fold runs BEFORE
         // `build_tree`, so our `CreateProveDlog(Const)` folds to the SAME
         // bare `SigmaPropConstant` the oracle emits — the root is bare, so
         // it takes `withoutSegregation` (header `0x00`, empty constants
         // table) exactly like the PK vector, and every byte/address matches
-        // the oracle verbatim (D-C2 CLOSED).
+        // the oracle verbatim.
         let r = compile_testnet(&generator_env(), "proveDlog(g1)").expect("compile");
         assert_eq!(r.tree_bytes[0], 0x00, "folded bare root, no segregation");
         assert!(r.ergo_tree.constants.is_empty());
@@ -1611,7 +1591,7 @@ mod tests {
 
     #[test]
     fn compile_isproven_bool_and_reconstructs_binand_matching_oracle() {
-        // M4 Task 6 (D-C3): `sigmaProp(true) && (1 == 1)` — the SigmaProp
+        // D-C3: `sigmaProp(true) && (1 == 1)` — the SigmaProp
         // operand's `.isProven` fuses (`SigmaPropIsProven(BoolToSigmaProp(true))
         // → true`) BEFORE the fold, exposing `BinAnd(true, EQ(1,1))`. The fold
         // reduces `EQ(1,1) → true` but keeps `BinAnd` (lazy, never const-folded),
@@ -1627,7 +1607,7 @@ mod tests {
 
     #[test]
     fn compile_isproven_bool_xor_folds_to_false_matching_oracle() {
-        // M4 Task 6 (D-C3): `sigmaProp(true) ^ (1 == 1)` — same isProven fusion
+        // D-C3: `sigmaProp(true) ^ (1 == 1)` — same isProven fusion
         // exposes `BinXor(true, EQ(1,1))`; unlike BinAnd, BinXor IS eagerly
         // const-folded (`true ^ true → false`), so the whole XOR collapses to a
         // `false` constant. Segregation extracts it into the constants table
@@ -1642,7 +1622,7 @@ mod tests {
 
     #[test]
     fn compile_allof_singleton_provedlog_strips_isproven_to_bare_const() {
-        // M4 Task 6 (D-C3): `allOf(Coll(proveDlog(g1)))` — the lowering block
+        // D-C3: `allOf(Coll(proveDlog(g1)))` — the lowering block
         // (D-C2 `CreateProveDlog(const)` fold + single-element `AllOf` unwrap)
         // exposes `BoolToSigmaProp(SigmaPropIsProven(Const{SigmaProp}))`, which
         // the post-lower top-level `removeIsProven` strips to the bare
@@ -1673,8 +1653,7 @@ mod tests {
 
     #[test]
     fn compile_bare_singleton_lowering_matches_oracle_property_call() {
-        // M4 Task 8 (recon-transforms.md §9, D-C7 singleton bullet, vector
-        // 30): bare `LastBlockUtxoRootHash` and bare `groupGenerator` are NOT
+        // D-C7: bare `LastBlockUtxoRootHash` and bare `groupGenerator` are NOT
         // `IsContextProperty` primitives on the Scala side — both re-emit as
         // `PropertyCall`s. Oracle-confirmed 2026-07-07, `ORACLE_TREE_VERSION=3`:
         for (src, oracle_hex) in [
@@ -1695,7 +1674,7 @@ mod tests {
 
     #[test]
     fn compile_deserialize_constant_matches_oracle() {
-        // M4 Task 8 (gap F6, D-T2 CLOSED): `deserialize[Int]("Jq")` decodes
+        // D-T2: `deserialize[Int]("Jq")` decodes
         // (Base58) to bytes `04 0a` — `IntConstant(5)` — and folds through the
         // generic constant fold (`5 == 5` → `true`) exactly like the oracle.
         // Oracle-confirmed 2026-07-07: `sigmaProp(deserialize[Int]("Jq") == 5)`

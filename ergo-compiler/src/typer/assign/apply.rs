@@ -139,9 +139,8 @@ pub(crate) fn assign_apply_explicit_method(
         // substitution (seed §4). Building the MethodCall unconditionally here
         // would leave a custom-irBuilder method like `arr1.slice[Byte](0, 1)`
         // as a residual `MethodCall (12,7)` no evaluator accepts, where Scala
-        // emits `Slice` (adversarial-findings-methodcalls.md F5; oracle: the
-        // annotated and un-annotated forms reply byte-identically,
-        // `…d193b1b47300…`). `lower_method` is the same catalog Scala's
+        // emits `Slice` (oracle: the annotated and un-annotated forms reply
+        // byte-identically, `…d193b1b47300…`). `lower_method` is the same catalog Scala's
         // irBuilders implement, so routing through it IS the §1.7 rule.
         let lowered = lower_method(
             &t_obj,

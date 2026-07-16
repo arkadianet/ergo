@@ -21,8 +21,7 @@ impl Scope {
             T::Context { .. } => node(0xFE, Payload::Zero),
             T::Global { .. } => node(0xDD, Payload::Zero),
 
-            // ── (recon-transforms.md §9, D-C7 singleton bullet):
-            //    bare `LastBlockUtxoRootHash` and bare/dotted `groupGenerator`
+            // ── (D-C7): bare `LastBlockUtxoRootHash` and bare/dotted `groupGenerator`
             //    are NOT `IsContextProperty`-recognized primitives on the
             //    Scala side (unlike Height/Inputs/Outputs/Self/MinerPubkey) —
             //    buildTree's fallback re-materializes both as PropertyCalls.
@@ -494,8 +493,7 @@ impl Scope {
 
     /// `Lambda(args, body)` → `FuncValue(Vector((argId, argType)), body)` @
     /// 0xD9. Args MUST carry types — they define the function signature and
-    /// the ergo-ser writer panics on a type-less arg (write.rs FuncValue arm,
-    /// recon-ergoser-ir §1).
+    /// the ergo-ser writer panics on a type-less arg (write.rs FuncValue arm).
     pub(crate) fn emit_lambda(
         &mut self,
         tpe_params: &[crate::typed::STypeParam],

@@ -15,10 +15,10 @@ impl Interner {
     /// 498-546`).
     ///
     /// A symbol clearing the [`should_hoist`](Self::should_hoist) gate is emitted
-    /// as ONE `ValDef` in the scope it was first built (spike §3); every
+    /// as ONE `ValDef` in the scope it was first built; every
     /// reference to it becomes a `ValUse` of the assigned id. A single-use symbol
     /// (or a gate-suppressed context/builder/constant) is INLINED at each use
-    /// (single-use inlining falls out for free, spike §7.2).
+    /// (single-use inlining falls out for free).
     ///
     /// # The schedule rule
     ///
@@ -28,14 +28,14 @@ impl Interner {
     /// filtered to that scope. The DFS runs over the LIVE construction-order graph
     /// — `self.syms` is indexed in interning order (== source construction / nodeId
     /// order) and `key.children` are in argument order, so the tie-break among
-    /// mutually-independent same-scope symbols is construction order for free (F2,
-    /// `m5-sched-crystalpool.md` §6). A nested compound (`BlockValue`/`FuncValue`
+    /// mutually-independent same-scope symbols is construction order for free.
+    /// A nested compound (`BlockValue`/`FuncValue`
     /// child, i.e. a symbol whose placement scope is DEEPER) is ONE node in its
     /// parent's DFS whose ordered deps are its `freeVars` — the ancestor-scope
-    /// symbols it references, in the CHILD's schedule order (F1,
-    /// `AstGraphs.scala:56-85`; `m5-sched-chaincash.md` §1). This is what makes the
-    /// chaincash root order `[1,2,3,4,5]` (a naive descend-in-source DFS predicts
-    /// `[1,2,4,3,5]`).
+    /// symbols it references, in the CHILD's schedule order
+    /// (`AstGraphs.scala:56-85`). This is what makes the
+    /// chaincash contract's root order `[1,2,3,4,5]` (a naive descend-in-source
+    /// DFS predicts `[1,2,4,3,5]`).
     pub fn materialize(&self, root: SymId) -> Expr {
         let usage = self.flat_usage_reachable(root);
         let env: BTreeMap<SymId, u32> = BTreeMap::new();
@@ -142,7 +142,7 @@ impl Interner {
     /// The DFS neighbours (`deps`) of `sym` as seen by scope `scope` — Scala's
     /// `neighbours(id)` (`ProgramGraphs.scala:49-60` / `Thunks.scala:205`). A
     /// LOCAL node exposes its structural children (construction order); a DEEPER
-    /// nested compound exposes its `freeVars` (F1); a `freeVar`/`isVar` leaf
+    /// nested compound exposes its `freeVars`; a `freeVar`/`isVar` leaf
     /// exposes nothing.
     pub(crate) fn neighbours(&self, sym: SymId, scope: ScopeId) -> Vec<SymId> {
         let info = &self.syms[sym.0 as usize];
@@ -163,7 +163,7 @@ impl Interner {
     /// `scheduleForResult`), scanning each scheduled node's deps and collecting
     /// those that are neither local (scheduled) nor bound vars, first-appearance.
     ///
-    /// The crux (`m5-root-schedule-order.md`): Scala schedules each
+    /// The crux: Scala schedules each
     /// by-name (`ThunkDef`) operand — the `&&`/`||` right arm, an `if` branch —
     /// as a SEPARATE post-order entry that PRECEDES the operator owning it, so its
     /// freeVars are collected BEFORE the operator's EAGER operands'. For `a && b`
@@ -337,13 +337,11 @@ impl Interner {
 
     /// Rebuild a lambda — Scala's `buildValue` `Lambda` case
     /// (`TreeBuilding.scala:186-191`). Each argument consumes ONE id starting at
-    /// `def_id+1` (a tupled lambda still has a single `STuple` arg → one id, the
-    /// Task-7 `+1`-not-`+2` correction, spike §4); the body is a nested
-    /// materialization scope (`body_scope`) whose ids continue from `varId+1`.
-    /// The `def_id`-by-value threading (T1) is what lets sibling lambdas reuse the
-    /// same arg id range (`m5-sched-small.md` §2.5), and building the rhs with
-    /// `def_id = id-1` makes a lambda-valued ValDef's arg id equal the ValDef id
-    /// (T2, `m5-sched-chaincash.md` §3).
+    /// `def_id+1` (a tupled lambda still has a single `STuple` arg → one id);
+    /// the body is a nested materialization scope (`body_scope`) whose ids
+    /// continue from `varId+1`. The `def_id`-by-value threading is what lets
+    /// sibling lambdas reuse the same arg id range, and building the rhs with
+    /// `def_id = id-1` makes a lambda-valued ValDef's arg id equal the ValDef id.
     pub(crate) fn build_func(
         &self,
         args: &[(SymId, Option<SigmaType>)],

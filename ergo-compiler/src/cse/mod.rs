@@ -9,12 +9,11 @@
 //! the `ValDef`/`ValUse`/`BlockValue`/`FuncValue` tree with assign-once dense
 //! ids.
 //!
-//! Spec: `dev-docs/ergoscript-compiler-m5-recon/spike-scope-chain.md`. All
 //! Scala citations resolve under the pinned oracle checkout
 //! `ergo-core/sigmastate-interpreter-v6.0.2`,
 //! `sc/shared/src/main/scala/sigma/compiler/ir/`.
 //!
-//! # The identity model (spike §1)
+//! # The identity model
 //!
 //! There are two tiers a node can be interned into, chosen at the moment it is
 //! *first constructed* by the top of the thunk stack (`Base.scala:777-789`
@@ -31,14 +30,14 @@
 //!   built inside sibling thunk B misses A entirely and creates a **second
 //!   distinct symbol** — cannonQ's "per-Thunk-distinct-sym".
 //!
-//! A node is **never migrated** between scopes (spike §1.3). The single
+//! A node is **never migrated** between scopes. The single
 //! determinant of sharing is the **scope of first build** — not use-count, not
-//! LCA. The keystone is the E2-vs-E6 pair (spike §6): they differ only in the
+//! LCA. The keystone is the E2-vs-E6 pair: they differ only in the
 //! `if` condition, yet E2 (each `HEIGHT+1` first built inside its own branch)
 //! emits two un-shared copies while E6 (`HEIGHT+1` first built in the shared
 //! condition) emits one.
 //!
-//! # Scope-push sites (spike §2)
+//! # Scope-push sites
 //!
 //! A hash-cons scope is pushed at EXACTLY three source shapes, each a *by-name*
 //! (lazy) operand; the left/condition operand is evaluated in the CURRENT scope
@@ -50,7 +49,7 @@
 //! | `0xED` BinAnd     | `a && b`           | **right** `b`     | `a`      |
 //! | `0xEC` BinOr      | `a \|\| b`         | **right** `b`     | `a`      |
 //!
-//! `0xF4` BinXor is **eager** (spike §2 last row, `GraphBuilding.scala:874-877`)
+//! `0xF4` BinXor is **eager** (`GraphBuilding.scala:874-877`)
 //! — no scope; both arms in the current scope (handled by the general path).
 //!
 //! **`0xE5` OptionGetOrElse is NOT a scope-push site.** In Scala 6.0.2 the
@@ -95,7 +94,7 @@
 //! (`HEIGHT+1`, a `Plus`) is untouchable. Literal-tuple receivers take the
 //! `Tup(a,b)` case (`:60`) and stay on the general path.
 //!
-//! # Lambdas are NOT thunks (spike §1.4 — the cannonQ correction)
+//! # Lambdas are NOT thunks
 //!
 //! `FuncValue` (`0xD9`) bodies do NOT push a hash-cons scope: `lambda`
 //! (`Functions.scala:359-383`) pushes only `lambdaStack`, never `thunkStack`. So
@@ -120,7 +119,7 @@
 //! - [`gate`] — Phase B usage counting and the 4-predicate admission gate
 //!   (`flat_usage`/`is_context_property`/`is_internal`/`is_const`/
 //!   `should_hoist`).
-//! - [`materialize`] — Task 3 schedule + materialize (`materialize`/
+//! - [`materialize`] — schedule + materialize (`materialize`/
 //!   `process_scope`/`schedule_order`/`build_value`/`build_op`), plus the
 //!   `val_def`/`val_use`/`wrap_block` tree-rebuilding helpers.
 //! - [`codec`] — the mutually-inverse `decompose`/`recompose` payload pair.
@@ -151,7 +150,7 @@ const BIN_OR: u8 = 0xEC;
 // built EAGERLY in the enclosing scope, not a thunk (GraphBuilding.scala:441,962,
 // 1013-1035 + Thunks.scala:261,283-286 empty-body thunk), so it routes through
 // the general eager path like any other node. See the module docs.
-/// Lambda — pushes `lambdaStack`, NOT `thunkStack` (spike §1.4).
+/// Lambda — pushes `lambdaStack`, NOT `thunkStack`.
 const FUNC_VALUE: u8 = 0xD9;
 /// `{ items; result }` block — transparent; items register bindings.
 const BLOCK_VALUE: u8 = 0xD8;
@@ -172,7 +171,7 @@ const SELECT_FIELD: u8 = 0x8C;
 /// stays on the general path.
 const TUPLE: u8 = 0x86;
 
-// ----- admission-gate predicate opcodes (Task 2, spike §5) -----
+// ----- admission-gate predicate opcodes -----
 //
 // The four *free context globals* recognized by Scala's `IsContextProperty`
 // (`TreeBuilding.scala:140-148`: `ContextM.HEIGHT/INPUTS/OUTPUTS/SELF` →
@@ -201,7 +200,7 @@ const SELF_BOX: u8 = 0xA7;
 const GLOBAL: u8 = 0xDD;
 
 /// The single subexpression-sharing pass — Scala's scope-chain hash-cons +
-/// `hasManyUsagesGlobal` ValDef materialization (spike §7.1). Interns the tree
+/// `hasManyUsagesGlobal` ValDef materialization. Interns the tree
 /// once (Phase A: identity by first-build scope), then materializes from the
 /// root symbol (Phase B: flat usage count → 4-predicate admission gate →
 /// per-scope `ValDef` schedule with assign-once dense ids).
@@ -209,8 +208,8 @@ const GLOBAL: u8 = 0xDD;
 /// Subsumes val inlining for free: a use-count-1 symbol is not hoisted, so its one
 /// use inlines at the materialization site; a multi-use non-const/non-context
 /// symbol hoists to a `ValDef` in its first-build scope. Dense ids are assigned as
-/// the tree is built (no post-hoc renumber). Runs at the spike §7.2 position
-/// (after all folds/lowering/tupling, before segregation); its input must already
+/// the tree is built (no post-hoc renumber). Runs after all folds/lowering/
+/// tupling, before segregation; its input must already
 /// be `prune_dead_vals`-cleaned so dead-code refs do not inflate the flat usage
 /// count, and a final `crate::fold::fold` must run over its output to collapse the
 /// constant adjacencies it exposes by P4-inlining constant-valued `val`s (the
@@ -244,7 +243,7 @@ mod tests {
     const TUPLE: u8 = 0x86;
     /// `Global` / `SigmaDslBuilder` singleton (P3 `IsInternalDef`).
     const GLOBAL_OP: u8 = 0xDD;
-    /// `CreateProveDHTuple` (spike §5 / OQ4 P4 witness).
+    /// `CreateProveDHTuple` opcode, used by the predicate-gate tests below.
     const CREATE_PROVE_DHTUPLE: u8 = 0xCE;
 
     fn op0(opcode: u8) -> Expr {
@@ -384,7 +383,7 @@ mod tests {
         assert_eq!(it.const_symbol_count(), 2);
     }
 
-    // ----- E1..E6 source shapes at the symbol level (spike §6) -----
+    // ----- E1..E6 source shapes at the symbol level -----
 
     #[test]
     fn e1_and_shares_val_across_both_arms() {
@@ -462,10 +461,10 @@ mod tests {
         // The left arm builds HEIGHT and 42 at ROOT (global); the scoped right
         // arm's HEIGHT / 42 lookups hit global, so at the INTERNING level both
         // hash-cons to ONE symbol each. NOTE: this is Phase A only. The LATER
-        // gates (Tasks 2-3) diverge: P2 `IsContextProperty` re-emits HEIGHT
+        // gates diverge: P2 `IsContextProperty` re-emits HEIGHT
         // inline per use (never a ValDef) and P4 `IsConstantDef` suppresses the
         // constant's ValDef so constant segregation gives the `42` TWO
-        // per-occurrence pool slots with no dedup (spike §5, E3 decoded tree).
+        // per-occurrence pool slots with no dedup.
         let e3 = op2(
             BIN_AND,
             op2(GT, height(), int(42)),
@@ -513,7 +512,7 @@ mod tests {
 
     #[test]
     fn binxor_is_eager_both_arms_current_scope() {
-        // `(HEIGHT+1) ^ (HEIGHT+1)` — BinXor (0xF4) is EAGER (spike §2): no
+        // `(HEIGHT+1) ^ (HEIGHT+1)` — BinXor (0xF4) is EAGER: no
         // thunk is pushed, both arms are interned in the current (root) scope,
         // so the two identical operands hash-cons to ONE Plus symbol.
         let xor = op2(BIN_XOR, height_plus_one(), height_plus_one());
@@ -646,7 +645,7 @@ mod tests {
         assert!(!Interner::has_many(&usage, p));
     }
 
-    // ----- lambdas (spike §1.4) -----
+    // ----- lambdas -----
 
     #[test]
     fn lambda_bodies_share_root_def_and_track_bound_var_deps() {
@@ -704,12 +703,12 @@ mod tests {
         assert!(it.deps_of(funcs[1]).is_empty());
     }
 
-    // ----- Phase B: flat usage count + admission gate (Task 2, spike §3/§5) -----
+    // ----- Phase B: flat usage count + admission gate -----
 
     #[test]
     fn flat_usage_counts_each_reference_with_multiplicity() {
         // `7 + 7` — the two operands hash-cons to ONE const symbol referenced
-        // twice (Scala's `syms = [x, x]` counts with multiplicity, spike §3).
+        // twice (Scala's `syms = [x, x]` counts with multiplicity).
         let e = op2(PLUS, int(7), int(7));
         let mut it = Interner::new();
         it.intern(&e);
@@ -907,7 +906,7 @@ mod tests {
 
     #[test]
     fn provedhtuple_repeated_ge_consts_hoist_liftedconst_not_p4_suppressed() {
-        // `m5-sched-small.md` §1.3: `proveDHTuple(…)` over
+        // `proveDHTuple(…)` over
         // repeated `GroupElement` constants. A `GroupElement` literal is a
         // `LiftedConst`, NOT Scala's narrow `Const[_]`, so P4 (`IsConstantDef`)
         // structurally cannot see it — it hoists like any ordinary multi-use
@@ -938,7 +937,7 @@ mod tests {
             );
             assert!(
                 it.should_hoist(*c, &usage),
-                "the GE const clears all four predicates → hoists (Fix 2)"
+                "the GE const clears all four predicates → hoists"
             );
         }
     }
@@ -950,7 +949,7 @@ mod tests {
         // (secp256k1 generator), so all four arguments are one const symbol used
         // 4× → a single `ValDef(1)` whose rhs segregates to `ConstPlaceholder(0)`,
         // result `ProveDHTuple(v1,v1,v1,v1)`. Byte-exact vs the Scala 6.0.2 `cce`
-        // oracle (`m5-sched-small.md` §1.2). Fix 2 is what makes this ValDef appear.
+        // oracle.
         let g = ge_const(0x42);
         let e = op4(CREATE_PROVE_DHTUPLE, g.clone(), g.clone(), g.clone(), g);
         let mut it = Interner::new();
@@ -969,15 +968,14 @@ mod tests {
         assert_eq!(mat, expected);
     }
 
-    // ----- Task 3: ValDef materialization — byte-exact vs the JVM oracle -----
+    // ----- ValDef materialization — byte-exact vs the JVM oracle -----
     //
     // Each vector below runs the pipeline PREFIX that precedes CSE (emit → the
-    // M4 fold/inline transforms), then this module's `materialize`, then the
+    // fold/inline transforms), then this module's `materialize`, then the
     // existing segregation + `write_ergo_tree`, and byte-compares the FULL tree
-    // bytes to the Scala 6.0.2 `cc` oracle (spike §6 E1–E6, captured live via
-    // `scripts/jvm_typer_oracle`). This is the first CSE task producing bytes to
-    // diff, so the comparison is end-to-end against the reference compiler — not
-    // a self-oracle.
+    // bytes to the Scala 6.0.2 `cc` oracle (E1–E6, captured live via
+    // `scripts/jvm_typer_oracle`). The comparison is end-to-end against the
+    // reference compiler — not a self-oracle.
     //
     // Placement note (route coercion vs explicit `sigmaProp`): the route wraps a
     // Boolean source in `BoolToSigmaProp` AFTER `buildTree` (so the block sits
@@ -1020,8 +1018,8 @@ mod tests {
         hex(&w.result())
     }
 
-    /// Run the pipeline transforms that PRECEDE the CSE slot (spike §7.2), the
-    /// same ones `crate::tree::compile` runs, and return the pre-CSE root plus
+    /// Run the pipeline transforms that PRECEDE the CSE pass — the
+    /// same ones `crate::tree::compile` runs — and return the pre-CSE root plus
     /// whether the route must re-wrap it in `BoolToSigmaProp` after CSE. A
     /// Boolean source is materialized bare and wrapped after (matching Scala's
     /// order); an explicit `sigmaProp(...)` source keeps its wrapper in the tree.
@@ -1128,7 +1126,7 @@ mod tests {
     fn e4_lambda_arg_id_threading_matches_oracle() {
         // Root ValDef k=id1 shared into TWO sibling lambdas; each lambda arg =
         // defId(1)+1 = id 2 (`d9 01 02`), body ValUse(1)=k. Proves the assign-once
-        // id threading through FuncValue (spike §4).
+        // id threading through FuncValue.
         assert_eq!(
             via_cse(
                 "{val k = HEIGHT + 1; \
