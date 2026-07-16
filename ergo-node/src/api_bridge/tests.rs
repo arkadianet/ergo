@@ -93,7 +93,7 @@ fn load_vectors(filename: &str) -> Vec<TxVector> {
 /// without them) by JSON round-trip. This exercises the same wire
 /// path real clients hit: `serde_json` re-parses the encoded JSON
 /// as the input variant, so derived fields land in serde's
-/// "ignored unknown" bucket per Q3.
+/// "ignored unknown" bucket.
 fn to_input(tx: &ScalaTransaction) -> ScalaTransactionInput {
     let json = serde_json::to_string(tx).expect("ScalaTransaction must serialize");
     serde_json::from_str(&json).expect("input variant must parse Scala JSON")
@@ -220,10 +220,10 @@ fn b4_byte_parity_broad_700k_corpus() {
 /// **Corpus.** 213 mainnet txs
 /// captured from heights 1750000-1750030: 147 with non-empty
 /// `proofBytes`, 156 with tokens, 112 with non-empty registers,
-/// 86 with non-empty context extensions, 25 with data inputs.
-/// Comfortably exceeds the spec's 100+ vector target with the
-/// diversity coverage it demanded. Re-extract via
-/// `extract_scala_tx_json.sh` when expanding the range.
+/// 86 with non-empty context extensions, 25 with data inputs — broad
+/// coverage of the shapes that could reveal an encoder/decoder
+/// asymmetry. Re-extract via `extract_scala_tx_json.sh` when expanding
+/// the range.
 #[test]
 fn b4_scala_captured_json_decodes_to_canonical_bytes() {
     #[derive(serde::Deserialize)]
@@ -823,7 +823,7 @@ fn utxo_encoder_register_hex_is_verbatim_wire_bytes() {
 }
 
 // ===================================================================
-// §12 step (e) — SubmitBridge::submit_full_block boundary tests
+// SubmitBridge::submit_full_block boundary tests
 // ===================================================================
 //
 // These tests pin the bridge-side contract: JSON decode, PoW verify,
@@ -838,8 +838,8 @@ use ergo_api::compat::types::{
 
 /// Returns a minimal v2 ScalaHeader / ScalaFullBlock pair the
 /// bridge's `decode_scala_full_block` accepts. Section-ids are
-/// computed from the decoded header_id so the boundary check
-/// (added in §12(a) fix `32bdc1e`) doesn't reject the body.
+/// computed from the decoded header_id so the section-id consistency
+/// boundary check doesn't reject the body.
 fn minimal_consistent_block() -> ScalaFullBlock {
     let header = ScalaHeader {
         extension_id: String::new(),
@@ -909,7 +909,7 @@ async fn submit_full_block_decode_failure_returns_deserialize() {
     let (bridge, _submit_rx, mut event_rx) = make_bridge();
     let mut body = minimal_consistent_block();
     // Mutate block_transactions.headerId so the JSON boundary
-    // consistency check (32bdc1e) rejects.
+    // consistency check rejects.
     body.block_transactions.header_id = "ff".repeat(32);
 
     let err = bridge.submit_full_block(body).await.unwrap_err();
@@ -1404,8 +1404,8 @@ fn host_state_db_empty_file_returns_some_zero() {
     assert_eq!(host.state_db_bytes, Some(0));
 }
 
-/// State DB path doesn't exist → `None`. Pre-r5 the field wired as
-/// `0` here, which monitoring scrapers misread as "database empty."
+/// State DB path doesn't exist → `None`, not `0` — monitoring scrapers
+/// would misread a wired `0` as "database empty."
 #[test]
 fn host_state_db_missing_file_returns_none() {
     let dir = tempfile::tempdir().unwrap();

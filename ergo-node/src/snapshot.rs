@@ -450,18 +450,18 @@ pub struct SnapshotParts<'a> {
     /// `Mempool::pool_input_overlay`. `Arc`-shared like `pool_outputs`.
     /// Empty when the pool has no entries.
     pub pool_inputs: Arc<HashMap<Digest32, Digest32>>,
-    /// Full pool-transaction bytes in priority order. Drives §10.4
+    /// Full pool-transaction bytes in priority order. Drives the
     /// unconfirmed full-tx endpoints.
     pub pool_full_txs: Arc<Vec<(Digest32, Arc<[u8]>)>>,
     /// Per-peer chain-state projection from
-    /// `SyncCoordinator::peer_sync_snapshots()`. Drives §10.6
+    /// `SyncCoordinator::peer_sync_snapshots()`. Drives
     /// `/peers/syncInfo`.
     pub peer_sync: Arc<std::collections::HashMap<std::net::SocketAddr, PeerSyncProjection>>,
-    /// Delivery-tracker counters at snapshot time. Drives §10.6
+    /// Delivery-tracker counters at snapshot time. Drives
     /// `/peers/trackInfo`.
     pub delivery_counts: DeliveryCounters,
     /// Currently-banned IPs at snapshot time, from
-    /// `PeerManager::currently_banned_ips`. Drives §10.6
+    /// `PeerManager::currently_banned_ips`. Drives
     /// `/peers/blacklisted`.
     pub banned_ips: Arc<Vec<std::net::IpAddr>>,
     /// Mode 2 bootstrap progress, `Some` only while the dashboard
@@ -489,12 +489,12 @@ pub struct SnapshotParts<'a> {
     /// Mode-2 serve-cache manifests `(height, hex id)`; see
     /// `NodeSnapshot::snapshot_manifests`.
     pub snapshot_manifests: Vec<(i32, String)>,
-    /// OBS-1: the most recent block-apply REJECTION projected to the API DTO
+    /// The most recent block-apply REJECTION projected to the API DTO
     /// (age computed at publish time from the executor's `Instant`), or `None`.
     /// Drives `ApiStatus.last_block_apply_error` and the
     /// `HealthStatus::Rejecting` overlay in `build_snapshot`.
     pub last_block_apply_error: Option<ergo_api::types::ApiBlockApplyError>,
-    /// OBS-1: monotonic block-apply rejection count, for the
+    /// Monotonic block-apply rejection count, for the
     /// `ergo_node_block_apply_errors_total` Prometheus counter.
     pub block_apply_errors_total: u64,
     /// Terminal deep-fork wedge projected to the API DTO (age computed at
@@ -506,13 +506,13 @@ pub struct SnapshotParts<'a> {
     /// `None` when the mode is off. Drives `ApiStatus.shadow` and the
     /// `ergo_node_shadow_*` metrics.
     pub shadow: Option<ergo_api::types::ApiShadowStatus>,
-    /// P2: monotonic count of unconfirmed-tx ids requested from peers, for
+    /// Monotonic count of unconfirmed-tx ids requested from peers, for
     /// the `ergo_node_mempool_tx_requested_total` Prometheus counter.
     pub mempool_tx_requested_total: u64,
-    /// P2: monotonic count of peer-sourced txs admitted to the mempool, for
+    /// Monotonic count of peer-sourced txs admitted to the mempool, for
     /// the `ergo_node_mempool_peer_tx_admitted_total` Prometheus counter.
     pub mempool_peer_tx_admitted_total: u64,
-    /// P2: monotonic count of peer-sourced txs rejected by admission, for
+    /// Monotonic count of peer-sourced txs rejected by admission, for
     /// the `ergo_node_mempool_peer_tx_rejected_total` Prometheus counter.
     pub mempool_peer_tx_rejected_total: u64,
 }
@@ -550,7 +550,7 @@ fn build_snapshot(p: SnapshotParts<'_>, info: ApiInfo, last_progress_age_ms: u64
         difficulty: decode_compact_bits(best_full_block_n_bits).to_string(),
     };
 
-    // OBS-1: an outstanding block-apply rejection overrides the sync-derived
+    // An outstanding block-apply rejection overrides the sync-derived
     // health below (a node refusing blocks its peers accept is not healthy,
     // however it looks on the sync axis).
     let rejecting = p.last_block_apply_error.is_some();
@@ -887,7 +887,7 @@ mod tests {
         assert_eq!(api.declared_address, None);
     }
 
-    /// P3 (accuracy): the declared port is a peer-advertised wire `u32`.
+    /// The declared port is a peer-advertised wire `u32`.
     /// An in-range port renders `ip:port`; an out-of-range port (> 65535,
     /// malformed/hostile) yields `None` rather than a silently-truncated
     /// `:0`. Fail-first against the old `as u16` cast, where `65536` wrapped
@@ -1191,7 +1191,7 @@ mod tests {
 
     /// `pool_inputs` must travel through `SnapshotParts → build_snapshot
     /// → NodeSnapshot` alongside `pool_outputs`. Same threading guard as
-    /// `active_params_round_trips_through_snapshot`: if a P5 reader can't
+    /// `active_params_round_trips_through_snapshot`: if a reader can't
     /// see a value the publisher set, the overlay would silently behave
     /// like `NoopMempoolView` even when the pool has entries.
     #[test]
@@ -1213,7 +1213,7 @@ mod tests {
         assert_eq!(snap.pool_inputs.get(&spent_box), Some(&spending_tx));
     }
 
-    /// OBS-1: a block-apply rejection threads from `SnapshotParts` through
+    /// A block-apply rejection threads from `SnapshotParts` through
     /// `build_snapshot` onto `status.last_block_apply_error` + the counter, AND
     /// overrides health to `Rejecting` (a node refusing blocks is unhealthy
     /// however the sync axis looks). Absent ⇒ `None` and the normal
@@ -1298,7 +1298,7 @@ mod tests {
         assert_ne!(snap2.health.status, HealthStatus::Wedged);
     }
 
-    /// P2: the three mempool-tx-gossip observability counters travel from
+    /// The three mempool-tx-gossip observability counters travel from
     /// `SnapshotParts` through `build_snapshot` onto `ApiStatus` (the
     /// `/metrics` source). Same threading guard as
     /// `build_snapshot_surfaces_block_apply_rejection_and_health`: a field

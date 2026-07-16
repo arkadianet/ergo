@@ -243,21 +243,20 @@ pub(crate) struct NodeState {
     /// Manifest download (part 2g) reads this to learn when a
     /// quorum has been reached.
     pub(super) snapshot_bootstrap: ergo_sync::snapshot_bootstrap::SnapshotBootstrap,
-    /// NiPoPoW bootstrap state machine (Part 2 sub-phase 14.6).
+    /// NiPoPoW bootstrap state machine.
     /// `None` for nodes that didn't enable `[node] nipopow_bootstrap`
     /// or have already exited the popow window (state == Applied
     /// AND store best_header_height > 0). Stays `Some` for the
     /// active bootstrap window so per-tick polling can drive
     /// request fan-out, proof apply, and the bounded forward catchup
     /// kickoff. Read by `drive_popow_bootstrap` (sync_tick.rs) and
-    /// `handle_inbound_popow_proof` (messaging.rs) — both follow-up
-    /// commits.
+    /// `handle_inbound_popow_proof` (messaging.rs).
     #[allow(dead_code)]
     pub(super) popow_bootstrap: Option<ergo_sync::popow_bootstrap::PopowBootstrap>,
     /// Mirror of `config.utxo_bootstrap`. The outbound discovery
-    /// fan-out (sub-phase 2f-3) checks this flag at each sync_tick
-    /// to decide whether to send `GetSnapshotsInfo` (code 76). Will
-    /// always be `false` until sub-phase 2j lifts the activation
+    /// fan-out checks this flag at each sync_tick to decide whether
+    /// to send `GetSnapshotsInfo` (code 76). Will always be `false`
+    /// until `validate_runtime_mode_support` lifts the activation
     /// gate, at which point a Mode 2-configured operator setting
     /// `utxo_bootstrap = true` flips this to `true` at boot.
     pub(super) utxo_bootstrap_enabled: bool,

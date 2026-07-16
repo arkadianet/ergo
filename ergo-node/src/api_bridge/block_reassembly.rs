@@ -8,9 +8,7 @@
 //! header's `transactions_root` so a builder/verifier drift can never
 //! ship a malformed proof.
 //!
-//! Extracted from `api_bridge.rs` per the public-readiness audit (item
-//! 5: assemble_full_block + Merkle proof construction at lines
-//! 619-1289). All callers are inside the `NodeChainQuery` impl on
+//! All callers are inside the `NodeChainQuery` impl on
 //! `ScalaCompatBridge`; this module is a `pub(super)` helper surface.
 
 use tracing::{error, warn};

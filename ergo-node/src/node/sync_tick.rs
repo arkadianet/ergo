@@ -40,10 +40,9 @@ use super::{cleanup_disconnected_peer, flush_actions, send_to_peer, NodeState};
 pub(super) fn handle_sync_tick(state: &mut NodeState) {
     let now = Instant::now();
 
-    // 0-pre. NiPoPoW bootstrap (Part 2 §14.6). Runs BEFORE Mode 2
-    // discovery so the proof apply can complete before snapshot
-    // manifest verification needs a canonical header at
-    // snapshot_height (Phase 0 §6.1 corrected ordering). No-op
+    // 0-pre. NiPoPoW bootstrap. Runs BEFORE Mode 2 discovery so the
+    // proof apply can complete before snapshot manifest verification
+    // needs a canonical header at snapshot_height. No-op
     // unless `[node] nipopow_bootstrap = true` AND history is
     // empty AND the reducer hasn't reached terminal state.
     drive_popow_bootstrap(state, now);
@@ -159,8 +158,8 @@ pub(super) fn handle_sync_tick(state: &mut NodeState) {
             //   - pipeline-path forward apply flushes the queued
             //     chain batch (with fsync in IBD) BEFORE the wallet
             //     write_txn — chain durable, then wallet. Still
-            //     two-commit, not atomic; pipeline-worker
-            //     integration is the M5 final slice in audit-todo.
+            //     two-commit, not atomic; closing this seam requires
+            //     pipeline-worker integration that does not yet exist.
             //   - rollback path (executor →
             //     rollback_full_chain_to_best_header → store
             //     rollback_to) rolls back chain + wallet inside a
@@ -340,8 +339,8 @@ fn request_snapshots_info_fan_out(state: &mut NodeState) {
     }
 }
 
-/// NiPoPoW bootstrap (Part 2 sub-phase 14.6) consume side. Three
-/// actions per tick, gated by `popow_bootstrap.is_active`:
+/// NiPoPoW bootstrap consume side. Three actions per tick, gated
+/// by `popow_bootstrap.is_active`:
 ///
 /// 1. Request fan-out: send `GetNipopowProof(m=6, k=10)` to each
 ///    active peer we haven't already asked. Scala peers respond
@@ -405,7 +404,7 @@ fn drive_popow_bootstrap(state: &mut NodeState, now: Instant) {
                         tail_len = proof.suffix_tail.len(),
                         "NiPoPoW: applied verified proof to history",
                     );
-                    // Mode 3 Phase 4 — mirror the proof-time prune
+                    // Mode 3 — mirror the proof-time prune
                     // sentinel into SyncState so the coordinator's
                     // request-side gate denies sub-sentinel sections
                     // from the first post-proof tick. Symmetric with
@@ -730,14 +729,14 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
     }
 
     // Re-fetch the canonical header at snapshot_height. A reorg
-    // since 2g's trust check would flip this; the install would
-    // then refuse on root mismatch and the operator restarts.
+    // since the earlier trust check would flip this; the install
+    // would then refuse on root mismatch and the operator restarts.
     //
     // In PoPowSparse mode (NiPoPoW-bootstrapped node), `SparseGap`
     // at `snapshot_height` means bounded forward catchup hasn't
-    // populated the row yet — defer the install until the next tick
-    // (Phase 0 §6.1 + §10.E). `AboveTip` and `Err` are still halt
-    // conditions (operator must intervene).
+    // populated the row yet — defer the install until the next tick.
+    // `AboveTip` and `Err` are still halt conditions (operator must
+    // intervene).
     use ergo_state::chain::HeightLookup;
     let header_id = match state
         .store
@@ -812,8 +811,7 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
             // that stale window → empty request batch every tick →
             // post-install stall.
             //
-            // Mode 2 part 2T fix — found by Codex audit of our flow
-            // vs Scala's. Scala doesn't have this split-brain because
+            // Scala doesn't have this split-brain because
             // `nextModifiersToDownload` reads `bestFullBlockOpt` from
             // the history reader each call rather than a coordinator-
             // side cached copy
@@ -823,7 +821,7 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
                 .coordinator
                 .sync_state_mut()
                 .set_best_full_block(snapshot_height_u32);
-            // Mode 3 Phase 4 — mirror the install-time prune
+            // Mode 3 — mirror the install-time prune
             // sentinel into SyncState so the coordinator's
             // request-side gate denies sub-sentinel sections from
             // the first post-install tick rather than waiting for

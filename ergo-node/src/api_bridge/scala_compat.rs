@@ -190,8 +190,8 @@ impl NodeChainQuery for ScalaCompatBridge {
     }
 
     fn header_ids_at_height(&self, height: u32) -> Vec<String> {
-        // Reads HEADERS_BY_HEIGHT (the multi-id index added in 684e980),
-        // which mirrors Scala's `heightIdsKey` row from
+        // Reads HEADERS_BY_HEIGHT (the multi-id index), which mirrors
+        // Scala's `heightIdsKey` row from
         // `HeadersProcessor.scala:264-276`. First entry is always the
         // best-header-chain id at `height`; subsequent entries are
         // orphans (validated headers at this height that aren't on
@@ -1001,7 +1001,7 @@ mod bin_for_wait_ms_tests {
 }
 
 // =====================================================================
-// §10.4 fee-stats helpers
+// Fee-stats helpers
 // =====================================================================
 //
 // `poolHistogram` / `getFee` / `waitTime` all depend on a per-tx

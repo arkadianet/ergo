@@ -117,13 +117,13 @@ pub struct NodeConfig {
     /// (Mode 2). Distinct from the runtime "snapshot applied" flag
     /// — this is what was asked for; the wire `-2` sentinel
     /// (`UTXOSetBootstrapped`) is set only after the actual
-    /// snapshot apply completes (Mode 2 part 2). Default `false`.
+    /// snapshot apply completes. Default `false`.
     pub utxo_bootstrap: bool,
     /// Operator intent: when `true`, download a PoPoW proof at
     /// startup and bootstrap headers from it. Distinct from the
     /// runtime "proof applied" flag — the wire `nipopow = Some(1)`
-    /// is set only after the proof has been validated and applied
-    /// (nipopow part 2). Default `false`.
+    /// is set only after the proof has been validated and applied.
+    /// Default `false`.
     pub nipopow_bootstrap: bool,
     /// Number of valid NiPoPoW proofs required for quorum before
     /// the apply path runs. Scala parity:

@@ -15,7 +15,7 @@ use ergo_api::wallet::WalletAdminError;
 use super::WriterContext;
 
 /// Whether the wallet is locked (no in-memory master key). Native build/select
-/// require an unlocked wallet (design §2) and map `Locked` → `409 wallet_locked`.
+/// require an unlocked wallet and map `Locked` → `409 wallet_locked`.
 fn is_locked(ctx: &WriterContext<'_>) -> bool {
     ctx.storage.read().unlocked().is_none()
 }
@@ -63,7 +63,7 @@ pub(crate) async fn native_sign_transaction(
     req: ergo_api::wallet::native::dto::SignTxRequest,
     reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::SignTxResponse, WalletAdminError>>,
 ) {
-    // No `Locked` precondition (design §5/P0-3): signing succeeds while locked when
+    // No `Locked` precondition: signing succeeds while locked when
     // external secrets cover every input; otherwise the prover's missing-secret
     // surfaces as `missing_secret`, never `wallet_locked`.
     let result = super::sign_transaction_native_impl(
@@ -83,7 +83,7 @@ pub(crate) async fn native_send_transaction(
     reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::SendTxResponse, WalletAdminError>>,
 ) {
     // `intent` builds + signs with the wallet's own secrets → needs unlock;
-    // `signed` submits caller-supplied bytes → no unlock (design §2).
+    // `signed` submits caller-supplied bytes → no unlock needed.
     if matches!(
         req,
         ergo_api::wallet::native::dto::SendTxRequest::Intent { .. }
