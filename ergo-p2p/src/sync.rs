@@ -37,8 +37,8 @@ pub enum PeerChainStatus {
 /// we'll keep pending download. Keeps the pipeline fed without unbounded
 /// prefetch. TOML-configurable via `[sync] download_window`.
 ///
-/// Raised from 192 (Scala parity default) to 384 (Sync-S3) to better
-/// saturate a single peer when multi-peer discovery is not yet active.
+/// Raised from 192 (Scala parity default) to 384 to better saturate a
+/// single peer when multi-peer discovery is not yet active.
 pub const DOWNLOAD_WINDOW: usize = 384;
 
 /// Safety clamp applied inside [`SyncState::new_with_window`] to prevent
@@ -96,10 +96,12 @@ pub struct SyncState {
     /// Mode 3 prune sentinel (`STATE_META[minimal_full_block_height]`),
     /// mirrored from the store. `0` = no pruning active (archive,
     /// Mode 6, or fresh store before first eviction). The coordinator
-    /// reads this to skip Phase 3a section-request emission for
-    /// headers whose height is below the sentinel — Scala parity
-    /// for the request-side third of "three drop points" (plan §240).
-    /// Updated by the boot/sync integration after store apply / open.
+    /// reads this to skip section-request emission for headers whose
+    /// height is below the sentinel — the request-side counterpart to
+    /// the store's own pruning of sections below this height (Scala
+    /// parity: we'd otherwise request sections we'd immediately evict
+    /// on apply). Updated by the boot/sync integration after store
+    /// apply / open.
     prune_sentinel: u32,
 }
 
@@ -149,7 +151,7 @@ impl SyncState {
             best_known_header_height: best_full_block_height,
             best_full_block_height,
             last_sync_sent: HashMap::new(),
-            // Lever 1's per-peer SyncInfo cadence. 100ms dispatches at
+            // Per-peer SyncInfo cadence. 100ms dispatches at
             // Scala's PerPeerSyncLockTime floor so the peer-side
             // `continuationIdsV1` index lookup is invoked up to 10× per
             // second per peer. Each invocation produces a 400-ID Inv at
@@ -165,9 +167,9 @@ impl SyncState {
     }
 
     /// Mirror the Mode 3 prune sentinel from the store. The
-    /// coordinator's request-side gate (Phase 3a, plan §240) reads
-    /// this to skip section requests for headers below the
-    /// sentinel — we'd just evict those sections on apply.
+    /// coordinator's request-side gate reads this to skip section
+    /// requests for headers below the sentinel — we'd just evict
+    /// those sections on apply.
     /// Integration layer (`ergo-node::boot.rs` and sync_tick after
     /// each store apply) calls this; archive / Mode 6 callers
     /// leave it at the default `0` so the gate is inert.

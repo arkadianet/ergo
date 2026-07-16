@@ -950,9 +950,9 @@ fn eligible_download_peers_prefers_non_degraded() {
 
 #[test]
 fn eligible_download_peers_falls_back_to_degraded_when_no_alternative() {
-    // Checklist contract: "bucketed by last-seen, falls back to
-    // degraded". When EVERY connected peer is degraded, return them
-    // all rather than stalling sync.
+    // Bucketed by last-seen, falling back to degraded peers. When
+    // EVERY connected peer is degraded, return them all rather than
+    // stalling sync.
     let mut mgr = PeerManager::new(1);
     let now = Instant::now();
     let a1 = addr(10, 0, 0, 1, 9030);

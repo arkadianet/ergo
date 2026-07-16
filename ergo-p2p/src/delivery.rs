@@ -644,8 +644,7 @@ impl DeliveryTracker {
 
     /// Whether the aggregate in-flight count has dropped below
     /// `watermark`. Used by the executor to trigger an early refill of
-    /// section requests without waiting for the next sync tick
-    /// (Sync-S2).
+    /// section requests without waiting for the next sync tick.
     pub fn below_drain_watermark(&self, watermark: usize) -> bool {
         self.total_inflight() < watermark
     }

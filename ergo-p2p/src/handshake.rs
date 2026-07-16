@@ -584,11 +584,11 @@ mod tests {
         }
     }
 
-    /// Roundtrip the `Mode` feature in the configurations the future
-    /// modes will emit on the wire: Digest backend (state_type=1),
-    /// headers-only (verify_tx=false). Pins the VLQ codec so part-2
-    /// commits that lift the activation gates land on a proven
-    /// serializer.
+    /// Roundtrip the `Mode` feature in configurations this node does not
+    /// yet advertise but the wire format already supports: Digest backend
+    /// (state_type=1), headers-only (verify_tx=false). Pins the VLQ codec
+    /// so those modes land on a proven serializer once this node starts
+    /// advertising them.
     #[test]
     fn mode_feature_state_type_and_verify_tx_roundtrip() {
         let combos = &[
@@ -643,8 +643,8 @@ mod tests {
     /// `all_features_roundtrip`), -2 (UTXO-bootstrap completed
     /// sentinel), 0 (extreme prune — keep zero suffix), and a
     /// positive N (typical Mode 3 retention). Failure here means the
-    /// VLQ codec is dropping or corrupting i32 mode values that the
-    /// other modes will start emitting once they ship.
+    /// VLQ codec is dropping or corrupting i32 mode values that other,
+    /// not-yet-advertised modes will need once this node emits them.
     #[test]
     fn mode_feature_blocks_to_keep_roundtrip_boundary_values() {
         for &v in &[-1i32, -2, 0, 1024, i32::MAX] {
