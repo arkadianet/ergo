@@ -1,9 +1,8 @@
 //! Block candidate orchestrator.
 //!
-//! Implements v12 §5 of the design plan: composes pre-header freeze,
-//! transaction selection, coinbase + reemission dispatch,
-//! `candidate_dry_run`, parent-id guard, header assembly, and work-message
-//! construction.
+//! Composes pre-header freeze, transaction selection, coinbase + reemission
+//! dispatch, `candidate_dry_run`, parent-id guard, header assembly, and
+//! work-message construction.
 //!
 //! Scope / invariants:
 //! - The block carries the coinbase (emission) tx, then mempool user
@@ -143,7 +142,7 @@ pub struct Candidate {
 /// has not reached a state from which mining is possible (tip below
 /// height 10, or a tip-flip caught by the post-dry-run guard).
 ///
-/// **Synced-tip contract** (v12 §0 row 2): the caller is expected to
+/// **Synced-tip contract:** the caller is expected to
 /// have gated on `synced(tip)` already. Mining at an unsynced tip
 /// produces script-divergent candidates and is forbidden.
 ///
@@ -175,7 +174,7 @@ pub fn generate_candidate<V: CandidateStateView>(
     eligible_rent_boxes: &[ErgoBox],
     voting_targets: &BTreeMap<u8, i64>,
     voting_settings: &VotingSettings,
-    // Component B side-output: ids of pooled txs whose consensus re-validation
+    // Side-output: ids of pooled txs whose consensus re-validation
     // failed during selection (suspected tip-invalid). Written only on the Full
     // path that runs mempool selection; left untouched for Minimal builds. The
     // engine forwards these to the node, which re-validates each against the live
@@ -510,7 +509,7 @@ pub fn generate_candidate<V: CandidateStateView>(
             reemission_rules,
         )?;
 
-        // Component B: forward consensus-revalidation-failure suspects to the
+        // Forward consensus-revalidation-failure suspects to the
         // caller. Copied (Digest32 is Copy) so `selected` stays intact for the
         // fee-trim below.
         suspects_out.extend(selected.suspects.iter().copied());

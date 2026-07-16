@@ -43,9 +43,9 @@ use crate::work_message::{MinerSolution, WorkMessage};
 /// the Autolykos hit for at most this many candidates, so it can't be turned
 /// into a large per-submit work amplifier). It covers the last few refresh
 /// cycles — enough for the brief window between a template being served and its
-/// solution arriving, given that longpoll (§9) keeps miners on a fresh template
+/// solution arriving, given that longpoll keeps miners on a fresh template
 /// rather than grinding a stale one. A solution for a template evicted beyond
-/// this window is not rejected — the miner re-polls (design §336), and the
+/// this window is not rejected — the miner re-polls, and the
 /// submit-time executor recheck remains authoritative. Sized for two publishes
 /// per tip (minimal + enriched two-phase publish): 16 slots retain ≈8
 /// tip-changes of in-flight solution history, matching the pre-two-phase
@@ -66,7 +66,7 @@ pub enum RewardKeySource {
 
 /// Mutable cache state — wrapped in an `RwLock` inside `MiningHandle`.
 ///
-/// Bounded-ring design (design §334): `templates` holds the last
+/// Bounded-ring design: `templates` holds the last
 /// [`MAX_RETAINED_TEMPLATES`] published templates, newest at the back. Serving
 /// returns the newest template whose parent matches the tip; solution
 /// verification scans the whole ring (newest-first) so a solution against any
@@ -138,7 +138,7 @@ pub struct MiningHandle {
     /// API read state (so `GET /api/v1/votes` reflects live edits), and the
     /// admin write path — so a runtime change is seen by all three at once.
     voting_targets: Arc<RwLock<std::collections::BTreeMap<u8, i64>>>,
-    /// Component B: ids of pooled txs whose consensus re-validation failed
+    /// Ids of pooled txs whose consensus re-validation failed
     /// during the most recent published Full build (suspected tip-invalid). The
     /// off-loop build worker records them here ([`MiningHandle::record_suspects`])
     /// and the action loop drains them ([`MiningHandle::take_suspects`]) to
@@ -197,7 +197,7 @@ impl MiningHandle {
         }
     }
 
-    /// Record the suspect ids from a just-published Full build (Component B).
+    /// Record the suspect ids from a just-published Full build.
     /// Latest-wins: replaces any undrained set, since the newest build's
     /// suspects supersede an older build's against a now-stale tip. A poisoned
     /// lock is ignored (best-effort hint; never panic the build worker).
@@ -497,7 +497,7 @@ impl MiningHandle {
     /// Run the API-side solution pre-check against every cached template,
     /// scanning the ring newest-first. A solution for any retained template
     /// verifies, so a solution submitted against a recently superseded template
-    /// during a refresh burst or reorg still resolves (design §334).
+    /// during a refresh burst or reorg still resolves.
     ///
     /// Returns `Ok(SolutionOutcome::Accepted(_))` to indicate the caller
     /// should ship the `SubmittedBlock` to the executor;
