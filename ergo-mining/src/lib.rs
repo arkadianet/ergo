@@ -19,6 +19,7 @@ pub mod emission_rules;
 pub mod engine;
 pub mod error;
 pub mod extension_builder;
+pub mod genesis;
 pub mod handle;
 pub mod reemission;
 pub mod reward_script;
