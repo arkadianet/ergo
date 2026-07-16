@@ -711,6 +711,20 @@ impl ChainSpec {
     }
 }
 
+/// Serialized `ErgoTree` of the emission proposition
+/// (`ErgoTreePredef.emissionBoxProp`) — the genesis emission box's
+/// script. Unlike [`ChainSpec::emission_script_trees`] this is NOT
+/// network-gated: the emission tree is a NETWORK-IDENTICAL protocol
+/// constant — mainnet, testnet, and devnet genesis emission boxes all
+/// carry these exact bytes (verified against each network's genesis
+/// box[0]). Exposed so consumers that must IDENTIFY the emission box
+/// within a genesis box set — e.g. devnet block-1 mining, which has no
+/// parent block to derive it from — share this one source instead of
+/// duplicating a consensus-critical constant.
+pub fn emission_tree_bytes() -> Vec<u8> {
+    hex::decode(MAINNET_EMISSION_TREE_HEX).expect("const emission tree hex")
+}
+
 /// Serialized `ErgoTree` bytes of the three emission-related contracts
 /// (see [`ChainSpec::emission_script_trees`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -846,6 +860,28 @@ mod tests {
         let pushed_nft = format!("0e20{nft}");
         assert!(hex::encode(&trees.reemission).contains(&pushed_nft));
         assert!(hex::encode(&trees.pay_to_reemission).contains(&pushed_nft));
+    }
+
+    #[test]
+    fn emission_tree_bytes_is_network_identical_genesis_box0_tree() {
+        let em = emission_tree_bytes();
+        assert!(!em.is_empty(), "emission tree is non-empty");
+        // First-principles provenance: the emission tree must be
+        // genesis box[0].ergoTree on BOTH networks (the network-identical
+        // claim), anchored to the FIRST ergoTree in each genesis JSON —
+        // not a loose hex-substring scan.
+        for gp in [GenesisParams::mainnet(), GenesisParams::testnet()] {
+            let boxes_json = gp.boxes_json.unwrap();
+            let anchored = format!("\"ergoTree\": \"{}\"", hex::encode(&em));
+            let first_tree_pos = boxes_json
+                .find("\"ergoTree\"")
+                .expect("genesis json has ergoTree keys");
+            assert_eq!(
+                boxes_json.find(&anchored),
+                Some(first_tree_pos),
+                "emission tree == genesis box[0].ergoTree (anchored, first box)"
+            );
+        }
     }
 
     #[test]
