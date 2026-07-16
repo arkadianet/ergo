@@ -847,8 +847,8 @@ fn run_eval_with_constants(expr: &Expr, constants: &[(SigmaType, SigmaValue)]) -
 
 // -- Audit: every `Value` variant must have a `PartialEq` self-self arm --
 
-/// Pin the cleanup landed by `10d5b9c` (UnsignedBigInt) plus the rest
-/// of the variants. Any future `Value` variant that lands without a
+/// Covers every `Value` variant, including `UnsignedBigInt`. Any future
+/// `Value` variant that lands without a
 /// matching arm in `impl PartialEq for Value` falls through to the
 /// catch-all `_ => false`, which silently breaks every script-level
 /// `==` on that carrier — `TrivialProp(false)` reductions whose
@@ -3242,7 +3242,7 @@ fn methodcall_global_deserializeto_v6_header_roundtrip() {
 /// `isV3OrLaterErgoTreeVersion`), NOT `activatedScriptVersion`. A legacy
 /// (version < 3) tree calling it must error even when activated >= 3 —
 /// otherwise we'd return a Header where the reference throws (accept-invalid
-/// fork hazard, codex P1 / GHSA-hfj8-hjph-7r78).
+/// fork hazard, GHSA-hfj8-hjph-7r78).
 #[test]
 fn deserializeto_sheader_gated_on_ergo_tree_version() {
     let h = ergo_ser::header::Header {
@@ -5827,8 +5827,8 @@ fn last_block_utxo_root_hash_mainnet_defaults() {
     }
 }
 
-/// Reviewer finding: 0xA6 must return the AvlTreeData unchanged, not
-/// synthesize metadata from the header digest. Non-default flags +
+/// 0xA6 must return the AvlTreeData unchanged, not synthesize metadata
+/// from the header digest. Non-default flags +
 /// non-32 keyLength + non-None value_length_opt catch any evaluator
 /// that rebuilds metadata from scratch.
 #[test]
@@ -11470,7 +11470,7 @@ fn serialize_avltree_and_header_eval_total_and_bytes() {
 // be rejected by the const/value-decoder SHeader gate
 // (sigma_to_value_versioned) BEFORE reaching the (106,3) serialize gate, so
 // these gate tests must use a runtime source to prove the serialize gate
-// itself (per CodeRabbit on PR #38).
+// itself.
 fn ctx_headers_index(idx: i32) -> Expr {
     op(
         0xB2,

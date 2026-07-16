@@ -100,7 +100,7 @@ fn check_valdef_pair_type(
     //     (the poisoned 0x86-register Coll);
     //   - inferred `STuple(n != 2)` rejects regardless of the value,
     //     matching the `sys.error` (a 0x86 register of arity 3+ read
-    //     at its tuple type lands here — CodeRabbit PR #161 finding).
+    //     at its tuple type lands here).
     if matches!(val, Value::Tuple(items) if items.len() == 2) {
         return Ok(());
     }
