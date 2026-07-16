@@ -292,7 +292,7 @@ fn topological_demote_order(
 /// outcome plus the per-action `mempool_tx_evicted` / `_replaced`
 /// fan-out.
 ///
-/// Level selection per the Phase 2A guidance:
+/// Level selection:
 /// - `TxSource::Api`: admit/reject at `info!` (operator action).
 /// - All other sources (`Peer`, `DemotedFromBlock`): `debug!` to keep
 ///   per-peer traffic out of the default operator stream.
@@ -862,7 +862,7 @@ impl Mempool {
     /// proof to drop an already-accepted tx — so such txs are left in place
     /// (rotation clock advanced) rather than dropped to the unresolved-bytes
     /// cache (a suppression filter, not a re-admit queue). Eviction goes through
-    /// the family-weight debiting wrapper (PR #139) and routes the FAILED ROOT
+    /// the family-weight debiting wrapper and routes the FAILED ROOT
     /// id through the shared `admission::record_failed_tx` classifier (here
     /// always the blacklist arm, since only hard-invalid failures reach it), so
     /// it stops being relayed. Cascade descendants are dependency-evicted only
@@ -1035,7 +1035,8 @@ impl Mempool {
     ///   input-conflict cascade; an `Other(_)` is an internal/contract error,
     ///   not a consensus verdict.
     /// * hard-invalid `Err` (script/monetary/structural/cost) → evict it + its
-    ///   now-orphaned descendants (debiting ancestors per #139), prune the pass
+    ///   now-orphaned descendants (debiting the surviving ancestor's family
+    ///   weight), prune the pass
     ///   overlay so a later tx can't resolve a gone output, and route ONLY the
     ///   failed root through the shared `record_failed_tx` classifier (here
     ///   always the blacklist arm). Cascade descendants are dependency-evicted,
@@ -1702,7 +1703,7 @@ mod recheck_tests {
     #[test]
     fn recheck_eviction_debits_ancestor_family_weight() {
         // P (weight carries a child boost) <- C. Evicting C must de-propagate
-        // its weight from the surviving ancestor P (#139 debiting removal).
+        // its weight from the surviving ancestor P (family-weight debiting).
         let mut mp = mempool_with(MempoolConfig::default());
         seed(&mut mp, 1, 0x10, 0x11, 900, vec![]); // P (boosted)
         seed(&mut mp, 2, 0x11, 0x22, 100, vec![d(1)]); // C spends P's output 0x11
@@ -2571,7 +2572,7 @@ mod recheck_tests {
         }
     }
 
-    // ----- revalidation-queue drain (§7) -----
+    // ----- revalidation-queue drain -----
 
     #[test]
     fn topological_demote_order_emits_parents_before_children() {
@@ -2677,7 +2678,7 @@ mod recheck_tests {
 
     #[test]
     fn demote_all_then_tick_revalidation_restores_pool() {
-        // The headline §7 fix: an epoch-style demote_all empties the active pool
+        // An epoch-style demote_all empties the active pool
         // into the revalidation queue, and a subsequent tick_revalidation drains
         // it — re-admitting the demoted txs — restoring the pool. Without a
         // drainer the pool would stay empty.
