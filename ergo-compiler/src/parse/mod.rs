@@ -1278,7 +1278,9 @@ mod expr_tests {
         assert!(crate::parse("a + /*c*/\nb", 3).is_ok());
         // (e) type-level infix across newline+comment → REJECT (shared one_nl_max)
         //     oracle: ParserOracle sigma-state 6.0.2 → REJECT 2:6
-        assert!(crate::parse("Int +\n/*c*/Long", 3).is_err());
+        //     Goes through `types::infix_type`, not the expression grammar: `Int`/
+        //     `Long` here are types, and `+` is the type-level infix operator.
+        assert!(crate::parse_type("Int +\n/*c*/Long", 3).is_err());
     }
 
     // ----- blocks and lambdas — Scala-cited edge cases -----
