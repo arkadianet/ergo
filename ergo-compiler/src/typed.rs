@@ -21,7 +21,7 @@
 //!   per N4); `Vec` not `HashMap` for determinism.
 //! - Lambda `args: Vec<(String, SType)>` — (name, type) pairs rendered as `name:#Type`.
 //! - `STypeParam { ident: String }` — simplified (only ident needed for printing;
-//!   upper/lower bounds always NoType for well-formed M2 lambdas).
+//!   upper/lower bounds always NoType for well-formed lambdas).
 //! - `ConstPayload` covers all literal types in the oracle demo env and common
 //!   script constants.
 
@@ -30,7 +30,7 @@ use crate::stype::SType;
 /// A single type parameter ident for Lambda.tpe_params.
 ///
 /// Scala: `case class STypeParam(ident: STypeVar, upperBound: SType, lowerBound: SType)`
-/// (SType.scala:78-89). For M2, tpeParams are always empty on well-formed Lambdas
+/// (SType.scala:78-89). `tpeParams` is always empty on well-formed Lambdas
 /// (binder enforces `require(!(tpeParams.nonEmpty && body.nonEmpty))`); the field
 /// exists for structural completeness.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +50,7 @@ pub struct MethodRef {
     pub name: String,
 }
 
-/// Constant payload for M2 scope — all literal types reachable in the oracle demo
+/// Constant payload — all literal types reachable in the oracle demo
 /// environment and common script expressions.
 ///
 /// Rendering (typed_print.rs `render_payload`):
@@ -61,14 +61,14 @@ pub struct MethodRef {
 ///   Long(n)                 → `@n`
 ///   BigInt(s)               → `(CBigInt @s)` where s is the decimal string
 ///   UnsignedBigInt(s)       → `(CUnsignedBigInt @s)` where s is the canonical
-///                             decimal string (D-T3, M3 Task-6)
+///                             decimal string (D-T3)
 ///   Unit                    → (no value field — ConstantNode:Unit renders with no value)
 ///   ByteColl(v)             → `<@v1 @v2 …>` decimal signed bytes, space-sep
 ///   LongColl(v)             → `<@v1 @v2 …>` decimal longs, space-sep
 ///   GroupElement(bytes)     → `(CGroupElement (Ecp @(x,y,1)))` — bytes is the 33-byte
 ///                             SEC1-compressed point; the printer decompresses to the
-///                             affine (x_hex,y_hex) pair (M3, D-T6).
-///   SigmaProp(inner_str)    → opaque rendering (M3 scope for full parity)
+///                             affine (x_hex,y_hex) pair (D-T6).
+///   SigmaProp(inner_str)    → opaque rendering
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstPayload {
     /// `@true` or `@false` — values.scala TrueLeaf/FalseLeaf, BooleanConstant.
@@ -86,7 +86,7 @@ pub enum ConstPayload {
     /// `(CUnsignedBigInt @n)` — UnsignedBigIntConstant (values.scala:503-515);
     /// n is the CANONICAL decimal string (leading zeros stripped, e.g.
     /// `unsignedBigInt("0005")` stores `"5"` — oracle-verified,
-    /// golden_seed.txt §24, D-T3, M3 Task-6). Parsed with `num_bigint::BigUint`
+    /// golden_seed.txt §24, D-T3). Parsed with `num_bigint::BigUint`
     /// (rejects malformed input) and range-capped at 256 bits
     /// (`CUnsignedBigInt.bitLength() > 256` throws `ArithmeticException`,
     /// `CUnsignedBigInt.scala:20-22`) — UNCONDITIONALLY, no `tree_version` gate
@@ -106,7 +106,7 @@ pub enum ConstPayload {
     LongColl(Vec<i64>),
     /// `(CGroupElement (Ecp @(x,y,1)))` — GroupElementConstant (values.scala:519).
     /// Carries the 33-byte SEC1-compressed secp256k1 point; bytes are the
-    /// source of truth (M3, D-T6). The printer decompresses on demand via
+    /// source of truth (D-T6). The printer decompresses on demand via
     /// `ergo_crypto::group_element::decompress_to_affine_hex` to reproduce
     /// the Scala `Ecp.toString` affine `(x_hex,y_hex,1)` form.
     GroupElement([u8; 33]),
@@ -118,13 +118,13 @@ pub enum ConstPayload {
     /// Carries the 33-byte SEC1-compressed secp256k1 public key returned by
     /// `ergo_ser::address::decode_p2pk_address`.
     ///
-    /// Rendering (M3, D-T4): the printer decompresses on demand to the
+    /// Rendering (D-T4): the printer decompresses on demand to the
     /// oracle-confirmed Ecp form (golden_seed.txt §10/§23):
     /// `(CSigmaProp (ProveDlog (Ecp @(x_hex,y_hex,1))))` with UNPADDED
     /// coordinate hex. Note: NO CGroupElement wrapper inside ProveDlog
     /// (oracle-verified).
     ///
-    /// On-curve validation happens at construction (M3, D-T5):
+    /// On-curve validation happens at construction (D-T5):
     /// `binder::bind_pk` / `env::lift` reject off-curve and identity points.
     ProveDlog([u8; 33]),
 }
@@ -754,6 +754,198 @@ pub fn product_prefix(e: &TypedExpr) -> &'static str {
         TypedExpr::MethodCall { .. } => "MethodCall",
         TypedExpr::ApplyTypes { .. } => "ApplyTypes",
         TypedExpr::MethodCallLike { .. } => "MethodCallLike",
+    }
+}
+
+/// `true` iff `e` is, or transitively contains, a node whose `tpe` is `NoType` —
+/// an un-renderable node the reference s-expression printer throws on
+/// (`RuntimeException` → REJECT).  Used by the §1.24 `MethodCall` passthrough to
+/// reject a binder-prebuilt `serialize(v)` whose bound arg the reference typer
+/// likewise leaves un-typed: an unbound Ident, an un-lowered `MethodCallLike`
+/// operator, an unresolved predef `Apply`/`ApplyTypes`, a NoType-result Block, or
+/// a `.get`/property chained on a function-typed receiver.  A property/method
+/// `Select` carries the declared method `SFunc` (non-`NoType`, see
+/// `declared_select_tpe`) and stays ACCEPT.  The match is exhaustive
+/// (compiler-enforced) so a future `TypedExpr` variant cannot silently escape.
+pub(crate) fn expr_contains_untyped_node(e: &TypedExpr) -> bool {
+    use TypedExpr::*;
+    if node_tpe(e) == &SType::NoType {
+        return true;
+    }
+    let opt =
+        |o: &Option<Box<TypedExpr>>| o.as_ref().is_some_and(|b| expr_contains_untyped_node(b));
+    match e {
+        // Always `NoType` (caught above); recurse for exhaustiveness.
+        MethodCallLike { obj, args, .. } => {
+            expr_contains_untyped_node(obj) || args.iter().any(expr_contains_untyped_node)
+        }
+        // Leaves — no child expressions.
+        Height { .. }
+        | Self_ { .. }
+        | Inputs { .. }
+        | Outputs { .. }
+        | Context { .. }
+        | Global { .. }
+        | MinerPubkey { .. }
+        | LastBlockUtxoRootHash { .. }
+        | GroupGenerator { .. }
+        | Constant { .. }
+        | Ident { .. }
+        | GetVar { .. }
+        | DeserializeContext { .. } => false,
+        // Single child (`input`/`value`/`body`).
+        Upcast { input, .. }
+        | Downcast { input, .. }
+        | LogicalNot { input, .. }
+        | Negation { input, .. }
+        | BitInversion { input, .. }
+        | SelectField { input, .. }
+        | SizeOf { input, .. }
+        | SigmaPropIsProven { input, .. }
+        | SigmaPropBytes { input, .. }
+        | AND { input, .. }
+        | OR { input, .. }
+        | XorOf { input, .. }
+        | OptionGet { input, .. }
+        | OptionIsDefined { input, .. }
+        | CalcBlake2b256 { input, .. }
+        | CalcSha256 { input, .. }
+        | ByteArrayToBigInt { input, .. }
+        | ByteArrayToLong { input, .. }
+        | LongToByteArray { input, .. }
+        | DecodePoint { input, .. } => expr_contains_untyped_node(input),
+        BoolToSigmaProp { value, .. } | CreateProveDlog { value, .. } => {
+            expr_contains_untyped_node(value)
+        }
+        ZKProofBlock { body, .. } => expr_contains_untyped_node(body),
+        Select { obj, .. } => expr_contains_untyped_node(obj),
+        ApplyTypes { input, .. } => expr_contains_untyped_node(input),
+        ValNode { body, .. } => expr_contains_untyped_node(body),
+        Lambda { body, .. } => opt(body),
+        // Two children.
+        ArithOp { left, right, .. }
+        | BitOp { left, right, .. }
+        | GT { left, right, .. }
+        | GE { left, right, .. }
+        | LT { left, right, .. }
+        | LE { left, right, .. }
+        | EQ { left, right, .. }
+        | NEQ { left, right, .. }
+        | BinAnd { left, right, .. }
+        | BinOr { left, right, .. }
+        | BinXor { left, right, .. }
+        | MultiplyGroup { left, right, .. }
+        | Exponentiate { left, right, .. }
+        | Xor { left, right, .. } => {
+            expr_contains_untyped_node(left) || expr_contains_untyped_node(right)
+        }
+        MapCollection { input, mapper, .. } => {
+            expr_contains_untyped_node(input) || expr_contains_untyped_node(mapper)
+        }
+        Append { input, col2, .. } => {
+            expr_contains_untyped_node(input) || expr_contains_untyped_node(col2)
+        }
+        Filter {
+            input, condition, ..
+        }
+        | Exists {
+            input, condition, ..
+        }
+        | ForAll {
+            input, condition, ..
+        } => expr_contains_untyped_node(input) || expr_contains_untyped_node(condition),
+        OptionGetOrElse { input, default, .. } => {
+            expr_contains_untyped_node(input) || expr_contains_untyped_node(default)
+        }
+        AtLeast { bound, input, .. } => {
+            expr_contains_untyped_node(bound) || expr_contains_untyped_node(input)
+        }
+        // Three children.
+        If {
+            condition,
+            true_branch,
+            false_branch,
+            ..
+        } => {
+            expr_contains_untyped_node(condition)
+                || expr_contains_untyped_node(true_branch)
+                || expr_contains_untyped_node(false_branch)
+        }
+        Slice {
+            input, from, until, ..
+        } => {
+            expr_contains_untyped_node(input)
+                || expr_contains_untyped_node(from)
+                || expr_contains_untyped_node(until)
+        }
+        Fold {
+            input,
+            zero,
+            fold_op,
+            ..
+        } => {
+            expr_contains_untyped_node(input)
+                || expr_contains_untyped_node(zero)
+                || expr_contains_untyped_node(fold_op)
+        }
+        SubstConstants {
+            script_bytes,
+            positions,
+            new_values,
+            ..
+        } => {
+            expr_contains_untyped_node(script_bytes)
+                || expr_contains_untyped_node(positions)
+                || expr_contains_untyped_node(new_values)
+        }
+        TreeLookup {
+            tree, key, proof, ..
+        } => {
+            expr_contains_untyped_node(tree)
+                || expr_contains_untyped_node(key)
+                || expr_contains_untyped_node(proof)
+        }
+        // Four children.
+        CreateProveDHTuple { gv, hv, uv, vv, .. } => {
+            expr_contains_untyped_node(gv)
+                || expr_contains_untyped_node(hv)
+                || expr_contains_untyped_node(uv)
+                || expr_contains_untyped_node(vv)
+        }
+        CreateAvlTree {
+            operation_flags,
+            digest,
+            key_length,
+            value_length_opt,
+            ..
+        } => {
+            expr_contains_untyped_node(operation_flags)
+                || expr_contains_untyped_node(digest)
+                || expr_contains_untyped_node(key_length)
+                || expr_contains_untyped_node(value_length_opt)
+        }
+        // `input` + `index` + optional `default`.
+        ByIndex {
+            input,
+            index,
+            default,
+            ..
+        } => expr_contains_untyped_node(input) || expr_contains_untyped_node(index) || opt(default),
+        DeserializeRegister { default, .. } => opt(default),
+        // Collections of children.
+        Tuple { items, .. }
+        | ConcreteCollection { items, .. }
+        | SigmaAnd { items, .. }
+        | SigmaOr { items, .. } => items.iter().any(expr_contains_untyped_node),
+        Apply { func, args, .. } => {
+            expr_contains_untyped_node(func) || args.iter().any(expr_contains_untyped_node)
+        }
+        Block {
+            bindings, result, ..
+        } => bindings.iter().any(expr_contains_untyped_node) || expr_contains_untyped_node(result),
+        MethodCall { obj, args, .. } => {
+            expr_contains_untyped_node(obj) || args.iter().any(expr_contains_untyped_node)
+        }
     }
 }
 
