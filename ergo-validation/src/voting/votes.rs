@@ -14,11 +14,11 @@ pub trait ChainHeaderReader {
     fn header_at(&self, height: u32) -> Result<HeaderView, ChainHeaderReaderError>;
 }
 
-/// Minimal projection of a block header â€” just the fields the vote
+/// Minimal projection of a block header — just the fields the vote
 /// tally needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderView {
-    /// The block's `header.votes` field â€” three bytes, each is one
+    /// The block's `header.votes` field — three bytes, each is one
     /// signed vote id (`i8`) or 0 for "no vote".
     pub votes: [u8; 3],
 }
@@ -42,7 +42,7 @@ pub enum ChainHeaderReaderError {
 
 /// Compute the vote tally for the voting epoch ending at
 /// `epoch_start_height` (i.e. the block at `epoch_start_height` itself
-/// is the new epoch's first block â€” its `header.votes` does NOT count
+/// is the new epoch's first block — its `header.votes` does NOT count
 /// here; that's the *next* epoch's seed).
 ///
 /// Mirrors Scala behavior:
@@ -76,7 +76,7 @@ pub fn compute_epoch_votes(
 
     // Initialize epoch_votes from the prev-epoch-start's votes,
     // preserving order. Scala `votes.map(_ -> 1)` produces an Array,
-    // not a Map â€” duplicates would be retained, but
+    // not a Map — duplicates would be retained, but
     // `hdrVotesDuplicates` (ErgoStateContext.scala:341) rejects such
     // headers upstream, so we never see them here in production.
     //
@@ -87,7 +87,7 @@ pub fn compute_epoch_votes(
     // convention places genesis at h=0 with `votes=[0,0,0]`; the
     // .filter on non-zero strips them all to empty. Skipping the
     // genesis read and starting from an empty seed produces an
-    // identical final tally â€” pinned by the Scala-fixture oracle in
+    // identical final tally — pinned by the Scala-fixture oracle in
     // `ergo-validation/tests/votes_first_epoch_oracle.rs`.
     let mut epoch_votes: Vec<(i8, i32)> = if prev_epoch_start == 0 {
         Vec::new()
@@ -243,7 +243,7 @@ mod tests {
     // ===== First-epoch-boundary tests =====
 
     /// Build a chain seeded only at heights 1..1023. h=0 is
-    /// intentionally absent â€” Rust storage convention is no chain row
+    /// intentionally absent — Rust storage convention is no chain row
     /// at height 0.
     fn build_first_epoch_chain(votes_by_height: &[(u32, [u8; 3])]) -> StubChain {
         let mut headers: HashMap<u32, [u8; 3]> = HashMap::new();
@@ -264,11 +264,11 @@ mod tests {
     /// Result is always empty: with `prev_epoch_start == 0` we
     /// initialize from an empty seed (matching Scala's
     /// `votes.map(_ -> 1)` of genesis `[0,0,0]` then `.filter` strips
-    /// to empty). The walk h=1..1023 then has nothing to increment â€”
+    /// to empty). The walk h=1..1023 then has nothing to increment —
     /// every incoming vote is "unseen" by `VotingData.update` and
     /// silently dropped. This tally is consensus-irrelevant: at the
     /// first boundary `extension_validation::compute` bypasses
-    /// `compute_next_params` (line 101 â€” `prev_active.epoch_start_height
+    /// `compute_next_params` (line 101 — `prev_active.epoch_start_height
     /// == 0`), so `epoch_votes` is computed and immediately
     /// discarded. The point of the fix is that the function must
     /// not panic.

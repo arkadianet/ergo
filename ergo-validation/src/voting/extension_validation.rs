@@ -595,8 +595,8 @@ mod tests {
     /// extension carrying a negative cost-bearing param surfaces as
     /// `ExtensionValidationError::ParseParameters` wrapping
     /// `ActiveParamsError::NegativeProtocolParam`. Pins that the
-    /// fail-closed contract at the codec boundary (spec §8.1) flows
-    /// through the rule-409/414 dispatcher unchanged.
+    /// fail-closed contract at the codec boundary flows through the
+    /// rule-409/414 dispatcher unchanged.
     #[test]
     fn validate_epoch_extension_rejects_negative_cost_bearing_param() {
         use crate::active_params::ActiveParamsError;

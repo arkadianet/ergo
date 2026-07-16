@@ -584,7 +584,7 @@ mod tests {
         ));
     }
 
-    // ----- §3.5 storage rent: check_storage_rent boundary semantics -----
+    // ----- storage rent: check_storage_rent boundary semantics -----
     //
     // Pin the per-output validation contract of
     // `check_storage_rent` against Scala's `checkExpiredBox` at
@@ -944,7 +944,7 @@ mod tests {
             );
         }
 
-        // ----- §3.5 4-year-boundary eligibility edges -----
+        // ----- 4-year-boundary eligibility edges -----
 
         #[test]
         fn eligibility_just_below_storage_period_rejected() {

@@ -233,7 +233,7 @@ mod tests {
         assert!(!verify_batch_merkle_proof(&bmp, &[0xFF; 32]));
     }
 
-    // ----- construct + verify round-trip (14.10 prove-side coverage) -----
+    // ----- construct + verify round-trip (prove-side coverage) -----
 
     /// Build a batch proof via `ergo_crypto::merkle::merkle_proof_by_indices`,
     /// convert it to the wire `BatchMerkleProof` shape, and verify it

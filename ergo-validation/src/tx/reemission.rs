@@ -294,8 +294,8 @@ mod tests {
     fn obligation_core_sums_all_inputs_including_non_floor_once_triggered() {
         // A floor reward box (value <= floor) carrying the token TRIGGERS the rule;
         // once triggered, the burn sums the token across ALL inputs — including the
-        // non-floor box's tokens (this is the codex P0-1 mixed-input case, mirroring
-        // the validator's all-inputs `to_burn`). 12 + 5 = 17, two token-carrying boxes.
+        // non-floor box's tokens, mirroring the validator's all-inputs `to_burn`.
+        // 12 + 5 = 17, two token-carrying boxes.
         let boxes = [
             (EMISSION_BOX_VALUE_FLOOR + 1, 12u64),
             (EMISSION_BOX_VALUE_FLOOR, 5),
@@ -461,11 +461,11 @@ mod tests {
 
     #[test]
     fn correct_burn_includes_non_floor_token_input() {
-        // codex P0-1 regression at the CONSENSUS entry point (not just the
-        // helper): a floor reward box (5 tokens, value == floor) TRIGGERS the
-        // rule; once triggered, a co-spent NON-floor box also carrying the token
-        // (12, value > floor) has its tokens burned too → 17 owed. Paying only
-        // the floor box's 5 must reject; paying the full 17 must accept.
+        // Regression at the CONSENSUS entry point (not just the helper): a
+        // floor reward box (5 tokens, value == floor) TRIGGERS the rule; once
+        // triggered, a co-spent NON-floor box also carrying the token (12,
+        // value > floor) has its tokens burned too → 17 owed. Paying only the
+        // floor box's 5 must reject; paying the full 17 must accept.
         let inputs = vec![
             input_box(EMISSION_BOX_VALUE_FLOOR, vec![reemission_token(5)]),
             input_box(EMISSION_BOX_VALUE_FLOOR + 1, vec![reemission_token(12)]),
