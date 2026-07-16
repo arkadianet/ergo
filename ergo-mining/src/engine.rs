@@ -330,6 +330,9 @@ pub fn build_and_publish(
                 &voting_targets,
                 handle.voting_settings(),
                 &mut suspects,
+                // Genesis (block-1) inputs are resolved and threaded at the node
+                // layer; the engine's build path constructs normal blocks only.
+                None,
             );
             // Read disposition from the view regardless of whether the build
             // succeeded — the path taken (Hit/Advanced/Rehydrated/…) is
@@ -350,6 +353,7 @@ pub fn build_and_publish(
             &voting_targets,
             handle.voting_settings(),
             &mut suspects,
+            None,
         )?,
     };
     let Some((candidate, work, timings)) = built else {

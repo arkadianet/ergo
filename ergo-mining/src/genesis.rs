@@ -43,6 +43,27 @@ pub fn synthetic_genesis_header(state_root: ADDigest, n_bits: u32) -> Header {
     }
 }
 
+/// Injected inputs for building the FIRST block on a bare devnet genesis.
+/// Block 1 IS the genesis block (Ergo's header chain starts at height 1):
+/// `parent_id == [0;32]`, an EMPTY extension (no interlinks — height 2 is
+/// the first to carry `[genesis_id]`), `n_bits == initial_difficulty`, and
+/// its coinbase spends the seeded genesis emission box. There is no stored
+/// parent header / parent block to read these from, so the genesis-successor
+/// build path takes them from here. `Some` only on the devnet block-1 build
+/// (`candidate_height == 1`); `None` for every normal build, which reads them
+/// from the committed view as before.
+#[derive(Debug, Clone)]
+pub struct GenesisBuildInputs {
+    /// The synthetic height-0 header — used ONLY as a carrier for the genesis
+    /// UTXO `state_root` (block 1's `last_block_utxo_root`) and a base
+    /// timestamp. NOT fed through `update_interlinks`: block 1's extension is
+    /// empty.
+    pub parent_header: Header,
+    /// The genesis emission box block 1's coinbase consumes (resolved via
+    /// [`genesis_emission_box`]).
+    pub emission_box: ErgoBox,
+}
+
 /// True if `tree_bytes` are the serialized emission proposition
 /// (`ErgoTreePredef.emissionBoxProp`). The emission tree is a
 /// network-identical protocol constant (see

@@ -36,6 +36,7 @@ use ergo_primitives::reader::VlqReader;
 use ergo_primitives::writer::VlqWriter;
 use ergo_ser::autolykos::AutolykosSolution;
 use ergo_ser::block_transactions::{write_block_transactions_with_version, BlockTransactions};
+use ergo_ser::difficulty::encode_compact_bits;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_ser::header::{read_header, serialize_header_without_pow, Header};
 use ergo_ser::transaction::{bytes_to_sign, write_transaction, Transaction};
@@ -182,6 +183,13 @@ pub fn generate_candidate<V: CandidateStateView>(
     // tip and evicts the still-invalid ones. A side-output (not part of the
     // Candidate) because suspects are diagnostic, not consensus artifacts.
     suspects_out: &mut Vec<Digest32>,
+    // DEVNET block-1 (genesis) build: `Some` only when building the first block
+    // on a bare genesis, where there is no stored parent header / parent block.
+    // Supplies the synthetic parent header (state_root + timestamp carrier) and
+    // the genesis emission box; the branch also forces `initial_difficulty` and
+    // an EMPTY extension (block 1 IS the genesis block — no interlinks). `None`
+    // for every normal build, which reads all of this from the committed view.
+    genesis: Option<&crate::genesis::GenesisBuildInputs>,
 ) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
     // 1. Tip + parent header (all reads via one committed view — see
     //    `CandidateStateView`; the snapshot impl sources them from a single
@@ -191,27 +199,42 @@ pub fn generate_candidate<V: CandidateStateView>(
     let candidate_height = parent_height + 1;
     let mut timings = PhaseTimings::default();
 
-    let parent_header_bytes = view
-        .get_header_bytes(&parent_id)
-        .map_err(state_err)?
-        .ok_or_else(|| MiningError::StateRead {
-            op: "load_parent_header",
-            reason: format!(
-                "best_full_block_id {} not in HEADERS",
-                hex::encode(parent_id)
-            ),
-        })?;
-    let parent_header = {
-        let mut r = VlqReader::new(&parent_header_bytes);
-        read_header(&mut r).map_err(|e| MiningError::Decode {
-            op: "parent_header",
-            reason: format!("{e:?}"),
-        })?
+    let parent_header = match genesis {
+        // Genesis (block 1): there is no stored parent header; use the synthetic
+        // height-0 carrier (genesis state_root + base timestamp).
+        Some(g) => g.parent_header.clone(),
+        None => {
+            let parent_header_bytes = view
+                .get_header_bytes(&parent_id)
+                .map_err(state_err)?
+                .ok_or_else(|| MiningError::StateRead {
+                    op: "load_parent_header",
+                    reason: format!(
+                        "best_full_block_id {} not in HEADERS",
+                        hex::encode(parent_id)
+                    ),
+                })?;
+            let mut r = VlqReader::new(&parent_header_bytes);
+            read_header(&mut r).map_err(|e| MiningError::Decode {
+                op: "parent_header",
+                reason: format!("{e:?}"),
+            })?
+        }
     };
 
     // 2. Snapshot params + applied-chain window
     let (active_params, validation_settings) = view.tip_snapshot_params().map_err(state_err)?;
-    let last_headers = view.last_applied_chain_window_10().map_err(state_err)?;
+    // Last-10 window for the tx-validation context. Genesis (block 1) has no
+    // predecessors — the apply path's `load_last_headers` returns an EMPTY
+    // window for a `[0;32]` parent. The candidate context type is a fixed
+    // `[Header; 10]`, so fill it with the synthetic genesis header: block 1's
+    // only tx is the emission coinbase, which does not consult `CONTEXT.headers`,
+    // and the apply path independently re-validates against its empty window —
+    // so the fill is consensus-neutral (the increment-4 apply round-trip pins it).
+    let last_headers = match genesis {
+        Some(g) => std::array::from_fn(|_| g.parent_header.clone()),
+        None => view.last_applied_chain_window_10().map_err(state_err)?,
+    };
 
     // 2b. Epoch-boundary recompute. At a voting-epoch start the candidate's
     //     extension must carry the recomputed parameter map + cumulative
@@ -291,16 +314,25 @@ pub fn generate_candidate<V: CandidateStateView>(
         rule_215_disabled,
     );
 
-    // 3. Difficulty retarget (or parent's nBits when non-recalc)
-    let epoch_len = epoch_length_for_height(candidate_height, chain_config);
-    let needed_heights = previous_heights_for_recalculation(candidate_height, epoch_len);
-    let epoch_headers = load_epoch_headers(view, &needed_heights, &parent_header)?;
-    let new_n_bits = next_n_bits(candidate_height, &epoch_headers, chain_config).map_err(|e| {
-        MiningError::IdComputation {
-            op: "difficulty_retarget",
-            reason: e.to_string(),
+    // 3. Difficulty retarget (or parent's nBits when non-recalc). Genesis
+    //    (block 1) is fixed at `initial_difficulty` — Scala's genesis-header
+    //    validation (`process_genesis_header`) requires exactly this, and the
+    //    height-1 epoch window is degenerate (`load_epoch_headers` drops the
+    //    genesis pseudo-height 0), so the retarget path can't run.
+    let new_n_bits = match genesis {
+        Some(_) => encode_compact_bits(&BigUint::from_bytes_be(&chain_config.initial_difficulty)),
+        None => {
+            let epoch_len = epoch_length_for_height(candidate_height, chain_config);
+            let needed_heights = previous_heights_for_recalculation(candidate_height, epoch_len);
+            let epoch_headers = load_epoch_headers(view, &needed_heights, &parent_header)?;
+            next_n_bits(candidate_height, &epoch_headers, chain_config).map_err(|e| {
+                MiningError::IdComputation {
+                    op: "difficulty_retarget",
+                    reason: e.to_string(),
+                }
+            })?
         }
-    })?;
+    };
 
     // 4. Timestamp: clamped monotonic.
     let now_ms = std::time::SystemTime::now()
@@ -339,29 +371,39 @@ pub fn generate_candidate<V: CandidateStateView>(
     //    validation-settings chunks. Both are the exact inverse of the parser
     //    the validator runs, so the serialized extension re-parses to the same
     //    params/settings the validator recomputes.
-    let parent_extension_bytes = read_parent_extension_bytes(view, &parent_header)?;
-    let parent_interlinks = unpack_interlinks_from_extension(&parent_extension_bytes)?;
-    // A non-genesis parent must carry interlinks; an empty set means its stored
-    // extension is malformed or missing them. Fail the build with a typed error
-    // here rather than panicking the engine task downstream (`update_interlinks`
-    // asserts a non-empty interlinks vector for a non-genesis header).
-    if *parent_header.parent_id.as_bytes() != [0u8; 32] && parent_interlinks.is_empty() {
-        return Err(MiningError::Decode {
-            op: "parent_interlinks",
-            reason: "non-genesis parent extension carries no interlinks fields".into(),
-        });
-    }
-    let epoch_boundary_fields = epoch_payload
-        .as_ref()
-        .map(|p| p.extension_fields())
-        .unwrap_or_default();
-    let extension_fields = build_candidate_extension_fields(
-        &parent_header,
-        &parent_interlinks,
-        candidate_height,
-        voting_settings.voting_length,
-        &epoch_boundary_fields,
-    )?;
+    let extension_fields = match genesis {
+        // Genesis (block 1) carries an EMPTY extension: no interlinks (height 2
+        // is the first block to link back to genesis), and height 1 is never a
+        // voting-epoch boundary. Confirmed against the interlinks corpus
+        // (height-1 block: 0 extension fields).
+        Some(_) => Vec::new(),
+        None => {
+            let parent_extension_bytes = read_parent_extension_bytes(view, &parent_header)?;
+            let parent_interlinks = unpack_interlinks_from_extension(&parent_extension_bytes)?;
+            // A non-genesis parent must carry interlinks; an empty set means its
+            // stored extension is malformed or missing them. Fail the build with a
+            // typed error here rather than panicking the engine task downstream
+            // (`update_interlinks` asserts a non-empty interlinks vector for a
+            // non-genesis header).
+            if *parent_header.parent_id.as_bytes() != [0u8; 32] && parent_interlinks.is_empty() {
+                return Err(MiningError::Decode {
+                    op: "parent_interlinks",
+                    reason: "non-genesis parent extension carries no interlinks fields".into(),
+                });
+            }
+            let epoch_boundary_fields = epoch_payload
+                .as_ref()
+                .map(|p| p.extension_fields())
+                .unwrap_or_default();
+            build_candidate_extension_fields(
+                &parent_header,
+                &parent_interlinks,
+                candidate_height,
+                voting_settings.voting_length,
+                &epoch_boundary_fields,
+            )?
+        }
+    };
 
     // 8. Coinbase: emission tx. Three regimes:
     //   - reemission = Some + height > activation_height: post-EIP-27,
@@ -373,7 +415,12 @@ pub fn generate_candidate<V: CandidateStateView>(
     //   - reemission = None: network has no EIP-27 protocol (new
     //     public testnet); always pre-EIP-27 emission tx.
     let phase_start = std::time::Instant::now();
-    let emission_box = lookup_emission_box_from_parent(view, &parent_id, &parent_header)?;
+    let emission_box = match genesis {
+        // Genesis (block 1): the emission box is the seeded genesis box, not a
+        // box derived from a parent block's BlockTransactions section.
+        Some(g) => g.emission_box.clone(),
+        None => lookup_emission_box_from_parent(view, &parent_id, &parent_header)?,
+    };
     let emission_tx = match reemission {
         Some(reem) if candidate_height > reem.activation_height => {
             build_post_eip27_emission_tx(&emission_box, miner_pk, candidate_height, monetary, reem)?
