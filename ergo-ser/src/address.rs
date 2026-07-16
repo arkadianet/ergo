@@ -715,8 +715,7 @@ mod tests {
     #[test]
     fn encode_p2sh_matches_scala_pay2sh_oracle_vector() {
         // Oracle: TyperOracle.scala `cc` verb (sigma-state 6.0.2 SigmaCompiler +
-        // Pay2SHAddress, ORACLE_NETWORK=testnet), captured 2026-07-04
-        // (.superpowers/sdd/task-1-report.md, Step-4 smoke, line 2):
+        // Pay2SHAddress, ORACLE_NETWORK=testnet):
         //   cc PK("3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN")
         //   → OK 0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
         //        5AgXz2KadZrAXE86MMjVQ7UAWeRFbhBZcQms4j2RgBuHNrVRwY7xvp2S

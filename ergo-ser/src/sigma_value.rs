@@ -1953,7 +1953,7 @@ mod tests {
     /// `ergo_tree_version` to `Some(3)` (a v3+ outer context); the nested parse must
     /// still reject code 9 because its own header is v0. Without the per-nested-tree
     /// version scoping, the inner script would inherit `Some(3)` and wrongly accept —
-    /// accept-invalid (codex P1).
+    /// accept-invalid.
     #[test]
     fn sbox_constant_sizeless_unsigned_bigint_gated_by_inner_version() {
         // The v6-only type must reject under the INNER v0 version whether it appears

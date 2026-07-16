@@ -1961,9 +1961,9 @@ mod tests {
     /// (110) must HARD-REJECT, NOT be wrapped as `UnparsedErgoTree`. Scala's
     /// `DeserializeCallDepthExceeded` is a `SerializerException` that
     /// `deserializeErgoTree` does not catch, so a depth overflow is
-    /// consensus-rejected even under the soft-fork wrapper. (Regression for the
-    /// codex review of the MAX_EXPR_DEPTH=110 fix — the wrapper used to swallow
-    /// this into an accepted unparsed tree.)
+    /// consensus-rejected even under the soft-fork wrapper. Regression guard:
+    /// the wrapper used to swallow this into an accepted unparsed tree instead
+    /// of hard-rejecting.
     #[test]
     fn size_flagged_over_depth_body_hard_rejects_not_wrapped() {
         // header 0x08 = v0, has_size, no cseg; body = 150x SizeOf(0xB1) then a
@@ -2091,14 +2091,14 @@ mod tests {
             // ...and a LANDMINE with a NON-SigmaProp receiver: Coll[Long].apply(0)
             // -> SLong (the projection is the receiver element type).
             "00dc0c0a8301050500010400",
-            // Type-variable UNIFICATION (codex P1): getOrElse/fold have the result
+            // Type-variable UNIFICATION: getOrElse/fold have the result
             // variable in TWO places; a determinable conflict -> non-SigmaProp ->
             // reject. Oracle REJECT (the receiver/zero is SigmaProp but the
             // default/op is not):
             "00dc2404e30008010500",         // Option[Sigma].getOrElse(0L)
             "00dc0c0283010808d30204000500", // Coll[Sigma].getOrElse(0, 0L)
             "00dc0c0583010808d30208d3d902010502057201", // Coll.fold(sigmaZero, Long-op)
-            // ...and a FIXED-type arg mismatch (codex P1): Coll[Sigma].apply needs an
+            // ...and a FIXED-type arg mismatch: Coll[Sigma].apply needs an
             // SInt index; a Long index makes specializeFor fail -> non-SigmaProp.
             "00dc0c0a83010808d3010500", // Coll[Sigma].apply(0L) -> reject
         ] {
@@ -2167,7 +2167,7 @@ mod tests {
             "00d801d60108d37201",
             // FunDef RHS is NOT always a function: { fun x = sigmaProp; x } binds x
             // to SigmaProp, so the ValUse result IS SigmaProp (oracle ACCEPT — a
-            // FunDef->SAny classification here would reject-valid, codex P1).
+            // FunDef->SAny classification here would reject-valid).
             "00d801d7010008d37201",
             // REUSED-ID ValUse -> lenient (a reused binding id never occurs in a
             // legitimately compiled tree; matching Scala's position-aware shared
@@ -2195,8 +2195,8 @@ mod tests {
 
     /// `value_contains_box` keys on the VALUE: it sees an actual box through `Coll`
     /// / `Option` / tuple nesting, but a box-FREE value — including an EMPTY
-    /// box-typed collection — must NOT count (codex P1: an empty `Coll[SBox]`
-    /// materializes no box and cannot pollute the shared store).
+    /// box-typed collection — must NOT count: an empty `Coll[SBox]`
+    /// materializes no box and cannot pollute the shared store.
     #[test]
     fn value_contains_box_keys_on_value_not_type() {
         use crate::sigma_value::{CollValue, SigmaValue};
@@ -2222,13 +2222,13 @@ mod tests {
         assert!(!value_contains_box(&SigmaValue::Long(0)));
     }
 
-    /// Reject-valid guard (codex P1): a box VALUE constant's nested script is parsed
+    /// Reject-valid guard: a box VALUE constant's nested script is parsed
     /// on the SAME reader, whose `valDefTypeStore` is shared and never restored, so
     /// it can rebind an id the outer body uses. Once a box value is present we trust
     /// no `ValUse` — `{ val x = Long; x }`, which alone rejects (root `SLong`), must
     /// go lenient so Scala's box-polluted `ValUse(1).tpe` (potentially `SigmaProp`)
     /// is never rejected. But a box-typed constant with NO box value (empty
-    /// `Coll[SBox]`) changes nothing and must STILL reject (codex P1 accept-invalid).
+    /// `Coll[SBox]`) changes nothing and must STILL reject.
     #[test]
     fn box_value_forces_valuse_root_leniency_but_empty_box_coll_does_not() {
         use crate::sigma_value::{CollValue, SigmaValue};
@@ -2262,12 +2262,12 @@ mod tests {
         ));
         assert!(
             check_sigma_prop_root(&with_empty_box_coll).is_err(),
-            "an empty Coll[SBox] constant must NOT trigger leniency (codex P1)"
+            "an empty Coll[SBox] constant must NOT trigger leniency"
         );
     }
 
-    /// A deeply-nested MethodCall receiver chain must type in LINEAR time (codex P1
-    /// DoS): `method_call_result_type` infers the receiver lazily, so a non-landmine
+    /// A deeply-nested MethodCall receiver chain must type in LINEAR time (a parse-time
+    /// CPU-DoS guard): `method_call_result_type` infers the receiver lazily, so a non-landmine
     /// root (`SBox.value`) returns `SAny` WITHOUT walking the chain. The eager
     /// version re-walked the receiver twice per level — exponential, a parse-time
     /// CPU DoS — and would hang this test well before 100 levels.

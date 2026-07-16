@@ -1550,7 +1550,7 @@ fn find_v3_only_method_walks_dead_branch_and_skips_clean_tree() {
 // the segregated `true && (1 == 1)` tree is `1000d1ed8503` — a segregated
 // header (0x10) with a ZERO-entry constants table; the body here is the inner
 // `BinAnd(true, true)` = `ed 85 03` (0xED BinAnd, 0x85 marker, 0x03 packed
-// bits = both true). See `dev-docs/.../recon-segregation.md` §3.
+// bits = both true).
 #[test]
 fn segregate_relation2_bool_pair_stays_inline_zero_constants() {
     let bin_and = Expr::Op(IrNode {
