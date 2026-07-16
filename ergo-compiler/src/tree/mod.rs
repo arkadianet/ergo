@@ -1,4 +1,4 @@
-//! ErgoTree assembly + the public end-to-end [`compile`] API (M3 Task 9).
+//! ErgoTree assembly + the public end-to-end [`compile`] API.
 //!
 //! Wires the full pipeline source → bytes → address: parse → bind →
 //! typecheck ([`crate::typecheck_with_network`]) → root coercion → emit
@@ -62,183 +62,172 @@ pub(crate) fn graph_build(root: Expr) -> Result<Expr, CompileError> {
         return Err(CompileError::Emit(e));
     }
 
-    // Explicit-cast folds, BOTH directions (M4 Task 4, lib.rs D-C7 cast
-    // bullet; recon-transforms.md §7): fold `Downcast`/`Upcast` of a DIRECT
-    // constant (range-checked — the reject side of the retired D-C5 checker
-    // cast arm now lives in this pass, one code path) while leaving a
-    // cast-of-cast CHAIN's outer casts unfolded, exactly like Scala. MUST run
-    // BEFORE `crate::fold::fold` below: a direct-constant `Upcast` (e.g. the
-    // typer's mixed-width widening in `9223372036854775807L + 1`) needs to
-    // already BE a plain `Const` by the time the arithmetic fold looks at it,
-    // or that pass's `Expr::Const` fast path never sees a value to propagate
-    // into the parent `+`/`-`/`*`/`min`/`max` (the overflow would silently go
-    // undetected). It also runs before the generic fold's `SizeOf`-literal
-    // rule — see `fold_direct_const_casts`'s docs for the oracle-pinned
+    // Explicit-cast folds, BOTH directions (lib.rs D-C7 cast bullet): fold
+    // `Downcast`/`Upcast` of a DIRECT constant (range-checked), while leaving
+    // a cast-of-cast CHAIN's outer casts unfolded, exactly like Scala. MUST
+    // run BEFORE `crate::fold::fold` below: a direct-constant `Upcast` (e.g.
+    // the typer's mixed-width widening in `9223372036854775807L + 1`) needs
+    // to already BE a plain `Const` by the time the arithmetic fold looks at
+    // it, or that pass's `Expr::Const` fast path never sees a value to
+    // propagate into the parent `+`/`-`/`*`/`min`/`max` (the overflow would
+    // silently go undetected). It also runs before the generic fold's
+    // `SizeOf`-literal rule — see `fold_direct_const_casts`'s docs for the
     // `.size.toLong` regression that position protects.
     let root = fold_direct_const_casts(root).map_err(CompileError::Emit)?;
 
-    // isProven→isValid fusion (M4 Task 6, D-C3; recon-transforms.md §3;
-    // `crate::isproven`): `SigmaPropIsProven(BoolToSigmaProp(x)) → x` and its
-    // dual `BoolToSigmaProp(SigmaPropIsProven(p)) → p`. This first placement is
-    // the fixpoint fusion (`GraphBuilding.scala:188-189`) — it must run BEFORE
-    // the generic fold so a fusion-exposed Boolean feeds the fold (e.g.
-    // `sigmaProp(true) ^ (1 == 1)` → `BinXor(true, true)` → `false`). The
-    // second placement is AFTER the lowering block (the top-level
+    // isProven→isValid fusion (D-C3; `crate::isproven`):
+    // `SigmaPropIsProven(BoolToSigmaProp(x)) → x` and its dual
+    // `BoolToSigmaProp(SigmaPropIsProven(p)) → p`. This first placement is
+    // the fixpoint fusion (`GraphBuilding.scala:188-189`) — it must run
+    // BEFORE the generic fold so a fusion-exposed Boolean feeds the fold
+    // (e.g. `sigmaProp(true) ^ (1 == 1)` → `BinXor(true, true)` → `false`).
+    // The second placement is AFTER the lowering block (the top-level
     // `removeIsProven`, over the coercion adjacency the unwrap/D-C2 fold
     // expose) — see below.
     let root = crate::isproven::eliminate_isproven(root);
 
-    // `val` inlining RETIRED (M5 Task 4, locked decision 4; spike §7.2): the
-    // M4 `inline_vals` pass is gone — `crate::cse::cse` below is now the SOLE
-    // subexpression-sharing pass and subsumes it (a use-count-1 symbol is not
-    // hoisted, so its one use inlines at materialization; a constant-valued
-    // `val` is P4-suppressed and inlines per-use). `inline_vals` could not stay:
-    // it SYNTACTICALLY clones a shared `def`'s rhs into each use site, so two
-    // uses in sibling `If`/`&&` thunks became sibling-distinct symbols that CSE
-    // (scope-chain hash-cons) could never re-share — the exact under-hoisting
-    // the M5 model exists to fix. CSE instead threads the shared graph node
-    // (`intern` gives every `ValUse` of a `ValDef` the same symbol), matching
-    // Scala's `buildGraph`. The overflow-reject-in-dead-`val` behaviour
-    // (`{ val unused = 2147483647 + 1; ... }` → reject) is UNCHANGED: the fold
-    // below still traverses every `ValDef` rhs (dead or live) and `prune_dead_
-    // vals` runs AFTER it, so the eager `buildNode` overflow still fires.
+    // `val` inlining is subsumed by `crate::cse::cse` below, the sole
+    // subexpression-sharing pass (a use-count-1 symbol is not hoisted, so
+    // its one use inlines at materialization; a constant-valued `val` is
+    // P4-suppressed and inlines per-use). A syntactic clone-based inliner
+    // cannot substitute for CSE here: cloning a shared `def`'s rhs into each
+    // use site makes two uses in sibling `If`/`&&` thunks sibling-distinct
+    // symbols that a scope-chain hash-cons could never re-share. CSE instead
+    // threads the shared graph node (`intern` gives every `ValUse` of a
+    // `ValDef` the same symbol), matching Scala's `buildGraph`. The
+    // overflow-reject-in-dead-`val` behaviour
+    // (`{ val unused = 2147483647 + 1; ... }` → reject) holds regardless: the
+    // fold below still traverses every `ValDef` rhs (dead or live) and
+    // `prune_dead_vals` runs AFTER it, so the eager `buildNode` overflow
+    // still fires.
 
-    // Generic constant fold (M4 Task 5, recon-transforms.md §1b/§2a-2d;
-    // `crate::fold`) — the GraphBuilding-exact `rewriteDef` cascade as one
-    // bottom-up fixpoint pass. It ABSORBS the two retired D-C5/D-C6 twins into
-    // one traversal (F5 discipline): the overflow CHECK is now the fold's
-    // reject arm (a both-`Const` `+`/`-`/`*` that overflows its width is
-    // Scala's `ArithmeticException` → compile reject, now byte-correct because
-    // the node is actually replaced), and the `SizeOf(<coll literal>)` element-
-    // count fold is one rule among many. Runs AFTER `fold_direct_const_casts`
-    // (casts fold their immediate-`Const` children BEFORE arith sees them, and
-    // this pass never re-folds a cast — mirroring Scala's build-time cast
-    // interception vs the `rewriteDef` fixpoint) and BEFORE the v0 data gate
-    // below — so a fold that erases v3-only constant DATA (a
-    // `Coll[UnsignedBigInt]().size` collapsing to `Int`, or the NF-1
-    // `unsignedBigInt == unsignedBigInt` closure) never puts that data on the
-    // wire (locked decision 1).
+    // Generic constant fold (`crate::fold`) — the GraphBuilding-exact
+    // `rewriteDef` cascade as one bottom-up fixpoint pass. The overflow check
+    // is the fold's reject arm (a both-`Const` `+`/`-`/`*` that overflows its
+    // width is Scala's `ArithmeticException` → compile reject), and the
+    // `SizeOf(<coll literal>)` element-count fold is one rule among many.
+    // Runs AFTER `fold_direct_const_casts` (casts fold their immediate-`Const`
+    // children BEFORE arith sees them, and this pass never re-folds a cast —
+    // mirroring Scala's build-time cast interception vs the `rewriteDef`
+    // fixpoint) and BEFORE the v0 data gate below — so a fold that erases
+    // v3-only constant DATA (a `Coll[UnsignedBigInt]().size` collapsing to
+    // `Int`, or an `unsignedBigInt == unsignedBigInt` closure) never puts
+    // that data on the wire.
     let root = crate::fold::fold(root).map_err(CompileError::Emit)?;
 
-    // Dead-`val` pruning (M4 Task 9, recon-transforms.md §8; `crate::inline`).
-    // Removes every `val` unreachable from its block result — Scala's schedule
-    // DFS (`ProgramGraphs.scala:35-64`) never visits it, so it is absent from
-    // the final tree. Runs AFTER `crate::fold::fold` (so any overflow in a dead
+    // Dead-`val` pruning (`crate::inline`). Removes every `val` unreachable
+    // from its block result — Scala's schedule DFS
+    // (`ProgramGraphs.scala:35-64`) never visits it, so it is absent from the
+    // final tree. Runs AFTER `crate::fold::fold` (so any overflow in a dead
     // `val`'s rhs has already rejected, matching the eager `buildNode`) and
-    // recomputes reachability, so a `val` that a fold turned dead (its sole use
-    // erased by `x * 0 -> 0`) is dropped too. Runs BEFORE the v0-data gate so a
-    // dead `val` holding v3-only data (`{ val unused = Coll[BigInt](); ... }`)
-    // is gone before the gate scans — the oracle accepts it (the schedule
-    // prunes it), and the gate must too. STILL REQUIRED pre-CSE (M5 Task 4): a
-    // dead `val`'s rhs must not be interned, else its `ValUse` refs would
-    // inflate `crate::cse`'s flat usage count and wrongly hoist a
-    // used-only-in-dead-code subexpression.
+    // recomputes reachability, so a `val` that a fold turned dead (its sole
+    // use erased by `x * 0 -> 0`) is dropped too. Runs BEFORE the v0-data
+    // gate so a dead `val` holding v3-only data
+    // (`{ val unused = Coll[BigInt](); ... }`) is gone before the gate scans
+    // — the oracle accepts it (the schedule prunes it), and the gate must
+    // too. Required pre-CSE: a dead `val`'s rhs must not be interned, else
+    // its `ValUse` refs would inflate `crate::cse`'s flat usage count and
+    // wrongly hoist a used-only-in-dead-code subexpression.
     let root = crate::inline::prune_dead_vals(root);
-
-    // Dense id renumbering RETIRED (M5 Task 4, locked decision 4; spike §7.2):
-    // `crate::inline::renumber_dense` is gone. Dense, assign-once ids now come
-    // from `crate::cse::cse` below, which allocates them top-down as the final
-    // tree is built (spike §4) — there is no post-hoc renumber pass to layer.
 
     // v0-header data gate — Scala's compile route cannot serialize v6-only
     // constant DATA: `ErgoTreeSerializer.serializeErgoTree` re-pins
     // `VersionContext.withVersions(_, treeVersion = ergoTree.version)`
-    // (v6.0.2 `data/.../ErgoTreeSerializer.scala:105-112`), and the route's
-    // header is ALWAYS `defaultHeaderWithVersion(0)` — so even an
-    // ORACLE_TREE_VERSION=3 compile serializes under `treeVersion = 0`, where
+    // (`data/.../ErgoTreeSerializer.scala:105-112`), and the route's header
+    // is ALWAYS `defaultHeaderWithVersion(0)` — so even a `tree_version = 3`
+    // compile serializes under `treeVersion = 0`, where
     // `CoreDataSerializer.serialize`'s v3-gated arms (`SUnsignedBigInt` at
     // :39, `SOption` at :78) fall through to the :86 catch-all
     // `SerializerException`. Mirror the reject (oracle:
     // `cc unsignedBigInt("5") > unsignedBigInt("3")` → `REJECT 0:0
-    // SerializerException`, compile_seed.json). Our wire layer is
-    // deliberately version-independent (ergo-ser stays consensus-lenient), so
-    // the gate lives here in the compile surface. M4 NOTE: when `build_tree`
-    // grows versioned headers, gate on the emitted header version < 3.
+    // SerializerException`). Our wire layer is deliberately
+    // version-independent (ergo-ser stays consensus-lenient), so the gate
+    // lives here in the compile surface; when `build_tree` grows versioned
+    // headers, gate on the emitted header version < 3 instead.
     if let Some(what) = find_v0_unserializable(&root) {
         return Err(CompileError::Serializer { what });
     }
 
-    // Lowering block (M4 Task 3, locked decision 1): AFTER every gate/fold
-    // above, BEFORE constant segregation. D-C2 (`CreateProveDlog(Const)` /
-    // `CreateProveDHTuple(Const×4)` → bare `SigmaPropConstant`) + the
-    // single-element `anyOf`/`allOf`/`allZK`/`anyZK` unwrap
-    // (recon-transforms.md §4/§5; `crate::lower`). Must run before the P2SH
-    // proposition bytes below are computed, so the folded/unwrapped shape is
-    // what both the proposition hash and `build_tree`'s bare-root check see.
+    // Lowering block: AFTER every gate/fold above, BEFORE constant
+    // segregation. D-C2 (`CreateProveDlog(Const)` / `CreateProveDHTuple(Const
+    // ×4)` → bare `SigmaPropConstant`) + the single-element
+    // `anyOf`/`allOf`/`allZK`/`anyZK` unwrap (`crate::lower`). Must run before
+    // the P2SH proposition bytes below are computed, so the folded/unwrapped
+    // shape is what both the proposition hash and `build_tree`'s bare-root
+    // check see.
     let root = crate::lower::lower(root);
 
-    // Re-fold after lowering (NF-M4-2, M4 close-out; mirrors the double-
-    // `isProven` pattern in this pipeline). Scala runs `proveDlog(const)` /
-    // `proveDHTuple(const×4)` folding and the `Equals` equal-operand fold in the
-    // SAME `rewriteDef` FIXPOINT, so `proveDlog(g1) == proveDlog(g1)` folds to
-    // `true` in one cascade: the D-C2 fold makes both operands identical
-    // `SigmaPropConstant`s, and the still-live `Equals` rule then collapses them.
-    // Our `crate::fold::fold` runs ONCE, BEFORE `crate::lower` — at which point
-    // the operands are still `CreateProveDlog` nodes, not `Const`, so the
-    // `Const`-restricted `Equals` rule correctly declines. `crate::lower` then
-    // exposes the identical-`Const` pair, but nothing re-examines it. Presenting
-    // the lowered tree to the fold a second time closes exactly that
-    // ordering-dependent gap. Idempotence: `fold` rewrites each node to its
-    // per-node fixpoint, so the first pass SATURATED every shape it could see —
-    // the second pass can only act on nodes `lower` newly exposed (the
-    // D-C2-created `Const == Const` / `Const != Const` pairs); everything else
-    // is already at its fixpoint and passes through unchanged.
+    // Re-fold after lowering (mirrors the double-`isProven` pattern in this
+    // pipeline). Scala runs `proveDlog(const)` / `proveDHTuple(const×4)`
+    // folding and the `Equals` equal-operand fold in the SAME `rewriteDef`
+    // FIXPOINT, so `proveDlog(g1) == proveDlog(g1)` folds to `true` in one
+    // cascade: the D-C2 fold makes both operands identical
+    // `SigmaPropConstant`s, and the still-live `Equals` rule then collapses
+    // them. Our `crate::fold::fold` runs ONCE, BEFORE `crate::lower` — at
+    // which point the operands are still `CreateProveDlog` nodes, not
+    // `Const`, so the `Const`-restricted `Equals` rule correctly declines.
+    // `crate::lower` then exposes the identical-`Const` pair, but nothing
+    // re-examines it. Presenting the lowered tree to the fold a second time
+    // closes exactly that ordering-dependent gap. Idempotence: `fold`
+    // rewrites each node to its per-node fixpoint, so the first pass
+    // saturated every shape it could see — the second pass can only act on
+    // nodes `lower` newly exposed (the D-C2-created `Const == Const` /
+    // `Const != Const` pairs); everything else is already at its fixpoint
+    // and passes through unchanged.
     let root = crate::fold::fold(root).map_err(CompileError::Emit)?;
 
-    // Top-level `removeIsProven` (M4 Task 6, D-C3; recon-transforms.md §3;
-    // `GraphBuilding.scala:245-252`, applied at `:418` AFTER buildGraph). The
-    // lowering block above (D-C2 `proveDlog(const)` fold + single-element
-    // `AllOf`/`AnyOf` unwrap) is what makes the `BoolToSigmaProp`/
-    // `SigmaPropIsProven` adjacency appear: `allOf(Coll(proveDlog(g1)))` lowers
-    // to `BoolToSigmaProp(SigmaPropIsProven(Const{SigmaProp}))`, which this
-    // strips to the bare `SigmaPropConstant` root (header `0x00`, matching PK).
-    // The `false`-XOR / `BinAnd` forms were already fused+folded pre-fold above,
-    // so this second pass is a no-op for them.
+    // Top-level `removeIsProven` (D-C3; `GraphBuilding.scala:245-252`, applied
+    // at `:418` AFTER buildGraph). The lowering block above (D-C2
+    // `proveDlog(const)` fold + single-element `AllOf`/`AnyOf` unwrap) is what
+    // makes the `BoolToSigmaProp`/`SigmaPropIsProven` adjacency appear:
+    // `allOf(Coll(proveDlog(g1)))` lowers to
+    // `BoolToSigmaProp(SigmaPropIsProven(Const{SigmaProp}))`, which this
+    // strips to the bare `SigmaPropConstant` root (header `0x00`, matching
+    // PK). The `false`-XOR / `BinAnd` forms were already fused+folded
+    // pre-fold above, so this second pass is a no-op for them.
     let root = crate::isproven::eliminate_isproven(root);
 
-    // Multi-arg lambda TUPLING (M4 Task 7, D-C4; recon-transforms.md §6;
-    // `crate::tuple`): a fold-slot lambda `{(a, b) => ...}` emits as a 2-arg
-    // `FuncValue`, which is wire-legal but unevaluable — the reference JIT
-    // hard-errors on any non-1-arg function (`values.scala:1042-1056`). Scala's
-    // IR pipeline lowers it to the tupled 1-arg form
-    // `FuncValue([(id, STuple(t_a, t_b))], body[a := SelectField(ValUse(id),1),
-    // b := SelectField(ValUse(id),2)])` (`GraphBuilding.scala:917-924` +
-    // `TreeBuilding.scala:185-190/454-457`) — the only shape real `Fold` trees
-    // carry on-chain. Runs AFTER `graph_building_lambda_reject` above (which has
-    // already rejected the non-1-arg *applications* Scala refuses; every
-    // multi-arg *definition* surviving to here is the D-C4 both-accept class —
-    // fold-slot and un-applied lambdas both compilers accept) and is a no-op for
-    // every 1-arg lambda. The tuple param reuses the first arg's id, matching
-    // Scala's `varId = defId + 1` for the non-CSE case (byte-verified against the
-    // oracle).
+    // Multi-arg lambda TUPLING (D-C4; `crate::tuple`): a fold-slot lambda
+    // `{(a, b) => ...}` emits as a 2-arg `FuncValue`, which is wire-legal but
+    // unevaluable — the reference JIT hard-errors on any non-1-arg function
+    // (`values.scala:1042-1056`). Scala's IR pipeline lowers it to the
+    // tupled 1-arg form `FuncValue([(id, STuple(t_a, t_b))],
+    // body[a := SelectField(ValUse(id),1), b := SelectField(ValUse(id),2)])`
+    // (`GraphBuilding.scala:917-924` + `TreeBuilding.scala:185-190/454-457`)
+    // — the only shape real `Fold` trees carry on-chain. Runs AFTER
+    // `graph_building_lambda_reject` above (which has already rejected the
+    // non-1-arg *applications* Scala refuses; every multi-arg *definition*
+    // surviving to here is the D-C4 both-accept class — fold-slot and
+    // un-applied lambdas both compilers accept) and is a no-op for every
+    // 1-arg lambda. The tuple param reuses the first arg's id, matching
+    // Scala's `varId = defId + 1` for the non-CSE case.
     let root = crate::tuple::tuple_lambdas(root);
 
-    // CSE / ValDef materialization (M5, locked decision 4; spike §7.1/§7.2;
-    // `crate::cse`) — the SOLE subexpression-sharing pass, replacing the retired
-    // M4 `inline_vals`/`renumber_dense`. A scope-chain hash-cons decides identity
+    // CSE / ValDef materialization (`crate::cse`) — the sole
+    // subexpression-sharing pass. A scope-chain hash-cons decides identity
     // by FIRST-BUILD scope (both `If` branches / `&&`/`||` right arm /
     // `getOrElse` default push a scope; siblings never share), a flat global
     // usage count + the 4-predicate gate (`has_many && !IsContextProperty &&
-    // !IsInternalDef && !IsConstantDef`) decides which symbols become `ValDef`s,
-    // and dense ids are threaded assign-once top-down (no renumber). Runs at the
-    // spike §7.2 position: AFTER every fold/lowering/tupling (so it sees the
-    // final lowered shape) and BEFORE constant segregation / `write_ergo_tree`.
-    // Its input is `prune_dead_vals`-cleaned (above) so dead-code refs do not
-    // inflate the usage count.
+    // !IsInternalDef && !IsConstantDef`) decides which symbols become
+    // `ValDef`s, and dense ids are threaded assign-once top-down. Runs AFTER
+    // every fold/lowering/tupling (so it sees the final lowered shape) and
+    // BEFORE constant segregation / `write_ergo_tree`. Its input is
+    // `prune_dead_vals`-cleaned (above) so dead-code refs do not inflate the
+    // usage count.
     let root = crate::cse::cse(root);
 
-    // Re-fold after CSE (M5 Task 4, oracle-pinned; mirrors the post-`lower`
-    // re-fold above). Scala folds continuously in `rewriteDef` AS the graph is
-    // built, so a constant threaded through a `val` (`{ val x = 1 + 1;
-    // sigmaProp(x > 0 && x < 3) }`) is already folded through its uses before the
-    // comparison nodes exist. Our fold ran BEFORE CSE, where `x`'s uses were
-    // still `ValUse` nodes it cannot fold through; CSE then P4-inlines the
-    // constant `2` at each use, newly exposing `2 > 0` / `2 < 3` as
-    // `Const`-adjacent. This pass collapses exactly those CSE-exposed constant
-    // adjacencies (oracle: the source above → `1000d1ed8503`, ZERO constants,
-    // ZERO ValDefs — identical to `sigmaProp(1 > 0 && 1 < 3)`). It never touches
-    // a hoisted `ValDef`/`ValUse` (fold does not propagate through `ValUse`), so
-    // it cannot disturb CSE's placement or ids; idempotence guarantees it only
+    // Re-fold after CSE (mirrors the post-`lower` re-fold above). Scala folds
+    // continuously in `rewriteDef` AS the graph is built, so a constant
+    // threaded through a `val` (`{ val x = 1 + 1; sigmaProp(x > 0 && x < 3)
+    // }`) is already folded through its uses before the comparison nodes
+    // exist. Our fold ran BEFORE CSE, where `x`'s uses were still `ValUse`
+    // nodes it cannot fold through; CSE then P4-inlines the constant `2` at
+    // each use, newly exposing `2 > 0` / `2 < 3` as `Const`-adjacent. This
+    // pass collapses exactly those CSE-exposed constant adjacencies (oracle:
+    // the source above → `1000d1ed8503`, ZERO constants, ZERO ValDefs —
+    // identical to `sigmaProp(1 > 0 && 1 < 3)`). It never touches a hoisted
+    // `ValDef`/`ValUse` (fold does not propagate through `ValUse`), so it
+    // cannot disturb CSE's placement or ids; idempotence guarantees it only
     // acts on the newly-inlined-constant shapes.
     let root = crate::fold::fold(root).map_err(CompileError::Emit)?;
     Ok(root)
@@ -258,7 +247,7 @@ pub(crate) fn graph_build(root: Expr) -> Result<Expr, CompileError> {
 ///    (`tree_version >= 3` ⇔ `VersionContext.isV3OrLaterErgoTreeVersion`).
 ///    Scala's route forwards its `treeVersion` param ONLY into
 ///    `VersionContext.withVersions` — never into the tree header.
-/// 2. **Wire header version (axis 2):** fixed at 0 in M3 (and in the route:
+/// 2. **Wire header version (axis 2):** fixed at 0 (matching the route's
 ///    `ErgoTree.defaultHeaderWithVersion(0.toByte)` unconditionally). See
 ///    [`build_tree`].
 /// 3. **Activated script version (axis 3):** the EVALUATOR's
@@ -285,34 +274,32 @@ pub(crate) fn graph_build(root: Expr) -> Result<Expr, CompileError> {
 /// P2SH is SEGREGATION-invariant (the D-C1 flip never moves it; D-C7 covers the
 /// residual IR-shape divergences that DO move it).
 ///
-/// # Task-10 verdict adjudication (the semantic-parity gate)
+/// # Semantic-parity verdict gates
 ///
-/// The Task-10 corpus run (`tests/compile_semantic_parity.rs`,
-/// `test-vectors/ergoscript/compile/compile_seed.json`) adjudicated every
-/// verdict divergence against the full Scala compiler:
-/// - Postfix method-call residuals (e.g. `arr1 size`): the UNWRAPPED corpus
-///   forms have non-`Boolean`/`SigmaProp` roots, so the route's root
-///   dispatch rejects them (class advisory); the WRAPPED forms
-///   (`sigmaProp((arr1 size) > 0)`) are rejected by the Task-11 wave-1
-///   `%SCollection.size` gate in `emit_method_call` (lib.rs D-C5, exact
-///   `GraphBuildingException` class).
-/// - `xorOf` over `Coll[SigmaProp]`: rejected in `emit` (Scala
-///   GraphBuilding `AssertionError`; see the `XorOf` arm).
+/// Verdict divergences against the full Scala compiler are adjudicated by
+/// `tests/compile_semantic_parity.rs` against
+/// `test-vectors/ergoscript/compile/compile_seed.json`:
+/// - Postfix method-call residuals (e.g. `arr1 size`): the UNWRAPPED forms
+///   have non-`Boolean`/`SigmaProp` roots, so the route's root dispatch
+///   rejects them; the WRAPPED forms (`sigmaProp((arr1 size) > 0)`) are
+///   rejected by the `%SCollection.size` gate in `emit_method_call` (lib.rs
+///   D-C5, exact `GraphBuildingException` class).
+/// - `xorOf` over `Coll[SigmaProp]`: rejected in `emit` (Scala GraphBuilding
+///   `AssertionError`; see the `XorOf` arm).
 /// - v6-only constant data under the v0 header (`unsignedBigInt(..)`
 ///   comparisons): rejected by the v0-header data gate below
 ///   ([`CompileError::Serializer`], mirroring Scala's
 ///   `SerializerException`).
 /// - Residual `SigmaPropIsProven` in mixed `Bool`/`SigmaProp` logical
-///   contexts: coercion-cancellation CLOSED (M4 Task 6, lib.rs D-C3) —
+///   contexts: coercion-cancellation (lib.rs D-C3) —
 ///   [`crate::isproven`] cancels the `BoolToSigmaProp`/`SigmaPropIsProven`
 ///   round trips before the fold and after the lowering block. The
 ///   surviving-sigma `HasSigmas` `SigmaAnd`/`SigmaOr` reconstruction (a
-///   residual `0xCF` in five corpus outputs) stays open, co-blocked on
-///   val-inline/CSE (Tasks 8/9).
-/// - Task-11 wave 1 added the GraphBuilding reject-gate family (lib.rs
-///   D-C5): bit ops, zero-arg/non-1-arg lambda applications, SFunc-typed
-///   lambda params, postfix `size`, out-of-range `getReg` literals,
-///   pre-v3 SNumericType methods, and the constant-fold overflow check
+///   residual `0xCF` in some corpus outputs) stays open.
+/// - The GraphBuilding reject-gate family (lib.rs D-C5): bit ops,
+///   zero-arg/non-1-arg lambda applications, SFunc-typed lambda params,
+///   postfix `size`, out-of-range `getReg` literals, pre-v3 SNumericType
+///   methods, and the constant-fold overflow check
 ///   ([`graph_building_lambda_reject`] below + [`crate::fold`]'s
 ///   arithmetic-overflow reject arm + the emit-arm gates).
 ///
@@ -360,8 +347,7 @@ pub fn compile(
     // still inline here, no placeholders yet), so hashing it is byte-equal to
     // Scala's re-inlining step AND cheaper than segregating then substituting
     // back. For a bare-constant root this is the body itself — equivalent. This
-    // is why the D-C1 segregation flip leaves the P2SH address INVARIANT
-    // (recon-segregation.md §4; lib.rs D-C1/D-C7).
+    // is why segregation leaves the P2SH address INVARIANT (lib.rs D-C1/D-C7).
     let mut pw = VlqWriter::new();
     write_expr(&mut pw, &root, false)?;
     let proposition_bytes = pw.result();
@@ -372,26 +358,23 @@ pub fn compile(
     write_ergo_tree(&mut w, &ergo_tree)?;
     let tree_bytes = w.result();
 
-    // Post-write self-check (Task-11 wave 2; lib.rs D-C6): the bytes we are
-    // about to derive ADDRESSES from must round-trip through our own
-    // deserializer. A failure means compile() would hand out a P2S address whose
-    // script no deserializer accepts — funds sent there are stranded (the F-3
+    // Post-write self-check (lib.rs D-C6): the bytes about to be used to
+    // derive addresses must round-trip through our own deserializer. A
+    // failure means compile() would hand out a P2S address whose script no
+    // deserializer accepts — funds sent there would be stranded (the F-3
     // class, adversarial-findings-constants.md).
     //
-    // The re-read runs under the ACTIVATED-version axis (`tree_version`), NOT the
-    // emitted header version (always 0). Scala gates V6-embeddable TYPE codes
-    // (`SUnsignedBigInt`, …) on the ACTIVATED version
+    // The re-read runs under the ACTIVATED-version axis (`tree_version`), NOT
+    // the emitted header version (always 0). Scala gates V6-embeddable TYPE
+    // codes (`SUnsignedBigInt`, …) on the ACTIVATED version
     // (`TypeSerializer.getEmbeddableType` → `VersionContext.isV6Activated`,
     // `VersionContext.scala:33`; deser under `withVersions(activatedVersion,
     // treeVersion)`, `ErgoTreeSerializer.scala:148-154`), so a header-v0 tree
     // carrying a code-9 type that a `tree_version >= 3` compile produces DOES
     // re-parse on a V6-activated network — `read_ergo_tree_with_activated_version`
-    // mirrors that. (The earlier premise that these bytes "neither side's reader
-    // re-parses → strands funds" was WRONG: the wrong-axis header-version gate in
-    // the plain reader was the only thing rejecting them; corrected here + lib.rs
-    // D-C6 item 5a.) A genuinely unrepresentable emission (a real serializer
-    // failure) still rejects reject-side-safely: a wrong-reject surfaces a user
-    // error, a wrong-accept strands funds.
+    // mirrors that. A genuinely unrepresentable emission (a real serializer
+    // failure) still rejects reject-side-safely: a wrong-reject surfaces a
+    // user error, a wrong-accept strands funds.
     {
         use ergo_primitives::reader::VlqReader;
         use ergo_ser::ergo_tree::read_ergo_tree_with_activated_version;
@@ -435,7 +418,7 @@ mod tests {
 
     // ----- helpers -----
 
-    /// secp256k1 generator, SEC1-compressed. The Task-1 PK test address
+    /// secp256k1 generator, SEC1-compressed. The PK test address
     /// `3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN` decodes to
     /// ProveDlog of exactly this point (the well-known "secret = 1" testnet
     /// address), and the oracle env's `g1` is bound to it too.
@@ -444,8 +427,7 @@ mod tests {
 
     /// Oracle capture, VERBATIM (TyperOracle.scala `cc` verb, sigma-state
     /// 6.0.2 SigmaCompiler + ErgoTreeSerializer + Pay2S/Pay2SHAddress,
-    /// ORACLE_NETWORK=testnet, captured 2026-07-04,
-    /// `.superpowers/sdd/task-1-report.md` Step-4 smoke, line 2):
+    /// ORACLE_NETWORK=testnet):
     ///
     ///   cc PK("3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN")
     ///   → OK <ORACLE_PK_TREE_HEX> <ORACLE_PK_P2S> <ORACLE_PK_P2SH>
@@ -519,7 +501,7 @@ mod tests {
     }
 
     /// Reparse under a V6-activated deserializer — the axis the compile
-    /// self-check uses for a `tree_version >= 3` build (F1). Mirrors Scala
+    /// self-check uses for a `tree_version >= 3` build. Mirrors Scala
     /// re-reading a header-v0 tree on a V6-activated network.
     fn reparse_v6(bytes: &[u8]) -> ErgoTree {
         let mut r = VlqReader::new(bytes);
@@ -1070,21 +1052,19 @@ mod tests {
     }
 
     /// A second bare-const pin beyond the PK class — and the oracle
-    /// authority for the SigmaTyperTest env's `g2 = 2·G` value (final
-    /// whole-M3 review finding 1). The oracle constant-folds
-    /// `proveDlog(g2)` into a bare `SigmaPropConstant` carrying the
-    /// NORMALIZED compressed point, so its tree hex is a byte-level pin
-    /// of the 2·G bytes the twin envs must bind.
+    /// authority for the SigmaTyperTest env's `g2 = 2·G` value. The oracle
+    /// constant-folds `proveDlog(g2)` into a bare `SigmaPropConstant`
+    /// carrying the NORMALIZED compressed point, so its tree hex is a
+    /// byte-level pin of the 2·G bytes the twin envs must bind.
     ///
     /// Oracle: `ccs proveDlog(g2)` →
     /// `OK 0008cd02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5
     ///  5AgXz2LADsxyCxEWvvHHpM9vKJsKbCwMjhXmVVrjH1dFtMgEupoAtSQd
     ///  rnwHaWHeaqaP7sCPFCF8VdN2Mxe72y4oLt8XKAt`
-    /// (sigma-state 6.0.2, ORACLE_NETWORK=testnet, captured 2026-07-07).
-    /// **M4 Task 3 flip:** the D-C2 fold now runs (`crate::lower`), so our
-    /// `CreateProveDlog(Const)` collapses into the SAME bare
-    /// `SigmaPropConstant` the oracle emits — full tree bytes AND both
-    /// addresses now match, not just the 33-byte point inside the constant.
+    /// (sigma-state 6.0.2, ORACLE_NETWORK=testnet). The D-C2 fold
+    /// (`crate::lower`) collapses our `CreateProveDlog(Const)` into the SAME
+    /// bare `SigmaPropConstant` the oracle emits — full tree bytes AND both
+    /// addresses match, not just the 33-byte point inside the constant.
     #[test]
     fn compile_provedlog_two_g_point_bytes_match_oracle_fold() {
         let mut env = ScriptEnv::new();

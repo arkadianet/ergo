@@ -225,9 +225,8 @@ pub(crate) fn collect_type_vars(t: &SType, acc: &mut Vec<String>) {
 /// post-condition `v.tpe != NoType` (SigmaTyper.scala:541-542) is enforced on
 /// every return.
 ///
-/// Exposed `pub` (re-exported from `typer`) to match the crate convention for
-/// reachable typer surface (see `unify`/`methods`); the brief's `pub(crate)` can
-/// be narrowed once Task 8's `typecheck` API consumes it in-crate.
+/// `pub` (re-exported from `typer`), matching the crate's convention of
+/// exposing each phase's entry point (see `unify`/`methods`).
 pub fn assign_type(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, TyperError> {
     let result = dispatch(env, e, ctx)?;
     // §7 post-condition: the typer eliminates `MethodCallLike` (§1.11) and
@@ -1483,9 +1482,9 @@ mod tests {
     }
 
     /// A2: because `min`/`max` are in the env, shadowing them in a block is a
-    /// duplicate-name error (SigmaTyper.scala:58-59) — the accept-invalid form that
-    /// previously slipped through (the 2-arg application desugars to `ArithOp`, but
-    /// the bare/shadow forms must see the env entry).
+    /// duplicate-name error (SigmaTyper.scala:58-59): the 2-arg application form
+    /// desugars to `ArithOp` directly, but the bare/shadow forms must see the env
+    /// entry.
     #[test]
     fn predef_env_min_shadow_rejects_duplicate() {
         for src in ["{ val min = 1; min }", "{ val max = 1; max }"] {

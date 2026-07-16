@@ -90,7 +90,7 @@ impl Interner {
             }
             // Every other opcode — incl. eager BinXor (0xF4) AND OptionGetOrElse
             // (0xE5), whose default is built EAGERLY in the enclosing scope, not a
-            // thunk (M5 Task 5c/R2; GraphBuilding.scala:441,962,1013-1035) — all
+            // thunk (GraphBuilding.scala:441,962,1013-1035) — all
             // children in the current scope.
             _ => {
                 let mut child_syms = Vec::with_capacity(children.len());

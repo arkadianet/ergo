@@ -93,7 +93,7 @@ fn segregate(root: &Expr) -> Result<(Expr, Vec<(SigmaType, SigmaValue)>), WriteE
 /// }
 /// ```
 ///
-/// **The D-C1 flip (M4 Task 2):** a bare-constant root (e.g. `PK("...")` →
+/// **The D-C1 flip:** a bare-constant root (e.g. `PK("...")` →
 /// `SigmaPropConstant`) takes `withoutSegregation` — header `0x00`, empty
 /// constants table, the constant itself as the body (byte-identical to Scala on
 /// both sides). EVERY other root takes `withSegregation` via [`segregate`] —

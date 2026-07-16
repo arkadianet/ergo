@@ -21,14 +21,14 @@ impl Scope {
             T::Context { .. } => node(0xFE, Payload::Zero),
             T::Global { .. } => node(0xDD, Payload::Zero),
 
-            // ── M4 Task 8 (recon-transforms.md §9, D-C7 singleton bullet):
+            // ── (recon-transforms.md §9, D-C7 singleton bullet):
             //    bare `LastBlockUtxoRootHash` and bare/dotted `groupGenerator`
             //    are NOT `IsContextProperty`-recognized primitives on the
             //    Scala side (unlike Height/Inputs/Outputs/Self/MinerPubkey) —
             //    buildTree's fallback re-materializes both as PropertyCalls.
-            //    Oracle-confirmed 2026-07-07 (×2 runs each,
-            //    `ORACLE_TREE_VERSION=3`): `LastBlockUtxoRootHash.digest.size`
-            //    and `CONTEXT.LastBlockUtxoRootHash.digest.size` both reply
+            //    Oracle-confirmed (`ORACLE_TREE_VERSION=3`):
+            //    `LastBlockUtxoRootHash.digest.size` and
+            //    `CONTEXT.LastBlockUtxoRootHash.digest.size` both reply
             //    `…db6509fe…` (`PropertyCall(101, 9)` over a bare `Context`
             //    receiver, opcode 0xFE) — so this arm alone closes the gap
             //    without touching the (already-correct) dotted-form typer
@@ -227,7 +227,7 @@ impl Scope {
             T::AND { input, .. } => node(0x96, self.one(input)?),
             T::OR { input, .. } => node(0x97, self.one(input)?),
             T::XorOf { input, .. } => {
-                // Verdict parity with the FULL Scala compiler (Task-10 gate):
+                // Verdict parity with the FULL Scala compiler:
                 // the reference typer accepts `xorOf(Coll(sigmaProp(..)))` as
                 // `XorOf(ConcreteCollection[SigmaProp])` — the Bool↔SigmaProp
                 // unifier admits the elements WITHOUT the per-element
@@ -356,33 +356,31 @@ impl Scope {
             T::Ident { name, .. } => match self.lookup(name) {
                 Some(id) => node(0x72, Payload::ValUse { id }),
                 // Two distinct reasons an Ident can be unbound here, and they
-                // must NOT be conflated (M4 Task 8 review, D-C8):
+                // must NOT be conflated (D-C8):
                 //
                 // 1. `name` is a KNOWN predef function (`allZK`/`anyZK`/
                 //    `outerJoin` — `predef_ir.rs`'s `predefined_env`) whose
                 //    Scala `irBuilder` is the literal `PredefFuncInfo(undefined)`
                 //    sentinel (SigmaPredef.scala:79-92/108-123) — genuinely
-                //    UNIMPLEMENTED in the reference compiler itself (tracked
-                //    upstream: sigmastate-interpreter#543), not a gap in this
-                //    port. `predef_ir_builder` mirrors that with a `None`
-                //    fall-through, so the typed tree keeps the raw
+                //    UNIMPLEMENTED in the reference compiler itself, not a gap
+                //    in this port. `predef_ir_builder` mirrors that with a
+                //    `None` fall-through, so the typed tree keeps the raw
                 //    `Apply(Ident, args)` shape all the way here — BYTE-
-                //    IDENTICAL to the oracle's own `tce`/`tcs` residual
-                //    (probed 2026-07-07). Scala's `compiler.compile` (the
-                //    `cc`/`cce`/`ccs` verbs this crate's `compile()` mirrors)
-                //    reaches `GraphBuilding.eval`'s `Ident` case,
-                //    `env.getOrElse(n, !!!(...))`, which throws unconditionally
-                //    (`n` was never bound as a lambda arg or block val) — a
-                //    `StagingException`. Live-probed 3x: literal single-/multi-
-                //    element `Coll` AND a val-bound `Coll` all REJECT
-                //    identically for both `allZK`/`anyZK` — there is no
-                //    accepting form, not even the "literal Coll unwraps to
-                //    SigmaAnd/SigmaOr" shape this port used to assume (that
-                //    unwrap only fires for the `&&`/`||` OPERATOR route, which
-                //    builds a `SigmaAnd`/`SigmaOr` node directly and never
-                //    passes through `PredefinedFuncApply` at all). This is a
-                //    real, user-reachable REJECT — reported as such, not as an
-                //    internal pipeline-bug.
+                //    IDENTICAL to the oracle's own `tce`/`tcs` residual. Scala's
+                //    `compiler.compile` (the `cc`/`cce`/`ccs` verbs this
+                //    crate's `compile()` mirrors) reaches `GraphBuilding.eval`'s
+                //    `Ident` case, `env.getOrElse(n, !!!(...))`, which throws
+                //    unconditionally (`n` was never bound as a lambda arg or
+                //    block val) — a `StagingException`. Oracle-confirmed:
+                //    literal single-/multi-element `Coll` AND a val-bound
+                //    `Coll` all REJECT identically for both `allZK`/`anyZK` —
+                //    there is no accepting form, not even the "literal Coll
+                //    unwraps to SigmaAnd/SigmaOr" shape this port used to
+                //    assume (that unwrap only fires for the `&&`/`||`
+                //    OPERATOR route, which builds a `SigmaAnd`/`SigmaOr` node
+                //    directly and never passes through `PredefinedFuncApply`
+                //    at all). This is a real, user-reachable REJECT —
+                //    reported as such, not as an internal pipeline bug.
                 // 2. Anything else: the binder substitutes env values as
                 //    Constants and the typer only emits Ident for in-scope
                 //    val/lambda-arg names or (1) above, so any OTHER unbound

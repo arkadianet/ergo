@@ -59,11 +59,10 @@ impl Interner {
 
     // ----- introspection (read API over the substrate) -----
     //
-    // The interned symbol graph IS this pass's product; these read-only
-    // accessors are how the Task-1 unit tests assert symbol identity (there is
-    // no ValDef/tree emission to diff yet) and how Tasks 2-4 (usage count,
-    // admission gate, schedule) will consume it. Public so they are part of the
-    // module's surface rather than dead in the non-test build.
+    // Read-only accessors over the interned symbol graph, used by unit tests
+    // to assert symbol identity and by the usage-count/admission-gate/schedule
+    // phases to consume it. Public so they are part of the module's surface
+    // rather than dead code outside tests.
 
     /// The symbols whose class is opcode `op`, in allocation order.
     pub fn symbols_with_opcode(&self, op: u8) -> Vec<SymId> {

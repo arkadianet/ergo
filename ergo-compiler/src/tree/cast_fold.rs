@@ -34,7 +34,7 @@ pub(crate) fn in_fold_range(w: FoldWidth, v: i64) -> bool {
     }
 }
 
-/// Explicit-cast folds, BOTH directions (M4 Task 4; recon-transforms.md §7).
+/// Explicit-cast folds, BOTH directions (recon-transforms.md §7).
 ///
 /// Scala's `buildNode`/`eval` intercepts `Upcast(Constant(v,_), toTpe)` /
 /// `Downcast(Constant(v,_), toTpe)` (`GraphBuilding.scala:514-518`) as a
@@ -43,38 +43,34 @@ pub(crate) fn in_fold_range(w: FoldWidth, v: i64) -> bool {
 /// built (before any lowering — ours or Scala's), is itself a bare
 /// `Constant` node. This walk mirrors that exactly:
 ///
-/// - **fold** (direction (a), the D-C5 checker's retired cast arm): a
-///   `Downcast`/`Upcast` whose immediate child IS `Expr::Const` folds to the
-///   cast target's `Const` — range-checked exactly like Scala's
-///   `toByteExact`/`toShortExact`/`toIntExact` (`300.toByte` REJECTs,
-///   `ArithmeticException`, matching the retired checker's message
-///   verbatim); Upcast never overflows (widening only). Flips
-///   recon-targets.md vectors 60/61/62 outright (`0.toByte`/`9.toByte`
-///   argument casts) and is an ingredient of 73/84/85 and the chaincash
-///   corpus's `Upcast` residuals (still MULTI — those also need Task 5's
-///   generic const-fold for the surrounding `Eq`/bitwise).
+/// - **fold** (direction (a)): a `Downcast`/`Upcast` whose immediate child
+///   IS `Expr::Const` folds to the cast target's `Const` — range-checked
+///   exactly like Scala's `toByteExact`/`toShortExact`/`toIntExact`
+///   (`300.toByte` REJECTs, `ArithmeticException`); Upcast never overflows
+///   (widening only). A chain of unfolded casts still reaching this pass
+///   (e.g. from the chaincash corpus) needs [`crate::fold`]'s generic
+///   const-fold for the surrounding `Eq`/bitwise.
 /// - **do NOT fold** (direction (b) — the cascade a naive bottom-up
-///   implementation of this SAME pass would introduce; no such over-fold
-///   ever shipped in either the typer or emit — pinned by the
+///   implementation of this SAME pass would introduce; pinned by the
 ///   `mod tests` regression pair
 ///   `compile_cast_chain_keeps_only_innermost_fold_matching_oracle_probe_34`
 ///   / `compile_cast_chain_depth_three_nested_under_gt_keeps_all_outer_casts`):
 ///   when the child is anything else — critically, ANOTHER
 ///   `Downcast`/`Upcast` node. A literal cast CHAIN (`1.toByte.toLong
 ///   .toBigInt`) builds `Upcast(Upcast(Downcast(Const(1),Byte),Long),BigInt)`
-///   at emit time (verified: `ergo-compiler/src/emit.rs`'s Select-cast arm
-///   just wraps whatever `self.emit(obj)` returns, one opcode per source
-///   `.castMethod`, with NO fold). Recursing into that non-constant child
-///   (to give the innermost `Downcast` its OWN, independent fold decision)
-///   and then REBUILDING the same outer node — never re-checking whether
-///   the now-lowered child happens to have become a `Const` — is what keeps
+///   at emit time (`ergo-compiler/src/emit.rs`'s Select-cast arm wraps
+///   whatever `self.emit(obj)` returns, one opcode per source `.castMethod`,
+///   with NO fold). Recursing into that non-constant child (to give the
+///   innermost `Downcast` its OWN, independent fold decision) and then
+///   REBUILDING the same outer node — never re-checking whether the
+///   now-lowered child happens to have become a `Const` — is what keeps
 ///   this non-cascading: only the cast immediately adjacent to the literal
-///   folds, matching numerics N-3 probe 34's oracle capture
-///   (`d1917e7e730005067301`: TWO real `Upcast` nodes over the folded Byte
-///   constant, not one folded `BigInt` constant). A naive bottom-up
-///   "recurse first, then check if the (now-lowered) child is `Const`"
-///   traversal would cascade-fold the whole chain — this is the exact bug
-///   class this function must NOT reintroduce.
+///   folds, matching the oracle capture (`d1917e7e730005067301`: TWO real
+///   `Upcast` nodes over the folded Byte constant, not one folded `BigInt`
+///   constant). A naive bottom-up "recurse first, then check if the
+///   (now-lowered) child is `Const`" traversal would cascade-fold the whole
+///   chain — this is the exact bug class this function must NOT
+///   reintroduce.
 ///
 /// **Pass position:** runs immediately BEFORE [`crate::fold::fold`] (the
 /// generic constant fold, whose overflow-reject arm this pass's retired D-C5

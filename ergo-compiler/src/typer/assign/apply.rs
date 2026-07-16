@@ -136,11 +136,11 @@ pub(crate) fn assign_apply_explicit_method(
         // exactly as on the no-type-arg §1.8 path, while a MethodCallIrBuilder
         // method (getReg/some/none/deserializeTo/fromBigEndianBytes/
         // getVarFromInput) survives as a MethodCall carrying the {T->rangeTpe}
-        // substitution (seed §4). Before Task-11 wave 2 this branch built the
-        // MethodCall UNCONDITIONALLY, leaving e.g. `arr1.slice[Byte](0, 1)` a
-        // residual `MethodCall (12,7)` no evaluator accepts while Scala emits
-        // `Slice` (adversarial-findings-methodcalls.md F5; oracle 2026-07-07
-        // ×3: the annotated and un-annotated forms reply byte-identically,
+        // substitution (seed §4). Building the MethodCall unconditionally here
+        // would leave a custom-irBuilder method like `arr1.slice[Byte](0, 1)`
+        // as a residual `MethodCall (12,7)` no evaluator accepts, where Scala
+        // emits `Slice` (adversarial-findings-methodcalls.md F5; oracle: the
+        // annotated and un-annotated forms reply byte-identically,
         // `…d193b1b47300…`). `lower_method` is the same catalog Scala's
         // irBuilders implement, so routing through it IS the §1.7 rule.
         let lowered = lower_method(
@@ -180,7 +180,7 @@ pub(crate) fn assign_apply_select(
     ctx: &TyperCtx,
 ) -> Result<TypedExpr, TyperError> {
     let new_args = type_all(env, args, ctx)?;
-    // exp -> expUnsigned hack (SigmaTyper.scala:188-193).
+    // exp -> expUnsigned rename (SigmaTyper.scala:188-193).
     let n = if n_original == "exp"
         && new_args
             .first()

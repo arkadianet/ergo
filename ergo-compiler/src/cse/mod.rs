@@ -1,16 +1,16 @@
-//! M5 Task 1 — CSE scaffold: the scope-chain hash-cons SUBSTRATE.
+//! Common subexpression elimination (CSE): scope-chain hash-cons interning,
+//! usage-count admission gate, and `ValDef`/`ValUse` materialization.
 //!
-//! This module reproduces the *build-time identity* half of Scala's Scalan
-//! CSE — the part that decides **how many distinct symbols exist** and **which
-//! scope each was first built in**. It is a graph-build SIMULATION over our
-//! opcode IR (`ergo_ser::opcode::Expr`), NOT a Scalan port. It builds ONLY the
-//! substrate: interning + scope stack + bound-var dependency tags. It does NOT
-//! emit `ValDef`s, assign ids, or run usage counting (Tasks 2–4), and it is NOT
-//! wired into `compile()` yet.
+//! This module reproduces Scala's Scalan CSE as a graph-build SIMULATION over
+//! our opcode IR (`ergo_ser::opcode::Expr`), not a literal Scalan port. Phase A
+//! (interning) decides **how many distinct symbols exist** and **which scope
+//! each was first built in**; Phase B counts flat usage and applies the
+//! 4-predicate admission gate; Phase C (materialize) schedules and rebuilds
+//! the `ValDef`/`ValUse`/`BlockValue`/`FuncValue` tree with assign-once dense
+//! ids.
 //!
-//! Spec: the validated spike `dev-docs/ergoscript-compiler-m5-recon/
-//! spike-scope-chain.md` (6/6 oracle predictions). All Scala citations resolve
-//! under the pinned oracle checkout
+//! Spec: `dev-docs/ergoscript-compiler-m5-recon/spike-scope-chain.md`. All
+//! Scala citations resolve under the pinned oracle checkout
 //! `ergo-core/sigmastate-interpreter-v6.0.2`,
 //! `sc/shared/src/main/scala/sigma/compiler/ir/`.
 //!
@@ -38,7 +38,7 @@
 //! emits two un-shared copies while E6 (`HEIGHT+1` first built in the shared
 //! condition) emits one.
 //!
-//! # Scope-push sites (spike §2, CORRECTED for getOrElse — M5 Task 5c/R2)
+//! # Scope-push sites (spike §2)
 //!
 //! A hash-cons scope is pushed at EXACTLY three source shapes, each a *by-name*
 //! (lazy) operand; the left/condition operand is evaluated in the CURRENT scope
@@ -53,9 +53,7 @@
 //! `0xF4` BinXor is **eager** (spike §2 last row, `GraphBuilding.scala:874-877`)
 //! — no scope; both arms in the current scope (handled by the general path).
 //!
-//! **`0xE5` OptionGetOrElse is NOT a scope-push site** — the correction the R2
-//! recon pinned from source. The spike §2 table (and the M5-Task-5 model) wrongly
-//! listed `opt.getOrElse(d)` as thunking its default `d`. In Scala 6.0.2 the
+//! **`0xE5` OptionGetOrElse is NOT a scope-push site.** In Scala 6.0.2 the
 //! default is built **eagerly, as an ordinary argument, in the ENCLOSING scope**
 //! (`GraphBuilding.scala:441` `In`, `:962` `argsV`, `:1013-1035` the getOrElse
 //! dispatch), *before* it is wrapped in a Thunk; that Thunk has an EMPTY body and
@@ -69,7 +67,7 @@
 //! keystone's `HEIGHT+1` is built by-name inside its If-branch and stays
 //! thunk-local even though it is bound-var-free.
 //!
-//! # Pair projections bypass thunk isolation (M5 Task 5d — `unzipPair`/`tuplesCache`)
+//! # Pair projections bypass thunk isolation (`unzipPair`/`tuplesCache`)
 //!
 //! One node class breaks the "first-build scope decides identity" rule above:
 //! pair projections `t._1`/`t._2`. Scalan's `unzipPair` (`Tuples.scala:57-74`,
@@ -103,8 +101,8 @@
 //! (`Functions.scala:359-383`) pushes only `lambdaStack`, never `thunkStack`. So
 //! a node built inside a lambda body is hash-consed into whatever scope was
 //! already open (global at root) — a root-shared def referenced from two
-//! sibling lambdas is a single global symbol (E4). To let Task 3 decide
-//! lambda-float-up, each interned symbol is tagged with the set of bound-var
+//! sibling lambdas is a single global symbol (E4). To let materialization
+//! decide lambda-float-up, each interned symbol is tagged with the set of bound-var
 //! ids (lambda arg ids) it transitively depends on; a bound-var-free node floats
 //! up to the enclosing scope, a bound-var-dependent node belongs to the body
 //! (`AstGraphs.scala:56-85,111-121` `freeVars`/`domain`).
@@ -149,7 +147,7 @@ const IF: u8 = 0x95;
 const BIN_AND: u8 = 0xED;
 /// `a || b` — right arm thunked (`GraphBuilding.scala:864-867`).
 const BIN_OR: u8 = 0xEC;
-// `0xE5` OptionGetOrElse is deliberately ABSENT (M5 Task 5c/R2): its default is
+// `0xE5` OptionGetOrElse is deliberately ABSENT: its default is
 // built EAGERLY in the enclosing scope, not a thunk (GraphBuilding.scala:441,962,
 // 1013-1035 + Thunks.scala:261,283-286 empty-body thunk), so it routes through
 // the general eager path like any other node. See the module docs.
@@ -192,22 +190,21 @@ const OUTPUTS: u8 = 0xA5;
 const SELF_BOX: u8 = 0xA7;
 
 /// `Global` / `SGlobal` (`0xDD`, types.rs:388) — our lowering of `SigmaDslBuilder`
-/// (`TypedExpr::Global` → `Op(0xDD, Zero)`, `emit.rs:322`; `SType::SGlobal`
+/// (`TypedExpr::Global` → `Op(0xDD, Zero)`, `emit::dispatch`; `SType::SGlobal`
 /// prints as `"SigmaDslBuilder"`, `typed_print.rs:53`). This is the OUR-IR
 /// analogue of Scala's `IsInternalDef` (`TreeBuilding.scala:153-158`:
 /// `SigmaDslBuilder | CollBuilder`). The `CollBuilder` alternative has NO node in
 /// our lowered IR (collections lower straight to `ConcreteCollection`, never
 /// through an explicit builder singleton), so that half of the predicate is
 /// vacuous for us — documented, not fabricated (no `grep` hit for a CollBuilder
-/// node in `ergo-compiler/src/emit.rs`).
+/// node anywhere under `ergo-compiler/src/emit/`).
 const GLOBAL: u8 = 0xDD;
 
 /// The single subexpression-sharing pass — Scala's scope-chain hash-cons +
-/// `hasManyUsagesGlobal` ValDef materialization (spike §7.1), the SOLE replacement
-/// for the retired M4 `inline_vals`/`renumber_dense` machinery (locked decision 4,
-/// spike §7.2). Interns the tree once (Phase A: identity by first-build scope),
-/// then materializes from the root symbol (Phase B: flat usage count → 4-predicate
-/// admission gate → per-scope `ValDef` schedule with assign-once dense ids).
+/// `hasManyUsagesGlobal` ValDef materialization (spike §7.1). Interns the tree
+/// once (Phase A: identity by first-build scope), then materializes from the
+/// root symbol (Phase B: flat usage count → 4-predicate admission gate →
+/// per-scope `ValDef` schedule with assign-once dense ids).
 ///
 /// Subsumes val inlining for free: a use-count-1 symbol is not hoisted, so its one
 /// use inlines at the materialization site; a multi-use non-const/non-context
@@ -241,7 +238,7 @@ mod tests {
     const HEIGHT_OP: u8 = 0xA3;
     const INPUTS_OP: u8 = 0xA4;
     const BIN_XOR: u8 = 0xF4;
-    /// `opt.getOrElse(d)` — NOT a scope-push site (M5 Task 5c/R2): its default is
+    /// `opt.getOrElse(d)` — NOT a scope-push site: its default is
     /// built eagerly in the enclosing scope. Test-local only.
     const OPT_GET_OR_ELSE: u8 = 0xE5;
     const TUPLE: u8 = 0x86;
@@ -531,16 +528,14 @@ mod tests {
 
     #[test]
     fn option_get_or_else_default_is_enclosing_scope_not_thunk() {
-        // CORRECTED mechanism check (M5 Task 5c/R2): `getOrElse` does NOT thunk
-        // its default — the default is built eagerly in the ENCLOSING scope
-        // (GraphBuilding.scala:441,962,1013-1035 + Thunks.scala:261,283-286).
-        // Distinguishing test vs a thunk-push: two SIBLING getOrElse nodes with
-        // byte-identical defaults (`HEIGHT+1`) but distinct receivers. Under the
-        // (wrong) thunk model each default lands in its own sibling thunk → TWO
-        // distinct Plus symbols. Under the correct eager model both defaults are
-        // built in the shared root scope → hash-cons → ONE Plus symbol. This is
-        // the exact under-sharing that pinned buy-token-for-erg's 2 missing root
-        // ValDefs.
+        // `getOrElse` does NOT thunk its default — the default is built eagerly
+        // in the ENCLOSING scope (GraphBuilding.scala:441,962,1013-1035 +
+        // Thunks.scala:261,283-286). Distinguishing test vs a thunk-push: two
+        // SIBLING getOrElse nodes with byte-identical defaults (`HEIGHT+1`) but
+        // distinct receivers. Under a (wrong) thunk model each default lands in
+        // its own sibling thunk → TWO distinct Plus symbols. Under the correct
+        // eager model both defaults are built in the shared root scope →
+        // hash-cons → ONE Plus symbol.
         let e = Expr::Op(IrNode {
             opcode: TUPLE,
             payload: Payload::Tuple {
@@ -559,7 +554,7 @@ mod tests {
         );
     }
 
-    // ----- pair projections (M5 Task 5d, Tuples.scala:57-74) -----
+    // ----- pair projections (Tuples.scala:57-74) -----
 
     #[test]
     fn pair_projection_root_forced_receiver_shares_second_across_if_branches() {
@@ -912,7 +907,7 @@ mod tests {
 
     #[test]
     fn provedhtuple_repeated_ge_consts_hoist_liftedconst_not_p4_suppressed() {
-        // M5 Task 5 Fix 2 (`m5-sched-small.md` §1.3): `proveDHTuple(…)` over
+        // `m5-sched-small.md` §1.3: `proveDHTuple(…)` over
         // repeated `GroupElement` constants. A `GroupElement` literal is a
         // `LiftedConst`, NOT Scala's narrow `Const[_]`, so P4 (`IsConstantDef`)
         // structurally cannot see it — it hoists like any ordinary multi-use
@@ -1039,9 +1034,9 @@ mod tests {
             SType::SBoolean => (crate::emit::emit(&typed).expect("emit"), true),
             other => panic!("unexpected root type: {other:?}"),
         };
-        // The CSE-preceding M4 transforms, MINUS `inline_vals`: CSE subsumes val
-        // inlining via its hash-cons (locked decision 4). This is load-bearing,
-        // not incidental — `inline_vals` SYNTACTICALLY clones a shared `def`'s
+        // The CSE-preceding transforms, MINUS `inline_vals`: CSE subsumes val
+        // inlining via its hash-cons. This is load-bearing, not incidental —
+        // `inline_vals` SYNTACTICALLY clones a shared `def`'s
         // rhs into each use site, and when two uses land in sibling thunks (e.g.
         // `deposit.es`: `def f = …; if (c) f(SELF) else f(SELF)`) the clones
         // become sibling-distinct symbols that never share, so CSE would never
@@ -1051,14 +1046,12 @@ mod tests {
         // see the un-inlined tree. `prune_dead_vals` is kept so a dead `val`'s
         // rhs is not interned (its refs would otherwise inflate the flat usage
         // count). `fold_direct_const_casts` is a no-op for these cast-free
-        // vectors and is private to tree.rs, so it is omitted.
+        // vectors, so it is omitted.
         //
-        // Task-4 note: the fold pass in `crate::tree::compile` runs AFTER
-        // `inline_vals` (so `{val x=2; x+1}` folds to `3`). Dropping the inline
-        // here loses that constant-through-`val` propagation — none of the Task-3
-        // single-ValDef vectors exercise it, but Task 4's retirement of
-        // `inline.rs` into CSE must fold over the interned graph (or keep a
-        // constant-only pre-inline) to preserve it.
+        // `crate::tree::compile` runs a final `crate::fold::fold` pass AFTER
+        // CSE (not reproduced here) to fold the constant adjacencies CSE
+        // exposes by P4-inlining constant-valued `val`s (`{val x=2; x+1}` →
+        // `3`) — none of the single-ValDef vectors below exercise it.
         let inner = crate::isproven::eliminate_isproven(inner);
         let inner = crate::fold::fold(inner).expect("fold");
         let inner = crate::inline::prune_dead_vals(inner);
@@ -1215,15 +1208,14 @@ aea4d9010263918cc77202017201"
 
     #[test]
     fn root_thunked_conjunct_block_emits_before_eager_block() {
-        // M5 Task 5e (basis-token): schedule-order freeVars. Two distinct
-        // multi-use root Boolean vals `x = HEIGHT>1`, `y = HEIGHT>2`, referenced
-        // ONLY inside a single if-branch — as the two operands of `x && y`, where
-        // `y` is the THUNKED right `&&` operand and `x` the EAGER left. Scala
-        // schedules the nested thunk (carrying `y`) as a post-order entry BEFORE
-        // the `BinAnd` that owns the eager `x`, so `freeVars` collects `y` before
+        // Schedule-order freeVars. Two distinct multi-use root Boolean vals
+        // `x = HEIGHT>1`, `y = HEIGHT>2`, referenced ONLY inside a single
+        // if-branch — as the two operands of `x && y`, where `y` is the
+        // THUNKED right `&&` operand and `x` the EAGER left. Scala schedules
+        // the nested thunk (carrying `y`) as a post-order entry BEFORE the
+        // `BinAnd` that owns the eager `x`, so `freeVars` collects `y` before
         // `x` → the root ValDef schedule emits `y`'s block first (dense id 1),
-        // `x`'s second. The pre-fix child-order collection emitted `x` first —
-        // this asserts the reorder end-to-end through `materialize`.
+        // `x`'s second. Asserted end-to-end through `materialize`.
         let e = block(
             vec![
                 valdef(1, op2(GT, height(), int(1))), // x = HEIGHT > 1
@@ -1284,11 +1276,9 @@ aea4d9010263918cc77202017201"
         // called from BOTH `if` branches. Its FuncValue is built once at root and
         // used twice → hoisted as a single root `ValDef(1, FuncValue)` with the
         // two branch calls as `FuncApply(ValUse(1), SELF)` — the single-ValDef
-        // class over a lambda rhs. This vector is in `DC7_P2SH_MISMATCH_SET`
-        // (M4-blocked on CSE); Task 3's `materialize` produces byte-identical
-        // bytes to the Scala 6.0.2 `cc` oracle. It stays SET-listed until Task 4
-        // wires CSE into `compile()` (this test proves the materializer, not the
-        // live path).
+        // class over a lambda rhs. `materialize` produces byte-identical bytes to
+        // the Scala 6.0.2 `cc` oracle, exercised here directly against the
+        // materializer rather than through the live `compile()` path.
         let src =
             std::fs::read_to_string("../test-vectors/ergoscript/corpus/crystalpool/deposit.es")
                 .expect("read deposit.es");
@@ -1302,14 +1292,10 @@ dad9010263e4c67202050401a7da720101a7da720101a7"
     #[test]
     fn corpus_dexy_gort_emission_matches_oracle() {
         // `dexy/gort-dev/emission.es` — a SEVEN-ValDef root `BlockValue`
-        // (`d807`) plus a nested one-ValDef block. Post-order-DFS schedule order
-        // already matches Scala's `depthFirstOrderFrom(deps)` for this vector, so
-        // it is byte-identical to the oracle — a Task-5 preview showing the
-        // multi-ValDef machinery works where the schedule order coincides.
-        // (The remaining chaincash/crystalpool multi-ValDef vectors do NOT yet
-        // agree on schedule order — that is Task 5's reverse-engineering loop,
-        // spike §7.4/OQ1 — so they stay in the mismatch set.) Also in
-        // `DC7_P2SH_MISMATCH_SET`; graduates only once Task 4 wires CSE live.
+        // (`d807`) plus a nested one-ValDef block, exercising the multi-ValDef
+        // schedule machinery. Post-order-DFS schedule order matches Scala's
+        // `depthFirstOrderFrom(deps)` for this vector, so it is byte-identical
+        // to the oracle.
         let src =
             std::fs::read_to_string("../test-vectors/ergoscript/corpus/dexy/gort-dev/emission.es")
                 .expect("read emission.es");

@@ -27,18 +27,17 @@ impl Scope {
         type_subst: &[(String, SType)],
     ) -> Result<Expr, EmitError> {
         // GraphBuilding reject gates (lib.rs D-C5) — residual MethodCalls the
-        // typer accepts (M2 parity) but the FULL Scala compiler rejects:
+        // typer accepts but the FULL Scala compiler rejects:
         //
         // (a) Shared-SNumericType-container methods (`toBytes`/`toBits`,
         //     D-T10): the owner name "SNumericType" is only ever produced at
         //     `tree_version < 3` (`owner_name_for_method`), where Scala's
         //     GraphBuilding rejects the v6-only method under v5 activation
         //     (oracle, ORACLE_TREE_VERSION=2: `ccs sigmaProp(x.toBytes.size
-        //     == 4)` → `REJECT 1:13 GraphBuildingException`, 2026-07-07 ×3
-        //     runs). At v3 the owner resolves per-type (`Int`/…): a CONSTANT
-        //     receiver folds at gate (d) below (wave 2, lib.rs D-C6), a
-        //     non-constant one keeps the residual MethodCall (Err/Err reduce
-        //     parity).
+        //     == 4)` → `REJECT 1:13 GraphBuildingException`). At v3 the owner
+        //     resolves per-type (`Int`/…): a CONSTANT receiver folds at gate
+        //     (d) below (lib.rs D-C6), a non-constant one keeps the residual
+        //     MethodCall (Err/Err reduce parity).
         if method.owner == "SNumericType" {
             return Err(EmitError::GraphBuildingReject {
                 class: "GraphBuildingException",
@@ -103,10 +102,10 @@ impl Scope {
         //     `ErgoBox.registers(i)` at compile time (oracle: `cc sigmaProp(
         //     SELF.getReg[Int](-1).isDefined)` → `REJECT 0:0
         //     ArrayIndexOutOfBoundsException`; same for 10 and 100). Out of
-        //     range → the wave-1 reject gate; IN RANGE → the wave-2 lowering
+        //     range → reject; IN RANGE → lowering
         //     (adversarial-findings-methodcalls.md F4): `SELF.getReg[Int](5)`
-        //     must emit the SAME bytes as `SELF.R5[Int]` (oracle 2026-07-07
-        //     ×3: both reply `1000d1e6c6a70504` — body `…c6a70504`,
+        //     must emit the SAME bytes as `SELF.R5[Int]` (oracle: both reply
+        //     `1000d1e6c6a70504` — body `…c6a70504`,
         //     ExtractRegisterAs). The wire carries the INNER elem type T
         //     (mirrors the Select `R0`..`R9` arm; ExtractRegisterAsSerializer
         //     writes `tpe.elemType`). Only a LITERAL Int argument lowers — a
@@ -150,9 +149,9 @@ impl Scope {
         }
         // (d) v6 numeric methods over CONSTANT receivers fold at compile time
         //     — Scala's GraphBuilding partially evaluates them, emitting the
-        //     folded constant (wave 2, adversarial-findings-methodcalls.md
-        //     F6). Oracle-probed fold set ONLY (2026-07-07 ×3 runs each):
-        //     `toBytes`/`toBits` on Byte/Short/Int/Long constants (`ccs
+        //     folded constant (adversarial-findings-methodcalls.md F6).
+        //     Oracle-probed fold set ONLY: `toBytes`/`toBits` on
+        //     Byte/Short/Int/Long constants (`ccs
         //     sigmaProp(x.toBytes.size == 4)` → const `0e04 0000000a`,
         //     big-endian; `x.toBits` → const `0d20 00000050`, Coll[Boolean]
         //     MSB-first; `7.toByte.toBytes` → `0e01 07` — a single explicit
@@ -284,15 +283,15 @@ impl Scope {
     }
 }
 
-/// Constant value of a v6-numeric-method receiver/argument for the wave-2
-/// compile-time fold (emit_method_call gate (d), lib.rs D-C6): a DIRECT
+/// Constant value of a v6-numeric-method receiver/argument for the
+/// compile-time fold (`emit_method_call` gate (d), lib.rs D-C6): a DIRECT
 /// Byte/Short/Int/Long constant, or a single explicit numeric cast of one
-/// (`7.toByte` — a typed `Select` the typer leaves unfolded, class-4(a)).
+/// (`7.toByte` — a typed `Select` the typer leaves unfolded).
 /// The cast case is range-checked: an out-of-range cast (`300.toByte`)
 /// returns `None`, so the residual `Downcast` reaches
-/// `tree.rs::fold_direct_const_casts`, which rejects with the oracle's
+/// `tree::fold_direct_const_casts`, which rejects with the oracle's
 /// `ArithmeticException` (oracle: `cc sigmaProp(300.toByte.toBytes.size ==
-/// 1)` → `REJECT 0:0 ArithmeticException`, 2026-07-07 ×3).
+/// 1)` → `REJECT 0:0 ArithmeticException`).
 pub(crate) fn const_numeric_i64(e: &TypedExpr) -> Option<i64> {
     fn direct(e: &TypedExpr) -> Option<i64> {
         match e {

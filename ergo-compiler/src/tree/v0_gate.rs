@@ -35,7 +35,7 @@ fn v0_unserializable_data(tpe: &SigmaType, val: &SigmaValue) -> Option<&'static 
 }
 
 /// Walk an emitted body for constants whose DATA cannot serialize under the
-/// M3 v0 header (see the gate comment in [`compile`]). Returns a description
+/// v0 header (see the gate comment in [`compile`]). Returns a description
 /// of the first offender, or `None` when the tree is v0-clean.
 pub(crate) fn find_v0_unserializable(expr: &Expr) -> Option<String> {
     let mut stack = vec![expr];

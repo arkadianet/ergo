@@ -1,17 +1,17 @@
 //! Typed ErgoScript AST → `ergo-ser` opcode IR (backend emission).
 //!
-//! M3 Task 7 laid the type map ([`map_type`]), the constant map
-//! ([`map_const`]), and every FIXED-ARITY opcode arm of [`emit`] — context
-//! singletons, relations, arithmetic/boolean operators, collection
-//! transformers, sigma combinators, crypto primitives, option/context access.
-//! (Bit operators later became Task-11 wave-1 GraphBuilding-parity REJECTS —
-//! lib.rs D-C5; Scala's full compiler cannot lower them.)
-//! M3 Task 8 adds the binding forms (`Block`/`ValNode`/`Ident`/`Lambda` →
-//! `BlockValue`/`ValDef`/`ValUse`/`FuncValue`), `MethodCall`/`PropertyCall`
-//! wire dispatch, the residual `Apply`/`Select` lowering catalog (numeric
-//! casts, box/sigma-prop/tuple properties, `FuncApply`), and defensive
-//! mixed-width `Upcast` normalization inside the binary arith/relation and
-//! `ByIndex` arms.
+//! Provides the type map ([`map_type`]), the constant map ([`map_const`]),
+//! and [`emit`]'s coverage: fixed-arity opcode arms (context singletons,
+//! relations, arithmetic/boolean operators, collection transformers, sigma
+//! combinators, crypto primitives, option/context access), binding forms
+//! (`Block`/`ValNode`/`Ident`/`Lambda` → `BlockValue`/`ValDef`/`ValUse`/
+//! `FuncValue`), `MethodCall`/`PropertyCall` wire dispatch, the residual
+//! `Apply`/`Select` lowering catalog (numeric casts, box/sigma-prop/tuple
+//! properties, `FuncApply`), and defensive mixed-width `Upcast`
+//! normalization inside the binary arith/relation and `ByIndex` arms. Bit
+//! operators are GraphBuilding-parity rejects (see
+//! [`EmitError::GraphBuildingReject`], lib.rs D-C5) — Scala's full compiler
+//! cannot lower them.
 //!
 //! This module keeps `EmitError`, the entry points ([`emit`]/
 //! [`emit_with_version`]/[`emit_with_placeholders`]), and the small shared
@@ -33,9 +33,9 @@
 //! contract with Scala `ValueSerializer`/`OpCodes.scala` (sigma-state 6.0.2).
 //! Payload shapes follow `dev-docs/ergoscript-compiler-m3-recon/recon-ergoser-ir.md`.
 //!
-//! # Boolean constants — byte-shape intel for Task 9/10 (oracle-captured)
+//! # Boolean constant wire shape
 //!
-//! Live TyperOracle captures (sigma-state 6.0.2, 2026-07-05, `cc` verb):
+//! TyperOracle captures (sigma-state 6.0.2, `cc` verb):
 //!
 //! ```text
 //! sigmaProp(true)        → 10 01 0101   d1 7300
@@ -47,13 +47,10 @@
 //! segregated `SBoolean` table entry (`0101`/`0100`) referenced by a
 //! `ConstPlaceholder` (`7300`) — NOT the dedicated `0x7F` True / `0x80` False
 //! opcodes. `emit` therefore builds `Expr::Const { SBoolean, Boolean(_) }`
-//! with no True/False special-casing; the M4 segregation transform (the
-//! D-C1 flip point — M3 deliberately emits non-segregated trees) will turn
-//! inline constants into table entries. The captures also pin the
+//! with no True/False special-casing; a later segregation transform (the
+//! D-C1 flip point — this module deliberately emits non-segregated trees)
+//! turns inline constants into table entries. The captures also pin the
 //! default P2S tree header `0x10` (version 0 + constant-segregation bit).
-//! (Note: the Task-1 review notes mislabeled the `sigmaProp(HEIGHT > 100)`
-//! bytes as the `sigmaProp(true)` reply; the three-way capture above
-//! disambiguates.)
 //!
 //! # Nodes `ergo-ser` cannot represent (deviation-ledger entries in lib.rs)
 //!
@@ -104,8 +101,7 @@ pub enum EmitError {
     /// A typed node with no opcode-IR lowering: a node `ergo-ser` cannot
     /// represent (see the module docs), or a residual `Select`/`Apply`/
     /// `MethodCall` outside the lowering catalog — the message names the
-    /// offending method/field/owner so the Task-11 adversarial pass can hunt
-    /// the gap.
+    /// offending method/field/owner.
     #[error("node not supported by emit: {0}")]
     UnsupportedNode(String),
     /// A structurally invalid shape that must never reach emit (pre-typed
@@ -113,8 +109,8 @@ pub enum EmitError {
     /// identifiers).
     #[error("invalid shape reached emit: {0}")]
     InvalidShape(&'static str),
-    /// A construct the TYPER accepts (M2 parity holds on both sides) but the
-    /// FULL Scala compiler REJECTS at its GraphBuilding/IR stage — no
+    /// A construct the typer accepts but the FULL Scala compiler REJECTS at
+    /// its GraphBuilding/IR stage — no
     /// lowering exists for the node, or compile-time constant evaluation
     /// throws. Mirroring the verdict keeps `compile()` from handing out tree
     /// bytes + addresses the reference compiler can never produce (several
@@ -275,8 +271,8 @@ mod tests {
 
     /// write_expr → parse_expr → structural equality → re-write → byte
     /// equality (the `ergo-ser/src/opcode/tests.rs::roundtrip_v` pattern via
-    /// the PUBLIC API). cseg=false: Task 7 emits inline constants only; the
-    /// segregation transform is Task 9/10.
+    /// the PUBLIC API). cseg=false: `emit` produces inline constants only;
+    /// segregation is a separate transform.
     fn wire_roundtrip(ir: &Expr) -> Vec<u8> {
         let mut w = VlqWriter::new();
         write_expr(&mut w, ir, false).expect("write_expr");
@@ -342,7 +338,8 @@ mod tests {
     }
 
     /// Hand-built node → emit → assert opcode → round-trip. For arms the
-    /// M3 frontend cannot reach without Task-8 forms (documented per test).
+    /// frontend cannot reach without dedicated binding-form syntax (documented
+    /// per test).
     fn rt_node(node: &TypedExpr, opcode: u8) -> Expr {
         let ir = emit(node).unwrap_or_else(|e| panic!("emit({node:?}): {e}"));
         assert_eq!(root_opcode(&ir), opcode, "expected opcode {opcode:#04x}");
@@ -634,11 +631,11 @@ mod tests {
 
     #[test]
     fn lowered_singletons_emit_property_call_and_roundtrip() {
-        // M4 Task 8 (recon-transforms.md §9, D-C7): bare `LastBlockUtxoRootHash`
+        // (recon-transforms.md §9, D-C7): bare `LastBlockUtxoRootHash`
         // and bare/dotted `groupGenerator` are NOT `IsContextProperty`
         // primitives on the Scala side — both lower to a `PropertyCall`
         // (opcode 0xDB), not the dedicated 0xA6/0x82 leaf. Oracle-confirmed
-        // 2026-07-07 (`ORACLE_TREE_VERSION=3`, ×2 runs each): both
+        // (`ORACLE_TREE_VERSION=3`): both
         // `LastBlockUtxoRootHash.digest.size` and
         // `CONTEXT.LastBlockUtxoRootHash.digest.size` reply the SAME
         // `PropertyCall(101, 9)` receiver bytes (`…db6509fe…`); both
@@ -821,7 +818,7 @@ mod tests {
     #[test]
     fn tuple_and_select_field_emit_and_roundtrip() {
         rt_op("(1, 2L)", 0x86);
-        // `(1, 2L)._2` survives as `Select '_2'` in the typed AST; the Task-8
+        // `(1, 2L)._2` survives as `Select '_2'` in the typed AST; the
         // Select arm lowers it to SelectField (GraphBuilding.scala:551-553).
         let ir = emit_tc("(1, 2L)._2");
         assert_eq!(root_opcode(&ir), 0x8C);
@@ -1048,8 +1045,8 @@ mod tests {
         // A NON-constant receiver keeps the residual MethodCall with wire
         // pair (4, 6) (oracle: `ccs sigmaProp(HEIGHT.toBytes.size == 4)`
         // keeps the pair too — Err/Err reduce parity, compile_seed.json); a
-        // CONSTANT receiver now FOLDS at v3 (wave 2 — see
-        // `numeric_const_receiver_methods_fold_to_oracle_bytes`).
+        // CONSTANT receiver folds at v3 — see
+        // `numeric_const_receiver_methods_fold_to_oracle_bytes`.
         let ir = emit_tc("HEIGHT.toBytes");
         assert_eq!(root_opcode(&ir), 0xDB);
         match &ir {
@@ -1087,7 +1084,7 @@ mod tests {
             );
         }
         // Nearest-accept boundaries: in-range literals (0..=9) lower to
-        // ExtractRegisterAs (wave 2 — byte pins in
+        // ExtractRegisterAs (byte pins in
         // `get_reg_in_range_literal_lowers_to_extract_register_as`), and a
         // DYNAMIC index is untouched (Scala keeps the MethodCall there too —
         // Err/Err reduce parity).
@@ -1101,11 +1098,10 @@ mod tests {
 
     #[test]
     fn numeric_const_receiver_methods_fold_to_oracle_bytes() {
-        // Wave 2 (adversarial-findings-methodcalls.md F6): Scala's
-        // GraphBuilding partially evaluates v6 numeric methods over CONSTANT
-        // receivers at v3; emit folds the same probed set. Every expected
-        // hex below is the CONSTANT segment of a fresh oracle capture
-        // (2026-07-07, 3 identical runs):
+        // (adversarial-findings-methodcalls.md F6): Scala's GraphBuilding
+        // partially evaluates v6 numeric methods over CONSTANT receivers at
+        // v3; emit folds the same probed set. Every expected hex below is
+        // the CONSTANT segment of an oracle capture:
         //   ccs `x.toBytes` (x=10)        → `0e04 0000000a` (big-endian)
         //   ccs `x.toBits`                → `0d20 00000050` (Coll[Boolean],
         //       index 0 = the most significant bit; bit-packed on the wire)
@@ -1145,12 +1141,12 @@ mod tests {
 
     #[test]
     fn get_reg_in_range_literal_lowers_to_extract_register_as() {
-        // Wave 2 (adversarial-findings-methodcalls.md F4): Scala lowers a
+        // (adversarial-findings-methodcalls.md F4): Scala lowers a
         // CONST-index `getReg[T]` to ExtractRegisterAs at GraphBuilding —
         // `cc sigmaProp(SELF.getReg[Int](5).isDefined)` and `cc sigmaProp(
-        // SELF.R5[Int].isDefined)` reply IDENTICALLY (`1000d1e6c6a70504`,
-        // oracle 2026-07-07 ×3; body `…c6 a7 05 04` = ExtractRegisterAs(
-        // SELF, reg 5, Int) — the wire carries the INNER elem type).
+        // SELF.R5[Int].isDefined)` reply IDENTICALLY (`1000d1e6c6a70504`;
+        // body `…c6 a7 05 04` = ExtractRegisterAs(SELF, reg 5, Int) — the
+        // wire carries the INNER elem type).
         let get_reg = emit_tc("SELF.getReg[Int](5)");
         let r5 = emit_tc("SELF.R5[Int]");
         assert_eq!(get_reg, r5, "getReg literal must lower like the R5 path");
@@ -1766,11 +1762,11 @@ mod tests {
     #[test]
     fn method_call_get_reg_emits_explicit_type_arg() {
         // `SELF.getReg[Int](HEIGHT)` (DYNAMIC index — a literal index lowers
-        // to ExtractRegisterAs since wave 2) → MethodCall 0xDC (99, 19) with
+        // to ExtractRegisterAs instead) → MethodCall 0xDC (99, 19) with
         // one value arg and the explicit `[T]` type block (ergo-ser
         // method_explicit_type_args_count(99, 19) == 1). Oracle keeps the
         // MethodCall for the dynamic form too (`cc sigmaProp(SELF.getReg[
-        // Int](HEIGHT).isDefined)` → body `…dc6313a701a304`, 2026-07-07 ×3).
+        // Int](HEIGHT).isDefined)` → body `…dc6313a701a304`).
         let ir = emit_tc("SELF.getReg[Int](HEIGHT)");
         assert_eq!(root_opcode(&ir), 0xDC);
         match &ir {
@@ -1834,7 +1830,7 @@ mod tests {
             ("LastBlockUtxoRootHash.digest", 0xDB, (100, 1)),
             ("g1.getEncoded", 0xDB, (7, 2)),
             // v3 concrete %Int.toBytes — NON-constant receiver (a constant
-            // one folds since wave 2, gate (d) in emit_method_call).
+            // receiver folds instead — gate (d) in emit_method_call).
             ("HEIGHT.toBytes", 0xDB, (4, 6)),
             ("Global.serialize(HEIGHT)", 0xDC, (106, 3)),
         ] {
@@ -2134,9 +2130,9 @@ mod tests {
     /// D-C8: `allZK`/`anyZK`/`outerJoin` are KNOWN predefs (present in
     /// `predefined_env`) with no Scala irBuilder — reaching them here as a
     /// bare unbound `Apply(Ident, args)` is a real, oracle-confirmed user
-    /// REJECT (`StagingException` — probed 2026-07-07, ×3 identical runs,
-    /// literal single-/multi-element `Coll` AND val-bound forms all reject),
-    /// not a pipeline bug. Must classify as `GraphBuildingReject`, never
+    /// REJECT (`StagingException`; literal single-/multi-element `Coll` AND
+    /// val-bound forms all reject), not a pipeline bug. Must classify as
+    /// `GraphBuildingReject`, never
     /// `InvalidShape` — the two are user-facing-vs-internal, not
     /// interchangeable (`unbound_ident_returns_invalid_shape` above pins the
     /// genuine-bug case stays `InvalidShape`).
@@ -2200,7 +2196,7 @@ mod tests {
     #[test]
     fn residual_select_returns_unsupported_node_naming_the_field() {
         // Outside the lowering catalog → UnsupportedNode carrying the field
-        // name (the Task-11 adversarial pass greps for these).
+        // name.
         let node = TypedExpr::Select {
             obj: Box::new(tc("SELF")),
             field: "getRegV5".to_string(),
@@ -2304,7 +2300,7 @@ mod tests {
 
     #[test]
     fn standalone_top_level_val_rejects_matching_oracle() {
-        // golden_seed §25 (live capture 2026-07-05): `tc val x = 1` →
+        // golden_seed §25: `tc val x = 1` →
         // `REJECT 1:1 ParserException`. Emit never sees a ValNode root from
         // the frontend because the parse already rejects.
         let err = typecheck(&demo_env(), "val x = 1", 3).unwrap_err();
@@ -2316,7 +2312,7 @@ mod tests {
         // Oracle capture (module docs): `cc sigmaProp(true)` →
         // `10 01 0101 d1 7300` — the Boolean rides the CONSTANT path
         // (segregated 0101 table entry + placeholder), not opcode 0x7F.
-        // Pre-segregation (Task 7) the same constant is inline: d1 01 01.
+        // Pre-segregation the same constant is inline: d1 01 01.
         let ir = emit_tc("sigmaProp(true)");
         assert_eq!(
             ir,
@@ -2335,7 +2331,7 @@ mod tests {
     #[test]
     fn sigma_prop_height_gt_100_inline_bytes_match_oracle_constant_bytes() {
         // Oracle capture: `cc sigmaProp(HEIGHT > 100)` →
-        // `10 01 04c801 d191a37300` (segregated). The inline Task-7 body is
+        // `10 01 04c801 d191a37300` (segregated). The inline pre-segregation body is
         // the same opcode spine with the constant bytes `04 c8 01` in place
         // of the placeholder: d1 91 a3 04c801.
         let bytes = wire_roundtrip(&emit_tc("sigmaProp(HEIGHT > 100)"));

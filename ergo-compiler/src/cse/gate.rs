@@ -124,7 +124,7 @@ impl Interner {
     /// each occurrence re-segregates into its own pool slot with no dedup
     /// (validated E3: `42` used twice → two `0454` slots).
     ///
-    /// **Type boundary (M5 Task 5, Fix 2, `m5-sched-small.md` §1.3).** Every
+    /// **Type boundary (`m5-sched-small.md` §1.3).** Every
     /// OTHER literal — `GroupElement`/`SigmaProp`/`BigInt`/`UnsignedBigInt`/
     /// `Coll`/`Box`/`AvlTree` — lifts to a `GroupElementConst`-style
     /// `LiftedConst` (`Base.scala:240`, `SigmaDslImpl.scala:539-593` via the
@@ -144,7 +144,7 @@ impl Interner {
 
     /// The exact admission conjunction (`TreeBuilding.scala:503-509`):
     /// `has_many && !IsContextProperty && !IsInternalDef && !IsConstantDef`.
-    /// A symbol clears the gate ⇒ Task 3 will materialize it as a `ValDef`; a
+    /// A symbol clearing the gate is materialized as a `ValDef`; a
     /// single-use symbol fails P1 and stays inlined at its one use (this is where
     /// single-use inlining "falls out free", spike §7.2). Takes the precomputed
     /// [`flat_usage`](Self::flat_usage) map.
@@ -152,7 +152,7 @@ impl Interner {
     /// Note this is the PURE 4-predicate gate. Lambda-argument placeholder symbols
     /// (`KeyTag::Arg`) are not excluded here by a predicate — Scala excludes them
     /// structurally (a bound `Variable` is never in a scope's `schedule`), which is
-    /// Task 3's schedule-membership concern, not a gate predicate.
+    /// materialization's schedule-membership concern, not a gate predicate.
     pub fn should_hoist(&self, sym: SymId, usage: &BTreeMap<SymId, usize>) -> bool {
         Self::has_many(usage, sym)
             && !self.is_context_property(sym)
@@ -165,8 +165,8 @@ impl Interner {
 /// primitive scalar literals produced by the `toRep` fallback
 /// (`GraphBuilding.scala:495-498`) — Int/Byte/Short/Long/Boolean/String. Every
 /// other literal type lifts to a `LiftedConst` (`Base.scala:240`) that P4
-/// structurally cannot see and so hoists as an ordinary node (M5 Task 5 Fix 2,
-/// `m5-sched-small.md` §1.3). `SString` is `Coll[SByte]` at the value level but
+/// structurally cannot see and so hoists as an ordinary node
+/// (`m5-sched-small.md` §1.3). `SString` is `Coll[SByte]` at the value level but
 /// carries its own type code and IS a scalar `Const` in Scala, so it stays here.
 pub(crate) fn is_primitive_scalar_const_type(tpe: &SigmaType) -> bool {
     matches!(

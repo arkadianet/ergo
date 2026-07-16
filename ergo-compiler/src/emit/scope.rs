@@ -28,9 +28,9 @@ use super::*;
 /// TreeBuilding.scala:186-191, recon-scala-pipeline §6). Scala additionally
 /// REUSES ids across disjoint scopes (each `processAstGraph` restarts its
 /// `curId` from the enclosing `defId`) and skips ids for non-materialized
-/// graph nodes (CSE); the monotonic counter never reuses, which is the
-/// M3-sanctioned relaxation — the milestone gates on validity and
-/// collision-freedom only, exact id parity is M5 (ValDef sharing).
+/// graph nodes (CSE); the monotonic counter never reuses. This is a
+/// sanctioned relaxation from exact Scala id parity: validity and
+/// collision-freedom are the only guarantees this module makes.
 pub(crate) struct Scope {
     pub(crate) bindings: Vec<HashMap<String, (u32, SigmaType)>>,
     next_id: u32,
@@ -164,8 +164,9 @@ impl Scope {
     /// Emit a collection/tuple index expression, wrapping a narrower-than-Int
     /// numeric index in `Upcast(_, SInt)` — `typedIndex.upcastTo(SInt)`,
     /// SigmaTyper.scala:265-288. The frontend inserts this at typer time
-    /// (assign.rs `assign_collection_index`/`assign_tuple_index`), so this is
-    /// defensive normalization for hand-built trees. A WIDER index (Long+) is
+    /// (`typer::assign::assign_collection_index`/`assign_tuple_index`), so
+    /// this is defensive normalization for hand-built trees. A WIDER index
+    /// (Long+) is
     /// left untouched: `upcastTo(SInt)` would be a downcast, which the Scala
     /// typer rejects before this point.
     pub(crate) fn emit_index(&mut self, index: &TypedExpr) -> Result<Expr, EmitError> {

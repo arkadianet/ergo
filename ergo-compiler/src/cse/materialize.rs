@@ -6,7 +6,7 @@ use ergo_ser::sigma_type::SigmaType;
 use super::*;
 
 impl Interner {
-    // ----- Task 3/5: per-scope schedule + ValDef materialization + assign-once ids -----
+    // ----- per-scope schedule + ValDef materialization + assign-once ids -----
 
     /// Reconstruct an opcode `Expr` from the interned graph rooted at `root`,
     /// materializing a `ValDef`/`ValUse`/`BlockValue`/`FuncValue` tree with
@@ -18,9 +18,9 @@ impl Interner {
     /// as ONE `ValDef` in the scope it was first built (spike §3); every
     /// reference to it becomes a `ValUse` of the assigned id. A single-use symbol
     /// (or a gate-suppressed context/builder/constant) is INLINED at each use
-    /// (single-use inlining falls out for free, spike §7.2 / locked decision 4).
+    /// (single-use inlining falls out for free, spike §7.2).
     ///
-    /// # The schedule rule (M5 Task 5, Fix 1a/1b)
+    /// # The schedule rule
     ///
     /// Per-scope ValDef order is Scala's `GraphUtil.depthFirstOrderFrom`
     /// (`GraphUtil.scala:43-64`): a POST-ORDER DFS from the scope's result symbol,
@@ -163,7 +163,7 @@ impl Interner {
     /// `scheduleForResult`), scanning each scheduled node's deps and collecting
     /// those that are neither local (scheduled) nor bound vars, first-appearance.
     ///
-    /// The crux (M5 Task 5e, `m5-root-schedule-order.md`): Scala schedules each
+    /// The crux (`m5-root-schedule-order.md`): Scala schedules each
     /// by-name (`ThunkDef`) operand — the `&&`/`||` right arm, an `if` branch —
     /// as a SEPARATE post-order entry that PRECEDES the operator owning it, so its
     /// freeVars are collected BEFORE the operator's EAGER operands'. For `a && b`
@@ -195,7 +195,7 @@ impl Interner {
             for &d in &deps {
                 // Free iff not local (scheduled) and not a bound var. A Deeper dep
                 // is itself scheduled (contributes at its own slot) so it is not a
-                // freeVar here — no inline descent (the Task-5e fix).
+                // freeVar here — no inline descent.
                 if matches!(self.syms[d.0 as usize].node, Node::Arg) {
                     continue;
                 }
@@ -375,9 +375,9 @@ impl Interner {
     /// right-hand operand are their own thunk sub-scopes (re-entered
     /// via the recorded `branch_scopes`, so a shared thunk-result symbol does not
     /// drag the wrong scope's members); every other child — including a
-    /// getOrElse default, built eagerly in the enclosing scope (M5 Task 5c/R2) —
-    /// is rebuilt in the current scope. A thunk carries the SAME `def_id` (no arg, no id consumed —
-    /// `ThunkDef` case, `TreeBuilding.scala:195-197`).
+    /// getOrElse default, built eagerly in the enclosing scope — is rebuilt in
+    /// the current scope. A thunk carries the SAME `def_id` (no arg, no id
+    /// consumed — `ThunkDef` case, `TreeBuilding.scala:195-197`).
     pub(crate) fn build_op(
         &self,
         sym: SymId,
@@ -431,7 +431,7 @@ pub(crate) enum Rel {
 
 /// A materialized `ValDef` node (`0xD6`). `tpe` is never on the wire (the reader
 /// always has a constant store), so it is pinned `None` exactly as emit does
-/// (`emit.rs` `emit_block`, `parse.rs` ValDef arm).
+/// (`emit::dispatch`'s `emit_block`, `ergo-ser`'s wire-parse ValDef arm).
 pub(crate) fn val_def(id: u32, rhs: Expr) -> Expr {
     Expr::Op(IrNode {
         opcode: VAL_DEF,

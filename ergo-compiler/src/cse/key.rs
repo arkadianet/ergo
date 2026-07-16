@@ -7,7 +7,7 @@ use ergo_ser::sigma_value::SigmaValue;
 // ----- symbol identity -----
 
 /// A build-time symbol identity. Assigned densely in interning (evaluation)
-/// order; the numeric value doubles as the index into [`Interner::syms`].
+/// order; the numeric value doubles as the index into [`super::Interner::syms`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct SymId(pub u32);
 
@@ -46,8 +46,8 @@ pub(crate) struct ScopeTable {
     pub(crate) by_key: BTreeMap<ExprKey, SymId>,
 }
 
-/// The rebuild template for an interned symbol — everything Task 3's
-/// [`Interner::materialize`] needs to reconstruct the node's `Expr` from its
+/// The rebuild template for an interned symbol — everything
+/// [`super::Interner::materialize`] needs to reconstruct the node's `Expr` from its
 /// interned children. The interner's [`ExprKey`] is a hash key (span- and
 /// structure-stripped); it is intentionally lossy about scalar payload layout,
 /// so materialization keeps this parallel template. Rebuilt children come from
@@ -72,7 +72,7 @@ pub(crate) enum Node {
         args: Vec<(SymId, Option<SigmaType>)>,
         body: SymId,
         /// The placement scope id of the lambda BODY (a `ScopeId` into
-        /// [`Interner::scope_parents`]). A lambda opens a schedule scope even
+        /// [`super::Interner::scope_parents`]). A lambda opens a schedule scope even
         /// though it opens no hash-cons scope (spike §1.4): its body's local
         /// nodes schedule INSIDE it (`Functions.scala:112-134`).
         body_scope: ScopeId,
@@ -83,7 +83,7 @@ pub(crate) enum Node {
     Arg,
 }
 
-/// An index into [`Interner::scope_parents`] — a node in the SCHEDULE scope
+/// An index into [`super::Interner::scope_parents`] — a node in the SCHEDULE scope
 /// tree. Scope 0 is the root program scope; every thunk push (both `If`
 /// branches, `&&`/`||` right arm) AND every lambda body
 /// opens a child scope. Distinct from the hash-cons scope stack (`scopes`,
@@ -101,7 +101,7 @@ pub(crate) struct SymInfo {
     /// names. Kept for introspection/tests; PLACEMENT now uses `scope` (the
     /// scope tree captures lambda nesting directly).
     pub(crate) deps: BTreeSet<u32>,
-    /// The rebuild template (Task 3 materialization).
+    /// The rebuild template used during materialization.
     pub(crate) node: Node,
     /// The PLACEMENT scope this symbol was first built in — a node in the
     /// schedule scope tree ([`ScopeId`]). A `ValDef` is materialized in exactly

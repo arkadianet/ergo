@@ -5,9 +5,8 @@ use crate::emit::EmitError;
 use super::*;
 
 /// GraphBuilding verdict-parity gate over the emitted body — lambda and
-/// application shapes the FULL Scala compiler rejects (lib.rs D-C5, wave 1;
-/// adversarial-findings-bindings.md F1/F2 + fresh boundary captures
-/// 2026-07-07, every probe 3 identical oracle runs).
+/// application shapes the FULL Scala compiler rejects (lib.rs D-C5;
+/// adversarial-findings-bindings.md F1/F2).
 ///
 /// Oracle-pinned rules:
 /// - **Zero-arg `FuncValue` rejects ANYWHERE** — even as the rhs of an
@@ -21,19 +20,19 @@ use super::*;
 ///   val-bound multi-arg lambda (`{ val unused = {(x: Int, y: Int) => x +
 ///   y}; sigmaProp(true) }` → OK), an un-applied alias (`val g = f` with no
 ///   call → OK) and every HOF-callback use — direct `fold(0L, {(a, b) =>
-///   ...})` AND val-bound `fold(0L, f)` (fresh capture: `cc { val f = {(a:
+///   ...})` AND val-bound `fold(0L, f)` (`cc { val f = {(a:
 ///   Long, b: Long) => a + b}; sigmaProp(Coll(1L, 2L).fold(0L, f) == 3L) }`
 ///   → OK, the D-C4 both-accept class, e.g. corpus
 ///   `crystalpool/swap-tokens.es`) — stay ACCEPTED: the gate keys on the
 ///   APPLICATION node, not on the `FuncValue`. Those accepted multi-arg
 ///   DEFINITIONS are lowered to the tupled 1-arg form downstream by
-///   [`crate::tuple`] (M4 Task 7, D-C4 CLOSED), which is why they are
-///   evaluable and byte-matchable — this gate itself is unchanged.
+///   [`crate::tuple`] (D-C4), which is why they are evaluable and
+///   byte-matchable — this gate itself is unchanged.
 /// - **A lambda with a FUNCTION-typed parameter rejects** (`{(f: Int => Int)
 ///   => f(10)}` and the param-unused body variant → `REJECT 0:0
 ///   MatchError`) UNLESS the lambda sits in DEAD code that Scala's schedule
-///   prunes before the lowering that dies. The exemption is now
-///   REACHABILITY-based and transitive (M4 Task 9, NF-2 CLOSED): a
+///   prunes before the lowering that dies. The exemption is
+///   REACHABILITY-based and transitive (NF-2): a
 ///   `FuncValue` with an `SFunc` param anywhere inside an unreachable `val`'s
 ///   rhs — direct rhs (`cc { val unused = {(f: Int => Int) => 1};
 ///   sigmaProp(true) }` → OK) OR nested (`cc { val unused = Coll({(f: Int =>
