@@ -25,10 +25,18 @@ pub(crate) fn render_derivation_path(components: &[u32]) -> String {
     s
 }
 
-/// Shared write path: persist a new tracked pubkey + rebuild WALLET_VISIBLE_ADDRESSES.
+/// Shared write path: persist a new tracked pubkey + rebuild WALLET_VISIBLE_ADDRESSES,
+/// optionally advancing WALLET_DERIVATION_HEAD in the SAME transaction. Returns
+/// the new `derivation_path_index` used for the entry.
 ///
-/// The write is atomic (single redb write transaction). Returns the new
-/// `derivation_path_index` used for the entry.
+/// The write is atomic (single redb write transaction) — including the head
+/// advance when `new_derivation_head` is `Some`. This matters for
+/// `derive_next_key_impl`: folding the head advance into this same commit
+/// means a crash can never leave a tracked pubkey persisted without its
+/// corresponding head advance (which would otherwise wedge future
+/// `deriveNextKey` calls permanently, since the head is the sole source for
+/// the next path and is never independently reconciled against the tracked
+/// set). `derive_key_impl` passes `None` — it has no head to advance.
 ///
 /// WALLET_VISIBLE_ADDRESSES is rebuilt from scratch from all tracked pubkeys
 /// except the hidden master (path_idx == 0, derivation_path == []).
@@ -38,6 +46,7 @@ pub(crate) fn persist_tracked_pubkey(
     path_idx: u64,
     pubkey: &[u8; 33],
     meta: &ergo_state::wallet::types::TrackedPubkeyMeta,
+    new_derivation_head: Option<u64>,
 ) -> Result<(), WalletAdminError> {
     use ergo_state::wallet::tables::{
         tracked_pubkey_key, WALLET_TRACKED_PUBKEYS, WALLET_VISIBLE_ADDRESSES,
@@ -109,6 +118,16 @@ pub(crate) fn persist_tracked_pubkey(
                     .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
                 visible_idx += 1;
             }
+        }
+
+        if let Some(new_head) = new_derivation_head {
+            use ergo_state::wallet::tables::WALLET_DERIVATION_HEAD;
+            let mut head_tbl = write_txn
+                .open_table(WALLET_DERIVATION_HEAD)
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            head_tbl
+                .insert((), new_head)
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
         }
     }
     write_txn
@@ -183,7 +202,7 @@ pub(crate) async fn derive_key_impl(
     };
 
     // Persist atomically (WALLET_TRACKED_PUBKEYS + WALLET_VISIBLE_ADDRESSES).
-    persist_tracked_pubkey(db, next_idx, &pubkey, &meta)?;
+    persist_tracked_pubkey(db, next_idx, &pubkey, &meta, None)?;
     drop(storage_guard);
 
     // Update in-memory WalletState.
@@ -204,8 +223,10 @@ pub(crate) async fn derive_key_impl(
 ///
 /// Shares its persist step with [`derive_key_impl`] via
 /// [`persist_tracked_pubkey`] (tracked pubkey + `WALLET_VISIBLE_ADDRESSES`
-/// rebuild); this function additionally advances `WALLET_DERIVATION_HEAD`
-/// in its own write transaction right after.
+/// rebuild), passing `Some(new_head)` so the `WALLET_DERIVATION_HEAD` advance
+/// commits in the SAME transaction — a crash can never persist the tracked
+/// pubkey without also advancing the head (which would otherwise wedge every
+/// future call, since the head is the sole source for the next path).
 pub(crate) async fn derive_next_key_impl(
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     state: &RwLock<ergo_wallet::state::WalletState>,
@@ -287,28 +308,7 @@ pub(crate) async fn derive_next_key_impl(
 
     // Persist WALLET_TRACKED_PUBKEYS + WALLET_VISIBLE_ADDRESSES, shared with
     // derive_key_impl so the two paths can never drift on this logic.
-    persist_tracked_pubkey(db, next_idx, &pubkey, &meta)?;
-
-    // Advance WALLET_DERIVATION_HEAD in its own write transaction. A crash
-    // between this commit and the persist above just means a retry recomputes
-    // the same `new_head` and re-derives the same path, which then hits the
-    // dedup check above and fails cleanly rather than silently double-tracking.
-    {
-        let write_txn = db
-            .begin_write()
-            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        {
-            let mut head_tbl = write_txn
-                .open_table(WALLET_DERIVATION_HEAD)
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            head_tbl
-                .insert((), new_head)
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        }
-        write_txn
-            .commit()
-            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-    }
+    persist_tracked_pubkey(db, next_idx, &pubkey, &meta, Some(new_head))?;
     drop(storage_guard);
 
     // Update in-memory WalletState.
