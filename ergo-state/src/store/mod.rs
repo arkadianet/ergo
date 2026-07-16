@@ -529,8 +529,8 @@ struct UtxoMutation<'a> {
 
 /// Owned wallet-apply payload built at block-apply time on the main
 /// thread. Carries everything needed to run `apply_block_to_wallet` +
-/// `promote_matured_boxes` inside the chain's redb write_txn —
-/// closes the M5 atomic-commit seam (`audit-2 M5`).
+/// `promote_matured_boxes` inside the chain's redb write_txn, so the
+/// chain and wallet commit atomically in the same transaction.
 ///
 /// Bundled as owned data (not references to live wallet state) so
 /// the payload crosses the persist-pipeline thread boundary into
@@ -3120,10 +3120,11 @@ impl StateStore {
     ///
     /// Callers that only need the legacy `Option<[u8; 32]>` shape
     /// (treating both gap arms as `None`) can stay on
-    /// [`Self::get_header_id_at_height`]; the lookups Phase 0 §1 marks
-    /// as "critical" (Mode 2 manifest verification, snapshot-install
-    /// re-fetch, executor `load_header_index`) MUST use this one or
-    /// the `SparseGap` signal is erased at the call site.
+    /// [`Self::get_header_id_at_height`]; callers where losing the
+    /// `SparseGap` distinction would be unsafe (Mode 2 manifest
+    /// verification, snapshot-install re-fetch, executor
+    /// `load_header_index`) MUST use this one or the signal is erased
+    /// at the call site.
     pub fn lookup_header_at_height(&self, height: u32) -> Result<HeightLookup, StateError> {
         if let Some(id) = self.get_header_id_at_height(height)? {
             return Ok(HeightLookup::Dense(id));
@@ -3462,7 +3463,7 @@ impl StateStore {
     /// for the **dense suffix range only**, the best-header pointers,
     /// and the `header_availability = PoPowSparse { .. }` mode tag.
     ///
-    /// Phase 0 §5. Caller is responsible for verifying the proof
+    /// Caller is responsible for verifying the proof
     /// (`NipopowProof::is_valid` + quorum semantics in
     /// `ergo-validation::popow`) BEFORE invoking this method —
     /// `apply_popow_proof` accepts any structurally-typed proof; the
@@ -3473,7 +3474,7 @@ impl StateStore {
     /// a node that already has chain state returns
     /// `StateError::ApplyPopowProofWrongMode` rather than
     /// overwriting; the re-bootstrap case is operator-driven (wipe
-    /// data_dir) per the Phase 0 §3.3 transition rules.
+    /// data_dir).
     ///
     /// Does NOT touch `CHAIN_INDEX` (full-block index) or
     /// `best_full_block_*`. The Mode 2 snapshot bootstrap remains
@@ -3481,8 +3482,8 @@ impl StateStore {
     /// Sentinel key for the cached NiPoPoW serve-side proof bytes.
     /// Scala parity: `PopowProcessor.scala::NipopowSnapshotHeightKey`.
     /// Holds a single serialized `NipopowProof` blob updated when the
-    /// chain crosses a snapshot epoch (see Part 2 sub-phase 14.10 /
-    /// 2W). Read on inbound `GetNipopowProof` requests from peers.
+    /// chain crosses a snapshot epoch. Read on inbound
+    /// `GetNipopowProof` requests from peers.
     const CACHED_POPOW_PROOF_KEY: &'static str = "cached_popow_proof";
 
     /// Advance best_full_block pointer without applying UTXO mutations.

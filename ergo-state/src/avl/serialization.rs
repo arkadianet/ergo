@@ -7,8 +7,7 @@
 //!                 || left_label[32] || right_label[32]`
 //! * Internal v1: `0x01 || key[32] || left[8] || right[8] || balance[1]`
 //!   (legacy, **read-only**: `node_from_bytes` still hydrates it but no
-//!   v2-capable writer produces it after the Task 1.6 child-label
-//!   activation)
+//!   v2-capable writer produces child-labelless nodes anymore)
 //!
 //! `AllocMeta` is `next_id[8]` big-endian under `STATE_META["allocator"]`,
 //! kept separate from consensus state so `committed_root` stays purely

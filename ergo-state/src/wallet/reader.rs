@@ -59,8 +59,7 @@ pub enum RewardKeyResolution {
 }
 
 /// Lifetime'd read view over wallet tables in a single redb read
-/// transaction. Created via `crate::store::StateStore::wallet_reader()`
-/// (Task 38).
+/// transaction. Created via `crate::store::StateStore::wallet_reader()`.
 pub struct WalletReader<'tx> {
     txn: &'tx ReadTransaction,
 }
@@ -332,8 +331,8 @@ impl<'tx> WalletReader<'tx> {
     /// - any other case (zero rows at the path in a NON-empty table, >1 rows at
     ///   the path, or any redb read / bincode decode failure) → `Corrupt`.
     ///
-    /// Per the consensus-review constraint: only true absence/emptiness maps to
-    /// `Pending`; every read/decode failure is `Corrupt`, never `Pending`.
+    /// Only true absence/emptiness maps to `Pending`; every read/decode
+    /// failure is `Corrupt`, never `Pending`.
     pub fn resolve_eip3_reward_key(&self) -> RewardKeyResolution {
         let tbl = match self.txn.open_table(WALLET_TRACKED_PUBKEYS) {
             Ok(t) => t,

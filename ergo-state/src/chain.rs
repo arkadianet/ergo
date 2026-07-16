@@ -136,8 +136,8 @@ pub enum HeaderMetaDecodeError {
 /// Persisted inline on [`ChainStateMeta`]. Legacy records that
 /// predate this field decode as [`HeaderAvailability::Dense`]
 /// (back-compat: any chain-state that exists today is dense, since
-/// no apply path can produce sparse state until sub-phase 14.5
-/// lands).
+/// no apply path can produce sparse state until NiPoPoW-proof
+/// apply lands).
 ///
 /// Guards the hidden invariant: `best_header_height` implies every
 /// height ≤ that is in `HEADER_CHAIN_INDEX`. The invariant holds for
@@ -190,8 +190,6 @@ impl HeaderAvailability {
 /// from "out-of-range" ([`Self::AboveTip`]). Mode 2 manifest
 /// verification and the snapshot-install re-fetch path MUST treat
 /// `SparseGap` as "wait, retry next tick" rather than fraud.
-///
-/// See Phase 0 design §4 for the per-call-site decision tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeightLookup {
     /// The height has a canonical header id locally available.
@@ -213,7 +211,7 @@ pub enum HeightLookup {
 ///
 /// Stored in `chain_state_meta` table under key "chain_state".
 /// Updated atomically with header acceptance, block application, or
-/// NiPoPoW proof apply (sub-phase 14.5). Wire format is suffixed by
+/// NiPoPoW proof apply. Wire format is suffixed by
 /// the header-availability discriminator so legacy records (without
 /// the trailing tag) decode as `HeaderAvailability::Dense`.
 #[derive(Debug, Clone)]
@@ -228,7 +226,7 @@ pub struct ChainStateMeta {
     pub best_full_block_id: [u8; 32],
     /// Height of `best_full_block_id`.
     pub best_full_block_height: u32,
-    /// Header availability mode (Phase 0 §3). Defaults to
+    /// Header availability mode. Defaults to
     /// [`HeaderAvailability::Dense`] for back-compat with legacy
     /// stores that predate this field.
     pub header_availability: HeaderAvailability,
@@ -377,7 +375,7 @@ pub struct ChainState {
     pub best_full_block_id: [u8; 32],
     /// Height of `best_full_block_id`.
     pub best_full_block_height: u32,
-    /// Header availability mode (Phase 0 §3). Mirrors
+    /// Header availability mode. Mirrors
     /// `ChainStateMeta::header_availability`.
     pub header_availability: HeaderAvailability,
     /// Session-only set of header ids that failed non-PoW validation

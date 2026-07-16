@@ -56,9 +56,9 @@
 //! shared `header_store::HeaderSectionTables`, so it persists headers
 //! and block sections and serves the read-side `StateBackend` traits
 //! (`ChainStateRead`, `HeaderSectionStore`). What remains deferred to
-//! C-2 is the apply-bridge that anchors the persisted digest to a
-//! header's `state_root`: that needs the ADProofs section, the
-//! boxChanges derivation, and the 5.7 oracle, none of which this
+//! a later layer is the apply-bridge that anchors the persisted digest
+//! to a header's `state_root`: that needs the ADProofs section, the
+//! boxChanges derivation, and a real-corpus oracle, none of which this
 //! read/persist layer owns.
 //!
 //! The seam is `pub(crate)` and the module is `#![allow(dead_code)]`:
@@ -2716,7 +2716,7 @@ mod tests {
 
     #[test]
     fn reopening_a_mode_6_digest_dir_as_digest_verifier_is_rejected() {
-        // The collision Codex flagged: a Mode 6 dir stamps "digest"
+        // The collision case: a Mode 6 dir stamps "digest"
         // (StateStore headers-only schema). Mode 5's DigestStateStore
         // stamps "digest-verifier" (a distinct, incompatible schema).
         // Opening a Mode 6 dir as Mode 5 must REJECT — otherwise the
@@ -3424,13 +3424,13 @@ mod tests {
         assert_eq!(ChainStateRead::active_params(&store).input_cost, 9999);
     }
 
-    /// Phase C-2 — the `BlockApply` apply-bridge.
+    /// The `BlockApply` apply-bridge.
     ///
     /// The successful real-box-change path (a header's `state_root`
     /// advancing across genuine inserts/removes, verified against a
-    /// Scala/mainnet ADProof) is the consensus gate and is covered by
-    /// the Phase 5.7 corpus replay, NOT here — a self-generated proof
-    /// is not a valid consensus oracle. These tests cover the bridge's
+    /// Scala/mainnet ADProof) is the consensus gate and is covered
+    /// elsewhere by a real-corpus replay, NOT here — a self-generated
+    /// proof is not a valid consensus oracle. These tests cover the bridge's
     /// guard logic, error classification, session-invalid marking, and
     /// the commit plumbing using a no-op transition (which still
     /// exercises section fetch → parse → verifier construction at a
@@ -3699,7 +3699,7 @@ mod tests {
             // genesis transition rather than rejecting it as
             // out-of-order or non-linear. (The successful genesis apply
             // itself, seeding the verifier at the pinned genesis state
-            // digest, is Phase 5.7's real-corpus territory.)
+            // digest, is covered elsewhere by a real-corpus replay.)
             let header = synth_block_header(1, genesis_tip, [1u8; 33], [0xCDu8; 32]);
             let (_, block) = empty_block(header);
             let err = BlockApply::apply_full_block(&mut store, &block, None, None)

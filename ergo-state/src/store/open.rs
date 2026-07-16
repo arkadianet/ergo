@@ -314,15 +314,15 @@ impl StateStore {
         // both inside their existing atomic write_txns.
         //
         // Open does NOT migrate absent rows for legacy bootstrap DBs
-        // (a DB whose `install_snapshot_state` ran before Phase 1b's
-        // sentinel co-commit existed). A migration here would have
+        // (a DB whose `install_snapshot_state` ran before the sentinel
+        // co-commit existed). A migration here would have
         // to distinguish "archive with best_full > 1 and absent row"
         // (where the row should stay absent — archive has all
         // blocks) from "bootstrap with best_full > 1 and absent row"
         // (where the row should be stamped at the anchor). Doing
         // that distinction requires config access (`blocks_to_keep`)
         // which open does not have, and Mode 4 has not shipped yet
-        // so no production legacy bootstrap DB exists. The Phase 5
+        // so no production legacy bootstrap DB exists. The
         // boot-consistency check (operator-config + persisted-
         // sentinel cross-check, in `ergo-node/src/node/boot.rs`)
         // owns this migration.
@@ -409,7 +409,7 @@ impl StateStore {
         Ok(())
     }
 
-    /// Test-only HEADERS_BY_HEIGHT seed. Phase 2a eviction reads
+    /// Test-only HEADERS_BY_HEIGHT seed. Pruned-height eviction reads
     /// this table to walk every header_id at a pruned height.
     /// Production populates it via the header validation
     /// pipeline; eviction tests that bypass block_proc seed it

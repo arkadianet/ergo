@@ -143,9 +143,8 @@ mod tests {
 
     #[test]
     fn first_boundary_helper_returns_empty_with_no_h0_row() {
-        // Spec 2026-05-02-voted-params-first-epoch-boundary: at the
-        // first epoch boundary the recompute returns empty because
-        // Rust storage has no chain row at h=0. Validation's
+        // At the first epoch boundary the recompute returns empty
+        // because Rust storage has no chain row at h=0. Validation's
         // `compute_epoch_votes` handles the empty seed branch; the
         // adapter is simply never asked about h=0.
         let (path, db) = tmp_db("first_epoch_helper");

@@ -57,7 +57,7 @@ impl StateStore {
 
         // Flush background persist pipeline — all in-flight blocks must be
         // committed before we can rollback against consistent DB state.
-        // Must run BEFORE the Phase 4 prune-sentinel check below;
+        // Must run BEFORE the prune-sentinel check below;
         // queued applies may advance the sentinel, and checking
         // before flush would race the flushed value with our read.
         if let Err(e) = self.flush_persist_pipeline() {
@@ -73,7 +73,7 @@ impl StateStore {
             return Err(e);
         }
 
-        // Mode 3 Phase 4 — reject below-sentinel rollback AFTER
+        // Mode 3: reject below-sentinel rollback AFTER
         // the pipeline flush so the sentinel reflects all
         // committed apply work. Section bytes at the target have
         // been pruned (or were never downloaded after a Mode 2

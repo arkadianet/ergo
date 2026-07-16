@@ -301,7 +301,7 @@ impl AvlTree {
         }
         self.root = root_id;
         self.height = tree_height;
-        // Task 1.7: label_of reads parent-held child labels (v2) in O(1);
+        // label_of reads parent-held child labels (v2) in O(1);
         // compute_label_fallback still fires for v1 legacy as a bounded
         // one-time cost until v2 has rewritten the affected nodes.
         self.root_label = self.label_of(root_id);

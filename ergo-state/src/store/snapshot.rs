@@ -1,8 +1,7 @@
 //! `CommittedSnapshot`: a single-read-transaction committed view of the
 //! chain and authenticated state, for off-loop mining-candidate builds.
 //!
-//! The off-loop candidate engine (see the mining-candidate regeneration
-//! design) must read every consensus-bearing build input — the best-full
+//! The off-loop candidate engine must read every consensus-bearing build input — the best-full
 //! and best-header tips, the parent header, the last-10 applied-header
 //! window, the active protocol parameters, the validation settings, and
 //! the AVL+ state root + node graph — from **one** redb read transaction.
@@ -2153,8 +2152,8 @@ mod tests {
     /// equals the committed state root, and returns `Advanced`.
     ///
     /// This pins: tx-id recomputation, create+spend UTXO netting, and the
-    /// replay path on a non-empty section — the risk surface Codex identified
-    /// as unpinned by the empty-block-only advance tests.
+    /// replay path on a non-empty section — a risk surface the empty-block-only
+    /// advance tests leave unpinned.
     #[test]
     fn advanced_base_non_empty_block_mutations_match_oracle() {
         use ergo_primitives::digest::{Digest32, ModifierId};
