@@ -197,9 +197,18 @@ pub fn scala_launch_for_network(net: Network) -> ActiveProtocolParameters {
     match net {
         Network::Mainnet => scala_launch_mainnet(),
         Network::Testnet => scala_launch_testnet(),
-        // Devnet launches with testnet's params (block_version >= 2, Autolykos v2,
-        // so the mining/solution path works and 0xB9 evaluates normally).
-        Network::Devnet => scala_launch_testnet(),
+        // Devnet launches at block_version 2 — Autolykos v2, so a mined header's
+        // V2 solution round-trips through (de)serialization (a v1 header carries a
+        // different solution layout and fails the submit-path header re-decode).
+        // Mainnet/testnet genuinely launched at block_version 1 and reached v2 by
+        // hardfork; the private devnet has no v1 history to preserve, so it starts
+        // at v2 directly. This is also the version at/above which the devnet-only
+        // verifyStark (0xB9) opcode evaluates.
+        Network::Devnet => {
+            let mut p = scala_launch_testnet();
+            p.block_version = 2;
+            p
+        }
     }
 }
 
