@@ -2141,6 +2141,7 @@ async fn engine_visibility_retry_exhaustion_warns_and_keeps_running() {
         miner_pk: [0x02u8; 33],
         reason: BuildReason::Startup,
         allow_genesis: false,
+        genesis_inputs: None,
     };
 
     let (intent_tx, intent_rx) = watch::channel(Some(intent));
@@ -2309,6 +2310,7 @@ async fn visibility_retry_budget_resets_on_parent_change() {
         miner_pk: [0x02u8; 33],
         reason: BuildReason::Startup,
         allow_genesis: false,
+        genesis_inputs: None,
     };
 
     let (intent_tx, intent_rx) = watch::channel(Some(intent_a));
@@ -2360,6 +2362,7 @@ async fn visibility_retry_budget_resets_on_parent_change() {
         miner_pk: [0x02u8; 33],
         reason: BuildReason::Tip,
         allow_genesis: false,
+        genesis_inputs: None,
     };
     intent_tx.send(Some(intent_b)).unwrap();
     let b_sent = Instant::now();

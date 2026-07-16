@@ -449,6 +449,7 @@ fn build_intent(parent: [u8; 32], parent_height: u32) -> BuildIntent {
         miner_pk: MINER_PK,
         reason: BuildReason::Startup,
         allow_genesis: false,
+        genesis_inputs: None,
     }
 }
 

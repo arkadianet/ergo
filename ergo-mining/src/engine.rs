@@ -99,6 +99,14 @@ pub struct BuildIntent {
     /// normally refuses an unsynced tip; a private devnet is meant to be mined
     /// from genesis. Set from the devnet P2P magic on the loop.
     pub allow_genesis: bool,
+    /// Devnet block-1 (genesis) build inputs, resolved on the loop when
+    /// `allow_genesis` holds and the tip is a bare genesis (height 0): there is
+    /// no stored parent header / parent block for the engine to read them from,
+    /// so the loop (which owns the live store) resolves the synthetic parent
+    /// header + genesis emission box and freezes them here. `Arc` so the intent
+    /// stays cheap to clone across the watch channel. `None` for every other
+    /// build (height > 0, or a non-devnet network).
+    pub genesis_inputs: Option<Arc<crate::genesis::GenesisBuildInputs>>,
 }
 
 /// Identity + versioning stamped onto every published template. The serve path
@@ -330,9 +338,9 @@ pub fn build_and_publish(
                 &voting_targets,
                 handle.voting_settings(),
                 &mut suspects,
-                // Genesis (block-1) inputs are resolved and threaded at the node
-                // layer; the engine's build path constructs normal blocks only.
-                None,
+                // Devnet block-1: `Some` only when the loop froze genesis inputs
+                // (bare genesis + allow_genesis); `None` for every normal build.
+                intent.genesis_inputs.as_deref(),
             );
             // Read disposition from the view regardless of whether the build
             // succeeded — the path taken (Hit/Advanced/Rehydrated/…) is
@@ -353,7 +361,7 @@ pub fn build_and_publish(
             &voting_targets,
             handle.voting_settings(),
             &mut suspects,
-            None,
+            intent.genesis_inputs.as_deref(),
         )?,
     };
     let Some((candidate, work, timings)) = built else {
@@ -429,6 +437,7 @@ mod tests {
             miner_pk: [0x02u8; 33],
             reason: BuildReason::Startup,
             allow_genesis: false,
+            genesis_inputs: None,
         }
     }
 

@@ -883,6 +883,7 @@ mod tests {
             miner_pk: [0x02u8; 33],
             reason: ergo_mining::engine::BuildReason::Startup,
             allow_genesis: false,
+            genesis_inputs: None,
         }
     }
 

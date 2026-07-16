@@ -177,6 +177,48 @@ impl MiningTipSnapshot {
 /// `chain_seq` bumps on every best-full **id** change (including equal-height
 /// reorgs); a header-only advance keeps the same seq. Returns the captured tip
 /// so the caller can track it for change detection.
+/// Resolve the devnet block-1 (genesis) build inputs from the live committed
+/// store. Called only when the tip is a bare genesis (height 0) on a devnet.
+/// The synthetic parent header carries the committed genesis state root (so
+/// block 1's `last_block_utxo_root` matches what `apply_genesis` recomputes)
+/// and the initial-difficulty nBits; the emission box is resolved from the
+/// seeded genesis box set. Any failure logs and returns `None` — the loop then
+/// simply publishes no genesis intent, and the serve path returns a 503.
+fn resolve_genesis_inputs(
+    store: &ergo_state::store::StateStore,
+    config: &ergo_crypto::difficulty::DifficultyParams,
+) -> Option<Arc<ergo_mining::genesis::GenesisBuildInputs>> {
+    // `allow_genesis` is set only on a devnet (P2P magic == DEVNET), so the
+    // seeded box set is the devnet one.
+    let boxes = crate::genesis::genesis_boxes_for(ergo_chain_spec::Network::Devnet);
+    let emission_box = match ergo_mining::genesis::genesis_emission_box(&boxes) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(error = %e, "devnet genesis: emission box unresolved; block-1 build skipped");
+            return None;
+        }
+    };
+    let state_root = match store.committed_snapshot() {
+        Ok(Some(s)) => s.state_root(),
+        Ok(None) => {
+            warn!("devnet genesis: no committed snapshot; block-1 build skipped");
+            return None;
+        }
+        Err(e) => {
+            warn!(error = %e, "devnet genesis: committed snapshot read failed; block-1 build skipped");
+            return None;
+        }
+    };
+    let n_bits = ergo_ser::difficulty::encode_compact_bits(&num_bigint::BigUint::from_bytes_be(
+        &config.initial_difficulty,
+    ));
+    let parent_header = ergo_mining::genesis::synthetic_genesis_header(state_root, n_bits);
+    Some(Arc::new(ergo_mining::genesis::GenesisBuildInputs {
+        parent_header,
+        emission_box,
+    }))
+}
+
 pub(super) fn signal_mining_engine(
     state: &NodeState,
     wiring: &MiningWiring,
@@ -213,6 +255,15 @@ pub(super) fn signal_mining_engine(
         RewardKeyResolution::Pending | RewardKeyResolution::Corrupt => return now,
     };
     let mempool = ergo_mempool::MempoolReadSnapshot::from_pool(&state.mempool);
+    // Devnet block-1 only: a bare genesis has no stored parent header / parent
+    // block, so the loop (which owns the live store) resolves the synthetic
+    // parent header + genesis emission box and freezes them into the intent.
+    // `None` once the tip advances past height 0.
+    let genesis_inputs = if now.allow_genesis && now.best_full_height == 0 {
+        resolve_genesis_inputs(store, handle.chain_config())
+    } else {
+        None
+    };
     let intent = BuildIntent {
         expected_parent: now.best_full_id,
         expected_height: now.best_full_height,
@@ -220,6 +271,7 @@ pub(super) fn signal_mining_engine(
         miner_pk,
         reason,
         allow_genesis: now.allow_genesis,
+        genesis_inputs,
     };
     // `watch::send` replaces the prior value (latest-wins); Err only if the
     // engine task receiver is gone (benign during shutdown).
@@ -549,6 +601,58 @@ pub(super) fn handle_mining_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- devnet genesis inputs -----
+
+    #[test]
+    fn resolve_genesis_inputs_from_bare_devnet_genesis() {
+        use ergo_ser::difficulty::encode_compact_bits;
+        use num_bigint::BigUint;
+
+        // Seed a bare devnet genesis exactly as the node does at boot.
+        let dir = tempfile::tempdir().unwrap();
+        let config = ergo_crypto::difficulty::DifficultyParams::devnet();
+        let mut store = ergo_state::store::StateStore::open_with_launch_params(
+            dir.path().join("state.redb").as_path(),
+            ergo_validation::active_params::scala_launch_for_network(
+                ergo_chain_spec::Network::Devnet,
+            ),
+        )
+        .unwrap();
+        store
+            .initialize_genesis(&crate::genesis::genesis_boxes_for(
+                ergo_chain_spec::Network::Devnet,
+            ))
+            .unwrap();
+        let committed_root = store
+            .committed_snapshot()
+            .unwrap()
+            .expect("genesis committed")
+            .state_root();
+
+        let inputs = resolve_genesis_inputs(&store, &config).expect("genesis inputs resolve");
+
+        // Synthetic parent carries the committed genesis state root (so block 1's
+        // last_block_utxo_root matches apply_genesis) and the initial-difficulty
+        // nBits; the emission box is the seeded genesis emission box.
+        assert_eq!(
+            inputs.parent_header.height, 0,
+            "synthetic genesis is height 0"
+        );
+        assert_eq!(
+            inputs.parent_header.state_root, committed_root,
+            "parent state_root == committed genesis root"
+        );
+        assert_eq!(
+            inputs.parent_header.n_bits,
+            encode_compact_bits(&BigUint::from_bytes_be(&config.initial_difficulty)),
+            "n_bits == encode(initial_difficulty)"
+        );
+        assert!(
+            ergo_mining::genesis::is_emission_box(inputs.emission_box.candidate.ergo_tree_bytes()),
+            "resolved box is the emission box"
+        );
+    }
 
     // ----- happy path -----
 
