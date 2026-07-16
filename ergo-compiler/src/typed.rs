@@ -757,6 +757,198 @@ pub fn product_prefix(e: &TypedExpr) -> &'static str {
     }
 }
 
+/// `true` iff `e` is, or transitively contains, a node whose `tpe` is `NoType` —
+/// an un-renderable node the reference s-expression printer throws on
+/// (`RuntimeException` → REJECT).  Used by the §1.24 `MethodCall` passthrough to
+/// reject a binder-prebuilt `serialize(v)` whose bound arg the reference typer
+/// likewise leaves un-typed: an unbound Ident, an un-lowered `MethodCallLike`
+/// operator, an unresolved predef `Apply`/`ApplyTypes`, a NoType-result Block, or
+/// a `.get`/property chained on a function-typed receiver.  A property/method
+/// `Select` carries the declared method `SFunc` (non-`NoType`, see
+/// `declared_select_tpe`) and stays ACCEPT.  The match is exhaustive
+/// (compiler-enforced) so a future `TypedExpr` variant cannot silently escape.
+pub(crate) fn expr_contains_untyped_node(e: &TypedExpr) -> bool {
+    use TypedExpr::*;
+    if node_tpe(e) == &SType::NoType {
+        return true;
+    }
+    let opt =
+        |o: &Option<Box<TypedExpr>>| o.as_ref().is_some_and(|b| expr_contains_untyped_node(b));
+    match e {
+        // Always `NoType` (caught above); recurse for exhaustiveness.
+        MethodCallLike { obj, args, .. } => {
+            expr_contains_untyped_node(obj) || args.iter().any(expr_contains_untyped_node)
+        }
+        // Leaves — no child expressions.
+        Height { .. }
+        | Self_ { .. }
+        | Inputs { .. }
+        | Outputs { .. }
+        | Context { .. }
+        | Global { .. }
+        | MinerPubkey { .. }
+        | LastBlockUtxoRootHash { .. }
+        | GroupGenerator { .. }
+        | Constant { .. }
+        | Ident { .. }
+        | GetVar { .. }
+        | DeserializeContext { .. } => false,
+        // Single child (`input`/`value`/`body`).
+        Upcast { input, .. }
+        | Downcast { input, .. }
+        | LogicalNot { input, .. }
+        | Negation { input, .. }
+        | BitInversion { input, .. }
+        | SelectField { input, .. }
+        | SizeOf { input, .. }
+        | SigmaPropIsProven { input, .. }
+        | SigmaPropBytes { input, .. }
+        | AND { input, .. }
+        | OR { input, .. }
+        | XorOf { input, .. }
+        | OptionGet { input, .. }
+        | OptionIsDefined { input, .. }
+        | CalcBlake2b256 { input, .. }
+        | CalcSha256 { input, .. }
+        | ByteArrayToBigInt { input, .. }
+        | ByteArrayToLong { input, .. }
+        | LongToByteArray { input, .. }
+        | DecodePoint { input, .. } => expr_contains_untyped_node(input),
+        BoolToSigmaProp { value, .. } | CreateProveDlog { value, .. } => {
+            expr_contains_untyped_node(value)
+        }
+        ZKProofBlock { body, .. } => expr_contains_untyped_node(body),
+        Select { obj, .. } => expr_contains_untyped_node(obj),
+        ApplyTypes { input, .. } => expr_contains_untyped_node(input),
+        ValNode { body, .. } => expr_contains_untyped_node(body),
+        Lambda { body, .. } => opt(body),
+        // Two children.
+        ArithOp { left, right, .. }
+        | BitOp { left, right, .. }
+        | GT { left, right, .. }
+        | GE { left, right, .. }
+        | LT { left, right, .. }
+        | LE { left, right, .. }
+        | EQ { left, right, .. }
+        | NEQ { left, right, .. }
+        | BinAnd { left, right, .. }
+        | BinOr { left, right, .. }
+        | BinXor { left, right, .. }
+        | MultiplyGroup { left, right, .. }
+        | Exponentiate { left, right, .. }
+        | Xor { left, right, .. } => {
+            expr_contains_untyped_node(left) || expr_contains_untyped_node(right)
+        }
+        MapCollection { input, mapper, .. } => {
+            expr_contains_untyped_node(input) || expr_contains_untyped_node(mapper)
+        }
+        Append { input, col2, .. } => {
+            expr_contains_untyped_node(input) || expr_contains_untyped_node(col2)
+        }
+        Filter {
+            input, condition, ..
+        }
+        | Exists {
+            input, condition, ..
+        }
+        | ForAll {
+            input, condition, ..
+        } => expr_contains_untyped_node(input) || expr_contains_untyped_node(condition),
+        OptionGetOrElse { input, default, .. } => {
+            expr_contains_untyped_node(input) || expr_contains_untyped_node(default)
+        }
+        AtLeast { bound, input, .. } => {
+            expr_contains_untyped_node(bound) || expr_contains_untyped_node(input)
+        }
+        // Three children.
+        If {
+            condition,
+            true_branch,
+            false_branch,
+            ..
+        } => {
+            expr_contains_untyped_node(condition)
+                || expr_contains_untyped_node(true_branch)
+                || expr_contains_untyped_node(false_branch)
+        }
+        Slice {
+            input, from, until, ..
+        } => {
+            expr_contains_untyped_node(input)
+                || expr_contains_untyped_node(from)
+                || expr_contains_untyped_node(until)
+        }
+        Fold {
+            input,
+            zero,
+            fold_op,
+            ..
+        } => {
+            expr_contains_untyped_node(input)
+                || expr_contains_untyped_node(zero)
+                || expr_contains_untyped_node(fold_op)
+        }
+        SubstConstants {
+            script_bytes,
+            positions,
+            new_values,
+            ..
+        } => {
+            expr_contains_untyped_node(script_bytes)
+                || expr_contains_untyped_node(positions)
+                || expr_contains_untyped_node(new_values)
+        }
+        TreeLookup {
+            tree, key, proof, ..
+        } => {
+            expr_contains_untyped_node(tree)
+                || expr_contains_untyped_node(key)
+                || expr_contains_untyped_node(proof)
+        }
+        // Four children.
+        CreateProveDHTuple { gv, hv, uv, vv, .. } => {
+            expr_contains_untyped_node(gv)
+                || expr_contains_untyped_node(hv)
+                || expr_contains_untyped_node(uv)
+                || expr_contains_untyped_node(vv)
+        }
+        CreateAvlTree {
+            operation_flags,
+            digest,
+            key_length,
+            value_length_opt,
+            ..
+        } => {
+            expr_contains_untyped_node(operation_flags)
+                || expr_contains_untyped_node(digest)
+                || expr_contains_untyped_node(key_length)
+                || expr_contains_untyped_node(value_length_opt)
+        }
+        // `input` + `index` + optional `default`.
+        ByIndex {
+            input,
+            index,
+            default,
+            ..
+        } => expr_contains_untyped_node(input) || expr_contains_untyped_node(index) || opt(default),
+        DeserializeRegister { default, .. } => opt(default),
+        // Collections of children.
+        Tuple { items, .. }
+        | ConcreteCollection { items, .. }
+        | SigmaAnd { items, .. }
+        | SigmaOr { items, .. } => items.iter().any(expr_contains_untyped_node),
+        Apply { func, args, .. } => {
+            expr_contains_untyped_node(func) || args.iter().any(expr_contains_untyped_node)
+        }
+        Block {
+            bindings, result, ..
+        } => bindings.iter().any(expr_contains_untyped_node) || expr_contains_untyped_node(result),
+        MethodCall { obj, args, .. } => {
+            expr_contains_untyped_node(obj) || args.iter().any(expr_contains_untyped_node)
+        }
+    }
+}
+
 // ----- ArithOp opcode constants (signed i8) ──────────────────────────────────
 // Source: OpCodes.scala newOpCode(shift) = (LastConstantCode(112) + shift).toByte
 // LastConstantCode = TypeCodes.LastDataType(111) + 1 = 112.
