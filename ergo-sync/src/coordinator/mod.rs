@@ -1039,12 +1039,11 @@ impl SyncCoordinator {
             return actions;
         }
 
-        // Mode 3 Phase 3a — request-side gate. Headers below the
-        // prune sentinel will have their sections evicted on
-        // apply, so requesting them is wasted bandwidth + peer
-        // load. Plan §240 calls this out as the third drop point
-        // (receive-side and serve-side gates in the executor +
-        // messaging layer cover the other two). Inert when
+        // Mode 3 — request-side gate. Headers below the prune sentinel
+        // will have their sections evicted on apply, so requesting them
+        // is wasted bandwidth + peer load. This is the third of three
+        // drop points; the other two are the receive-side and serve-side
+        // gates in the executor + messaging layer. Inert when
         // `prune_sentinel == 0` (archive / Mode 6 / fresh
         // pre-eviction store).
         let sentinel = self.sync_state.prune_sentinel();
@@ -1345,7 +1344,7 @@ impl SyncCoordinator {
     /// Ports Scala's `requestDownload` + `ElementPartitioner.distribute`,
     /// with two Rust-native adjustments documented inline below:
     ///   * Step 2.5 balances section types against actual per-peer
-    ///     in-flight capacity (Sync-S3) instead of a static cap.
+    ///     in-flight capacity instead of a static cap.
     ///   * Step 3 keeps Scala's 12/peer/round only when 3+ peers are
     ///     available; for 1–2 peers it derives `max_per_bucket` from the
     ///     balanced per-type budget so IBD doesn't stall waiting for
@@ -1460,7 +1459,7 @@ impl SyncCoordinator {
             return actions;
         }
 
-        // Step 2.5 (Sync-S3): balance section types against each peer's
+        // Step 2.5: balance section types against each peer's
         // *actual* remaining in-flight capacity. Sum free slots across
         // peers, divide by the number of section types with actual
         // demand, and use `div_ceil` so:

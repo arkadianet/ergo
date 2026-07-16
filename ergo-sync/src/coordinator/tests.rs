@@ -1080,12 +1080,13 @@ fn timeout_ordering_penalty_before_rerequest() {
     }
 }
 
-// ---- Sync-S0: characterization of current request_missing_sections ----
+// ---- Characterization of the single-peer request_missing_sections ----
 //
-// These tests lock in the current emission transcript BEFORE Sync-S1
-// changes it to bucketed multi-peer. Each assertion is a regression
-// guard that future refactors must preserve (or consciously break with
-// a test update + diff review).
+// These tests lock in the emission transcript of the original single-peer
+// implementation, which `request_missing_sections_bucketed` below replaces
+// with bucketed multi-peer requests. Each assertion is a regression guard
+// that future refactors must preserve (or consciously break with a test
+// update + diff review).
 
 /// Arrange a coordinator + 2-peer situation with 2 pending blocks whose
 /// sections are UNKNOWN to the delivery tracker (i.e. not yet requested).
@@ -1324,7 +1325,7 @@ fn s0_check_timeouts_preserves_section_type_on_rerequest() {
             "Header type leaked through the rerequest path (identify_section fallback), got {rerequest_types:?}");
 }
 
-// ---- Sync-S1: request_missing_sections_bucketed characterization ----
+// ---- request_missing_sections_bucketed characterization ----
 
 /// Distinct [u8;32] ID per `seed` for test bookkeeping. Unlike `mk()`
 /// which repeats a single byte, this scales to n up to u32::MAX.
@@ -2384,9 +2385,9 @@ fn caught_up_fallback_flips_latch_with_multiple_equal_and_no_older() {
 
 #[test]
 fn caught_up_fallback_discounts_equal_against_a_superseded_tip() {
-    // codex round-4 guard: Equal is relative to the tip it was observed
-    // against. If our tip advances/reorgs, those (still time-fresh) Equal
-    // snapshots must not be counted as confirming the NEW tip.
+    // Equal is relative to the tip it was observed against. If our tip
+    // advances/reorgs, those (still time-fresh) Equal snapshots must not be
+    // counted as confirming the NEW tip.
     let (chain, peer_bytes) = equal_tip_chain();
     let mut coord = SyncCoordinator::new(0);
     let t0 = Instant::now();
@@ -2471,10 +2472,10 @@ fn tip_chain_with_lower_overlap() -> (MockChain, Vec<u8>, Vec<u8>) {
 
 #[test]
 fn caught_up_fallback_blocked_when_younger_peers_are_a_majority() {
-    // codex round-3 guard: a peer slightly ahead with an overlapping
-    // `[H+1, H, ...]` SyncInfo classifies as Younger, NOT Older. The majority
-    // test must count every non-Equal fresh peer, so two Equal peers must not
-    // outvote three Younger ones.
+    // A peer slightly ahead with an overlapping `[H+1, H, ...]` SyncInfo
+    // classifies as Younger, NOT Older. The majority test must count every
+    // non-Equal fresh peer, so two Equal peers must not outvote three
+    // Younger ones.
     let (chain, equal_bytes, younger_bytes) = tip_chain_with_lower_overlap();
     let mut coord = SyncCoordinator::new(0);
     let t0 = Instant::now();

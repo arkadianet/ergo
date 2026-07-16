@@ -450,8 +450,8 @@ fn process_block_utxo(
         // disk and the cache-fold step updates `cached_validation_settings`
         // in lockstep. Without this, the trusted cumulative would live
         // only in RAM and any restart / cache refresh / reorg would
-        // recompute from disk and silently drop it — see the codex
-        // review notes on persistence/reorg regressions.
+        // recompute from disk and silently drop it across a restart,
+        // cache refresh, or reorg.
         //
         // The genuine `parsed.proposed_update` (the activation that
         // technically belongs to this epoch alone) is folded INTO the
@@ -638,15 +638,15 @@ fn process_block_utxo(
     // pass them separately.
     //
     let t0 = Instant::now();
-    // M5 wallet-hook plumbing (atomicity depends on path):
+    // Wallet-hook plumbing (atomicity depends on path):
     //   - sync path: chain + wallet commit inside the same redb
     //     write_txn (truly atomic).
     //   - pipeline path: chain commits durably first (flush + fsync
     //     when needed), THEN wallet commits on a separate write_txn.
     //     Two-commit, not atomic; failure mode is "wallet behind
     //     chain" (covered by rescan), not "wallet ahead of chain".
-    //     The pipeline-worker integration that would close this seam
-    //     is the M5 final slice tracked in audit-todo.
+    //     Closing this seam requires pipeline-worker integration that
+    //     does not yet exist.
     // Caller threads `wallet_hook` from NodeState; `None` is
     // acceptable for tests and non-wallet deployments.
     store.apply_block(&checked_block, voted_params_row, wallet_hook)?;
