@@ -100,13 +100,24 @@ fn tip_snapshot_params_returns_cached_settings_unchanged() {
     );
 }
 
+/// Below 10 applied blocks the window returns the AVAILABLE headers (tip-first),
+/// not an error — mining a chain up from genesis (a from-genesis devnet) needs a
+/// short window at heights 1..9. This matches the apply path's `load_last_headers`
+/// (walks back, stops at genesis), so build- and apply-time CONTEXT.headers agree.
 #[test]
-fn window_errors_when_tip_below_10() {
+fn window_returns_available_headers_when_tip_below_10() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("state.redb");
     let mut store = StateStore::open(&path).unwrap();
     seed_genesis(&mut store);
-    // Apply only 5 blocks.
+
+    // Bare genesis (0 applied blocks) → empty window.
+    assert!(
+        store.last_applied_chain_window_10().unwrap().is_empty(),
+        "bare genesis has an empty last-headers window"
+    );
+
+    // Apply 5 blocks → the window is the 5 available headers, tip-first (5..1).
     let mut parent_id: ModifierId = Digest32::from_bytes([0u8; 32]).into();
     for h in 1..=5u32 {
         let hdr = synthetic_header(h, parent_id);
@@ -118,18 +129,14 @@ fn window_errors_when_tip_below_10() {
             .apply_block_unchecked_for_test(h, &id_bytes, &expected, &[])
             .unwrap();
         parent_id = id;
-    }
-    let err = store
-        .last_applied_chain_window_10()
-        .expect_err("must error");
-    match err {
-        ergo_state::store::StateError::EarlyIBD {
-            needed_min,
-            observed,
-        } => {
-            assert_eq!(needed_min, 10);
-            assert_eq!(observed, 5);
-        }
-        other => panic!("expected EarlyIBD, got {other:?}"),
+
+        let window = store.last_applied_chain_window_10().unwrap();
+        assert_eq!(window.len(), h as usize, "window grows with the chain");
+        assert_eq!(window[0].height, h, "index 0 is tip-first");
+        assert_eq!(
+            window.last().unwrap().height,
+            1,
+            "oldest entry is height 1 (genesis header chain start)"
+        );
     }
 }

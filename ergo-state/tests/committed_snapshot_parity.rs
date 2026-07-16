@@ -431,25 +431,21 @@ fn snapshot_is_frozen_against_later_commits() {
     );
 }
 
-// ----- error paths -----
+// ----- short window (early chain) -----
 
+/// Below 10 applied blocks the snapshot window returns the AVAILABLE headers
+/// (tip-first), not an error — parity with `StateStore::last_applied_chain_window_10`
+/// and the apply path, so a chain mined up from genesis is buildable at heights 1..9.
 #[test]
-fn window_errors_when_tip_below_10() {
+fn window_returns_available_headers_when_tip_below_10() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
     seed_genesis(&mut store);
     apply_n_blocks(&mut store, 5);
 
     let snap = store.committed_snapshot().unwrap().expect("snapshot");
-    let err = snap.last_headers_window().expect_err("must error below 10");
-    match err {
-        ergo_state::store::StateError::EarlyIBD {
-            needed_min,
-            observed,
-        } => {
-            assert_eq!(needed_min, 10);
-            assert_eq!(observed, 5);
-        }
-        other => panic!("expected EarlyIBD, got {other:?}"),
-    }
+    let window = snap.last_headers_window().expect("window");
+    assert_eq!(window.len(), 5, "5 applied blocks → 5 headers");
+    assert_eq!(window[0].height, 5, "index 0 is tip-first");
+    assert_eq!(window.last().unwrap().height, 1, "oldest is height 1");
 }

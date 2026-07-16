@@ -3799,21 +3799,26 @@ impl StateStore {
     /// for callers that may invoke this before sync completes.
     pub fn last_applied_chain_window_10(
         &self,
-    ) -> Result<[ergo_ser::header::Header; 10], StateError> {
+    ) -> Result<Vec<ergo_ser::header::Header>, StateError> {
         let tip_h = self.chain_state.best_full_block_height;
-        if tip_h < 10 {
-            return Err(StateError::EarlyIBD {
-                needed_min: 10,
-                observed: tip_h,
-            });
+        // Up to 10 applied headers, tip-first (index 0 = the best-full tip).
+        // Fewer than 10 on an early chain (the header chain starts at height 1),
+        // and EMPTY at a bare genesis (height 0). Mirrors the apply path's
+        // `load_last_headers`, which walks back and stops at genesis — so build-
+        // and apply-time CONTEXT.headers agree from the first block on. No IBD
+        // error: mining is already gated on `synced()`, which is the real IBD
+        // guard; near-genesis mining (a from-genesis devnet) is legitimate.
+        if tip_h == 0 {
+            return Ok(Vec::new());
         }
         let read_txn = self.db.begin_read()?;
         let chain_table = read_txn.open_table(CHAIN_INDEX)?;
         let headers_table = read_txn.open_table(HEADERS)?;
 
-        // Newest first.
+        // Newest first, down to height 1 (or tip-9, whichever is higher).
+        let start = tip_h.saturating_sub(9).max(1);
         let mut headers: Vec<ergo_ser::header::Header> = Vec::with_capacity(10);
-        for h in (tip_h - 9..=tip_h).rev() {
+        for h in (start..=tip_h).rev() {
             let id_guard = chain_table
                 .get(h as u64)?
                 .ok_or(StateError::AppliedChainGap { at_height: h })?;
@@ -3845,13 +3850,7 @@ impl StateStore {
                 })?;
             headers.push(header);
         }
-        let arr: [ergo_ser::header::Header; 10] =
-            headers
-                .try_into()
-                .map_err(|_| StateError::InternalInvariant {
-                    what: "last_applied_chain_window_10: built window with size != 10",
-                })?;
-        Ok(arr)
+        Ok(headers)
     }
 
     /// If the hci_version sentinel is absent, rebuild HEADER_CHAIN_INDEX via

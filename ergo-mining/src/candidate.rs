@@ -224,15 +224,13 @@ pub fn generate_candidate<V: CandidateStateView>(
 
     // 2. Snapshot params + applied-chain window
     let (active_params, validation_settings) = view.tip_snapshot_params().map_err(state_err)?;
-    // Last-10 window for the tx-validation context. Genesis (block 1) has no
-    // predecessors — the apply path's `load_last_headers` returns an EMPTY
-    // window for a `[0;32]` parent. The candidate context type is a fixed
-    // `[Header; 10]`, so fill it with the synthetic genesis header: block 1's
-    // only tx is the emission coinbase, which does not consult `CONTEXT.headers`,
-    // and the apply path independently re-validates against its empty window —
-    // so the fill is consensus-neutral (the increment-4 apply round-trip pins it).
+    // Up-to-10 window for the tx-validation context, tip-first. Genesis (block
+    // 1) has no predecessors, so an EMPTY window — exactly what the apply path's
+    // `load_last_headers` returns for a `[0;32]` parent, so build- and apply-time
+    // `CONTEXT.headers` agree. For an early chain (heights 2..10) the view
+    // returns the available headers (fewer than 10), also matching apply.
     let last_headers = match genesis {
-        Some(g) => std::array::from_fn(|_| g.parent_header.clone()),
+        Some(_) => Vec::new(),
         None => view.last_applied_chain_window_10().map_err(state_err)?,
     };
 

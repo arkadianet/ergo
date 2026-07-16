@@ -266,24 +266,22 @@ impl CommittedSnapshot {
         crate::reader::lookup_box_in_txn(&self.txn, self.state_meta.root_node_id, box_id)
     }
 
-    /// The last 10 applied-chain headers, tip-first (index 0 = the
-    /// committed best-full tip). Errors with [`StateError::EarlyIBD`] when
-    /// fewer than 10 blocks have been applied. Mirrors
-    /// [`StateStore::last_applied_chain_window_10`] but reads from this
-    /// snapshot's single transaction.
-    pub fn last_headers_window(&self) -> Result<[Header; 10], StateError> {
+    /// Up to 10 applied-chain headers, tip-first (index 0 = the committed
+    /// best-full tip). Fewer than 10 on an early chain (the header chain starts
+    /// at height 1) and EMPTY at a bare genesis. Mirrors
+    /// [`StateStore::last_applied_chain_window_10`] (and the apply path's
+    /// `load_last_headers`) but reads from this snapshot's single transaction.
+    pub fn last_headers_window(&self) -> Result<Vec<Header>, StateError> {
         let tip_h = self.chain_state.best_full_block_height;
-        if tip_h < 10 {
-            return Err(StateError::EarlyIBD {
-                needed_min: 10,
-                observed: tip_h,
-            });
+        if tip_h == 0 {
+            return Ok(Vec::new());
         }
         let chain_table = self.txn.open_table(CHAIN_INDEX)?;
         let headers_table = self.txn.open_table(HEADERS)?;
 
+        let start = tip_h.saturating_sub(9).max(1);
         let mut headers: Vec<Header> = Vec::with_capacity(10);
-        for h in (tip_h - 9..=tip_h).rev() {
+        for h in (start..=tip_h).rev() {
             let id_guard = chain_table
                 .get(h as u64)?
                 .ok_or(StateError::AppliedChainGap { at_height: h })?;
@@ -312,11 +310,7 @@ impl CommittedSnapshot {
                 })?;
             headers.push(header);
         }
-        headers
-            .try_into()
-            .map_err(|_| StateError::InternalInvariant {
-                what: "CommittedSnapshot::last_headers_window: built window with size != 10",
-            })
+        Ok(headers)
     }
 
     /// Active protocol parameters at the committed tip — the block version

@@ -629,7 +629,7 @@ mod tests {
                 miner_pubkey: pk,
             },
             activated_script_version: 2,
-            last_headers: std::array::from_fn(|_| h.clone()),
+            last_headers: vec![h.clone(); 10],
             last_block_utxo_root: build_last_block_utxo_root(ADDigest::from_bytes([0u8; 33])),
         };
         let candidate = Candidate {

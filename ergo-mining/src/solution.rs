@@ -180,7 +180,7 @@ mod tests {
                 nonce: [0u8; 8],
             },
         };
-        let last_headers: [Header; 10] = std::array::from_fn(|_| h.clone());
+        let last_headers: Vec<Header> = vec![h.clone(); 10];
 
         let validation_ctx = CandidateValidationContext {
             pre_header: pre_header.clone(),

@@ -1,12 +1,14 @@
-//! Increment 4 acceptance: build block 1 — the genesis block — on a BARE devnet
-//! genesis, CPU-solve it at difficulty 1, and drive it through the SAME apply
-//! path a submitted / peer-received block takes:
+//! Devnet from-genesis mining acceptance: build block 1 — the genesis block —
+//! on a BARE devnet genesis, CPU-solve it at difficulty 1, and drive it through
+//! the SAME apply path a submitted / peer-received block takes:
 //!   verify_solution → apply_mined_block → process_header_cfg [→ process_genesis_header]
 //!                   → process_block [→ apply_genesis].
-//! The tip must advance to height 1 with block 1's id. This proves the built
-//! genesis block is consensus-valid END TO END (its `state_root` matches the
-//! post-coinbase UTXO digest that `apply_genesis` recomputes) — not merely
-//! well-shaped (which `ergo-mining/tests/genesis_candidate.rs` already pins).
+//! The tip must advance to height 1 with block 1's id, then block 2 must build +
+//! apply on top (height 1 -> 2). This proves the built blocks are consensus-valid
+//! END TO END (state_root matches the post-coinbase UTXO digest `apply_genesis`
+//! recomputes) AND that a chain mined up from genesis advances past height 1 —
+//! the early-chain case the fixed-10 last-headers window used to deadlock. Shape
+//! alone is pinned by `ergo-mining/tests/genesis_candidate.rs`.
 //!
 //! This is the DEVNET block-1 scenario the node hits from a fresh start; the
 //! test drives the mechanism directly (no node boot / HTTP) by calling
@@ -52,7 +54,7 @@ fn solve(msg: &[u8; 32], height: u32, version: u8, n_bits: u32) -> [u8; 8] {
 }
 
 #[test]
-fn devnet_mines_and_applies_block_1_from_bare_genesis() {
+fn devnet_mines_and_applies_blocks_1_and_2_from_bare_genesis() {
     let config = DifficultyParams::devnet();
 
     // 1. Bare devnet genesis: seed the REAL (testnet) genesis box set, exactly
@@ -150,5 +152,82 @@ fn devnet_mines_and_applies_block_1_from_bare_genesis() {
         s.chain_state().best_full_block_id,
         header_id,
         "tip is the mined block 1"
+    );
+
+    // 7. Block 2 — the early-chain case (height 1 -> 2) that the fixed-10
+    //    last-headers window used to deadlock (`EarlyIBD needed_min:10`). This is
+    //    the NORMAL build path (genesis = None): the parent is block 1, the
+    //    emission box is derived from block 1's BlockTransactions, and the
+    //    last-headers window is the single applied header. Proves a chain mined
+    //    up from genesis advances past height 1.
+    let store2 = backend.as_utxo().expect("utxo backend");
+    let (cand2, _w2, _t2) = generate_candidate(
+        store2,
+        BuildMode::Full,
+        MempoolReadSnapshot::empty(),
+        &MINER_PK,
+        &MonetarySettings::mainnet(),
+        None,
+        None,
+        &config,
+        &[],
+        &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
+        &mut Vec::new(),
+        None, // normal build — block 2 has a real parent (block 1)
+    )
+    .expect("block 2 builds (early-chain short window)")
+    .expect("block 2 candidate is Some");
+    assert_eq!(cand2.header.height, 2, "block 2");
+    assert_eq!(
+        *cand2.header.parent_id.as_bytes(),
+        header_id,
+        "block 2's parent is block 1"
+    );
+    let nonce2 = solve(
+        &cand2.msg,
+        cand2.header.height,
+        cand2.header.version,
+        cand2.header.n_bits,
+    );
+    let submitted2 = match verify_solution(
+        &cand2,
+        &MinerSolution {
+            nonce: nonce2,
+            pk: None,
+        },
+        store2,
+    )
+    .expect("verify_solution block 2")
+    {
+        SolutionOutcome::Accepted(b) => b,
+        other => panic!("block 2 solution not accepted: {other:?}"),
+    };
+    let (header_id2, header_bytes2) =
+        apply_mined_block(backend.as_utxo_mut().unwrap(), submitted2).expect("apply_mined_block 2");
+    process_header_cfg(backend.as_utxo_mut().unwrap(), &header_bytes2, &config)
+        .expect("process_header_cfg block 2");
+    let processed2 = process_block(
+        &mut backend,
+        &header_id2,
+        &ProtocolParams::mainnet_default(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("process_block block 2");
+    assert_eq!(processed2.height, 2, "processed block is height 2");
+    let s2 = backend.as_utxo().expect("utxo backend");
+    assert_eq!(
+        s2.chain_state().best_full_block_height,
+        2,
+        "tip advanced to height 2 (early-chain window no longer deadlocks)"
+    );
+    assert_eq!(
+        s2.chain_state().best_full_block_id,
+        header_id2,
+        "tip is the mined block 2"
     );
 }

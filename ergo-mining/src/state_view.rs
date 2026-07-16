@@ -54,8 +54,9 @@ pub trait CandidateStateView: UtxoView {
     fn header_id_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError>;
     /// Serialized block-section bytes by modifier id (`None` if absent).
     fn block_section(&self, modifier_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError>;
-    /// Last 10 applied-chain headers, tip-first.
-    fn last_applied_chain_window_10(&self) -> Result<[Header; 10], StateError>;
+    /// Up to 10 applied-chain headers, tip-first; fewer near genesis, empty at
+    /// a bare genesis (matches the apply path's `load_last_headers`).
+    fn last_applied_chain_window_10(&self) -> Result<Vec<Header>, StateError>;
     /// Active protocol params + cumulative validation settings at the tip.
     fn tip_snapshot_params(
         &self,
@@ -95,7 +96,7 @@ impl CandidateStateView for StateStore {
     fn block_section(&self, modifier_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
         StateStore::get_block_section(self, modifier_id)
     }
-    fn last_applied_chain_window_10(&self) -> Result<[Header; 10], StateError> {
+    fn last_applied_chain_window_10(&self) -> Result<Vec<Header>, StateError> {
         StateStore::last_applied_chain_window_10(self)
     }
     fn tip_snapshot_params(
@@ -131,7 +132,7 @@ impl CandidateStateView for CommittedSnapshot {
     fn block_section(&self, modifier_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
         CommittedSnapshot::block_section(self, modifier_id)
     }
-    fn last_applied_chain_window_10(&self) -> Result<[Header; 10], StateError> {
+    fn last_applied_chain_window_10(&self) -> Result<Vec<Header>, StateError> {
         CommittedSnapshot::last_headers_window(self)
     }
     fn tip_snapshot_params(
@@ -226,7 +227,7 @@ impl CandidateStateView for CachedSnapshotView<'_> {
     fn block_section(&self, modifier_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
         CommittedSnapshot::block_section(self.snap, modifier_id)
     }
-    fn last_applied_chain_window_10(&self) -> Result<[Header; 10], StateError> {
+    fn last_applied_chain_window_10(&self) -> Result<Vec<Header>, StateError> {
         CommittedSnapshot::last_headers_window(self.snap)
     }
     fn tip_snapshot_params(

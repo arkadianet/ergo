@@ -60,10 +60,11 @@ pub struct CandidateValidationContext {
     /// validation settings at the tip. Re-deriving later would change
     /// evaluator behavior.
     pub activated_script_version: u8,
-    /// Last 10 applied headers, tip-first. `[0]` is the parent
-    /// header; `[9]` is parent - 9. From
-    /// `StateStore::last_applied_chain_window_10`.
-    pub last_headers: [Header; 10],
+    /// Up to 10 applied headers, tip-first. `[0]` is the parent header. Fewer
+    /// than 10 on an early chain and EMPTY for block 1 (genesis), matching the
+    /// apply path's `load_last_headers` so build- and apply-time
+    /// `CONTEXT.headers` agree. From `StateStore::last_applied_chain_window_10`.
+    pub last_headers: Vec<Header>,
     /// AvlTreeData for `CONTEXT.LastBlockUtxoRootHash`, constructed
     /// from `parent_header.state_root` with all-ops-allowed flags and
     /// key_length=32 (matches the existing fallback at
