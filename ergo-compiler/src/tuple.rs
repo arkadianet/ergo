@@ -1,4 +1,4 @@
-//! M4 Task 7 — multi-arg lambda TUPLING (D-C4).
+//! Multi-arg lambda tupling (D-C4).
 //!
 //! Scala's `buildGraph` builds a 2-arg `Lambda` as a **single tuple-arg**
 //! graph function (`GraphBuilding.scala:917-924`:
@@ -16,9 +16,9 @@
 //! argument"), so the tupled 1-arg shape is the ONLY valid on-chain form —
 //! and the ONLY one Scala's compiler ever emits.
 //!
-//! **M3 evidence** (lib.rs D-C4): our emit produced a 2-arg `FuncValue`,
-//! wire-legal but unevaluable. This pass lowers it to the tupled 1-arg form,
-//! making fold-slot lambdas evaluable and byte-matchable.
+//! This pass corrects a deviation (lib.rs D-C4): the emitter produces a 2-arg
+//! `FuncValue`, which is wire-legal but unevaluable. Lowering it to the tupled
+//! 1-arg form here makes fold-slot lambdas evaluable and byte-matchable.
 //!
 //! # Id allocation (Scala-faithful)
 //!
@@ -33,7 +33,7 @@
 //! in the never-reuse relaxation, so substituting `ValUse(arg_id)` throughout
 //! the body cannot collide with any inner binding.
 //!
-//! **Pass position** (plan locked decision 1): the lowering block, AFTER the
+//! **Pass position:** the lowering block, AFTER the
 //! `graph_building_lambda_reject` gate (which rejects non-1-arg *applications*
 //! — `FuncApply` — that Scala refuses; the multi-arg *definitions* that reach
 //! here are the D-C4 both-accept class: fold-slot and un-applied lambdas) and

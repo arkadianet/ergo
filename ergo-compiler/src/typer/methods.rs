@@ -61,7 +61,7 @@ pub struct SMethodDesc {
     /// This is a 2-way flag: it records *presence* only.  The distinction between
     /// `MethodCallIrBuilder` (→ `MethodCall` in the typed tree) and a custom builder
     /// (→ a specialized IR node, e.g. `Exponentiate`, `MapCollection`) is handled by
-    /// the lowering dispatch in Tasks 5–7 — do **not** add a 3-way enum here.
+    /// the lowering dispatch in `typer::assign` — do **not** add a 3-way enum here.
     pub has_ir_builder: bool,
     /// `true` iff the on-wire encoding carries an explicit type argument
     /// (`hasExplicitTypeArgs = Seq(tT)` in Scala; affects wire format).
@@ -241,7 +241,8 @@ fn long_methods() -> &'static Vec<SMethodDesc> {
 }
 
 // SBigInt (type_id = 6): 13 shared + 2 extras (methods.scala:546-565).
-// id 14 comment in source says "id=8" — actual code is 14; see m2-tables.md §delta3.
+// The Scala source's comment for `toUnsigned` says "id=8", but the method is
+// actually registered at id 14 — the id below matches the registered value.
 fn bigint_methods() -> &'static Vec<SMethodDesc> {
     static METHODS: OnceLock<Vec<SMethodDesc>> = OnceLock::new();
     METHODS.get_or_init(|| {
@@ -601,7 +602,8 @@ fn global_methods() -> &'static Vec<SMethodDesc> {
         vec![
             md!(v5; "groupGenerator",    1, vec![g.clone()],                              SType::SGroupElement, vec![]),
             md!(v5; "xor",               2, vec![g.clone(), cb.clone(), cb.clone()],      cb.clone(),   vec![]),
-            // V6 — serialize: NO wire explicit_type_args (delta5 in m2-tables.md)
+            // V6 — serialize carries no wire explicit_type_args, unlike the
+            // other type-parameterised methods in this table.
             md!(v6; "serialize",         3, vec![g.clone(), t.clone()],                   cb.clone(),   t_params.clone()),
             md!(v6e; "deserializeTo",    4, vec![g.clone(), cb.clone()],                  t.clone(),    t_params.clone()),
             md!(v6e; "fromBigEndianBytes",5,vec![g.clone(), cb.clone()],                  t.clone(),    t_params.clone()),
@@ -874,8 +876,7 @@ pub fn owner_name_for_method(recv: &SType, name: &str, tree_version: u8) -> &'st
 /// `MethodCallSerializer` writes for the same tree.
 ///
 /// Returns `None` for an unknown owner or method name — the emit layer
-/// surfaces that as `UnsupportedNode` (a residual the Task-11 adversarial
-/// pass hunts).
+/// surfaces that as `UnsupportedNode`.
 pub(crate) fn wire_method(owner: &str, name: &str) -> Option<(u8, &'static SMethodDesc)> {
     let (type_id, table): (u8, &'static Vec<SMethodDesc>) = match owner {
         "Byte" => (2, byte_methods()),
@@ -1145,7 +1146,7 @@ mod tests {
     #[test]
     fn explicit_type_args_correct_for_known_set() {
         // Exactly 6 methods have wire explicit_type_args.
-        // Source: ergo-ser method_explicit_type_args_count + m2-tables.md §coverage.
+        // Source: ergo-ser method_explicit_type_args_count.
         let explicit_set: &[(&SType, &str)] = &[
             (&SType::SBox, "getReg"),                // (99,19)
             (&SType::SContext, "getVarFromInput"),   // (101,12)
@@ -1578,8 +1579,8 @@ mod tests {
         );
     }
 
-    /// Verify the method_id of every container aligns with Scala's methods.scala.
-    /// Uses known spot checks against the methods.scala line references in m2-tables.md.
+    /// Verify the method_id of every container aligns with Scala's methods.scala,
+    /// via spot checks against the methods.scala line references.
     #[test]
     fn oracle_parity_spot_check_method_ids() {
         // SBox.tokens is id=8 (not 7 or 9)

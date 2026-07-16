@@ -1,13 +1,10 @@
 //! Dead-`val` pruning + dead-code reachability over the emitted opcode IR
 //! (`ergo_ser::opcode::Expr`), reproducing the OBSERVABLE effect of Scala's
-//! `buildGraph`/`buildTree` schedule pruning
-//! (`dev-docs/ergoscript-compiler-m4-recon/recon-transforms.md` §8).
+//! `buildGraph`/`buildTree` schedule pruning.
 //!
-//! ## Scope (post-M5-Task-4)
+//! ## Scope
 //!
-//! This module was originally the M4 `val`-inlining + id-renumbering surface.
-//! Those responsibilities RETIRED into `crate::cse` (M5 Task 4, locked decision
-//! 4): the scope-chain hash-cons is now the SOLE subexpression-sharing pass —
+//! `crate::cse`'s scope-chain hash-cons is the SOLE subexpression-sharing pass —
 //! single-use `val`s inline for free (a use-count-1 symbol is not hoisted),
 //! multi-use non-constant `val`s hoist to `ValDef`s in their first-build scope,
 //! and dense ids are assigned assign-once with no renumber pass. What remains
@@ -90,7 +87,7 @@ pub(crate) fn prune_dead_vals(expr: Expr) -> Expr {
 /// — a def id is "live" iff it is reachable from its own block's result. Used by
 /// [`crate::tree::graph_building_lambda_reject`] to know which higher-order
 /// (`SFunc`-param) lambdas sit in dead code that Scala's schedule prunes before
-/// the lowering that would `MatchError` (recon-transforms.md §8; NF-2). The
+/// the lowering that would `MatchError` (NF-2, `lib.rs`). The
 /// reject walk combines this with a transitively-inherited dead flag, so a def
 /// that is "live within its own block" but nested inside an outer DEAD def is
 /// still treated as dead there.

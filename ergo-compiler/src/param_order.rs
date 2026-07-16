@@ -1,6 +1,6 @@
 //! Scala 2.12 immutable-`HashMap` (`HashTrieMap`) iteration order over a set of
 //! contract-template param names — the byte-exact source of `ConstantPlaceholder`
-//! indices for `@contract` templates with ≥5 params (M7).
+//! indices for `@contract` templates with ≥5 params.
 //!
 //! ## Why this exists
 //! `SigmaTemplateCompiler.compile` builds the param env as an immutable `Map`
@@ -18,14 +18,13 @@
 //! The iteration order is Scala-version dependent: 2.12 uses
 //! `scala.collection.immutable.HashMap$HashTrieMap` (5-bit-sliced trie, sub-tries
 //! visited **in place** in ascending bucket order); 2.13 uses the CHAMP `HashMap`
-//! (all same-level payloads first, THEN sub-nodes). M7 pins **2.12**, matching the
+//! (all same-level payloads first, THEN sub-nodes). This crate pins **2.12**, matching the
 //! `ct` oracle (`TyperOracle.scala` `//> using scala 2.12`, captured under Scala
 //! 2.12.21) and ergo-appkit (the real-world `ContractTemplate` producer, a 2.12
 //! artifact). The 2.13 CHAMP order is documented in [`iteration_order_2_13`] for
 //! the day the ecosystem's producer moves to 2.13.
 //!
-//! Reverse-engineered and bit-validated against the live oracle in
-//! `dev-docs/ergoscript-compiler-m7-recon/m7-param-ordering.md` (§3).
+//! Reverse-engineered and bit-validated against the live oracle.
 
 /// JVM `String.hashCode`: `h = 31*h + c` over the string's UTF-16 code units,
 /// `i32` wrapping arithmetic (`java.lang.String.hashCode`).
@@ -108,8 +107,8 @@ fn order_2_12(group: &[usize], depth: u32, improved: &[u32], out: &mut Vec<usize
 }
 
 /// The Scala **2.13** CHAMP `HashMap` iteration order over `names` — documented
-/// alternative for the day the `ContractTemplate` producer moves to 2.13 (M7 pins
-/// 2.12; see the module docs). Differs from [`iteration_order_2_12`] only in that
+/// alternative for the day the `ContractTemplate` producer moves to 2.13 (this
+/// crate pins 2.12; see the module docs). Differs from [`iteration_order_2_12`] only in that
 /// a colliding bucket is demoted after ALL same-level singletons rather than
 /// visited in place.
 #[cfg(test)]
@@ -179,11 +178,11 @@ mod tests {
         pairs.iter().map(|(n, i)| (n.to_string(), *i)).collect()
     }
 
-    // ----- oracle parity (recon §2/§3, bit-validated vs live JVM) -----
+    // ----- oracle parity (bit-validated vs live JVM) -----
 
     #[test]
     fn jvm_string_hash_matches_known_values() {
-        // §2 param-name hashCodes (Java String.hashCode), load-bearing for the port.
+        // Java String.hashCode of these param names, load-bearing for the port.
         assert_eq!(jvm_string_hash("zeta"), 3735256);
         assert_eq!(jvm_string_hash("alpha"), 92909918);
         assert_eq!(jvm_string_hash("mike"), 3351542);
@@ -206,7 +205,7 @@ mod tests {
 
     #[test]
     fn order_2_12_p5_matches_oracle() {
-        // recon §3: p5 2.12 → alpha=0 zeta=1 bravo=2 oscar=3 mike=4.
+        // oracle: p5 2.12 → alpha=0 zeta=1 bravo=2 oscar=3 mike=4.
         let names = ["zeta", "alpha", "mike", "bravo", "oscar"];
         let got = placeholder_map(&names, iteration_order_2_12(&names));
         let want = expect(&[
@@ -221,7 +220,7 @@ mod tests {
 
     #[test]
     fn order_2_12_p8_matches_oracle() {
-        // recon §3: p8 2.12 → kappa=0 lambda=1 omega=2 sigma=3 theta=4 delta=5 beta=6 gamma=7.
+        // oracle: p8 2.12 → kappa=0 lambda=1 omega=2 sigma=3 theta=4 delta=5 beta=6 gamma=7.
         let names = [
             "sigma", "delta", "kappa", "omega", "theta", "gamma", "lambda", "beta",
         ];
@@ -241,7 +240,7 @@ mod tests {
 
     #[test]
     fn order_2_13_p5_matches_oracle() {
-        // recon §3: p5 2.13 → alpha=0 oscar=1 mike=2 zeta=3 bravo=4 (collision demoted).
+        // oracle: p5 2.13 → alpha=0 oscar=1 mike=2 zeta=3 bravo=4 (collision demoted).
         let names = ["zeta", "alpha", "mike", "bravo", "oscar"];
         let got = placeholder_map(&names, iteration_order_2_13(&names));
         let want = expect(&[
@@ -256,7 +255,7 @@ mod tests {
 
     #[test]
     fn order_2_13_p8_matches_oracle() {
-        // recon §3: p8 2.13 → kappa,lambda,omega,sigma,theta,gamma,delta,beta.
+        // oracle: p8 2.13 → kappa,lambda,omega,sigma,theta,gamma,delta,beta.
         let names = [
             "sigma", "delta", "kappa", "omega", "theta", "gamma", "lambda", "beta",
         ];

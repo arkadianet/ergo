@@ -10,9 +10,10 @@
 //! - `data/shared/src/main/scala/sigma/ast/syntax.scala` (upcastTo)
 //! - `data/shared/src/main/scala/sigma/ast/SigmaBuilder.scala` (builder op layers)
 //!
-//! Task scope: Task 2 added unification + numeric machinery; Task 3 the SMethod
-//! tables; Task 5 (this) adds the structural `assignType` dispatch (`assign.rs`).
-//! Later tasks (6/7) add the Apply/MethodCallLike arms + predef lowering.
+//! Module structure: [`unify`] holds unification, substitution, and numeric
+//! upcast machinery; [`methods`] the SMethod tables; [`predef_ir`] the
+//! predefined-function environment and irBuilder lowering; [`assign`] the
+//! structural `assignType` dispatch, including the Apply/MethodCallLike arms.
 
 use std::collections::BTreeMap;
 
@@ -52,19 +53,12 @@ pub type TypeEnv = BTreeMap<String, SType>;
 /// (SigmaTyper.scala:21-24).  `builder`/`predefFuncRegistry` are folded into the
 /// Rust port's method tables + node constructors, so only `tree_version` remains.
 ///
-/// M4 Task 8 (recon-transforms.md §10, roadmap dead-flag note): the Scala
-/// constructor's `lowerMethodCalls` parameter is DROPPED here rather than
-/// ported. `SigmaCompiler.scala` always constructs `SigmaTyper` with
+/// The Scala constructor's `lowerMethodCalls` parameter is not modeled as a
+/// runtime toggle: `SigmaCompiler.scala` always constructs `SigmaTyper` with
 /// `lowerMethodCalls = true` in the production `compile()` path this port
-/// targets — the Rust port's property/method irBuilders
+/// targets, so the Rust port's property/method irBuilders
 /// (`predef_ir::predef_ir_builder`, `assign::lower_method`) are correspondingly
-/// unconditional, matching that fixed value. An earlier `lower_method_calls: bool`
-/// field on this struct was always constructed `true` and never read anywhere
-/// in the dispatch — a dead knob that implied a toggle nothing in this crate
-/// implements. Wiring it for real would mean threading a `false` branch
-/// through every one of those call sites to reproduce a mode Scala's own
-/// production path never takes; deleting it instead keeps the struct honest
-/// about what it actually models.
+/// unconditional, matching that fixed value.
 #[derive(Debug, Clone, Copy)]
 pub struct TyperCtx {
     /// ErgoTree version, gating the v5/v6 method tables

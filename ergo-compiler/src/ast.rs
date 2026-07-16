@@ -1,7 +1,7 @@
 //! Untyped AST produced by the parser. One variant per node the Scala parser
 //! can emit (sigma.ast values.scala, frontend nodes with opCode=Undefined plus
 //! the surviving constant/op nodes). Distinct from the ergo-ser opcode IR by
-//! design (design doc §6): this is a semantic tree with names and spans.
+//! design: this is a semantic tree with names and spans.
 
 use crate::span::Pos;
 use crate::stype::SType;
@@ -55,7 +55,7 @@ pub enum Expr {
     }, // Literals.scala:72-77
     /// Raw captured string with only delimiting `"` stripped — escapes are NOT
     /// decoded (Literals.scala:119-124). Also carries the `null`, `'c'`, `'sym`
-    /// and id-prefixed-string quirk forms (recon-lexical.md §4-5).
+    /// and id-prefixed-string quirk forms produced by the lexer.
     StringConst {
         value: String,
         pos: Pos,
@@ -64,7 +64,7 @@ pub enum Expr {
         pos: Pos,
     }, // SigmaBuilder.scala:652
 
-    // ----- frontend nodes (eliminated by binder/typer in M2+) -----
+    // ----- frontend nodes (eliminated by the binder/typer) -----
     Ident {
         name: String,
         tpe: SType,

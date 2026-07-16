@@ -49,28 +49,28 @@ pub(crate) use types::*;
 /// Source-text nesting depth upper-bounds every downstream structure (typed
 /// AST, emitted IR, wire body -- the M4/M5 transform passes rewrite the tree,
 /// they don't deepen it beyond source depth times a small constant), so this
-/// ONE cap -- shared by both of `parse.rs`'s structural-nesting recursion
+/// ONE cap -- shared by both of this parser's structural-nesting recursion
 /// families (`expr()`'s statement/block/paren/lambda nesting AND `type_()`'s
 /// `Coll[Coll[...]]`-style type nesting, via a single [`Cursor::depth`]
 /// counter both entry points share) -- bounds the whole compile pipeline in
-/// one place, rather than adding separate counters to `emit.rs` and every
-/// M4/M5 pass individually (M6 recon §5 audit: `fold.rs`/`lower.rs`/
-/// `inline.rs`/`cse.rs`/`isproven.rs`/`tuple.rs` are all call-stack-recursive
-/// 1:1 tree walks over the already-depth-bounded typed AST -- none amplifies
-/// depth beyond what the parser already accepted, so none needs its own
-/// guard).
+/// one place, rather than adding separate counters to the `emit` module and
+/// every downstream transform pass individually: `fold`, `lower`, `inline`,
+/// `cse`, `isproven`, and `tuple` are all call-stack-recursive 1:1 tree walks
+/// over the already-depth-bounded typed AST, so none amplifies depth beyond
+/// what the parser already accepted and none needs its own guard.
 ///
 /// NOT oracle-pinned: the compiler's own limits are explicitly not
-/// consensus-critical (`lib.rs` D-note), unlike `ergo_ser::opcode::types::
-/// MAX_EXPR_DEPTH` (110, the CONSENSUS wire-tree depth bound the assembled
-/// tree is re-parsed against at `build_tree` time, `tree.rs`). Set
-/// conservatively ABOVE that consensus bound -- source text can legitimately
-/// nest a little deeper than the assembled/segregated tree before the
-/// transform passes fold/fuse it down -- while staying far below any real
-/// stack-overflow threshold. No vendored corpus contract (`test-vectors/
-/// ergoscript/corpus`, ~79 real deployed scripts) comes anywhere close: the
-/// deepest, `rosen-bridge/RwtRepo.es`, bottoms out around a dozen levels of
-/// structural nesting (see `corpus_deepest_contract_still_parses` below).
+/// consensus-critical (see the deviation ledger in `lib.rs`), unlike
+/// `ergo_ser::opcode::types::MAX_EXPR_DEPTH` (110, the CONSENSUS wire-tree
+/// depth bound the assembled tree is re-parsed against at `build_tree` time,
+/// in the `tree` module). Set conservatively ABOVE that consensus bound --
+/// source text can legitimately nest a little deeper than the
+/// assembled/segregated tree before the transform passes fold/fuse it down --
+/// while staying far below any real stack-overflow threshold. No vendored
+/// corpus contract (`test-vectors/ergoscript/corpus`, ~79 real deployed
+/// scripts) comes anywhere close: the deepest, `rosen-bridge/RwtRepo.es`,
+/// bottoms out around a dozen levels of structural nesting (see
+/// `corpus_deepest_contract_still_parses` below).
 const MAX_PARSE_DEPTH: usize = 128;
 
 /// Parse an ErgoScript expression (Scala `SigmaParser.apply`,
@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn parse_type_version_gates_unsignedbigint() {
-        // D3: predef lookup succeeds (Types.scala:37) but SPrimType availability
+        // Predef lookup succeeds (Types.scala:37) but SPrimType availability
         // (Types.scala:128 + SType.scala:105-122) rejects below v3.
         assert_eq!(
             parse_type("UnsignedBigInt", 3).unwrap(),
@@ -855,7 +855,7 @@ mod expr_tests {
 
     #[test]
     fn unary_ops_bind_atom_then_suffixes_wrap() {
-        // :775-786 + recon-gap item 2
+        // :775-786 -- unary ops bind the atom first, then suffixes wrap it
         assert_eq!(
             strip_pos(&p("-OUTPUTS.size")),
             negation(select(ident0("OUTPUTS"), "size"))
@@ -975,7 +975,7 @@ mod expr_tests {
 
     #[test]
     fn stableid_keyword_as_field_selects() {
-        // `val`/`def` are Idents lexically (recon-lexical.md §2.3), so `a.val`
+        // `val`/`def` are Idents lexically, not reserved keywords, so `a.val`
         // selects a field named "val" via StableId (Core.scala:62-69).
         assert_eq!(strip_pos(&p("a.val")), select(ident0("a"), "val"));
     }
@@ -1255,7 +1255,7 @@ mod expr_tests {
 
     #[test]
     fn one_nl_max_bc_before_only_poisons_when_newline_consumed() {
-        // Round-12 fix: bc_before poisons one_nl_max ONLY when it consumed a Newline.
+        // bc_before poisons one_nl_max ONLY when it consumed a Newline.
         //
         // (a) later-chunk block-lambda head via newline+comment gap → REJECT
         //     oracle: ParserOracle sigma-state 6.0.2 → REJECT 0:0
@@ -1415,7 +1415,7 @@ mod expr_tests {
         assert!(crate::parse("1;", 3).is_err());
     }
 
-    // ----- FunTypeArgs grammar (Finding A, Types.scala:143,153-165) -----
+    // ----- FunTypeArgs grammar (Types.scala:143,153-165) -----
 
     #[test]
     fn def_typeargs_empty_brackets_errors() {
@@ -1450,7 +1450,7 @@ mod expr_tests {
         );
     }
 
-    // ----- Extractor-arg silent drop (Finding B, Exprs.scala:236) -----
+    // ----- Extractor-arg silent drop (Exprs.scala:236) -----
 
     #[test]
     fn val_extractor_args_binds_name_silently_dropping() {
@@ -1482,7 +1482,7 @@ mod expr_tests {
         assert!(crate::parse("{ val Some(123) = 1; 2 }", 3).is_err());
     }
 
-    // ----- LambdaRhs leading BlockLambda drop (Finding C, Exprs.scala:59-60) -----
+    // ----- LambdaRhs leading BlockLambda drop (Exprs.scala:59-60) -----
 
     #[test]
     fn lambda_rhs_leading_blocklambda_head_silently_dropped() {
@@ -1549,7 +1549,7 @@ mod expr_tests {
         assert_eq!(e.line_col(src), (1, 10));
     }
 
-    // ----- structural-nesting depth guard (M6, ParseError::TooDeep) -----
+    // ----- structural-nesting depth guard (ParseError::TooDeep) -----
 
     /// `n` levels of parenthesized nesting around a leaf integer, e.g.
     /// `nested_parens(3)` = `"(((1)))"`. Each level costs exactly one extra

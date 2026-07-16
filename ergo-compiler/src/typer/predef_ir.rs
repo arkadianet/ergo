@@ -13,7 +13,7 @@
 //!   `Ident`s in a bound tree — their env entries are inert, so omitting *those* is
 //!   behaviour-preserving.  `min`/`max` are the exception: they ARE valid
 //!   identifiers (bare `min`, `val x = min`, and the block duplicate-name check
-//!   `{ val min = 1; min }`), so they must be present (adversarial finding A2).
+//!   `{ val min = 1; min }`), so they must be present.
 //!
 //! - [`predef_ir_builder`] — the `PredefinedFuncApply.unapply` post-wrapper
 //!   (SigmaPredef.scala:745-753): given a typed callee `Ident(name, …)` and its
@@ -21,8 +21,8 @@
 //!   `Option<Result<…>>` return encodes the three Scala outcomes:
 //!   - `None` — no irBuilder for `name`, or `isDefinedAt` was false (the arg
 //!     pattern didn't match) → the caller keeps the `mkApply` node (fall-through).
-//!     This is the TYPER path's crucial difference from the BINDER path (Task-4
-//!     finding): a non-matching arg pattern falls through here rather than throwing.
+//!     This is the TYPER path's crucial difference from the BINDER path: a
+//!     non-matching arg pattern falls through here rather than throwing.
 //!   - `Some(Ok(n))` — `isDefinedAt` true, the builder produced IR node `n`.
 //!   - `Some(Err(e))` — `isDefinedAt` true, the builder body threw (e.g.
 //!     `executeFromSelfReg` bad index) → propagated by the caller.
@@ -34,7 +34,7 @@
 //! see `CLASS_DEVIATION_SOURCES`; `"-0"`/`"-0000"` have `signum() == 0` and
 //! ACCEPT as `@0`, golden_seed.txt §24(g)); a valid non-negative literal
 //! builds the canonical `ConstPayload::UnsignedBigInt`
-//! constant (D-T3 CLOSED, M3 Task-6; oracle: `unsignedBigInt("5")` →
+//! constant (D-T3 CLOSED; oracle: `unsignedBigInt("5")` →
 //! `OK (ConstantNode:UnsignedBigInt (CUnsignedBigInt @5))`, golden_seed.txt
 //! §13/§24). Canonicalizes leading zeros (`"0005"` → `"5"`, oracle-verified) and
 //! caps at 256 bits (`bitLength() > 256` → reject, `CUnsignedBigInt.scala:20-22`)
@@ -47,7 +47,7 @@
 //! `TyperError` (D-T2: verdict parity; error class differs, as documented in
 //! lib.rs).  A valid (or empty) literal decodes canonically to a
 //! `ByteArrayConstant` (`bs58::decode`, Bitcoin alphabet — byte-identical to
-//! Scorex's decoder; M3 Task-5 closes the deferred shape).
+//! Scorex's decoder).
 //!
 //! `fromBase64` validates that every character is in the Java standard Base64
 //! alphabet (`A-Za-z0-9+/=`).  An invalid character causes
@@ -56,15 +56,14 @@
 //! documented in lib.rs).  A valid literal decodes canonically to a
 //! `ByteArrayConstant` via the `JAVA_BASE64` engine (standard alphabet,
 //! optional padding, trailing bits in the last quantum silently dropped —
-//! matching `java.util.Base64.getDecoder()` exactly; M3 Task-5 closes the
-//! deferred shape).
+//! matching `java.util.Base64.getDecoder()` exactly).
 //!
-//! `deserialize[T](s)` — CLOSED (M4 Task 8, D-T2).  `SigmaPredef.scala:169-188`
+//! `deserialize[T](s)` — (D-T2).  `SigmaPredef.scala:169-188`
 //! Base58-decodes `s`, runs `ValueSerializer.deserialize` (the SAME general
 //! `Value` grammar `ergo_ser::opcode::parse_expr` reads ErgoTree bodies with)
 //! over the bytes, and embeds the resulting expression IN PLACE at typecheck
-//! time — a genuine opcode-IR→`TypedExpr` reverse mapping (gap F6). Oracle
-//! 2026-07-07 (×2 confirms, `ORACLE_TREE_VERSION=3`): `deserialize[Int]("Jq")`
+//! time — a genuine opcode-IR→`TypedExpr` reverse mapping. Oracle-confirmed
+//! (×2, `ORACLE_TREE_VERSION=3`): `deserialize[Int]("Jq")`
 //! (bytes `04 0a`, a bare `IntConstant(5)`) embeds `ConstantNode:Int @5`;
 //! `deserialize[Int]("3p")` (byte `a3`, bare `Height`) embeds `Height:Int` — a
 //! non-constant, genuinely RUNTIME node. A bare `deserialize(...)` with no
@@ -73,12 +72,9 @@
 //!
 //! **Scope (probe-bounded):** [`unlower_expr`] covers every `Const` shape
 //! [`crate::emit::map_const`] can produce in reverse (the `unmap_const`
-//! lockstep — M4 Task 8 review closed the `ConstPayload::ProveDlog` gap,
-//! D-C8: `unmap_const` had no arm for `SigmaValue::SigmaProp(SigmaBoolean::
-//! ProveDlog(_))`, silently falling through to reject instead of
-//! reconstructing a shape `map_const` can re-emit byte-identically; a
-//! `map_const ∘ unmap_const = identity` test now sweeps every `ConstPayload`
-//! variant to guard the pair against future drift), plus the nine
+//! lockstep, including `ConstPayload::ProveDlog` — a
+//! `map_const ∘ unmap_const = identity` test sweeps every `ConstPayload`
+//! variant to guard the pair against drift), plus the nine
 //! zero-payload context/global singleton primitives (`Height`/`Inputs`/
 //! `Outputs`/`Self_`/`MinerPubkey`/`LastBlockUtxoRootHash`/`Context`/`Global`/
 //! `GroupGenerator`) — both oracle-confirmed. `ConstPayload::SigmaProp`
@@ -91,11 +87,10 @@
 //! `BinOp`, a `MethodCall`, a materialized `Coll[Int]`/`Coll[Boolean]`
 //! constant — `ConstPayload` has no variant for those, only `Coll[Byte]`/
 //! `Coll[Long]`, mirroring `map_const`'s own coverage) is REJECTED with a
-//! descriptive `TyperError` rather than silently mismapped — an honest,
-//! bounded residual: no source in the 79-contract corpus calls `deserialize`
-//! at all (grep-confirmed), so this is not a corpus blocker, and closing the
-//! general case would mean porting a second full opcode-IR↔TypedExpr
-//! symmetric mapping for a predef nothing exercises. See lib.rs § "Known M2
+//! descriptive `TyperError` rather than silently mismapped: no source in the
+//! 79-contract corpus calls `deserialize` at all, and closing the general
+//! case would mean porting a second full opcode-IR↔TypedExpr symmetric
+//! mapping for a predef nothing exercises. See lib.rs § "Known M2
 //! deviations" (D-T2) for the full ledger.
 //!
 //! `fromBase16`/`bigInt` ARE fully implemented (oracle-verified against the JVM
@@ -173,8 +168,8 @@ pub fn predefined_env(_tree_version: u8) -> TypeEnv {
     // declaration type `[T](T,T) => T`.  The 2-arg *application* form `min(a,b)` is
     // desugared to `ArithOp` Min/Max at bind time (binder.rs), but the bare/value/
     // shadow forms resolve through this env entry, and the block duplicate-name
-    // check reads it (adversarial finding A2).  The `[T]` binder is attached by the
-    // tpe_params patch below, so bare `min` prints `[T](T,T) => T` (wave-B shape fix).
+    // check reads it.  The `[T]` binder is attached by the tpe_params patch below,
+    // so bare `min` prints `[T](T,T) => T`.
     put("min", vec![t(), t()], t());
     put("max", vec![t(), t()], t());
 
@@ -263,7 +258,7 @@ pub fn predefined_env(_tree_version: u8) -> TypeEnv {
     // binder's `PK("addr")` rewrite (binder.rs `bind_pk`).  A spurious env entry
     // both fabricates a bare-`PK` value (`PK` accepts, oracle rejects) and wrongly
     // fires the block duplicate-name check (`{ val PK = 1; PK }` rejects, oracle
-    // accepts) — adversarial finding A2.
+    // accepts).
 
     // Attach declared type parameters to the polymorphic predefs (`STypeParam.ident`,
     // SType.scala:78-89) so a bare/unapplied Ident value prints its `[T]`/`[K,L,R,O]`
@@ -561,7 +556,7 @@ pub fn predef_ir_builder(
         // unsignedBigInt(s): reject negative literals (Scala InvalidArguments,
         // class deviation — see `tests/typer_oracle_parity.rs`
         // `CLASS_DEVIATION_SOURCES`); a valid non-negative literal builds the
-        // canonical `UnsignedBigInt` constant (D-T3 CLOSED, M3 Task-6). The
+        // canonical `UnsignedBigInt` constant (D-T3 CLOSED). The
         // sign check lives INSIDE `parse_unsigned_big_int` — Scala parses
         // FIRST and rejects only `signum() < 0`, so `"-0"` ACCEPTs (§24(g)).
         "unsignedBigInt" => {
@@ -571,7 +566,7 @@ pub fn predef_ir_builder(
         // fromBase58: reject if any char is outside the Bitcoin/Scorex Base58
         // alphabet (Scorex `Base58.decode(s).get` → AssertionError on bad char via
         // `Predef.ensuring`; we emit TyperError — D-T2, verdict parity). A valid
-        // (or empty) literal decodes canonically (D-T2 CLOSED, M3 Task-5).
+        // (or empty) literal decodes canonically (D-T2 CLOSED).
         "fromBase58" => {
             let s = string_const(args.first()?)?;
             match s.chars().find(|&c| !is_base58_char(c)) {
@@ -584,7 +579,7 @@ pub fn predef_ir_builder(
         // fromBase64: reject if any char is outside the Java standard Base64
         // alphabet (`java.util.Base64.getDecoder().decode(s)` → IllegalArgumentException;
         // we emit TyperError — D-T2, verdict parity). A valid literal decodes
-        // canonically (D-T2 CLOSED, M3 Task-5).
+        // canonically (D-T2 CLOSED).
         "fromBase64" => {
             let s = string_const(args.first()?)?;
             match validate_base64(s) {
@@ -592,7 +587,7 @@ pub fn predef_ir_builder(
                 Ok(()) => Some(decode_base64(s)),
             }
         }
-        // deserialize[T](s): CLOSED (M4 Task 8, D-T2) — see module docs.
+        // deserialize[T](s): (D-T2) — see module docs.
         "deserialize" => {
             let s = string_const(args.first()?)?;
             let target_tpe = func_range(func)?.clone();
@@ -727,7 +722,7 @@ fn execute_from_self_reg(
 /// Parses with `num_bigint::BigInt` — rejects malformed input (mirrors Java
 /// `NumberFormatException`) — and stores the CANONICAL decimal string (leading
 /// zeros stripped: `bigInt("0005")` → `OK (ConstantNode:BigInt (CBigInt @5))`,
-/// oracle-verified, golden_seed.txt §24, D-T3 M3 Task-6).
+/// oracle-verified, golden_seed.txt §24, D-T3).
 ///
 /// Cap (`CBigInt.scala:14-20`): `wrappedValue.bitLength() > 255` throws
 /// `ArithmeticException`, but ONLY at `tree_version >= 3`
@@ -758,12 +753,12 @@ fn parse_big_int(s: &str, tree_version: u8) -> Result<TypedExpr, TyperError> {
 /// `new BigInteger(s)` and rejects only `signum() < 0`, and
 /// `BigInteger("-0").signum() == 0`, so `"-0"`/`"-0000"` ACCEPT as `@0`
 /// (oracle: `tc unsignedBigInt("-0")` → `OK (ConstantNode:UnsignedBigInt
-/// (CUnsignedBigInt @0))`, golden_seed.txt §24(g), captured 2026-07-07 ×3
+/// (CUnsignedBigInt @0))`, golden_seed.txt §24(g) ×3
 /// runs; num-bigint normalizes `-0` to `Sign::NoSign`, so `Sign::Minus`
 /// reproduces `signum() < 0` exactly).  Stores the CANONICAL decimal string
 /// (leading zeros / `-0` sign stripped: `unsignedBigInt("0005")` →
 /// `OK (ConstantNode:UnsignedBigInt (CUnsignedBigInt @5))`, oracle-verified,
-/// golden_seed.txt §24, D-T3 M3 Task-6).
+/// golden_seed.txt §24, D-T3).
 ///
 /// Cap (`CUnsignedBigInt.scala:14-22`): `wrappedValue.bitLength() > 256` throws
 /// `ArithmeticException` — UNCONDITIONALLY, no `tree_version` gate (unlike
@@ -892,7 +887,7 @@ fn deserialize_predef(
 
 /// Reverse of [`crate::emit::map_const`] plus the nine zero-payload
 /// singleton primitives — the opcode-IR→`TypedExpr` mapping `deserialize`
-/// needs (gap F6). `None` for anything else (composite expressions, or a
+/// needs. `None` for anything else (composite expressions, or a
 /// `Const` shape `ConstPayload` has no variant for).
 fn unlower_expr(op: &OpExpr) -> Option<TypedExpr> {
     match op {
@@ -967,12 +962,9 @@ fn unmap_const(tpe: &WireType, val: &WireValue) -> Option<(SType, ConstPayload)>
             ConstPayload::GroupElement(*group_element_bytes(ge)),
         )),
         // Mirrors `emit::map_const`'s `ConstPayload::ProveDlog` arm (the
-        // binder PK-rule / P2PK-address shape) — closes the M4 Task 8 review
-        // gap (D-C8 lockstep): `unmap_const` previously had no arm for
-        // `SigmaValue::SigmaProp(SigmaBoolean::ProveDlog(_))`, so a
-        // `deserialize[SigmaProp](...)` decoding a `ProveDlog` constant would
-        // silently fall through to the `_ => None` reject instead of
-        // reconstructing the payload `map_const` can re-emit byte-identically.
+        // binder PK-rule / P2PK-address shape), so a `deserialize[SigmaProp](...)`
+        // decoding a `ProveDlog` constant reconstructs the payload `map_const`
+        // can re-emit byte-identically (D-C8 lockstep).
         // `SigmaBoolean::{Cand,Cor,Cthreshold,ProveDHTuple,TrivialProp}` have
         // no `ConstPayload` variant at all (mirrors `map_const`'s own
         // coverage — those shapes never appear as bare Constants on the wire
@@ -1076,7 +1068,7 @@ static JAVA_BASE64: base64::engine::GeneralPurpose = base64::engine::GeneralPurp
 /// Returns `Err(msg)` otherwise, mirroring the `IllegalArgumentException`
 /// that the Java decoder throws.
 ///
-/// Oracle-confirmed (2026-07-04, ORACLE_TREE_VERSION=3):
+/// Oracle-confirmed (ORACLE_TREE_VERSION=3):
 ///   `fromBase64("a=")` → REJECT (pad present, len 2, 2 % 4 ≠ 0)
 ///   `fromBase64("abcde=")` → REJECT (pad present, len 6, 6 % 4 ≠ 0)
 ///   `fromBase64("ab")` → OK (no padding, len 2, no structural check)
@@ -1178,7 +1170,7 @@ mod tests {
     #[test]
     fn predefined_env_getvar_declaration_is_byte_to_option_t() {
         let env = predefined_env(3);
-        // getVar is polymorphic: its SFunc carries the `[T]` binder (wave-B shape fix)
+        // getVar is polymorphic: its SFunc carries the `[T]` binder,
         // so a bare `getVar` prints `[T](Byte) => Option[T]`.
         assert_eq!(
             env.get("getVar"),
@@ -1369,7 +1361,7 @@ mod tests {
     // ----- error paths / fall-through -----
 
     /// `deserialize` without an explicit `[T]` REJECTs `InvalidArguments`
-    /// (oracle-confirmed 2026-07-07: `deserialize("Jq") == 5` → `REJECT 0:0
+    /// (oracle-confirmed: `deserialize("Jq") == 5` → `REJECT 0:0
     /// InvalidArguments`) — the range stays an unresolved type var, same gate
     /// as `deserializeTo`/`fromBigEndianBytes`'s `global_deserialize`.
     #[test]
@@ -1381,7 +1373,7 @@ mod tests {
     }
 
     /// `deserialize[Int]("Jq")` → `ConstantNode:Int @5` (oracle-confirmed
-    /// 2026-07-07 ×2: bytes `04 0a` = `IntConstant(5)`; `"Jq"` is that pair's
+    /// ×2: bytes `04 0a` = `IntConstant(5)`; `"Jq"` is that pair's
     /// Base58 encoding).
     #[test]
     fn deserialize_constant_folds_to_typed_constant() {
@@ -1398,7 +1390,7 @@ mod tests {
         );
     }
 
-    /// `deserialize[Int]("3p")` → bare `Height` (oracle-confirmed 2026-07-07:
+    /// `deserialize[Int]("3p")` → bare `Height` (oracle-confirmed:
     /// byte `a3` is the bare `Height` opcode) — a genuinely NON-constant,
     /// runtime node, not just a constant-folding shortcut.
     #[test]
@@ -1424,7 +1416,7 @@ mod tests {
     }
 
     /// Malformed (truncated) ValueSerializer bytes → `TyperError` (Scala:
-    /// `BufferUnderflowException`, oracle-confirmed 2026-07-07).
+    /// `BufferUnderflowException`, oracle-confirmed).
     #[test]
     fn deserialize_malformed_bytes_errors() {
         // Base58 of a single 0x04 byte: a lone SInt type tag with no value
@@ -1449,8 +1441,8 @@ mod tests {
 
     /// A shape `unlower_expr` does not cover (a composite expression — here a
     /// `GT` relation over two Height/Const nodes) rejects with a descriptive
-    /// error rather than silently mismapping (probe-bounded scope: gap F6
-    /// covers constants + the nine singleton primitives only).
+    /// error rather than silently mismapping (`unlower_expr` covers constants
+    /// plus the nine singleton primitives only).
     #[test]
     fn deserialize_composite_expression_rejects_honestly() {
         // Base58 of `HEIGHT > 0`: `d1 91 a3 04 00` — Height(0xa3) is covered,
@@ -1551,7 +1543,7 @@ mod tests {
     // ----- fromBase64 structural padding validation (oracle §17) -----
 
     /// `fromBase64("a=")` → Err: padding present but len 2, not a multiple of 4.
-    /// Oracle (2026-07-04, ORACLE_TREE_VERSION=3, fresh-JVM):
+    /// Oracle (ORACLE_TREE_VERSION=3, fresh-JVM):
     ///   `fromBase64("a=")` → REJECT 0:0 IllegalArgumentException
     /// Java's `Base64.getDecoder().decode("a=")` throws because length 2 ≢ 0 (mod 4).
     #[test]
@@ -1566,7 +1558,7 @@ mod tests {
     }
 
     /// `fromBase64("abcde=")` → Err: padding present but len 6, not a multiple of 4.
-    /// Oracle (2026-07-04, ORACLE_TREE_VERSION=3, fresh-JVM):
+    /// Oracle (ORACLE_TREE_VERSION=3, fresh-JVM):
     ///   `fromBase64("abcde=")` → REJECT 0:0 IllegalArgumentException
     #[test]
     fn from_base64_padded_length_six_rejects() {
@@ -1581,7 +1573,7 @@ mod tests {
 
     /// `fromBase64("ab")` → decodes to a single byte (unpadded, no length-mod-4
     /// check; 2 data chars decode to 1 byte, Java drops the 4 dangling low bits
-    /// of the last quantum). Oracle (2026-07-04, ORACLE_TREE_VERSION=3, fresh-JVM):
+    /// of the last quantum). Oracle (ORACLE_TREE_VERSION=3, fresh-JVM):
     ///   `fromBase64("ab")` → OK (ConstantNode:Coll[Byte] <@105>)
     #[test]
     fn from_base64_unpadded_short_decodes_dropping_trailing_bits() {
@@ -1615,7 +1607,7 @@ mod tests {
     }
 
     /// `unsignedBigInt("5")` → `ConstantNode:UnsignedBigInt (CUnsignedBigInt @5)`
-    /// (D-T3 CLOSED, M3 Task-6; oracle §13/§24).
+    /// (D-T3 CLOSED; oracle §13/§24).
     #[test]
     fn unsigned_big_int_non_negative_builds_constant() {
         let f = ident(
@@ -1636,7 +1628,7 @@ mod tests {
     /// FIRST and rejects only `signum() < 0`, and `BigInteger("-0").signum()
     /// == 0` (oracle: `tc unsignedBigInt("-0")` → `OK
     /// (ConstantNode:UnsignedBigInt (CUnsignedBigInt @0))`, golden_seed.txt
-    /// §24(g), captured 2026-07-07 ×3 runs).
+    /// §24(g) ×3 runs).
     #[test]
     fn unsigned_big_int_negative_zero_accepts_as_zero() {
         let f = ident(
@@ -1789,12 +1781,10 @@ mod tests {
         bytes
     }
 
-    /// D-C8 drift guard (M4 Task 8 review): `emit::map_const` and this
-    /// module's `unmap_const` must stay exact inverses over every
-    /// `ConstPayload` variant `map_const` can actually emit. The review found
-    /// `unmap_const` silently missing the `ProveDlog` arm (now fixed above) —
-    /// this test sweeps every OTHER variant too so a future `ConstPayload`
-    /// addition can't reintroduce the same silent one-sided gap.
+    /// D-C8 drift guard: `emit::map_const` and this module's `unmap_const`
+    /// must stay exact inverses over every `ConstPayload` variant `map_const`
+    /// can actually emit. This test sweeps every variant so a future
+    /// `ConstPayload` addition can't introduce a silent one-sided gap.
     /// `ConstPayload::SigmaProp` is deliberately excluded — see
     /// `map_const_rejects_opaque_sigma_prop_no_roundtrip_possible` below for
     /// why it is not a gap.

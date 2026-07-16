@@ -3,7 +3,8 @@
 //! Mirrors `sigmastate.interpreter.Interpreter.ScriptEnv` (Scala `Map[String, Any]`,
 //! Interpreter.scala:503), restricted to the value types that
 //! `Platform.liftToConstant` (data/jvm/src/main/scala/sigma/Platform.scala:16-65)
-//! successfully lifts and that appear in the oracle demo env (m2-typer-plan.md E9).
+//! successfully lifts and that appear in the oracle demo env exercised by this
+//! crate's golden test vectors.
 //!
 //! Uses `BTreeMap` for deterministic iteration order (alphabetical by key).
 
@@ -20,10 +21,10 @@ use crate::typed::{ConstPayload, TypedExpr};
 /// A single compile-time constant value in the script environment.
 ///
 /// Covers every value type that `Platform.liftToConstant` handles and that
-/// appears in the oracle demo env (E9).  The version-gated arms
+/// appears in the oracle demo env.  The version-gated arms
 /// (java.math.BigInteger at v5 only, sigma.Header/PreHeader/UnsignedBigInt at
 /// v6 only) are omitted — they are not reachable from the demo env and the
-/// oracle does not exercise them in M2 scope.
+/// oracle does not exercise them.
 ///
 /// Normative source: Platform.scala:16-65.
 #[derive(Debug, Clone, PartialEq)]
@@ -51,22 +52,20 @@ pub enum EnvValue {
     /// Uses `ergo_primitives::group_element::GroupElement` (opaque newtype
     /// around `[u8; 33]`).
     GroupElement(GroupElement),
-    /// Opaque `SigmaProp` value (M3 scope for full parity). Platform.scala:45-47.
+    /// Opaque `SigmaProp` value. Platform.scala:45-47.
     SigmaProp(String),
     /// `ProveDlog` (33-byte SEC1-compressed secp256k1 pubkey) -> a REAL,
     /// emittable `SigmaPropConstant(ProveDlog(pk))`, unlike the opaque
-    /// [`EnvValue::SigmaProp`] label above. Added for M6
-    /// (dev-docs/ergoscript-compiler-m6-recon.md §3): Scala's `keysToEnv`
+    /// [`EnvValue::SigmaProp`] label above. Scala's `keysToEnv`
     /// (`ScriptApiRoute.scala:52-54`) injects each wallet pubkey as
     /// `myPubKey_N -> ProveDlog(pk)` into the `/script/p2sAddress` /
-    /// `p2shAddress` compile env, and there was no `EnvValue` variant that
-    /// lifted to a real, emittable SigmaProp constant before this — only the
-    /// opaque, non-emittable `SigmaProp(String)` label (`lib.rs` D-E3) or the
-    /// raw-curve-point (not SigmaProp-typed) `GroupElement`. The downstream
+    /// `p2shAddress` compile env; the opaque, non-emittable `SigmaProp(String)`
+    /// label (`lib.rs` D-E3) and the raw-curve-point (not SigmaProp-typed)
+    /// `GroupElement` variant cannot represent this shape. The downstream
     /// typed-AST/binder/emit plumbing for `ConstPayload::ProveDlog` already
     /// exists end-to-end (the binder's `PK(...)` rule, `binder.rs:604`,
-    /// produces the identical shape), so this is the ONE missing env-side
-    /// entry point.
+    /// produces the identical shape), so this is the one env-side entry point
+    /// that constructs it.
     ProveDlog([u8; 33]),
 }
 
@@ -123,7 +122,7 @@ impl ScriptEnv {
 ///
 /// Normative source: Platform.scala:16-65.
 ///
-/// # Deviations (M3, D-T5)
+/// # Deviations (D-T5)
 ///
 /// Every `EnvValue` variant except `GroupElement` lifts unconditionally
 /// (matching the Scala doc above). `GroupElement` additionally on-curve-checks

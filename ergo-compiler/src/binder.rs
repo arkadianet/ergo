@@ -1,6 +1,6 @@
 //! Binder — port of Scala `SigmaBinder` (sigma-state 6.0.2).
 //!
-//! Runs between the M1 parser and the typer: substitutes ScriptEnv constants
+//! Runs between the parser and the typer: substitutes ScriptEnv constants
 //! and global names, and performs the shallow structural rewrites (Coll,
 //! min/max, PK, serialize, isEmpty). All actual type inference, method
 //! resolution, and local-variable scoping is the TYPER's job.
@@ -31,8 +31,8 @@
 //! - Rule 11 outputs `LogicalNot(Select(_, "isDefined"))` — "isDefined" is not
 //!   a rule pattern.
 //!
-//! Scala's `SrcCtxCallbackRewriter` source-context propagation has no M2
-//! equivalent: `TypedExpr` carries no positions (positions surface only in
+//! Scala's `SrcCtxCallbackRewriter` source-context propagation has no
+//! equivalent here: `TypedExpr` carries no positions (positions surface only in
 //! `BindError`), so nothing is lost by not porting it.
 //!
 //! # Error-order faithfulness
@@ -57,8 +57,8 @@ use crate::typer::get_method;
 // ── BindError ────────────────────────────────────────────────────────────────
 
 /// Binder reject surface. Error MESSAGES are not parity-relevant (same policy
-/// as `ParseError`, design doc §10); the accept/reject verdict, the error
-/// class, and the position are.
+/// as `ParseError`); the accept/reject verdict, the error class, and the
+/// position are.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BindError {
     /// Scala `BinderException` (SigmaBinder.scala:121 `error()`): a Block
@@ -102,7 +102,7 @@ impl BindError {
 
 /// Bind a parsed expression: substitute ScriptEnv constants and global names,
 /// apply the 11 SigmaBinder rewrite rules, and convert the untyped `Expr`
-/// vocabulary into the single post-parse `TypedExpr` vocabulary (E11) with
+/// vocabulary into the single post-parse `TypedExpr` vocabulary, with
 /// `NoType` placeholders wherever typing is pending.
 ///
 /// Mirrors `SigmaBinder.bind(e) = eval(e, env)` (SigmaBinder.scala:116-117).
@@ -284,7 +284,7 @@ fn bind_expr(
         // ── Rule 6: Lambda body bound with the SAME outer env ──────────────
         // (SigmaBinder.scala:81-86). Lambda params are NOT added to env —
         // param scoping is the typer's job (SigmaTyper.scala:132). The Scala
-        // `require(params.isEmpty)` is structurally guaranteed here: the M1
+        // `require(params.isEmpty)` is structurally guaranteed here: the
         // parser AST has no tpe_params field at all.
         Expr::Lambda {
             args,
@@ -627,11 +627,11 @@ fn bind_pk(args: Vec<TypedExpr>, pos: Pos, network: NetworkPrefix) -> Result<Typ
 /// A bound Select's `tpe` is normally OVERWRITTEN by the typer — `assign_type`
 /// re-derives it in `assign_select` (via `get_method`) and fills `res_type` — so
 /// this value is only ever *observed* on a Select that survives un-typed: inside a
-/// binder-prebuilt `serialize(v)` argument, which §1.24 passes through unchanged.
+/// binder-prebuilt `serialize(v)` argument, which passes through unchanged.
 /// There the s-expression must match the reference byte-for-byte (`get_method`
 /// supplies the full declared `SFunc`, incl. `SBox`/`SGroupElement`/… receivers the
 /// parse-AST `product_method_tpe` port omits), and any `NoType` node makes the
-/// reference printer throw → REJECT (enforced by the §1.24 passthrough).
+/// reference printer throw → REJECT (enforced by that passthrough).
 ///
 /// This does NOT change `Expr::parse_tpe` (a separate `product_method_tpe` call site
 /// on the untyped parse AST that drives unary/relation operand checks); only the
@@ -655,9 +655,10 @@ fn declared_select_tpe(obj_tpe: &SType, field: &str, tree_version: u8) -> SType 
 ///
 /// The `withConcreteTypes` substitution specializes the METHOD DESCRIPTOR
 /// (not the MethodCall.typeSubst, which stays empty `Map()`); `MethodRef`
-/// carries only owner+name, and neither the printer nor the M2 pipeline reads
-/// the descriptor's dom, so dropping the specialization is lossless here
-/// (M3 lowering recomputes it). tpe = the method range, `Coll[Byte]`.
+/// carries only owner+name, and neither the printer nor the rest of the
+/// pipeline reads the descriptor's dom, so dropping the specialization is
+/// lossless here (the lowering pass recomputes it). tpe = the method range,
+/// `Coll[Byte]`.
 ///
 /// Non-single arity is a `scala.MatchError` crash in the reference — mapped
 /// to `InvalidArguments` (verdict parity; class tag deviation D-T8).

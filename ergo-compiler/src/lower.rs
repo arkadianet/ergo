@@ -1,33 +1,30 @@
-//! M4 Task 3 — lowering-block AST→AST passes over the emitted opcode IR
+//! Lowering-block AST→AST passes over the emitted opcode IR
 //! (`ergo_ser::opcode::Expr`), mirroring two rules from Scala's
 //! `GraphBuilding.rewriteDef` fixpoint cascade:
 //!
-//! - **D-C2** (`dev-docs/ergoscript-compiler-m4-recon/recon-transforms.md`
-//!   §5, `TreeBuilding.scala:416-430`): `CreateProveDlog(Const{GroupElement})`
+//! - **D-C2** (`TreeBuilding.scala:416-430`): `CreateProveDlog(Const{GroupElement})`
 //!   folds to a bare `Const{SigmaProp, ProveDlog(ge)}`, and the
 //!   `CreateProveDHTuple` analog folds when **all four** arguments are
 //!   `Const{GroupElement}`.
-//! - **single-element sigma unwrap** (recon-transforms.md §4,
-//!   `GraphBuilding.scala:205-208`): a logical `And`/`Or` over a one-item
+//! - **single-element sigma unwrap** (`GraphBuilding.scala:205-208`): a logical
+//!   `And`/`Or` over a one-item
 //!   `ConcreteCollection`, or a `SigmaAnd`/`SigmaOr` over a one-item
 //!   `SigmaCollection`, collapses to its sole item. `AtLeast` is
-//!   DELIBERATELY excluded — the dossier's unwrap bullet lists only
-//!   `AllOf`/`AnyOf`/`AllZk`/`AnyZk`, and recon-targets vector #15
-//!   (`atLeast(1, Coll(proveDlog(g1)))`) pins the `AtLeast` shape as
-//!   unchanged even over a singleton `Coll`.
+//!   DELIBERATELY excluded — Scala's unwrap rule lists only
+//!   `AllOf`/`AnyOf`/`AllZk`/`AnyZk`, and
+//!   `atLeast(1, Coll(proveDlog(g1)))` keeps its `AtLeast` shape
+//!   even over a singleton `Coll` (oracle-confirmed).
 //!
-//! Deliberately NOT implemented here (deferred to later M4 tasks, per the
-//! plan's narrow-PR-granularity locked decision): the `HasSigmas`
-//! Boolean/`isValid`-of-SigmaProp split (recon-transforms.md §4,
-//! `GraphBuilding.scala:191-203`) needs the `SigmaPropIsProven` elimination
-//! that is Task 6's D-C3; the all-`Const[Boolean]` `AnyOf`/`AllOf` fold
-//! (§4, `:214-219`) belongs to Task 5's generic constant-folding engine.
+//! Deliberately NOT implemented here: the `HasSigmas`
+//! Boolean/`isValid`-of-SigmaProp split (`GraphBuilding.scala:191-203`) needs
+//! the `SigmaPropIsProven` elimination in `crate::isproven` (D-C3); the
+//! all-`Const[Boolean]` `AnyOf`/`AllOf` fold (`:214-219`) belongs to
+//! `crate::fold`'s generic constant-folding engine.
 //!
-//! **Pass position** (plan locked decision 1): the lowering block — AFTER
-//! the D-C5 reject gates and every constant fold (incl. the D-C6
-//! `fold_literal_coll_sizes` wave) and the v0-unserializable-data gate, and
-//! BEFORE constant segregation (`tree.rs::build_tree`) — wired in
-//! `tree::compile`.
+//! **Pass position:** the lowering block — AFTER
+//! the D-C5 reject gates and every constant fold and the v0-unserializable-data
+//! gate, and BEFORE constant segregation (`tree/assemble.rs::build_tree`) —
+//! wired in `tree::compile`.
 
 use ergo_ser::opcode::{Expr, IrNode, Payload};
 use ergo_ser::sigma_type::SigmaType;
@@ -42,22 +39,21 @@ const LOGICAL_OR: u8 = 0x97;
 const SIGMA_AND: u8 = 0xEA;
 const SIGMA_OR: u8 = 0xEB;
 
-/// Run the M4 Task-3 lowering rules over `expr`, bottom-up (children are
+/// Run the lowering rules over `expr`, bottom-up (children are
 /// lowered before a node's own shape is inspected).
 ///
 /// A single post-order traversal suffices — no fixpoint loop is needed. Each
 /// rule only ever looks at its DIRECT children, and those children are
 /// already fully lowered by the time a node's own rule runs, so a fold deep
 /// in the tree is visible to an enclosing unwrap in the SAME pass. Worked
-/// example (recon-targets vector #16's Task-3 ingredient):
+/// example:
 /// `allOf(Coll(proveDlog(g1)))` emits as
 /// `And(One(ConcreteCollection([SigmaPropIsProven(CreateProveDlog(Const g1))])))`.
 /// Recursing into the `And`'s child first lowers the inner
 /// `CreateProveDlog(Const)` to `Const{SigmaProp}` (D-C2); the single-item
 /// `ConcreteCollection` and its parent `And` are then unwrapped, leaving bare
-/// `SigmaPropIsProven(Const{SigmaProp})` — matching recon-targets' `And:1→0,
-/// ConcreteCollection:1→0, ProveDlog:1→0` deltas exactly (the residual
-/// `SigmaPropIsProven`/`BoolToSigmaProp` deltas are D-C3, Task 6).
+/// `SigmaPropIsProven(Const{SigmaProp})` — oracle-matched exactly (the residual
+/// `SigmaPropIsProven`/`BoolToSigmaProp` deltas are `crate::isproven`'s D-C3).
 pub(crate) fn lower(expr: Expr) -> Expr {
     let expr = match expr {
         Expr::Op(IrNode { opcode, payload }) => Expr::Op(IrNode {
@@ -169,7 +165,7 @@ fn map_children(payload: Payload) -> Payload {
     }
 }
 
-/// D-C2 (recon-transforms.md §5): `CreateProveDlog(Const{GroupElement})` ->
+/// D-C2: `CreateProveDlog(Const{GroupElement})` ->
 /// `Const{SigmaProp, ProveDlog(ge)}`; `CreateProveDHTuple` folds only when
 /// **all four** arguments are `Const{GroupElement}` (`TreeBuilding.scala:
 /// 416-430` — a partially-constant `proveDHTuple` stays a `CreateProveDHTuple`
@@ -217,8 +213,8 @@ fn fold_prove_dlog_dhtuple(expr: Expr) -> Expr {
                 // pairwise DISTINCT. Scala hash-conses (CSE) BEFORE `buildValue`'s
                 // four-`Constant` fold-guard runs, so a REPEATED point is already a
                 // shared `ValDef`/`ValUse` — not a `Constant` — by the time the
-                // guard is checked, and the guard does not fire (`m5-sched-small.md`
-                // §1.3; lib.rs D-C7). `proveDHTuple(g1,g2,g1,g2)` under the `cce`
+                // guard is checked, and the guard does not fire (lib.rs D-C7).
+                // `proveDHTuple(g1,g2,g1,g2)` under the `cce`
                 // env (g1==g2) therefore stays a `CreateProveDHTuple` node whose one
                 // distinct `GroupElement` (a `LiftedConst`, NOT P4-suppressed) CSE
                 // hoists to `ValDef(1)` — oracle `d801 d601 7300 ce 7201 7201 7201
@@ -239,12 +235,12 @@ fn fold_prove_dlog_dhtuple(expr: Expr) -> Expr {
     }
 }
 
-/// Single-element unwrap (recon-transforms.md §4, `GraphBuilding.scala:
+/// Single-element unwrap (`GraphBuilding.scala:
 /// 205-208`): `And`(0x96)/`Or`(0x97) over a one-item `ConcreteCollection`, or
 /// `SigmaAnd`(0xEA)/`SigmaOr`(0xEB) over a one-item `SigmaCollection`,
 /// collapses to its sole item. The `SigmaAnd`/`SigmaOr` arm is PERMANENTLY
 /// unreachable from ErgoScript source, not merely pending a future wiring
-/// (M4 Task 8 review, lib.rs D-C8): binary `&&`/`||` between `SigmaProp`s
+/// (lib.rs D-C8): binary `&&`/`||` between `SigmaProp`s
 /// always produces >= 2 items, and `allZK`/`anyZK` — the only OTHER route
 /// that could construct a single-item `SigmaAnd`/`SigmaOr` — never lowers to
 /// one at all: Scala's own `SigmaPredef.AllZKFunc`/`AnyZKFunc` irBuilder is
@@ -383,8 +379,7 @@ mod tests {
         // args are ONE distinct point. Scala hash-conses that point into a shared
         // ValDef BEFORE its four-`Constant` fold-guard runs, so the guard never
         // fires — the node must stay a `CreateProveDHTuple` so CSE can hoist the
-        // (LiftedConst) point to `ValDef(1)`. Our all-distinct gate reproduces this
-        // (`m5-sched-small.md` §1.3; M5 Task 5 Fix 2).
+        // (LiftedConst) point to `ValDef(1)`. Our all-distinct gate reproduces this.
         let dht = Expr::Op(IrNode {
             opcode: CREATE_PROVE_DHTUPLE,
             payload: Payload::Four(

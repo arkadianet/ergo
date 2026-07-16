@@ -1,6 +1,5 @@
-//! M4 Task 6 — D-C3: `SigmaPropIsProven` elimination + Boolean↔SigmaProp
-//! coercion fusion (`dev-docs/ergoscript-compiler-m4-recon/recon-transforms.md`
-//! §3).
+//! D-C3: `SigmaPropIsProven` elimination + Boolean↔SigmaProp
+//! coercion fusion.
 //!
 //! A typed AST that mixes `SigmaProp` and `Boolean` in a logical context
 //! carries the round-trip coercions `SigmaPropIsProven` (`.isProven`, wire
@@ -29,19 +28,19 @@
 //!   `SigmaPropIsProven` root never occurs, so the top-level strip and the
 //!   `:189` fusion collapse into this single `0xD1(0xCF(p))` rule.
 //!
-//! **Pass position** (plan locked decision 1): run [`eliminate_isproven`] at
+//! **Pass position:** [`eliminate_isproven`] runs at
 //! TWO points, mirroring the two Scala positions — once BEFORE
 //! [`crate::fold`] (the fixpoint fusion) and once AFTER [`crate::lower`] (the
 //! post-buildGraph top-level strip, over the adjacency the unwrap/D-C2 fold
 //! expose). Both are pure AST→AST rewrites; the fold that reduces a
 //! fusion-exposed operand is the existing [`crate::fold`] pass, not this one.
 //!
-//! **`HasSigmas` reconstruction (M5 Task 5b, D-C3 residual now CLOSED):** a
+//! **`HasSigmas` reconstruction (D-C3 residual, CLOSED):** a
 //! SigmaProp operand that SURVIVES fusion inside a logical op
 //! (`proveDlog(receiver).isProven && HEIGHT > 5`, or an `allOf(Coll(.., sigma))`,
-//! where the sigma is not itself `sigmaProp(<bool>)`) is now reconstructed into
-//! Scala's `SigmaAnd`/`SigmaOr` shape (recon-transforms.md §3/§4,
-//! `GraphBuilding.scala:167-203`) by [`reconstruct_binop`] / [`reconstruct_collop`],
+//! where the sigma is not itself `sigmaProp(<bool>)`) is reconstructed into
+//! Scala's `SigmaAnd`/`SigmaOr` shape (`GraphBuilding.scala:167-203`) by
+//! [`reconstruct_binop`] / [`reconstruct_collop`],
 //! run in this same post-order pass (see [`eliminate_isproven`] rule family 2).
 //! Byte-pinned against three corpus vectors whose CSE schedule is otherwise
 //! oracle-exact: `chaincash-basis/basis-tracker-basis.es` and
