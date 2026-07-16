@@ -1,9 +1,9 @@
-//! `boxes/*` reads (`v1-api-design.md` §3.7) — by-id, by-address, by-ergo-tree,
-//! by-template, by-token, their unspent variants, and the global-index range.
+//! `boxes/*` reads — by-id, by-address, by-ergo-tree, by-template, by-token,
+//! their unspent variants, and the global-index range.
 //!
 //! This group OWNS the canonical box shape: every response converges on the ONE
-//! [`V1Box`](super::dto::V1Box) the transactions group defined (coherence Part
-//! B / coordination flag #2). Handlers adapt the existing indexer readers
+//! [`V1Box`](super::dto::V1Box) the transactions group defined. Handlers adapt
+//! the existing indexer readers
 //! (`address_boxes_paged`, `token_unspent_paged`, …) and pool overlays
 //! (`pool_unspent_for_*`) into the v1 envelope + cursor, gating every read on
 //! the extra index (`indexer_disabled` / `_syncing` / `_halted`).

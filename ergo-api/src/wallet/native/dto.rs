@@ -1,7 +1,7 @@
 //! Native `/api/v1/wallet/*` response DTOs.
 //!
-//! Factual-only, built for permanence (see `dev-docs/native-wallet-v1-design.md`):
-//! money and token amounts are decimal **strings** (JSON numbers lose precision
+//! Factual-only, built for permanence: money and token amounts are decimal
+//! **strings** (JSON numbers lose precision
 //! above 2^53); status/provenance/scope are **tagged unions** `{type:"…"}`; lean
 //! summaries extend additively. These are distinct from the Scala-compat
 //! `super::super::types` DTOs — neither is reused or mutated.

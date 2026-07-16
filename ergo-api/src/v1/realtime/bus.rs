@@ -1,16 +1,14 @@
-//! `RealtimeBus` — the fine-grained fan-out hub (`v1-api-design.md` Appendix A
-//! **G5**, §4.1).
+//! `RealtimeBus` (G5) — the fine-grained fan-out hub.
 //!
-//! The load-bearing new primitive behind `WS /api/v1/ws` and (a future PR)
-//! webhooks. It is a **concrete shared type in `ergo-api`**, mirroring the O4
-//! [`MempoolDepthRing`](crate::v1::mempool_depth) precedent: shared
-//! infrastructure lives here and is fed by a task wired at the server seam. The
-//! design fragment framed it as a consumed trait, but the fan-out *hub* is best
-//! concrete — its drop policy, per-key filtering, and backfill window are
-//! directly unit-testable, and node-side taps simply call [`RealtimeBus::publish`]
-//! (see the design corrections in the PR report).
+//! The load-bearing shared primitive behind both `WS /api/v1/ws` and
+//! `webhooks/*`. It is a **concrete shared type in `ergo-api`**, mirroring the
+//! O4 [`MempoolDepthRing`](crate::v1::mempool_depth) precedent: shared
+//! infrastructure lives here and is fed by a task wired at the server seam.
+//! The fan-out *hub* is concrete rather than a consumed trait because its
+//! drop policy, per-key filtering, and backfill window are directly
+//! unit-testable, and node-side taps simply call [`RealtimeBus::publish`].
 //!
-//! ## Fan-out + drop policy (the slow-consumer contract, §2.6)
+//! ## Fan-out + drop policy (the slow-consumer contract)
 //!
 //! Each subscriber gets a **bounded** [`tokio::sync::mpsc`] queue
 //! ([`SUB_QUEUE_CAP`] frames) and a shared filter. [`RealtimeBus::publish`]:
@@ -21,7 +19,7 @@
 //! the socket with `slow_consumer` so one slow client can never stall the
 //! fan-out (or the node). A **closed** queue (socket gone) is reaped.
 //!
-//! ## Resume window (§2.7)
+//! ## Resume window
 //!
 //! The last [`RESUME_WINDOW`] published events are retained for
 //! [`RealtimeBus::backfill`]. `gap = true` is the honest "you fell behind,
@@ -42,11 +40,11 @@ use tokio::sync::mpsc;
 
 use super::model::{ChannelClass, RealtimeEventBody};
 
-/// Bounded per-subscriber send queue (§2.6 — 256 frames). Overflow evicts the
+/// Bounded per-subscriber send queue (256 frames). Overflow evicts the
 /// socket (`slow_consumer`), never the fan-out.
 pub const SUB_QUEUE_CAP: usize = 256;
 
-/// Retained resume window (§4.1 — 8192 events). One global cursor across the
+/// Retained resume window (8192 events). One global cursor across the
 /// whole realtime surface.
 pub const RESUME_WINDOW: usize = 8192;
 
@@ -68,7 +66,7 @@ pub struct RealtimeEvent {
     pub height: Option<u32>,
     /// The snake_case payload.
     pub data: serde_json::Value,
-    /// The `seq` a retraction invalidates (§2.7), if any.
+    /// The `seq` a retraction invalidates, if any.
     pub previous_seq: Option<u64>,
 }
 
@@ -79,7 +77,7 @@ impl RealtimeEvent {
     }
 }
 
-/// One bounded backfill page for `resume` (§2.7).
+/// One bounded backfill page for `resume`.
 #[derive(Debug)]
 pub struct BackfillPage {
     /// Matching events with `seq > since`, oldest-first, capped at the request
@@ -153,7 +151,7 @@ impl RealtimeBus {
         }
     }
 
-    /// The Phase-1 bus: only `blocks` has a live upstream (the coarse-ring
+    /// A bus where only `blocks` has a live upstream (the coarse-ring
     /// bridge). Every other class is `channel_unavailable` until its
     /// node-internal fine-grained tap lands.
     pub fn blocks_only() -> Self {
@@ -261,7 +259,7 @@ impl RealtimeBus {
         seq
     }
 
-    /// Bounded resume backfill (§2.7): events with `seq > since` matching
+    /// Bounded resume backfill: events with `seq > since` matching
     /// `filter`, oldest-first, capped at `limit`. `gap = true` when `since`
     /// predates the retained window.
     pub fn backfill(&self, filter: &HashSet<String>, since: u64, limit: usize) -> BackfillPage {
@@ -306,7 +304,7 @@ impl RealtimeBus {
     }
 }
 
-/// Per-IP + global live-connection limiter for `WS /api/v1/ws` (§2.6). Separate
+/// Per-IP + global live-connection limiter for `WS /api/v1/ws`. Separate
 /// from the per-request token-bucket [`Governor`](crate::v1::governor): this
 /// counts *concurrent open sockets*, checked pre-upgrade so an over-limit
 /// upgrade gets HTTP 429 `connection_limit` before the WebSocket is accepted.
@@ -342,8 +340,8 @@ impl Drop for ConnGuard {
 }
 
 impl ConnLimiter {
-    /// A limiter with the given per-IP and global ceilings (§2.6 proposals:
-    /// 16 sockets/IP, an FD-derived global cap).
+    /// A limiter with the given per-IP and global ceilings (defaults: 16
+    /// sockets/IP, an FD-derived global cap).
     pub fn new(max_per_ip: usize, global_max: usize) -> Self {
         ConnLimiter {
             inner: Mutex::new(ConnInner {

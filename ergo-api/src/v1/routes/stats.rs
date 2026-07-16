@@ -1,4 +1,4 @@
-//! `stats/*` — chain time-series analytics (`v1-api-design.md` §3.14).
+//! `stats/*` — chain time-series analytics.
 //!
 //! Every series is collection-enveloped (`{items, page}` (+ `meta`)), ascending
 //! oldest-first so a consumer appends. A shared query grammar

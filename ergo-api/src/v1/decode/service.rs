@@ -1,9 +1,9 @@
-//! The decode service — the ONE entrypoint every box-returning surface calls to
-//! populate `decoded` (`v1-api-design.md` Appendix A O6): `boxes/{id}?decode`,
-//! the box list routes, `POST /boxes/decode`, and (reused) tx-intelligence
-//! output previews all funnel through [`decode_box`]. No consensus evaluation —
-//! pure deserialization + register reads + a bounded registry lookup (fragment
-//! §7). A malformed tree or ill-typed register never errors the box; it yields
+//! The decode service (O6) — the ONE entrypoint every box-returning surface
+//! calls to populate `decoded`: `boxes/{id}?decode`, the box list routes,
+//! `POST /boxes/decode`, and (reused) tx-intelligence output previews all
+//! funnel through [`decode_box`]. No consensus evaluation — pure
+//! deserialization + register reads + a bounded registry lookup. A malformed
+//! tree or ill-typed register never errors the box; it yields
 //! `contract: null` / `confidence: heuristic` (fail-soft, `bytemplate.rs:163`
 //! precedent).
 

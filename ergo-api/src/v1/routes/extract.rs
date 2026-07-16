@@ -1,5 +1,5 @@
 //! v1 extractor wrappers that keep EVERY request-parsing failure inside the v1
-//! envelope (`v1-api-design.md` §1.4).
+//! envelope.
 //!
 //! Axum's stock [`Query`]/[`Json`] extractors answer a malformed query string or
 //! request body with their own plain-text `400`, which bypasses the canonical

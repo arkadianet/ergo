@@ -1,5 +1,5 @@
 //! The protocol registry — the extensible matcher table that turns a box into a
-//! recognized protocol (`v1-api-design.md` §4.3; semantic-decode fragment §2).
+//! recognized protocol.
 //!
 //! A box is matched by one of three keys, tried in priority order:
 //! 1. an **identifying token** (a singleton NFT the box holds — the most robust
@@ -206,8 +206,8 @@ pub struct RegistryMatch {
 /// contract keys (unprefixed hex, `None` when the tree failed to hash).
 ///
 /// Priority: identifying-token first (most robust), then template hash, then
-/// tree hash — matching the fragment's key precedence. Bounded: at most a
-/// linear pass over the small static registry, no scan, no evaluation.
+/// tree hash. Bounded: at most a linear pass over the small static registry,
+/// no scan, no evaluation.
 pub fn match_box(
     token_ids: &[&str],
     template_hash_hex: Option<&str>,

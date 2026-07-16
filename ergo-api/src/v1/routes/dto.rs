@@ -1,10 +1,10 @@
 //! Shared v1 wire DTOs + projection helpers for the `chain/*` and
-//! `transactions/*` route groups (`v1-api-design.md` §3.5–§3.6, §3.7 box).
+//! `transactions/*` route groups.
 //!
 //! **This is the first v1 route group, so the shapes here are the template
-//! every later group copies.** Field names are the §1.1 glossary verbatim
+//! every later group copies.** Field names are the glossary verbatim
 //! (`tx_id`, `header_id`, `value` as string, `size_bytes`, `inclusion_height`,
-//! …), timestamps follow §1.2 (`*_unix_ms` int + `*_iso` mirror), amounts that
+//! …), timestamps use the format (`*_unix_ms` int + `*_iso` mirror), amounts that
 //! can exceed 2^53 are strings, and enums are lowercase strings (`"left"` /
 //! `"right"`), never magic ints.
 //!
@@ -31,10 +31,10 @@ use crate::blockchain::{
 use crate::types::{ApiMempoolTransaction, ApiTxSource, ApiWeightFunction};
 use crate::v1::cursor::Page;
 
-// ----- timestamps (§1.2) --------------------------------------------------
+// ----- timestamps --------------------------------------------------
 
 /// Render a unix-milliseconds instant as the `<name>_iso` ISO-8601 mirror
-/// required by §1.2 (`YYYY-MM-DDTHH:MM:SS.sssZ`, always UTC/`Z`).
+/// using the ISO-8601 rule (`YYYY-MM-DDTHH:MM:SS.sssZ`, always UTC/`Z`).
 ///
 /// Self-contained (no `chrono`/`time` dependency): the calendar date is
 /// derived with Howard Hinnant's `civil_from_days` algorithm, which is exact
@@ -62,9 +62,9 @@ pub(crate) fn unix_ms_to_iso(ms: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hh:02}:{mm:02}:{ss:02}.{millis:03}Z")
 }
 
-// ----- collections envelope (§1.3) ----------------------------------------
+// ----- collections envelope ----------------------------------------
 
-/// A v1 collection: `{items, page}` (`v1-api-design.md` §1.3). Uniform for
+/// A v1 collection: `{items, page}`. Uniform for
 /// every list, even single-page ones (a block's tx list, header-ids at a
 /// height): those carry `page.has_more = false`, `page.next_cursor = null`.
 #[derive(Debug, Serialize, ToSchema)]
@@ -89,7 +89,7 @@ impl<T> Collection<T> {
     }
 }
 
-// ----- header / block (§3.5) ----------------------------------------------
+// ----- header / block ----------------------------------------------
 
 /// Glossary-renamed header fields shared by the standalone header object,
 /// the full block, and a block summary (`serde(flatten)`ed into each).
@@ -134,7 +134,7 @@ pub struct V1BlockSummary {
     pub size_bytes: u32,
     pub transaction_count: u32,
     /// First-deliverer peer — only known inside the near-tip live ring;
-    /// `null` for any block outside it (documented capability gap, §3.5).
+    /// `null` for any block outside it (documented capability gap).
     pub delivered_by: Option<String>,
 }
 
@@ -172,7 +172,7 @@ pub struct V1BlockAdProofs {
 }
 
 /// `GET /chain/modifiers/{modifier_id}` — v1 adds the explicit `kind`
-/// discriminant the untagged Scala `BlockSection` lacks (§3.5).
+/// discriminant the untagged Scala `BlockSection` lacks.
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum V1Modifier {
@@ -191,7 +191,7 @@ pub struct V1BlockTransactions {
 }
 
 /// `GET /chain/proofs/{header_id}/transactions/{tx_id}` — Merkle membership
-/// proof. Side byte `0/1` rendered as `"left"/"right"` strings (§3.5).
+/// proof. Side byte `0/1` rendered as `"left"/"right"` strings.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct V1MerkleProof {
     pub tx_id: String,
@@ -211,7 +211,7 @@ pub enum MerkleSide {
     Right,
 }
 
-// ----- transactions + boxes (§3.6, §3.7) ----------------------------------
+// ----- transactions + boxes ----------------------------------
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct V1Asset {
@@ -219,7 +219,7 @@ pub struct V1Asset {
     pub amount: String,
 }
 
-/// The v1 box object (`v1-api-design.md` §3.7). Every box-returning surface
+/// The v1 box object. Every box-returning surface
 /// shares this shape. `box_id`/`confirmed` are always present; the remaining
 /// fields are `Option` because a box can appear in three provenance contexts
 /// with different available metadata:
@@ -228,7 +228,7 @@ pub struct V1Asset {
 /// * block-embedded output (from a block's own bytes) — no `global_index` /
 ///   `spent_by`;
 /// * an unresolved input of an unconfirmed tx — only `box_id` is known, the
-///   rest are `null` (honest "unknown", never fabricated — §1.1).
+///   rest are `null` (honest "unknown", never fabricated).
 ///
 /// The `boxes/*` group owns the final canonical box shape (coherence Part B /
 /// coordination flag #2); this is the transactions-group projection it must
@@ -251,7 +251,7 @@ pub struct V1Box {
     pub global_index: Option<i64>,
     /// Reserved: populated only on input boxes carrying a proof; `null` here.
     pub spending_proof: Option<serde_json::Value>,
-    /// Semantic decode (§0.3): **omitted** unless `?decode=true`, `null` when
+    /// Semantic decode: **omitted** unless `?decode=true`, `null` when
     /// requested but the semantic-decode registry (a later group) matched no
     /// contract. The registry owns the populated object's shape; this group
     /// owns the toggle + presence contract.
@@ -508,7 +508,7 @@ pub(crate) fn modifier_from_scala(
     }
 }
 
-// ----- boxes / tokens / addresses (§3.7) ----------------------------------
+// ----- boxes / tokens / addresses ----------------------------------
 
 /// A v1 collection carrying an extra `meta` object for whole-result scalars
 /// (coherence Part D): `{items, page, meta}`. Used by `tokens/{id}/holders`,
@@ -521,7 +521,7 @@ pub struct CollectionMeta<T, M> {
     pub meta: M,
 }
 
-/// The v1 token object (`v1-api-design.md` §3.7). `box_id` is the *minting*
+/// The v1 token object. `box_id` is the *minting*
 /// box; `emission_amount` is the string-restrung ever-minted figure.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct V1Token {
@@ -608,7 +608,7 @@ pub struct V1AddressTxSummary {
 /// Detects the pool-overlay sentinel (`inclusion_height == 0`, unreachable for
 /// a confirmed box since chain heights start at 1) and renders it as an
 /// unconfirmed box with `confirmed = false` and null on-chain metadata
-/// (`inclusion_height` / `confirmations` / `global_index`) per §0.4. `decode`
+/// (`inclusion_height` / `confirmations` / `global_index`). `decode`
 /// wires the `?decode=true` toggle: `Some(null)` when requested (registry is a
 /// later group), field omitted otherwise. `spending_proof` stays `null` here —
 /// a reserved field the box-read surface does not yet populate.
@@ -618,7 +618,7 @@ pub(crate) fn v1box_from_indexed_response(
     decode: bool,
 ) -> V1Box {
     let confirmed = resp.inclusion_height >= 1;
-    // O6: the shared semantic-decode seam. Built from the box body BEFORE the
+    // The shared semantic-decode seam. Built from the box body BEFORE the
     // assets are consumed below. `None` (field omitted) unless `?decode=true`;
     // when requested, `decode_box` yields `{registers, contract}` with an honest
     // `contract: null` for an unrecognized box (never fabricated state).
@@ -711,13 +711,12 @@ pub(crate) fn address_tx_summary_from_indexed(
     }
 }
 
-// ----- mempool (§3.8) -----------------------------------------------------
+// ----- mempool -----------------------------------------------------
 
-/// The v1 `mempool_tx` row (`v1-api-design.md` §3.8) — the glossary-renamed,
+/// The v1 `mempool_tx` row — the glossary-renamed,
 /// string-amount projection of [`ApiMempoolTransaction`] (`types.rs`). Fees and
-/// the priority weight become strings (§1.1); `first_seen` follows the §1.2 flat
-/// `*_unix_ms` + `*_iso` timestamp rule (superseding the fragment's nested
-/// `first_seen:{}` shape).
+/// the priority weight become strings; `first_seen` follows the flat
+/// `*_unix_ms` + `*_iso` timestamp rule rather than a nested object.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct V1MempoolTx {
     pub tx_id: String,
@@ -727,9 +726,8 @@ pub struct V1MempoolTx {
     pub validation_cost_units: u64,
     pub priority_weight: String,
     /// Where the tx entered our pool: `peer | api | wallet | demoted_from_block`
-    /// (the real [`ApiTxSource`] taxonomy — see the design correction in the
-    /// group report; the fragment's `propagated|local|reemission|rebroadcast`
-    /// never matched the implemented enum).
+    /// (the real [`ApiTxSource`] taxonomy, not a `propagated|local|reemission|
+    /// rebroadcast` classification, which does not match the implemented enum).
     pub source: String,
     pub input_count: u32,
     pub output_count: u32,
@@ -770,10 +768,10 @@ pub(crate) fn mempool_tx_from_api(t: &ApiMempoolTransaction) -> V1MempoolTx {
     }
 }
 
-/// A resolved input/output of a pooled tx (§3.8 `io_box`). Every field is
+/// A resolved input/output of a pooled tx (`io_box`). Every field is
 /// nullable: a spent input may not resolve against the extra index or the
 /// pool-output overlay, and `null` ≠ `[]` (an unresolved box is not a box with
-/// no assets) per the §1.1 honesty rule.
+/// no assets) per the honesty rule of never fabricating data.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct V1IoBox {
     pub box_id: Option<String>,
@@ -782,7 +780,7 @@ pub struct V1IoBox {
     pub assets: Option<Vec<V1Asset>>,
 }
 
-/// The v1 `mempool/transactions/{tx_id}` bare object (§3.8): the `mempool_tx`
+/// The v1 `mempool/transactions/{tx_id}` bare object: the `mempool_tx`
 /// row (flattened) plus its resolved `io_box` inputs/outputs.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct V1MempoolTxDetail {
@@ -801,8 +799,8 @@ pub struct V1MempoolUtilization {
     pub bytes_pct: f64,
 }
 
-/// The v1 `mempool/summary` bare object (§3.8): capacity counters + derived
-/// `utilization` + active `weight_function`, plus the OPTIONAL O4 depth
+/// The v1 `mempool/summary` bare object: capacity counters + derived
+/// `utilization` + active `weight_function`, plus the OPTIONAL depth
 /// `history` (present only when `?history=<n>` is requested).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct V1MempoolSummary {
@@ -817,10 +815,10 @@ pub struct V1MempoolSummary {
     pub history: Option<Vec<V1MempoolDepthPoint>>,
 }
 
-/// One point of the O4 mempool-depth series (`stats/mempool-depth` point shape,
-/// §3.14). The wire projection of a [`crate::v1::mempool_depth::MempoolDepthSample`];
+/// One point of the mempool-depth series (`stats/mempool-depth` point shape).
+/// The wire projection of a [`crate::v1::mempool_depth::MempoolDepthSample`];
 /// the future `stats/mempool-depth` endpoint reuses this SAME type over the SAME
-/// ring (Overlap O4).
+/// ring.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct V1MempoolDepthPoint {
     pub timestamp_unix_ms: u64,
@@ -848,8 +846,8 @@ impl V1MempoolDepthPoint {
     }
 }
 
-/// One bin of the v1 `mempool/fee-histogram` (§3.8). `total_fee` is
-/// string-amount per §1.1. `fee_per_byte_min`/`_max` are the ASSUMED-new band:
+/// One bin of the v1 `mempool/fee-histogram`. `total_fee` is
+/// a string amount. `fee_per_byte_min`/`_max` are the ASSUMED-new band:
 /// the frozen `pool_fee_histogram` hook is a WAIT-TIME histogram carrying only
 /// `{n_txns, total_fee}` per bin, so the band is honestly `null` until a
 /// fee-keyed histogram hook exists (design correction — see the group report).
@@ -862,7 +860,7 @@ pub struct V1FeeHistogramBin {
     pub fee_per_byte_max: Option<String>,
 }
 
-/// The v1 `mempool/fee-histogram` bare object (§3.8): active `weight_function`,
+/// The v1 `mempool/fee-histogram` bare object: active `weight_function`,
 /// the `max_wait_ms` horizon the bins span, and the per-bin counts.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct V1FeeHistogram {
@@ -902,7 +900,7 @@ mod tests {
         }
     }
 
-    /// The canonical §3.7 / §0.4 V1Box key set — the ONE box shape every
+    /// The canonical V1Box key set — the ONE box shape every
     /// box-returning v1 surface converges on. Both the transactions group (which
     /// defined `V1Box`) and this boxes group serialize the identical struct;
     /// this pins the glossary field names so neither can drift.
@@ -947,13 +945,13 @@ mod tests {
         assert!(json.get("boxId").is_none());
         assert!(json.get("additionalRegisters").is_none());
         assert!(json.get("transactionId").is_none());
-        // decode not requested → `decoded` omitted (§0.3).
+        // decode not requested → `decoded` omitted.
         assert!(json.get("decoded").is_none());
     }
 
     #[test]
     fn v1box_pool_sentinel_renders_unconfirmed_with_null_metadata() {
-        // inclusion_height == 0 is the pool-overlay sentinel (§0.4): the box is
+        // inclusion_height == 0 is the pool-overlay sentinel: the box is
         // unconfirmed, so its on-chain metadata is honest `null`.
         let v = v1box_from_indexed_response(indexed_box_response(0), 431_772, false);
         let json = serde_json::to_value(&v).unwrap();
@@ -969,11 +967,11 @@ mod tests {
     fn v1box_decode_toggle_populates_registers_and_null_contract_when_unmatched() {
         let v = v1box_from_indexed_response(indexed_box_response(1), 1, true);
         let json = serde_json::to_value(&v).unwrap();
-        // `?decode=true` → `decoded` present as `{registers, contract}` (§4.3).
+        // `?decode=true` → `decoded` present as `{registers, contract}`.
         assert!(json.get("decoded").is_some());
         // The box carries no known protocol NFT and a non-protocol tree, so the
         // contract is honestly `null` — but the typed registers are still there
-        // (a raw box is never *less* useful with decode=true, fragment §4.1).
+        // (a raw box is never *less* useful with decode=true).
         assert!(json["decoded"]["contract"].is_null());
         assert_eq!(json["decoded"]["registers"]["R4"]["type"], "coll[byte]");
         assert_eq!(json["decoded"]["registers"]["R4"]["value"], "54455354");

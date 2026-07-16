@@ -1,4 +1,4 @@
-//! REST handlers for the `/wallet/*` routes per spec §8.
+//! REST handlers for the `/wallet/*` routes.
 //!
 //! Submodules:
 //! - `lifecycle`  — status/init/restore/unlock/lock/check

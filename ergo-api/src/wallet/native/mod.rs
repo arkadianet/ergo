@@ -1,8 +1,7 @@
 //! Native `/api/v1/wallet/*` surface — a second adapter over [`WalletAdmin`],
 //! distinct from the Scala-compat `/wallet/*` handlers. Factual-only DTOs
 //! (decimal-string amounts, tagged unions), the native `{reason, detail?}`
-//! error envelope, and an EIP-27-aware balance. See
-//! `dev-docs/native-wallet-v1-design.md`.
+//! error envelope, and an EIP-27-aware balance.
 
 use std::sync::Arc;
 
@@ -19,7 +18,7 @@ pub mod error;
 
 /// Unwrap a `Query<T>` extraction, mapping Axum's rejection (unknown query key
 /// via `deny_unknown_fields`, malformed value) to the native `{reason, detail?}`
-/// envelope instead of Axum's default plain-text 400 (codex). Handlers take
+/// envelope instead of Axum's default plain-text 400. Handlers take
 /// `Result<Query<T>, QueryRejection>` and pass it here.
 fn query<T>(q: Result<Query<T>, QueryRejection>) -> Result<T, NativeErr> {
     match q {
@@ -598,7 +597,7 @@ pub(crate) async fn rescan(
 
 /// `POST /api/v1/wallet/boxes/select` — burn-aware box-selection dry-run. Returns
 /// the real selected inputs, computed change, and the exact EIP-27 re-emission
-/// burn. Requires an unlocked wallet (design §2).
+/// burn. Requires an unlocked wallet.
 #[utoipa::path(
     post, path = "/api/v1/wallet/boxes/select", tag = "wallet",
     request_body = dto::BoxSelectRequest,
@@ -622,7 +621,7 @@ pub(crate) async fn select_boxes(
 
 /// `POST /api/v1/wallet/transactions/build` — build a burn-aware unsigned tx from
 /// an intent. Returns the unsigned tx plus the selected inputs, change outputs,
-/// fee, and re-emission burn. Requires an unlocked wallet (design §2).
+/// fee, and re-emission burn. Requires an unlocked wallet.
 #[utoipa::path(
     post, path = "/api/v1/wallet/transactions/build", tag = "wallet",
     request_body = dto::TxIntent,

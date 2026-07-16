@@ -1,11 +1,9 @@
 //! The v1 nested error envelope + the canonical machine-readable `reason`
 //! enum.
 //!
-//! Implements `v1-api-design.md` §1.3 (envelope family) and §1.4 (the
-//! canonical error `reason` enum, adopted verbatim from the coherence pass
-//! Part A). Every future `/api/v1/*` endpoint draws its error reasons from
-//! this ONE enum and emits errors through [`v1_error`] — there is no
-//! per-group error shape and no per-group reason spelling.
+//! Every `/api/v1/*` endpoint draws its error reasons from this ONE enum and
+//! emits errors through [`v1_error`] — there is no per-group error shape and
+//! no per-group reason spelling.
 //!
 //! Wire shape (machine-first — a client switches on `reason`, `message` is
 //! human, `detail` is actionable):
@@ -20,10 +18,10 @@
 //! `ApiNativeSubmitError{reason,detail}` with no `message`). Those stay
 //! untouched; v1 is a parallel, additive surface.
 //!
-//! **Status mapping (§1.4):** derived solely from the `reason` so a client
+//! **Status mapping:** derived solely from the `reason` so a client
 //! can also switch on HTTP status consistently. The suffix rules
 //! (`*_not_found`→404, `invalid_*`→400, `*_disabled`→409, `*_unavailable`
-//! →503, …) hold except where §1.4/§1.6 explicitly override a member
+//! →503, …) hold except where a member's status is explicitly overridden
 //! (documented at each override arm below).
 
 use axum::{
@@ -34,10 +32,10 @@ use axum::{
 use serde::Serialize;
 use utoipa::ToSchema;
 
-/// Canonical machine-readable error reason (`v1-api-design.md` §1.4;
-/// coherence Part A). Serialized as `lowercase_snake_case`; the string is a
-/// **stable enum a client switches on** — treat additions as an open set
-/// (§1.6), never rename an existing variant inside v1.
+/// Canonical machine-readable error reason. Serialized as
+/// `lowercase_snake_case`; the string is a **stable enum a client switches
+/// on** — treat additions as an open set, never rename an existing variant
+/// inside v1.
 ///
 /// One spelling per concept: typed `<resource>_not_found` (never bare
 /// `not_found`), `invalid_<thing>` (never `bad_<thing>`), `<subsystem>_disabled`
@@ -79,9 +77,8 @@ pub enum Reason {
     InvalidBoxBytes,
     InvalidSeedLength,
     InvalidPow,
-    /// Tamper / stale / malformed pagination cursor (`v1-api-design.md`
-    /// §1.5). Added to the canonical set because §1.5 names it explicitly
-    /// and it obeys naming rule 2 (`invalid_<thing>`).
+    /// Tamper / stale / malformed pagination cursor. Named explicitly in
+    /// the canonical set and obeys naming rule 2 (`invalid_<thing>`).
     InvalidCursor,
     AddressTooShort,
     BadChecksum,
@@ -91,8 +88,8 @@ pub enum Reason {
     BadEncoding,
     UnsupportedHashAlgo,
     /// Well-formed but not-yet-supported tx intent. Maps to **422**, not
-    /// 400: §1.6 blesses a documented `unsupported_intent` shape flipping
-    /// 422→200 additively as new intents ship.
+    /// 400: the documented `unsupported_intent` shape flips 422→200
+    /// additively as new intents ship, without ever changing meaning.
     UnsupportedIntent,
     NotHotReloadable,
     NotVotable,
@@ -145,11 +142,11 @@ pub enum Reason {
     CandidateUnavailable,
     RewardUnavailable,
     BlockPruned,
-    /// Built-without / not-configured (§1.4 note): keeps the `_unavailable`
+    /// Built-without / not-configured: keeps the `_unavailable`
     /// spelling the script group chose but is semantically subsystem-off →
     /// **501 Not Implemented**, not 503.
     CompilerUnavailable,
-    /// Built-without / not-configured (§1.4 note): `_unavailable` spelling,
+    /// Built-without / not-configured: `_unavailable` spelling,
     /// **501 Not Implemented** status. See [`Reason::CompilerUnavailable`].
     OracleUnavailable,
     Overloaded,
@@ -195,7 +192,7 @@ pub enum Reason {
 }
 
 impl Reason {
-    /// HTTP status for this reason (`v1-api-design.md` §1.4). Pure function
+    /// HTTP status for this reason. Pure function
     /// of the reason so status and `reason` never disagree. Overrides of the
     /// mechanical suffix rule are documented on the variants and grouped
     /// explicitly below.
@@ -269,7 +266,7 @@ impl Reason {
             | CostLimit
             | TooDeep => StatusCode::BAD_REQUEST,
 
-            // 422 — well-formed but unsupported intent (§1.6 additive path)
+            // 422 — well-formed but unsupported intent (additive path)
             UnsupportedIntent => StatusCode::UNPROCESSABLE_ENTITY,
 
             // 409 — subsystem-off (config) + state-conflict
@@ -277,7 +274,7 @@ impl Reason {
             | MempoolViewDisabled | RealtimeDisabled | WebhooksDisabled | SnapshotDisabled
             | MiningDisabled | SensitiveOpDisabled | AlreadyBlacklisted => StatusCode::CONFLICT,
 
-            // 501 — built-without / not-configured (§1.4 note)
+            // 501 — built-without / not-configured
             CompilerUnavailable | OracleUnavailable => StatusCode::NOT_IMPLEMENTED,
 
             // 504 — timeout (frozen `map_submit_error` parity)
@@ -325,7 +322,7 @@ impl Reason {
     }
 }
 
-/// Inner object of the v1 error envelope (`v1-api-design.md` §1.3).
+/// Inner object of the v1 error envelope.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct V1ErrorInner {
     /// Stable machine-readable enum a client switches on.
@@ -336,8 +333,8 @@ pub struct V1ErrorInner {
     pub detail: String,
 }
 
-/// The v1 error envelope: `{ "error": { reason, message, detail } }`
-/// (`v1-api-design.md` §1.3). Carries its own HTTP status via the `reason`.
+/// The v1 error envelope: `{ "error": { reason, message, detail } }`.
+/// Carries its own HTTP status via the `reason`.
 ///
 /// Prefer returning `Result<T, V1Error>` from a handler and `?`-ing the
 /// error path; [`IntoResponse`] renders the envelope with the correct
@@ -375,7 +372,7 @@ impl IntoResponse for V1Error {
 }
 
 /// Build a v1 error [`Response`] from a `reason`, human `message`, and
-/// actionable `detail` (`v1-api-design.md` §1.3–§1.4). The HTTP status is
+/// actionable `detail`. The HTTP status is
 /// derived from the `reason`. This is the ONE error helper every v1 endpoint
 /// group uses — never a bare `StatusCode::NOT_FOUND` and never a bare 404 for
 /// "subsystem off" (a disabled subsystem answers its `*_disabled` reason so
@@ -409,10 +406,8 @@ mod tests {
     }
 
     /// The canonical (reason → exact wire string, exact HTTP status) table.
-    /// This IS the product contract from `v1-api-design.md` §1.4 — the spec
-    /// is the oracle. Any serde-snake-case drift or status regression fails
-    /// here loudly. 111 variants = the 110 canonical Part-A reasons + the
-    /// `invalid_cursor` §1.5 addition.
+    /// This IS the product contract — any serde-snake-case drift or status
+    /// regression fails here loudly.
     fn contract() -> Vec<(Reason, &'static str, StatusCode)> {
         use Reason::*;
         let nf = StatusCode::NOT_FOUND;

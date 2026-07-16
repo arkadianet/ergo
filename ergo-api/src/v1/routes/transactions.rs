@@ -1,10 +1,9 @@
-//! `transactions/*` reads + submit/check (`v1-api-design.md` §3.6, Phase-1
-//! read subset). `GET /transactions/{tx_id}` unifies the confirmed
-//! (extra-index) and unconfirmed (mempool overlay) views behind one shape;
-//! `POST /transactions/{submit,check}` are the canonical submit paths
-//! (Overlap O1 — `mempool/{submit,check}` stays a documented alias, added by
-//! the mempool group). The tx-intelligence members (build / simulate /
-//! fee-estimate / status) are a separate Phase-2 group and are not here.
+//! `transactions/*` reads + submit/check. `GET /transactions/{tx_id}` unifies
+//! the confirmed (extra-index) and unconfirmed (mempool overlay) views behind
+//! one shape; `POST /transactions/{submit,check}` are the canonical submit
+//! paths (`mempool/{submit,check}` stays a documented alias, added by the
+//! mempool group). The tx-intelligence members (build / simulate /
+//! fee-estimate / status) are a separate group and are not here.
 
 use std::collections::HashMap;
 

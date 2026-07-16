@@ -1,11 +1,11 @@
-//! Per-IP rate/cost governor middleware (`v1-api-design.md` §2.1–§2.2).
+//! Per-IP rate/cost governor middleware.
 //!
 //! The T0 "public but **bounded**" contract's load-bearing control: every
 //! open surface sits behind a per-IP token bucket whose refill and burst are
-//! config knobs, and each route class ("cheap read / heavy read / compute" —
-//! §2.2) consumes a different number of tokens per request. A depleted bucket
-//! answers `429 rate_limited` (the §1.3 envelope) with a `Retry-After`
-//! header. The operator's own UI (loopback) is exempt by default.
+//! config knobs, and each route class ("cheap read / heavy read / compute")
+//! consumes a different number of tokens per request. A depleted bucket
+//! answers `429 rate_limited` (the standard error envelope) with a
+//! `Retry-After` header. The operator's own UI (loopback) is exempt by default.
 //!
 //! Dependency-light on purpose: a plain `HashMap<IpAddr, Bucket>` behind a
 //! `std::sync::Mutex`, refilled lazily on access (no timer task). The lock is
@@ -49,7 +49,7 @@ use super::{client_ip, is_trusted_loopback};
 /// bypass.
 const UNKNOWN_IP: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 
-/// Cost class of a route (`v1-api-design.md` §2.2). The weight (tokens
+/// Cost class of a route. The weight (tokens
 /// consumed per request) grows with server-side work: a cheap snapshot read,
 /// a heavier indexed/scan read, or attacker-driven compute (script execute,
 /// tx build/simulate).
@@ -63,7 +63,7 @@ pub enum RouteClass {
     Compute,
 }
 
-/// Tunable governor knobs (all config-driven, shipped conservative — §2.2).
+/// Tunable governor knobs (all config-driven, shipped conservative).
 #[derive(Debug, Clone)]
 pub struct GovernorConfig {
     /// Sustained refill rate, tokens per second per IP.
@@ -91,8 +91,8 @@ pub struct GovernorConfig {
 
 impl Default for GovernorConfig {
     /// Conservative fleet defaults: ~20 cheap reads/sec sustained, burst 40;
-    /// heavy reads cost 4×, compute 10×; loopback exempt. Groups tune per
-    /// the §2.2 table.
+    /// heavy reads cost 4×, compute 10×; loopback exempt. Route groups
+    /// override these per their own risk profile.
     fn default() -> Self {
         Self {
             refill_per_sec: 20.0,
@@ -130,8 +130,8 @@ pub enum GovernorConfigError {
 }
 
 impl GovernorConfig {
-    /// Validate the knobs at the constructor boundary (`v1-api-design.md`
-    /// §2.2). Rejects a non-finite/non-positive `refill_per_sec` or `burst`
+    /// Validate the knobs at the constructor boundary. Rejects a
+    /// non-finite/non-positive `refill_per_sec` or `burst`
     /// and any non-finite/non-positive route weight (a zero weight would make
     /// its whole route class unmetered — every charge costs 0), so
     /// [`Governor::charge_at`] never operates on config that would corrupt or
@@ -292,9 +292,9 @@ impl Governor {
     }
 
     /// The token cost of a request in `class` under this governor's
-    /// configured weights (§2.2) — the ONE weight table `batch` (§4.7,
-    /// `routes::batch`) and any future non-middleware caller draws from,
-    /// rather than inventing a second per-endpoint cost vocabulary.
+    /// configured weights — the ONE weight table [`routes::batch`](crate::v1::routes::batch)
+    /// and any other non-middleware caller draws from, rather than inventing
+    /// a second per-endpoint cost vocabulary.
     pub(crate) fn class_weight(&self, class: RouteClass) -> f64 {
         self.config.weight(class)
     }
@@ -302,7 +302,7 @@ impl Governor {
     /// Charge `cost` tokens against `ip`'s bucket right now, returning the
     /// whole-second `Retry-After` hint (seconds) on throttle. The one
     /// non-middleware entry point into the SAME per-IP bucket
-    /// [`governor_mw`] draws from — `batch` (§4.7) charges once, up front,
+    /// [`governor_mw`] draws from — `routes::batch` charges once, up front,
     /// for its members' summed weight rather than re-entering the bucket
     /// once per dispatched item (which would double-charge every item
     /// against both batch's own charge and a per-route middleware layer).
@@ -333,7 +333,7 @@ pub struct GovernorState {
 
 /// axum middleware enforcing the per-IP token bucket for its route class.
 /// Loopback is exempt when configured; a depleted bucket answers
-/// `429 rate_limited` (§1.3 envelope) with a `Retry-After` header.
+/// `429 rate_limited` (the standard error envelope) with a `Retry-After` header.
 pub async fn governor_mw(
     State(state): State<GovernorState>,
     req: Request<Body>,

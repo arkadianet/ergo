@@ -1,10 +1,10 @@
-//! `/api/v1/*` route groups mounted on the G2 shared primitives.
+//! `/api/v1/*` route groups mounted on the shared v1 primitives.
 //!
 //! This module mounts every native read group — `chain/*`, `transactions/*`,
-//! `boxes/*`, `tokens/*`, `addresses/*`, and `mempool/*` (`v1-api-design.md`
-//! §3.5–§3.8). Everything here consumes the G2 primitives (`error` envelope +
-//! [`Reason`], `cursor` page builder, `governor`, `auth` tiers) rather than
-//! inventing parallel mechanisms; later groups copy this shape.
+//! `boxes/*`, `tokens/*`, `addresses/*`, and `mempool/*`. Everything here
+//! consumes the shared primitives (`error` envelope + [`Reason`], `cursor`
+//! page builder, `governor`, `auth` tiers) rather than inventing parallel
+//! mechanisms; later groups copy this shape.
 //!
 //! Mounting: [`v1_router`] returns a state-erased `Router` the server merges
 //! under `/api/v1`. Every route in this group is **T0 (public)** — bounded by
@@ -61,16 +61,16 @@ pub struct V1State {
     /// Extra-index reader — the confirmed side of `transactions/{tx_id}`.
     pub indexer: Option<Arc<dyn IndexerQuery>>,
     /// Submit bridge — `transactions/{submit,check}` + the non-mutating
-    /// `transactions/simulate` (G8; `NodeSubmit::simulate`).
+    /// `transactions/simulate` (`NodeSubmit::simulate`).
     pub submit: Option<Arc<dyn NodeSubmit>>,
-    /// Keyless transaction builder — backs `POST /transactions/build`
-    /// (`v1-api-design.md` §4.2 O7). `None` until the extracted keyless core is
-    /// wired; the endpoint then answers the honest `route_unavailable` rather
-    /// than fabricating a coin selection.
+    /// Keyless transaction builder — backs `POST /transactions/build`.
+    /// `None` until the extracted keyless core is wired; the endpoint then
+    /// answers the honest `route_unavailable` rather than fabricating a coin
+    /// selection.
     pub tx_builder: Option<Arc<dyn NodeTxBuilder>>,
     /// Mempool overlay — the unconfirmed side of `transactions/{tx_id}`.
     pub mempool: Arc<dyn MempoolView>,
-    /// Shared O4 mempool-depth sample ring — the source for
+    /// Shared mempool-depth sample ring — the source for
     /// `mempool/summary?history=` and (future) `stats/mempool-depth`.
     pub mempool_depth: Arc<crate::v1::mempool_depth::MempoolDepthRing>,
     /// Per-height emission schedule — backs `stats/supply` (realized curve) and
@@ -251,8 +251,8 @@ fn candidate_heights(cursor_h: Option<u32>, order: Order, tip: u32, n: u32) -> V
 
 // ----- shared box/token/address helpers -----------------------------------
 
-/// Offset-alias opaque cursor for the indexed collections (§0.2 / §1.5). A thin
-/// shim over the offset-based `IndexerQuery`; opaque to clients so a Phase-2
+/// Offset-alias opaque cursor for the indexed collections. A thin shim over
+/// the offset-based `IndexerQuery`; opaque to clients so a future
 /// stable-seek key can replace it without a wire break.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub(super) struct OffsetCursor {
@@ -272,7 +272,7 @@ pub(super) struct GiCursor {
 pub(super) fn parse_id32(s: &str) -> Option<[u8; 32]> {
     // Canonical ids are 64-char LOWERCASE hex. Reuse `valid_modifier_id` so the
     // shared box/token id parsing rejects uppercase/mixed-case consistently with
-    // the tx routes (CodeRabbit #170) — `hex::decode` alone accepts uppercase
+    // the tx routes — `hex::decode` alone accepts uppercase
     // (identical bytes), leaving `/boxes/*` and `/tokens/*` misaligned.
     if !valid_modifier_id(s) {
         return None;
@@ -338,12 +338,12 @@ pub(super) fn offset_page_at<T>(
 /// Build the native `/api/v1/*` product-API router: the `chain/*` +
 /// `transactions/*` reads group, the `boxes/*` + `tokens/*` + `addresses/*`
 /// reads group, AND the `mempool/*` group (summary, listing, `by-*` filters,
-/// single-tx detail, fee histogram, and the O1 `submit/check` aliases), all
-/// consuming the G2 shared primitives (error envelope, cursor page builder,
+/// single-tx detail, fee histogram, and the `submit/check` aliases), all
+/// consuming the shared primitives (error envelope, cursor page builder,
 /// per-IP governor) and state-erased for merging under `/api/v1`.
 ///
-/// Route classes (§2.2): the single by-id lookups (`boxes/{id}`, `tokens/{id}`)
-/// sit at `CheapRead`; every paginated / scan / range surface (and the whole
+/// Route classes: the single by-id lookups (`boxes/{id}`, `tokens/{id}`) sit
+/// at `CheapRead`; every paginated / scan / range surface (and the whole
 /// chain+tx group) sits at `HeavyRead`. The shared [`Governor`] is one per node
 /// so all classes draw on the same per-IP budget. No tier gate: T0 is bounded
 /// by the governor, not by auth.
@@ -430,13 +430,13 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
         .route("/api/v1/transactions/:tx_id", get(transactions::tx_by_id))
         .route("/api/v1/transactions/submit", post(transactions::submit))
         .route("/api/v1/transactions/check", post(transactions::check))
-        // ----- transactions/* intelligence reads (§3.6 Phase-2) -----
+        // ----- transactions/* intelligence reads -----
         .route(
             "/api/v1/transactions/fee-estimate",
             get(tx_intel::fee_estimate),
         )
         .route("/api/v1/transactions/:tx_id/status", get(tx_intel::status))
-        // ----- mempool/* lists + O1 submit/check aliases -----
+        // ----- mempool/* lists + submit/check aliases -----
         .route("/api/v1/mempool/transactions", get(mempool::transactions))
         .route(
             "/api/v1/mempool/by-address/:address",
@@ -502,7 +502,7 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
             get(tokens::token_holders),
         )
         .route("/api/v1/tokens/:token_id/stats", get(tokens::token_stats))
-        // ----- addresses/* (O9; boxes/unspent are dual mounts of boxes::*) -----
+        // ----- addresses/* (boxes/unspent are dual mounts of boxes::*) -----
         .route(
             "/api/v1/addresses/:address/balance",
             get(addresses::balance),
@@ -519,13 +519,13 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
             "/api/v1/addresses/:address/unspent",
             get(boxes::boxes_unspent_by_address),
         )
-        // ----- light/* trustless-sync proofs (§3.13) -----
+        // ----- light/* trustless-sync proofs -----
         .route("/api/v1/light/bootstrap-proof", get(light::bootstrap_proof))
         .route(
             "/api/v1/light/headers-interlinks",
             get(light::headers_interlinks),
         )
-        // O2: dual mount of the chain/proofs membership-proof core (query params).
+        // Dual mount of the chain/proofs membership-proof core (query params).
         .route(
             "/api/v1/light/membership-proof",
             get(light::membership_proof),

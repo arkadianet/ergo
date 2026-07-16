@@ -1,4 +1,4 @@
-//! The ONE cursor-pagination codec (`v1-api-design.md` §1.5, coherence C.4).
+//! The ONE cursor-pagination codec.
 //!
 //! Every v1 collection is cursor-paginated (`?limit=&cursor=`, never
 //! `offset` on the wire) and answers `page:{limit, next_cursor, has_more}`.
@@ -7,16 +7,16 @@
 //! global-index key `{gi}`, an offset shim `{offset}`, a mempool keyset
 //! `{w,t}`, a wallet keyset `{after_index}`, …).
 //!
-//! **Opaqueness is load-bearing (locked decision D5, §1.5 / §8):** the wire
-//! form is `version-byte || compact-JSON(payload)`, base64url-no-pad encoded.
-//! Clients MUST treat it as opaque. Because it is opaque, Phase-2 can swap a
-//! Phase-1 *offset-alias* payload (which drifts under a moving DESC feed,
-//! same as Scala today) for a stable-seek key (`IndexerQuery::*_after`)
-//! WITHOUT breaking any client. The [`CURSOR_VERSION`] byte is what lets the
-//! decoder reject a future incompatible encoding cleanly instead of
-//! mis-parsing it.
+//! **Opaqueness is load-bearing:** the wire form is
+//! `version-byte || compact-JSON(payload)`, base64url-no-pad encoded.
+//! Clients MUST treat it as opaque. Because it is opaque, a group can swap
+//! its current *offset-alias* payload (which drifts under a moving DESC
+//! feed, same as Scala today) for a future stable-seek key
+//! (`IndexerQuery::*_after`) WITHOUT breaking any client. The
+//! [`CURSOR_VERSION`] byte is what lets the decoder reject a future
+//! incompatible encoding cleanly instead of mis-parsing it.
 //!
-//! `has_more` is computed by **overfetch-by-one** (§1.5): a handler requests
+//! `has_more` is computed by **overfetch-by-one**: a handler requests
 //! `limit + 1` rows, and [`Page::from_overfetch`] trims the sentinel row,
 //! sets `has_more`, and mints `next_cursor` from the last *kept* row. This
 //! works with or without a total-count method — v1's envelope has no `total`.
@@ -29,14 +29,15 @@ use super::error::{v1_error, Reason};
 use axum::response::Response;
 
 /// Version tag prepended to every encoded cursor before the compact JSON.
-/// Bumping it (Phase-2 stable-seek payloads) makes every older cursor decode
-/// to [`CursorError::Version`] rather than silently mis-seeking — the codec
-/// change stays invisible to clients while old in-flight cursors fail closed.
+/// Bumping it (e.g. to switch a group to a stable-seek payload) makes every
+/// older cursor decode to [`CursorError::Version`] rather than silently
+/// mis-seeking — the codec change stays invisible to clients while old
+/// in-flight cursors fail closed.
 pub const CURSOR_VERSION: u8 = 1;
 
 /// Default page size when a caller omits `limit`. Groups pass their own
-/// per-group default (see the §2.2 bounding table); this is the fleet
-/// fallback for handlers that don't specialize.
+/// per-group default; this is the fleet fallback for handlers that don't
+/// specialize.
 pub const DEFAULT_LIMIT: u32 = 50;
 
 /// Fleet hard cap on `limit` when a group doesn't specify a tighter one.
@@ -68,7 +69,7 @@ pub enum CursorError {
 }
 
 impl CursorError {
-    /// Render as the canonical `invalid_cursor` 400 envelope (§1.5). The
+    /// Render as the canonical `invalid_cursor` 400 envelope. The
     /// `detail` is generic on purpose — a tampering client learns nothing
     /// about the internal encoding.
     pub fn into_response(self) -> Response {
@@ -80,7 +81,7 @@ impl CursorError {
     }
 }
 
-/// Encode an opaque `next_cursor` from a group's payload (§1.5). The result
+/// Encode an opaque `next_cursor` from a group's payload. The result
 /// is `base64url(no-pad, [CURSOR_VERSION] ++ compact-JSON(payload))`.
 ///
 /// Infallible for any payload that serializes (all `#[derive(Serialize)]`
@@ -99,7 +100,7 @@ pub fn encode_cursor<T: CursorPayload>(payload: &T) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// Decode a client-supplied opaque cursor back to a group's payload (§1.5).
+/// Decode a client-supplied opaque cursor back to a group's payload.
 /// Any tamper — bad base64, wrong version, wrong shape — is
 /// [`CursorError`], which the caller renders as `invalid_cursor`.
 pub fn decode_cursor<T: CursorPayload>(cursor: &str) -> Result<T, CursorError> {
@@ -127,10 +128,10 @@ pub fn decode_opt_cursor<T: CursorPayload>(
     }
 }
 
-/// Clamp a caller-supplied `limit` into `[1, max]`, defaulting when absent
-/// (§1.5). `requested == Some(0)` clamps up to 1 (a zero-row page is never
+/// Clamp a caller-supplied `limit` into `[1, max]`, defaulting when absent.
+/// `requested == Some(0)` clamps up to 1 (a zero-row page is never
 /// what a caller means); anything above `max` clamps down to `max`. Groups
-/// pass their own `(default, max)` from the §2.2 bounding table.
+/// pass their own `(default, max)`.
 pub fn clamp_limit(requested: Option<u32>, default: u32, max: u32) -> u32 {
     let max = max.max(1);
     match requested {
@@ -139,8 +140,8 @@ pub fn clamp_limit(requested: Option<u32>, default: u32, max: u32) -> u32 {
     }
 }
 
-/// The `page` object of a v1 collection envelope (`v1-api-design.md` §1.3 /
-/// §1.5): `{ limit, next_cursor, has_more }`. `next_cursor` is `null` exactly
+/// The `page` object of a v1 collection envelope:
+/// `{ limit, next_cursor, has_more }`. `next_cursor` is `null` exactly
 /// when `has_more` is false.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct Page {
@@ -153,8 +154,8 @@ pub struct Page {
 }
 
 impl Page {
-    /// Build a `Page` and trim an overfetched result set in one step (§1.5
-    /// overfetch-by-one). Pass the rows a handler fetched with `limit + 1`;
+    /// Build a `Page` and trim an overfetched result set in one step
+    /// (overfetch-by-one). Pass the rows a handler fetched with `limit + 1`;
     /// if more than `limit` came back, the extra row is dropped, `has_more`
     /// is `true`, and `next_cursor` is minted from the last *kept* row via
     /// `key_of`. Otherwise `has_more` is `false` and `next_cursor` is `None`.

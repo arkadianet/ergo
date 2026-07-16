@@ -271,7 +271,7 @@ pub fn serve_on_with_mempool_and_wallet_and_security(
     security: Option<Arc<crate::auth::ApiSecurity>>,
 ) -> JoinHandle<()> {
     let bind_addr = listener.local_addr().ok();
-    // v1 boot-warn (§2.1): loudly flag a network-reachable T1/T2 surface under
+    // v1 boot-warn: loudly flag a network-reachable T1/T2 surface under
     // a weak/default (or absent) api_key. Called once here, right after the
     // bind address is known and before serving — the documented startup seam.
     if let Some(addr) = bind_addr {
@@ -580,25 +580,24 @@ pub fn router_with_mempool_and_wallet_and_security(
     // reads). Cloned up front because the compat / submit handles are moved into
     // the Scala-compat match further down; the v1 group mounts unconditionally
     // and gates inside each handler on the honest `*_unavailable` / `*_disabled`
-    // reason (`dev-docs/v1-api-design.md` §3.5–§3.6).
+    // reason.
     let v1_read = read.clone();
     let v1_chain = compat.clone();
     let v1_indexer = indexer.clone();
-    // Per-height emission schedule for the `stats/*` supply series (§3.14).
+    // Per-height emission schedule for the `stats/*` supply series.
     let v1_emission = emission.clone();
     let v1_submit = submit.clone();
     let v1_mempool = mempool.clone();
-    // Same up-front-clone rationale for the `script/*` group (§5): `compat` is
+    // Same up-front-clone rationale for the `script/*` group: `compat` is
     // moved into the Scala-compat `match` further down, so the chain reader for
     // `simulate`/`explain` box lookups (and the tip-height reader) are captured
     // here before that move.
     let v1_script_read = read.clone();
     let v1_script_chain = compat.clone();
     // Operator/control group inputs (`node/*`, `network/*`, `mining/*`,
-    // `voting/*` — `dev-docs/v1-api-design.md` §3.1–§3.4). Cloned up front
-    // because `admin` / `mining` are moved into the Scala-compat mounts further
-    // down; the group mounts unconditionally and gates inside each handler on
-    // the honest `*_unavailable` reason.
+    // `voting/*`). Cloned up front because `admin` / `mining` are moved into
+    // the Scala-compat mounts further down; the group mounts unconditionally
+    // and gates inside each handler on the honest `*_unavailable` reason.
     let v1_op_read = read.clone();
     let v1_op_chain = compat.clone();
     let v1_op_admin = admin.clone();
@@ -650,7 +649,7 @@ pub fn router_with_mempool_and_wallet_and_security(
         .route("/api/v1/sync", get(sync_handler))
         .route("/api/v1/peers", get(peers_handler))
         // `mempool/*` reads (summary, transactions[/{tx_id}]) are owned by the
-        // v1 product router (`crate::v1::v1_router`, §3.8) — reshaped into the
+        // v1 product router (`crate::v1::v1_router`) — reshaped into the
         // envelope + cursor. Not mounted here to avoid a route collision.
         .route("/api/v1/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
@@ -909,9 +908,9 @@ pub fn router_with_mempool_and_wallet_and_security(
         operator
     };
 
-    // `POST /api/v1/mempool/{submit,check}` are Overlap-O1 aliases of the
+    // `POST /api/v1/mempool/{submit,check}` are aliases of the
     // canonical `transactions/{submit,check}` handlers, owned by the v1 product
-    // router (`crate::v1::v1_router`, §3.8). They mount unconditionally there
+    // router (`crate::v1::v1_router`). They mount unconditionally there
     // and answer `409 submit_disabled` when no submit bridge is wired (the v1
     // honest-reason posture), superseding the old conditional native mount.
 
@@ -1216,7 +1215,7 @@ pub fn router_with_mempool_and_wallet_and_security(
                         "/transactions/check",
                         post(crate::compat::transactions::check_handler),
                     )
-                    // §12 sendMinedBlock. axum 0.7 dispatches GET and
+                    // `sendMinedBlock`. axum 0.7 dispatches GET and
                     // POST on the same path independently, so the
                     // existing read-side `GET /blocks` (header pagination,
                     // line 603) and this POST live side-by-side without
@@ -1237,7 +1236,7 @@ pub fn router_with_mempool_and_wallet_and_security(
     // win over its `/wallet/*rest` catch-all (which would otherwise 403 them).
     let assembled = assembled.merge(wallet_ui_router());
 
-    // `/wallet/*` — unconditionally mounted per spec §8.1.
+    // `/wallet/*` — unconditionally mounted.
     // The wallet admin is always wired (never Optional); read-only
     // mirrors supply a `NoopWalletAdmin` so the routes return the
     // zero-state status rather than 404.
@@ -1250,7 +1249,7 @@ pub fn router_with_mempool_and_wallet_and_security(
     // Captured before `security` is consumed by the native wallet mount.
     let v1_auth = crate::v1::auth::V1AuthConfig::new(security.clone()).into_shared();
     // Captured before the native mount consumes `wallet_admin`: the v1
-    // scan/accounts group (`/api/v1/scan/*` + `/api/v1/accounts/*`, §3.10–§3.11)
+    // scan/accounts group (`/api/v1/scan/*` + `/api/v1/accounts/*`)
     // reuses the SAME wallet-admin bridge for scan + key operations.
     let v1_accounts_admin = wallet_admin.clone();
     // Native `/api/v1/wallet/*` — a second adapter over the SAME wallet admin,
@@ -1262,12 +1261,12 @@ pub fn router_with_mempool_and_wallet_and_security(
     ));
 
     // Native `/api/v1/*` product API — the `chain/*` + `transactions/*` reads
-    // group, the first consumer of the G2 shared primitives (error envelope,
+    // group, the first consumer of the shared v1 primitives (error envelope,
     // cursor page builder, rate/cost governor). All routes are T0 (public),
     // fronted by the per-IP governor at route-class `HeavyRead`. The shared
     // governor is one per node, so later route groups reuse the same per-IP
-    // budget (`dev-docs/v1-api-design.md` §2.2).
-    // O4 shared mempool-depth ring (Appendix A O4). Fed by a background sampler
+    // budget.
+    // Shared mempool-depth ring. Fed by a background sampler
     // (production only — guarded on a live Tokio runtime so non-async test
     // router builds never spawn a task), read by `mempool/summary?history=` and
     // the future `stats/mempool-depth`.
@@ -1288,8 +1287,8 @@ pub fn router_with_mempool_and_wallet_and_security(
             crate::v1::mempool_depth::DEFAULT_SAMPLE_INTERVAL,
         );
     }
-    // Real-time subscriptions (§4.1). The `RealtimeBus` is constructed once and
-    // shared like the O4 depth ring. It is fed by the coarse-ring bridge task
+    // Real-time subscriptions. The `RealtimeBus` is constructed once and
+    // shared like the mempool-depth ring above. It is fed by the coarse-ring bridge task
     // (production only — same live-runtime + once-per-process guards as the
     // depth sampler so non-async test router builds never spawn it and repeated
     // router assembly never stacks pollers). `realtime_handle()` uses
@@ -1311,13 +1310,13 @@ pub fn router_with_mempool_and_wallet_and_security(
             crate::v1::realtime::DEFAULT_BRIDGE_INTERVAL,
         );
     }
-    // Webhooks (§4.1) — the durable, retried, signed sibling of WS. An internal
+    // Webhooks — the durable, retried, signed sibling of WS. An internal
     // subscriber to the SAME `RealtimeBus` (one event source, one global seq).
     // The registry + delivery-log + retry/backoff/HMAC state machine, and the
     // production `ReqwestSink` (rustls-TLS only — no system OpenSSL, see
     // `ergo-api/Cargo.toml`), are constructed here; the delivery worker is
     // spawned exactly once per process (guarded to a live Tokio runtime, same
-    // idiom as the O4 depth sampler / realtime-bridge feeder above), so
+    // idiom as the mempool-depth sampler / realtime-bridge feeder above), so
     // registered webhooks now actually deliver. Persistence is the one
     // remaining deferral: the registry + delivery log are in-memory, so
     // registrations are lost on restart until a durable `*-db` store lands
@@ -1357,7 +1356,7 @@ pub fn router_with_mempool_and_wallet_and_security(
         indexer: v1_indexer,
         submit: v1_submit,
         // Keyless build stays honest-unavailable (route_unavailable) until the
-        // extracted keyless TxBuilder core (§4.2 O7) is wired in ergo-node.
+        // extracted keyless TxBuilder core is wired in ergo-node.
         tx_builder: None,
         mempool: v1_mempool,
         mempool_depth: v1_mempool_depth,
@@ -1367,12 +1366,12 @@ pub fn router_with_mempool_and_wallet_and_security(
     };
     let v1_governor = crate::v1::governor::Governor::new(Default::default())
         .expect("default GovernorConfig is valid");
-    // The `script/*` playground (§5) shares the one per-node governor (bounded
-    // at the `Compute` class — the load-bearing anti-DoS control, D2) and the
+    // The `script/*` playground shares the one per-node governor (bounded
+    // at the `Compute` class — the load-bearing anti-DoS control) and the
     // one v1 auth config (so `[api.script] require_api_key` can flip the group
     // to T1). Clone both before they move into the reads router / webhooks
     // router below. The Scala oracle for `script/diff` is unconfigured here, so
-    // `diff` answers `oracle_unavailable` until a transport is wired (D3).
+    // `diff` answers `oracle_unavailable` until a transport is wired.
     let script_state = crate::v1::script::ScriptState {
         read: v1_script_read,
         chain: v1_script_chain,
@@ -1386,8 +1385,8 @@ pub fn router_with_mempool_and_wallet_and_security(
         v1_auth.clone(),
     ));
     let assembled = assembled.merge(crate::v1::v1_router(v1_state.clone(), v1_governor.clone()));
-    // Operator/control group (`node/*`, `network/*`, `mining/*`, `voting/*` —
-    // §3.1–§3.4). Mixed tiers over one `OperatorState`: T0 reads share the same
+    // Operator/control group (`node/*`, `network/*`, `mining/*`, `voting/*`).
+    // Mixed tiers over one `OperatorState`: T0 reads share the same
     // per-node governor (`CheapRead`); T1/T2 controls ride the v1 api-key gate
     // (`require_tier`), T2 (config-mutate) additionally loopback-preferred.
     // `node/shutdown` is NOT on this router's T2 gate — it stays on the frozen
@@ -1405,7 +1404,7 @@ pub fn router_with_mempool_and_wallet_and_security(
         v1_auth.clone(),
     ));
     // Scan registry + account-abstraction group (`/api/v1/scan/*`,
-    // `/api/v1/accounts/*` — §3.10–§3.11). T0 watch reads (governor), T1 scan +
+    // `/api/v1/accounts/*`). T0 watch reads (governor), T1 scan +
     // watch writes + account/PSBT seams (`require_tier(Operator)`), T2 private-key
     // export (`require_tier(Admin)` — api-key + loopback-preferred).
     let v1_accounts_state = crate::v1::AccountsState {
@@ -1417,7 +1416,7 @@ pub fn router_with_mempool_and_wallet_and_security(
         v1_governor.clone(),
         v1_auth.clone(),
     ));
-    // `POST /api/v1/batch` (§3.18/§4.7) — a bounded read-only multiplexer over
+    // `POST /api/v1/batch` — a bounded read-only multiplexer over
     // the SAME `chain/*`/`boxes/*`/`tokens/*`/`addresses/*`/`mempool/*`/
     // `transactions/*`(reads)/`stats/*`/`diagnostics`/`light/*`/`protocols/*`
     // handlers just mounted above, dispatched in-process (never HTTP-to-

@@ -54,9 +54,8 @@ pub struct IndexedErgoBoxResponse {
     // mainnet h=1788718 and testnet h=352776 — zero records
     // carried the field). Scala's wire behaviour is the practical
     // compatibility target; re-introducing the field would break
-    // byte-equal parity for every box-emitting route (#9–#16 in
-    // the spec inventory) and for nested input/output boxes inside
-    // `/blockchain/transaction/*`.
+    // byte-equal parity for every box-emitting route, and for
+    // nested input/output boxes inside `/blockchain/transaction/*`.
     #[serde(rename = "inclusionHeight")]
     pub inclusion_height: i32,
     /// Optional in openapi (not required) but nullable. Emit JSON `null`

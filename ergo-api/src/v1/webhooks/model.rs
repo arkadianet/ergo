@@ -1,9 +1,8 @@
 //! Webhook data model: the durable-ish subscription + delivery records, their
-//! wire DTOs, the HMAC-SHA256 signing recipe, and the SSRF URL policy
-//! (`v1-api-design.md` §4.1, fragment `realtime-ws-webhooks.md` §3.2–§3.4).
+//! wire DTOs, the HMAC-SHA256 signing recipe, and the SSRF URL policy.
 //!
 //! A [`Subscription`] is the operator-registered target: a URL, the set of
-//! channel keys (the SAME vocabulary as WS §2.2, validated by
+//! channel keys (the SAME vocabulary as the WS channel grammar, validated by
 //! [`parse_channel`](crate::v1::realtime::parse_channel)), an optional signing
 //! secret, and the live governor state (`consecutive_failures`, `last_status`).
 //! The secret is **write-only after creation** — echoed exactly once at
@@ -16,8 +15,8 @@
 //!
 //! The signature is `HMAC-SHA256(secret, "{timestamp}.{raw_body}")`, hex,
 //! prefixed `sha256=` — the exact recipe a consumer recomputes and
-//! constant-time compares (`X-Ergo-Signature` header, §3.4). Signing uses the
-//! proven `hmac` + `sha2` workspace crates (CLAUDE.md §2 — never hand-rolled).
+//! constant-time compares (`X-Ergo-Signature` header). Signing uses the
+//! proven `hmac` + `sha2` workspace crates, never hand-rolled.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use utoipa::ToSchema;
@@ -29,10 +28,10 @@ use sha2::Sha256;
 
 use crate::v1::routes::dto::unix_ms_to_iso;
 
-/// The signing header value prefix (`X-Ergo-Signature: sha256=<hex>`, §3.4).
+/// The signing header value prefix (`X-Ergo-Signature: sha256=<hex>`).
 pub const SIGNATURE_PREFIX: &str = "sha256=";
 
-/// Live delivery-health of a subscription (§3.2 `delivery.last_status`).
+/// Live delivery-health of a subscription.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WebhookHealth {
@@ -44,7 +43,7 @@ pub enum WebhookHealth {
     Disabled,
 }
 
-/// Status of one delivery attempt-group (§3.5).
+/// Status of one delivery attempt-group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryStatus {
@@ -65,7 +64,7 @@ impl DeliveryStatus {
     }
 }
 
-/// The reason a subscription was auto-disabled (§3.3). `None` while active.
+/// The reason a subscription was auto-disabled. `None` while active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AutoDisabledReason {
@@ -73,7 +72,7 @@ pub enum AutoDisabledReason {
     MaxConsecutiveFailures,
 }
 
-/// An operator-registered webhook subscription (in-memory this PR; durable
+/// An operator-registered webhook subscription (in-memory; durable
 /// persistence is DEFERRED — see the module docs on `super`).
 #[derive(Debug, Clone)]
 pub struct Subscription {
@@ -81,7 +80,7 @@ pub struct Subscription {
     pub webhook_id: String,
     /// The delivery target URL (validated by [`UrlPolicy`] at registration).
     pub url: String,
-    /// Normalized channel keys (WS §2.2 vocabulary). Delivery fires when an
+    /// Normalized channel keys (the same vocabulary as WS). Delivery fires when an
     /// event's routes intersect this set.
     pub channels: Vec<String>,
     /// The HMAC signing secret. `None` = unsigned deliveries (allowed, but the
@@ -89,19 +88,19 @@ pub struct Subscription {
     pub secret: Option<String>,
     /// `false` when paused (by the operator) or auto-disabled.
     pub active: bool,
-    /// `0` = fire on mempool-tentative events too; `>=1` = confirmed only
-    /// (§3.2 `confirmations`). The substrate only distinguishes 0-vs-1 today.
+    /// `0` = fire on mempool-tentative events too; `>=1` = confirmed only.
+    /// The substrate only distinguishes 0-vs-1 today.
     pub min_confirmations: u32,
     /// Registration time, unix ms.
     pub created_at_unix_ms: u64,
     // ----- live governor state -----
-    /// Consecutive failed deliveries since the last success (§3.3).
+    /// Consecutive failed deliveries since the last success.
     pub consecutive_failures: u32,
     /// Rolled-up health for the DTO.
     pub health: WebhookHealth,
     /// Time of the last delivery attempt outcome, unix ms.
     pub last_delivery_at_unix_ms: Option<u64>,
-    /// Set when `active` was flipped off automatically (§3.3).
+    /// Set when `active` was flipped off automatically.
     pub auto_disabled_reason: Option<AutoDisabledReason>,
 }
 
@@ -119,7 +118,7 @@ impl Subscription {
         routes.iter().any(|r| self.channels.iter().any(|c| c == r))
     }
 
-    /// The public DTO (§3.2). **Never** carries the secret — only `secret_set`.
+    /// The public DTO. **Never** carries the secret — only `secret_set`.
     pub fn to_dto(&self) -> serde_json::Value {
         json!({
             "webhook_id": self.webhook_id,
@@ -140,7 +139,7 @@ impl Subscription {
     }
 
     /// The registration/rotation response DTO: the public DTO **plus** the
-    /// secret, echoed exactly once (§3.2). Callers use this ONLY on the
+    /// secret, echoed exactly once. Callers use this ONLY on the
     /// create/rotate path and never persist the returned value server-side.
     pub fn to_dto_with_secret(&self) -> serde_json::Value {
         let mut v = self.to_dto();
@@ -182,7 +181,7 @@ pub struct Delivery {
 }
 
 impl Delivery {
-    /// The delivery-log DTO (§3.5).
+    /// The delivery-log DTO.
     pub fn to_dto(&self) -> serde_json::Value {
         json!({
             "delivery_id": self.delivery_id,
@@ -198,7 +197,7 @@ impl Delivery {
     }
 }
 
-/// Compute the `X-Ergo-Signature` value for a delivery (§3.4):
+/// Compute the `X-Ergo-Signature` value for a delivery:
 /// `sha256=` + hex(HMAC-SHA256(secret, "{timestamp}.{raw_body}")).
 ///
 /// The `timestamp` is folded into the signed string so a consumer can reject
@@ -214,7 +213,7 @@ pub fn sign_body(secret: &str, timestamp_unix_ms: u64, raw_body: &str) -> String
     format!("{SIGNATURE_PREFIX}{}", hex::encode(digest))
 }
 
-/// SSRF guard policy for a registration URL (§3.2). Default-deny for
+/// SSRF guard policy for a registration URL. Default-deny for
 /// loopback / private / link-local / unspecified targets; an operator opts
 /// dev/loopback delivery in explicitly.
 #[derive(Debug, Clone, Copy)]
@@ -240,7 +239,7 @@ impl Default for UrlPolicy {
     }
 }
 
-/// Why a registration URL was rejected. Maps to the canonical §4 reasons.
+/// Why a registration URL was rejected. Maps to the canonical `Reason` set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UrlReject {
     /// Not `https` (and http not allowed) → `insecure_url`.
@@ -309,7 +308,7 @@ fn ip_is_forbidden(ip: IpAddr) -> bool {
     }
 }
 
-/// Validate a registration URL against the policy (§3.2 SSRF guard).
+/// Validate a registration URL against the SSRF guard policy.
 ///
 /// **Scope + honest limitation:** this validates the URL's *literal* host. A
 /// literal private/loopback IP or `localhost` is rejected; a hostname that

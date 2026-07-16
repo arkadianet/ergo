@@ -1,5 +1,4 @@
-//! The T0/T1/T2 exposure-tier gate (`v1-api-design.md` §2.1) + the startup
-//! insecure-posture boot-warn.
+//! The T0/T1/T2 exposure-tier gate + the startup insecure-posture boot-warn.
 //!
 //! Three tiers, one api-key scheme:
 //! * **[`Tier::Public`]** (T0) — no gate. Bounded by the [`super::governor`],
@@ -14,18 +13,18 @@
 //!
 //! The compat gate [`crate::auth::require_api_key`] answers the legacy
 //! `403 {reason:"invalid.api-key"}` shape and is frozen. This v1 gate answers
-//! the §1.3 envelope with `unauthorized` (401), so v1 clients get uniform
-//! errors. Both call the same `verify`.
+//! the standard error envelope with `unauthorized` (401), so v1 clients get
+//! uniform errors. Both call the same `verify`.
 //!
-//! **Boot-warn (§2.1).** [`warn_startup_posture`] logs a loud warning when
+//! **Boot-warn.** [`warn_startup_posture`] logs a loud warning when
 //! T1/T2 routes are network-reachable under a weak/default `api_key_hash` (or
 //! none at all). The server calls it once at startup — see the call-site note
 //! on that function. The underlying decision is the pure, testable
 //! [`assess_posture`].
 //!
-//! **Interim honesty (§2.1).** Until each group mounts its tiers, T2 endpoints
-//! sit behind the single gate plus an operator-side reverse-proxy loopback
-//! rule; this module is the mechanism the route PRs attach.
+//! Each v1 route group mounts [`require_tier`] at the tier its endpoints
+//! need; a T2 endpoint additionally relies on an operator-side reverse-proxy
+//! loopback rule when the node sits behind one.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -37,7 +36,7 @@ use super::error::{v1_error, Reason};
 use super::is_trusted_loopback;
 use crate::auth::{ApiSecurity, API_KEY_HEADER};
 
-/// Exposure tier of a route (`v1-api-design.md` §2.1). Pinned per route/subtree
+/// Exposure tier of a route. Pinned per route/subtree
 /// at mount time via [`V1AuthConfig::state`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
@@ -72,7 +71,7 @@ pub struct V1AuthConfig {
     pub security: Option<Arc<ApiSecurity>>,
     /// When `true`, [`Tier::Admin`] routes hard-deny any non-loopback caller
     /// (even with a valid key) with `sensitive_op_disabled`. Default `false`
-    /// = warn-and-allow (§2.1).
+    /// = warn-and-allow.
     pub admin_hard_deny_nonloopback: bool,
     /// When `true`, a reverse proxy terminates in front of the v1 API on
     /// loopback, so a loopback peer socket is the PROXY, not a real local
@@ -83,7 +82,7 @@ pub struct V1AuthConfig {
 
 impl V1AuthConfig {
     /// Build a config. `admin_hard_deny_nonloopback` defaults to `false`
-    /// (warn-and-allow) per §2.1.
+    /// (warn-and-allow).
     pub fn new(security: Option<Arc<ApiSecurity>>) -> Self {
         Self {
             security,
@@ -129,7 +128,7 @@ pub struct V1AuthState {
     tier: Tier,
 }
 
-/// axum middleware enforcing the route's [`Tier`] (`v1-api-design.md` §2.1).
+/// axum middleware enforcing the route's [`Tier`].
 ///
 /// Mount per subtree:
 /// ```ignore
@@ -192,7 +191,7 @@ enum KeyOutcome {
 /// a T1/T2 route is reached. Operator/Admin routes gate sensitive operations
 /// (shutdown, secret export), so an unconfigured key must DENY, not pass. The
 /// boot-warn ([`warn_startup_posture`]) surfaces the misconfiguration loudly;
-/// it is not the gate. Answers the §1.3 `unauthorized` (401) envelope.
+/// it is not the gate. Answers the standard `unauthorized` (401) envelope.
 fn no_key_configured() -> Response {
     v1_error(
         Reason::Unauthorized,
@@ -227,7 +226,7 @@ pub enum InsecurePosture {
     WeakDefaultKey,
 }
 
-/// Pure posture check (`v1-api-design.md` §2.1): given the api-key verifier
+/// Pure posture check: given the api-key verifier
 /// and the API bind address, is the T1/T2 surface dangerously exposed?
 ///
 /// A loopback-only bind is never flagged (only the operator can reach it).
@@ -249,14 +248,12 @@ pub fn assess_posture(security: Option<&ApiSecurity>, bind: SocketAddr) -> Optio
     }
 }
 
-/// Boot-warn hook (`v1-api-design.md` §2.1). Logs a loud `WARN` if the v1
-/// T1/T2 surface is network-reachable under a weak/default api-key (or none).
+/// Boot-warn hook. Logs a loud `WARN` if the v1 T1/T2 surface is
+/// network-reachable under a weak/default api-key (or none).
 ///
-/// **Call site (next PR):** invoke once at server startup, right after the
-/// `ApiSecurity` is built and the bind `SocketAddr` is known, before `serve`
-/// — e.g. in `crate::server` alongside the `info!(addr, "api listening")`
-/// line. It is intentionally not wired here: this PR mounts no routes and
-/// changes no server behavior.
+/// **Call site:** invoked once at server startup in `crate::server`, right
+/// after `ApiSecurity` is built and the bind `SocketAddr` is known, before
+/// `serve`, alongside the `info!(addr, "api listening")` line.
 pub fn warn_startup_posture(security: Option<&ApiSecurity>, bind: SocketAddr) {
     match assess_posture(security, bind) {
         Some(InsecurePosture::NoKeyNetworkReachable) => warn!(

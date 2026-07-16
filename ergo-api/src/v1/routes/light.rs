@@ -1,4 +1,4 @@
-//! `light/*` — trustless mobile-sync proofs (`v1-api-design.md` §3.13).
+//! `light/*` — trustless mobile-sync proofs.
 //!
 //! A phone wallet syncs against *this* node without trusting it: it verifies
 //! PoW + interlink structure itself. Three primitives — a NiPoPoW bootstrap

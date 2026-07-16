@@ -1,6 +1,5 @@
-//! `transactions/*` intelligence group — the `v1-api-design.md` §3.6 Phase-2
-//! subset (with §4.2): intent-based `build`, non-mutating `simulate` (G8), the
-//! mempool `fee-estimate` oracle, and lifecycle `status`.
+//! `transactions/*` intelligence group: intent-based `build`, non-mutating
+//! `simulate`, the mempool `fee-estimate` oracle, and lifecycle `status`.
 //!
 //! These are the "help me transact" endpoints. Two are honestly backed by
 //! existing node hooks today — `fee-estimate` (the chain reader's
@@ -9,11 +8,11 @@
 //! honest-unavailable until the node wires them:
 //!
 //! - `build` delegates to [`crate::traits::NodeTxBuilder`] — the ONE keyless
-//!   builder (O7). `V1State::tx_builder` is `None` until the extracted core is
+//!   builder. `V1State::tx_builder` is `None` until the extracted core is
 //!   wired, and the endpoint answers `route_unavailable` (never fake coin
 //!   selection).
 //! - `simulate` delegates to [`crate::traits::NodeSubmit::simulate`], a
-//!   **non-mutating** validate entrypoint (G8). It must never use
+//!   **non-mutating** validate entrypoint. It must never use
 //!   [`SubmitMode::CheckOnly`], which still mutates the mempool anti-DoS
 //!   bookkeeping (mempool invariant #7); the default impl is unavailable so a
 //!   node without the read-only validator answers `route_unavailable`.
@@ -40,7 +39,7 @@ use crate::traits::{
 };
 use crate::v1::error::{v1_error, Reason, V1Error};
 
-// ----- caps (§2.2 tx-intelligence row) ------------------------------------
+// ----- caps ----------------------------------------------------------------
 
 /// Max outputs an intent may request.
 const MAX_OUTPUTS: usize = 128;
@@ -87,7 +86,7 @@ fn parse_amount(s: &str, what: &str) -> Result<u64, Box<Response>> {
         err(
             Reason::InvalidParams,
             format!("{what} must be a decimal nanoERG amount string"),
-            "amounts are u64 encoded as base-10 strings (§1.1)",
+            "amounts are u64 encoded as base-10 strings",
         )
     })
 }
@@ -297,7 +296,7 @@ async fn build_inner(state: &V1State, body: BuildBody) -> Result<BuildResponse, 
         return Err(err(
             Reason::RouteUnavailable,
             "the keyless transaction builder is not wired on this node",
-            "build requires the extracted keyless TxBuilder (v1-api-design.md §4.2 O7)",
+            "build requires the extracted keyless TxBuilder",
         ));
     };
 
@@ -462,9 +461,7 @@ fn shape_outputs(
                 return Err(err(
                     Reason::UnsupportedIntent,
                     "`mint` outputs are not supported yet",
-                    format!(
- "token minting ships later (v1-api-design.md §4.2); requested mint of {amount} to {address}"
-                    ),
+                    format!("token minting ships later; requested mint of {amount} to {address}"),
                 ))
             }
             OutputDto::Burn { assets } => {
@@ -472,7 +469,7 @@ fn shape_outputs(
                     Reason::UnsupportedIntent,
                     "`burn` outputs are not supported yet",
                     format!(
- "token burning ships later (v1-api-design.md §4.2); requested burn of {} asset kind(s)",
+                        "token burning ships later; requested burn of {} asset kind(s)",
                         assets.len()
                     ),
                 ))
@@ -638,7 +635,7 @@ pub(crate) struct SimulateResponse {
 }
 
 /// `POST /api/v1/transactions/simulate` — dry-run an assembled tx: accept/reject
-/// + cost + conflicts, NO broadcast and NO mempool mutation (G8).
+/// + cost + conflicts, NO broadcast and NO mempool mutation.
 #[utoipa::path(
     post, path = "/api/v1/transactions/simulate", tag = "transactions",
     request_body = SimulateBody,

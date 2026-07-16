@@ -1,6 +1,6 @@
 //! The seven `script/*` route handlers — each a thin adapter over the ONE
-//! reduce / compile / parse facade in [`super`] (locked decision D3). No
-//! handler owns reduction, cost, or compile logic.
+//! reduce / compile / parse facade in [`super`]. No handler owns reduction,
+//! cost, or compile logic.
 
 use std::collections::BTreeMap;
 use utoipa::ToSchema;
@@ -26,7 +26,7 @@ use crate::v1::error::{Reason, V1Error};
 use crate::v1::routes::extract::V1Json;
 
 // A trace entry cap: the one place a response array is bounded in lieu of
-// pagination (fragment §4.3).
+// pagination.
 const MAX_TRACE_ENTRIES: usize = 4096;
 
 // ----- shared helpers -----------------------------------------------------
@@ -85,7 +85,7 @@ fn context_height(state: &ScriptState, ctx: Option<&ContextDto>) -> u32 {
 }
 
 /// Build an optional `SELF` [`EvalBox`] from the context. Registers / tokens
-/// are a documented follow-on (fragment §7-D2 single-box first cut); a script
+/// are a documented follow-on; a script
 /// reading them errors honestly rather than seeing empty defaults drive a wrong
 /// verdict.
 fn self_box_from_ctx(
@@ -128,7 +128,7 @@ fn self_box_from_ctx(
 }
 
 // ==========================================================================
-//  POST /api/v1/script/compile   (fragment §4.7)
+//  POST /api/v1/script/compile
 // ==========================================================================
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -212,7 +212,7 @@ fn compile_inner(state: &ScriptState, body: CompileBody) -> Result<CompileRespon
 }
 
 // ==========================================================================
-//  POST /api/v1/script/inspect   (fragment §4.2)
+//  POST /api/v1/script/inspect
 // ==========================================================================
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -372,7 +372,7 @@ fn count_payload(node: &IrNode) -> usize {
 }
 
 // ==========================================================================
-//  POST /api/v1/script/execute   (fragment §4.3)  — cost governor MANDATORY
+//  POST /api/v1/script/execute   — cost governor MANDATORY
 // ==========================================================================
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -389,7 +389,7 @@ pub struct ExecuteBody {
     #[serde(default)]
     context: Option<ContextDto>,
     /// Per-request cost ceiling (block-cost units). May only LOWER the group
-    /// ceiling, never raise it (fragment §4.3).
+    /// ceiling, never raise it.
     #[serde(default)]
     max_cost: Option<u64>,
 }
@@ -465,7 +465,7 @@ fn execute_inner(state: &ScriptState, body: ExecuteBody) -> Result<ExecuteRespon
 }
 
 // ==========================================================================
-//  POST /api/v1/script/cost   (fragment §4.4)  — cost governor MANDATORY
+//  POST /api/v1/script/cost   — cost governor MANDATORY
 // ==========================================================================
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -473,7 +473,7 @@ pub(crate) struct CostResponse {
     total_cost: u64,
     within_block_limit: bool,
     /// A per-opcode `breakdown` is gated on the interpreter's `cost-trace`
-    /// feature (fragment §4.4); until that is wired at the API seam the field
+    /// feature; until that is wired at the API seam the field
     /// is an honest empty array, not a fabricated split.
     breakdown: Vec<CostBreakdownEntry>,
 }
@@ -486,7 +486,7 @@ struct CostBreakdownEntry {
 
 /// `POST /script/cost` — the total reduce cost under a bounded accumulator.
 /// Same request shape as `execute`; reuses the SAME bounded reduce primitive
-/// (compose, don't reimplement the cost accounting — fragment §4.4).
+/// (compose, don't reimplement the cost accounting).
 #[utoipa::path(
     post, path = "/api/v1/script/cost", tag = "script",
     request_body = ExecuteBody,
@@ -526,7 +526,7 @@ fn cost_inner(state: &ScriptState, body: ExecuteBody) -> Result<CostResponse, Bo
 }
 
 // ==========================================================================
-//  POST /api/v1/script/simulate   (fragment §4.5)  — node-only differentiator
+//  POST /api/v1/script/simulate   — node-only differentiator
 // ==========================================================================
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -547,8 +547,8 @@ struct SimulateResponse {
     cost: u64,
     at_height: u32,
     /// Honest scope marker: this first cut reduces the real box's guard against
-    /// a single-box context (no spending tx, no proof verification) — fragment
-    /// §7-D2. A `reduced_to` sigma proposition means "spendable with the right
+    /// a single-box context (no spending tx, no proof verification). A
+    /// `reduced_to` sigma proposition means "spendable with the right
     /// proof", not a verified spend.
     note: &'static str,
 }
@@ -629,7 +629,7 @@ fn simulate_inner(
 /// Convert a [`ScalaOutput`] (the chain reader's box shape) into an
 /// [`EvalBox`]. Registers are a documented follow-on — a script reading its own
 /// registers errors honestly (`script_error`) rather than silently seeing
-/// `None` (fragment §7-D2 single-box first cut).
+/// `None`.
 fn eval_box_from_scala(o: &ScalaOutput) -> Result<EvalBox, Box<Response>> {
     let script_bytes = hex::decode(o.ergo_tree.trim()).map_err(|e| {
         err(
@@ -675,7 +675,7 @@ fn eval_box_from_scala(o: &ScalaOutput) -> Result<EvalBox, Box<Response>> {
 }
 
 // ==========================================================================
-//  POST /api/v1/script/explain   (fragment §4.6)  — the debugger
+//  POST /api/v1/script/explain   — the debugger
 // ==========================================================================
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -697,7 +697,7 @@ pub(crate) struct ExplainResponse {
 /// `POST /script/explain` — same input as `simulate`, plus the mechanical
 /// diagnosis: the reduction trace and a best-effort human line. The mechanical
 /// fields ship in the node; the `human_diagnosis` is explicitly
-/// non-authoritative (fragment §7-D3).
+/// non-authoritative.
 #[utoipa::path(
     post, path = "/api/v1/script/explain", tag = "script",
     request_body = SimulateBody,
@@ -782,7 +782,7 @@ fn explain_inner(
 }
 
 // ==========================================================================
-//  POST /api/v1/script/diff   (fragment §4.8)  — opt-in Scala oracle
+//  POST /api/v1/script/diff   — opt-in Scala oracle
 // ==========================================================================
 
 #[derive(Debug, Deserialize, ToSchema)]

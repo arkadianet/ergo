@@ -1,5 +1,4 @@
-//! Realtime channel vocabulary + the canonical event shape (`v1-api-design.md`
-//! §4.1, fragment `realtime-ws-webhooks.md` §2.2/§2.5).
+//! Realtime channel vocabulary + the canonical event shape.
 //!
 //! A [`ChannelClass`] is one of the six subscription classes. A wire channel
 //! string is `"<class>"` (class channels) or `"<class>:<selector>"`
@@ -17,7 +16,7 @@
 use ergo_ser::address::NetworkPrefix;
 use serde_json::json;
 
-/// One of the seven subscription channel classes (§4.1 vocabulary).
+/// One of the seven subscription channel classes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChannelClass {
     /// `blocks` — `block_applied`, `reorg`. Class channel (no selector).
@@ -60,7 +59,7 @@ impl ChannelClass {
     }
 
     /// True for channels that fire exactly once and then auto-unsubscribe
-    /// (`box:`, `tx:` — §2.2 terminal-channel rule).
+    /// (`box:`, `tx:` — the terminal-channel rule).
     pub fn is_terminal(self) -> bool {
         matches!(self, ChannelClass::Box | ChannelClass::Tx)
     }
@@ -68,7 +67,7 @@ impl ChannelClass {
 
 /// Why a channel selector was rejected at subscribe time. Both map to the
 /// canonical [`invalid_selector`](crate::v1::error::Reason::InvalidSelector)
-/// reason (§2.2) — there is no separate "unknown channel" reason in the
+/// reason — there is no separate "unknown channel" reason in the
 /// canonical set, so an unknown class token is treated as a malformed selector.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectorReject {
@@ -101,8 +100,8 @@ fn is_lower_hex64(s: &str) -> bool {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
-/// Parse and validate a wire channel string into its class + normalized key
-/// (§2.2). Selector validation happens here so a malformed selector is
+/// Parse and validate a wire channel string into its class + normalized key.
+/// Selector validation happens here so a malformed selector is
 /// `invalid_selector` before the liveness gate (`channel_unavailable`) ever
 /// runs — the two rejects are distinct and ordered.
 ///
@@ -180,7 +179,7 @@ pub fn parse_channel(raw: &str, network: NetworkPrefix) -> Result<ParsedChannel,
 
 /// A fully-shaped event minus its `seq` (assigned by the bus at publish time,
 /// so the whole realtime surface shares one monotonic cursor). Constructors
-/// below build the canonical payloads from §2.5.
+/// below build the canonical payload for each event kind.
 #[derive(Debug, Clone)]
 pub struct RealtimeEventBody {
     /// Wall-clock time the source signal was observed, unix milliseconds.
@@ -190,19 +189,19 @@ pub struct RealtimeEventBody {
     pub routes: Vec<String>,
     /// The event-kind token (`block_applied`, `reorg`, `box_spent`, …).
     pub event: &'static str,
-    /// `false` = mempool-tentative, `true` = on-chain (§2.4).
+    /// `false` = mempool-tentative, `true` = on-chain.
     pub confirmed: bool,
     /// Chain height the event pertains to, when applicable.
     pub height: Option<u32>,
     /// The event payload, snake_case, reusing the v1 REST DTO field names.
     pub data: serde_json::Value,
     /// For a retraction event (`box_reverted`, `box_unspent`, `tx_dropped`
-    /// on reorg): the `seq` this event invalidates (§2.7). `None` otherwise.
+    /// on reorg): the `seq` this event invalidates. `None` otherwise.
     pub previous_seq: Option<u64>,
 }
 
 impl RealtimeEventBody {
-    /// `block_applied` on the `blocks` channel (§2.5). Always `confirmed`.
+    /// `block_applied` on the `blocks` channel. Always `confirmed`.
     pub fn block_applied(
         unix_ms: u64,
         header_id: String,
@@ -227,7 +226,7 @@ impl RealtimeEventBody {
     }
 }
 
-/// The `reorg` wire payload (§2.5) — grouped so the builder stays within
+/// The `reorg` wire payload — grouped so the builder stays within
 /// arity limits and REST/WS carry identical fields.
 pub struct ReorgPayload {
     pub height: u32,
@@ -244,7 +243,7 @@ pub struct ReorgPayload {
 }
 
 impl RealtimeEventBody {
-    /// `reorg` on the `blocks` channel (§2.5). `dropped_header_ids` is the set
+    /// `reorg` on the `blocks` channel. `dropped_header_ids` is the set
     /// of orphaned tip ids the coarse ring can name (empty when only the new
     /// tip is known — the coarse substrate does not enumerate the dropped
     /// branch; documented as a best-effort guarantee).
@@ -268,7 +267,7 @@ impl RealtimeEventBody {
         }
     }
 
-    /// `box_spent` (§2.5). Routes to the box's `address:` channel and its
+    /// `box_spent`. Routes to the box's `address:` channel and its
     /// terminal `box:` channel. The `data` is expected to be the v1 box DTO
     /// (built by the caller); this helper only fixes the routing + envelope.
     pub fn box_spent(
@@ -295,7 +294,7 @@ impl RealtimeEventBody {
         }
     }
 
-    /// `tx_confirmed` on `mempool` + terminal `tx:` (§2.5).
+    /// `tx_confirmed` on `mempool` + terminal `tx:`.
     ///
     /// Dual-routed to `mempool` so pool dashboards see the leave-on-mine
     /// without waiting for a fine-grained `tx:` subscription. `confirmed:
@@ -318,7 +317,7 @@ impl RealtimeEventBody {
         }
     }
 
-    /// `tx_accepted` on the `mempool` channel (§2.5). Mempool events are
+    /// `tx_accepted` on the `mempool` channel. Mempool events are
     /// tentative until a later chain event confirms or drops the transaction.
     /// Local to this node's admission policy — not a network-wide oracle.
     pub fn tx_accepted(
@@ -342,7 +341,7 @@ impl RealtimeEventBody {
         }
     }
 
-    /// `tx_dropped` on both `mempool` and the terminal `tx:` channel (§2.5).
+    /// `tx_dropped` on both `mempool` and the terminal `tx:` channel.
     ///
     /// Means the tx left this node's pool *without* confirming (policy
     /// eviction, tip-invalid, replacement loser, …). Not used for mined

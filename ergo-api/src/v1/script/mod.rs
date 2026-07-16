@@ -1,17 +1,16 @@
-//! `/api/v1/script/*` — the ErgoScript playground (`v1-api-design.md` §5,
-//! `dev-docs/v1-design-fragments/script-tooling.md`).
+//! `/api/v1/script/*` — the ErgoScript playground.
 //!
 //! The developer-facing surface over the node's TWO node-only assets: the
 //! byte-parity compiler ([`ergo_compiler::compile`]) and the consensus-exact
 //! interpreter ([`ergo_sigma`]'s reduce/cost path). Seven `POST` endpoints —
 //! `compile` / `inspect` / `execute` / `cost` / `simulate` / `explain` /
 //! `diff` — each a **thin adapter** over one of those primitives; this module
-//! owns NO reduction / cost / compile logic (locked decision **D3**).
+//! owns NO reduction / cost / compile logic.
 //!
-//! **Tier (locked decision D2).** The whole group is **T0 public-but-BOUNDED**,
+//! **Tier.** The whole group is **T0 public-but-BOUNDED**,
 //! gated not by an api-key but by the shared per-IP [`Governor`] at the
-//! `Compute` route class + a hard per-request cost cap (§6 of the fragment).
-//! The cost governor is the load-bearing anti-DoS control: `execute` / `cost` /
+//! `Compute` route class + a hard per-request cost cap. The cost governor is
+//! the load-bearing anti-DoS control: `execute` / `cost` /
 //! `simulate` / `explain` run attacker-supplied code, and every reduction is
 //! bounded by [`ScriptConfig::max_cost`] through an enforcing
 //! [`CostAccumulator`] — a script that would exceed it answers
@@ -20,7 +19,7 @@
 //! ([`ScriptConfig::require_api_key`]); the router then wraps every route in the
 //! [`Tier::Operator`] api-key gate instead of [`Tier::Public`].
 //!
-//! **Compat boundary (D3).** The frozen M6 Scala-compat slice
+//! **Compat boundary.** The frozen M6 Scala-compat slice
 //! (`POST /script/p2sAddress` + `/p2shAddress`) is a *separate*, byte-frozen
 //! surface — this native `script/compile` is its own richer adapter over the
 //! SAME [`ergo_compiler::compile`] facade and never proxies or enriches the
@@ -52,22 +51,22 @@ use crate::v1::governor::{governor_mw, Governor, RouteClass};
 
 use axum::response::Response;
 
-// ----- caps (fragment §6) -------------------------------------------------
+// ----- caps -----------------------------------------------------------
 
-/// Consensus `maxBlockCost` default (fragment §3.4 / §6): the ceiling a
+/// Consensus `maxBlockCost` default: the ceiling a
 /// per-request cost cap may never exceed. Block-cost units.
 pub const MAX_BLOCK_COST: u64 = 8_001_091;
 
 /// Hard cap on the hex length of an `ergo_tree` input (bytes on the wire are
 /// half this). Bounds the parse/reduce work an unauthenticated caller can ask
-/// for (fragment §6 body-size caps). 128 KiB of hex ⇒ 64 KiB of tree.
+/// for. 128 KiB of hex ⇒ 64 KiB of tree.
 pub const MAX_TREE_HEX_LEN: usize = 128 * 1024;
 
-/// Hard cap on `source` text length for `compile` (fragment §6). The compiler's
+/// Hard cap on `source` text length for `compile`. The compiler's
 /// recursion is depth-guarded at the wire layer; this bounds the parser input.
 pub const MAX_SOURCE_LEN: usize = 64 * 1024;
 
-/// Operator-tunable knobs for the whole `script/*` group (locked decision D2).
+/// Operator-tunable knobs for the whole `script/*` group.
 #[derive(Debug, Clone)]
 pub struct ScriptConfig {
     /// `[api.script] require_api_key` — flip the group from **T0 public**
@@ -103,8 +102,8 @@ impl ScriptConfig {
     }
 }
 
-/// Config-gated Scala reference oracle for `script/diff` (locked decision
-/// **D3** residual / fragment §7-D4). Transport-agnostic: a live Scala node OR
+/// Config-gated Scala reference oracle for `script/diff`.
+/// Transport-agnostic: a live Scala node OR
 /// a bundled scala-cli reducer implements this trait. **Unconfigured
 /// (`None`) ⇒ `diff` answers `oracle_unavailable`** — the trait is never
 /// required to exist.
@@ -112,12 +111,12 @@ impl ScriptConfig {
 pub trait ScalaOracle: Send + Sync {
     /// Reduce `tree_bytes` against a minimal context at `height` on the Scala
     /// reference, returning its verdict. Bounded / pooled / timeout-guarded is
-    /// the implementation's responsibility (fragment §4.8) — a diff request
+    /// the implementation's responsibility — a diff request
     /// must never spawn one process per call.
     async fn reduce_tree(&self, tree_bytes: &[u8], height: u32) -> Result<OracleVerdict, String>;
 }
 
-/// A Scala-oracle reduction verdict (fragment §4.8).
+/// A Scala-oracle reduction verdict.
 #[derive(Debug, Clone)]
 pub struct OracleVerdict {
     /// `true` = the reference accepted (reduced without error), `false` = it
@@ -150,7 +149,7 @@ pub struct ScriptState {
     pub config: ScriptConfig,
 }
 
-/// Build the `/api/v1/script/*` router (fragment §1). All seven routes sit at
+/// Build the `/api/v1/script/*` router. All seven routes sit at
 /// the governor's [`RouteClass::Compute`] weight — the load-bearing bound — and
 /// carry the tier gate the operator selected via `require_api_key` (T0
 /// [`Tier::Public`] by default, T1 [`Tier::Operator`] when set). State-erased
@@ -225,7 +224,7 @@ pub(crate) fn decode_tree_hex(hex_str: &str) -> Result<Vec<u8>, Box<Response>> {
 
 /// Parse raw `ergo_tree` bytes to an [`ErgoTree`] under the same size cap as
 /// the hex path (so an address-derived tree cannot bypass it). A malformed
-/// tree is `400 invalid_ergo_tree` — never a panic (fragment §6).
+/// tree is `400 invalid_ergo_tree` — never a panic.
 pub(crate) fn parse_tree_bytes(bytes: &[u8]) -> Result<ErgoTree, Box<Response>> {
     if bytes.len() * 2 > MAX_TREE_HEX_LEN {
         return Err(err(
@@ -268,7 +267,7 @@ pub(crate) fn build_env(
 }
 
 /// A typed constant on the wire: `{ "type": "<sigma type>", "value": "<string>" }`
-/// (fragment §4.1). Scalars are decimal strings, byte collections / group
+/// Scalars are decimal strings, byte collections / group
 /// elements are hex, booleans are `"true"`/`"false"`.
 #[derive(Debug, Clone, serde::Deserialize, ToSchema)]
 pub struct TypedConstant {
@@ -328,7 +327,7 @@ fn env_value_from_typed(name: &str, tc: &TypedConstant) -> Result<EnvValue, Box<
 }
 
 /// Map a compiler [`CompileError`] to a v1 error [`Response`], carrying the
-/// error position / phase / Scala class in `detail` for free (fragment §4.7).
+/// error position / phase / Scala class in `detail` for free.
 pub(crate) fn compile_error_response(e: &CompileError) -> Box<Response> {
     let detail = format!(
         "position={} phase={} scala_class={}",
@@ -369,7 +368,7 @@ pub(crate) struct ReduceOutput {
 
 /// Reduce `tree` against a minimal context on the EXACT interpreter path
 /// ([`reduce_expr_with_cost`]), bounded by an ENFORCING [`CostAccumulator`] at
-/// `limit_block_cost` — the load-bearing anti-DoS control (D2 / fragment §6).
+/// `limit_block_cost` — the load-bearing anti-DoS control.
 /// A cost-over-limit is surfaced as [`EvalError::CostExceeded`], never a hang;
 /// evaluation depth is independently bounded by the interpreter's
 /// `MAX_EVAL_DEPTH`.
@@ -429,8 +428,7 @@ fn reduction_env<'a>(
 
 /// Map an [`EvalError`] from the reduce path to the v1 envelope. Cost / depth
 /// refusals get DISTINCT reasons (`cost_limit` / `too_deep`) so a caller
-/// distinguishes a resource refusal from a genuine script error
-/// (fragment §4.0).
+/// distinguishes a resource refusal from a genuine script error.
 pub(crate) fn eval_error_response(e: &EvalError) -> Box<Response> {
     match e {
         EvalError::CostExceeded(_) | EvalError::JitCostOverflow(_) => err(

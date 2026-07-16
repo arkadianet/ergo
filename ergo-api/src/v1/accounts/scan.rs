@@ -1,5 +1,5 @@
-//! `/api/v1/scan/*` — the native scan-registry surface (`v1-api-design.md`
-//! §3.10). All **T1** (operator api-key). Every route reuses the existing
+//! `/api/v1/scan/*` — the native scan-registry surface. All **T1**
+//! (operator api-key). Every route reuses the existing
 //! [`WalletAdmin`](crate::wallet::WalletAdmin) scan machinery
 //! (`register_scan`/`list_scans`/`deregister_scan`/`scan_unspent_boxes`/
 //! `scan_add_box`/`scan_stop_tracking`/`transactions_by_scan_id`) — this is
@@ -31,7 +31,7 @@ const SCAN_DEFAULT_LIMIT: u32 = 50;
 /// validator's hard 1..=2500 bound, so the overfetch-by-one probe
 /// (`limit + 1`) always fits it — at 2500 the probe itself was rejected,
 /// turning a valid `?limit=2500` into a 400. A larger `?limit` clamps here
-/// (§1.5 clamp semantics, same as every other v1 collection).
+/// (same clamp semantics as every other v1 collection).
 const SCAN_BOX_MAX_LIMIT: u32 = 2499;
 /// Cap for the scan-list / scan-transactions collections.
 const SCAN_LIST_MAX_LIMIT: u32 = 500;
@@ -52,7 +52,7 @@ pub struct ScanRegisterRequest {
     remove_offchain: Option<bool>,
 }
 
-/// A registered scan, snake_case (`v1-api-design.md` §3.10).
+/// A registered scan, snake_case.
 #[derive(Debug, Serialize, ToSchema)]
 pub(crate) struct ScanView {
     scan_id: u16,
@@ -76,7 +76,7 @@ impl From<ScanDto> for ScanView {
 
 /// A box tracked by a scan (unspent surface). `spent_by` is always `null` here
 /// (the `/unspent` endpoint) — carried only for shape parity with a future
-/// `/spent` surface. `value` is a decimal string (§1.1).
+/// `/spent` surface. `value` is a decimal string.
 #[derive(Debug, Serialize, ToSchema)]
 pub(crate) struct ScanBoxView {
     box_id: String,
@@ -123,7 +123,7 @@ struct ScanIdCursor {
 
 /// Opaque offset cursor for the box / transaction collections, whose underlying
 /// trait calls are offset/limit paged. Opaque so a keyset seek can replace it
-/// without a wire break (§1.5).
+/// without a wire break.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct OffsetCursor {
     off: u32,

@@ -1,5 +1,5 @@
-//! `/api/v1/{node,network,mining,voting}/*` — the operator/control group
-//! (`v1-api-design.md` §3.1–§3.4). Mixed tiers:
+//! `/api/v1/{node,network,mining,voting}/*` — the operator/control group.
+//! Mixed tiers:
 //!
 //! * **T0 reads** — `node/{info,status,sync,tip,identity,health,version,host}`,
 //!   `network/{peers,connected,blacklisted,sync-info,track-info}`,
@@ -20,10 +20,10 @@
 //! [`NodeChainQuery`](crate::compat::NodeChainQuery) /
 //! [`NodeAdmin`](crate::traits::NodeAdmin) /
 //! [`NodeMining`](crate::mining::NodeMining) traits the compat surface reads —
-//! reshaped into the §1.3 envelope + §1.1 snake_case glossary. Where a
+//! reshaped into the standard envelope + snake_case glossary. Where a
 //! capability has no trait seam yet (manual peer-ban, config read/patch,
 //! forced-tx candidate, next-block vote preview), the endpoint mounts and
-//! answers the honest `route_unavailable` (§1.4) rather than a bare 404.
+//! answers the honest `route_unavailable` rather than a bare 404.
 
 pub(crate) mod mining;
 pub(crate) mod network;
@@ -52,7 +52,7 @@ use crate::v1::governor::{governor_mw, Governor, RouteClass};
 
 /// Shared state for the operator/control group. Every node-capability handle is
 /// `Option` where the subsystem may be absent, so a handler answers the honest
-/// `*_unavailable` reason (§1.4) instead of a bare 404 — the group mounts
+/// `*_unavailable` reason instead of a bare 404 — the group mounts
 /// unconditionally and gates *inside* each handler, mirroring [`crate::v1::V1State`].
 #[derive(Clone)]
 pub struct OperatorState {
@@ -76,7 +76,7 @@ pub struct OperatorState {
 }
 
 impl OperatorState {
-    /// The live chain reader, or the boxed `503 chain_reader_unavailable` (§1.4)
+    /// The live chain reader, or the boxed `503 chain_reader_unavailable`
     /// when the node was wired without one. Boxed to keep the `Ok` path small
     /// (repo convention).
     fn chain(&self) -> Result<&Arc<dyn NodeChainQuery>, Box<Response>> {
@@ -101,7 +101,7 @@ impl OperatorState {
         })
     }
 
-    /// The mining subsystem, or the boxed `409 mining_disabled` (§1.4) when the
+    /// The mining subsystem, or the boxed `409 mining_disabled` when the
     /// node runs with `[mining] enabled = false`.
     fn mining(&self) -> Result<&Arc<dyn NodeMining>, Box<Response>> {
         self.mining.as_ref().ok_or_else(|| {
@@ -124,13 +124,13 @@ pub(crate) struct ListQuery {
 /// Opaque offset cursor for the bounded operator collections (peers, blacklist,
 /// sync-info, operator-votes). These lists are node-bounded (well under a few
 /// hundred entries), so an offset alias is stable enough; opaque to clients so a
-/// keyset seek can replace it without a wire break (§1.5).
+/// keyset seek can replace it without a wire break.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct OffsetCursor {
     off: u32,
 }
 
-/// Build a `{items, page}` collection envelope (§1.3) from a fully-materialized
+/// Build a `{items, page}` collection envelope from a fully-materialized
 /// bounded list via offset pagination + overfetch-by-one. Used by every
 /// operator list endpoint (all are node-bounded snapshot reads).
 pub(super) fn offset_collection<T: Serialize>(

@@ -1,19 +1,19 @@
-//! `/api/v1/*` product-API shared primitives (design Appendix A, item **G2**).
+//! `/api/v1/*` product-API shared primitives.
 //!
-//! Four pieces of infrastructure every future v1 endpoint depends on, built
-//! ONCE here (`dev-docs/v1-api-design.md` §1–§2):
+//! Four pieces of infrastructure every v1 endpoint depends on, built ONCE
+//! here:
 //!
 //! * [`error`] — the nested error envelope `{error:{reason,message,detail}}`
-//!   and the canonical [`error::Reason`] enum with its status mapping (§1.3–§1.4).
-//! * [`cursor`] — the one opaque, versioned cursor codec + `page` builder (§1.5).
+//!   and the canonical [`error::Reason`] enum with its status mapping.
+//! * [`cursor`] — the one opaque, versioned cursor codec + `page` builder.
 //! * [`governor`] — the per-IP token-bucket rate/cost governor with per-route-class
-//!   weights, loopback-exempt (§2.2).
+//!   weights, loopback-exempt.
 //! * [`auth`] — the T0/T1/T2 tier split reusing the existing [`crate::auth`]
-//!   api-key verification, plus the boot-warn posture check (§2.1).
+//!   api-key verification, plus the boot-warn posture check.
 //!
-//! **Nothing here is mounted on a route.** This module is pure infrastructure;
-//! the first route-group PR consumes it. Re-exports below are the stable
-//! surface those groups import.
+//! This module is pure infrastructure; every v1 route group ([`routes`],
+//! [`accounts`], [`operator`], [`script`], [`webhooks`]) consumes it.
+//! Re-exports below are the stable surface those groups import.
 
 pub mod accounts;
 pub mod auth;

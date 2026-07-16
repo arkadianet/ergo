@@ -1,4 +1,4 @@
-//! Scala-compat block submission handler (§12 sendMinedBlock).
+//! Scala-compat block submission handler (sendMinedBlock).
 //!
 //! Mounts at `POST /blocks` — the Scala equivalent of `BlocksApiRoute`'s
 //! `sendMinedBlock` endpoint. Accepts a full block as a JSON body in

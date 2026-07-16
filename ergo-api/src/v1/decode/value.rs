@@ -1,13 +1,14 @@
 //! The typed value renderer — [`decode_value`] maps a parsed [`SigmaValue`]
-//! (+ its [`SigmaType`]) into a self-describing `{ "type", "value" }` JSON node
-//! (`v1-api-design.md` §4.3; semantic-decode fragment §3). It is the generic
-//! layer under both "decode any register" and every family decoder, so it lives
-//! here and is re-exported for the script-playground / tx-intelligence groups to
-//! reuse (fragment §8 coordination flag #2).
+//! (+ its [`SigmaType`]) into a self-describing `{ "type", "value" }` JSON node.
+//! It is the generic layer under both "decode any register" and every family
+//! decoder, so it lives here and is re-exported for the script-playground /
+//! tx-intelligence groups to reuse.
 //!
-//! The 2^53 discipline (§1.1) is obeyed: `Long`/`BigInt` render as strings,
-//! `Byte`/`Short`/`Int` as JSON numbers, `Coll[Byte]` as hex. No consensus
-//! evaluation happens here — this is pure deserialization + projection.
+//! The JSON-safe-integer discipline is obeyed: `Long`/`BigInt` render as
+//! strings (they can exceed `2^53`, the largest integer a JSON number
+//! round-trips exactly through a JS/JSON parser), `Byte`/`Short`/`Int` as
+//! JSON numbers, `Coll[Byte]` as hex. No consensus evaluation happens here —
+//! this is pure deserialization + projection.
 
 use ergo_ser::sigma_type::SigmaType;
 use ergo_ser::sigma_value::{AvlTreeData, CollValue, SigmaBoolean, SigmaValue};
@@ -103,7 +104,7 @@ fn sigma_value_json(v: &SigmaValue) -> Value {
         SigmaValue::Byte(n) => json!(*n),
         SigmaValue::Short(n) => json!(*n),
         SigmaValue::Int(n) => json!(*n),
-        // 64-bit + arbitrary precision must be strings (§1.1).
+        // 64-bit + arbitrary precision must be strings.
         SigmaValue::Long(n) => Value::String(n.to_string()),
         SigmaValue::BigInt(n) => Value::String(n.to_string()),
         SigmaValue::Str(s) => Value::String(s.clone()),
