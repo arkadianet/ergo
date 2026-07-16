@@ -107,6 +107,9 @@ pub(super) struct MiningTipSnapshot {
     best_full_height: u32,
     best_header_id: [u8; 32],
     best_header_height: u32,
+    /// Devnet-only: allow a bare genesis tip (height 0) to count as synced, so a
+    /// private devnet can be mined from genesis. Constant per node.
+    allow_genesis: bool,
 }
 
 impl MiningTipSnapshot {
@@ -118,15 +121,18 @@ impl MiningTipSnapshot {
             best_full_height: cs.best_full_block_height,
             best_header_id: cs.best_header_id,
             best_header_height: cs.best_header_height,
+            allow_genesis: state.magic == ergo_chain_spec::NetworkParams::DEVNET.magic,
         }
     }
 
-    /// The full live mining-gate predicate (identical to the serve-time gate
-    /// and `CommittedSnapshot::synced`): a full block exists and the header
-    /// tip equals it. Never true at the zeroed genesis state.
+    /// The full live mining-gate predicate (identical to the serve-time gate and
+    /// `CommittedSnapshot::synced`): a full block exists and the header tip
+    /// equals it. Normally never true at the zeroed genesis state — except on a
+    /// devnet (`allow_genesis`), where genesis-as-consistent-tip counts as synced
+    /// so the private chain is mineable from genesis.
     pub(super) fn synced(&self) -> bool {
         self.best_header_height == self.best_full_height
-            && self.best_full_height > 0
+            && (self.best_full_height > 0 || self.allow_genesis)
             && self.best_header_id == self.best_full_id
     }
 
@@ -151,6 +157,7 @@ impl MiningTipSnapshot {
             best_full_height,
             best_header_id,
             best_header_height,
+            allow_genesis: false,
         }
     }
 }
@@ -212,6 +219,7 @@ pub(super) fn signal_mining_engine(
         mempool: Arc::new(mempool),
         miner_pk,
         reason,
+        allow_genesis: now.allow_genesis,
     };
     // `watch::send` replaces the prior value (latest-wins); Err only if the
     // engine task receiver is gone (benign during shutdown).

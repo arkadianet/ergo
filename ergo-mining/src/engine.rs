@@ -95,6 +95,10 @@ pub struct BuildIntent {
     /// signal while the wallet key is `Pending`).
     pub miner_pk: [u8; 33],
     pub reason: BuildReason,
+    /// Devnet-only: permit building on a bare genesis tip (height 0). The engine
+    /// normally refuses an unsynced tip; a private devnet is meant to be mined
+    /// from genesis. Set from the devnet P2P magic on the loop.
+    pub allow_genesis: bool,
 }
 
 /// Identity + versioning stamped onto every published template. The serve path
@@ -261,8 +265,13 @@ pub fn build_and_publish(
     }
 
     // Synced gate (full live predicate), evaluated within this committed
-    // view: never build while the header tip leads the full tip.
-    if !snapshot.synced() {
+    // view: never build while the header tip leads the full tip. Devnet
+    // exception: allow a bare genesis tip (height 0) when it is a consistent
+    // tip (header == full), so a private devnet is mineable from genesis.
+    let genesis_ok = intent.allow_genesis
+        && snapshot.best_header_height() == snapshot.best_full_block_height()
+        && snapshot.best_header_id() == snapshot.best_full_block_id();
+    if !snapshot.synced() && !genesis_ok {
         return Ok(BuildOutcome::NotSynced);
     }
 
@@ -415,6 +424,7 @@ mod tests {
             mempool: Arc::new(MempoolReadSnapshot::empty()),
             miner_pk: [0x02u8; 33],
             reason: BuildReason::Startup,
+            allow_genesis: false,
         }
     }
 
