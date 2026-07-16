@@ -45,7 +45,7 @@ mod tests {
         // Mainnet P2PK addresses base58-encode to a string starting with '9'.
         // Any HD pubkey we derive from a known mnemonic must produce
         // an address with this prefix.
-        // Full module paths — re-exports land in Task 38, not earlier.
+        // Full module paths: these types are not yet re-exported from the crate root.
         use crate::derivation::DerivationPath;
         use crate::extended_key::ExtendedSecretKey;
         use crate::mnemonic::Mnemonic;

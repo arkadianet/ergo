@@ -29,9 +29,8 @@ mod tests {
     use super::*;
     use crate::derivation::DerivationPath;
     use crate::mnemonic::Mnemonic;
-    // Use full module paths instead of root re-exports (Task 38);
-    // this lets the test compile in TDD order regardless of when
-    // `pub use` lines land in lib.rs.
+    // Use full module paths instead of root re-exports: these types
+    // are not yet re-exported from the crate root.
 
     #[test]
     fn dlog_secret_yields_compressed_pubkey() {

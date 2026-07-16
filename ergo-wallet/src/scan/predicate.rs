@@ -1,11 +1,11 @@
-//! Scan tracking-rule predicates (`/scan/*` subsystem, PR 1 of N).
+//! Scan tracking-rule predicates (`/scan/*` subsystem).
 //!
 //! Mirrors Scala `org.ergoplatform.nodeView.wallet.scanning.ScanningPredicate`
 //! and its JSON codec: a tracking rule is a predicate tree over a box, and the
-//! wallet's apply-hook (a later slice) runs every registered scan's rule over
-//! each output box to decide what to track. This module is just the language +
-//! the box matcher; the registry, persistence, apply-hook, and the eight HTTP
-//! endpoints land in following PRs.
+//! wallet's apply-hook runs every registered scan's rule over each output box
+//! to decide what to track. This module covers the predicate language and the
+//! box matcher; the registry lives in [`super::registry`]. The apply-hook and
+//! the eight HTTP endpoints are not yet implemented.
 //!
 //! Verification note: the `/scan` family is auth-gated, so — unlike the other
 //! Scala-compat surfaces — this is grounded against the Scala node source + the
@@ -24,10 +24,10 @@
 //!
 //! `register` is optional and defaults to **R1** (the box's propositionBytes),
 //! matching Scala's `register.getOrElse(ErgoBox.R1)`. The `value` field is a
-//! serialized `EvaluatedValue` (a typed constant). PR 1 evaluates `register` R1 and the
-//! additional registers R4-R9 — the registers real scans address; R0/R2/R3
-//! (monetary value / tokens / creation info) parse and round-trip but never
-//! match yet, tracked as a follow-up.
+//! serialized `EvaluatedValue` (a typed constant). This module evaluates
+//! `register` R1 and the additional registers R4-R9 — the registers real
+//! scans address; R0/R2/R3 (monetary value / tokens / creation info) parse
+//! and round-trip but never match yet.
 
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::ergo_box::ErgoBox;
@@ -154,8 +154,8 @@ impl ScanningPredicate {
     /// scan is stored. Our wire decode only hex-decodes into bytes, so we apply
     /// the same constant check here. Returns the offending kind on failure.
     ///
-    /// (This is the registration-boundary rejection deferred from the predicate
-    /// PR; without it a malformed value would persist and silently never match.)
+    /// (This is the registration-boundary rejection; without it a malformed
+    /// value would persist and silently never match.)
     ///
     /// Note: [`parse_constant`] requires the whole `value` slice to be consumed,
     /// so a valid constant followed by trailing bytes is rejected here. Scala's
@@ -247,8 +247,8 @@ fn equals_filter(register: ScanRegister, value: &[u8], b: &ErgoBox) -> bool {
 ///
 /// `None` means the bytes are not a well-formed constant; the matcher treats
 /// that as "no match". Scala rejects a malformed `value` at its `/scan`
-/// registration codec — the equivalent reject-at-decode lands with this node's
-/// registration endpoint (a later slice), so a malformed rule never reaches the
+/// registration codec; once this node's registration endpoint applies the
+/// equivalent reject-at-decode check, a malformed rule never reaches the
 /// matcher in practice.
 fn parse_constant(bytes: &[u8]) -> Option<(SigmaType, SigmaValue)> {
     let mut r = VlqReader::new(bytes);
