@@ -68,8 +68,6 @@ pub(super) fn build_scaffold(
     };
     let api_identity =
         super::super::identity::build_api_identity(config, boot_sentinel, bootstrap_kind)?;
-    let identity_inputs = crate::node::identity::IdentityInputs::from_config(config);
-    let _ = &identity_inputs; // consumed by NodeState construction in the orchestrator
     let identity_slot: crate::api_bridge::IdentitySlot =
         Arc::new(arc_swap::ArcSwap::from_pointee(api_identity.clone()));
     let snapshot_publisher =
