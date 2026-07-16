@@ -956,7 +956,7 @@ pub(crate) async fn native_addresses(
                         .map_err(|e| WalletAdminError::Internal(format!("address encode: {e}")))?;
                     Ok(WalletAddressDto {
                         address,
-                        derivation_path: super::super::render_derivation_path(&m.derivation_path),
+                        derivation_path: super::render_derivation_path(&m.derivation_path),
                         // `index` is `u64` (matches `path_idx`) — no narrowing, so
                         // distinct addresses never alias past `u32::MAX`.
                         index: m.path_idx,
