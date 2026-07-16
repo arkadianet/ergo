@@ -235,11 +235,19 @@ impl DifficultyParams {
         }
     }
 
-    /// Devnet schedule: testnet's (difficulty-1 seed, no EIP-37) but a 20s
-    /// target block interval for a snappier local test chain.
+    /// Devnet schedule: testnet's (difficulty-1 seed, no EIP-37) with a 20s
+    /// target block interval, but NO difficulty retarget — `epoch_length` is
+    /// pushed far beyond any devnet height so the difficulty stays 1 forever.
+    /// A private devnet is mined from genesis and meant to be trivially
+    /// mineable throughout (see `VotingParams::devnet` for the matching
+    /// voting-epoch treatment); a retarget off a fast-mined early epoch would
+    /// spike the difficulty and stall the miner, and the first difficulty epoch
+    /// spans genesis, which the retarget path does not special-case. `1 << 25`
+    /// (~33.5M blocks) is effectively unreachable at a 20s target.
     pub fn devnet() -> Self {
         Self {
             desired_interval_ms: 20_000,
+            epoch_length: 1 << 25,
             ..Self::testnet()
         }
     }
@@ -303,6 +311,25 @@ impl VotingParams {
     pub const fn testnet() -> Self {
         Self {
             voting_length: 128,
+            soft_fork_epochs: 32,
+            activation_epochs: 32,
+            version2_activation: None,
+        }
+    }
+
+    /// Devnet: testnet's thresholds but a `voting_length` pushed far beyond any
+    /// devnet height, so NO voting-epoch boundary is ever reached. A private
+    /// devnet is mined from genesis; the first voting boundary would be a
+    /// genesis-era epoch (previous epoch starts at genesis), which the candidate
+    /// builder's `compute_epoch_payload` deliberately refuses (Scala's genesis
+    /// bypass is not reproduced — "a live node is always far past it"). The
+    /// devnet does no parameter voting, so an unreachable epoch is the right
+    /// treatment. `1 << 25` (~33.5M blocks) keeps the soft-fork threshold
+    /// (`voting_length * soft_fork_epochs * 9/10`) well within `i32`. Pairs with
+    /// [`DifficultyParams::devnet`]'s matching no-retarget epoch length.
+    pub const fn devnet() -> Self {
+        Self {
+            voting_length: 1 << 25,
             soft_fork_epochs: 32,
             activation_epochs: 32,
             version2_activation: None,
@@ -644,7 +671,7 @@ impl ChainSpec {
             network: Network::Devnet,
             network_params: NetworkParams::DEVNET,
             difficulty: DifficultyParams::devnet(),
-            voting: VotingParams::testnet(),
+            voting: VotingParams::devnet(),
             monetary: MonetaryParams::testnet(),
             reemission: None,
             genesis: GenesisParams::testnet(),
@@ -1207,6 +1234,46 @@ mod tests {
         assert_eq!(
             hex::encode(id),
             "ca5aa96a2d560f49cd5652eae4b9e16bbf410ee32365313dc16544ee5fda1e6d"
+        );
+    }
+
+    #[test]
+    fn devnet_has_no_epoch_boundaries_within_reach() {
+        // A from-genesis devnet must never hit a genesis-era voting- or
+        // difficulty-epoch boundary: the candidate builder refuses the former
+        // (Scala's genesis bypass isn't reproduced) and a retarget off a
+        // fast-mined early epoch would spike difficulty off difficulty-1. Both
+        // epoch lengths are pushed far beyond any devnet height, so only genesis
+        // (height 0) is a boundary. Testnet keeps its real 128-block epochs.
+        let spec = ChainSpec::devnet();
+        let voting_len = spec.voting.voting_length;
+        let diff_epoch = spec.difficulty.epoch_length;
+        assert!(
+            voting_len >= 1 << 20,
+            "voting epoch reachable: {voting_len}"
+        );
+        assert!(
+            diff_epoch >= 1 << 20,
+            "difficulty epoch reachable: {diff_epoch}"
+        );
+        assert_eq!(
+            ChainSpec::testnet().voting.voting_length,
+            128,
+            "testnet unchanged"
+        );
+        for h in 1..=200_000u32 {
+            assert!(!h.is_multiple_of(voting_len), "h={h} is a voting boundary");
+            assert!(
+                !h.is_multiple_of(diff_epoch),
+                "h={h} is a difficulty boundary"
+            );
+        }
+        // The larger voting_length must not overflow the i32 soft-fork threshold
+        // (`voting_length * soft_fork_epochs * 9 / 10`).
+        let threshold = (voting_len as u64) * (spec.voting.soft_fork_epochs as u64) * 9 / 10;
+        assert!(
+            threshold < i32::MAX as u64,
+            "soft-fork threshold overflows i32"
         );
     }
 }
