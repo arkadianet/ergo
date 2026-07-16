@@ -311,7 +311,7 @@ mod tests {
         assert!(AvlFrame::decode(&encoded).is_err());
     }
 
-    /// Generate the DoS-class trigger for bug #6 (valid-but-wrong AVL proof).
+    /// Generate the DoS-class trigger: a valid-but-wrong AVL proof.
     ///
     /// A LOOKUP proof for `key_a` is supplied to a verifier that then attempts
     /// a REMOVE of `key_a`.  On unguarded upstream: op-time panic.

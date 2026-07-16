@@ -1,10 +1,10 @@
-//! Classification, auto-filing, and the divergence record schema for
-//! Slice 3 of the fuzz-differential harness.
+//! Classification, auto-filing, and the divergence record schema for the
+//! fuzz-differential harness.
 //!
 //! ## Schema
-//! [`DivergenceRecord`] matches `interface-contracts.md §4` verbatim.
+//! [`DivergenceRecord`] is the on-disk record shared with the triage tooling.
 //!
-//! ## Classification rule (from `findings-and-triage.md`)
+//! ## Classification rule
 //! For a divergence on a **parse** surface (`ergo_tree`, `ergo_box_candidate`,
 //! `transaction`, `header`): re-run `diff` on the **`reduce`** surface for the
 //! same bytes.  If `reduce` **agrees** (no divergence), the parse-surface

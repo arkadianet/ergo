@@ -531,8 +531,8 @@ struct BlockSections {
 /// buggy decode prepended for a magnitude whose top byte is >= 0x80 (mainnet
 /// height 3 is the first such block). We strip it with precise byte-surgery on
 /// the header's trailing `[d_len][d]` fields, leaving every other byte
-/// byte-identical to Scala. Full writeup + fix recipe: gitignored dev-docs
-/// Autolykos note; the production fix is a deferred, tightly-scoped PR.
+/// byte-identical to Scala. The production fix (correcting the decode itself)
+/// remains deferred; this is a replay-only workaround.
 fn correct_v1_pow_d(header_bytes: &[u8]) -> Result<Vec<u8>, String> {
     let hdr = parse_header(header_bytes)?;
     if let AutolykosSolution::V1 { d, .. } = &hdr.solution {
@@ -892,9 +892,8 @@ fn hex32(s: &str) -> Result<[u8; 32], String> {
 /// 0x00, producing a wrong header id — which then fails the BlockTransactions
 /// section-id match. `d` is the header's trailing PoW field (unused here: PoW is
 /// trusted, meta_pow_validity = 1), so the correct id + the intact stateRoot /
-/// height / parentId prefix are all we need for state-root replay. Full
-/// writeup + fix recipe live in the (gitignored) dev-docs Autolykos note; the
-/// production fix is deferred to a tightly-scoped PR.
+/// height / parentId prefix are all we need for state-root replay. The
+/// production fix (correcting the decode itself) remains deferred.
 fn checked_header_with_oracle_id(
     sections: &BlockSections,
     oracle_id_hex: &str,
