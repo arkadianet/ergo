@@ -1,54 +1,48 @@
 //! `POST /api/v1/batch` — bounded read-only multiplexer over the v1 read
-//! surface (`v1-api-design.md` §3.18, §4.7; fragment
-//! `dev-docs/v1-design-fragments/batch-graphql.md` §1). One round trip, many
-//! v1 reads: each sub-request is dispatched, in-process, to the SAME
-//! `routes::*` handlers every standalone v1 endpoint uses — never
-//! HTTP-to-itself (the fragment's own ground-truth warning: that would be a
-//! self-inflicted DoS amplifier). Batch answers `200` for any structurally
-//! valid, in-cap request even when individual items fail (partial-failure
-//! semantics) — only a malformed/empty/oversize request short-circuits
-//! before any item runs.
+//! surface. One round trip, many v1 reads: each sub-request is dispatched,
+//! in-process, to the SAME `routes::*` handlers every standalone v1 endpoint
+//! uses — never HTTP-to-itself (that would be a self-inflicted DoS
+//! amplifier). Batch answers `200` for any structurally valid, in-cap
+//! request even when individual items fail (partial-failure semantics) —
+//! only a malformed/empty/oversize request short-circuits before any item
+//! runs.
 //!
-//! **Closed allow-list, not a proxy.** The fragment's original sketch used a
-//! closed `kind` tag enum because, at the time it was written, almost none
-//! of the v1 REST surface existed yet. On this branch `chain/*`, `boxes/*`,
-//! `tokens/*`, `addresses/*`, `mempool/*`, `transactions/*` (reads),
-//! `stats/*`, `diagnostics`, `light/*`, and `protocols/*` are real mounted
-//! routes — so batch allow-lists concrete `(method, path template)` pairs
-//! and dispatches through a SECOND, restricted `Router<V1State>` wired to
-//! the exact same handler functions (never a re-implementation). This is the
-//! same dual-mount idiom already used in this crate for O1
-//! (`mempool/{submit,check}` aliasing `transactions::{submit,check}`) and O2
-//! (`light/membership-proof` aliasing the `chain/proofs` core) — a second
-//! mount of an existing handler, not a second implementation.
+//! **Closed allow-list, not a proxy.** Batch allow-lists concrete
+//! `(method, path template)` pairs — `chain/*`, `boxes/*`, `tokens/*`,
+//! `addresses/*`, `mempool/*`, `transactions/*` (reads), `stats/*`,
+//! `diagnostics`, `light/*`, and `protocols/*` — and dispatches through a
+//! SECOND, restricted `Router<V1State>` wired to the exact same handler
+//! functions (never a re-implementation). This is the same dual-mount idiom
+//! already used in this crate for `mempool/{submit,check}` aliasing
+//! `transactions::{submit,check}`, and `light/membership-proof` aliasing the
+//! `chain/proofs` core — a second mount of an existing handler, not a second
+//! implementation.
 //!
 //! A `(method, path)` not on [`allowed_routes`]'s table is REJECTED before
 //! any dispatch — `forbidden_target`, never proxied, never a bare 404. The
 //! submit-domain routes (`transactions/{submit,check}` — `check` also
-//! mutates mempool bookkeeping per §4.2, not a pure read), the keyless
-//! builder (`transactions/build`), the compute-class `transactions/simulate`,
-//! and the whole `script/*` playground are deliberately absent from the
-//! table: batch is read-only by hard invariant (§4.7), not by convention.
+//! mutates mempool bookkeeping, not a pure read), the keyless builder
+//! (`transactions/build`), the compute-class `transactions/simulate`, and
+//! the whole `script/*` playground are deliberately absent from the table:
+//! batch is read-only by hard invariant, not by convention.
 //!
 //! **Cost.** Every allowed entry inherits the SAME [`RouteClass`] (cheap /
-//! heavy) the standalone route's own governor layer already charges
-//! (`v1-api-design.md` §2.2) — batch does not invent a second weight
-//! vocabulary (the fragment's per-`kind` weight sketch is superseded by
-//! reusing the one that shipped). The whole batch call is charged ONCE, up
-//! front, for the SUM of its dispatchable members' weights against the SAME
-//! per-IP [`Governor`] bucket every other T0 surface draws from; a rejected
-//! (not-allow-listed) item costs nothing, since it never reaches a handler.
+//! heavy) the standalone route's own governor layer already charges — batch
+//! does not invent a second weight vocabulary, it reuses the one that
+//! shipped. The whole batch call is charged ONCE, up front, for the SUM of
+//! its dispatchable members' weights against the SAME per-IP [`Governor`]
+//! bucket every other T0 surface draws from; a rejected (not-allow-listed)
+//! item costs nothing, since it never reaches a handler.
 //! The restricted dispatch router itself carries no per-route governor
 //! layer — that would double-charge every dispatched item.
 //!
 //! **Mixed tiers (deferred, not forgotten).** Every entry on today's table is
 //! T0 — no v1 T1 read group (wallet/mining/scan) has landed on this stacked
-//! branch yet. The fragment's per-item-auth design (§1.4: batch itself stays
-//! ungated, a T1/T2 `kind` is checked per item) has an obvious extension
-//! point here (an `AllowedRoute::tier` field + the shared
-//! `crate::v1::auth` check before dispatch) but is not built until a T1 v1
-//! route actually exists to gate — building it now would be untested,
-//! unreachable machinery.
+//! branch yet. A per-item-auth design (batch itself stays ungated, a T1/T2
+//! `kind` is checked per item) has an obvious extension point here (an
+//! `AllowedRoute::tier` field + the shared `crate::v1::auth` check before
+//! dispatch) but is not built until a T1 v1 route actually exists to gate —
+//! building it now would be untested, unreachable machinery.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -74,15 +68,15 @@ use crate::v1::client_ip;
 use crate::v1::error::{v1_error, Reason, V1Error};
 use crate::v1::governor::{Governor, RouteClass};
 
-/// Hard cap on sub-requests per batch call (`v1-api-design.md` §2.2/§4.7).
-/// ASSUMED policy constant (matches the design's "e.g. 32/64" sketch) —
-/// not yet an operator-config knob, same as every other T0 bound at launch.
+/// Hard cap on sub-requests per batch call.
+/// ASSUMED policy constant — not yet an operator-config knob, same as every
+/// other T0 bound at launch.
 pub const MAX_BATCH_ITEMS: usize = 32;
 
 /// Hard cap on the SUMMED [`RouteClass`] weight of one batch call's
-/// dispatchable members (the fragment's `MAX_BATCH_COST`), independent of
-/// the governor's own per-IP burst — a structural request-shape bound, not
-/// a rate limit. A rejected (not allow-listed) item contributes zero.
+/// dispatchable members, independent of the governor's own per-IP burst —
+/// a structural request-shape bound, not a rate limit. A rejected (not
+/// allow-listed) item contributes zero.
 pub const MAX_BATCH_WEIGHT: f64 = 200.0;
 
 /// Byte cap applied when buffering EITHER the inbound batch request body or a
@@ -136,7 +130,7 @@ impl BatchItemResult {
     /// Build an item-slot error from the canonical [`Reason`] triple — the
     /// exact `{reason, message, detail}` shape a standalone endpoint's
     /// [`v1_error`] would have rendered, just nested under `error` inside
-    /// the item instead of at the top level (§4.7's per-item error rule).
+    /// the item instead of at the top level.
     fn error(
         id: String,
         reason: Reason,
@@ -780,7 +774,7 @@ fn parse_method(raw: &str) -> Option<Method> {
 /// Dispatch one already-classified item through the restricted router and
 /// translate its response into a [`BatchItemResult`]. `data` is exactly the
 /// standalone endpoint's own JSON body — no re-serialization, no parallel
-/// vocabulary (§4.7).
+/// vocabulary.
 async fn dispatch_one(dispatch: &Router, id: String, item: BatchItemRequest) -> BatchItemResult {
     // Classification (the caller) already proved `item.method` parses.
     let method = parse_method(&item.method).expect("classified items have a valid method");
@@ -974,7 +968,7 @@ pub(crate) async fn batch_handler(State(state): State<BatchState>, req: Request<
     Json(BatchResponse { items }).into_response()
 }
 
-/// Mount `/api/v1/batch` (`v1-api-design.md` §3.18/§4.7). `governor` is the
+/// Mount `/api/v1/batch`. `governor` is the
 /// SAME shared per-node [`Governor`] every other T0 group draws its budget
 /// from — batch is one more class of spender on the one bucket, not a
 /// second rate limiter.

@@ -14,11 +14,11 @@
 //! field-for-field. The Scala source remains the consensus oracle
 //! whenever this Rust port and the Scala node disagree.
 //!
-//! No I/O, no state. Callers feed parsed [`ergo_ser::header::Header`]
-//! values and interlinks read out of an [`ergo_ser::extension::Extension`].
-//! Stateful pieces (proof verifier, quorum reducer, sync orchestration)
-//! live in sibling modules added in subsequent NiPoPoW Part 2
-//! sub-phases (14.3 / 14.4 / 14.6).
+//! [`algos`] itself does no I/O and holds no state. Callers feed parsed
+//! [`ergo_ser::header::Header`] values and interlinks read out of an
+//! [`ergo_ser::extension::Extension`]. Stateful pieces (proof verifier,
+//! quorum reducer, sync orchestration) live in the sibling [`proof`] and
+//! [`verifier`] modules.
 
 pub mod algos;
 pub mod merkle;

@@ -69,8 +69,8 @@ impl NipopowVerifier {
     /// `None` for an open verifier that accepts any first-header).
     ///
     /// **Mainnet must always pass `Some(_)`** — passing `None` makes
-    /// the verifier accept proofs for any chain, which is the R5
-    /// security gap the verifier's §11 genesis pin closes.
+    /// the verifier accept proofs for any chain; pinning the genesis id
+    /// is what prevents that.
     pub fn new(genesis_id_opt: Option<[u8; 32]>, chain_config: DifficultyParams) -> Self {
         Self {
             genesis_id_opt,

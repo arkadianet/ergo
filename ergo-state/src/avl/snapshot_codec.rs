@@ -511,7 +511,7 @@ fn collect_chunk_roots(
 /// chunk wire format and MUST be preserved during reconstruction
 /// — labels alone do not commit it, so a tree with correct labels
 /// but wrong separator keys would pass root-equality but break
-/// AVL lookup semantics (codex risk flag in 2h plan).
+/// AVL lookup semantics.
 #[derive(Debug, Clone)]
 pub enum ReconstructedNode {
     Leaf {

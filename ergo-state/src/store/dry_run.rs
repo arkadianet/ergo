@@ -8,8 +8,8 @@
 //! resulting `(new_state_root, raw_proof_bytes)`. The caller of
 //! [`crate::StateStore::candidate_dry_run`] later frames the raw proof
 //! into a type-104 ADProofs section and hashes it via
-//! `ad_proofs_root = blake2b256(raw_proof_bytes)` (Phase 1c step c0
-//! resolved — see `ergo-state/tests/ad_proofs_root_oracle.rs`).
+//! `ad_proofs_root = blake2b256(raw_proof_bytes)` (oracle-verified —
+//! see `ergo-state/tests/ad_proofs_root_oracle.rs`).
 //!
 //! CONSENSUS — the lookup prefix is part of the canonical stream:
 //! Scala `StateChanges.operations = toLookup ++ toRemove ++ toAppend`,
@@ -20,7 +20,7 @@
 //! `state_root` with a non-canonical `ad_proofs_root`, and the
 //! reference rejects the mined block with "Regenerated proofHash is
 //! not equal to the declared one" (incident: mainnet block 344f5a2f…
-//! at height 1,805,523; see dev-docs/incident-2026-06-11-adproofs/).
+//! at height 1,805,523).
 //! The verifier-side replay (`digest_apply.rs`) has always consumed
 //! the lookup prefix; this module is the generator-side mirror.
 //!

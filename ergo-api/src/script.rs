@@ -2,8 +2,7 @@
 //! members of Scala `ScriptApiRoute` this node previously omitted (see
 //! `crate::utils` for the two decode-only siblings, `addressToTree` /
 //! `addressToBytes`, which needed no compiler). Wired now that
-//! `ergo_compiler::compile` exists (M6,
-//! dev-docs/ergoscript-compiler-m6-recon.md).
+//! `ergo_compiler::compile` exists.
 //!
 //! **Public, ungated** — Scala's `ScriptApiRoute` carries no `withAuth`
 //! (`ScriptApiRoute.scala:38-46`), unlike the admin/`/node/*` routes, even

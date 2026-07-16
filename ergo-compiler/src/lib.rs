@@ -2,9 +2,8 @@
 //!
 //! M1 scope: source text → untyped AST, faithful to the Scala reference parser
 //! (`sigmastate.lang.SigmaParser`, sigma-state 6.0.2): same accept/reject
-//! decisions, same AST shapes, same error positions. Design:
-//! `dev-docs/ergoscript-compiler-design.md`. Every grammar decision in this
-//! crate cites the mirrored Scala source as `file:line` under
+//! decisions, same AST shapes, same error positions. Every grammar decision in
+//! this crate cites the mirrored Scala source as `file:line` under
 //! `sigmastate-interpreter`.
 //!
 //! NOT a consensus surface: a compiler bug yields a wrong tree/address, never
@@ -66,8 +65,8 @@
 //!   tables. Exact except that 8 `Cn` version-skew BMP code points Rust marks
 //!   `is_alphabetic` but the JVM does not treat as letters — these are still
 //!   accepted as id-tail chars (unassigned, no real contract uses them). The 52
-//!   `So` circled letters (U+24B6–24E9) that were previously in this residual are
-//!   now correctly excluded by `ALPHA_NOT_LETTER` (round 11 fix). Numeric literals
+//!   `So` circled letters (U+24B6–24E9) are excluded by `ALPHA_NOT_LETTER`, matching
+//!   the JVM's `isLetter`. Numeric literals
 //!   use ASCII-only `is_ascii_digit` (exact).
 //!
 //! - **`is_printable_char` — supplementary scalars BMP-gated, SPECIALS excluded,
@@ -93,7 +92,7 @@
 //!   differs. The practical consequence is that `-2147483648` is rejected (as in
 //!   Scala: the positive magnitude overflows before the sign is applied).
 //!
-//! - **D5 — block-lambda head at a non-first chunk** (`parse.rs`): a `BlockLambda`
+//! - **D5 — block-lambda head at a non-first chunk** (`parse/block/lambda.rs`): a `BlockLambda`
 //!   head at any `Body` chunk start — a consecutive head (`{ (a,b)=>(c,d)=>e }`) or
 //!   a head in a later chunk after a newline gap / `;`-separated empty chunk
 //!   (`{ val x=1\n(x,y)=>x }`, `{ (x)=>; (a,b)=>c }`) — is a `scala.MatchError` crash
@@ -103,7 +102,7 @@
 //!   contract produces (corpus-verified). A head after a `;` that CONTINUES a
 //!   non-empty chunk is an expression lambda, not a head, and is unaffected.
 //!
-//! - **`|`-separated pattern with a `|`-prefixed op-id** (`parse.rs`): in an
+//! - **`|`-separated pattern with a `|`-prefixed op-id** (`parse/block/definitions.rs`): in an
 //!   extractor `TupleEx` element, a `Pattern` alternative separator is the literal
 //!   char `|`, but the lexer folds a `|`-led operator run (`|:`) into one `OpId`.
 //!   So `Some(x |: T)` reports the reject one column early (at the `|:` token, not
@@ -117,20 +116,20 @@
 //!   (matches the `u32` return type). Neither affects error positions for any
 //!   real contract.
 //!
-//! - **`take_one_semi` else-separator edge** (`parse.rs`): the input
+//! - **`take_one_semi` else-separator edge** (`parse/cursor.rs`, `parse/expr_atoms.rs`): the input
 //!   `if (c) t\n;else e` — Scala's `Semi.?` (Basic.scala:35, Literals.scala:50)
 //!   consumes the newline-run as the single Semi and the residual `;` blocks
 //!   `else` (reject). Our transparent-newline `take_one_semi` skips the newlines
 //!   and consumes the `;` directly (accept). Accept-divergence on a pathological
 //!   newline+semicolon separator mix that no real contract produces.
 //!
-//! - **Nested empty-block reject position** (`parse.rs`): both sides REJECT a bare
+//! - **Nested empty-block reject position** (`parse/block/mod.rs`): both sides REJECT a bare
 //!   empty block, but on the doubly-nested `{{}}` the reference's furthest-failure
 //!   reports `1:5` (past the outer `}`) while our recursive descent fails at the
 //!   inner empty block (`1:4`, one past the inner `}`). Position-only, reject-parity
 //!   holds; bounded to nested bare empty blocks no real contract produces.
 //!
-//! - **Stray-brace block absurdity rejected** (`parse.rs`): SigmaParser ACCEPTS the
+//! - **Stray-brace block absurdity rejected** (`parse/block/mod.rs`): SigmaParser ACCEPTS the
 //!   malformed inputs `{ } a }` (block with result `a`) and `{}/}` (block with
 //!   result `/`) — a genuine reference-parser misbehavior where a stray closing `}`
 //!   after an empty-looking `{}` still yields a valid block. M1 rejects both at the
@@ -175,7 +174,7 @@
 //! # M2: Binder + Typer
 //!
 //! The M2 pipeline:
-//! - **parse** (`parse.rs`, `token.rs`) → untyped `Expr` AST (same oracle bar as M1)
+//! - **parse** (`parse/`, `token.rs`) → untyped `Expr` AST (same oracle bar as M1)
 //! - **bind** (`binder.rs`) → converts `Expr` → `TypedExpr` with `NoType` placeholders,
 //!   substitutes env constants, desugars predefined functions (Rules 1–11 from
 //!   `SigmaBinder.scala`), runs a single bottom-up pass (fixpoint-equivalent for
@@ -192,8 +191,8 @@
 //! - **Typer oracle** (`scripts/jvm_typer_oracle/TyperOracle.scala`) — typed s-expression
 //!   from `SigmaCompiler.typecheck` with `lowerMethodCalls=true`,
 //!   `TransformingSigmaBuilder`
-//! - **tc1.sh** — fresh-JVM mode for position grading (avoids singleton contamination;
-//!   see R1 in `dev-docs/m2-recon/m2-oracle.md`)
+//! - **tc1.sh** — fresh-JVM mode for position grading (avoids singleton
+//!   contamination that a shared-JVM batch run introduces in position data)
 //! - **Golden seed** (`test-vectors/ergoscript/typer/golden_seed.txt`) — every committed
 //!   record is swept in full by `typer_oracle_parity` (the seed file is the record count
 //!   of record; a hardcoded number here rots as sections are added)
@@ -216,36 +215,22 @@
 //!   original `(line, col)` is preserved in a comment in
 //!   `tests/sigma_typer_spec.rs` for a future position pass.
 //!
-//! ## M3 handoff notes
+//! `SWEEP_SKIP` in `tests/typer_oracle_parity.rs` stays empty; it is the
+//! mechanism for any future rendering-only deviation (reject-side divergences
+//! live in the separate `VERDICT_DEVIATION_SOURCES` list). `predef_ir_builder`
+//! returns `None` for `deserialize` unconditionally, since Scala
+//! constant-folds `deserialize(lit)` at typecheck time and closing this gap
+//! requires an opcode-IR→`TypedExpr` reverse mapping (see D-T2 below).
 //!
-//! - **SWEEP_SKIP rendering worklist — DONE (M3).** The D-T4/D-T6 fix emptied
-//!   `SWEEP_SKIP` in `tests/typer_oracle_parity.rs`; it remains as the mechanism
-//!   for any future rendering-only deviation (reject-side divergences live in
-//!   the separate `VERDICT_DEVIATION_SOURCES` list).
-//! - **fromBase58/fromBase64 canonical decode — DONE (M3 Task-5, D-T2).** Valid
-//!   literals now fold to `ByteArrayConstant`; see the consolidated ledger entry
-//!   below for the engine-config rationale.
-//! - **`deserialize` deferred, re-scoped (D-T2):** `predef_ir_builder` returns
-//!   `None` for `deserialize` unconditionally. Scala constant-folds
-//!   `deserialize(lit)` at typecheck time; closing this requires an
-//!   opcode-IR→`TypedExpr` reverse mapping — scheduled at M4 alongside the
-//!   lowering catalog, which needs the same mapping (M3 close-out decision;
-//!   the adversarial pass surfaced no real-contract need).
-//! - **unsignedBigInt canonical constant + bigInt canonicalization — DONE
-//!   (M3 Task-6, D-T3).** `ConstPayload::UnsignedBigInt(String)` added;
-//!   `bigInt`/`unsignedBigInt` canonicalize leading zeros and enforce the
-//!   Scala range caps (255 bits, `tree_version >= 3`-gated, for `BigInt`;
-//!   256 bits, unconditional, for `UnsignedBigInt`). See the consolidated
-//!   ledger entry below.
-//! - **Network-per-contract (M3 byte vectors):** The JVM oracle defaults to
-//!   `ORACLE_NETWORK=testnet`. When adding golden-seed records for `PK(...)`, run the
-//!   oracle with the matching network env var and record the network in the seed comment.
-//!   M3 byte-vector work must account for the network prefix embedded in P2PK addresses.
+//! **Network-per-contract:** The JVM oracle defaults to `ORACLE_NETWORK=testnet`.
+//! When adding golden-seed records for `PK(...)`, run the oracle with the
+//! matching network env var and record the network in the seed comment — the
+//! network prefix is embedded in P2PK addresses.
 //!
 //! # M3: Emit + semantic parity — COMPLETE
 //!
 //! The full pipeline is live: **parse → bind → typecheck → emit** (`emit.rs`,
-//! typed AST → `ergo_ser` opcode IR) → **assemble** (`tree.rs`, v0 `0x00`
+//! typed AST → `ergo_ser` opcode IR) → **assemble** (`tree/`, v0 `0x00`
 //! header, no segregation — D-C1) → **bytes → P2S/P2SH address**. Entry
 //! point: [`compile`] → [`CompileResult`].
 //!
@@ -257,15 +242,13 @@
 //!   targets for M4/M5); REJECT vectors carry the verdict + class.
 //! - **Gate** (`tests/compile_semantic_parity.rs`): every swept ACCEPT pair
 //!   reduces to the SAME SigmaBoolean under the dummy context
-//!   (`SEMANTIC_SKIP` is EMPTY as of M4 Task 6 — the D-C3 coercion
-//!   cancellation closed the last five); rejects grade the oracle's
-//!   exception class
-//!   exactly; the address gate pins P2SH per-vector against a committed
-//!   failing-vector SET (`DC7_P2SH_MISMATCH_SET`, M4 Task 1 —
-//!   recon-gap.md Finding 5 upgraded this from a count assert; shrinks as
-//!   M4/M5 lowerings land, graduating vectors out explicitly) and
-//!   hard-asserts byte-equal-prop ⇒ P2SH-equal. The `PK(...)` bare-constant
-//!   class is byte- and address-EXACT.
+//!   (`SEMANTIC_SKIP` is EMPTY — the D-C3 coercion cancellation closed the
+//!   last five); rejects grade the oracle's exception class exactly; the
+//!   address gate pins P2SH per-vector against a committed failing-vector SET
+//!   (`DC7_P2SH_MISMATCH_SET`) rather than a bare count, so a lowering that
+//!   fixes one vector while silently breaking another cannot hide behind an
+//!   unchanged total, and hard-asserts byte-equal-prop ⇒ P2SH-equal. The
+//!   `PK(...)` bare-constant class is byte- and address-EXACT.
 //! - **Deviation families:** `D-E1..D-E3` (emit layer) and `D-C1..D-C7`
 //!   (tree/compile layer), ledgered below. D-C7 (no IR optimization pass)
 //!   IS the M4/M5 byte-parity worklist — see the roadmap's "M4 worklist"
@@ -291,7 +274,7 @@
 //! matches, error class differs. Bounded to out-of-range literal ids which no
 //! real contract uses.
 //!
-//! ### D-T2 — fromBase58/fromBase64 canonical decode — CLOSED (M3 Task-5); deserialize CLOSED (M4 Task 8)
+//! ### D-T2 — fromBase58/fromBase64 canonical decode — CLOSED; deserialize CLOSED
 //!
 //! **`fromBase58` / `fromBase64` — CLOSED.** Both character-class AND structural
 //! padding validation are implemented in `predef_ir_builder` and match Scala's
@@ -314,7 +297,7 @@
 //! byte-exact ACCEPT records for `fromBase58("")`, `fromBase64("")`,
 //! `fromBase64("YWJj")`, `fromBase64("ab")`.
 //!
-//! **`deserialize[T](s)` — CLOSED (M4 Task 8, gap F6).** `predef_ir.rs`
+//! **`deserialize[T](s)` — CLOSED.** `predef_ir.rs`
 //! implements the opcode-IR→`TypedExpr` reverse mapping `ValueSerializer`
 //! needs (it decodes to sigma-state's own general `Value` AST, not just
 //! constants — `deserialize[Int]("3p")` embeds a bare, non-constant `Height`
@@ -337,7 +320,7 @@
 //! the fully general case would mean porting a second full symmetric
 //! opcode-IR↔TypedExpr mapping for a predef nothing exercises.
 //!
-//! ### D-T3 — unsignedBigInt canonical constant + bigInt literal canonicalization — CLOSED (M3 Task-6)
+//! ### D-T3 — unsignedBigInt canonical constant + bigInt literal canonicalization — CLOSED
 //!
 //! `unsignedBigInt(s)` for a valid non-negative decimal now builds the dedicated
 //! `ConstPayload::UnsignedBigInt(String)` constant (`predef_ir.rs`
@@ -385,8 +368,7 @@
 //! wrapper — golden_seed §10/§23). All former `SWEEP_SKIP` records byte-match
 //! and are swept normally.
 //!
-//! **Correction (adversarial-review finding, fixed 2026-07-05):** `x`/`y` in
-//! that rendered form are the coordinate's UNPADDED `BigInteger.toString(16)`
+//! `x`/`y` in that rendered form are the coordinate's UNPADDED `BigInteger.toString(16)`
 //! (same root as D-T12's `showPoint`, per the `TyperOracle.scala` `renderField`
 //! trace at golden_seed.txt §23(f)), NOT the fixed-width 64-char hex
 //! `decompress_to_affine_hex` returns. `typed_print.rs`'s GroupElement/
@@ -409,7 +391,7 @@
 //!
 //! `ConstPayload::GroupElement` now stores the 33-byte SEC1-compressed key
 //! (bytes-of-record, matching `ProveDlog`); the printer decompresses on
-//! demand. Emit (M3 Task 7+) consumes the bytes directly.
+//! demand. The emitter consumes the bytes directly.
 //!
 //! ### D-T7 — Typer error positions always 0 (E12)
 //!
@@ -422,7 +404,7 @@
 //! `SigmaTyperTest.scala` are ported as class+verdict-only in
 //! `tests/sigma_typer_spec.rs`, with the original `(line, col)` preserved in
 //! comments for a future M3 position pass.
-//! Source: `typer/assign.rs` module doc; `typecheck.rs` `CompileError` doc.
+//! Source: `typer/assign/mod.rs` module doc; `typecheck.rs` `CompileError` doc.
 //!
 //! ### D-T8 — BindError class-tag for irBuilder arg-shape mismatch
 //!
@@ -459,7 +441,7 @@
 //! `SHeader` V6 additions) are unconstructable in pre-V6 trees, so the typer never
 //! reaches a method-lookup for them at `tree_version < 3`.
 //!
-//! A RELATED version-dependence is NOT inert and is handled explicitly (M2 wave B):
+//! A RELATED version-dependence is NOT inert and is handled explicitly:
 //! the numeric `toBytes`/`toBits` methods live on the shared `SNumericTypeMethods`
 //! container (`objType.typeName = "SNumericType"`) at V5 and gain a per-type container
 //! (`Int`/`Long`/…) only at V6.  Since numeric types ARE constructable pre-V6, the
@@ -481,32 +463,31 @@
 //! `assign_type` arm — it appears only as a pre-typed passthrough node, and
 //! neither the binder nor the oracle exercises a default value whose type differs
 //! by type-argument but shares a typeCode.
-//! Source: `typer/assign.rs:855-858`.
+//! Source: `typer/assign/method_call_like.rs`, the `ByIndex` arm.
 //!
 //! ### D-T12 — String-constant `+` GroupElement/ProveDlog-constant fold (CLOSED for those two payloads; residual below)
 //!
-//! `mcl_string` (`typer/assign.rs`) folds `StringConstant + <any Constant>` via the
+//! `mcl_string` (`typer/assign/method_call_like.rs`) folds `StringConstant + <any Constant>` via the
 //! JVM `.toString`, matching Scala's `mkStringConcat` (the `@unchecked` `Constant`
 //! type args are erased at runtime).  Reproducible payloads fold byte-exactly
 //! (`Int`→decimal, `Bool`→`true`/`false`, `Unit`→`()`, `BigInt`→`CBigInt(n)`, …).
 //!
-//! **CLOSED at M3 Task 4** for `GroupElement` and `ProveDlog`: Scala's `.toString`
+//! **CLOSED** for `GroupElement` and `ProveDlog`: Scala's `.toString`
 //! on an `ECPoint` (via `CryptoFacade.showPoint`, `Platform.scala:81-85`) truncates
 //! each affine coordinate's UNPADDED `BigInteger.toString(16)` hex to its first 6
 //! chars — `GroupElement(ECPoint(79be66,483ada,...))` for a bare `GroupElement`
 //! constant, `SigmaProp(ProveDlog(ECPoint(79be66,483ada,...)))` for a `ProveDlog`
 //! constant (e.g. from `PK("<addr>")`). Both ARE byte-derivable from our stored
-//! `[u8; 33]` via `ergo_crypto::group_element::decompress_to_affine_hex` (Task 3)
+//! `[u8; 33]` via `ergo_crypto::group_element::decompress_to_affine_hex`
 //! composed with `ergo_crypto::group_element::strip_leading_zero_hex` (the payload
 //! is on-curve-checked before reaching a `Constant` node — `env::lift` /
 //! `binder::bind_pk`, D-T5).
 //!
-//! **Correction (adversarial-review finding, fixed 2026-07-05):** the generator
-//! and non-generator (g3) probes originally cited here confirm only the
+//! The generator and non-generator (g3) probes confirm only that the
 //! truncate-to-6-chars SHAPE generalizes across distinct points — NEITHER has a
 //! leading-zero-nibble coordinate, so neither actually distinguishes padded
-//! 64-char hex (our prior, WRONG assumption — a straight `&decompress_to_affine_hex(..)[..6]`
-//! slice) from Java's unpadded `BigInteger.toString(16)` (the real semantics).
+//! 64-char hex (a straight `&decompress_to_affine_hex(..)[..6]` slice) from
+//! Java's unpadded `BigInteger.toString(16)` (the real semantics).
 //! A fourth probe — a `PK(...)` pubkey chosen specifically for a leading-zero
 //! y-coordinate (`0ab0902e...`) — pins this: the oracle folds `ab0902`
 //! (unpadded), NOT `0ab090` (padded-slice). Live-captured at golden_seed.txt
@@ -523,9 +504,9 @@
 //! or wired) still fold in Scala via a JVM-runtime `.toString` we cannot reproduce —
 //! rather than fold WRONG bytes we keep the REJECT (reject-valid; no golden-seed OK
 //! record exercises these, so they carry no `VERDICT_DEVIATION_SOURCES` entry).
-//! This resolves the adversarial reject-valid finding (`"ab" + 1` etc.) while pinning
-//! the remaining residual to payloads with no reproducible byte source.
-//! Source: `typer/assign.rs` `const_java_to_string` / `mcl_string`.
+//! This keeps `"ab" + 1`-style folds correct while pinning the remaining
+//! residual to payloads with no reproducible byte source.
+//! Source: `typer/assign/method_call_like.rs` `const_java_to_string` / `mcl_string`.
 //!
 //! # Known M3 deviations (emit layer)
 //!
@@ -539,7 +520,7 @@
 //! `EmitError::UnsupportedNode("CreateAvlTree")`; `avlTree(...)` scripts
 //! typecheck but do not compile to bytes. NOTE for the ergo-ser owners: this
 //! looks like a genuine ergo-ser↔Scala accept-set divergence (a Scala tree
-//! containing `CreateAvlTree` would mis-parse), flagged in the Task-7 report.
+//! containing `CreateAvlTree` would mis-parse).
 //!
 //! ### D-E2 — `ZKProofBlock` not emittable (matches Scala)
 //!
@@ -553,22 +534,21 @@
 //! `ConstPayload::SigmaProp(String)` is an env-injected opaque label (e.g. the
 //! SigmaTyperTest env's `p1`/`p2`) with no curve bytes to serialize; only
 //! reachable from a hand-built env. `emit` returns `UnsupportedNode`; real
-//! keys flow through `ConstPayload::ProveDlog([u8;33])`. Correction (Task-11
-//! wave 3; this entry previously claimed "no oracle vector exists"): the
-//! `ccs` verb mirrors the SigmaTyperTest env, whose JVM-side `p1`/`p2` are
+//! keys flow through `ConstPayload::ProveDlog([u8;33])`. The `ccs` verb
+//! mirrors the SigmaTyperTest env, whose JVM-side `p1`/`p2` are
 //! REAL `ProveDlog`s — `ccs sigmaProp(p1.propBytes.size > 0)` compile-ACCEPTs
-//! on the oracle while we reject (methodcalls report, excluded section). A
+//! on the oracle while we reject. A
 //! reject-side divergence bounded to the opaque-label env representation;
 //! not committable as an ACCEPT vector because our representation carries no
 //! curve bytes whose output could be compared.
 //!
 //! ### D-E4 — `EnvValue::ProveDlog` closes the D-E3 gap for a REAL wallet key (M6)
 //!
-//! D-E3 above documents that the only pre-M6 env constant in the
+//! D-E3 above documents that the only other env constant in the
 //! `SigmaProp`/`ProveDlog` family, `EnvValue::SigmaProp(String)`, is an opaque
 //! label with `emit` returning `UnsupportedNode` — real curve-bearing keys had
-//! no env entry point at all. M6 (dev-docs/ergoscript-compiler-m6-recon.md §3)
-//! adds `EnvValue::ProveDlog([u8; 33])`, whose `lift` arm on-curve-checks the
+//! no env entry point at all. `EnvValue::ProveDlog([u8; 33])` closes that gap:
+//! its `lift` arm on-curve-checks the
 //! bytes (same `decompress_to_affine_hex` policy as `GroupElement` above, D-T5:
 //! rejects off-curve AND identity) and produces `ConstPayload::ProveDlog` —
 //! the IDENTICAL shape the binder's `PK(...)` rule already produces
@@ -584,7 +564,7 @@
 //!
 //! # Known M3 deviations (tree/compile layer)
 //!
-//! ### D-C1 — constant segregation (CLOSED, M4 Task 2 — the D-C1 flip)
+//! ### D-C1 — constant segregation (CLOSED — the D-C1 flip)
 //!
 //! Scala's `ErgoTree.fromProposition` segregates every root that is not a bare
 //! `SigmaPropConstant` (header `0x10`, constants pulled into the table,
@@ -598,8 +578,8 @@
 //! bypassed for free (a compacted bool pair never reaches the `Expr::Const`
 //! arm the sink lives in — unit-pinned: `BinAnd(true,true)` → `ed8503`, sink
 //! empty). The oracle's `cc true && (1 == 1)` zero-entry table also
-//! depends on its `1 == 1 → true` CONSTANT FOLD — **landed M4 Task 5**
-//! (`crate::fold`, `Const == Const → true`), so that source now folds to the
+//! depends on its `1 == 1 → true` CONSTANT FOLD, landed in
+//! `crate::fold` (`Const == Const → true`), so that source now folds to the
 //! oracle-exact `1000d1ed8503` (`BinAnd(true, true)`, zero-entry table) and
 //! graduated out of the mismatch set. Oracle-exact for
 //! `cc sigmaProp(HEIGHT > 100)` → `100104c801d191a37300` (was our
@@ -612,22 +592,22 @@
 //! remains is the ORTHOGONAL IR-transform axis: wherever Scala's GraphBuilding
 //! reshapes the proposition itself (folds, val inlining, CSE, unwraps), BOTH
 //! the P2SH and the segregated tree bytes still diverge — that family is D-C7
-//! below. After Task 2, P2S matches iff P2SH matches (a segregated tree's bytes
+//! below. With segregation now applied consistently, P2S matches iff P2SH matches (a segregated tree's bytes
 //! are equal iff its inlined proposition is), so `P2S_DC1_MISMATCH_SET` has
 //! converged EXACTLY onto `DC7_P2SH_MISMATCH_SET` (43 vectors; 35 graduated).
 //!
-//! ### D-C2 — CLOSED (M4 Task 3): `CreateProveDlog(Const)` → `SigmaPropConstant` fold
+//! ### D-C2 — CLOSED: `CreateProveDlog(Const)` → `SigmaPropConstant` fold
 //!
 //! Scala's IR pipeline constant-folds `proveDlog(<GroupElement const>)` into a
 //! bare `SigmaPropConstant` at the GraphBuilding stage (oracle:
 //! `cce proveDlog(g1)` replies with the SAME tree/addresses as the equivalent
-//! `PK(...)`, task-1-report Concern 1; `TreeBuilding.scala:416-430`, also
+//! `PK(...)`; `TreeBuilding.scala:416-430`, also
 //! folding `proveDHTuple` when **all four** arguments are `Constant`s). `crate::
-//! lower` now runs this fold in the lowering block (`tree::compile`, locked
-//! decision 1: after every gate/fold, before segregation) — a folded
+//! lower` now runs this fold in the lowering block, after every other
+//! gate/fold and before segregation — a folded
 //! `proveDlog(const)` root joins the bare-constant `withoutSegregation` class
-//! byte-for-byte with the oracle (recon-targets.md vectors #14/#29;
-//! `tree.rs::compile_prove_dlog_generator_folds_to_bare_const_matching_pk_oracle`,
+//! byte-for-byte with the oracle
+//! (`tree::mod::compile_prove_dlog_generator_folds_to_bare_const_matching_pk_oracle`,
 //! `compile_provedlog_two_g_point_bytes_match_oracle_fold`). `proveDHTuple`
 //! with a REPEATED constant argument (`proveDHTuple(g1, g2, g1, g2)`) stays
 //! unfolded on the oracle side too — Scala's hash-consing shares the repeated
@@ -635,7 +615,7 @@
 //! so that check never fires there either; this residual is M5 CSE/ValDef
 //! sharing (D-C7 below), not a D-C2 gap.
 //!
-//! ### D-C3 — `SigmaPropIsProven` (0xCF) coercion cancellation + `HasSigmas` reconstruction — CLOSED (M4 Task 6 + M5 Task 5b)
+//! ### D-C3 — `SigmaPropIsProven` (0xCF) coercion cancellation + `HasSigmas` reconstruction — CLOSED
 //!
 //! Sources mixing `SigmaProp` and `Boolean` in a logical context — e.g.
 //! `sigmaProp(true) && (1 == 1)`, `(1 == 1) ^ sigmaProp(true)`,
@@ -648,7 +628,7 @@
 //! top-level `removeIsProven` at `:245-252` applied at `:418`), then
 //! constant-folds / sigma-reconstructs.
 //!
-//! **Fix (M4 Task 6):** [`crate::isproven::eliminate_isproven`] ports the two
+//! **Fix:** [`crate::isproven::eliminate_isproven`] ports the two
 //! fusion rules as an AST→AST pass run at BOTH Scala positions — before the
 //! generic fold ([`crate::fold`], the fixpoint fusion, so a fusion-exposed
 //! Boolean feeds `BinXor(true, true) → false`) and after the lowering block
@@ -661,14 +641,14 @@
 //! (`0008cd0279be…`, header `0x00`). They are removed from `SEMANTIC_SKIP`
 //! (now EMPTY) and semantic-gated again.
 //!
-//! **`HasSigmas` reconstruction (M5 Task 5b — CLOSES the D-C3 residual):** when
+//! **`HasSigmas` reconstruction (CLOSES the D-C3 residual):** when
 //! a SigmaProp operand does NOT reduce to a plain Boolean (it is a real sigma,
 //! not `sigmaProp(<const bool>)`), Scala does NOT leave a residual `0xCF` — it
 //! splits the mixed Bool/`isValid` logic into a `SigmaAnd`(0xEA)/`SigmaOr`(0xEB)
 //! over sigma operands, coercing every Boolean operand UP via `BoolToSigmaProp`
 //! (`GraphBuilding.scala:167-203`: the lazy `ApplyBinOpLazy(And/Or)` rules for
 //! `&&`/`||`, and the `AllOf`/`AnyOf` `HasSigmas` rules with the single-element
-//! `allZK`/`anyZK`/`allOf`/`anyOf` unwraps). M5 Task 4/5 landed CSE, which made
+//! `allZK`/`anyZK`/`allOf`/`anyOf` unwraps). M5's CSE pass made
 //! the schedule of the corpus mixed-logic vectors byte-exact and exposed this
 //! reconstruction as their SOLE remaining blocker. [`crate::isproven`] now
 //! ports it in the SAME post-order pass as the cancellation
@@ -688,14 +668,14 @@
 //! `TypeError`/`TypeError` pair is UNCHANGED. `BinXor` is NOT reconstructed
 //! (strict op, no Scala lazy rule, SigmaProp has no XOR — the `^` forms fold to
 //! a constant). **D-C3 is now FULLY CLOSED (cancellation + reconstruction).**
-//! Residual (at Task 5b): `basis-token` + the four crystalpool vectors stay in
-//! the mismatch set on DISTINCT M5 rules, NOT on `HasSigmas`. UPDATE (M5 Task
-//! 5c/R2): the four crystalpool vectors graduated via the getOrElse-default
-//! eager-scope fix (D-C7 below); `basis-token` alone remained, then M5 Tasks
-//! 5d+5e CLOSED it (pair-projection memo + root schedule-order, D-C7 below) →
+//! Residual: `basis-token` + the four crystalpool vectors stayed in
+//! the mismatch set on DISTINCT M5 rules, NOT on `HasSigmas`. The four
+//! crystalpool vectors graduated via the getOrElse-default
+//! eager-scope fix (D-C7 below); `basis-token` alone remained, then the
+//! pair-projection memo + root schedule-order fix (D-C7 below) closed it →
 //! byte-parity 110/110.
 //!
-//! ### D-C4 — multi-arg lambda TUPLING (CLOSED, M4 Task 7)
+//! ### D-C4 — multi-arg lambda TUPLING (CLOSED)
 //!
 //! A two-parameter lambda (`.fold(0L, {(a: Long, b: Box) => ...})`) originally
 //! emitted as a FuncValue with TWO args — wire-legal (`FuncValueSerializer`
@@ -707,7 +687,7 @@
 //! `SelectField` projections), which is what real `Fold` trees look like
 //! on-chain.
 //!
-//! **M4 Task 7 CLOSED this** (`crate::tuple`, recon-transforms.md §6): a
+//! **CLOSED** (`crate::tuple`): a
 //! lowering pass in the pipeline's lowering block rewrites every multi-arg
 //! `FuncValue([(id1,t1),(id2,t2)], body)` to
 //! `FuncValue([(id1, STuple(t1,t2))], body[ValUse(id1) := SelectField(ValUse(id1),1),
@@ -718,19 +698,17 @@
 //! compiles BYTE-IDENTICAL to the oracle and reduces Ok/Ok (committed via the
 //! recapture harness). The five crystalpool corpus contracts that carry
 //! fold-slot lambdas are now evaluable too, but stay byte-mismatched in
-//! `DC7_P2SH_MISMATCH_SET` pending CSE (M5). With Task 9 landed we DO now
-//! inline the single-use `val f`, but the crystalpool contracts additionally
-//! carry repeated-subterm CSE that only M5's hash-cons model reproduces. M5 NOTE
-//! (Task-7 review, CORRECTED at M4 close-out per the scopes adversarial
-//! re-verify): the inner-id divergence is on the SINGLE-ARG lambda body, not the
+//! `DC7_P2SH_MISMATCH_SET` pending CSE (M5). `crate::inline` now
+//! inlines the single-use `val f`, but the crystalpool contracts additionally
+//! carry repeated-subterm CSE that only M5's hash-cons model reproduces. The
+//! inner-id divergence is on the SINGLE-ARG lambda body, not the
 //! tupled one. A surviving inner binding (nested lambda or `val`) inside a
 //! `.exists`/`.map`/`.filter` SINGLE-arg lambda body gets a Scala id of
 //! `param+2` where ours is `param+1` — Scala advances its GraphBuilding id
 //! counter by 2 on entering a lambda scope / materializing the binding, we
 //! advance by 1. A TUPLED (fold-callback) body, by contrast, MATCHES
 //! byte-for-byte: tupling consumes two arg slots, so both sides land the inner
-//! binding at `tuple_id+2` and converge. (The earlier note had this inverted —
-//! it claimed the tupled body diverged and the single-arg body was fine.) This
+//! binding at `tuple_id+2` and converge. This
 //! `+2`-per-lambda-scope allocation is an M5 dependency for such shapes, beyond
 //! CSE itself; under the dummy reduction context they still Err/Err (a
 //! fold-derived divide-by-zero or a context register read — verdict parity,
@@ -740,7 +718,7 @@
 //! multi-arg `f` with `GraphBuildingException`); tupling applies to the
 //! multi-arg DEFINITIONS both compilers accept (fold-slot + un-applied).
 //!
-//! ### D-C5 — GraphBuilding reject-gate parity (Task-11 adversarial wave 1)
+//! ### D-C5 — GraphBuilding reject-gate parity (wave 1)
 //!
 //! Our pipeline has no analogue of Scala's GraphBuilding/IR stage, so before
 //! this gate EVERY typed tree emit could serialize was accepted — including
@@ -749,8 +727,7 @@
 //! `EmitError::GraphBuildingReject { class, what }` (class = the oracle's
 //! exception class, graded exactly, not advisory): every rule below is
 //! oracle-pinned (captures 2026-07-07, 3 identical runs each; committed as
-//! `compile_probes.txt` → `compile_seed.json` vectors; findings reports
-//! `dev-docs/ergoscript-compiler-m3-recon/adversarial-findings-*.md`).
+//! `compile_probes.txt` → `compile_seed.json` vectors).
 //!
 //! Seven gated classes:
 //! 1. **Bit ops** (`emit.rs` BitOp/BitInversion arms;
@@ -759,7 +736,7 @@
 //!    0xF1-0xF8 are unreachable from both compilers. The TYPER accepts on
 //!    both sides (golden-seed bit-op records stay valid); boolean `^`
 //!    (BinXor) is untouched.
-//! 2. **Zero-arg lambdas + non-1-arg applications** (`tree.rs`
+//! 2. **Zero-arg lambdas + non-1-arg applications** (`tree/lambda_gate.rs`
 //!    `graph_building_lambda_reject`; `GraphBuildingException`): a zero-arg
 //!    `FuncValue` rejects ANYWHERE (even the rhs of an unused val); a
 //!    `FuncApply` with != 1 args rejects (direct/aliased/inline). The
@@ -772,7 +749,7 @@
 //! 3. **Function-typed lambda parameters** (same walk; `MatchError`): any
 //!    lambda with an `SFunc`-typed param rejects unless it sits in DEAD code
 //!    that Scala's schedule prunes before the lowering that dies (oracle:
-//!    pruned → ACCEPT). **NF-2 CLOSED (M4 Task 9):** the exemption is now
+//!    pruned → ACCEPT). **NF-2 CLOSED:** the exemption is now
 //!    REACHABILITY-based and transitive, keyed on the same
 //!    `crate::inline::live_def_ids` reachability the dead-`val` pruning
 //!    transform prunes on. An SFunc-param lambda anywhere inside an
@@ -800,7 +777,7 @@
 //!    rejects the v6 method under v5 activation. At v3 the per-type residual
 //!    MethodCall is unchanged.
 //! 7. **V6-only `SGlobal` methods via the bare predef at `tree_version < 3`**
-//!    (`emit_method_call`; `GraphBuildingException`; F2, 2026-07-07): the bare
+//!    (`emit_method_call`; `GraphBuildingException`): the bare
 //!    `fromBigEndianBytes[T]` predef (and its `global_deserialize` siblings)
 //!    builds `MethodCall(Global, m)` DIRECTLY in `typer/predef_ir.rs`, bypassing
 //!    the version-scoped `SGlobal` method table the dotted `Global.<m>` form
@@ -812,48 +789,47 @@
 //!    oracle rejects (`REJECT 0:0 GraphBuildingException`). At v3 both accept,
 //!    byte-identical.
 //!
-//! Plus the **constant-fold overflow REJECT** (`ArithmeticException`): as of M4
-//! Task 5 this is no longer a separate check pass — it is the reject arm of the
+//! Plus the **constant-fold overflow REJECT** (`ArithmeticException`): this
+//! is no longer a separate check pass — it is the reject arm of the
 //! generic constant fold (`crate::fold`, D-C7 below). A `+`/`-`/`*` over
 //! same-width `Byte`/`Short`/`Int`/`Long` constants that overflows its width
 //! rejects; otherwise the node is now actually REPLACED by the folded constant
 //! (the tree is folded, not merely checked — that is the D-C7 graduation). The
 //! `Downcast`/`Upcast`-of-DIRECT-constant fold + overflow moved to
-//! `tree.rs::fold_direct_const_casts` in M4 Task 4. Probed fold boundary
+//! `tree::cast_fold::fold_direct_const_casts`. Probed fold boundary
 //! honored: BigInt arith NOT folded (outside the `i64` ladder), `Negation` NOT
 //! folded (probe-confirmed PARITY: `-(0 + 2147483647) - 2` ACCEPTs with the
 //! Negation node unfolded even over a folded constant); casts of
 //! non-direct-constant subexpressions NOT folded (`(x*100).toByte` compiles;
-//! `crate::fold` recurses through a cast but never folds it). **Correction (M4
-//! Task 5, source-authoritative `DivOp.shouldPropagate = rhs != 0`, fresh cc
-//! probe):** division/modulo DO fold when the divisor is a NON-ZERO constant
-//! (`4/2`, `5%3` fold); only the divisor-`0` forms (`1/0`, `1%0`) stay
-//! unfolded — the earlier "division/modulo never folded" note was drawn from
-//! the `rhs==0` case alone. The fold runs everywhere — unused-val rhs and
+//! `crate::fold` recurses through a cast but never folds it). Division/modulo
+//! DO fold when the divisor is a NON-ZERO constant (source-authoritative:
+//! `DivOp.shouldPropagate = rhs != 0`) — `4/2`, `5%3` fold; only the
+//! divisor-`0` forms (`1/0`, `1%0`) stay
+//! unfolded. The fold runs everywhere — unused-val rhs and
 //! lambda bodies included (both oracle-pinned REJECT on overflow).
 //!
-//! Wave-2 items (getReg in-range literal lowering F4, `slice[T]`
-//! explicit-type-arg residual F5, v6 numeric constant-receiver folds F6,
-//! `Coll[UnsignedBigInt]().size` fold / self-readability, constants F-3)
-//! landed as D-C6 below. The remaining Task-11 finding — the whole
-//! P2SH-address divergence family (fold/CSE/upcast/ident lowerings —
-//! numerics N-3, bindings F3, methodcalls class 4, harness H-1) — is
-//! ledgered as D-C7 below, counted and gated by the wave-3 address gate in
+//! Wave-2 items (getReg in-range literal lowering, `slice[T]`
+//! explicit-type-arg residual, v6 numeric constant-receiver folds,
+//! `Coll[UnsignedBigInt]().size` fold / self-readability)
+//! landed as D-C6 below. The remaining finding — the whole
+//! P2SH-address divergence family (fold/CSE/upcast/ident lowerings and
+//! methodcalls class 4) — is
+//! ledgered as D-C7 below, counted and gated by the address gate in
 //! `tests/compile_semantic_parity.rs`.
 //!
-//! ### D-C6 — evaluability lowerings + folds (Task-11 adversarial wave 2)
+//! ### D-C6 — evaluability lowerings + folds (wave 2)
 //!
 //! Wave 2 closes the oracle-confirmed "both accept, OUR tree cannot evaluate
 //! (or re-read) where the oracle's can" families — unlike wave 1 these CHANGE
 //! the emitted bytes toward Scala's. Every rule is oracle-pinned (captures
 //! 2026-07-07, 3 identical runs each; committed as `compile_probes.txt` →
-//! `compile_seed.json` wave-2 vectors; byte/P2SH pins in `emit.rs`/`tree.rs`
+//! `compile_seed.json` wave-2 vectors; byte/P2SH pins in `emit.rs`/`tree/`
 //! tests). Since our trees stay non-segregated (D-C1), the oracle-comparable
 //! byte surface is the P2SH address (hashes the constant-inlined
 //! proposition) — asserted for every lowering below.
 //!
 //! 1. **`Box.getReg[T](in-range literal)` → `ExtractRegisterAs` (0xC6)**
-//!    (`emit_method_call`; methodcalls F4): `SELF.getReg[Int](5)` emits the
+//!    (`emit_method_call`): `SELF.getReg[Int](5)` emits the
 //!    SAME bytes as `SELF.R5[Int]` (oracle: both reply `1000d1e6c6a70504`);
 //!    the wire carries the INNER elem type T. Dynamic index stays MethodCall
 //!    on both sides. RESIDUAL: Scala const-PROPAGATES a val-bound index
@@ -861,11 +837,11 @@
 //!    eliminated); our typed AST keeps the ValUse → the MethodCall survives,
 //!    both-accept but unevaluable on our side under the v0 header — the
 //!    vector is therefore NOT committable (the semantic gate would grade it
-//!    mixed Ok/Err); pinned verdict-only in `tree.rs`
+//!    mixed Ok/Err); pinned verdict-only in `tree/mod.rs`
 //!    (`compile_val_bound_get_reg_index_stays_residual_method_call`).
 //!    Const-propagation is M5-family scope.
-//! 2. **Explicit-type-arg custom irBuilders lower** (`typer/assign.rs` §1.7;
-//!    methodcalls F5): the §1.7 `has_ir_builder` branch previously built a
+//! 2. **Explicit-type-arg custom irBuilders lower** (`typer/assign/apply.rs` §1.7):
+//!    the §1.7 `has_ir_builder` branch previously built a
 //!    MethodCall UNCONDITIONALLY; Scala routes through the method's OWN
 //!    irBuilder (`irBuilder.lift(...).getOrElse(mkMethodCall(subst))`,
 //!    SigmaTyper.scala:167-171). Now routed through the same `lower_method`
@@ -875,10 +851,9 @@
 //!    survive as MethodCalls with the {T→rangeTpe} subst. (`map[T]` with a
 //!    concrete-range lambda REJECTS on BOTH sides — the §1.7 expected-args
 //!    check fires before the irBuilder, `STypeVar("OV") != SByte`; oracle
-//!    `REJECT 1:16 TyperException` — the F5 report's "map[T] OKPAR" control
-//!    note was inaccurate.)
+//!    `REJECT 1:16 TyperException` — `map[T]` does NOT accept on both sides.)
 //! 3. **v6 numeric methods on CONSTANT receivers fold at v3**
-//!    (`emit_method_call` gate (d); methodcalls F6): the oracle-probed fold
+//!    (`emit_method_call` gate (d)): the oracle-probed fold
 //!    set ONLY — `toBytes` (big-endian `Coll[Byte]`), `toBits`
 //!    (`Coll[Boolean]`, index 0 = MSB) on Byte/Short/Int/Long constants, and
 //!    `bitwiseAnd`/`bitwiseOr`/`bitwiseXor` over two constants (all three
@@ -894,14 +869,14 @@
 //!    `compile_semantic_parity.rs` — both compilers keep byte-matching
 //!    MethodCalls that neither evaluator accepts under v0.
 //! 4. **`SizeOf(<collection literal>)` folds to the element count**
-//!    (M4 Task 5: absorbed into `crate::fold`; constants F-3): Scala folds
+//!    (absorbed into `crate::fold`): Scala folds
 //!    `.size` of a `ConcreteCollection` literal regardless of element
 //!    constancy (`Coll(HEIGHT).size` folds; probed). Children fold BEFORE a
 //!    parent's `SizeOf` (discarded elements stay verdict-checked —
 //!    `Coll(2147483647 + 1).size` still rejects), and the fold runs BEFORE
 //!    serialization, so `Coll[UnsignedBigInt]().size == 0` emits clean v0
 //!    bytes (the v3-only elem-type code 9 never hits the wire — previously a
-//!    stranded-funds P2S our own `read_ergo_tree` refused). **M4 Task 5** now
+//!    stranded-funds P2S our own `read_ergo_tree` refused). `crate::fold` now
 //!    ALSO folds the surrounding `== 0` (`Const == Const → true`), so
 //!    `Coll[UnsignedBigInt]().size == 0`/`Coll(HEIGHT).size == 1`/`Coll(1,
 //!    2).size == 2` graduate to a byte-identical `sigmaProp(true)` (D-C7). A
@@ -918,25 +893,24 @@
 //!    (`TypeSerializer.getEmbeddableType` → `VersionContext.isV6Activated`,
 //!    `VersionContext.scala:33`; deser under `withVersions(activatedVersion,
 //!    treeVersion)`, `ErgoTreeSerializer.scala:148-154`).
-//!    (a) **V6-type-code-under-v0-header family — CORRECTED (F1, 2026-07-07;
-//!    was a FALSE reject-side premise).** A `tree_version >= 3` compile emits a
+//!    (a) **V6-type-code-under-v0-header family — GENUINE ACCEPT.** A
+//!    `tree_version >= 3` compile emits a
 //!    header-v0 tree whose body carries a V6 type code, e.g.
 //!    `getVar[UnsignedBigInt](1)` → `1000d1e6e30109` /
-//!    `SELF.R4[UnsignedBigInt].isDefined` → `1000d1e6c6a70409`. This USED to be
-//!    documented as a deliberate reject ("bytes neither side's version-gated
-//!    reader re-parses → strands funds") — that premise was WRONG. Scala
+//!    `SELF.R4[UnsignedBigInt].isDefined` → `1000d1e6c6a70409`. Scala
 //!    re-parses these fine on a V6-ACTIVATED network (the embeddable gate is on
-//!    the activated version, not the tree header), so the oracle's ACCEPT is
-//!    GENUINE. The only thing rejecting them was OUR self-check reading on the
+//!    the activated version, not the tree header — bytes neither side's
+//!    version-gated reader could re-parse would strand funds, but that is not
+//!    what happens here). The only thing rejecting them was OUR self-check reading on the
 //!    wrong (header-version) axis; the activated-version reader now ACCEPTS all
 //!    7 captured blast-radius shapes byte-identically to the oracle (pinned in
-//!    `tree.rs` `compile_v6_embeddable_type_code_under_v0_header_accepts_at_tv3_matching_oracle`).
-//!    (b) **the UBI-fold family (re-verify finding NF-1; NARROWED by M4 Task
-//!    5)** — the INLINE-constant cases whose fold Scala performs now fold on OUR
+//!    `tree/mod.rs` `compile_v6_embeddable_type_code_under_v0_header_accepts_at_tv3_matching_oracle`).
+//!    (b) **the UBI-fold family (NF-1)** — the INLINE-constant cases whose
+//!    fold Scala performs now fold on OUR
 //!    side too: `unsignedBigInt("1") == unsignedBigInt("1")` folds via the
 //!    generic engine's `Const == Const → true` to a byte-identical
-//!    `10010101d17300` BEFORE the v0 UBI-data gate sees the UBI (the NF-1
-//!    closure — locked decision 1: folds run before the gate). This ACCEPT is
+//!    `10010101d17300` BEFORE the v0 UBI-data gate sees the UBI — folds
+//!    always run before this gate (the NF-1 closure). This ACCEPT is
 //!    GENUINE (oracle-matched). The NON-foldable shapes still REJECT in parity
 //!    on BOTH sides (`unsignedBigInt("5") > unsignedBigInt("3")`,
 //!    `unsignedBigInt("5") == unsignedBigInt("3")` — unequal operands, Eq's
@@ -944,18 +918,18 @@
 //!    which gates v6-only constant DATA/VALUES on the header-0 wire — distinct
 //!    from the embeddable-TYPE-code axis fixed in (a)) must NOT be weakened. The
 //!    val-bound `Coll[UnsignedBigInt]()` under `.size` folds the UBI off the
-//!    wire before either gate (M4 Task 9), so it too is byte-exact. No self-check
+//!    wire before either gate, so it too is byte-exact. No self-check
 //!    reject-side divergence remains.
 //!
-//! ### D-C7 — no IR optimization pass: proposition-shape (and P2SH) parity only for transform-free trees (Task-11 adversarial wave 3)
+//! ### D-C7 — no IR optimization pass: proposition-shape (and P2SH) parity only for transform-free trees (wave 3)
 //!
 //! Our emit is 1:1 with the typed AST; Scala's compiler runs the
 //! GraphBuilding/IR stage between typing and serialization, which
 //! restructures the proposition wherever any of its rules fires
-//! (adversarial reports: harness H-1, numerics N-3, bindings F3,
-//! methodcalls class 4 — five consolidated root causes plus folds):
+//! (root causes: a test-harness scoping issue, numeric cast-chain lowering,
+//! `val`-binding shapes, and methodcalls class 4 — plus folds):
 //!
-//! - ~~constant folding~~ **CLOSED (M4 Task 5, `crate::fold`)** — the generic
+//! - ~~constant folding~~ **CLOSED (`crate::fold`)** — the generic
 //!   GraphBuilding-exact fold now performs env-constant propagation (`ccs`
 //!   binds `x`/`b1`/… as constants, so closed-over comparisons fold to
 //!   `sigmaProp(true)`), both-`Const` relational/boolean folds
@@ -966,11 +940,11 @@
 //!   `!`. 19 CONST-FOLD vectors graduated (incl. the NF-1
 //!   `unsignedBigInt == unsignedBigInt` closure and the MULTI cast+const
 //!   vectors #73/#84/#85, now fully folded). RESIDUAL: `val`-bound operands
-//!   (below) and CSE-shared repeats (below) whose fold needs Task 9/M5;
-//! - ~~explicit constant-cast shape differences~~ **CLOSED (M4 Task 4):**
+//!   (below) and CSE-shared repeats (below) whose fold needs `crate::inline`/M5;
+//! - ~~explicit constant-cast shape differences~~ **CLOSED:**
 //!   both directions now match Scala exactly — `Downcast`/`Upcast` of a
 //!   DIRECT constant folds (`0.toByte` argument casts, methodcalls (a)), and
-//!   a literal cast CHAIN (`1.toByte.toLong.toBigInt`, numerics N-3 probe
+//!   a literal cast CHAIN (`1.toByte.toLong.toBigInt`, probe
 //!   34) folds ONLY the innermost cast, leaving the outer casts as real
 //!   nodes over the folded constant — Scala's `eval` pattern-matches
 //!   `Upcast(Constant(v,_), toTpe)` against the untouched, pre-transform
@@ -979,17 +953,15 @@
 //!   directions in one non-cascading pass (verified byte-identical to the
 //!   oracle capture `10020201060100d1917e7e730005067301` for the probe-34
 //!   vector);
-//! - ~~`val` inlining and unused-`val` pruning~~ **CLOSED (M4 Task 9,
-//!   recon-transforms.md §8; `crate::inline`):** single-use and
+//! - ~~`val` inlining and unused-`val` pruning~~ **CLOSED** (`crate::inline`): single-use and
 //!   constant-valued `val`s inline into every use site, dead `val`s are
 //!   pruned, and an emptied block flattens to its bare result
 //!   (`{ val x = HEIGHT; x > 5 }` → `GT(Height, 5)`;
 //!   `corpus:lsp/test_contract.es` → `GT(Height, SELF.R4[Int].get)`) — both
 //!   graduate to byte-identical. Multi-use `val`s bound to a NON-TRIVIAL
 //!   expression KEEP their `ValDef` untouched — that residual is
-//!   CSE/id-renumbering (below), NOT this transform. CORRECTION (M4 close-out,
-//!   scopes adversarial re-verify): the earlier "multi-use NON-constant `val`s
-//!   keep their `ValDef`" phrasing over-generalized — a multi-use `val` bound to
+//!   CSE/id-renumbering (below), NOT this transform. This applies only to a
+//!   multi-use `val` bound to a NON-trivial expression: a multi-use `val` bound to
 //!   a TRIVIAL LEAF (`val a = HEIGHT`, and likewise `Self`/`Inputs`/`Outputs`/…)
 //!   is INLINED by Scala at every use (duplication, the OPPOSITE of CSE — `{ val
 //!   a = HEIGHT; val b = a + a; b > 0 }` → `(HEIGHT + HEIGHT) > 0`, no `ValDef`),
@@ -997,7 +969,7 @@
 //!   NON-trivial expression survive as `ValDef`s on both sides. Reproducing the
 //!   leaf inlining is a concrete, CSE-INDEPENDENT M5 inliner task (a
 //!   leaf-triviality rule), distinct from the `hasManyUsagesGlobal` hash-cons
-//!   model. CLOSED (M5 Task 4): a multi-use `val` whose rhs FOLDS to a constant
+//!   model. CLOSED: a multi-use `val` whose rhs FOLDS to a constant
 //!   (`val x = 1 + 1`) now reaches the oracle shape. `inline_vals`/`renumber_
 //!   dense` are RETIRED — `crate::cse` is the sole sharing pass. The
 //!   constant-through-`val` fold is recovered by a `crate::fold::fold` run AFTER
@@ -1015,18 +987,18 @@
 //!   chaincash-basis family, whose oracle props carry surviving `ValDef`s with
 //!   DENSE ids `1,2,3,…` allocated by `TreeBuilding.processAstGraph` over the
 //!   post-CSE graph — e.g. `basis-tracker` `ValDef:60→25`. These do NOT
-//!   graduate under Task 9's source-`val` inlining and are the M5
-//!   ValDef-sharing roadmap item; see `.superpowers/sdd/m4-task-9-report.md`);
-//! - ~~single-element `anyOf`/`atLeast` unwrapping~~ **CLOSED (M4 Task 3):**
-//!   `anyOf(Coll(HEIGHT > 5))` → the bare comparison. Correction: only
+//!   graduate under source-`val` inlining alone and are the M5
+//!   ValDef-sharing item);
+//! - ~~single-element `anyOf`/`atLeast` unwrapping~~ **CLOSED:**
+//!   `anyOf(Coll(HEIGHT > 5))` → the bare comparison. Only
 //!   `AllOf`/`AnyOf`/`AllZk`/`AnyZk` unwrap on `items.length == 1`
-//!   (`GraphBuilding.scala:205-208`) — `AtLeast` does NOT (recon-targets.md
-//!   vector #15, `atLeast(1, Coll(proveDlog(g1)))` keeps its `AtLeast` shape
-//!   even over a singleton `Coll`); `crate::lower` implements the fold;
+//!   (`GraphBuilding.scala:205-208`) — `AtLeast` does NOT
+//!   (`atLeast(1, Coll(proveDlog(g1)))` keeps its `AtLeast` shape
+//!   even over a singleton `Coll`, oracle-confirmed); `crate::lower` implements the fold;
 //! - ~~`proveDlog(const)` → `SigmaPropConstant`~~ **CLOSED, see D-C2 above**
 //!   (one instance of this family);
 //! - ~~bare-ident context/global singletons lowered to `PropertyCall`s~~
-//!   **CLOSED (M4 Task 8, recon-transforms.md §9):** bare
+//!   **CLOSED:** bare
 //!   `LastBlockUtxoRootHash` → `PropertyCall(101, 9)` over a bare `Context`
 //!   receiver; bare `groupGenerator` AND dotted `Global.groupGenerator` (both
 //!   route to the SAME `TypedExpr::GroupGenerator` node in our typer) →
@@ -1048,17 +1020,16 @@
 //!   transform), and the chaincash corpus's bare `groupGenerator` usage
 //!   (`val g: GroupElement = groupGenerator`, `reserve.es` + 5 sibling
 //!   contracts) is `val`-bound and stays MULTI-blocked on CSE/`ValDef`-sharing
-//!   (M5) even with Task 9's `val` inlining landed. Direct byte-exact regression coverage instead
+//!   (M5) even with `crate::inline`'s `val` inlining landed. Direct byte-exact regression coverage instead
 //!   lives in two new tests: `emit::tests::
 //!   lowered_singletons_emit_property_call_and_roundtrip` (shape) and
 //!   `tree::tests::compile_bare_singleton_lowering_matches_oracle_property_call`
 //!   (full-pipeline, byte-identical to the oracle capture above).
 //!
-//! **CORRECTION (M4 Task 1, recon-gap.md Finding 2):** an earlier pass of
-//! this ledger listed "env collections lifted per-element" (env `Coll[Long]`
-//! → a per-element `ConcreteCollection` on the Scala side) as a sixth
-//! instance of this family. It is **not a compiler transform** — it was an
-//! artifact of the M3 test harness's `ccs` (SigmaTyperTest) oracle env,
+//! **Not part of this family:** "env collections lifted per-element" (env
+//! `Coll[Long]` → a per-element `ConcreteCollection` on the Scala side) looks
+//! like a sixth instance but is **not a compiler transform** — it was an
+//! artifact of the test harness's `ccs` (SigmaTyperTest) oracle env,
 //! which binds `col1`/`col2` as a per-element `ConcreteCollection` SValue
 //! (`TyperOracle.scala:176`), while the `cce` (demo) env and the real
 //! `/script` compile API's `liftToConstant` path both always lift
@@ -1072,25 +1043,22 @@
 //!
 //! Consequence: PROPOSITION bytes — and therefore the P2SH address, which
 //! hashes them — diverge from Scala wherever ANY such rule fires, not just
-//! on the D-C1 segregation axis (whose "P2SH is UNAFFECTED" sentence wave 3
-//! corrected). Semantic parity is unaffected: the Task-10/11 gate reduces
-//! every ACCEPT pair to the same SigmaBoolean under the dummy context, and
-//! the Task-11 probe batteries verified sem=EQ on every mismatching probe
-//! (the untransformed control group P2SH-matches exactly, pinning
-//! `encode_p2sh` itself as correct). The class is a SET, not open-ended (M4
-//! Task 1, recon-gap.md Finding 5 — a failing-vector-label SET catches a
-//! compensating regression a count assert would miss): the address gate
+//! on the D-C1 segregation axis (segregation itself leaves P2SH unaffected,
+//! but this proposition-shape family does not). Semantic parity is
+//! unaffected: the semantic gate reduces every ACCEPT pair to the same
+//! SigmaBoolean under the dummy context, and probe batteries verified sem=EQ
+//! on every mismatching probe (the untransformed control group P2SH-matches
+//! exactly, pinning `encode_p2sh` itself as correct). The class is a SET, not
+//! open-ended: a failing-vector-label SET catches a compensating regression
+//! a count assert would miss, so the address gate
 //! (`tests/compile_semantic_parity.rs`) pins the corpus at
-//! `DC7_P2SH_MISMATCH_SET` (1 vector as of M5 Task 5c/R2, down from 5 at Task
-//! 5b, 8 at Fix 1a, 10/11 at Task 4/5-Fix2, 15 at M4 Task 9, 17 at Task 5, 36
-//! at Task 4, 39 at Task 3, 43 at Task 1/2). The M5 CSE hash-cons + schedule
-//! model (Tasks 4/5a/5b/5c) graduated the whole benchmark set except one; the
-//! rest P2SH-match and are hard-asserted equal wherever the proposition bytes
-//! agree.
+//! `DC7_P2SH_MISMATCH_SET` (1 vector, down from 43 originally). The M5 CSE
+//! hash-cons + schedule model graduated the whole benchmark set except one;
+//! the rest P2SH-match and are hard-asserted equal wherever the proposition
+//! bytes agree.
 //!
-//! **M5 Task 5c/R2 — getOrElse-default CSE mechanism CLOSED (5 → 1).** The R2
-//! recon (`dev-docs/ergoscript-compiler-m5-recon/m5-r2-floatup.md`) corrected the
-//! single wrong scope-model premise: `opt.getOrElse(d)` does NOT thunk its
+//! **getOrElse-default CSE mechanism CLOSED (5 → 1).**
+//! `opt.getOrElse(d)` does NOT thunk its
 //! default. Scala builds the default EAGERLY as an ordinary argument in the
 //! ENCLOSING scope (`GraphBuilding.scala:441,962,1013-1035`) and then wraps the
 //! already-built ref in an EMPTY-body Thunk (`Thunks.scala:261,283-286`), so a
@@ -1103,19 +1071,19 @@
 //! keystone is structurally untouched: If/`&&`/`||` bodies stay by-name thunks),
 //! byte-parity 105/110 → 109/110.
 //!
-//! **M5 Task 5d (pair-projection memo) + Task 5e (root schedule-order) — CLOSED
-//! `basis-token`; byte-parity 109/110 → 110/110; D-C7 is now FULLY CLOSED.**
+//! **Pair-projection memo + root schedule-order — CLOSED `basis-token`;
+//! byte-parity 109/110 → 110/110; D-C7 is now FULLY CLOSED.**
 //! basis-token carried TWO independent divergences on one contract: (1) a
 //! missing cross-branch-shared root ValDef, and (2) a permutation of the root
 //! ValDef order.
-//! Task 5d ported Scalan's `unzipPair`/`tuplesCache` (`Tuples.scala:57-74`): a
+//! The pair-projection memo ports Scalan's `unzipPair`/`tuplesCache` (`Tuples.scala:57-74`): a
 //! process-wide pair-projection memo keyed by the receiver SymId that eagerly
 //! interns `First`+`Second` on the first `._1`/`._2` access, so both if-branches'
 //! `SELF.tokens(1)._2` resolve to ONE shared root ValDef (the oracle's 10th)
 //! instead of two inline thunk-local copies — the sole documented bypass of thunk
 //! hash-cons isolation. E2's `HEIGHT+1` (a `Plus`, not a pair projection) is
 //! provably untouched.
-//! Task 5e then fixed the surviving root ValDef ORDER: Scala's root schedule is a
+//! The root-schedule-order fix addressed the surviving root ValDef ORDER: Scala's root schedule is a
 //! post-order DFS over `node.deps` where a thunk's deps are its `freeVars` over
 //! its LOCAL-only schedule (`Thunks.scala:196-212`, `AstGraphs.scala:56-85`,
 //! `ProgramGraphs.scala:35-64`), so a by-name `&&` conjunct's freeVars are
@@ -1124,25 +1092,22 @@
 //! (`&&`/`||`/`if`) arm's children AFTER the eager children; made it collect the
 //! scoped-arm children first. A faithful port is safe by construction: all 109
 //! already equalled Scala, so none regressed (0 ENTERED), and only the sole
-//! diverging vector changed. Both fixes are `cse.rs`-only; see
-//! `.superpowers/sdd/m5-task-5d-report.md` + `m5-task-5e-report.md` and
-//! `dev-docs/ergoscript-compiler-m5-recon/m5-root-schedule-order.md`.
+//! diverging vector changed. Both fixes are `cse.rs`-only.
 //!
-//! ### MethodCall lowering catalog (M4 Task 8, recon-transforms.md §10, recon-cannonq.md Part A)
+//! ### MethodCall lowering catalog
 //!
-//! Every cannonQ-only row was re-probed against the pinned 6.0.2 checkout/live
-//! oracle before entering this ledger (per the plan's authority rule) rather
-//! than trusted from the 6.1.2-derived fork audit:
+//! Every row below was checked against the pinned 6.0.2 checkout/live oracle
+//! directly, not assumed from a related fork's method table:
 //!
-//! - **`g.multiply(h)` → `MultiplyGroup` (recon-cannonq.md A.1 row 2):**
-//!   already correct — `typer/assign.rs`'s `(SType::SGroupElement, "multiply")`
+//! - **`g.multiply(h)` → `MultiplyGroup`:**
+//!   already correct — `typer/assign/lower_method.rs`'s `(SType::SGroupElement, "multiply")`
 //!   arm (and the binder's `*`-operator route) both build
 //!   `TypedExpr::MultiplyGroup` directly, `emit.rs` writes the dedicated
 //!   `0xA0` opcode. Was a ledger DOCUMENTATION gap (never listed under any
 //!   D-C item), not a code gap — no change needed. `exp`/`Exponentiate`
 //!   (`0x9F`) is the same story.
-//! - **`tree.get(key, proof)` → `MethodCall(100, 10)`, NOT `TreeLookup`
-//!   (recon-cannonq.md A.1 row 3):** already correct — no special-case
+//! - **`tree.get(key, proof)` → `MethodCall(100, 10)`, NOT `TreeLookup`:**
+//!   already correct — no special-case
 //!   irBuilder for `(SAvlTree, "get")` in `lower_method`, so it falls to the
 //!   generic `MethodCall` fallback (wire pair confirmed against the AvlTree
 //!   method table, `methods.rs` `avl_tree_methods` id 10).
@@ -1155,33 +1120,31 @@
 //!   OWN frontend cannot reach `TreeLookup` either. Oracle-confirmed
 //!   2026-07-07: `treeLookup(...)` REJECTs (`ParserException`/`TyperException`
 //!   depending on phrasing) — verdict-matches our compiler's lack of a
-//!   `treeLookup` predef. This resolves recon-cannonq.md's open question
-//!   ("same target opcode?" for the predef vs method forms) definitively: the
-//!   predef form doesn't exist in reachable ErgoScript at all.
-//! - **`allZK`/`anyZK` single-literal-`Coll` unwrap (recon-cannonq.md A.1 row
-//!   4): RESOLVED, corrected (M4 Task 8 review, D-C8 below).** The M4 Task 8
-//!   framing above ("OUT OF SCOPE... implementing those two predefs is
-//!   new-feature scope") was itself wrong: `predef_ir.rs`'s `predefined_env`
+//!   `treeLookup` predef. The predef form doesn't exist in reachable
+//!   ErgoScript at all — only the method form (`tree.get(...)`) is reachable,
+//!   and both compilers agree on its target opcode.
+//! - **`allZK`/`anyZK` single-literal-`Coll` unwrap — RESOLVED, see D-C8
+//!   below.** `predef_ir.rs`'s `predefined_env`
 //!   DOES register `"allZK"`/`"anyZK"` (parsing/typing already worked), and
 //!   the assumption that a literal `Coll` argument lowers to `SigmaAnd`/
 //!   `SigmaOr` was never oracle-checked. A live probe (2026-07-07) shows the
 //!   opposite: `compiler.compile` REJECTS every form (`StagingException`) —
 //!   see D-C8 for the full account and the fix (a `GraphBuildingReject`
 //!   classification, not a lowering). `crate::lower`'s `SigmaAnd`/`SigmaOr`
-//!   single-element unwrap arm (recon-transforms.md §4) stays PERMANENTLY
+//!   single-element unwrap arm stays PERMANENTLY
 //!   unreachable from ErgoScript source, not merely "currently" so — it is
 //!   pinned by the same `GraphBuilding.scala:205-208` citation as the
 //!   `And`/`Or` arm it ships alongside, and exercises only the `&&`/`||`
 //!   OPERATOR route (which builds `SigmaAnd`/`SigmaOr` typed nodes directly,
 //!   bypassing `PredefinedFuncApply` entirely), never the `allZK`/`anyZK`
 //!   function-call route.
-//! - The remaining §10a "primitives that stay primitives" and §10b fallback
+//! - The remaining "primitives that stay primitives" and fallback
 //!   rows (Coll/Box/Option/Sigma ops, numeric unary `toBytes`/`toBits`/bitwise
 //!   binops) were spot-checked against `emit.rs`/`methods.rs` and are already
-//!   byte-correct (M2/M3's wire-id sweep + M4 Task 8's re-audit found no
+//!   byte-correct (M2/M3's wire-id sweep plus a later re-audit found no
 //!   further gaps) — no code change.
 //!
-//! **`TyperCtx::lower_method_calls` dead flag — DELETED (M4 Task 8).** The
+//! **`TyperCtx::lower_method_calls` dead flag — DELETED.** The
 //! field mirrored Scala's `SigmaTyper` constructor parameter but was always
 //! constructed `true` (`TyperCtx::new`) and never read by any dispatch site —
 //! a knob that implied a toggle nothing in this crate implements. Scala's own
@@ -1193,9 +1156,9 @@
 //! see `typer/mod.rs`'s `TyperCtx` doc comment for the full reasoning.
 //!
 //! ### D-C8 — `allZK`/`anyZK`/`outerJoin` error-class divergence, RESOLVED
-//! (M4 Task 8 review; both sides reject — never a verdict divergence)
+//! (both sides reject — never a verdict divergence)
 //!
-//! Reviewer-caught bug: the typer accepts `allZK(Coll(proveDlog(g1)))`
+//! The typer accepts `allZK(Coll(proveDlog(g1)))`
 //! identically to Scala (residual `Apply(Ident 'allZK') [...]`, both sides —
 //! `predefined_env` has the name, `predef_ir_builder` has no irBuilder arm so
 //! it falls through, matching Scala's `PredefinedFuncApply.unapply` doing the
@@ -1220,8 +1183,7 @@
 //! `StagingException`. Probed exhaustively for `allZK`/`anyZK`: literal
 //! single-element `Coll`, literal multi-element `Coll`, AND a val-bound
 //! `Coll` all reject IDENTICALLY — there is no accepting form at all, not
-//! even the "literal `Coll` lowers to `SigmaAnd`/`SigmaOr`" shape this
-//! ledger's M4 Task 8 entry (above) used to assume without checking: that
+//! even the "literal `Coll` lowers to `SigmaAnd`/`SigmaOr`" shape — that
 //! lowering only fires for the `&&`/`||` OPERATOR route (`GraphBuilding.
 //! scala`'s `case SigmaAnd(items) => ... sigmaDslBuilder.allZK(...)`), which
 //! builds a `SigmaAnd` typed node directly and never touches
@@ -1238,9 +1200,9 @@
 //! (byte-for-class match against the oracle) plus a unit-level
 //! `emit::tests::known_predef_gap_ident_returns_graph_building_reject_not_invalid_shape`.
 //!
-//! Also closed in the same review pass: `typer/predef_ir.rs`'s `unmap_const`
-//! (the `emit::map_const` reverse mapping `deserialize[T]` uses, M4 Task 8
-//! §3 above) was missing the `ConstPayload::ProveDlog` arm — a real
+//! Also fixed: `typer/predef_ir.rs`'s `unmap_const`
+//! (the `emit::map_const` reverse mapping `deserialize[T]` uses, D-T2 above)
+//! was missing the `ConstPayload::ProveDlog` arm — a real
 //! `map_const ∘ unmap_const` drift, now fixed with a
 //! `map_const_unmap_const_roundtrips_every_variant` property test sweeping
 //! every `ConstPayload` variant (except `SigmaProp`, which `map_const` itself
@@ -1251,9 +1213,8 @@ pub mod ast;
 pub mod binder;
 pub mod contract_parse;
 pub mod contract_template;
-// M5 Task 1 — CSE scope-chain hash-cons substrate. Built and unit-tested in
-// isolation; NOT yet wired into `compile()` (ValDef emission + pipeline
-// integration land in M5 Tasks 2-4).
+// CSE scope-chain hash-cons substrate, wired into `compile()` (`tree::mod`)
+// as the sole subexpression-sharing pass; see D-C6/D-C7 above.
 pub mod cse;
 pub mod emit;
 pub mod env;

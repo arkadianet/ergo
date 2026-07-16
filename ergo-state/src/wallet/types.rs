@@ -140,7 +140,7 @@ pub struct WalletTransaction {
 
 /// Metadata about a tracked HD pubkey. Stored in
 /// `WALLET_TRACKED_PUBKEYS` value bucket. Matches Scala
-/// `WalletStorage` per-key metadata shape (spec §7.1).
+/// `WalletStorage`'s per-key metadata shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackedPubkeyMeta {
     /// BIP32 derivation path components (with hardened bits set).

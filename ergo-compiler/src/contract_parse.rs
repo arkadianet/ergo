@@ -8,22 +8,22 @@
 //! under `import fastparse.NoWhitespace._`: the doc block and signature are
 //! hand-parsed here, then EVERYTHING after the top-level `=` is captured raw and
 //! handed to the EXISTING [`crate::parse`] entry point — this module never
-//! duplicates the expression grammar (§1 of the M7 recon).
+//! duplicates the expression grammar.
 //!
 //! Reuse points (verbatim, no re-implementation):
-//! - `Type` in a parameter → [`crate::parse::parse_type`] (`parse.rs:77`,
+//! - `Type` in a parameter → [`crate::parse::parse_type`] (`parse/mod.rs`,
 //!   Types.scala:63).
-//! - the contract body → [`crate::parse::parse`] (`parse.rs:36`,
+//! - the contract body → [`crate::parse::parse`] (`parse/mod.rs`,
 //!   `SigmaParser(body).get.value`, ContractParser.scala:138).
 //! - identifier char classes → [`crate::token::is_id_start`]/[`is_id_char`]
 //!   (the same predicates the core lexer uses, `Identifiers.Id`).
 //!
-//! ## Deviations (M7, reject-side-safe / accept-parity doctrine)
+//! ## Deviations (reject-side-safe / accept-parity doctrine)
 //! - A malformed contract BODY surfaces here as a proper [`ParseError`] with a
 //!   position, NOT the uncategorised `NoSuchElementException` Scala's `.get`
 //!   throws (ContractParser.scala:138 unwraps the body parse via `.get`). This
-//!   is the M1 "prefer information over faithful reproduction of a reference
-//!   rough edge" doctrine (lib.rs D6/stray-brace), applied per M7 recon §6 Q3.
+//!   is the same "prefer information over faithful reproduction of a reference
+//!   rough edge" doctrine `lib.rs`'s stray-brace deviation documents.
 //! - Parameter/contract names accept the core `Id` PLAIN-identifier form only;
 //!   backtick/operator identifiers in NAME position are rejected (no real
 //!   `@contract` source uses them). Types and literal defaults are parsed by the
@@ -445,7 +445,7 @@ fn parse_param(part: &str, base: usize, tree_version: u8) -> Result<ContractPara
 /// default. We reuse the full [`crate::parse`] entry (no separate literal
 /// grammar exists) and REQUIRE the result to be a literal node, mirroring
 /// Scala's restriction to `Literals.Expr.Literal` (a `p: Int = 1 + 1` default is
-/// rejected on both sides — recon §1b).
+/// rejected on both sides).
 fn parse_literal_default(src: &str, tree_version: u8) -> Result<Expr, ParseError> {
     let e = parse(src, tree_version)?;
     if is_literal(&e) {
@@ -773,7 +773,7 @@ mod tests {
         assert!(err.pos() as usize >= "/* */\n@contract def c() = ".len());
     }
 
-    // ----- string-literal default delimiters (M7 finding 1) -----
+    // ----- string-literal default delimiters -----
 
     #[test]
     fn signature_string_default_with_comma_parses() {

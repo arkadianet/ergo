@@ -840,7 +840,7 @@ mod tests {
             a.unlocked().unwrap().master.master_pubkey().unwrap(),
             b.unlocked().unwrap().master.master_pubkey().unwrap(),
             "mnemonic_pass must change the derived master key — if equal, \
-             the passphrase is being dropped (the r1 storage-phrase bug)",
+             the passphrase is being dropped",
         );
     }
 

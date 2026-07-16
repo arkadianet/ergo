@@ -62,9 +62,8 @@ pub enum MiningError {
 
     /// A deterministic computation in the candidate / coinbase /
     /// reemission assembly path failed. Covers id and bytes-to-sign
-    /// computation (the original audit-1 motivation) plus the
-    /// neighbouring numerical conversions, intermediate tx assembly
-    /// (build / serialize / validate of the candidate's own coinbase),
+    /// computation, the neighbouring numerical conversions, intermediate
+    /// tx assembly (build / serialize / validate of the candidate's own coinbase),
     /// and difficulty / cost retargeting that share the same "honest
     /// flow shouldn't reach here, but if it does we surface the
     /// failure typed" semantics. Distinct from [`Decode`] (on-disk

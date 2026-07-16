@@ -1,6 +1,6 @@
-//! `voting/*` handlers (`v1-api-design.md` §3.4). The reads (T0) reshape the
-//! camelCase `ApiVotes` / `ApiVotesHistory` DTOs into §1.1 snake_case;
-//! `voting/votes` drops the operator-private `configured_votes` (finding 5),
+//! `voting/*` handlers. The reads (T0) reshape the
+//! camelCase `ApiVotes` / `ApiVotesHistory` DTOs into snake_case;
+//! `voting/votes` drops the operator-private `configured_votes`,
 //! which moves to the T1 `operator-votes` read. The operator write (T1) reuses
 //! [`NodeAdmin::set_voting_targets`](crate::traits::NodeAdmin).
 
@@ -31,7 +31,7 @@ struct VotableParam {
     max: i32,
 }
 
-/// The public `voting/votes` body — ONLY the public half (§3.4 #1). The
+/// The public `voting/votes` body — ONLY the public half. The
 /// operator's own `configured_votes` is dropped here and served (gated) at
 /// `operator-votes`.
 #[derive(Serialize, ToSchema)]
@@ -139,7 +139,7 @@ pub(crate) async fn history(State(s): State<OperatorState>) -> Response {
 }
 
 /// `GET /api/v1/voting/candidate` — T0, seam-deferred. The next-block vote-byte
-/// preview (§3.4 #3) has no projection in `ergo-api` and needs a read threaded
+/// preview has no projection in `ergo-api` and needs a read threaded
 /// through the candidate-builder crate; until then it answers the honest
 /// `route_unavailable` rather than fabricating vote bytes.
 #[utoipa::path(
@@ -164,7 +164,7 @@ pub(crate) struct ConfiguredVote {
 }
 
 /// `GET /api/v1/voting/operator-votes` — T1. The operator-private half split off
-/// `ApiVotes.configured_votes` (finding 5), now gated. Collection envelope
+/// `ApiVotes.configured_votes`, now gated. Collection envelope
 /// (bounded, ≤ ~9 entries).
 #[utoipa::path(
     get, path = "/api/v1/voting/operator-votes", tag = "voting",
@@ -213,7 +213,8 @@ pub(crate) struct SetVotesRequest {
 /// `POST /api/v1/voting/operator-votes` — T1. Reuses
 /// [`NodeAdmin::set_voting_targets`]. REPLACES the configured set. `204` on
 /// success; `400 not_votable` / `400 out_of_range` / `409 mining_disabled`
-/// (reason re-spelled from the dot-form `mining.disabled` per §1.4 rule 7).
+/// (reason re-spelled from the dot-form `mining.disabled` to the v1 naming
+/// convention).
 #[utoipa::path(
     post, path = "/api/v1/voting/operator-votes", tag = "voting",
     request_body = SetVotesRequest,

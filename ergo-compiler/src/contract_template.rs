@@ -1,4 +1,4 @@
-//! Contract-template assembly (M7) — the Rust mirror of
+//! Contract-template assembly — the Rust mirror of
 //! `SigmaTemplateCompiler.compile`/`assemble`
 //! (`sc/.../sigma/compiler/SigmaTemplateCompiler.scala:22-53`, sigma-state
 //! 6.0.2). Drives [`crate::contract_parse::parse_contract`] → typer (with the
@@ -16,11 +16,11 @@
 //!
 //! For **≤4** entries Scala's immutable `Map` is a `Map1..Map4` that preserves
 //! INSERTION order, so `index = declaration position` — byte-exact against
-//! declaration order (M7 recon §3). For **≥5** params the `.toMap` upgrades to a
+//! declaration order. For **≥5** params the `.toMap` upgrades to a
 //! JVM `HashMap` whose iteration order is `improve(String.hashCode)` bucket
 //! order, NOT declaration order — reproduced here via
 //! [`crate::param_order::iteration_order_2_12`] (Scala 2.12 `HashTrieMap` walk,
-//! the version the `ct` oracle and ergo-appkit pin; recon §5).
+//! the version the `ct` oracle and ergo-appkit pin).
 //!
 //! CRUCIAL: `constTypes`/`constValues`/`parameters` (and each
 //! `Parameter.constantIndex`) walk `parsed.signature.params` DIRECTLY, so they
@@ -44,7 +44,7 @@ use crate::typecheck::{typecheck_contract_body, CompileError};
 use crate::typed::{node_tpe, ConstPayload};
 
 /// Scala's `Map1..Map4` preserve insertion order; `.toMap` upgrades to a
-/// hash map ABOVE this many entries (M7 recon §3). At or below it, placeholder
+/// hash map ABOVE this many entries. At or below it, placeholder
 /// index assignment is declaration order; above it, Scala 2.12 `HashTrieMap`
 /// iteration order ([`crate::param_order::iteration_order_2_12`]).
 pub const MAX_DECLARATION_ORDER_PARAMS: usize = 4;
@@ -91,8 +91,8 @@ pub enum ContractError {
     DuplicateParamName { name: String },
 }
 
-/// Compile an ErgoScript contract-template source into a [`ContractTemplate`]
-/// (M7). Mirrors `SigmaTemplateCompiler(networkPrefix).compile(source)`.
+/// Compile an ErgoScript contract-template source into a [`ContractTemplate`].
+/// Mirrors `SigmaTemplateCompiler(networkPrefix).compile(source)`.
 pub fn compile_contract(
     source: &str,
     tree_version: u8,

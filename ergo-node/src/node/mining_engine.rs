@@ -744,9 +744,9 @@ mod tests {
 
     #[test]
     fn page_stale_first_page_backfills_from_second() {
-        // THE Codex case: cap 4, page 1 has 4 rows but 3 are stale; only the
-        // valid ones must count against the cap, with the rest backfilled
-        // from page 2 — so a lagging index costs retries, not claim slots.
+        // Cap 4, page 1 has 4 rows but 3 are stale; only the valid ones must
+        // count against the cap, with the rest backfilled from page 2 — so a
+        // lagging index costs retries, not claim slots.
         let rows = [
             row(1),
             row(2),

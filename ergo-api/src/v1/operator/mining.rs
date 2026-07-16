@@ -1,9 +1,9 @@
-//! `mining/*` handlers (`v1-api-design.md` §3.3). The candidate/solution/reward
+//! `mining/*` handlers. The candidate/solution/reward
 //! endpoints (T1) reuse [`NodeMining`](crate::mining::NodeMining) — the existing
-//! PoW/candidate machinery — mapping its [`MiningApiError`] onto the §1.4 error
-//! envelope. `miner-stats` (T0) folds the same headers the compat handler reads;
-//! `status` (T0) composes existing snapshot reads. `candidate-with-txs` has no
-//! trait seam yet (§3.3 #5), so it answers the honest `route_unavailable`.
+//! PoW/candidate machinery — mapping its [`MiningApiError`] onto the standard
+//! error envelope. `miner-stats` (T0) folds the same headers the compat handler
+//! reads; `status` (T0) composes existing snapshot reads. `candidate-with-txs`
+//! has no trait seam yet, so it answers the honest `route_unavailable`.
 
 use axum::{
     extract::{Query, State},
@@ -21,7 +21,7 @@ use crate::mining::MiningApiError;
 use crate::types::{ApiMinerStat, ApiMinerStats, SyncStateLabel};
 use crate::v1::error::{v1_error, Reason, V1Error};
 
-/// Map a [`MiningApiError`] onto the §1.4 v1 error envelope. `unavailable`
+/// Map a [`MiningApiError`] onto the standard v1 error envelope. `unavailable`
 /// picks the endpoint-appropriate 503 reason (`candidate_unavailable` for the
 /// candidate path, `reward_unavailable` for the reward path).
 fn map_mining_error(e: MiningApiError, unavailable: Reason) -> Response {
@@ -129,7 +129,7 @@ pub(crate) async fn miner_stats(
     .into_response()
 }
 
-/// The `mining/status` aggregate (§3.3 #7). Always `200` — safe to poll from an
+/// The `mining/status` aggregate. Always `200` — safe to poll from an
 /// unauthenticated dashboard even when mining is off (hence T0). The
 /// `last_template_*` / `template_seq` fields require the mining bridge to cache
 /// its last-published template metadata; that seam is not wired yet, so they are
@@ -242,7 +242,7 @@ pub(crate) async fn solution(State(s): State<OperatorState>, body: axum::body::B
     }
 }
 
-/// Fresh snake_case reward-address DTO (§3.3 #3 — the compat
+/// Fresh snake_case reward-address DTO (the compat
 /// `RewardAddressResponse` is hard-renamed camelCase + pinned by a unit test, so
 /// a new DTO is required).
 #[derive(Serialize, ToSchema)]
@@ -250,7 +250,7 @@ pub(crate) struct RewardAddress {
     reward_address: String,
 }
 
-/// Fresh snake_case reward-pubkey DTO (§3.3 #4 — same rationale).
+/// Fresh snake_case reward-pubkey DTO (same rationale).
 #[derive(Serialize, ToSchema)]
 pub(crate) struct RewardPubkey {
     reward_pubkey: String,
@@ -302,7 +302,7 @@ pub(crate) async fn reward_pubkey(State(s): State<OperatorState>) -> Response {
 }
 
 /// `POST /api/v1/mining/candidate-with-txs` — T1, seam-deferred. The wire shape
-/// is documented (§3.3 #5) but no `NodeMining::candidate_with_txs` seam exists,
+/// is documented but no `NodeMining::candidate_with_txs` seam exists,
 /// so this answers the honest `route_unavailable` rather than silently ignoring
 /// the forced-tx set. Still gated at `Tier::Operator`.
 #[utoipa::path(

@@ -457,7 +457,7 @@ paths:
       summary: |-
         `POST /api/v1/wallet/boxes/select` — burn-aware box-selection dry-run. Returns
         the real selected inputs, computed change, and the exact EIP-27 re-emission
-        burn. Requires an unlocked wallet (design §2).
+        burn. Requires an unlocked wallet.
       operationId: select_boxes
       requestBody:
         content:
@@ -855,7 +855,7 @@ paths:
       summary: |-
         `POST /api/v1/wallet/transactions/build` — build a burn-aware unsigned tx from
         an intent. Returns the unsigned tx plus the selected inputs, change outputs,
-        fee, and re-emission burn. Requires an unlocked wallet (design §2).
+        fee, and re-emission burn. Requires an unlocked wallet.
       operationId: build_transaction
       requestBody:
         content:
@@ -3337,7 +3337,7 @@ components:
           description: Optional human-readable detail; never carries secret material.
         reason:
           type: string
-          description: Closed snake_case reason set (see the design §4).
+          description: A closed snake_case reason set (e.g. `"locked"`, `"box_not_found"`).
     NetworkDto:
       oneOf:
       - type: object

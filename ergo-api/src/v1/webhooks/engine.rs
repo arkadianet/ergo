@@ -1,5 +1,5 @@
 //! [`WebhookEngine`] — the durable-ish registry + delivery-log + retry/backoff
-//! state machine (`v1-api-design.md` §4.1, fragment §3.2–§3.3).
+//! state machine.
 //!
 //! This is the load-bearing, **transport-free** core. It owns all state behind
 //! one mutex and exposes pure, synchronous, clock-injected operations:
@@ -14,8 +14,7 @@
 //!
 //! **Persistence is DEFERRED.** State is in-memory and bounded; a node restart
 //! loses all registrations and the delivery log. Durable-across-restart
-//! registration needs a `*-db` schema (CLAUDE.md §2) and is intentionally NOT
-//! invented here — see the PR report.
+//! registration needs a `*-db` schema and is intentionally NOT invented here.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
@@ -29,21 +28,21 @@ use super::model::{
 use crate::v1::realtime::RealtimeEvent;
 use crate::v1::routes::dto::unix_ms_to_iso;
 
-/// Max registered webhooks node-wide (§3.3 `MAX_WEBHOOKS_PER_KEY`; one operator
-/// key → one global cap). Registration past it ⇒ `webhook_limit`.
+/// Max registered webhooks node-wide (one operator key → one global cap).
+/// Registration past it ⇒ `webhook_limit`.
 pub const MAX_WEBHOOKS: usize = 100;
-/// Max channels one webhook may subscribe (§3.3, mirrors WS `max_channels`).
+/// Max channels one webhook may subscribe (mirrors WS `max_channels`).
 pub const MAX_CHANNELS_PER_WEBHOOK: usize = 64;
 /// Global bounded delivery-log ring (FIFO eviction) — the in-memory cap that
 /// keeps a slow-to-drain or high-throughput hook from unbounded growth.
 pub const DELIVERY_RING_CAP: usize = 4096;
-/// First-retry base delay, ms (§3.3 `base=2s`).
+/// First-retry base delay, ms.
 pub const BASE_BACKOFF_MS: u64 = 2_000;
-/// Backoff ceiling, ms (§3.3 `cap=1h`).
+/// Backoff ceiling, ms.
 pub const MAX_BACKOFF_MS: u64 = 3_600_000;
-/// Bounded attempts before a delivery is parked `failed` (§3.3 `max_attempts`).
+/// Bounded attempts before a delivery is parked `failed`.
 pub const MAX_ATTEMPTS: u32 = 12;
-/// Consecutive failed attempts before the subscription auto-disables (§3.3).
+/// Consecutive failed attempts before the subscription auto-disables.
 pub const MAX_CONSECUTIVE_FAILURES: u32 = 20;
 /// Per-webhook concurrent in-flight sends (the delivery-rate cap — a slow
 /// endpoint can hold at most this many attempts at once, never stalling others).
@@ -53,8 +52,8 @@ pub const MAX_INFLIGHT_GLOBAL: usize = 64;
 /// Random-secret length in bytes (hex-encoded into the `whsec_` value).
 pub const SECRET_BYTES: usize = 32;
 
-/// Deterministic exponential backoff for the `attempts`-th completed attempt
-/// (§3.3): `BASE * 2^(attempts-1)`, saturating at `MAX_BACKOFF_MS`. Jitter is
+/// Deterministic exponential backoff for the `attempts`-th completed attempt:
+/// `BASE * 2^(attempts-1)`, saturating at `MAX_BACKOFF_MS`. Jitter is
 /// applied on top by [`WebhookEngine`] from a per-delivery-id sample so retries
 /// of distinct deliveries spread out; this base is kept pure for exact tests.
 pub fn base_backoff_ms(attempts: u32) -> u64 {
@@ -97,7 +96,7 @@ pub struct PreparedRequest {
     pub webhook_id: String,
     /// Target URL.
     pub url: String,
-    /// Request headers (`Content-Type` + the `X-Ergo-*` set, §3.4).
+    /// Request headers (`Content-Type` + the `X-Ergo-*` set).
     pub headers: Vec<(&'static str, String)>,
     /// The JSON body (stable across retries of the same delivery).
     pub body: String,
@@ -115,7 +114,7 @@ pub enum DeliveryOutcome {
     TransportError,
 }
 
-/// Why a registration was rejected (mapped to a §4 reason by the route layer).
+/// Why a registration was rejected (mapped to a `Reason` by the route layer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegisterError {
     /// The global webhook cap is reached.
@@ -249,7 +248,7 @@ impl WebhookEngine {
     }
 
     /// Pause / resume a subscription (PATCH). Resuming resets the failure
-    /// counter + health so a re-enabled hook starts clean (§3.3). Returns the
+    /// counter + health so a re-enabled hook starts clean. Returns the
     /// updated subscription, or `None` if unknown.
     pub fn set_active(&self, webhook_id: &str, active: bool) -> Option<Subscription> {
         let mut g = self.lock();
@@ -426,7 +425,7 @@ impl WebhookEngine {
     }
 
     /// Apply one attempt outcome to its delivery + the owning subscription's
-    /// governor state (§3.3). Success clears the failure counter; a failure
+    /// governor state. Success clears the failure counter; a failure
     /// schedules an exponential-backoff retry, or parks `failed` at
     /// `MAX_ATTEMPTS`, and auto-disables the subscription at
     /// `MAX_CONSECUTIVE_FAILURES`.
@@ -602,7 +601,7 @@ fn push_bounded(
     deliveries.push_back(delivery);
 }
 
-/// Render the delivery JSON body (§3.4). Stable across retries of the same
+/// Render the delivery JSON body. Stable across retries of the same
 /// delivery; `data` reuses the event's v1 DTO verbatim.
 fn render_body(
     webhook_id: &str,
@@ -624,7 +623,7 @@ fn render_body(
     serde_json::to_string(&v).unwrap_or_else(|_| "{}".to_string())
 }
 
-/// Build the outbound header set for one attempt (§3.4). Omits the signature
+/// Build the outbound header set for one attempt. Omits the signature
 /// header when the subscription has no secret.
 fn build_headers(
     webhook_id: &str,

@@ -5,7 +5,7 @@
 //! thin 3-line shims that call this function via libFuzzer. See
 //! `ergo-difftest/fuzz/README.md` for how to run those targets.
 //!
-//! # Design (decision D1 from interface-contracts.md §6)
+//! # Design
 //!
 //! Keeping the logic on stable means:
 //! - The invariant code is covered by the stable CI gate and unit tests.

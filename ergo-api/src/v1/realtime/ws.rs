@@ -1,5 +1,5 @@
 //! `GET /api/v1/ws` — the axum WebSocket adapter over the [`RealtimeBus`] +
-//! [`Session`] (`v1-api-design.md` §4.1, fragment §2.1).
+//! [`Session`].
 //!
 //! This layer is deliberately thin: it owns the transport (upgrade, text-frame
 //! I/O, WS ping/pong, heartbeat/idle timers, connection caps) and delegates
@@ -10,7 +10,7 @@
 //! [`spawn_event_bridge`] is the server-seam feeder (runtime-guarded like the
 //! O4 depth sampler): it polls the coarse operator event ring via
 //! [`NodeReadState::events`] and republishes `block_applied` / `reorg` into the
-//! bus `blocks` channel. This is the honest Phase-1 upstream — the coarse ring
+//! bus `blocks` channel. This is the honest current upstream — the coarse ring
 //! is bridged INTO the bus (one push path), not a second event source. The
 //! fine-grained address/box/token/tx taps live in node internals and are a
 //! follow-up; until they land those classes are `channel_unavailable`.
@@ -33,7 +33,7 @@ use super::protocol::{
     parse_client_frame, ClientFrame, FrameParseError, Session, HEARTBEAT_MS, MAX_MESSAGE_BYTES,
 };
 
-/// Max events replayed per `resume` (bounds the backfill cost, §2.7).
+/// Max events replayed per `resume` (bounds the backfill cost).
 const RESUME_MAX: usize = 1024;
 
 /// Default coarse-ring poll cadence for the bridge feeder. The coarse ring is
@@ -59,9 +59,9 @@ fn session_id() -> String {
 ///
 /// **Not a plain REST read.** A successful call performs the WebSocket
 /// upgrade handshake (HTTP 101) and hands off to the long-lived [`Session`]
-/// protocol (subscribe/unsubscribe/resume/ping, `v1-api-design.md` §4.1) — not
-/// representable as an OpenAPI response body. Only the pre-upgrade rejection
-/// paths are documented below.
+/// protocol (subscribe/unsubscribe/resume/ping) — not representable as an
+/// OpenAPI response body. Only the pre-upgrade rejection paths are
+/// documented below.
 #[utoipa::path(
     get, path = "/api/v1/ws", tag = "realtime",
     responses(
@@ -232,7 +232,7 @@ async fn handle_text(
     bus: &Arc<RealtimeBus>,
     text: &str,
 ) -> Result<(), axum::Error> {
-    // Control-frame rate limit (§2.6) — every inbound text frame counts,
+    // Control-frame rate limit — every inbound text frame counts,
     // BEFORE parsing, so malformed/unknown frames cannot bypass the limiter
     // (each otherwise still costs a parse + error response).
     if !session.record_control_op(Instant::now()) {

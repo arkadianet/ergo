@@ -41,8 +41,9 @@ pub type ResolvedBoxes = Vec<([u8; 32], Vec<u8>)>;
 
 /// Failure arms for the digest-mode apply seam. Each arm is a
 /// distinct rejection cause — the apply orchestrator uses these to
-/// classify failures into `session-scoped invalid` vs
-/// `cryptographically definitive invalid` per the design doc.
+/// classify failures into `session-scoped invalid` (this node's local
+/// state may be at fault) vs `cryptographically definitive invalid`
+/// (the block itself is provably malformed, regardless of local state).
 #[derive(Debug, thiserror::Error)]
 pub enum DigestApplyError {
     /// `blake2b256(proof_bytes) != header.ad_proofs_root`. The
@@ -1144,7 +1145,7 @@ mod tests {
         );
     }
 
-    /// Phase 5.7 — the real consensus oracle. Replays a contiguous run
+    /// The real consensus oracle. Replays a contiguous run
     /// of mainnet blocks through the digest verifier: seed at each
     /// block's parent `state_root`, apply its real net box changes
     /// against its real ADProofs, and assert the finalized root equals

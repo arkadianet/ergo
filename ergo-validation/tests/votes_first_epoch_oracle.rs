@@ -5,7 +5,7 @@
 //! directly from a live Scala mainnet node's
 //! `/blocks/at/{n}` and `/blocks/{id}/header.votes`. The tally is
 //! derived offline from the captured raw votes (NOT from
-//! `/blockchain/parameters` â€” that endpoint reflects the Scala
+//! `/blockchain/parameters` — that endpoint reflects the Scala
 //! genesis-era bypass at `extension_validation.rs:101` and is not
 //! the actual epoch-vote tally).
 //!
@@ -59,7 +59,7 @@ fn load_fixture() -> HashMap<u32, [u8; 3]> {
 /// rather than hard-coding `Vec::new()`.
 fn derive_expected_tally_from_fixture(headers: &HashMap<u32, [u8; 3]>) -> Vec<(i8, i32)> {
     // Seed: empty (no h=0 in Rust storage; or [0,0,0] in Scala
-    // which filters to empty â€” same outcome).
+    // which filters to empty — same outcome).
     let mut epoch_votes: Vec<(i8, i32)> = Vec::new();
     // Walk h=1..1023, applying VotingData.update semantics:
     // increment existing matching entries; drop unseen.
@@ -97,7 +97,7 @@ fn first_boundary_matches_scala_oracle_for_mainnet() {
         expected
     );
 
-    // Build the chain reader. Deliberately omit h=0 â€” matches Rust
+    // Build the chain reader. Deliberately omit h=0 — matches Rust
     // storage convention.
     headers.remove(&0); // no-op; just makes intent explicit
     let chain = FixtureChain { headers };
@@ -113,7 +113,7 @@ fn first_boundary_matches_scala_oracle_for_mainnet() {
 /// Sanity: synthesizing h=0 with [0,0,0] (matching Scala's protocol
 /// convention for genesis votes) must produce the same tally as
 /// omitting h=0 entirely (Rust storage convention). The two
-/// conventions must yield byte-identical tallies â€” this pins that
+/// conventions must yield byte-identical tallies — this pins that
 /// equivalence.
 #[test]
 fn first_boundary_synthesized_h0_matches_omitted() {

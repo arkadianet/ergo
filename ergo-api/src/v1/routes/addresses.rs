@@ -1,7 +1,6 @@
-//! `addresses/*` reads (`v1-api-design.md` §3.7). This group OWNS the
-//! `/api/v1/addresses/*` subtree (coherence O9). `balance` and `transactions`
-//! are unique here; `boxes` / `unspent` are the SAME resources as
-//! `boxes/{by-address,unspent/by-address}` (O10) — one handler
+//! `addresses/*` reads. This group OWNS the `/api/v1/addresses/*` subtree.
+//! `balance` and `transactions` are unique here; `boxes` / `unspent` are the
+//! SAME resources as `boxes/{by-address,unspent/by-address}` — one handler
 //! ([`super::boxes`]), dual-mounted in the router, never a second copy.
 
 use axum::extract::{Path, State};
@@ -166,7 +165,7 @@ pub async fn transactions(
     // there ARE txs; an empty result is authoritative from the index and needs
     // no chain. Guard the non-empty case so a missing reader is an honest
     // `chain_reader_unavailable`, not a 500 from the downstream
-    // `build_indexed_tx_response` (CodeRabbit #170).
+    // `build_indexed_tx_response`.
     if !txs.is_empty() {
         if let Err(e) = state.chain() {
             return *e;

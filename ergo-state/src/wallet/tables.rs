@@ -73,10 +73,9 @@ pub const WALLET_DERIVATION_HEAD: TableDefinition<(), u64> =
     TableDefinition::new("wallet_derivation_head");
 
 /// Tracked HD pubkeys. Keyed by `(derivation_path_index, pubkey)` so
-/// the BTree iteration order = derivation order across restarts
-/// (spec §7.1 invariant). Value carries metadata (derivation path
-/// Vec<u32>, optional label, height-added) per spec §7.1's
-/// value-shape definition.
+/// the BTree iteration order = derivation order across restarts.
+/// Value carries metadata (derivation path Vec<u32>, optional label,
+/// height-added).
 ///
 /// Key: `(derivation_path_index: u64 BE, pubkey: [u8; 33])` packed
 /// as 41 bytes (8 + 33). Big-endian u64 ensures sort-by-index.
@@ -86,13 +85,13 @@ pub const WALLET_TRACKED_PUBKEYS: TableDefinition<[u8; 41], Vec<u8>> =
 
 /// Visible-address cache (the filtered list per
 /// `WalletCache.publicKeyAddresses`). Rebuilt atomically with every
-/// write to `WALLET_TRACKED_PUBKEYS`. Per spec §7.1 the value is
-/// the pubkey bytes; address rendering happens at REST read time so
-/// we don't bake the network prefix into persistent state.
+/// write to `WALLET_TRACKED_PUBKEYS`. The value is the pubkey bytes;
+/// address rendering happens at REST read time so we don't bake the
+/// network prefix into persistent state.
 ///
-/// Key: `index: u32` (matches spec's "filtered-view sequential
-/// index"). Only entries for VISIBLE addresses appear here — hidden
-/// master is absent.
+/// Key: `index: u32` (a sequential index over the filtered view).
+/// Only entries for VISIBLE addresses appear here — hidden master is
+/// absent.
 /// Value: `pubkey: [u8; 33]`. The REST `/wallet/addresses` handler
 /// renders to base58 at response-build time.
 pub const WALLET_VISIBLE_ADDRESSES: TableDefinition<u32, [u8; 33]> =
@@ -100,7 +99,7 @@ pub const WALLET_VISIBLE_ADDRESSES: TableDefinition<u32, [u8; 33]> =
 
 /// Persisted change address (one row, value = 33-byte pubkey).
 /// When `None`, the change address falls back to the first tracked
-/// pubkey per spec §7.4. Stores the pubkey bytes, not the rendered
+/// pubkey. Stores the pubkey bytes, not the rendered
 /// address string — REST handlers render at read time with the
 /// current network prefix.
 pub const WALLET_CHANGE_ADDRESS: TableDefinition<(), [u8; 33]> =

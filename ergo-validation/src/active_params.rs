@@ -138,7 +138,7 @@ pub enum ActiveParamsError {
     /// so negatives only reach this codec via storage corruption or a
     /// bug in the voted-params writer. Failing here at the parse /
     /// persisted-codec boundary keeps `ProtocolParams::from_active`
-    /// infallible per spec `2026-04-28-voted-parameters-phase2.md` §8.1.
+    /// infallible.
     #[error("non-negativity-constrained parameter id {id} value {value} is negative")]
     NegativeProtocolParam {
         /// Numeric parameter id (1..=8 in the named-id space).
@@ -261,8 +261,7 @@ pub fn parse_active_params(
         m.remove(&id).ok_or(ActiveParamsError::MissingRequired(id))
     };
     // Non-negativity-constrained fields: parser fail-closes so
-    // `ProtocolParams::from_active` stays infallible per
-    // `2026-04-28-voted-parameters-phase2.md` §8.1. Scala emits only
+    // `ProtocolParams::from_active` stays infallible. Scala emits only
     // non-negative values for these ids; a negative here can only come
     // from storage corruption or a producer bug.
     let take_required_nonneg = |m: &mut std::collections::BTreeMap<u8, i32>, id: u8| {
@@ -565,8 +564,8 @@ impl ActiveProtocolParameters {
                 .ok_or(ActiveParamsError::MissingRequired(id))
         };
         // Non-negativity-constrained fields fail-close at the codec
-        // boundary so `ProtocolParams::from_active` stays infallible
-        // (spec §8.1). Same contract as parse_active_params.
+        // boundary so `ProtocolParams::from_active` stays infallible.
+        // Same contract as parse_active_params.
         let mut take_nonneg = |id: u8| -> Result<i32, ActiveParamsError> {
             let v = take(id)?;
             if v < 0 {
@@ -941,7 +940,7 @@ mod tests {
     fn deserialize_rejects_negative_cost_bearing_param() {
         // Storage corruption case: a row has a negative i32 in a
         // cost-bearing slot. The codec must reject at this boundary so
-        // `ProtocolParams::from_active` can stay infallible (§8.1).
+        // `ProtocolParams::from_active` can stay infallible.
         let bytes = {
             let mut wire = scala_launch().serialize().unwrap();
             // Find input_cost (id=6) and overwrite its i32 with -1.

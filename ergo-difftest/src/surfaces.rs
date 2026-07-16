@@ -56,8 +56,8 @@ where
             // The `MAX_TYPE_DEPTH` (=100) guard is a stack-overflow safeguard, NOT
             // a consensus boundary: Scala's `TypeSerializer` imposes no type-depth
             // limit (only the 4096-byte proposition cap), so the node deliberately
-            // rejects 101..4096-deep *type descriptors* Scala accepts (QA SER-003,
-            // kept doc-only — see ergo-ser sigma_type.rs MAX_TYPE_DEPTH). A
+            // rejects 101..4096-deep *type descriptors* Scala accepts (documented,
+            // not fixed — see ergo-ser sigma_type.rs MAX_TYPE_DEPTH). A
             // re-decode that trips ONLY that conservative cap is that documented
             // divergence firing on a near-boundary re-encoding, not a codec
             // inconsistency — so it is not a Bug. NOTE: this excludes the *type*
@@ -276,14 +276,15 @@ pub fn registry(only: Option<&str>) -> Vec<Surface> {
         },
         // ----- `verify_avl`: AVL+ batch-proof verification -----
         //
-        // Hermetic check that exercises the `AvlVerifier` panic guard (bug #6):
+        // Hermetic check that exercises the `AvlVerifier` panic guard:
         //   CLEAN HEAD  — `AvlVerifier::guarded` catches an op-time panic from
         //                 the upstream crate and returns `Err(())` → `Rejected`.
         //   PATCHED HEAD — the guard is removed; the panic escapes the surface
         //                 run fn; `run_one`'s `catch_unwind` catches it →
         //                 `Outcome::Bug("PANIC: …")`.
         //
-        // This surface is the canonical re-injection detection channel for #6.
+        // This surface is the canonical re-injection detection channel for
+        // a regression of that guard.
         Surface {
             name: "verify_avl",
             run: Box::new(|b| {

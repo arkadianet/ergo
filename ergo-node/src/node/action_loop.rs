@@ -116,7 +116,7 @@ pub(super) async fn action_loop(
     let mut mining_votes_dirty = false;
     // Startup priming: publish the initial BestTip + (if already synced) the
     // first BuildIntent, so an idle already-synced node serves a candidate
-    // without waiting for an unrelated state change (Codex plan finding).
+    // without waiting for an unrelated state change.
     if let Some(wiring) = mining.as_ref() {
         let prev = mining_last_tip.best_full_id();
         mining_last_tip = signal_mining_engine(
@@ -429,7 +429,7 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
     // Three independent maintenance passes this tick:
     //  - recheck (A): full-pool recheck-and-evict on a tip change.
     //  - suspects (B): re-validate the off-loop build's flagged ids between blocks.
-    //  - drain (§7): re-admit demoted/rolled-back txs from the revalidation
+    //  - drain: re-admit demoted/rolled-back txs from the revalidation
     //    queue. Gated on the QUEUE being non-empty, NOT the pool — an epoch
     //    `demote_all` empties the pool INTO the queue, so the drain must run with
     //    `pool.size() == 0`.

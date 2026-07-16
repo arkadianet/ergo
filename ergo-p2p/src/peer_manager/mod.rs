@@ -1,8 +1,9 @@
 //! Peer manager: connection limits, peer selection, discovery, eviction.
 //!
 //! Manages the set of connected peers with anti-eclipse measures:
-//! - Max 80 total connections by default
-//! - Target 60 outbound connections by default
+//! - Max 384 total connections by default
+//! - Target 96 outbound, up to 256 inbound (decoupled — a full outbound
+//!   set never reduces inbound capacity)
 //! - 1 connection per IP
 //! - Max 3 from same /16 subnet [inherited, relaxed]
 //!
@@ -528,9 +529,9 @@ impl PeerManager {
             preferred.sort();
             return preferred;
         }
-        // Fallback: accept degraded peers rather than stall sync entirely.
-        // Matches the checklist's "bucketed by last-seen, falls back to
-        // degraded" contract.
+        // Fallback: accept degraded peers rather than stall sync entirely
+        // — bucketed by last-seen, falling back to degraded peers only
+        // when no preferred peer is connected.
         let mut fallback: Vec<PeerId> = self
             .peers
             .values()
@@ -554,14 +555,14 @@ impl PeerManager {
     /// ```
     /// where `allBlocksAvailable = blocksToKeep == -1` (full archive).
     ///
-    /// Why this matters: in `eligible_download_peers` we returned ALL
-    /// connected peers regardless of advertised capability. Mode 5/6
-    /// peers (digest, no block sections) and Mode 2 mid-bootstrap peers
-    /// (no pre-snapshot blocks) silently ignore our RequestModifier
-    /// because they don't have the data, but our delivery tracker still
-    /// counts them as "request sent, awaiting reply" until timeout.
-    /// Found by Codex audit after Mode 2 attempts 4/5 stalled with 0
-    /// post-install block applies despite 60+ healthy peers.
+    /// Why this matters: `eligible_download_peers` returns ALL connected
+    /// peers regardless of advertised capability. Mode 5/6 peers (digest,
+    /// no block sections) and Mode 2 mid-bootstrap peers (no
+    /// pre-snapshot blocks) silently ignore our RequestModifier because
+    /// they don't have the data, but our delivery tracker still counts
+    /// them as "request sent, awaiting reply" until timeout — stalling
+    /// block application even with many otherwise-healthy peers
+    /// connected.
     ///
     /// Filter: peer must be Active, have completed handshake, and have
     /// advertised `state_type=Utxo` + `verify_tx=true` + `blocks_to_keep

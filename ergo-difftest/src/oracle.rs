@@ -340,8 +340,8 @@ fn deserialize_box_script(
 /// JVM oracle uses (`EvalCore.dummyContext`): SELF = the tree at 1M nanoErg, the
 /// sole input; no data/outputs; empty extension; activated v6; the cost limit =
 /// `scriptCostLimitInEvaluator` (1,000,000 block cost). Emits
-/// `P:<sigmaboolean-hex>|<cost>` so a `(prop, cost)` divergence — the #108/#115
-/// cost-bug class, invisible to the deserialize-only surfaces — shows as a canonical
+/// `P:<sigmaboolean-hex>|<cost>` so a `(prop, cost)` divergence — a
+/// cost-accounting bug invisible to the deserialize-only surfaces — shows as a canonical
 /// mismatch. A soft-fork-wrapped body can't reduce to a prop (the JVM eval also
 /// fails), so it rejects.
 /// Construct the `reduce` surface's SELF box to match `EvalCore.dummyContext`'s
@@ -503,7 +503,8 @@ fn validate_verdict(bytes: &[u8]) -> (Verdict, usize) {
 /// the frame. On success returns the final tree digest as hex; on any op
 /// failure returns `Reject`.
 ///
-/// The guard's `catch_unwind` boundary is the load-bearing element for bug #6:
+/// The guard's `catch_unwind` boundary is what makes this surface safe against
+/// a real upstream panic path:
 /// a structurally-valid-but-wrong proof (e.g. a Lookup proof used for a Remove)
 /// causes the upstream crate to `panic!` at op-time; the guard catches it and
 /// returns `Err(())`, which surfaces here as `Verdict::Reject`. On a patched

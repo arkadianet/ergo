@@ -185,7 +185,7 @@ pub(crate) fn if_expr(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
 /// `Ident("_")`), exactly as in the reference where `StableId` precedes it.
 ///
 /// `ctx` does not influence the atom head (`Parened` hardcodes `ExprCtx`), but is
-/// carried for signature parity with the Task-8 layer.
+/// carried through for signature parity with the rest of the postfix/suffix layer.
 pub(crate) fn simple_expr(c: &mut Cursor, _ctx: Ctx) -> Result<Expr, ParseError> {
     let t = c.peek();
     if t.kind == TokenKind::LBrace {

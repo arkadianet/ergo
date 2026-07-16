@@ -570,7 +570,7 @@ pub struct SubmitRequest {
 ///
 /// Carries two channels into the action loop:
 /// - `tx` — tx submission (existing `SubmitRequest`).
-/// - `event_tx` — `PeerEvent` channel, used for the §12 `POST /blocks`
+/// - `event_tx` — `PeerEvent` channel, used for the `POST /blocks`
 ///   sendMinedBlock path. Wraps the same channel peer-task events
 ///   ride on, since locally-mined blocks are processed through
 ///   `PeerEvent::LocalFullBlock`.
@@ -606,7 +606,7 @@ impl NodeSubmit for SubmitBridge {
         self.submit_transaction(bytes, mode).await
     }
 
-    /// §12 `POST /blocks` (sendMinedBlock) production override.
+    /// `POST /blocks` (sendMinedBlock) production override.
     ///
     /// 1. Decode the Scala-shape JSON into canonical wire bytes for each
     ///    section via `decode_scala_full_block`. Section-id consistency

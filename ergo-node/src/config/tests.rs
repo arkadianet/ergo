@@ -893,8 +893,8 @@ fn blocks_to_keep_zero_requires_canonical_mode_6() {
 
 #[test]
 fn blocks_to_keep_below_rollback_floor_rejected() {
-    // Phase 4 replaced the "not yet supported" activation gate
-    // with the rollback-window floor: pruning must retain at least
+    // The old "not yet supported" activation gate was replaced with the
+    // rollback-window floor: pruning must retain at least
     // `ROLLBACK_WINDOW + SAFETY_MARGIN` blocks so a reorg never
     // needs evicted section bytes. blocks_to_keep = 5 (below the
     // floor) must reject.
@@ -909,7 +909,7 @@ fn blocks_to_keep_below_rollback_floor_rejected() {
 
 #[test]
 fn blocks_to_keep_above_rollback_floor_accepted() {
-    // Phase 4: blocks_to_keep above the floor loads successfully.
+    // blocks_to_keep above the floor loads successfully.
     let path = write_toml(
         "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
          [node]\nblocks_to_keep = 1024\n",
@@ -1069,7 +1069,7 @@ fn archive_with_extra_index_accepted() {
 
 #[test]
 fn pruned_without_extra_index_loads_after_phase4() {
-    // Phase 4 lifted the activation gate. blocks_to_keep = 1024
+    // The activation gate is lifted. blocks_to_keep = 1024
     // (above the rollback floor) without extra-index loads
     // successfully — that's the standard Mode 3 setup.
     let path = write_toml(
@@ -1204,8 +1204,8 @@ fn non_canonical_mode_6_combo_archive_btk_rejected() {
 #[test]
 fn canonical_mode_6_combo_accepted() {
     // The canonical Mode 6 combo (state_type=digest, vT=false,
-    // blocks_to_keep=0) ships in part 2b — it passes all gates
-    // and produces a NodeConfig with the expected values. The
+    // blocks_to_keep=0) passes all gates and produces a NodeConfig
+    // with the expected values. The
     // mempool is force-disabled since headers-only has no UTXO
     // state to validate transactions against.
     let path = write_toml(
@@ -1457,7 +1457,7 @@ fn utxo_bootstrap_explicit_false_accepted() {
 
 #[test]
 fn utxo_bootstrap_true_accepted_after_part_2j_gate_lift() {
-    // Mode 2 part 2j lifted the activation gate. A TOML
+    // The Mode 2 activation gate is lifted. A TOML
     // setting `utxo_bootstrap = true` (without conflicting
     // flags like extra-index) now loads successfully. R-rule
     // conflicts (R2 etc.) still fire as configured.
@@ -1624,10 +1624,10 @@ fn nipopow_bootstrap_with_explicit_genesis_id_accepted_and_preserved() {
 
 #[test]
 fn nipopow_bootstrap_true_with_pruning_accepted_post_phase4() {
-    // Phase 4 lifted the Mode 3 activation gate. Pruning +
+    // The Mode 3 activation gate is lifted. Pruning +
     // nipopow_bootstrap = true is now the standard Mode 3 +
-    // NiPoPoW combo (the Phase 1b sentinel composition contract
-    // covers this — both bootstrap writers play nice). The
+    // NiPoPoW combo (the sentinel composition contract covers
+    // this — both bootstrap writers play nice). The
     // rollback floor still applies: blocks_to_keep = 1024 is
     // safely above ROLLBACK_WINDOW + SAFETY_MARGIN.
     let path = write_toml(

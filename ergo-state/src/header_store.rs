@@ -122,7 +122,7 @@ impl HeaderSectionTables {
     /// Mode 3 — look up a section's parent-header height via the
     /// `SECTION_HEIGHT_INDEX`. Returns `None` for sections with no
     /// row (not-yet-indexed legacy + never-seen ids alike — the
-    /// serve gate in Phase 3a treats both as fail-closed deny).
+    /// serve gate treats both as fail-closed deny).
     ///
     /// The embedding store drains the persist pipeline before
     /// delegating here so async commit failures surface as
@@ -201,7 +201,7 @@ impl HeaderSectionTables {
     /// `/blocks/modifier/{id}` can dispatch immediately on the next
     /// read without waiting for a startup back-fill pass.
     ///
-    /// Mode 3 Phase 3a defense-in-depth: rejects writes whose
+    /// Mode 3 defense-in-depth: rejects writes whose
     /// parent header is below the current prune sentinel. The
     /// receive-side gating in `ergo-sync::executor` silently
     /// drops these before they reach the store; the storage-side
@@ -209,8 +209,8 @@ impl HeaderSectionTables {
     /// (resurrection attempt via a delayed peer delivery, a
     /// rogue peer pushing directly, or an executor bug that
     /// bypassed receive gating). `SECTION_HEIGHT_INDEX` provides
-    /// the height lookup that was stamped at header-store time
-    /// (Phase 1a wiring) — sections whose parent we never indexed
+    /// the height lookup that was stamped at header-store time —
+    /// sections whose parent we never indexed
     /// are passed through (no height to compare against; the
     /// serve gate will catch them on read if needed).
     pub(crate) fn store_block_section_typed(
@@ -221,7 +221,7 @@ impl HeaderSectionTables {
     ) -> Result<(), StateError> {
         let mut write_txn = crate::begin_write_qr(&self.db)?;
         write_txn.set_durability(redb::Durability::None);
-        // Phase 3a guard — read sentinel + section-height INSIDE
+        // Sentinel guard — read sentinel + section-height INSIDE
         // the write_txn so a concurrent persist worker that's
         // advancing the sentinel can't race the check-then-write.
         // Gate fires whenever `sentinel > 1` (sentinel-based, not

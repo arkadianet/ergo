@@ -1,7 +1,6 @@
-//! M4 Task 5 — generic constant-folding engine over the emitted opcode IR
+//! Generic constant-folding engine over the emitted opcode IR
 //! (`ergo_ser::opcode::Expr`), a GraphBuilding-exact port of Scala's
-//! `rewriteDef` fold cascade (`dev-docs/ergoscript-compiler-m4-recon/
-//! recon-transforms.md` §1b/§2a-2d).
+//! `rewriteDef` fold cascade.
 //!
 //! # What this ports (each rule pins its Scala `file:line`)
 //!
@@ -22,14 +21,13 @@
 //!   `applySeq` throws `ArithmeticException` on overflow → compile reject,
 //!   absorbing the retired D-C5 `fold_overflow_check`); `min`/`max` fold (never
 //!   overflow); `/`/`%` fold **only when the divisor is a non-zero constant**
-//!   (`DivOp.shouldPropagate = rhs != n.zero`, `NumericOps.scala:73` — a fresh
-//!   cc probe, `compile_probes.txt`, corrects the M3/dossier "never folded"
-//!   note); ordering comparisons `<`/`<=`/`>`/`>=` fold both-`Const`;
+//!   (`DivOp.shouldPropagate = rhs != n.zero`, `NumericOps.scala:73`,
+//!   `compile_probes.txt`); ordering comparisons `<`/`<=`/`>`/`>=` fold both-`Const`;
 //!   `!Const(b)→Const(!b)` (`:89`).
 //! - **§2b Equals/NotEquals** (`DefRewriting.scala:100-129`): `x==y→true` /
 //!   `x!=y→false` fire on Scala **graph-ref equality** (hash-consing), which we
 //!   mirror with structural `Expr` equality **restricted to `Const` operands**
-//!   (the non-`Const` `a==a` case is CSE-substrate — M5, locked decision 6);
+//!   (the non-`Const` `a==a` case is CSE substrate, handled by `crate::cse`);
 //!   the boolean-`Const` arms (`x==true→x`, `x==false→!x`, and NotEquals'
 //!   mirror) are ported. A **non-equal, non-boolean** `Const==Const` (e.g.
 //!   `1==2`) does NOT fold — Scala's `Equals` case is terminal (never falls to
@@ -45,13 +43,13 @@
 //!   `fromItems(items).length → items.length` rule, absorbing the retired D-C6
 //!   `fold_literal_coll_sizes`): `SizeOf(<ConcreteCollection literal>)` folds to
 //!   the element count. This is the NF-1 closure — it eliminates a
-//!   `Coll[UnsignedBigInt]()` (v3-only elem type) BEFORE the v0-data gate that
-//!   runs after this pass (locked decision 1). A `SizeOf` over a `Coll` CONSTANT
+//!   `Coll[UnsignedBigInt]()` (v3-only elem type) BEFORE the v0-data gate: this
+//!   fold pass always runs before that gate. A `SizeOf` over a `Coll` CONSTANT
 //!   is NOT folded (see [`coll_len`] for the oracle pin).
 //! - **§4 all-`Const` `anyOf`/`allOf`** (`GraphBuilding.scala:214-219`, gated on
 //!   const-prop): `Or`/`And` over a `ConcreteCollection` whose items are all
 //!   `Const[Boolean]` fold to `exists`/`forall`. The single-element unwrap and
-//!   sigma-split (`:205-208`) remain in `crate::lower` (Task 3), which runs
+//!   sigma-split (`:205-208`) remain in `crate::lower`, which runs
 //!   AFTER this pass.
 //! - **De Morgan on `!`** (`DefRewriting.scala:73-85`, NOT gated on const-prop):
 //!   `!(x<y)→x>=y`, `!(x<=y)→x>y`, `!(x>y)→x<=y`, `!(x>=y)→x<y`; `!(!x)→x`.
@@ -71,7 +69,7 @@
 //!   parent fold — so `ccs (x*100).toByte > 0.toByte` folds `x*100→1000` yet
 //!   keeps the `Downcast` AND the `Gt` (oracle-pinned).
 //! - **`BigInt` arithmetic/comparison** — outside the `i64` width ladder; not
-//!   compile-folded (dossier control + the existing cast-fold boundary). A
+//!   compile-folded (oracle-confirmed, respecting the existing cast-fold boundary). A
 //!   BigInt `Const` is opaque to [`as_num`], so no BigInt fold ever fires.
 //! - **Division/modulo by a zero constant** — divisor-`0` skips the fold (Scala
 //!   `shouldPropagate=false`), leaving `1/0`/`1%0` unfolded (oracle-pinned).
@@ -877,8 +875,7 @@ mod tests {
     #[test]
     fn fold_byte_bitwise_result_equality_folds_true() {
         // The receiver is already a folded Byte Const (emit's bitwise fold);
-        // Task 5 folds the surrounding equality: 7.toByte == 7.toByte → true
-        // (vectors 84/85 core).
+        // this pass then folds the surrounding equality: 7.toByte == 7.toByte → true.
         assert_eq!(f(op2(EQ, byte(7), byte(7))), boolean(true));
     }
 

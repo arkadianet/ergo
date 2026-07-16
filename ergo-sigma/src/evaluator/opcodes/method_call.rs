@@ -1,10 +1,10 @@
-//! `0xDC MethodCall` â€” dispatch on `(type_id, method_id)` to the
+//! `0xDC MethodCall` — dispatch on `(type_id, method_id)` to the
 //! corresponding type-method handler. Scala charges `MethodCall`
 //! overhead (4) at entry plus per-method cost; this module is the
 //! single largest opcode in the evaluator.
 //!
 //! Cost discipline is per-method: each arm calls `add_method_cost(cx.cost, n)`
-//! after the dispatcher's `add_cost(cx.cost, 0xDC)`. The two are kept distinct â€”
+//! after the dispatcher's `add_cost(cx.cost, 0xDC)`. The two are kept distinct —
 //! a shared "method overhead" wrapper would silently collapse the per-method
 //! cost into the dispatcher cost.
 
@@ -40,7 +40,7 @@ pub(in crate::evaluator) fn eval_method_call(
     // Scala parity: `MethodCall.evaluate` cross-checks
     // `method.methodVersion` (declared in `_v6Methods`) against
     // `context.activatedScriptVersion`. The table below mirrors the
-    // Scala v6 method registry â€” any method-id appearing in `_v6Methods`
+    // Scala v6 method registry — any method-id appearing in `_v6Methods`
     // for a given type-id requires `activatedScriptVersion >= 3` (block
     // header version 4). The (12, 31 | 32) range is fused with
     // 30..=33 since 31 and 32 are the startsWith/endsWith arm. (101, 8)
@@ -54,7 +54,7 @@ pub(in crate::evaluator) fn eval_method_call(
         // SCollection(12).indexOf(26) -> Int
         // Cost: PerItemCost(20, 10, 2) charged on actual iterations.
         //
-        // Negative `from` clamps to 0 â€” Scala parity. `methods.scala`
+        // Negative `from` clamps to 0 — Scala parity. `methods.scala`
         // `indexOf_eval` computes `val start = math.max(from, 0)` and
         // loops from `start`. It does NOT throw. Mirror with
         // `v.max(0) as usize` below.
@@ -133,7 +133,7 @@ pub(in crate::evaluator) fn eval_method_call(
                 .zip(items_b)
                 .map(|(a, b)| Value::Tuple(vec![a, b]))
                 .collect();
-            // Outer is Coll[(A, B)] â€” boxed-element coll carrier;
+            // Outer is Coll[(A, B)] — boxed-element coll carrier;
             // each inner element is a real 2-tuple pair (kept as
             // `Value::Tuple`).
             Ok(Value::CollGeneric(
@@ -545,8 +545,8 @@ pub(in crate::evaluator) fn eval_method_call(
         // `getMethodById` → CheckAndGetMethod ValidationException);
         // our wire layer must stay version-independent because real
         // 6.x-compiled trees carry v6 method calls under v0 headers
-        // and outputs paying to them must decode (PR #13/#14 oracle
-        // vectors), so the reject lands here on the evaluation path.
+        // and outputs paying to them must decode (oracle-confirmed),
+        // so the reject lands here on the evaluation path.
         // KNOWN RESIDUAL (pre-existing): a DEAD-BRANCH (99, 19) in a
         // pre-v3 tree evaluates past this gate while Scala fails the
         // whole tree at parse — needs a spend-path AST pre-walk.
@@ -595,7 +595,7 @@ pub(in crate::evaluator) fn eval_method_call(
         // a real v6 MethodCall and is handled just below.)
         // SContext(101).getVarFromInput(12, inputIndex: Short, varId: Byte)[T] -> Option[T]
         // EIP-50 v6 method, new in 6.0 (no v5 inline twin). Reads
-        // `tx.inputs(inputIndex).extension.getVar[T](varId)` â€”
+        // `tx.inputs(inputIndex).extension.getVar[T](varId)` —
         // same exact-type-match rule as `0xE3 GetVar`, just on a
         // different input than SELF. `hasExplicitTypeArgs =
         // Seq(tT)` per Scala source. Returns `None` when the
@@ -681,7 +681,7 @@ pub(in crate::evaluator) fn eval_method_call(
             // `DataSerializer.deserialize(typeArg, reader)`. That is the
             // *data* serializer (raw typed value bytes), not the
             // expression-body serializer used by DeserializeContext.
-            // The two formats differ â€” DataSerializer for SBoolean is
+            // The two formats differ — DataSerializer for SBoolean is
             // a single byte (`!= 0` â‡’ true); for collections it's
             // VLQ-encoded length followed by per-element data. The
             // type to decode against comes from the explicit type
@@ -791,7 +791,7 @@ pub(in crate::evaluator) fn eval_method_call(
         // V5+ method (predates EIP-50). Element-wise XOR, truncates to
         // `min(left.len, right.len)` per Scala
         // `CollsOverArrays.scala:261`. Functionally identical to the
-        // inline `0x9B Xor` opcode â€” same algorithm, different call
+        // inline `0x9B Xor` opcode — same algorithm, different call
         // surface. Cost mirrors the inline op (per-item on the
         // shorter collection); we charge through the `0x9B` row to
         // keep JIT cost parity tests green.
@@ -873,7 +873,7 @@ pub(in crate::evaluator) fn eval_method_call(
         }
         // SAvlTree(100).contains(9) -> Boolean
         // Args: key (Coll[Byte]), proof (Coll[Byte])
-        // Scala `SAvlTreeMethods.containsMethod` â€” same prover/verifier
+        // Scala `SAvlTreeMethods.containsMethod` — same prover/verifier
         // workflow as `get` (cost-shape matches) but returns the
         // presence bit instead of the value. Without this arm any
         // script using `tree.contains(key, proof)` stalls block apply
@@ -1185,7 +1185,7 @@ pub(in crate::evaluator) fn eval_method_call(
         }
         // SAvlTree(100).insertOrUpdate(16) -> Option[AvlTree].
         // EIP-50 v6 method. Mirrors `SAvlTreeMethods.insertOrUpdateMethod`
-        // at `methods.scala:1671-1686` â€” inserts new entries OR
+        // at `methods.scala:1671-1686` — inserts new entries OR
         // overwrites existing ones for the same key in a single
         // proof-verified batch. Same args/result shape as
         // `insert` (100,12): `(entries: Coll[(Coll[Byte], Coll[Byte])],
@@ -1372,7 +1372,7 @@ pub(in crate::evaluator) fn eval_method_call(
             Ok(Value::AvlTree(updated))
         }
         // SColl(12).flatMap(15) -> Coll[B]
-        // Scala: xs.flatMap(f) â€” map each element to a collection, flatten results.
+        // Scala: xs.flatMap(f) — map each element to a collection, flatten results.
         (12, 15) => {
             if args.len() != 1 {
                 return Err(EvalError::ArityMismatch {
@@ -1640,7 +1640,7 @@ pub(in crate::evaluator) fn eval_method_call(
         // Scala's `xs[0..chunk1] ++ patch ++ xs[xs.length - chunk2 ..]`
         // for every i32 input pair (oracle-verified, 12 cases incl. i32
         // boundaries). `Coll.updated` is the only method in the Coll
-        // family whose Scala backing throws on out-of-range indices â€”
+        // family whose Scala backing throws on out-of-range indices —
         // see the updated arm below.
         (12, 19) => {
             if args.len() != 3 {
@@ -1677,7 +1677,7 @@ pub(in crate::evaluator) fn eval_method_call(
             // = JitCost(2), chunkSize = 10)` charged over
             // `xs.length + patch.length`. The prior fallback through
             // `add_cost_per_item(cx.cost, 0xDC, n)` resolved to
-            // `Fixed(4)` â€” under-charging vs. Scala (consensus-loosening).
+            // `Fixed(4)` — under-charging vs. Scala (consensus-loosening).
             let xs_len = collection_len(&obj_val, cx.ctx);
             let patch_len = collection_len(&patch_val, cx.ctx);
             let cost_n = (xs_len + patch_len) as u32;
@@ -1724,7 +1724,7 @@ pub(in crate::evaluator) fn eval_method_call(
             }
         }
         // SColl(12).updated(20) -> Coll[T]
-        // Scala: coll.updated(index, elem) â€” replace element at index.
+        // Scala: coll.updated(index, elem) — replace element at index.
         // sigma-state's `CollsOverArrays.scala:100-104` delegates to
         // `Array[A].updated(index, elem)`, which throws
         // `IndexOutOfBoundsException` for any `index < 0 || index >= length`.
@@ -1736,12 +1736,12 @@ pub(in crate::evaluator) fn eval_method_call(
         // Order of checks below keeps the error class for non-collection
         // receivers as `TypeError`:
         //   1. Eval args, type-check index is `Int`.
-        //   2. Charge cost â€” matches Scala's `addSeqCost(costKind,
+        //   2. Charge cost — matches Scala's `addSeqCost(costKind,
         //      coll.length, opDesc) { coll.updated(...) }` ordering at
         //      `methods.scala::updated_eval`.
-        //   3. Type-check receiver is a `Coll` â€” `TypeError` on miss.
-        //   4. Bounds-check index â€” `RuntimeException` on out-of-range.
-        //   5. Dispatch by carrier â€” `TypeError` on elem mismatch.
+        //   3. Type-check receiver is a `Coll` — `TypeError` on miss.
+        //   4. Bounds-check index — `RuntimeException` on out-of-range.
+        //   5. Dispatch by carrier — `TypeError` on elem mismatch.
         // The Scala-source citation above is the rejection-parity oracle
         // (sigma-state delegates to Scala stdlib whose Scaladoc pins the
         // throw semantics).
@@ -1767,7 +1767,7 @@ pub(in crate::evaluator) fn eval_method_call(
             // declares `PerItemCost(baseCost = JitCost(20), perChunkCost
             // = JitCost(1), chunkSize = 10)` charged over `coll.length`.
             // Prior fallback through `add_cost_per_item(cx.cost, 0xDC, n)`
-            // resolved to `Fixed(4)` â€” under-charging vs. Scala.
+            // resolved to `Fixed(4)` — under-charging vs. Scala.
             let n = collection_len(&obj_val, cx.ctx);
             let updated_cost = CostKind::PerItem {
                 base: JitCost::from_jit(20),
@@ -1784,7 +1784,7 @@ pub(in crate::evaluator) fn eval_method_call(
             );
             // Receiver type-gate. `collection_len` returns 0 for
             // non-collections, which would make the bounds-check below
-            // fire RuntimeException for any idx â€” wrong error class.
+            // fire RuntimeException for any idx — wrong error class.
             // Filter here so the dispatch below only sees real Colls.
             //
             // Scala-sigma's `Coll[T].updated` accepts any element-typed
@@ -1795,17 +1795,17 @@ pub(in crate::evaluator) fn eval_method_call(
             // (CollBytes/Short/Int/Long/Bool), strictly-typed boxed
             // carriers (CollSigmaProp, CollHeader), special-shape
             // carriers (CollBox, Tokens), and the source-ref box
-            // carrier (BoxCollection â€” produced by INPUTS, OUTPUTS,
+            // carrier (BoxCollection — produced by INPUTS, OUTPUTS,
             // dataInputs).
             //
             // `Value::Tuple` (real fixed-arity STuple) is permanently
-            // excluded â€” tuples are not collections in Scala-sigma,
+            // excluded — tuples are not collections in Scala-sigma,
             // and STuple field replacement is not an EIP-50 method.
             // `Value::CollGeneric` is the boxed-element coll carrier
             // (Coll[Tuple], Coll[Header], nested colls); accepted
             // here because Scala's `Coll[A].updated` is generic over
             // any `A`. The element-type compatibility is trusted to
-            // the script-load type-check â€” runtime simply replaces
+            // the script-load type-check — runtime simply replaces
             // the box at the index.
             if !matches!(
                 obj_val,
@@ -1833,7 +1833,7 @@ pub(in crate::evaluator) fn eval_method_call(
             }
             let idx = idx_i32 as usize;
             match (obj_val, elem_val) {
-                // CollBytes accepts a Byte element â€” the natural carrier
+                // CollBytes accepts a Byte element — the natural carrier
                 // produced by `eval_by_index` on a Coll[Byte] (see
                 // collection.rs:118). Scala-sigma's typed dispatch
                 // accepts `Coll[Byte].updated(i, e: Byte)` and the
@@ -1846,7 +1846,7 @@ pub(in crate::evaluator) fn eval_method_call(
                 // typed dispatch on `Coll[Byte].updated` pins the
                 // element to `SByte`, so a hand-built ErgoTree
                 // presenting an `Int` element falls through to the
-                // mismatch arm below and TypeErrors â€” matching Scala
+                // mismatch arm below and TypeErrors — matching Scala
                 // rejection semantics.
                 (Value::CollBytes(mut coll), Value::Byte(v)) => {
                     coll[idx] = v as u8;
@@ -1905,7 +1905,7 @@ pub(in crate::evaluator) fn eval_method_call(
                 // Tokens stores canonical (TokenId, Long) pairs. The
                 // typical update path is `tokens.updated(i,
                 // (idBytes, amt))` where the element matches the
-                // canonical 32-byte+Long shape â€” preserve as Tokens.
+                // canonical 32-byte+Long shape — preserve as Tokens.
                 //
                 // For mismatched shapes (non-32-byte id, non-Long
                 // amount, or wrong arity), `values_to_collection`'s
@@ -2074,7 +2074,7 @@ pub(in crate::evaluator) fn eval_method_call(
             values_to_collection(kind, items, elem_type)
         }
         // SOption(36).map(7) -> Option[B]
-        // Scala: opt.map(f) â€” apply f to value if Some, return None if None.
+        // Scala: opt.map(f) — apply f to value if Some, return None if None.
         // `SOption.MapMethod.costKind = FixedCost(JitCost(20))`; applying the
         // lambda to a Some value additionally charges AddToEnv(5) when the
         // argument is bound (same per-application overhead as every other HOF
@@ -2186,8 +2186,8 @@ pub(in crate::evaluator) fn eval_method_call(
         // SBigInt(6).toUnsigned(14) -> UnsignedBigInt
         // SBigInt(6).toUnsignedMod(15, m: UnsignedBigInt) -> UnsignedBigInt
         // Sigma 6.0 conversions from signed â†’ unsigned. Scala costs:
-        //   ToUnsigned     FixedCost(JitCost(5)) â€” methods.scala:545-546
-        //   ToUnsignedMod  FixedCost(JitCost(15)) â€” methods.scala:552-553
+        //   ToUnsigned     FixedCost(JitCost(5)) — methods.scala:545-546
+        //   ToUnsignedMod  FixedCost(JitCost(15)) — methods.scala:552-553
         // toUnsigned: errors if `this` is negative (caller bug; the
         // unsigned type can't represent it). toUnsignedMod: reduces
         // any signed value modulo `m`, always producing a value in
@@ -2294,7 +2294,7 @@ pub(in crate::evaluator) fn eval_method_call(
             Ok(Value::UnsignedBigInt(a >> bits as usize))
         }
         // SUnsignedBigInt(9) v6 modular-arithmetic methods. Costs
-        // per methods.scala:574-609 â€” fixed costs (no per-bit scaling
+        // per methods.scala:574-609 — fixed costs (no per-bit scaling
         // in Scala for these operations either).
         //   14 modInverse   FixedCost(JitCost(150))  (this, m)
         //   15 plusMod      FixedCost(JitCost(30))   (this, that, m)
@@ -2361,7 +2361,7 @@ pub(in crate::evaluator) fn eval_method_call(
                     "SUnsignedBigInt.subtractMod: modulus is zero",
                 ));
             }
-            // (a - b) mod m â€” unsigned semantics: if a < b, the
+            // (a - b) mod m — unsigned semantics: if a < b, the
             // difference is negative; add m to wrap into [0, m).
             let diff = a - b;
             let r = diff % m;
@@ -2405,12 +2405,12 @@ pub(in crate::evaluator) fn eval_method_call(
         // SGroupElement(7).exp(6, e: UnsignedBigInt) -> GroupElement
         // Scala `SGroupElementMethods.ExponentiateUnsignedMethod`
         // (EIP-50 / v6Methods, confirmed by disassembly of
-        // `sigma/ast/SGroupElementMethods$.class` â€” method id 6).
+        // `sigma/ast/SGroupElementMethods$.class` — method id 6).
         // Semantics: same EC scalar multiplication as the inline
         // 0x9F `Exponentiate` opcode, but the exponent carrier is
         // `SUnsignedBigInt` rather than `SBigInt`. Because the
         // unsigned value is already in [0, 2^256), the signed
-        // Euclidean correction needed in 0x9F is unnecessary â€”
+        // Euclidean correction needed in 0x9F is unnecessary —
         // `Scalar::reduce` over the 256-bit big-endian magnitude
         // is the canonical reduction mod the secp256k1 group order.
         // Cost matches `Exponentiate.costKind` = `FixedCost(900)`.
@@ -2490,7 +2490,7 @@ pub(in crate::evaluator) fn eval_method_call(
 
 /// Returns `true` if `(type_id, method_id)` is a Sigma 6.0 / EIP-50
 /// method requiring `activatedScriptVersion >= 3`. Mirrors the Scala
-/// `_v6Methods` declarations across `sigma/ast/methods.scala` â€”
+/// `_v6Methods` declarations across `sigma/ast/methods.scala` —
 /// specifically:
 ///
 /// * `SNumericTypeMethods._v6Methods` (Byte=2, Short=3, Int=4, Long=5,
@@ -2511,14 +2511,14 @@ pub(in crate::evaluator) fn eval_method_call(
 /// * `SGlobalMethods._v6Methods`: serialize(3), deserializeTo(4),
 ///   fromBigEndianBytes(5), encodeNbits(6), decodeNbits(7), powHit(8),
 ///   some(9), none(10).
-///   (Global.xor(2) predates EIP-50 â€” V5+, not gated here.)
+///   (Global.xor(2) predates EIP-50 — V5+, not gated here.)
 ///
 /// (12, 26)/(12, 29) `indexOf`/`updateMany`, (36, *) Option methods,
 /// the V5+ SAvlTree methods (`contains` / `get` / `getMany` /
 /// `insert` / `update` / `remove` / `updateDigest` etc.),
 /// (101, 8) `selfBoxIndex`, and (106, 2) `Global.xor` are V5+ and
-/// intentionally not listed. The only v6 addition to SAvlTree â€”
-/// `insertOrUpdate` (100, 16) â€” IS listed below.
+/// intentionally not listed. The only v6 addition to SAvlTree —
+/// `insertOrUpdate` (100, 16) — IS listed below.
 pub(super) fn is_v6_method(type_id: u8, method_id: u8) -> bool {
     match (type_id, method_id) {
         // SNumericType bitwise + shifts
@@ -2534,7 +2534,7 @@ pub(super) fn is_v6_method(type_id: u8, method_id: u8) -> bool {
         (12, 30..=33) => true,
         // SBox.getReg v6 slot (getRegMethodV5 id 7 is V5+, ungated)
         (99, 19) => true,
-        // SAvlTree.insertOrUpdate (v6 â€” methods.scala:1671-1686).
+        // SAvlTree.insertOrUpdate (v6 — methods.scala:1671-1686).
         // Pre-v6 SAvlTree methods stay non-gated (caller already
         // pre-v6 callable).
         (100, 16) => true,
@@ -3093,7 +3093,7 @@ fn expect_unsigned_bigint<'a>(
 /// 2. Take the top 3 bytes (left-shift if shorter); these become
 ///    the 24-bit mantissa.
 /// 3. If the mantissa's high bit collides with the sign bit
-///    (`& 0x00800000`), shift right by 8 and bump the exponent â€”
+///    (`& 0x00800000`), shift right by 8 and bump the exponent —
 ///    keeps the sign bit reserved for the negative-difficulty
 ///    encoding.
 /// 4. Combine: `result = (size << 24) | mantissa | sign_bit`.
@@ -3140,7 +3140,7 @@ fn decode_compact_bits(compact: i64) -> num_bigint::BigInt {
     if size >= 3 {
         mantissa.push((compact & 0xFF) as u8);
     }
-    // Zero-pad on the right out to `size` total bytes â€” Scala's
+    // Zero-pad on the right out to `size` total bytes — Scala's
     // `decodeMPI` reads the full length, treating the unread tail
     // as zero (this is the difference between "23 bits of
     // mantissa" and "the mantissa scaled to size bytes").
@@ -3160,14 +3160,14 @@ fn decode_compact_bits(compact: i64) -> num_bigint::BigInt {
 }
 
 /// Truncate a `BigInt` to the low 64 bits, matching Java's
-/// `BigInteger.longValue()` semantics â€” wraps around modulo 2^64
+/// `BigInteger.longValue()` semantics — wraps around modulo 2^64
 /// without panicking on out-of-range values.
 fn bigint_low_i64(v: &num_bigint::BigInt) -> i64 {
     use num_traits::ToPrimitive;
     if let Some(x) = v.to_i64() {
         return x;
     }
-    // Out-of-range â€” wrap modulo 2^64 like Java BigInteger.longValue.
+    // Out-of-range — wrap modulo 2^64 like Java BigInteger.longValue.
     let bytes = v.to_signed_bytes_be();
     let mut buf = [0u8; 8];
     let take = bytes.len().min(8);

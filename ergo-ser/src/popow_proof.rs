@@ -292,8 +292,7 @@ mod tests {
         let parsed = deserialize_nipopow_proof(&bytes).unwrap();
         assert_eq!(parsed, proof);
 
-        // Encode -> decode -> re-encode produces identical bytes
-        // (oracle round-trip parity per Phase 0 §11.5).
+        // Encode -> decode -> re-encode produces identical bytes.
         let re_bytes = serialize_nipopow_proof(&parsed).unwrap();
         assert_eq!(re_bytes, bytes, "re-encode must be byte-identical");
     }

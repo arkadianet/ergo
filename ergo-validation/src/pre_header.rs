@@ -18,15 +18,15 @@ use ergo_ser::sigma_value::AvlTreeData;
 /// only get set after the miner solves the puzzle.
 ///
 /// `votes` is always `[0, 0, 0]` in v1 — automatic voting bit selection
-/// is deferred (the design plan documents this as out-of-scope for v1).
+/// is not yet implemented.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidatePreHeader {
     /// Block version. Comes from active protocol parameters
     /// (`active_params.block_version`).
     pub version: u8,
     /// Parent header id at the moment generation started. The
-    /// post-dry-run guard at v12 §5 step 14 compares this against the
-    /// state's `best_full_block_id` to catch tip-flip races.
+    /// post-dry-run guard compares this against the state's
+    /// `best_full_block_id` to catch tip-flip races.
     pub parent_id: [u8; 32],
     /// Candidate height (`parent_header.height + 1`).
     pub height: u32,
@@ -53,8 +53,8 @@ pub struct CandidatePreHeader {
 /// (script.rs:222-238).
 #[derive(Debug, Clone)]
 pub struct CandidateValidationContext {
-    /// Frozen pre-header. Cloned into the final Header at v12 §5 step
-    /// 15.
+    /// Frozen pre-header. Cloned into the final Header when the
+    /// candidate is finalized.
     pub pre_header: CandidatePreHeader,
     /// Derived once from `pre_header.version` and the cumulative
     /// validation settings at the tip. Re-deriving later would change

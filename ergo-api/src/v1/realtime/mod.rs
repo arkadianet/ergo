@@ -1,5 +1,5 @@
-//! Real-time subscriptions: the `WS /api/v1/ws` surface + the `RealtimeBus`
-//! fan-out hub (`v1-api-design.md` §3.16 / §4.1, Appendix A **G5**).
+//! Real-time subscriptions (G5): the `WS /api/v1/ws` surface + the
+//! `RealtimeBus` fan-out hub.
 //!
 //! The single biggest net-new of the v1 API: every Ergo node polls today; this
 //! is the push surface. Layering:
@@ -47,15 +47,15 @@ pub struct RealtimeHandle {
     pub limiter: Arc<ConnLimiter>,
 }
 
-/// Default per-IP socket cap (§2.6).
+/// Default per-IP socket cap.
 pub const MAX_SOCKETS_PER_IP: usize = 16;
-/// Default global socket ceiling (§2.6 — a conservative FD-derived bound; the
-/// operator can raise it when the node's FD budget allows).
+/// Default global socket ceiling — a conservative FD-derived bound; the
+/// operator can raise it when the node's FD budget allows.
 pub const GLOBAL_SOCKET_CEILING: usize = 4096;
 
 impl RealtimeHandle {
-    /// The Phase-1 handle: a `blocks`-only bus (fed from the coarse-ring bridge)
-    /// and the default connection caps.
+    /// A `blocks`-only bus (fed from the coarse-ring bridge) and the default
+    /// connection caps.
     pub fn blocks_only() -> Self {
         RealtimeHandle {
             bus: Arc::new(RealtimeBus::blocks_only()),

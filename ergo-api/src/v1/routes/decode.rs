@@ -1,9 +1,9 @@
-//! Semantic-decode HTTP surface (`v1-api-design.md` §4.3): the protocol-registry
-//! discovery endpoints (`GET /protocols`, `GET /protocols/{id}`), the stateless
-//! off-chain decoder (`POST /boxes/decode`), and the singleton-state one-shot
+//! Semantic-decode HTTP surface: the protocol-registry discovery endpoints
+//! (`GET /protocols`, `GET /protocols/{id}`), the stateless off-chain decoder
+//! (`POST /boxes/decode`), and the singleton-state one-shot
 //! (`GET /protocols/{id}/state`). The core `?decode=true` augmentation on the
-//! box routes is wired in `dto.rs` (the O6 seam); this file is the registry's
-//! own surface. All T0, all bounded (fragment §7).
+//! box routes is wired in `dto.rs`; this file is the registry's own surface.
+//! All T0, all bounded.
 
 use std::collections::BTreeMap;
 use utoipa::ToSchema;

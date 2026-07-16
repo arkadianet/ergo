@@ -1,6 +1,6 @@
-//! Shadow validation (operator workload §D): live cross-check of this node's
-//! chain against a configured Scala reference node, surfacing divergence as
-//! an event + metric instead of a day of log archaeology.
+//! Shadow validation: live cross-check of this node's chain against a
+//! configured Scala reference node, surfacing divergence as an event + metric
+//! instead of a day of log archaeology.
 //!
 //! Two signals, both from two cheap reference reads per tick (`/info` +
 //! `/blocks/at/{h}`), never touching the apply path:
@@ -15,7 +15,7 @@
 //! committed INSIDE the header, so header-id equality at a height already
 //! pins it, and our own apply path enforces our-state-vs-our-header.
 //!
-//! False-positive discipline (design §6): compares run `lag_tolerance`
+//! False-positive discipline: compares run `lag_tolerance`
 //! blocks below `min(tips)`; an S1 mismatch must reproduce on the NEXT tick
 //! before it fires (transient cross-node reorgs clear themselves); an
 //! unreachable reference sets a gauge and skips — never an event; confirmed
@@ -292,7 +292,7 @@ pub async fn tick<T, H>(
         return;
     }
 
-    // Mismatch: arm on first sight, confirm on reproduction (design §6.2).
+    // Mismatch: arm on first sight, confirm on reproduction.
     // Reproduction = a mismatch was armed on a previous tick and one is
     // still visible at the same-or-later height — the ids themselves may
     // legitimately change as the compare window advances along the fork.

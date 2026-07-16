@@ -17,8 +17,8 @@
 //!
 //! The batch Merkle proof itself is stored as an opaque length-prefixed
 //! blob at this layer; structural parsing + verification against an
-//! extension root happens in `ergo-validation::popow` (sub-phase 14.3),
-//! which is the only consumer that needs to look inside the proof.
+//! extension root happens in `ergo-validation::popow`, which is the
+//! only consumer that needs to look inside the proof.
 //! Keeping the codec opaque here matches the layering rule
 //! (`ergo-ser` is byte ↔ struct only; validation predicates live in
 //! `ergo-validation`).
@@ -44,10 +44,9 @@ use crate::header::{read_header, serialize_header, Header};
 ///
 /// Sizing rationale: per KMZ17 §4.2, interlinks length is `O(log2 h)`
 /// where `h` is the header's height. Mainnet height ≈ 1.5M observed
-/// today → `log2 h ≈ 21` interlinks per header. The audit-supplied
-/// upper bound for future regimes is 256 — ~12× observed mainnet,
-/// nine bits of headroom against any plausible height for the next
-/// several decades.
+/// today → `log2 h ≈ 21` interlinks per header. The chosen upper bound
+/// for future regimes is 256 — ~12× observed mainnet, nine bits of
+/// headroom against any plausible height for the next several decades.
 ///
 /// Without the cap, `Vec::with_capacity(links_qty)` allocates
 /// `links_qty * 32` bytes (≈ 64 GiB on `i32::MAX`) before any 32-byte
@@ -63,7 +62,7 @@ const POPOW_HEADER_MAX_INTERLINKS: usize = 256;
 /// The [`Self::interlinks_proof`] field holds the opaque proof bytes
 /// as transmitted on the wire. Structural decoding + verification of
 /// the proof against an extension's interlinks-subtree root happens
-/// in `ergo-validation::popow` (sub-phase 14.3).
+/// in `ergo-validation::popow`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PoPowHeader {
     /// The header itself.
@@ -171,8 +170,8 @@ mod tests {
     fn popow_header_roundtrip_with_interlinks_and_opaque_proof() {
         // Realistic shape: a few interlinks and a non-empty opaque
         // proof blob. The proof bytes are not parsed at this layer
-        // (handled in ergo-validation::popow §14.3), so any byte
-        // sequence round-trips identically.
+        // (handled in ergo-validation::popow), so any byte sequence
+        // round-trips identically.
         let p = PoPowHeader {
             header: genesis_header(),
             interlinks: vec![

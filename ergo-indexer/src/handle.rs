@@ -163,7 +163,7 @@ impl IndexerQuery for IndexerHandle {
         // bit level so the data behind the guard is always a valid
         // height. Letting `/blockchain/indexedHeight` continue to
         // serve reads after an indexer fault is the explicit
-        // recovery posture (audit-2 M11).
+        // recovery posture: degrade, don't halt.
         *self
             .inner
             .indexed_height

@@ -1,12 +1,12 @@
-//! `webhooks/*` — the T1 (operator) management surface (`v1-api-design.md`
-//! §4.1, fragment §3.1). Registration is an outbound-request lever, so every
-//! endpoint is gated by [`require_tier`](crate::v1::auth::require_tier) at
-//! `Tier::Operator` — the same api-key gate as `/wallet/*` and `POST /votes`.
+//! `webhooks/*` — the T1 (operator) management surface. Registration is an
+//! outbound-request lever, so every endpoint is gated by
+//! [`require_tier`](crate::v1::auth::require_tier) at `Tier::Operator` — the
+//! same api-key gate as `/wallet/*` and `POST /votes`.
 //!
 //! Handlers consume the shared G2 primitives (error envelope + [`Reason`],
 //! cursor page builder) and gate *inside* the handler on the subsystem being
 //! wired, so a node without the webhook store answers `webhooks_disabled`
-//! (409) — never a bare 404 (§4 subsystem-off rule).
+//! (409) — never a bare 404 (the subsystem-off rule).
 
 use std::sync::Arc;
 use utoipa::ToSchema;
@@ -57,7 +57,7 @@ pub struct WebhooksState {
 
 impl WebhooksState {
     /// The wired subsystem handle, or the boxed `409 webhooks_disabled`
-    /// response (§4). Boxed to keep the `Ok` path small — the repo convention
+    /// response. Boxed to keep the `Ok` path small — the repo convention
     /// for handler early-returns (a rendered [`Response`] is large).
     fn handle(&self) -> Result<&WebhooksHandle, Box<Response>> {
         self.handle.as_ref().ok_or_else(|| {

@@ -1,6 +1,6 @@
 //! Canonical s-expression printer for `TypedExpr`.
 //!
-//! Implements the oracle format from m2-oracle.md §4 and TyperOracle.scala
+//! Implements the oracle format defined by TyperOracle.scala
 //! (scripts/jvm_typer_oracle/TyperOracle.scala) EXACTLY. The format is:
 //!
 //!   `(ProductPrefix:TypeTermString field1 field2 …)`
@@ -8,8 +8,8 @@
 //! Normalization rules (N1-N5 from TyperOracle.scala `renderNode`):
 //!   N1 — The header is always `Name:TypeTermString`.
 //!   N2 — Skip a field whose unwrapped SType (bare, Option-wrapped, or
-//!        Nullable-wrapped) equals the node's own tpe. E6 extends this to
-//!        unwrap `Option[SType]` before the self-type test (Select.resType).
+//!        Nullable-wrapped) equals the node's own tpe, including unwrapping
+//!        `Option[SType]` before the self-type test (Select.resType).
 //!   N3 — Node fields render recursively: `(ChildName:Type …)`.
 //!   N4 — typeSubst entries are sorted by rendered full-entry string
 //!        (TyperOracle.scala:172 `.sorted`) then joined with "," (not space).
@@ -174,17 +174,17 @@ fn render_opt_node(opt: &Option<Box<TypedExpr>>) -> String {
 ///   numeric primitives  → `@n` (signed decimal)
 ///   BigInt(s)           → `(CBigInt @n)` — the CBigInt wrapper
 ///   UnsignedBigInt(s)   → `(CUnsignedBigInt @n)` — the CUnsignedBigInt wrapper
-///                         (D-T3, M3 Task-6); n is the canonical decimal string.
+///                         (D-T3); n is the canonical decimal string.
 ///   String(s)           → `'s'`
 ///   Unit                → `@()` (Scala BoxedUnit in productIterator context)
 ///   ByteColl/LongColl   → `<@v1 @v2 …>` (N5 primitive-seq form)
 ///   GroupElement(bytes) → `(CGroupElement (Ecp @(x,y,1)))` — decompresses the
-///                         33-byte SEC1-compressed point to affine hex (M3, D-T6).
+///                         33-byte SEC1-compressed point to affine hex (D-T6).
 ///                         x/y are UNPADDED (Java `BigInteger.toString(16)`
 ///                         semantics via BouncyCastle's `ECPoint.toString`) —
 ///                         oracle-pinned on a leading-zero coordinate,
 ///                         golden_seed.txt §23(f); see `strip_leading_zero_hex`.
-///   SigmaProp(s)        → opaque string (M3 scope for full parity)
+///   SigmaProp(s)        → opaque string
 ///   ProveDlog(bytes)    → `(ProveDlog (Ecp @(x,y,1)))` — NO CGroupElement
 ///                         wrapper (oracle-verified, golden_seed.txt §10),
 ///                         same unpadded x/y semantics as GroupElement above.
@@ -196,7 +196,7 @@ fn render_payload(p: &ConstPayload) -> String {
         ConstPayload::Int(n) => format!("@{}", n),
         ConstPayload::Long(n) => format!("@{}", n),
         ConstPayload::BigInt(s) => format!("(CBigInt @{})", s),
-        // D-T3 (M3 Task-6): oracle `unsignedBigInt("5")` → `OK (ConstantNode:
+        // D-T3: oracle `unsignedBigInt("5")` → `OK (ConstantNode:
         // UnsignedBigInt (CUnsignedBigInt @5))` (golden_seed.txt §13/§24).
         ConstPayload::UnsignedBigInt(s) => format!("(CUnsignedBigInt @{})", s),
         // String renders with single quotes per N5 `case s: String => "'" + s + "'"`.
@@ -228,7 +228,7 @@ fn render_payload(p: &ConstPayload) -> String {
             let y = strip_leading_zero_hex(&y);
             format!("(CGroupElement (Ecp @({x},{y},1)))")
         }
-        // SigmaProp: opaque in M2; store the full representation string.
+        // SigmaProp: opaque; store the full representation string.
         ConstPayload::SigmaProp(s) => s.clone(),
         // ProveDlog: decompressed Ecp form (golden_seed.txt §10), no
         // CGroupElement wrapper (oracle-verified). Bytes are on-curve by
@@ -1157,11 +1157,10 @@ mod tests {
     /// N4: multiple typeSubst entries are sorted by full rendered entry string and
     /// joined with "," (TyperOracle.scala:172-173 `.sorted` + `mkString("{",",","}")`).
     ///
-    /// source-derived: TyperOracle.scala:172-173 mkString(",") — no 2-subst producer
-    /// found in 6.0.2 typer output after 6 probes (col1.flatMap, Global.some[Coll[Int]],
-    /// Global.fromBigEndianBytes, Coll(1,2).zip(Coll(true,false)),
-    /// Coll(Coll(1,2),Coll(3,4)).flatMap, Coll(1,2).fold). All surviving MethodCall
-    /// nodes have 0 or 1 typeSubst entry in sigma-state 6.0.2.
+    /// source-derived: TyperOracle.scala:172-173 mkString(","). Every surviving
+    /// MethodCall node has 0 or 1 typeSubst entry in sigma-state 6.0.2, so this
+    /// case has no oracle vector; the multi-entry rendering is exercised
+    /// directly against a hand-built node instead.
     #[test]
     fn type_subst_comma_separated_sorted_by_full_entry() {
         // N4: multiple typeSubst entries → comma-separated, sorted by full `#K->#V` string.
@@ -1243,12 +1242,12 @@ mod tests {
         assert_eq!(print_typed(&e), "(ConstantNode:Coll[Byte] <>)");
     }
 
-    // ----- oracle parity — new §8 vectors (Fix round 1) -----
+    // ----- oracle parity — golden seed §8 vectors -----
 
     /// golden seed §8: `tc ()` → `(ConstantNode:Unit @())`
     ///
-    /// Verifies Fix 2: Unit constant emits its `@()` payload (was erroneously
-    /// suppressed).  Pinned against ORACLE_TREE_VERSION=3.
+    /// Verifies the Unit constant emits its `@()` payload. Pinned against
+    /// ORACLE_TREE_VERSION=3.
     #[test]
     fn fixture_unit_constant_emits_at_unit() {
         let e = TypedExpr::Constant {
@@ -1260,7 +1259,7 @@ mod tests {
 
     /// golden seed §8: `tc "ab" + "cd"` → `(ConstantNode:String 'abcd')`
     ///
-    /// Verifies Fix 3: ConstPayload::String renders with single quotes.
+    /// Verifies ConstPayload::String renders with single quotes.
     /// The Scala typer const-folds string concatenation → one StringConstant.
     /// Pinned against ORACLE_TREE_VERSION=3.
     #[test]
@@ -1272,7 +1271,7 @@ mod tests {
         assert_eq!(print_typed(&e), seed_expected("\"ab\" + \"cd\""));
     }
 
-    // ----- E11 bound-tree variant rendering (source-derived; no oracle vectors) -----
+    // ----- bound-tree variant rendering (source-derived; no oracle vectors) -----
 
     /// ApplyTypes renders as `(ApplyTypes:<tpe> <input> [#T1 #T2 …])`.
     ///

@@ -1,11 +1,11 @@
-//! `tokens/*` reads (`v1-api-design.md` §3.7) — by-id, list, holders, stats.
+//! `tokens/*` reads — by-id, list, holders, stats.
 //!
 //! `by-id` is a cheap point lookup. `holders`/`stats` share ONE bounded
-//! full-scan (coherence overlap O3) — walk the token's unspent boxes up to a
-//! hard cap, aggregate per address, and surface `scan_capped` honestly rather
-//! than return a silently-partial ranking. The mint-order `list` needs an
-//! enumeration index that does not exist yet (design G3), so it answers an
-//! honest `state_unavailable` instead of faking data.
+//! full-scan — walk the token's unspent boxes up to a hard cap, aggregate
+//! per address, and surface `scan_capped` honestly rather than return a
+//! silently-partial ranking. The mint-order `list` needs an enumeration
+//! index that does not exist yet, so it answers an honest
+//! `state_unavailable` instead of faking data.
 
 use std::collections::HashMap;
 use utoipa::ToSchema;
@@ -87,9 +87,9 @@ pub async fn token_by_id(State(state): State<V1State>, Path(token_hex): Path<Str
     }
 }
 
-// ----- tokens (list) — Phase-2 honest gap ---------------------------------
+// ----- tokens (list) — honest gap ------------------------------------------
 
-/// `GET /api/v1/tokens` — mint-order list. Phase-2 (design G3): `INDEXED_TOKEN`
+/// `GET /api/v1/tokens` — mint-order list. `INDEXED_TOKEN`
 /// is hash-keyed with no mint-sequence enumeration index, so there is no honest
 /// way to enumerate every token in mint order today. Answers `503
 /// state_unavailable` (never fabricated data) once the index is confirmed
@@ -110,8 +110,8 @@ pub async fn tokens_list(State(state): State<V1State>) -> Response {
     v1_error(
         Reason::StateUnavailable,
         "token mint-order enumeration is not available on this node",
-        "listing every minted token needs a mint-sequence index (design G3) \
-         that is not built; query a known token by id instead",
+        "listing every minted token needs a mint-sequence index that is not \
+         built; query a known token by id instead",
     )
 }
 

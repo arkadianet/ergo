@@ -21,7 +21,7 @@ impl StateStore {
     /// by [`Self::compute_and_cache_popow_proof_dense`] or by
     /// future apply-time hooks. Empty/missing on a node that has
     /// never run the compute path (e.g. fresh boot, sparse-mode
-    /// nodes — those can't serve per Phase 0 §8.4 anyway).
+    /// nodes — those can't serve NiPoPoW proofs anyway).
     pub fn get_cached_popow_proof_bytes(&self) -> Result<Option<Vec<u8>>, StateError> {
         let read_txn = self.db.begin_read()?;
         match read_txn.open_table(STATE_META) {
@@ -572,7 +572,7 @@ impl StateStore {
 
     /// Build a NiPoPoW proof from the locally-stored chain via the
     /// fast interlinks-walk variant and cache the serialized bytes
-    /// for serve-side `GetNipopowProof` requests (Part 2 sub-phase 14.10).
+    /// for serve-side `GetNipopowProof` requests.
     ///
     /// Now backed by [`Self::prove_with_db`] (Scala parity:
     /// `NipopowProverWithDbAlgs.prove`). Number of DB reads is
@@ -646,7 +646,7 @@ impl StateStore {
             });
         }
 
-        // Reciprocal precondition (Phase 1b — symmetric to
+        // Reciprocal precondition (symmetric to
         // `install_snapshot_state`'s `best_full_block_height > 0`
         // refusal): once `install_snapshot_state` has run, the store
         // is full-state past the snapshot anchor. Running
@@ -770,7 +770,7 @@ impl StateStore {
 
                 // HEADER_CHAIN_INDEX gets the dense suffix range ONLY —
                 // prefix headers are content-addressed in HEADERS / HEADER_META
-                // but not height-indexed (Phase 0 §5.1 + §5.2).
+                // but not height-indexed.
                 if header.height >= dense_from && header.height <= dense_to {
                     chain_index_table.insert(header.height as u64, id.as_slice())?;
                 }
@@ -817,7 +817,7 @@ impl StateStore {
             let mut state_meta_table = write_txn.open_table(STATE_META)?;
             state_meta_table.insert("hci_version", [1u8].as_slice())?;
         }
-        // Mode 3 Phase 1b — co-commit the prune low-water mark at
+        // Mode 3: co-commit the prune low-water mark at
         // `dense_from_height` (the first dense-coverage height —
         // no `+1`). Writing here is the only point where
         // `dense_from_height` is definitively known; deferring

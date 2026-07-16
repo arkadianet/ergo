@@ -1,8 +1,8 @@
 //! The `/scan/*` wallet subsystem (Scala scanning API).
 //!
-//! Built incrementally: the tracking-rule predicate language ([`predicate`])
-//! and the scan [`registry`] (model + id allocation + CRUD) are in place; the
-//! block-apply matcher and the remaining HTTP endpoints follow in later PRs.
+//! Covers the tracking-rule predicate language ([`predicate`]) and the scan
+//! [`registry`] (model + id allocation + CRUD); the block-apply matcher and
+//! the remaining HTTP endpoints are not yet implemented.
 
 pub mod predicate;
 pub mod registry;

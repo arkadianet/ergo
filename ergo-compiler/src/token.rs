@@ -1,7 +1,7 @@
 //! Lexer core for ErgoScript.
 //!
 //! There is no separate lexer in the Scala reference — it is a scannerless
-//! fastparse grammar (recon-lexical.md §0). This module reconstructs the token
+//! fastparse grammar. This module reconstructs the token
 //! stream that grammar observes, so the parser can drive semicolon
 //! inference off explicit `Newline` tokens. Every rule cites the mirrored Scala
 //! source under `sigmastate-interpreter/parsers/shared/.../parsers`.
@@ -265,7 +265,7 @@ fn in_ranges(c: char, table: &[(u16, u16)]) -> bool {
 // JVM identifier-class range tables (Unicode 16.0.0). Both are generated from the
 // intersection of Rust's own `char::is_numeric`/`char::is_alphabetic` sets with the
 // UCD general category (`unicodedata`), then collapsed to sorted `[lo, hi]` ranges;
-// see `scripts/` provenance in the round-7 report. They are the *difference* sets
+// see `scripts/` for the generation logic. They are the *difference* sets
 // that narrow Rust's wider predicates to the exact JVM `Character.isDigit`/`isLetter`
 // masks, so a change in either Rust's or the UCD's Unicode version can only shift a
 // handful of exotic code points (none in any real contract).
@@ -539,7 +539,7 @@ impl<'a> Lexer<'a> {
     /// spaces/tabs and is cleared by a newline (Literals.scala:57-60).
     ///
     /// A lone `\r` (one not followed by `\n`) in the inter-token gap is a hard
-    /// `Lexical` error — see the Round-10 CR matrix below. In fastparse it is
+    /// `Lexical` error — see the CR matrix below. In fastparse it is
     /// neither `Basic.WSChars` (space/tab only) nor `Basic.Newline` (`\r\n`|`\n`
     /// only); it is swallowed by the implicit `ScalaWhitespace` at `~` junctions
     /// yet invisible to every explicit `WS`/`WL`/`Newline`/`Semi`/`OneNLMax`
@@ -763,7 +763,7 @@ impl<'a> Lexer<'a> {
         let text = &self.src[start..self.pos];
         let kind = match text {
             // AlphabetKeywords (Identifiers.scala:51). `then` is reserved
-            // (recon-gap.md item 11) though no production uses it.
+            // though no production uses it.
             "case" => TokenKind::Kw(Kw::Case),
             "else" => TokenKind::Kw(Kw::Else),
             "false" => TokenKind::Kw(Kw::False),
@@ -774,7 +774,7 @@ impl<'a> Lexer<'a> {
             "then" => TokenKind::Kw(Kw::Then),
             "true" => TokenKind::Kw(Kw::True),
             // val/def/type/this/super/with/extends/implicit/new/lazy/null/_ are
-            // NOT reserved (recon-lexical.md §2.3) — they lex as Ident.
+            // NOT reserved — they lex as Ident.
             _ => TokenKind::Ident,
         };
         // Id-prefixed string forms 1-2 (Literals.scala:151-152): `Id ~ TQ/"\""`
@@ -791,7 +791,7 @@ impl<'a> Lexer<'a> {
         // (e.g. `*"foo"`), Scala's String production (Literals.scala:152, Id ~ '"') matches
         // the operator as a PlainId prefix and yields one SString("*\"foo\"") where we lex
         // [OpId, Str] and the parser will reject — a real accept/reject divergence on
-        // pathological input no real contract contains. Tracked as a known M1 deviation.
+        // pathological input no real contract contains. Tracked as a known deviation.
         if kind == TokenKind::Ident && self.peek_byte() == Some(b'"') {
             return self.lex_string(start, true);
         }
@@ -1113,7 +1113,7 @@ impl<'a> Lexer<'a> {
     /// content. Only `${` is special.
     fn consume_interp_dollar(&mut self) -> Result<(), ParseError> {
         // deviation (D6): the reference's `${ Block }` interpolation is not
-        // supported in M1 — reject it rather than parse an embedded expression.
+        // supported — reject it rather than parse an embedded expression.
         if self.peek_byte_at(1) == Some(b'{') {
             return Err(ParseError::Lexical {
                 pos: self.pos as u32,
@@ -1380,7 +1380,7 @@ mod tests {
         assert_eq!(t[0].kind, TokenKind::Ident);
         assert_eq!(t[0].text("x\u{2160}"), "x");
         // U+1D400 (supplementary Lu): fails both is_id_char (BMP gate) AND is_id_start
-        // (BMP gate added by F1 fix) → lex error at the supplementary char.
+        // (BMP gate) → lex error at the supplementary char.
         // oracle: `x𝐀` REJECT 1:2.
         assert!(
             matches!(tokenize("x\u{1D400}"), Err(ParseError::Lexical { .. })),
@@ -1389,9 +1389,9 @@ mod tests {
     }
     #[test]
     fn id_tail_circled_letter_so_excluded_from_letter_class() {
-        // Round-11 fix: U+24B6–24E9 (CIRCLED LATIN CAPITAL/SMALL LETTER A–Z, category
-        // So) are Rust `is_alphabetic` but NOT JVM `Character.isLetter`. They must not
-        // extend an identifier; the ALPHA_NOT_LETTER table now covers them.
+        // U+24B6–24E9 (CIRCLED LATIN CAPITAL/SMALL LETTER A–Z, category So) are Rust
+        // `is_alphabetic` but NOT JVM `Character.isLetter`. They must not extend an
+        // identifier; the ALPHA_NOT_LETTER table covers them.
         //
         // `xⒶ+1`: Scala REJECT 1:4 (id ends at x; Ⓐ is a So op-char; `Ⓐ+` is an
         // operator; `1` is the operand — parses but no well-typed result → REJECT at
@@ -1452,7 +1452,7 @@ mod tests {
     }
     #[test]
     fn id_start_supplementary_scalar_rejected() {
-        // F1 (P2): is_id_start BMP gate — supplementary code points (> U+FFFF)
+        // is_id_start BMP gate — supplementary code points (> U+FFFF)
         // appear as surrogate halves in JVM's UTF-16 scanner, which are never
         // isUpperCase/isLowerCase, so they can never start an identifier.
         // oracle: `𝐀` (U+1D400, Lu supplementary) REJECT 1:1;
@@ -1472,7 +1472,7 @@ mod tests {
     }
     #[test]
     fn char_literal_supplementary_scalar_rejected() {
-        // F3 (P2): is_printable_char BMP gate — supplementary scalars (> U+FFFF)
+        // is_printable_char BMP gate — supplementary scalars (> U+FFFF)
         // are not printable because the JVM sees them as surrogate halves, which
         // fail `isPrintableChar`'s `!isSurrogate` check.
         // oracle: `'😀'` (U+1F600) REJECT 1:2; `'𝐀'` (U+1D400) REJECT 1:2.
@@ -1569,8 +1569,7 @@ mod tests {
     // ----- happy path (additional edge cases found while implementing) -----
     #[test]
     fn punctuation_each_is_one_token() {
-        // recon-lexical.md §6-7: single-char delimiters; `.` and `;` are not
-        // op-chars (Basic.scala:41-45).
+        // Single-char delimiters; `.` and `;` are not op-chars (Basic.scala:41-45).
         assert_eq!(
             kinds("()[]{},;."),
             vec![
@@ -1603,9 +1602,9 @@ mod tests {
     }
     #[test]
     fn then_is_reserved_but_null_and_def_are_ident() {
-        // recon-gap.md item 11: `then` IS reserved (Identifiers.scala:51).
+        // `then` IS reserved (Identifiers.scala:51).
         assert_eq!(kinds("then")[0], TokenKind::Kw(Kw::Then));
-        // recon-lexical.md §2.3: these grammar-words are NOT reserved.
+        // These grammar-words are NOT reserved.
         assert_eq!(kinds("null")[0], TokenKind::Ident);
         assert_eq!(kinds("def")[0], TokenKind::Ident);
         assert_eq!(kinds("_")[0], TokenKind::Ident); // `_` lexes as an Ident
@@ -1638,7 +1637,7 @@ mod tests {
     }
     #[test]
     fn lone_cr_in_gap_is_lexical_error_at_the_cr() {
-        // Round-10 CR matrix (oracle: ParserOracle sigma-state 6.0.2). A lone \r
+        // CR matrix (oracle: ParserOracle sigma-state 6.0.2). A lone \r
         // in the inter-token gap is neither WSChars nor Basic.Newline; its true
         // behavior is junction-dependent (space at some, newline at others) and
         // cannot cause a wrong-bytes accept, so we take the reject-side-safe route
@@ -1870,7 +1869,7 @@ mod tests {
 
     #[test]
     fn opid_string_prefix_not_merged_known_deviation() {
-        // Known M1 deviation (see comment at the id-prefix merge site): for
+        // Known deviation (see comment at the id-prefix merge site): for
         // op-ids at ATOM position Scala's String production (Literals.scala:152,
         // Id ~ '"') matches the operator as a PlainId prefix and yields one
         // op-prefixed SString, whereas we lex [OpId, Str] and the parser will
@@ -1923,7 +1922,7 @@ mod tests {
     }
     #[test]
     fn string_backslash_backslash_is_invalid_escape() {
-        // recon-lexical.md §4: \\ is NOT in the escape set (fastparse CharIn quirk)
+        // \\ is NOT in the escape set (fastparse CharIn quirk)
         assert!(matches!(lex_err(r#""a\\b""#), ParseError::Lexical { .. }));
     }
     #[test]
@@ -1933,7 +1932,7 @@ mod tests {
         assert_eq!(e.pos(), 4);
     }
     #[test]
-    fn interp_block_rejected_m1() {
+    fn interp_block_rejected() {
         assert!(matches!(
             lex_err(r#"s"a ${x} b""#),
             ParseError::Lexical { .. }
@@ -1941,7 +1940,7 @@ mod tests {
     }
     #[test]
     fn int_overflow_min_value_magnitude_errors() {
-        // D4 / recon-gap.md item 8: Scala rejects -2147483648 because the positive
+        // D4: Scala rejects -2147483648 because the positive
         // magnitude overflows before the sign applies (Literals.scala:106-116).
         assert!(matches!(lex_err("2147483648"), ParseError::Lexical { .. }));
         assert!(matches!(

@@ -1,4 +1,4 @@
-//! `node/*` handlers (`v1-api-design.md` §3.1). Reads (T0) reuse
+//! `node/*` handlers. Reads (T0) reuse
 //! [`NodeReadState`](crate::traits::NodeReadState) verbatim (its DTOs are
 //! already snake_case, no reshape); `shutdown` (T2) reuses
 //! [`NodeAdmin::request_shutdown`](crate::traits::NodeAdmin). `config` GET/PATCH
@@ -19,7 +19,7 @@ use crate::types::{
 };
 use crate::v1::error::{v1_error, Reason, V1Error};
 
-/// `GET /api/v1/node/info` — T0. Bare `ApiInfo` (reused verbatim, §3.1).
+/// `GET /api/v1/node/info` — T0. Bare `ApiInfo` (reused verbatim).
 #[utoipa::path(
     get, path = "/api/v1/node/info", tag = "node",
     responses((status = 200, description = "Node info", body = ApiInfo)),
@@ -75,8 +75,8 @@ pub(crate) async fn host(State(s): State<OperatorState>) -> Response {
 }
 
 /// `GET /api/v1/node/health` — T0, dual status. `200` when `status = ok`; `503`
-/// for `stalled|disconnected|rejecting|wedged`, WITH the full typed body (§3.1
-/// — never a bare error). Same mapping as the compat `health_handler`.
+/// for `stalled|disconnected|rejecting|wedged`, WITH the full typed body
+/// (never a bare error). Same mapping as the compat `health_handler`.
 #[utoipa::path(
     get, path = "/api/v1/node/health", tag = "node",
     responses(
@@ -97,7 +97,7 @@ pub(crate) async fn health(State(s): State<OperatorState>) -> Response {
     (code, [(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
-/// The `node/version` probe body (§3.1 #7): an ultra-cheap liveness/version
+/// The `node/version` probe body: an ultra-cheap liveness/version
 /// read, distinct from `info`. `activated_protocol_version` is the currently
 /// active block-format version — sourced from the same snapshot's votes view
 /// (`ApiVotes.block_version`), the one place the node already surfaces it.
@@ -124,7 +124,7 @@ pub(crate) async fn version(State(s): State<OperatorState>) -> Response {
 }
 
 /// `GET /api/v1/node/config` — T1. No `NodeConfigView` seam exists on the node
-/// yet (§3.1 #8, Phase-2 ASSUMED-new), so this answers the honest
+/// yet, so this answers the honest
 /// `route_unavailable` (503) rather than fabricating or half-projecting a config
 /// tree. Gated at `Tier::Operator` so the closed shape is still auth-bounded.
 #[utoipa::path(

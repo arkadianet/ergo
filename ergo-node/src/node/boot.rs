@@ -413,7 +413,7 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
     }
 
     // 2d. Mode 3 — back-fill SECTION_HEIGHT_INDEX for any
-    // pre-existing data. Powers the Phase 3a serve gate (a peer
+    // pre-existing data. Powers the serve gate (a peer
     // requesting a section at height below the prune sentinel
     // gets a silent deny). Sentinel-gated like the two above;
     // runs even on archive boots so a future archive→pruned
@@ -443,7 +443,7 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
             );
         }
     }
-    // Mode 3 Phase 1b — prune-sentinel seeding happens at the
+    // Mode 3 — prune-sentinel seeding happens at the
     // writer side (`install_snapshot_state` and `apply_popow_proof`
     // co-commit the sentinel inside their existing atomic txns),
     // not here. Reading `chain_state.best_full_block_height + 1`
@@ -672,7 +672,7 @@ async fn run_inner_with_backend(
     //    that already has a snapshot would corrupt state.
     //
     // The install path flips `bootstrap_in_progress` back to
-    // false once it succeeds. Phase 4b's contract: an operator
+    // false once it succeeds. The contract: an operator
     // can leave `utxo_bootstrap = true` in config across N
     // restarts and the node boots cleanly every time, only
     // doing the install on the first boot.
@@ -1002,8 +1002,8 @@ async fn run_inner_with_backend(
     };
 
     // 8. Event channel
-    // Per spec §2 "Channel Sizing": P2P → Header pipeline =
-    // bounded(4096). Headers are small (~200B) and the action loop
+    // P2P → Header pipeline uses bounded(4096). Headers are small
+    // (~200B) and the action loop
     // processes them in big batches (one batch_validate_headers
     // call per Modifier event), so a deep buffer absorbs burst
     // arrivals from 60+ concurrent peers without back-pressuring

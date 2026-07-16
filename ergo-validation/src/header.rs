@@ -12,8 +12,8 @@ use thiserror::Error;
 /// [`CheckedHeader::from_persisted_parts()`] (for headers already validated
 /// and stored by the header pipeline).
 ///
-/// Design note: the spec sketches `Header<Checked>` phantom-generic typestate,
-/// but we use a concrete proof object instead. `CheckedHeader` carries
+/// Design note: a `Header<Checked>` phantom-generic typestate was considered
+/// and rejected in favor of a concrete proof object. `CheckedHeader` carries
 /// `header_id` (the computed Blake2b256 hash), which a phantom marker could
 /// not.
 #[derive(Debug, Clone)]

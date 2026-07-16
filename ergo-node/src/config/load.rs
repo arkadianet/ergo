@@ -342,12 +342,12 @@ impl NodeConfig {
                 .to_string());
         }
         // Identify the canonical Mode 6 (headers-only) combo so it can
-        // pass through the activation gates below. Mode 6 ships in this
-        // commit (part 2b) — the sync coordinator skips block-section
-        // requests when `verify_transactions = false`, the StateStore
-        // accepts the `"digest"` sentinel, and the mempool disables
-        // itself. Other Digest combos (Mode 5) and other pruning
-        // combos (Mode 3) stay gated until their own part 2 lands.
+        // pass through the activation gates below. Mode 6 ships: the
+        // sync coordinator skips block-section requests when
+        // `verify_transactions = false`, the StateStore accepts the
+        // `"digest"` sentinel, and the mempool disables itself. Other
+        // Digest combos (Mode 5) and other pruning combos (Mode 3) stay
+        // gated until their own machinery ships.
         let is_canonical_mode_6 = super::is_canonical_mode_6_combo(
             state_type,
             verify_transactions,
@@ -367,9 +367,8 @@ impl NodeConfig {
             utxo_bootstrap,
         );
 
-        // Mode 3 activation gate — lifted in Phase 4 now that
-        // eviction (Phase 2a+2b), receive/serve gating (Phase 3a+3b),
-        // and rollback guard (Phase 4) all ship in the same envelope.
+        // Mode 3 activation gate — lifted now that eviction, receive/serve
+        // gating, and the rollback guard all ship in the same envelope.
         // Replaced with the rollback-window floor: pruning must keep
         // enough blocks to cover the reorg resolver's worst-case
         // rollback depth. Rolling back into a pruned region would
@@ -434,22 +433,19 @@ impl NodeConfig {
                  verify_transactions=false combos are not yet supported."
                 .to_string());
         }
-        // Mode 2 activation gate. Schema, R2 second half, and
-        // `/api/v1/identity` reflection landed in Mode 2 part 1; the
-        // Mode 2 activation gate lifted: snapshot codec (2b-2c),
-        // snapshot-message p2p surface (2e), consume-side state
-        // machine (2f-2i) all ship. Operators on a fresh data_dir
+        // Mode 2 activation gate: lifted now that the snapshot codec,
+        // the snapshot-message p2p surface, and the consume-side state
+        // machine all ship. Operators on a fresh data_dir
         // can set utxo_bootstrap = true to opt into the bootstrap
         // path. Trust verification against header.state_root is
         // PROVISIONAL until a Scala oracle pin lands — production
         // operators should cross-check the installed root against
         // a known-good Scala mainnet snapshot before treating the
         // UTXO state as authoritative.
-        // Nipopow activation gate LIFTED in Part 2 §14.6
-        // (orchestration end-to-end commit). PoPoW proof verification,
-        // the p2p messages (codes 90/91), apply_popow_proof, and the
-        // drive_popow_bootstrap orchestration are all on master. R5
-        // genesis-id enforcement (Part 2 §14.7) is wired through
+        // NiPoPoW activation gate: lifted now that PoPoW proof
+        // verification, the p2p messages (codes 90/91), apply_popow_proof,
+        // and the drive_popow_bootstrap orchestration all ship. R5
+        // genesis-id enforcement is wired through
         // NipopowVerifier::new(genesis_id_opt, ...), defaulting to the
         // network's hardcoded genesis when the operator hasn't set
         // `[chain] genesis_id`.
@@ -513,7 +509,7 @@ impl NodeConfig {
             None => default_cp,
         };
 
-        // Genesis-id resolution for NiPoPoW R5 (Part 2 §11). TOML
+        // Genesis-id resolution for NiPoPoW R5. TOML
         // override > network default. An explicit empty string in
         // TOML (`genesis_id = ""`) disables the check entirely —
         // intended for development against synthetic chains only;

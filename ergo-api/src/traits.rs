@@ -166,7 +166,7 @@ pub trait NodeSubmit: Send + Sync {
     }
 
     /// Non-mutating dry-run of an assembled transaction, backing
-    /// `POST /api/v1/transactions/simulate` (`v1-api-design.md` §3.6, G8).
+    /// `POST /api/v1/transactions/simulate`.
     ///
     /// Unlike [`SubmitMode::CheckOnly`] — which still mutates the mempool
     /// anti-DoS bookkeeping (mempool invariant #7) — this entrypoint MUST NOT
@@ -195,10 +195,9 @@ pub trait NodeSubmit: Send + Sync {
 }
 
 /// Outcome of a non-mutating [`NodeSubmit::simulate`] dry-run — the report
-/// `POST /api/v1/transactions/simulate` renders (`v1-api-design.md` §3.6). A
-/// cleanly-invalid tx still produces an outcome (`valid = false`); the handler
-/// renders it as a 200. nanoErg amounts are raw `u64` here and stringified at
-/// the wire boundary (§1.1).
+/// `POST /api/v1/transactions/simulate` renders. A cleanly-invalid tx still
+/// produces an outcome (`valid = false`); the handler renders it as a 200.
+/// nanoErg amounts are raw `u64` here and stringified at the wire boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SimulateOutcome {
     /// Transaction id computed from the assembled bytes.
@@ -236,12 +235,12 @@ pub struct SimulateConflict {
 }
 
 /// Keyless transaction-builder boundary backing
-/// `POST /api/v1/transactions/build` (`v1-api-design.md` §3.6, §4.2 O7).
+/// `POST /api/v1/transactions/build`.
 ///
 /// "Keyless" = the caller supplies the input universe (addresses to select
 /// from, or explicit input box ids) and an explicit change address; no secret
 /// material ever crosses this boundary, so the endpoint is T0. This is the ONE
-/// builder seam (O7): the production impl delegates to the same selection /
+/// builder seam: the production impl delegates to the same selection /
 /// change / fee core the keyed wallet build uses — a second builder is never
 /// forked. `V1State::tx_builder` is `None` until that core is wired, and the
 /// endpoint then answers the honest `route_unavailable` (503) rather than
@@ -254,7 +253,7 @@ pub trait NodeTxBuilder: Send + Sync {
     ) -> Result<BuiltUnsigned, TxBuildError>;
 }
 
-/// A keyless build request — the node-facing projection of the §4.2 `tx_intent`
+/// A keyless build request — the node-facing projection of the `tx_intent`
 /// the handler shapes the wire intent into. Unwired intent shapes (mint,
 /// payment registers, raw boxes) are rejected as `unsupported_intent` up front
 /// and never reach the builder.
@@ -619,7 +618,7 @@ mod tests {
         }
     }
 
-    /// Pin the §12(b) trait contract: implementations that don't
+    /// Pin the trait contract: implementations that don't
     /// wire block submission inherit `route_disabled` on
     /// `submit_full_block`. The Scala-compat `POST /blocks`
     /// handler will map this to 503 so operators see a clear

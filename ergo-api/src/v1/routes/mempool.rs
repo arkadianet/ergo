@@ -1,6 +1,6 @@
-//! `mempool/*` reads (`v1-api-design.md` §3.8) — the last read-gap group.
+//! `mempool/*` reads.
 //!
-//! Summary (+ derived utilization, active weight-function, and the O4 depth
+//! Summary (+ derived utilization, active weight-function, and the depth
 //! `history`), the cursor-paginated pool listing, the four `by-*` filtered
 //! views, single pooled-tx detail with resolved `io_box`, and the fee
 //! histogram. `mempool/{submit,check}` are NOT here: per Overlap O1 they are

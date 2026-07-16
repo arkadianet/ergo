@@ -1,8 +1,8 @@
-//! `network/*` handlers (`v1-api-design.md` §3.2). Reads (T0) project the same
-//! peer/sync state the compat `/peers/*` routes read, reshaped into the §1.3
-//! collection envelope + §1.1 snake_case. `connect` (T1) reuses
+//! `network/*` handlers. Reads (T0) project the same
+//! peer/sync state the compat `/peers/*` routes read, reshaped into the
+//! standard collection envelope + snake_case. `connect` (T1) reuses
 //! [`NodeAdmin::connect_to_peer`](crate::traits::NodeAdmin). Manual blacklist
-//! writes have no node-side seam yet (§3.2 #7/#8 — the peer manager exposes no
+//! writes have no node-side seam yet (the peer manager exposes no
 //! externally-triggered ban), so they answer the honest `route_unavailable`.
 
 use std::net::SocketAddr;
@@ -22,7 +22,7 @@ use crate::types::{ApiPeer, ApiPeerState};
 use crate::v1::error::{v1_error, Reason, V1Error};
 use crate::v1::routes::dto::Collection;
 
-/// Default/hard page size for the peer list (§3.2 #1 — node-bounded, so the
+/// Default/hard page size for the peer list (node-bounded, so the
 /// default is generous and `has_more:false` in the common case).
 const PEERS_DEFAULT_LIMIT: u32 = 256;
 const PEERS_MAX_LIMIT: u32 = 1024;
@@ -48,8 +48,8 @@ pub(crate) async fn peers(State(s): State<OperatorState>, Query(q): Query<ListQu
 }
 
 /// `GET /api/v1/network/connected` — T0. Server-side filter of the same
-/// `peers()` data down to handshake-complete (`state == active`) peers (§3.2
-/// #2) — no new trait method.
+/// `peers()` data down to handshake-complete (`state == active`) peers — no
+/// new trait method.
 #[utoipa::path(
     get, path = "/api/v1/network/connected", tag = "network",
     params(
@@ -74,7 +74,7 @@ pub(crate) async fn connected(
     offset_collection(active, &q, PEERS_DEFAULT_LIMIT, PEERS_MAX_LIMIT)
 }
 
-/// One blacklisted-peer entry (§3.2 #3). `addr` is the clean canonical
+/// One blacklisted-peer entry. `addr` is the clean canonical
 /// `ip[:port]` — the compat path keeps the ugly Java `InetAddress.toString()`
 /// `hostname/ip` double-form for byte-parity; v1 strips it.
 #[derive(Serialize, ToSchema)]
@@ -83,7 +83,7 @@ pub(crate) struct BlacklistedPeer {
 }
 
 /// Strip the Java `InetAddress.toString()` decoration (`hostname/1.2.3.4:9030`
-/// or `/1.2.3.4:9030`) down to the bare `ip[:port]` after the last `/` (§3.2 #3).
+/// or `/1.2.3.4:9030`) down to the bare `ip[:port]` after the last `/`.
 fn clean_blacklist_addr(raw: &str) -> String {
     match raw.rsplit_once('/') {
         Some((_, tail)) => tail.to_string(),
@@ -126,7 +126,7 @@ pub(crate) async fn blacklisted(
     offset_collection(items, &q, NET_DEFAULT_LIMIT, NET_MAX_LIMIT)
 }
 
-/// One per-peer sync-info entry (§3.2 #4). `peer_height` (not bare `height`)
+/// One per-peer sync-info entry. `peer_height` (not bare `height`)
 /// disambiguates whose height; `status` is the lowercased Scala
 /// `PeerChainStatus` set (`equal|younger|older|fork|unknown|nonsense`).
 #[derive(Serialize, ToSchema)]
@@ -170,7 +170,7 @@ pub(crate) async fn sync_info(
     offset_collection(items, &q, NET_DEFAULT_LIMIT, NET_MAX_LIMIT)
 }
 
-/// The `network/track-info` aggregate counters (§3.2 #5). Bare object, not a
+/// The `network/track-info` aggregate counters. Bare object, not a
 /// collection.
 #[derive(Serialize, ToSchema)]
 pub(crate) struct TrackInfo {
@@ -261,7 +261,7 @@ pub(crate) async fn connect(State(s): State<OperatorState>, body: axum::body::By
 }
 
 /// `POST /api/v1/network/blacklist` — T1, seam-deferred. No manual-ban write
-/// path exists on the peer manager yet (§3.2 #7), so this answers the honest
+/// path exists on the peer manager yet, so this answers the honest
 /// `route_unavailable` rather than pretending to ban.
 #[utoipa::path(
     post, path = "/api/v1/network/blacklist", tag = "network",

@@ -55,7 +55,7 @@ impl WalletBootService {
     /// 4. Open a redb read txn to check if `WALLET_TRACKED_PUBKEYS` has entries.
     ///    - Non-empty: hydrate state from `WalletReader` (redb is source of truth).
     ///    - Empty: auto-derive master + EIP-3 first child, persist both tables in ONE write txn.
-    /// 5. Validate change-address per spec §7.4: if `WALLET_CHANGE_ADDRESS` points at an
+    /// 5. Validate the change address: if `WALLET_CHANGE_ADDRESS` points at an
     ///    untracked pubkey, return `ChangeAddressUntracked` and roll back the unlock.
     pub fn unlock_and_sync(
         storage: &mut SecretStorage,
@@ -114,7 +114,7 @@ impl WalletBootService {
             Self::auto_derive_and_persist(storage, state, db, network)?;
         }
 
-        // Step 5.5: Change-address backfill per spec §7.4. A wallet that
+        // Step 5.5: Change-address backfill. A wallet that
         // was created before the change address became a persisted default
         // (or restored from a mnemonic) reaches here with no
         // WALLET_CHANGE_ADDRESS row; without a change address every send
@@ -125,7 +125,7 @@ impl WalletBootService {
             Self::backfill_change_address(storage, state, db, network)?;
         }
 
-        // Step 6: Change-address validation per spec §7.4. (The change
+        // Step 6: Change-address validation. (The change
         // address is persisted as a pubkey and re-rendered with the
         // current network prefix at hydrate, so the decoder's network
         // check always passes here; it is load-bearing only on the
@@ -221,7 +221,7 @@ impl WalletBootService {
                 .insert(0u32, child_pk)
                 .map_err(|e| WalletError::SecretFile(format!("insert visible_address: {e}")))?;
 
-            // Change address defaults to the EIP-3 first-address key (spec §7.4
+            // Change address defaults to the EIP-3 first-address key (the
             // backfill rule). Persisted in the SAME txn as the tracked/visible
             // rows so a fresh wallet is never left without a spendable change
             // target — its absence is what made every send fail with
@@ -247,7 +247,7 @@ impl WalletBootService {
     }
 
     /// Backfill `WALLET_CHANGE_ADDRESS` for an already-persisted wallet that
-    /// has no change address (spec §7.4). Mirrors `auto_derive_and_persist`:
+    /// has no change address. Mirrors `auto_derive_and_persist`:
     /// the change target is the EIP-3 first-address key derived from the
     /// unlocked master, which is guaranteed to be in the tracked set (it was
     /// persisted at init). Falls back to the master (root) key if EIP-3
@@ -263,7 +263,7 @@ impl WalletBootService {
             WalletError::SecretFile("must be unlocked at backfill_change_address".to_string())
         })?;
 
-        // EIP-3 first-address key, with the root key as the §7.4 fallback.
+        // EIP-3 first-address key, with the root key as the fallback.
         let eip3_path = ergo_wallet::derivation::DerivationPath::eip3_first_address();
         let change_pk = match unlocked.master.derive_pubkey_at_path(&eip3_path) {
             Ok(pk) => pk,
@@ -410,7 +410,7 @@ mod tests {
         }
     }
 
-    /// Spec §7.4 backfill: a wallet persisted BEFORE the change address became
+    /// Change-address backfill: a wallet persisted BEFORE the change address became
     /// a default (or restored) reaches `unlock_and_sync` with tracked keys but
     /// no `WALLET_CHANGE_ADDRESS` row. The unlock must backfill it (to the
     /// EIP-3 first key) so the send path has a change target — its absence is

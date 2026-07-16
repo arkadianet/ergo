@@ -38,7 +38,7 @@ pub trait TxSubmitter: Send + Sync {
     /// **typed** [`ergo_api::types::SubmitError`] `{reason, detail}` — NOT collapsed
     /// to a string — so callers can distinguish a `duplicate` admission (map to an
     /// idempotent success) from a real failure (map to 5xx) at their own boundary.
-    /// The native send path (P3) maps `duplicate` → `200 accepted`; the existing
+    /// The native send path maps `duplicate` → `200 accepted`; the existing
     /// compat callers map it to `WalletAdminError::Internal` exactly as before.
     async fn submit_transaction(
         &self,
@@ -882,7 +882,7 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
         // value captured at construction. A node that boots below EIP-27
         // activation and then syncs past it MUST observe the new tip, or the
         // native `reserved`/`eip27Active` (candidate height `tip+1`) would stay
-        // wrong forever (codex P0). Same `chain_state_meta` source the block
+        // wrong forever. Same `chain_state_meta` source the block
         // validator's candidate height uses. `Ok(None)` = chain unstarted → 0; a
         // read FAILURE is surfaced in the log (not silently downgraded to 0, which
         // would mask an operational fault as "below activation").
@@ -2524,7 +2524,7 @@ fn map_submit_error(e: ergo_api::types::SubmitError) -> WalletAdminError {
     })
 }
 
-/// Native `transactions/send`. **txId-first** idempotency (codex P0-4): compute the
+/// Native `transactions/send`. **txId-first** idempotency: compute the
 /// id, short-circuit a known wallet tx BEFORE any UTXO-dependent self-verify, then
 /// submit. `intent` builds (burn-aware) + signs with the wallet's own secrets;
 /// `signed` submits caller-supplied bytes. A `duplicate` submit reason maps to an
@@ -3002,7 +3002,7 @@ async fn payment_send_impl(
     let tx_bytes = serialize_signed_tx(&signed_tx)?;
     // Compat boundary: collapse the typed SubmitError to `Internal` exactly as
     // the adapter did before (unchanged compat behavior). The native send path
-    // (P3) maps the typed reason — e.g. `duplicate` → 200 — at its own boundary.
+    // maps the typed reason — e.g. `duplicate` → 200 — at its own boundary.
     submitter
         .submit_transaction(tx_bytes)
         .await
@@ -4564,7 +4564,7 @@ fn render_derivation_path(components: &[u32]) -> String {
 ///
 /// WALLET_VISIBLE_ADDRESSES is rebuilt from scratch from all tracked pubkeys
 /// except the hidden master (path_idx == 0, derivation_path == []).
-/// Matches `wallet_boot.rs` and spec §7.3 step 4.
+/// Matches `wallet_boot.rs`'s equivalent rebuild step.
 fn persist_tracked_pubkey(
     db: &redb::Database,
     path_idx: u64,
@@ -5185,7 +5185,7 @@ mod burn_aware_builder_tests {
             "must pay exactly to_burn nanoErg to pay-to-reemission",
         );
 
-        // (c) codex P1: the explicit branch funds the burn from CHANGE ONLY — the
+        // (c) the explicit branch funds the burn from CHANGE ONLY — the
         // requested fee is preserved (NOT shaved), matching the auto branch.
         let fee_tree_bytes = ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES;
         let fee_paid: u64 = utx

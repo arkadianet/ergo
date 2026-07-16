@@ -425,10 +425,9 @@ fn validation_failure_charges_partial_cost() {
 
 #[test]
 fn below_min_fee_short_circuits_before_validation() {
-    // Item 3 of the code-review fixes: below-min-fee rejections
-    // must NOT run full validation (no input resolution, no
-    // script eval, no cost charged). Proved via MockValidator
-    // call counters.
+    // Below-min-fee rejections must NOT run full validation (no input
+    // resolution, no script eval, no cost charged). Proved via
+    // MockValidator call counters.
     let utxo = EmptyUtxo;
     let c = ctx();
     let (mut pool, mut b, mut inv, mut unr) = fresh();
@@ -478,8 +477,7 @@ fn below_min_fee_short_circuits_before_validation() {
         }
     ));
     // Observe event carries the REAL tx_id from peek_fee, not a
-    // zeroed placeholder — observability is preserved across the
-    // gate (reviewer finding 1).
+    // zeroed placeholder — observability is preserved across the gate.
     let observed_id = actions.iter().find_map(|a| match a {
         MempoolAction::Observe {
             event: ObservedEvent::DroppedBelowMinFee { tx_id, .. },

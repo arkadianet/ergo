@@ -215,7 +215,7 @@ pub(super) fn handle_message(
                         | ModifierTypeId::ADProofs
                         | ModifierTypeId::Extension,
                     ) => {
-                        // Mode 3 Phase 3b — serve gating. Silently
+                        // Mode 3 serve gating. Silently
                         // skip sections whose parent header is
                         // below our prune sentinel. The peer is
                         // not penalized — they may legitimately
@@ -228,7 +228,7 @@ pub(super) fn handle_message(
                         // silent-skip.
                         //
                         // Fail-CLOSED on missing or unreadable
-                        // SECTION_HEIGHT_INDEX rows (plan §284 +
+                        // SECTION_HEIGHT_INDEX rows (see the
                         // get_section_height docstring at
                         // ergo-state/src/store/mod.rs): a pruned
                         // node only serves sections it can prove
@@ -577,11 +577,11 @@ pub(super) fn handle_message(
         }
         message::CODE_SNAPSHOTS_INFO => match message::deserialize_snapshots_info(payload) {
             Ok(info) => {
-                // Feed the discovery reducer (sub-phase 2f-1). The reducer
-                // tracks per-peer votes and applies the Scala quorum rule.
-                // Eligibility filtering — restricting which peers we *ask*
-                // for SnapshotsInfo — lives in the outbound fan-out (sub-
-                // phase 2f-3). Inbound, we accept what we're given: a
+                // Feed the discovery reducer. The reducer tracks per-peer
+                // votes and applies the Scala quorum rule. Eligibility
+                // filtering — restricting which peers we *ask* for
+                // SnapshotsInfo — lives in the outbound fan-out instead.
+                // Inbound, we accept what we're given: a
                 // Mode 5/6 peer that pushes a SnapshotsInfo unsolicited
                 // will send an empty list anyway (they have no UTXO
                 // state) and the reducer drops empty-list votes.
@@ -680,8 +680,7 @@ pub(super) fn handle_message(
         },
         message::CODE_NIPOPOW_PROOF => handle_inbound_popow_proof(state, peer, payload.to_vec()),
         message::CODE_GET_NIPOPOW_PROOF => {
-            // Serve side (Part 2 sub-phase 14.10). Phase 0 §8.4 +
-            // Scala parity (HeadersProcessor.scala:166-169): a
+            // Serve side. Scala parity (HeadersProcessor.scala:166-169): a
             // NiPoPoW-bootstrapped (sparse-mode) node has no
             // extension/interlinks data for prefix headers and so
             // cannot construct a proof — silent no-op. A Dense
@@ -940,8 +939,7 @@ fn handle_inbound_manifest(state: &mut NodeState, peer: PeerId, manifest_bytes: 
     // `SparseGap` at `snapshot_height` means "we haven't completed
     // bounded forward catchup yet" → silent drop (the voter is
     // still valid; re-poll on the next tick). Distinguishing the
-    // two requires the 3-arm `HeightLookup` (Phase 0 §4.2 + §4.4 +
-    // §10.E resolution).
+    // two requires the 3-arm `HeightLookup`.
     use ergo_state::chain::HeightLookup;
     let header_id = match state
         .store

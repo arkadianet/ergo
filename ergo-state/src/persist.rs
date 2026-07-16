@@ -738,7 +738,7 @@ impl PersistPipeline {
             }
         }
 
-        // 7b. Mode 3 Phase 2b — block-section eviction at the
+        // 7b. Mode 3 block-section eviction at the
         // pipeline-batch seam. Iterates PER-JOB so the
         // sentinel-advance and prune-range exactly match what
         // the synchronous-seam would do if the batch were
@@ -1113,12 +1113,11 @@ mod tests {
 
     #[test]
     fn flush_target_already_drained_returns_immediately() {
-        // Codex-third-pass regression: flush() must be honest even when
-        // the result channel was drained before it was called. The
-        // pre-fix implementation could block forever on `wait_for_height`
-        // because the completion events had already been consumed. The
-        // new commit-watch barrier does not depend on result-channel
-        // state.
+        // flush() must be honest even when the result channel was
+        // drained before it was called. A height-based implementation
+        // could block forever on `wait_for_height` because the
+        // completion events had already been consumed. The commit-watch
+        // barrier does not depend on result-channel state.
         let (_d, p) = fresh_pipeline(8);
         for h in 1..=3u32 {
             p.send(minimal_job(h)).expect("test pipeline alive");
@@ -1198,13 +1197,13 @@ mod tests {
 
     #[test]
     fn flush_honest_when_batch_overflows_result_channel() {
-        // Codex-third-pass regression: smallest legal queue_depth is 1
-        // (so result_rx capacity = 2). Submit a batch larger than that
-        // capacity AND do NOT drain `result_rx` between submissions, so
-        // the worker's per-job `try_send` silently drops completion
-        // events. The pre-fix `flush()` had no way to know those drops
-        // happened; the new commit-watch barrier records every
-        // committed batch regardless of channel state.
+        // Smallest legal queue_depth is 1 (so result_rx capacity = 2).
+        // Submit a batch larger than that capacity AND do NOT drain
+        // `result_rx` between submissions, so the worker's per-job
+        // `try_send` silently drops completion events. A result-channel-
+        // based `flush()` would have no way to know those drops
+        // happened; the commit-watch barrier records every committed
+        // batch regardless of channel state.
         //
         // Note: queue_depth=1 backpressures the producer between sends,
         // so we get separate batches of size 1 — each commit increments

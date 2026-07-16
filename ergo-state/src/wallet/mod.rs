@@ -1,4 +1,5 @@
-//! Wallet persistence layer per spec §7.1.
+//! Wallet persistence layer: tracked-pubkey/box/transaction storage
+//! that lives alongside chain state.
 //!
 //! Tables live in the SAME `state.redb` as chain state. Atomicity
 //! with chain mutations depends on the apply path:
@@ -9,8 +10,9 @@
 //! - **Pipeline forward apply**: chain is queued + drained durably,
 //!   then wallet commits on a separate write_txn. Two-commit;
 //!   failure mode "wallet behind chain" recoverable via rescan-on-
-//!   restart. M5 final-slice work extends `PersistJob` so the
-//!   worker consumes wallet writes atomically too.
+//!   restart. Closing this seam so the pipeline worker consumes
+//!   wallet writes atomically too requires extending `PersistJob`,
+//!   which does not yet exist.
 //! - **Rollback (both paths)**: chain rollback + wallet rollback
 //!   share a single write_txn in `persist_rollback`. Atomic.
 //!

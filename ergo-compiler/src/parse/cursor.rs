@@ -7,8 +7,8 @@ use super::MAX_PARSE_DEPTH;
 // Cursor: token stream with newline-sensitivity primitives.
 // =============================================================================
 
-/// Token cursor consumed by the type grammar (this task) and by the
-/// expression/statement grammar (Tasks 7-9).
+/// Token cursor shared by the type grammar and the expression/statement
+/// grammar.
 ///
 /// Default access (`peek`/`peek2`/`bump`) transparently skips `Newline` tokens,
 /// mirroring fastparse's implicit `ScalaWhitespace` (which includes newlines).
@@ -121,7 +121,7 @@ impl<'a> Cursor<'a> {
     }
 
     /// `Ident` whose text is exactly `w` (grammar words `val`/`def`/`with`/… that
-    /// are *not* reserved keywords, recon-lexical.md §2.3).
+    /// are *not* reserved keywords, so they lex as plain `Ident`s).
     pub(crate) fn at_word(&self, w: &str) -> bool {
         let t = self.peek();
         t.kind == TokenKind::Ident && t.text(self.src) == w

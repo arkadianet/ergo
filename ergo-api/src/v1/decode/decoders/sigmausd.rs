@@ -1,5 +1,5 @@
-//! SigmaUSD (AgeUSD) bank-box decoder — the one family whose register/token
-//! layout is verified (semantic-decode fragment §5, `bank`).
+//! SigmaUSD (AgeUSD) bank-box decoder — the one family (`bank`) whose
+//! register/token layout is verified.
 //!
 //! Grounded facts (AgeUSD v2 bank box; token ids cross-checked against mainnet
 //! token metadata 2026-07):
@@ -10,7 +10,7 @@
 //! * the bank box holds the bank NFT plus the not-yet-circulating SigUSD and
 //!   SigRSV supply as tokens (matched here by id, so token *order* is irrelevant).
 //!
-//! **Honesty (fragment §5 note):** nominal SigUSD/SigRSV prices and the reserve
+//! **Honesty note:** nominal SigUSD/SigRSV prices and the reserve
 //! ratio need the current ERG/USD rate from the linked oracle-pool data-input —
 //! which a single-box decode cannot see. This decoder therefore emits only the
 //! reserve, the register-derived circulating counts, the in-bank token balances,
@@ -69,7 +69,7 @@ pub fn decode_state(input: &DecodeInput, bank_nft: &str) -> StateResult {
         "sigusd_in_bank": token_amount(input, SIGUSD_V2_SC_TOKEN),
         "sigrsv_in_bank": token_amount(input, SIGUSD_V2_RC_TOKEN),
         // Deliberately no price/ratio: those need the ERG/USD oracle rate from a
-        // data-input, which a single-box decode cannot resolve (fragment §5).
+        // data-input, which a single-box decode cannot resolve.
         "oracle_derived_price_available": false,
     });
     StateResult { state, downgraded }

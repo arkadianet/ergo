@@ -1,5 +1,5 @@
-//! `chain/*` reads (`v1-api-design.md` §3.5) — blocks, headers, modifiers,
-//! proofs. Every route is T0 Phase-1 and rides the live-store
+//! `chain/*` reads — blocks, headers, modifiers, proofs. Every route is T0
+//! and rides the live-store
 //! [`NodeChainQuery`](crate::compat::NodeChainQuery) trait; none needs the
 //! indexer or the compiler. Handlers project the frozen Scala-compat DTOs into
 //! the glossary-named v1 shapes in [`super::dto`] and answer the honest

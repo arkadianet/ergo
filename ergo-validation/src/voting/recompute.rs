@@ -476,10 +476,10 @@ pub fn votable_param_name(id: u8) -> Option<&'static str> {
 /// votes endpoint / dashboard so an operator understands what a vote does before
 /// casting it. `None` for ids outside the votable numeric set.
 ///
-/// The implication claims were verified against the cost/economic model in
-/// `dev-docs/protocol/{costing,emission-monetary}.md` and the validation code
+/// The implication claims were verified against the validation code
 /// (`ergo-validation/src/tx/{script,structural}.rs`); keep them accurate if the
-/// model changes — operators cast real consensus votes based on this text.
+/// cost/economic model changes — operators cast real consensus votes based on
+/// this text.
 pub fn votable_param_description(id: u8) -> Option<&'static str> {
     Some(match id {
         1 => {

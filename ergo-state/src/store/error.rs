@@ -106,7 +106,8 @@ pub enum StateError {
         best_header_height: u32,
     },
     /// `apply_popow_proof` refused because the store already has
-    /// full-block state applied. Phase 1b reciprocal guard:
+    /// full-block state applied. Reciprocal guard to
+    /// `install_snapshot_state`'s own check:
     /// running the sparse-mode writer after
     /// `install_snapshot_state` would downgrade
     /// `header_availability` to PoPowSparse and could persist
@@ -138,7 +139,7 @@ pub enum StateError {
     /// proof from our transactions and compares digests, so a
     /// candidate failing this check would be rejected network-wide —
     /// refusing to serve it is the fail-safe direction (incident:
-    /// mainnet h1,805,523; dev-docs/incident-2026-06-11-adproofs/).
+    /// mainnet h1,805,523).
     #[error("candidate ADProofs self-check failed at {stage}: {detail}")]
     CandidateProofSelfCheckFailed { stage: &'static str, detail: String },
     /// Background persist worker reported a job failure at the
@@ -231,7 +232,7 @@ pub enum StateError {
          boundaries, the first non-trivial boundary is at 1024 testnet / 52224 mainnet)"
     )]
     InstallSnapshotAtGenesisRefused,
-    /// Mode 3 Phase 3a — `store_block_section_typed` rejected a
+    /// Mode 3: `store_block_section_typed` rejected a
     /// section write whose parent header is below the current
     /// prune sentinel. Returned to the caller (sync executor)
     /// which logs + silently drops; the peer is NOT penalized
@@ -247,11 +248,11 @@ pub enum StateError {
         section_height: u32,
         sentinel: u32,
     },
-    /// Mode 3 Phase 4 — `rollback_to` rejected a target height
+    /// Mode 3: `rollback_to` rejected a target height
     /// below the prune sentinel. Section bytes at the target
     /// height have been pruned, so the wallet replay path
     /// cannot reconstruct the rollback. The caller must abort the
-    /// reorg attempt. Phase 4's config-load gate enforces
+    /// reorg attempt. The config-load gate enforces
     /// `blocks_to_keep >= ROLLBACK_WINDOW + SAFETY_MARGIN` so
     /// the rollback resolver never needs a pruned block in
     /// practice; this error catches misconfiguration / off-by-one
@@ -337,11 +338,10 @@ pub enum StateError {
     /// the index; without the back-fill, legacy archive rows
     /// would be indistinguishable from genuinely-pruned rows
     /// (serve gate denies for missing-row, classifying valid
-    /// archive data as "pruned"). The Phase 4 activation gate
-    /// raises this fail-closed before any pruned-mode logic runs.
-    /// Phase 1a delivers the variant + the boot check so the
-    /// machinery is in place when Phase 4 drops the config-load
-    /// gate.
+    /// archive data as "pruned"). The pruned-mode activation gate
+    /// raises this fail-closed before any pruned-mode logic runs,
+    /// so a missing back-fill sentinel can never be mistaken for
+    /// legitimate archive-mode operation.
     #[error(
         "section-height back-fill required before pruned-mode boot: \
          run the open-time back-fill walk (sentinel \

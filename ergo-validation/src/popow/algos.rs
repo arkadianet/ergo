@@ -145,7 +145,7 @@ pub fn build_popow_header(
     // 218-219) and `PoPowHeaderSerializer` embeds its serialized form.
     // Emitting 0 bytes here made every proof containing genesis
     // wire-divergent from Scala (their parser rejects a 0-byte proof
-    // blob), caught by the T4 live differential at h=1.
+    // blob) -- caught by a live differential run against block h=1.
     if interlinks.is_empty() {
         // Only genesis legitimately carries no interlinks. A non-genesis
         // header with an empty vector is corrupt or forged — the empty
@@ -779,8 +779,8 @@ mod tests {
         // without manipulating PoW, so this test pins the input/output
         // shape for the level==0 branch by mocking via dependency
         // injection... which we don't have. Skip the in-mod assertion
-        // and rely on the §11.1 oracle test surface. Documented here
-        // so a future reader knows the intent and to extend coverage
+        // and rely on the crate's oracle test surface instead. Documented
+        // here so a future reader knows the intent and to extend coverage
         // when a level-0 mainnet header is pinned.
         let h2 = header_from_hex(HEIGHT_2_V1_HEX);
         let prev_interlinks = vec![

@@ -1,5 +1,4 @@
-//! WS frame protocol + the pure per-socket session state machine
-//! (`v1-api-design.md` §4.1, fragment §2.1–§2.5).
+//! WS frame protocol + the pure per-socket session state machine.
 //!
 //! All frames are text JSON, `snake_case`, one object per frame. Client control
 //! ops: `subscribe` / `unsubscribe` / `resume` / `ping` / `auth`. Server frames
@@ -22,15 +21,15 @@ use crate::v1::routes::dto::unix_ms_to_iso;
 use super::bus::RealtimeEvent;
 use super::model::{parse_channel, ChannelClass};
 
-/// Max subscribed channels per socket (§2.6).
+/// Max subscribed channels per socket.
 pub const MAX_CHANNELS: usize = 64;
-/// Max inbound control-frame size in bytes (§2.6).
+/// Max inbound control-frame size in bytes.
 pub const MAX_MESSAGE_BYTES: usize = 65_536;
-/// Server heartbeat cadence, milliseconds (§2.6).
+/// Server heartbeat cadence, milliseconds.
 pub const HEARTBEAT_MS: u64 = 15_000;
-/// Control-frame rate-limit window (§2.6).
+/// Control-frame rate-limit window.
 pub const CONTROL_WINDOW: Duration = Duration::from_secs(10);
-/// Max control ops per [`CONTROL_WINDOW`] (§2.6).
+/// Max control ops per [`CONTROL_WINDOW`].
 pub const MAX_CONTROL_OPS: usize = 20;
 
 /// The server-advertised limits, echoed in the `welcome` frame.
@@ -54,7 +53,7 @@ impl Default for Limits {
     }
 }
 
-/// A parsed client control frame (§2.3). Produced by [`parse_client_frame`],
+/// A parsed client control frame. Produced by [`parse_client_frame`],
 /// which reports `unknown_op` precisely rather than a generic parse error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientFrame {
@@ -137,7 +136,7 @@ pub fn parse_client_frame(text: &str) -> Result<ClientFrame, FrameParseError> {
     }
 }
 
-/// A server → client frame (§2.4). `type`-tagged, snake_case.
+/// A server → client frame. `type`-tagged, snake_case.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerFrame {
@@ -269,7 +268,7 @@ impl Session {
         self.channels.len()
     }
 
-    /// Record a control op against the rate limiter (§2.6). Returns `false`
+    /// Record a control op against the rate limiter. Returns `false`
     /// when the socket has exceeded [`MAX_CONTROL_OPS`] in [`CONTROL_WINDOW`],
     /// in which case the caller emits `rate_limited` and does NOT dispatch.
     pub fn record_control_op(&mut self, now: Instant) -> bool {
@@ -298,7 +297,7 @@ impl Session {
         self.channels.keys().cloned().collect()
     }
 
-    /// Handle `subscribe` (§2.3): validate + liveness-gate each channel,
+    /// Handle `subscribe`: validate + liveness-gate each channel,
     /// enforce [`MAX_CHANNELS`]. Partial success is explicit — accepted
     /// channels return in the `ack`, each rejected one gets its own
     /// `subscribe_rejected`.
@@ -370,8 +369,7 @@ impl Session {
         frames
     }
 
-    /// Handle `unsubscribe` (§2.3): remove each named channel; ack the removed
-    /// set.
+    /// Handle `unsubscribe`: remove each named channel; ack the removed set.
     pub fn handle_unsubscribe(
         &mut self,
         id: Option<String>,
@@ -398,12 +396,12 @@ impl Session {
         }]
     }
 
-    /// Handle `ping` (§2.3).
+    /// Handle `ping`.
     pub fn handle_ping(&self, id: Option<String>, latest_seq: u64) -> ServerFrame {
         ServerFrame::Pong { id, latest_seq }
     }
 
-    /// Handle `auth` (§2.3): T0 channels ignore it; ack so the client knows the
+    /// Handle `auth`: T0 channels ignore it; ack so the client knows the
     /// frame was seen (the socket stays a pure T0 feed).
     pub fn handle_auth(&self, id: Option<String>) -> ServerFrame {
         ServerFrame::Ack {
@@ -415,7 +413,7 @@ impl Session {
     }
 
     /// Render a delivered [`RealtimeEvent`] into one frame per matched
-    /// subscribed channel (§2.2). A terminal channel (`box:`/`tx:`) is removed
+    /// subscribed channel. A terminal channel (`box:`/`tx:`) is removed
     /// after firing and gets a trailing `unsubscribed reason:"fulfilled"`.
     pub fn on_event(&mut self, event: &RealtimeEvent) -> Vec<ServerFrame> {
         // Dedupe across the replay/live seam: an event published between

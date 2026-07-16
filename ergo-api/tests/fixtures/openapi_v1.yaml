@@ -12,7 +12,7 @@ paths:
       tags:
       - accounts
       summary: |-
-        Any named-account route (`v1-api-design.md` §3.11). Net-new subsystem with
+        Any named-account route. Net-new subsystem with
         no `account_id` model in the wallet layer today → honest `route_unavailable`.
         Representative mount for the whole named-accounts family — every method on
         `/api/v1/accounts`, `/api/v1/accounts/{account_id}`,
@@ -2214,7 +2214,7 @@ paths:
       - mining
       summary: |-
         `POST /api/v1/mining/candidate-with-txs` — T1, seam-deferred. The wire shape
-        is documented (§3.3 #5) but no `NodeMining::candidate_with_txs` seam exists,
+        is documented but no `NodeMining::candidate_with_txs` seam exists,
         so this answers the honest `route_unavailable` rather than silently ignoring
         the forced-tx set. Still gated at `Tier::Operator`.
       operationId: candidate_with_txs
@@ -2378,7 +2378,7 @@ paths:
       - network
       summary: |-
         `POST /api/v1/network/blacklist` — T1, seam-deferred. No manual-ban write
-        path exists on the peer manager yet (§3.2 #7), so this answers the honest
+        path exists on the peer manager yet, so this answers the honest
         `route_unavailable` rather than pretending to ban.
       operationId: blacklist_add
       responses:
@@ -2504,8 +2504,8 @@ paths:
       - network
       summary: |-
         `GET /api/v1/network/connected` — T0. Server-side filter of the same
-        `peers()` data down to handshake-complete (`state == active`) peers (§3.2
-        #2) — no new trait method.
+        `peers()` data down to handshake-complete (`state == active`) peers — no
+        new trait method.
       operationId: connected
       parameters:
       - name: limit
@@ -2640,7 +2640,7 @@ paths:
       - node
       summary: |-
         `GET /api/v1/node/config` — T1. No `NodeConfigView` seam exists on the node
-        yet (§3.1 #8, Phase-2 ASSUMED-new), so this answers the honest
+        yet, so this answers the honest
         `route_unavailable` (503) rather than fabricating or half-projecting a config
         tree. Gated at `Tier::Operator` so the closed shape is still auth-bounded.
       operationId: config_get
@@ -2677,8 +2677,8 @@ paths:
       - node
       summary: |-
         `GET /api/v1/node/health` — T0, dual status. `200` when `status = ok`; `503`
-        for `stalled|disconnected|rejecting|wedged`, WITH the full typed body (§3.1
-        — never a bare error). Same mapping as the compat `health_handler`.
+        for `stalled|disconnected|rejecting|wedged`, WITH the full typed body
+        (never a bare error). Same mapping as the compat `health_handler`.
       operationId: health
       responses:
         '200':
@@ -2725,7 +2725,7 @@ paths:
     get:
       tags:
       - node
-      summary: '`GET /api/v1/node/info` — T0. Bare `ApiInfo` (reused verbatim, §3.1).'
+      summary: '`GET /api/v1/node/info` — T0. Bare `ApiInfo` (reused verbatim).'
       operationId: info
       responses:
         '200':
@@ -3292,7 +3292,7 @@ paths:
       summary: |-
         `POST /script/cost` — the total reduce cost under a bounded accumulator.
         Same request shape as `execute`; reuses the SAME bounded reduce primitive
-        (compose, don't reimplement the cost accounting — fragment §4.4).
+        (compose, don't reimplement the cost accounting).
       operationId: cost
       requestBody:
         content:
@@ -3396,7 +3396,7 @@ paths:
         `POST /script/explain` — same input as `simulate`, plus the mechanical
         diagnosis: the reduction trace and a best-effort human line. The mechanical
         fields ship in the node; the `human_diagnosis` is explicitly
-        non-authoritative (fragment §7-D3).
+        non-authoritative.
       operationId: explain
       requestBody:
         content:
@@ -3858,7 +3858,7 @@ paths:
       tags:
       - tokens
       summary: |-
-        `GET /api/v1/tokens` — mint-order list. Phase-2 (design G3): `INDEXED_TOKEN`
+        `GET /api/v1/tokens` — mint-order list. `INDEXED_TOKEN`
         is hash-keyed with no mint-sequence enumeration index, so there is no honest
         way to enumerate every token in mint order today. Answers `503
         state_unavailable` (never fabricated data) once the index is confirmed
@@ -4024,7 +4024,7 @@ paths:
       tags:
       - accounts
       summary: |-
-        Any PSBT-session route (`v1-api-design.md` §3.11). The commitment/hint math
+        Any PSBT-session route. The commitment/hint math
         exists (`generate_commitments`/`extract_hints`) but the durable session +
         threshold state + a hints-bag sign variant do not → honest
         `route_unavailable`, never a faked partial signature. Representative mount
@@ -4195,7 +4195,7 @@ paths:
       - transactions
       summary: |-
         `POST /api/v1/transactions/simulate` — dry-run an assembled tx: accept/reject
-        + cost + conflicts, NO broadcast and NO mempool mutation (G8).
+        + cost + conflicts, NO broadcast and NO mempool mutation.
       operationId: simulate
       requestBody:
         content:
@@ -4379,7 +4379,7 @@ paths:
       - voting
       summary: |-
         `GET /api/v1/voting/candidate` — T0, seam-deferred. The next-block vote-byte
-        preview (§3.4 #3) has no projection in `ergo-api` and needs a read threaded
+        preview has no projection in `ergo-api` and needs a read threaded
         through the candidate-builder crate; until then it answers the honest
         `route_unavailable` rather than fabricating vote bytes.
       operationId: candidate
@@ -4418,7 +4418,7 @@ paths:
       - voting
       summary: |-
         `GET /api/v1/voting/operator-votes` — T1. The operator-private half split off
-        `ApiVotes.configured_votes` (finding 5), now gated. Collection envelope
+        `ApiVotes.configured_votes`, now gated. Collection envelope
         (bounded, ≤ ~9 entries).
       operationId: operator_votes_get
       parameters:
@@ -4458,7 +4458,8 @@ paths:
         `POST /api/v1/voting/operator-votes` — T1. Reuses
         [`NodeAdmin::set_voting_targets`]. REPLACES the configured set. `204` on
         success; `400 not_votable` / `400 out_of_range` / `409 mining_disabled`
-        (reason re-spelled from the dot-form `mining.disabled` per §1.4 rule 7).
+        (reason re-spelled from the dot-form `mining.disabled` to the v1 naming
+        convention).
       operationId: operator_votes_set
       requestBody:
         content:
@@ -4765,9 +4766,9 @@ paths:
       description: |-
         **Not a plain REST read.** A successful call performs the WebSocket
         upgrade handshake (HTTP 101) and hands off to the long-lived [`Session`]
-        protocol (subscribe/unsubscribe/resume/ping, `v1-api-design.md` §4.1) — not
-        representable as an OpenAPI response body. Only the pre-upgrade rejection
-        paths are documented below.
+        protocol (subscribe/unsubscribe/resume/ping) — not representable as an
+        OpenAPI response body. Only the pre-upgrade rejection paths are
+        documented below.
       operationId: ws_handler
       responses:
         '101':
@@ -5990,7 +5991,7 @@ components:
     BlacklistedPeer:
       type: object
       description: |-
-        One blacklisted-peer entry (§3.2 #3). `addr` is the clean canonical
+        One blacklisted-peer entry. `addr` is the clean canonical
         `ip[:port]` — the compat path keeps the ugly Java `InetAddress.toString()`
         `hostname/ip` double-form for byte-parity; v1 strips it.
       required:
@@ -6295,7 +6296,7 @@ components:
     Collection_ApiPeer:
       type: object
       description: |-
-        A v1 collection: `{items, page}` (`v1-api-design.md` §1.3). Uniform for
+        A v1 collection: `{items, page}`. Uniform for
         every list, even single-page ones (a block's tx list, header-ids at a
         height): those carry `page.has_more = false`, `page.next_cursor = null`.
       required:
@@ -6399,7 +6400,7 @@ components:
     Collection_BlacklistedPeer:
       type: object
       description: |-
-        A v1 collection: `{items, page}` (`v1-api-design.md` §1.3). Uniform for
+        A v1 collection: `{items, page}`. Uniform for
         every list, even single-page ones (a block's tx list, header-ids at a
         height): those carry `page.has_more = false`, `page.next_cursor = null`.
       required:
@@ -6411,7 +6412,7 @@ components:
           items:
             type: object
             description: |-
-              One blacklisted-peer entry (§3.2 #3). `addr` is the clean canonical
+              One blacklisted-peer entry. `addr` is the clean canonical
               `ip[:port]` — the compat path keeps the ugly Java `InetAddress.toString()`
               `hostname/ip` double-form for byte-parity; v1 strips it.
             required:
@@ -6424,7 +6425,7 @@ components:
     Collection_ConfiguredVote:
       type: object
       description: |-
-        A v1 collection: `{items, page}` (`v1-api-design.md` §1.3). Uniform for
+        A v1 collection: `{items, page}`. Uniform for
         every list, even single-page ones (a block's tx list, header-ids at a
         height): those carry `page.has_more = false`, `page.next_cursor = null`.
       required:
@@ -6457,7 +6458,7 @@ components:
     Collection_ProtocolListItem:
       type: object
       description: |-
-        A v1 collection: `{items, page}` (`v1-api-design.md` §1.3). Uniform for
+        A v1 collection: `{items, page}`. Uniform for
         every list, even single-page ones (a block's tx list, header-ids at a
         height): those carry `page.has_more = false`, `page.next_cursor = null`.
       required:
@@ -6509,7 +6510,7 @@ components:
     Collection_ScanBoxView:
       type: object
       description: |-
-        A v1 collection: `{items, page}` (`v1-api-design.md` §1.3). Uniform for
+        A v1 collection: `{items, page}`. Uniform for
         every list, even single-page ones (a block's tx list, header-ids at a
         height): those carry `page.has_more = false`, `page.next_cursor = null`.
       required:
@@ -6523,7 +6524,7 @@ components:
             description: |-
               A box tracked by a scan (unspent surface). `spent_by` is always `null` here
               (the `/unspent` endpoint) — carried only for shape parity with a future
-              `/spent` surface. `value` is a decimal string (§1.1).
+              `/spent` surface. `value` is a decimal string.
             required:
             - box_id
             - value
@@ -6555,7 +6556,7 @@ components:
     Collection_String:
       type: object
       description: |-
-        A v1 collection: `{items, page}` (`v1-api-design.md` §1.3). Uniform for
+        A v1 collection: `{items, page}`. Uniform for
         every list, even single-page ones (a block's tx list, header-ids at a
         height): those carry `page.has_more = false`, `page.next_cursor = null`.
       required:
@@ -6571,7 +6572,7 @@ components:
     Collection_SyncInfoEntry:
       type: object
       description: |-
-        A v1 collection: `{items, page}` (`v1-api-design.md` §1.3). Uniform for
+        A v1 collection: `{items, page}`. Uniform for
         every list, even single-page ones (a block's tx list, header-ids at a
         height): those carry `page.has_more = false`, `page.next_cursor = null`.
       required:
@@ -6583,7 +6584,7 @@ components:
           items:
             type: object
             description: |-
-              One per-peer sync-info entry (§3.2 #4). `peer_height` (not bare `height`)
+              One per-peer sync-info entry. `peer_height` (not bare `height`)
               disambiguates whose height; `status` is the lowercased Scala
               `PeerChainStatus` set (`equal|younger|older|fork|unknown|nonsense`).
             required:
@@ -6604,7 +6605,7 @@ components:
     Collection_V1AddressTxSummary:
       type: object
       description: |-
-        A v1 collection: `{items, page}` (`v1-api-design.md` §1.3). Uniform for
+        A v1 collection: `{items, page}`. Uniform for
         every list, even single-page ones (a block's tx list, header-ids at a
         height): those carry `page.has_more = false`, `page.next_cursor = null`.
       required:
@@ -6669,7 +6670,7 @@ components:
     Collection_V1Block:
       type: object
       description: |-
-        A v1 collection: `{items, page}` (`v1-api-design.md` §1.3). Uniform for
+        A v1 collection: `{items, page}`. Uniform for
         every list, even single-page ones (a block's tx list, header-ids at a
         height): those carry `page.has_more = false`, `page.next_cursor = null`.
       required:
@@ -6708,7 +6709,7 @@ components:
     Collection_V1BlockSummary:
       type: object
       description: |-
-        A v1 collection: `{items, page}` (`v1-api-design.md` §1.3). Uniform for
+        A v1 collection: `{items, page}`. Uniform for
         every list, even single-page ones (a block's tx list, header-ids at a
         height): those carry `page.has_more = false`, `page.next_cursor = null`.
       required:
@@ -6731,7 +6732,7 @@ components:
                   - 'null'
                   description: |-
                     First-deliverer peer — only known inside the near-tip live ring;
-                    `null` for any block outside it (documented capability gap, §3.5).
+                    `null` for any block outside it (documented capability gap).
                 size_bytes:
                   type: integer
                   format: int32
@@ -6746,7 +6747,7 @@ components:
     Collection_V1BlockTx:
       type: object
       description: |-
-        A v1 collection: `{items, page}` (`v1-api-design.md` §1.3). Uniform for
+        A v1 collection: `{items, page}`. Uniform for
         every list, even single-page ones (a block's tx list, header-ids at a
         height): those carry `page.has_more = false`, `page.next_cursor = null`.
       required:
@@ -6790,7 +6791,7 @@ components:
     Collection_V1Box:
       type: object
       description: |-
-        A v1 collection: `{items, page}` (`v1-api-design.md` §1.3). Uniform for
+        A v1 collection: `{items, page}`. Uniform for
         every list, even single-page ones (a block's tx list, header-ids at a
         height): those carry `page.has_more = false`, `page.next_cursor = null`.
       required:
@@ -6802,7 +6803,7 @@ components:
           items:
             type: object
             description: |-
-              The v1 box object (`v1-api-design.md` §3.7). Every box-returning surface
+              The v1 box object. Every box-returning surface
               shares this shape. `box_id`/`confirmed` are always present; the remaining
               fields are `Option` because a box can appear in three provenance contexts
               with different available metadata:
@@ -6811,7 +6812,7 @@ components:
               * block-embedded output (from a block's own bytes) — no `global_index` /
                 `spent_by`;
               * an unresolved input of an unconfirmed tx — only `box_id` is known, the
-                rest are `null` (honest "unknown", never fabricated — §1.1).
+                rest are `null` (honest "unknown", never fabricated).
 
               The `boxes/*` group owns the final canonical box shape (coherence Part B /
               coordination flag #2); this is the transactions-group projection it must
@@ -6847,7 +6848,7 @@ components:
                 minimum: 0
               decoded:
                 description: |-
-                  Semantic decode (§0.3): **omitted** unless `?decode=true`, `null` when
+                  Semantic decode: **omitted** unless `?decode=true`, `null` when
                   requested but the semantic-decode registry (a later group) matched no
                   contract. The registry owns the populated object's shape; this group
                   owns the toggle + presence contract.
@@ -6898,7 +6899,7 @@ components:
     Collection_V1Header:
       type: object
       description: |-
-        A v1 collection: `{items, page}` (`v1-api-design.md` §1.3). Uniform for
+        A v1 collection: `{items, page}`. Uniform for
         every list, even single-page ones (a block's tx list, header-ids at a
         height): those carry `page.has_more = false`, `page.next_cursor = null`.
       required:
@@ -6924,7 +6925,7 @@ components:
     Collection_V1MempoolTx:
       type: object
       description: |-
-        A v1 collection: `{items, page}` (`v1-api-design.md` §1.3). Uniform for
+        A v1 collection: `{items, page}`. Uniform for
         every list, even single-page ones (a block's tx list, header-ids at a
         height): those carry `page.has_more = false`, `page.next_cursor = null`.
       required:
@@ -6936,11 +6937,10 @@ components:
           items:
             type: object
             description: |-
-              The v1 `mempool_tx` row (`v1-api-design.md` §3.8) — the glossary-renamed,
+              The v1 `mempool_tx` row — the glossary-renamed,
               string-amount projection of [`ApiMempoolTransaction`] (`types.rs`). Fees and
-              the priority weight become strings (§1.1); `first_seen` follows the §1.2 flat
-              `*_unix_ms` + `*_iso` timestamp rule (superseding the fragment's nested
-              `first_seen:{}` shape).
+              the priority weight become strings; `first_seen` follows the flat
+              `*_unix_ms` + `*_iso` timestamp rule rather than a nested object.
             required:
             - tx_id
             - fee
@@ -6997,9 +6997,8 @@ components:
                 type: string
                 description: |-
                   Where the tx entered our pool: `peer | api | wallet | demoted_from_block`
-                  (the real [`ApiTxSource`] taxonomy — see the design correction in the
-                  group report; the fragment's `propagated|local|reemission|rebroadcast`
-                  never matched the implemented enum).
+                  (the real [`ApiTxSource`] taxonomy, not a `propagated|local|reemission|
+                  rebroadcast` classification, which does not match the implemented enum).
               tx_id:
                 type: string
               validation_cost_units:
@@ -7128,7 +7127,7 @@ components:
             $ref: '#/components/schemas/CostBreakdownEntry'
           description: |-
             A per-opcode `breakdown` is gated on the interpreter's `cost-trace`
-            feature (fragment §4.4); until that is wired at the API seam the field
+            feature; until that is wired at the API seam the field
             is an honest empty array, not a fabricated split.
         total_cost:
           type: integer
@@ -7372,7 +7371,7 @@ components:
           format: int64
           description: |-
             Per-request cost ceiling (block-cost units). May only LOWER the group
-            ceiling, never raise it (fragment §4.3).
+            ceiling, never raise it.
           minimum: 0
         source:
           type:
@@ -7969,7 +7968,7 @@ components:
     MiningStatus:
       type: object
       description: |-
-        The `mining/status` aggregate (§3.3 #7). Always `200` — safe to poll from an
+        The `mining/status` aggregate. Always `200` — safe to poll from an
         unauthenticated dashboard even when mining is off (hence T0). The
         `last_template_*` / `template_seq` fields require the mining bridge to cache
         its last-published template metadata; that seam is not wired yet, so they are
@@ -8010,7 +8009,7 @@ components:
     NodeVersion:
       type: object
       description: |-
-        The `node/version` probe body (§3.1 #7): an ultra-cheap liveness/version
+        The `node/version` probe body: an ultra-cheap liveness/version
         read, distinct from `info`. `activated_protocol_version` is the currently
         active block-format version — sourced from the same snapshot's votes view
         (`ApiVotes.block_version`), the one place the node already surfaces it.
@@ -8086,8 +8085,8 @@ components:
     Page:
       type: object
       description: |-
-        The `page` object of a v1 collection envelope (`v1-api-design.md` §1.3 /
-        §1.5): `{ limit, next_cursor, has_more }`. `next_cursor` is `null` exactly
+        The `page` object of a v1 collection envelope:
+        `{ limit, next_cursor, has_more }`. `next_cursor` is `null` exactly
         when `has_more` is false.
       required:
       - limit
@@ -8415,7 +8414,7 @@ components:
     PublicVotes:
       type: object
       description: |-
-        The public `voting/votes` body — ONLY the public half (§3.4 #1). The
+        The public `voting/votes` body — ONLY the public half. The
         operator's own `configured_votes` is dropped here and served (gated) at
         `operator-votes`.
       required:
@@ -8452,10 +8451,10 @@ components:
     Reason:
       type: string
       description: |-
-        Canonical machine-readable error reason (`v1-api-design.md` §1.4;
-        coherence Part A). Serialized as `lowercase_snake_case`; the string is a
-        **stable enum a client switches on** — treat additions as an open set
-        (§1.6), never rename an existing variant inside v1.
+        Canonical machine-readable error reason. Serialized as
+        `lowercase_snake_case`; the string is a **stable enum a client switches
+        on** — treat additions as an open set, never rename an existing variant
+        inside v1.
 
         One spelling per concept: typed `<resource>_not_found` (never bare
         `not_found`), `invalid_<thing>` (never `bad_<thing>`), `<subsystem>_disabled`
@@ -8600,7 +8599,7 @@ components:
     RewardAddress:
       type: object
       description: |-
-        Fresh snake_case reward-address DTO (§3.3 #3 — the compat
+        Fresh snake_case reward-address DTO (the compat
         `RewardAddressResponse` is hard-renamed camelCase + pinned by a unit test, so
         a new DTO is required).
       required:
@@ -8610,7 +8609,7 @@ components:
           type: string
     RewardPubkey:
       type: object
-      description: 'Fresh snake_case reward-pubkey DTO (§3.3 #4 — same rationale).'
+      description: Fresh snake_case reward-pubkey DTO (same rationale).
       required:
       - reward_pubkey
       properties:
@@ -8621,7 +8620,7 @@ components:
       description: |-
         A box tracked by a scan (unspent surface). `spent_by` is always `null` here
         (the `/unspent` endpoint) — carried only for shape parity with a future
-        `/spent` surface. `value` is a decimal string (§1.1).
+        `/spent` surface. `value` is a decimal string.
       required:
       - box_id
       - value
@@ -8672,7 +8671,7 @@ components:
       additionalProperties: false
     ScanView:
       type: object
-      description: A registered scan, snake_case (`v1-api-design.md` §3.10).
+      description: A registered scan, snake_case.
       required:
       - scan_id
       - name
@@ -8844,10 +8843,10 @@ components:
           items:
             type: object
             description: |-
-              One point of the O4 mempool-depth series (`stats/mempool-depth` point shape,
-              §3.14). The wire projection of a [`crate::v1::mempool_depth::MempoolDepthSample`];
+              One point of the mempool-depth series (`stats/mempool-depth` point shape).
+              The wire projection of a [`crate::v1::mempool_depth::MempoolDepthSample`];
               the future `stats/mempool-depth` endpoint reuses this SAME type over the SAME
-              ring (Overlap O4).
+              ring.
             required:
             - timestamp_unix_ms
             - timestamp_iso
@@ -8941,8 +8940,8 @@ components:
           type: string
           description: |-
             Honest scope marker: this first cut reduces the real box's guard against
-            a single-box context (no spending tx, no proof verification) — fragment
-            §7-D2. A `reduced_to` sigma proposition means "spendable with the right
+            a single-box context (no spending tx, no proof verification). A
+            `reduced_to` sigma proposition means "spendable with the right
             proof", not a verified spend.
         reduced_to:
           type: string
@@ -9022,7 +9021,7 @@ components:
     SyncInfoEntry:
       type: object
       description: |-
-        One per-peer sync-info entry (§3.2 #4). `peer_height` (not bare `height`)
+        One per-peer sync-info entry. `peer_height` (not bare `height`)
         disambiguates whose height; `status` is the lowercased Scala
         `PeerChainStatus` set (`equal|younger|older|fork|unknown|nonsense`).
       required:
@@ -9116,7 +9115,7 @@ components:
     TrackInfo:
       type: object
       description: |-
-        The `network/track-info` aggregate counters (§3.2 #5). Bare object, not a
+        The `network/track-info` aggregate counters. Bare object, not a
         collection.
       required:
       - num_requested
@@ -9152,7 +9151,7 @@ components:
       type: object
       description: |-
         A typed constant on the wire: `{ "type": "<sigma type>", "value": "<string>" }`
-        (fragment §4.1). Scalars are decimal strings, byte collections / group
+        Scalars are decimal strings, byte collections / group
         elements are hex, booleans are `"true"`/`"false"`.
       required:
       - type
@@ -9325,7 +9324,7 @@ components:
             - 'null'
             description: |-
               First-deliverer peer — only known inside the near-tip live ring;
-              `null` for any block outside it (documented capability gap, §3.5).
+              `null` for any block outside it (documented capability gap).
           size_bytes:
             type: integer
             format: int32
@@ -9386,7 +9385,7 @@ components:
     V1Box:
       type: object
       description: |-
-        The v1 box object (`v1-api-design.md` §3.7). Every box-returning surface
+        The v1 box object. Every box-returning surface
         shares this shape. `box_id`/`confirmed` are always present; the remaining
         fields are `Option` because a box can appear in three provenance contexts
         with different available metadata:
@@ -9395,7 +9394,7 @@ components:
         * block-embedded output (from a block's own bytes) — no `global_index` /
           `spent_by`;
         * an unresolved input of an unconfirmed tx — only `box_id` is known, the
-          rest are `null` (honest "unknown", never fabricated — §1.1).
+          rest are `null` (honest "unknown", never fabricated).
 
         The `boxes/*` group owns the final canonical box shape (coherence Part B /
         coordination flag #2); this is the transactions-group projection it must
@@ -9431,7 +9430,7 @@ components:
           minimum: 0
         decoded:
           description: |-
-            Semantic decode (§0.3): **omitted** unless `?decode=true`, `null` when
+            Semantic decode: **omitted** unless `?decode=true`, `null` when
             requested but the semantic-decode registry (a later group) matched no
             contract. The registry owns the populated object's shape; this group
             owns the toggle + presence contract.
@@ -9480,8 +9479,8 @@ components:
     V1Error:
       type: object
       description: |-
-        The v1 error envelope: `{ "error": { reason, message, detail } }`
-        (`v1-api-design.md` §1.3). Carries its own HTTP status via the `reason`.
+        The v1 error envelope: `{ "error": { reason, message, detail } }`.
+        Carries its own HTTP status via the `reason`.
 
         Prefer returning `Result<T, V1Error>` from a handler and `?`-ing the
         error path; [`IntoResponse`] renders the envelope with the correct
@@ -9494,7 +9493,7 @@ components:
           description: The single `error` key holding the machine/human/actionable triple.
     V1ErrorInner:
       type: object
-      description: Inner object of the v1 error envelope (`v1-api-design.md` §1.3).
+      description: Inner object of the v1 error envelope.
       required:
       - reason
       - message
@@ -9526,7 +9525,7 @@ components:
     V1FeeHistogram:
       type: object
       description: |-
-        The v1 `mempool/fee-histogram` bare object (§3.8): active `weight_function`,
+        The v1 `mempool/fee-histogram` bare object: active `weight_function`,
         the `max_wait_ms` horizon the bins span, and the per-bin counts.
       required:
       - weight_function
@@ -9546,8 +9545,8 @@ components:
     V1FeeHistogramBin:
       type: object
       description: |-
-        One bin of the v1 `mempool/fee-histogram` (§3.8). `total_fee` is
-        string-amount per §1.1. `fee_per_byte_min`/`_max` are the ASSUMED-new band:
+        One bin of the v1 `mempool/fee-histogram`. `total_fee` is
+        a string amount. `fee_per_byte_min`/`_max` are the ASSUMED-new band:
         the frozen `pool_fee_histogram` hook is a WAIT-TIME histogram carrying only
         `{n_txns, total_fee}` per bin, so the band is honestly `null` until a
         fee-keyed histogram hook exists (design correction — see the group report).
@@ -9659,10 +9658,10 @@ components:
     V1IoBox:
       type: object
       description: |-
-        A resolved input/output of a pooled tx (§3.8 `io_box`). Every field is
+        A resolved input/output of a pooled tx (`io_box`). Every field is
         nullable: a spent input may not resolve against the extra index or the
         pool-output overlay, and `null` ≠ `[]` (an unresolved box is not a box with
-        no assets) per the §1.1 honesty rule.
+        no assets) per the honesty rule of never fabricating data.
       properties:
         address:
           type:
@@ -9685,10 +9684,10 @@ components:
     V1MempoolDepthPoint:
       type: object
       description: |-
-        One point of the O4 mempool-depth series (`stats/mempool-depth` point shape,
-        §3.14). The wire projection of a [`crate::v1::mempool_depth::MempoolDepthSample`];
+        One point of the mempool-depth series (`stats/mempool-depth` point shape).
+        The wire projection of a [`crate::v1::mempool_depth::MempoolDepthSample`];
         the future `stats/mempool-depth` endpoint reuses this SAME type over the SAME
-        ring (Overlap O4).
+        ring.
       required:
       - timestamp_unix_ms
       - timestamp_iso
@@ -9730,8 +9729,8 @@ components:
     V1MempoolSummary:
       type: object
       description: |-
-        The v1 `mempool/summary` bare object (§3.8): capacity counters + derived
-        `utilization` + active `weight_function`, plus the OPTIONAL O4 depth
+        The v1 `mempool/summary` bare object: capacity counters + derived
+        `utilization` + active `weight_function`, plus the OPTIONAL depth
         `history` (present only when `?history=<n>` is requested).
       required:
       - size
@@ -9775,11 +9774,10 @@ components:
     V1MempoolTx:
       type: object
       description: |-
-        The v1 `mempool_tx` row (`v1-api-design.md` §3.8) — the glossary-renamed,
+        The v1 `mempool_tx` row — the glossary-renamed,
         string-amount projection of [`ApiMempoolTransaction`] (`types.rs`). Fees and
-        the priority weight become strings (§1.1); `first_seen` follows the §1.2 flat
-        `*_unix_ms` + `*_iso` timestamp rule (superseding the fragment's nested
-        `first_seen:{}` shape).
+        the priority weight become strings; `first_seen` follows the flat
+        `*_unix_ms` + `*_iso` timestamp rule rather than a nested object.
       required:
       - tx_id
       - fee
@@ -9836,9 +9834,8 @@ components:
           type: string
           description: |-
             Where the tx entered our pool: `peer | api | wallet | demoted_from_block`
-            (the real [`ApiTxSource`] taxonomy — see the design correction in the
-            group report; the fragment's `propagated|local|reemission|rebroadcast`
-            never matched the implemented enum).
+            (the real [`ApiTxSource`] taxonomy, not a `propagated|local|reemission|
+            rebroadcast` classification, which does not match the implemented enum).
         tx_id:
           type: string
         validation_cost_units:
@@ -9867,7 +9864,7 @@ components:
             items:
               $ref: '#/components/schemas/V1IoBox'
       description: |-
-        The v1 `mempool/transactions/{tx_id}` bare object (§3.8): the `mempool_tx`
+        The v1 `mempool/transactions/{tx_id}` bare object: the `mempool_tx`
         row (flattened) plus its resolved `io_box` inputs/outputs.
     V1MempoolUtilization:
       type: object
@@ -9898,7 +9895,7 @@ components:
       type: object
       description: |-
         `GET /chain/proofs/{header_id}/transactions/{tx_id}` — Merkle membership
-        proof. Side byte `0/1` rendered as `"left"/"right"` strings (§3.5).
+        proof. Side byte `0/1` rendered as `"left"/"right"` strings.
       required:
       - tx_id
       - levels
@@ -9957,7 +9954,7 @@ components:
             - ad_proofs
       description: |-
         `GET /chain/modifiers/{modifier_id}` — v1 adds the explicit `kind`
-        discriminant the untagged Scala `BlockSection` lacks (§3.5).
+        discriminant the untagged Scala `BlockSection` lacks.
     V1SpendInput:
       type: object
       description: |-
@@ -9989,7 +9986,7 @@ components:
     V1Token:
       type: object
       description: |-
-        The v1 token object (`v1-api-design.md` §3.7). `box_id` is the *minting*
+        The v1 token object. `box_id` is the *minting*
         box; `emission_amount` is the string-restrung ever-minted figure.
       required:
       - token_id

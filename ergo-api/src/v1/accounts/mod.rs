@@ -1,7 +1,6 @@
 //! `/api/v1/scan/*` + `/api/v1/accounts/*` — the native scan registry, the
 //! account-abstraction subsystem (named accounts, watch-only addresses,
-//! PSBT-like partial signing), and the T2 private-key export
-//! (`v1-api-design.md` §3.10–§3.11).
+//! PSBT-like partial signing), and the T2 private-key export.
 //!
 //! **Mount seam / collision note.** The pre-existing native `/api/v1/wallet/*`
 //! surface owns that whole prefix (including a `*rest` catch-all), exactly as
@@ -61,9 +60,9 @@ pub struct AccountsState {
     pub network: NetworkPrefix,
 }
 
-/// Map a [`WalletAdminError`] onto the canonical v1 [`Reason`] envelope
-/// (`v1-api-design.md` §1.4). Exhaustive — a new trait variant must choose its
-/// v1 reason explicitly, never fall through.
+/// Map a [`WalletAdminError`] onto the canonical v1 [`Reason`] envelope.
+/// Exhaustive — a new trait variant must choose its v1 reason explicitly,
+/// never fall through.
 ///
 /// The v1 `Reason` enum was not extended with wallet-execution reasons, so a
 /// few variants map to the closest existing reason (documented inline); the
@@ -193,7 +192,7 @@ pub(super) fn map_wallet_err(e: WalletAdminError) -> Response {
 }
 
 /// A boxed `route_unavailable` seam for a net-new capability with no node
-/// backing yet (`v1-api-design.md` §1.4). Honest: never a fabricated success.
+/// backing yet. Honest: never a fabricated success.
 fn seam(what: &str, detail: &str) -> Response {
     v1_error(
         Reason::RouteUnavailable,
@@ -427,7 +426,7 @@ pub(crate) async fn private_key(
 //  Named accounts + PSBT (honest seams — no node backing yet)
 // ==========================================================================
 
-/// Any named-account route (`v1-api-design.md` §3.11). Net-new subsystem with
+/// Any named-account route. Net-new subsystem with
 /// no `account_id` model in the wallet layer today → honest `route_unavailable`.
 /// Representative mount for the whole named-accounts family — every method on
 /// `/api/v1/accounts`, `/api/v1/accounts/{account_id}`,
@@ -449,7 +448,7 @@ pub(crate) async fn accounts_seam() -> Response {
     )
 }
 
-/// Any PSBT-session route (`v1-api-design.md` §3.11). The commitment/hint math
+/// Any PSBT-session route. The commitment/hint math
 /// exists (`generate_commitments`/`extract_hints`) but the durable session +
 /// threshold state + a hints-bag sign variant do not → honest
 /// `route_unavailable`, never a faked partial signature. Representative mount

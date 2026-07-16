@@ -862,7 +862,7 @@ mod tests {
         assert_eq!(out, vec![0, 128]);
     }
 
-    // ----- §6.3 final-edge cases: direct proof-layer is_valid pins -----
+    // ----- final-edge cases: direct proof-layer is_valid pins -----
 
     /// Direct `is_valid` pin on a genesis-only proof (prefix
     /// empty, suffix_head = genesis, suffix_tail empty). Verifies

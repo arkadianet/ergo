@@ -103,7 +103,7 @@ pub fn rollback_one_block(
 
     // Capture identity fields before any mutation so the `_failed`
     // event below carries the pre-attempt values, never rebuilt-state
-    // values. Per the Codex supervisor plan for this phase.
+    // values.
     let header_id_hex = hex::encode(block.header_id.as_bytes());
     info!(
         event = "indexer_rollback_started",
@@ -193,14 +193,12 @@ fn rollback_one_block_inner(
         let mut template_table = write_txn.open_table(INDEXED_TEMPLATE)?;
         let mut token_table = write_txn.open_table(INDEXED_TOKEN)?;
         let mut segments_table = write_txn.open_table(SEGMENTS)?;
-        // Storage-rent eligibility index inverse (spec
-        // `2026-05-01-storage-rent-eligibility.md` §4.2). Symmetric to
-        // apply: deletes on output rollback (the output's row created
-        // during apply is removed) and inserts on input rollback (the
-        // unspent state of the consumed box is restored). All values
-        // are derived from the unchanged `IndexedErgoBox` rows; the
-        // `INDEXER_UNDO` payload is deliberately not extended (spec §7
-        // O1).
+        // Storage-rent eligibility index inverse: symmetric to apply —
+        // deletes on output rollback (the output's row created during
+        // apply is removed) and inserts on input rollback (the unspent
+        // state of the consumed box is restored). All values are derived
+        // from the unchanged `IndexedErgoBox` rows, so the `INDEXER_UNDO`
+        // payload does not need to carry them separately.
         let mut storage_rent_table = write_txn.open_table(UNSPENT_BY_CREATION_HEIGHT)?;
 
         for tx in block.transactions.iter().rev() {
@@ -459,7 +457,7 @@ fn rollback_one_block_inner(
                     // box_value, box_bytes_len)` is reconstructed
                     // entirely from the in-hand `existing`
                     // `IndexedErgoBox` — no `INDEXER_UNDO` payload
-                    // extension required (spec §7 O1).
+                    // extension required.
                     let restored_bytes = ergo_ser::ergo_box::serialize_ergo_box(&existing.box_data)
                         .map_err(|e| IndexerError::Serialize {
                             context: "serialize_ergo_box for storage_rent",

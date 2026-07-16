@@ -1,5 +1,4 @@
-//! `diagnostics` — the WARGAMES operator signals as product
-//! (`v1-api-design.md` §3.15).
+//! `diagnostics` — operator signals as product.
 //!
 //! Not `up/down` health, but "am I on the majority chain / lone-producing a
 //! fork / are my peers good / is my tip stuck / how fast do I build

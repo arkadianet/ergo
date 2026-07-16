@@ -1,7 +1,7 @@
 //! Family decoders — one module per protocol family. A decoder renders the
 //! `state` object for a matched box from its already-parsed registers + tokens.
 //! Adding a protocol adds a module here (or reuses an existing family) + a
-//! registry entry + a `test-vectors/decode/` oracle (fragment §6).
+//! registry entry + a `test-vectors/decode/` oracle.
 
 pub mod sigmausd;
 

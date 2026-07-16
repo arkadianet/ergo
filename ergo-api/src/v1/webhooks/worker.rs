@@ -1,7 +1,7 @@
 //! The delivery worker: a [`RealtimeBus`] subscriber that fans matched events
 //! into per-webhook deliveries and drives the injected transport
 //! ([`WebhookSink`]) under the [`WebhookEngine`]'s at-least-once retry
-//! discipline (`v1-api-design.md` §4.1, fragment §3.3).
+//! discipline.
 //!
 //! **Transport seam.** The concrete outbound HTTP(S) client is abstracted
 //! behind [`WebhookSink`] and injected — the engine + worker + retry
@@ -16,7 +16,7 @@
 //! outbound-network worker. Deliveries now actually reach operator-registered
 //! URLs; **persistence is the one remaining deferral** — the registry +
 //! delivery log are in-memory and bounded, so a node restart loses all
-//! registrations until a durable `*-db` schema lands (CLAUDE.md §2).
+//! registrations until a durable `*-db` schema lands.
 //!
 //! **Never stalls the bus.** The worker owns a bounded [`BusSubscription`]; a
 //! slow endpoint only backs up that webhook's own deliveries (bounded ring +

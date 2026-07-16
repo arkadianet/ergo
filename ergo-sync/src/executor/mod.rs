@@ -1782,8 +1782,7 @@ impl SyncExecutor {
         // Capture identity fields before any mutation so the `_failed`
         // event below carries pre-attempt values, not rebuilt-state
         // values. `fork_id` is the common-ancestor header at
-        // `fork_height`, not the new tip — per the Codex supervisor
-        // plan for this phase.
+        // `fork_height`, not the new tip.
         let old_height = store.chain_state_meta().best_full_block_height;
         let old_id = store.chain_state_meta().best_full_block_id;
         if fork_height == old_height {

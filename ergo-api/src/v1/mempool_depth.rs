@@ -1,13 +1,11 @@
-//! O4 — the shared mempool-depth sample ring (`v1-api-design.md` Appendix A
-//! O4, §3.14 `stats/mempool-depth`).
+//! The shared mempool-depth sample ring.
 //!
 //! A bounded, in-memory ring that samples pool depth (size / bytes / capacity /
 //! min-fee / revalidation backlog) over time. It is **shared infrastructure**:
-//! this crate's `mempool/summary?history=` exposes it today, and the future
-//! `stats/mempool-depth` time-series endpoint MUST consume this SAME ring
-//! (Overlap O4 — one ring, two surfaces) rather than build a parallel one.
-//! Consumers project a raw [`MempoolDepthSample`] onto the wire via
-//! [`crate::v1::routes::dto::V1MempoolDepthPoint`].
+//! both `mempool/summary?history=` and the `stats/mempool-depth` time-series
+//! endpoint consume this SAME ring (one ring, two surfaces) rather than each
+//! building their own. Consumers project a raw [`MempoolDepthSample`] onto the
+//! wire via [`crate::v1::routes::dto::V1MempoolDepthPoint`].
 //!
 //! Design mirrors the operator event ring (`ergo-node/src/node/event_feed.rs`):
 //! FIFO eviction at [`DEPTH_RING_CAP`], a monotonic `seq` per sample, and
@@ -37,8 +35,8 @@ pub const DEFAULT_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// One raw depth observation. `min_fee_per_byte` is the cheapest pooled tx's
 /// fee-per-byte (nanoERG/byte), or `0` on an empty pool. Amounts stay `u64`
-/// here (the raw store); the wire projection restringifies per the §1.1
-/// convention.
+/// here (the raw store); the wire projection restringifies large amounts to
+/// avoid JSON-number precision loss.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ToSchema)]
 pub struct MempoolDepthSample {
     /// Monotonic sample sequence (starts at 1, never reused) — lets a future

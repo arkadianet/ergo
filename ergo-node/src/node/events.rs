@@ -626,9 +626,8 @@ fn inject_local_full_block(
     // the header to `recently_installed` so any peer-orphan headers
     // buffered on top of this locally-mined block as parent can
     // drain on the next P2P `ValidateHeader` flush. Calling the
-    // raw `process_header_cfg` (an earlier draft) would have stranded
-    // those orphans indefinitely. Codex follow-up on the prior
-    // attempt.
+    // raw `process_header_cfg` would have stranded those orphans
+    // indefinitely.
     //
     // `HeaderProcessError::Deserialize` here means "re-parse of a
     // persisted parent header failed" — NOT "caller sent bad bytes".

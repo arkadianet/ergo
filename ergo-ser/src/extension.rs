@@ -240,8 +240,8 @@ mod tests {
         /// the two wire-format caps (≤65535 fields, each value ≤255
         /// bytes) survives `read_extension ∘ write_extension`. Bounds
         /// match the same caps the writer enforces in
-        /// `extension_too_many_fields_returns_invalid_data` and
-        /// `extension_value_too_long_returns_invalid_data`; this
+        /// `extension_field_count_above_u16_returns_invalid_data` and
+        /// `extension_field_value_above_255_returns_invalid_data`; this
         /// property covers everything inside both caps.
         ///
         /// Field count cap of 256 chosen for proptest tractability

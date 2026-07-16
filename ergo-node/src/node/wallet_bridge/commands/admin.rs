@@ -63,8 +63,8 @@ pub(crate) async fn init(
     reply: oneshot::Sender<Result<String, WalletAdminError>>,
 ) {
     let mut storage = ctx.storage.write();
-    // Refuse to overwrite an existing wallet (codex: `init` on an initialized
-    // wallet would persist a second secret file). Return a typed `WalletExists`
+    // Refuse to overwrite an existing wallet: `init` on an initialized
+    // wallet would persist a second secret file. Return a typed `WalletExists`
     // (native 409 wallet_exists / compat 400) instead of clobbering the seed.
     if !matches!(
         storage.lock_state(),
@@ -863,7 +863,7 @@ pub(crate) async fn native_status(
                 }
             };
             // changeAddress is persisted PUBLIC metadata — surfaced regardless of
-            // lock state (codex: it must not disappear when locked); `null` only
+            // lock state (it must not disappear when locked); `null` only
             // when unset. Read the stored pubkey + render to the network address.
             let change_address = match read_txn
                 .open_table(ergo_state::wallet::tables::WALLET_CHANGE_ADDRESS)
@@ -975,7 +975,7 @@ pub(crate) async fn native_addresses(
 }
 
 /// `GET /api/v1/wallet/boxes` (paged). All wallet boxes (any status), ordered
-/// `(creationHeight desc, boxId asc)` — sorted before paging (codex P2-13).
+/// `(creationHeight desc, boxId asc)` — sorted before paging.
 pub(crate) async fn native_boxes(
     ctx: &WriterContext<'_>,
     offset: u32,

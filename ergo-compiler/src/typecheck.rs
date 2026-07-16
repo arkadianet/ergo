@@ -119,8 +119,9 @@ impl CompileError {
     ///
     /// `Type` delegates to [`TyperError::class_tag`] (`TyperException`,
     /// `MethodNotFound`, `NonApplicableMethod`, …).  `Parse` reports
-    /// `ParserException` (the single Scala parser exception class; the M1 lexical
-    /// vs syntax vs semantic split is a Rust-side refinement, design doc §10).
+    /// `ParserException` (the single Scala parser exception class; the lexical
+    /// vs syntax vs semantic split is a Rust-side refinement with no Scala
+    /// analogue).
     /// `Bind` reports the `BinderException`-family class.
     pub fn class(&self) -> &'static str {
         match self {
@@ -206,7 +207,7 @@ pub fn typecheck_with_network(
 }
 
 /// Typecheck an already-parsed contract body against a named-parameter TYPE
-/// environment (M7). Mirrors `SigmaCompiler.typecheck(env, parsedExpr)`
+/// environment. Mirrors `SigmaCompiler.typecheck(env, parsedExpr)`
 /// (SigmaCompiler.scala:71-79) as driven by `SigmaTemplateCompiler.compile`
 /// (SigmaTemplateCompiler.scala:28-30): the contract's `parEnv` is a
 /// `Map[String, SType]` — declared param TYPES, no values — so the binder runs

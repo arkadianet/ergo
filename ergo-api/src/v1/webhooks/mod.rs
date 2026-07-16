@@ -1,6 +1,5 @@
 //! `webhooks/*` — durable, retried, signed outbound delivery: the **T1**
-//! sibling of the WS [`RealtimeBus`](crate::v1::realtime) (`v1-api-design.md`
-//! §4.1, fragment `realtime-ws-webhooks.md` §3).
+//! sibling of the WS [`RealtimeBus`](crate::v1::realtime).
 //!
 //! Where WS pushes to an open socket, a webhook makes the node POST each
 //! matching event to an operator-registered URL with an **at-least-once,
@@ -30,10 +29,9 @@
 //! webhooks now actually POST to their operator-configured URL under the
 //! engine's at-least-once, exponential-backoff, HMAC-signed discipline.
 //!
-//! **One remaining honest deferral (see the PR report): persistence.** The
-//! registry + delivery log are bounded and in-memory; registrations are LOST
-//! on node restart until a `*-db` schema lands (CLAUDE.md §2). No schema is
-//! invented here.
+//! **One remaining honest deferral: persistence.** The registry + delivery
+//! log are bounded and in-memory; registrations are LOST on node restart
+//! until a `*-db` schema lands. No schema is invented here.
 
 pub mod engine;
 pub mod model;

@@ -93,9 +93,8 @@ impl IdentityInputs {
 /// `classify_node_mode` projection maps an `IdentityInputs` to
 /// exactly one variant. Intended as the dispatch surface for
 /// Mode 4 orchestration when the boot path needs to branch on
-/// the configured mode; currently the projection is also a
-/// foundation for the runtime mode-coherence checks landing in
-/// the same Phase 4a slice.
+/// the configured mode; it is also the foundation for the
+/// runtime mode-coherence checks.
 ///
 /// The Scala node has no equivalent enum — it derives behavior
 /// from the same field cross-product on demand. The enum here is
@@ -114,7 +113,7 @@ pub enum NodeMode {
     Pruned { keep: u32 },
     /// Mode 4 — pruned + bootstrap. At least one of `utxo` /
     /// `nipopow` is true; both true is the composed-bootstrap
-    /// case from the Phase 4d Row C acceptance.
+    /// case.
     PrunedBootstrap {
         keep: u32,
         utxo: bool,
@@ -211,8 +210,8 @@ pub fn classify_nipopow_resume(
     }
 }
 
-/// Phase 4b decision predicate: should the boot path engage the
-/// UTXO snapshot install machinery? Returns `true` only when:
+/// Should the boot path engage the UTXO snapshot install
+/// machinery? Returns `true` only when:
 /// - the operator configured `utxo_bootstrap = true`, AND
 /// - no full block has ever been applied
 ///   (`best_full_block_height == 0`), AND
@@ -762,16 +761,16 @@ pub(crate) fn validate_runtime_mode_support(config: &NodeConfig) -> Result<(), N
         );
     }
     // Mode 2 (utxo_bootstrap = true) is now accepted at runtime.
-    // The consume-side pipeline (parts 2f-2i) is live; on a fresh
-    // data_dir the node will discover snapshots, verify trust
-    // against header.state_root, download chunks, reconstruct the
-    // UTXO tree, and install it before normal block sync takes
-    // over. Trust verification remains PROVISIONAL until a Scala
-    // oracle pin lands (see 2g-2 docs); operators running Mode 2
-    // against a fresh data_dir should cross-check the installed
-    // root against a known-good Scala mainnet snapshot.
-    // NiPoPoW bootstrap runtime gate LIFTED in Part 2 §14.6
-    // (orchestration end-to-end). The PopowBootstrap reducer is
+    // The consume-side pipeline is live; on a fresh data_dir the
+    // node will discover snapshots, verify trust against
+    // header.state_root, download chunks, reconstruct the UTXO
+    // tree, and install it before normal block sync takes over.
+    // Trust verification remains PROVISIONAL until a Scala oracle
+    // pin lands; operators running Mode 2 against a fresh data_dir
+    // should cross-check the installed root against a known-good
+    // Scala mainnet snapshot.
+    // NiPoPoW bootstrap is fully wired end-to-end. The PopowBootstrap
+    // reducer is
     // constructed in NodeState when `config.nipopow_bootstrap`
     // is `true` AND `store.chain_state().best_header_height == 0`
     // (fresh data_dir); subsequent ticks drive request fan-out,

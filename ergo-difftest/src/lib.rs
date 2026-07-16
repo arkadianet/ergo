@@ -3,8 +3,8 @@
 //!
 //! Phase 1 (this crate) generates and mutates bytes, runs them through the
 //! `ergo-ser` decoders, and checks oracle-free invariants:
-//!   * no decode ever panics (the panic class — e.g. the write-overflow fixed
-//!     in #97), and
+//!   * no decode ever panics (the panic class this harness exists to catch —
+//!     e.g. a writer overflow on an out-of-range field), and
 //!   * `decode → encode` reaches a byte-stable fixed point.
 //!
 //! Phase 2 (`scripts/jvm_serde_oracle`, modeled on `scripts/scala_hamt_oracle`)

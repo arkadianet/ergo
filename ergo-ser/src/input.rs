@@ -1097,9 +1097,8 @@ mod tests {
     // ----- oracle parity -----
     //
     // The ATTACK/CONTROL verdicts below come from the sigma-state 6.0.2
-    // Scala reference (scripts/jvm_serde_oracle, surface `transaction`),
-    // recorded in dev-docs/context-ext-count-signedness-recon.md. They are
-    // EXTERNAL oracle verdicts, not self-oracles: Scala's
+    // Scala reference (scripts/jvm_serde_oracle, surface `transaction`).
+    // They are EXTERNAL oracle verdicts, not self-oracles: Scala's
     // ContextExtension.serializer.parse reads the count with a SIGNED
     // getByte() and rejects the high bit before reading any entry.
 

@@ -1,4 +1,5 @@
-//! Read endpoints for `/wallet/*` — always-served per spec §8.1.
+//! Read endpoints for `/wallet/*` — unconditionally mounted, unlike routes
+//! gated on node configuration.
 //!
 //! Routes: balances, addresses, boxes, boxes/unspent, transactions,
 //! transactionById, transactionsByScanId/{id}.

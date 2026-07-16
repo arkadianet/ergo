@@ -17,7 +17,7 @@ use crate::wallet::WalletAdminError;
 /// The native wallet error body. `detail` is omitted (not `null`) when absent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct NativeWalletError {
-    /// Closed snake_case reason set (see the design §4).
+    /// A closed snake_case reason set (e.g. `"locked"`, `"box_not_found"`).
     pub reason: String,
     /// Optional human-readable detail; never carries secret material.
     #[serde(skip_serializing_if = "Option::is_none")]

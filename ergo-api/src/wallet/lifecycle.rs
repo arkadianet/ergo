@@ -1,4 +1,5 @@
-//! Lifecycle endpoints for `/wallet/*` — always-served per spec §8.1.
+//! Lifecycle endpoints for `/wallet/*` — unconditionally mounted, unlike
+//! routes gated on node configuration.
 //!
 //! Routes: status, init, restore, unlock, lock, check.
 
@@ -11,7 +12,7 @@ use axum::Json;
 use super::types;
 use super::WalletAdmin;
 
-/// Map `WalletAdminError` to an HTTP response per spec §8.1.
+/// Map `WalletAdminError` to an HTTP response.
 ///
 /// `pub(crate)` so `reads` and `state_mut` can reuse this mapping
 /// without duplicating the status-code table.

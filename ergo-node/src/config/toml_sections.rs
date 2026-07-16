@@ -227,8 +227,7 @@ pub(super) struct TomlChain {
     pub(super) script_validation_checkpoint_block_id: Option<String>,
     /// Hex-encoded genesis header id (32 bytes). Required for NiPoPoW
     /// proof verification: the verifier rejects any proof whose first
-    /// header's id does not match this value (R5 enforcement per
-    /// Part 2 spec §11). If omitted, the network's baked-in default
+    /// header's id does not match this value. If omitted, the network's baked-in default
     /// is used (mainnet / testnet hardcoded ids). Pass an empty
     /// string to disable genesis-id checking entirely — accepted
     /// **only** in development; production runs MUST keep the default.

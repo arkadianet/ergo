@@ -168,7 +168,7 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
     let headers_chain_synced = state.coordinator.sync_state().headers_chain_synced();
     let max_peer_height = state.coordinator.sync_state().best_known_header_height();
     let recovery_done = state.executor.recovery_done();
-    // OBS-1: project the executor's most recent block-apply REJECTION to the
+    // Project the executor's most recent block-apply REJECTION to the
     // API DTO, computing `age_ms` from the captured `Instant` against this
     // snapshot's `now` (the executor stores an `Instant`, not a wall-clock).
     let block_apply_errors_total = state.executor.block_apply_error_count();
@@ -294,12 +294,12 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
     // Currently-banned IPs from the peer manager — filtered to
     // entries whose ban hasn't expired at snapshot time so a stale
     // row that's aged past `until` doesn't appear in
-    // `/peers/blacklisted`. Drives the §10.6 blacklisted route.
+    // `/peers/blacklisted`. Drives the blacklisted route.
     let banned_ips: Arc<Vec<std::net::IpAddr>> =
         Arc::new(state.peer_manager.currently_banned_ips(now));
 
     // Full-tx bytes in priority order: (tx_id, serialized bytes) per
-    // pool entry. Drives the §10.4 unconfirmed full-tx endpoints
+    // pool entry. Drives the unconfirmed full-tx endpoints
     // (`/transactions/unconfirmed?offset=&limit=`, `byTransactionId/{id}`,
     // `POST byTransactionIds`). `Arc<[u8]>` is shared with the
     // mempool's own Entry, so no copy here.
@@ -346,7 +346,7 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
                 // async-persist window the in-memory tip runs ahead of the
                 // committed tail; feeding it here would advance the differ's
                 // cursor past heights `recent` doesn't contain yet and
-                // permanently drop their block events (codex High, PR review).
+                // permanently drop their block events.
                 // Same-source tip + tail keeps the differ self-consistent:
                 // events simply emit a tick later, when the commit lands.
                 tip_height: recent_tuples.first().map(|(h, ..)| *h).unwrap_or(0),
@@ -922,13 +922,12 @@ fn build_bootstrap_status(state: &mut NodeState, now_unix_ms: u64) -> Option<Api
         }
     };
 
-    // NiPoPoW + header-availability dashboard fields (Part 2 §14.8).
-    // popow_phase / popow_providers report on the popow_bootstrap
-    // reducer when wired (14.6 orchestration follow-up). Until then,
-    // these stay None.
+    // NiPoPoW + header-availability dashboard fields.
+    // popow_phase / popow_providers will report on the popow_bootstrap
+    // reducer once wired to it; until then, these stay None.
     // header_availability + popow_dense_from_height reflect what the
     // store reports — surfaceable today since the persistence layer
-    // (14.4.5) is already on disk.
+    // is already on disk.
     let (header_availability, popow_dense_from_height) =
         match state.store.chain_state_meta().header_availability {
             ergo_state::chain::HeaderAvailability::Dense => (None, None),
@@ -1016,7 +1015,7 @@ fn build_events_projection(
     // the seq contract promises that a gap between polls means ring
     // EVICTION and nothing else. A narrower projection would open a silent
     // second gap source for any client whose `since` cursor is older than
-    // the window but younger than eviction (CodeRabbit, PR #152). ~512
+    // the window but younger than eviction. ~512
     // small events clone only when the seq advances (see the cache at the
     // call site), so the cost stays negligible.
     let events = ring
