@@ -134,7 +134,7 @@ mod tests {
         bytes
     }
 
-    /// `g3 = 7*G`, a fixed non-generator point (Task-2 `env.rs`/
+    /// `g3 = 7*G`, a fixed non-generator point (`env.rs`/
     /// `typer_oracle_parity.rs` `non_generator_ge`; oracle-captured
     /// golden_seed.txt §23(c)).
     fn g3_bytes() -> [u8; 33] {
@@ -161,7 +161,7 @@ mod tests {
     /// The pubkey behind `PK("3WzPmMVoyrrj1m9NkmpWchWoiZy1wN3wYsmn8gE1cZXcdwck7LBg")`
     /// (testnet) — chosen because its y-coordinate has a leading zero nibble
     /// (`0ab0902e...`), the case golden_seed.txt §23(d)/(f) live-captures.
-    /// Sign byte `0x03` (odd y) independently confirmed (see Task-4 report).
+    /// Sign byte `0x03` (odd y) independently confirmed against the oracle.
     fn leading_zero_y_bytes() -> [u8; 33] {
         let mut bytes = [0u8; 33];
         bytes[0] = 0x03;
@@ -213,9 +213,9 @@ mod tests {
     #[test]
     fn decompress_leading_zero_y_matches_golden_seed_23d_23f() {
         // Oracle: golden_seed.txt §23(d)/(f) — the PK(...) fold and plain Ecp
-        // render both embed this x/y pair (see Task-4 report for the
-        // verbatim replies). Our fixed-width decompress pads y to 64 chars
-        // (leading zero present); the two Scala print surfaces DON'T pad —
+        // render both embed this x/y pair. Our fixed-width decompress pads y
+        // to 64 chars (leading zero present); the two Scala print surfaces
+        // DON'T pad —
         // that's exactly what `strip_leading_zero_hex` corrects for.
         let (x, y) = decompress_to_affine_hex(&leading_zero_y_bytes()).expect("on-curve");
         assert_eq!(
