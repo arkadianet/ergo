@@ -39,6 +39,25 @@ fn modifiers_roundtrip() {
 }
 
 #[test]
+fn serialize_modifiers_rejects_when_no_modifier_fits() {
+    // A single modifier larger than MAX_MODIFIER_WITH_RESERVE leaves
+    // msg_count == 0. Serializing a zero-count frame would produce a
+    // message the peer's `deserialize_modifiers` rejects as
+    // `EmptyModifiers`; the serializer must fail on the sender side
+    // instead of emitting a frame that can't round-trip.
+    let oversize = vec![0u8; MAX_MODIFIER_WITH_RESERVE + 1];
+    let data = ModifiersData {
+        type_id: 102,
+        modifiers: vec![([0x11; 32], oversize)],
+    };
+    let err = serialize_modifiers(&data).expect_err("oversize single modifier must reject");
+    assert!(
+        matches!(err, MessageError::ModifiersTooLarge(_)),
+        "expected ModifiersTooLarge, got {err:?}",
+    );
+}
+
+#[test]
 fn deserialize_modifiers_size_check_matches_serializer_accounting() {
     // Regression for the +4 length-prefix accounting. The
     // serializer counts `MODIFIER_ID_SIZE + 4 + obj_len` per

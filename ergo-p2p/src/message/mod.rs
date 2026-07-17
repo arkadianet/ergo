@@ -148,6 +148,14 @@ pub fn serialize_modifiers(data: &ModifiersData) -> Result<Vec<u8>, MessageError
         msg_size += entry_size;
     }
 
+    // If not even the first modifier fits the reserve, `msg_count` stays 0.
+    // Writing a zero-count frame produces a message the peer's
+    // `deserialize_modifiers` rejects as `EmptyModifiers` — fail on the
+    // sender side instead of emitting a frame that can't round-trip.
+    if msg_count == 0 {
+        return Err(MessageError::ModifiersTooLarge(msg_size));
+    }
+
     w.put_u32(msg_count as u32);
     for (id, modifier) in data.modifiers.iter().take(msg_count) {
         w.put_bytes(id);
