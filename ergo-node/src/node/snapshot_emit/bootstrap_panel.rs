@@ -119,11 +119,19 @@ pub(super) fn build_bootstrap_status(
     };
     let phase = select_bootstrap_phase(&reducer_state, &phase_inputs);
     let (snapshot_height, manifest_id, trust_check_passed) = if in_catchup {
-        // Post-install: report the height we installed at, derived
-        // from chain_state. manifest_id no longer carried in the
-        // reducer (it's been cleared post-install); use the
-        // best_full_block_id at snapshot_height as a stable proxy.
-        (best_full, None, true)
+        // Post-install: report the height/manifest actually installed at,
+        // latched by `install_reconstructed_snapshot` before the reducer
+        // cleared its own copy — NOT `best_full`, which keeps climbing
+        // every tick as catch-up applies blocks and would misreport a
+        // live, advancing value as the fixed installation height.
+        match state.installed_snapshot {
+            Some((height, manifest_id)) => (height, Some(hex::encode(manifest_id)), true),
+            // Should be unreachable (post_install_catchup implies a
+            // successful install happened), but degrade to the prior
+            // best-effort proxy rather than panic if the invariant is
+            // ever violated.
+            None => (best_full, None, true),
+        }
     } else {
         match reducer_state {
             BootstrapState::Idle | BootstrapState::Querying => (0, None, false),

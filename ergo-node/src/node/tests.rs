@@ -169,6 +169,7 @@ fn make_state_with_backend(
         pending_manifest_bytes: None,
         bootstrap_started_unix_ms: None,
         bootstrap_was_active_this_session: false,
+        installed_snapshot: None,
         wallet_hook: None,
         mining_enabled: false,
         api_weight_function: ergo_api::types::ApiWeightFunction::Cost,
