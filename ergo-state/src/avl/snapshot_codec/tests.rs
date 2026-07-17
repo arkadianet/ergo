@@ -4,6 +4,8 @@
 //! peer-supplied bytes. Moved verbatim from the former inline
 //! `mod tests` block of `avl/snapshot_codec.rs`.
 
+#![cfg(test)]
+
 use super::manifest::{compute_node_label, parse_chunk};
 use crate::avl::tree::AvlTree;
 

@@ -3,6 +3,8 @@
 //! (advance / rehydrate / poison) contract. Moved verbatim from the
 //! former inline `mod tests` block of `store/snapshot.rs`.
 
+#![cfg(test)]
+
 use std::collections::BTreeMap;
 
 use crate::store::dry_run::{

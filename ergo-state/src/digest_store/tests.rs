@@ -3,6 +3,8 @@
 //! guards. Moved verbatim from the former inline `mod tests` block of
 //! `digest_store.rs`.
 
+#![cfg(test)]
+
 use super::*;
 use crate::backend::{ChainStateRead, HeaderSectionStore};
 use crate::chain::HeaderAvailability;
