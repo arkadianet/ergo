@@ -108,11 +108,18 @@ pub(super) fn try_send_anchor_sync_info(
         Some(p) => p,
         None => return false,
     };
-    let payload = message::serialize_sync_info(&message::SyncInfo::V1 {
+    // A single anchor id can never exceed the sync-info cap, so this
+    // serialize is infallible in practice; on the unreachable error we
+    // simply don't send (report "not sent") rather than emit a bad frame.
+    match message::serialize_sync_info(&message::SyncInfo::V1 {
         header_ids: vec![anchor_id],
-    });
-    send_to_peer(state, peer, message::CODE_SYNC_INFO, payload);
-    true
+    }) {
+        Ok(payload) => {
+            send_to_peer(state, peer, message::CODE_SYNC_INFO, payload);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// Hedge `RequestModifier` dispatch. After `on_inv` registers

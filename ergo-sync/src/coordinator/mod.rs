@@ -726,12 +726,22 @@ impl SyncCoordinator {
                 // peer; the broadcast loop in node.rs handles the
                 // others independently.
                 if self.sync_state.should_send_sync(peer, now) {
-                    let our_sync = build_sync_info_payload(sync_version, chain);
-                    actions.push(Action::SendToPeer {
-                        peer,
-                        code: message::CODE_SYNC_INFO,
-                        payload: our_sync,
-                    });
+                    match build_sync_info_payload(sync_version, chain) {
+                        Ok(our_sync) => {
+                            actions.push(Action::SendToPeer {
+                                peer,
+                                code: message::CODE_SYNC_INFO,
+                                payload: our_sync,
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to serialize SyncInfo; skipping send")
+                        }
+                    }
+                    // Throttle regardless of the serialization outcome: an
+                    // (unreachable-from-valid-state) failure must still back off
+                    // to the next window rather than retry — and warn — every
+                    // tick. Matches the original always-mark-after-attempt path.
                     self.sync_state.mark_sync_sent(peer, now);
                 }
             }
@@ -1849,7 +1859,10 @@ fn find_continuation_header(peer_headers: &[Vec<u8>], chain: &dyn ChainView) -> 
 
 /// Build a SyncInfo payload appropriate for the peer's sync version.
 /// Uses ChainView to get actual recent headers from our best chain.
-pub fn build_sync_info_payload(version: SyncVersion, chain: &dyn ChainView) -> Vec<u8> {
+pub fn build_sync_info_payload(
+    version: SyncVersion,
+    chain: &dyn ChainView,
+) -> Result<Vec<u8>, message::MessageError> {
     match version {
         SyncVersion::V2 => {
             let headers = chain.recent_header_bytes(50); // MaxHeadersAllowed = 50

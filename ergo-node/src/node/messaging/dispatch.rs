@@ -268,8 +268,14 @@ pub(in crate::node) fn handle_message(
                     let info = ergo_p2p::types::SnapshotsInfo {
                         available_manifests: state.snapshot_state.available_manifests(),
                     };
-                    let reply = message::serialize_snapshots_info(&info);
-                    send_to_peer(state, &peer, message::CODE_SNAPSHOTS_INFO, reply);
+                    match message::serialize_snapshots_info(&info) {
+                        Ok(reply) => {
+                            send_to_peer(state, &peer, message::CODE_SNAPSHOTS_INFO, reply);
+                        }
+                        Err(e) => {
+                            warn!(peer = %peer, error = %e, "failed to serialize SnapshotsInfo reply");
+                        }
+                    }
                     Vec::new()
                 }
                 Err(e) => {
@@ -287,8 +293,14 @@ pub(in crate::node) fn handle_message(
                 // drop, matching Scala `peer.handlerRef !` no-op when
                 // `SnapshotsDb.get(manifestId)` returns None.
                 if let Some(bytes) = state.snapshot_state.manifest_bytes(&manifest_id) {
-                    let reply = message::serialize_manifest(bytes);
-                    send_to_peer(state, &peer, message::CODE_MANIFEST, reply);
+                    match message::serialize_manifest(bytes) {
+                        Ok(reply) => {
+                            send_to_peer(state, &peer, message::CODE_MANIFEST, reply);
+                        }
+                        Err(e) => {
+                            warn!(peer = %peer, error = %e, "failed to serialize Manifest reply");
+                        }
+                    }
                 }
                 Vec::new()
             }
@@ -329,8 +341,14 @@ pub(in crate::node) fn handle_message(
         message::CODE_GET_UTXO_CHUNK => match message::deserialize_get_utxo_chunk(payload) {
             Ok(subtree_id) => {
                 if let Some(bytes) = state.snapshot_state.chunk_bytes(&subtree_id) {
-                    let reply = message::serialize_utxo_chunk(bytes);
-                    send_to_peer(state, &peer, message::CODE_UTXO_CHUNK, reply);
+                    match message::serialize_utxo_chunk(bytes) {
+                        Ok(reply) => {
+                            send_to_peer(state, &peer, message::CODE_UTXO_CHUNK, reply);
+                        }
+                        Err(e) => {
+                            warn!(peer = %peer, error = %e, "failed to serialize UtxoSnapshotChunk reply");
+                        }
+                    }
                 }
                 Vec::new()
             }
@@ -713,7 +731,7 @@ fn handle_modifier_batch(
     if bh > bh_before && state.registry.peers.contains_key(&peer) {
         if !try_send_anchor_sync_info(state, &peer, now) {
             if let Some(rt) = state.registry.peers.get(&peer) {
-                let payload = match rt.sync_version {
+                let payload_res = match rt.sync_version {
                     SyncVersion::V2 => {
                         let headers = state.executor.cached_header_bytes(50);
                         message::serialize_sync_info(&message::SyncInfo::V2 { headers })
@@ -723,11 +741,18 @@ fn handle_modifier_batch(
                         &state.store,
                     ),
                 };
-                all_actions.push(Action::SendToPeer {
-                    peer,
-                    code: message::CODE_SYNC_INFO,
-                    payload,
-                });
+                match payload_res {
+                    Ok(payload) => all_actions.push(Action::SendToPeer {
+                        peer,
+                        code: message::CODE_SYNC_INFO,
+                        payload,
+                    }),
+                    Err(e) => warn!(
+                        peer = %peer,
+                        error = %e,
+                        "failed to serialize SyncInfo; skipping send"
+                    ),
+                }
             }
         }
         state.coordinator.sync_state_mut().mark_sync_sent(peer, now);
