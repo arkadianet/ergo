@@ -1,5 +1,6 @@
 use super::*;
 use ergo_p2p::peer::Penalty;
+use ergo_p2p::peer_manager::PeerManager;
 use ergo_primitives::digest::{blake2b256, ADDigest, Digest32, ModifierId};
 use ergo_primitives::group_element::{GroupElement, GROUP_ELEMENT_LENGTH};
 use ergo_primitives::writer::VlqWriter;
