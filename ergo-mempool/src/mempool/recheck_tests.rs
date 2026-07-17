@@ -7,8 +7,9 @@
 //! recheck semantics, not from mainnet bytes.
 
 use super::*;
-use crate::admission::{MockPlan, MockValidator, PeekedTx, Validated};
+use crate::admission::{MockPlan, MockValidator, PeekedTx, Validated, ValidationErr};
 use crate::pool::Entry;
+use crate::weight::ByCost;
 use ergo_primitives::cost::JitCost;
 use ergo_primitives::digest::{Digest32, ModifierId};
 use ergo_primitives::reader::VlqReader;
