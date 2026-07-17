@@ -30,19 +30,23 @@ use ergo_wallet::storage::SecretStorage;
 
 use super::{ChainStateAccessor, TxSubmitter, WriterConfig};
 
-// Re-export the private wallet_bridge.rs helpers the per-command
-// handlers call. Rust private-item visibility extends to descendant
-// modules, so the helpers are reachable from `super::` here without
-// any visibility bumps on the originals; this re-export just gives
-// each handler file a single one-level `super::<name>` path instead
-// of `super::super::<name>`.
-pub(super) use super::{
-    boxes_collect_impl, build_transaction_impl, derive_key_impl, derive_next_key_impl,
-    extract_hints_impl, generate_commitments_impl, get_private_key_impl, paginate_boxes,
-    paginate_transactions, payment_send_impl, retrieve_rewards_impl, select_boxes_impl,
-    send_transaction_native_impl, sign_transaction_native_impl, transaction_generate_impl,
-    transaction_generate_unsigned_impl, transaction_sign_impl, wallet_tx_to_entry,
+// Re-export the `support::*` business-logic helpers the per-command
+// handlers call, so each handler file gets a single one-level
+// `super::<name>` path instead of `super::support::<submodule>::<name>`.
+pub(super) use super::support::dto::{paginate_boxes, paginate_transactions, wallet_tx_to_entry};
+pub(super) use super::support::generate_sign::{
+    boxes_collect_impl, payment_send_impl, transaction_generate_impl,
+    transaction_generate_unsigned_impl, transaction_sign_impl,
 };
+pub(super) use super::support::key_derivation::{
+    derive_key_impl, derive_next_key_impl, get_private_key_impl, render_derivation_path,
+};
+pub(super) use super::support::multisig_helpers::{extract_hints_impl, generate_commitments_impl};
+pub(super) use super::support::sign_submit::{
+    send_transaction_native_impl, sign_transaction_native_impl,
+};
+pub(super) use super::support::sweep::retrieve_rewards_impl;
+pub(super) use super::support::tx_build::{build_transaction_impl, select_boxes_impl};
 
 pub(super) mod admin;
 pub(super) mod multisig;
