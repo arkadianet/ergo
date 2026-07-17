@@ -330,7 +330,7 @@ fn diagnose_auction_divergence_700001() {
                 data_inputs: &eval_data,
                 miner_pubkey: *header.solution.pk().as_bytes(),
                 pre_header_timestamp: header.timestamp,
-                extension: input.spending_proof.extension.values.clone(),
+                extension: input.spending_proof.extension().values.clone(),
                 last_headers: &eval_headers,
                 last_block_utxo_root: None,
                 activated_script_version: 2,
@@ -368,9 +368,9 @@ fn diagnose_auction_divergence_700001() {
             // Also report the extension values
             eprintln!(
                 "\n  context extension: {} values",
-                input.spending_proof.extension.values.len()
+                input.spending_proof.extension().values.len()
             );
-            for (k, (tpe, v)) in &input.spending_proof.extension.values {
+            for (k, (tpe, v)) in &input.spending_proof.extension().values {
                 eprintln!("    var[{}]: type={:?} val={:?}", k, tpe, v);
             }
         }

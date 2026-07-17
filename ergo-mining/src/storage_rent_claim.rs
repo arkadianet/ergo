@@ -560,7 +560,7 @@ mod tests {
     fn var127(input: &Input) -> i16 {
         match input
             .spending_proof
-            .extension
+            .extension()
             .values
             .get(&STORAGE_RENT_OUTPUT_INDEX_VAR_ID)
         {

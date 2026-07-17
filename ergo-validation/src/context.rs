@@ -150,7 +150,7 @@ pub trait UtxoView {
 
 /// Block/chain context needed for transaction validation.
 ///
-/// Per-input context extension values come from `Input.spending_proof.extension`,
+/// Per-input context extension values come from `Input.spending_proof.extension()`,
 /// not from this struct — they are threaded per-input in script validation.
 pub struct TransactionContext {
     /// Current block height being validated.

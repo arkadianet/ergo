@@ -201,9 +201,17 @@ fn golden_option_coll_int() {
 
 #[test]
 fn golden_option_coll_box() {
-    // constrId 4, primId 0 = 48, then SBox = 0x63
+    // Option[Coll[non-embeddable]] uses the GENERAL Option prefix: Scala
+    // `TypeSerializer.serialize` puts OptionTypeCode (0x24) then serializes
+    // the whole collection = CollectionTypeCode (0x0c) + SBox (0x63). The
+    // embedded OptionCollection form (0x30 + embeddable code) is reserved for
+    // Option[Coll[embeddable]] only.
+    //
+    // This vector previously pinned the NON-canonical `[0x30, 0x63]` — the
+    // hand-computed buggy form the old `write_option` emitted, which shifts
+    // derived IDs vs the reference. Corrected to the canonical Scala bytes.
     let t = SigmaType::SOption(Box::new(SigmaType::SColl(Box::new(SigmaType::SBox))));
-    assert_eq!(encode(&t), [0x30, 0x63]);
+    assert_eq!(encode(&t), [0x24, 0x0c, 0x63]);
 }
 
 // -- Pair — constrId 5 (first elem embeddable) --

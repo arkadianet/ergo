@@ -139,7 +139,7 @@ pub fn bag_for_transaction(
     let all_input_extensions: Vec<ergo_ser::input::ContextExtension> = tx
         .inputs
         .iter()
-        .map(|i| i.spending_proof.extension.clone())
+        .map(|i| i.spending_proof.extension().clone())
         .collect();
 
     let mut tbag = crate::proving::hints::TransactionHintsBag::empty();
@@ -147,7 +147,7 @@ pub fn bag_for_transaction(
     for (idx, (input, input_box)) in tx.inputs.iter().zip(boxes_to_spend.iter()).enumerate() {
         let owned_rc = state_context.build_reduction_owned(
             input_box,
-            &input.spending_proof.extension,
+            input.spending_proof.extension(),
             boxes_to_spend,
             data_boxes,
             &tx.output_candidates,

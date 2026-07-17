@@ -141,7 +141,7 @@ pub fn validate_scripts(
     > = tx
         .inputs
         .iter()
-        .map(|i| i.spending_proof.extension.values.clone())
+        .map(|i| i.spending_proof.extension().values.clone())
         .collect();
     for (i, (input, resolved)) in tx.inputs.iter().zip(resolved_inputs).enumerate() {
         // Storage rent path: if the box is old enough, proof is empty,
@@ -155,7 +155,7 @@ pub fn validate_scripts(
         let proof_empty = input.spending_proof.proof.is_empty();
         let has_storage_var = input
             .spending_proof
-            .extension
+            .extension()
             .values
             .contains_key(&STORAGE_INDEX_VAR_ID);
 
@@ -167,7 +167,7 @@ pub fn validate_scripts(
         ) {
             let rent_ok = check_storage_rent(
                 resolved,
-                &input.spending_proof.extension,
+                input.spending_proof.extension(),
                 tx,
                 cx.ctx.height,
                 cx.params,
@@ -224,7 +224,7 @@ pub fn validate_scripts(
             pre_header_parent_id: cx.ctx.pre_header_parent_id,
             pre_header_n_bits: cx.ctx.pre_header_n_bits,
             pre_header_votes: cx.ctx.pre_header_votes,
-            extension: input.spending_proof.extension.values.clone(),
+            extension: input.spending_proof.extension().values.clone(),
             input_extensions: &input_extensions,
             last_headers: &eval_headers,
             last_block_utxo_root,
