@@ -7,6 +7,7 @@ use super::*;
 use crate::backend::{ChainStateRead, HeaderSectionStore};
 use crate::chain::HeaderAvailability;
 use ergo_validation::scala_launch;
+use redb::ReadableTable;
 use std::path::Path;
 use tempfile::tempdir;
 
