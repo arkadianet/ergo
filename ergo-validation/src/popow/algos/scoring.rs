@@ -105,6 +105,14 @@ pub fn best_arg(chain: &[Header], m: u32) -> u64 {
 /// header; the genesis sentinel [`GENESIS_LEVEL`] participates in
 /// every level's count, exactly as the header form does.
 pub fn best_arg_from_levels(levels: &[u32], m: u32) -> u64 {
+    // `m` is a minimum super-chain length and is ≥ 1 for every honest
+    // proof (mainnet `m = 6`; the deserializer and `prove` reject a
+    // zero). A stray `m = 0` would make the `count < m` cutoff below
+    // (`count < 0`) unreachable, so the loop would never terminate via
+    // the m-gate. Coerce it to the loosest valid threshold (1) so the
+    // function stays total and bounded on invalid input rather than
+    // spinning to `u32::MAX`; legitimate `m ≥ 1` is untouched.
+    let m = m.max(1);
     let mut best: u64 = 0;
 
     // Level 0: always included with count = levels.len(). Every header
@@ -127,6 +135,15 @@ pub fn best_arg_from_levels(levels: &[u32], m: u32) -> u64 {
             .saturating_mul(count);
         if score > best {
             best = score;
+        }
+        // Once the score saturates at `u64::MAX` the result can no
+        // longer change: `best` is monotonic and every future `score`
+        // is itself saturating, so nothing exceeds `u64::MAX`. Return
+        // immediately. This bounds pathological inputs — a chain
+        // carrying the [`GENESIS_LEVEL`] sentinel qualifies at every
+        // level, which would otherwise iterate ~2^32 times — to O(64).
+        if best == u64::MAX {
+            return best;
         }
         // u32 level cap: a chain whose every header has level ≥ 32 is
         // already at score ~chain.len() * 2^32. Beyond that we'd need
@@ -260,6 +277,36 @@ mod tests {
         // score of 6. A longer all-level-0 chain of 20 scores only 20.
         assert_eq!(best_arg_from_levels(&[3; 6], 2), 48);
         assert_eq!(best_arg_from_levels(&[0; 20], 2), 20);
+    }
+
+    #[test]
+    fn best_arg_from_levels_m_zero_is_bounded_and_equals_m_one() {
+        // `m = 0` is invalid input (the deserializer and `prove` reject
+        // it). It must not spin the loop toward u32::MAX: the coercion
+        // `m.max(1)` makes it terminate and score identically to m=1.
+        // (This test completing at all proves termination.)
+        for levels in [&[3u32, 3, 3][..], &[0, 1, 2, 5][..], &[][..]] {
+            assert_eq!(
+                best_arg_from_levels(levels, 0),
+                best_arg_from_levels(levels, 1),
+                "m=0 must coerce to the m=1 result for levels={levels:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn best_arg_from_levels_saturation_terminates_on_genesis_sentinel() {
+        // A chain carrying the GENESIS_LEVEL sentinel (u32::MAX) qualifies
+        // at EVERY level, so without the saturation early-return the loop
+        // would run ~2^32 times. The score saturates to u64::MAX around
+        // level 63; the guard must then return immediately. This test
+        // completing (not hanging) is the real assertion; the value pins
+        // the saturated result.
+        assert_eq!(best_arg_from_levels(&[GENESIS_LEVEL; 3], 1), u64::MAX);
+        // Saturation returning early never changes a NON-saturating
+        // result: a modest chain still scores exactly as before
+        // (levels [2,2,0], m=2 → 2^2 * 2 = 8).
+        assert_eq!(best_arg_from_levels(&[2, 2, 0], 2), 8);
     }
 
     #[test]

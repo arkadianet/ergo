@@ -34,6 +34,13 @@ pub fn prove(
     if params.k < 1 {
         return Err(format!("PoPowParams::k must be >= 1 (got {})", params.k));
     }
+    // `m` is the minimum super-chain length; `prove_prefix_loop` indexes
+    // `sub_chain[sub_chain.len() - m]`, so `m == 0` would compute
+    // `sub_chain[len]` and panic out of bounds. Reject it here alongside
+    // the sibling `k` check (honest callers pass `m ≥ 1`; mainnet uses 6).
+    if params.m < 1 {
+        return Err(format!("PoPowParams::m must be >= 1 (got {})", params.m));
+    }
     if (chain.len() as u32) < params.k.saturating_add(params.m) {
         return Err(format!(
             "chain.len() = {} < k + m = {}",
@@ -162,6 +169,28 @@ mod tests {
         };
         let err = prove(chain, params).expect_err("chain too short");
         assert!(err.contains("< k + m"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn prove_rejects_m_zero() {
+        // m == 0 would make prove_prefix_loop index sub_chain[len] (out
+        // of bounds) and panic. It must be rejected up front, like k == 0.
+        let g = header_from_hex(GENESIS_HEX);
+        let chain: Vec<ergo_ser::popow_header::PoPowHeader> = vec![g]
+            .into_iter()
+            .map(|h| ergo_ser::popow_header::PoPowHeader {
+                header: h,
+                interlinks: vec![],
+                interlinks_proof: vec![],
+            })
+            .collect();
+        let params = PoPowParams {
+            m: 0,
+            k: 2,
+            continuous: true,
+        };
+        let err = prove(chain, params).expect_err("m == 0 must be rejected");
+        assert!(err.contains("m must be >= 1"), "unexpected error: {err}");
     }
 
     #[test]
