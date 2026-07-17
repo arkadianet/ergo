@@ -76,22 +76,44 @@ use super::NodeError;
 /// Tests bypass this and call [`run_inner`] directly so they own
 /// shutdown through [`RunHandle::shutdown`] instead of sending signals.
 pub async fn run(config: NodeConfig) -> Result<(), NodeError> {
+    // Install signal handlers BEFORE `run_inner` so a signal during startup
+    // (store open, genesis init, AVL load, address-book restore, API bind —
+    // which can run for minutes on a large archive database) is captured by
+    // the OS-level handler rather than falling through to the default
+    // terminate-immediately action. `tokio::signal::unix::signal` installs
+    // its handler synchronously at call time (before the returned stream is
+    // ever polled), so a signal arriving during `run_inner` is buffered and
+    // observed by the `select!` below the moment startup completes.
+    #[cfg(unix)]
+    let (mut sig_int, mut sig_term, mut sig_hup) = {
+        use tokio::signal::unix::{signal, SignalKind};
+        (
+            signal(SignalKind::interrupt())
+                .map_err(|e| format!("failed to install SIGINT handler: {e}"))?,
+            signal(SignalKind::terminate())
+                .map_err(|e| format!("failed to install SIGTERM handler: {e}"))?,
+            // SIGHUP: sent by the terminal when the controlling process
+            // (e.g. the parent cargo process) exits. Without a handler,
+            // default action is terminate — catching it here lets us close
+            // the DB cleanly.
+            signal(SignalKind::hangup())
+                .map_err(|e| format!("failed to install SIGHUP handler: {e}"))?,
+        )
+    };
+    // Windows has no persistent signal-handle equivalent to Unix's `signal()`
+    // — `ctrl_c()` only arms its OS-level hook once its future is first
+    // polled. Spawn it immediately (before `run_inner`) so a Ctrl+C during
+    // startup is captured; the supervisor `select!` below then awaits this
+    // same task instead of calling `ctrl_c()` fresh (which would reopen the
+    // startup gap).
+    #[cfg(windows)]
+    let mut ctrl_c_task = tokio::spawn(tokio::signal::ctrl_c());
+
     let mut handle = run_inner(config).await?;
     let shutdown_notify = handle.shutdown_notify.clone();
 
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut sig_int = signal(SignalKind::interrupt())
-            .map_err(|e| format!("failed to install SIGINT handler: {e}"))?;
-        let mut sig_term = signal(SignalKind::terminate())
-            .map_err(|e| format!("failed to install SIGTERM handler: {e}"))?;
-        // SIGHUP: sent by the terminal when the controlling process (e.g. the
-        // parent cargo process) exits. Without a handler, default action is
-        // terminate — catching it here lets us close the DB cleanly.
-        let mut sig_hup = signal(SignalKind::hangup())
-            .map_err(|e| format!("failed to install SIGHUP handler: {e}"))?;
-
         tokio::select! {
             biased;
             _ = sig_int.recv() => shutdown_log!("[node] SIGINT received, shutting down..."),
@@ -114,7 +136,7 @@ pub async fn run(config: NodeConfig) -> Result<(), NodeError> {
     {
         tokio::select! {
             biased;
-            _ = tokio::signal::ctrl_c() => shutdown_log!("[node] Ctrl+C received, shutting down..."),
+            _ = &mut ctrl_c_task => shutdown_log!("[node] Ctrl+C received, shutting down..."),
             _ = shutdown_notify.notified() => shutdown_log!("[node] REST shutdown received, shutting down..."),
             loop_result = &mut handle.loop_handle => {
                 let cause: NodeError = match loop_result {
