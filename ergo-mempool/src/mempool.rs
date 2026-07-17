@@ -12,7 +12,7 @@ use crate::budget::CostBudgets;
 use crate::invalidation::InvalidationCache;
 use crate::pool::{Entry, OrderedPool};
 use crate::reorg;
-use crate::revalidation::RevalidationQueue;
+use crate::revalidation::{topological_demote_order, RevalidationQueue};
 use crate::telemetry::{
     emit_tracing_for_admission, emit_tracing_for_check, emit_tracing_for_pool_actions,
 };
@@ -22,7 +22,7 @@ use crate::types::{
 };
 use crate::unresolved::UnresolvedCache;
 use crate::weight::WeightFunction;
-use crate::{topological_demote_order, MempoolObserver};
+use crate::MempoolObserver;
 
 /// Top-level mempool handle. Bundles all the sub-components so callers
 /// don't thread six pieces through every call site. Production wiring
