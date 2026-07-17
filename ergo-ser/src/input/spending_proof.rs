@@ -22,12 +22,25 @@ use super::context_extension::{read_context_extension, write_context_extension, 
 pub struct SpendingProof {
     /// Raw signature / sigma proof bytes.
     pub proof: Vec<u8>,
-    /// Parsed context extension committed to by `proof`.
-    pub extension: ContextExtension,
+    /// Parsed context extension committed to by `proof`. Kept in sync with the
+    /// private `extension_bytes` cache that every writer emits — so it is
+    /// `pub(crate)` (read via [`SpendingProof::extension`], mutate only through
+    /// the constructors) rather than `pub`: external mutation of
+    /// `extension.values` would desync `bytes_to_sign` / serialization (which
+    /// use the cached bytes) from inspection.
+    pub(crate) extension: ContextExtension,
     extension_bytes: Vec<u8>,
 }
 
 impl SpendingProof {
+    /// Borrow the parsed context extension committed to by `proof`. Read-only:
+    /// the wire-byte cache (`extension_bytes`) is fixed at construction, so
+    /// mutation would desync serialization — rebuild via [`SpendingProof::new`]
+    /// (or a `from_*_raw_parts` constructor) to change the extension.
+    pub fn extension(&self) -> &ContextExtension {
+        &self.extension
+    }
+
     /// Build a `SpendingProof` from `(proof, extension)`, serializing
     /// the extension to its canonical wire form internally. Use this on
     /// the construct-and-sign path where no externally-supplied byte
@@ -241,6 +254,32 @@ mod tests {
             spending_proof: SpendingProof::new(vec![0xCA, 0xFE, 0xBA, 0xBE], ext).unwrap(),
         };
         roundtrip_result(write_input, read_input, &input);
+    }
+
+    #[test]
+    fn extension_accessor_stays_coherent_with_cached_bytes() {
+        // Regression for the desync footgun: `extension` is `pub(crate)` and
+        // externally reachable only read-only via `extension()`, so external
+        // code cannot mutate `extension.values` out of sync with the private
+        // `extension_bytes` that every writer (serialization, `bytes_to_sign`)
+        // emits. Pin that construction keeps them coherent and the accessor
+        // reflects the parsed extension through a full round-trip.
+        let mut ext = ContextExtension::empty();
+        ext.values
+            .insert(7, (SigmaType::SInt, SigmaValue::Int(123)));
+        let input = Input {
+            box_id: make_box_id(0x11),
+            spending_proof: SpendingProof::new(vec![0xAA, 0xBB], ext.clone()).unwrap(),
+        };
+        assert_eq!(input.spending_proof.extension(), &ext);
+        // The writer-emitted bytes re-parse to the same extension — the cache
+        // the writer used is coherent with what the accessor reports.
+        let mut w = VlqWriter::new();
+        write_input(&mut w, &input).unwrap();
+        let bytes = w.result();
+        let mut r = VlqReader::new(&bytes);
+        let parsed = read_input(&mut r).unwrap();
+        assert_eq!(parsed.spending_proof.extension(), &ext);
     }
 
     #[test]

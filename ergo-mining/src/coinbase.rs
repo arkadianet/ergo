@@ -397,7 +397,7 @@ mod tests {
         );
         // Empty spending proof.
         assert!(built.inputs[0].spending_proof.proof.is_empty());
-        assert!(built.inputs[0].spending_proof.extension.is_empty());
+        assert!(built.inputs[0].spending_proof.extension().is_empty());
 
         // Output[0] = new emission box.
         let new_em = &built.output_candidates[0];

@@ -271,7 +271,7 @@ fn full_send_flow_produces_tx_that_verifies_at_transaction_level() {
     let all_input_extensions: Vec<ContextExtension> = signed_tx
         .inputs
         .iter()
-        .map(|i| i.spending_proof.extension.clone())
+        .map(|i| i.spending_proof.extension().clone())
         .collect();
 
     for (idx, (input, input_box)) in signed_tx
@@ -282,7 +282,7 @@ fn full_send_flow_produces_tx_that_verifies_at_transaction_level() {
     {
         let owned_rc = state_ctx.build_reduction_owned(
             input_box,
-            &input.spending_proof.extension,
+            input.spending_proof.extension(),
             &boxes_to_spend,
             &[],
             &signed_tx.output_candidates,
@@ -382,7 +382,7 @@ fn unsigned_tx_roundtrip_then_sign_verifies() {
     let all_input_extensions: Vec<ContextExtension> = signed_tx
         .inputs
         .iter()
-        .map(|i| i.spending_proof.extension.clone())
+        .map(|i| i.spending_proof.extension().clone())
         .collect();
 
     for (idx, (input, input_box)) in signed_tx
@@ -393,7 +393,7 @@ fn unsigned_tx_roundtrip_then_sign_verifies() {
     {
         let owned_rc = state_ctx.build_reduction_owned(
             input_box,
-            &input.spending_proof.extension,
+            input.spending_proof.extension(),
             &boxes_to_spend,
             &[],
             &signed_tx.output_candidates,

@@ -480,13 +480,13 @@ pub(crate) fn self_verify_signed_tx(
     let all_input_extensions: Vec<ergo_ser::input::ContextExtension> = tx
         .inputs
         .iter()
-        .map(|i| i.spending_proof.extension.clone())
+        .map(|i| i.spending_proof.extension().clone())
         .collect();
 
     for (idx, (input, input_box)) in tx.inputs.iter().zip(boxes_to_spend.iter()).enumerate() {
         let owned_rc = state_ctx.build_reduction_owned(
             input_box,
-            &input.spending_proof.extension,
+            input.spending_proof.extension(),
             boxes_to_spend,
             data_boxes,
             &tx.output_candidates,
