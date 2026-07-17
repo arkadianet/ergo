@@ -801,6 +801,9 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
                 "Mode 2: bootstrap complete — UTXO state installed; \
                  normal block sync resumes from snapshot_height + 1",
             );
+            // Latch the install-time facts before the reducer clears its own
+            // copy — see `NodeState::installed_snapshot`'s doc comment.
+            state.installed_snapshot = Some((snapshot_height_u32, manifest_id));
             // Align the coordinator's SyncState with the store's new
             // best_full_block_height. WITHOUT this, the coordinator
             // keeps its SyncState.best_full_block_height = 0 (from

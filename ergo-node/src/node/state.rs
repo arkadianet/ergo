@@ -296,6 +296,18 @@ pub(crate) struct NodeState {
     /// the bootstrap flow this session, the catch-up panel remains a
     /// valid surface until the node reaches tip.
     pub(super) bootstrap_was_active_this_session: bool,
+    /// `(snapshot_height, manifest_id)` latched by
+    /// `install_reconstructed_snapshot` at the moment Mode 2 install
+    /// succeeds. The snapshot-bootstrap reducer clears its own
+    /// `manifest_id`/`height` post-install, so the operator-API
+    /// dashboard needs this separate, never-overwritten copy to keep
+    /// reporting the height the snapshot was actually installed at
+    /// during post-install catch-up — `best_full_block_height` itself
+    /// keeps climbing every tick as catch-up applies blocks, and using
+    /// it directly for `snapshot_height` would misreport a live,
+    /// advancing value as a fixed installation fact. `None` until the
+    /// first successful install this process lifetime.
+    pub(super) installed_snapshot: Option<(u32, [u8; 32])>,
     /// Production wallet apply hook. `Some` when the node runs with the
     /// REST API enabled (which implies wallet subsystem boot). Called
     /// from `sync_tick` after each block apply to keep wallet tables
