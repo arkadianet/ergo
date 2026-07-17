@@ -1,9 +1,12 @@
 use super::*;
-use ergo_p2p::message::SyncInfo;
+use ergo_p2p::delivery::ModifierStatus;
+use ergo_p2p::message::{self, SyncInfo};
 use ergo_p2p::peer::SyncVersion;
+use ergo_p2p::types::{InvData, ModifierTypeId};
 use ergo_primitives::digest::blake2b256;
 use ergo_ser::modifier_id::ExpectedSections;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::time::{Duration, Instant};
 
 // ----- helpers -----
 
