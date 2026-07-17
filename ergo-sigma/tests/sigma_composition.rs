@@ -302,7 +302,7 @@ fn verify_sigma_threshold_2_of_3() {
     let pk3_bytes = point_bytes(&pk3);
 
     let message = b"threshold 2-of-3 test";
-    let k: u8 = 2;
+    let k: u16 = 2;
     let n: usize = 3;
 
     let prop = SigmaBoolean::Cthreshold {
@@ -341,7 +341,7 @@ fn verify_sigma_threshold_2_of_3() {
     let mut fs = Vec::new();
     fs.push(0u8); // internal prefix
     fs.push(2u8); // threshold conjecture type
-    fs.push(k);
+    fs.push(k as u8); // fiat-shamir encodes k as a single byte
     fs.extend_from_slice(&(n as i16).to_be_bytes());
     // 3 leaf children
     for (prop_b, a_pt) in [(&prop1, &a1), (&prop2, &a2), (&prop3, &a3)] {

@@ -422,7 +422,7 @@ fn at_least_reduce(bound: i32, children: Vec<SigmaBoolean>) -> SigmaBoolean {
         return cand_normalized(sigmas);
     }
     SigmaBoolean::Cthreshold {
-        k: cur_bound as u8,
+        k: cur_bound as u16,
         children: sigmas,
     }
 }

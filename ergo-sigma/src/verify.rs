@@ -198,7 +198,9 @@ enum UncheckedTree {
     Threshold {
         challenge: Vec<u8>,
         children: Vec<UncheckedTree>,
-        k: u8,
+        // `u16` to match `SigmaBoolean::Cthreshold.k`: a k-of-n threshold above
+        // 255 must not truncate through verification.
+        k: u16,
         polynomial: Option<gf2_192::gf2_192poly::Gf2_192Poly>,
     },
 }
@@ -561,7 +563,9 @@ fn fiat_shamir_tree_to_bytes(tree: &UncheckedTree) -> Vec<u8> {
             const THRESHOLD_CONJECTURE: u8 = 2;
             buf.push(INTERNAL_NODE_PREFIX);
             buf.push(THRESHOLD_CONJECTURE);
-            buf.push(*k);
+            // Fiat-Shamir tree encodes k as a single byte (Scala UnprovenTree.toBytes:
+            // `w.put(unchecked.k.toByte)`), independent of the u16 wire width elsewhere.
+            buf.push(*k as u8);
             buf.extend_from_slice(&(children.len() as i16).to_be_bytes());
             for child in children {
                 buf.extend_from_slice(&fiat_shamir_tree_to_bytes(child));

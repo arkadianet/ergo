@@ -590,7 +590,7 @@ fn sigmaprop_equality_value_error_and_cost() {
     assert!(eqc(&cand(1), &cand(1)).unwrap().0);
 
     // Cthreshold k-mismatch is false (NOT error — same constructor).
-    let cth = |k: u8| {
+    let cth = |k: u16| {
         Value::SigmaProp(SigmaBoolean::Cthreshold {
             k,
             children: vec![SigmaBoolean::ProveDlog(GroupElement::from_bytes([1; 33]))],

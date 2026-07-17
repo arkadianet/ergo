@@ -24,10 +24,11 @@ pub(super) fn write_coll(
         CollValue::Bytes(b) => b.len(),
         CollValue::Values(v) => v.len(),
     };
-    assert!(
-        len_for_cap <= u16::MAX as usize,
-        "Coll length too large for Scala wire format: {len_for_cap} (max 65535)",
-    );
+    if len_for_cap > u16::MAX as usize {
+        return Err(WriteError::InvalidData(format!(
+            "Coll length too large for Scala wire format: {len_for_cap} (max 65535)"
+        )));
+    }
     match (elem_type, coll) {
         (SigmaType::SBoolean, CollValue::BoolBits(bits)) => {
             w.put_u16(bits.len() as u16);

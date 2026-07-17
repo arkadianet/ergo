@@ -64,8 +64,10 @@ pub enum SigmaBoolean {
     /// `k`-of-n threshold — at least `k` of the `children` must be
     /// satisfied.
     Cthreshold {
-        /// Minimum number of satisfied children required.
-        k: u8,
+        /// Minimum number of satisfied children required. `u16` because the
+        /// wire form encodes `k` as a `getUShort` (Scala) — a threshold above
+        /// 255 must not be truncated to a `u8`.
+        k: u16,
         /// Candidate sub-propositions.
         children: Vec<SigmaBoolean>,
     },
@@ -270,7 +272,7 @@ pub fn write_value(w: &mut VlqWriter, tpe: &SigmaType, val: &SigmaValue) -> Resu
             w.put_bytes(ge.as_bytes());
         }
         (SigmaType::SSigmaProp, SigmaValue::SigmaProp(sb)) => {
-            write_sigma_boolean(w, sb);
+            write_sigma_boolean(w, sb)?;
         }
         (SigmaType::SAvlTree, SigmaValue::AvlTree(avl)) => {
             write_avl_tree(w, avl);

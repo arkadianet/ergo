@@ -80,7 +80,7 @@ fn sb_from_json(v: &Value) -> SigmaBoolean {
             SigmaBoolean::Cor(children)
         }
         "Cthreshold" => {
-            let k = v["k"].as_u64().expect("k field missing") as u8;
+            let k = v["k"].as_u64().expect("k field missing") as u16;
             let children: Vec<SigmaBoolean> = v["children"]
                 .as_array()
                 .expect("Cthreshold children must be array")

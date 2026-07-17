@@ -48,6 +48,14 @@ impl std::error::Error for TreeHashError {}
 pub fn tree_hash_from_bytes(tree_bytes: &[u8]) -> Result<[u8; 32], TreeHashError> {
     let mut reader = VlqReader::new(tree_bytes);
     let tree = read_ergo_tree(&mut reader).map_err(TreeHashError::Parse)?;
+    // Reject trailing bytes: `valid_tree ++ junk` must not hash to the same
+    // key as the canonical tree (a malformed input resolving to the same
+    // index key as a real address).
+    if !reader.is_empty() {
+        return Err(TreeHashError::Parse(ReadError::InvalidData(
+            "trailing bytes after ergoTree".into(),
+        )));
+    }
     let mut writer = VlqWriter::new();
     write_ergo_tree(&mut writer, &tree).map_err(TreeHashError::Write)?;
     Ok(*blake2b256(&writer.result()).as_bytes())
@@ -107,6 +115,13 @@ pub fn template_bytes(tree: &ErgoTree) -> Result<Vec<u8>, WriteError> {
 /// — caller must check `was_wrapped` (use [`template_hash_from_bytes`]
 /// for the parse-then-hash path).
 pub fn template_hash(tree: &ErgoTree) -> Result<[u8; 32], TemplateHashError> {
+    // A soft-fork-wrapped tree has an `Expr::Unparsed` whole-tree body with no
+    // meaningful template. Honor the documented contract by returning
+    // `Unparseable` rather than passing `Expr::Unparsed` to `template_bytes`
+    // (which surfaces a generic `Write` error).
+    if matches!(tree.body, crate::opcode::Expr::Unparsed(_)) {
+        return Err(TemplateHashError::Unparseable);
+    }
     let bytes = template_bytes(tree).map_err(TemplateHashError::Write)?;
     Ok(*blake2b256(&bytes).as_bytes())
 }
@@ -119,6 +134,11 @@ pub fn template_hash_from_bytes(tree_bytes: &[u8]) -> Result<[u8; 32], TemplateH
     let mut reader = VlqReader::new(tree_bytes);
     let (tree, was_wrapped) =
         read_ergo_tree_tracking_wrap(&mut reader).map_err(TemplateHashError::Parse)?;
+    if !reader.is_empty() {
+        return Err(TemplateHashError::Parse(ReadError::InvalidData(
+            "trailing bytes after ergoTree".into(),
+        )));
+    }
     if was_wrapped {
         return Err(TemplateHashError::Unparseable);
     }

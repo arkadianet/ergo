@@ -13,6 +13,11 @@ use super::{
     MAX_SUPPORTED_TREE_VERSION, SIZE_FLAG, VERSION_MASK,
 };
 
+/// Deserialize an ErgoTree from bytes.
+///
+/// For size-delimited trees, exactly `size` bytes are consumed after the size
+/// field. For non-size-delimited trees, all remaining bytes in the reader are
+/// consumed (the caller must provide exact bounds).
 pub fn read_ergo_tree(r: &mut VlqReader) -> Result<ErgoTree, ReadError> {
     let (tree, _was_wrapped) = read_ergo_tree_tracking_wrap(r)?;
     Ok(tree)
@@ -150,6 +155,12 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
             // this tree's header version, like Scala's version-scoped
             // `getEmbeddableType`. Covers segregated constants + the body.
             inner.set_ergo_tree_version(Some(version));
+            // Also propagate the activated-version override (set by the
+            // ergo-compiler self-check) into the size-delimited body reader, so a
+            // header-v0 tree gates SUnsignedBigInt (v6-only) by the activated
+            // version rather than version 0. Byte-inert on every consensus caller
+            // (the override is `None`, falling back to the header version).
+            inner.set_embeddable_activated_version(r.embeddable_activated_version());
             let parsed = parse_body(&mut inner, version, has_size, constant_segregation);
             (
                 parsed,

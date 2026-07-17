@@ -659,7 +659,7 @@ fn reduce_to_sigma_hex(tree: &ErgoTree, wire_bytes: &[u8]) -> Result<String, Str
     match reduce_expr(&tree.body, &ctx, &tree.constants) {
         Ok(sb) => {
             let mut w = VlqWriter::new();
-            write_sigma_boolean(&mut w, &sb);
+            write_sigma_boolean(&mut w, &sb).map_err(|e| format!("{e:?}"))?;
             Ok(hex::encode(w.result()))
         }
         Err(e) => Err(format!("{e:?}")),

@@ -145,7 +145,7 @@ fn cor(children: Vec<SigmaBoolean>) -> SigmaBoolean {
     SigmaBoolean::Cor(children)
 }
 
-fn cthreshold(k: u8, children: Vec<SigmaBoolean>) -> SigmaBoolean {
+fn cthreshold(k: u16, children: Vec<SigmaBoolean>) -> SigmaBoolean {
     SigmaBoolean::Cthreshold { k, children }
 }
 

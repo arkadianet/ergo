@@ -123,11 +123,6 @@ fn write_ergo_tree_body(w: &mut VlqWriter, tree: &ErgoTree) -> Result<(), WriteE
     Ok(())
 }
 
-/// Deserialize an ErgoTree from bytes.
-///
-/// For size-delimited trees, exactly `size` bytes are consumed after the size
-/// field. For non-size-delimited trees, all remaining bytes in the reader are
-/// consumed (the caller must provide exact bounds).
 /// Maximum ErgoTree version we can fully parse and evaluate.
 /// Trees with higher versions are accepted without body parsing (soft-fork).
 /// Matches Scala's VersionContext.MaxSupportedScriptVersion = 3.

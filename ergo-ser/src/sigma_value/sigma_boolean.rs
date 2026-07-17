@@ -6,6 +6,7 @@ use ergo_primitives::reader::{ReadError, VlqReader};
 use ergo_primitives::writer::VlqWriter;
 
 use super::SigmaBoolean;
+use crate::error::WriteError;
 
 // SigmaPropCodes from sigmastate-interpreter (SigmaPropCodes.scala).
 // Computed as LastConstantCode(0x70) + shift.
@@ -24,7 +25,15 @@ const TRIVIAL_PROP_TRUE: u8 = 0xD3; // 0x70 + 99
 /// ProveDlog, `0xCE` ProveDHTuple, `0x96` Cand, `0x97` Cor, `0x98`
 /// Cthreshold, `0xD2`/`0xD3` trivial false/true) followed by the
 /// node-specific payload.
-pub fn write_sigma_boolean(w: &mut VlqWriter, sb: &SigmaBoolean) {
+pub fn write_sigma_boolean(w: &mut VlqWriter, sb: &SigmaBoolean) -> Result<(), WriteError> {
+    fn check_children_len(len: usize, node: &str) -> Result<(), WriteError> {
+        if len > u16::MAX as usize {
+            return Err(WriteError::InvalidData(format!(
+                "{node} children count too large for Scala wire format: {len} (max 65535)"
+            )));
+        }
+        Ok(())
+    }
     match sb {
         SigmaBoolean::TrivialProp(false) => w.put_u8(TRIVIAL_PROP_FALSE),
         SigmaBoolean::TrivialProp(true) => w.put_u8(TRIVIAL_PROP_TRUE),
@@ -40,43 +49,32 @@ pub fn write_sigma_boolean(w: &mut VlqWriter, sb: &SigmaBoolean) {
             w.put_bytes(v.as_bytes());
         }
         SigmaBoolean::Cand(children) => {
-            assert!(
-                children.len() <= u16::MAX as usize,
-                "Cand children count too large for Scala wire format: {} (max 65535)",
-                children.len()
-            );
+            check_children_len(children.len(), "Cand")?;
             w.put_u8(SIGMA_AND);
             w.put_u16(children.len() as u16);
             for child in children {
-                write_sigma_boolean(w, child);
+                write_sigma_boolean(w, child)?;
             }
         }
         SigmaBoolean::Cor(children) => {
-            assert!(
-                children.len() <= u16::MAX as usize,
-                "Cor children count too large for Scala wire format: {} (max 65535)",
-                children.len()
-            );
+            check_children_len(children.len(), "Cor")?;
             w.put_u8(SIGMA_OR);
             w.put_u16(children.len() as u16);
             for child in children {
-                write_sigma_boolean(w, child);
+                write_sigma_boolean(w, child)?;
             }
         }
         SigmaBoolean::Cthreshold { k, children } => {
-            assert!(
-                children.len() <= u16::MAX as usize,
-                "Cthreshold children count too large for Scala wire format: {} (max 65535)",
-                children.len()
-            );
+            check_children_len(children.len(), "Cthreshold")?;
             w.put_u8(SIGMA_THRESHOLD);
-            w.put_u16(*k as u16);
+            w.put_u16(*k);
             w.put_u16(children.len() as u16);
             for child in children {
-                write_sigma_boolean(w, child);
+                write_sigma_boolean(w, child)?;
             }
         }
     }
+    Ok(())
 }
 
 /// Scala bounds nested value/`SigmaBoolean` deserialization at
@@ -130,7 +128,7 @@ pub(super) fn read_sigma_boolean_at_depth(
         }
         SIGMA_THRESHOLD => {
             // Scala: k = r.getUShort(), n = r.getUShort()
-            let k = r.get_u16()? as u8;
+            let k = r.get_u16()?;
             let count = r.get_u16()? as usize;
             let mut children = Vec::with_capacity(count);
             for _ in 0..count {
@@ -332,7 +330,7 @@ mod tests {
     fn golden_prove_dlog_tag() {
         let mut w = VlqWriter::new();
         let sb = SigmaBoolean::ProveDlog(fake_ge(0x00));
-        write_sigma_boolean(&mut w, &sb);
+        write_sigma_boolean(&mut w, &sb).unwrap();
         let data = w.result();
         assert_eq!(data[0], 0xCD);
         assert_eq!(data.len(), 1 + 33);
