@@ -56,6 +56,37 @@ fn read_tip_n_bits(state: &NodeState, id: &[u8; 32], height: u32, which: &str) -
     }
 }
 
+/// Read a tip's `(parent_id, timestamp, cumulative_score)` header metadata.
+/// Height 0 = no tip yet (legit zeroed defaults, no read). For a real tip
+/// (`height > 0`) a miss or read error is a store fault — logged with its
+/// cause rather than silently reported as the same zeroed shape a genuinely
+/// empty chain would produce, which would otherwise mask the fault as
+/// "nothing committed yet".
+fn header_meta_or_default(
+    state: &NodeState,
+    id: &[u8; 32],
+    height: u32,
+    which: &str,
+) -> ([u8; 32], u64, Vec<u8>) {
+    if height == 0 {
+        return ([0u8; 32], 0, Vec::new());
+    }
+    match state.store.get_header_meta(id) {
+        Ok(Some(m)) => (m.parent_id, m.timestamp, m.cumulative_score),
+        Ok(None) => {
+            tracing::error!(
+                which,
+                "snapshot: tip header meta absent; reporting zeroed defaults"
+            );
+            ([0u8; 32], 0, Vec::new())
+        }
+        Err(e) => {
+            tracing::error!(error = %e, which, "snapshot: tip header meta read failed; reporting zeroed defaults");
+            ([0u8; 32], 0, Vec::new())
+        }
+    }
+}
+
 /// Build the operator-API snapshot once per sync_tick.
 ///
 /// Bounded work: collects connected peers (capped naturally by socket
@@ -75,20 +106,18 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
     let cs_best_header_height = cs.best_header_height;
     let cs_best_full_block_height = cs.best_full_block_height;
 
-    let (best_header_parent, best_header_ts, best_header_score) = state
-        .store
-        .get_header_meta(&cs_best_header_id)
-        .ok()
-        .flatten()
-        .map(|m| (m.parent_id, m.timestamp, m.cumulative_score))
-        .unwrap_or(([0u8; 32], 0, Vec::new()));
-    let (best_full_parent, best_full_ts, best_full_block_score) = state
-        .store
-        .get_header_meta(&cs_best_full_block_id)
-        .ok()
-        .flatten()
-        .map(|m| (m.parent_id, m.timestamp, m.cumulative_score))
-        .unwrap_or(([0u8; 32], 0, Vec::new()));
+    let (best_header_parent, best_header_ts, best_header_score) = header_meta_or_default(
+        state,
+        &cs_best_header_id,
+        cs_best_header_height,
+        "best_header",
+    );
+    let (best_full_parent, best_full_ts, best_full_block_score) = header_meta_or_default(
+        state,
+        &cs_best_full_block_id,
+        cs_best_full_block_height,
+        "best_full_block",
+    );
     // Difficulty surface: HeaderMeta doesn't carry `n_bits`, so deserialize
     // each tip header for it. Height 0 = no tip yet (legit 0); for a real
     // tip a failure is a store/serializer fault, logged with its cause, and
@@ -108,13 +137,25 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
     );
     // Ergo genesis is height 1 in HEADER_CHAIN_INDEX (h=0 is never written —
     // see `rewrite_best_chain_into_index` walk terminating at cur_height == 1).
-    // Matches Scala's chain numbering.
-    let genesis_block_id = state
-        .store
-        .get_header_id_at_height(1)
-        .ok()
-        .flatten()
-        .unwrap_or([0u8; 32]);
+    // Matches Scala's chain numbering. Height 0 (no header committed yet) is
+    // the only legitimate reason genesis is absent; once the chain has any
+    // header, a miss or error here is a store fault, not a "not yet
+    // committed" state — logged so it isn't silently mistaken for the latter.
+    let genesis_block_id = match state.store.get_header_id_at_height(1) {
+        Ok(Some(id)) => id,
+        Ok(None) if cs_best_header_height == 0 => [0u8; 32],
+        Ok(None) => {
+            tracing::error!(
+                "snapshot: genesis header id absent despite a committed chain; \
+                 reporting zeroed genesis_block_id",
+            );
+            [0u8; 32]
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "snapshot: genesis header id lookup failed");
+            [0u8; 32]
+        }
+    };
 
     // Backend-agnostic tip state-root digest (UTXO arena root or digest
     // verifier's ADProof-derived root); both equal the tip header's
