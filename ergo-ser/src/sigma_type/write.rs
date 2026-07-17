@@ -23,8 +23,18 @@ pub fn write_type(w: &mut VlqWriter, t: &SigmaType) -> Result<(), WriteError> {
         SigmaType::SGroupElement => w.put_u8(7),
         SigmaType::SSigmaProp => w.put_u8(8),
         SigmaType::SUnsignedBigInt => w.put_u8(9),
-        SigmaType::SReserved10 => w.put_u8(10),
-        SigmaType::SReserved11 => w.put_u8(11),
+        // Codes 10 and 11 are NOT valid embeddable types — Scala's embeddable
+        // set stops at 8 (V5) / 9 (V6), so SReserved10/11 must never reach the
+        // wire. Unreachable from parsing (the reader rejects codes 10/11);
+        // error defensively so a programmatically-built value can't emit a
+        // type descriptor the reference rejects.
+        SigmaType::SReserved10 | SigmaType::SReserved11 => {
+            return Err(WriteError::InvalidData(
+                "reserved embeddable type codes 10/11 are not serializable \
+                 (outside the Scala embeddable set)"
+                    .into(),
+            ));
+        }
 
         // Special non-embeddable types
         SigmaType::SAny => w.put_u8(SANY_CODE),
@@ -139,17 +149,23 @@ fn write_coll(w: &mut VlqWriter, elem: &SigmaType) -> Result<(), WriteError> {
 }
 
 fn write_option(w: &mut VlqWriter, elem: &SigmaType) -> Result<(), WriteError> {
-    // Check for Option[Coll[T]] — constrId 4
+    // Option[Coll[embeddable]] has a compressed single-byte form (constrId 4,
+    // OPTION_COLL_CODE + the embeddable code). This applies ONLY when the
+    // collection's element is embeddable; Option[Coll[non-embeddable]] uses
+    // the general Option prefix `0x24 <Coll[inner]>` — Scala
+    // `TypeSerializer.serialize` puts OptionTypeCode then serializes the WHOLE
+    // collection. Emitting `OPTION_COLL_CODE <inner>` for a non-embeddable
+    // inner produced non-canonical bytes vs the reference (e.g.
+    // Option[Coll[Box]] = 0x30 0x63 instead of 0x24 0x0c 0x63), which shifts
+    // derived IDs. Mirrors the identical `write_coll` nested-collection rule.
     if let SigmaType::SColl(inner) = elem {
         if let Some(code) = inner.embeddable_code() {
             // Option[Coll[embeddable]] — single byte
             w.put_u8(OPTION_COLL_CODE + code);
-        } else {
-            // Option[Coll[complex]] — constrId 4 + primId 0, then inner type
-            w.put_u8(OPTION_COLL_CODE);
-            write_type(w, inner)?;
+            return Ok(());
         }
-        return Ok(());
+        // else: fall through to the general Option[T] path below, which writes
+        // OPTION_CODE then recurses into `elem` (the whole Coll).
     }
     // Option[T] — constrId 3
     if let Some(code) = elem.embeddable_code() {
@@ -274,6 +290,54 @@ mod tests {
         let nested_byte = SigmaType::SColl(Box::new(SigmaType::SColl(Box::new(SigmaType::SByte))));
         let byte_code = SigmaType::SByte.embeddable_code().unwrap();
         assert_eq!(encode(&nested_byte), vec![COLL_COLL_CODE + byte_code]);
+    }
+
+    #[test]
+    fn option_coll_nonembeddable_uses_general_prefix() {
+        // Option[Coll[X]] with a NON-embeddable inner X must serialize as the
+        // general Option prefix `0x24 <Coll[X]>` = `0x24 0x0c <X>` (Scala puts
+        // OptionTypeCode then serializes the WHOLE collection), NOT the
+        // compressed OptionCollection form. Emitting `OPTION_COLL_CODE <X>`
+        // (0x30 0x63 for Option[Coll[Box]] instead of 0x24 0x0c 0x63) shifts
+        // derived IDs — the consensus-critical drift this fixes.
+        let opt_coll_box =
+            SigmaType::SOption(Box::new(SigmaType::SColl(Box::new(SigmaType::SBox))));
+        assert_eq!(
+            encode(&opt_coll_box),
+            vec![OPTION_CODE, COLL_CODE, SBOX_CODE]
+        );
+        roundtrip(&opt_coll_box);
+
+        // The compressed prefix is still used when the collection element IS
+        // embeddable (Option[Coll[Byte]] -> OPTION_COLL_CODE + Byte's code).
+        let opt_coll_byte =
+            SigmaType::SOption(Box::new(SigmaType::SColl(Box::new(SigmaType::SByte))));
+        let byte_code = SigmaType::SByte.embeddable_code().unwrap();
+        assert_eq!(encode(&opt_coll_byte), vec![OPTION_COLL_CODE + byte_code]);
+        roundtrip(&opt_coll_byte);
+    }
+
+    #[test]
+    fn reserved_embeddable_codes_10_and_11_rejected_both_directions() {
+        // Codes 10/11 are outside the Scala embeddable set (1..=8 V5, 1..=9 V6).
+        // The reader must reject them (was accept-invalid) and the writer must
+        // never emit them.
+        for code in [10u8, 11u8] {
+            let bytes = [code];
+            let mut r = VlqReader::new(&bytes);
+            assert!(
+                read_type(&mut r).is_err(),
+                "embeddable type code {code} must be rejected on read"
+            );
+        }
+        assert!(matches!(
+            write_err(&SigmaType::SReserved10),
+            WriteError::InvalidData(_)
+        ));
+        assert!(matches!(
+            write_err(&SigmaType::SReserved11),
+            WriteError::InvalidData(_)
+        ));
     }
 
     // ----- error paths -----

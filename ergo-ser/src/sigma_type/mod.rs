@@ -79,10 +79,14 @@ const MAX_TYPE_DEPTH: usize = 100;
 /// typed values.
 ///
 /// The encoding is designed so that common types (a primitive element
-/// inside a collection or option) fit in a single byte. The eleven
-/// "embeddable" types (`SBoolean..=SReserved11`) get codes 1..=11 and
-/// can be packed into the constructor byte of a higher-kinded type
-/// (`SColl`, `SOption`, `STuple` of pairs).
+/// inside a collection or option) fit in a single byte. The "embeddable"
+/// types (`SBoolean..=SUnsignedBigInt`) get codes 1..=9 — 1..=8 in the V5
+/// set, plus `SUnsignedBigInt` = 9 in the V6 set — and can be packed into
+/// the constructor byte of a higher-kinded type (`SColl`, `SOption`,
+/// `STuple` of pairs). Codes 10 and 11 are NOT embeddable types: they only
+/// exist so the primitive-code range (`MaxPrimTypeCode = 11`) yields clean
+/// constructor multipliers. The reader rejects codes 10/11 and the writer
+/// refuses to emit the reserved variants below.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SigmaType {
     /// Embeddable code 1 — boolean.
@@ -103,11 +107,12 @@ pub enum SigmaType {
     SSigmaProp,
     /// Embeddable code 9 — unsigned 256-bit integer (protocol v6+).
     SUnsignedBigInt,
-    /// Embeddable code 10 — placeholder for a type observed on mainnet
-    /// whose runtime semantics are not yet finalized.
+    /// Reserved primitive-code slot 10 — NOT an embeddable type. Outside the
+    /// Scala embeddable set (1..=8 V5 / 1..=9 V6); the reader rejects code 10
+    /// and the writer refuses to serialize this variant.
     SReserved10,
-    /// Embeddable code 11 — placeholder for a type observed on mainnet
-    /// whose runtime semantics are not yet finalized.
+    /// Reserved primitive-code slot 11 — NOT an embeddable type (see
+    /// [`SigmaType::SReserved10`]). Reader rejects code 11; writer refuses it.
     SReserved11,
     /// Top type — every other type is a subtype of `SAny`.
     SAny,
@@ -163,8 +168,8 @@ impl SigmaType {
             SigmaType::SGroupElement => Some(7),
             SigmaType::SSigmaProp => Some(8),
             SigmaType::SUnsignedBigInt => Some(9),
-            SigmaType::SReserved10 => Some(10),
-            SigmaType::SReserved11 => Some(11),
+            // Codes 10/11 are outside the Scala embeddable set (1..=8 V5,
+            // 1..=9 V6); SReserved10/11 are not embeddable and never emitted.
             _ => None,
         }
     }
@@ -216,8 +221,10 @@ fn prim_from_code(code: u8, gate_version: u8) -> Result<SigmaType, ReadError> {
         9 => Err(ReadError::InvalidData(format!(
             "embeddable type SUnsignedBigInt (code 9) requires ErgoTree version >= {V6_EMBEDDABLE_TREE_VERSION}, got tree version {gate_version}"
         ))),
-        10 => Ok(SigmaType::SReserved10),
-        11 => Ok(SigmaType::SReserved11),
+        // Codes 10 and 11 are NOT in the Scala embeddable set (`embeddableV5`
+        // length 9 → codes 1..=8; `embeddableV6` length 10 → codes 1..=9).
+        // Scala's `getEmbeddableType` indexes those arrays and throws on an
+        // out-of-range code; accepting them as SReserved10/11 was accept-invalid.
         _ => Err(ReadError::InvalidData(format!(
             "invalid embeddable type code: {code}"
         ))),
