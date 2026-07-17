@@ -149,10 +149,20 @@ fn check_named_fields(
             return Err(mk_err(field, *p, *c));
         }
     }
-    if parsed.subblocks_per_block != computed.subblocks_per_block {
-        let p = parsed.subblocks_per_block.unwrap_or(-1) as i64;
-        let c = computed.subblocks_per_block.unwrap_or(-1) as i64;
-        return Err(mk_err("subblocks_per_block", p, c));
+    // subblocks (id 9): enforce only when the PARSED extension actually
+    // carries it — mirroring the `extra` handling below and rule 414's
+    // `parsed.size <= computed.size` subset contract. A computed-only
+    // subblocks (parsed None, computed Some) is a legitimate subset
+    // omission that rule 414 must accept (v6.0 injects id 9 while a
+    // parsed extension may omit it). Rule 409 stays strict: when
+    // subblocks presence differs, `field_count` differs, so 409's
+    // size-equality gate rejects that case before this runs — this
+    // relaxation is a provable no-op for 409.
+    if let Some(parsed_sub) = parsed.subblocks_per_block {
+        if computed.subblocks_per_block != Some(parsed_sub) {
+            let c = computed.subblocks_per_block.unwrap_or(-1) as i64;
+            return Err(mk_err("subblocks_per_block", parsed_sub as i64, c));
+        }
     }
     // Extras: every extra key in parsed must equal the same key in
     // computed. (Scala iterates parsed.parametersTable; in our model
@@ -174,4 +184,78 @@ fn check_named_fields(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::active_params::scala_launch;
+
+    fn params_at(height: u32, subblocks: Option<i32>) -> ActiveProtocolParameters {
+        let mut p = scala_launch();
+        p.epoch_start_height = height;
+        p.subblocks_per_block = subblocks;
+        p
+    }
+
+    #[test]
+    fn rule_414_accepts_computed_only_subblocks() {
+        // Rule 414 (`matchParameters60`) allows `parsed.size <= computed.size`:
+        // a parsed extension that omits subblocks (id 9) while computed
+        // injected it (v6.0 / block-v4) is a legitimate subset omission and
+        // must be accepted.
+        let parsed = params_at(2048, None);
+        let computed = params_at(2048, Some(30));
+        assert!(
+            match_parameters_60(&parsed, &computed).is_ok(),
+            "rule 414 must accept computed-only subblocks (subset omission)",
+        );
+    }
+
+    #[test]
+    fn rule_409_rejects_computed_only_subblocks() {
+        // Rule 409 (`matchParameters`) requires exact equality: the same
+        // computed-only subblocks is a size mismatch and must reject (via the
+        // size-equality gate, before the per-field walk).
+        let parsed = params_at(2048, None);
+        let computed = params_at(2048, Some(30));
+        let err = match_parameters(&parsed, &computed).unwrap_err();
+        assert!(
+            matches!(err, ExtensionValidationError::MatchParametersSize { .. }),
+            "rule 409 must reject computed-only subblocks via the size gate, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn rule_414_still_rejects_differing_subblocks_value() {
+        // The 414 relaxation is subset-only, not value-blind: when BOTH sides
+        // carry subblocks but the values differ, 414 must still reject.
+        let parsed = params_at(2048, Some(10));
+        let computed = params_at(2048, Some(30));
+        let err = match_parameters_60(&parsed, &computed).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ExtensionValidationError::MatchParameters60 {
+                    field: "subblocks_per_block",
+                    ..
+                }
+            ),
+            "rule 414 must reject a differing subblocks value, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn both_rules_accept_matching_subblocks() {
+        // Regression guard: when parsed and computed agree (both Some, equal;
+        // or both None) neither rule is affected by the relaxation.
+        let a = params_at(2048, Some(30));
+        let b = params_at(2048, Some(30));
+        assert!(match_parameters(&a, &b).is_ok());
+        assert!(match_parameters_60(&a, &b).is_ok());
+        let c = params_at(2048, None);
+        let d = params_at(2048, None);
+        assert!(match_parameters(&c, &d).is_ok());
+        assert!(match_parameters_60(&c, &d).is_ok());
+    }
 }
