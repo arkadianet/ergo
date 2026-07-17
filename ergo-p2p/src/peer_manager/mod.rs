@@ -25,7 +25,7 @@ use crate::peer::{
     DEGRADED_THRESHOLD, DELIVERY_DEGRADE_STREAK,
 };
 
-pub mod known_peer;
+mod known_peer;
 pub mod limits;
 mod persistence;
 pub mod routability;
