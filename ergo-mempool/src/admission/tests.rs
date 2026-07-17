@@ -1,7 +1,11 @@
 use super::*;
+use crate::budget::CostBudgets;
+use crate::invalidation::{InvalidationCache, InvalidationReason};
+use crate::types::TipPointer;
 use crate::unresolved::UnresolvedCache;
 use crate::weight::ByCost;
 use ergo_primitives::digest::Digest32;
+use ergo_validation::{ProtocolParams, TransactionContext, UtxoView};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
