@@ -1,22 +1,7 @@
-//! Pure NiPoPoW algorithms — KMZ17 maxLevelOf, bestArg, LCA, and
-//! update_interlinks. Scala reference: `NipopowAlgos.scala` (lines
-//! cited inline at each function).
-
-use ergo_crypto::autolykos::common::{blake2b256, calc_n};
-use ergo_crypto::autolykos::v1::secp256k1_order;
-use ergo_crypto::autolykos::v2::hit_for_v2;
 use ergo_primitives::digest::ModifierId;
-use ergo_ser::autolykos::AutolykosSolution;
-use ergo_ser::difficulty::decode_compact_bits;
-use ergo_ser::header::{serialize_header_without_pow, Header};
-use num_bigint::BigUint;
-use num_traits::ToPrimitive;
+use ergo_ser::header::Header;
 
-/// Sentinel μ-level for genesis. Matches Scala's `Int.MaxValue`
-/// (`NipopowAlgos.scala:75`). A genesis header is at infinite level
-/// because its required-target / real-target ratio is degenerate
-/// and the consensus definition assigns it the top of the lattice.
-pub const GENESIS_LEVEL: u32 = u32::MAX;
+use super::{header_id, is_genesis, scoring::max_level_of};
 
 /// Key prefix for the interlinks vector in the extension's key-value
 /// fields. Scala: `Extension.InterlinksVectorPrefix = 0x01`
@@ -222,287 +207,6 @@ pub fn build_popow_header(
     })
 }
 
-/// Parameters governing NiPoPoW proof construction (KMZ17). Mirrors
-/// Scala `PoPowParams(m, k, continuous)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PoPowParams {
-    /// Minimum super-chain length per level (mainnet = 6).
-    pub m: u32,
-    /// Suffix length (mainnet = 10).
-    pub k: u32,
-    /// Whether the proof is continuous (true) — required for the
-    /// post-suffix difficulty-headers check.
-    pub continuous: bool,
-}
-
-/// Construct a NiPoPoW proof for the given chain. Scala parity:
-/// `NipopowAlgos.prove` (`NipopowAlgos.scala:129-159`).
-///
-/// Preconditions:
-/// * `chain.len() >= k + m`.
-/// * `chain[0]` is genesis (`parent_id == zeros`).
-/// * `params.k >= 1`.
-///
-/// Returns `Err` on precondition violation.
-///
-/// The chain is supplied as a `Vec<PoPowHeader>` so each entry
-/// carries its own (header, interlinks, batch-merkle-proof) — the
-/// caller is expected to build PoPowHeader instances via
-/// [`build_popow_header`] before calling `prove`.
-pub fn prove(
-    chain: Vec<ergo_ser::popow_header::PoPowHeader>,
-    params: PoPowParams,
-) -> Result<ergo_ser::popow_proof::NipopowProof, String> {
-    if params.k < 1 {
-        return Err(format!("PoPowParams::k must be >= 1 (got {})", params.k));
-    }
-    if (chain.len() as u32) < params.k.saturating_add(params.m) {
-        return Err(format!(
-            "chain.len() = {} < k + m = {}",
-            chain.len(),
-            params.k.saturating_add(params.m)
-        ));
-    }
-    let genesis = chain.first().ok_or_else(|| "empty chain".to_string())?;
-    if *genesis.header.parent_id.as_bytes() != [0u8; 32] {
-        return Err("chain.first() must be genesis (parent_id == zeros)".into());
-    }
-
-    let k = params.k as usize;
-    let m = params.m as usize;
-
-    // Suffix = last k entries. suffix_head = first; suffix_tail =
-    // the remaining k-1 raw headers.
-    let suffix_start = chain.len() - k;
-    let suffix: Vec<ergo_ser::popow_header::PoPowHeader> = chain[suffix_start..].to_vec();
-    let suffix_head = suffix[0].clone();
-    let suffix_tail: Vec<ergo_ser::header::Header> =
-        suffix.iter().skip(1).map(|p| p.header.clone()).collect();
-
-    // The prefix carries the sparse witness chain. Scala recurses
-    // from `maxLevel = chain.dropRight(k).last.interlinks.size - 1`
-    // down to 0, accumulating sub-chains of each level that
-    // satisfy `m < subChain.size`.
-    let dropped_last = &chain[chain.len() - k - 1];
-    let max_level = if dropped_last.interlinks.is_empty() {
-        0i64
-    } else {
-        (dropped_last.interlinks.len() as i64) - 1
-    };
-
-    let mut acc: Vec<ergo_ser::popow_header::PoPowHeader> = Vec::new();
-    prove_prefix_loop(&chain, max_level, &chain[0], &mut acc, k, m);
-    acc.sort_by_key(|p| p.header.height);
-    acc.dedup_by_key(|p| p.header.height);
-
-    Ok(ergo_ser::popow_proof::NipopowProof {
-        m: params.m,
-        k: params.k,
-        prefix: acc,
-        suffix_head,
-        suffix_tail,
-        continuous: params.continuous,
-    })
-}
-
-/// Tail-recursive worker for [`prove`]'s prefix construction.
-/// Mirrors Scala `provePrefix` at `NipopowAlgos.scala:137-151`.
-fn prove_prefix_loop(
-    chain: &[ergo_ser::popow_header::PoPowHeader],
-    level: i64,
-    anchoring_point: &ergo_ser::popow_header::PoPowHeader,
-    acc: &mut Vec<ergo_ser::popow_header::PoPowHeader>,
-    k: usize,
-    m: usize,
-) {
-    if level < 0 {
-        return;
-    }
-    // chain.dropRight(k).filter(maxLevelOf >= level && height >= anchoring_point.height)
-    let cutoff = chain.len().saturating_sub(k);
-    let sub_chain: Vec<ergo_ser::popow_header::PoPowHeader> = chain[..cutoff]
-        .iter()
-        .filter(|p| {
-            (max_level_of(&p.header) as i64) >= level
-                && p.header.height >= anchoring_point.header.height
-        })
-        .cloned()
-        .collect();
-    if m < sub_chain.len() {
-        // Scala: provePrefix(subChain(subChain.size - params.m), level - 1, acc ++ subChain)
-        let new_anchor = sub_chain[sub_chain.len() - m].clone();
-        acc.extend(sub_chain);
-        prove_prefix_loop(chain, level - 1, &new_anchor, acc, k, m);
-    } else {
-        // Scala: provePrefix(anchoringPoint, level - 1, acc ++ subChain)
-        acc.extend(sub_chain);
-        let preserved_anchor = anchoring_point.clone();
-        prove_prefix_loop(chain, level - 1, &preserved_anchor, acc, k, m);
-    }
-}
-
-/// μ-level of `header` per KMZ17 §2.2:
-///
-/// ```text
-/// μ = log2(requiredTarget) - log2(realTarget)
-/// requiredTarget = q / decode_compact_bits(nBits)
-/// realTarget     = powHit(header)
-/// ```
-///
-/// `q` is the secp256k1 group order (Autolykos `Q`). `powHit` is the
-/// header's PoW hit value: for header version 1 it is the
-/// solution's `d` component; for v2+ it is the
-/// `hit_for_v2(msg, nonce, height, n)` value where
-/// `msg = Blake2b256(header bytes without PoW)`.
-///
-/// Genesis returns [`GENESIS_LEVEL`].
-///
-/// Returns `0` if either target is non-positive after `BigUint -> f64`
-/// conversion (defensive — would indicate corrupt nBits or a hit of
-/// zero). The Scala `.toInt` truncation on a negative `log2` diff is
-/// matched by clamping to `0` here, since unsigned `u32::from`
-/// otherwise wraps.
-///
-/// Scala source: `NipopowAlgos.scala:68-76`.
-pub fn max_level_of(header: &Header) -> u32 {
-    if is_genesis(header) {
-        return GENESIS_LEVEL;
-    }
-
-    let required_target = secp256k1_order() / decode_compact_bits(header.n_bits);
-    // If pow_hit can't serialize the header (unreachable from honest
-    // callers — pre-gates filter), fall through to level 0 (the same
-    // defensive return used below for non-positive targets and
-    // non-finite log diffs). This keeps `max_level_of` infallible
-    // without re-introducing a panic.
-    let real_target = match pow_hit(header) {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::debug!(error = ?e, "popow: pow_hit failed in max_level_of; degrading header to level 0");
-            return 0;
-        }
-    };
-
-    let required_f = biguint_to_f64(&required_target);
-    let real_f = biguint_to_f64(&real_target);
-
-    if required_f <= 0.0 || real_f <= 0.0 {
-        tracing::debug!(
-            required_f,
-            real_f,
-            "popow: non-positive target in max_level_of; degrading header to level 0"
-        );
-        return 0;
-    }
-
-    let level = required_f.log2() - real_f.log2();
-    if !level.is_finite() || level <= 0.0 {
-        tracing::debug!(level, "popow: non-finite or non-positive mu-level in max_level_of; degrading header to level 0");
-        return 0;
-    }
-    level as u32
-}
-
-/// Best argument score for `chain` under minimum-superchain-length `m`.
-/// Iterates μ-levels from 0 upward, accumulating `(level, count_at_or_above)`
-/// for each level whose super-chain has length ≥ `m`. Level 0 is always
-/// accumulated with `count = chain.len()`. Returns the maximum of
-/// `2^level * count` over the accumulated pairs.
-///
-/// KMZ17 Algorithm 4. Scala source: `NipopowAlgos.scala:98-111`.
-///
-/// `u64` return covers any realistic chain × level product without
-/// overflow; Scala returns `Int` and would overflow at extreme inputs.
-/// Empty chain returns `0` (level 0 contributes `2^0 * 0 = 0`; no
-/// higher level reaches the m-cutoff).
-pub fn best_arg(chain: &[Header], m: u32) -> u64 {
-    // `max_level_of` is a deterministic function of the header, so
-    // computing each level once and scoring over the vector is
-    // score-identical to the previous per-level recomputation.
-    let levels: Vec<u32> = chain.iter().map(max_level_of).collect();
-    best_arg_from_levels(&levels, m)
-}
-
-/// [`best_arg`] over pre-computed μ-levels instead of headers — the
-/// same KMZ17 Algorithm 4 score for callers that track per-header
-/// levels without retaining full `Header`s (e.g. a light
-/// header-follower scoring its own followed chain against a NiPoPoW
-/// proof). `levels[i]` must be `max_level_of` of the i-th chain
-/// header; the genesis sentinel [`GENESIS_LEVEL`] participates in
-/// every level's count, exactly as the header form does.
-pub fn best_arg_from_levels(levels: &[u32], m: u32) -> u64 {
-    let mut best: u64 = 0;
-
-    // Level 0: always included with count = levels.len(). Every header
-    // is by definition at least level 0; Scala explicitly skips the
-    // m-cutoff at level 0 (`NipopowAlgos.scala:101-102`).
-    let level_0_count = levels.len() as u64;
-    best = best.max(level_0_count); // 2^0 * count
-
-    let mut level: u32 = 1;
-    loop {
-        let count = levels.iter().filter(|&&l| l >= level).count() as u64;
-        if count < m as u64 {
-            return best;
-        }
-        // 2^level * count, saturating at u64::MAX so a hypothetical
-        // 2^64 wrap-around can't underestimate the score.
-        let score = (1u64)
-            .checked_shl(level)
-            .unwrap_or(u64::MAX)
-            .saturating_mul(count);
-        if score > best {
-            best = score;
-        }
-        // u32 level cap: a chain whose every header has level ≥ 32 is
-        // already at score ~chain.len() * 2^32. Beyond that we'd need
-        // u64 levels, which KMZ17 does not produce in practice. Cap
-        // here defensively rather than overflowing the shift.
-        if level == u32::MAX {
-            return best;
-        }
-        level += 1;
-    }
-}
-
-/// Last shared header between two chains, iff they share a genesis
-/// (i.e. their first elements are equal). Returns `None` otherwise.
-///
-/// Scala uses the naïve intersect-then-last (`NipopowAlgos.scala:116-122`);
-/// this port matches the same semantics. The intersection is by header
-/// id, walked in order, so the returned header is the deepest one
-/// present in both chains.
-pub fn lowest_common_ancestor<'a>(
-    left_chain: &'a [Header],
-    right_chain: &'a [Header],
-) -> Result<Option<&'a Header>, ergo_ser::error::WriteError> {
-    let Some(left_head) = left_chain.first() else {
-        return Ok(None);
-    };
-    let Some(right_head) = right_chain.first() else {
-        return Ok(None);
-    };
-    if header_id(left_head)? != header_id(right_head)? {
-        return Ok(None);
-    }
-
-    // Same-genesis: walk left, keep the deepest one that's also in
-    // right by id. O(L * R) like Scala's intersect; chains used here
-    // are small (proof prefixes), not full mainnet chains.
-    let mut right_ids: std::collections::HashSet<[u8; 32]> =
-        std::collections::HashSet::with_capacity(right_chain.len());
-    for h in right_chain {
-        right_ids.insert(header_id(h)?);
-    }
-
-    for h in left_chain.iter().rev() {
-        if right_ids.contains(&header_id(h)?) {
-            return Ok(Some(h));
-        }
-    }
-    Ok(None)
-}
-
 /// Compute the interlinks vector for the header immediately following
 /// `prev_header`, given `prev_interlinks` (the interlinks vector that
 /// was attached to `prev_header`).
@@ -564,54 +268,6 @@ pub fn update_interlinks(
     Ok(out)
 }
 
-// ---- internal helpers ----
-
-/// Genesis predicate: parent_id is the zero-bytes 32-byte array.
-/// Matches Scala `Header.isGenesis` (`parentId.sameElements(GenesisParentId)`).
-pub(crate) fn is_genesis(header: &Header) -> bool {
-    *header.parent_id.as_bytes() == [0u8; 32]
-}
-
-/// Header id: Blake2b256 of the canonical serialized bytes. We compute
-/// from the `bytes-without-pow` || solution path implicitly via
-/// `serialize_header` if needed, but for popow we only need an id-by-
-/// header lookup; build it via `blake2b256` of the full
-/// serialization.
-fn header_id(header: &Header) -> Result<[u8; 32], ergo_ser::error::WriteError> {
-    // Pre-gates (NipopowProofExt::all_headers_serializable at verifier
-    // entry; block validation / mining callers exercise paths where the
-    // parent header has already been accepted) keep this Err
-    // unreachable in honest control flow. Returning Result rather than
-    // panicking lets production callers (block.rs interlinks check,
-    // extension_builder.rs candidate construction) degrade to typed
-    // errors instead of aborting the node when peer-supplied or
-    // mempool-derived headers slip past a future relaxation.
-    let (_bytes, id) = ergo_ser::header::serialize_header(header)?;
-    Ok(*id.as_bytes())
-}
-
-/// `powHit(header)` per Scala `AutolykosPowScheme.scala:219-225`:
-/// v1 reads `header.solution.d`; v2+ computes `hit_for_v2`.
-fn pow_hit(header: &Header) -> Result<BigUint, ergo_ser::error::WriteError> {
-    match &header.solution {
-        AutolykosSolution::V1 { d, .. } => Ok(BigUint::from_bytes_be(d)),
-        AutolykosSolution::V2 { nonce, .. } => {
-            // Same pre-gate as `header_id` above. Returning Result lets
-            // `max_level_of` degrade to level 0 ("not a μ-level
-            // qualifier") instead of panicking when production callers
-            // hit malformed headers.
-            let header_bytes = serialize_header_without_pow(header)?;
-            let msg = blake2b256(&header_bytes);
-            let n = calc_n(header.version, header.height);
-            Ok(hit_for_v2(&msg, nonce, header.height, n))
-        }
-    }
-}
-
-fn biguint_to_f64(v: &BigUint) -> f64 {
-    v.to_f64().unwrap_or(0.0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,128 +293,67 @@ mod tests {
     /// Sourced from `headers_1_10.json[1]`.
     const HEIGHT_2_V1_HEX: &str = "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b828b0f6a0e6cb98ed4649c6e4cc00599ae78755324c79a8cec51e94ecca339d7a3a11a92de9c0ba1e95068f39bc1e08afa4ca23dff16de135fac64d0cf7dd1ab6291b70477f591ee8efb8a962d36ddbe3ac57591e39fe45ffb8c51c4939e41980387d9cfe9ba2d6b46bcba6f750f5be67d89679e921b78c277c5546a08cdb0955376fa0ea271e30601176502000000033c46c7fd7085638bf4bc902badb4e5a1942d3251d92d0eddd6fbe5d57e91553703df646d7f6138aede718a2a4f1a76d4125750e8ab496b7a8a25292d07e14cbadb0000000a03d0d0191b06164a2e86a170f0d8ac96cffa2e3312f2f5b0b1c3b1e082b9a0cd";
 
-    /// Helper: synthesize a non-genesis header by mutating a real one's
-    /// `parent_id` to a non-zero value (and otherwise keeping every
-    /// field, so the solution remains consistent for downstream
-    /// hashing). Only used in tests that don't validate the PoW.
-    fn with_nonzero_parent(mut h: Header, parent: [u8; 32]) -> Header {
-        h.parent_id = ergo_primitives::digest::ModifierId::from_bytes(parent);
-        h
-    }
-
-    // ----- happy path -----
+    // ----- pack_interlinks -----
 
     #[test]
-    fn max_level_of_genesis_returns_sentinel() {
-        let h = header_from_hex(GENESIS_HEX);
-        assert_eq!(max_level_of(&h), GENESIS_LEVEL);
+    fn pack_interlinks_single_unique_entry_emits_one_field() {
+        let id = ModifierId::from_bytes([0x11; 32]);
+        let packed = pack_interlinks(&[id]);
+        assert_eq!(packed.len(), 1);
+        assert_eq!(packed[0].0, vec![INTERLINKS_VECTOR_PREFIX, 0]);
+        assert_eq!(packed[0].1[0], 1); // duplicate count = 1
+        assert_eq!(&packed[0].1[1..], id.as_bytes());
     }
 
     #[test]
-    fn max_level_of_non_genesis_v1_returns_finite_level() {
-        // Height 2: real mainnet v1 header. We don't pin a specific
-        // level value here (no Scala-extracted oracle vector is
-        // available for this height yet); instead we pin that the
-        // function:
-        //   * does not panic
-        //   * returns a finite value (< GENESIS_LEVEL)
-        //   * returns 0 or more (no underflow/wraparound)
-        let h = header_from_hex(HEIGHT_2_V1_HEX);
-        let level = max_level_of(&h);
-        assert!(level < GENESIS_LEVEL, "level should be finite, got {level}");
+    fn pack_then_unpack_interlinks_roundtrips() {
+        // Pack a vector with duplicates → unpack → same vector.
+        let g = ModifierId::from_bytes([0x11; 32]);
+        let lvl1 = ModifierId::from_bytes([0x22; 32]);
+        let lvl2 = ModifierId::from_bytes([0x33; 32]);
+        let interlinks = vec![g, lvl1, lvl1, lvl1, lvl2];
+        let packed = pack_interlinks(&interlinks);
+        let unpacked = unpack_interlinks(&packed).unwrap();
+        assert_eq!(unpacked, interlinks);
     }
 
     #[test]
-    fn best_arg_empty_chain_returns_zero() {
-        let score = best_arg(&[], 2);
-        assert_eq!(score, 0);
+    fn unpack_interlinks_ignores_non_interlinks_fields() {
+        // Real extensions carry voted params + interlinks; only the
+        // 0x01-prefixed keys should contribute.
+        let g = ModifierId::from_bytes([0x11; 32]);
+        let mut packed = pack_interlinks(&[g]);
+        packed.push((vec![0x00, 0x05], vec![0xAB, 0xCD])); // some other field
+        packed.push((vec![0x02, 0x00], vec![0xEF])); // another non-interlinks field
+        let unpacked = unpack_interlinks(&packed).unwrap();
+        assert_eq!(unpacked.len(), 1);
+        assert_eq!(unpacked[0], g);
     }
 
     #[test]
-    fn best_arg_single_genesis_chain_returns_one_at_level_zero() {
-        // Genesis has max_level_of == u32::MAX. For m=2, the level-0
-        // count is 1 (< m). Higher levels would all pass the filter
-        // (genesis satisfies any level), but the count there is also
-        // 1 < m, so the loop terminates immediately after level 0.
-        // The level-0 entry contributes 2^0 * 1 = 1.
-        let h = header_from_hex(GENESIS_HEX);
-        let score = best_arg(std::slice::from_ref(&h), 2);
-        assert_eq!(score, 1);
+    fn unpack_interlinks_rejects_wrong_value_length() {
+        // A value that's not exactly 33 bytes means the dup-count
+        // run-encoding is corrupted — Scala raises "Interlinks
+        // improperly packed".
+        let bad_fields = vec![(vec![0x01, 0x00], vec![0x01, 0xAA, 0xBB])];
+        let err = unpack_interlinks(&bad_fields).expect_err("bad length must error");
+        assert!(err.contains("improperly packed"), "unexpected: {err}");
     }
 
     #[test]
-    fn best_arg_from_levels_matches_header_form_on_real_headers() {
-        // The refactor-parity pin: `best_arg` must equal
-        // `best_arg_from_levels` over `max_level_of`-derived levels for
-        // real headers, for several m values.
-        let chain = vec![
-            header_from_hex(GENESIS_HEX),
-            header_from_hex(HEIGHT_2_V1_HEX),
-        ];
-        let levels: Vec<u32> = chain.iter().map(max_level_of).collect();
-        for m in [1u32, 2, 6] {
-            assert_eq!(best_arg(&chain, m), best_arg_from_levels(&levels, m));
-        }
+    fn pack_interlinks_runs_of_duplicates_get_run_length_encoded() {
+        let g = ModifierId::from_bytes([0x11; 32]);
+        let lvl1 = ModifierId::from_bytes([0x22; 32]);
+        // Interlinks: [g, lvl1, lvl1, lvl1] → 2 unique entries, the
+        // second with dup_count = 3 starting at index 1.
+        let packed = pack_interlinks(&[g, lvl1, lvl1, lvl1]);
+        assert_eq!(packed.len(), 2);
+        assert_eq!(packed[0].1[0], 1); // g appears once at index 0
+        assert_eq!(packed[1].0, vec![INTERLINKS_VECTOR_PREFIX, 1]); // starts at index 1
+        assert_eq!(packed[1].1[0], 3); // dup_count = 3
     }
 
-    #[test]
-    fn best_arg_from_levels_empty_returns_zero() {
-        assert_eq!(best_arg_from_levels(&[], 2), 0);
-    }
-
-    #[test]
-    fn best_arg_from_levels_level_zero_skips_m_cutoff() {
-        // One level-0 header with m=6: level 0 always counts
-        // (2^0 * 1 = 1) even though 1 < m.
-        assert_eq!(best_arg_from_levels(&[0], 6), 1);
-    }
-
-    #[test]
-    fn best_arg_from_levels_scores_superchain_over_length() {
-        // Six level-3 headers with m=2: level 3 passes the cutoff
-        // (count 6 >= 2) and scores 2^3 * 6 = 48, beating the level-0
-        // score of 6. A longer all-level-0 chain of 20 scores only 20.
-        assert_eq!(best_arg_from_levels(&[3; 6], 2), 48);
-        assert_eq!(best_arg_from_levels(&[0; 20], 2), 20);
-    }
-
-    #[test]
-    fn best_arg_from_levels_m_cutoff_stops_at_thin_level() {
-        // Levels [2, 2, 0]: at level 1 and 2 the count is 2 >= m=2
-        // (score 2^2 * 2 = 8); at level 3 the count 0 < m stops the
-        // loop. Max(3, 4, 8) = 8.
-        assert_eq!(best_arg_from_levels(&[2, 2, 0], 2), 8);
-        // Same levels with m=3: count 2 < 3 already at level 1, so
-        // only level 0 contributes.
-        assert_eq!(best_arg_from_levels(&[2, 2, 0], 3), 3);
-    }
-
-    #[test]
-    fn lowest_common_ancestor_shared_genesis_returns_deepest_common() {
-        let g = header_from_hex(GENESIS_HEX);
-        let h2 = header_from_hex(HEIGHT_2_V1_HEX);
-        // Both chains start at genesis, share heights 1..2, then
-        // diverge synthetically at h3.
-        let h3_left = with_nonzero_parent(h2.clone(), [0x11; 32]);
-        let h3_right = with_nonzero_parent(h2.clone(), [0x22; 32]);
-        let left = vec![g.clone(), h2.clone(), h3_left];
-        let right = vec![g, h2.clone(), h3_right];
-        let lca = lowest_common_ancestor(&left, &right)
-            .expect("test fixture headers serialize")
-            .expect("shared genesis -> some lca");
-        assert_eq!(header_id(lca).unwrap(), header_id(&h2).unwrap());
-    }
-
-    #[test]
-    fn lowest_common_ancestor_diff_genesis_returns_none() {
-        let h2 = header_from_hex(HEIGHT_2_V1_HEX);
-        let left = vec![h2.clone()]; // genesis = h2.id
-        let right_synth_genesis = with_nonzero_parent(h2.clone(), [0xff; 32]);
-        let right = vec![right_synth_genesis];
-        assert!(lowest_common_ancestor(&left, &right)
-            .expect("test fixture headers serialize")
-            .is_none());
-    }
+    // ----- update_interlinks -----
 
     #[test]
     fn update_interlinks_genesis_returns_singleton_with_prev_id() {
@@ -873,146 +468,6 @@ mod tests {
         );
     }
 
-    // ----- pack_interlinks -----
-
-    #[test]
-    fn pack_interlinks_single_unique_entry_emits_one_field() {
-        let id = ModifierId::from_bytes([0x11; 32]);
-        let packed = pack_interlinks(&[id]);
-        assert_eq!(packed.len(), 1);
-        assert_eq!(packed[0].0, vec![INTERLINKS_VECTOR_PREFIX, 0]);
-        assert_eq!(packed[0].1[0], 1); // duplicate count = 1
-        assert_eq!(&packed[0].1[1..], id.as_bytes());
-    }
-
-    #[test]
-    fn pack_then_unpack_interlinks_roundtrips() {
-        // Pack a vector with duplicates → unpack → same vector.
-        let g = ModifierId::from_bytes([0x11; 32]);
-        let lvl1 = ModifierId::from_bytes([0x22; 32]);
-        let lvl2 = ModifierId::from_bytes([0x33; 32]);
-        let interlinks = vec![g, lvl1, lvl1, lvl1, lvl2];
-        let packed = pack_interlinks(&interlinks);
-        let unpacked = unpack_interlinks(&packed).unwrap();
-        assert_eq!(unpacked, interlinks);
-    }
-
-    #[test]
-    fn unpack_interlinks_ignores_non_interlinks_fields() {
-        // Real extensions carry voted params + interlinks; only the
-        // 0x01-prefixed keys should contribute.
-        let g = ModifierId::from_bytes([0x11; 32]);
-        let mut packed = pack_interlinks(&[g]);
-        packed.push((vec![0x00, 0x05], vec![0xAB, 0xCD])); // some other field
-        packed.push((vec![0x02, 0x00], vec![0xEF])); // another non-interlinks field
-        let unpacked = unpack_interlinks(&packed).unwrap();
-        assert_eq!(unpacked.len(), 1);
-        assert_eq!(unpacked[0], g);
-    }
-
-    #[test]
-    fn unpack_interlinks_rejects_wrong_value_length() {
-        // A value that's not exactly 33 bytes means the dup-count
-        // run-encoding is corrupted — Scala raises "Interlinks
-        // improperly packed".
-        let bad_fields = vec![(vec![0x01, 0x00], vec![0x01, 0xAA, 0xBB])];
-        let err = unpack_interlinks(&bad_fields).expect_err("bad length must error");
-        assert!(err.contains("improperly packed"), "unexpected: {err}");
-    }
-
-    #[test]
-    fn pack_interlinks_runs_of_duplicates_get_run_length_encoded() {
-        let g = ModifierId::from_bytes([0x11; 32]);
-        let lvl1 = ModifierId::from_bytes([0x22; 32]);
-        // Interlinks: [g, lvl1, lvl1, lvl1] → 2 unique entries, the
-        // second with dup_count = 3 starting at index 1.
-        let packed = pack_interlinks(&[g, lvl1, lvl1, lvl1]);
-        assert_eq!(packed.len(), 2);
-        assert_eq!(packed[0].1[0], 1); // g appears once at index 0
-        assert_eq!(packed[1].0, vec![INTERLINKS_VECTOR_PREFIX, 1]); // starts at index 1
-        assert_eq!(packed[1].1[0], 3); // dup_count = 3
-    }
-
-    // ----- prove -----
-
-    #[test]
-    fn prove_rejects_chain_below_k_plus_m() {
-        let g = header_from_hex(GENESIS_HEX);
-        let h2 = header_from_hex(HEIGHT_2_V1_HEX);
-        let chain: Vec<ergo_ser::popow_header::PoPowHeader> = vec![g, h2]
-            .into_iter()
-            .map(|h| ergo_ser::popow_header::PoPowHeader {
-                header: h,
-                interlinks: vec![],
-                interlinks_proof: vec![],
-            })
-            .collect();
-        let params = PoPowParams {
-            m: 6,
-            k: 10,
-            continuous: true,
-        };
-        let err = prove(chain, params).expect_err("chain too short");
-        assert!(err.contains("< k + m"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn prove_rejects_non_genesis_anchored_chain() {
-        // h2 first (not genesis) → must error.
-        let h2 = header_from_hex(HEIGHT_2_V1_HEX);
-        let chain: Vec<ergo_ser::popow_header::PoPowHeader> = (0..3)
-            .map(|_| ergo_ser::popow_header::PoPowHeader {
-                header: h2.clone(),
-                interlinks: vec![],
-                interlinks_proof: vec![],
-            })
-            .collect();
-        let params = PoPowParams {
-            m: 1,
-            k: 2,
-            continuous: true,
-        };
-        let err = prove(chain, params).expect_err("must be genesis-anchored");
-        assert!(err.contains("genesis"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn prove_minimal_chain_produces_well_formed_proof() {
-        // Build a 3-header chain (genesis + 2 fake follow-ups by
-        // reusing h2; the prove() function only checks heights +
-        // interlinks structure, not chain semantic correctness).
-        // m=1, k=2 → minimum viable.
-        let g = header_from_hex(GENESIS_HEX);
-        let h2 = header_from_hex(HEIGHT_2_V1_HEX);
-        let mut h3 = header_from_hex(HEIGHT_2_V1_HEX);
-        h3.height = 3;
-        let chain: Vec<ergo_ser::popow_header::PoPowHeader> = vec![g, h2, h3]
-            .into_iter()
-            .map(|h| ergo_ser::popow_header::PoPowHeader {
-                header: h,
-                interlinks: vec![ModifierId::from_bytes([0x11; 32])],
-                interlinks_proof: vec![],
-            })
-            .collect();
-        let params = PoPowParams {
-            m: 1,
-            k: 2,
-            continuous: true,
-        };
-        let proof = prove(chain, params).expect("3-header chain proves");
-        assert_eq!(proof.m, 1);
-        assert_eq!(proof.k, 2);
-        // suffix = last k=2 entries: suffix_head + 1 tail header.
-        assert_eq!(proof.suffix_tail.len(), 1);
-        // prefix sorted by height + dedup'd.
-        for w in proof.prefix.windows(2) {
-            assert!(
-                w[0].header.height < w[1].header.height,
-                "prefix must be strictly increasing in height"
-            );
-        }
-    }
-
     // ----- build_popow_header -----
 
     #[test]
@@ -1037,8 +492,8 @@ mod tests {
         // recomputed from the interlinks vector — NOT against the full
         // extension root. This test previously pinned the
         // full-extension-root behavior, i.e. it pinned the bug.
-        use super::super::merkle::verify_batch_merkle_proof;
-        use super::super::proof::check_popow_header_interlinks_proof;
+        use crate::popow::merkle::verify_batch_merkle_proof;
+        use crate::popow::proof::check_popow_header_interlinks_proof;
         use ergo_crypto::merkle::merkle_tree_root;
         use ergo_ser::batch_merkle_proof::deserialize_batch_merkle_proof;
 
