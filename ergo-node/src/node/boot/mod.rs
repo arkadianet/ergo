@@ -670,7 +670,7 @@ async fn run_inner_with_backend(
 
     let start_height = sync.chain_meta.best_full_block_height;
     let start_headers = sync.chain_meta.best_header_height;
-    let weight_fn = sync_setup::mempool_weight_fn(&config);
+    let weight_fn = sync_setup::mempool_weight_fn(&config)?;
     let api_weight_function = ergo_api::types::ApiWeightFunction::try_from(weight_fn.name())
         .map_err(|e| {
             NodeError::from(format!(

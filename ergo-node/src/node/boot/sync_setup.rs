@@ -41,10 +41,25 @@ pub(super) struct SyncSetup {
 /// `weight::from_config` also lives here so `run_inner_with_backend` can
 /// build the mempool right after this phase without re-deriving the sort
 /// policy validation performed at config load.
+///
+/// `NodeConfig::load` rejects an invalid `mempool_sort_policy` before this
+/// ever runs, so the typical production path always hits `Ok`. Returning a
+/// typed error rather than panicking matches the same `api_key_hash`
+/// invariant-guard pattern in `api_wiring::bind` — a caller that builds a
+/// `NodeConfig` literal bypassing `load()` (tests, embedders) gets a clean
+/// boot failure instead of a panic.
 pub(super) fn mempool_weight_fn(
     config: &NodeConfig,
-) -> Box<dyn ergo_mempool::weight::WeightFunction> {
-    weight::from_config(&config.mempool_sort_policy).expect("sort policy validated at config load")
+) -> Result<Box<dyn ergo_mempool::weight::WeightFunction>, NodeError> {
+    weight::from_config(&config.mempool_sort_policy).map_err(|e| -> NodeError {
+        format!(
+            "config invariant broken: mempool_sort_policy {:?} failed \
+             weight::from_config; NodeConfig::load would have rejected this, \
+             so the caller built a NodeConfig literal that bypassed validation: {e}",
+            config.mempool_sort_policy
+        )
+        .into()
+    })
 }
 
 pub(super) fn setup(
