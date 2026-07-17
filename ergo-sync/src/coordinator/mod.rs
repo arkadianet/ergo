@@ -733,12 +733,16 @@ impl SyncCoordinator {
                                 code: message::CODE_SYNC_INFO,
                                 payload: our_sync,
                             });
-                            self.sync_state.mark_sync_sent(peer, now);
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "failed to serialize SyncInfo; skipping send")
                         }
                     }
+                    // Throttle regardless of the serialization outcome: an
+                    // (unreachable-from-valid-state) failure must still back off
+                    // to the next window rather than retry — and warn — every
+                    // tick. Matches the original always-mark-after-attempt path.
+                    self.sync_state.mark_sync_sent(peer, now);
                 }
             }
             PeerChainStatus::Equal | PeerChainStatus::Unknown | PeerChainStatus::Nonsense => {
