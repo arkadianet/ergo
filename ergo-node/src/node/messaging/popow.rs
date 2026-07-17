@@ -43,28 +43,6 @@ pub(super) fn handle_inbound_popow_proof(
         }
     };
 
-    // Scala-oracle capture hook. If env var
-    // `ERGO_CAPTURE_NIPOPOW_PROOF` is set, write the raw inbound
-    // proof bytes to that path as a one-shot capture. Lets an
-    // operator dump a real Scala-served proof for use as a pinned
-    // test vector (`test-vectors/mainnet/nipopow_proof_<peer>_<ts>.bin`)
-    // without recompiling. Capture once per node lifetime — first
-    // proof wins to keep the dump deterministic.
-    if let Ok(capture_path) = std::env::var("ERGO_CAPTURE_NIPOPOW_PROOF") {
-        if !capture_path.is_empty() && !std::path::Path::new(&capture_path).exists() {
-            if let Err(e) = std::fs::write(&capture_path, &proof_bytes) {
-                warn!(peer = %peer, error = %e, "failed to write NipopowProof capture");
-            } else {
-                info!(
-                    peer = %peer,
-                    path = %capture_path,
-                    bytes = proof_bytes.len(),
-                    "NipopowProof captured for Scala-oracle test fixture",
-                );
-            }
-        }
-    }
-
     // Step 2: parse the proof structure.
     let proof = match ergo_ser::popow_proof::deserialize_nipopow_proof(&proof_bytes) {
         Ok(p) => p,
@@ -99,6 +77,7 @@ pub(super) fn handle_inbound_popow_proof(
                 total_proofs,
                 "NiPoPoW: BetterChain (best-proof replaced)"
             );
+            maybe_capture_verified_proof(peer, &proof_bytes);
             Vec::new()
         }
         NipopowVerificationResult::NoBetterChain { total_proofs } => {
@@ -107,6 +86,7 @@ pub(super) fn handle_inbound_popow_proof(
                 total_proofs,
                 "NiPoPoW: NoBetterChain (proof valid but not better)"
             );
+            maybe_capture_verified_proof(peer, &proof_bytes);
             Vec::new()
         }
         NipopowVerificationResult::WrongGenesis => {
@@ -139,6 +119,35 @@ pub(super) fn handle_inbound_popow_proof(
                 peer,
                 penalty: Penalty::Misbehavior,
             }]
+        }
+    }
+}
+
+/// Scala-oracle capture hook. If env var `ERGO_CAPTURE_NIPOPOW_PROOF` is
+/// set, write the raw inbound proof bytes to that path as a one-shot
+/// capture. Lets an operator dump a real Scala-served proof for use as a
+/// pinned test vector (`test-vectors/mainnet/nipopow_proof_<peer>_<ts>.bin`)
+/// without recompiling. Capture once per node lifetime — first proof wins
+/// to keep the dump deterministic.
+///
+/// Called only from the `BetterChain`/`NoBetterChain` result arms — i.e.
+/// after the proof has passed wire-frame parse, structure parse, AND the
+/// reducer/verifier's genesis + validation checks. A malformed or
+/// wrong-genesis proof must never be captured as if it were a clean
+/// Scala-oracle fixture.
+fn maybe_capture_verified_proof(peer: PeerId, proof_bytes: &[u8]) {
+    if let Ok(capture_path) = std::env::var("ERGO_CAPTURE_NIPOPOW_PROOF") {
+        if !capture_path.is_empty() && !std::path::Path::new(&capture_path).exists() {
+            if let Err(e) = std::fs::write(&capture_path, proof_bytes) {
+                warn!(peer = %peer, error = %e, "failed to write NipopowProof capture");
+            } else {
+                info!(
+                    peer = %peer,
+                    path = %capture_path,
+                    bytes = proof_bytes.len(),
+                    "NipopowProof captured for Scala-oracle test fixture",
+                );
+            }
         }
     }
 }
