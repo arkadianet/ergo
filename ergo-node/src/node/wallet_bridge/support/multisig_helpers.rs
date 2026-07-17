@@ -90,7 +90,7 @@ pub(crate) fn hex_pk_to_sigma_boolean(
                 .ok()
                 .and_then(|v| v.try_into().ok())
                 .ok_or_else(|| {
-                    WalletAdminError::Internal(format!(
+                    WalletAdminError::BadRequest(format!(
                         "extractHints: ProveDHTuple bad point hex for '{field}'"
                     ))
                 })?;
@@ -98,7 +98,9 @@ pub(crate) fn hex_pk_to_sigma_boolean(
         }
 
         let dto: DhtJson = serde_json::from_str(trimmed).map_err(|e| {
-            WalletAdminError::Internal(format!("extractHints: JSON proposition parse failed: {e}"))
+            WalletAdminError::BadRequest(format!(
+                "extractHints: JSON proposition parse failed: {e}"
+            ))
         })?;
         return Ok(SigmaBoolean::ProveDHTuple {
             g: decode_ge_field(&dto.g, "g")?,
@@ -113,7 +115,7 @@ pub(crate) fn hex_pk_to_sigma_boolean(
         .ok()
         .and_then(|v| v.try_into().ok())
         .ok_or_else(|| {
-            WalletAdminError::Internal(format!(
+            WalletAdminError::BadRequest(format!(
                 "extractHints: bad proposition (expected 33-byte hex pubkey or DHT JSON object): {s}"
             ))
         })?;
@@ -137,28 +139,21 @@ pub(crate) fn resolve_inputs_for_unsigned(
                     .ok()
                     .and_then(|v| v.try_into().ok())
                     .ok_or_else(|| {
-                        WalletAdminError::Internal(format!("{label} override[{i}]: bad box id hex"))
+                        WalletAdminError::BadRequest(format!(
+                            "{label} override[{i}]: bad box id hex"
+                        ))
                     })?;
-                chain.lookup_utxo(&id).ok_or_else(|| {
-                    WalletAdminError::Internal(format!(
-                        "{label} override[{i}] box {} not in UTXO set",
-                        hex_id
-                    ))
-                })
+                chain.lookup_utxo(&id).ok_or(WalletAdminError::BoxNotFound)
             })
             .collect(),
         None => unsigned_tx
             .inputs
             .iter()
-            .enumerate()
-            .map(|(i, ui)| {
+            .map(|ui| {
                 let box_id = ui.box_id.as_bytes();
-                chain.lookup_utxo(box_id).ok_or_else(|| {
-                    WalletAdminError::Internal(format!(
-                        "{label}[{i}] box {} not in UTXO set",
-                        hex::encode(box_id)
-                    ))
-                })
+                chain
+                    .lookup_utxo(box_id)
+                    .ok_or(WalletAdminError::BoxNotFound)
             })
             .collect(),
     }
@@ -179,30 +174,21 @@ pub(crate) fn resolve_data_inputs_for_unsigned(
                     .ok()
                     .and_then(|v| v.try_into().ok())
                     .ok_or_else(|| {
-                        WalletAdminError::Internal(format!(
+                        WalletAdminError::BadRequest(format!(
                             "data_input override[{i}]: bad box id hex"
                         ))
                     })?;
-                chain.lookup_utxo(&id).ok_or_else(|| {
-                    WalletAdminError::Internal(format!(
-                        "data_input override[{i}] box {} not in UTXO set",
-                        hex_id
-                    ))
-                })
+                chain.lookup_utxo(&id).ok_or(WalletAdminError::BoxNotFound)
             })
             .collect(),
         None => unsigned_tx
             .data_inputs
             .iter()
-            .enumerate()
-            .map(|(i, di)| {
+            .map(|di| {
                 let box_id = di.box_id.as_bytes();
-                chain.lookup_utxo(box_id).ok_or_else(|| {
-                    WalletAdminError::Internal(format!(
-                        "data_input[{i}] box {} not in UTXO set",
-                        hex::encode(box_id)
-                    ))
-                })
+                chain
+                    .lookup_utxo(box_id)
+                    .ok_or(WalletAdminError::BoxNotFound)
             })
             .collect(),
     }
@@ -223,28 +209,19 @@ pub(crate) fn resolve_inputs_for_signed(
                     .ok()
                     .and_then(|v| v.try_into().ok())
                     .ok_or_else(|| {
-                        WalletAdminError::Internal(format!("input override[{i}]: bad box id hex"))
+                        WalletAdminError::BadRequest(format!("input override[{i}]: bad box id hex"))
                     })?;
-                chain.lookup_utxo(&id).ok_or_else(|| {
-                    WalletAdminError::Internal(format!(
-                        "input override[{i}] box {} not in UTXO set",
-                        hex_id
-                    ))
-                })
+                chain.lookup_utxo(&id).ok_or(WalletAdminError::BoxNotFound)
             })
             .collect(),
         None => tx
             .inputs
             .iter()
-            .enumerate()
-            .map(|(i, inp)| {
+            .map(|inp| {
                 let box_id = inp.box_id.as_bytes();
-                chain.lookup_utxo(box_id).ok_or_else(|| {
-                    WalletAdminError::Internal(format!(
-                        "input[{i}] box {} not in UTXO set",
-                        hex::encode(box_id)
-                    ))
-                })
+                chain
+                    .lookup_utxo(box_id)
+                    .ok_or(WalletAdminError::BoxNotFound)
             })
             .collect(),
     }
@@ -265,30 +242,21 @@ pub(crate) fn resolve_data_inputs_for_signed(
                     .ok()
                     .and_then(|v| v.try_into().ok())
                     .ok_or_else(|| {
-                        WalletAdminError::Internal(format!(
+                        WalletAdminError::BadRequest(format!(
                             "data_input override[{i}]: bad box id hex"
                         ))
                     })?;
-                chain.lookup_utxo(&id).ok_or_else(|| {
-                    WalletAdminError::Internal(format!(
-                        "data_input override[{i}] box {} not in UTXO set",
-                        hex_id
-                    ))
-                })
+                chain.lookup_utxo(&id).ok_or(WalletAdminError::BoxNotFound)
             })
             .collect(),
         None => tx
             .data_inputs
             .iter()
-            .enumerate()
-            .map(|(i, di)| {
+            .map(|di| {
                 let box_id = di.box_id.as_bytes();
-                chain.lookup_utxo(box_id).ok_or_else(|| {
-                    WalletAdminError::Internal(format!(
-                        "data_input[{i}] box {} not in UTXO set",
-                        hex::encode(box_id)
-                    ))
-                })
+                chain
+                    .lookup_utxo(box_id)
+                    .ok_or(WalletAdminError::BoxNotFound)
             })
             .collect(),
     }
@@ -308,12 +276,12 @@ pub(crate) async fn generate_commitments_impl(
     use ergo_api::wallet::multi_sig::GenerateCommitmentsResponse;
 
     let unsigned_tx_bytes = hex::decode(&request.unsigned_tx).map_err(|_| {
-        WalletAdminError::Internal("generateCommitments: unsigned_tx bad hex".into())
+        WalletAdminError::BadRequest("generateCommitments: unsigned_tx bad hex".into())
     })?;
     let unsigned_tx = {
         let mut r = ergo_primitives::reader::VlqReader::new(&unsigned_tx_bytes);
         ergo_ser::transaction::read_unsigned_transaction(&mut r).map_err(|e| {
-            WalletAdminError::Internal(format!("generateCommitments: unsigned_tx decode: {e:?}"))
+            WalletAdminError::BadRequest(format!("generateCommitments: unsigned_tx decode: {e:?}"))
         })?
     };
 
@@ -363,11 +331,11 @@ pub(crate) async fn extract_hints_impl(
     use ergo_api::wallet::multi_sig::HintExtractionResponse;
 
     let tx_bytes = hex::decode(&request.tx)
-        .map_err(|_| WalletAdminError::Internal("extractHints: tx bad hex".into()))?;
+        .map_err(|_| WalletAdminError::BadRequest("extractHints: tx bad hex".into()))?;
     let tx = {
         let mut r = ergo_primitives::reader::VlqReader::new(&tx_bytes);
         ergo_ser::transaction::read_transaction(&mut r)
-            .map_err(|e| WalletAdminError::Internal(format!("extractHints: tx decode: {e:?}")))?
+            .map_err(|e| WalletAdminError::BadRequest(format!("extractHints: tx decode: {e:?}")))?
     };
 
     let real: Vec<ergo_ser::sigma_value::SigmaBoolean> = request
