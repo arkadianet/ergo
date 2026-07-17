@@ -56,31 +56,54 @@ impl SnapshotPublisher {
     /// from the supplied projections.
     pub fn publish(&mut self, mut parts: SnapshotParts<'_>) {
         // Resolve n_bits on read failure (`*_n_bits == None`): carry the
-        // last-known value forward, never a synthetic 0. If the tip is live
-        // (height > 0) but there is no real prior to carry — the very first
-        // publish on a non-empty chain hit a header-read fault — retain the
-        // previous snapshot rather than publish a live tip with 0
-        // difficulty (the fault was already logged in `read_tip_n_bits`).
-        let (prior_header_n_bits, prior_full_n_bits) = {
+        // last-known value forward, never a synthetic 0 — but ONLY when the
+        // prior snapshot's value genuinely describes the SAME tip. A read
+        // failure on a tip that has already advanced to a different block
+        // must not silently relabel the OLD tip's difficulty as belonging
+        // to the new one; skip publishing this tick instead; the next tick
+        // retries the read. If the tip is live (height > 0) but there is no
+        // real prior to carry — the very first publish on a non-empty
+        // chain hit a header-read fault — likewise retain the previous
+        // snapshot rather than publish a live tip with 0 difficulty (the
+        // fault was already logged in `read_tip_n_bits`).
+        let (prior_header_tip_id, prior_header_n_bits, prior_full_tip_id, prior_full_n_bits) = {
             let prior = self.handle.load();
             (
+                prior.tip.best_header.header_id.clone(),
                 prior.tip.best_header.n_bits,
+                prior.tip.best_full_block.header_id.clone(),
                 prior.tip.best_full_block.n_bits,
             )
         };
         if parts.best_header_n_bits.is_none() {
-            if parts.best_header_height > 0 && prior_header_n_bits == 0 {
+            let same_tip = hex::encode(parts.best_header_id) == prior_header_tip_id;
+            if !same_tip || (parts.best_header_height > 0 && prior_header_n_bits == 0) {
                 return;
             }
             parts.best_header_n_bits = Some(prior_header_n_bits);
         }
         if parts.best_full_block_n_bits.is_none() {
-            if parts.best_full_block_height > 0 && prior_full_n_bits == 0 {
+            let same_tip = hex::encode(parts.best_full_block_id) == prior_full_tip_id;
+            if !same_tip || (parts.best_full_block_height > 0 && prior_full_n_bits == 0) {
                 return;
             }
             parts.best_full_block_n_bits = Some(prior_full_n_bits);
         }
         let now = Instant::now();
+        // A rollback (height dropping below the last-observed value -- a
+        // reorg) resets the baseline DOWN to the new height. Without this,
+        // re-applying blocks back through the pre-reorg height would never
+        // register as "advanced" relative to the stale (higher) baseline,
+        // so `last_block_progress_at` would sit frozen at its pre-reorg
+        // value for the whole recovery replay -- an actively, successfully
+        // recovering node would misreport itself as stalled if that replay
+        // takes longer than `STALL_THRESHOLD_SECS`.
+        if parts.best_header_height < self.last_header_height {
+            self.last_header_height = parts.best_header_height;
+        }
+        if parts.best_full_block_height < self.last_full_block_height {
+            self.last_full_block_height = parts.best_full_block_height;
+        }
         let header_advanced = parts.best_header_height > self.last_header_height;
         let block_advanced = parts.best_full_block_height > self.last_full_block_height;
         if header_advanced || block_advanced {
@@ -141,15 +164,25 @@ mod tests {
         full_h: u32,
         peers: &'a [&'a ergo_p2p::peer::PeerInfo],
     ) -> SnapshotParts<'a> {
+        make_parts_with_ids(header_h, full_h, [1u8; 32], [3u8; 32], peers)
+    }
+
+    fn make_parts_with_ids<'a>(
+        header_h: u32,
+        full_h: u32,
+        header_id: [u8; 32],
+        full_id: [u8; 32],
+        peers: &'a [&'a ergo_p2p::peer::PeerInfo],
+    ) -> SnapshotParts<'a> {
         SnapshotParts {
             now_unix_ms: 0,
             snapshot_built_at: Instant::now(),
             best_header_height: header_h,
-            best_header_id: [1u8; 32],
+            best_header_id: header_id,
             best_header_parent_id: [2u8; 32],
             best_header_timestamp_ms: 1_700_000_000_000,
             best_full_block_height: full_h,
-            best_full_block_id: [3u8; 32],
+            best_full_block_id: full_id,
             best_full_block_parent_id: [4u8; 32],
             best_full_block_timestamp_ms: 1_700_000_000_000,
             // Captured Scala mainnet nBits (test-vectors scala_chainslice);
@@ -217,15 +250,20 @@ mod tests {
         assert_eq!(snap.tip.best_full_block.difficulty, "263500538576896");
     }
 
-    /// A header-read failure (`n_bits == None`) carries the prior
-    /// snapshot's difficulty forward — never a false-zero (a 0 fallback
-    /// would flicker `/info difficulty` to 0 on a transient read fault).
+    /// A header-read failure (`n_bits == None`) on the SAME tip (height can
+    /// still advance from e.g. header/full-block asymmetry, but the header_id
+    /// itself hasn't changed — a transient re-read of the identical block)
+    /// carries the prior snapshot's difficulty forward — never a false-zero
+    /// (a 0 fallback would flicker `/info difficulty` to 0 on a transient
+    /// read fault).
     #[test]
-    fn snapshot_carries_n_bits_forward_on_read_failure() {
+    fn snapshot_carries_n_bits_forward_on_read_failure_for_same_tip() {
         let mut publisher =
             SnapshotPublisher::new(fake_info(), Instant::now(), ApiWeightFunction::Cost);
-        publisher.publish(make_parts(100, 100, &[]));
-        let mut parts = make_parts(101, 101, &[]);
+        let header_id = [7u8; 32];
+        let full_id = [9u8; 32];
+        publisher.publish(make_parts_with_ids(100, 100, header_id, full_id, &[]));
+        let mut parts = make_parts_with_ids(100, 100, header_id, full_id, &[]);
         parts.best_header_n_bits = None;
         parts.best_full_block_n_bits = None;
         publisher.publish(parts);
@@ -233,6 +271,29 @@ mod tests {
         assert_eq!(snap.tip.best_header.n_bits, 117_501_863);
         assert_eq!(snap.tip.best_header.difficulty, "263500538576896");
         assert_ne!(snap.tip.best_header.difficulty, "0");
+    }
+
+    /// A header-read failure on a tip that has advanced to a DIFFERENT
+    /// header_id must NOT carry the OLD tip's difficulty forward under the
+    /// new tip's identity — that would misreport a stale value as belonging
+    /// to a block it was never read from. The publish is skipped entirely
+    /// (the prior snapshot, still describing the old tip, is retained
+    /// unchanged) until a later tick reads the new tip's difficulty
+    /// successfully.
+    #[test]
+    fn snapshot_skips_publish_on_read_failure_for_a_new_tip() {
+        let mut publisher =
+            SnapshotPublisher::new(fake_info(), Instant::now(), ApiWeightFunction::Cost);
+        publisher.publish(make_parts_with_ids(100, 100, [1u8; 32], [3u8; 32], &[]));
+        let mut parts = make_parts_with_ids(101, 101, [11u8; 32], [13u8; 32], &[]);
+        parts.best_header_n_bits = None;
+        parts.best_full_block_n_bits = None;
+        publisher.publish(parts);
+        let snap = publisher.handle().load_full();
+        // Unchanged: still the height-100 snapshot from the first publish,
+        // not a height-101 snapshot wearing the old tip's difficulty.
+        assert_eq!(snap.tip.best_header.height, 100);
+        assert_eq!(snap.tip.best_header.n_bits, 117_501_863);
     }
 
     /// First publish on a non-empty chain whose tip header is unreadable
@@ -337,6 +398,38 @@ mod tests {
         assert!(
             age_after_block < 50,
             "block advance must reset stall clock, got {age_after_block}ms",
+        );
+    }
+
+    /// A reorg (`best_full_block_height` dropping below a previously
+    /// observed value) must not freeze the stall clock at its pre-reorg
+    /// baseline: once the baseline resets down to the post-reorg height,
+    /// blocks re-applied through the (lower) recovery range are recognized
+    /// as forward progress again and refresh `last_block_progress_at` -- an
+    /// actively recovering node must not be misreported as stalled while
+    /// replaying back up toward its pre-reorg height.
+    #[test]
+    fn rollback_resets_stall_baseline_so_recovery_progress_is_recognized() {
+        let mut publisher =
+            SnapshotPublisher::new(fake_info(), Instant::now(), ApiWeightFunction::Cost);
+
+        // Chain climbs to height 100 pre-reorg.
+        publisher.publish(make_parts(100, 100, &[]));
+
+        // Reorg drops the tip to height 90. Without the baseline reset,
+        // last_full_block_height would stay pinned at 100.
+        sleep(Duration::from_millis(80));
+        publisher.publish(make_parts(90, 90, &[]));
+
+        // Recovery re-applies through height 95 -- still below the
+        // pre-reorg height of 100, but above the (correctly reset) new
+        // baseline of 90.
+        sleep(Duration::from_millis(80));
+        publisher.publish(make_parts(95, 95, &[]));
+        let age = publisher.handle().load_full().health.last_progress_age_ms;
+        assert!(
+            age < 50,
+            "recovery progress through the reorg range must refresh the stall clock, got {age}ms",
         );
     }
 
