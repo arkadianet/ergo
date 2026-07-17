@@ -387,12 +387,15 @@ pub(in crate::node) fn handle_message(
             if is_sparse {
                 return Vec::new();
             }
-            let cached = match state
-                .store
-                .as_utxo()
-                .expect("utxo-only: NiPoPoW proof serving is gated off in digest mode")
-                .get_cached_popow_proof_bytes()
-            {
+            let Some(utxo_store) = state.store.as_utxo() else {
+                // Digest-backend nodes don't retain the cached dense-mode
+                // proof this route serves (NiPoPoW proof serving is
+                // designed around the UTXO backend's Dense-mode compute
+                // path). Silently decline rather than assume this
+                // combination can never reach here from peer input.
+                return Vec::new();
+            };
+            let cached = match utxo_store.get_cached_popow_proof_bytes() {
                 Ok(Some(bytes)) => bytes,
                 Ok(None) => {
                     // Dense archive node but no proof has been
@@ -553,6 +556,28 @@ fn handle_modifier_batch(
         let mut actions = Vec::new();
         for (mod_id, bytes) in mods.modifiers {
             use ergo_p2p::delivery::DeliveryAction as DA;
+            // Verify the delivered bytes actually hash to the claimed
+            // modifier_id before marking it delivered. `admit_transaction`
+            // below derives its own tx_id from `bytes` and is unaffected
+            // either way, but the coordinator's delivery tracker trusts
+            // `mod_id` as given — a peer substituting different bytes
+            // under a requested id would otherwise poison that
+            // bookkeeping (clearing `late_acceptable` for the REAL
+            // awaited tx) while the substituted bytes ride through under
+            // a false identity. Mirrors the `verify_section_modifier_id`
+            // check already applied to section types below.
+            if !claimed_tx_id_matches(&mod_id, &bytes) {
+                warn!(
+                    peer = %peer,
+                    modifier_id = %hex::encode(mod_id),
+                    "Modifier tx bytes don't match claimed modifier_id; penalizing",
+                );
+                actions.push(Action::Penalize {
+                    peer,
+                    penalty: Penalty::Misbehavior,
+                });
+                continue;
+            }
             match state.coordinator.on_transaction_received(peer, &mod_id) {
                 DA::Accept => {
                     // NB: a tx delivery deliberately does NOT
@@ -780,4 +805,56 @@ fn handle_peers_response(state: &mut NodeState, peer: PeerId, peers: Vec<PeerSpe
         );
     }
     Vec::new()
+}
+
+/// Does `bytes` actually parse to a `Transaction` whose canonical
+/// `transaction_id` equals the claimed `mod_id`? `false` on any parse
+/// failure too — an unparseable payload can't be verified, so it's
+/// treated the same as a mismatch (penalize, don't mark delivered).
+fn claimed_tx_id_matches(mod_id: &[u8; 32], bytes: &[u8]) -> bool {
+    let mut r = ergo_primitives::reader::VlqReader::new(bytes);
+    ergo_ser::transaction::read_transaction(&mut r)
+        .ok()
+        .and_then(|tx| ergo_ser::transaction::transaction_id(&tx).ok())
+        .is_some_and(|id| id.as_bytes() == mod_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal structurally-valid (zero inputs/outputs) transaction,
+    /// serialized, plus its canonical id.
+    fn empty_tx_bytes_and_id() -> (Vec<u8>, [u8; 32]) {
+        let tx = ergo_ser::transaction::Transaction {
+            inputs: vec![],
+            data_inputs: vec![],
+            output_candidates: vec![],
+        };
+        let id = *ergo_ser::transaction::transaction_id(&tx)
+            .unwrap()
+            .as_bytes();
+        let mut w = ergo_primitives::writer::VlqWriter::new();
+        ergo_ser::transaction::write_transaction(&mut w, &tx).unwrap();
+        (w.result(), id)
+    }
+
+    #[test]
+    fn claimed_tx_id_matches_accepts_the_real_id() {
+        let (bytes, id) = empty_tx_bytes_and_id();
+        assert!(claimed_tx_id_matches(&id, &bytes));
+    }
+
+    #[test]
+    fn claimed_tx_id_matches_rejects_a_substituted_id() {
+        let (bytes, _id) = empty_tx_bytes_and_id();
+        let wrong_id = [0xAAu8; 32];
+        assert!(!claimed_tx_id_matches(&wrong_id, &bytes));
+    }
+
+    #[test]
+    fn claimed_tx_id_matches_rejects_unparseable_bytes() {
+        let garbage = vec![0xFFu8; 4];
+        assert!(!claimed_tx_id_matches(&[0u8; 32], &garbage));
+    }
 }
