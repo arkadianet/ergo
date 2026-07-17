@@ -799,6 +799,16 @@ pub(crate) fn select_boxes_impl(
             for id in box_ids {
                 wanted.insert(parse_box_id_hex(id)?);
             }
+            // A duplicate id in the request silently collapses into the
+            // HashSet above; catch it here as a client error rather than
+            // treating "spend box X twice" as "spend box X once" — matches
+            // `build_unsigned_tx`'s explicit-input path, which processes
+            // each listed id as its own occurrence rather than deduping.
+            if box_ids.len() != wanted.len() {
+                return Err(WalletAdminError::BadRequest(
+                    "duplicate box id in boxIds input source".to_string(),
+                ));
+            }
             summaries.retain(|s| wanted.contains(&s.box_id));
             // Every requested id must be a wallet unspent box.
             if summaries.len() != wanted.len() {
@@ -1169,6 +1179,57 @@ mod tests {
         assert_eq!(
             fee_paid, MIN_FEE,
             "the miner fee must be preserved (burn funded from change, not fee)",
+        );
+    }
+
+    struct NoBlocksChain;
+    impl ChainStateAccessor for NoBlocksChain {
+        fn wallet_scan_height(&self) -> u32 {
+            0
+        }
+        fn tip_height(&self) -> u32 {
+            0
+        }
+        fn is_pruned(&self) -> bool {
+            false
+        }
+        fn read_block_at(&self, _h: u32) -> Option<ergo_state::wallet::scan::RescanBlock> {
+            None
+        }
+    }
+
+    /// A `boxIds` input source listing the same id twice must be rejected as
+    /// a client error, not silently collapsed into "spend it once" by the
+    /// dedup `HashSet` — matches `build_unsigned_tx`'s explicit-input path,
+    /// which would instead double-count the same box's value.
+    #[test]
+    fn select_boxes_rejects_duplicate_box_id_in_boxids_source() {
+        use ergo_api::wallet::native::dto as ndto;
+
+        let ws = ergo_wallet::state::WalletState::empty(false);
+        let state = RwLock::new(ws);
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("w.redb")).unwrap();
+        let chain = NoBlocksChain;
+
+        let dup_id = hex::encode([0x42u8; 32]);
+        let req = ndto::BoxSelectRequest {
+            target: ndto::SelectTarget {
+                nano_erg: "1000000".to_string(),
+                assets: vec![],
+            },
+            inputs: ndto::InputSource::BoxIds {
+                box_ids: vec![dup_id.clone(), dup_id],
+            },
+            change_address: None,
+            allow_reemission_spend: false,
+        };
+
+        let err = select_boxes_impl(&req, &state, &db, &chain, NetworkPrefix::Mainnet)
+            .expect_err("duplicate box id must be rejected");
+        assert!(
+            matches!(err, WalletAdminError::BadRequest(_)),
+            "expected BadRequest, got {err:?}",
         );
     }
 }
