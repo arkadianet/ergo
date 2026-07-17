@@ -85,6 +85,18 @@ pub fn parse_ergo_box_bytes(
     // Parse the tree structure from the known bytes
     let mut tree_reader = VlqReader::new(ergo_tree_bytes);
     let ergo_tree = read_ergo_tree(&mut tree_reader)?;
+    // `read_ergo_tree` can finish before `ergo_tree_bytes` is exhausted. If the
+    // caller supplied more bytes than the tree actually occupies, the surplus
+    // (box-tail bytes) would be silently retained as `ergo_tree_bytes` while the
+    // parsed `ergo_tree` covers only the prefix — desyncing the raw and parsed
+    // tree and shifting every subsequent field. Reject trailing content, matching
+    // the box-leftover guard below.
+    if !tree_reader.is_empty() {
+        return Err(ReadError::InvalidData(format!(
+            "{} trailing bytes after ergoTree in supplied tree bytes",
+            tree_reader.remaining()
+        )));
+    }
     crate::ergo_tree::check_tree_version_supported(&ergo_tree)?;
     crate::ergo_tree::check_header_size_bit(&ergo_tree)?;
     crate::ergo_tree::check_resolvable_methods(&ergo_tree)?;
