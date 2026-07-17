@@ -142,6 +142,26 @@ pub fn read_nipopow_proof(r: &mut VlqReader) -> Result<NipopowProof, ReadError> 
     let m = r.get_u32_exact()?;
     let k = r.get_u32_exact()?;
 
+    // `m` (minimum super-chain length) and `k` (suffix length) are ≥ 1 for
+    // every well-formed proof — KMZ17 requires positive parameters and
+    // mainnet uses `m = 6`, `k = 10`. A peer-supplied `m = 0` or `k = 0`
+    // is malformed and is dangerous downstream: `m = 0` makes
+    // `best_arg`'s `count < m` cutoff unreachable (an unbounded scoring
+    // loop) and `prove`'s `sub_chain[len - m]` index out of bounds. Reject
+    // both at the untrusted deserialize boundary so no such value ever
+    // reaches the scoring / proving code. (`ergo-validation` also guards
+    // these functions defensively, but the wire boundary is the root gate.)
+    if m == 0 {
+        return Err(ReadError::InvalidData(
+            "NipopowProof.m must be >= 1 (got 0)".to_string(),
+        ));
+    }
+    if k == 0 {
+        return Err(ReadError::InvalidData(
+            "NipopowProof.k must be >= 1 (got 0)".to_string(),
+        ));
+    }
+
     let prefix_size = r.get_u32_exact()? as usize;
     if prefix_size > POPOW_PROOF_MAX_PREFIX {
         return Err(ReadError::InvalidData(format!(
@@ -346,6 +366,41 @@ mod tests {
         w.put_u32(10); // k
         w.put_u32(prefix_size);
         w.result()
+    }
+
+    #[test]
+    fn read_nipopow_proof_rejects_zero_m() {
+        // A peer-supplied m = 0 is malformed and must be rejected at the
+        // wire boundary (before it can reach best_arg's unbounded loop).
+        // k = 10 is valid, so this pins the m guard specifically.
+        let mut w = VlqWriter::new();
+        w.put_u32(0); // m = 0
+        w.put_u32(10); // k
+        let bytes = w.result();
+        let mut r = VlqReader::new(&bytes);
+        match read_nipopow_proof(&mut r).expect_err("m = 0 must be rejected") {
+            ReadError::InvalidData(msg) => {
+                assert!(msg.contains("m must be >= 1"), "wrong message: {msg}");
+            }
+            other => panic!("expected InvalidData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_nipopow_proof_rejects_zero_k() {
+        // Sibling guard: k = 0 is likewise malformed. m = 6 is valid so
+        // the k guard is exercised on its own.
+        let mut w = VlqWriter::new();
+        w.put_u32(6); // m
+        w.put_u32(0); // k = 0
+        let bytes = w.result();
+        let mut r = VlqReader::new(&bytes);
+        match read_nipopow_proof(&mut r).expect_err("k = 0 must be rejected") {
+            ReadError::InvalidData(msg) => {
+                assert!(msg.contains("k must be >= 1"), "wrong message: {msg}");
+            }
+            other => panic!("expected InvalidData, got {other:?}"),
+        }
     }
 
     #[test]
