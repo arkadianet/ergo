@@ -27,16 +27,22 @@ pub fn parse_active_params(
         }
         let id = field.key[1];
         if id == SOFT_FORK_DISABLING_RULES_ID {
-            // Scala `Parameters.parseExtension` decodes this via
-            // `ErgoValidationSettingsUpdateSerializer.parseBytesTry`
-            // and silently uses `empty` on parse failure
-            // (`Parameters.scala:382-387`). We surface the parse
-            // error instead — this is consensus state.
+            // Scala `Parameters.parseExtension` (`Parameters.scala:382-386`)
+            // decodes id 124 via
+            // `ErgoValidationSettingsUpdateSerializer.parseBytesTry(v).toOption
+            //  .getOrElse(ErgoValidationSettingsUpdate.empty)` — a MALFORMED
+            // value silently yields the EMPTY update, not a parse error. Match
+            // that: a block Scala accepts (with an empty proposed_update) must
+            // not be reject-valid for us. Well-formed values still decode
+            // normally. Duplicate id 124 is still rejected (Scala's `find`
+            // takes the first, but a duplicate extension key is independently
+            // rejected by rule 405 `exDuplicateKeys` at block validation).
             if saw_proposed_update {
                 return Err(ActiveParamsError::DuplicateId(id));
             }
             saw_proposed_update = true;
-            proposed_update = ErgoValidationSettingsUpdate::deserialize(&field.value)?;
+            proposed_update = ErgoValidationSettingsUpdate::deserialize(&field.value)
+                .unwrap_or_else(|_| ErgoValidationSettingsUpdate::empty());
             continue;
         }
         if field.value.len() != 4 {
@@ -245,13 +251,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_malformed_softfork_disabling_rules_value() {
+    fn parse_malformed_softfork_disabling_rules_value_falls_back_to_empty() {
+        // Scala `parseExtension` decodes id 124 via
+        // `parseBytesTry(v).toOption.getOrElse(empty)` — a malformed value
+        // yields the EMPTY update, NOT a rejection. Match that so we don't
+        // reject-valid a block Scala accepts.
         let mut fields = full_required_set();
         // Bytes that don't decode as ErgoValidationSettingsUpdate
         // (continuation bit set without termination).
         fields.push(([0x00, 124], vec![0xCA, 0xFE]));
-        let err = parse_active_params(&ext_with(fields), 1024).unwrap_err();
-        assert!(matches!(err, ActiveParamsError::ValidationSettings(_)));
+        let p = parse_active_params(&ext_with(fields), 1024).unwrap();
+        assert_eq!(p.proposed_update, ErgoValidationSettingsUpdate::empty());
     }
 
     #[test]
