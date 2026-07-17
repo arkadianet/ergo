@@ -122,6 +122,13 @@ pub(super) struct ApiBind {
 /// bridge, wires the wallet admin + writer task, assembles `ServerCtx`, and
 /// starts serving. Bind failure is logged-and-degraded, not fatal — REST is
 /// an operator surface, not a prerequisite for sync/validation availability.
+///
+/// Wallet hydration + the writer task + `live_wallet_hook` are built
+/// UNCONDITIONALLY, before the REST-bind checks below: the wallet apply
+/// hook feeds `NodeState.wallet_hook`, which the action loop needs
+/// regardless of whether REST is configured on or successfully bound — a
+/// wallet-tracking node with `[api] disabled = true` (or a transient bind
+/// failure) must still see its balance move as blocks apply.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn bind(
     config: &NodeConfig,
@@ -138,99 +145,16 @@ pub(super) async fn bind(
     peer_connect_tx: &mpsc::Sender<std::net::SocketAddr>,
     votes_changed_tx: &mpsc::Sender<()>,
 ) -> Result<ApiBind, NodeError> {
-    let Some(bind_addr) = config.api_bind else {
-        info!("api disabled by config");
-        return Ok(ApiBind {
-            api_addr: None,
-            api_handle: None,
-            api_shutdown_tx: None,
-            live_wallet_hook: None,
-        });
-    };
-
-    let (api_shutdown_tx, api_shutdown_rx) = oneshot::channel::<()>();
-
-    // Bind first so `rest_api_url` reflects the actual port (matters
-    // for `:0` ephemeral binds in tests and embedders).
-    //
-    // Bind failure is logged-and-degraded, not fatal: REST is an
-    // operator surface, not a prerequisite for sync / validation
-    // availability. A test or embedder that needs strict bind
-    // detection inspects the returned `RunHandle.api_addr` — `None`
-    // after configuring `api_bind = Some(..)` is the failure signal,
-    // distinguishable from "API disabled by config" (where
-    // `api_bind` itself is `None`).
-    let (actual, listener) = match ergo_api::bind(bind_addr).await {
-        Ok(pair) => pair,
-        Err(e) => {
-            tracing::warn!(addr = %bind_addr, error = %e, "api bind failed; node continuing without API");
-            drop(api_shutdown_rx);
-            return Ok(ApiBind {
-                api_addr: None,
-                api_handle: None,
-                api_shutdown_tx: None,
-                live_wallet_hook: None,
-            });
-        }
-    };
-
-    let scala_static = ScalaCompatStatic {
-        name: format!("ergo-rust-{}-{}", api_info.network, api_info.version),
-        app_version: api_info.version.clone(),
-        network: api_info.network.clone(),
-        launch_time_unix_ms: api_info.started_at_unix_ms,
-        rest_api_url: Some(format!("http://{actual}")),
-    };
-    let scala_compat_bridge_arc = Arc::new(ScalaCompatBridge::new(
-        snapshot_publisher.handle(),
-        scala_static,
-        store.reader_handle(),
-        config.chain_spec.difficulty.clone(),
-    ));
-    let scala_compat: Arc<dyn ergo_api::NodeChainQuery> = scala_compat_bridge_arc.clone();
-    // Submission HTTP routes are always mounted, matching
-    // Scala's TransactionsApiRoute / BlocksApiRoute which
-    // register unconditionally. Not-ready signals come
-    // from the admission pipeline (TipUnready / IbdGated /
-    // Disabled) rather than from a route-level gate.
-    info!("api submission enabled; POST /api/v1/mempool/{{submit,check}} and POST /transactions[/bytes][/check[Bytes]], POST /blocks are live");
-    let mounted_submit = Some(submit_bridge.clone());
     let network_prefix = config.chain_spec.network_params.address_prefix;
-    let indexer_for_api: Option<Arc<dyn ergo_indexer::IndexerQuery>> = indexer_handle
-        .clone()
-        .map(|h| Arc::new(h) as Arc<dyn ergo_indexer::IndexerQuery>);
     // P5 mempool overlay: hand the snapshot-backed view to
     // the API so `/blockchain/balance` (and future unspent
     // routes) can render `unconfirmed` from pool state
     // without going through the action loop. Reads are
     // lock-free `arc_swap.load()` per snapshot, so the
-    // overlay adds no contention with the main loop.
+    // overlay adds no contention with the main loop. Also handed to the
+    // wallet writer below for its unconfirmed-balance overlay — built
+    // once here so both consumers share the same instance.
     let mempool_view = SnapshotMempoolView::new(snapshot_publisher.handle()).into_dyn();
-    // Realtime WS bridge (A2): the same process-wide bus the
-    // router feeds the `blocks` coarse-ring bridge into. Wiring
-    // it as a `MempoolObserver` lets admit/evict publish
-    // `tx_accepted`/`tx_dropped` on the `mempool` channel
-    // directly from the admission hot path, bypassing the
-    // coarse ring (which only carries block/reorg/peer events).
-    mempool.set_observer(Some(Arc::new(
-        crate::realtime_mempool_bridge::RealtimeMempoolObserver::new(
-            ergo_api::realtime_handle().bus,
-        ),
-    )));
-    let mut admin = crate::api_bridge::ShutdownAdmin::new(
-        shutdown_notify.clone(),
-        Some(peer_connect_tx.clone()),
-    )
-    // Held regardless of mining state to keep the channel open; only
-    // fired on a successful vote update (which requires mining).
-    .with_votes_changed_signal(votes_changed_tx.clone());
-    // Expose the runtime voting write only when mining is enabled —
-    // votes have no effect without a candidate builder, so
-    // `POST /api/v1/votes` otherwise returns `MiningDisabled`.
-    if config.mining_config.enabled {
-        admin = admin.with_voting_targets(voting_targets_slot.clone());
-    }
-    let admin_handle: Arc<dyn ergo_api::NodeAdmin> = admin.into_dyn();
 
     // Production wallet admin. Owns the secret storage + wallet
     // state behind RwLocks; the writer task is a dedicated tokio
@@ -316,6 +240,96 @@ pub(super) async fn bind(
     ));
     let wallet_admin: Arc<dyn ergo_api::wallet::WalletAdmin> =
         Arc::new(super::super::wallet_bridge::NodeWalletAdmin::new(wallet_tx));
+    let hook = Arc::new(super::super::wallet_bridge::WalletStateHook {
+        wallet: wallet_state_for_hook,
+        db: db_arc.clone(),
+    });
+
+    let Some(bind_addr) = config.api_bind else {
+        info!("api disabled by config");
+        return Ok(ApiBind {
+            api_addr: None,
+            api_handle: None,
+            api_shutdown_tx: None,
+            live_wallet_hook: Some(hook),
+        });
+    };
+
+    let (api_shutdown_tx, api_shutdown_rx) = oneshot::channel::<()>();
+
+    // Bind first so `rest_api_url` reflects the actual port (matters
+    // for `:0` ephemeral binds in tests and embedders).
+    //
+    // Bind failure is logged-and-degraded, not fatal: REST is an
+    // operator surface, not a prerequisite for sync / validation
+    // availability. A test or embedder that needs strict bind
+    // detection inspects the returned `RunHandle.api_addr` — `None`
+    // after configuring `api_bind = Some(..)` is the failure signal,
+    // distinguishable from "API disabled by config" (where
+    // `api_bind` itself is `None`).
+    let (actual, listener) = match ergo_api::bind(bind_addr).await {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!(addr = %bind_addr, error = %e, "api bind failed; node continuing without API");
+            drop(api_shutdown_rx);
+            return Ok(ApiBind {
+                api_addr: None,
+                api_handle: None,
+                api_shutdown_tx: None,
+                live_wallet_hook: Some(hook),
+            });
+        }
+    };
+
+    let scala_static = ScalaCompatStatic {
+        name: format!("ergo-rust-{}-{}", api_info.network, api_info.version),
+        app_version: api_info.version.clone(),
+        network: api_info.network.clone(),
+        launch_time_unix_ms: api_info.started_at_unix_ms,
+        rest_api_url: Some(format!("http://{actual}")),
+    };
+    let scala_compat_bridge_arc = Arc::new(ScalaCompatBridge::new(
+        snapshot_publisher.handle(),
+        scala_static,
+        store.reader_handle(),
+        config.chain_spec.difficulty.clone(),
+    ));
+    let scala_compat: Arc<dyn ergo_api::NodeChainQuery> = scala_compat_bridge_arc.clone();
+    // Submission HTTP routes are always mounted, matching
+    // Scala's TransactionsApiRoute / BlocksApiRoute which
+    // register unconditionally. Not-ready signals come
+    // from the admission pipeline (TipUnready / IbdGated /
+    // Disabled) rather than from a route-level gate.
+    info!("api submission enabled; POST /api/v1/mempool/{{submit,check}} and POST /transactions[/bytes][/check[Bytes]], POST /blocks are live");
+    let mounted_submit = Some(submit_bridge.clone());
+    let indexer_for_api: Option<Arc<dyn ergo_indexer::IndexerQuery>> = indexer_handle
+        .clone()
+        .map(|h| Arc::new(h) as Arc<dyn ergo_indexer::IndexerQuery>);
+    // Realtime WS bridge (A2): the same process-wide bus the
+    // router feeds the `blocks` coarse-ring bridge into. Wiring
+    // it as a `MempoolObserver` lets admit/evict publish
+    // `tx_accepted`/`tx_dropped` on the `mempool` channel
+    // directly from the admission hot path, bypassing the
+    // coarse ring (which only carries block/reorg/peer events).
+    mempool.set_observer(Some(Arc::new(
+        crate::realtime_mempool_bridge::RealtimeMempoolObserver::new(
+            ergo_api::realtime_handle().bus,
+        ),
+    )));
+    let mut admin = crate::api_bridge::ShutdownAdmin::new(
+        shutdown_notify.clone(),
+        Some(peer_connect_tx.clone()),
+    )
+    // Held regardless of mining state to keep the channel open; only
+    // fired on a successful vote update (which requires mining).
+    .with_votes_changed_signal(votes_changed_tx.clone());
+    // Expose the runtime voting write only when mining is enabled —
+    // votes have no effect without a candidate builder, so
+    // `POST /api/v1/votes` otherwise returns `MiningDisabled`.
+    if config.mining_config.enabled {
+        admin = admin.with_voting_targets(voting_targets_slot.clone());
+    }
+    let admin_handle: Arc<dyn ergo_api::NodeAdmin> = admin.into_dyn();
 
     let api_ctx = ergo_api::ServerCtx {
         read: read_state.clone(),
@@ -369,10 +383,6 @@ pub(super) async fn bind(
         wallet_admin,
         Some(security),
     );
-    let hook = Arc::new(super::super::wallet_bridge::WalletStateHook {
-        wallet: wallet_state_for_hook,
-        db: db_arc.clone(),
-    });
 
     Ok(ApiBind {
         api_addr: Some(actual),
