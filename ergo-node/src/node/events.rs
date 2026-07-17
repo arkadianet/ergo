@@ -176,7 +176,7 @@ fn process_header_modifier_batch(
             if state.registry.peers.contains_key(&peer) {
                 if !try_send_anchor_sync_info(state, &peer, now) {
                     if let Some(rt) = state.registry.peers.get(&peer) {
-                        let payload = match rt.sync_version {
+                        let payload_res = match rt.sync_version {
                             SyncVersion::V2 => {
                                 let headers = state.executor.cached_header_bytes(50);
                                 message::serialize_sync_info(&message::SyncInfo::V2 { headers })
@@ -186,11 +186,18 @@ fn process_header_modifier_batch(
                                 &state.store,
                             ),
                         };
-                        all_actions.push(Action::SendToPeer {
-                            peer,
-                            code: message::CODE_SYNC_INFO,
-                            payload,
-                        });
+                        match payload_res {
+                            Ok(payload) => all_actions.push(Action::SendToPeer {
+                                peer,
+                                code: message::CODE_SYNC_INFO,
+                                payload,
+                            }),
+                            Err(e) => warn!(
+                                peer = %peer,
+                                error = %e,
+                                "failed to serialize SyncInfo; skipping send"
+                            ),
+                        }
                     }
                 }
                 state.coordinator.sync_state_mut().mark_sync_sent(peer, now);
@@ -398,9 +405,14 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
             // ~1s later (the throttle would think no recent send had
             // happened on this peer).
             if !try_send_anchor_sync_info(state, &addr, now) {
-                let payload =
-                    ergo_sync::coordinator::build_sync_info_payload(sync_version, &state.store);
-                send_to_peer(state, &addr, message::CODE_SYNC_INFO, payload);
+                match ergo_sync::coordinator::build_sync_info_payload(sync_version, &state.store) {
+                    Ok(payload) => {
+                        send_to_peer(state, &addr, message::CODE_SYNC_INFO, payload);
+                    }
+                    Err(e) => {
+                        warn!(peer = %addr, error = %e, "failed to serialize SyncInfo; skipping send")
+                    }
+                }
             }
             state.coordinator.sync_state_mut().mark_sync_sent(addr, now);
 

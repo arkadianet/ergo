@@ -58,6 +58,74 @@ fn serialize_modifiers_rejects_when_no_modifier_fits() {
 }
 
 #[test]
+fn serialize_sync_info_rejects_oversize_inputs() {
+    // V1: more ids than deserialize accepts (MAX_SYNC_V1_IDS + 1).
+    let too_many_ids = SyncInfo::V1 {
+        header_ids: vec![[0u8; 32]; MAX_SYNC_V1_IDS + 2],
+    };
+    assert!(matches!(
+        serialize_sync_info(&too_many_ids),
+        Err(MessageError::TooManyHeaders(_))
+    ));
+
+    // V2: more headers than MAX_SYNC_V2_HEADERS.
+    let too_many_headers = SyncInfo::V2 {
+        headers: vec![vec![0u8; 4]; MAX_SYNC_V2_HEADERS + 1],
+    };
+    assert!(matches!(
+        serialize_sync_info(&too_many_headers),
+        Err(MessageError::TooManyHeaders(_))
+    ));
+
+    // V2: a single header larger than MAX_HEADER_SIZE.
+    let oversize_header = SyncInfo::V2 {
+        headers: vec![vec![0u8; MAX_HEADER_SIZE + 1]],
+    };
+    assert!(matches!(
+        serialize_sync_info(&oversize_header),
+        Err(MessageError::PayloadTooLarge(_))
+    ));
+}
+
+#[test]
+fn serialize_manifest_rejects_oversize_and_utxo_chunk_shares_cap() {
+    // A manifest whose frame would exceed the 4 MB decoder cap must be
+    // rejected on the sender side rather than emitted (the `len() as u32`
+    // could otherwise wrap for truly gigantic inputs).
+    let oversize = vec![0u8; 4_000_001];
+    assert!(matches!(
+        serialize_manifest(&oversize),
+        Err(MessageError::PayloadTooLarge(_))
+    ));
+    // utxo_chunk shares the manifest format + cap.
+    assert!(matches!(
+        serialize_utxo_chunk(&oversize),
+        Err(MessageError::PayloadTooLarge(_))
+    ));
+    // A modest manifest still round-trips.
+    let ok = vec![0xABu8; 1024];
+    let framed = serialize_manifest(&ok).unwrap();
+    assert_eq!(deserialize_manifest(&framed).unwrap(), ok);
+}
+
+#[test]
+fn serialize_nipopow_proof_cap_counts_prefix_and_pad() {
+    // The 2 MB cap bounds the whole frame (4-byte len prefix + proof +
+    // 2-byte pad). A proof of exactly 2_000_000 bytes overflows the cap
+    // once the 6 framing bytes are added, so it must reject.
+    let proof = vec![0u8; 2_000_000];
+    assert!(matches!(
+        serialize_nipopow_proof(&proof),
+        Err(MessageError::PayloadTooLarge(_))
+    ));
+    // Just under the cap (leaving room for the 6 framing bytes) succeeds
+    // and round-trips.
+    let ok = vec![0x11u8; 2_000_000 - 6];
+    let framed = serialize_nipopow_proof(&ok).unwrap();
+    assert_eq!(deserialize_nipopow_proof(&framed).unwrap(), ok);
+}
+
+#[test]
 fn deserialize_modifiers_size_check_matches_serializer_accounting() {
     // Regression for the +4 length-prefix accounting. The
     // serializer counts `MODIFIER_ID_SIZE + 4 + obj_len` per
@@ -140,7 +208,7 @@ fn sync_info_v1_roundtrip() {
     let info = SyncInfo::V1 {
         header_ids: vec![[0x01; 32], [0x02; 32], [0x03; 32]],
     };
-    let bytes = serialize_sync_info(&info);
+    let bytes = serialize_sync_info(&info).unwrap();
     let parsed = deserialize_sync_info(&bytes).unwrap();
     match parsed {
         SyncInfo::V1 { header_ids } => {
@@ -156,7 +224,7 @@ fn sync_info_v2_roundtrip() {
     let info = SyncInfo::V2 {
         headers: vec![vec![10, 20, 30], vec![40, 50]],
     };
-    let bytes = serialize_sync_info(&info);
+    let bytes = serialize_sync_info(&info).unwrap();
     let parsed = deserialize_sync_info(&bytes).unwrap();
     match parsed {
         SyncInfo::V2 { headers } => {
@@ -173,7 +241,7 @@ fn sync_info_empty_v1() {
     let info = SyncInfo::V1 {
         header_ids: Vec::new(),
     };
-    let bytes = serialize_sync_info(&info);
+    let bytes = serialize_sync_info(&info).unwrap();
     let parsed = deserialize_sync_info(&bytes).unwrap();
     match parsed {
         SyncInfo::V1 { header_ids } => assert!(header_ids.is_empty()),
@@ -186,7 +254,7 @@ fn snapshots_info_roundtrip() {
     let info = SnapshotsInfo {
         available_manifests: vec![(100000, [0xDD; 32]), (200000, [0xEE; 32])],
     };
-    let bytes = serialize_snapshots_info(&info);
+    let bytes = serialize_snapshots_info(&info).unwrap();
     let parsed = deserialize_snapshots_info(&bytes).unwrap();
     assert_eq!(parsed.available_manifests.len(), 2);
     assert_eq!(parsed.available_manifests[0].0, 100000);
@@ -218,7 +286,7 @@ fn snapshots_info_byte_layout_one_entry() {
     let info = SnapshotsInfo {
         available_manifests: vec![(100, [0xAB; 32])],
     };
-    let bytes = serialize_snapshots_info(&info);
+    let bytes = serialize_snapshots_info(&info).unwrap();
     let mut expected = vec![0x01u8, 0xC8, 0x01];
     expected.extend_from_slice(&[0xABu8; 32]);
     assert_eq!(
@@ -233,7 +301,7 @@ fn snapshots_info_byte_layout_empty() {
     let info = SnapshotsInfo {
         available_manifests: vec![],
     };
-    let bytes = serialize_snapshots_info(&info);
+    let bytes = serialize_snapshots_info(&info).unwrap();
     assert_eq!(
         bytes,
         vec![0x00u8],
@@ -288,7 +356,7 @@ fn get_manifest_rejects_short_payload() {
 #[test]
 fn manifest_roundtrip() {
     let data = vec![1, 2, 3, 4, 5, 6, 7, 8];
-    let bytes = serialize_manifest(&data);
+    let bytes = serialize_manifest(&data).unwrap();
     let parsed = deserialize_manifest(&bytes).unwrap();
     assert_eq!(parsed, data);
 }
@@ -303,7 +371,7 @@ fn manifest_roundtrip() {
 #[test]
 fn manifest_byte_layout_short_payload() {
     let data = vec![0x01, 0x02, 0x03, 0x04];
-    let bytes = serialize_manifest(&data);
+    let bytes = serialize_manifest(&data).unwrap();
     assert_eq!(bytes, vec![0x04, 0x01, 0x02, 0x03, 0x04]);
 }
 
@@ -337,7 +405,7 @@ fn get_utxo_chunk_rejects_short_payload() {
 fn utxo_chunk_roundtrip() {
     // UtxoSnapshotChunk uses the same wire shape as Manifest.
     let data = vec![0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6];
-    let bytes = serialize_utxo_chunk(&data);
+    let bytes = serialize_utxo_chunk(&data).unwrap();
     let parsed = deserialize_utxo_chunk(&bytes).unwrap();
     assert_eq!(parsed, data);
 }
@@ -349,8 +417,8 @@ fn utxo_chunk_byte_layout_matches_manifest() {
     // Locks the "same format" invariant in
     // `serialize_utxo_chunk = serialize_manifest`.
     let data = vec![0xCC; 17];
-    let chunk_bytes = serialize_utxo_chunk(&data);
-    let manifest_bytes = serialize_manifest(&data);
+    let chunk_bytes = serialize_utxo_chunk(&data).unwrap();
+    let manifest_bytes = serialize_manifest(&data).unwrap();
     assert_eq!(chunk_bytes, manifest_bytes);
 }
 

@@ -513,6 +513,7 @@ fn snapshots_info_payload(manifests: &[(i32, [u8; 32])]) -> Vec<u8> {
     message::serialize_snapshots_info(&ergo_p2p::types::SnapshotsInfo {
         available_manifests: manifests.to_vec(),
     })
+    .unwrap()
 }
 
 fn synthetic_peer(port: u16) -> SocketAddr {
@@ -2450,7 +2451,8 @@ fn handshake_complete_digest_backend_sends_sync_info_without_panic() {
 
     // Expected bytes: `build_sync_info_payload` over the digest store
     // directly. This is the exact call the fixed handshake arm makes.
-    let expected = ergo_sync::coordinator::build_sync_info_payload(sync_version, &state.store);
+    let expected =
+        ergo_sync::coordinator::build_sync_info_payload(sync_version, &state.store).unwrap();
 
     // Run the fixed seam: anchor scheduler is off in the fixture, so
     // `try_send_anchor_sync_info` returns false and the fallback path
@@ -2459,7 +2461,8 @@ fn handshake_complete_digest_backend_sends_sync_info_without_panic() {
         !try_send_anchor_sync_info(&mut state, &peer, now),
         "anchor scheduler is disabled in the fixture; fallback must run",
     );
-    let payload = ergo_sync::coordinator::build_sync_info_payload(sync_version, &state.store);
+    let payload =
+        ergo_sync::coordinator::build_sync_info_payload(sync_version, &state.store).unwrap();
     assert!(send_to_peer(
         &state,
         &peer,

@@ -253,26 +253,42 @@ const MAX_SYNC_V1_IDS: usize = 1000;
 const MAX_SYNC_V2_HEADERS: usize = 50;
 const MAX_HEADER_SIZE: usize = 1000;
 
-pub fn serialize_sync_info(info: &SyncInfo) -> Vec<u8> {
+pub fn serialize_sync_info(info: &SyncInfo) -> Result<Vec<u8>, MessageError> {
     let mut w = VlqWriter::new();
     match info {
         SyncInfo::V1 { header_ids } => {
+            // Reject beyond the count `deserialize_sync_info` accepts
+            // (MAX_SYNC_V1_IDS + 1) so we never emit a frame our own (or
+            // Scala's) decoder rejects — and so the `len() as u16` write
+            // below can't silently wrap.
+            if header_ids.len() > MAX_SYNC_V1_IDS + 1 {
+                return Err(MessageError::TooManyHeaders(header_ids.len()));
+            }
             w.put_u16(header_ids.len() as u16);
             for id in header_ids {
                 w.put_bytes(id);
             }
         }
         SyncInfo::V2 { headers } => {
+            // Same rationale for the `len() as u8` count and each
+            // `len() as u16` header length: bound them to the decoder's
+            // caps (MAX_SYNC_V2_HEADERS / MAX_HEADER_SIZE) before writing.
+            if headers.len() > MAX_SYNC_V2_HEADERS {
+                return Err(MessageError::TooManyHeaders(headers.len()));
+            }
             w.put_u16(0); // sentinel for V2
             w.put_u8(SYNC_V2_MARKER as u8);
             w.put_u8(headers.len() as u8);
             for header_bytes in headers {
+                if header_bytes.len() > MAX_HEADER_SIZE {
+                    return Err(MessageError::PayloadTooLarge(header_bytes.len()));
+                }
                 w.put_u16(header_bytes.len() as u16);
                 w.put_bytes(header_bytes);
             }
         }
     }
-    w.result()
+    Ok(w.result())
 }
 
 pub fn deserialize_sync_info(payload: &[u8]) -> Result<SyncInfo, MessageError> {
@@ -337,14 +353,21 @@ pub fn deserialize_get_snapshots_info(payload: &[u8]) -> Result<(), MessageError
     Ok(())
 }
 
-pub fn serialize_snapshots_info(info: &SnapshotsInfo) -> Vec<u8> {
+pub fn serialize_snapshots_info(info: &SnapshotsInfo) -> Result<Vec<u8>, MessageError> {
     let mut w = VlqWriter::new();
     w.put_u32(info.available_manifests.len() as u32);
     for (height, digest) in &info.available_manifests {
         w.put_i32(*height);
         w.put_bytes(digest);
     }
-    w.result()
+    let out = w.result();
+    // Symmetric with `deserialize_snapshots_info`'s 20_000-byte cap: never
+    // emit a frame our decoder rejects (also bounds the `len() as u32`,
+    // since any count large enough to wrap far exceeds this byte cap).
+    if out.len() > 20_000 {
+        return Err(MessageError::PayloadTooLarge(out.len()));
+    }
+    Ok(out)
 }
 
 pub fn deserialize_snapshots_info(payload: &[u8]) -> Result<SnapshotsInfo, MessageError> {
@@ -386,11 +409,17 @@ pub fn deserialize_get_manifest(payload: &[u8]) -> Result<[u8; 32], MessageError
     Ok(id)
 }
 
-pub fn serialize_manifest(data: &[u8]) -> Vec<u8> {
+pub fn serialize_manifest(data: &[u8]) -> Result<Vec<u8>, MessageError> {
     let mut w = VlqWriter::new();
     w.put_u32(data.len() as u32);
     w.put_bytes(data);
-    w.result()
+    let out = w.result();
+    // Symmetric with `deserialize_manifest`'s 4_000_000-byte cap (also
+    // bounds the `len() as u32`).
+    if out.len() > 4_000_000 {
+        return Err(MessageError::PayloadTooLarge(out.len()));
+    }
+    Ok(out)
 }
 
 pub fn deserialize_manifest(payload: &[u8]) -> Result<Vec<u8>, MessageError> {
@@ -423,8 +452,8 @@ pub fn deserialize_get_utxo_chunk(payload: &[u8]) -> Result<[u8; 32], MessageErr
     Ok(id)
 }
 
-pub fn serialize_utxo_chunk(data: &[u8]) -> Vec<u8> {
-    serialize_manifest(data) // same format
+pub fn serialize_utxo_chunk(data: &[u8]) -> Result<Vec<u8>, MessageError> {
+    serialize_manifest(data) // same format (incl. the 4 MB cap)
 }
 
 pub fn deserialize_utxo_chunk(payload: &[u8]) -> Result<Vec<u8>, MessageError> {
@@ -495,7 +524,15 @@ pub fn serialize_nipopow_proof(proof_bytes: &[u8]) -> Result<Vec<u8>, MessageErr
     w.put_u32(proof_bytes.len() as u32);
     w.put_bytes(proof_bytes);
     w.put_u16(0); // padding
-    Ok(w.result())
+    let out = w.result();
+    // `deserialize_nipopow_proof` caps the WHOLE frame at 2_000_000 bytes —
+    // the 4-byte length prefix and 2-byte pad included, not just
+    // proof_bytes. Check the assembled frame so an oversize proof is
+    // rejected here rather than emitted as a frame the decoder rejects.
+    if out.len() > 2_000_000 {
+        return Err(MessageError::PayloadTooLarge(out.len()));
+    }
+    Ok(out)
 }
 
 pub fn deserialize_nipopow_proof(payload: &[u8]) -> Result<Vec<u8>, MessageError> {

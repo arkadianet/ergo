@@ -149,7 +149,7 @@ fn sync_info_v1_single_header_mainnet_roundtrips_scala_vector() {
         &MAINNET_MAGIC,
         &MessageFrame {
             code: frame.code,
-            payload: serialize_sync_info(&SyncInfo::V1 { header_ids }),
+            payload: serialize_sync_info(&SyncInfo::V1 { header_ids }).unwrap(),
         },
     );
     assert_eq!(re_framed, captured);
@@ -241,7 +241,8 @@ fn sync_info_v2_single_header_payload_roundtrips_scala_source_derivation() {
     // Roundtrip 1: payload-only.
     let re_payload = serialize_sync_info(&SyncInfo::V2 {
         headers: headers.clone(),
-    });
+    })
+    .unwrap();
     assert_eq!(
         re_payload, captured_payload,
         "V2 payload byte-identical roundtrip",
@@ -278,7 +279,7 @@ fn sync_info_v2_single_header_payload_roundtrips_scala_source_derivation() {
         &MAINNET_MAGIC,
         &MessageFrame {
             code: CODE_SYNC_INFO,
-            payload: serialize_sync_info(&SyncInfo::V2 { headers }),
+            payload: serialize_sync_info(&SyncInfo::V2 { headers }).unwrap(),
         },
     );
     assert_eq!(re_framed, framed, "V2 full-frame self-roundtrip identical");

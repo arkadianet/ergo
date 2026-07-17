@@ -244,8 +244,14 @@ pub(super) fn handle_sync_tick(state: &mut NodeState) {
         // outer `&state.store` borrow doesn't conflict with the
         // `&mut state` taken by `try_send_anchor_sync_info`.
         if !try_send_anchor_sync_info(state, &peer_id, now) {
-            let payload = ergo_sync::coordinator::build_sync_info_payload(sv, &state.store);
-            send_to_peer(state, &peer_id, message::CODE_SYNC_INFO, payload);
+            match ergo_sync::coordinator::build_sync_info_payload(sv, &state.store) {
+                Ok(payload) => {
+                    send_to_peer(state, &peer_id, message::CODE_SYNC_INFO, payload);
+                }
+                Err(e) => {
+                    warn!(peer = %peer_id, error = %e, "failed to serialize SyncInfo; skipping send")
+                }
+            }
         }
         state
             .coordinator
