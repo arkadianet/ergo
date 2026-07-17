@@ -13,16 +13,16 @@ use crate::invalidation::InvalidationCache;
 use crate::pool::{Entry, OrderedPool};
 use crate::reorg;
 use crate::revalidation::RevalidationQueue;
+use crate::telemetry::{
+    emit_tracing_for_admission, emit_tracing_for_check, emit_tracing_for_pool_actions,
+};
 use crate::types::{
     EvictionReason, MempoolAction, MempoolConfig, ObservedEvent, PeerId, TipPointer, TxDiff, TxId,
     TxSource,
 };
 use crate::unresolved::UnresolvedCache;
 use crate::weight::WeightFunction;
-use crate::{
-    emit_tracing_for_admission, emit_tracing_for_check, emit_tracing_for_pool_actions,
-    topological_demote_order, MempoolObserver,
-};
+use crate::{topological_demote_order, MempoolObserver};
 
 /// Top-level mempool handle. Bundles all the sub-components so callers
 /// don't thread six pieces through every call site. Production wiring
