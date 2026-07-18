@@ -22,9 +22,12 @@ use ergo_ser::modifier_id::{
 /// after we've persisted bad bytes and walked them through the
 /// assembly path.
 ///
-/// Returns `Ok(())` for unknown section types — those don't have a
-/// canonical receive-time recomputation rule and are filtered out
-/// upstream by the delivery tracker (unsolicited modifiers → Spam).
+/// Returns `Err` for unknown section types: they have no canonical
+/// receive-time recomputation rule, so rather than let a peer escape
+/// the check by claiming an arbitrary high `type_id` that clears
+/// `is_block_section`'s `>= 50` floor, an unknown type is rejected
+/// (see the unknown-type branch below). Callers gate this on the
+/// canonical section types {102, 104, 108}.
 ///
 /// Caller is `ergo-node/src/node/messaging.rs`'s `CODE_MODIFIER` arm,
 /// which invokes this before passing bytes to
