@@ -232,6 +232,14 @@ pub struct SyncCoordinator {
     /// (drained every action-loop tick), same drain pattern as
     /// [`take_net_stats`].
     first_deliverers: Vec<([u8; 32], PeerId)>,
+    /// Digest-verifier (Mode 5) flag: when true, block-section scheduling also
+    /// requests/tracks the ADProofs section (type 104) — the UTXO-set
+    /// transformation proofs a digest node needs to apply a block. Scala
+    /// `ToDownloadProcessor.requiredModifiersForHeader` downloads `h.sectionIds`
+    /// (all three) when `stateType.requireProofs`, vs `h.sectionIdsWithNoProof`
+    /// otherwise. Default `false` (UTXO/full node) — set by the node at boot for
+    /// the digest-verifier backend. Independent of `headers_only`.
+    requires_proofs: bool,
 }
 
 impl SyncCoordinator {
@@ -266,6 +274,7 @@ impl SyncCoordinator {
             bootstrap_in_progress: false,
             peer_sync: std::collections::HashMap::new(),
             first_deliverers: Vec::new(),
+            requires_proofs: false,
         }
     }
 
@@ -296,6 +305,7 @@ impl SyncCoordinator {
             bootstrap_in_progress: false,
             peer_sync: std::collections::HashMap::new(),
             first_deliverers: Vec::new(),
+            requires_proofs: false,
         }
     }
 
@@ -311,6 +321,18 @@ impl SyncCoordinator {
     /// pipelines (mempool admission, block assembly) when this is set.
     pub fn is_headers_only(&self) -> bool {
         self.headers_only
+    }
+
+    /// True when this coordinator schedules the ADProofs section (digest-
+    /// verifier / Mode 5). Read by the block-section scheduling paths.
+    pub fn requires_proofs(&self) -> bool {
+        self.requires_proofs
+    }
+
+    /// Enable ADProofs scheduling for a digest-verifier backend. Called once at
+    /// boot for Mode 5; UTXO/full nodes leave it at the `false` default.
+    pub fn set_requires_proofs(&mut self, flag: bool) {
+        self.requires_proofs = flag;
     }
 
     /// Mode 2 transient gate. Set `true` at boot when

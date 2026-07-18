@@ -494,7 +494,10 @@ impl SyncExecutor {
                         header.extension_root.as_bytes(),
                         header.ad_proofs_root.as_bytes(),
                     );
-                    coordinator.assembly_mut().register_header(expected);
+                    let requires_proofs = coordinator.requires_proofs();
+                    coordinator
+                        .assembly_mut()
+                        .register_header(expected, requires_proofs);
                 }
             }
         }

@@ -135,6 +135,8 @@ impl SyncCoordinator {
         // reduces P2P overhead and avoids overwhelming the peer.
         let mut tx_ids: Vec<[u8; 32]> = Vec::new();
         let mut ext_ids: Vec<[u8; 32]> = Vec::new();
+        // Digest-verifier (Mode 5) only; empty and unused for a UTXO node.
+        let mut ad_proofs_ids: Vec<[u8; 32]> = Vec::new();
 
         for pending in blocks_to_download {
             let section_ids = match self.assembly.expected_section_ids(&pending.header_id) {
@@ -186,16 +188,22 @@ impl SyncCoordinator {
                     tx_ids.push(section_id);
                 } else if type_id == ModifierTypeId::Extension.as_byte() {
                     ext_ids.push(section_id);
+                } else if self.requires_proofs && type_id == ModifierTypeId::ADProofs.as_byte() {
+                    ad_proofs_ids.push(section_id);
                 }
             }
         }
 
         // Send batched requests — one message per type, up to 400 IDs each.
         // This matches how the Scala node batches RequestModifier.
-        for (type_id, ids) in [
+        let mut buckets: Vec<(u8, &Vec<[u8; 32]>)> = vec![
             (ModifierTypeId::BlockTransactions.as_byte(), &tx_ids),
             (ModifierTypeId::Extension.as_byte(), &ext_ids),
-        ] {
+        ];
+        if self.requires_proofs {
+            buckets.push((ModifierTypeId::ADProofs.as_byte(), &ad_proofs_ids));
+        }
+        for (type_id, ids) in buckets {
             if ids.is_empty() {
                 continue;
             }
@@ -284,6 +292,8 @@ impl SyncCoordinator {
         let blocks_to_download = self.sync_state.blocks_to_download();
         let mut tx_ids: Vec<[u8; 32]> = Vec::new();
         let mut ext_ids: Vec<[u8; 32]> = Vec::new();
+        // Digest-verifier (Mode 5) only; empty and unused for a UTXO node.
+        let mut ad_proofs_ids: Vec<[u8; 32]> = Vec::new();
         for pending in blocks_to_download {
             let section_ids = match self.assembly.expected_section_ids(&pending.header_id) {
                 Some(ids) => ids,
@@ -323,11 +333,13 @@ impl SyncCoordinator {
                     tx_ids.push(section_id);
                 } else if type_id == ModifierTypeId::Extension.as_byte() {
                     ext_ids.push(section_id);
+                } else if self.requires_proofs && type_id == ModifierTypeId::ADProofs.as_byte() {
+                    ad_proofs_ids.push(section_id);
                 }
             }
         }
 
-        if tx_ids.is_empty() && ext_ids.is_empty() {
+        if tx_ids.is_empty() && ext_ids.is_empty() && ad_proofs_ids.is_empty() {
             return actions;
         }
 
@@ -356,7 +368,9 @@ impl SyncCoordinator {
             .iter()
             .map(|p| self.delivery.available_slots(p))
             .sum();
-        let types_with_demand = (!tx_ids.is_empty() as usize) + (!ext_ids.is_empty() as usize);
+        let types_with_demand = (!tx_ids.is_empty() as usize)
+            + (!ext_ids.is_empty() as usize)
+            + (!ad_proofs_ids.is_empty() as usize);
         let per_type_total_cap = if types_with_demand == 0 {
             0
         } else {
@@ -364,6 +378,7 @@ impl SyncCoordinator {
         };
         tx_ids.truncate(per_type_total_cap);
         ext_ids.truncate(per_type_total_cap);
+        ad_proofs_ids.truncate(per_type_total_cap);
 
         // Step 3: adaptive bucket cap. Scala's 12/peer/round works
         // because Scala sees many peers. With 1-2 connected peers a
@@ -395,6 +410,10 @@ impl SyncCoordinator {
         }
         if !ext_ids.is_empty() {
             by_type.insert(ModifierTypeId::Extension.as_byte(), ext_ids);
+        }
+        // ADProofs(104) sorts before Extension(108) in the BTreeMap.
+        if !ad_proofs_ids.is_empty() {
+            by_type.insert(ModifierTypeId::ADProofs.as_byte(), ad_proofs_ids);
         }
         let buckets =
             ergo_p2p::partition::distribute(&capacity_filtered, &by_type, self.download_round, cfg);
@@ -478,8 +497,11 @@ impl SyncCoordinator {
         let mut revived_failed = 0usize;
 
         for (type_id, section_id) in section_ids {
+            let is_ad_proofs =
+                self.requires_proofs && type_id == ModifierTypeId::ADProofs.as_byte();
             if type_id != ModifierTypeId::BlockTransactions.as_byte()
                 && type_id != ModifierTypeId::Extension.as_byte()
+                && !is_ad_proofs
             {
                 continue;
             }
@@ -566,6 +588,7 @@ impl SyncCoordinator {
 
         let mut tx_ids: Vec<[u8; 32]> = Vec::new();
         let mut ext_ids: Vec<[u8; 32]> = Vec::new();
+        let mut ad_proofs_ids: Vec<[u8; 32]> = Vec::new();
         let mut header_ids: Vec<[u8; 32]> = Vec::new();
 
         for id in ids {
@@ -578,6 +601,10 @@ impl SyncCoordinator {
                 tx_ids.push(*id);
             } else if type_id == ModifierTypeId::Extension.as_byte() {
                 ext_ids.push(*id);
+            } else if self.requires_proofs && type_id == ModifierTypeId::ADProofs.as_byte() {
+                // Preserve type 104 on retry — dropping it into the header
+                // fallback would re-request an ADProof section as a Header.
+                ad_proofs_ids.push(*id);
             } else {
                 header_ids.push(*id);
             }
@@ -585,10 +612,10 @@ impl SyncCoordinator {
 
         let mut actions = Vec::new();
 
-        if !tx_ids.is_empty() || !ext_ids.is_empty() {
+        if !tx_ids.is_empty() || !ext_ids.is_empty() || !ad_proofs_ids.is_empty() {
             const MAX_INV_OBJECTS: usize = 400;
             let n_peers = peers.len();
-            let total = tx_ids.len().max(ext_ids.len());
+            let total = tx_ids.len().max(ext_ids.len()).max(ad_proofs_ids.len());
             let max_per_bucket = if n_peers >= 3 {
                 12
             } else {
@@ -598,6 +625,9 @@ impl SyncCoordinator {
             let mut by_type = std::collections::BTreeMap::new();
             if !tx_ids.is_empty() {
                 by_type.insert(ModifierTypeId::BlockTransactions.as_byte(), tx_ids);
+            }
+            if !ad_proofs_ids.is_empty() {
+                by_type.insert(ModifierTypeId::ADProofs.as_byte(), ad_proofs_ids);
             }
             if !ext_ids.is_empty() {
                 by_type.insert(ModifierTypeId::Extension.as_byte(), ext_ids);

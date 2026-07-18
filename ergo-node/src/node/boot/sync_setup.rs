@@ -81,6 +81,14 @@ pub(super) fn setup(
             .block_timing
             .header_freshness_threshold_ms(),
     );
+    // Mode 5 (digest-verifier): the digest backend keeps no UTXO set, so block
+    // application needs the ADProofs section (the UTXO-set transformation
+    // proofs) — schedule it alongside transactions + extension. Scala
+    // `stateType.requireProofs`. Mode 6 (headers-only) never applies blocks, so
+    // it stays on the two-section path.
+    if matches!(store, ergo_state::StateBackendKind::Digest(_)) && !headers_only {
+        coordinator.set_requires_proofs(true);
+    }
     // Operator escape hatch (sibling of ERGO_BAN_HEADERS): force the
     // headers-chain-synced latch at boot so block downloads start even
     // when every header on the target chain is stale. Needed when a

@@ -36,6 +36,19 @@ struct SectionState {
     has_transactions: bool,
     has_extension: bool,
     has_ad_proofs: bool,
+    /// Digest-verifier (Mode 5) block application needs the ADProofs section to
+    /// verify the UTXO-set transition, so completion must wait for it. A UTXO
+    /// node stores the set itself and needs only transactions + extension, so
+    /// this is `false` and `has_ad_proofs` never gates completion.
+    requires_ad_proofs: bool,
+}
+
+impl SectionState {
+    fn is_complete(&self) -> bool {
+        self.has_transactions
+            && self.has_extension
+            && (!self.requires_ad_proofs || self.has_ad_proofs)
+    }
 }
 
 impl AssemblyTracker {
@@ -47,7 +60,11 @@ impl AssemblyTracker {
     }
 
     /// Register expected sections for a header (call after header is validated).
-    pub fn register_header(&mut self, expected: ExpectedSections) {
+    ///
+    /// `requires_ad_proofs` is `true` for a digest-verifier (Mode 5) node, which
+    /// needs the ADProofs section to apply the block; a UTXO node passes `false`
+    /// (completion never waits for ADProofs, so its behavior is unchanged).
+    pub fn register_header(&mut self, expected: ExpectedSections, requires_ad_proofs: bool) {
         let hid = expected.header_id;
         if self.headers.contains_key(&hid) {
             return; // already tracking
@@ -66,6 +83,7 @@ impl AssemblyTracker {
                 has_transactions: false,
                 has_extension: false,
                 has_ad_proofs: false,
+                requires_ad_proofs,
             },
         );
     }
@@ -79,7 +97,7 @@ impl AssemblyTracker {
         let section_type = *section_type;
         let state = self.headers.get_mut(&header_id)?;
 
-        let was_complete = state.has_transactions && state.has_extension;
+        let was_complete = state.is_complete();
 
         match section_type {
             TYPE_BLOCK_TRANSACTIONS => state.has_transactions = true,
@@ -88,20 +106,21 @@ impl AssemblyTracker {
             _ => return None,
         }
 
-        let is_complete = state.has_transactions && state.has_extension;
         // Only signal completion on the transition from incomplete → complete.
-        if is_complete && !was_complete {
+        // In digest mode this waits for ADProofs too, so the AssembleBlock is
+        // emitted once all required sections are present (a late ADProof after
+        // tx+ext would otherwise never re-trigger assembly).
+        if state.is_complete() && !was_complete {
             Some(header_id)
         } else {
             None
         }
     }
 
-    /// Check if a full block is ready for a given header (UTXO mode).
+    /// Check if a full block is ready for a given header (all required sections
+    /// present — includes ADProofs for a digest-verifier node).
     pub fn is_complete(&self, header_id: &[u8; 32]) -> bool {
-        self.headers
-            .get(header_id)
-            .is_some_and(|s| s.has_transactions && s.has_extension)
+        self.headers.get(header_id).is_some_and(|s| s.is_complete())
     }
 
     /// Remove tracking for a header (after block assembled and applied).
@@ -167,7 +186,7 @@ mod tests {
         let tx_id = expected.transactions_id;
         let ext_id = expected.extension_id;
 
-        tracker.register_header(expected);
+        tracker.register_header(expected, false);
         assert!(!tracker.is_complete(&header_id));
 
         // Receive transactions — not complete yet
@@ -178,6 +197,50 @@ mod tests {
         // Receive extension — now complete
         let result = tracker.section_received(&ext_id);
         assert_eq!(result, Some(header_id));
+        assert!(tracker.is_complete(&header_id));
+    }
+
+    #[test]
+    fn digest_mode_waits_for_ad_proofs_to_complete() {
+        // requires_ad_proofs = true (Mode 5): tx + ext is NOT enough; completion
+        // fires only when the ADProofs section also arrives.
+        let mut tracker = AssemblyTracker::new();
+        let header_id = mk(1);
+        let expected = ExpectedSections::from_header(&mk(1), &mk(2), &mk(3), &mk(4));
+        let tx_id = expected.transactions_id;
+        let ext_id = expected.extension_id;
+        let ap_id = expected.ad_proofs_id;
+
+        tracker.register_header(expected, true);
+        assert!(tracker.section_received(&tx_id).is_none());
+        assert!(
+            tracker.section_received(&ext_id).is_none(),
+            "tx+ext must NOT complete a digest-mode block"
+        );
+        assert!(!tracker.is_complete(&header_id));
+        assert_eq!(
+            tracker.section_received(&ap_id),
+            Some(header_id),
+            "ADProofs completes the block, signalled exactly once"
+        );
+        assert!(tracker.is_complete(&header_id));
+    }
+
+    #[test]
+    fn digest_mode_ad_proofs_first_completes_on_last_section() {
+        // ADProofs arriving FIRST must not prematurely signal; the completion
+        // transition fires when the last required section lands.
+        let mut tracker = AssemblyTracker::new();
+        let header_id = mk(5);
+        let expected = ExpectedSections::from_header(&mk(5), &mk(6), &mk(7), &mk(8));
+        let tx_id = expected.transactions_id;
+        let ext_id = expected.extension_id;
+        let ap_id = expected.ad_proofs_id;
+
+        tracker.register_header(expected, true);
+        assert!(tracker.section_received(&ap_id).is_none());
+        assert!(tracker.section_received(&tx_id).is_none());
+        assert_eq!(tracker.section_received(&ext_id), Some(header_id));
         assert!(tracker.is_complete(&header_id));
     }
 
@@ -196,7 +259,7 @@ mod tests {
         let tx_id = expected.transactions_id;
         let ext_id = expected.extension_id;
 
-        tracker.register_header(expected);
+        tracker.register_header(expected, false);
 
         let (type_id, hid) = tracker.identify_section(&tx_id).unwrap();
         assert_eq!(type_id, TYPE_BLOCK_TRANSACTIONS);
@@ -213,7 +276,7 @@ mod tests {
         let mut tracker = AssemblyTracker::new();
         let header_id = mk(1);
         let expected = ExpectedSections::from_header(&header_id, &mk(2), &mk(3), &mk(4));
-        tracker.register_header(expected);
+        tracker.register_header(expected, false);
         assert_eq!(tracker.pending_count(), 1);
 
         tracker.remove(&header_id);
