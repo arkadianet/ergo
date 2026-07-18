@@ -7904,6 +7904,48 @@ fn option_filter_body_does_not_leak_into_caller_env() {
     assert_eq!(run_eval(&block), Value::Int(999));
 }
 
+/// Consensus cost: Scala `SOptionMethods.FilterMethod` is
+/// `FixedCost(JitCost(20))` (methods.scala). Pin the total for a minimal
+/// `Option.filter` so a regression back to the pre-fix 10-unit charge (which
+/// would drop this total to 54) is caught — that would be a consensus cost
+/// divergence. The 20-unit method cost is the only filter-specific component;
+/// the rest is shared MethodCall dispatch + receiver + closure (`x > 0`) eval.
+#[test]
+fn option_filter_charges_declared_fixed_cost() {
+    // Closure `x > 0` (0x91 = GT) over the Some(7) receiver.
+    let closure = op(
+        0xD9,
+        Payload::FuncValue {
+            args: vec![(1, Some(SigmaType::SInt))],
+            body: Box::new(op(
+                0x91,
+                Payload::Two(
+                    Box::new(op(0x72, Payload::ValUse { id: 1 })),
+                    Box::new(const_int(0)),
+                ),
+            )),
+        },
+    );
+    let filter = op(
+        0xDC,
+        Payload::MethodCall {
+            type_id: 36,
+            method_id: 8,
+            obj: Box::new(const_some_int(7)),
+            args: vec![closure],
+            type_args: vec![],
+        },
+    );
+    let ctx = ReductionContext::minimal(500_000, 0);
+    let (res, cost) = eval_value_and_cost(&filter, &ctx);
+    assert!(res.is_ok(), "filter eval failed: {res:?}");
+    assert_eq!(
+        cost, 64,
+        "Option.filter total cost (incl. the 20-unit FilterMethod FixedCost); \
+         a drop to 54 means the fixed cost regressed to 10",
+    );
+}
+
 /// flatMap (MethodCall type=12 method=15) — element binding does not
 /// leak into the caller's env. Closure maps each Int to a Coll[Int]
 /// of length 1, so result is the input flattened identically.

@@ -16,7 +16,14 @@ use crate::evaluator::types::*;
 pub(crate) fn trace_val(v: &Value) -> String {
     let s = format!("{v:?}");
     if s.len() > 150 {
-        format!("{}...", &s[..150])
+        // Truncate on a UTF-8 char boundary: a `Value` carrying a Unicode
+        // string can place a multibyte char across byte 150, and `&s[..150]`
+        // would panic mid-character.
+        let mut end = 150;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
     } else {
         s
     }
@@ -424,11 +431,28 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
                         _ => Ok(Value::CollGeneric(items, Box::new(elem_type.clone()))),
                     }
                 }
-                (_, CollValue::Bytes(b)) => Ok(Value::CollBytes(b.clone())),
+                // A `Bytes` payload is only consistent with element type
+                // `SByte` (handled above). Any other declared element type
+                // paired with a bytes payload is an inconsistent
+                // SigmaType/SigmaValue shape → reject rather than silently
+                // re-tag it as `CollBytes`.
                 _ => Err(EvalError::UnsupportedConstant(tpe.clone())),
             }
         }
         (SigmaType::STuple(elem_types), SigmaValue::Tuple(vals)) => {
+            // Arity must match: `zip` would otherwise silently drop extra
+            // elements or accept a short tuple, producing a value for an
+            // inconsistent shape.
+            if elem_types.len() != vals.len() {
+                return Err(EvalError::TypeError {
+                    expected: "STuple arity matching the tuple value",
+                    got: format!(
+                        "STuple declares {} element(s) but the value has {}",
+                        elem_types.len(),
+                        vals.len()
+                    ),
+                });
+            }
             let items: Result<Vec<Value>, EvalError> = elem_types
                 .iter()
                 .zip(vals.iter())

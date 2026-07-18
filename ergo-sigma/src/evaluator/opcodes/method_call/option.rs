@@ -78,7 +78,9 @@ pub(super) fn filter(
             got: args.len(),
         });
     }
-    add_method_cost(cx.cost, 10)?;
+    // Scala `FilterMethod` is `FixedCost(JitCost(20))` (methods.scala
+    // SOptionMethods) — same as `map`; charging 10 diverges on consensus cost.
+    add_method_cost(cx.cost, 20)?;
     let func_val = cx.eval_expr(&args[0])?;
     match obj_val {
         Value::Opt(None) => Ok(Value::Opt(None)),
