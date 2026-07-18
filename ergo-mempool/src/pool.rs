@@ -352,20 +352,45 @@ impl OrderedPool {
     /// family walks. Returns removed entries in removal order (parent
     /// last — children are removed first so their `parents_in_pool`
     /// backreferences stay consistent during the sweep).
+    /// Discards the truncation frontier; production callers use the
+    /// `_frontier` / `_debiting` variants (only tests want the plain form).
+    #[cfg(test)]
     pub(crate) fn remove_with_descendants(&mut self, tx_id: &TxId, max_depth: usize) -> Vec<Entry> {
+        self.remove_with_descendants_frontier(tx_id, max_depth).0
+    }
+
+    /// Like [`Self::remove_with_descendants`] but also returns the *truncation
+    /// frontier*: descendants that were NOT removed because the `max_depth`
+    /// node cap was hit — the un-visited direct children of removed nodes,
+    /// still pooled. Every frontier id's parent WAS removed, so each is
+    /// orphaned; the caller carries them into bounded follow-up removal so a
+    /// deep family below a hard-invalid tx is fully evicted over several
+    /// passes rather than left dangling (its later revalidation returns
+    /// `UnresolvedInput`, which the recheck policy retains, not evicts).
+    /// The frontier is empty when the cap was not hit.
+    pub(crate) fn remove_with_descendants_frontier(
+        &mut self,
+        tx_id: &TxId,
+        max_depth: usize,
+    ) -> (Vec<Entry>, Vec<TxId>) {
         if !self.contains(tx_id) {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         // Collect descendants depth-first (explicit stack), capped at
         // `max_depth` nodes visited.
         let mut to_visit: Vec<TxId> = vec![*tx_id];
         let mut ordered_ids: Vec<TxId> = Vec::new();
         let mut seen = std::collections::HashSet::new();
+        let mut truncated = false;
         while let Some(next) = to_visit.pop() {
             if !seen.insert(next) {
                 continue;
             }
             if ordered_ids.len() >= max_depth {
+                // Cap hit BEFORE visiting `next`: it (and everything else
+                // still queued) is an un-removed descendant of a removed node.
+                to_visit.push(next);
+                truncated = true;
                 break;
             }
             ordered_ids.push(next);
@@ -379,13 +404,26 @@ impl OrderedPool {
         }
         // Remove children first, parent last.
         ordered_ids.reverse();
+        let removed_set: std::collections::HashSet<TxId> = ordered_ids.iter().copied().collect();
         let mut removed = Vec::with_capacity(ordered_ids.len());
         for id in ordered_ids {
             if let Some(e) = self.remove(&id) {
                 removed.push(e);
             }
         }
-        removed
+        // Frontier = remaining queued ids, deduped and excluding any that were
+        // actually removed (a diamond child can be queued twice, one copy
+        // popped+removed). Empty unless the cap truncated the walk.
+        let frontier: Vec<TxId> = if truncated {
+            let mut seen_f = std::collections::HashSet::new();
+            to_visit
+                .into_iter()
+                .filter(|id| !removed_set.contains(id) && seen_f.insert(*id))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        (removed, frontier)
     }
 
     /// Re-key a single in-pool tx to `new_weight`, moving only its slot in
@@ -538,11 +576,25 @@ impl OrderedPool {
         max_depth: usize,
         bounds: FamilyBounds,
     ) -> Vec<Entry> {
-        let removed = self.remove_with_descendants(tx_id, max_depth);
+        self.remove_with_descendants_debiting_frontier(tx_id, max_depth, bounds)
+            .0
+    }
+
+    /// [`Self::remove_with_descendants_debiting`] that also returns the
+    /// truncation frontier (see [`Self::remove_with_descendants_frontier`]) so
+    /// the recheck cascade can carry orphaned deep descendants into bounded
+    /// follow-up eviction.
+    pub(crate) fn remove_with_descendants_debiting_frontier(
+        &mut self,
+        tx_id: &TxId,
+        max_depth: usize,
+        bounds: FamilyBounds,
+    ) -> (Vec<Entry>, Vec<TxId>) {
+        let (removed, frontier) = self.remove_with_descendants_frontier(tx_id, max_depth);
         for entry in &removed {
             self.update_family(&entry.inputs, -i128::from(entry.weight), bounds);
         }
-        removed
+        (removed, frontier)
     }
 
     /// Tx id(s) that created the given output box_id. Used by

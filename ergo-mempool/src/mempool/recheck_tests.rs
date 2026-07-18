@@ -466,6 +466,65 @@ fn recheck_cascade_descendant_not_blacklisted() {
     mp.pool().check_invariants();
 }
 
+#[test]
+fn recheck_hard_invalid_cascade_evicts_full_subtree_past_depth_cap() {
+    // Chain 1→2→3→4→5 with max_family_depth = 2. tx 1 is hard-invalid; the
+    // single-op cascade only removes cap-many ({1,2}), but the truncation
+    // frontier is carried into a bounded follow-up drain the SAME pass, so the
+    // ENTIRE invalid subtree is evicted. Descendants carry `ok_plan`s (a real
+    // validator would report UnresolvedInput once their ancestor is gone, which
+    // the recheck policy RETAINS) — the point is they are removed structurally
+    // as dependents of the hard-invalid root, not on their own verdict. Before
+    // the frontier fix, {3,4,5} lingered in the pool.
+    let cfg = MempoolConfig {
+        max_family_depth: 2,
+        ..MempoolConfig::default()
+    };
+    let mut mp = mempool_with(cfg);
+    let base = Instant::now();
+    seed(&mut mp, 1, 0x10, 0x11, 100, vec![]);
+    seed(&mut mp, 2, 0x11, 0x12, 100, vec![d(1)]);
+    seed(&mut mp, 3, 0x12, 0x13, 100, vec![d(2)]);
+    seed(&mut mp, 4, 0x13, 0x14, 100, vec![d(3)]);
+    seed(&mut mp, 5, 0x14, 0x15, 100, vec![d(4)]);
+    for b in 1..=5u8 {
+        set_checked(&mut mp, b, base + Duration::from_millis(u64::from(b)));
+    }
+
+    let utxo = FakeUtxo::empty();
+    let tip = TestTip::new();
+    let mut plans = vec![err_plan(1, 10_000)];
+    for b in 2..=5u8 {
+        plans.push(ok_plan(b, 10_000));
+    }
+    let v = validator(plans);
+
+    let actions = mp.recheck_and_evict(base + Duration::from_secs(10), &tip.view(&utxo), &v);
+
+    for b in 1..=5u8 {
+        assert!(
+            !mp.contains(&d(b)),
+            "tx {b} must be evicted (full invalid subtree)"
+        );
+    }
+    assert!(
+        mp.is_invalidated(&d(1)),
+        "only the hard-invalid root is blacklisted"
+    );
+    for b in 2..=5u8 {
+        assert!(
+            !mp.is_invalidated(&d(b)),
+            "descendant {b} is dependency-evicted, not blacklisted"
+        );
+    }
+    assert_eq!(
+        evicted_ids(&actions).len(),
+        5,
+        "all five ids reported evicted"
+    );
+    mp.pool().check_invariants();
+}
+
 // ----- anti-DoS cost cap + rotation -----
 
 #[test]
