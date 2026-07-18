@@ -37,11 +37,18 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// Production slice of a source file: everything before the first
-/// `#[cfg(test)]` attribute (or the whole file if it has none).
+/// `#[cfg(test)]` attribute (or the whole file if it has none). A file
+/// whose top carries the inner form `#![cfg(test)]` is an extracted
+/// test-only module (its `mod` declaration is cfg(test)-gated in the
+/// parent), so everything from that marker on is test code too.
 fn production_section(src: &str) -> &str {
-    match src.find("#[cfg(test)]") {
-        Some(idx) => &src[..idx],
-        None => src,
+    let outer = src.find("#[cfg(test)]");
+    let inner = src.find("#![cfg(test)]");
+    match (outer, inner) {
+        (Some(a), Some(b)) => &src[..a.min(b)],
+        (Some(a), None) => &src[..a],
+        (None, Some(b)) => &src[..b],
+        (None, None) => src,
     }
 }
 

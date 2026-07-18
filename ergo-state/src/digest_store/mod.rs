@@ -1,0 +1,440 @@
+//! Mode 5 digest-verifier persistence backend — sibling type to
+//! [`crate::store::StateStore`].
+//!
+//! Mode 5 retains an authenticated *digest* of the UTXO state instead
+//! of the full AVL+ box arena. The apply seam consumes ADProofs
+//! sections (see `crate::digest_apply`) and advances a 33-byte root
+//! digest; this store persists that digest, the chain pointers, and
+//! a per-height history ledger that drives rollback. No box bytes
+//! are written — Mode 5 cannot answer per-input box lookups, and the
+//! API-layer gates in `ergo-api` already 503 the affected routes.
+//!
+//! Atomic-commit invariant: every successful `apply_block_digest`
+//! writes
+//! `(DIGEST_HISTORY[prev_height], CHAIN_STATE_HISTORY[prev_height],
+//! STATE_META["root_digest"], CHAIN_STATE_META["chain_state"],
+//! CHAIN_INDEX[new_height], voted_params row if epoch boundary)`
+//! inside one redb `write_txn`. A crash mid-apply rolls the whole
+//! transition back; no half-applied state survives. Rollback is the
+//! same shape in reverse: read the per-height history rows, restore
+//! `(root_digest, chain_state)`, truncate every height-indexed table
+//! (`DIGEST_HISTORY`, `CHAIN_STATE_HISTORY`, `CHAIN_INDEX`,
+//! `VOTED_PARAMS`) above the target.
+//!
+//! Schema:
+//! - `DIGEST_HISTORY[height: u64] -> [u8; 33]` — root digest that was
+//!   current AT that height. The rollback substrate, analogous to
+//!   the role `LDBVersionedStore` plays in Scala's `DigestState`.
+//! - `CHAIN_STATE_HISTORY[height: u64] -> ChainStateMeta` — full
+//!   chain-state snapshot at that height, so rollback restores
+//!   `best_header_*`, `best_full_block_*`, `header_availability`
+//!   atomically with the digest.
+//! - `STATE_META["root_digest"] -> [u8; 33]` — current root digest.
+//!   Reuses the existing `STATE_META` table with a key distinct from
+//!   Mode 1's `"root"` so a misopened store cannot confuse the two.
+//! - `CHAIN_STATE_META`, `CHAIN_INDEX`, `VOTED_PARAMS` — shared with
+//!   the UTXO backend (same schema).
+//!
+//! Retention: both history ledgers retain a row for every applied
+//! height — there is no bounded-version prune. Mode 1 prunes its
+//! `undo_log` below `height - ROLLBACK_WINDOW` on each forward apply;
+//! the digest ledgers do not, so the deepest reachable rollback is
+//! genesis. A bounded-retention floor (and the matching
+//! rollback-below-floor guard) is a separate concern from this
+//! schema + atomic-commit layer.
+//!
+//! Verify/persist boundary: this module PERSISTS digests; it does
+//! not VERIFY them. The binding `root_digest == header.state_root`
+//! is established by the verifier layer (`crate::digest_apply`'s
+//! `DigestProofVerifier::apply_block_in_memory`, which cross-checks
+//! the AVL+-computed root against `header.state_root`), and the
+//! orchestrator passes only an already-verified root to
+//! `apply_block_digest`. The store therefore enforces only
+//! self-consistency invariants it can check from its own tables
+//! (height monotonicity, dense history/index, non-empty digest at
+//! applied heights, voted-params key placement). The store embeds the
+//! shared `header_store::HeaderSectionTables`, so it persists headers
+//! and block sections and serves the read-side `StateBackend` traits
+//! (`ChainStateRead`, `HeaderSectionStore`). What remains deferred to
+//! a later layer is the apply-bridge that anchors the persisted digest
+//! to a header's `state_root`: that needs the ADProofs section, the
+//! boxChanges derivation, and a real-corpus oracle, none of which this
+//! read/persist layer owns.
+//!
+//! The seam is `pub(crate)` and the module is `#![allow(dead_code)]`:
+//! no in-crate caller reaches it yet. The boot dispatch and the
+//! shared `StateBackend` trait that consume it live in higher
+//! layers; this module persists the schema and the atomic-commit
+//! invariant on its own. Deferred to those layers (each needs state
+//! this schema-only sibling does not own): header-anchored digest
+//! validation, intermediate voted-params epoch-row continuity (the
+//! section/extension reconcile Mode 1 runs in `reconcile_voted_params`),
+//! bounded history retention, and reorg-abort rebuild-from-committed.
+#![allow(dead_code)]
+
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use ergo_validation::{ActiveProtocolParameters, ErgoValidationSettings};
+use redb::{Database, TableDefinition};
+
+#[cfg(any(test, feature = "test-helpers"))]
+use crate::active_params;
+use crate::chain::ChainStateMeta;
+use crate::store::StateError;
+
+/// Per-height ledger of the root digest. Key = the height at which
+/// that digest was *current*; rollback to height `h` reads
+/// `DIGEST_HISTORY[h]` and writes it back to
+/// `STATE_META["root_digest"]`.
+pub(crate) const DIGEST_HISTORY: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("digest_history");
+
+/// Per-height ledger of the full chain-state snapshot. Pairs with
+/// `DIGEST_HISTORY` so rollback restores `(root_digest,
+/// best_header_*, best_full_block_*, header_availability)`
+/// atomically.
+pub(crate) const CHAIN_STATE_HISTORY: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("chain_state_history");
+
+/// Key in shared `STATE_META` for the current root digest. Distinct
+/// from Mode 1's `"root"` so a misopened store cannot confuse the
+/// two.
+const ROOT_DIGEST_KEY: &str = "root_digest";
+
+/// Key in shared `CHAIN_STATE_META` for the current chain state.
+/// Same key the UTXO backend uses — only one is live per data dir,
+/// and the `data_dir_state_type` stamp prevents misopening.
+const CHAIN_STATE_KEY: &str = "chain_state";
+
+/// `data_dir_state_type` sentinel for the digest-verifier backend.
+/// Distinct from the UTXO backend's `"utxo"` AND from the
+/// headers-only `StateStore` configuration's `"digest"`: those two
+/// share the `StateStore` on-disk schema (an AVL+ arena), while
+/// `DigestStateStore` has its own incompatible schema (digest +
+/// chain-state history ledgers, no arena). A dir written by one
+/// backend can never be safely reopened by the other, so each owns
+/// a distinct sentinel and a mismatch is a hard `StateTypeMismatch`.
+const DIGEST_VERIFIER_STATE_TYPE: &str = "digest-verifier";
+
+/// All-zeros 33-byte sentinel used as the synthetic genesis seed in
+/// this module's unit tests. It is NOT the AVL+ digest of an empty
+/// tree (that is the non-zero `4ec61f...0900`) and it is NOT a real
+/// network's genesis digest (mainnet's is `a5df...02`). A fresh Mode 5
+/// store seeds whatever genesis digest the network supplies through
+/// `open`; the synth tests pass this sentinel so their apply/rollback
+/// invariants stay self-consistent against a fixed, recognizable
+/// height-0 root.
+#[cfg(test)]
+pub(crate) const EMPTY_AVL_DIGEST: [u8; 33] = [0u8; 33];
+
+/// Mode 5 persistence handle. Holds the redb database and an
+/// in-memory mirror of the persisted `(root_digest, chain_state)`
+/// pair. Mutated only through `apply_block_digest` and
+/// `rollback_to`; both commit atomically. `voting_settings` carries
+/// the network's voting-epoch length (used to enforce that a
+/// co-committed voted-params row lands only at a real epoch boundary,
+/// mirroring the Mode 1 `StateStore` guard) plus the soft-fork
+/// thresholds block validation reads.
+#[derive(Debug)]
+pub struct DigestStateStore {
+    db: Arc<Database>,
+    root_digest: [u8; 33],
+    chain_state: ChainStateMeta,
+    /// Network voting parameters (`voting_length` + soft-fork
+    /// thresholds). The epoch-boundary guard reads `voting_length`;
+    /// block validation reads the soft-fork thresholds. Holds the whole
+    /// `VotingParams` so both consumers share one source, mirroring
+    /// `StateStore`.
+    voting_settings: ergo_chain_spec::VotingParams,
+    /// Shared header/section table component — same redb file, same
+    /// `Arc<Database>`. Serves the read-side `HeaderSectionStore` trait.
+    headers: crate::header_store::HeaderSectionTables,
+    /// Active protocol parameters at the current tip: the latest
+    /// `voted_params` row at or below the committed height. Computed at
+    /// open and refreshed by `refresh_cached_params_post_commit` after
+    /// every apply/rollback so it always tracks the committed tip.
+    active_params: ActiveProtocolParameters,
+    /// Cumulative validation settings at the current tip — the fold of
+    /// every `voted_params` row's `activated_update` up to the tip.
+    /// Refreshed alongside `active_params` on every commit.
+    validation_settings: ErgoValidationSettings,
+    /// Session-scoped invalidity: cleared on every restart. Persistent
+    /// invalidity is reserved for cryptographically definitive failures
+    /// the digest backend does not yet produce.
+    session_invalids: HashSet<[u8; 32]>,
+    /// The network's height-0 AVL+ root digest (post the genesis boxes),
+    /// supplied at `open` from `GenesisParams::state_digest`. This is the
+    /// digest a fresh store seeds, the value `read_consistent_state`
+    /// expects at height 0, and the root `rollback_to(0)` must restore.
+    /// Mainnet's is `a5df...02`; it is never the all-zero or empty-tree
+    /// digest.
+    genesis_state_digest: [u8; 33],
+}
+
+mod apply;
+mod open;
+mod rollback;
+mod voted_params;
+
+pub(crate) use voted_params::has_digest_verifier_markers;
+use voted_params::{
+    require_genesis_voted_params_match_or_seed, require_genesis_voted_params_present,
+    validate_voted_params_keys,
+};
+
+impl DigestStateStore {
+    /// A cloned `Arc` handle to the underlying redb `Database`. Mirrors
+    /// [`StateStore::db_arc`] so boot-time subsystems (the wallet writer
+    /// task) can open their own read transactions against the same file
+    /// without a backend-typed branch. The digest db holds no box arena,
+    /// so UTXO-dependent wallet reads see an empty set — wallet routes are
+    /// subsystem-gated off in Mode 5 regardless.
+    pub fn db_arc(&self) -> Arc<Database> {
+        self.db.clone()
+    }
+
+    /// Current root digest. Returns the network's genesis digest on a
+    /// fresh store (no apply yet).
+    pub fn root_digest(&self) -> [u8; 33] {
+        self.root_digest
+    }
+
+    /// Current `best_full_block_height`. 0 on a fresh store.
+    pub fn height(&self) -> u32 {
+        self.chain_state.best_full_block_height
+    }
+
+    /// Read-only handle to the in-memory chain-state mirror. Reflects
+    /// the last committed write.
+    pub fn chain_state(&self) -> &ChainStateMeta {
+        &self.chain_state
+    }
+
+    /// Network voting parameters seeded at `open`. Stable for the
+    /// store's lifetime — `voting_length` and the soft-fork thresholds
+    /// are network constants, not per-epoch state. Block validation
+    /// consumes this so epoch-boundary and soft-fork-vote logic use the
+    /// right cadence; mirrors `StateStore::voting_settings`.
+    pub fn voting_settings(&self) -> &ergo_chain_spec::VotingParams {
+        &self.voting_settings
+    }
+
+    /// Sparse-aware best-chain height lookup, mirroring
+    /// [`StateStore::lookup_header_at_height`]. The digest backend is
+    /// always `HeaderAvailability::Dense` (Mode 5 does not NiPoPoW-
+    /// bootstrap), so a missing row at or below the header tip is store
+    /// corruption rather than an expected sparse gap; the both-arms
+    /// handling matches `StateStore` so the `ChainView` semantics are
+    /// identical across backends.
+    pub fn lookup_header_at_height(
+        &self,
+        height: u32,
+    ) -> Result<crate::chain::HeightLookup, StateError> {
+        use crate::backend::HeaderSectionStore;
+        use crate::chain::{HeaderAvailability, HeightLookup};
+        if let Some(id) = self.get_header_id_at_height(height)? {
+            return Ok(HeightLookup::Dense(id));
+        }
+        if height > self.chain_state.best_header_height {
+            return Ok(HeightLookup::AboveTip);
+        }
+        match self.chain_state.header_availability {
+            HeaderAvailability::Dense => {
+                tracing::error!(
+                    height,
+                    best_header_height = self.chain_state.best_header_height,
+                    "HEADER_CHAIN_INDEX missing row in Dense mode — digest store corruption",
+                );
+                Ok(HeightLookup::SparseGap)
+            }
+            HeaderAvailability::PoPowSparse {
+                dense_from_height, ..
+            } => {
+                if height < dense_from_height {
+                    Ok(HeightLookup::SparseGap)
+                } else {
+                    tracing::error!(
+                        height,
+                        dense_from_height,
+                        best_header_height = self.chain_state.best_header_height,
+                        "HEADER_CHAIN_INDEX missing row inside dense range (digest, PoPowSparse)",
+                    );
+                    Ok(HeightLookup::SparseGap)
+                }
+            }
+        }
+    }
+
+    /// Set the in-memory tip `(root_digest, chain_state)`. Test-only seam
+    /// for the Mode 5 executor-replay oracle; see
+    /// `crate::test_helpers::DigestStateStore::seed_tip_for_test`.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub(crate) fn set_tip_internal_for_test_helpers(
+        &mut self,
+        root_digest: [u8; 33],
+        chain_state: ChainStateMeta,
+    ) {
+        self.root_digest = root_digest;
+        self.chain_state = chain_state;
+        // Re-derive the cached params/settings at the new tip height, so a
+        // `voted_params` row seeded for the tip's epoch is reflected in
+        // `active_params()` / `validation_settings()` (mirrors the
+        // post-commit refresh `apply_block_digest` runs).
+        self.refresh_cached_params_post_commit();
+    }
+
+    /// Insert a `voted_params` row in its own write txn, then refresh the
+    /// cached params/settings. Test-only seam for the Mode 5
+    /// executor-replay oracle; see
+    /// `crate::test_helpers::DigestStateStore::seed_voted_params_row_for_test`.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub(crate) fn insert_voted_params_internal_for_test_helpers(
+        &mut self,
+        params: &ActiveProtocolParameters,
+    ) -> Result<(), StateError> {
+        let write_txn = crate::begin_write_qr(&self.db)?;
+        active_params::insert(&write_txn, params).map_err(|e| {
+            StateError::VotedParamsWriteFailed {
+                op: "test-helper voted_params seed",
+                height: params.epoch_start_height,
+                source: Box::new(e),
+            }
+        })?;
+        write_txn.commit()?;
+        self.refresh_cached_params_post_commit();
+        Ok(())
+    }
+
+    /// Write `HEADER_CHAIN_INDEX[height] = header_id`. Test-only seam for
+    /// the Mode 5 executor-replay oracle; see
+    /// `crate::test_helpers::DigestStateStore::seed_header_chain_index_for_test`.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub(crate) fn set_header_chain_index_internal_for_test_helpers(
+        &self,
+        height: u32,
+        header_id: &[u8; 32],
+    ) -> Result<(), StateError> {
+        let write_txn = crate::begin_write_qr(&self.db)?;
+        {
+            let mut idx = write_txn.open_table(crate::store::HEADER_CHAIN_INDEX)?;
+            idx.insert(height as u64, &header_id[..])?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+}
+
+/// Cross-check that a root we are about to trust — the stored tip root
+/// at open, or a snapshot root a rollback is about to install live —
+/// equals the `state_root` the tip block's header commits to. The header
+/// is the consensus-authenticated commitment to the post-apply digest,
+/// so a stored root that disagrees with it is corruption: a mutated
+/// `STATE_META[root_digest]` or `DIGEST_HISTORY[h]` (even one that happens
+/// to equal the genesis digest) would otherwise be accepted, and the node
+/// would boot or reorg onto the wrong parent root and then reject honest
+/// follow-on blocks. This anchor is what makes the root-value check the
+/// genesis seed displaced safe: instead of guessing whether `root ==
+/// genesis` at an applied height is a torn write or a real empty block, it
+/// asks the header, which knows.
+///
+/// An applied tip cannot exist without its header — the full block is
+/// verified against that header's `state_root` before it commits — so a
+/// missing header here is itself corruption, not a benign absence.
+fn require_root_matches_tip_header(
+    headers: &crate::header_store::HeaderSectionTables,
+    tip_header_id: &[u8; 32],
+    expected_root: &[u8; 33],
+) -> Result<(), StateError> {
+    let header_bytes =
+        headers
+            .get_header(tip_header_id)?
+            .ok_or_else(|| StateError::DbCorruption {
+                table: "headers",
+                key: hex::encode(tip_header_id),
+                reason: "applied tip has no stored header — cannot anchor the \
+                     persisted state root to its consensus commitment"
+                    .into(),
+            })?;
+    let mut reader = ergo_primitives::reader::VlqReader::new(&header_bytes);
+    let header =
+        ergo_ser::header::read_header(&mut reader).map_err(|e| StateError::DbCorruption {
+            table: "headers",
+            key: hex::encode(tip_header_id),
+            reason: format!("stored tip header failed to parse: {e:?}"),
+        })?;
+    if header.state_root.as_bytes() != expected_root {
+        return Err(StateError::DbCorruption {
+            table: "state_meta",
+            key: "root_digest".into(),
+            reason: format!(
+                "persisted root {} disagrees with tip header {} state_root {} \
+                 — torn write or external mutation of the stored root",
+                hex::encode(expected_root),
+                hex::encode(tip_header_id),
+                hex::encode(header.state_root.as_bytes()),
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Canonical genesis chain state for a fresh digest store. Reuses
+/// `ChainState::empty()` (the crate-wide pre-genesis state) so the
+/// digest backend's genesis matches the UTXO backend byte-for-byte
+/// — notably `best_header_score = [0]`, not an empty vec.
+fn genesis_chain_state() -> ChainStateMeta {
+    crate::chain::ChainState::empty().to_persisted()
+}
+
+/// Internal fork-choice invariants every `ChainStateMeta` the store
+/// accepts must satisfy, independent of any header store:
+/// - `best_header_height >= best_full_block_height` — headers are
+///   validated before the full blocks they cover, so the header tip
+///   can never trail the full-block tip.
+/// - `best_header_score` is non-empty — even genesis carries `[0]`.
+///
+/// Returns a static reason on violation so callers can route it to
+/// `InvalidPrecondition` (caller-supplied state) or `DbCorruption`
+/// (on-disk state). This does NOT validate `best_header_*` against
+/// persisted header rows — that needs header tables this sibling
+/// does not own.
+fn chain_state_internal_invariant(cs: &ChainStateMeta) -> Result<(), &'static str> {
+    if cs.best_header_height < cs.best_full_block_height {
+        return Err("chain state best_header_height < best_full_block_height \
+             (headers must lead or equal full blocks)");
+    }
+    if cs.best_header_score.is_empty() {
+        return Err("chain state best_header_score is empty (must be non-empty)");
+    }
+    Ok(())
+}
+
+fn decode_33_bytes(bytes: &[u8], table: &'static str, key: &str) -> Result<[u8; 33], StateError> {
+    if bytes.len() != 33 {
+        return Err(StateError::DbCorruption {
+            table,
+            key: key.into(),
+            reason: format!("must be 33 bytes; got {}", bytes.len()),
+        });
+    }
+    let mut out = [0u8; 33];
+    out.copy_from_slice(bytes);
+    Ok(out)
+}
+
+fn decode_32_bytes(bytes: &[u8], table: &'static str) -> Result<[u8; 32], StateError> {
+    if bytes.len() != 32 {
+        return Err(StateError::DbCorruption {
+            table,
+            key: "tip".into(),
+            reason: format!("header id must be 32 bytes; got {}", bytes.len()),
+        });
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(bytes);
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests;
