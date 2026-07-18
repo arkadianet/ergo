@@ -129,9 +129,15 @@ fn pooled_status(state: &V1State, row: crate::types::ApiMempoolTransaction) -> S
     let mut ahead_bytes: u64 = 0;
     let mut rank: u32 = 1;
     let mut max_fpb: u64 = row.fee_per_byte_nano_erg;
+    // TOCTOU: the O(1) `mempool_transaction` lookup and this full snapshot are
+    // separate reads, so the tx may have been mined/evicted in between. If it is
+    // no longer in the snapshot, report "unknown" rather than a rank/ahead-bytes
+    // computed against a pool that no longer contains it.
+    let mut found_self = false;
     for other in &rows {
         max_fpb = max_fpb.max(other.fee_per_byte_nano_erg);
         if other.tx_id == row.tx_id {
+            found_self = true;
             continue;
         }
         let ahead = other.priority_weight > row.priority_weight
@@ -140,6 +146,20 @@ fn pooled_status(state: &V1State, row: crate::types::ApiMempoolTransaction) -> S
             rank += 1;
             ahead_bytes += u64::from(other.size_bytes);
         }
+    }
+
+    if !found_self {
+        // Left the pool between the lookup and the snapshot — a stale read.
+        return StatusResponse {
+            tx_id: row.tx_id.clone(),
+            state: "unknown",
+            pool: None,
+            first_seen_unix_ms: None,
+            first_seen_iso: None,
+            inclusion_height: None,
+            confirmations: None,
+            header_id: None,
+        };
     }
 
     let competitiveness = if max_fpb == 0 {
