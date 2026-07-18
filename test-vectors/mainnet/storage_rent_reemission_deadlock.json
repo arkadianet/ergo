@@ -1,0 +1,103 @@
+{
+ "description": "Storage-rent / EIP-27 deadlock oracle vector. A rent-eligible mainnet miner-reward box still carrying re-emission tokens cannot be claimed via storage rent: the token-preserving claim (checkExpiredBox's recreate branch) violates verifyReemissionSpending, and the EIP-27-compliant burn variant violates checkExpiredBox. Both shapes were rejected by a live Scala 6.x mainnet node via POST /transactions/check; verdicts captured verbatim below.",
+ "captured": {
+  "scala_node": "sigmora-node, mainnet, POST /transactions/check",
+  "capture_height": 1831842,
+  "spending_height": 1831843
+ },
+ "input_box": {
+  "boxId": "fbf119cbeb73cadc5866f63931599c85e26ea603b9db6d4a97914b88f1f82cfb",
+  "value": 63000000000,
+  "ergoTree": "100204a00b08cd02a1f56716cb8df4feb9371437904b9125b82db939238cd7d948786db33de3139fea02d192a39a8cc7a70173007301",
+  "assets": [
+   {
+    "tokenId": "d9a2cc8a09abfaed87afacfbb7daee79a6b26f10c6613fc13d3f3953e5521d1a",
+    "amount": 12000000000
+   }
+  ],
+  "creationHeight": 777693,
+  "additionalRegisters": {},
+  "transactionId": "a1eed80ffd1036add2e5ca5b25b627bd42702e776fab1aed0c3cc2ca1bf756af",
+  "index": 1
+ },
+ "token_preserving_claim": {
+  "tx": {
+   "inputs": [
+    {
+     "boxId": "fbf119cbeb73cadc5866f63931599c85e26ea603b9db6d4a97914b88f1f82cfb",
+     "spendingProof": {
+      "proofBytes": "",
+      "extension": {
+       "127": "0300"
+      }
+     }
+    }
+   ],
+   "dataInputs": [],
+   "outputs": [
+    {
+     "value": 62831250000,
+     "ergoTree": "100204a00b08cd02a1f56716cb8df4feb9371437904b9125b82db939238cd7d948786db33de3139fea02d192a39a8cc7a70173007301",
+     "assets": [
+      {
+       "tokenId": "d9a2cc8a09abfaed87afacfbb7daee79a6b26f10c6613fc13d3f3953e5521d1a",
+       "amount": 12000000000
+      }
+     ],
+     "additionalRegisters": {},
+     "creationHeight": 1831843
+    },
+    {
+     "value": 168750000,
+     "ergoTree": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+     "assets": [],
+     "additionalRegisters": {},
+     "creationHeight": 1831843
+    }
+   ]
+  },
+  "scala_verdict": "Malformed transaction: Transaction should conform EIP-27 rules 13eed065fc5a95d959fe3618b788dfeb4b5ab909c0bd4a3567c5f2fd0afe2f8d",
+  "expected_rust_error": "ReemissionRulesViolated"
+ },
+ "burn_compliant_claim": {
+  "tx": {
+   "inputs": [
+    {
+     "boxId": "fbf119cbeb73cadc5866f63931599c85e26ea603b9db6d4a97914b88f1f82cfb",
+     "spendingProof": {
+      "proofBytes": "",
+      "extension": {
+       "127": "0300"
+      }
+     }
+    }
+   ],
+   "dataInputs": [],
+   "outputs": [
+    {
+     "value": 50831250000,
+     "ergoTree": "100204a00b08cd02a1f56716cb8df4feb9371437904b9125b82db939238cd7d948786db33de3139fea02d192a39a8cc7a70173007301",
+     "assets": [],
+     "additionalRegisters": {},
+     "creationHeight": 1831843
+    },
+    {
+     "value": 12000000000,
+     "ergoTree": "193c03040004000e20d3feeffa87f2df63a7a15b4905e618ae3ce4c69a7975f171bd314d0b877927b8d1938cb2e4c6b2a5730000020c4d0e730100017302",
+     "assets": [],
+     "additionalRegisters": {},
+     "creationHeight": 1831843
+    },
+    {
+     "value": 168750000,
+     "ergoTree": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+     "assets": [],
+     "additionalRegisters": {},
+     "creationHeight": 1831843
+    }
+   ]
+  },
+  "scala_verdict": "Malformed transaction: Scripts of all transaction inputs should pass verification. d895753f0f1e576fce59dfd2e5f1dd497726310d7bbb6639a26cf58e36799bfd: #0 => Success((false,50))",
+  "expected_rust_error": "ProofFailed"
+ }
+}

@@ -29,10 +29,13 @@
 //! Contract: the builder only ever returns transactions the validator
 //! will accept. A box is silently skipped when claiming it would produce
 //! an output the validator rejects — recreate value below the per-byte
-//! min-value (dust) floor, an output past `max_box_size`, or a count past
-//! `max_claims`. Excess seized tokens past what fits one P2PK output are
-//! burned. If the total proceeds cannot clear the dust floor, no claim is
-//! produced.
+//! min-value (dust) floor, an output past `max_box_size`, a count past
+//! `max_claims`, or (EIP-27 networks) a box still carrying re-emission
+//! tokens, which is consensus-unclaimable outright (see
+//! [`build_rent_claim`]; oracle-pinned by
+//! `tests/storage_rent_reemission_oracle.rs`). Excess seized tokens past
+//! what fits one P2PK output are burned. If the total proceeds cannot
+//! clear the dust floor, no claim is produced.
 
 use ergo_primitives::reader::VlqReader;
 use ergo_primitives::writer::VlqWriter;
@@ -48,8 +51,8 @@ use ergo_ser::token::Token;
 use ergo_ser::transaction::{write_transaction, Transaction};
 use ergo_validation::storage_rent::compute_storage_fee;
 use ergo_validation::{
-    validate_transaction_parsed, CheckedTransaction, CostAccumulator, ProtocolParams,
-    ReemissionRuleInputs, TransactionContext, TxValidationCtx, TxValidationRules,
+    reemission_obligation_core, validate_transaction_parsed, CheckedTransaction, CostAccumulator,
+    ProtocolParams, ReemissionRuleInputs, TransactionContext, TxValidationCtx, TxValidationRules,
 };
 
 use crate::error::MiningError;
@@ -72,9 +75,9 @@ pub struct RentClaim {
     /// The zero-fee rent-claim transaction.
     pub tx: Transaction,
     /// The boxes actually claimed, in `tx.inputs` order. Boxes skipped
-    /// because they are too young, fee-overflowed, would recreate below
-    /// the dust floor, would exceed `max_box_size`, or fell past
-    /// `max_claims` are absent.
+    /// because they are too young, fee-overflowed, carry re-emission
+    /// tokens (EIP-27), would recreate below the dust floor, would exceed
+    /// `max_box_size`, or fell past `max_claims` are absent.
     pub resolved_inputs: Vec<ErgoBox>,
 }
 
@@ -87,12 +90,23 @@ pub struct RentClaim {
 /// `max_box_size`. `max_claims` bounds how many boxes (and thus outputs)
 /// one claim may carry; it is clamped to `i16::MAX` so every var-127
 /// output index fits the wire format.
+///
+/// `reemission_rules` (EIP-27 networks) excludes boxes still carrying
+/// re-emission tokens: such a box is consensus-unclaimable via storage
+/// rent — `checkExpiredBox`'s recreate branch demands the claimed output
+/// preserve the box's exact script and tokens, while
+/// `verifyReemissionSpending` rejects any output carrying the re-emission
+/// token, so no output can satisfy both. (The full-consume branch never
+/// applies: post-activation only emission-tx outputs carry the token, and
+/// a reward box's value is always far above its storage fee.) `None`
+/// disables the exclusion (networks without EIP-27).
 pub fn build_rent_claim(
     eligible: &[ErgoBox],
     current_height: u32,
     params: &ProtocolParams,
     max_claims: usize,
     miner_pubkey: &[u8; 33],
+    reemission_rules: Option<&ReemissionRuleInputs>,
 ) -> Result<Option<RentClaim>, MiningError> {
     // Clamp so every var-127 output index fits the i16 the wire uses.
     let max_claims = max_claims.min(i16::MAX as usize);
@@ -125,6 +139,35 @@ pub fn build_rent_claim(
         let box_age = current_height.saturating_sub(b.candidate.creation_height);
         if box_age < params.storage_period {
             continue;
+        }
+
+        // EIP-27: a box still carrying re-emission tokens cannot be claimed
+        // (see the function docs). The trigger predicate is the validator's
+        // own `reemission_obligation_core`, applied to this box alone, so
+        // the builder's skip can never drift from what
+        // `verify_reemission_spending` rejects. Checking each box alone is
+        // complete because the token cannot exist in a NON-triggering box:
+        // post-activation `verifyReemissionSpending` forbids every output
+        // from carrying it except the emission tx's own (whose reward box
+        // triggers, and whose emission box sits above the 100K-ERG floor
+        // but is re-spent every block and thus never rent-eligible).
+        if let Some(rules) = reemission_rules {
+            let token_amount = b
+                .candidate
+                .tokens
+                .iter()
+                .filter(|t| t.token_id.as_bytes() == &rules.reemission_token_id)
+                .map(|t| t.amount)
+                .fold(0u64, |acc, v| acc.saturating_add(v));
+            if reemission_obligation_core(
+                [(b.candidate.value, token_amount)],
+                current_height,
+                rules.activation_height,
+            )
+            .triggered
+            {
+                continue;
+            }
         }
 
         // `storageFee = storage_fee_factor *(i32 wrapping)* box_bytes_len`.
@@ -282,7 +325,14 @@ pub fn build_budget_bounded_rent_claim(
         if cap == 0 {
             return Ok(None);
         }
-        let claim = match build_rent_claim(eligible, current_height, params, cap, miner_pubkey)? {
+        let claim = match build_rent_claim(
+            eligible,
+            current_height,
+            params,
+            cap,
+            miner_pubkey,
+            reemission_rules,
+        )? {
             Some(c) => c,
             None => return Ok(None),
         };
@@ -583,7 +633,7 @@ mod tests {
         let height = 100;
         let box1 = aged_box(10_000_000_000, 0, 0xAA);
 
-        let claim = build_rent_claim(&[box1], height, &params, CLAIMS, &MINER_PK)
+        let claim = build_rent_claim(&[box1], height, &params, CLAIMS, &MINER_PK, None)
             .unwrap()
             .expect("a 10-ERG aged box must produce a claim");
 
@@ -599,7 +649,7 @@ mod tests {
         let height = 100;
         let box1 = aged_box(1_000_000, 0, 0xBB);
 
-        let claim = build_rent_claim(&[box1], height, &params, CLAIMS, &MINER_PK)
+        let claim = build_rent_claim(&[box1], height, &params, CLAIMS, &MINER_PK, None)
             .unwrap()
             .expect("a sub-fee aged box must be fully consumed into a claim");
 
@@ -632,7 +682,7 @@ mod tests {
         );
 
         assert!(
-            build_rent_claim(&[big], height, &params, CLAIMS, &MINER_PK)
+            build_rent_claim(&[big], height, &params, CLAIMS, &MINER_PK, None)
                 .unwrap()
                 .is_none(),
             "a fee-overflow box must be skipped, not claimed",
@@ -658,7 +708,7 @@ mod tests {
             "test box must land back positive after wrapping"
         );
 
-        let claim = build_rent_claim(&[big], height, &params, CLAIMS, &MINER_PK)
+        let claim = build_rent_claim(&[big], height, &params, CLAIMS, &MINER_PK, None)
             .unwrap()
             .expect("a second-wrap-positive box is collectable and must be claimed");
         validate_rent(&claim, height, &params)
@@ -674,7 +724,7 @@ mod tests {
         let young = aged_box(10_000_000_000, 95, 0xE0); // age 5 < 10
 
         assert!(
-            build_rent_claim(&[young], height, &params, CLAIMS, &MINER_PK)
+            build_rent_claim(&[young], height, &params, CLAIMS, &MINER_PK, None)
                 .unwrap()
                 .is_none(),
             "a box younger than the storage period must be skipped",
@@ -692,7 +742,7 @@ mod tests {
         let box1 = aged_box(10_000_000_000, 0, 0xD7);
 
         assert!(
-            build_rent_claim(&[box1], height, &params, CLAIMS, &MINER_PK)
+            build_rent_claim(&[box1], height, &params, CLAIMS, &MINER_PK, None)
                 .unwrap()
                 .is_none(),
             "a recreate that would fall below the dust floor must be skipped",
@@ -708,7 +758,7 @@ mod tests {
         let tiny = aged_box(1, 0, 0xD8); // 1 nanoERG, value < fee, < dust
 
         assert!(
-            build_rent_claim(&[tiny], height, &params, CLAIMS, &MINER_PK)
+            build_rent_claim(&[tiny], height, &params, CLAIMS, &MINER_PK, None)
                 .unwrap()
                 .is_none(),
             "sub-dust total proceeds must yield no claim",
@@ -723,7 +773,7 @@ mod tests {
             .map(|i| aged_box(10_000_000_000, 0, 0x10 + i as u8))
             .collect();
 
-        let claim = build_rent_claim(&boxes, height, &params, 3, &MINER_PK)
+        let claim = build_rent_claim(&boxes, height, &params, 3, &MINER_PK, None)
             .unwrap()
             .expect("claimable");
         assert_eq!(
@@ -744,9 +794,16 @@ mod tests {
         let recreate = aged_box(10_000_000_000, 0, 0xD0); // value ≫ fee
         let consume = aged_box(1_000_000, 0, 0xD1); // value < fee
 
-        let claim = build_rent_claim(&[recreate, consume], height, &params, CLAIMS, &MINER_PK)
-            .unwrap()
-            .expect("both boxes are claimable");
+        let claim = build_rent_claim(
+            &[recreate, consume],
+            height,
+            &params,
+            CLAIMS,
+            &MINER_PK,
+            None,
+        )
+        .unwrap()
+        .expect("both boxes are claimable");
 
         // outputs = [recreated_box, aggregate_p2pk]; two inputs.
         assert_eq!(claim.tx.inputs.len(), 2);
@@ -774,6 +831,7 @@ mod tests {
             &params,
             CLAIMS,
             &MINER_PK,
+            None,
         )
         .unwrap()
         .expect("claimable");
@@ -794,7 +852,7 @@ mod tests {
         // value < fee → full consume; carries two tokens.
         let consume = box_with_tokens(1_000_000, 0, 0xC1, tokens_from(0, 2));
 
-        let claim = build_rent_claim(&[consume], height, &params, CLAIMS, &MINER_PK)
+        let claim = build_rent_claim(&[consume], height, &params, CLAIMS, &MINER_PK, None)
             .unwrap()
             .expect("claimable");
 
@@ -822,7 +880,7 @@ mod tests {
             box_with_tokens(1_000_000, 0, 0xA4, tokens_from(135, 45)),
         ];
 
-        let claim = build_rent_claim(&boxes, height, &params, CLAIMS, &MINER_PK)
+        let claim = build_rent_claim(&boxes, height, &params, CLAIMS, &MINER_PK, None)
             .unwrap()
             .expect("claimable");
 
@@ -850,6 +908,7 @@ mod tests {
             &params,
             CLAIMS,
             &MINER_PK,
+            None,
         )
         .unwrap()
         .expect("claimable");
@@ -975,6 +1034,145 @@ mod tests {
         assert!(
             checked.transaction().inputs.len() < 10,
             "claim must have shrunk below all 10 boxes"
+        );
+    }
+
+    // ----- EIP-27 re-emission interaction -----
+
+    /// Mainnet-shaped EIP-27 rules (real token id + pay-to-reemission tree)
+    /// with a test-friendly activation height.
+    fn reemission_rules(activation_height: u32) -> ReemissionRuleInputs {
+        let spec = ergo_chain_spec::ChainSpec::mainnet();
+        let reem = spec.reemission.as_ref().expect("mainnet has EIP-27");
+        let trees = spec
+            .emission_script_trees()
+            .expect("mainnet has emission trees");
+        ReemissionRuleInputs {
+            activation_height,
+            reemission_token_id: *reem.reemission_token_id.as_bytes(),
+            pay_to_reemission_tree: trees.pay_to_reemission,
+        }
+    }
+
+    fn reemission_token(rules: &ReemissionRuleInputs, amount: u64) -> Token {
+        Token {
+            token_id: Digest32::from_bytes(rules.reemission_token_id),
+            amount,
+        }
+    }
+
+    #[test]
+    fn reemission_token_box_is_skipped_with_rules_enabled() {
+        // Direct unit check of the exclusion: with EIP-27 rules wired, a
+        // token-carrying eligible box produces no claim at all (nothing
+        // else to sweep), instead of a claim the validator would reject.
+        let params = rent_params(10, 1_250_000);
+        let height = 100;
+        let rules = reemission_rules(0);
+        let tokened = box_with_tokens(10_000_000_000, 0, 0xD2, vec![reemission_token(&rules, 12)]);
+
+        let claim =
+            build_rent_claim(&[tokened], height, &params, CLAIMS, &MINER_PK, Some(&rules)).unwrap();
+        assert!(
+            claim.is_none(),
+            "a re-emission-token box must not be claimable under EIP-27 rules"
+        );
+    }
+
+    #[test]
+    fn reemission_token_box_claimed_without_rules() {
+        // `None` rules (a network without EIP-27, e.g. the public testnet):
+        // the same box is an ordinary token-carrying box, claimed via the
+        // recreate branch, and the claim passes consensus validation
+        // (whose reemission check is equally off — TxValidationRules
+        // default).
+        let params = rent_params(10, 1_250_000);
+        let height = 100;
+        let rules = reemission_rules(0);
+        let tokened = box_with_tokens(10_000_000_000, 0, 0xD3, vec![reemission_token(&rules, 12)]);
+
+        let claim = build_rent_claim(&[tokened], height, &params, CLAIMS, &MINER_PK, None)
+            .unwrap()
+            .expect("without EIP-27 the box is an ordinary claimable box");
+        validate_rent(&claim, height, &params)
+            .expect("claim must pass consensus validation with reemission off");
+    }
+
+    #[test]
+    fn reemission_token_box_claimed_at_activation_height() {
+        // Scala's trigger is STRICTLY `height > activationHeight`; at
+        // exactly the activation height the burn rule does not apply yet,
+        // so the box is claimable (the shared `reemission_obligation_core`
+        // encodes this boundary — pinned here against builder drift).
+        let params = rent_params(10, 1_250_000);
+        let height = 100;
+        let rules = reemission_rules(height);
+        let tokened = box_with_tokens(10_000_000_000, 0, 0xD4, vec![reemission_token(&rules, 12)]);
+
+        let claim =
+            build_rent_claim(&[tokened], height, &params, CLAIMS, &MINER_PK, Some(&rules)).unwrap();
+        assert!(
+            claim.is_some(),
+            "at exactly the activation height the trigger is off (strict >)"
+        );
+    }
+
+    #[test]
+    fn budget_bounded_claim_excludes_reemission_token_box() {
+        // A rent-eligible reward-shaped box still carrying re-emission
+        // tokens is consensus-unclaimable: `checkExpiredBox`'s recreate
+        // branch demands the output keep the box's exact tokens, while
+        // `verifyReemissionSpending` rejects any output carrying the
+        // re-emission token — no output satisfies both. The builder must
+        // exclude the box (and still sweep the clean ones) instead of
+        // producing a claim the validator rejects with "an output carries
+        // the re-emission token".
+        let params = rent_params(10, 1_250_000);
+        let height = 100;
+        let rules = reemission_rules(0);
+
+        let clean = aged_box(10_000_000_000, 0, 0xD0);
+        let tokened = box_with_tokens(
+            10_000_000_000,
+            0,
+            0xD1,
+            vec![reemission_token(&rules, 12_000_000_000)],
+        );
+        let ctx = TransactionContext {
+            height,
+            miner_pubkey: MINER_PK,
+            pre_header_timestamp: 0,
+            activated_script_version: 2,
+            pre_header_version: 3,
+            pre_header_parent_id: [0u8; 32],
+            pre_header_n_bits: 0,
+            pre_header_votes: [0u8; 3],
+        };
+
+        let (checked, _, _) = build_budget_bounded_rent_claim(
+            &[clean.clone(), tokened],
+            height,
+            &params,
+            CLAIMS,
+            &MINER_PK,
+            &ctx,
+            &[],
+            u64::MAX,
+            u64::MAX,
+            Some(&rules),
+        )
+        .expect("builder must not error over a re-emission-token box")
+        .expect("the clean box must still be claimed");
+
+        assert_eq!(
+            checked.transaction().inputs.len(),
+            1,
+            "only the clean box may be claimed"
+        );
+        assert_eq!(
+            checked.transaction().inputs[0].box_id,
+            clean.box_id().unwrap(),
+            "the claimed input must be the clean box"
         );
     }
 }
