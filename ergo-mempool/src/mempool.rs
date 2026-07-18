@@ -41,6 +41,15 @@ pub struct Mempool {
     /// every existing caller and test keeps working unchanged; the node
     /// wires a `Some(_)` after boot once the realtime bus exists.
     observer: Option<Arc<dyn MempoolObserver>>,
+    /// Descendants left pooled when a hard-invalid recheck cascade truncated
+    /// at `max_family_depth` (the [`OrderedPool::remove_with_descendants_frontier`]
+    /// frontier). Their hard-invalid ancestor is gone, so they are orphaned and
+    /// must be dependency-evicted — but doing the whole family in one op would
+    /// reintroduce the O(family) cost the depth cap prevents, so they are
+    /// drained under the per-pass budget across successive recheck passes.
+    /// Only ever fed from the hard-invalid arm, so a transient
+    /// unresolved-input (demoted-parent) tx is never enqueued here.
+    pending_orphan_eviction: Vec<TxId>,
 }
 
 impl Mempool {
@@ -66,6 +75,7 @@ impl Mempool {
             unresolved,
             revalidation,
             observer: None,
+            pending_orphan_eviction: Vec::new(),
         }
     }
 
@@ -421,15 +431,14 @@ impl Mempool {
     /// id through the shared `admission::record_failed_tx` classifier (here
     /// always the blacklist arm, since only hard-invalid failures reach it), so
     /// it stops being relayed. Cascade descendants are dependency-evicted only
-    /// (never cached). NOTE: a descendant beyond the `max_family_depth` cascade
-    /// bound is left in the pool and is NOT re-caught by a later recheck pass —
-    /// its subsequent revalidation returns `UnresolvedInput` (its evicted
-    /// ancestor's output is gone), which the policy above retains rather than
-    /// evicts. Such an orphan lingers until independent removal (saturation
-    /// `LowWeight` eviction, or confirmation/reorg). This is a bounded,
-    /// known limitation of the fixed cascade depth; a follow-up that carries
-    /// the truncated dependency frontier into bounded cascade removal is
-    /// tracked separately.
+    /// (never cached). A descendant BEYOND the `max_family_depth` cascade bound
+    /// is not removed in the same op (the cap guards against an O(family) spike),
+    /// but it is not abandoned either: the removal returns the truncation
+    /// frontier, which is queued in `pending_orphan_eviction` and swept by
+    /// [`Self::drain_orphan_evictions`] under this pass's cost budget, carrying
+    /// the deeper frontier forward until the whole invalid subtree is gone. Only
+    /// hard-invalid cascades feed that queue, so a transient `UnresolvedInput`
+    /// (demoted-parent) tx is never swept.
     ///
     /// `now` is injected and stamps all per-tx bookkeeping (the rotation clock),
     /// so the pass is deterministic and unit-testable; the only wall-clock read
@@ -522,6 +531,19 @@ impl Mempool {
                 &mut passed_ids,
             )));
         }
+
+        // Dependency-evict any descendants orphaned by this pass's hard-invalid
+        // cascades that the depth cap left pooled (bounded by the remaining
+        // budget; leftovers carry to the next pass).
+        self.drain_orphan_evictions(
+            max_family_depth,
+            bounds,
+            max_tx_cost,
+            &mut pool_outputs,
+            &mut removed_for_actions,
+            &mut cost_acc,
+            cost_cap,
+        );
 
         let evicted = removed_for_actions.len();
         if !removed_for_actions.is_empty() {
@@ -646,9 +668,16 @@ impl Mempool {
                 self.pool.touch_rechecked(&id, now);
             }
             Err(err) => {
-                let removed =
-                    self.pool
-                        .remove_with_descendants_debiting(&id, max_family_depth, bounds);
+                let (removed, frontier) = self.pool.remove_with_descendants_debiting_frontier(
+                    &id,
+                    max_family_depth,
+                    bounds,
+                );
+                // Descendants past the depth cap are orphaned by this eviction;
+                // queue them for bounded dependency-eviction (drained under the
+                // per-pass budget) rather than leaving them to linger as
+                // retained UnresolvedInput.
+                self.pending_orphan_eviction.extend(frontier);
                 for e in &removed {
                     for out in &e.outputs {
                         pool_outputs.remove(out);
@@ -668,6 +697,64 @@ impl Mempool {
             }
         }
         consumed
+    }
+
+    /// Drain queued orphan evictions — descendants a hard-invalid cascade left
+    /// pooled past the `max_family_depth` cap — bounded by the pass's remaining
+    /// cost budget. Each is dependency-evicted with its own descendants; a
+    /// removal that truncates again re-queues the deeper frontier, so a large
+    /// orphan subtree is cleared over successive passes rather than in one
+    /// O(family) spike. Orphans no longer pooled (confirmed / already swept) are
+    /// skipped; those not reached this pass stay queued for the next. Appends
+    /// removed ids to `removed_for_actions` and prunes `pool_outputs`; does NOT
+    /// blacklist — this is dependency eviction, not a per-tx verdict. Charges
+    /// `max_tx_cost` per removal op against `cost_acc` so the same anti-DoS
+    /// budget that bounds the validation pass also bounds the sweep.
+    #[allow(clippy::too_many_arguments)]
+    fn drain_orphan_evictions(
+        &mut self,
+        max_family_depth: usize,
+        bounds: crate::pool::FamilyBounds,
+        max_tx_cost: u64,
+        pool_outputs: &mut std::collections::HashMap<
+            ergo_primitives::digest::Digest32,
+            ergo_ser::ergo_box::ErgoBox,
+        >,
+        removed_for_actions: &mut Vec<TxId>,
+        cost_acc: &mut u128,
+        cost_cap: u128,
+    ) {
+        if self.pending_orphan_eviction.is_empty() {
+            return;
+        }
+        // Work-queue: process queued orphans and any deeper frontier they
+        // surface within this pass, until the queue drains or the budget is
+        // hit. Whatever remains on a budget cutoff persists to the next pass.
+        let mut work: std::collections::VecDeque<TxId> =
+            std::mem::take(&mut self.pending_orphan_eviction).into();
+        while let Some(id) = work.pop_front() {
+            if *cost_acc >= cost_cap {
+                work.push_front(id);
+                break;
+            }
+            if !self.pool.contains(&id) {
+                continue; // already gone (confirmed / swept by another cascade)
+            }
+            let (removed, frontier) =
+                self.pool
+                    .remove_with_descendants_debiting_frontier(&id, max_family_depth, bounds);
+            *cost_acc = cost_acc.saturating_add(u128::from(max_tx_cost));
+            for e in &removed {
+                for out in &e.outputs {
+                    pool_outputs.remove(out);
+                }
+                removed_for_actions.push(e.tx_id);
+            }
+            for f in frontier {
+                work.push_back(f);
+            }
+        }
+        self.pending_orphan_eviction = work.into();
     }
 
     /// Targeted recheck of a SPECIFIC set of pooled tx ids — Component B's
@@ -751,6 +838,17 @@ impl Mempool {
                 &mut passed_ids,
             )));
         }
+
+        // Same orphan-cascade drain as the full pass (see `recheck_and_evict`).
+        self.drain_orphan_evictions(
+            max_family_depth,
+            bounds,
+            max_tx_cost,
+            &mut pool_outputs,
+            &mut removed_for_actions,
+            &mut cost_acc,
+            cost_cap,
+        );
 
         let evicted = removed_for_actions.len();
         if !removed_for_actions.is_empty() {

@@ -234,6 +234,42 @@ fn remove_with_descendants_respects_max_depth() {
 }
 
 #[test]
+fn remove_with_descendants_frontier_reports_truncated_orphans() {
+    // Chain 1→2→3→4. Cap at 2 removes {1,2}; tx 3 is the un-visited direct
+    // child of the removed tx 2 — the truncation frontier the caller carries
+    // forward. tx 4 is discovered only once tx 3 is itself processed.
+    let mut p = OrderedPool::with_capacity(8);
+    p.insert(mk_entry(1, 10, &[10], &[100], &[])).unwrap();
+    p.insert(mk_entry(2, 20, &[100], &[200], &[1])).unwrap();
+    p.insert(mk_entry(3, 30, &[200], &[210], &[2])).unwrap();
+    p.insert(mk_entry(4, 40, &[210], &[220], &[3])).unwrap();
+
+    let (removed, frontier) = p.remove_with_descendants_frontier(&digest(1), 2);
+    assert_eq!(removed.len(), 2, "cap removes only parent + first child");
+    assert_eq!(frontier, vec![digest(3)], "tx 3 is the orphaned frontier");
+    assert!(p.contains(&digest(3)) && p.contains(&digest(4)));
+    p.check_invariants();
+
+    // Carrying the frontier forward finishes the job: removing tx 3 (cap 2
+    // again) evicts {3,4} with an empty frontier.
+    let (removed2, frontier2) = p.remove_with_descendants_frontier(&digest(3), 2);
+    assert_eq!(removed2.len(), 2, "tx 3 + tx 4");
+    assert!(frontier2.is_empty(), "subtree fully cleared");
+    assert!(p.is_empty());
+    p.check_invariants();
+}
+
+#[test]
+fn remove_with_descendants_frontier_empty_when_within_cap() {
+    let mut p = OrderedPool::with_capacity(4);
+    p.insert(mk_entry(1, 10, &[10], &[100], &[])).unwrap();
+    p.insert(mk_entry(2, 20, &[100], &[200], &[1])).unwrap();
+    let (removed, frontier) = p.remove_with_descendants_frontier(&digest(1), 500);
+    assert_eq!(removed.len(), 2);
+    assert!(frontier.is_empty(), "no truncation → no frontier");
+}
+
+#[test]
 fn remove_with_descendants_on_missing_tx() {
     let mut p = OrderedPool::with_capacity(4);
     assert!(p.remove_with_descendants(&digest(99), 10).is_empty());
