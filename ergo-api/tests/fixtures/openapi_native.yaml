@@ -2745,7 +2745,9 @@ components:
         target:
           type: integer
           format: int64
-          description: Desired value; the node votes up/down one step per block toward it.
+          description: |-
+            Desired value; the node votes up/down one step per voting epoch toward it
+            (consistent with `ApiVotableParam` above and the per-epoch history rows).
     ApiVotes:
       type: object
       description: |-

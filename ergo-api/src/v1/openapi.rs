@@ -159,7 +159,7 @@ operator controls. Distinct from the pre-v1 native surface documented at `/swagg
         crate::v1::routes::diagnostics::candidate_build,
         crate::v1::routes::diagnostics::reorgs,
         crate::v1::routes::diagnostics::composite,
-        crate::v1::routes::batch::batch_handler,
+        crate::v1::routes::batch::dispatch::batch_handler,
         crate::v1::script::handlers::compile,
         crate::v1::script::handlers::inspect,
         crate::v1::script::handlers::execute,
