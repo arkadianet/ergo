@@ -545,6 +545,108 @@ fn check_request_timeout_with_no_pending_is_noop() {
     assert!(matches!(bs.state(), BootstrapState::Selected { .. }));
 }
 
+#[test]
+fn should_query_false_past_selected_in_requested_and_verified() {
+    // Discovery is over once we leave Querying. should_query must
+    // stay false through ManifestRequested and ManifestVerified so a
+    // late-arriving peer doesn't reopen GetSnapshotsInfo fan-out.
+    let mut bs = reach_selected(3);
+    bs.mark_manifest_requested(peer(1), 52_224, mid(0xAA), Instant::now());
+    assert!(matches!(
+        bs.state(),
+        BootstrapState::ManifestRequested { .. }
+    ));
+    assert!(
+        !bs.should_query(&peer(99)),
+        "ManifestRequested must suppress discovery queries",
+    );
+
+    bs.accept_verified_manifest(vec![1, 2, 3]);
+    assert!(matches!(
+        bs.state(),
+        BootstrapState::ManifestVerified { .. }
+    ));
+    assert!(
+        !bs.should_query(&peer(98)),
+        "ManifestVerified must suppress discovery queries",
+    );
+}
+
+#[test]
+fn disconnect_of_pending_owner_clears_request_without_waiting_timeout() {
+    // Peer 1 owns the outstanding GetManifest; four peers back A so
+    // the quorum survives its eviction. Disconnecting peer 1 must drop
+    // the pending request immediately (fall back to Selected) rather
+    // than leave it wedged until MANIFEST_REQUEST_TIMEOUT.
+    let mut bs = SnapshotBootstrap::with_quorum(3);
+    for p in 1..=4u16 {
+        bs.on_snapshots_info(peer(p), &[(52_224, mid(0xAA))]);
+    }
+    bs.mark_manifest_requested(peer(1), 52_224, mid(0xAA), Instant::now());
+
+    bs.on_peer_disconnect(&peer(1));
+    assert_eq!(
+        bs.state(),
+        BootstrapState::Selected {
+            height: 52_224,
+            manifest_id: mid(0xAA),
+        },
+        "pending owner left → request cleared, reselect same manifest",
+    );
+    let next = bs
+        .should_request_manifest()
+        .expect("can re-request from a surviving voter");
+    assert_ne!(next.0, peer(1), "disconnected peer must not be re-chosen");
+}
+
+#[test]
+fn disconnect_of_non_pending_peer_preserves_pending_request() {
+    // A disconnect that is NOT the pending owner must leave the
+    // outstanding request intact (only its vote is dropped).
+    let mut bs = SnapshotBootstrap::with_quorum(3);
+    for p in 1..=4u16 {
+        bs.on_snapshots_info(peer(p), &[(52_224, mid(0xAA))]);
+    }
+    bs.mark_manifest_requested(peer(1), 52_224, mid(0xAA), Instant::now());
+
+    bs.on_peer_disconnect(&peer(4));
+    assert_eq!(
+        bs.state(),
+        BootstrapState::ManifestRequested {
+            peer: peer(1),
+            height: 52_224,
+            manifest_id: mid(0xAA),
+        },
+        "non-owner disconnect must not touch the pending request",
+    );
+}
+
+#[test]
+fn voters_for_selected_manifest_stays_latched_after_vote_change() {
+    // After verifying manifest A, a fresh higher-height quorum for B
+    // would move the live `selected` tally — but chunk requests must
+    // still target the VERIFIED manifest A, not B.
+    let mut bs = SnapshotBootstrap::with_quorum(2);
+    bs.on_snapshots_info(peer(1), &[(52_224, mid(0xAA))]);
+    bs.on_snapshots_info(peer(2), &[(52_224, mid(0xAA))]);
+    bs.mark_manifest_requested(peer(1), 52_224, mid(0xAA), Instant::now());
+    bs.accept_verified_manifest(vec![1, 2, 3]);
+
+    // A higher-height quorum for B appears post-verification.
+    bs.on_snapshots_info(peer(3), &[(104_448, mid(0xBB))]);
+    bs.on_snapshots_info(peer(4), &[(104_448, mid(0xBB))]);
+
+    let voters = bs.voters_for_selected_manifest();
+    assert!(
+        voters.iter().all(|p| [peer(1), peer(2)].contains(p)),
+        "chunk voters must stay pinned to verified manifest A; got {voters:?}",
+    );
+    assert!(
+        !voters.contains(&peer(3)) && !voters.contains(&peer(4)),
+        "B-voters must not become chunk targets for verified manifest A",
+    );
+}
+
 // ----- 2g-2 trust verification -----
 
 fn ad_digest_with_root(root: [u8; 32], height_byte: u8) -> ADDigest {

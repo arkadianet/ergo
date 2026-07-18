@@ -214,20 +214,36 @@ impl SnapshotBootstrap {
     /// vote, the selection reverts to `Querying`. Also clears the
     /// peer from `discovery_queried` so a reconnect triggers a
     /// fresh `GetSnapshotsInfo`.
+    ///
+    /// If the departing peer owns the outstanding `GetManifest`, the
+    /// request is dropped immediately (evict + recompute) rather than
+    /// left to expire after [`MANIFEST_REQUEST_TIMEOUT`] — a dead peer
+    /// will never reply, so waiting the full window only stalls the
+    /// rotation to another voter.
     pub fn on_peer_disconnect(&mut self, peer: &PeerId) {
         self.discovery_queried.remove(peer);
-        if self.votes.remove(peer).is_some() {
+        if self.pending_request.map(|p| p.peer) == Some(*peer) {
+            // Owner of the pending request left: clear it, evict their
+            // vote, and recompute so the next tick rotates to a new voter.
+            self.reject_manifest_and_evict_voter(*peer);
+        } else if self.votes.remove(peer).is_some() {
             self.recompute_selection();
         }
     }
 
     /// True when the outbound fan-out should send `GetSnapshotsInfo`
     /// to this peer. Returns `false` once we've already queried them
-    /// in this discovery epoch, or once we've reached `Selected`
-    /// (no need to keep asking — manifest download phase takes over).
+    /// in this discovery epoch, or once discovery has produced a
+    /// selection — `Selected` **or beyond** (`ManifestRequested` /
+    /// `ManifestVerified`). Past `Selected` the manifest download phase
+    /// has taken over, so querying even a newly-seen peer would only
+    /// re-open discovery for a decision already made.
     pub fn should_query(&self, peer: &PeerId) -> bool {
-        if matches!(self.state(), BootstrapState::Selected { .. }) {
-            return false;
+        match self.state() {
+            BootstrapState::Selected { .. }
+            | BootstrapState::ManifestRequested { .. }
+            | BootstrapState::ManifestVerified { .. } => return false,
+            BootstrapState::Idle | BootstrapState::Querying => {}
         }
         !self.discovery_queried.contains(peer)
     }
@@ -277,17 +293,37 @@ impl SnapshotBootstrap {
             .map(|(peer, _)| *peer)
     }
 
-    /// All peers whose vote matches the currently-selected
-    /// manifest. The chunk-download fan-out (part 2h-3) iterates
-    /// this list to spread chunk requests across the quorum rather
-    /// than hammer the single manifest responder. Returns an empty
-    /// `Vec` when not Selected.
+    /// The manifest the reducer is committed to, latched against
+    /// recomputation. Once a request is pending or a manifest is
+    /// verified, that `(height, manifest_id)` is the target for the
+    /// rest of the session — a later vote change must not silently
+    /// repoint the chunk-download fan-out at a different manifest than
+    /// the one whose bytes we verified. Precedence mirrors [`Self::state`]:
+    /// verified > pending > selected.
+    fn latched_target(&self) -> Option<PeerVote> {
+        if let Some(v) = &self.verified {
+            return Some((v.height, v.manifest_id));
+        }
+        if let Some(p) = &self.pending_request {
+            return Some((p.height, p.manifest_id));
+        }
+        self.selected
+    }
+
+    /// All peers whose vote matches the manifest we're committed to.
+    /// The chunk-download fan-out (part 2h-3) iterates this list to
+    /// spread chunk requests across the quorum rather than hammer the
+    /// single manifest responder. Returns an empty `Vec` before a
+    /// selection exists.
     ///
-    /// Includes the peer that already served the manifest — they
-    /// can serve chunks too. Excludes only peers we've explicitly
-    /// evicted via `reject_manifest_and_evict_voter`.
+    /// Targets the [`Self::latched_target`] (verified > pending >
+    /// selected), not the live `selected` tally, so a vote change
+    /// after verification cannot repoint chunk requests away from the
+    /// verified manifest. Includes the peer that already served the
+    /// manifest — they can serve chunks too. Excludes only peers we've
+    /// explicitly evicted via `reject_manifest_and_evict_voter`.
     pub fn voters_for_selected_manifest(&self) -> Vec<PeerId> {
-        let Some(target) = self.selected else {
+        let Some(target) = self.latched_target() else {
             return Vec::new();
         };
         self.votes
