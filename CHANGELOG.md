@@ -16,6 +16,70 @@ infrastructure.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-07-19
+
+The refactor-and-harden release: a workspace-wide split of oversized source
+files into navigable module directories (behavior-preserving, content-
+preservation-verified), a review-findings hardening pass over the split
+surfaces (storage data-integrity, snapshot-sync authentication, download-path
+DoS bounds), and a batch of consensus/correctness fixes — most visibly the
+mining candidate that could no longer be built once a storage-rent-eligible
+box carried the re-emission token. The refactors change no consensus-relevant
+behavior; re-verify this node's verdicts against the Scala reference before
+relying on it for funds.
+
+### Added
+
+- **Operator-configurable custom extension fields (#199).** `[mining]
+  extension_fields` — a general merge-mining / commitment hook (e.g. an
+  Aegis block-commitment field) injected into every candidate's extension
+  alongside interlinks, validated at config time so a misconfig refuses to
+  boot.
+- **ADProofs section scheduling in digest-verifier mode (#224).** Mode-5
+  (digest) nodes request ADProofs sections so they can verify state
+  transitions without downloading full block bodies.
+
+### Fixed
+
+- **Mining candidate build vs storage-rent + EIP-27 (#225).** A
+  storage-rent-eligible box carrying the re-emission token made every
+  candidate build fail (`validate_rent_tx` → `ReemissionRulesViolated`);
+  re-emission-token boxes are now excluded from the zero-fee self-claim set,
+  so the candidate builds again.
+- **Typer parse-order fidelity (Finding E, #226).** rule-1001 valDef type
+  inference now replicates Scala's serialization-order `valDefTypeStore`
+  (duplicate id → reject, guardrail → accept), oracle-validated against
+  sigmastate 6.0.2.
+- **Sigma evaluator fidelity (#223).** Carrier / type / serialize parity
+  fixes (three #215 review findings), JVM-oracle-checked.
+- **Mempool orphan-cascade eviction (#222).** Descendants orphaned past the
+  cascade depth cap are evicted instead of stranded.
+- **Sync download-path correctness + DoS hardening (#220, #221).** Six
+  review findings on the download path, plus snapshot-bootstrap manifest
+  liveness and a latched chunk target.
+- **NiPoPoW deserialize bounds (#210).** `NipopowProof` with `m = 0` or
+  `k = 0` is rejected at the deserialize boundary.
+- **Storage-layer data-integrity guards (#218).** Index back-fills no longer
+  stamp a completion sentinel after detecting malformed source state
+  (retriable on the next boot rather than permanently locked out);
+  height-index promotion validates `HEADER_META.height` before writing; the
+  wallet block-section read uses a single consistent snapshot.
+- **Snapshot-sync authentication (#219).** The AVL snapshot codec now
+  authenticates digest-uncommitted structural metadata — a peer can no
+  longer tamper with internal separator keys or cached child labels without
+  detection, the whole chunk is authenticated (not just its root node), and
+  `manifest_depth` is range-checked at every boundary.
+
+### Changed
+
+- **Workspace-wide oversized-file split (#200, #202, #205–#219).** The
+  largest source files across ergo-compiler, ergo-node, ergo-validation,
+  ergo-p2p, ergo-ser, ergo-sync, ergo-mempool, ergo-sigma, ergo-api, and
+  ergo-state were split into sibling module directories along call-graph /
+  concern boundaries. Mechanical and behavior-preserving — verified by
+  whole-file content-preservation checks and unchanged test suites.
+- Reference-implementation documentation review, crate by crate (#203).
+
 ## [0.5.2] - 2026-07-13
 
 The v1 product API release: the complete Rust-native `/api/v1/*` surface (16
