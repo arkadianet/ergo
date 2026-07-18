@@ -53,6 +53,7 @@ skip-if-missing and re-run after re-extraction. Committed mainnet: 101 MB → 20
 | `schnorr_proofs_700000.json` | schnorr/spending/sigma-composition | P2PK + sigma proofs |
 | `transactions_205000_205200.json`, `transactions_1_200.json` | `api_bridge` byte-parity, scala-parity, indexer backfill | mid-era + genesis tx shapes |
 | `boxes_recent.json`, `genesis_boxes.json`, `fee_proposition.hex` | box decode, genesis, storage-rent fee prop | box/register shapes |
+| `storage_rent_reemission_deadlock.json` | `storage_rent_reemission_oracle` (ergo-mining) | storage-rent × EIP-27 deadlock: real rent-eligible reward box w/ re-emission tokens; both claim shapes + live-Scala `/transactions/check` rejection verdicts |
 
 ## Retained contiguous seeds (short, hermetic CI cumulative-state sanity)
 `transactions_1_1000` + `utxo_digests_1_1000` + `headers_1_2000` (`chain_validate_1_1000`,

@@ -863,6 +863,7 @@ mod tests {
             &params,
             1,
             &MINER_PK,
+            None,
         )
         .unwrap()
         .expect("aged box is claimable");
