@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::MiningError;
 
+/// Resolved custom extension fields — `(2-byte key, value bytes)` pairs,
+/// as consumed by [`crate::handle::MiningHandle::with_extension_fields`].
+pub type ResolvedExtensionFields = Vec<([u8; 2], Vec<u8>)>;
+
 /// Configuration for the mining subsystem.
 ///
 /// Fields map directly to the TOML `[mining]` section. CLI flags
@@ -79,6 +83,26 @@ pub struct MiningConfig {
     /// it is opt-in for mining nodes with RAM headroom.
     #[serde(default)]
     pub candidate_base_cache: bool,
+
+    /// Operator-configured custom extension fields, injected into every block
+    /// candidate's Extension section (the general merge-mining / commitment
+    /// hook — e.g. an Aegis `0xAE00` block commitment). Empty by default
+    /// (opt-in — it adds bytes to every block). Each entry is a hex `key`
+    /// (2 bytes / 4 hex chars) and hex `value` (≤ 64 bytes); the key's first
+    /// byte must not be a protocol-reserved namespace (`0x00`/`0x01`/`0x02`).
+    /// Validated at startup via [`MiningConfig::validate`].
+    #[serde(default)]
+    pub extension_fields: Vec<CustomExtensionField>,
+}
+
+/// One operator-configured custom extension field, as hex strings in the
+/// `[mining]` TOML (`{ key = "ae00", value = "01…" }`).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CustomExtensionField {
+    /// 2-byte extension key as hex (4 hex chars), e.g. `"ae00"`.
+    pub key: String,
+    /// Field value as hex (≤ 64 bytes → ≤ 128 hex chars).
+    pub value: String,
 }
 
 fn default_candidate_interval_ms() -> u64 {
@@ -112,6 +136,7 @@ impl Default for MiningConfig {
             claim_storage_rent: false,
             max_storage_rent_claims: default_max_storage_rent_claims(),
             candidate_base_cache: false,
+            extension_fields: Vec::new(),
         }
     }
 }
@@ -165,7 +190,44 @@ impl MiningConfig {
                 self.block_candidate_generation_interval_ms,
             )));
         }
+        // Custom extension fields: hex-decodable (below) and consensus-legal
+        // (rule 404 size, reserved-namespace guard, rule 405 no-duplicates).
+        crate::extension_builder::validate_custom_extension_fields(
+            &self.resolve_extension_fields()?,
+        )?;
         Ok(())
+    }
+
+    /// Decode the configured custom extension fields from their hex form into
+    /// `(key, value)` byte pairs for [`crate::handle::MiningHandle::with_extension_fields`].
+    /// Fails on malformed hex or a key that is not exactly 2 bytes. Deeper
+    /// consensus checks (size / namespace / duplicates) are applied by
+    /// [`crate::extension_builder::validate_custom_extension_fields`].
+    pub fn resolve_extension_fields(&self) -> Result<ResolvedExtensionFields, MiningError> {
+        self.extension_fields
+            .iter()
+            .map(|field| {
+                let key_bytes = hex::decode(&field.key).map_err(|e| {
+                    MiningError::InvalidConfig(format!(
+                        "[mining] extension field key {:?} is not valid hex: {e}",
+                        field.key
+                    ))
+                })?;
+                let key: [u8; 2] = key_bytes.as_slice().try_into().map_err(|_| {
+                    MiningError::InvalidConfig(format!(
+                        "[mining] extension field key {:?} must be exactly 2 bytes (4 hex chars)",
+                        field.key
+                    ))
+                })?;
+                let value = hex::decode(&field.value).map_err(|e| {
+                    MiningError::InvalidConfig(format!(
+                        "[mining] extension field {:?} value is not valid hex: {e}",
+                        field.key
+                    ))
+                })?;
+                Ok((key, value))
+            })
+            .collect()
     }
 }
 
@@ -181,6 +243,45 @@ mod tests {
         assert!(!cfg.enabled);
         cfg.validate()
             .expect("disabled config validates without pubkey");
+    }
+
+    // ----- custom extension fields -----
+
+    #[test]
+    fn resolve_extension_fields_decodes_hex_pairs() {
+        let cfg = MiningConfig {
+            extension_fields: vec![CustomExtensionField {
+                key: "ae00".into(),
+                value: "01aabb".into(),
+            }],
+            ..Default::default()
+        };
+        let resolved = cfg.resolve_extension_fields().expect("valid hex");
+        assert_eq!(resolved, vec![([0xAE, 0x00], vec![0x01, 0xaa, 0xbb])]);
+    }
+
+    #[test]
+    fn validate_rejects_reserved_namespace_and_bad_key_len() {
+        // Reserved namespace (0x00 = params).
+        let reserved = MiningConfig {
+            enabled: true,
+            miner_public_key_hex: None,
+            extension_fields: vec![CustomExtensionField {
+                key: "0001".into(),
+                value: "aa".into(),
+            }],
+            ..Default::default()
+        };
+        assert!(reserved.validate().is_err());
+        // Key not exactly 2 bytes.
+        let short_key = MiningConfig {
+            extension_fields: vec![CustomExtensionField {
+                key: "ae".into(),
+                value: "aa".into(),
+            }],
+            ..Default::default()
+        };
+        assert!(short_key.resolve_extension_fields().is_err());
     }
 
     #[test]

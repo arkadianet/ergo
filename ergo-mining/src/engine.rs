@@ -320,6 +320,7 @@ pub fn build_and_publish(
                 eligible_rent_boxes.as_slice(),
                 &voting_targets,
                 handle.voting_settings(),
+                handle.custom_extension_fields(),
                 &mut suspects,
             );
             // Read disposition from the view regardless of whether the build
@@ -340,6 +341,7 @@ pub fn build_and_publish(
             eligible_rent_boxes.as_slice(),
             &voting_targets,
             handle.voting_settings(),
+            handle.custom_extension_fields(),
             &mut suspects,
         )?,
     };
