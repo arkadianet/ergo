@@ -603,6 +603,287 @@ mod tests {
     use super::*;
     use crate::from_hex;
 
+    /// Rule-1001 `valDefTypeStore` parity (Finding E): the node's verdict on
+    /// duplicate-binding-id trees must equal the JVM's, which resolves every
+    /// `ValUse` from a FLAT, never-scoped, last-write-wins store evolving in
+    /// PARSE order (`ValDefSerializer.parse` writes `store[id] = rhs.tpe` AFTER
+    /// the rhs; `FuncValueSerializer.parse` writes each arg's declared type
+    /// BEFORE the body; `ValUseSerializer.parse` reads at its position).
+    ///
+    /// Live-oracle test: needs `scala-cli` on PATH; the first query resolves
+    /// JVM dependencies (minutes). Run with
+    /// `cargo test -p ergo-difftest --lib valdef_type_store -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "needs scala-cli (live JVM oracle)"]
+    fn valdef_type_store_shapes_match_jvm_oracle() {
+        use ergo_primitives::writer::VlqWriter;
+        use ergo_ser::ergo_tree::{write_ergo_tree, ErgoTree};
+        use ergo_ser::opcode::{Expr, IrNode, Payload};
+        use ergo_ser::sigma_type::SigmaType;
+        use ergo_ser::sigma_value::{SigmaBoolean, SigmaValue};
+
+        fn op(opcode: u8, payload: Payload) -> Expr {
+            Expr::Op(IrNode { opcode, payload })
+        }
+        fn long0() -> Expr {
+            Expr::Const {
+                tpe: SigmaType::SLong,
+                val: SigmaValue::Long(0),
+            }
+        }
+        fn sigma_const() -> Expr {
+            Expr::Const {
+                tpe: SigmaType::SSigmaProp,
+                val: SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)),
+            }
+        }
+        fn val_def(id: u32, rhs: Expr) -> Expr {
+            op(
+                0xD6,
+                Payload::ValDef {
+                    id,
+                    tpe: None,
+                    rhs: Box::new(rhs),
+                },
+            )
+        }
+        fn fun_def(id: u32, rhs: Expr) -> Expr {
+            op(
+                0xD7,
+                Payload::FunDef {
+                    id,
+                    tpe: None,
+                    tpe_args: vec![SigmaType::STypeVar("T".into())],
+                    rhs: Box::new(rhs),
+                },
+            )
+        }
+        fn val_use(id: u32) -> Expr {
+            op(0x72, Payload::ValUse { id })
+        }
+        fn block(items: Vec<Expr>, result: Expr) -> Expr {
+            op(
+                0xD8,
+                Payload::BlockValue {
+                    items,
+                    result: Box::new(result),
+                },
+            )
+        }
+        fn func_value(args: Vec<(u32, Option<SigmaType>)>, body: Expr) -> Expr {
+            op(
+                0xD9,
+                Payload::FuncValue {
+                    args,
+                    body: Box::new(body),
+                },
+            )
+        }
+        /// Sizeless v0 tree (the class where rule 1001 is a plain REJECT on
+        /// both sides, so accept/reject diffing is clean) — or has_size v0
+        /// (where rule 1001 soft-fork-WRAPS on both sides instead: verdict
+        /// stays ACCEPT and the canonical bytes are the preserved original).
+        fn tree_bytes_sized(body: Expr, has_size: bool) -> Vec<u8> {
+            let tree = ErgoTree {
+                version: 0,
+                has_size,
+                constant_segregation: false,
+                constants: vec![],
+                body,
+            };
+            let mut w = VlqWriter::new();
+            write_ergo_tree(&mut w, &tree).expect("write probe tree");
+            w.result()
+        }
+        fn tree_bytes(body: Expr) -> Vec<u8> {
+            tree_bytes_sized(body, false)
+        }
+
+        let dup_id_body = || block(vec![val_def(1, long0()), val_def(1, long0())], val_use(1));
+        // (name, tree bytes, assert_parity). `assert_parity = false` probes are
+        // reported only (documented residuals outside the rule-1001 typer).
+        let probes: Vec<(&str, Vec<u8>, bool)> = vec![
+            (
+                // The Finding-E accept-invalid: root ValUse of a reused id is
+                // SLong at its parse position -> Scala REJECTS.
+                "dup_id_long { val x = 0L; val x = 0L; x }",
+                tree_bytes(dup_id_body()),
+                true,
+            ),
+            (
+                // The same dup-id body under has_size: rule 1001 soft-fork
+                // WRAPS on both sides -> ACCEPT with the original bytes as the
+                // canonical form (checked below when both accept).
+                "dup_id_long_has_size (wrap parity)",
+                tree_bytes_sized(dup_id_body(), true),
+                true,
+            ),
+            (
+                // THE GUARDRAIL (reject-valid = chain stall if broken): y is
+                // fixed to SigmaProp BEFORE the rebind -> Scala ACCEPTS.
+                "guardrail { val x = sigma; val y = x; val x = 0L; y }",
+                tree_bytes(block(
+                    vec![
+                        val_def(1, sigma_const()),
+                        val_def(2, val_use(1)),
+                        val_def(1, long0()),
+                    ],
+                    val_use(2),
+                )),
+                true,
+            ),
+            (
+                // Last-write-wins in the ACCEPT direction: final store[x] is
+                // SigmaProp -> Scala ACCEPTS (a first-write-wins bug rejects).
+                "lastwrite_sigma { val x = 0L; val x = sigma; x }",
+                tree_bytes(block(
+                    vec![val_def(1, long0()), val_def(1, sigma_const())],
+                    val_use(1),
+                )),
+                true,
+            ),
+            (
+                // Dup ids present but the root is independent of them -> ACCEPT.
+                "dup_id_unused_root { val x = 0L; val x = 0L; sigma }",
+                tree_bytes(block(
+                    vec![val_def(1, long0()), val_def(1, long0())],
+                    sigma_const(),
+                )),
+                true,
+            ),
+            (
+                // Off-spine rebind: the rebind of x sits inside the SECOND
+                // item's rhs (a nested block the type spine never visits) but
+                // is parsed BEFORE the root ValUse -> store[x] = SLong -> REJECT.
+                "offspine_rebind { val x = sigma; val d = { val x = 0L; 0L }; x }",
+                tree_bytes(block(
+                    vec![
+                        val_def(1, sigma_const()),
+                        val_def(2, block(vec![val_def(1, long0())], long0())),
+                    ],
+                    val_use(1),
+                )),
+                true,
+            ),
+            (
+                // FuncValue ARG rebind: FuncValueSerializer.parse writes each
+                // arg's declared type into the store (never popped) -> the
+                // lambda's arg id 1 rebinds x to SLong -> REJECT.
+                "funcvalue_arg_rebind { val x = sigma; val f = (id1: Long) => 0L; x }",
+                tree_bytes(block(
+                    vec![
+                        val_def(1, sigma_const()),
+                        val_def(2, func_value(vec![(1, Some(SigmaType::SLong))], long0())),
+                    ],
+                    val_use(1),
+                )),
+                true,
+            ),
+            (
+                // Rebind inside a FuncValue BODY (flat store, no scoping): the
+                // nested ValDef in the lambda body rebinds x -> REJECT.
+                "funcvalue_body_rebind { val x = sigma; val f = (id3: Long) => { val x = 0L; 0L }; x }",
+                tree_bytes(block(
+                    vec![
+                        val_def(1, sigma_const()),
+                        val_def(
+                            2,
+                            func_value(
+                                vec![(3, Some(SigmaType::SLong))],
+                                block(vec![val_def(1, long0())], long0()),
+                            ),
+                        ),
+                    ],
+                    val_use(1),
+                )),
+                true,
+            ),
+            (
+                // FunDef (0xD7) writes the store exactly like ValDef -> the
+                // ValDef rebind after it wins -> root ValUse = SLong -> REJECT.
+                "fundef_rebind { fun f[T] = sigma; val f = 0L; f }",
+                tree_bytes(block(
+                    vec![fun_def(1, sigma_const()), val_def(1, long0())],
+                    val_use(1),
+                )),
+                true,
+            ),
+            (
+                // A bare ValDef root types as its rhs (Scala `ValDef.tpe =
+                // rhs.tpe`, values.scala:924): a Long rhs -> REJECT...
+                "bare_valdef_root_long { val x = 0L }",
+                tree_bytes(val_def(1, long0())),
+                true,
+            ),
+            (
+                // ...and a sigma rhs -> ACCEPT.
+                "bare_valdef_root_sigma { val x = sigma }",
+                tree_bytes(val_def(1, sigma_const())),
+                true,
+            ),
+            (
+                // ValUse of an id NEVER bound: Scala's `store(id)` throws
+                // NoSuchElementException at PARSE (not a ValidationException,
+                // so a hard reject even under has_size). The node's parser
+                // accepts an unbound ValUse and the typer stays lenient — a
+                // PARSE-layer divergence outside the rule-1001 typer, reported
+                // here as a documented residual (not asserted).
+                "unbound_valuse { x }",
+                tree_bytes(block(vec![], val_use(1))),
+                false,
+            ),
+        ];
+
+        let script = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../scripts/jvm_serde_oracle/ErgoSerdeOracle.scala"
+        );
+        let mut oracle = Oracle::spawn(script).expect("spawn JVM oracle");
+
+        let mut failures = Vec::new();
+        for (name, bytes, assert_parity) in probes {
+            let (rust, _consumed) = ergo_tree_verdict(&bytes);
+            let jvm = oracle.query("ergo_tree", &bytes).expect("oracle query");
+            let class = |v: &Verdict| match v {
+                Verdict::Accept(_) => "ACCEPT",
+                Verdict::Reject(_) => "REJECT",
+                Verdict::Err(_) => "ERR",
+            };
+            println!(
+                "{name}\n  bytes: {}\n  node: {} | jvm: {}{}",
+                to_hex(&bytes),
+                class(&rust),
+                class(&jvm),
+                if assert_parity { "" } else { "  (report-only)" },
+            );
+            assert!(
+                !matches!(jvm, Verdict::Err(_)),
+                "oracle ERR on {name}: {jvm:?}"
+            );
+            if assert_parity {
+                if class(&rust) != class(&jvm) {
+                    failures.push(format!(
+                        "{name}: node={} jvm={} ({rust:?} vs {jvm:?})",
+                        class(&rust),
+                        class(&jvm)
+                    ));
+                } else if let (Verdict::Accept(a), Verdict::Accept(b)) = (&rust, &jvm) {
+                    // Both accepted: the canonical re-serialization must agree
+                    // too (a soft-fork WRAP preserves the original bytes on
+                    // both sides, so a wrap-vs-plain-accept split shows here).
+                    if !a.is_empty() && !b.is_empty() && a != b {
+                        failures.push(format!("{name}: canonical mismatch node={a} jvm={b}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "node/JVM rule-1001 verdict divergence:\n{}",
+            failures.join("\n")
+        );
+    }
+
     // ----- oracle parity -----
 
     /// The `reduce` surface's node half must agree with the JVM reference on the

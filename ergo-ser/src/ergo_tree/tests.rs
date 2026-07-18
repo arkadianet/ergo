@@ -729,11 +729,14 @@ fn check_sigma_prop_root_matches_jvm_on_sizeless_trees() {
         // makes the ValUse — and the block result — non-SigmaProp (oracle REJECT).
         "00d801d7010005007201", // { fun x = Long(0); x } -> SLong
         // Duplicate-id block whose RESULT is independent of the reused binding:
-        // `{ val x = sigmaProp; val x = sigmaProp; true }` -> SBoolean. The id is
-        // ambiguous but the root (a Boolean const) does not resolve through it,
-        // so rule 1001 is still enforced (oracle REJECT — the dup-id leniency is
-        // scoped to a ValUse of the reused id, not the whole tree).
+        // `{ val x = sigmaProp; val x = sigmaProp; true }` -> SBoolean (the
+        // root is a Boolean const; the store never enters the verdict).
         "00d802d60108d3d60108d30101",
+        // REUSED-ID ValUse resolved from the parse-order `valDefTypeStore`
+        // (Finding E): `{ val x = 0L; val x = 0L; x }` -> the root ValUse
+        // reads the LAST write (SLong) -> oracle REJECT (was the documented
+        // accept-invalid before the store replica).
+        "00d802d6010500d60105007201",
         // FuncValue root -> SFunc (a function is never SigmaProp).
         "00d90101017201", // FuncValue(arg: Bool, body: ValUse) -> SFunc
         // MethodCall/PropertyCall roots (Phase 3, harness-verified registry):
@@ -821,22 +824,21 @@ fn check_sigma_prop_root_matches_jvm_on_sizeless_trees() {
             // to SigmaProp, so the ValUse result IS SigmaProp (oracle ACCEPT — a
             // FunDef->SAny classification here would reject-valid).
             "00d801d7010008d37201",
-            // REUSED-ID ValUse -> lenient (a reused binding id never occurs in a
-            // legitimately compiled tree; matching Scala's position-aware shared
-            // store is intractable from the parsed AST, so we take the safe
-            // direction). All four are oracle ACCEPT, and lenient resolution accepts
-            // them — three because Scala also accepts (no reject-valid), the last as
-            // a deliberate, documented accept-invalid. See `BindingScan`.
-            //   reject-valid avoided — Scala's last write makes `x` SigmaProp:
+            // REUSED-ID ValUse: resolved from the parse-order `valDefTypeStore`
+            // replica (Finding E) — the store's value at the ValUse's parse
+            // position. All three are oracle ACCEPT and MUST stay accepted
+            // (rejecting any of them is a reject-valid = chain stall).
+            //   Scala's last write makes `x` a BoolToSigmaProp rhs — not
+            //   statically determinable here -> the store holds `None` -> lenient:
             "00d802d6010500d601d101017201", // { val x=Long; val x=BoolToSigmaProp; x }
-            //   ...same, but the rebinding is buried off-spine in an `Eq` operand:
+            //   ...same, but the rebinding is buried off-spine in an `Eq` operand
+            //   (the serialization-order walk still reaches it):
             "00d802d6010500d60293d801d601d10101050005007201",
-            //   ...forward reference: Scala fixes `y` to SigmaProp BEFORE the rebind
-            //   (a whole-tree last-write would wrongly reject this):
+            //   THE GUARDRAIL — forward reference: `y` is fixed to SigmaProp
+            //   BEFORE the rebind (`ValDef.parse` writes AFTER its rhs, so the
+            //   rhs `ValUse(x)` read the pre-rebind store; a whole-tree
+            //   last-write model would wrongly reject this):
             "00d803d60108d3d6027201d60105007202", // { val x=sigma; val y=x; val x=0L; y }
-            //   documented ACCEPT-invalid: Scala rejects (last-write SLong), we are
-            //   lenient — the safe direction on an adversarial determinable dup-id tree:
-            "00d802d6010500d60105007201", // { val x=0L; val x=0L; x }
         ] {
             assert!(
                 check_sigma_prop_root(&parse(op)).is_ok(),
@@ -874,15 +876,17 @@ fn value_contains_box_keys_on_value_not_type() {
     assert!(!value_contains_box(&SigmaValue::Long(0)));
 }
 
-/// Reject-valid guard: a box VALUE constant's nested script is parsed
-/// on the SAME reader, whose `valDefTypeStore` is shared and never restored, so
-/// it can rebind an id the outer body uses. Once a box value is present we trust
-/// no `ValUse` — `{ val x = Long; x }`, which alone rejects (root `SLong`), must
-/// go lenient so Scala's box-polluted `ValUse(1).tpe` (potentially `SigmaProp`)
-/// is never rejected. But a box-typed constant with NO box value (empty
-/// `Coll[SBox]`) changes nothing and must STILL reject.
+/// Box-VALUE pollution of the shared `valDefTypeStore` is POSITIONAL: a box
+/// constant's nested script parses on the SAME reader (the store is shared and
+/// never restored), so it can rebind ids — but only at the box's parse
+/// position. A SEGREGATED box constant parses BEFORE the body, so a binding
+/// the body itself establishes overwrites any pollution (last-write-wins, in
+/// Scala too): `{ val x = Long; x }` still rejects (root `SLong`) with a box
+/// in the constants table. An empty `Coll[SBox]` (no box VALUE) also changes
+/// nothing. The lenient case is a `ValUse` whose entry predates an INLINE box
+/// constant — covered by `type_infer`'s `box_constant_pollution_is_positional`.
 #[test]
-fn box_value_forces_valuse_root_leniency_but_empty_box_coll_does_not() {
+fn segregated_box_value_does_not_shadow_a_body_rebound_valuse() {
     use crate::sigma_value::{CollValue, SigmaValue};
     let parse = |hex: &str| {
         let bytes = hex::decode(hex).unwrap();
@@ -895,18 +899,18 @@ fn box_value_forces_valuse_root_leniency_but_empty_box_coll_does_not() {
         check_sigma_prop_root(&base).is_err(),
         "baseline val-x-equals-Long block must reject (root SLong)"
     );
-    // A real box value pollutes the shared store -> the ValUse can no longer be
-    // trusted -> lenient (accept).
+    // A segregated box value parses before the body; the body's own
+    // `val x = Long` is the LAST write to x before the root ValUse — exactly
+    // as in Scala — so the SLong verdict stands (reject).
     let mut with_box = base.clone();
     with_box
         .constants
         .push((SigmaType::SBox, SigmaValue::OpaqueBoxBytes(vec![])));
     assert!(
-        check_sigma_prop_root(&with_box).is_ok(),
-        "a box value must force ValUse-root leniency (reject-valid guard)"
+        check_sigma_prop_root(&with_box).is_err(),
+        "a body-rebound ValUse must stay trusted past a segregated box constant"
     );
-    // An EMPTY Coll[SBox] materializes no box, so the store is unchanged and the
-    // SLong root must STILL reject (no spurious leniency).
+    // An EMPTY Coll[SBox] materializes no box; the SLong root must STILL reject.
     let mut with_empty_box_coll = base.clone();
     with_empty_box_coll.constants.push((
         SigmaType::SColl(Box::new(SigmaType::SBox)),
@@ -919,10 +923,10 @@ fn box_value_forces_valuse_root_leniency_but_empty_box_coll_does_not() {
 }
 
 /// A deeply-nested MethodCall receiver chain must type in LINEAR time (a parse-time
-/// CPU-DoS guard): `method_call_result_type` infers the receiver lazily, so a non-landmine
-/// root (`SBox.value`) returns `SAny` WITHOUT walking the chain. The eager
-/// version re-walked the receiver twice per level — exponential, a parse-time
-/// CPU DoS — and would hang this test well before 100 levels.
+/// CPU-DoS guard): the single-pass store walk types each node exactly once, so a
+/// non-landmine chain (`SBox.value`) is linear in its depth. An implementation
+/// that re-walks the receiver per level is exponential — a parse-time CPU DoS —
+/// and would hang this test well before 100 levels.
 #[test]
 fn nested_methodcall_receiver_types_in_linear_time() {
     // 100 levels of `SBox.value` (PropertyCall 0xDB, type 99, method 1) over SELF.
