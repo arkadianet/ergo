@@ -81,6 +81,27 @@ pub(super) fn compute_node_label(tree: &AvlTree, node_id: NodeId) -> Result<Dige
     }
 }
 
+/// Reject a `manifest_depth` outside the usable `1..=MAINNET_MANIFEST_DEPTH`
+/// range at every public boundary.
+///
+/// The DFS walks all start at level 1 and recurse while `level <
+/// manifest_depth`. `manifest_depth == 0` is therefore degenerate: the
+/// producer emits a single node and *no* chunk roots, while the consumer's
+/// `parse_manifest_walk` treats the root's children as pending chunk slots —
+/// the two sides disagree on the tree shape. Values above
+/// `MAINNET_MANIFEST_DEPTH` are producible but rejected by the consumer, so
+/// the two sides would also disagree. Gating both producer and consumer on
+/// the same range keeps them consistent and gives a peer-supplied manifest a
+/// single, early rejection point.
+fn validate_manifest_depth(manifest_depth: u8) -> Result<(), StateError> {
+    if !(1..=MAINNET_MANIFEST_DEPTH).contains(&manifest_depth) {
+        return Err(StateError::Serialization(format!(
+            "snapshot codec: manifest_depth {manifest_depth} outside 1..={MAINNET_MANIFEST_DEPTH}",
+        )));
+    }
+    Ok(())
+}
+
 /// Serialize the manifest — the top subtree of the AVL+ tree cut at
 /// `manifest_depth`. Wire format:
 ///
@@ -97,6 +118,7 @@ pub(super) fn compute_node_label(tree: &AvlTree, node_id: NodeId) -> Result<Dige
 /// nodes become the roots of their respective chunks (see
 /// [`serialize_chunk`]).
 pub fn serialize_manifest(tree: &AvlTree, manifest_depth: u8) -> Result<Vec<u8>, StateError> {
+    validate_manifest_depth(manifest_depth)?;
     let mut out = Vec::new();
     out.push(tree.tree_height());
     out.push(manifest_depth);
@@ -206,6 +228,7 @@ pub fn enumerate_chunk_roots(
     tree: &AvlTree,
     manifest_depth: u8,
 ) -> Result<Vec<NodeId>, StateError> {
+    validate_manifest_depth(manifest_depth)?;
     let mut roots = Vec::new();
     collect_chunk_roots(tree, tree.root_id(), 1, manifest_depth, &mut roots)?;
     Ok(roots)
@@ -419,8 +442,11 @@ pub fn reconstruct_tree(
             nodes.push(remapped);
         }
 
-        // Verify the chunk's actual root label matches the requested id.
-        let actual_label = recompute_label(&nodes, new_root_idx)?;
+        // Verify the chunk's actual root label matches the requested id AND
+        // that the chunk's internal metadata (separator keys, cached child
+        // labels) is structurally faithful — a per-chunk failure gives a
+        // precise error before the whole-tree pass below.
+        let (actual_label, _) = validate_and_recompute_label(&nodes, new_root_idx, 0)?;
         if actual_label != subtree_id {
             return Err(StateError::Serialization(format!(
                 "snapshot codec: chunk for subtree {} has actual root label {} \
@@ -449,8 +475,10 @@ pub fn reconstruct_tree(
         }
     }
 
-    // Final pass: recompute the root label from the fully-spliced arena.
-    let root_label = recompute_label(&nodes, 0)?;
+    // Final pass: recompute the root label from the fully-spliced arena and
+    // validate every internal node's separator key + cached child labels
+    // across the whole tree (covers manifest-level nodes and chunk internals).
+    let (root_label, _) = validate_and_recompute_label(&nodes, 0, 0)?;
 
     Ok(ReconstructedTree {
         nodes,
@@ -478,15 +506,12 @@ fn parse_manifest_header(bytes: &[u8]) -> Result<(u8, u8, &[u8]), StateError> {
     let manifest_depth = bytes[1];
     // A peer supplies `manifest_depth`; the manifest DFS walks recurse while
     // `level < manifest_depth`, so an out-of-range value would let a hostile
-    // manifest drive deeper recursion than any valid snapshot. Mainnet uses
-    // `MAINNET_MANIFEST_DEPTH` (14); reject anything above it. Both manifest
-    // readers (`reconstruct_tree` and `enumerate_expected_chunk_ids`) go
-    // through here, so this single check covers both walk entry points.
-    if manifest_depth > MAINNET_MANIFEST_DEPTH {
-        return Err(StateError::Serialization(format!(
-            "snapshot codec: manifest_depth {manifest_depth} exceeds maximum {MAINNET_MANIFEST_DEPTH}",
-        )));
-    }
+    // manifest drive deeper recursion than any valid snapshot, or (at 0)
+    // desync the producer/consumer tree shape. Restrict to the usable
+    // `1..=MAINNET_MANIFEST_DEPTH` range. Both manifest readers
+    // (`reconstruct_tree` and `enumerate_expected_chunk_ids`) go through here,
+    // so this single check covers both walk entry points.
+    validate_manifest_depth(manifest_depth)?;
     Ok((bytes[0], manifest_depth, &bytes[2..]))
 }
 
@@ -692,15 +717,37 @@ fn parse_chunk_walk(
     }
 }
 
-/// Recompute a node's label by recursing into its arena children.
-/// Uses [`crate::avl::digest::leaf_label`] for leaves and
-/// [`crate::avl::digest::internal_label`] for internals — same
-/// primitives the serve side uses, so a correctly-spliced tree
-/// produces the same labels as the original.
-fn recompute_label(nodes: &[ReconstructedNode], idx: usize) -> Result<Digest32, StateError> {
+/// Recompute a subtree's label AND validate the structural metadata that
+/// the root label alone does not commit. Returns `(label, min_leaf_key)`
+/// where `min_leaf_key` is the leftmost leaf key of the subtree.
+///
+/// The AVL+ root label is a Merkle hash over `balance` + child labels +
+/// leaf `(key, value, next_key)` — it does **not** depend on an internal
+/// node's stored separator `key` or its cached `left_label`/`right_label`
+/// (see [`recompute_label`-style hashing in `crate::avl::digest`]). Yet the
+/// runtime tree persists and trusts exactly those fields: the separator key
+/// routes lookups (`lookup_at`: `k < sep_key` → left, else right, so the
+/// separator is the right subtree's minimum key), and the cached child
+/// labels are served verbatim on the hot path (`sibling_label_from_parent`).
+/// A peer can therefore tamper with any of them without changing the
+/// root label the trust check verifies, corrupting routing or poisoning the
+/// cached labels. This walk re-derives both and rejects any mismatch, so a
+/// reconstructed tree that passes is structurally faithful, not merely
+/// root-equal.
+fn validate_and_recompute_label(
+    nodes: &[ReconstructedNode],
+    idx: usize,
+    depth: usize,
+) -> Result<(Digest32, [u8; 32]), StateError> {
+    if depth > MAX_RECONSTRUCT_DEPTH {
+        return Err(StateError::Serialization(format!(
+            "snapshot codec: label-validation recursion exceeds maximum {MAX_RECONSTRUCT_DEPTH} \
+             (malformed deep-spine tree)",
+        )));
+    }
     let node = nodes.get(idx).ok_or_else(|| {
         StateError::Serialization(format!(
-            "snapshot codec: recompute_label idx {idx} out of bounds",
+            "snapshot codec: validate_and_recompute_label idx {idx} out of bounds",
         ))
     })?;
     match node {
@@ -708,55 +755,80 @@ fn recompute_label(nodes: &[ReconstructedNode], idx: usize) -> Result<Digest32, 
             key,
             value,
             next_key,
-        } => Ok(crate::avl::digest::leaf_label(key, value, next_key)),
+        } => Ok((crate::avl::digest::leaf_label(key, value, next_key), *key)),
         ReconstructedNode::Internal {
+            key,
             balance,
             left,
             right,
-            ..
+            left_label,
+            right_label,
         } => {
-            let l = recompute_label(nodes, *left)?;
-            let r = recompute_label(nodes, *right)?;
-            Ok(crate::avl::digest::internal_label(*balance, &l, &r))
+            let (l_label, l_min) = validate_and_recompute_label(nodes, *left, depth + 1)?;
+            let (r_label, r_min) = validate_and_recompute_label(nodes, *right, depth + 1)?;
+            // Cached child labels must equal the recomputed child labels.
+            if &l_label != left_label {
+                return Err(StateError::Serialization(format!(
+                    "snapshot codec: node {idx} stored left_label {} != recomputed {} \
+                     (tampered cached label)",
+                    hex::encode(left_label.as_bytes()),
+                    hex::encode(l_label.as_bytes()),
+                )));
+            }
+            if &r_label != right_label {
+                return Err(StateError::Serialization(format!(
+                    "snapshot codec: node {idx} stored right_label {} != recomputed {} \
+                     (tampered cached label)",
+                    hex::encode(right_label.as_bytes()),
+                    hex::encode(r_label.as_bytes()),
+                )));
+            }
+            // Separator key must equal the right subtree's minimum key — the
+            // AVL+ routing invariant the runtime `lookup_at` relies on.
+            if key != &r_min {
+                return Err(StateError::Serialization(format!(
+                    "snapshot codec: node {idx} separator key {} != right-subtree min key {} \
+                     (tampered routing key)",
+                    hex::encode(key),
+                    hex::encode(r_min),
+                )));
+            }
+            let label = crate::avl::digest::internal_label(*balance, &l_label, &r_label);
+            // The subtree's minimum leaf key is the left subtree's minimum.
+            Ok((label, l_min))
         }
     }
 }
 
-/// Recompute the root label of a chunk's serialized bytes.
+/// Recompute the root label of a chunk's serialized bytes, authenticating
+/// the **entire** chunk.
 ///
-/// Parses only the first prover-node (the chunk's root) and
-/// derives its label from its content. The chunk's bytes are
-/// trusted as authentic iff the recomputed label equals the
-/// `subtree_id` the chunk-download state machine requested —
-/// the integration layer makes that comparison after this
+/// Parses every prover-node in the chunk into an arena (rejecting trailing
+/// bytes, malformed nodes, and deep-spine bombs), then recomputes the root
+/// label bottom-up while validating each internal node's separator key and
+/// cached child labels. The chunk's bytes are trusted as authentic iff the
+/// returned label equals the `subtree_id` the chunk-download state machine
+/// requested — the integration layer makes that comparison after this
 /// function returns.
 ///
-/// This is the per-chunk authenticity primitive. It's distinct
-/// from the manifest's trust check (which compares against
-/// `header.state_root`); chunks are authenticated by their own
-/// bytes producing the expected label.
+/// Hashing only the root node's *supplied* child labels (as an earlier
+/// version did) would let a peer serve a chunk whose root labels reproduce
+/// the expected `subtree_id` while its descendant bytes — or trailing bytes —
+/// are arbitrary. That chunk would fill its assembly slot and only be
+/// rejected at whole-tree reconstruction, after which the honest chunk is
+/// never re-requested (bootstrap-poisoning DoS). Authenticating the full
+/// chunk here rejects it at receive time, keeping the slot open.
+///
+/// This is the per-chunk authenticity primitive. It's distinct from the
+/// manifest's trust check (which compares against `header.state_root`);
+/// chunks are authenticated by their own bytes producing the expected label.
 pub fn recompute_chunk_root_label(chunk_bytes: &[u8]) -> Result<Digest32, StateError> {
     if chunk_bytes.is_empty() {
         return Err(StateError::Serialization(
             "snapshot codec: empty chunk bytes".into(),
         ));
     }
-    let (parsed, _) = parse_prover_node(chunk_bytes)?;
-    match parsed {
-        ParsedProverNode::Leaf {
-            key,
-            value,
-            next_leaf_key,
-        } => Ok(crate::avl::digest::leaf_label(&key, &value, &next_leaf_key)),
-        ParsedProverNode::Internal {
-            balance,
-            left_label,
-            right_label,
-            ..
-        } => Ok(crate::avl::digest::internal_label(
-            balance,
-            &Digest32::from_bytes(left_label),
-            &Digest32::from_bytes(right_label),
-        )),
-    }
+    let (root_idx, nodes) = parse_chunk(chunk_bytes)?;
+    let (label, _) = validate_and_recompute_label(&nodes, root_idx, 0)?;
+    Ok(label)
 }

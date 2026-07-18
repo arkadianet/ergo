@@ -835,3 +835,127 @@ fn parse_chunk_at_max_depth_accepted() {
         "a chunk reaching exactly MAX_RECONSTRUCT_DEPTH must still parse",
     );
 }
+
+// ----- digest-uncommitted structural-metadata tampering (peer attack) -----
+
+#[test]
+fn manifest_depth_zero_rejected_at_both_boundaries() {
+    // depth 0 is degenerate: the DFS walks start at level 1 and recurse
+    // while `level < manifest_depth`, so the producer emits no chunk roots
+    // while the consumer treats the root's children as pending chunks — the
+    // two sides disagree on tree shape. Reject at both the consumer entry
+    // (peer-supplied) and the producer entry.
+    let manifest = [5u8, 0u8]; // tree_height=5, manifest_depth=0
+    let err = enumerate_expected_chunk_ids(&manifest).unwrap_err();
+    assert!(
+        format!("{err:?}").contains("manifest_depth"),
+        "consumer must reject depth 0; got: {err:?}",
+    );
+    let tree = populated_tree(3);
+    let err2 = serialize_manifest(&tree, 0).unwrap_err();
+    assert!(
+        format!("{err2:?}").contains("manifest_depth"),
+        "producer must reject depth 0; got: {err2:?}",
+    );
+}
+
+#[test]
+fn reconstruct_rejects_tampered_internal_separator_key() {
+    // A peer flips a byte in a chunk root internal node's separator key.
+    // The key is NOT committed by the AVL+ root label (which hashes
+    // balance + child labels + leaf content), so the chunk still recomputes
+    // to its requested subtree_id — the old code accepted it, leaving a
+    // corrupt routing key in AVL_NODES that would misdirect `lookup_at`.
+    // The whole-tree validation now rejects it: key must equal the right
+    // subtree's minimum leaf key.
+    let tree = populated_tree(8);
+    let server = SnapshotServer::build(&tree, 1, 1).unwrap();
+    let mut chunks = chunks_map_from_server(&server);
+    let target_id = server.chunks[0].0;
+    let mut tampered = server.chunks[0].1.clone();
+    assert_eq!(
+        tampered[0], INTERNAL_NODE_PREFIX,
+        "chunk root must be internal"
+    );
+    // Internal wire layout: prefix(1) | balance(1) | key(32) | ...; key
+    // starts at offset 2. Flip a key byte.
+    tampered[2] ^= 0xFF;
+    chunks.insert(target_id, tampered);
+
+    let err = reconstruct_tree(&server.manifest_bytes, &chunks).unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("tampered routing key"),
+        "must reject the tampered separator key; got: {msg}",
+    );
+}
+
+#[test]
+fn reconstruct_rejects_tampered_cached_child_label() {
+    // A peer flips a byte in a chunk root internal node's stored left_label.
+    // Cached child labels are served verbatim by the runtime hot path
+    // (`sibling_label_from_parent`) but are not committed by the root label,
+    // so the chunk still recomputes to its subtree_id. The whole-tree
+    // validation now rejects it: stored child labels must equal the labels
+    // recomputed from the children.
+    let tree = populated_tree(8);
+    let server = SnapshotServer::build(&tree, 1, 1).unwrap();
+    let mut chunks = chunks_map_from_server(&server);
+    let target_id = server.chunks[0].0;
+    let mut tampered = server.chunks[0].1.clone();
+    assert_eq!(
+        tampered[0], INTERNAL_NODE_PREFIX,
+        "chunk root must be internal"
+    );
+    // left_label starts at offset 2 + KEY_SIZE.
+    tampered[2 + KEY_SIZE] ^= 0xFF;
+    chunks.insert(target_id, tampered);
+
+    let err = reconstruct_tree(&server.manifest_bytes, &chunks).unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("tampered cached label"),
+        "must reject the tampered cached child label; got: {msg}",
+    );
+}
+
+#[test]
+fn recompute_chunk_root_label_authenticates_full_chunk() {
+    // The per-chunk authenticity primitive (the node-download path's gate)
+    // must authenticate the ENTIRE chunk, not just its first node —
+    // otherwise a peer serves a chunk whose root labels reproduce the
+    // expected subtree_id while its descendants / trailing bytes are
+    // arbitrary, filling the assembly slot and only failing at whole-tree
+    // reconstruction (bootstrap-poisoning DoS).
+    let tree = populated_tree(8);
+    let server = SnapshotServer::build(&tree, 1, 1).unwrap();
+    let target_id = server.chunks[0].0;
+    let good = server.chunks[0].1.clone();
+
+    // Sanity: an untampered chunk authenticates to its subtree_id.
+    assert_eq!(
+        recompute_chunk_root_label(&good).unwrap(),
+        target_id,
+        "honest chunk must authenticate to its subtree_id",
+    );
+
+    // (a) Trailing bytes — old root-only parse ignored them; now rejected.
+    let mut trailing = good.clone();
+    trailing.push(0xFF);
+    let err = recompute_chunk_root_label(&trailing).unwrap_err();
+    assert!(
+        format!("{err:?}").contains("trailing bytes"),
+        "trailing bytes must be rejected; got: {err:?}",
+    );
+
+    // (b) Tampered descendant — flip the chunk's last byte (a field of the
+    // deepest node). Root node bytes are untouched, so root-only auth would
+    // still return target_id; full-chunk auth must not.
+    let mut desc = good.clone();
+    *desc.last_mut().unwrap() ^= 0xFF;
+    assert_ne!(
+        recompute_chunk_root_label(&desc).ok(),
+        Some(target_id),
+        "a chunk with a tampered descendant must not authenticate as target_id",
+    );
+}
