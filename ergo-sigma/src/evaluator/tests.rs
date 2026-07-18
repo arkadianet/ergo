@@ -12164,6 +12164,69 @@ fn flatmap_flattens_coll_short_body() {
     assert_eq!(run_eval(&expr), Value::CollShort(vec![9, 9, 9, 9]));
 }
 
+#[test]
+fn flatmap_empty_receiver_recovers_output_type_from_const_body() {
+    use ergo_ser::sigma_value::CollValue;
+    // Empty Coll[Int] receiver; mapper body is a Coll[Long] constant. The mapper
+    // never runs, but the result must be an empty Coll[Long] — B recovered from
+    // the body's static type — NOT the legacy Coll[Byte].
+    let empty = const_coll_int(vec![]);
+    let long_body = Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SLong)),
+        val: SigmaValue::Coll(CollValue::Values(vec![SigmaValue::Long(7)])),
+    };
+    let func = op(
+        0xD9,
+        Payload::FuncValue {
+            args: vec![(1, Some(SigmaType::SInt))],
+            body: Box::new(long_body),
+        },
+    );
+    let expr = op(
+        0xDC,
+        Payload::MethodCall {
+            type_id: 12,
+            method_id: 15,
+            obj: Box::new(empty),
+            args: vec![func],
+            type_args: vec![],
+        },
+    );
+    assert_eq!(run_eval(&expr), Value::CollLong(vec![]));
+}
+
+#[test]
+fn flatmap_empty_receiver_recovers_output_type_from_concrete_collection_body() {
+    // Same, but the mapper body is a ConcreteCollection (0x83) of Coll[Int]:
+    // empty receiver → empty Coll[Int].
+    let empty = const_coll_int(vec![]);
+    let concrete_body = op(
+        0x83,
+        Payload::ConcreteCollection {
+            elem_type: SigmaType::SInt,
+            items: vec![const_int(5)],
+        },
+    );
+    let func = op(
+        0xD9,
+        Payload::FuncValue {
+            args: vec![(1, Some(SigmaType::SInt))],
+            body: Box::new(concrete_body),
+        },
+    );
+    let expr = op(
+        0xDC,
+        Payload::MethodCall {
+            type_id: 12,
+            method_id: 15,
+            obj: Box::new(empty),
+            args: vec![func],
+            type_args: vec![],
+        },
+    );
+    assert_eq!(run_eval(&expr), Value::CollInt(vec![]));
+}
+
 // ── AvlTree.updateDigest (100,15) / updateOperations (100,8) + variable digest ──
 // Scala CAvlTree.updateDigest stores any-length Coll[Byte] verbatim (no length
 // check); updateOperations swaps the flags byte (insert=&0x01, update=&0x02,

@@ -182,6 +182,48 @@ pub(super) fn get(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
 
 // SColl(12).flatMap(15) -> Coll[B]
 // Scala: xs.flatMap(f) — map each element to a collection, flatten results.
+/// Best-effort static output element type `B` of a flatMap mapper body (a
+/// `Coll[B]` expression), for typing the EMPTY result when the receiver is
+/// empty. Covers the statically-determinable IR shapes; `None` otherwise, so
+/// the caller keeps the legacy `Coll[Byte]` fallback (a documented residual).
+/// A returned type is always correct (it IS the body's collection element
+/// type), so this can never introduce a new divergence.
+fn flatmap_output_elem_type(body: &Expr) -> Option<SigmaType> {
+    use ergo_ser::opcode::Payload;
+    match body {
+        Expr::Const {
+            tpe: SigmaType::SColl(elem),
+            ..
+        } => Some((**elem).clone()),
+        Expr::Op(node) => match &node.payload {
+            Payload::ConcreteCollection { elem_type, .. } => Some(elem_type.clone()),
+            Payload::BoolCollection { .. } => Some(SigmaType::SBoolean),
+            // If (0x95): both branches share the `Coll[B]` result type, so the
+            // then-branch determines B.
+            Payload::Three(_cond, then_branch, _else_branch) if node.opcode == 0x95 => {
+                flatmap_output_elem_type(then_branch)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Empty collection `Value` in the carrier the evaluator uses for `elem`.
+fn empty_coll_for_elem(elem: &SigmaType) -> Value {
+    match elem {
+        SigmaType::SByte => Value::CollBytes(Vec::new()),
+        SigmaType::SShort => Value::CollShort(Vec::new()),
+        SigmaType::SInt => Value::CollInt(Vec::new()),
+        SigmaType::SLong => Value::CollLong(Vec::new()),
+        SigmaType::SBoolean => Value::CollBool(Vec::new()),
+        SigmaType::SSigmaProp => Value::CollSigmaProp(Vec::new()),
+        SigmaType::SBox => Value::CollBox(Vec::new()),
+        SigmaType::SHeader => Value::CollHeader(Vec::new()),
+        other => Value::CollGeneric(Vec::new(), Box::new(other.clone())),
+    }
+}
+
 pub(super) fn flat_map(
     obj_val: Value,
     args: &[Expr],
@@ -290,7 +332,15 @@ pub(super) fn flat_map(
             });
             inner_colls.retain(|v| !matches!(v, Value::CollGeneric(t, _) if t.is_empty()));
             let result = if inner_colls.is_empty() {
-                first_shape.unwrap_or(Value::CollBytes(vec![]))
+                // Empty receiver: no inner collection exists to read the shape
+                // from, so recover the output element type B from the mapper
+                // body's static `Coll[B]` type (Scala threads `RType[B]`),
+                // rather than collapsing to `Coll[Byte]`. Undeterminable bodies
+                // still fall back to the legacy `Coll[Byte]` — a documented
+                // residual; a recovered type is always correct.
+                first_shape
+                    .or_else(|| flatmap_output_elem_type(&body).map(|b| empty_coll_for_elem(&b)))
+                    .unwrap_or_else(|| Value::CollBytes(Vec::new()))
             } else {
                 match &inner_colls[0] {
                     Value::CollBytes(_) => {
