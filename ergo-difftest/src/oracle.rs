@@ -634,4 +634,140 @@ mod tests {
             assert_eq!(v, Verdict::Accept(want.to_string()), "mismatch on {hex}");
         }
     }
+
+    // ----- LIVE JVM-oracle differential for the #215 evaluator fixes -----
+    //
+    // Ignored by default (needs `scala-cli` on PATH; first query resolves the
+    // sigma-state deps). Run with:
+    //   cargo test -p ergo-difftest --lib reduce_diff_serialize_and_flatmap -- --ignored --nocapture
+    //
+    // Each tree exercises a #215 fix so its reduced `P:<prop>|<cost>` MUST match
+    // the JVM reference. Both sides reduce against the same dummy context
+    // (SELF = the box whose script IS the tree; INPUTS = [SELF]).
+    #[test]
+    #[ignore = "requires scala-cli"]
+    fn reduce_diff_serialize_and_flatmap_match_jvm_oracle() {
+        use ergo_ser::ergo_tree::{write_ergo_tree, ErgoTree};
+        use ergo_ser::opcode::{Expr, IrNode, Payload};
+        use ergo_ser::sigma_type::SigmaType;
+        use ergo_ser::sigma_value::{CollValue, SigmaValue};
+
+        fn op(opcode: u8, payload: Payload) -> Expr {
+            Expr::Op(IrNode { opcode, payload })
+        }
+        fn tree_bytes(body: Expr) -> Vec<u8> {
+            let tree = ErgoTree {
+                version: 3,
+                has_size: true,
+                constant_segregation: false,
+                constants: vec![],
+                body,
+            };
+            let mut w = ergo_primitives::writer::VlqWriter::new();
+            write_ergo_tree(&mut w, &tree).expect("write tree");
+            w.result()
+        }
+        let self_box = || op(0xA7, Payload::Zero); // SELF
+        let global = || op(0xDD, Payload::Zero); // SGlobal receiver
+        let serialize = |arg: Expr| {
+            op(
+                0xDC,
+                Payload::MethodCall {
+                    type_id: 106,
+                    method_id: 3, // SGlobal.serialize
+                    obj: Box::new(global()),
+                    args: vec![arg],
+                    type_args: vec![],
+                },
+            )
+        };
+        let bool_to_prop = |b: Expr| op(0xD1, Payload::One(Box::new(b)));
+
+        // #2a serialize(SELF) == SELF.bytes  → the canonical-bytes analogy the fix
+        // relies on; TRUE on both iff serialize(SELF) equals ErgoBox.bytes.
+        let v_self = bool_to_prop(op(
+            0x93, // Eq
+            Payload::Two(
+                Box::new(serialize(self_box())),
+                Box::new(op(0xC3, Payload::One(Box::new(self_box())))), // SELF.bytes
+            ),
+        ));
+
+        // #2b serialize(INPUTS).size > 0  → the BoxCollection resolve path accepts
+        // (pre-fix it rejected → REJECT vs the JVM's ACCEPT), and the serialized
+        // length + cost must match.
+        let v_inputs = bool_to_prop(op(
+            0x91, // Gt
+            Payload::Two(
+                Box::new(op(
+                    0xB1,                                                       // SizeOf
+                    Payload::One(Box::new(serialize(op(0xA4, Payload::Zero)))), // serialize(INPUTS)
+                )),
+                Box::new(Expr::Const {
+                    tpe: SigmaType::SInt,
+                    val: SigmaValue::Int(0),
+                }),
+            ),
+        ));
+
+        // #4 serialize(Coll[Long]().flatMap(x => Coll[Long](x))) == serialize(Coll[Long]())
+        // → the empty-flatMap output must be tagged Coll[Long] (fix), not Coll[Byte];
+        // both serialize to the same bytes only when the element type is preserved.
+        let empty_long = || Expr::Const {
+            tpe: SigmaType::SColl(Box::new(SigmaType::SLong)),
+            val: SigmaValue::Coll(CollValue::Values(vec![])),
+        };
+        let mapper = op(
+            0xD9, // FuncValue
+            Payload::FuncValue {
+                args: vec![(1, Some(SigmaType::SLong))],
+                body: Box::new(op(
+                    0x83, // ConcreteCollection
+                    Payload::ConcreteCollection {
+                        elem_type: SigmaType::SLong,
+                        items: vec![op(0x72, Payload::ValUse { id: 1 })],
+                    },
+                )),
+            },
+        );
+        let flat_mapped = op(
+            0xDC,
+            Payload::MethodCall {
+                type_id: 12,
+                method_id: 15, // Coll.flatMap
+                obj: Box::new(empty_long()),
+                args: vec![mapper],
+                type_args: vec![],
+            },
+        );
+        let v_flatmap = bool_to_prop(op(
+            0x93, // Eq
+            Payload::Two(
+                Box::new(serialize(flat_mapped)),
+                Box::new(serialize(empty_long())),
+            ),
+        ));
+
+        let vectors = [
+            ("serialize(SELF)==SELF.bytes", tree_bytes(v_self)),
+            ("serialize(INPUTS).size>0", tree_bytes(v_inputs)),
+            ("empty flatMap type", tree_bytes(v_flatmap)),
+        ];
+
+        let script = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../scripts/jvm_serde_oracle/ErgoSerdeOracle.scala"
+        );
+        let mut oracle = Oracle::spawn(script).expect("spawn scala-cli oracle");
+        for (name, bytes) in vectors {
+            let (node, _consumed) = reduce_verdict(&bytes);
+            let jvm = oracle.query("reduce", &bytes).expect("oracle query");
+            eprintln!("[{name}] node={node:?}  jvm={jvm:?}");
+            assert!(
+                matches!(node, Verdict::Accept(_)),
+                "[{name}] node must ACCEPT (a malformed tree or rejected fix would REJECT): {node:?}"
+            );
+            assert_eq!(node, jvm, "[{name}] node vs JVM reduce divergence");
+        }
+    }
 }
