@@ -10201,6 +10201,41 @@ fn coll_patch_long_carrier_negative_replaced() {
     }
 }
 
+#[test]
+fn coll_patch_short_carrier() {
+    // Scala `Coll[A].patch` accepts every element type, but the previous impl
+    // only matched Byte/Int/Long carriers and rejected `Coll[Short]` — a
+    // reject-valid. patch([1,2,3,4,5], 1, [99], 2) → [1, 99, 4, 5].
+    let expr = coll_patch_call(
+        const_coll_short(vec![1, 2, 3, 4, 5]),
+        1,
+        const_coll_short(vec![99]),
+        2,
+    );
+    let v = eval_to_value(&expr, &ReductionContext::minimal(500_000, 0), &[]).unwrap();
+    match v {
+        Value::CollShort(c) => assert_eq!(c, vec![1, 99, 4, 5]),
+        other => panic!("expected CollShort, got {other:?}"),
+    }
+}
+
+#[test]
+fn coll_patch_bool_carrier() {
+    // `Coll[Boolean]` was likewise rejected. patch([T,T,T], 1, [F], 1) →
+    // [T, F, T].
+    let expr = coll_patch_call(
+        const_coll_bool(vec![true, true, true]),
+        1,
+        const_coll_bool(vec![false]),
+        1,
+    );
+    let v = eval_to_value(&expr, &ReductionContext::minimal(500_000, 0), &[]).unwrap();
+    match v {
+        Value::CollBool(c) => assert_eq!(c, vec![true, false, true]),
+        other => panic!("expected CollBool, got {other:?}"),
+    }
+}
+
 // ----- Coll.indexOf / Slice negative-input guards -----
 //
 // These guard tests lock the contract split: any future "negative

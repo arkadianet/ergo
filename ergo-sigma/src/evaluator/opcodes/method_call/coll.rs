@@ -512,34 +512,41 @@ pub(super) fn patch(
         patch_delta.value(),
         cx.cost.total().value(),
     );
-    // splice(start..end, patch) yields xs[0..start] ++ patch
-    //   ++ xs[end..n], equivalent to Scala chunk1/chunk2 model
-    //   above. `from + replaced` cannot overflow usize on
-    //   supported targets: both args are clamped to [0,
-    //   i32::MAX], so the worst-case sum is 2 * i32::MAX =
-    //   4_294_967_294, which fits in u32 (and trivially in
-    //   u64).
-    match (obj_val, patch_val) {
-        (Value::CollBytes(mut coll), Value::CollBytes(patch)) => {
-            let end = (from + replaced).min(coll.len());
-            coll.splice(from.min(coll.len())..end, patch);
-            Ok(Value::CollBytes(coll))
+    // Generic carrier: Scala `Coll[A].patch` accepts every element type
+    // (CollsOverArrays), so decompose both receiver and patch to a `Vec<Value>`
+    // and splice — rather than enumerating a few carriers (which reject-valid'd
+    // `Coll[Short]` / `Coll[Boolean]` / tuple / box / header receivers). Mirrors
+    // the generic path `updateMany` already uses.
+    let elem_type = coll_elem_type(&obj_val).ok_or_else(|| EvalError::TypeError {
+        expected: "Coll for patch receiver",
+        got: format!("{obj_val:?}"),
+    })?;
+    let (kind, mut items) = collection_to_values(obj_val, cx.ctx)?;
+    let (_patch_kind, patch_items) = collection_to_values(patch_val, cx.ctx)?;
+    // Each patched-in element must be assignable to the receiver's element
+    // type: Scala's `patch(_, patch: Coll[A], _)` is backed by `Array[A]`, so a
+    // foreign element throws ArrayStoreException. An empty patch writes nothing
+    // and is accepted regardless of its declared element type — matching Scala
+    // and the `updateMany` empty-values rule.
+    for p in &patch_items {
+        let p_ty = value_to_sigma_type(p).ok_or_else(|| EvalError::TypeError {
+            expected: "patch element with recoverable SigmaType",
+            got: format!("{p:?}"),
+        })?;
+        if !sigma_type_compatible(&elem_type, &p_ty) {
+            return Err(EvalError::TypeError {
+                expected: "matching element type for patch",
+                got: format!("{elem_type:?} vs {p_ty:?}"),
+            });
         }
-        (Value::CollInt(mut coll), Value::CollInt(patch)) => {
-            let end = (from + replaced).min(coll.len());
-            coll.splice(from.min(coll.len())..end, patch);
-            Ok(Value::CollInt(coll))
-        }
-        (Value::CollLong(mut coll), Value::CollLong(patch)) => {
-            let end = (from + replaced).min(coll.len());
-            coll.splice(from.min(coll.len())..end, patch);
-            Ok(Value::CollLong(coll))
-        }
-        (c, p) => Err(EvalError::TypeError {
-            expected: "matching collection types for patch",
-            got: format!("{c:?}, {p:?}"),
-        }),
     }
+    // splice(start..end, patch) yields xs[0..start] ++ patch ++ xs[end..n],
+    // equivalent to Scala's chunk1/chunk2 model above. `from + replaced` cannot
+    // overflow usize on supported targets: both args are clamped to
+    // [0, i32::MAX], so the worst-case sum 2 * i32::MAX fits in u32.
+    let end = (from + replaced).min(items.len());
+    items.splice(from.min(items.len())..end, patch_items);
+    values_to_collection(kind, items, elem_type)
 }
 
 // SColl(12).updated(20) -> Coll[T]
