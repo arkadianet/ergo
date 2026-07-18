@@ -198,6 +198,64 @@ fn on_modifier_received_accepts_requested() {
 }
 
 #[test]
+fn on_modifier_received_rejects_wire_type_mismatch() {
+    // Request a modifier AS a BlockTransactions section, then have the peer
+    // deliver that id claiming it's a Header. The wire type must be validated
+    // against the requested type: penalize misbehavior, do NOT route, and keep
+    // the request outstanding (no mark_received) so a retry can still land.
+    let mut coord = SyncCoordinator::new(100);
+    let chain = MockChain::new(101, 100);
+    let now = Instant::now();
+    let p = peer(9030);
+
+    let inv = InvData {
+        type_id: ModifierTypeId::BlockTransactions.as_byte(),
+        ids: vec![mk(7)],
+    };
+    coord.on_inv(p, &inv, &chain, now);
+
+    // Deliver the same id but claim it's a Header (mismatched type).
+    let actions =
+        coord.on_modifier_received(p, ModifierTypeId::Header.as_byte(), mk(7), vec![1, 2, 3]);
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::Penalize {
+                penalty: Penalty::Misbehavior,
+                ..
+            }
+        )),
+        "wire/requested type mismatch must penalize misbehavior",
+    );
+    assert!(
+        !actions.iter().any(|a| matches!(
+            a,
+            Action::ValidateHeader { .. } | Action::PersistSection { .. }
+        )),
+        "a mismatched delivery must not be routed",
+    );
+
+    // Request preserved (not mark_received): a correctly-typed delivery of the
+    // same id from the same peer is still accepted, not treated as spam.
+    let ok = coord.on_modifier_received(
+        p,
+        ModifierTypeId::BlockTransactions.as_byte(),
+        mk(7),
+        vec![1, 2, 3],
+    );
+    assert!(
+        !ok.iter().any(|a| matches!(
+            a,
+            Action::Penalize {
+                penalty: Penalty::Spam,
+                ..
+            }
+        )),
+        "outstanding request survived the mismatch, so the correct-type delivery is accepted",
+    );
+}
+
+#[test]
 fn block_section_accept_records_delivery_success_outcome() {
     // An accepted block-BODY section emits a success outcome for the
     // delivering peer so the peer manager can clear its download streak.
@@ -2563,6 +2621,56 @@ fn on_sync_info_v2_unknown_peer_falls_through_to_older_path() {
     assert_eq!(
         inv_count, 0,
         "peer with no overlap should fall through to Older path, no Inv extension"
+    );
+}
+
+#[test]
+fn on_sync_info_v2_offchain_tip_with_older_common_classifies_older() {
+    // Peer's TIP (newest header) is off our chain, but an OLDER header of
+    // theirs IS on our chain (they forked/advanced above a shared ancestor).
+    // Classification keys on the TIP: this is Older (fetch their continuation),
+    // NOT Younger. The old `.any()` logic misread the shared older header as
+    // "peer is behind us" and would have emitted a catch-up Inv.
+    let mut chain = MockChain::new(105, 105);
+    for h in 100u32..=105 {
+        let mut id = [0u8; 32];
+        id[..4].copy_from_slice(&h.to_be_bytes());
+        id[4] = b'O';
+        chain.add_best_chain_header(h, id);
+    }
+
+    // A shared older peer header that maps onto our best chain at h=102.
+    let common_bytes = fake_header_bytes([0xC0u8; 32]);
+    let common_id = id_for_bytes(&common_bytes);
+    chain.height_to_id.insert(102, common_id);
+    chain.id_to_height.insert(common_id, 102);
+    chain.best_chain_ids.insert(common_id);
+    chain.known_headers.insert(common_id);
+
+    // Peer's tip: off our chain (never inserted into any chain set).
+    let tip_bytes = fake_header_bytes([0xEEu8; 32]);
+
+    let mut coord = SyncCoordinator::new(0);
+    let p = peer(9030);
+    coord.on_sync_info(
+        p,
+        SyncVersion::V2,
+        &SyncInfo::V2 {
+            headers: vec![tip_bytes, common_bytes], // newest-first
+        },
+        &chain,
+        Instant::now(),
+    );
+
+    let status = coord
+        .peer_sync_snapshots()
+        .get(&p)
+        .expect("peer snapshot recorded")
+        .status;
+    assert_eq!(
+        status,
+        ergo_p2p::sync::PeerChainStatus::Older,
+        "off-chain tip above a shared ancestor must classify Older, not Younger",
     );
 }
 

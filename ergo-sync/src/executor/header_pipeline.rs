@@ -6,7 +6,7 @@
 //! the recent-header window maintenance.
 
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ergo_p2p::peer::{PeerId, Penalty};
 use ergo_ser::modifier_id::ExpectedSections;
@@ -43,6 +43,13 @@ pub(crate) const ORPHAN_HEADER_LIMIT: usize = 100_000;
 /// peers have advanced tip several thousand headers. Live-tip
 /// far-ahead announces (hundreds of thousands ahead) still drop.
 pub(crate) const ORPHAN_HEADER_IBD_LOOKAHEAD: u32 = 60_000;
+
+/// Minimum spacing between single-header orphan-root parent-walks. The walk is
+/// an O(orphan-buffer) scan; the ParentNotFound path fires it per buffered
+/// orphan, so under an orphan flood it would be quadratic. Throttling to once
+/// per second bounds the scan cost while the batch drain path and reciprocal
+/// SyncInfo keep surfacing genuinely missing parents.
+pub(crate) const ORPHAN_ROOT_WALK_MIN_INTERVAL: Duration = Duration::from_secs(1);
 
 impl SyncExecutor {
     /// Run the full single-header validation pipeline for an
@@ -194,12 +201,13 @@ impl SyncExecutor {
                 // Single-header path on ParentNotFound: nothing was
                 // installed, so the orphan buffer can't have any new
                 // unlocks. Skip the full drain — calling it would
-                // re-finalize the entire 50k-cap buffer for nothing
+                // re-finalize the entire 100k-cap buffer for nothing
                 // (the dominant CPU cost observed at Step C+D
-                // fanout — `orphan_n=800k+` per perf-hdr line). Just
-                // emit the parent-walk requests so peers ship us
-                // the missing parent for the fork-stitch case.
-                self.request_orphan_root_parents(store, coordinator, now)
+                // fanout — `orphan_n=800k+` per perf-hdr line). Emit the
+                // parent-walk requests (throttled — the walk is an
+                // O(buffer) scan and must not run per buffered orphan) so
+                // peers ship us the missing parent for the fork-stitch case.
+                self.request_orphan_root_parents_throttled(store, coordinator, now)
             }
             Err(HeaderProcessError::EpochContextIncomplete { height, .. }) => {
                 // Local context gap (older epoch ancestors missing for
@@ -425,7 +433,7 @@ impl SyncExecutor {
         let newly_installed = std::mem::take(&mut self.recently_installed);
 
         if self.orphan_headers.is_empty() {
-            self.cap_orphan_buffer();
+            self.cap_orphan_buffer_and_forget(coordinator);
             all_actions.extend(self.request_orphan_root_parents(store, coordinator, now));
             return all_actions;
         }
@@ -443,7 +451,7 @@ impl SyncExecutor {
             }
         }
         if work_queue.is_empty() {
-            self.cap_orphan_buffer();
+            self.cap_orphan_buffer_and_forget(coordinator);
             all_actions.extend(self.request_orphan_root_parents(store, coordinator, now));
             return all_actions;
         }
@@ -559,7 +567,7 @@ impl SyncExecutor {
         // function so cascade tracking is observable in trace.
         let _ = newly_installed_local;
 
-        self.cap_orphan_buffer();
+        self.cap_orphan_buffer_and_forget(coordinator);
 
         // Parent-walk: if the buffer is still non-empty after drain, the
         // chain bottoms out at a header we don't have yet. Ask peers for
@@ -591,6 +599,12 @@ impl SyncExecutor {
                 .or_default()
                 .push((peer, pre, bytes));
             self.orphan_headers_len = self.orphan_headers_len.saturating_add(1);
+            // Enforce the hard cap on the insertion path too. The single-header
+            // ParentNotFound / EpochContextIncomplete branches reach here
+            // without ever triggering the batch-drain cap, so an orphan flood
+            // that never installs a header would otherwise grow the buffer
+            // without bound. No-op below ORPHAN_HEADER_LIMIT.
+            self.cap_orphan_buffer_and_forget(coordinator);
             return true;
         }
 
@@ -618,9 +632,18 @@ impl SyncExecutor {
         height <= best.saturating_add(ORPHAN_HEADER_IBD_LOOKAHEAD)
     }
 
-    pub(super) fn cap_orphan_buffer(&mut self) {
+    /// Drop entries to bring the buffer back to `ORPHAN_HEADER_LIMIT`,
+    /// returning the header IDs evicted so the caller can
+    /// `forget_received_modifier` them (otherwise the coordinator keeps them
+    /// marked-received and they can never be re-requested once their parent
+    /// chain reconnects). Eviction drops the HIGHEST-height entries — keeping
+    /// the root side of orphan chains, whose parents reconnect first — rather
+    /// than strict insertion order; the reconnectable-root rationale predates
+    /// this change. No-op (empty vec) when already under the cap.
+    #[must_use]
+    pub(super) fn cap_orphan_buffer(&mut self) -> Vec<[u8; 32]> {
         if self.orphan_headers_len <= ORPHAN_HEADER_LIMIT {
-            return;
+            return Vec::new();
         }
         // Buffer is HashMap<parent_id, Vec<orphan>>. Cap by dropping
         // the highest-height ENTRIES — keep the root side of orphan
@@ -652,11 +675,13 @@ impl SyncExecutor {
         for (p, i) in to_drop {
             by_parent.entry(p).or_default().push(i);
         }
+        let mut evicted: Vec<[u8; 32]> = Vec::with_capacity(overflow);
         for (parent_id, mut indices) in by_parent {
             indices.sort_unstable_by(|a, b| b.cmp(a));
             if let Some(children) = self.orphan_headers.get_mut(&parent_id) {
                 for i in indices {
                     if i < children.len() {
+                        evicted.push(*children[i].1.header_id());
                         children.swap_remove(i);
                         self.orphan_headers_len = self.orphan_headers_len.saturating_sub(1);
                     }
@@ -666,6 +691,39 @@ impl SyncExecutor {
                 }
             }
         }
+        evicted
+    }
+
+    /// [`Self::cap_orphan_buffer`] + `forget_received_modifier` for every
+    /// evicted header so a re-announcement after the parent chain reconnects
+    /// is re-requested rather than deduplicated away.
+    pub(super) fn cap_orphan_buffer_and_forget(&mut self, coordinator: &mut SyncCoordinator) {
+        for id in self.cap_orphan_buffer() {
+            coordinator.forget_received_modifier(&id);
+        }
+    }
+
+    /// [`Self::request_orphan_root_parents`] gated by
+    /// [`ORPHAN_ROOT_WALK_MIN_INTERVAL`]. The single-header ParentNotFound
+    /// path reaches this once per buffered orphan; since the underlying walk
+    /// is an O(orphan-buffer) scan, running it every time is quadratic under
+    /// an orphan flood. Returns no actions when throttled — the batch drain
+    /// path (unthrottled, amortized over a bulk install) and the reciprocal
+    /// SyncInfo dance still surface any genuinely missing parent promptly.
+    fn request_orphan_root_parents_throttled(
+        &mut self,
+        store: &ergo_state::StateBackendKind,
+        coordinator: &mut SyncCoordinator,
+        now: Instant,
+    ) -> Vec<Action> {
+        if self
+            .orphan_root_walk_last
+            .is_some_and(|t| now.duration_since(t) < ORPHAN_ROOT_WALK_MIN_INTERVAL)
+        {
+            return Vec::new();
+        }
+        self.orphan_root_walk_last = Some(now);
+        self.request_orphan_root_parents(store, coordinator, now)
     }
 
     /// Emit `RequestModifier(Header, [parent_id])` per peer for orphan-buffer

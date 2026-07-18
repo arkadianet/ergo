@@ -366,6 +366,15 @@ impl SyncExecutor {
         let effective_header_height = cs.best_header_height.min(recovery_limit);
 
         if effective_header_height <= cs.best_full_block_height {
+            // Nothing to re-seed: every header within the window is already
+            // block-applied. Latch recovery_done (as the walk-completed path
+            // at the end does) so sync_tick's `headers_chain_synced &&
+            // !recovery_done` gate stops re-calling every tick and the API
+            // stops reporting recovery_done=false. Safe because headers are
+            // synced here (gated above); any later header is seeded live via
+            // on_header_validated, and the mid-bootstrap transient re-opens
+            // this latch through reset_recovery_done.
+            self.recovery_done = true;
             return Ok(0);
         }
 
