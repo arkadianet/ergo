@@ -72,6 +72,21 @@ pub(crate) fn emit_tracing_for_pool_actions(
     observer: Option<&dyn MempoolObserver>,
     tip: Option<TipPointer>,
 ) {
+    // Direct double-spend losers are attributed via `on_replaced`, and the
+    // observer contract excludes them from `on_evicted`. They also appear in
+    // the batch's `Evicted(DoubleSpendWinner)` tx_ids (which additionally
+    // carries their CPFP descendants), so precompute the loser set and skip
+    // exactly those ids in the eviction callback — descendants still fire it.
+    let replaced_losers: std::collections::HashSet<TxId> = actions
+        .iter()
+        .filter_map(|a| match a {
+            MempoolAction::Observe {
+                event: ObservedEvent::Replaced { loser_id, .. },
+            } => Some(*loser_id),
+            _ => None,
+        })
+        .collect();
+
     for a in actions {
         if let MempoolAction::Observe { event } = a {
             match event {
@@ -97,6 +112,12 @@ pub(crate) fn emit_tracing_for_pool_actions(
                             _ => {
                                 let reason_str = format!("{reason:?}");
                                 for tx_id in tx_ids {
+                                    // Direct replacement losers are reported
+                                    // via on_replaced only, per the observer
+                                    // contract.
+                                    if replaced_losers.contains(tx_id) {
+                                        continue;
+                                    }
                                     obs.on_evicted(*tx_id, &reason_str);
                                 }
                             }

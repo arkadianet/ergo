@@ -53,6 +53,26 @@ impl RevalidationQueue {
         dropped
     }
 
+    /// Push a full parent-before-child demotion batch, dropping from the TAIL
+    /// (deepest descendants) when it exceeds `max_depth` — the opposite of
+    /// [`Self::push`]'s front-drop. `demote_all_for_revalidation` emits the
+    /// whole pool parents-first; capping from the front there would discard
+    /// the parents and retain orphaned children, which then fail
+    /// `UnresolvedInput` on drain. Truncating the tail keeps the
+    /// dependency-safe prefix (every retained child's parent is retained too).
+    /// Returns the number of entries dropped.
+    pub fn push_batch_truncating(&mut self, txs: Vec<DemotedTx>) -> usize {
+        for tx in txs {
+            self.queue.push_back(tx);
+        }
+        let mut dropped = 0usize;
+        while self.queue.len() > self.max_depth {
+            self.queue.pop_back();
+            dropped += 1;
+        }
+        dropped
+    }
+
     /// Pop up to `limit` entries from the head. Order preserved.
     pub fn drain(&mut self, limit: usize) -> Vec<DemotedTx> {
         let take = limit.min(self.queue.len());
@@ -204,6 +224,27 @@ mod tests {
         // Survivors are the 3 most recent: 3, 4, 5.
         assert_eq!(out[0].tx_id.as_bytes()[0], 3);
         assert_eq!(out[2].tx_id.as_bytes()[0], 5);
+    }
+
+    #[test]
+    fn push_batch_truncating_keeps_parent_first_prefix() {
+        // A parent-before-child demotion batch [1(parent)..5(deepest child)]
+        // capped at 3: the tail (deepest children) is dropped, the
+        // dependency-safe prefix (parents) survives — the opposite of
+        // push_batch's front-drop, which would strand orphaned children.
+        let mut q = RevalidationQueue::new(3);
+        let batch = (1..=5u8).map(demoted).collect();
+        let dropped = q.push_batch_truncating(batch);
+        assert_eq!(
+            dropped, 2,
+            "deepest 2 children dropped from a 5→cap-3 batch"
+        );
+        assert_eq!(q.len(), 3);
+        let out = q.drain(3);
+        // Survivors are the 3 OLDEST (parent-first prefix): 1, 2, 3.
+        assert_eq!(out[0].tx_id.as_bytes()[0], 1, "parent retained");
+        assert_eq!(out[1].tx_id.as_bytes()[0], 2);
+        assert_eq!(out[2].tx_id.as_bytes()[0], 3);
     }
 
     /// Digest32 with all bytes = `b` (test id constructor).

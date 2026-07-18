@@ -421,8 +421,15 @@ impl Mempool {
     /// id through the shared `admission::record_failed_tx` classifier (here
     /// always the blacklist arm, since only hard-invalid failures reach it), so
     /// it stops being relayed. Cascade descendants are dependency-evicted only
-    /// (never cached): a descendant beyond the `max_family_depth` cascade bound
-    /// is left in the pool and caught on a later pass.
+    /// (never cached). NOTE: a descendant beyond the `max_family_depth` cascade
+    /// bound is left in the pool and is NOT re-caught by a later recheck pass —
+    /// its subsequent revalidation returns `UnresolvedInput` (its evicted
+    /// ancestor's output is gone), which the policy above retains rather than
+    /// evicts. Such an orphan lingers until independent removal (saturation
+    /// `LowWeight` eviction, or confirmation/reorg). This is a bounded,
+    /// known limitation of the fixed cascade depth; a follow-up that carries
+    /// the truncated dependency frontier into bounded cascade removal is
+    /// tracked separately.
     ///
     /// `now` is injected and stamps all per-tx bookkeeping (the rotation clock),
     /// so the pass is deterministic and unit-testable; the only wall-clock read
@@ -810,8 +817,11 @@ impl Mempool {
         }
         // Reset cost budgets (mirrors reorg::on_tip_change line 188).
         self.budgets.reset();
-        // Enqueue for re-admission, parent-before-child.
-        self.revalidation.push_batch(demoted)
+        // Enqueue for re-admission, parent-before-child. Truncate from the
+        // TAIL when the whole pool exceeds `revalidation_max_depth`: dropping
+        // the parent-first prefix (front-drop) would strand orphaned children
+        // that then fail `UnresolvedInput` on drain.
+        self.revalidation.push_batch_truncating(demoted)
     }
 
     /// Test-only: access the underlying pool for invariant checks.
