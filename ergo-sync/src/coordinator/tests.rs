@@ -375,6 +375,29 @@ fn on_header_validated_requests_sections_with_correct_types() {
 }
 
 #[test]
+fn on_header_validated_requests_ad_proofs_in_digest_mode() {
+    // Digest-verifier (Mode 5): the ADProofs section (104) is requested
+    // alongside BlockTransactions (102) and Extension (108).
+    let mut coord = SyncCoordinator::new(100);
+    coord.set_requires_proofs(true);
+    let now = Instant::now();
+    let p = peer(9030);
+    let expected = ExpectedSections::from_header(&mk(1), &mk(10), &mk(11), &mk(12));
+    let recent_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let actions = coord.on_header_validated(p, mk(1), 101, recent_ts, expected, now);
+    let mut types = request_modifier_codes_in_order(&actions);
+    types.sort_unstable();
+    assert_eq!(
+        types,
+        vec![102, 104, 108],
+        "digest mode must request all three sections including ADProofs (104)"
+    );
+}
+
+#[test]
 fn mode_6_headers_only_emits_no_section_requests() {
     // Mode 6 sync path: on_header_validated must update sync_state
     // (best-known-header advances, headers-chain-synced is
@@ -1185,12 +1208,12 @@ fn setup_pending_blocks_for_request_tests() -> (
     let ext1 = exp1.extension_id;
     coord.sync_state_mut().set_best_known_header(101);
     coord.sync_state_mut().add_pending_block(101, mk(1));
-    coord.assembly_mut().register_header(exp1);
+    coord.assembly_mut().register_header(exp1, false);
 
     let exp2 = ExpectedSections::from_header(&mk(2), &mk(20), &mk(21), &mk(22));
     coord.sync_state_mut().set_best_known_header(102);
     coord.sync_state_mut().add_pending_block(102, mk(2));
-    coord.assembly_mut().register_header(exp2);
+    coord.assembly_mut().register_header(exp2, false);
 
     (coord, chain, p1, p2, tx1, ext1)
 }
@@ -1423,7 +1446,7 @@ fn setup_n_pending_blocks_with_window(n: u32, window: usize) -> (SyncCoordinator
         );
         coord.sync_state_mut().set_best_known_header(height);
         coord.sync_state_mut().add_pending_block(height, header_id);
-        coord.assembly_mut().register_header(exp);
+        coord.assembly_mut().register_header(exp, false);
     }
     (coord, chain)
 }
@@ -1456,7 +1479,7 @@ fn setup_pending_with_mode(
         );
         coord.sync_state_mut().set_best_known_header(height);
         coord.sync_state_mut().add_pending_block(height, header_id);
-        coord.assembly_mut().register_header(exp);
+        coord.assembly_mut().register_header(exp, false);
     }
     (coord, chain)
 }

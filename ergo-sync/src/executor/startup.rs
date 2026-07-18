@@ -459,7 +459,10 @@ impl SyncExecutor {
             coordinator
                 .sync_state_mut()
                 .add_pending_block(height, header_id);
-            coordinator.assembly_mut().register_header(expected);
+            let requires_proofs = coordinator.requires_proofs();
+            coordinator
+                .assembly_mut()
+                .register_header(expected, requires_proofs);
         }
         // Reached here = the near-tip gate passed and the walk completed
         // (even if the walk was empty because header_height <= full_block_height).

@@ -542,7 +542,8 @@ impl SyncCoordinator {
         }
 
         self.sync_state.add_pending_block(height, header_id);
-        self.assembly.register_header(expected_sections.clone());
+        self.assembly
+            .register_header(expected_sections.clone(), self.requires_proofs);
 
         // Request block sections if within download window.
         let within_window = height
@@ -552,7 +553,7 @@ impl SyncCoordinator {
                 .saturating_add(self.sync_state.download_window() as u32);
 
         if within_window {
-            let section_requests = [
+            let mut section_requests = vec![
                 (
                     ModifierTypeId::BlockTransactions.as_byte(),
                     expected_sections.transactions_id,
@@ -562,6 +563,15 @@ impl SyncCoordinator {
                     expected_sections.extension_id,
                 ),
             ];
+            // Digest-verifier (Mode 5): also request the ADProofs section, which
+            // the digest block-apply path needs to verify the UTXO transition
+            // (Scala ToDownloadProcessor requiredModifiersForHeader = sectionIds).
+            if self.requires_proofs {
+                section_requests.push((
+                    ModifierTypeId::ADProofs.as_byte(),
+                    expected_sections.ad_proofs_id,
+                ));
+            }
 
             for (type_id, section_id) in section_requests {
                 let registered = self.delivery.request(peer, type_id, &[section_id], now);
