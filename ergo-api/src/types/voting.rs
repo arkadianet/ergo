@@ -76,7 +76,8 @@ pub struct ApiVoteTarget {
     /// Votable parameter id (1..=8, or 9 = subblocksPerBlock). `blockVersion`
     /// (123) and soft-fork (120) are not operator-votable and are rejected.
     pub parameter_id: u8,
-    /// Desired value; the node votes up/down one step per block toward it.
+    /// Desired value; the node votes up/down one step per voting epoch toward it
+    /// (consistent with `ApiVotableParam` above and the per-epoch history rows).
     pub target: i64,
 }
 
