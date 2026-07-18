@@ -10201,6 +10201,41 @@ fn coll_patch_long_carrier_negative_replaced() {
     }
 }
 
+#[test]
+fn coll_patch_short_carrier() {
+    // Scala `Coll[A].patch` accepts every element type, but the previous impl
+    // only matched Byte/Int/Long carriers and rejected `Coll[Short]` — a
+    // reject-valid. patch([1,2,3,4,5], 1, [99], 2) → [1, 99, 4, 5].
+    let expr = coll_patch_call(
+        const_coll_short(vec![1, 2, 3, 4, 5]),
+        1,
+        const_coll_short(vec![99]),
+        2,
+    );
+    let v = eval_to_value(&expr, &ReductionContext::minimal(500_000, 0), &[]).unwrap();
+    match v {
+        Value::CollShort(c) => assert_eq!(c, vec![1, 99, 4, 5]),
+        other => panic!("expected CollShort, got {other:?}"),
+    }
+}
+
+#[test]
+fn coll_patch_bool_carrier() {
+    // `Coll[Boolean]` was likewise rejected. patch([T,T,T], 1, [F], 1) →
+    // [T, F, T].
+    let expr = coll_patch_call(
+        const_coll_bool(vec![true, true, true]),
+        1,
+        const_coll_bool(vec![false]),
+        1,
+    );
+    let v = eval_to_value(&expr, &ReductionContext::minimal(500_000, 0), &[]).unwrap();
+    match v {
+        Value::CollBool(c) => assert_eq!(c, vec![true, false, true]),
+        other => panic!("expected CollBool, got {other:?}"),
+    }
+}
+
 // ----- Coll.indexOf / Slice negative-input guards -----
 //
 // These guard tests lock the contract split: any future "negative
@@ -11629,7 +11664,7 @@ fn serialize_coll_header_native_carrier() {
     use ergo_ser::sigma_type::SigmaType as T;
     use ergo_ser::sigma_value::{CollValue, SigmaValue as Sv};
     let coll = Value::CollHeader(vec![test_eval_header_v2(), test_eval_header_v2()]);
-    let (t, sv) = value_to_typed_sigma(&coll).unwrap();
+    let (t, sv) = value_to_typed_sigma(&coll, None).unwrap();
     assert_eq!(t, T::SColl(Box::new(T::SHeader)));
     assert!(matches!(&sv, Sv::Coll(CollValue::Values(v)) if v.len() == 2));
     // Cost = putUShort(len)=3 + 2 * Header(v2)=244 = 491.
@@ -11973,12 +12008,51 @@ fn value_to_typed_sigma_inline_box_surfaces_opaque_bytes() {
     );
     let v = sigma_to_value(&SigmaType::SBox, &SigmaValue::OpaqueBoxBytes(bytes.clone())).unwrap();
     assert!(matches!(v, Value::InlineBox(_)));
-    let (t, sv) = value_to_typed_sigma(&v).unwrap();
+    let (t, sv) = value_to_typed_sigma(&v, None).unwrap();
     assert_eq!(t, SigmaType::SBox);
     match sv {
         SigmaValue::OpaqueBoxBytes(raw) => assert_eq!(raw, bytes),
         other => panic!("expected OpaqueBoxBytes, got {other:?}"),
     }
+}
+
+#[test]
+fn value_to_typed_sigma_resolves_self_box_via_context() {
+    // serialize(SELF): the SelfBox carrier resolves through the
+    // ReductionContext to the concrete box and yields the same
+    // (SBox, OpaqueBoxBytes(raw)) the InlineBox path does — where it was
+    // previously rejected. Without a context (the SubstConstants path) it
+    // still rejects. The raw bytes are the canonical box serialization
+    // (`ExtractBytes`/`ErgoBox.sigmaSerializer`).
+    let bytes = build_box(
+        1_000_000,
+        &ser_box_tree(),
+        100,
+        &[],
+        &reg_none(),
+        &[0xAB; 32],
+        7,
+    );
+    let inline =
+        sigma_to_value(&SigmaType::SBox, &SigmaValue::OpaqueBoxBytes(bytes.clone())).unwrap();
+    let eb = match inline {
+        Value::InlineBox(eb) => *eb,
+        other => panic!("expected InlineBox, got {other:?}"),
+    };
+    let ctx = ReductionContext {
+        self_box: Some(&eb),
+        ..ReductionContext::minimal(500_000, 0)
+    };
+
+    let (t, sv) = value_to_typed_sigma(&Value::SelfBox, Some(&ctx)).unwrap();
+    assert_eq!(t, SigmaType::SBox);
+    match sv {
+        SigmaValue::OpaqueBoxBytes(raw) => assert_eq!(raw, bytes),
+        other => panic!("expected OpaqueBoxBytes, got {other:?}"),
+    }
+
+    // No context → still rejected (SubstConstants behavior unchanged).
+    assert!(value_to_typed_sigma(&Value::SelfBox, None).is_err());
 }
 
 #[test]
@@ -12127,6 +12201,69 @@ fn flatmap_flattens_coll_short_body() {
         },
     );
     assert_eq!(run_eval(&expr), Value::CollShort(vec![9, 9, 9, 9]));
+}
+
+#[test]
+fn flatmap_empty_receiver_recovers_output_type_from_const_body() {
+    use ergo_ser::sigma_value::CollValue;
+    // Empty Coll[Int] receiver; mapper body is a Coll[Long] constant. The mapper
+    // never runs, but the result must be an empty Coll[Long] — B recovered from
+    // the body's static type — NOT the legacy Coll[Byte].
+    let empty = const_coll_int(vec![]);
+    let long_body = Expr::Const {
+        tpe: SigmaType::SColl(Box::new(SigmaType::SLong)),
+        val: SigmaValue::Coll(CollValue::Values(vec![SigmaValue::Long(7)])),
+    };
+    let func = op(
+        0xD9,
+        Payload::FuncValue {
+            args: vec![(1, Some(SigmaType::SInt))],
+            body: Box::new(long_body),
+        },
+    );
+    let expr = op(
+        0xDC,
+        Payload::MethodCall {
+            type_id: 12,
+            method_id: 15,
+            obj: Box::new(empty),
+            args: vec![func],
+            type_args: vec![],
+        },
+    );
+    assert_eq!(run_eval(&expr), Value::CollLong(vec![]));
+}
+
+#[test]
+fn flatmap_empty_receiver_recovers_output_type_from_concrete_collection_body() {
+    // Same, but the mapper body is a ConcreteCollection (0x83) of Coll[Int]:
+    // empty receiver → empty Coll[Int].
+    let empty = const_coll_int(vec![]);
+    let concrete_body = op(
+        0x83,
+        Payload::ConcreteCollection {
+            elem_type: SigmaType::SInt,
+            items: vec![const_int(5)],
+        },
+    );
+    let func = op(
+        0xD9,
+        Payload::FuncValue {
+            args: vec![(1, Some(SigmaType::SInt))],
+            body: Box::new(concrete_body),
+        },
+    );
+    let expr = op(
+        0xDC,
+        Payload::MethodCall {
+            type_id: 12,
+            method_id: 15,
+            obj: Box::new(empty),
+            args: vec![func],
+            type_args: vec![],
+        },
+    );
+    assert_eq!(run_eval(&expr), Value::CollInt(vec![]));
 }
 
 // ── AvlTree.updateDigest (100,15) / updateOperations (100,8) + variable digest ──

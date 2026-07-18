@@ -115,7 +115,10 @@ pub(crate) fn subst_constants(
     for (i, (template_type, original_value)) in constants.iter().enumerate() {
         if backref[i] >= 0 {
             let new_value = &new_values[backref[i] as usize];
-            let (new_type, sv) = value_to_typed_sigma(new_value)?;
+            // No ReductionContext on the SubstConstants path: a context-backed
+            // box as a substituted constant stays unsupported (pre-existing
+            // residual; SGlobal.serialize handles the box case with `Some`).
+            let (new_type, sv) = value_to_typed_sigma(new_value, None)?;
             // Scala `require(c.tpe == newConst.tpe)`: a substitution cannot
             // change the constant's type. `sigma_type_compatible` bridges the
             // SAny wildcard our type recovery surfaces for `Opt(None)` / empty

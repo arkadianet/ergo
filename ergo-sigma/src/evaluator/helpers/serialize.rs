@@ -30,7 +30,16 @@ pub(crate) fn trace_val(v: &Value) -> String {
 }
 
 /// Convert a runtime Value to (SigmaType, SigmaValue) for serialization.
-pub(crate) fn value_to_typed_sigma(val: &Value) -> Result<(SigmaType, SigmaValue), EvalError> {
+///
+/// `ctx` is `Some` on the `SGlobal.serialize` path, where context-backed box
+/// carriers (`SELF`, `INPUTS`/`OUTPUTS`/`DATAINPUTS`, `Coll[Box]`) can be
+/// resolved to their concrete boxes and serialized. It is `None` on the
+/// `SubstConstants` path (no context available there — a context box as a
+/// substituted constant remains unsupported, a pre-existing residual).
+pub(crate) fn value_to_typed_sigma(
+    val: &Value,
+    ctx: Option<&crate::evaluator::types::ReductionContext<'_>>,
+) -> Result<(SigmaType, SigmaValue), EvalError> {
     use ergo_ser::sigma_value::CollValue;
     match val {
         Value::Bool(b) => Ok((SigmaType::SBoolean, SigmaValue::Boolean(*b))),
@@ -102,7 +111,7 @@ pub(crate) fn value_to_typed_sigma(val: &Value) -> Result<(SigmaType, SigmaValue
         // type-compatibility check (`sigma_type_compatible`) bridges
         // the wildcard back to the concrete `T` when needed.
         Value::Opt(Some(inner)) => {
-            let (inner_ty, inner_val) = value_to_typed_sigma(inner)?;
+            let (inner_ty, inner_val) = value_to_typed_sigma(inner, ctx)?;
             Ok((
                 SigmaType::SOption(Box::new(inner_ty)),
                 SigmaValue::Opt(Some(Box::new(inner_val))),
@@ -121,7 +130,7 @@ pub(crate) fn value_to_typed_sigma(val: &Value) -> Result<(SigmaType, SigmaValue
             let mut types: Vec<SigmaType> = Vec::with_capacity(items.len());
             let mut vals: Vec<SigmaValue> = Vec::with_capacity(items.len());
             for item in items {
-                let (t, v) = value_to_typed_sigma(item)?;
+                let (t, v) = value_to_typed_sigma(item, ctx)?;
                 types.push(t);
                 vals.push(v);
             }
@@ -141,7 +150,7 @@ pub(crate) fn value_to_typed_sigma(val: &Value) -> Result<(SigmaType, SigmaValue
         Value::CollGeneric(items, elem_type) => {
             let mut sigma_vals: Vec<SigmaValue> = Vec::with_capacity(items.len());
             for item in items {
-                let (t, v) = value_to_typed_sigma(item)?;
+                let (t, v) = value_to_typed_sigma(item, ctx)?;
                 // `sigma_type_compatible` bridges the `SAny`
                 // wildcard `Value::Opt(None)` surfaces back to the
                 // carrier's concrete `T`, so a mixed
@@ -211,18 +220,70 @@ pub(crate) fn value_to_typed_sigma(val: &Value) -> Result<(SigmaType, SigmaValue
         // routes SBox to `ErgoBox.sigmaSerializer`; hand the cached bytes to
         // `write_value(SBox, OpaqueBoxBytes)` (-> put_bytes), and
         // `serialize_put_cost(SBox)` re-parses them for the put-cost sum.
-        // SelfBox / BoxRef would need context resolution to a concrete box; no
-        // SANTA vector exercises a top-level serialize(SELF)/serialize(INPUTS),
-        // so they stay in the catch-all below.
         Value::InlineBox(eb) => Ok((
             SigmaType::SBox,
             SigmaValue::OpaqueBoxBytes(eb.raw_bytes.clone()),
         )),
+        // Context-backed single box (SELF / INPUTS(i) / OUTPUTS(i) / …):
+        // resolve to the concrete box and emit its canonical `raw_bytes` — the
+        // SAME bytes ExtractBytes (0xC3) and the InlineBox arm above use, which
+        // is exactly what Scala `DataSerializer` / `ErgoBox.sigmaSerializer`
+        // writes. Only reachable with a context (SGlobal.serialize); without
+        // one it falls through to the SubstConstants reject.
+        Value::SelfBox | Value::BoxRef { .. } => {
+            let ctx = ctx.ok_or_else(|| EvalError::TypeError {
+                expected: "serializable value for SubstConstants",
+                got: format!("{val:?}"),
+            })?;
+            let b = crate::evaluator::helpers::equality::resolve_box(val, ctx)?;
+            Ok((
+                SigmaType::SBox,
+                SigmaValue::OpaqueBoxBytes(b.raw_bytes.clone()),
+            ))
+        }
+        // A context box COLLECTION (INPUTS / OUTPUTS / DATAINPUTS) → Coll[SBox].
+        Value::BoxCollection(source) => {
+            let ctx = ctx.ok_or_else(|| EvalError::TypeError {
+                expected: "serializable value for SubstConstants",
+                got: format!("{val:?}"),
+            })?;
+            use crate::evaluator::types::BoxSource;
+            let boxes: &[crate::evaluator::types::EvalBox] = match source {
+                BoxSource::Inputs => ctx.inputs,
+                BoxSource::Outputs => ctx.outputs,
+                BoxSource::DataInputs => ctx.data_inputs,
+            };
+            let vals: Vec<SigmaValue> = boxes
+                .iter()
+                .map(|b| SigmaValue::OpaqueBoxBytes(b.raw_bytes.clone()))
+                .collect();
+            Ok((
+                SigmaType::SColl(Box::new(SigmaType::SBox)),
+                SigmaValue::Coll(CollValue::Values(vals)),
+            ))
+        }
+        // A materialized `Coll[Box]` whose elements are context box refs.
+        Value::CollBox(elems) => {
+            let ctx = ctx.ok_or_else(|| EvalError::TypeError {
+                expected: "serializable value for SubstConstants",
+                got: format!("{val:?}"),
+            })?;
+            let vals = elems
+                .iter()
+                .map(|e| {
+                    let b = crate::evaluator::helpers::equality::resolve_box(e, ctx)?;
+                    Ok(SigmaValue::OpaqueBoxBytes(b.raw_bytes.clone()))
+                })
+                .collect::<Result<Vec<SigmaValue>, EvalError>>()?;
+            Ok((
+                SigmaType::SColl(Box::new(SigmaType::SBox)),
+                SigmaValue::Coll(CollValue::Values(vals)),
+            ))
+        }
         // Catch-all rejects the remaining non-serializable runtime carriers
-        // (BoxCollection / SelfBox / BoxRef / Func / Global / Opt / Tokens /
-        // PreHeader / CollBox). These either lack a public SigmaValue
-        // counterpart or have no Scala-anchored bytes for the
-        // SubstConstants/SGlobal.serialize boundary.
+        // (Func / Global / PreHeader / Tokens …). These lack a public
+        // SigmaValue counterpart or have no Scala-anchored bytes for the
+        // SubstConstants / SGlobal.serialize boundary.
         other => Err(EvalError::TypeError {
             expected: "serializable value for SubstConstants",
             got: format!("{other:?}"),

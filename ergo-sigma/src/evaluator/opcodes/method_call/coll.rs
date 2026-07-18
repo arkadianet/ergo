@@ -182,6 +182,48 @@ pub(super) fn get(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
 
 // SColl(12).flatMap(15) -> Coll[B]
 // Scala: xs.flatMap(f) — map each element to a collection, flatten results.
+/// Best-effort static output element type `B` of a flatMap mapper body (a
+/// `Coll[B]` expression), for typing the EMPTY result when the receiver is
+/// empty. Covers the statically-determinable IR shapes; `None` otherwise, so
+/// the caller keeps the legacy `Coll[Byte]` fallback (a documented residual).
+/// A returned type is always correct (it IS the body's collection element
+/// type), so this can never introduce a new divergence.
+fn flatmap_output_elem_type(body: &Expr) -> Option<SigmaType> {
+    use ergo_ser::opcode::Payload;
+    match body {
+        Expr::Const {
+            tpe: SigmaType::SColl(elem),
+            ..
+        } => Some((**elem).clone()),
+        Expr::Op(node) => match &node.payload {
+            Payload::ConcreteCollection { elem_type, .. } => Some(elem_type.clone()),
+            Payload::BoolCollection { .. } => Some(SigmaType::SBoolean),
+            // If (0x95): both branches share the `Coll[B]` result type, so the
+            // then-branch determines B.
+            Payload::Three(_cond, then_branch, _else_branch) if node.opcode == 0x95 => {
+                flatmap_output_elem_type(then_branch)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Empty collection `Value` in the carrier the evaluator uses for `elem`.
+fn empty_coll_for_elem(elem: &SigmaType) -> Value {
+    match elem {
+        SigmaType::SByte => Value::CollBytes(Vec::new()),
+        SigmaType::SShort => Value::CollShort(Vec::new()),
+        SigmaType::SInt => Value::CollInt(Vec::new()),
+        SigmaType::SLong => Value::CollLong(Vec::new()),
+        SigmaType::SBoolean => Value::CollBool(Vec::new()),
+        SigmaType::SSigmaProp => Value::CollSigmaProp(Vec::new()),
+        SigmaType::SBox => Value::CollBox(Vec::new()),
+        SigmaType::SHeader => Value::CollHeader(Vec::new()),
+        other => Value::CollGeneric(Vec::new(), Box::new(other.clone())),
+    }
+}
+
 pub(super) fn flat_map(
     obj_val: Value,
     args: &[Expr],
@@ -290,7 +332,15 @@ pub(super) fn flat_map(
             });
             inner_colls.retain(|v| !matches!(v, Value::CollGeneric(t, _) if t.is_empty()));
             let result = if inner_colls.is_empty() {
-                first_shape.unwrap_or(Value::CollBytes(vec![]))
+                // Empty receiver: no inner collection exists to read the shape
+                // from, so recover the output element type B from the mapper
+                // body's static `Coll[B]` type (Scala threads `RType[B]`),
+                // rather than collapsing to `Coll[Byte]`. Undeterminable bodies
+                // still fall back to the legacy `Coll[Byte]` — a documented
+                // residual; a recovered type is always correct.
+                first_shape
+                    .or_else(|| flatmap_output_elem_type(&body).map(|b| empty_coll_for_elem(&b)))
+                    .unwrap_or_else(|| Value::CollBytes(Vec::new()))
             } else {
                 match &inner_colls[0] {
                     Value::CollBytes(_) => {
@@ -512,34 +562,41 @@ pub(super) fn patch(
         patch_delta.value(),
         cx.cost.total().value(),
     );
-    // splice(start..end, patch) yields xs[0..start] ++ patch
-    //   ++ xs[end..n], equivalent to Scala chunk1/chunk2 model
-    //   above. `from + replaced` cannot overflow usize on
-    //   supported targets: both args are clamped to [0,
-    //   i32::MAX], so the worst-case sum is 2 * i32::MAX =
-    //   4_294_967_294, which fits in u32 (and trivially in
-    //   u64).
-    match (obj_val, patch_val) {
-        (Value::CollBytes(mut coll), Value::CollBytes(patch)) => {
-            let end = (from + replaced).min(coll.len());
-            coll.splice(from.min(coll.len())..end, patch);
-            Ok(Value::CollBytes(coll))
+    // Generic carrier: Scala `Coll[A].patch` accepts every element type
+    // (CollsOverArrays), so decompose both receiver and patch to a `Vec<Value>`
+    // and splice — rather than enumerating a few carriers (which reject-valid'd
+    // `Coll[Short]` / `Coll[Boolean]` / tuple / box / header receivers). Mirrors
+    // the generic path `updateMany` already uses.
+    let elem_type = coll_elem_type(&obj_val).ok_or_else(|| EvalError::TypeError {
+        expected: "Coll for patch receiver",
+        got: format!("{obj_val:?}"),
+    })?;
+    let (kind, mut items) = collection_to_values(obj_val, cx.ctx)?;
+    let (_patch_kind, patch_items) = collection_to_values(patch_val, cx.ctx)?;
+    // Each patched-in element must be assignable to the receiver's element
+    // type: Scala's `patch(_, patch: Coll[A], _)` is backed by `Array[A]`, so a
+    // foreign element throws ArrayStoreException. An empty patch writes nothing
+    // and is accepted regardless of its declared element type — matching Scala
+    // and the `updateMany` empty-values rule.
+    for p in &patch_items {
+        let p_ty = value_to_sigma_type(p).ok_or_else(|| EvalError::TypeError {
+            expected: "patch element with recoverable SigmaType",
+            got: format!("{p:?}"),
+        })?;
+        if !sigma_type_compatible(&elem_type, &p_ty) {
+            return Err(EvalError::TypeError {
+                expected: "matching element type for patch",
+                got: format!("{elem_type:?} vs {p_ty:?}"),
+            });
         }
-        (Value::CollInt(mut coll), Value::CollInt(patch)) => {
-            let end = (from + replaced).min(coll.len());
-            coll.splice(from.min(coll.len())..end, patch);
-            Ok(Value::CollInt(coll))
-        }
-        (Value::CollLong(mut coll), Value::CollLong(patch)) => {
-            let end = (from + replaced).min(coll.len());
-            coll.splice(from.min(coll.len())..end, patch);
-            Ok(Value::CollLong(coll))
-        }
-        (c, p) => Err(EvalError::TypeError {
-            expected: "matching collection types for patch",
-            got: format!("{c:?}, {p:?}"),
-        }),
     }
+    // splice(start..end, patch) yields xs[0..start] ++ patch ++ xs[end..n],
+    // equivalent to Scala's chunk1/chunk2 model above. `from + replaced` cannot
+    // overflow usize on supported targets: both args are clamped to
+    // [0, i32::MAX], so the worst-case sum 2 * i32::MAX fits in u32.
+    let end = (from + replaced).min(items.len());
+    items.splice(from.min(items.len())..end, patch_items);
+    values_to_collection(kind, items, elem_type)
 }
 
 // SColl(12).updated(20) -> Coll[T]
