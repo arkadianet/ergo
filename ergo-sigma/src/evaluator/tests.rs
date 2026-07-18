@@ -11664,7 +11664,7 @@ fn serialize_coll_header_native_carrier() {
     use ergo_ser::sigma_type::SigmaType as T;
     use ergo_ser::sigma_value::{CollValue, SigmaValue as Sv};
     let coll = Value::CollHeader(vec![test_eval_header_v2(), test_eval_header_v2()]);
-    let (t, sv) = value_to_typed_sigma(&coll).unwrap();
+    let (t, sv) = value_to_typed_sigma(&coll, None).unwrap();
     assert_eq!(t, T::SColl(Box::new(T::SHeader)));
     assert!(matches!(&sv, Sv::Coll(CollValue::Values(v)) if v.len() == 2));
     // Cost = putUShort(len)=3 + 2 * Header(v2)=244 = 491.
@@ -12008,12 +12008,51 @@ fn value_to_typed_sigma_inline_box_surfaces_opaque_bytes() {
     );
     let v = sigma_to_value(&SigmaType::SBox, &SigmaValue::OpaqueBoxBytes(bytes.clone())).unwrap();
     assert!(matches!(v, Value::InlineBox(_)));
-    let (t, sv) = value_to_typed_sigma(&v).unwrap();
+    let (t, sv) = value_to_typed_sigma(&v, None).unwrap();
     assert_eq!(t, SigmaType::SBox);
     match sv {
         SigmaValue::OpaqueBoxBytes(raw) => assert_eq!(raw, bytes),
         other => panic!("expected OpaqueBoxBytes, got {other:?}"),
     }
+}
+
+#[test]
+fn value_to_typed_sigma_resolves_self_box_via_context() {
+    // serialize(SELF): the SelfBox carrier resolves through the
+    // ReductionContext to the concrete box and yields the same
+    // (SBox, OpaqueBoxBytes(raw)) the InlineBox path does — where it was
+    // previously rejected. Without a context (the SubstConstants path) it
+    // still rejects. The raw bytes are the canonical box serialization
+    // (`ExtractBytes`/`ErgoBox.sigmaSerializer`).
+    let bytes = build_box(
+        1_000_000,
+        &ser_box_tree(),
+        100,
+        &[],
+        &reg_none(),
+        &[0xAB; 32],
+        7,
+    );
+    let inline =
+        sigma_to_value(&SigmaType::SBox, &SigmaValue::OpaqueBoxBytes(bytes.clone())).unwrap();
+    let eb = match inline {
+        Value::InlineBox(eb) => *eb,
+        other => panic!("expected InlineBox, got {other:?}"),
+    };
+    let ctx = ReductionContext {
+        self_box: Some(&eb),
+        ..ReductionContext::minimal(500_000, 0)
+    };
+
+    let (t, sv) = value_to_typed_sigma(&Value::SelfBox, Some(&ctx)).unwrap();
+    assert_eq!(t, SigmaType::SBox);
+    match sv {
+        SigmaValue::OpaqueBoxBytes(raw) => assert_eq!(raw, bytes),
+        other => panic!("expected OpaqueBoxBytes, got {other:?}"),
+    }
+
+    // No context → still rejected (SubstConstants behavior unchanged).
+    assert!(value_to_typed_sigma(&Value::SelfBox, None).is_err());
 }
 
 #[test]

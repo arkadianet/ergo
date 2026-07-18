@@ -333,7 +333,7 @@ pub(super) fn xor(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, EvalErro
 pub(super) fn serialize(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, EvalError> {
     check_arity(args, 1)?;
     let v = cx.eval_expr(&args[0])?;
-    let (target_type, sv) = crate::evaluator::helpers::value_to_typed_sigma(&v)?;
+    let (target_type, sv) = crate::evaluator::helpers::value_to_typed_sigma(&v, Some(cx.ctx))?;
     // Scala `DataSerializer.serialize(SHeader)` is gated on
     // `isV3OrLaterErgoTreeVersion` PER materialized header — and the
     // v6 method gate only checks `activatedScriptVersion`, so a tree
