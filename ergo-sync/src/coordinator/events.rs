@@ -51,15 +51,19 @@ impl SyncCoordinator {
         // V1 path uses the existing height-based heuristic with the
         // ID overlap predicate.
         //
-        // V2 path: scan peer's headers (assumed newest-first per Scala
-        // convention) and find the first ID on our best chain. That ID
-        // is the common point (Scala's `commonPoint`). If the newest
-        // peer header IS our best_header → Equal. If we find a common
-        // point that's NOT our tip → peer is Younger (their tip lives
-        // somewhere on our chain, below us). If no peer header is on
-        // our chain → fall back to the existing Older path
-        // (continuation-header shortcut + reciprocal SyncInfo) which
-        // covers Older / Fork / Unknown without needing peer height.
+        // V2 path: peer headers are newest-first (Scala convention), so
+        // peer_header_ids[0] is the peer's tip. Classification keys on the
+        // TIP, mirroring `compare_sync_info` (the V1 comparator):
+        //   * tip == our best_header → Equal.
+        //   * tip is on our best chain but isn't our tip → Younger (their
+        //     tip lives below us; they're strictly behind).
+        //   * tip is NOT on our chain → Older, even if an OLDER peer header
+        //     is on our chain: an off-chain tip above a shared ancestor
+        //     means the peer has headers we don't (ahead or on a fork), so
+        //     we must take the Older path (continuation-header shortcut +
+        //     reciprocal SyncInfo) to fetch them. Using `.any()` here would
+        //     misread such an ahead/fork peer as Younger and suppress the
+        //     continuation request.
         let status = if !peer_header_ids.is_empty() && peer_headers.is_empty() {
             // V1: ID-only comparison
             ergo_p2p::sync::compare_sync_info(
@@ -73,15 +77,14 @@ impl SyncCoordinator {
             let newest_id = peer_header_ids.first().copied().unwrap_or([0u8; 32]);
             if newest_id == our_best {
                 PeerChainStatus::Equal
-            } else if peer_header_ids.iter().any(|id| chain.is_on_best_chain(id)) {
-                // Peer's newest is NOT our tip but at least one of their
-                // headers IS on our chain — peer is behind us.
+            } else if chain.is_on_best_chain(&newest_id) {
+                // Peer's TIP is on our chain but below our tip — strictly behind.
                 PeerChainStatus::Younger
             } else {
-                // Default to Older (existing reciprocal path handles
-                // catchup; if peer is on a fork, find_continuation_header
-                // returns None and the SyncInfo reply keeps the dance
-                // going).
+                // Tip not on our chain → peer is ahead or forked. Older path
+                // handles catchup; if on a fork, find_continuation_header
+                // returns None and the reciprocal SyncInfo keeps the dance
+                // going.
                 PeerChainStatus::Older
             }
         } else {
@@ -393,6 +396,24 @@ impl SyncCoordinator {
         let action = self.delivery.on_received(&modifier_id, &peer);
         match action {
             DeliveryAction::Accept => {
+                // Type-match guard: the peer's wire-claimed `type_id` must
+                // equal the type we actually requested for this id. A
+                // mismatch means the peer answered our request with the wrong
+                // modifier type (buggy or malicious) — reject BEFORE
+                // mark_received so the outstanding request survives and a
+                // retry can fetch the correct section from another peer.
+                // Routing below trusts `type_id`, so an unchecked mismatch
+                // would mis-route (e.g. persist a header's bytes as a section,
+                // or feed section bytes to header validation).
+                if let Some(requested_type) = self.delivery.modifier_type(&modifier_id) {
+                    if requested_type != type_id {
+                        actions.push(Action::Penalize {
+                            peer,
+                            penalty: Penalty::Misbehavior,
+                        });
+                        return actions;
+                    }
+                }
                 // Body-only streak reset: only an accepted block-BODY section
                 // clears the download-failure streak. A header or mempool-tx
                 // delivery must NOT reset it, or a peer that stalls on bodies

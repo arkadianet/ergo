@@ -464,7 +464,17 @@ fn orphan_cap_preserves_root_side() {
     let boundary = bytes_at_height[ORPHAN_HEADER_LIMIT - 1].clone();
     let dropped = bytes_at_height[ORPHAN_HEADER_LIMIT].clone();
 
-    executor.cap_orphan_buffer();
+    let evicted = executor.cap_orphan_buffer();
+
+    // The 3-over-cap highest-height entries are returned so the caller can
+    // forget_received_modifier them; the dropped entry's id is among them.
+    assert_eq!(evicted.len(), 3, "3 entries over the cap were evicted");
+    let mut dropped_id = [0u8; 32];
+    dropped_id[28..32].copy_from_slice(&(ORPHAN_HEADER_LIMIT as u32).to_be_bytes());
+    assert!(
+        evicted.contains(&dropped_id),
+        "the dropped high-height header id is reported evicted",
+    );
 
     // cap_orphan_buffer drops the highest-height entries, so the
     // root side (lower heights, including `first` and `boundary`)

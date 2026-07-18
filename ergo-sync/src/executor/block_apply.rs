@@ -123,7 +123,12 @@ impl SyncExecutor {
                     "block validation failed",
                 );
                 self.record_block_apply_error(*header_id, meta.height, e.to_string());
-                store.mark_session_invalid(*header_id);
+                // Same classifier as try_apply_next_blocks: a definitive
+                // validation verdict durably invalidates the block + its
+                // descendants and re-anchors best_header across restart, so an
+                // invalid block isn't retried every tick; anything else stays a
+                // session-only mark.
+                self.invalidate_or_session_mark(store, coordinator, *header_id, meta.height, &e);
                 Vec::new()
             }
         }

@@ -209,6 +209,13 @@ pub struct SyncExecutor {
     /// re-detected every tick, and warning every tick would bury the one log
     /// line that explains the stall.
     deep_fork_wedge_last_warn: Option<Instant>,
+    /// Rate-limiter for the single-header orphan-root parent-walk. That walk
+    /// is an O(orphan-buffer) scan (bounded by `ORPHAN_HEADER_LIMIT` but still
+    /// large), and the ParentNotFound path would otherwise run it on every
+    /// buffered orphan — quadratic under an orphan flood. Throttled to at most
+    /// once per [`header_pipeline::ORPHAN_ROOT_WALK_MIN_INTERVAL`]; the batch
+    /// drain path and reciprocal SyncInfo still surface missing parents.
+    orphan_root_walk_last: Option<Instant>,
 }
 
 impl SyncExecutor {
@@ -232,6 +239,7 @@ impl SyncExecutor {
             apply_phase: std::sync::Arc::new(crate::ApplyPhaseMetrics::default()),
             deep_fork_wedge: None,
             deep_fork_wedge_last_warn: None,
+            orphan_root_walk_last: None,
         }
     }
 

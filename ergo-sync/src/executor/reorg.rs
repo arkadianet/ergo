@@ -196,6 +196,71 @@ impl SyncExecutor {
     /// (`SendToPeer`/`Penalize`/`PersistSection`/`AssembleBlock`); chained
     /// block-apply is a state event, not an external effect. Returning
     /// `()` rather than `Vec<Action>` keeps that contract honest.
+    /// Shared apply-failure handler for a block `process_block` rejected.
+    ///
+    /// A definitive validation verdict ([`is_validation_verdict`]) means the
+    /// Scala reference node also rejects the block, so it can never apply:
+    /// durably invalidate it and every stored descendant, re-anchor
+    /// best_header to the surviving tip (Scala `reportModifierIsInvalid`),
+    /// evict the dead branch from the download queue, and drop stale
+    /// `header_index` rows above the re-anchored tip. Persisting this across
+    /// restart is what stops an invalid block being retried forever. Any other
+    /// error (transient / IO / digest-ambiguous) gets only a session-scoped
+    /// mark, cleared on restart — we must never persistently poison a branch
+    /// that might be failing on our own bug or a stale local root. If the
+    /// durable walk itself fails (IO), fall back to the session mark.
+    ///
+    /// Shared by [`Self::try_apply_next_blocks`] and `handle_assemble_block`
+    /// so both apply-failure paths classify a failure identically.
+    pub(super) fn invalidate_or_session_mark(
+        &mut self,
+        store: &mut ergo_state::StateBackendKind,
+        coordinator: &mut SyncCoordinator,
+        header_id: [u8; 32],
+        height: u32,
+        err: &block_proc::BlockProcessError,
+    ) {
+        if !is_validation_verdict(err) {
+            // Transient / IO / digest-ambiguous failure: never poison the
+            // branch persistently. Session-scoped only, cleared on restart.
+            store.mark_session_invalid(header_id);
+            return;
+        }
+        match store.invalidate_validation_branch(header_id) {
+            Ok(invalidated) => {
+                let invalid_ids: std::collections::HashSet<[u8; 32]> =
+                    invalidated.iter().copied().collect();
+                // Evict the dead branch from the download queue so the
+                // coordinator stops targeting it.
+                coordinator
+                    .sync_state_mut()
+                    .retain_pending_blocks(|b| !invalid_ids.contains(&b.header_id));
+                let cs = store.chain_state_meta();
+                // Drop stale header_index entries above the re-anchored tip so
+                // a later recover_coordinator can't re-seed the dead branch.
+                self.header_index.retain(|&h, _| h <= cs.best_header_height);
+                warn!(
+                    height,
+                    header_id = %hex::encode(header_id),
+                    invalidated = invalidated.len(),
+                    reanchored_best_header_height = cs.best_header_height,
+                    "invalidated block and descendants; best_header re-anchored",
+                );
+            }
+            Err(inv_err) => {
+                // Persisting the invalidation itself failed (IO). Fall back to
+                // a session mark so we at least stop re-applying this tick; the
+                // durable walk retries next drain.
+                warn!(
+                    height,
+                    error = %inv_err,
+                    "branch invalidation failed; session-marking",
+                );
+                store.mark_session_invalid(header_id);
+            }
+        }
+    }
+
     pub fn try_apply_next_blocks(
         &mut self,
         store: &mut ergo_state::StateBackendKind,
@@ -356,60 +421,7 @@ impl SyncExecutor {
                     guard.failure();
                     warn!(height = next, error = %e, "block apply failed");
                     self.record_block_apply_error(header_id, next, e.to_string());
-                    if is_validation_verdict(&e) {
-                        // Definitive validation-rule rejection: the Scala
-                        // reference node also rejects this block, so it can
-                        // never apply. Durably invalidate it and every stored
-                        // descendant and re-anchor best_header to the surviving
-                        // tip (Scala `reportModifierIsInvalid`). This reopens
-                        // the mining gate (`headers == full`) and stops the
-                        // apply loop wedging forever below the dead branch.
-                        match store.invalidate_validation_branch(header_id) {
-                            Ok(invalidated) => {
-                                let invalid_ids: std::collections::HashSet<[u8; 32]> =
-                                    invalidated.iter().copied().collect();
-                                // Evict the dead branch from the download queue
-                                // so the coordinator stops targeting it.
-                                coordinator
-                                    .sync_state_mut()
-                                    .retain_pending_blocks(|b| !invalid_ids.contains(&b.header_id));
-                                let cs = store.chain_state_meta();
-                                // Drop stale header_index entries above the
-                                // re-anchored tip. Otherwise a subsequent
-                                // recover_coordinator (after reset_recovery_done)
-                                // could read an invalidated id at a height that
-                                // the rebuilt valid chain hasn't overwritten yet
-                                // and re-seed pending blocks from the dead branch.
-                                self.header_index
-                                    .retain(|&h, _| h <= cs.best_header_height);
-                                warn!(
-                                    height = next,
-                                    header_id = %hex::encode(header_id),
-                                    invalidated = invalidated.len(),
-                                    reanchored_best_header_height = cs.best_header_height,
-                                    "invalidated block and descendants; best_header re-anchored",
-                                );
-                            }
-                            Err(inv_err) => {
-                                // Persisting the invalidation itself failed
-                                // (IO). Fall back to a session mark so we at
-                                // least stop re-applying this tick; the durable
-                                // walk retries next drain.
-                                warn!(
-                                    height = next,
-                                    error = %inv_err,
-                                    "branch invalidation failed; session-marking",
-                                );
-                                store.mark_session_invalid(header_id);
-                            }
-                        }
-                    } else {
-                        // Transient / IO / digest-ambiguous failure: never
-                        // poison the branch persistently — it might be our bug
-                        // or a stale local root. Session-scoped only, cleared
-                        // on restart.
-                        store.mark_session_invalid(header_id);
-                    }
+                    self.invalidate_or_session_mark(store, coordinator, header_id, next, &e);
                     break;
                 }
             }
@@ -449,9 +461,18 @@ impl SyncExecutor {
     ) {
         let cs = store.chain_state_meta();
         let base = cs.best_full_block_height + 1;
-        let limit = base.saturating_add(coordinator.sync_state().download_window() as u32);
-        let best_h = cs.best_header_height;
-        for h in base..=limit.min(best_h) {
+        // Inclusive upper bound spans at most `download_window` blocks from
+        // `base` (heights base..=best_full+window), matching
+        // on_header_validated's request gate `height <= best_full + window`.
+        // A zero window yields an empty range (base > upper) so nothing is
+        // registered, mirroring recover_coordinator. Capped at the best
+        // header height so we never register beyond the header chain.
+        let window = coordinator.sync_state().download_window() as u32;
+        let upper = cs
+            .best_full_block_height
+            .saturating_add(window)
+            .min(cs.best_header_height);
+        for h in base..=upper {
             let hid = match store.get_header_id_at_height(h) {
                 Ok(Some(id)) => id,
                 Ok(None) => continue,
