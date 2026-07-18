@@ -455,7 +455,9 @@ fn reduce_verdict(bytes: &[u8]) -> (Verdict, usize) {
     match reduce_expr_with_cost(&tree.body, &ctx, &tree.constants, &mut cost) {
         Ok(sb) => {
             let mut w = VlqWriter::new();
-            ergo_ser::sigma_value::write_sigma_boolean(&mut w, &sb);
+            if let Err(e) = ergo_ser::sigma_value::write_sigma_boolean(&mut w, &sb) {
+                return (Verdict::Reject(format!("serialize: {e:?}")), consumed);
+            }
             (
                 Verdict::Accept(format!(
                     "P:{}|{}",

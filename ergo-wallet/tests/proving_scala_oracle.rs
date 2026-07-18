@@ -188,8 +188,8 @@ fn build_proposition(secrets: &JsonValue, node: &JsonValue) -> SigmaBoolean {
         "Cthreshold" => {
             let k = node["k"]
                 .as_u64()
-                .and_then(|n| u8::try_from(n).ok())
-                .expect("Cthreshold.k u8");
+                .and_then(|n| u16::try_from(n).ok())
+                .expect("Cthreshold.k u16");
             let children = node["children"]
                 .as_array()
                 .expect("Cthreshold.children array");

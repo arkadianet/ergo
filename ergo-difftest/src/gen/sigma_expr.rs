@@ -822,7 +822,7 @@ mod tests {
         let sb = reduce_expr_with_cost(&tree.body, &ctx, &tree.constants, &mut cost)
             .map_err(|e| format!("reduce: {e:?}"))?;
         let mut w = VlqWriter::new();
-        ergo_ser::sigma_value::write_sigma_boolean(&mut w, &sb);
+        ergo_ser::sigma_value::write_sigma_boolean(&mut w, &sb).map_err(|e| format!("{e:?}"))?;
         Ok((w.result(), cost.total().value()))
     }
 
