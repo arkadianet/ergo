@@ -1,9 +1,12 @@
 use super::*;
+use ergo_p2p::peer::Penalty;
+use ergo_p2p::peer_manager::PeerManager;
 use ergo_primitives::digest::{blake2b256, ADDigest, Digest32, ModifierId};
 use ergo_primitives::group_element::{GroupElement, GROUP_ELEMENT_LENGTH};
 use ergo_primitives::writer::VlqWriter;
 use ergo_ser::autolykos::AutolykosSolution;
 use ergo_ser::header::{write_header, Header};
+use ergo_state::ChainStateRead;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 fn peer(port: u16) -> PeerId {
