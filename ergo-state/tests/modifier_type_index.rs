@@ -479,3 +479,55 @@ fn malformed_header_does_not_abort_remaining_rows() {
     // of body parseability.
     assert_eq!(store.get_modifier_type(&bad_id).unwrap(), Some(101));
 }
+
+/// An unparseable header marks the scan known-incomplete: the completion
+/// sentinel must NOT be stamped, so a later boot re-scans (never takes the
+/// `Skipped` fast path) and can still tag sections that arrive after the
+/// first pass. Same "don't lock out future back-fill" guarantee the
+/// empty-DB path gives — a malformed row must not permanently suppress the
+/// index for the surrounding valid data.
+#[test]
+fn malformed_header_leaves_backfill_retriable() {
+    let (_d, store) = temp_store();
+
+    let good_id = [0x61u8; 32];
+    let good_bytes = write_minimal_header([0x60; 32], [0xA1; 32], [0xB1; 32], [0xC1; 32]);
+    store.store_header(&good_id, &good_bytes).unwrap();
+
+    let bad_id = [0x62u8; 32];
+    store
+        .store_header(&bad_id, &[0xFF, 0xFF, 0xFF, 0xFF])
+        .unwrap();
+
+    // First pass hits the anomaly → returns without stamping the sentinel.
+    let mut events1 = Vec::new();
+    store
+        .back_fill_modifier_type_index_with_progress(|ev| events1.push(ev))
+        .unwrap();
+    assert!(
+        !events1
+            .iter()
+            .any(|e| matches!(e, ModifierIndexBackfillEvent::Skipped)),
+        "first pass must actually scan, not short-circuit",
+    );
+
+    // A section for the good header arrives only now.
+    let good_tx = compute_section_id(TYPE_BLOCK_TRANSACTIONS, &good_id, &[0xB1; 32]);
+    store.store_block_section(&good_tx, &[0; 64]).unwrap();
+    assert_eq!(store.get_modifier_type(&good_tx).unwrap(), None);
+
+    // Second pass must re-scan (sentinel unset after an anomaly) and tag it —
+    // proving the malformed row did not lock out future back-fill.
+    let mut events2 = Vec::new();
+    let n2 = store
+        .back_fill_modifier_type_index_with_progress(|ev| events2.push(ev))
+        .unwrap();
+    assert!(
+        !events2
+            .iter()
+            .any(|e| matches!(e, ModifierIndexBackfillEvent::Skipped)),
+        "sentinel must NOT be stamped after an anomaly — second pass re-scans",
+    );
+    assert_eq!(n2, 1, "re-scan tags the newly-arrived section");
+    assert_eq!(store.get_modifier_type(&good_tx).unwrap(), Some(102));
+}

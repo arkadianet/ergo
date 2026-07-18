@@ -192,13 +192,23 @@ pub(crate) fn build_wallet_block_txs_from_sections(
     db: &redb::Database,
     header_id: &[u8; 32],
 ) -> Result<Option<Vec<OwnedBlockTxData>>, StateError> {
+    let read_txn = db.begin_read()?;
+    build_wallet_block_txs_from_read_txn(&read_txn, header_id)
+}
+
+/// Section-read core of [`build_wallet_block_txs_from_sections`], taking an
+/// existing read transaction so the caller can keep the height→header_id lookup
+/// and these section reads on ONE snapshot (a reorg/rewrite between two separate
+/// transactions could otherwise pair a height with a different block's txs).
+pub(crate) fn build_wallet_block_txs_from_read_txn(
+    read_txn: &redb::ReadTransaction,
+    header_id: &[u8; 32],
+) -> Result<Option<Vec<OwnedBlockTxData>>, StateError> {
     use ergo_primitives::reader::VlqReader;
     use ergo_ser::block_transactions::read_block_transactions;
     use ergo_ser::header::read_header;
     use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
     use ergo_ser::transaction::transaction_id;
-
-    let read_txn = db.begin_read()?;
 
     // Read header bytes to get transactions_root.
     let header_bytes = match read_txn.open_table(HEADERS) {
@@ -397,9 +407,12 @@ pub fn block_txs_for_wallet_at_height(
         Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    drop(read_txn);
 
-    match build_wallet_block_txs_from_sections(db, &header_id)? {
+    // Reuse the SAME read transaction for the section reads so the height's
+    // header_id and the block txs are read from one consistent snapshot — a
+    // reorg between two separate transactions could pair the height with a
+    // different block's transactions.
+    match build_wallet_block_txs_from_read_txn(&read_txn, &header_id)? {
         Some(txs) => Ok(Some((header_id, txs))),
         None => Ok(None),
     }

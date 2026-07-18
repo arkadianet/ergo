@@ -516,6 +516,10 @@ impl CommittedSnapshot {
         checked: &[CheckedTransaction],
         disposition: &mut Option<BaseDisposition>,
     ) -> Result<(ADDigest, Vec<u8>, [u8; 32]), StateError> {
+        // Clear before the fallible preprocessing below: a `?` here returns
+        // before `candidate_dry_run_cached_with_changes` can assign a
+        // disposition, and a stale value from a previous build must not survive.
+        *disposition = None;
         let (to_remove, to_insert) = StateStore::build_utxo_changes_checked(checked)?;
         let to_lookup = StateStore::build_data_input_lookups_checked(checked);
         self.candidate_dry_run_cached_with_changes(
@@ -646,6 +650,10 @@ impl CommittedSnapshot {
         to_insert: &super::dry_run::DryRunInsertMap,
         disposition: &mut Option<BaseDisposition>,
     ) -> Result<(ADDigest, Vec<u8>, [u8; 32]), StateError> {
+        // Any error path below returns before setting a disposition; clear the
+        // (possibly stale) caller value up front so an error never leaves a
+        // disposition from a previous build. Set to `Some(_)` only on success.
+        *disposition = None;
         let tip = self.best_full_block_id();
 
         // Miss or stale tip: attempt a single-step advance if we have a stale

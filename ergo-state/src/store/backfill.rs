@@ -249,6 +249,13 @@ impl StateStore {
         let scan_start = std::time::Instant::now();
         let mut written: usize = 0;
         let mut rows_seen: usize = 0;
+        // Malformed HEADERS keys / unparseable header payloads seen during
+        // the walk. Any anomaly means the derived section ids for that row
+        // never got tagged, so the index is known-incomplete — suppress the
+        // completion sentinel (warn + retriable on next boot) rather than
+        // stamping DONE and locking out future repair. Mirrors
+        // `back_fill_section_height_index`'s `parse_failures` gate.
+        let mut anomalies: usize = 0;
 
         // Empty-DB case: don't write the sentinel. The sentinel must only
         // be set after a *populated* successful pass; otherwise a fresh
@@ -301,6 +308,10 @@ impl StateStore {
                     let (k, v) = entry?;
                     let kb = k.value();
                     if kb.len() != 32 {
+                        // A HEADERS key that isn't a 32-byte header id is
+                        // corruption — skip it, but record the anomaly so the
+                        // sentinel isn't stamped over known-bad source state.
+                        anomalies += 1;
                         continue;
                     }
                     let mut id = [0u8; 32];
@@ -349,7 +360,13 @@ impl StateStore {
                         &mut ergo_primitives::reader::VlqReader::new(header_bytes),
                     ) {
                         Ok(h) => h,
-                        Err(_) => continue,
+                        Err(_) => {
+                            // Unparseable header bytes — its three section ids
+                            // can't be derived, so those sections stay untagged.
+                            // Record the anomaly to suppress the sentinel.
+                            anomalies += 1;
+                            continue;
+                        }
                     };
                     let tx_root = header.transactions_root.as_bytes();
                     let ad_root = header.ad_proofs_root.as_bytes();
@@ -401,6 +418,25 @@ impl StateStore {
             chunk_index += 1;
 
             drop(chunk);
+        }
+
+        // Known-incomplete: header rows were skipped over corruption, so some
+        // derived section ids never got tagged. Do NOT stamp the sentinel —
+        // leave it unset so the next boot re-walks and retries. The
+        // `/blocks/modifier/{id}` lookups for the unindexed sections stay
+        // unserved until then. Mirrors `back_fill_section_height_index`.
+        if anomalies > 0 {
+            warn!(
+                anomalies,
+                written,
+                rows_seen,
+                total_rows,
+                "modifier-type-index back-fill incomplete: malformed keys / header \
+                 parse failures left some derived section ids untagged. Sentinel NOT \
+                 stamped — back-fill will retry on next boot. Investigate `HEADERS` \
+                 corruption if the count is persistent.",
+            );
+            return Ok(written);
         }
 
         // Step 4: final Immediate-durability sentinel commit. This is the
@@ -483,13 +519,29 @@ impl StateStore {
         use std::collections::HashMap;
         use std::time::Instant;
 
-        // 1. Sentinel short-circuit.
+        // 1. Sentinel short-circuit. Validate the payload (written as
+        //    `MODIFIER_INDEX_BACKFILL_DONE_VAL` by
+        //    `set_headers_by_height_backfill_sentinel`) rather than trusting
+        //    any present value — an unexpected payload is corrupt metadata and
+        //    must surface, not silently suppress the back-fill. Matches the
+        //    sentinel-validation pattern of the other two back-fills.
         {
             let r = self.db.begin_read()?;
             match r.open_table(STATE_META) {
                 Ok(table) => {
-                    if table.get(HEADERS_BY_HEIGHT_BACKFILL_DONE_V1)?.is_some() {
-                        return Ok(0);
+                    if let Some(guard) = table.get(HEADERS_BY_HEIGHT_BACKFILL_DONE_V1)? {
+                        let bytes = guard.value();
+                        if bytes == MODIFIER_INDEX_BACKFILL_DONE_VAL {
+                            return Ok(0);
+                        }
+                        return Err(StateError::DbCorruption {
+                            table: "state_meta",
+                            key: hex::encode(HEADERS_BY_HEIGHT_BACKFILL_DONE_V1.as_bytes()),
+                            reason: format!(
+                                "headers-by-height backfill sentinel has unexpected payload: \
+                                 {bytes:?}"
+                            ),
+                        });
                     }
                 }
                 Err(redb::TableError::TableDoesNotExist(_)) => {}
@@ -498,6 +550,12 @@ impl StateStore {
         }
 
         let scan_start = Instant::now();
+
+        // Malformed keys / best-chain rows seen during the scan. Any anomaly
+        // means the reconstructed index is built over known-bad source state,
+        // so the completion sentinel is suppressed (retriable next boot)
+        // rather than stamped. Consistent with the other two back-fills.
+        let mut anomalies: usize = 0;
 
         // 2. Walk HEADER_META, group ids by height.
         let mut by_height: HashMap<u32, Vec<[u8; 32]>> = HashMap::new();
@@ -517,6 +575,9 @@ impl StateStore {
             for entry in table.iter()? {
                 let (k, v) = entry?;
                 if k.value().len() != 32 {
+                    // Non-32-byte HEADER_META key is corruption — skip, but
+                    // record so the sentinel isn't stamped over bad state.
+                    anomalies += 1;
                     continue;
                 }
                 let mut id = [0u8; 32];
@@ -537,18 +598,29 @@ impl StateStore {
         let mut best_at_height: HashMap<u32, [u8; 32]> = HashMap::new();
         {
             let r = self.db.begin_read()?;
-            if let Ok(table) = r.open_table(HEADER_CHAIN_INDEX) {
-                for entry in table.iter()? {
-                    let (k, v) = entry?;
-                    let h = k.value() as u32;
-                    let bytes = v.value();
-                    if bytes.len() != 32 {
-                        continue;
+            // A missing HEADER_CHAIN_INDEX is legitimate (no chain index yet —
+            // slot-0 promotion is simply skipped). Any *other* open error is a
+            // real fault and must propagate, not be swallowed into a silent
+            // "no best-chain info" that then stamps DONE.
+            match r.open_table(HEADER_CHAIN_INDEX) {
+                Ok(table) => {
+                    for entry in table.iter()? {
+                        let (k, v) = entry?;
+                        let h = k.value() as u32;
+                        let bytes = v.value();
+                        if bytes.len() != 32 {
+                            // Malformed best-chain id — skip and record so the
+                            // sentinel isn't stamped over corrupt index state.
+                            anomalies += 1;
+                            continue;
+                        }
+                        let mut id = [0u8; 32];
+                        id.copy_from_slice(bytes);
+                        best_at_height.insert(h, id);
                     }
-                    let mut id = [0u8; 32];
-                    id.copy_from_slice(bytes);
-                    best_at_height.insert(h, id);
                 }
+                Err(redb::TableError::TableDoesNotExist(_)) => {}
+                Err(e) => return Err(e.into()),
             }
         }
 
@@ -589,7 +661,20 @@ impl StateStore {
             write_txn.commit()?;
         }
 
-        // 5. Set sentinel so subsequent boots short-circuit.
+        // 5. Set sentinel so subsequent boots short-circuit — but only if the
+        //    scan saw no corruption. Known-bad source state stays retriable
+        //    rather than being locked out by a stamped DONE.
+        if anomalies > 0 {
+            warn!(
+                anomalies,
+                written,
+                heights = heights.len(),
+                "headers-by-height back-fill incomplete: malformed HEADER_META keys / \
+                 best-chain rows encountered. Sentinel NOT stamped — back-fill will \
+                 retry on next boot. Investigate index corruption if persistent.",
+            );
+            return Ok(written);
+        }
         self.set_headers_by_height_backfill_sentinel()?;
 
         let scan_secs = scan_start.elapsed().as_secs_f32();
@@ -709,6 +794,10 @@ impl StateStore {
                     let (k, v) = entry?;
                     let kb = k.value();
                     if kb.len() != 32 {
+                        // Non-32-byte HEADERS key is corruption — skip, but
+                        // count it so the sentinel stays unstamped (same
+                        // known-incomplete gate as a header parse failure).
+                        parse_failures += 1;
                         continue;
                     }
                     let mut id = [0u8; 32];
@@ -770,9 +859,9 @@ impl StateStore {
                 parse_failures,
                 written,
                 headers_scanned = total_rows,
-                "section-height back-fill incomplete: header parse failures \
-                 left some derived section ids unindexed. Sentinel NOT \
-                 stamped — back-fill will retry on next boot. Investigate \
+                "section-height back-fill incomplete: header parse failures / \
+                 malformed keys left some derived section ids unindexed. Sentinel \
+                 NOT stamped — back-fill will retry on next boot. Investigate \
                  `HEADERS` corruption if the count is persistent.",
             );
             return Ok(written);

@@ -144,16 +144,11 @@ pub(crate) fn rewrite_height_index_for_new_best<'txn>(
     let mut cur_height = new_best_height;
 
     loop {
-        let existing = read_height_index_ids(idx, cur_height)?;
-        if existing.first() == Some(&cur_id) {
-            return Ok(());
-        }
-        promote_to_height_index_slot_0(idx, cur_height, &cur_id)?;
-
-        if cur_height == 1 {
-            return Ok(());
-        }
-
+        // Validate HEADER_META for the current walked id FIRST — before writing
+        // the height row or taking the early return — matching
+        // `rewrite_best_chain_into_index`. Otherwise a corrupt parent-chain
+        // could promote an id under the wrong height, or the genesis boundary
+        // (cur_height == 1) could return without ever validating its metadata.
         let meta_guard = meta.get(cur_id.as_slice())?.ok_or_else(|| {
             // The lookup is `meta.get(cur_id)` — the row missing is
             // the current walked id's own HEADER_META row, reached
@@ -172,6 +167,30 @@ pub(crate) fn rewrite_height_index_for_new_best<'txn>(
                 key: hex::encode(cur_id),
                 reason: e.to_string(),
             })?;
+        drop(meta_guard);
+        if m.height != cur_height {
+            // HEADER_META.height disagrees with the height the walk arrived at.
+            return Err(StateError::DbCorruption {
+                table: "header_meta",
+                key: hex::encode(cur_id),
+                reason: format!(
+                    "rewrite_height_index_for_new_best: height mismatch (expected \
+                     {cur_height}, HEADER_META says {})",
+                    m.height,
+                ),
+            });
+        }
+
+        let existing = read_height_index_ids(idx, cur_height)?;
+        if existing.first() == Some(&cur_id) {
+            return Ok(());
+        }
+        promote_to_height_index_slot_0(idx, cur_height, &cur_id)?;
+
+        if cur_height == 1 {
+            return Ok(());
+        }
+
         cur_id = m.parent_id;
         cur_height = cur_height.saturating_sub(1);
     }
