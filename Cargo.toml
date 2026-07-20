@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "ergo-primitives",
+    "ergo-stark",
     "ergo-ser",
     "ergo-chain-spec",
     "ergo-crypto",
@@ -31,6 +32,7 @@ repository = "https://github.com/arkadianet/ergo"
 [workspace.dependencies]
 # Internal crates — keep paths here so a single edit moves every member.
 ergo-primitives    = { path = "ergo-primitives" }
+ergo-stark         = { path = "ergo-stark" }
 ergo-ser           = { path = "ergo-ser" }
 ergo-chain-spec    = { path = "ergo-chain-spec" }
 ergo-crypto        = { path = "ergo-crypto" }

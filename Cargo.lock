@@ -956,6 +956,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ergo-stark"
+version = "0.5.2"
+dependencies = [
+ "blake2",
+ "hex",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "ergo-state"
 version = "0.5.2"
 dependencies = [
