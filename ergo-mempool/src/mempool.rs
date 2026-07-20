@@ -331,7 +331,14 @@ impl Mempool {
                     // exactly for these two boostable rejections (never for the
                     // oversize `PoolFull`, which a package cannot rescue).
                     if let Some(hc) = held_out.take() {
-                        self.stage_held_candidate(hc, tx_bytes, &source, now, tip_ctx);
+                        // Data-input box-ids (for block-advance pruning) come
+                        // from a cheap structural peek — `Validated` doesn't
+                        // carry them.
+                        let data_inputs = validator
+                            .peek_structure(tx_bytes)
+                            .map(|s| s.data_input_box_ids)
+                            .unwrap_or_default();
+                        self.stage_held_candidate(hc, tx_bytes, data_inputs, &source, now, tip_ctx);
                     }
                 }
                 _ => {}
@@ -381,6 +388,7 @@ impl Mempool {
             s.tx_id,
             Arc::from(tx_bytes),
             s.input_box_ids,
+            s.data_input_box_ids,
             s.output_box_ids,
             s.fee,
             tx_bytes.len() as u32,
@@ -402,6 +410,7 @@ impl Mempool {
         &mut self,
         hc: admission::HeldCandidate,
         tx_bytes: &[u8],
+        data_input_box_ids: Vec<Digest32>,
         source: &TxSource,
         now: std::time::Instant,
         tip_ctx: &admission::TipContext<'_>,
@@ -411,6 +420,7 @@ impl Mempool {
             v.tx_id,
             Arc::from(tx_bytes),
             v.input_box_ids,
+            data_input_box_ids,
             v.output_box_ids,
             v.fee,
             v.size_bytes,
@@ -542,6 +552,7 @@ impl Mempool {
                             staged.tx_id,
                             bytes.clone(),
                             staged.input_box_ids.clone(),
+                            staged.data_input_box_ids.clone(),
                             staged.output_box_ids.clone(),
                             staged.fee,
                             staged.size_bytes,
@@ -561,6 +572,7 @@ impl Mempool {
                             v.tx_id,
                             bytes.clone(),
                             v.input_box_ids,
+                            staged.data_input_box_ids.clone(),
                             v.output_box_ids,
                             v.fee,
                             v.size_bytes,
@@ -613,28 +625,91 @@ impl Mempool {
             return None;
         }
 
-        // Overlay = committed + pool outputs + the held ancestors' materialized
-        // outputs, so the child's input into a held parent resolves.
+        // Build the overlay + the held-ancestor members incrementally,
+        // ancestors-first. A held ancestor whose tip has MOVED since it was
+        // staged is RE-VALIDATED at the current tip before inclusion (M1 fix):
+        // a height- or data-input-dependent parent can go invalid while held,
+        // and cached `HeldFacts` must never launder a now-invalid tx into the
+        // pool. Each re-validation is charged to `CostBudgets` (no free oracle),
+        // and runs against the overlay built from this ancestor's OWN (already
+        // re-validated) ancestors. A held ancestor that no longer validates is
+        // evicted from staging and the whole package aborted.
         let mut overlay: HashMap<Digest32, ErgoBox> = self.pool.output_map();
+        let mut members: Vec<PackageMember> = Vec::with_capacity(held_order.len() + 1);
         for hid in &held_order {
-            if let Some(st) = self.staging.get(hid) {
-                if let Some(facts) = &st.validated {
-                    for (i, oid) in st.output_box_ids.iter().enumerate() {
-                        if let Some(b) = facts.outputs.get(i) {
-                            overlay.insert(*oid, b.clone());
+            // Snapshot from staging, then drop the borrow before any `&mut self`
+            // (charge / remove). `Ok` = usable cached member; `Err` = the bytes
+            // + source to re-validate.
+            let cached_or_reval: Result<PackageMember, (Arc<[u8]>, TxSource)> = {
+                let st = self.staging.get(hid)?;
+                let facts = st.validated.as_ref()?;
+                if st.staged_height == tip_ctx.tip.height {
+                    Ok(PackageMember {
+                        tx_id: st.tx_id,
+                        bytes: st.bytes.clone(),
+                        input_box_ids: st.input_box_ids.clone(),
+                        output_box_ids: st.output_box_ids.clone(),
+                        outputs: facts.outputs.clone(),
+                        fee: st.fee,
+                        weight: facts.weight,
+                        size_bytes: st.size_bytes,
+                        cost: facts.cost,
+                        source: st.source.clone(),
+                    })
+                } else {
+                    Err((st.bytes.clone(), st.source.clone()))
+                }
+            };
+            let member = match cached_or_reval {
+                Ok(m) => m,
+                Err((bytes, src)) => {
+                    match self.validate_package_child(&bytes, &overlay, &src, tip_ctx, validator) {
+                        Ok(v) => {
+                            let w = self.weight_fn.compute(WeightInputs {
+                                tx_id: &v.tx_id,
+                                fee: v.fee,
+                                size_bytes: v.size_bytes,
+                                cost: v.consumed_cost,
+                            });
+                            PackageMember {
+                                tx_id: v.tx_id,
+                                bytes,
+                                input_box_ids: v.input_box_ids,
+                                output_box_ids: v.output_box_ids,
+                                outputs: v.outputs,
+                                fee: v.fee,
+                                weight: w,
+                                size_bytes: v.size_bytes,
+                                cost: v.consumed_cost,
+                                source: src,
+                            }
+                        }
+                        // Stale/invalid at the new tip → evict it and abort: the
+                        // child's ancestor chain is broken.
+                        Err(_) => {
+                            self.staging.remove(hid);
+                            return Some(Vec::new());
                         }
                     }
                 }
+            };
+            // Publish this member's outputs so the next ancestor / the child can
+            // resolve against them.
+            for (i, oid) in member.output_box_ids.iter().enumerate() {
+                if let Some(b) = member.outputs.get(i) {
+                    overlay.insert(*oid, b.clone());
+                }
             }
+            members.push(member);
         }
 
-        // Validate the child against the augmented overlay. This is script eval
-        // — charged to CostBudgets regardless of verdict (no free oracle).
+        // Validate the child against the fully-built overlay. Script eval —
+        // charged to CostBudgets regardless of verdict (no free oracle).
         let c_validated =
             match self.validate_package_child(c_bytes, &overlay, source, tip_ctx, validator) {
                 Ok(v) => v,
-                // A deeper ancestor is still genuinely missing → let the caller hold
-                // the child as a plain orphan instead.
+                // A deeper ancestor is still genuinely missing → let the caller
+                // hold the child as a plain orphan instead.
                 Err(ValidationErr::UnresolvedInput) | Err(ValidationErr::UnresolvedDataInput) => {
                     return None
                 }
@@ -648,25 +723,6 @@ impl Mempool {
             cost: c_validated.consumed_cost,
         });
 
-        // Build the package: held ancestors (facts known) ancestors-first, then
-        // the child last.
-        let mut members: Vec<PackageMember> = Vec::with_capacity(held_order.len() + 1);
-        for hid in &held_order {
-            let st = self.staging.get(hid)?;
-            let facts = st.validated.as_ref()?;
-            members.push(PackageMember {
-                tx_id: st.tx_id,
-                bytes: st.bytes.clone(),
-                input_box_ids: st.input_box_ids.clone(),
-                output_box_ids: st.output_box_ids.clone(),
-                outputs: facts.outputs.clone(),
-                fee: st.fee,
-                weight: facts.weight,
-                size_bytes: st.size_bytes,
-                cost: facts.cost,
-                source: st.source.clone(),
-            });
-        }
         members.push(PackageMember {
             tx_id: c_validated.tx_id,
             bytes: Arc::from(c_bytes),
@@ -746,6 +802,7 @@ impl Mempool {
                     c_validated.tx_id,
                     Arc::from(c_bytes),
                     c_validated.input_box_ids,
+                    s.data_input_box_ids,
                     c_validated.output_box_ids,
                     c_validated.fee,
                     c_validated.size_bytes,

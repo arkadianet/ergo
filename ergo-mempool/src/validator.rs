@@ -114,6 +114,8 @@ impl Validator for ErgoValidator {
 
         // Input box-ids: declared spends, in order (same as `validate`).
         let input_box_ids: Vec<Digest32> = tx.inputs.iter().map(|i| i.box_id).collect();
+        // Data-input box-ids, in order.
+        let data_input_box_ids: Vec<Digest32> = tx.data_inputs.iter().map(|di| di.box_id).collect();
 
         // Output box-ids: derived from (tx_id, index) exactly as `validate`
         // materializes them — box_id = H(bytes(box)); a serialization error
@@ -134,6 +136,7 @@ impl Validator for ErgoValidator {
             tx_id,
             fee,
             input_box_ids,
+            data_input_box_ids,
             output_box_ids,
         })
     }

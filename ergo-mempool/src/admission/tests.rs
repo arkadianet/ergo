@@ -1976,6 +1976,7 @@ fn data_input_does_not_resolve_through_pool_overlay() {
                 tx_id: self.tx_id,
                 fee: 5_000_000,
                 input_box_ids: vec![],
+                data_input_box_ids: vec![],
                 output_box_ids: vec![id(0xCC)],
             })
         }

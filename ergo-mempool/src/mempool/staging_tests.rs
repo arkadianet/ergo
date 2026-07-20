@@ -72,9 +72,13 @@ struct ProbePlan {
     tx_id: TxId,
     fee: u64,
     inputs: Vec<Digest32>,
+    data_inputs: Vec<Digest32>,
     outputs: Vec<Digest32>,
     output_boxes: Vec<ErgoBox>,
     charge: u64,
+    /// If `Some(h)`, the tx only validates at tip height `h` (a stand-in for a
+    /// `HEIGHT`-gated script); at any other height it fails `ScriptFailed`.
+    valid_at_height: Option<u32>,
 }
 
 struct PoolAwareProbe {
@@ -95,16 +99,58 @@ impl PoolAwareProbe {
 
     /// Like [`plan`] but with an explicit validation `cost`, so tests can
     /// build a low-feerate / high-absolute-fee incumbent (the pinning case).
-    fn plan_cost(mut self, tx: u8, fee: u64, cost: u64, inputs: &[u8], outputs: &[u8]) -> Self {
+    fn plan_cost(self, tx: u8, fee: u64, cost: u64, inputs: &[u8], outputs: &[u8]) -> Self {
+        self.plan_full(tx, fee, cost, inputs, &[], outputs, None)
+    }
+
+    /// Like [`plan`] but with DATA inputs (resolved against the committed view).
+    fn plan_data(
+        self,
+        tx: u8,
+        fee: u64,
+        inputs: &[u8],
+        data_inputs: &[u8],
+        outputs: &[u8],
+    ) -> Self {
+        self.plan_full(tx, fee, 10_000, inputs, data_inputs, outputs, None)
+    }
+
+    /// Like [`plan`] but the tx only validates at tip height `height` (a
+    /// height-gated script stand-in) — used to prove a stale held parent is
+    /// re-validated (and rejected) when the tip moves.
+    fn plan_height_gated(
+        self,
+        tx: u8,
+        fee: u64,
+        height: u32,
+        inputs: &[u8],
+        outputs: &[u8],
+    ) -> Self {
+        self.plan_full(tx, fee, 10_000, inputs, &[], outputs, Some(height))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn plan_full(
+        mut self,
+        tx: u8,
+        fee: u64,
+        cost: u64,
+        inputs: &[u8],
+        data_inputs: &[u8],
+        outputs: &[u8],
+        valid_at_height: Option<u32>,
+    ) -> Self {
         self.plans.insert(
             tx_bytes(tx),
             ProbePlan {
                 tx_id: d(tx),
                 fee,
                 inputs: inputs.iter().map(|b| d(*b)).collect(),
+                data_inputs: data_inputs.iter().map(|b| d(*b)).collect(),
                 outputs: outputs.iter().map(|b| d(*b)).collect(),
                 output_boxes: outputs.iter().map(|b| dummy_box(*b)).collect(),
                 charge: cost,
+                valid_at_height,
             },
         );
         self
@@ -124,6 +170,7 @@ impl Validator for PoolAwareProbe {
             tx_id: p.tx_id,
             fee: p.fee,
             input_box_ids: p.inputs.clone(),
+            data_input_box_ids: p.data_inputs.clone(),
             output_box_ids: p.outputs.clone(),
         })
     }
@@ -131,17 +178,29 @@ impl Validator for PoolAwareProbe {
         &self,
         tx_bytes: &[u8],
         input_view: &dyn UtxoView,
-        _data_input_view: &dyn UtxoView,
+        data_input_view: &dyn UtxoView,
         cx: &mut TxValidationCtx<'_>,
     ) -> Result<Validated, ValidationErr> {
         let p = self.plans.get(tx_bytes).ok_or(ValidationErr::Deserialize)?;
         if let Ok(jc) = JitCost::from_block_cost(p.charge) {
             let _ = cx.cost.add(jc);
         }
-        // Real resolution: any input absent from the overlay ⇒ orphan.
+        // Real resolution: any regular input absent from the overlay ⇒ orphan.
         for i in &p.inputs {
             if input_view.get_box(i).is_none() {
                 return Err(ValidationErr::UnresolvedInput);
+            }
+        }
+        // Data inputs resolve against the committed-only view.
+        for di in &p.data_inputs {
+            if data_input_view.get_box(di).is_none() {
+                return Err(ValidationErr::UnresolvedDataInput);
+            }
+        }
+        // Height-gated script stand-in.
+        if let Some(h) = p.valid_at_height {
+            if cx.ctx.height != h {
+                return Err(ValidationErr::ScriptFailed);
             }
         }
         Ok(Validated {
@@ -172,12 +231,17 @@ fn tx_context(height: u32) -> TransactionContext {
 struct TestTip {
     tx_context: TransactionContext,
     params: ProtocolParams,
+    height: u32,
 }
 impl TestTip {
     fn new() -> Self {
+        Self::at_height(1000)
+    }
+    fn at_height(height: u32) -> Self {
         Self {
-            tx_context: tx_context(1000),
+            tx_context: tx_context(height),
             params: ProtocolParams::mainnet_default(),
+            height,
         }
     }
     fn with_max_block_cost(mut self, c: u64) -> Self {
@@ -187,11 +251,11 @@ impl TestTip {
     fn view<'a>(&'a self, utxo: &'a dyn UtxoView) -> admission::TipContext<'a> {
         admission::TipContext {
             tip: TipPointer {
-                height: 1000,
+                height: self.height,
                 header_id: d(0xFF),
             },
-            best_header_height: 1000,
-            best_full_block_height: 1000,
+            best_header_height: self.height,
+            best_full_block_height: self.height,
             utxo,
             tx_context: &self.tx_context,
             params: &self.params,
@@ -770,4 +834,81 @@ fn pool_insert_rejects_input_collision() {
         "second spender of a box must be rejected: {err:?}"
     );
     pool.check_invariants();
+}
+
+// ----- FIX 2 (M1): held members re-validated at the current tip -----
+
+#[test]
+fn stale_held_parent_revalidated_and_rejected_at_new_tip() {
+    // Pool full at height 1000. P is height-gated: valid ONLY at height 1000, so
+    // it is held there. The tip then advances to 1001 and child C arrives.
+    // Because P's staged_height (1000) != the current tip (1001), try_package
+    // RE-VALIDATES P at 1001 — it now fails, is evicted, and the package is
+    // aborted. The stale parent must NOT be laundered into the pool on its
+    // cached outputs.
+    let cfg = MempoolConfig {
+        max_pool_size: 1,
+        ..MempoolConfig::default()
+    };
+    let mut mp = Mempool::new(cfg, Box::new(ByCost));
+    let utxo = FakeUtxo::with(&[0x90, 0x70]);
+    let tip1000 = TestTip::at_height(1000);
+    let v = PoolAwareProbe::new()
+        .plan(9, 9_000_000, &[0x90], &[0x9A]) // X — fills the pool
+        .plan_height_gated(1, 1_000_000, 1000, &[0x70], &[0x71]) // P — valid only @1000
+        .plan(2, 10_000_000, &[0x71], &[0x72]); // C — spends P's output
+    let now = Instant::now();
+
+    mp.process(&tx_bytes(9), TxSource::Api, now, &tip1000.view(&utxo), &v);
+    let (po, _) = mp.process(&tx_bytes(1), TxSource::Api, now, &tip1000.view(&utxo), &v);
+    assert!(matches!(
+        po,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::PoolFull
+        }
+    ));
+    assert_eq!(mp.staging_len(), 1, "P held at height 1000");
+
+    // Tip advances; the child arrives at height 1001.
+    let tip1001 = TestTip::at_height(1001);
+    let (_co, ca) = mp.process(&tx_bytes(2), TxSource::Api, now, &tip1001.view(&utxo), &v);
+    assert!(
+        !mp.contains(&d(1)) && !mp.contains(&d(2)),
+        "stale height-gated parent not laundered; child not admitted"
+    );
+    assert!(mp.contains(&d(9)), "live pool untouched");
+    assert!(broadcasts(&ca).is_empty(), "nothing gossiped");
+    assert_eq!(
+        mp.staging_len(),
+        0,
+        "the stale held parent is evicted from staging on failed re-validation"
+    );
+    mp.pool().check_invariants();
+}
+
+#[test]
+fn block_advance_prunes_orphan_with_spent_data_input() {
+    // An orphan (regular input 0xAA missing) that also READS data-input box
+    // 0xDD. When a block confirms a tx consuming 0xDD, the orphan can never be
+    // admitted, so block-advance pruning drops it (data inputs are pruned, not
+    // just regular inputs).
+    let mut mp = mempool();
+    let utxo = FakeUtxo::with(&[]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new().plan_data(2, 5_000_000, &[0xAA], &[0xDD], &[0xBB]);
+    let now = Instant::now();
+    mp.process(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert_eq!(
+        mp.staging_len(),
+        1,
+        "orphan staged with its data input tracked"
+    );
+
+    let diff = diff_at(1001, vec![(0x99, vec![0xDD])]); // block spends 0xDD
+    mp.on_tip_change(&diff);
+    assert_eq!(
+        mp.staging_len(),
+        0,
+        "orphan whose DATA input was confirmed-and-consumed is pruned"
+    );
 }

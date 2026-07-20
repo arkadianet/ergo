@@ -134,6 +134,9 @@ impl Validator for MockValidator {
                 tx_id: s.tx_id,
                 fee: s.fee,
                 input_box_ids: s.input_box_ids.clone(),
+                // The mock does not model data inputs; tests exercising
+                // data-input paths use the pool-aware probe instead.
+                data_input_box_ids: Vec::new(),
                 output_box_ids: s.output_box_ids.clone(),
             });
         }
@@ -155,6 +158,7 @@ impl Validator for MockValidator {
             tx_id: plan.peek_tx_id.unwrap_or(default_tx_id),
             fee: plan.peek_fee.unwrap_or(default_fee),
             input_box_ids: inputs,
+            data_input_box_ids: Vec::new(),
             output_box_ids: outputs,
         })
     }

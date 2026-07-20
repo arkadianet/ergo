@@ -53,8 +53,12 @@ pub struct StagedTx {
     pub tx_id: TxId,
     pub bytes: Arc<[u8]>,
     pub kind: StagedKind,
-    /// ALL declared inputs (from `peek_structure` / `Validated`).
+    /// ALL declared regular inputs (from `peek_structure` / `Validated`).
     pub input_box_ids: Vec<Digest32>,
+    /// Declared DATA inputs. Tracked so block-advance pruning can drop an
+    /// entry whose data-input box was confirmed-and-consumed (it can never be
+    /// admitted again). Empty when unknown.
+    pub data_input_box_ids: Vec<Digest32>,
     /// ALL created outputs.
     pub output_box_ids: Vec<Digest32>,
     pub fee: u64,
@@ -250,6 +254,7 @@ impl StagingPool {
         tx_id: TxId,
         bytes: Arc<[u8]>,
         input_box_ids: Vec<Digest32>,
+        data_input_box_ids: Vec<Digest32>,
         output_box_ids: Vec<Digest32>,
         fee: u64,
         size_bytes: u32,
@@ -263,6 +268,7 @@ impl StagingPool {
             bytes,
             kind: StagedKind::Orphan,
             input_box_ids,
+            data_input_box_ids,
             output_box_ids,
             fee,
             size_bytes,
@@ -284,6 +290,7 @@ impl StagingPool {
         tx_id: TxId,
         bytes: Arc<[u8]>,
         input_box_ids: Vec<Digest32>,
+        data_input_box_ids: Vec<Digest32>,
         output_box_ids: Vec<Digest32>,
         fee: u64,
         size_bytes: u32,
@@ -299,6 +306,7 @@ impl StagingPool {
             bytes,
             kind: StagedKind::Held,
             input_box_ids,
+            data_input_box_ids,
             output_box_ids,
             fee,
             size_bytes,
@@ -471,9 +479,10 @@ impl StagingPool {
             .map(|e| e.tx_id)
     }
 
-    /// Drop every staged tx that spends any box in `spent` — its input has
-    /// been confirmed-and-consumed on-chain, so it can never be admitted.
-    /// Returns removed entries.
+    /// Drop every staged tx that spends (as a REGULAR input) or reads (as a
+    /// DATA input) any box in `spent` — that box has been confirmed-and-
+    /// consumed on-chain, so the tx can never be admitted again. Returns
+    /// removed entries.
     pub fn prune_spent_inputs(&mut self, spent: &HashSet<Digest32>) -> Vec<StagedTx> {
         if spent.is_empty() || self.by_tx_id.is_empty() {
             return Vec::new();
@@ -481,7 +490,12 @@ impl StagingPool {
         let doomed: Vec<TxId> = self
             .by_tx_id
             .values()
-            .filter(|e| e.input_box_ids.iter().any(|b| spent.contains(b)))
+            .filter(|e| {
+                e.input_box_ids
+                    .iter()
+                    .chain(e.data_input_box_ids.iter())
+                    .any(|b| spent.contains(b))
+            })
             .map(|e| e.tx_id)
             .collect();
         doomed.iter().filter_map(|id| self.remove(id)).collect()

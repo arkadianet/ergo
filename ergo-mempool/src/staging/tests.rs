@@ -45,6 +45,7 @@ fn held(
         d(tx),
         bytes(tx, size as usize),
         inputs.iter().map(|b| d(*b)).collect(),
+        vec![], // data inputs
         outputs.iter().map(|b| d(*b)).collect(),
         1_000_000,
         size,
@@ -74,6 +75,7 @@ fn orphan(
         d(tx),
         bytes(tx, size as usize),
         inputs.iter().map(|b| d(*b)).collect(),
+        vec![], // data inputs
         outputs.iter().map(|b| d(*b)).collect(),
         fee,
         size,

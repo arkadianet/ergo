@@ -128,8 +128,12 @@ pub struct PeekedTx {
 pub struct PeekedStructure {
     pub tx_id: TxId,
     pub fee: u64,
-    /// Box-ids this tx spends (all declared inputs, in order).
+    /// Box-ids this tx spends (all declared regular inputs, in order).
     pub input_box_ids: Vec<Digest32>,
+    /// Box-ids this tx reads as DATA inputs (in order). Tracked so the
+    /// staging pool can prune an entry whose data-input box was
+    /// confirmed-and-consumed on-chain (it can never be admitted again).
+    pub data_input_box_ids: Vec<Digest32>,
     /// Box-ids this tx creates (all outputs, index order).
     pub output_box_ids: Vec<Digest32>,
 }
