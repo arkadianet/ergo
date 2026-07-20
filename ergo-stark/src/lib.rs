@@ -24,6 +24,8 @@
 //! - [`hash`] — the BLAKE2b-256 and SHA-256 profile hashers.
 //! - [`merkle`] — the IOP Merkle branch verifier (Layer 2).
 //! - [`fri`] — the FRI low-degree-test verifier (Layer 2).
+//! - [`circuit`] — the recursion circuit's tap set + constraint-program
+//!   interpreter (Layer 3), producing the per-query DEEP-ALI FRI goal.
 
 pub mod baby_bear;
 pub mod ext4;
@@ -36,7 +38,13 @@ pub mod poseidon2;
 pub mod fri;
 pub mod merkle;
 
+pub mod circuit;
+
 pub use baby_bear::BabyBear;
+pub use circuit::{
+    deep_goal, step as poly_ext_step, CircuitTap, CircuitTapSet, MixState, PolyExtOp, PolyExtTable,
+    TapRegister,
+};
 pub use ext4::Ext4;
 pub use merkle::MerkleVerifier;
 pub use poseidon2::Poseidon2;
