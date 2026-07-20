@@ -1965,6 +1965,21 @@ fn data_input_does_not_resolve_through_pool_overlay() {
                 fee: 5_000_000,
             })
         }
+        fn peek_structure(
+            &self,
+            tx_bytes: &[u8],
+        ) -> Result<crate::admission::PeekedStructure, ValidationErr> {
+            if tx_bytes != self.bytes {
+                return Err(ValidationErr::Deserialize);
+            }
+            Ok(crate::admission::PeekedStructure {
+                tx_id: self.tx_id,
+                fee: 5_000_000,
+                input_box_ids: vec![],
+                data_input_box_ids: vec![],
+                output_box_ids: vec![id(0xCC)],
+            })
+        }
         fn validate(
             &self,
             tx_bytes: &[u8],

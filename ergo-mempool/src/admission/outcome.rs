@@ -76,6 +76,25 @@ pub(crate) enum ReplacementDecision {
     Replace(Vec<TxId>),
 }
 
+/// Payload captured when a fully-validated transaction loses the
+/// fee/capacity gate (`PoolFull`) or a double-spend contest
+/// (`DoubleSpendLoser`) but is a candidate to be HELD in the staging pool:
+/// a booster child arriving later could complete an admissible package.
+///
+/// It is surfaced out-of-band from `check` / `process` via a
+/// `&mut Option<HeldCandidate>`, NOT baked into `CheckOutcome` /
+/// `AdmissionOutcome`, so the external rejection shape (and every existing
+/// match site) is unchanged. It is consumed ONLY by `Mempool::process`;
+/// `Mempool::check` (the `/check` path) passes a throwaway `&mut None` and
+/// therefore can never stage. Because the tx was already fully validated
+/// and its cost already charged to `CostBudgets`, holding it runs no extra
+/// validation and opens no free-oracle hole.
+#[derive(Debug, Clone)]
+pub struct HeldCandidate {
+    pub validated: Validated,
+    pub weight: u64,
+}
+
 pub(crate) fn classify(
     err: &ValidationErr,
     tip_ctx: &TipContext<'_>,

@@ -5,11 +5,26 @@
 use std::collections::HashMap;
 
 use ergo_primitives::cost::JitCost;
+use ergo_primitives::digest::Digest32;
 use ergo_validation::{TxValidationCtx, UtxoView};
 
 use crate::types::TxId;
 
-use super::context::{PeekedTx, Validated, ValidationErr, Validator};
+use super::context::{PeekedStructure, PeekedTx, Validated, ValidationErr, Validator};
+
+/// Canned structural peek for [`MockValidator::peek_structure`], keyed by
+/// raw bytes independently of the [`MockPlan`] `validate` result. Lets an
+/// orphan test return real input/output box-ids from `peek_structure`
+/// while `validate` still returns `UnresolvedInput` — the two are
+/// deliberately decoupled (production derives both from the same parse,
+/// but the mock must stage them separately).
+#[derive(Debug, Clone)]
+pub struct MockStructure {
+    pub tx_id: TxId,
+    pub fee: u64,
+    pub input_box_ids: Vec<Digest32>,
+    pub output_box_ids: Vec<Digest32>,
+}
 
 /// Test-only validator: returns canned decisions per (tx_id, bytes).
 /// Exposed at the crate root behind `feature = "test-support"` so
@@ -20,6 +35,10 @@ pub struct MockValidator {
     /// `ValidationErr::Deserialize` so callers can tell "unconfigured"
     /// from "canned success".
     plans: HashMap<Vec<u8>, MockPlan>,
+    /// Canned structural peeks, keyed by raw bytes. Consulted first by
+    /// `peek_structure`; absent an entry it falls back to deriving the
+    /// projection from the plan (see `peek_structure`).
+    structures: HashMap<Vec<u8>, MockStructure>,
     /// Counts calls to `validate(..)`. Used by tests that prove the
     /// admission pipeline short-circuited before full validation
     /// (e.g. below-min-fee gate).
@@ -57,6 +76,7 @@ impl MockValidator {
     pub fn new() -> Self {
         Self {
             plans: HashMap::new(),
+            structures: HashMap::new(),
             validate_calls: std::cell::Cell::new(0),
             peek_fee_calls: std::cell::Cell::new(0),
         }
@@ -64,6 +84,14 @@ impl MockValidator {
 
     pub fn plan(mut self, bytes: impl Into<Vec<u8>>, plan: MockPlan) -> Self {
         self.plans.insert(bytes.into(), plan);
+        self
+    }
+
+    /// Register a canned structural peek for `bytes`, independent of the
+    /// plan's `validate` result. Needed to stage orphans: `peek_structure`
+    /// returns these ids while `validate` still fails `UnresolvedInput`.
+    pub fn structure(mut self, bytes: impl Into<Vec<u8>>, structure: MockStructure) -> Self {
+        self.structures.insert(bytes.into(), structure);
         self
     }
 
@@ -96,6 +124,42 @@ impl Validator for MockValidator {
         Ok(PeekedTx {
             tx_id: plan.peek_tx_id.unwrap_or(default_tx_id),
             fee: plan.peek_fee.unwrap_or(default_fee),
+        })
+    }
+
+    fn peek_structure(&self, tx_bytes: &[u8]) -> Result<PeekedStructure, ValidationErr> {
+        // A registered structure wins outright — the orphan-staging path.
+        if let Some(s) = self.structures.get(tx_bytes) {
+            return Ok(PeekedStructure {
+                tx_id: s.tx_id,
+                fee: s.fee,
+                input_box_ids: s.input_box_ids.clone(),
+                // The mock does not model data inputs; tests exercising
+                // data-input paths use the pool-aware probe instead.
+                data_input_box_ids: Vec::new(),
+                output_box_ids: s.output_box_ids.clone(),
+            });
+        }
+        // Otherwise derive from the plan, mirroring `peek_fee` for
+        // tx_id/fee and reusing the validated projection for box-ids on a
+        // planned success (empty on a planned error, matching an orphan
+        // that registered no structure).
+        let plan = self.plans.get(tx_bytes).ok_or(ValidationErr::Deserialize)?;
+        let (default_fee, default_tx_id, inputs, outputs) = match &plan.result {
+            Ok(v) => (
+                v.fee,
+                v.tx_id,
+                v.input_box_ids.clone(),
+                v.output_box_ids.clone(),
+            ),
+            Err(_) => (0, Digest32::ZERO, Vec::new(), Vec::new()),
+        };
+        Ok(PeekedStructure {
+            tx_id: plan.peek_tx_id.unwrap_or(default_tx_id),
+            fee: plan.peek_fee.unwrap_or(default_fee),
+            input_box_ids: inputs,
+            data_input_box_ids: Vec::new(),
+            output_box_ids: outputs,
         })
     }
 
