@@ -276,6 +276,16 @@ pub struct ReductionContext<'a> {
     /// (version < 3) tree can be spent in a block whose activated version is
     /// already >= 3, and those two versions then disagree.
     pub ergo_tree_version: u8,
+    /// Host-authenticated chain domain id for the EIP-0045 `verifyStark`
+    /// (0xB9) opcode — the raw 32 bytes of THIS chain's genesis (height-1)
+    /// `Header.id`. The Rust analogue of the reference interpreter's
+    /// `snapshot.chainDomainId` capability (`VerifyStark.scala:99`): it is read
+    /// from context, NEVER from a script child, so it is non-spoofable. Populated
+    /// host-side at the validation boundary; `[0u8; 32]` means "not yet pinned"
+    /// (devnet genesis id is captured at relaunch — see the migration build spec
+    /// §3). It only participates in the 4-child `verifyStark` statement prefix;
+    /// every other opcode ignores it.
+    pub chain_domain_id: [u8; 32],
 }
 
 impl<'a> ReductionContext<'a> {
@@ -309,6 +319,10 @@ impl<'a> ReductionContext<'a> {
             // per-test ceremony; tests pinning legacy behavior set it
             // explicitly.
             ergo_tree_version: 3,
+            // Not-yet-pinned devnet genesis id. Only the 4-child verifyStark
+            // (0xB9) reads this; the real value is threaded at the block-
+            // validation boundary (see `ReductionContext::chain_domain_id`).
+            chain_domain_id: [0u8; 32],
         }
     }
 

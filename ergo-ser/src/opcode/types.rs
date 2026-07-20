@@ -65,11 +65,14 @@ pub enum Payload {
     Two(Box<Expr>, Box<Expr>),
     /// Three positional sub-expressions.
     Three(Box<Expr>, Box<Expr>, Box<Expr>),
-    /// Four positional sub-expressions (e.g. ProveDHTuple `g, h, u, v`).
+    /// Four positional sub-expressions (e.g. ProveDHTuple `g, h, u, v`, and
+    /// the EIP-0045 4-child VerifyStark `proofChunks, applicationPayload,
+    /// programId, profileId` — opcode `0xB9`).
     Four(Box<Expr>, Box<Expr>, Box<Expr>, Box<Expr>),
-    /// Five positional sub-expressions (VerifyStark `proofChunks,
-    /// publicInputs, imageId, vmType, costParams` — EIP-0045, devnet-only
-    /// opcode `0xB9`).
+    /// Five positional sub-expressions. Generic 5-ary container retained for
+    /// exhaustive traversal completeness; no opcode currently produces it
+    /// (VerifyStark migrated from the legacy 5-child spike to the 4-child
+    /// EIP-0045 ABI — see the `0xB9` arm of [`opcode_pattern`]).
     Five(Box<Expr>, Box<Expr>, Box<Expr>, Box<Expr>, Box<Expr>),
     /// Use of an existing `ValDef`/`FunDef` by binding id.
     ValUse {
@@ -247,7 +250,6 @@ pub(super) enum ArgPattern {
     Two,
     Three,
     Four,
-    Five,
     ValUse,
     ConstPlaceholder,
     TaggedVar,
@@ -389,10 +391,14 @@ pub(super) fn opcode_pattern(op: u8) -> Option<ArgPattern> {
         // forks the chain (project rule: verify the gate premise against the
         // reference, not a code comment).
         //
-        // Wire shape mirrors sigmastate-interpreter#1116 VerifyStarkSerializer: five
-        // positional child Values (proofChunks, publicInputs, imageId, vmType,
-        // costParams). Byte = Scala newOpCode(73) = LAST_CONSTANT_CODE + 73.
-        0xB9 => Some(Five), // VerifyStark (devnet-only, EIP-0045)
+        // Wire shape mirrors the EIP-0045 4-child VerifyStarkSerializer (sigmastate
+        // @9372697, `VerifyStark.scala` OpType): four positional child Values
+        // (proofChunks: Coll[Coll[Byte]], applicationPayload: Coll[Byte],
+        // programId: Coll[Byte], profileId: Coll[Byte]). There is no
+        // transaction-selected vmType/costParams — profileId selects an immutable
+        // network profile and the host derives chainDomainId + contractId.
+        // Byte = Scala newOpCode(73) = LAST_CONSTANT_CODE + 73.
+        0xB9 => Some(Four), // VerifyStark (devnet-only, EIP-0045 4-child)
         // 0xBA..0xC0 reserved
         0xC1 => Some(One), // ExtractAmount
         0xC2 => Some(One), // ExtractScriptBytes

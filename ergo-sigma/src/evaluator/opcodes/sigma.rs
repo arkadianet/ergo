@@ -17,7 +17,7 @@
 //! the `bytes[0] == 0x00 → IDENTITY` shortcut and the exact
 //! `EvalError::TypeError` messages from the original arm bodies.
 
-use ergo_primitives::cost::{CostKind, JitCost};
+use ergo_primitives::cost::JitCost;
 use ergo_primitives::group_element::GroupElement;
 use ergo_ser::opcode::Expr;
 use ergo_ser::sigma_type::SigmaType;
@@ -198,102 +198,109 @@ pub(in crate::evaluator) fn eval_calc_sha256(
     Ok(Value::CollBytes(hash.to_vec()))
 }
 
-// ===== 0xB9 VerifyStark (EIP-0045) — DEVNET-ONLY spike =====
+// ===== 0xB9 VerifyStark (EIP-0045, 4-child stock profile) — DEVNET-ONLY =====
 //
-// A phased, AOT-costed pure Boolean check that mirrors
-// sigmastate-interpreter#1116 `VerifyStark.eval`. This is NOT a mainnet
-// consensus opcode: 0xB9 is unknown to mainnet Scala, so this arm only runs on
-// the feature-branch / devnet build. NB it is NOT true that "Scala just rejects
-// 0xB9" — a has_size tree carrying it is soft-fork-wrapped and can evaluate to
-// TrueSigmaProp (accept); only a sizeless tree hard-rejects. See the consensus
-// premise + productionization requirement at the 0xB9 arm of
-// `opcode_pattern` (ergo-ser opcode/types.rs). M1 used a STUB verifier; M2 wired
-// the real RISC0 succinct verifier (risc0-verifier, Poseidon2/BabyBear — NOT
-// #1116's Poseidon1/Ext16 profile) behind the `stark-verify` feature, at which
-// point a tampered proof returns `false`.
+// Native STARK proof verifier node, on the stock-profile 4-child ABI
+// (sigmastate @9372697 `sigma.ast.VerifyStark`). The four children and their
+// order are consensus-critical:
 //
-// Cost model (M3 calibration). The dominant term BASE_COST is calibrated to the
-// REAL RISC0 succinct-STARK verify measured off-node at ~11.8 ms (stark-poc).
-// Anchored to the Scala verifyStark spike's directly-measured ~100-200k JIT for a
-// minimal STARK verify (external reference); 11.8 ms sits at the upper end, so we
-// take ~150k JIT. This corrects #1116's preliminary BASE=5000, which undercharged
-// a real verify by ~9x — an under-cost is a DoS risk (it would allow ~570
-// verifies/block against the 10M-JIT budget instead of a realistic ~66).
-// PROVISIONAL + devnet-only: re-derive via JMH on the Foundation baseline machine
-// before any production use. NOT oracle-anchored to mainnet (no mainnet
-// verifyStark exists). Note: the node already permits 512 KB tx / block
-// (max_transaction_size / max_block_size = 524_288), so the ~218 KiB proof fits
-// with no tx-size change — the EIP's 96->256 KB bump was a mainnet-Scala concern.
+//   verifyStark(proofChunks: Coll[Coll[Byte]], applicationPayload: Coll[Byte],
+//               programId: Coll[Byte], profileId: Coll[Byte]) -> Boolean
+//
+// There is NO transaction-selected vmType/costParams: `profileId` selects an
+// immutable network profile, and the host derives `chainDomainId`
+// (`cx.ctx.chain_domain_id` — a non-spoofable capability, NOT a script child)
+// and `contractId = BLAKE2b-256(SELF.propositionBytes)`.
+//
+// This is NOT a mainnet consensus opcode: 0xB9 is unknown to mainnet Scala, so
+// this arm only runs on the devnet/feature build (see the 0xB9 note in ergo-ser
+// `opcode/types.rs`). This PR-A "shell" reconstructs the `ErgoStatementV1` +
+// RISC0 claim, decodes the fixed four-chunk raw seal, and calls the fail-closed
+// `stark::verify::verify_raw_seal` seam — the single function the FRI/STARK
+// verifier core (PR-B, `ergo-stark`) drops into. That stub returns `false`
+// until PR-B lands, so nothing spoofable ships.
 
-/// Fixed RISC0 succinct-verify cost, calibrated to the ~11.8 ms measured verify
-/// (~= the Scala spike's ~100-200k JIT). Dominant term; RISC0 verify is ~fixed.
-/// PROVISIONAL — recalibrate on the baseline machine. (Was #1116's preliminary 5000.)
-const VERIFY_STARK_BASE_COST: u64 = 150_000;
-/// Marginal per-FRI-query cost (#1116 `PER_QUERY_COST`). Minor vs BASE for RISC0.
-const VERIFY_STARK_PER_QUERY_COST: u64 = 50;
-/// Marginal per-query-per-Merkle-layer cost (#1116 `PER_MERKLE_LAYER_COST`).
-const VERIFY_STARK_PER_MERKLE_LAYER_COST: u64 = 10;
+/// Provisional upfront dispatch charge (reference `snapshot.dispatchJit`), added
+/// after `profileId` evaluation and before the profile match. TODO(B5): the
+/// EIP-0045 cost numbers are unfrozen upstream — re-pin at activation.
+/// Devnet-only; not oracle-anchored (no mainnet verifyStark exists).
+const VERIFY_STARK_DISPATCH_JIT: u64 = 1_000;
+/// Provisional upfront profile charge (reference `active.fixedJit`), added once
+/// the profile resolves active and before any heavy child / transport / hash /
+/// verify work. TODO(B5): unfrozen upstream. Devnet-only.
+const VERIFY_STARK_FIXED_JIT: u64 = 150_000;
 
-/// 0xB9 VerifyStark — verify a STARK proof, returning Boolean (EIP-0045).
+/// 0xB9 VerifyStark — EIP-0045 4-child native STARK verify, returning Boolean.
 ///
-/// Evaluation is phased to give an AOT (ahead-of-time) fail-fast guarantee:
-/// the O(1) scalars (`vmType`, `costParams`) are evaluated first and the full
-/// query/Merkle cost is charged BEFORE the heavy proof byte arrays are touched,
-/// so a malicious `costParams` that would blow the block budget is rejected
-/// without materializing proof data.
+/// Evaluation order mirrors the reference `VerifyStark.eval`: `profileId`
+/// (→ dispatch charge; profile match → fixed charge) → `programId` →
+/// `applicationPayload` → `proofChunks`, then host-side statement/claim
+/// reconstruction, raw-seal decode, and the fail-closed verify seam. Every
+/// structural / profile / binding failure is a soft `Bool(false)` — never an
+/// error, never a panic (mirrors the reference's `return false` arms). The two
+/// fixed charges are prepaid before the heavy children so an under-budget
+/// transaction is rejected before any transport allocation.
 pub(in crate::evaluator) fn eval_verify_stark(
     proof_chunks: &Expr,
-    public_inputs: &Expr,
-    image_id: &Expr,
-    vm_type: &Expr,
-    cost_params: &Expr,
+    application_payload: &Expr,
+    program_id: &Expr,
+    profile_id: &Expr,
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
-    // ---- Phase 1: evaluate the O(1) scalars first (AOT preemptive cost). ----
-    let vm_type_v = match cx.eval_expr(vm_type)? {
-        Value::Int(v) => v,
-        other => {
-            return Err(EvalError::TypeError {
-                expected: "Int for VerifyStark vmType",
-                got: format!("{other:?}"),
-            })
-        }
-    };
-    let costs_v = match cx.eval_expr(cost_params)? {
-        Value::CollInt(v) => v,
-        other => {
-            return Err(EvalError::TypeError {
-                expected: "Coll[Int] for VerifyStark costParams",
-                got: format!("{other:?}"),
-            })
-        }
-    };
+    use crate::stark::{self, raw_seal};
 
-    // Fail-fast on corrupted/malicious params (mirrors #1116): a short or
-    // negative param vector, or a negative vmType, is a soft `false` — never
-    // an error, and nothing past this point is charged.
-    if costs_v.len() < 2 || costs_v[0] < 0 || costs_v[1] < 0 || vm_type_v < 0 {
+    // ---- profileId: the only child evaluated before trusted dispatch. ----
+    let profile_id_v = match cx.eval_expr(profile_id)? {
+        Value::CollBytes(b) => b,
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "Coll[Byte] for VerifyStark profileId",
+                got: format!("{other:?}"),
+            })
+        }
+    };
+    // Dispatch charge precedes the length/lookup check (reference `VerifyStark.scala:52`).
+    cx.cost.add(JitCost::from_jit(VERIFY_STARK_DISPATCH_JIT))?;
+    // Wrong length or a non-stock (unknown) profile → soft false (reference:
+    // length gate + `snapshot.lookup` → None). The slice≠array compare also
+    // rejects any non-32-byte profileId.
+    if profile_id_v[..] != stark::STOCK_PROFILE_ID {
         return Ok(Value::Bool(false));
     }
-    let num_queries = costs_v[0] as u64; // Q
-    let merkle_depth = costs_v[1] as u64; // D
+    // Profile resolved active → the complete profile charge precedes every heavy
+    // child, transport allocation, statement hash and verifier operation.
+    cx.cost.add(JitCost::from_jit(VERIFY_STARK_FIXED_JIT))?;
 
-    // AOT cost = BASE + Q*PER_QUERY + Q*D*PER_MERKLE_LAYER, in SATURATING u64
-    // arithmetic (Q and D are attacker-controlled). Charge it upfront via
-    // `try_from_jit` — NEVER `from_jit`, which panics above Scala Int.MaxValue.
-    // An over-limit or overflowing cost rejects fail-fast (the
-    // CostLimitException-equivalent) BEFORE any proof byte is read.
-    let aot_cost = VERIFY_STARK_BASE_COST
-        .saturating_add(num_queries.saturating_mul(VERIFY_STARK_PER_QUERY_COST))
-        .saturating_add(
-            num_queries
-                .saturating_mul(merkle_depth)
-                .saturating_mul(VERIFY_STARK_PER_MERKLE_LAYER_COST),
-        );
-    cx.cost.add(JitCost::try_from_jit(aot_cost)?)?;
+    // ---- programId ----
+    let program_id_v = match cx.eval_expr(program_id)? {
+        Value::CollBytes(b) => b,
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "Coll[Byte] for VerifyStark programId",
+                got: format!("{other:?}"),
+            })
+        }
+    };
+    if program_id_v.len() != stark::DIGEST_BYTES {
+        return Ok(Value::Bool(false));
+    }
 
-    // ---- Phase 2: evaluate the heavy byte arrays (cost now secured). ----
-    let chunks_v = match cx.eval_expr(proof_chunks)? {
+    // ---- applicationPayload ----
+    let payload_v = match cx.eval_expr(application_payload)? {
+        Value::CollBytes(b) => b,
+        other => {
+            return Err(EvalError::TypeError {
+                expected: "Coll[Byte] for VerifyStark applicationPayload",
+                got: format!("{other:?}"),
+            })
+        }
+    };
+    if payload_v.len() > stark::MAX_APPLICATION_PAYLOAD_BYTES {
+        return Ok(Value::Bool(false));
+    }
+
+    // ---- proofChunks: Coll[Coll[Byte]], exact fixed partition. ----
+    let chunk_items = match cx.eval_expr(proof_chunks)? {
         Value::CollGeneric(items, _) => items,
         other => {
             return Err(EvalError::TypeError {
@@ -302,31 +309,17 @@ pub(in crate::evaluator) fn eval_verify_stark(
             })
         }
     };
-    let public_inputs_v = match cx.eval_expr(public_inputs)? {
-        Value::CollBytes(b) => b,
-        other => {
-            return Err(EvalError::TypeError {
-                expected: "Coll[Byte] for VerifyStark publicInputs",
-                got: format!("{other:?}"),
-            })
-        }
-    };
-    let image_id_v = match cx.eval_expr(image_id)? {
-        Value::CollBytes(b) => b,
-        other => {
-            return Err(EvalError::TypeError {
-                expected: "Coll[Byte] for VerifyStark imageId",
-                got: format!("{other:?}"),
-            })
-        }
-    };
-
-    // ---- Phase 3: charge byte-ingestion, reassemble the proof, then verify. ----
-    // Reassemble the chunked proof (chunking dodges Ergo's per-Coll[Byte] limit).
-    let mut proof_bytes: Vec<u8> = Vec::new();
-    for chunk in &chunks_v {
-        match chunk {
-            Value::CollBytes(b) => proof_bytes.extend_from_slice(b),
+    if chunk_items.len() != raw_seal::CHUNK_COUNT {
+        return Ok(Value::Bool(false));
+    }
+    let mut chunk_bytes: Vec<&[u8]> = Vec::with_capacity(raw_seal::CHUNK_COUNT);
+    for (i, item) in chunk_items.iter().enumerate() {
+        match item {
+            Value::CollBytes(b) if b.len() == raw_seal::CANONICAL_CHUNK_LENGTHS[i] => {
+                chunk_bytes.push(b.as_slice());
+            }
+            // Wrong chunk length → soft false (reference chunk-length loop).
+            Value::CollBytes(_) => return Ok(Value::Bool(false)),
             other => {
                 return Err(EvalError::TypeError {
                     expected: "Coll[Byte] element in VerifyStark proofChunks",
@@ -335,62 +328,31 @@ pub(in crate::evaluator) fn eval_verify_stark(
             }
         }
     }
-    // Anti-padding-spam PerItemCost from #1116 `byteIngestionCost`
-    // (base=10, perChunk=1, chunkSize=1024) over the total ingested bytes.
-    let total_bytes: u64 =
-        public_inputs_v.len() as u64 + image_id_v.len() as u64 + proof_bytes.len() as u64;
-    let byte_ingestion = CostKind::PerItem {
-        base: JitCost::from_jit(10),
-        per_chunk: JitCost::from_jit(1),
-        chunk_size: 1024,
-    };
-    let n_bytes = u32::try_from(total_bytes).unwrap_or(u32::MAX);
-    cx.cost.add(byte_ingestion.compute(n_bytes)?)?;
 
-    // An invalid or malformed proof is a soft `Bool(false)` — never an error and
-    // never a panic (mirrors #1116's `catch { invalid => false }`).
-    #[cfg(feature = "stark-verify")]
-    let verified = verify_stark_risc0(&proof_bytes, &public_inputs_v, &image_id_v, vm_type_v);
-    #[cfg(not(feature = "stark-verify"))]
-    let verified = {
-        // M1 STUB: no verifier wired without the `stark-verify` feature; accept
-        // well-formed input so the devnet accept-path stays exercisable.
-        let _ = &proof_bytes;
-        true
+    // ---- SELF.propositionBytes → contractId is host-derived (never a child). ----
+    let self_prop = match cx.ctx.self_box {
+        Some(b) => b.script_bytes.as_slice(),
+        // No SELF box → cannot derive contractId; fail closed.
+        None => return Ok(Value::Bool(false)),
+    };
+
+    // ---- host reconstruction + transport decode + claim binding, then seam. ----
+    let outcome = stark::verify::prepare_verify_stark(
+        &profile_id_v,
+        &program_id_v,
+        &payload_v,
+        &chunk_bytes,
+        self_prop,
+        &cx.ctx.chain_domain_id,
+    );
+    let verified = match outcome {
+        stark::verify::PreparedVerify::Reject => false,
+        stark::verify::PreparedVerify::Ready {
+            words,
+            expected_claim,
+        } => stark::verify::verify_raw_seal(&words, &expected_claim, stark::verify::StockProfile),
     };
     Ok(Value::Bool(verified))
-}
-
-/// Real RISC0 STARK verification (EIP-0045 verifyStark, `stark-verify` feature,
-/// DEVNET-ONLY). Reassembled `proof` is a bincode `InnerReceipt`, `image_id` a
-/// 32-byte RISC0 image id (= Vk), `public_inputs` the journal, `vm_type` the
-/// RISC0 prover version selector. Any malformed input or verifier panic yields
-/// `false` — deterministic across nodes, never an abort.
-#[cfg(feature = "stark-verify")]
-fn verify_stark_risc0(proof: &[u8], public_inputs: &[u8], image_id: &[u8], vm_type: i32) -> bool {
-    use risc0_verifier::{v3_0, verify, Journal, Proof, Vk};
-
-    let vk_bytes: [u8; 32] = match image_id.try_into() {
-        Ok(b) => b,
-        Err(_) => return false, // image id must be exactly 32 bytes
-    };
-    let inner: risc0_verifier::InnerReceipt = match bincode::deserialize(proof) {
-        Ok(r) => r,
-        Err(_) => return false, // malformed receipt bytes
-    };
-    let vk: Vk = vk_bytes.into();
-    let journal = Journal::new(public_inputs.to_vec());
-    let proof = Proof::new(inner);
-
-    // Isolate any panic from the third-party verifier (same posture as the AVL
-    // verifier): a malformed proof must evaluate to `false`, never abort.
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match vm_type {
-        // Spike supports RISC0 prover 3.0 (the profile the poc emits). A
-        // production build would map the full v1.0..=v3.0 verifier registry.
-        3 => verify(&v3_0(), vk, proof, journal).is_ok(),
-        _ => false,
-    }));
-    outcome.unwrap_or(false)
 }
 
 // 0x9F Exponentiate — `GroupElement ** BigInt` (EC scalar multiplication).

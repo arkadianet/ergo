@@ -120,6 +120,7 @@ impl ReductionContextOwned {
             // tree's first byte), distinct from activatedScriptVersion. Drives
             // the v6 SHeader data-serialization gate (isV3OrLaterErgoTreeVersion).
             ergo_tree_version: self.self_box.script_bytes.first().map_or(0, |b| b & 0x07),
+            chain_domain_id: [0u8; 32],
         }
     }
 }

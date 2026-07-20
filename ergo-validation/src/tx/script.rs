@@ -304,6 +304,18 @@ pub fn validate_scripts(
             // isV3OrLaterErgoTreeVersion on this for the v6 SHeader data
             // serialization gate.
             ergo_tree_version: ergo_tree.version,
+            // Host-authenticated chain domain id for the EIP-0045 verifyStark
+            // (0xB9) opcode — the raw 32 bytes of this chain's genesis
+            // (height-1) Header.id (reference `snapshot.chainDomainId`).
+            // TODO(W1): thread the captured genesis id here. It is per-devnet
+            // and only known once the chain is launched (migration build spec
+            // §3): the source belongs on `TxValidationCtx` / the node's
+            // block-apply boundary (ergo-node/ergo-state hold the genesis
+            // header), fed from a single pinned constant shared with the
+            // guest/prover. Until then `[0u8; 32]` = not-yet-pinned. 0xB9 is a
+            // devnet-only opcode and its verify seam returns `false` in PR-A,
+            // so this field is inert on every consensus path today.
+            chain_domain_id: [0u8; 32],
         };
 
         let verified = verify_spending_proof_with_context_and_cost(

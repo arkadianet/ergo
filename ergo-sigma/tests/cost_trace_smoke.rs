@@ -55,6 +55,7 @@ fn trace_captures_opcode_costs() {
         last_block_utxo_root: None,
         activated_script_version: 2,
         ergo_tree_version: 2,
+        chain_domain_id: [0u8; 32],
         pre_header_version: 0,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,
@@ -161,6 +162,7 @@ fn trace_pins_method_indexof_cumulative_total() {
         // independent of EIP-50 activation gates.
         activated_script_version: 2,
         ergo_tree_version: 2,
+        chain_domain_id: [0u8; 32],
         pre_header_version: 0,
         pre_header_parent_id: [0u8; 32],
         pre_header_n_bits: 0,
