@@ -12,7 +12,7 @@ use ergo_ser::ergo_box::ErgoBox;
 use ergo_ser::transaction::{bytes_to_sign, read_transaction, Transaction};
 use ergo_validation::{validate_transaction_parsed, UtxoView, ValidationError};
 
-use crate::admission::{PeekedTx, Validated, ValidationErr, Validator};
+use crate::admission::{PeekedStructure, PeekedTx, Validated, ValidationErr, Validator};
 
 /// Canonical miner-fee ErgoTree serialization on Ergo mainnet. Any
 /// output whose `ergo_tree_bytes()` equals this tree is counted as
@@ -85,6 +85,57 @@ impl Validator for ErgoValidator {
         let message = bytes_to_sign(&tx).map_err(|_| ValidationErr::Deserialize)?;
         let tx_id = Digest32::from_bytes(*blake2b256(&message).as_bytes());
         Ok(PeekedTx { tx_id, fee })
+    }
+
+    fn peek_structure(&self, tx_bytes: &[u8]) -> Result<PeekedStructure, ValidationErr> {
+        // Deserialize only — same bounded parse as `peek_fee`, with the
+        // trailing-byte check that mirrors ergo-validation. No input
+        // resolution, no script eval, no cost counter.
+        let mut r = VlqReader::new(tx_bytes);
+        let tx = read_transaction(&mut r).map_err(|_| ValidationErr::Deserialize)?;
+        if !r.is_empty() {
+            return Err(ValidationErr::Deserialize);
+        }
+
+        // Fee: identical canonical-fee-output sum as `peek_fee`, saturating.
+        let fee = tx
+            .output_candidates
+            .iter()
+            .filter(|c| c.ergo_tree_bytes() == MAINNET_FEE_PROPOSITION_BYTES)
+            .map(|c| c.value)
+            .fold(0u64, |acc, v| acc.saturating_add(v));
+
+        // tx_id = blake2b256(bytes_to_sign(tx)) — the same id `validate`
+        // and `peek_fee` compute, so downstream box-id derivation matches.
+        let message = bytes_to_sign(&tx).map_err(|_| ValidationErr::Deserialize)?;
+        let tx_id_bytes = *blake2b256(&message).as_bytes();
+        let tx_id = Digest32::from_bytes(tx_id_bytes);
+        let tx_id_modifier: ModifierId = tx_id.into();
+
+        // Input box-ids: declared spends, in order (same as `validate`).
+        let input_box_ids: Vec<Digest32> = tx.inputs.iter().map(|i| i.box_id).collect();
+
+        // Output box-ids: derived from (tx_id, index) exactly as `validate`
+        // materializes them — box_id = H(bytes(box)); a serialization error
+        // on a parseable candidate is treated as a deserialize failure so
+        // the structural peek only ever fails with `Deserialize`.
+        let mut output_box_ids = Vec::with_capacity(tx.output_candidates.len());
+        for (idx, candidate) in tx.output_candidates.iter().enumerate() {
+            let ergo_box = ErgoBox {
+                candidate: candidate.clone(),
+                transaction_id: tx_id_modifier,
+                index: idx as u16,
+            };
+            let id = ergo_box.box_id().map_err(|_| ValidationErr::Deserialize)?;
+            output_box_ids.push(id);
+        }
+
+        Ok(PeekedStructure {
+            tx_id,
+            fee,
+            input_box_ids,
+            output_box_ids,
+        })
     }
 
     fn validate(
@@ -397,6 +448,173 @@ mod tests {
             peeked.tx_id, expected_id,
             "peek_fee returns real tx_id, not a placeholder"
         );
+    }
+
+    #[test]
+    fn peek_structure_extracts_ids_fee_inputs_outputs() {
+        use ergo_primitives::digest::ModifierId;
+        use ergo_primitives::writer::VlqWriter;
+        use ergo_ser::ergo_box::{ErgoBox, ErgoBoxCandidate};
+        use ergo_ser::ergo_tree::read_ergo_tree;
+        use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+        use ergo_ser::register::AdditionalRegisters;
+        use ergo_ser::transaction::{bytes_to_sign, write_transaction, Transaction};
+
+        // One canonical-fee output + one ordinary output, two inputs.
+        let fee_tree_bytes = MAINNET_FEE_PROPOSITION_BYTES.to_vec();
+        let mut fr = VlqReader::new(&fee_tree_bytes);
+        let fee_tree = read_ergo_tree(&mut fr).unwrap();
+        let ord_tree_bytes = vec![0x00u8, 0x08, 0xd3];
+        let mut or = VlqReader::new(&ord_tree_bytes);
+        let ord_tree = read_ergo_tree(&mut or).unwrap();
+
+        let fee_out = ErgoBoxCandidate::from_trusted_raw_parts(
+            1_500_000,
+            fee_tree,
+            fee_tree_bytes,
+            0,
+            vec![],
+            AdditionalRegisters::empty(),
+            vec![0u8],
+        );
+        let ord_out =
+            ErgoBoxCandidate::new(900_000, ord_tree, 0, vec![], AdditionalRegisters::empty())
+                .unwrap();
+        let in0 = Digest32::from_bytes([3u8; 32]);
+        let in1 = Digest32::from_bytes([4u8; 32]);
+        let tx = Transaction {
+            inputs: vec![
+                Input {
+                    box_id: in0,
+                    spending_proof: SpendingProof::new(Vec::new(), ContextExtension::empty())
+                        .unwrap(),
+                },
+                Input {
+                    box_id: in1,
+                    spending_proof: SpendingProof::new(Vec::new(), ContextExtension::empty())
+                        .unwrap(),
+                },
+            ],
+            data_inputs: vec![],
+            output_candidates: vec![fee_out.clone(), ord_out.clone()],
+        };
+        let mut w = VlqWriter::new();
+        write_transaction(&mut w, &tx).unwrap();
+        let bytes = w.result();
+
+        let peeked = ErgoValidator.peek_structure(&bytes).unwrap();
+
+        // tx_id.
+        let expected_id =
+            Digest32::from_bytes(*blake2b256(&bytes_to_sign(&tx).unwrap()).as_bytes());
+        assert_eq!(peeked.tx_id, expected_id, "tx_id");
+        // fee = only the canonical-fee output's value.
+        assert_eq!(peeked.fee, 1_500_000, "fee is the miner-fee output sum");
+        // input box ids, in order.
+        assert_eq!(peeked.input_box_ids, vec![in0, in1], "input box ids");
+        // output box ids match manual (tx_id, idx) derivation.
+        let modifier: ModifierId = expected_id.into();
+        let expected_out0 = ErgoBox {
+            candidate: fee_out,
+            transaction_id: modifier,
+            index: 0,
+        }
+        .box_id()
+        .unwrap();
+        let expected_out1 = ErgoBox {
+            candidate: ord_out,
+            transaction_id: modifier,
+            index: 1,
+        }
+        .box_id()
+        .unwrap();
+        assert_eq!(
+            peeked.output_box_ids,
+            vec![expected_out0, expected_out1],
+            "output box ids derived from (tx_id, index)"
+        );
+    }
+
+    #[test]
+    fn peek_structure_and_peek_fee_agree_on_id_and_fee() {
+        use ergo_primitives::writer::VlqWriter;
+        use ergo_ser::ergo_box::ErgoBoxCandidate;
+        use ergo_ser::ergo_tree::read_ergo_tree;
+        use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+        use ergo_ser::register::AdditionalRegisters;
+        use ergo_ser::transaction::{write_transaction, Transaction};
+
+        let tree_bytes = vec![0x00u8, 0x08, 0xd3];
+        let mut r = VlqReader::new(&tree_bytes);
+        let tree = read_ergo_tree(&mut r).unwrap();
+        let tx = Transaction {
+            inputs: vec![Input {
+                box_id: Digest32::from_bytes([7u8; 32]),
+                spending_proof: SpendingProof::new(Vec::new(), ContextExtension::empty()).unwrap(),
+            }],
+            data_inputs: vec![],
+            output_candidates: vec![ErgoBoxCandidate::new(
+                1_000,
+                tree,
+                0,
+                vec![],
+                AdditionalRegisters::empty(),
+            )
+            .unwrap()],
+        };
+        let mut w = VlqWriter::new();
+        write_transaction(&mut w, &tx).unwrap();
+        let bytes = w.result();
+
+        let s = ErgoValidator.peek_structure(&bytes).unwrap();
+        let f = ErgoValidator.peek_fee(&bytes).unwrap();
+        assert_eq!(s.tx_id, f.tx_id, "peek_structure/peek_fee tx_id agree");
+        assert_eq!(s.fee, f.fee, "peek_structure/peek_fee fee agree");
+    }
+
+    #[test]
+    fn peek_structure_rejects_malformed_bytes() {
+        assert!(matches!(
+            ErgoValidator.peek_structure(b"\xff\xff\xff").unwrap_err(),
+            ValidationErr::Deserialize
+        ));
+    }
+
+    #[test]
+    fn peek_structure_rejects_trailing_bytes() {
+        use ergo_primitives::writer::VlqWriter;
+        use ergo_ser::ergo_box::ErgoBoxCandidate;
+        use ergo_ser::ergo_tree::read_ergo_tree;
+        use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+        use ergo_ser::register::AdditionalRegisters;
+        use ergo_ser::transaction::{write_transaction, Transaction};
+
+        let tree_bytes = vec![0x00u8, 0x08, 0xd3];
+        let mut r = VlqReader::new(&tree_bytes);
+        let tree = read_ergo_tree(&mut r).unwrap();
+        let tx = Transaction {
+            inputs: vec![Input {
+                box_id: Digest32::from_bytes([7u8; 32]),
+                spending_proof: SpendingProof::new(Vec::new(), ContextExtension::empty()).unwrap(),
+            }],
+            data_inputs: vec![],
+            output_candidates: vec![ErgoBoxCandidate::new(
+                1_000,
+                tree,
+                0,
+                vec![],
+                AdditionalRegisters::empty(),
+            )
+            .unwrap()],
+        };
+        let mut w = VlqWriter::new();
+        write_transaction(&mut w, &tx).unwrap();
+        let mut bytes = w.result();
+        bytes.push(0xAB); // trailing garbage
+        assert!(matches!(
+            ErgoValidator.peek_structure(&bytes).unwrap_err(),
+            ValidationErr::Deserialize
+        ));
     }
 
     #[test]

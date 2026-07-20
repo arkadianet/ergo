@@ -114,6 +114,26 @@ pub struct PeekedTx {
     pub fee: u64,
 }
 
+/// Structural projection of a transaction obtained WITHOUT full
+/// validation: a bounded deserialize plus box-id derivation, no UTXO
+/// resolution, no script evaluation, and no `CostAccumulator`. Returned
+/// by [`Validator::peek_structure`] so the staging pool can index an
+/// orphan (or a not-yet-resolvable child) by the box-ids it must spend
+/// and the box-ids it creates, all before any metered work runs.
+///
+/// The `tx_id`, `fee`, `input_box_ids`, and `output_box_ids` MUST match
+/// what `validate(..)` would expose on its `Validated` for the same
+/// bytes; any divergence is a validator bug.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeekedStructure {
+    pub tx_id: TxId,
+    pub fee: u64,
+    /// Box-ids this tx spends (all declared inputs, in order).
+    pub input_box_ids: Vec<Digest32>,
+    /// Box-ids this tx creates (all outputs, index order).
+    pub output_box_ids: Vec<Digest32>,
+}
+
 pub trait Validator {
     /// Cheap pre-check: deserialize `tx_bytes` and extract
     /// `(tx_id, declared miner fee)` without running scripts,
@@ -132,6 +152,21 @@ pub trait Validator {
     /// monetary/structural rules" — cheap gate should never be the
     /// place a malicious tx terminates.
     fn peek_fee(&self, tx_bytes: &[u8]) -> Result<PeekedTx, ValidationErr>;
+
+    /// Cheap structural projection: deserialize `tx_bytes` and derive
+    /// `(tx_id, fee, input_box_ids, output_box_ids)` WITHOUT resolving
+    /// inputs, running scripts, or touching a `CostAccumulator`. Used by
+    /// the staging pool to index an orphan by the boxes it needs and the
+    /// boxes it creates before any metered validation runs.
+    ///
+    /// Like [`Self::peek_fee`], the ONLY error variant this may return is
+    /// `Deserialize` — every other classification belongs to full
+    /// validation. Fee summation MUST saturate (not panic, not wrap),
+    /// matching `peek_fee`'s overflow policy.
+    ///
+    /// The returned fields must agree with `validate(..)`'s `Validated`
+    /// for the same bytes.
+    fn peek_structure(&self, tx_bytes: &[u8]) -> Result<PeekedStructure, ValidationErr>;
 
     /// Validate `tx_bytes` against the supplied UTXO views. The
     /// `input_view` is the `PoolUtxoOverlay` (committed + pool-created),

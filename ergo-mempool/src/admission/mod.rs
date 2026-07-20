@@ -35,9 +35,11 @@ mod mock;
 mod outcome;
 mod revalidate;
 
-pub use context::{AdmissionCtx, PeekedTx, TipContext, Validated, ValidationErr, Validator};
+pub use context::{
+    AdmissionCtx, PeekedStructure, PeekedTx, TipContext, Validated, ValidationErr, Validator,
+};
 #[cfg(any(test, feature = "test-support"))]
-pub use mock::{MockPlan, MockValidator};
+pub use mock::{MockPlan, MockStructure, MockValidator};
 pub use outcome::{AdmissionOutcome, CheckOutcome, RejectReason};
 pub use revalidate::revalidate_pooled;
 pub(crate) use revalidate::{is_hard_invalid, record_failed_tx};

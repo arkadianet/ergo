@@ -856,6 +856,9 @@ impl Validator for ViewRecordingProbe {
     fn peek_fee(&self, _: &[u8]) -> Result<PeekedTx, ValidationErr> {
         Err(ValidationErr::Deserialize)
     }
+    fn peek_structure(&self, _: &[u8]) -> Result<crate::admission::PeekedStructure, ValidationErr> {
+        Err(ValidationErr::Deserialize)
+    }
     fn validate(
         &self,
         tx_bytes: &[u8],
@@ -959,6 +962,9 @@ struct AlwaysErr {
 }
 impl Validator for AlwaysErr {
     fn peek_fee(&self, _: &[u8]) -> Result<PeekedTx, ValidationErr> {
+        Err(ValidationErr::Deserialize)
+    }
+    fn peek_structure(&self, _: &[u8]) -> Result<crate::admission::PeekedStructure, ValidationErr> {
         Err(ValidationErr::Deserialize)
     }
     fn validate(
@@ -1305,6 +1311,9 @@ struct HeightGatedValidator {
 }
 impl Validator for HeightGatedValidator {
     fn peek_fee(&self, _: &[u8]) -> Result<PeekedTx, ValidationErr> {
+        Err(ValidationErr::Deserialize)
+    }
+    fn peek_structure(&self, _: &[u8]) -> Result<crate::admission::PeekedStructure, ValidationErr> {
         Err(ValidationErr::Deserialize)
     }
     fn validate(
