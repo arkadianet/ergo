@@ -232,6 +232,7 @@ impl Mempool {
             );
             return (outcome, Vec::new());
         }
+        let mut held_out: Option<admission::HeldCandidate> = None;
         let (outcome, mut actions) = {
             let mut cx = admission::AdmissionCtx {
                 tip_ctx,
@@ -242,7 +243,14 @@ impl Mempool {
                 unresolved: &mut self.unresolved,
                 weight_fn: &*self.weight_fn,
             };
-            admission::process(tx_bytes, source.clone(), now, &mut cx, validator)
+            admission::process_capturing_held(
+                tx_bytes,
+                source.clone(),
+                now,
+                &mut cx,
+                validator,
+                &mut held_out,
+            )
         };
         // Emit the PARENT admission's tracing/observer BEFORE any staging
         // side effect, so resolution's own per-child tracing (emitted inside
@@ -280,6 +288,18 @@ impl Mempool {
                 } => {
                     // Child arrived before its parent → hold as an orphan.
                     self.stage_orphan(tx_bytes, &source, now, tip_ctx, validator);
+                }
+                AdmissionOutcome::Rejected {
+                    reason: RejectReason::DoubleSpendLoser | RejectReason::PoolFull,
+                } => {
+                    // A fully-validated parent that lost the fee/capacity or
+                    // double-spend gate → hold it briefly so a booster child
+                    // can complete an admissible package. `held_out` is `Some`
+                    // exactly for these two boostable rejections (never for the
+                    // oversize `PoolFull`, which a package cannot rescue).
+                    if let Some(hc) = held_out.take() {
+                        self.stage_held_candidate(hc, tx_bytes, &source, now, tip_ctx);
+                    }
                 }
                 _ => {}
             }
@@ -335,6 +355,38 @@ impl Mempool {
             source.clone(),
             now,
             height,
+        );
+    }
+
+    /// Hold a fully-validated tx that lost the fee/capacity or double-spend
+    /// gate (a [`HeldCandidate`]) in the staging pool. The tx was already
+    /// validated with its cost charged, so this stages deserialize-derived
+    /// facts only — no further validation, no `CostBudgets` charge owed. A
+    /// stage refusal (cap hit, duplicate) is non-fatal — the tx is simply not
+    /// held. Its materialized outputs are retained so a later descendant can
+    /// resolve against them when assembling a package.
+    fn stage_held_candidate(
+        &mut self,
+        hc: admission::HeldCandidate,
+        tx_bytes: &[u8],
+        source: &TxSource,
+        now: std::time::Instant,
+        tip_ctx: &admission::TipContext<'_>,
+    ) {
+        let v = hc.validated;
+        let _ = self.staging.stage_held(
+            v.tx_id,
+            Arc::from(tx_bytes),
+            v.input_box_ids,
+            v.output_box_ids,
+            v.fee,
+            v.size_bytes,
+            hc.weight,
+            v.consumed_cost,
+            v.outputs,
+            source.clone(),
+            now,
+            tip_ctx.tip.height,
         );
     }
 
@@ -400,6 +452,7 @@ impl Mempool {
             // Lift the unresolved-cache suppression so the step-3 gate does
             // not short-circuit this re-validation as RecentlyUnresolved.
             self.unresolved.remove(&bytes);
+            let mut held_out: Option<admission::HeldCandidate> = None;
             let (outcome, child_actions) = {
                 let mut cx = admission::AdmissionCtx {
                     tip_ctx,
@@ -410,7 +463,14 @@ impl Mempool {
                     unresolved: &mut self.unresolved,
                     weight_fn: &*self.weight_fn,
                 };
-                admission::process(&bytes, staged.source.clone(), now, &mut cx, validator)
+                admission::process_capturing_held(
+                    &bytes,
+                    staged.source.clone(),
+                    now,
+                    &mut cx,
+                    validator,
+                    &mut held_out,
+                )
             };
             emit_tracing_for_admission(
                 &outcome,
@@ -438,13 +498,13 @@ impl Mempool {
                     }
                 }
                 AdmissionOutcome::Rejected { .. } => {
-                    // Re-stage only if it is STILL an orphan (a deeper ancestor
-                    // is missing); bounded by the reeval cap. A now-resolvable
-                    // tx that lost a fee/capacity gate is a HELD case — dropped
-                    // here in P2, retained by the P3 package path.
                     let missing = self.missing_inputs(&staged.input_box_ids, tip_ctx.utxo);
                     let next_reeval = staged.reeval_count.saturating_add(1);
                     if !missing.is_empty() && next_reeval < max_reevals {
+                        // Still an orphan (a deeper ancestor is missing) →
+                        // re-stage, bounded by the reeval cap. Preserve the
+                        // original `staged_at`/`staged_height` so TTL and the
+                        // block horizon do not renew on retry.
                         let _ = self.staging.stage_orphan(
                             staged.tx_id,
                             bytes.clone(),
@@ -457,8 +517,27 @@ impl Mempool {
                             staged.staged_at,
                             staged.staged_height,
                         );
-                        // Preserve the accrued reeval count on the re-staged entry.
                         self.staging.bump_reeval(&staged.tx_id, next_reeval);
+                    } else if let Some(hc) = held_out.take() {
+                        // Fully resolvable now, but lost the fee/capacity or
+                        // double-spend gate → convert to a HELD entry so its own
+                        // future descendant can complete a package. Preserve the
+                        // original staging clock/height (no horizon renewal).
+                        let v = hc.validated;
+                        let _ = self.staging.stage_held(
+                            v.tx_id,
+                            bytes.clone(),
+                            v.input_box_ids,
+                            v.output_box_ids,
+                            v.fee,
+                            v.size_bytes,
+                            hc.weight,
+                            v.consumed_cost,
+                            v.outputs,
+                            staged.source.clone(),
+                            staged.staged_at,
+                            staged.staged_height,
+                        );
                     }
                 }
             }

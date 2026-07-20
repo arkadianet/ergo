@@ -419,3 +419,93 @@ fn per_trigger_budget_defers_remaining_orphans_not_dropped() {
     );
     mp.pool().check_invariants();
 }
+
+// ----- P3: held parents (parent-first, lost-the-gate rescue) -----
+
+#[test]
+fn held_parent_staged_on_double_spend_loss() {
+    // X (high fee) and Y (low fee) both spend committed 0x60. X wins; Y loses
+    // the double-spend contest but is FULLY VALIDATED, so it is HELD (a booster
+    // child could later win the same conflict as a package).
+    let mut mp = mempool();
+    let utxo = FakeUtxo::with(&[0x60]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(1, 5_000_000, &[0x60], &[0xA1]) // X — wins
+        .plan(2, 2_000_000, &[0x60], &[0xA2]); // Y — same input, lower fee, loses
+    let now = Instant::now();
+
+    let (xo, _) = mp.process(&tx_bytes(1), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(matches!(xo, AdmissionOutcome::Admitted { .. }));
+
+    let (yo, ya) = mp.process(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(matches!(
+        yo,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::DoubleSpendLoser
+        }
+    ));
+    assert!(mp.contains(&d(1)), "winner stays pooled");
+    assert!(!mp.contains(&d(2)), "loser not pooled");
+    assert_eq!(mp.staging_len(), 1, "double-spend loser held, not dropped");
+    assert!(broadcasts(&ya).is_empty(), "a held tx is never gossiped");
+}
+
+#[test]
+fn held_parent_staged_on_pool_full() {
+    // A single-slot pool holds a high-weight X. A lower-weight Y (no conflict)
+    // cannot displace it (PoolFull), but it fully validated, so it is HELD.
+    let cfg = MempoolConfig {
+        max_pool_size: 1,
+        ..MempoolConfig::default()
+    };
+    let mut mp = Mempool::new(cfg, Box::new(ByCost));
+    let utxo = FakeUtxo::with(&[0x60, 0x61]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(1, 5_000_000, &[0x60], &[0xA1]) // X — high weight, fills the pool
+        .plan(2, 2_000_000, &[0x61], &[0xA2]); // Y — low weight, no conflict
+    let now = Instant::now();
+
+    mp.process(&tx_bytes(1), TxSource::Api, now, &tip.view(&utxo), &v);
+    let (yo, ya) = mp.process(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(matches!(
+        yo,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::PoolFull
+        }
+    ));
+    assert!(mp.contains(&d(1)) && !mp.contains(&d(2)));
+    assert_eq!(mp.staging_len(), 1, "underpriced-for-full-pool tx held");
+    assert!(broadcasts(&ya).is_empty(), "a held tx is never gossiped");
+}
+
+#[test]
+fn check_never_stages_held_candidate() {
+    // The `/check` path must not stage even a held-eligible rejection.
+    let cfg = MempoolConfig {
+        max_pool_size: 1,
+        ..MempoolConfig::default()
+    };
+    let mut mp = Mempool::new(cfg, Box::new(ByCost));
+    let utxo = FakeUtxo::with(&[0x60, 0x61]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(1, 5_000_000, &[0x60], &[0xA1])
+        .plan(2, 2_000_000, &[0x61], &[0xA2]);
+    let now = Instant::now();
+
+    mp.process(&tx_bytes(1), TxSource::Api, now, &tip.view(&utxo), &v); // fills the pool
+    let (co, _) = mp.check(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(matches!(
+        co,
+        CheckOutcome::Rejected {
+            reason: RejectReason::PoolFull
+        }
+    ));
+    assert_eq!(
+        mp.staging_len(),
+        0,
+        "/check must never stage a held candidate"
+    );
+}

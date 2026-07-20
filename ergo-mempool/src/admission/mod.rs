@@ -40,6 +40,7 @@ pub use context::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use mock::{MockPlan, MockStructure, MockValidator};
+pub(crate) use outcome::HeldCandidate;
 pub use outcome::{AdmissionOutcome, CheckOutcome, RejectReason};
 pub use revalidate::revalidate_pooled;
 pub(crate) use revalidate::{is_hard_invalid, record_failed_tx};
@@ -62,7 +63,29 @@ pub fn process<V: Validator>(
     cx: &mut AdmissionCtx<'_>,
     validator: &V,
 ) -> (AdmissionOutcome, Vec<MempoolAction>) {
-    let (outcome, mut actions) = check(tx_bytes, &source, now, cx, validator);
+    // Public entry point: discard the held-candidate side channel. Callers
+    // that want to retain a valid-but-rejected parent in staging use
+    // `process_capturing_held` directly (only `Mempool`, never `/check`).
+    let mut held_out = None;
+    process_capturing_held(tx_bytes, source, now, cx, validator, &mut held_out)
+}
+
+/// Like [`process`], but ALSO surfaces a [`HeldCandidate`] when a fully-
+/// validated tx lost the `PoolFull` or `DoubleSpendLoser` gate, so the
+/// caller (`Mempool::process`) can hold it in the staging pool for later
+/// package re-evaluation instead of dropping it. The candidate was already
+/// validated with its cost charged to `CostBudgets`, so holding it runs no
+/// additional validation and opens no free-oracle hole.
+pub(crate) fn process_capturing_held<V: Validator>(
+    tx_bytes: &[u8],
+    source: TxSource,
+    now: Instant,
+    cx: &mut AdmissionCtx<'_>,
+    validator: &V,
+    held_out: &mut Option<HeldCandidate>,
+) -> (AdmissionOutcome, Vec<MempoolAction>) {
+    let (outcome, mut actions) =
+        check_capturing_held(tx_bytes, &source, now, cx, validator, held_out);
     match outcome {
         CheckOutcome::Rejected { reason } => (AdmissionOutcome::Rejected { reason }, actions),
         CheckOutcome::WouldAdmit {
@@ -78,6 +101,7 @@ pub fn process<V: Validator>(
                 weight,
                 replaced_ids,
                 &mut actions,
+                held_out,
             );
             (admit, actions)
         }
@@ -104,6 +128,26 @@ pub fn check<V: Validator>(
     now: Instant,
     cx: &mut AdmissionCtx<'_>,
     validator: &V,
+) -> (CheckOutcome, Vec<MempoolAction>) {
+    // Public entry point: discard the held-candidate side channel. `/check`
+    // (`Mempool::check`) uses this and therefore never stages.
+    let mut held_out = None;
+    check_capturing_held(tx_bytes, source, now, cx, validator, &mut held_out)
+}
+
+/// Like [`check`], but records a [`HeldCandidate`] into `held_out` when the
+/// tx fully validated yet lost the `DoubleSpendLoser` or `PoolFull` gate
+/// (the two rejections a booster child could later rescue via a package).
+/// Every other return path leaves `held_out` untouched (`None`). See
+/// [`HeldCandidate`] for why this is a side channel rather than a new
+/// outcome variant.
+pub(crate) fn check_capturing_held<V: Validator>(
+    tx_bytes: &[u8],
+    source: &TxSource,
+    now: Instant,
+    cx: &mut AdmissionCtx<'_>,
+    validator: &V,
+    held_out: &mut Option<HeldCandidate>,
 ) -> (CheckOutcome, Vec<MempoolAction>) {
     let mut actions: Vec<MempoolAction> = Vec::new();
     let peer = source.peer();
@@ -397,6 +441,14 @@ pub fn check<V: Validator>(
                     tx_id: validated.tx_id,
                 },
             });
+            // The tx is fully validated (cost already charged) but lost the
+            // double-spend contest. Surface it as a held candidate: a
+            // higher-fee booster child could later win the SAME conflict as a
+            // package (RBF R1∧R2). `Mempool::process` decides whether to hold.
+            *held_out = Some(HeldCandidate {
+                validated: validated.clone(),
+                weight,
+            });
             return (
                 CheckOutcome::Rejected {
                     reason: RejectReason::DoubleSpendLoser,
@@ -460,6 +512,15 @@ pub fn check<V: Validator>(
                         tx_id: validated.tx_id,
                     },
                 });
+                // Underpriced for a full pool, but fully validated (cost
+                // charged). A booster child could lift the family over the
+                // eviction threshold as a package, so surface it as a held
+                // candidate. (Guard 1 above — a tx too big to EVER fit — is
+                // deliberately NOT held: a package only grows the size.)
+                *held_out = Some(HeldCandidate {
+                    validated: validated.clone(),
+                    weight,
+                });
                 return (
                     CheckOutcome::Rejected {
                         reason: RejectReason::PoolFull,
@@ -487,6 +548,7 @@ pub fn check<V: Validator>(
 /// performs no anti-DoS bookkeeping. The pre-checks in `check` make
 /// the eviction loop terminate (the new tx is heavier than the
 /// remaining minimum and fits the byte cap on its own).
+#[allow(clippy::too_many_arguments)]
 fn commit(
     cx: &mut AdmissionCtx<'_>,
     tx_bytes: &[u8],
@@ -495,6 +557,7 @@ fn commit(
     weight: u64,
     replaced_ids: Vec<TxId>,
     actions: &mut Vec<MempoolAction>,
+    held_out: &mut Option<HeldCandidate>,
 ) -> AdmissionOutcome {
     let peer = source.peer();
 
@@ -548,6 +611,13 @@ fn commit(
                     event: ObservedEvent::DroppedPoolFull {
                         tx_id: validated.tx_id,
                     },
+                });
+                // Post-boost, the new tx was the pool's own lowest and was
+                // evicted. It is fully validated (cost charged): hold it, since
+                // a booster child could lift its family above the threshold.
+                *held_out = Some(HeldCandidate {
+                    validated: validated.clone(),
+                    weight,
                 });
                 return AdmissionOutcome::Rejected {
                     reason: RejectReason::PoolFull,
