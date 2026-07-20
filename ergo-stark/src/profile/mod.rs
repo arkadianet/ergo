@@ -152,8 +152,21 @@ pub enum LoaderError {
 pub struct ProfilePackageLoader;
 
 impl ProfilePackageLoader {
-    /// Load one package selected by a network activation record. The expected
-    /// profile ID is an activation input, not read from the package itself.
+    /// Load a profile package: decode+validate the manifest, derive+check the
+    /// `profileId`, bind the B1/B2 artifacts by digest, and cross-check the B2
+    /// fixed header + reverse-roots against the Layer-1 compiled implementation.
+    ///
+    /// KNOWN GAP (safe for the stock profile, must close before a governance-
+    /// selectable profile): unlike the Scala reference's `validateCompiledImpl`,
+    /// this does NOT structurally decode + cross-check B2's tap/PolyExt region —
+    /// it executes the Layer-3 compiled stock tap/PolyExt tables, binding that
+    /// region only via the whole-B2 digest + `profileId` chain. For the stock
+    /// profile those tables are byte-for-byte identical to B2's tap/PolyExt bytes
+    /// (verified), so it is sound; a different (future) profile with a valid
+    /// header/roots but a different tap/PolyExt region would silently run the
+    /// stock circuit. TODO(governance-profile): port the reference's B2
+    /// tap/PolyExt structural decode + cross-check (extend
+    /// `CompiledImplementationMismatch` to that region).
     pub fn load(
         raw_manifest: &[u8],
         algorithm_bytes: &[u8],
@@ -701,5 +714,24 @@ impl<'a> Cursor<'a> {
         }
         self.pos += len;
         Ok(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ----- happy path -----
+
+    #[test]
+    fn stock_profile_loads_and_matches_pinned_id() {
+        let loaded = ProfilePackageLoader::load(
+            STOCK_MANIFEST,
+            STOCK_ALGORITHM,
+            STOCK_BINARY,
+            STOCK_PROFILE_ID,
+        )
+        .expect("the frozen stock profile must load");
+        assert_eq!(loaded.profile_id.as_slice(), STOCK_PROFILE_ID);
     }
 }
