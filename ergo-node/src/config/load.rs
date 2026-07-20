@@ -656,6 +656,18 @@ impl NodeConfig {
             per_peer_cost_budget: def.per_peer_cost_budget,
             unresolved_cache_size: def.unresolved_cache_size,
             unresolved_cache_ttl_seconds: def.unresolved_cache_ttl_seconds,
+            // Staging pool (package admission) — internal tuning, not
+            // operator-configurable via TOML/CLI.
+            staging_enabled: def.staging_enabled,
+            staging_max_count: def.staging_max_count,
+            staging_max_bytes: def.staging_max_bytes,
+            staging_max_count_per_peer: def.staging_max_count_per_peer,
+            staging_max_bytes_per_peer: def.staging_max_bytes_per_peer,
+            staging_max_waiters_per_input: def.staging_max_waiters_per_input,
+            staging_max_reevals: def.staging_max_reevals,
+            staging_max_package_txs: def.staging_max_package_txs,
+            staging_ttl_seconds: def.staging_ttl_seconds,
+            staging_max_blocks: def.staging_max_blocks,
         };
         if mempool_config.max_pool_size == 0 {
             return Err("[mempool] max_pool_size must be >= 1".into());

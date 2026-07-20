@@ -403,6 +403,16 @@ impl StagingPool {
         Ok(admit)
     }
 
+    /// Overwrite a staged tx's `reeval_count`. Used when an orphan is
+    /// re-staged after a failed promotion attempt so the CPU-per-tx cap
+    /// (`staging_max_reevals`) accrues across attempts rather than resetting.
+    /// No-op if absent.
+    pub fn bump_reeval(&mut self, tx_id: &TxId, reeval_count: u16) {
+        if let Some(e) = self.by_tx_id.get_mut(tx_id) {
+            e.reeval_count = reeval_count;
+        }
+    }
+
     /// Remove a staged tx and clean every index. Returns the removed entry.
     pub fn remove(&mut self, tx_id: &TxId) -> Option<StagedTx> {
         let entry = self.by_tx_id.remove(tx_id)?;

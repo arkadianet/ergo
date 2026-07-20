@@ -3,9 +3,12 @@
 //! unresolved caches, and the revalidation queue, and drives them via the
 //! admission / reorg / revalidation free functions.
 
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 use tracing::{debug, info};
+
+use ergo_primitives::digest::Digest32;
 
 use crate::admission::{self, AdmissionOutcome, CheckOutcome, RejectReason, Validator};
 use crate::budget::CostBudgets;
@@ -13,6 +16,7 @@ use crate::invalidation::InvalidationCache;
 use crate::pool::{Entry, OrderedPool};
 use crate::reorg;
 use crate::revalidation::{topological_demote_order, RevalidationQueue};
+use crate::staging::StagingPool;
 use crate::telemetry::{
     emit_tracing_for_admission, emit_tracing_for_check, emit_tracing_for_pool_actions,
 };
@@ -50,6 +54,11 @@ pub struct Mempool {
     /// Only ever fed from the hard-invalid arm, so a transient
     /// unresolved-input (demoted-parent) tx is never enqueued here.
     pending_orphan_eviction: Vec<TxId>,
+    /// Brief holding store for orphans (child-before-parent) and held
+    /// parents/singles (parent-before-child) that cannot be admitted yet.
+    /// A side effect of `process` alone — `check` (`/check`) never touches
+    /// it — and it never gossips. See [`crate::staging`].
+    staging: StagingPool,
 }
 
 impl Mempool {
@@ -65,6 +74,7 @@ impl Mempool {
             std::time::Duration::from_secs(config.unresolved_cache_ttl_seconds),
         );
         let revalidation = RevalidationQueue::new(config.revalidation_max_depth);
+        let staging = StagingPool::new(config.staging_caps());
         Self {
             pool: OrderedPool::with_capacity(config.max_pool_size),
             config,
@@ -76,7 +86,19 @@ impl Mempool {
             revalidation,
             observer: None,
             pending_orphan_eviction: Vec::new(),
+            staging,
         }
+    }
+
+    /// Number of transactions currently held in the staging pool
+    /// (orphans + held). Read-only operator surface.
+    pub fn staging_len(&self) -> usize {
+        self.staging.len()
+    }
+
+    /// Total bytes held in the staging pool.
+    pub fn staging_bytes(&self) -> usize {
+        self.staging.total_bytes()
     }
 
     /// Install (or clear, with `None`) the telemetry observer. Cheap — one
@@ -210,17 +232,21 @@ impl Mempool {
             );
             return (outcome, Vec::new());
         }
-        let mut cx = admission::AdmissionCtx {
-            tip_ctx,
-            config: &self.config,
-            pool: &mut self.pool,
-            budgets: &mut self.budgets,
-            invalidated: &mut self.invalidation,
-            unresolved: &mut self.unresolved,
-            weight_fn: &*self.weight_fn,
+        let (outcome, mut actions) = {
+            let mut cx = admission::AdmissionCtx {
+                tip_ctx,
+                config: &self.config,
+                pool: &mut self.pool,
+                budgets: &mut self.budgets,
+                invalidated: &mut self.invalidation,
+                unresolved: &mut self.unresolved,
+                weight_fn: &*self.weight_fn,
+            };
+            admission::process(tx_bytes, source.clone(), now, &mut cx, validator)
         };
-        let (outcome, actions) =
-            admission::process(tx_bytes, source.clone(), now, &mut cx, validator);
+        // Emit the PARENT admission's tracing/observer BEFORE any staging
+        // side effect, so resolution's own per-child tracing (emitted inside
+        // `resolve_orphans`) is not double-counted against this outcome.
         emit_tracing_for_admission(
             &outcome,
             &actions,
@@ -230,7 +256,215 @@ impl Mempool {
             self.observer.as_deref(),
             self.tip,
         );
+
+        // ── Staging side effects — `process` ONLY (never `check`) ────────
+        // Staging never gossips; the only `BroadcastInv` here come from
+        // `resolve_orphans` promoting a child through the real commit path.
+        if self.config.staging_enabled {
+            match &outcome {
+                AdmissionOutcome::Admitted { tx_id, .. } => {
+                    // Parent arrived → resolve orphans waiting on its outputs.
+                    let trigger_outputs = self
+                        .pool
+                        .get(tx_id)
+                        .map(|e| e.outputs.clone())
+                        .unwrap_or_default();
+                    if !trigger_outputs.is_empty() {
+                        let child_actions =
+                            self.resolve_orphans(trigger_outputs, now, tip_ctx, validator);
+                        actions.extend(child_actions);
+                    }
+                }
+                AdmissionOutcome::Rejected {
+                    reason: RejectReason::UnresolvedInput,
+                } => {
+                    // Child arrived before its parent → hold as an orphan.
+                    self.stage_orphan(tx_bytes, &source, now, tip_ctx, validator);
+                }
+                _ => {}
+            }
+        }
         (outcome, actions)
+    }
+
+    /// Which regular inputs of `input_box_ids` are NOT yet resolvable — i.e.
+    /// neither created by an in-pool tx (`by_output`) nor present in the
+    /// committed UTXO view. This uses the pool's `by_output` INDEX (not a
+    /// materialized overlay), so it is cheap and needs no `ErgoBox`es.
+    fn missing_inputs(
+        &self,
+        input_box_ids: &[Digest32],
+        utxo: &dyn ergo_validation::UtxoView,
+    ) -> Vec<Digest32> {
+        input_box_ids
+            .iter()
+            .filter(|b| self.pool.parent_for_output(b).is_none() && utxo.get_box(b).is_none())
+            .copied()
+            .collect()
+    }
+
+    /// Stage an incoming child (that just failed admission with
+    /// `UnresolvedInput`) as an orphan, keyed by its still-missing inputs.
+    /// Deserialize-only work (a `peek_structure`); no script validation, so
+    /// no `CostBudgets` charge is owed here. A stage refusal (cap hit,
+    /// duplicate) is non-fatal — the tx is simply not held.
+    fn stage_orphan<V: Validator>(
+        &mut self,
+        tx_bytes: &[u8],
+        source: &TxSource,
+        now: std::time::Instant,
+        tip_ctx: &admission::TipContext<'_>,
+        validator: &V,
+    ) {
+        let Ok(s) = validator.peek_structure(tx_bytes) else {
+            return; // unparseable — nothing to stage (admission already handled)
+        };
+        let missing = self.missing_inputs(&s.input_box_ids, tip_ctx.utxo);
+        if missing.is_empty() {
+            return; // resolvable now — not actually an orphan
+        }
+        let height = tip_ctx.tip.height;
+        let _ = self.staging.stage_orphan(
+            s.tx_id,
+            Arc::from(tx_bytes),
+            s.input_box_ids,
+            s.output_box_ids,
+            s.fee,
+            tx_bytes.len() as u32,
+            missing,
+            source.clone(),
+            now,
+            height,
+        );
+    }
+
+    /// A tx was admitted (or a cascade child was): its `trigger_outputs` are
+    /// now spendable, so re-attempt any orphan waiting on them, cascading to
+    /// deeper waiters. Bounded by a per-trigger cost budget
+    /// (`mempool_cleanup_cost_mult × params.max_block_cost`); over-budget
+    /// waiters are DEFERRED (left staged), never dropped. Each attempt is
+    /// bounded work: a cheap resolvability pre-check (via the pool's
+    /// `by_output` index) gates the full re-validation, and the actual script
+    /// cost is charged to `CostBudgets` inside `admission::process` exactly
+    /// like any admission (upholding the no-free-oracle invariant). Emits its
+    /// OWN per-child tracing/observer and returns the child actions
+    /// (`BroadcastInv` etc.) for the caller to route.
+    fn resolve_orphans<V: Validator>(
+        &mut self,
+        trigger_outputs: Vec<Digest32>,
+        now: std::time::Instant,
+        tip_ctx: &admission::TipContext<'_>,
+        validator: &V,
+    ) -> Vec<MempoolAction> {
+        let mut out_actions: Vec<MempoolAction> = Vec::new();
+        if self.staging.is_empty() {
+            return out_actions;
+        }
+        let cost_cap: u128 = u128::from(self.config.mempool_cleanup_cost_mult)
+            .saturating_mul(u128::from(tip_ctx.params.max_block_cost));
+        let max_tx_cost = self.config.max_tx_cost;
+        let max_reevals = self.config.staging_max_reevals;
+        let mut cost_acc: u128 = 0;
+
+        // Seed the work-queue with the orphans waiting on the trigger outputs.
+        let mut queued: HashSet<TxId> = HashSet::new();
+        let mut work: VecDeque<TxId> = VecDeque::new();
+        for out in &trigger_outputs {
+            for w in self.staging.waiters_on(out) {
+                if queued.insert(*w) {
+                    work.push_back(*w);
+                }
+            }
+        }
+
+        while let Some(child_id) = work.pop_front() {
+            if cost_acc >= cost_cap {
+                break; // per-trigger budget spent; remainder deferred (still staged)
+            }
+            let Some(staged) = self.staging.get(&child_id).cloned() else {
+                continue; // already promoted/pruned earlier this pass
+            };
+            // Cheap resolvability pre-check: every regular input must now be a
+            // pool output or a committed box, else leave it staged (no attempt,
+            // no reeval charge) — another parent has yet to arrive.
+            let still_missing = self.missing_inputs(&staged.input_box_ids, tip_ctx.utxo);
+            if !still_missing.is_empty() {
+                continue;
+            }
+            // Attempt full admission. Charge the per-trigger budget up front
+            // (bounded by max_tx_cost per attempt); the real script cost is
+            // charged to CostBudgets inside admission::process.
+            cost_acc = cost_acc.saturating_add(u128::from(max_tx_cost));
+            let bytes = staged.bytes.clone();
+            self.staging.remove(&child_id);
+            // Lift the unresolved-cache suppression so the step-3 gate does
+            // not short-circuit this re-validation as RecentlyUnresolved.
+            self.unresolved.remove(&bytes);
+            let (outcome, child_actions) = {
+                let mut cx = admission::AdmissionCtx {
+                    tip_ctx,
+                    config: &self.config,
+                    pool: &mut self.pool,
+                    budgets: &mut self.budgets,
+                    invalidated: &mut self.invalidation,
+                    unresolved: &mut self.unresolved,
+                    weight_fn: &*self.weight_fn,
+                };
+                admission::process(&bytes, staged.source.clone(), now, &mut cx, validator)
+            };
+            emit_tracing_for_admission(
+                &outcome,
+                &child_actions,
+                &staged.source,
+                self.pool.len(),
+                self.pool.total_bytes(),
+                self.observer.as_deref(),
+                self.tip,
+            );
+            match &outcome {
+                AdmissionOutcome::Admitted { tx_id, .. } => {
+                    // Cascade: enqueue orphans waiting on this child's outputs.
+                    let outs = self
+                        .pool
+                        .get(tx_id)
+                        .map(|e| e.outputs.clone())
+                        .unwrap_or_default();
+                    for o in &outs {
+                        for w in self.staging.waiters_on(o) {
+                            if queued.insert(*w) {
+                                work.push_back(*w);
+                            }
+                        }
+                    }
+                }
+                AdmissionOutcome::Rejected { .. } => {
+                    // Re-stage only if it is STILL an orphan (a deeper ancestor
+                    // is missing); bounded by the reeval cap. A now-resolvable
+                    // tx that lost a fee/capacity gate is a HELD case — dropped
+                    // here in P2, retained by the P3 package path.
+                    let missing = self.missing_inputs(&staged.input_box_ids, tip_ctx.utxo);
+                    let next_reeval = staged.reeval_count.saturating_add(1);
+                    if !missing.is_empty() && next_reeval < max_reevals {
+                        let _ = self.staging.stage_orphan(
+                            staged.tx_id,
+                            bytes.clone(),
+                            staged.input_box_ids.clone(),
+                            staged.output_box_ids.clone(),
+                            staged.fee,
+                            staged.size_bytes,
+                            missing,
+                            staged.source.clone(),
+                            staged.staged_at,
+                            staged.staged_height,
+                        );
+                        // Preserve the accrued reeval count on the re-staged entry.
+                        self.staging.bump_reeval(&staged.tx_id, next_reeval);
+                    }
+                }
+            }
+            out_actions.extend(child_actions);
+        }
+        out_actions
     }
 
     /// Run admission steps 0-14 on `tx_bytes` *without committing*.
@@ -306,6 +540,30 @@ impl Mempool {
         );
         self.tip = Some(new_tip);
 
+        // ── Block-advance staging prune ──────────────────────────────────
+        // Drop staged txs whose input was confirmed-and-consumed on-chain
+        // (can never be admitted) and any past their TTL / block-count
+        // horizon. Staged entries were never gossiped or pooled, so this
+        // emits no actions. `/check` never stages, so nothing here leaks.
+        let staging_pruned = if self.config.staging_enabled {
+            let mut pruned = self
+                .staging
+                .prune_spent_inputs(&diff.applied_spent_inputs)
+                .len();
+            pruned += self
+                .staging
+                .prune_expired(
+                    t0,
+                    new_tip.height,
+                    std::time::Duration::from_secs(self.config.staging_ttl_seconds),
+                    self.config.staging_max_blocks,
+                )
+                .len();
+            pruned
+        } else {
+            0
+        };
+
         // Per-action evictions log first so dashboards show the cause
         // before the summary.
         emit_tracing_for_pool_actions(&actions, self.observer.as_deref(), Some(new_tip));
@@ -329,6 +587,8 @@ impl Mempool {
             pool_size = self.pool.len(),
             pool_bytes = self.pool.total_bytes(),
             revalidation_pending = self.revalidation.len(),
+            staging_pending = self.staging.len(),
+            staging_pruned,
             duration_ms = t0.elapsed().as_millis() as u64,
             "mempool tip change processed",
         );
@@ -956,3 +1216,5 @@ impl Mempool {
 
 #[cfg(test)]
 mod recheck_tests;
+#[cfg(test)]
+mod staging_tests;
