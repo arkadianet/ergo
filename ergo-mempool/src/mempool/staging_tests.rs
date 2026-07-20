@@ -16,6 +16,7 @@ use ergo_ser::ergo_tree::read_ergo_tree;
 use ergo_ser::register::AdditionalRegisters;
 use ergo_validation::{ProtocolParams, TransactionContext, TxValidationCtx, UtxoView};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 fn d(b: u8) -> Digest32 {
@@ -658,4 +659,115 @@ fn package_rbf_rejects_pin_higher_feerate_but_lower_absolute_fee() {
         "parent and child both held for a future try"
     );
     mp.pool().check_invariants();
+}
+
+// ----- FIX 1 (B1): intra-package double-spend must never be seated -----
+
+#[test]
+fn package_rejects_intra_package_double_spend_child_and_parent() {
+    // Single-slot pool full of high-weight X. P (underpriced) spends box 0x80
+    // and is held. A malicious child C spends BOTH P's output 0x81 AND the same
+    // box 0x80 — so the package [P, C] would double-spend 0x80. It must be
+    // rejected wholesale, the live pool left untouched, and no double-spend or
+    // index corruption seated.
+    let cfg = MempoolConfig {
+        max_pool_size: 1,
+        ..MempoolConfig::default()
+    };
+    let mut mp = Mempool::new(cfg, Box::new(ByCost));
+    let utxo = FakeUtxo::with(&[0x90, 0x80]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(9, 9_000_000, &[0x90], &[0x9A]) // X — fills the 1-slot pool
+        .plan(1, 1_000_000, &[0x80], &[0x81]) // P — underpriced, held
+        .plan(2, 10_000_000, &[0x81, 0x80], &[0x82]); // C — spends P.out AND 0x80
+    let now = Instant::now();
+
+    mp.process(&tx_bytes(9), TxSource::Api, now, &tip.view(&utxo), &v);
+    mp.process(&tx_bytes(1), TxSource::Api, now, &tip.view(&utxo), &v); // P held
+    assert_eq!(mp.staging_len(), 1);
+
+    let (_co, ca) = mp.process(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(
+        !mp.contains(&d(1)) && !mp.contains(&d(2)),
+        "the double-spending package must not be admitted"
+    );
+    assert!(mp.contains(&d(9)), "the live pool is untouched");
+    assert!(
+        broadcasts(&ca).is_empty(),
+        "a rejected double-spend package gossips nothing"
+    );
+    mp.pool().check_invariants();
+}
+
+#[test]
+fn package_rejects_intra_package_double_spend_two_held_parents() {
+    // Two held parents P1, P2 BOTH spend box 0x80 (each was held while the pool
+    // was full). A child C spends both their outputs, pulling both into one
+    // package [P1, P2, C] — a double-spend of 0x80. Must be rejected wholesale.
+    let cfg = MempoolConfig {
+        max_pool_size: 1,
+        ..MempoolConfig::default()
+    };
+    let mut mp = Mempool::new(cfg, Box::new(ByCost));
+    let utxo = FakeUtxo::with(&[0x90, 0x80]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(9, 9_000_000, &[0x90], &[0x9A]) // X — fills the pool
+        .plan(1, 1_000_000, &[0x80], &[0x81]) // P1 — held, spends 0x80
+        .plan(2, 1_000_000, &[0x80], &[0x82]) // P2 — held, spends 0x80 too
+        .plan(3, 10_000_000, &[0x81, 0x82], &[0x83]); // C — spends both outputs
+    let now = Instant::now();
+
+    mp.process(&tx_bytes(9), TxSource::Api, now, &tip.view(&utxo), &v);
+    mp.process(&tx_bytes(1), TxSource::Api, now, &tip.view(&utxo), &v); // P1 held
+    mp.process(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v); // P2 held
+    assert_eq!(mp.staging_len(), 2);
+
+    let (_co, ca) = mp.process(&tx_bytes(3), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(
+        !mp.contains(&d(1)) && !mp.contains(&d(2)) && !mp.contains(&d(3)),
+        "no member of the double-spending package is admitted"
+    );
+    assert!(mp.contains(&d(9)), "live pool untouched");
+    assert!(broadcasts(&ca).is_empty());
+    mp.pool().check_invariants();
+}
+
+#[test]
+fn pool_insert_rejects_input_collision() {
+    // Defense-in-depth: OrderedPool::insert refuses a tx whose input is already
+    // spent by a pooled tx, so no path can ever seat a double-spend.
+    let mut pool = OrderedPool::with_capacity(4);
+    let e1 = Entry::new(
+        d(1),
+        Arc::from(vec![1u8; 10].into_boxed_slice()),
+        vec![d(0x80)],
+        vec![d(0x81)],
+        vec![],
+        1_000_000,
+        100,
+        10,
+        10_000,
+        TxSource::Api,
+    );
+    pool.insert(e1).unwrap();
+    let e2 = Entry::new(
+        d(2),
+        Arc::from(vec![2u8; 10].into_boxed_slice()),
+        vec![d(0x80)], // same input as e1
+        vec![d(0x82)],
+        vec![],
+        1_000_000,
+        200,
+        10,
+        10_000,
+        TxSource::Api,
+    );
+    let err = pool.insert(e2).unwrap_err();
+    assert!(
+        matches!(err, crate::pool::PoolError::InputCollision(_)),
+        "second spender of a box must be rejected: {err:?}"
+    );
+    pool.check_invariants();
 }

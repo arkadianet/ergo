@@ -883,6 +883,26 @@ impl Mempool {
         );
         let max_depth = self.config.max_family_depth;
 
+        // ── Intra-package double-spend guard ─────────────────────────────
+        // No box may be spent by two members: that would seat a double-spend
+        // in the pool (two spenders of one box), corrupt `by_input`, and
+        // gossip both. Dedup across EVERY member's inputs (internal +
+        // external); reject the whole package all-or-nothing if any box
+        // repeats — the live pool is untouched and nothing is emitted.
+        // (`OrderedPool::insert` also rejects an input already spent by a
+        // POOLED tx; this guard additionally catches two members that share
+        // an input neither of which is pooled yet.)
+        {
+            let mut spent: HashSet<Digest32> = HashSet::new();
+            for m in &members {
+                for i in &m.input_box_ids {
+                    if !spent.insert(*i) {
+                        return None; // intra-package double-spend
+                    }
+                }
+            }
+        }
+
         let pkg_fee: u64 = members
             .iter()
             .map(|m| m.fee)

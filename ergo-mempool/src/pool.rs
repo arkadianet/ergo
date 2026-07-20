@@ -168,6 +168,13 @@ pub enum PoolError {
     Duplicate(TxId),
     #[error("output box_id collision on insert: {0:?}")]
     OutputCollision(Digest32),
+    /// An input box is already spent by another pooled tx. A double-spend
+    /// must never be seated: the single-tx path removes the loser BEFORE
+    /// inserting the winner, so this only fires as defense-in-depth against
+    /// a package (or any future) path that tries to insert two spenders of
+    /// the same box. See [`OrderedPool::insert`].
+    #[error("input box_id already spent by a pooled tx: {0:?}")]
+    InputCollision(Digest32),
 }
 
 /// The ordered pool. Single-writer; all mutations through `&mut self`.
@@ -294,6 +301,16 @@ impl OrderedPool {
         for out in &entry.outputs {
             if self.by_output.contains_key(out) {
                 return Err(PoolError::OutputCollision(*out));
+            }
+        }
+        // Never seat a double-spend: reject if any input is already spent by a
+        // pooled tx. The single-tx admission path removes double-spend losers
+        // before inserting the winner (so this never fires there); it is the
+        // backstop that stops a package — or any future caller — from
+        // silently overwriting `by_input` with a second spender of the box.
+        for inp in &entry.inputs {
+            if self.by_input.contains_key(inp) {
+                return Err(PoolError::InputCollision(*inp));
             }
         }
         let key = WeightedKey::new(entry.weight, entry.tx_id);

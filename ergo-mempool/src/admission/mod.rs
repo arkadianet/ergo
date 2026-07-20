@@ -771,7 +771,11 @@ fn apply_commit(
         Ok(()) => {}
         // Unreachable: step 8 checked duplicates. Fail safe.
         Err(PoolError::Duplicate(_)) => return Err(RejectReason::Duplicate),
-        Err(PoolError::OutputCollision(_)) => return Err(RejectReason::InsertCollision),
+        // Both unreachable on the single-tx path (losers are removed before the
+        // winner is inserted), but map them to a clean reject as a backstop.
+        Err(PoolError::OutputCollision(_)) | Err(PoolError::InputCollision(_)) => {
+            return Err(RejectReason::InsertCollision)
+        }
     }
 
     // 15c — CPFP family credit: propagate the new tx's own weight up to its
