@@ -71,7 +71,9 @@ pub use redb_util::{begin_write_qr, open_with_repair_logging};
 /// The state-backend dispatch surface NodeState binds against: the
 /// `StateBackendKind` enum (UTXO arena or Mode 5 digest verifier) and
 /// the three traits it implements.
-pub use backend::{BlockApply, ChainStateRead, HeaderSectionStore, StateBackend, StateBackendKind};
+pub use backend::{
+    chain_domain_id, BlockApply, ChainStateRead, HeaderSectionStore, StateBackend, StateBackendKind,
+};
 pub use digest_store::DigestStateStore;
 
 /// Mode 5 digest-apply surface the `ergo-sync` block-processing path

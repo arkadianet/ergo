@@ -58,6 +58,7 @@ fn tip_ctx<'a>(
         params,
         last_headers: &[],
         reemission: None,
+        chain_domain_id: [0u8; 32],
     }
 }
 

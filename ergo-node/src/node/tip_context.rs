@@ -39,6 +39,13 @@ impl OwnedTipContext {
             params: &self.params,
             last_headers: &self.last_headers,
             reemission: self.reemission.as_ref(),
+            // Genesis (height-1) header id for the EIP-0045 `verifyStark`
+            // opcode's `snapshot.chainDomainId`. One canonical lookup shared
+            // with block application (`ergo-sync`) and mining candidate
+            // assembly, so a `verifyStark`-guarded tx is admitted against the
+            // same id block validation later reconstructs. `[0u8; 32]`
+            // fail-closed before height-1 exists.
+            chain_domain_id: ergo_state::chain_domain_id(store),
         }
     }
 }

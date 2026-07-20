@@ -19,7 +19,7 @@ use ergo_ser::extension::read_extension;
 use ergo_ser::header::read_header;
 use ergo_ser::modifier_id::{compute_section_id, ExpectedSections, TYPE_AD_PROOFS, TYPE_EXTENSION};
 use ergo_state::store::StateStore;
-use ergo_state::{ChainStateRead, DigestStateStore, HeaderSectionStore};
+use ergo_state::{chain_domain_id, ChainStateRead, DigestStateStore, HeaderSectionStore};
 use ergo_validation::block::{
     validate_full_block_parallel_with_group_elements, BlockValidationContext, BlockValidationError,
     SoftForkState,
@@ -185,25 +185,6 @@ pub struct ProcessedBlock {
     /// The validated header. None for genesis (uses apply_block_unchecked).
     /// Used by the executor to update the rolling block-context cache.
     pub checked_header: Option<CheckedHeader>,
-}
-
-/// The chain domain id for the EIP-0045 `verifyStark` (0xB9) opcode: the raw
-/// 32 bytes of this chain's genesis (height-1) `Header.id`, read from the node's
-/// own state store. This is the host capability the interpreter exposes as
-/// `snapshot.chainDomainId` — non-spoofable because it comes from the node, not
-/// from a spending script.
-///
-/// Every block validated through this path is at height >= 2 (genesis itself is
-/// applied unchecked via `apply_genesis`), so height-1 is always present. A
-/// missing/errored lookup degrades to `[0u8; 32]` ("not-yet-pinned"): the only
-/// effect is that a `verifyStark` proof bound to the real genesis id would be
-/// rejected, never spuriously accepted — fail-closed.
-fn chain_domain_id<S: HeaderSectionStore + ?Sized>(store: &S) -> [u8; 32] {
-    store
-        .get_header_id_at_height(1)
-        .ok()
-        .flatten()
-        .unwrap_or([0u8; 32])
 }
 
 /// Build the last 10 headers preceding a block at `height` by walking

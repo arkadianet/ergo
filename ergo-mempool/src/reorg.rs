@@ -254,6 +254,7 @@ mod tests {
                 params: &self.params,
                 last_headers: &[],
                 reemission: None,
+                chain_domain_id: [0u8; 32],
             }
         }
     }
@@ -790,6 +791,7 @@ mod tests {
             params: &ctx.params,
             last_headers: &[],
             reemission: None,
+            chain_domain_id: [0u8; 32],
         };
         let mut cx = AdmissionCtx {
             tip_ctx: &lagging,

@@ -99,6 +99,33 @@ pub trait HeaderSectionStore {
     fn shutdown_cleanly(&mut self) -> Result<(), StateError>;
 }
 
+/// The chain domain id for the EIP-0045 `verifyStark` (0xB9) opcode: the raw
+/// 32 bytes of this chain's genesis (height-1) `Header.id`, read from the node's
+/// own state store. This is the host capability the interpreter exposes as
+/// `snapshot.chainDomainId` — non-spoofable because it comes from the node, not
+/// from a spending script, and it binds a `verifyStark` statement claim to THIS
+/// chain's genesis.
+///
+/// One canonical lookup for every path that builds an evaluation context —
+/// block application (`ergo-sync`), mempool admission (`ergo-mempool` via the
+/// node's tip context), and mining candidate assembly (`ergo-mining`) — so the
+/// value a candidate/mempool tx is validated against is byte-identical to the
+/// value block validation will later reconstruct.
+///
+/// A missing/errored lookup degrades to `[0u8; 32]` ("not-yet-pinned"): the only
+/// effect is that a `verifyStark` proof bound to the real genesis id would be
+/// rejected, never spuriously accepted — fail-closed. Height-1 is present for
+/// every chain that has applied its first post-genesis block; before that (a
+/// bare genesis being mined as block 1) there is no height-1 id yet, so the
+/// fail-closed default applies.
+pub fn chain_domain_id<S: HeaderSectionStore + ?Sized>(store: &S) -> [u8; 32] {
+    store
+        .get_header_id_at_height(1)
+        .ok()
+        .flatten()
+        .unwrap_or([0u8; 32])
+}
+
 /// The block-apply write seam — the only surface that differs between
 /// backends, and the reason the executor is generic, not `dyn`.
 pub trait BlockApply {

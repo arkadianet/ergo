@@ -467,6 +467,7 @@ fn scala_pending_tx_oracle() {
             params: &params,
             last_headers: &[],
             reemission: None,
+            chain_domain_id: [0u8; 32],
         };
 
         // ── Admit with BySize ──
@@ -578,6 +579,7 @@ fn scala_pending_tx_oracle() {
                 params: &params,
                 last_headers: &[],
                 reemission: None,
+                chain_domain_id: [0u8; 32],
             };
             pool.process(
                 &tx_bytes,
@@ -650,6 +652,7 @@ fn scala_pending_tx_oracle() {
                 params: &params,
                 last_headers: &[],
                 reemission: None,
+                chain_domain_id: [0u8; 32],
             };
             pool.process(
                 &tx_bytes,
