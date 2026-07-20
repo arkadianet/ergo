@@ -452,6 +452,7 @@ pub fn generate_candidate<V: CandidateStateView>(
     let mut emission_cost_acc = CostAccumulator::new(block_cap);
     let checked_emission = {
         let mut tx_ctx = TxValidationCtx {
+            chain_domain_id: [0u8; 32],
             ctx: &ctx,
             params: &params,
             cost: &mut emission_cost_acc,
@@ -605,6 +606,7 @@ pub fn generate_candidate<V: CandidateStateView>(
                     let mut fee_cost_acc = CostAccumulator::new(block_cap);
                     let cf = {
                         let mut fee_ctx = TxValidationCtx {
+                            chain_domain_id: [0u8; 32],
                             ctx: &ctx,
                             params: &params,
                             cost: &mut fee_cost_acc,

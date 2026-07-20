@@ -302,6 +302,7 @@ fn cost_total_oracle_mainnet_700000_700001() {
             JitCost::from_block_cost(params.max_block_cost).expect("block cap"),
         );
         let mut tx_cx = ergo_validation::TxValidationCtx {
+            chain_domain_id: [0u8; 32],
             ctx: &ctx,
             params: &params,
             cost: &mut cost,
@@ -371,6 +372,7 @@ fn cost_limit_rejects_inside_script_eval_at_one_below_expected() {
     let mut cost =
         CostAccumulator::new(JitCost::from_block_cost(params.max_block_cost).expect("tight cap"));
     let mut tx_cx = ergo_validation::TxValidationCtx {
+        chain_domain_id: [0u8; 32],
         ctx: &ctx,
         params: &params,
         cost: &mut cost,
@@ -430,6 +432,7 @@ fn cost_limit_rejects_at_init_cost_charge() {
     let mut cost =
         CostAccumulator::new(JitCost::from_block_cost(params.max_block_cost).expect("tight cap"));
     let mut tx_cx = ergo_validation::TxValidationCtx {
+        chain_domain_id: [0u8; 32],
         ctx: &ctx,
         params: &params,
         cost: &mut cost,

@@ -180,6 +180,7 @@ fn chain_validate_blocks_2_1000_with_state_store() {
         };
         let mut cost = CostAccumulator::recording_only();
         let mut tx_cx = ergo_validation::TxValidationCtx {
+            chain_domain_id: [0u8; 32],
             ctx: &ctx,
             params: &params,
             cost: &mut cost,

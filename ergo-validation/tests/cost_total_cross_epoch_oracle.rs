@@ -308,6 +308,7 @@ fn cost_total_oracle_epoch_1499136_uses_voted_params() {
             JitCost::from_block_cost(params.max_block_cost).expect("block cap"),
         );
         let mut tx_cx = ergo_validation::TxValidationCtx {
+            chain_domain_id: [0u8; 32],
             ctx: &ctx,
             params: &params,
             cost: &mut cost,
@@ -399,6 +400,7 @@ fn cost_total_with_mainnet_default_diverges_by_exact_delta() {
         let mut cost =
             CostAccumulator::new(JitCost::from_block_cost(defaults.max_block_cost).expect("cap"));
         let mut tx_cx = ergo_validation::TxValidationCtx {
+            chain_domain_id: [0u8; 32],
             ctx: &ctx,
             params: &defaults,
             cost: &mut cost,

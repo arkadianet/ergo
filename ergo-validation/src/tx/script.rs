@@ -307,15 +307,12 @@ pub fn validate_scripts(
             // Host-authenticated chain domain id for the EIP-0045 verifyStark
             // (0xB9) opcode — the raw 32 bytes of this chain's genesis
             // (height-1) Header.id (reference `snapshot.chainDomainId`).
-            // TODO(W1): thread the captured genesis id here. It is per-devnet
-            // and only known once the chain is launched (migration build spec
-            // §3): the source belongs on `TxValidationCtx` / the node's
-            // block-apply boundary (ergo-node/ergo-state hold the genesis
-            // header), fed from a single pinned constant shared with the
-            // guest/prover. Until then `[0u8; 32]` = not-yet-pinned. 0xB9 is a
-            // devnet-only opcode and its verify seam returns `false` in PR-A,
-            // so this field is inert on every consensus path today.
-            chain_domain_id: [0u8; 32],
+            // Threaded from the block-apply boundary via
+            // `TxValidationCtx.chain_domain_id` (the node populates it from its
+            // own state store; see `BlockValidationContext.chain_domain_id`).
+            // `[0u8; 32]` on non-block callers (mempool/mining/tests) means
+            // "not-yet-pinned" — inert, since 0xB9 is a devnet-only opcode.
+            chain_domain_id: cx.chain_domain_id,
         };
 
         let verified = verify_spending_proof_with_context_and_cost(

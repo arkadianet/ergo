@@ -140,6 +140,7 @@ fn reject_script_evaluates_to_false() {
     let params = ProtocolParams::mainnet_default();
     let policy = LocalPolicy::default_policy();
     let mut tx_cx = ergo_validation::TxValidationCtx {
+        chain_domain_id: [0u8; 32],
         ctx: &ctx,
         params: &params,
         cost: &mut cost,
@@ -199,6 +200,7 @@ fn reject_invalid_spending_proof() {
     let params = ProtocolParams::mainnet_default();
     let policy = LocalPolicy::default_policy();
     let mut tx_cx = ergo_validation::TxValidationCtx {
+        chain_domain_id: [0u8; 32],
         ctx: &ctx,
         params: &params,
         cost: &mut cost,
@@ -286,6 +288,7 @@ fn reject_transaction_exceeding_block_cost() {
     let params = ProtocolParams::mainnet_default();
     let policy = LocalPolicy::default_policy();
     let mut tx_cx = ergo_validation::TxValidationCtx {
+        chain_domain_id: [0u8; 32],
         ctx: &ctx,
         params: &params,
         cost: &mut cost,
@@ -328,6 +331,7 @@ fn reject_non_canonical_encoding() {
     let params = ProtocolParams::mainnet_default();
     let policy = LocalPolicy::default_policy();
     let mut tx_cx = ergo_validation::TxValidationCtx {
+        chain_domain_id: [0u8; 32],
         ctx: &ctx,
         params: &params,
         cost: &mut cost,

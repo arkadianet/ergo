@@ -407,6 +407,7 @@ mod tests {
         let params = ProtocolParams::mainnet_default();
         let mut cost = CostAccumulator::new(JitCost::from_block_cost(1_000_000).unwrap());
         let mut tx_cx = TxValidationCtx {
+            chain_domain_id: [0u8; 32],
             ctx: &ctx,
             params: &params,
             cost: &mut cost,

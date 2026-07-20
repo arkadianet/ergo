@@ -222,6 +222,7 @@ pub fn select_user_txs(
         let mut cost = CostAccumulator::new(block_cap);
         let checked = {
             let mut cx = TxValidationCtx {
+                chain_domain_id: [0u8; 32],
                 ctx,
                 params,
                 cost: &mut cost,

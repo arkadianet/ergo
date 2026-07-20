@@ -214,6 +214,7 @@ fn triage_700000_inner() {
         };
         let mut cost = CostAccumulator::recording_only();
         let mut tx_cx = ergo_validation::TxValidationCtx {
+            chain_domain_id: [0u8; 32],
             ctx: &ctx,
             params: &params,
             cost: &mut cost,

@@ -305,6 +305,7 @@ pub fn build_budget_bounded_rent_claim(
         let mut cost_acc = CostAccumulator::recording_only();
         let checked = {
             let mut cx = TxValidationCtx {
+                chain_domain_id: [0u8; 32],
                 ctx,
                 params,
                 cost: &mut cost_acc,
@@ -539,6 +540,7 @@ mod tests {
         let mut cost =
             CostAccumulator::new(JitCost::from_block_cost(params.max_block_cost).unwrap());
         let mut cx = TxValidationCtx {
+            chain_domain_id: [0u8; 32],
             ctx: &ctx,
             params,
             cost: &mut cost,

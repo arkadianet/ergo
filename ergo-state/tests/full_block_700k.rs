@@ -284,6 +284,7 @@ fn full_block_v2_700k_with_state() {
         let checked_parent =
             ergo_validation::header::CheckedHeader::trust_me(parent.clone(), *parent_id);
         let block_ctx = ergo_validation::block::BlockValidationContext {
+            chain_domain_id: [0u8; 32],
             parent: &checked_parent,
             utxo: &utxo,
             params: &params,

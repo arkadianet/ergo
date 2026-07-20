@@ -143,6 +143,17 @@ pub struct BlockValidationContext<'a> {
     /// check — the public testnet (no EIP-27) and callers that don't supply
     /// it. See [`ReemissionRuleInputs`].
     pub reemission: Option<&'a ReemissionRuleInputs>,
+    /// Host-authenticated chain domain id for the EIP-0045 `verifyStark`
+    /// (0xB9) opcode: the raw 32 bytes of THIS chain's genesis (height-1)
+    /// `Header.id`. A chain-level constant (like `voting_length`), populated
+    /// by the node at the block-apply boundary from its own state store
+    /// (`get_header_id_at_height(1)`), and threaded through
+    /// `TxValidationCtx.chain_domain_id` → `ReductionContext.chain_domain_id`,
+    /// where the interpreter reads it as `snapshot.chainDomainId` (from
+    /// context, never a script child — non-spoofable). `[0u8; 32]` means
+    /// "not-yet-pinned"; `verifyStark` is devnet-only, so the zero default is
+    /// inert on mainnet consensus.
+    pub chain_domain_id: [u8; 32],
 }
 
 /// Failures raised by [`validate_full_block`] /
@@ -1184,6 +1195,9 @@ pub fn validate_full_block(
             rules: crate::tx::TxValidationRules {
                 reemission: ctx.reemission,
             },
+            // Genesis header id (host capability) for the EIP-0045 verifyStark
+            // (0xB9) opcode; carried from the block-apply boundary.
+            chain_domain_id: ctx.chain_domain_id,
         };
         let checked = validate_transaction_parsed(
             tx.clone(),
@@ -1464,6 +1478,9 @@ fn validate_full_block_parallel_impl(
         // `Option<&_>` is Copy — capture it into each parallel closure and
         // thread it through the per-tx validator's rule bundle.
         let reemission = ctx.reemission;
+        // `[u8; 32]` is Copy — capture the chain domain id (genesis header id)
+        // into each parallel closure for the EIP-0045 `verifyStark` opcode.
+        let chain_domain_id = ctx.chain_domain_id;
         let layer_results: Vec<TxLayerResult> = per_tx_inputs
             .into_par_iter()
             .map(|(i, tx_bytes, inputs, data_inputs)| {
@@ -1478,6 +1495,7 @@ fn validate_full_block_parallel_impl(
                     cost: &mut cost,
                     last_headers: raw_headers_ref,
                     rules: crate::tx::TxValidationRules { reemission },
+                    chain_domain_id,
                 };
                 // Pre-collected points (from the block deserialize) skip the
                 // per-tx re-parse; borrowed (not cloned) and indexed here.

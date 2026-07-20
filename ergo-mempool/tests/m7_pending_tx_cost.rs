@@ -297,6 +297,7 @@ fn probe_cost_of_pending_tx_e67() {
     // block-cost units. In JitCost that's 10_000_000.
     let mut cost = CostAccumulator::new(JitCost::from_block_cost(1_000_000).unwrap());
     let mut tx_cx = ergo_validation::TxValidationCtx {
+        chain_domain_id: [0u8; 32],
         ctx: &ctx,
         params: &params,
         cost: &mut cost,

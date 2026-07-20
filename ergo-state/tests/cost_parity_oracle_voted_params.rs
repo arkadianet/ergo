@@ -378,6 +378,7 @@ fn cost_parity_against_scala_corpus_sampled() {
         let checked_header = CheckedHeader::trust_me(header.clone(), *header_id);
 
         let ctx = BlockValidationContext {
+            chain_domain_id: [0u8; 32],
             parent: &parent_checked,
             utxo: &utxo,
             params: &params,

@@ -196,6 +196,7 @@ pub fn revalidate_pooled<V: Validator>(
     };
     let mut cost = CostAccumulator::new(cap);
     let mut tx_cx = TxValidationCtx {
+        chain_domain_id: [0u8; 32],
         ctx: tip_ctx.tx_context,
         params: tip_ctx.params,
         cost: &mut cost,
@@ -705,6 +706,7 @@ pub fn check<V: Validator>(
     };
     let mut cost = CostAccumulator::new(cap);
     let mut tx_cx = TxValidationCtx {
+        chain_domain_id: [0u8; 32],
         ctx: cx.tip_ctx.tx_context,
         params: cx.tip_ctx.params,
         cost: &mut cost,
