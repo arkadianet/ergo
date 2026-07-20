@@ -1137,3 +1137,114 @@ fn package_admission_clears_child_unresolved_suppression() {
     assert!(broadcasts(&ca).contains(&d(2)));
     mp.pool().check_invariants();
 }
+
+// ----- package RBF over a MULTI-TX descendant conflict closure -----
+// Guards FIX B's decision-identity for the non-trivial closure: the incumbent
+// family {I, I2} (I2 spends I's output) is removed + measured on the single
+// commit clone, and the R1∧R2 decision + evicted set must match the old
+// two-clone way.
+
+#[test]
+fn package_rbf_accepts_over_multi_tx_descendant_closure() {
+    // Pool holds an incumbent FAMILY: I spends external box 0x80 and creates
+    // 0x81; I2 spends 0x81 (so remove_with_descendants_debiting(I) evicts the
+    // whole {I, I2} closure). P (held) also spends 0x80; its child C boosts it.
+    // The package {P, C} beats the FULL closure on BOTH aggregate feerate (R1)
+    // and aggregate absolute fee (R2), so the whole family is displaced.
+    let mut mp = mempool();
+    let utxo = FakeUtxo::with(&[0x80]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(9, 2_000_000, &[0x80], &[0x81]) // I  — spends external B=0x80
+        .plan(8, 2_000_000, &[0x81], &[0x82]) // I2 — spends I's output (descendant)
+        .plan(1, 1_000_000, &[0x80], &[0x85]) // P  — double-spend loser vs I → held
+        .plan(2, 6_000_000, &[0x85], &[0x86]); // C  — booster child
+    let now = Instant::now();
+
+    mp.process(&tx_bytes(9), TxSource::Api, now, &tip.view(&utxo), &v);
+    mp.process(&tx_bytes(8), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert_eq!(mp.size(), 2, "incumbent family {{I, I2}} pooled");
+
+    let (po, _) = mp.process(&tx_bytes(1), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(matches!(
+        po,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::DoubleSpendLoser
+        }
+    ));
+
+    // inc closure {I,I2}: Σfee = 4M, Σcost = 20_000 → feerate 204800.
+    // pkg {P,C}: Σfee = 7M > 4M (R2), Σcost = 20_000 → feerate 358400 > 204800 (R1).
+    let (_co, ca) = mp.process(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(
+        mp.contains(&d(1)) && mp.contains(&d(2)),
+        "package admitted over the family"
+    );
+    assert!(
+        !mp.contains(&d(9)) && !mp.contains(&d(8)),
+        "the FULL {{I, I2}} closure was evicted"
+    );
+    let revoked: Vec<TxId> = ca
+        .iter()
+        .filter_map(|a| match a {
+            MempoolAction::RevokeBroadcast { tx_ids } => Some(tx_ids.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert!(
+        revoked.contains(&d(9)) && revoked.contains(&d(8)),
+        "both family members revoked: {revoked:?}"
+    );
+    assert_eq!(mp.staging_len(), 0, "held parent drained");
+    mp.pool().check_invariants();
+}
+
+#[test]
+fn package_rbf_rejects_over_multi_tx_closure_when_r2_fails_on_descendant_fee() {
+    // Same incumbent family, but the DESCENDANT I2 carries a large absolute fee
+    // (10M) at a low feerate (cost 200_000). Counting the whole closure, the
+    // package beats it on feerate (R1) but NOT on absolute fee (R2 fails once
+    // the descendant's fee is included), so the package is rejected and the
+    // family is left fully intact.
+    let mut mp = mempool();
+    let utxo = FakeUtxo::with(&[0x80]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(9, 2_000_000, &[0x80], &[0x81]) // I
+        .plan_cost(8, 10_000_000, 200_000, &[0x81], &[0x82]) // I2 — high abs fee, low feerate
+        .plan(1, 1_000_000, &[0x80], &[0x85]) // P held
+        .plan(2, 2_000_000, &[0x85], &[0x86]); // C
+    let now = Instant::now();
+
+    mp.process(&tx_bytes(9), TxSource::Api, now, &tip.view(&utxo), &v);
+    mp.process(&tx_bytes(8), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert_eq!(mp.size(), 2);
+
+    let (po, _) = mp.process(&tx_bytes(1), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(matches!(
+        po,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::DoubleSpendLoser
+        }
+    ));
+
+    // inc closure {I,I2}: Σfee = 12M, Σcost = 210_000 → feerate 58514.
+    // pkg {P,C}: Σfee = 3M, Σcost = 20_000 → feerate 153600 > 58514 (R1 holds),
+    // but 3M < 12M (R2 FAILS) → reject.
+    let (_co, ca) = mp.process(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(
+        mp.contains(&d(9)) && mp.contains(&d(8)),
+        "the full family survives — R2 fails once the descendant's fee is counted"
+    );
+    assert!(
+        !mp.contains(&d(1)) && !mp.contains(&d(2)),
+        "neither package member entered the pool"
+    );
+    assert!(
+        broadcasts(&ca).is_empty(),
+        "a rejected package gossips nothing"
+    );
+    assert_eq!(mp.staging_len(), 2, "P and C both held for a future try");
+    mp.pool().check_invariants();
+}
