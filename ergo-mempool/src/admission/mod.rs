@@ -445,10 +445,7 @@ pub(crate) fn check_capturing_held<V: Validator>(
             // double-spend contest. Surface it as a held candidate: a
             // higher-fee booster child could later win the SAME conflict as a
             // package (RBF R1∧R2). `Mempool::process` decides whether to hold.
-            *held_out = Some(HeldCandidate {
-                validated: validated.clone(),
-                weight,
-            });
+            *held_out = Some(HeldCandidate { validated, weight });
             return (
                 CheckOutcome::Rejected {
                     reason: RejectReason::DoubleSpendLoser,
@@ -517,10 +514,7 @@ pub(crate) fn check_capturing_held<V: Validator>(
                 // eviction threshold as a package, so surface it as a held
                 // candidate. (Guard 1 above — a tx too big to EVER fit — is
                 // deliberately NOT held: a package only grows the size.)
-                *held_out = Some(HeldCandidate {
-                    validated: validated.clone(),
-                    weight,
-                });
+                *held_out = Some(HeldCandidate { validated, weight });
                 return (
                     CheckOutcome::Rejected {
                         reason: RejectReason::PoolFull,
@@ -615,10 +609,7 @@ fn commit(
                 // Post-boost, the new tx was the pool's own lowest and was
                 // evicted. It is fully validated (cost charged): hold it, since
                 // a booster child could lift its family above the threshold.
-                *held_out = Some(HeldCandidate {
-                    validated: validated.clone(),
-                    weight,
-                });
+                *held_out = Some(HeldCandidate { validated, weight });
                 return AdmissionOutcome::Rejected {
                     reason: RejectReason::PoolFull,
                 };

@@ -424,6 +424,41 @@ fn byte_cap_evicts_until_it_fits() {
 }
 
 #[test]
+fn byte_cap_multi_evict_reject_leaves_pool_unchanged() {
+    // A byte-heavy newcomer would need to evict TWO incumbents to fit, but the
+    // second-lowest one outranks it. The pool must be left FULLY UNCHANGED —
+    // the first (evictable) incumbent must NOT be dropped on the reject path.
+    let mut p = StagingPool::new(StagingCaps {
+        max_count: 100, // count is not the binding constraint
+        max_bytes: 100,
+        max_count_per_peer: 100,
+        max_bytes_per_peer: 100,
+        max_waiters_per_input: 100,
+    });
+    let now = Instant::now();
+    held(&mut p, 1, &[1], &[11], 100, 40, TxSource::Api, now, 1).unwrap(); // low prio, 40b
+    held(&mut p, 2, &[2], &[12], 900, 40, TxSource::Api, now, 1).unwrap(); // high prio, 40b
+    assert_eq!(p.len(), 2);
+    // Newcomer: 70b, intermediate priority (100 < 500 < 900). Fitting it needs
+    // 80+70=150 > 100 → evict tx1 (frees 40, still 110 > 100) → tx2 next, but
+    // tx2 outranks the newcomer → reject.
+    assert_eq!(
+        held(&mut p, 3, &[3], &[13], 500, 70, TxSource::Api, now, 1).unwrap_err(),
+        StageReject::Full
+    );
+    // Pool untouched: both incumbents remain, bytes unchanged, newcomer absent.
+    assert!(
+        p.contains(&d(1)),
+        "lower incumbent must NOT be evicted on reject"
+    );
+    assert!(p.contains(&d(2)));
+    assert!(!p.contains(&d(3)));
+    assert_eq!(p.len(), 2);
+    assert_eq!(p.total_bytes(), 80);
+    p.check_invariants();
+}
+
+#[test]
 fn oversize_single_tx_refused() {
     let mut p = StagingPool::new(small_caps()); // max_bytes = 1000
     let now = Instant::now();

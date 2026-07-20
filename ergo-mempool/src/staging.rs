@@ -369,32 +369,52 @@ impl StagingPool {
         }
 
         // Global capacity: evict lowest-priority incumbents to make room.
-        // Refuse if the newcomer is itself the least valuable entry.
+        // Decide the FULL victim set BEFORE mutating: walk incumbents
+        // lowest-priority first, accumulating freed count/bytes until the
+        // newcomer fits. If a required victim outranks the newcomer, reject
+        // with the pool UNCHANGED — a partial eviction followed by reject
+        // would silently drop the entries already removed.
         let newcomer_priority = entry.priority_proxy();
         let mut admit = StageAdmit::default();
-        loop {
-            let over_count = self.by_tx_id.len() + 1 > self.caps.max_count;
-            let over_bytes = self.total_bytes + size > self.caps.max_bytes;
-            if !over_count && !over_bytes {
-                break;
-            }
-            let Some(low_id) = self.lowest_priority_id() else {
-                // Nothing left to evict; only the newcomer would remain. It
-                // fits (size <= max_bytes, count 1 <= max_count).
-                break;
-            };
-            let low_priority = self.by_tx_id.get(&low_id).map(|e| e.priority_proxy());
-            if let Some(lp) = low_priority {
-                if lp > newcomer_priority {
-                    // The least valuable incumbent still outranks the
-                    // newcomer — don't regress the pool for it.
+        let over_count = self.by_tx_id.len() + 1 > self.caps.max_count;
+        let over_bytes = self.total_bytes + size > self.caps.max_bytes;
+        if over_count || over_bytes {
+            // (priority, seq, id, size) sorted ascending — same order the old
+            // per-iteration `lowest_priority_id` picked (priority, then seq).
+            let mut ranked: Vec<(u64, u64, TxId, usize)> = self
+                .by_tx_id
+                .values()
+                .map(|e| (e.priority_proxy(), e.seq, e.tx_id, e.size_bytes as usize))
+                .collect();
+            ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+            let base_count = self.by_tx_id.len();
+            let mut victims: Vec<TxId> = Vec::new();
+            let mut freed_bytes = 0usize;
+            for (prio, _seq, id, vsize) in &ranked {
+                // `victims.len()` is the count freed so far.
+                let still_over_count =
+                    base_count.saturating_sub(victims.len()) + 1 > self.caps.max_count;
+                let still_over_bytes =
+                    self.total_bytes.saturating_sub(freed_bytes) + size > self.caps.max_bytes;
+                if !still_over_count && !still_over_bytes {
+                    break;
+                }
+                if *prio > newcomer_priority {
+                    // The next required victim outranks the newcomer — don't
+                    // regress the pool for it. Reject, pool untouched.
                     return Err(StageReject::Full);
                 }
+                victims.push(*id);
+                freed_bytes += *vsize;
             }
-            if let Some(removed) = self.remove(&low_id) {
-                admit.evicted.push(removed);
-            } else {
-                break;
+            // Incumbents exhausted without fitting → the newcomer still fits
+            // alone (size <= max_bytes, count 1 <= max_count), matching the
+            // old "nothing left to evict" break. Now apply the vetted set.
+            for id in victims {
+                if let Some(removed) = self.remove(&id) {
+                    admit.evicted.push(removed);
+                }
             }
         }
 
@@ -471,19 +491,6 @@ impl StagingPool {
         self.total_bytes = self.total_bytes.saturating_sub(entry.size_bytes as usize);
         self.fifo.retain(|id| id != tx_id);
         Some(entry)
-    }
-
-    /// The lowest-priority staged tx id (priority ascending, then oldest
-    /// `seq`), or `None` if empty.
-    fn lowest_priority_id(&self) -> Option<TxId> {
-        self.by_tx_id
-            .values()
-            .min_by(|a, b| {
-                a.priority_proxy()
-                    .cmp(&b.priority_proxy())
-                    .then_with(|| a.seq.cmp(&b.seq))
-            })
-            .map(|e| e.tx_id)
     }
 
     /// Drop every staged tx that spends (as a REGULAR input) or reads (as a
