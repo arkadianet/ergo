@@ -60,6 +60,7 @@ pub mod dht;
 pub mod evaluator;
 pub mod reduce;
 pub mod schnorr;
+pub mod stark;
 pub mod verify;
 
 /// Fiat-Shamir challenge size: 192 bits = 24 bytes.
