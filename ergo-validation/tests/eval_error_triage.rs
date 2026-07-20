@@ -194,6 +194,7 @@ fn collect_errors(
         };
         let mut cost = CostAccumulator::new(JitCost::from_block_cost(BLOCK_COST_LIMIT).unwrap());
         let mut tx_cx = ergo_validation::TxValidationCtx {
+            chain_domain_id: [0u8; 32],
             ctx: &ctx,
             params,
             cost: &mut cost,
