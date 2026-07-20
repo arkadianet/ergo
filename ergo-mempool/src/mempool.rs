@@ -783,7 +783,10 @@ impl Mempool {
                 for (tx_id, fee, size, weight) in &member_meta {
                     actions.push(MempoolAction::BroadcastInv {
                         tx_id: *tx_id,
-                        except: None,
+                        // Exclude the peer that sent the child (which triggered
+                        // this package), matching the single-tx `except: peer`
+                        // so members aren't re-advertised back to that peer.
+                        except: source.peer(),
                     });
                     actions.push(MempoolAction::Observe {
                         event: ObservedEvent::Admitted {
@@ -1010,24 +1013,30 @@ impl Mempool {
             .collect();
         let conflicts = self.pool.conflicts_for_inputs(&external_inputs);
 
+        // ONE `clone_for_staging` for the whole decision — the same O(pool)
+        // cost the single-tx eviction path pays. The RBF conflict closure is
+        // removed from THIS clone while its aggregates are measured; if the
+        // package is rejected the clone is simply discarded (never swapped into
+        // the live pool), so no separate probe clone is needed.
         let mut staged = self.pool.clone_for_staging();
         let mut evicted: Vec<TxId> = Vec::new();
 
         if !conflicts.is_empty() {
             // ── Package RBF (R1 ∧ R2) ────────────────────────────────────
-            // Measure the incumbent conflict closure on a throwaway probe so
-            // the aggregates are known BEFORE we decide.
-            let mut probe = self.pool.clone_for_staging();
+            // Remove the incumbent conflict closure from the (real) clone ONCE,
+            // capturing the removed entries to compute the RBF aggregates.
             let mut inc_fee: u64 = 0;
             let mut inc_size: usize = 0;
             let mut inc_cost: u64 = 0;
             let mut inc_seen: HashSet<TxId> = HashSet::new();
+            let mut removed_incumbents: Vec<TxId> = Vec::new();
             for c in &conflicts {
-                for e in probe.remove_with_descendants_debiting(c, max_depth, bounds) {
+                for e in staged.remove_with_descendants_debiting(c, max_depth, bounds) {
                     if inc_seen.insert(e.tx_id) {
                         inc_fee = inc_fee.saturating_add(e.fee);
                         inc_size += e.size_bytes as usize;
                         inc_cost = inc_cost.saturating_add(e.cost);
+                        removed_incumbents.push(e.tx_id);
                     }
                 }
             }
@@ -1040,14 +1049,10 @@ impl Mempool {
             // R1: strictly higher aggregate feerate. R2: strictly higher
             // aggregate absolute fee (the anti-pinning teeth). BOTH required.
             if !(pkg_weight > inc_weight && pkg_fee > inc_fee) {
-                return None;
+                return None; // clone discarded — live pool untouched
             }
-            // Accept: evict the incumbent closure from the real staged clone.
-            for c in &conflicts {
-                for e in staged.remove_with_descendants_debiting(c, max_depth, bounds) {
-                    evicted.push(e.tx_id);
-                }
-            }
+            // Accepted: the closure is already removed from `staged`.
+            evicted = removed_incumbents;
         } else {
             // ── Threshold case ───────────────────────────────────────────
             let would_overflow = staged.len() + members.len() > self.config.max_pool_size
