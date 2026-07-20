@@ -666,6 +666,7 @@ impl NodeConfig {
             staging_max_waiters_per_input: def.staging_max_waiters_per_input,
             staging_max_reevals: def.staging_max_reevals,
             staging_max_package_txs: def.staging_max_package_txs,
+            staging_max_package_cost: def.staging_max_package_cost,
             staging_ttl_seconds: def.staging_ttl_seconds,
             staging_max_blocks: def.staging_max_blocks,
         };

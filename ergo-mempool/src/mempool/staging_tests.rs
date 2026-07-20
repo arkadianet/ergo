@@ -963,3 +963,77 @@ fn staging_disabled_is_a_clean_no_op() {
         "only the parent is advertised — no staging side effects"
     );
 }
+
+// ----- N1: aggregate package-cost cap -----
+
+#[test]
+fn package_rejected_when_aggregate_cost_exceeds_cap() {
+    // The threshold-admit scenario, but with a tiny package-cost cap: the
+    // package Σcost (P 10_000 + C 10_000 = 20_000) exceeds the 15_000 cap, so
+    // it is rejected before any pool mutation.
+    let cfg = MempoolConfig {
+        max_pool_size: 2,
+        staging_max_package_cost: 15_000,
+        ..base_cfg()
+    };
+    let mut mp = Mempool::new(cfg, Box::new(ByCost));
+    let utxo = FakeUtxo::with(&[0x90, 0x91, 0x70]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(10, 1_000_000, &[0x90], &[0x9A]) // L
+        .plan(11, 3_000_000, &[0x91], &[0x9B]) // M
+        .plan(1, 1_000_000, &[0x70], &[0x71]) // P held
+        .plan(2, 10_000_000, &[0x71], &[0x72]); // C
+    let now = Instant::now();
+
+    mp.process(&tx_bytes(10), TxSource::Api, now, &tip.view(&utxo), &v);
+    mp.process(&tx_bytes(11), TxSource::Api, now, &tip.view(&utxo), &v);
+    mp.process(&tx_bytes(1), TxSource::Api, now, &tip.view(&utxo), &v); // P held
+    let (_co, ca) = mp.process(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v);
+
+    assert!(
+        !mp.contains(&d(1)) && !mp.contains(&d(2)),
+        "over-cost package rejected"
+    );
+    assert!(
+        mp.contains(&d(10)) && mp.contains(&d(11)),
+        "incumbents untouched"
+    );
+    assert!(broadcasts(&ca).is_empty());
+    mp.pool().check_invariants();
+}
+
+// ----- N2: package admission lifts the child's unresolved-cache suppression -----
+
+#[test]
+fn package_admission_clears_child_unresolved_suppression() {
+    // The child first fails single-tx admission with UnresolvedInput (recorded
+    // in the unresolved cache), then the package admits it. The suppression
+    // must be lifted so a later re-arrival of the same bytes is not declined.
+    let cfg = MempoolConfig {
+        max_pool_size: 2,
+        ..base_cfg()
+    };
+    let mut mp = Mempool::new(cfg, Box::new(ByCost));
+    let utxo = FakeUtxo::with(&[0x90, 0x91, 0x70]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(10, 1_000_000, &[0x90], &[0x9A]) // L filler
+        .plan(11, 3_000_000, &[0x91], &[0x9B]) // M filler
+        .plan(1, 1_000_000, &[0x70], &[0x71]) // P held (pool full)
+        .plan(2, 10_000_000, &[0x71], &[0x72]); // C completes the package
+    let now = Instant::now();
+
+    mp.process(&tx_bytes(10), TxSource::Api, now, &tip.view(&utxo), &v);
+    mp.process(&tx_bytes(11), TxSource::Api, now, &tip.view(&utxo), &v);
+    mp.process(&tx_bytes(1), TxSource::Api, now, &tip.view(&utxo), &v); // P held
+    let (_co, ca) = mp.process(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v);
+
+    assert!(mp.contains(&d(1)) && mp.contains(&d(2)), "package admitted");
+    assert!(
+        !mp.unresolved_contains(&tx_bytes(2)),
+        "the admitted child's unresolved-cache suppression is lifted"
+    );
+    assert!(broadcasts(&ca).contains(&d(2)));
+    mp.pool().check_invariants();
+}

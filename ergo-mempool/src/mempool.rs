@@ -749,6 +749,10 @@ impl Mempool {
                 for hid in &held_order {
                     self.staging.remove(hid);
                 }
+                // Lift the child's unresolved-cache suppression (it was recorded
+                // when the child first failed `UnresolvedInput`), so a later
+                // re-arrival of the same bytes is not spuriously declined.
+                self.unresolved.remove(c_bytes);
                 let mut actions: Vec<MempoolAction> = Vec::new();
                 if !evicted.is_empty() {
                     actions.push(MempoolAction::RevokeBroadcast {
@@ -969,6 +973,11 @@ impl Mempool {
             .iter()
             .map(|m| m.cost)
             .fold(0u64, |a, c| a.saturating_add(c));
+        // Aggregate-cost bound (re-eval DoS bound): a package whose total
+        // validation cost exceeds the cap is rejected before any mutation.
+        if pkg_cost > self.config.staging_max_package_cost {
+            return None;
+        }
         let last_id = members.last().map(|m| m.tx_id)?;
         let pkg_weight = self.weight_fn.compute(WeightInputs {
             tx_id: &last_id,
@@ -1824,6 +1833,15 @@ impl Mempool {
     #[doc(hidden)]
     pub fn pool(&self) -> &OrderedPool {
         &self.pool
+    }
+
+    /// Test-only: is `bytes` currently suppressed by the unresolved-input
+    /// cache? Used to assert the package path lifts that suppression on admit.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn unresolved_contains(&self, bytes: &[u8]) -> bool {
+        self.unresolved
+            .contains_key(&crate::unresolved::UnresolvedCache::key_of(bytes))
     }
 
     /// Test-only: mutable pool access. Production code writes through

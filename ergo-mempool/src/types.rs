@@ -281,6 +281,10 @@ pub struct MempoolConfig {
     pub staging_max_reevals: u16,
     /// Max transactions in one assembled package (walk bound).
     pub staging_max_package_txs: usize,
+    /// Max aggregate validation cost of one package (re-eval bound). A package
+    /// whose `Σcost` exceeds this is rejected. Defaults to roughly one block's
+    /// cost budget (design §4.3).
+    pub staging_max_package_cost: u64,
     /// Wall-clock TTL (seconds) for a staged tx.
     pub staging_ttl_seconds: u64,
     /// Block-count horizon: a staged tx is dropped once the tip has
@@ -325,6 +329,8 @@ impl Default for MempoolConfig {
             staging_max_waiters_per_input: 64,
             staging_max_reevals: 4,
             staging_max_package_txs: 24,
+            staging_max_package_cost: 8_000_000, // ≈ mainnet max_block_cost
+
             staging_ttl_seconds: 300,
             staging_max_blocks: 4,
         }
