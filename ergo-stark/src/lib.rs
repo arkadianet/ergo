@@ -22,6 +22,8 @@
 //! - [`read_iop`] — the verifier-side proof-word transcript reader and its
 //!   Fiat-Shamir RNG.
 //! - [`hash`] — the BLAKE2b-256 and SHA-256 profile hashers.
+//! - [`merkle`] — the IOP Merkle branch verifier (Layer 2).
+//! - [`fri`] — the FRI low-degree-test verifier (Layer 2).
 
 pub mod baby_bear;
 pub mod ext4;
@@ -31,8 +33,12 @@ pub mod read_iop;
 
 pub mod poseidon2;
 
+pub mod fri;
+pub mod merkle;
+
 pub use baby_bear::BabyBear;
 pub use ext4::Ext4;
+pub use merkle::MerkleVerifier;
 pub use poseidon2::Poseidon2;
 pub use poseidon2_constants::{CELLS, ROUNDS_HALF_FULL, ROUNDS_PARTIAL};
 pub use read_iop::ReadIop;
