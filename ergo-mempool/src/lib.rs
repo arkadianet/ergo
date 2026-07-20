@@ -36,6 +36,7 @@ pub mod pool;
 pub mod reorg;
 pub mod revalidation;
 pub mod snapshot;
+pub mod staging;
 mod telemetry;
 pub mod types;
 pub mod unresolved;
