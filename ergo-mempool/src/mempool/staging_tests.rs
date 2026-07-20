@@ -79,6 +79,11 @@ struct ProbePlan {
     /// If `Some(h)`, the tx only validates at tip height `h` (a stand-in for a
     /// `HEIGHT`-gated script); at any other height it fails `ScriptFailed`.
     valid_at_height: Option<u32>,
+    /// If `Some(p)`, the tx only validates when the context's
+    /// `pre_header_parent_id` equals `p` (a stand-in for a CONTEXT.headers /
+    /// preHeader-dependent script) — used to flip validity across a
+    /// same-height reorg.
+    valid_at_parent: Option<[u8; 32]>,
 }
 
 struct PoolAwareProbe {
@@ -100,7 +105,7 @@ impl PoolAwareProbe {
     /// Like [`plan`] but with an explicit validation `cost`, so tests can
     /// build a low-feerate / high-absolute-fee incumbent (the pinning case).
     fn plan_cost(self, tx: u8, fee: u64, cost: u64, inputs: &[u8], outputs: &[u8]) -> Self {
-        self.plan_full(tx, fee, cost, inputs, &[], outputs, None)
+        self.plan_full(tx, fee, cost, inputs, &[], outputs, None, None)
     }
 
     /// Like [`plan`] but with DATA inputs (resolved against the committed view).
@@ -112,7 +117,7 @@ impl PoolAwareProbe {
         data_inputs: &[u8],
         outputs: &[u8],
     ) -> Self {
-        self.plan_full(tx, fee, 10_000, inputs, data_inputs, outputs, None)
+        self.plan_full(tx, fee, 10_000, inputs, data_inputs, outputs, None, None)
     }
 
     /// Like [`plan`] but the tx only validates at tip height `height` (a
@@ -126,7 +131,30 @@ impl PoolAwareProbe {
         inputs: &[u8],
         outputs: &[u8],
     ) -> Self {
-        self.plan_full(tx, fee, 10_000, inputs, &[], outputs, Some(height))
+        self.plan_full(tx, fee, 10_000, inputs, &[], outputs, Some(height), None)
+    }
+
+    /// Like [`plan`] but the tx only validates when the tip's context parent id
+    /// equals `[parent; 32]` (a CONTEXT-dependent script stand-in) — used to
+    /// prove a held member is re-validated across a SAME-HEIGHT reorg.
+    fn plan_context_gated(
+        self,
+        tx: u8,
+        fee: u64,
+        parent: u8,
+        inputs: &[u8],
+        outputs: &[u8],
+    ) -> Self {
+        self.plan_full(
+            tx,
+            fee,
+            10_000,
+            inputs,
+            &[],
+            outputs,
+            None,
+            Some([parent; 32]),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -139,6 +167,7 @@ impl PoolAwareProbe {
         data_inputs: &[u8],
         outputs: &[u8],
         valid_at_height: Option<u32>,
+        valid_at_parent: Option<[u8; 32]>,
     ) -> Self {
         self.plans.insert(
             tx_bytes(tx),
@@ -151,6 +180,7 @@ impl PoolAwareProbe {
                 output_boxes: outputs.iter().map(|b| dummy_box(*b)).collect(),
                 charge: cost,
                 valid_at_height,
+                valid_at_parent,
             },
         );
         self
@@ -203,6 +233,12 @@ impl Validator for PoolAwareProbe {
                 return Err(ValidationErr::ScriptFailed);
             }
         }
+        // Context-gated (CONTEXT.headers / preHeader) script stand-in.
+        if let Some(parent) = p.valid_at_parent {
+            if cx.ctx.pre_header_parent_id != parent {
+                return Err(ValidationErr::ScriptFailed);
+            }
+        }
         Ok(Validated {
             tx_id: p.tx_id,
             input_box_ids: p.inputs.clone(),
@@ -232,16 +268,29 @@ struct TestTip {
     tx_context: TransactionContext,
     params: ProtocolParams,
     height: u32,
+    /// Distinguishes tips that share a height (a same-height reorg): drives
+    /// both the tip `header_id` and a per-tip context field
+    /// (`pre_header_parent_id`) so a context-gated probe tx can flip validity
+    /// across a reorg.
+    header: u8,
 }
 impl TestTip {
     fn new() -> Self {
         Self::at_height(1000)
     }
     fn at_height(height: u32) -> Self {
+        // Distinct heights get distinct header ids (as on a real chain), so the
+        // tip-identity freshness gate treats a height advance as a new tip.
+        Self::at_height_header(height, (height & 0xFF) as u8)
+    }
+    fn at_height_header(height: u32, header: u8) -> Self {
+        let mut txc = tx_context(height);
+        txc.pre_header_parent_id = [header; 32];
         Self {
-            tx_context: tx_context(height),
+            tx_context: txc,
             params: ProtocolParams::mainnet_default(),
             height,
+            header,
         }
     }
     fn with_max_block_cost(mut self, c: u64) -> Self {
@@ -252,7 +301,7 @@ impl TestTip {
         admission::TipContext {
             tip: TipPointer {
                 height: self.height,
-                header_id: d(0xFF),
+                header_id: d(self.header),
             },
             best_header_height: self.height,
             best_full_block_height: self.height,
@@ -891,6 +940,57 @@ fn stale_held_parent_revalidated_and_rejected_at_new_tip() {
         mp.staging_len(),
         0,
         "the stale held parent is evicted from staging on failed re-validation"
+    );
+    mp.pool().check_invariants();
+}
+
+// ----- FIX A: same-height reorg forces held-member re-validation -----
+
+#[test]
+fn held_parent_revalidated_across_same_height_reorg() {
+    // P is held at tip X@1000 (context parent 0xF1), where it validates. A
+    // SAME-HEIGHT reorg replaces X with Y@1000 (context parent 0xF2) — the
+    // height number is unchanged, so a height-keyed freshness gate would reuse
+    // P's cached facts. Keying on tip IDENTITY (header id) instead forces
+    // re-validation of P at Y; because P is context-gated to 0xF1 it now fails,
+    // is evicted, and the package is aborted — the stale parent is NOT
+    // laundered into the pool.
+    let cfg = MempoolConfig {
+        max_pool_size: 1,
+        ..base_cfg()
+    };
+    let mut mp = Mempool::new(cfg, Box::new(ByCost));
+    let utxo = FakeUtxo::with(&[0x90, 0x70]);
+    let tip_x = TestTip::at_height_header(1000, 0xF1);
+    let v = PoolAwareProbe::new()
+        .plan(9, 9_000_000, &[0x90], &[0x9A]) // X — fills the pool (no gate)
+        .plan_context_gated(1, 1_000_000, 0xF1, &[0x70], &[0x71]) // P — valid only @parent 0xF1
+        .plan(2, 10_000_000, &[0x71], &[0x72]); // C — spends P's output
+    let now = Instant::now();
+
+    mp.process(&tx_bytes(9), TxSource::Api, now, &tip_x.view(&utxo), &v);
+    let (po, _) = mp.process(&tx_bytes(1), TxSource::Api, now, &tip_x.view(&utxo), &v);
+    assert!(matches!(
+        po,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::PoolFull
+        }
+    ));
+    assert_eq!(mp.staging_len(), 1, "P held at tip X@1000");
+
+    // Same-height reorg: Y@1000, different header id / context parent.
+    let tip_y = TestTip::at_height_header(1000, 0xF2);
+    let (_co, ca) = mp.process(&tx_bytes(2), TxSource::Api, now, &tip_y.view(&utxo), &v);
+    assert!(
+        !mp.contains(&d(1)) && !mp.contains(&d(2)),
+        "stale context-invalidated parent not laundered across the same-height reorg"
+    );
+    assert!(mp.contains(&d(9)), "live pool untouched");
+    assert!(broadcasts(&ca).is_empty(), "nothing gossiped");
+    assert_eq!(
+        mp.staging_len(),
+        0,
+        "the reorg-invalidated held parent is evicted from staging on re-validation"
     );
     mp.pool().check_invariants();
 }

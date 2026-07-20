@@ -383,7 +383,6 @@ impl Mempool {
         if missing.is_empty() {
             return; // resolvable now — not actually an orphan
         }
-        let height = tip_ctx.tip.height;
         let _ = self.staging.stage_orphan(
             s.tx_id,
             Arc::from(tx_bytes),
@@ -395,7 +394,7 @@ impl Mempool {
             missing,
             source.clone(),
             now,
-            height,
+            tip_ctx.tip,
         );
     }
 
@@ -429,7 +428,7 @@ impl Mempool {
             v.outputs,
             source.clone(),
             now,
-            tip_ctx.tip.height,
+            tip_ctx.tip,
         );
     }
 
@@ -559,7 +558,10 @@ impl Mempool {
                             missing,
                             staged.source.clone(),
                             staged.staged_at,
-                            staged.staged_height,
+                            TipPointer {
+                                height: staged.staged_height,
+                                header_id: staged.staged_tip_id,
+                            },
                         );
                         self.staging.bump_reeval(&staged.tx_id, next_reeval);
                     } else if let Some(hc) = held_out.take() {
@@ -581,7 +583,10 @@ impl Mempool {
                             v.outputs,
                             staged.source.clone(),
                             staged.staged_at,
-                            staged.staged_height,
+                            TipPointer {
+                                height: staged.staged_height,
+                                header_id: staged.staged_tip_id,
+                            },
                         );
                     }
                 }
@@ -627,10 +632,11 @@ impl Mempool {
 
         // Build the overlay + the held-ancestor members incrementally,
         // ancestors-first. A held ancestor whose tip has MOVED since it was
-        // staged is RE-VALIDATED at the current tip before inclusion (M1 fix):
-        // a height- or data-input-dependent parent can go invalid while held,
-        // and cached `HeldFacts` must never launder a now-invalid tx into the
-        // pool. Each re-validation is charged to `CostBudgets` (no free oracle),
+        // staged (by header id — see the gate below) is RE-VALIDATED at the
+        // current tip before inclusion (M1 / FIX A): a height-, context-, or
+        // data-input-dependent parent can go invalid while held, and cached
+        // `HeldFacts` must never launder a now-invalid tx into the pool. Each
+        // re-validation is charged to `CostBudgets` (no free oracle),
         // and runs against the overlay built from this ancestor's OWN (already
         // re-validated) ancestors. A held ancestor that no longer validates is
         // evicted from staging and the whole package aborted.
@@ -643,7 +649,12 @@ impl Mempool {
             let cached_or_reval: Result<PackageMember, (Arc<[u8]>, TxSource)> = {
                 let st = self.staging.get(hid)?;
                 let facts = st.validated.as_ref()?;
-                if st.staged_height == tip_ctx.tip.height {
+                // Freshness keyed on tip IDENTITY (header id), not height: a
+                // same-height reorg changes `header_id` while `height` is
+                // unchanged, and a context-sensitive parent (reading
+                // CONTEXT.headers / preHeader) could have gone invalid, so ANY
+                // tip change forces re-validation.
+                if st.staged_tip_id == tip_ctx.tip.header_id {
                     Ok(PackageMember {
                         tx_id: st.tx_id,
                         bytes: st.bytes.clone(),
@@ -815,7 +826,7 @@ impl Mempool {
                     c_validated.outputs,
                     source.clone(),
                     now,
-                    tip_ctx.tip.height,
+                    tip_ctx.tip,
                 );
                 Some(Vec::new())
             }

@@ -54,7 +54,10 @@ fn held(
         vec![],
         src,
         now,
-        height,
+        TipPointer {
+            height,
+            header_id: d(0),
+        },
     )
 }
 
@@ -82,7 +85,10 @@ fn orphan(
         missing.iter().map(|b| d(*b)).collect(),
         src,
         now,
-        height,
+        TipPointer {
+            height,
+            header_id: d(0),
+        },
     )
 }
 

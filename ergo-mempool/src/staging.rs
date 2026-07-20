@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use ergo_primitives::digest::Digest32;
 use ergo_ser::ergo_box::ErgoBox;
 
-use crate::types::{PeerId, TxId, TxSource};
+use crate::types::{PeerId, TipPointer, TxId, TxSource};
 use crate::weight::SCALE;
 
 /// Which of the two staging kinds an entry is.
@@ -71,6 +71,11 @@ pub struct StagedTx {
     pub staged_at: Instant,
     /// Tip height when staged → block-count expiry.
     pub staged_height: u32,
+    /// Header id of the tip this entry was (re-)validated against. The package
+    /// freshness gate keys on tip IDENTITY, not height: a same-height reorg
+    /// (Y@H replacing X@H) leaves `staged_height` unchanged but changes this,
+    /// forcing re-validation of a context-sensitive held member.
+    pub staged_tip_id: Digest32,
     /// Full-revalidation attempts; hard cap (`staging_max_reevals`).
     pub reeval_count: u16,
     /// Monotonic insertion sequence — FIFO tiebreak for eviction/expiry.
@@ -261,7 +266,7 @@ impl StagingPool {
         missing_inputs: Vec<Digest32>,
         source: TxSource,
         now: Instant,
-        staged_height: u32,
+        staged_tip: TipPointer,
     ) -> Result<StageAdmit, StageReject> {
         let entry = StagedTx {
             tx_id,
@@ -276,7 +281,8 @@ impl StagingPool {
             missing_inputs,
             source,
             staged_at: now,
-            staged_height,
+            staged_height: staged_tip.height,
+            staged_tip_id: staged_tip.header_id,
             reeval_count: 0,
             seq: 0, // assigned in `insert`
         };
@@ -299,7 +305,7 @@ impl StagingPool {
         outputs: Vec<ErgoBox>,
         source: TxSource,
         now: Instant,
-        staged_height: u32,
+        staged_tip: TipPointer,
     ) -> Result<StageAdmit, StageReject> {
         let entry = StagedTx {
             tx_id,
@@ -318,7 +324,8 @@ impl StagingPool {
             missing_inputs: Vec::new(),
             source,
             staged_at: now,
-            staged_height,
+            staged_height: staged_tip.height,
+            staged_tip_id: staged_tip.header_id,
             reeval_count: 0,
             seq: 0,
         };
