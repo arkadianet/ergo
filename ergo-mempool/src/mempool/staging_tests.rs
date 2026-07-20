@@ -86,8 +86,15 @@ impl PoolAwareProbe {
         }
     }
     /// `tx` byte, `fee`, `inputs`, `outputs` (created box ids). Output boxes
-    /// are materialized so the overlay can resolve a child's input.
-    fn plan(mut self, tx: u8, fee: u64, inputs: &[u8], outputs: &[u8]) -> Self {
+    /// are materialized so the overlay can resolve a child's input. Fixed
+    /// validation cost of 10_000.
+    fn plan(self, tx: u8, fee: u64, inputs: &[u8], outputs: &[u8]) -> Self {
+        self.plan_cost(tx, fee, 10_000, inputs, outputs)
+    }
+
+    /// Like [`plan`] but with an explicit validation `cost`, so tests can
+    /// build a low-feerate / high-absolute-fee incumbent (the pinning case).
+    fn plan_cost(mut self, tx: u8, fee: u64, cost: u64, inputs: &[u8], outputs: &[u8]) -> Self {
         self.plans.insert(
             tx_bytes(tx),
             ProbePlan {
@@ -96,7 +103,7 @@ impl PoolAwareProbe {
                 inputs: inputs.iter().map(|b| d(*b)).collect(),
                 outputs: outputs.iter().map(|b| d(*b)).collect(),
                 output_boxes: outputs.iter().map(|b| dummy_box(*b)).collect(),
-                charge: 10_000,
+                charge: cost,
             },
         );
         self
@@ -508,4 +515,147 @@ fn check_never_stages_held_candidate() {
         0,
         "/check must never stage a held candidate"
     );
+}
+
+// ----- P4: package admission + package RBF (R1 ∧ R2) -----
+
+#[test]
+fn package_admitted_when_child_completes_held_parent_threshold() {
+    // A 2-slot pool full of L (low) + M (mid). P (low fee) is held on PoolFull.
+    // Its child C (high fee) completes the package {P, C}, whose aggregate
+    // feerate beats the pool's lowest, so BOTH enter — evicting L and M.
+    let cfg = MempoolConfig {
+        max_pool_size: 2,
+        ..MempoolConfig::default()
+    };
+    let mut mp = Mempool::new(cfg, Box::new(ByCost));
+    let utxo = FakeUtxo::with(&[0x90, 0x91, 0x70]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(10, 1_000_000, &[0x90], &[0x9A]) // L — low
+        .plan(11, 3_000_000, &[0x91], &[0x9B]) // M — mid
+        .plan(1, 1_000_000, &[0x70], &[0x71]) // P — held (low fee)
+        .plan(2, 10_000_000, &[0x71], &[0x72]); // C — high fee, spends P's output
+    let now = Instant::now();
+
+    mp.process(&tx_bytes(10), TxSource::Api, now, &tip.view(&utxo), &v);
+    mp.process(&tx_bytes(11), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert_eq!(mp.size(), 2, "pool full");
+
+    let (po, _) = mp.process(&tx_bytes(1), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(matches!(
+        po,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::PoolFull
+        }
+    ));
+    assert_eq!(mp.staging_len(), 1, "parent held");
+
+    let (_co, ca) = mp.process(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(
+        mp.contains(&d(1)) && mp.contains(&d(2)),
+        "P and C admitted together as a package"
+    );
+    assert!(
+        !mp.contains(&d(10)) && !mp.contains(&d(11)),
+        "the two lower-priority incumbents were evicted"
+    );
+    assert_eq!(mp.staging_len(), 0, "held parent drained from staging");
+    let inv = broadcasts(&ca);
+    assert!(
+        inv.contains(&d(1)) && inv.contains(&d(2)),
+        "both package members advertised: {inv:?}"
+    );
+    mp.pool().check_invariants();
+}
+
+#[test]
+fn package_rbf_accepts_when_r1_and_r2_both_hold() {
+    // Incumbent I spends box 0x80 (fee 2M). P also spends 0x80 (fee 1M) and
+    // loses the double-spend → held. Child C (fee 5M) spends P's output. The
+    // package {P, C} beats I on BOTH aggregate feerate (R1) and aggregate
+    // absolute fee (R2), so it displaces I via package RBF.
+    let mut mp = mempool();
+    let utxo = FakeUtxo::with(&[0x80]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(9, 2_000_000, &[0x80], &[0x8A]) // I — incumbent
+        .plan(1, 1_000_000, &[0x80], &[0x81]) // P — double-spend loser, held
+        .plan(2, 5_000_000, &[0x81], &[0x8C]); // C — booster child
+    let now = Instant::now();
+
+    mp.process(&tx_bytes(9), TxSource::Api, now, &tip.view(&utxo), &v);
+    let (po, _) = mp.process(&tx_bytes(1), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(matches!(
+        po,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::DoubleSpendLoser
+        }
+    ));
+
+    let (_co, ca) = mp.process(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(
+        mp.contains(&d(1)) && mp.contains(&d(2)),
+        "package displaced the incumbent and entered the pool"
+    );
+    assert!(!mp.contains(&d(9)), "incumbent evicted by package RBF");
+    assert_eq!(mp.staging_len(), 0, "held parent drained");
+    // The evicted incumbent is un-advertised; the members are advertised.
+    let revoked: Vec<TxId> = ca
+        .iter()
+        .filter_map(|a| match a {
+            MempoolAction::RevokeBroadcast { tx_ids } => Some(tx_ids.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert!(revoked.contains(&d(9)), "incumbent revoked: {revoked:?}");
+    mp.pool().check_invariants();
+}
+
+#[test]
+fn package_rbf_rejects_pin_higher_feerate_but_lower_absolute_fee() {
+    // Anti-pinning: incumbent I has a HIGH absolute fee (10M) but LOW feerate
+    // (cost 100_000 → weight 102400). P (fee 1M, cost 10_000 → weight 102400)
+    // ties and is held. The package {P, C} (fees 1M + 2M = 3M) has a HIGHER
+    // feerate (R1 holds) but a LOWER absolute fee than I (R2 FAILS), so it must
+    // NOT displace I — the miner earns more absolute fee keeping the incumbent.
+    let mut mp = mempool();
+    let utxo = FakeUtxo::with(&[0x80]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan_cost(9, 10_000_000, 100_000, &[0x80], &[0x8A]) // I — high abs fee, low feerate
+        .plan(1, 1_000_000, &[0x80], &[0x81]) // P — ties I's feerate, loses, held
+        .plan(2, 2_000_000, &[0x81], &[0x8C]); // C — booster
+    let now = Instant::now();
+
+    mp.process(&tx_bytes(9), TxSource::Api, now, &tip.view(&utxo), &v);
+    let (po, _) = mp.process(&tx_bytes(1), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(matches!(
+        po,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::DoubleSpendLoser
+        }
+    ));
+
+    let (_co, ca) = mp.process(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(
+        mp.contains(&d(9)),
+        "incumbent survives — R2 (absolute fee) rejects the pinning package"
+    );
+    assert!(
+        !mp.contains(&d(1)) && !mp.contains(&d(2)),
+        "neither package member entered the pool"
+    );
+    assert!(
+        broadcasts(&ca).is_empty(),
+        "a rejected package gossips nothing"
+    );
+    // P stays held; C is now held too (validated, package lost).
+    assert_eq!(
+        mp.staging_len(),
+        2,
+        "parent and child both held for a future try"
+    );
+    mp.pool().check_invariants();
 }
