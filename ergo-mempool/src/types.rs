@@ -313,8 +313,11 @@ impl Default for MempoolConfig {
             per_peer_cost_budget: 10_000_000,
             unresolved_cache_size: 4_096,
             unresolved_cache_ttl_seconds: 60,
-            // Staging pool — human-confirmed bounds.
-            staging_enabled: true,
+            // Staging pool — human-confirmed bounds. OPT-IN: the orphan/held
+            // staging + package-admission path defaults OFF until it is proven
+            // in the wild; when disabled, admission behaves exactly as it did
+            // before staging existed.
+            staging_enabled: false,
             staging_max_count: 2_048,
             staging_max_bytes: 8 * 1024 * 1024,
             staging_max_count_per_peer: 128,

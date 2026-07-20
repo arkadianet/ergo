@@ -265,8 +265,17 @@ impl TestTip {
     }
 }
 
+/// Base config with staging explicitly ENABLED — the default is opt-out, so
+/// every staging test must turn it on.
+fn base_cfg() -> MempoolConfig {
+    MempoolConfig {
+        staging_enabled: true,
+        ..MempoolConfig::default()
+    }
+}
+
 fn mempool() -> Mempool {
-    Mempool::new(MempoolConfig::default(), Box::new(ByCost))
+    Mempool::new(base_cfg(), Box::new(ByCost))
 }
 
 fn broadcasts(actions: &[MempoolAction]) -> Vec<TxId> {
@@ -529,7 +538,7 @@ fn held_parent_staged_on_pool_full() {
     // cannot displace it (PoolFull), but it fully validated, so it is HELD.
     let cfg = MempoolConfig {
         max_pool_size: 1,
-        ..MempoolConfig::default()
+        ..base_cfg()
     };
     let mut mp = Mempool::new(cfg, Box::new(ByCost));
     let utxo = FakeUtxo::with(&[0x60, 0x61]);
@@ -557,7 +566,7 @@ fn check_never_stages_held_candidate() {
     // The `/check` path must not stage even a held-eligible rejection.
     let cfg = MempoolConfig {
         max_pool_size: 1,
-        ..MempoolConfig::default()
+        ..base_cfg()
     };
     let mut mp = Mempool::new(cfg, Box::new(ByCost));
     let utxo = FakeUtxo::with(&[0x60, 0x61]);
@@ -591,7 +600,7 @@ fn package_admitted_when_child_completes_held_parent_threshold() {
     // feerate beats the pool's lowest, so BOTH enter — evicting L and M.
     let cfg = MempoolConfig {
         max_pool_size: 2,
-        ..MempoolConfig::default()
+        ..base_cfg()
     };
     let mut mp = Mempool::new(cfg, Box::new(ByCost));
     let utxo = FakeUtxo::with(&[0x90, 0x91, 0x70]);
@@ -736,7 +745,7 @@ fn package_rejects_intra_package_double_spend_child_and_parent() {
     // index corruption seated.
     let cfg = MempoolConfig {
         max_pool_size: 1,
-        ..MempoolConfig::default()
+        ..base_cfg()
     };
     let mut mp = Mempool::new(cfg, Box::new(ByCost));
     let utxo = FakeUtxo::with(&[0x90, 0x80]);
@@ -771,7 +780,7 @@ fn package_rejects_intra_package_double_spend_two_held_parents() {
     // package [P1, P2, C] — a double-spend of 0x80. Must be rejected wholesale.
     let cfg = MempoolConfig {
         max_pool_size: 1,
-        ..MempoolConfig::default()
+        ..base_cfg()
     };
     let mut mp = Mempool::new(cfg, Box::new(ByCost));
     let utxo = FakeUtxo::with(&[0x90, 0x80]);
@@ -848,7 +857,7 @@ fn stale_held_parent_revalidated_and_rejected_at_new_tip() {
     // cached outputs.
     let cfg = MempoolConfig {
         max_pool_size: 1,
-        ..MempoolConfig::default()
+        ..base_cfg()
     };
     let mut mp = Mempool::new(cfg, Box::new(ByCost));
     let utxo = FakeUtxo::with(&[0x90, 0x70]);
@@ -910,5 +919,47 @@ fn block_advance_prunes_orphan_with_spent_data_input() {
         mp.staging_len(),
         0,
         "orphan whose DATA input was confirmed-and-consumed is pruned"
+    );
+}
+
+// ----- FIX 3: feature defaults OFF (opt-in) -----
+
+#[test]
+fn staging_disabled_is_a_clean_no_op() {
+    // The default config has staging OFF. An out-of-order child is simply
+    // rejected `UnresolvedInput` and NOT held; the parent admits normally with
+    // no promotion side effects — exactly the pre-staging behaviour.
+    assert!(
+        !MempoolConfig::default().staging_enabled,
+        "staging must default OFF"
+    );
+    let mut mp = Mempool::new(MempoolConfig::default(), Box::new(ByCost));
+    let utxo = FakeUtxo::with(&[0x50]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(1, 5_000_000, &[0x50], &[0xAA]) // P
+        .plan(2, 5_000_000, &[0xAA], &[0xBB]); // C (orphan)
+    let now = Instant::now();
+
+    let (co, ca) = mp.process(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(matches!(
+        co,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::UnresolvedInput
+        }
+    ));
+    assert_eq!(mp.staging_len(), 0, "staging disabled → nothing held");
+    assert!(broadcasts(&ca).is_empty());
+
+    let (po, pa) = mp.process(&tx_bytes(1), TxSource::Api, now, &tip.view(&utxo), &v);
+    assert!(matches!(po, AdmissionOutcome::Admitted { .. }));
+    assert!(
+        mp.contains(&d(1)) && !mp.contains(&d(2)),
+        "no orphan promotion when staging is disabled"
+    );
+    assert_eq!(
+        broadcasts(&pa),
+        vec![d(1)],
+        "only the parent is advertised — no staging side effects"
     );
 }
