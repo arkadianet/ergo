@@ -26,6 +26,10 @@
 //! - [`fri`] — the FRI low-degree-test verifier (Layer 2).
 //! - [`circuit`] — the recursion circuit's tap set + constraint-program
 //!   interpreter (Layer 3), producing the per-query DEEP-ALI FRI goal.
+//! - [`profile`] — the capstone (Layer 4): the stock-profile package loader and
+//!   the top-level [`Risc0RawSealVerifier`], plus the fail-closed
+//!   [`verify_stock_profile_seal`] opcode entry point that ties Layers 1–3 into
+//!   a single accept/reject over a decoded raw seal.
 
 pub mod baby_bear;
 pub mod ext4;
@@ -40,6 +44,8 @@ pub mod merkle;
 
 pub mod circuit;
 
+pub mod profile;
+
 pub use baby_bear::BabyBear;
 pub use circuit::{
     deep_goal, step as poly_ext_step, CircuitTap, CircuitTapSet, MixState, PolyExtOp, PolyExtTable,
@@ -49,4 +55,8 @@ pub use ext4::Ext4;
 pub use merkle::MerkleVerifier;
 pub use poseidon2::Poseidon2;
 pub use poseidon2_constants::{CELLS, ROUNDS_HALF_FULL, ROUNDS_PARTIAL};
+pub use profile::{
+    verify_stock_profile_seal, verify_stock_profile_seal_checked, LoadedProfile, LoaderError,
+    ProfilePackageLoader, RawSealProfile, Risc0RawSealVerifier, TerminalControl, Verified,
+};
 pub use read_iop::ReadIop;

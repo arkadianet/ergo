@@ -12,9 +12,10 @@
 //!
 //! The Layer-4 verifier wires [`deep_goal`] into
 //! [`fri_verify`](crate::fri::fri_verify)'s
-//! `inner: FnMut(usize) -> Result<Ext4, String>`: for each query position it
-//! builds the tapped evaluations `u` and the global buffers, then calls the
-//! interpreter and takes the result `tot` as the goal.
+//! `inner: FnMut(&mut ReadIop, usize) -> Result<Ext4, String>`: for each query
+//! position it reads that query's tap Merkle openings, builds the tapped
+//! evaluations `u` and the global buffers, then calls the interpreter and takes
+//! the result `tot` as the goal.
 //!
 //! Consensus-critical: every table and every op result reproduces the reference
 //! byte-for-byte, pinned by the extracted KAT oracles (`circuit_taps.tsv`,

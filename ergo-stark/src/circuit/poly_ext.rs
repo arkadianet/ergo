@@ -532,7 +532,8 @@ pub fn step(
 }
 
 /// Compute the per-query DEEP-ALI FRI goal — the entry point Layer 4 wires into
-/// [`crate::fri::fri_verify`]'s `inner: FnMut(usize) -> Result<Ext4, String>`.
+/// [`crate::fri::fri_verify`]'s
+/// `inner: FnMut(&mut ReadIop, usize) -> Result<Ext4, String>`.
 ///
 /// This is [`step`] projected to its `tot` component: the mixed
 /// constraint-polynomial evaluation the FRI query requires equal the recombined

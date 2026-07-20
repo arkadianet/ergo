@@ -127,7 +127,7 @@ pub fn fri_verify<I>(
     inner: I,
 ) -> Result<(), String>
 where
-    I: FnMut(usize) -> Result<Ext4, String>,
+    I: FnMut(&mut ReadIop, usize) -> Result<Ext4, String>,
 {
     fri_verify_probed(iop, tot_cycles, queries, inner, |_, _, _, _| {})
 }
@@ -153,7 +153,7 @@ pub fn fri_verify_probed<I, P>(
     mut probe: P,
 ) -> Result<(), String>
 where
-    I: FnMut(usize) -> Result<Ext4, String>,
+    I: FnMut(&mut ReadIop, usize) -> Result<Ext4, String>,
     P: Probe,
 {
     assert!(
@@ -203,7 +203,7 @@ where
     let pos_bits = log2_ceil(orig_domain) as u32;
     for q in 0..queries {
         let mut pos = iop.random_bits(pos_bits) as usize;
-        let mut goal = inner(pos).map_err(|e| format!("fri query {q} inner: {e}"))?;
+        let mut goal = inner(iop, pos).map_err(|e| format!("fri query {q} inner: {e}"))?;
         for (r, round) in rounds.iter().enumerate() {
             probe.probe(q, r, pos, goal);
             let quot = pos / round.rows;
@@ -468,7 +468,7 @@ mod tests {
         let mut iop = ReadIop::new(proof.to_vec());
         iop.commit(&v.initial_commit);
         let mut call = 0usize;
-        let inner = |pos: usize| -> Result<Ext4, String> {
+        let inner = |_iop: &mut ReadIop, pos: usize| -> Result<Ext4, String> {
             let mut g = goal_map.get(&pos).copied().unwrap_or(Ext4::ZERO);
             if bad_goal == Some(call) {
                 g = g.add(Ext4::ONE);
@@ -559,7 +559,7 @@ mod tests {
 
             let mut call = 0usize;
             let qck_inner = &v.qck;
-            let inner = |pos: usize| -> Result<Ext4, String> {
+            let inner = |_iop: &mut ReadIop, pos: usize| -> Result<Ext4, String> {
                 assert_eq!(
                     pos, qck_inner[call][0].0,
                     "case {}: query {call} pos",
@@ -640,12 +640,9 @@ mod tests {
         let v = &kat.cases[0];
         let mut iop = ReadIop::new(v.proof.clone());
         iop.commit(&v.initial_commit);
-        let res = fri_verify(
-            &mut iop,
-            v.degree,
-            v.queries,
-            |_| Err("no goal".to_string()),
-        );
+        let res = fri_verify(&mut iop, v.degree, v.queries, |_: &mut ReadIop, _| {
+            Err("no goal".to_string())
+        });
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("no goal"));
     }
@@ -653,6 +650,6 @@ mod tests {
     #[test]
     fn rejects_empty_stream() {
         let mut iop = ReadIop::new(Vec::new());
-        assert!(fri_verify(&mut iop, 4096, 50, |_| Ok(Ext4::ZERO)).is_err());
+        assert!(fri_verify(&mut iop, 4096, 50, |_: &mut ReadIop, _| Ok(Ext4::ZERO)).is_err());
     }
 }
