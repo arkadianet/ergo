@@ -19,30 +19,26 @@ use super::{raw_seal, statement, DIGEST_BYTES, MAX_APPLICATION_PAYLOAD_BYTES, ST
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StockProfile;
 
-/// **The seam PR-B (`ergo-stark`) implements.** Verify the decoded raw succinct
-/// seal against the host-derived expected RISC0 `ReceiptClaim` under `profile`.
+/// **The FRI/STARK verify seam**, now wired to the `ergo-stark` verifier. Verify
+/// the decoded raw succinct seal against the host-derived expected RISC0
+/// `ReceiptClaim` under the stock profile.
 ///
 /// * `seal_words` — the 55,667 canonical wire words from [`raw_seal::decode`].
 /// * `expected_claim` — the SHA-256 tagged-struct `ReceiptClaim` digest from
 ///   [`statement::build`] (binds `programId`, `chainDomainId`, `profileId`,
 ///   `contractId`, and the `applicationPayload`).
 ///
-/// MUST be fail-closed: any claim mismatch, malformed seal, control-root
-/// mismatch, or FRI failure returns `false` and never panics.
-///
-/// PR-A ships a STUB that always returns `false`. TODO(PR-B): wire to the
-/// `ergo-stark` recursion-circuit FRI verifier. The signature is frozen so the
-/// drop-in replaces only this function body — the opcode does not change.
+/// Fail-closed: any claim mismatch, malformed seal, control-root mismatch, or
+/// FRI failure returns `false` and never panics. `ergo-stark` loads the single
+/// stock profile internally (fail-closed on a load error), so the opaque
+/// [`StockProfile`] handle carries no state — it stays only to keep the opcode ↔
+/// verifier seam signature frozen across the PR boundary.
 pub fn verify_raw_seal(
     seal_words: &[u32],
     expected_claim: &[u8; DIGEST_BYTES],
     _profile: StockProfile,
 ) -> bool {
-    // Touch the inputs so the frozen signature is honestly consumed; PR-B
-    // re-derives the claim from `seal_words`, checks it against `expected_claim`,
-    // validates the terminal control root, and runs the recursion-circuit FRI.
-    let _ = (seal_words, expected_claim);
-    false
+    ergo_stark::verify_stock_profile_seal(seal_words, expected_claim)
 }
 
 /// Outcome of the host-side preparation that precedes the FRI verify.
@@ -199,7 +195,8 @@ mod tests {
             } => {
                 assert_eq!(expected_claim, claim);
                 assert_eq!(words.len(), raw_seal::WORD_COUNT);
-                // PR-A seam: nothing spoofable ships — the verifier stub is false.
+                // The seam reaches the wired verifier; a zero-content seal is not
+                // a valid proof, so it is rejected (fail-closed).
                 assert!(!verify_raw_seal(&words, &expected_claim, StockProfile));
             }
             PreparedVerify::Reject => panic!("well-formed happy path must reach the verify seam"),
@@ -295,7 +292,9 @@ mod tests {
     }
 
     #[test]
-    fn stub_verifier_is_fail_closed() {
+    fn verifier_is_fail_closed_on_degenerate_input() {
+        // A too-short, all-zero seal is not a valid proof: the wired verifier
+        // rejects it without panicking.
         assert!(!verify_raw_seal(&[0u32; 4], &[0u8; 32], StockProfile));
     }
 }

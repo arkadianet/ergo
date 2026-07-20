@@ -9,6 +9,7 @@ publish    = false
 
 [dependencies]
 ergo-primitives   = { workspace = true }
+ergo-stark        = { workspace = true }
 ergo-ser          = { workspace = true }
 ergo-crypto       = { workspace = true }
 sha2              = { workspace = true }
