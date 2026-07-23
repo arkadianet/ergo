@@ -14,20 +14,35 @@ info:
 
     ## Not implemented in this build
 
-    These paths return **404** under default config. Tracked-but-
-    deferred items are listed with their status; off-spec items
-    are not on our roadmap.
+    These paths return **404**. Everything else on this spec is
+    mounted (or config-gated — see below).
 
-    **Script compile/execute (no ErgoScript compiler in this build):**
+    **Script:**
 
-    - `/script/p2sAddress`, `/script/p2shAddress`,
-      `/script/executeWithContext` — these compile or run ErgoScript
-      *source*, and this node ships no compiler.
+    - `POST /script/executeWithContext` — compile + reduce with a
+      caller-supplied env; not wired. (`POST /script/p2sAddress` and
+      `/script/p2shAddress` ARE mounted via `ergo-compiler`; the
+      decode-only `/script/addressToTree` and `/script/addressToBytes`
+      routes are mounted too.)
 
-    (The stateless decoders `/script/addressToTree/{address}` and
-    `/script/addressToBytes/{address}` ARE mounted — they match the
-    Scala wire shape; see **Everything else**.)
+    **Mining / UTXO:**
 
+    - `POST /mining/candidateWithTxs` — out of scope for the
+      external-miner surface (no mandatory-tx candidate path).
+    - `POST /utxo/getBoxesBinaryProof` — batch AD-proof for a set of
+      box ids; not mounted.
+
+    **Unconfirmed box lookups (Scala path shape):**
+
+    - `GET /transactions/unconfirmed/inputs/byBoxId/{boxId}`
+    - `GET /transactions/unconfirmed/outputs/byBoxId/{boxId}`
+    - `POST /transactions/unconfirmed/outputs/byErgoTree`
+    - `GET /transactions/unconfirmed/outputs/byTokenId/{tokenId}`
+    - `POST /transactions/unconfirmed/outputs/byRegisters`
+
+    (Related tx-filter routes ARE mounted:
+    `POST /transactions/unconfirmed/by{BoxId,ErgoTree,TokenId,Registers}`
+    return matching pool *transactions*, not individual boxes.)
 
     **Config-gated (not 404 — depend on operator settings):**
 
@@ -44,6 +59,8 @@ info:
     - `/mining/candidate`, `/mining/solution`,
       `/mining/rewardAddress`, `/mining/rewardPublicKey` are
       unmounted when `[mining] enabled = false`.
+    - `GET /emission/scripts` is served on mainnet; testnet/dev
+      return 404 pending an oracle capture.
 
     ## Wallet (integrated)
 

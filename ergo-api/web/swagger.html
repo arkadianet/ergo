@@ -22,15 +22,15 @@
 <body>
 <div class="ergo-banner">
   <strong>Heads up:</strong> this is the full Scala-node OpenAPI spec.
-  <code>ergo-rust-node</code> implements a large subset — <code>/info</code>,
-  <code>/blocks/*</code>, <code>/transactions/*</code> (including the
-  <code>/unconfirmed</code> pool queries and <code>/bytes</code> submit),
-  <code>/peers/*</code>, <code>/utils/seed</code>, <code>/utxo/genesis</code>
-  and <code>/utxo/byId/{id}</code>, the integrated <code>/wallet/*</code>
-  (always mounted; browser UI at <a href="/wallet/ui">/wallet/ui</a>), plus —
-  when the matching subsystem is enabled — <code>/blockchain/*</code> and
-  <code>/mining/*</code>. Everything else returns <code>404</code> (notably
-  the rest of <code>/utils/*</code>). See
+  Almost all of it is mounted; the gaps that still return <code>404</code>
+  are <code>POST /script/executeWithContext</code>,
+  <code>POST /mining/candidateWithTxs</code>,
+  <code>POST /utxo/getBoxesBinaryProof</code>, and the Scala-shape
+  <code>/transactions/unconfirmed/{inputs,outputs}/…</code> box lookups
+  (this build serves the related <code>POST /transactions/unconfirmed/by*</code>
+  tx filters instead). Config-gated families (<code>/blockchain/*</code>,
+  <code>/mining/*</code>) are unmounted when their subsystem is off — see
+  the spec description below. See
   <a href="/swagger/native">/swagger/native</a> for the Rust-native
   <code>/api/v1/*</code> API, or <a href="/">/</a> for the live dashboard.
 </div>
