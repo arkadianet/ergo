@@ -199,6 +199,16 @@ pub fn generate_candidate<V: CandidateStateView>(
     let candidate_height = parent_height + 1;
     let mut timings = PhaseTimings::default();
 
+    // Genesis (height-1) header id for the EIP-0045 `verifyStark` opcode's
+    // `snapshot.chainDomainId`, read from this build's committed view. Threaded
+    // into EVERY `TxValidationCtx` this candidate builds (emission, storage-rent
+    // claim, selected user txs, fee tx) so a `verifyStark`-guarded mempool tx is
+    // validated against the SAME genesis id block validation will later
+    // reconstruct — otherwise it would fail candidate re-validation and never be
+    // mined. `[0u8; 32]` (fail-closed) for a bare-genesis block-1 build, where
+    // height-1 does not exist yet.
+    let chain_domain_id = view.chain_domain_id();
+
     let parent_header = match genesis {
         // Genesis (block 1): there is no stored parent header; use the synthetic
         // height-0 carrier (genesis state_root + base timestamp).
@@ -452,6 +462,7 @@ pub fn generate_candidate<V: CandidateStateView>(
     let mut emission_cost_acc = CostAccumulator::new(block_cap);
     let checked_emission = {
         let mut tx_ctx = TxValidationCtx {
+            chain_domain_id,
             ctx: &ctx,
             params: &params,
             cost: &mut emission_cost_acc,
@@ -520,6 +531,7 @@ pub fn generate_candidate<V: CandidateStateView>(
             rent_cost_ceiling,
             rent_size_ceiling,
             reemission_rules,
+            chain_domain_id,
         )? {
             Some((checked, cost, size)) => {
                 overlay.apply_tx(checked.transaction())?;
@@ -553,6 +565,7 @@ pub fn generate_candidate<V: CandidateStateView>(
             cost_budget,
             size_budget,
             reemission_rules,
+            chain_domain_id,
         )?;
 
         // Component B: forward consensus-revalidation-failure suspects to the
@@ -605,6 +618,7 @@ pub fn generate_candidate<V: CandidateStateView>(
                     let mut fee_cost_acc = CostAccumulator::new(block_cap);
                     let cf = {
                         let mut fee_ctx = TxValidationCtx {
+                            chain_domain_id,
                             ctx: &ctx,
                             params: &params,
                             cost: &mut fee_cost_acc,

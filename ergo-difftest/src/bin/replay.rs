@@ -967,6 +967,7 @@ fn apply_one_block(
     //    `reemission: None` — EIP-27 launched much later than height 200.
     //    `script_validation_checkpoint: None` — forced full script validation.
     let ctx = BlockValidationContext {
+        chain_domain_id: [0u8; 32],
         parent,
         utxo: store,
         params,

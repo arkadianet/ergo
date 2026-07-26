@@ -874,16 +874,15 @@ fn eval_op(
             opcodes::sigma::eval_prove_dh_tuple(g_expr, h_expr, u_expr, v_expr, &mut cx)
         }
 
-        // VerifyStark(proofChunks, publicInputs, imageId, vmType, costParams)
-        // — EIP-0045 native STARK verify. DEVNET-ONLY (byte 0xB9); a stock
-        // node never reaches this arm. See opcodes::sigma::eval_verify_stark.
-        (0xB9, Payload::Five(proof_chunks, public_inputs, image_id, vm_type, cost_params)) => {
+        // VerifyStark(proofChunks, applicationPayload, programId, profileId)
+        // — EIP-0045 4-child native STARK verify. DEVNET-ONLY (byte 0xB9); a
+        // stock node never reaches this arm. See opcodes::sigma::eval_verify_stark.
+        (0xB9, Payload::Four(proof_chunks, application_payload, program_id, profile_id)) => {
             opcodes::sigma::eval_verify_stark(
                 proof_chunks,
-                public_inputs,
-                image_id,
-                vm_type,
-                cost_params,
+                application_payload,
+                program_id,
+                profile_id,
                 &mut cx,
             )
         }

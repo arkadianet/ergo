@@ -377,6 +377,7 @@ fn mempool_admits_mainnet_corpus_1761k() {
                 params: &params,
                 last_headers: &[],
                 reemission: Some(&reemission_rules),
+                chain_domain_id: [0u8; 32],
             };
             // Does this tx hit the EIP-27 burn-path trigger, exactly as
             // `verify_reemission_spending`: height strictly above activation AND

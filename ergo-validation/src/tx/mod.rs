@@ -62,6 +62,22 @@ pub struct TxValidationCtx<'a> {
     /// every caller that doesn't supply them gets via
     /// `TxValidationRules::default()`.
     pub rules: TxValidationRules<'a>,
+    /// Host-authenticated chain domain id for the EIP-0045 `verifyStark`
+    /// (0xB9) opcode: the raw 32 bytes of THIS chain's genesis (height-1)
+    /// `Header.id`. A chain-level constant (like `voting_length` on
+    /// `BlockValidationContext`), carried on the validation bundle rather
+    /// than on the per-tx `TransactionContext`. Threaded into
+    /// `ReductionContext.chain_domain_id`, where it is read as the reference
+    /// interpreter's `snapshot.chainDomainId` capability — from context,
+    /// never from a script child, so it is non-spoofable.
+    ///
+    /// The block-apply boundary (`block::validate_full_block*` →
+    /// `BlockValidationContext.chain_domain_id`) populates the real genesis
+    /// id from the node's state store. Callers that never evaluate
+    /// `verifyStark` (mempool admission, mining, most tests) pass `[0u8; 32]`
+    /// = "not-yet-pinned"; `verifyStark` is a devnet-only opcode, so the
+    /// zero default is inert on every mainnet consensus path.
+    pub chain_domain_id: [u8; 32],
 }
 
 /// A transaction that has passed all validation checks.

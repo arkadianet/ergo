@@ -1,0 +1,125 @@
+{
+  "spec": "EIP-0045 ErgoStatementV1 + RISC0 OK ReceiptClaim",
+  "oracle": {
+    "sigmastate_commit": "9372697",
+    "encoder": "core/shared/src/main/scala/sigma/stark/profile/ErgoStarkStatement.scala:195-216 (encodeStatement)",
+    "claim_deriver": "ErgoStarkStatement.scala:184-193 (deriveOkClaim) + taggedStructDigest:218-245",
+    "kat_spec": "core/shared/src/test/scala/sigma/stark/profile/ErgoStarkStatementSpec.scala"
+  },
+  "constants": {
+    "domainTag_ascii": "Ergo.VerifyStark.Statement",
+    "domainTag_hex": "4572676f2e566572696679537461726b2e53746174656d656e74",
+    "domainTag_len": 26,
+    "version": 1,
+    "prefixBytes": 159,
+    "offsets": {
+      "tag": "0..26",
+      "version": "26..27",
+      "chainDomainId": "27..59",
+      "profileId": "59..91",
+      "programId": "91..123",
+      "contractId": "123..155",
+      "payloadLen_u32le": "155..159",
+      "applicationPayload": "159..N"
+    },
+    "maxApplicationPayloadBytes": 16384,
+    "maxStatementBytes": 16543,
+    "profileId_stock_B3": "23c4a123ffb33a1c8db89436fe0e7972bd8e4e289459ee5fd71be5440607d383",
+    "hashers": {
+      "statement_claim": "SHA-256",
+      "contractId_profileId": "BLAKE2b-256"
+    }
+  },
+  "note": "Vectors 1-4 are pinned DIRECTLY by the reference KATs (ErgoStarkStatementSpec.scala) and are reproduced byte-for-byte by the committed generator (scratchpad/gen_vectors.py self-check). Vector 5 applies the SAME reference-validated algorithm to an AEGISPV1-shaped payload (engine/src/epoch/mod.rs:57-80). Its chainDomainId / programId / contractId are PLACEHOLDERS (per-devnet / re-pinned-at-cut) -- swap the captured devnet genesis id, pinned guest image id, and BLAKE2b(vault propositionBytes) at relaunch and regenerate. The framing/offsets/claim derivation it pins are value-independent.",
+  "vectors": [
+    {
+      "name": "empty-payload",
+      "note": "159-byte prefix boundary; ErgoStarkStatementSpec.scala:62-71",
+      "inputs": {
+        "chainDomainId": "0000000000000000000000000000000000000000000000000000000000000000",
+        "profileId": "0000000000000000000000000000000000000000000000000000000000000000",
+        "programId": "0000000000000000000000000000000000000000000000000000000000000000",
+        "contractId": "0000000000000000000000000000000000000000000000000000000000000000",
+        "applicationPayload": "",
+        "applicationPayloadLen": 0
+      },
+      "expected": {
+        "statement": "4572676f2e566572696679537461726b2e53746174656d656e7401000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "statementLen": 159,
+        "journalDigest_sha256": "9b8899bb1fa709880a1d3ce2a5fb87b8c82d067c9ceaa3efd88eb99e37624f89",
+        "postStateDigest": "a3acc27117418996340b84e5a90f3ef4c49d22c79e44aad822ec9c313e1eb8e2",
+        "outputDigest": "65071bef11ffec7f370df403257a4cfa56c265bafb6ca28b61b8f0b36a042a33",
+        "expectedClaim": "f2ac8e12159acd390c902931248b799f97376ee80b49735cea788122b0f99c5b"
+      }
+    },
+    {
+      "name": "synthetic-196",
+      "note": "reference synthetic KAT; ErgoStarkStatementSpec.scala:11-23",
+      "inputs": {
+        "chainDomainId": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "profileId": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+        "programId": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+        "contractId": "96f2898a7d4a18a164943804351e489c38af0f2f6cd897b31e73437fb26f0e7d",
+        "applicationPayload": "4549502d303034352073796e746865746963207061796c6f61643b206e6f6e2d66696e616c",
+        "applicationPayloadLen": 37
+      },
+      "expected": {
+        "statement": "4572676f2e566572696679537461726b2e53746174656d656e7401000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f96f2898a7d4a18a164943804351e489c38af0f2f6cd897b31e73437fb26f0e7d250000004549502d303034352073796e746865746963207061796c6f61643b206e6f6e2d66696e616c",
+        "statementLen": 196,
+        "journalDigest_sha256": "7d2c8dc514f5a929fe38a6be100e500b86d31e41bcf08846c71866f843155cf4",
+        "postStateDigest": "a3acc27117418996340b84e5a90f3ef4c49d22c79e44aad822ec9c313e1eb8e2",
+        "outputDigest": "229a3e672940599f8ce4f2bd1a4bd2103dbfd28f4883cafa6b0c1524f4490894",
+        "expectedClaim": "fd71ff1ad9b73ef403ac1bbb919a509f67d33816ab0334c685785f0cf6b4bc9e"
+      }
+    },
+    {
+      "name": "final-B3-191",
+      "note": "final B3 profileId + mainnet chainDomainId; ErgoStarkStatementSpec.scala:40-60",
+      "inputs": {
+        "chainDomainId": "b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b",
+        "profileId": "23c4a123ffb33a1c8db89436fe0e7972bd8e4e289459ee5fd71be5440607d383",
+        "programId": "d82a9f903bdb2c7e68dcf15686cf75b3220fe457fa6bc1042529df288de222d8",
+        "contractId": "d4fde033ba3d2d696696cb7d0e80abd39aa84db8ba93038157338e85aac6f5b8",
+        "applicationPayload": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "applicationPayloadLen": 32
+      },
+      "expected": {
+        "statement": "4572676f2e566572696679537461726b2e53746174656d656e7401b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b23c4a123ffb33a1c8db89436fe0e7972bd8e4e289459ee5fd71be5440607d383d82a9f903bdb2c7e68dcf15686cf75b3220fe457fa6bc1042529df288de222d8d4fde033ba3d2d696696cb7d0e80abd39aa84db8ba93038157338e85aac6f5b820000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "statementLen": 191,
+        "journalDigest_sha256": "ba80801e59c8bcd8ffff6eddcbbd91a43c36206539d217c7944edef81cd9c297",
+        "postStateDigest": "a3acc27117418996340b84e5a90f3ef4c49d22c79e44aad822ec9c313e1eb8e2",
+        "outputDigest": "c5068190e04dd7d5a1bef489605f1bf3fad87148e65b97bf70d5693bbbc0658e",
+        "expectedClaim": "a88ae10e9e0bf2a3458becf3ff26b2ac617f1054a35d1b88e37f9f5a62c14415"
+      }
+    },
+    {
+      "name": "aegis-epoch-single-withdrawal",
+      "note": "AEGISPV1 payload, 1 withdrawal (36-byte P2PK). PLACEHOLDER chain/program/contract; validated algorithm.",
+      "inputs": {
+        "chainDomainId": "41454749532d4445564e45542d47454e455349532d49442d504c414345484c44",
+        "profileId": "23c4a123ffb33a1c8db89436fe0e7972bd8e4e289459ee5fd71be5440607d383",
+        "programId": "d82a9f903bdb2c7e68dcf15686cf75b3220fe457fa6bc1042529df288de222d8",
+        "contractId": "d4fde033ba3d2d696696cb7d0e80abd39aa84db8ba93038157338e85aac6f5b8",
+        "applicationPayload": "414547495350563111111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222333333333333333333333333333333333333333333333333333333333333333344444444444444444444444444444444444444444444444444444444444444445555555555555555555555555555555555555555555555555555555555555555666666666666666666666666666666666666666666666666666666666666666677777777777777777777777777777777777777777777777777777777777777770000000000000001000000003b9aca0000000000000000240008cdababababababababababababababababababababababababababababababababab",
+        "applicationPayloadLen": 292
+      },
+      "expected": {
+        "statement": "4572676f2e566572696679537461726b2e53746174656d656e740141454749532d4445564e45542d47454e455349532d49442d504c414345484c4423c4a123ffb33a1c8db89436fe0e7972bd8e4e289459ee5fd71be5440607d383d82a9f903bdb2c7e68dcf15686cf75b3220fe457fa6bc1042529df288de222d8d4fde033ba3d2d696696cb7d0e80abd39aa84db8ba93038157338e85aac6f5b824010000414547495350563111111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222333333333333333333333333333333333333333333333333333333333333333344444444444444444444444444444444444444444444444444444444444444445555555555555555555555555555555555555555555555555555555555555555666666666666666666666666666666666666666666666666666666666666666677777777777777777777777777777777777777777777777777777777777777770000000000000001000000003b9aca0000000000000000240008cdababababababababababababababababababababababababababababababababab",
+        "statementLen": 451,
+        "journalDigest_sha256": "21de7b4b7dfaf5eb5a1e9cf85691e6742b4b88cf4639a1dcb3d5568926c3fb9e",
+        "postStateDigest": "a3acc27117418996340b84e5a90f3ef4c49d22c79e44aad822ec9c313e1eb8e2",
+        "outputDigest": "7a186bf4146d48e2a9e8ab92445874cede4612eb6dec0a4bf079d9198f7b4b6c",
+        "expectedClaim": "ea19e07a4bb14cbe6cf6423cd474ac1aa2eea00c79135dd9ded527757b05c8fb"
+      }
+    }
+  ],
+  "claim_chain_kat": {
+    "note": "deriveOkClaim over a raw (unframed) journal; ErgoStarkStatementSpec.scala:25-38",
+    "programId": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "journal_ascii": "EIP-0045 independent claim oracle KAT",
+    "journalDigest_sha256": "67261f6e1ed8c95ccb856bab6331a9a3ea4bb16ba53d1993a2840b0a2f5dfb25",
+    "postStateDigest": "a3acc27117418996340b84e5a90f3ef4c49d22c79e44aad822ec9c313e1eb8e2",
+    "outputDigest": "63b627d856c66a3a8ed83ba5e1f28b172234e1c7b15d3370977bf157019d38f2",
+    "expectedClaim": "14fd85f19032d53ce5ae85f10dab8c6c3f12ae9e11a9c6b778e26cd751170e16"
+  }
+}

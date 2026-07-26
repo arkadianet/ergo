@@ -674,12 +674,12 @@ fn roundtrip_four_arg_prove_dh() {
 }
 
 #[test]
-fn roundtrip_five_arg_verify_stark() {
-    // VerifyStark (0xB9, EIP-0045, devnet-only): five positional children in
-    // sigmastate-interpreter#1116 VerifyStarkSerializer order — proofChunks
-    // (Coll[Coll[Byte]]), publicInputs (Coll[Byte]), imageId (Coll[Byte]),
-    // vmType (Int), costParams (Coll[Int]). SELF-ORACLE: this pins that OUR
-    // serialize->deserialize is byte-stable for the 5-child shape and that the
+fn roundtrip_four_arg_verify_stark() {
+    // VerifyStark (0xB9, EIP-0045, devnet-only): four positional children in the
+    // reference VerifyStarkSerializer order (sigmastate @9372697) — proofChunks
+    // (Coll[Coll[Byte]]), applicationPayload (Coll[Byte]), programId
+    // (Coll[Byte]), profileId (Coll[Byte]). SELF-ORACLE: this pins that OUR
+    // serialize->deserialize is byte-stable for the 4-child shape and that the
     // child order survives a round-trip; it is NOT byte-parity with Scala (no
     // mainnet verifyStark bytes exist to anchor against).
     use crate::sigma_value::CollValue;
@@ -694,25 +694,13 @@ fn roundtrip_five_arg_verify_stark() {
             SigmaValue::Coll(CollValue::Bytes(vec![4, 5])),
         ])),
     };
-    let vm_type = Expr::Const {
-        tpe: SigmaType::SInt,
-        val: SigmaValue::Int(0),
-    };
-    let cost_params = Expr::Const {
-        tpe: SigmaType::SColl(Box::new(SigmaType::SInt)),
-        val: SigmaValue::Coll(CollValue::Values(vec![
-            SigmaValue::Int(35), // Q
-            SigmaValue::Int(16), // D
-        ])),
-    };
     let body = Expr::Op(IrNode {
         opcode: 0xB9,
-        payload: Payload::Five(
+        payload: Payload::Four(
             Box::new(proof_chunks),
-            Box::new(byte_coll(vec![9, 8, 7])), // publicInputs
-            Box::new(byte_coll(vec![0xAB; 4])), // imageId
-            Box::new(vm_type),
-            Box::new(cost_params),
+            Box::new(byte_coll(vec![9, 8, 7])), // applicationPayload
+            Box::new(byte_coll(vec![0xCD; 32])), // programId
+            Box::new(byte_coll(vec![0xAB; 32])), // profileId
         ),
     });
     roundtrip(&body, false);

@@ -815,6 +815,7 @@ mod tests {
             self_box: Some(&inputs[0]),
             inputs: &inputs,
             ergo_tree_version: tree.version,
+            chain_domain_id: [0u8; 32],
             ..ReductionContext::minimal(0, 0)
         };
         let limit = JitCost::from_block_cost(1_000_000).map_err(|e| format!("{e:?}"))?;

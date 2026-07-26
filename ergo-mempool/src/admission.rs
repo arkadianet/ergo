@@ -52,6 +52,15 @@ pub struct TipContext<'a> {
     /// bundle so admission enforces the same burning condition as block
     /// application — same code path, no separate mempool check.
     pub reemission: Option<&'a ReemissionRuleInputs>,
+    /// This chain's genesis (height-1) header id, for the EIP-0045
+    /// `verifyStark` (0xB9) opcode's `snapshot.chainDomainId`. Threaded into
+    /// every `TxValidationCtx` admission builds so a `verifyStark`-guarded tx is
+    /// validated against the SAME genesis id block validation will reconstruct —
+    /// otherwise its statement claim binds against `[0u8; 32]` and is rejected at
+    /// admission (never selected for mining). The node computes this once via
+    /// `ergo_state::chain_domain_id(store)`; `[0u8; 32]` is the fail-closed
+    /// default before height-1 exists.
+    pub chain_domain_id: [u8; 32],
 }
 
 impl TipContext<'_> {
@@ -196,6 +205,7 @@ pub fn revalidate_pooled<V: Validator>(
     };
     let mut cost = CostAccumulator::new(cap);
     let mut tx_cx = TxValidationCtx {
+        chain_domain_id: tip_ctx.chain_domain_id,
         ctx: tip_ctx.tx_context,
         params: tip_ctx.params,
         cost: &mut cost,
@@ -705,6 +715,7 @@ pub fn check<V: Validator>(
     };
     let mut cost = CostAccumulator::new(cap);
     let mut tx_cx = TxValidationCtx {
+        chain_domain_id: cx.tip_ctx.chain_domain_id,
         ctx: cx.tip_ctx.tx_context,
         params: cx.tip_ctx.params,
         cost: &mut cost,

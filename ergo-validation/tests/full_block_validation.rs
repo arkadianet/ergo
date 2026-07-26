@@ -259,6 +259,7 @@ fn block_validate_full_block_700k_v2_pipeline() {
 
         let checked_parent = CheckedHeader::trust_me(parent.clone(), *parent_id);
         let block_ctx = BlockValidationContext {
+            chain_domain_id: [0u8; 32],
             parent: &checked_parent,
             utxo: &EmptyUtxo,
             params: &params,
@@ -321,6 +322,7 @@ fn run_validate_full_block_range(blocks_path: &str, headers_path: &str, label: &
 
         let checked_parent = CheckedHeader::trust_me(parent.clone(), *parent_id);
         let block_ctx = BlockValidationContext {
+            chain_domain_id: [0u8; 32],
             parent: &checked_parent,
             utxo: &EmptyUtxo,
             params: &params,
@@ -414,6 +416,7 @@ fn validate_full_block_eip37_activation() {
 
         let checked_parent = CheckedHeader::trust_me(parent.clone(), *parent_id);
         let block_ctx = BlockValidationContext {
+            chain_domain_id: [0u8; 32],
             parent: &checked_parent,
             utxo: &EmptyUtxo,
             params: &params,
@@ -480,6 +483,7 @@ fn parallel_equivalent_to_sequential_on_mainnet_700k() {
         let checked_parent = CheckedHeader::trust_me(parent.clone(), *parent_id);
 
         let ctx_seq = BlockValidationContext {
+            chain_domain_id: [0u8; 32],
             parent: &checked_parent,
             utxo: &EmptyUtxo,
             params: &params,
@@ -492,6 +496,7 @@ fn parallel_equivalent_to_sequential_on_mainnet_700k() {
             reemission: None,
         };
         let ctx_par = BlockValidationContext {
+            chain_domain_id: [0u8; 32],
             parent: &checked_parent,
             utxo: &EmptyUtxo,
             params: &params,
@@ -594,6 +599,7 @@ fn checkpoint_mismatch_at_pinned_height_hard_fails() {
     let bad_ckpt = Some((target_h, wrong_id));
 
     let ctx = BlockValidationContext {
+        chain_domain_id: [0u8; 32],
         parent: &checked_parent,
         utxo: &EmptyUtxo,
         params: &params,
@@ -650,6 +656,7 @@ fn checkpoint_match_at_pinned_height_passes_through() {
     let good_ckpt = Some((target_h, *header_id));
 
     let ctx = BlockValidationContext {
+        chain_domain_id: [0u8; 32],
         parent: &checked_parent,
         utxo: &EmptyUtxo,
         params: &params,
@@ -719,6 +726,7 @@ fn rule_306_rejection_parity_across_sequential_and_parallel_paths() {
 
     let checked_parent = CheckedHeader::trust_me(parent.clone(), *parent_id);
     let ctx_seq = BlockValidationContext {
+        chain_domain_id: [0u8; 32],
         parent: &checked_parent,
         utxo: &EmptyUtxo,
         params: &params,
@@ -731,6 +739,7 @@ fn rule_306_rejection_parity_across_sequential_and_parallel_paths() {
         reemission: None,
     };
     let ctx_par = BlockValidationContext {
+        chain_domain_id: [0u8; 32],
         parent: &checked_parent,
         utxo: &EmptyUtxo,
         params: &params,
@@ -815,6 +824,7 @@ fn parallel_equivalent_to_sequential_on_committed_multitx_blocks() {
         let checked_parent = CheckedHeader::trust_me(parent.clone(), *parent_id);
 
         let ctx_seq = BlockValidationContext {
+            chain_domain_id: [0u8; 32],
             parent: &checked_parent,
             utxo: &EmptyUtxo,
             params: &params,
@@ -827,6 +837,7 @@ fn parallel_equivalent_to_sequential_on_committed_multitx_blocks() {
             reemission: None,
         };
         let ctx_par = BlockValidationContext {
+            chain_domain_id: [0u8; 32],
             parent: &checked_parent,
             utxo: &EmptyUtxo,
             params: &params,
@@ -986,6 +997,7 @@ fn rule_215_gated_at_full_block_call_sites() {
 
     for &disabled in &[false, true] {
         let ctx = BlockValidationContext {
+            chain_domain_id: [0u8; 32],
             parent: &checked_parent,
             utxo: &EmptyUtxo,
             params: &params,

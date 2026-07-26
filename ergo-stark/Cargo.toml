@@ -1,0 +1,15 @@
+[package]
+name        = "ergo-stark"
+description = "Layer-1 crypto primitives for the EIP-0045 raw-seal STARK verifier: the BabyBear prime field, its degree-4 extension, the Poseidon2-BabyBear width-24 permutation/sponge, the Fiat-Shamir transcript RNG and reader, and the profile hashers (BLAKE2b-256, SHA-256). A faithful, byte-exact port of the reference sigmastate verifier — no dependency on ergo-sigma."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish    = false
+
+[dependencies]
+blake2 = { workspace = true }
+sha2   = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }

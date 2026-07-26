@@ -445,6 +445,7 @@ fn reduce_verdict(bytes: &[u8]) -> (Verdict, usize) {
             value_length_opt: None,
         }),
         ergo_tree_version: tree.version,
+        chain_domain_id: [0u8; 32],
         ..ReductionContext::minimal(0, 0)
     };
     let limit = match JitCost::from_block_cost(1_000_000) {

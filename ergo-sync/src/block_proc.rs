@@ -19,7 +19,7 @@ use ergo_ser::extension::read_extension;
 use ergo_ser::header::read_header;
 use ergo_ser::modifier_id::{compute_section_id, ExpectedSections, TYPE_AD_PROOFS, TYPE_EXTENSION};
 use ergo_state::store::StateStore;
-use ergo_state::{ChainStateRead, DigestStateStore, HeaderSectionStore};
+use ergo_state::{chain_domain_id, ChainStateRead, DigestStateStore, HeaderSectionStore};
 use ergo_validation::block::{
     validate_full_block_parallel_with_group_elements, BlockValidationContext, BlockValidationError,
     SoftForkState,
@@ -619,6 +619,7 @@ fn process_block_utxo(
         last_headers,
         script_validation_checkpoint,
         reemission,
+        chain_domain_id: chain_domain_id(store),
     };
 
     // 8. Validate the full block (no PoW/difficulty — already validated by header pipeline)
@@ -1149,6 +1150,7 @@ fn process_block_digest(
         last_headers,
         script_validation_checkpoint,
         reemission,
+        chain_domain_id: chain_domain_id(store),
     };
 
     let t0 = Instant::now();

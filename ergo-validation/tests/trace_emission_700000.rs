@@ -117,6 +117,7 @@ fn trace_inner() {
         };
         let mut cost = CostAccumulator::recording_only();
         let mut tx_cx = ergo_validation::TxValidationCtx {
+            chain_domain_id: [0u8; 32],
             ctx: &ctx,
             params: &params,
             cost: &mut cost,
@@ -251,6 +252,7 @@ fn trace_inner() {
                             last_block_utxo_root: None,
                             activated_script_version: 1,
                             ergo_tree_version: 1,
+                            chain_domain_id: [0u8; 32],
                             pre_header_version: 0,
                             pre_header_parent_id: [0u8; 32],
                             pre_header_n_bits: 0,

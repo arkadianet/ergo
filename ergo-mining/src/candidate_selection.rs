@@ -179,6 +179,13 @@ pub fn select_user_txs(
     cost_budget: u64,
     size_budget: u64,
     reemission_rules: Option<&ReemissionRuleInputs>,
+    // Genesis (height-1) header id for the EIP-0045 `verifyStark` opcode's
+    // `snapshot.chainDomainId`. Computed once by `generate_candidate` from the
+    // committed view and threaded in so a `verifyStark`-guarded pooled tx is
+    // re-validated against the SAME genesis id block validation reconstructs;
+    // otherwise its statement claim binds against `[0u8; 32]` and the tx is
+    // dropped from the candidate. `[0u8; 32]` is the fail-closed default.
+    chain_domain_id: [u8; 32],
 ) -> Result<Selected, MiningError> {
     let block_cap = JitCost::from_block_cost(params.max_block_cost).map_err(|e| {
         MiningError::IdComputation {
@@ -222,6 +229,7 @@ pub fn select_user_txs(
         let mut cost = CostAccumulator::new(block_cap);
         let checked = {
             let mut cx = TxValidationCtx {
+                chain_domain_id,
                 ctx,
                 params,
                 cost: &mut cost,
@@ -462,6 +470,7 @@ mod tests {
             u64::MAX,
             u64::MAX,
             None,
+            [0u8; 32],
         )
         .unwrap();
 
@@ -494,6 +503,7 @@ mod tests {
             u64::MAX,
             u64::MAX,
             None,
+            [0u8; 32],
         )
         .unwrap();
 
@@ -535,6 +545,7 @@ mod tests {
             u64::MAX,
             u64::MAX,
             None,
+            [0u8; 32],
         )
         .unwrap();
 
@@ -570,6 +581,7 @@ mod tests {
             u64::MAX,
             u64::MAX,
             None,
+            [0u8; 32],
         )
         .unwrap();
 
@@ -613,6 +625,7 @@ mod tests {
             u64::MAX,
             u64::MAX,
             None,
+            [0u8; 32],
         )
         .unwrap();
 
@@ -651,6 +664,7 @@ mod tests {
             u64::MAX,
             u64::MAX,
             None,
+            [0u8; 32],
         )
         .unwrap();
 
@@ -702,6 +716,7 @@ mod tests {
             u64::MAX,
             u64::MAX,
             None,
+            [0u8; 32],
         )
         .unwrap();
 
@@ -739,6 +754,7 @@ mod tests {
             u64::MAX,
             250,
             None,
+            [0u8; 32],
         )
         .unwrap();
 
@@ -755,8 +771,18 @@ mod tests {
 
         let mut overlay = CandidateOverlay::new(&utxo);
         let params = ProtocolParams::mainnet_default();
-        let sel =
-            select_user_txs(&mut overlay, &snap, &ctx(), &params, &[], 0, u64::MAX, None).unwrap();
+        let sel = select_user_txs(
+            &mut overlay,
+            &snap,
+            &ctx(),
+            &params,
+            &[],
+            0,
+            u64::MAX,
+            None,
+            [0u8; 32],
+        )
+        .unwrap();
 
         assert!(sel.checked.is_empty(), "a zero cost budget admits nothing");
     }
@@ -783,6 +809,7 @@ mod tests {
             u64::MAX,
             u64::MAX,
             None,
+            [0u8; 32],
         )
         .unwrap();
 
@@ -824,6 +851,7 @@ mod tests {
             u64::MAX,
             u64::MAX,
             None,
+            [0u8; 32],
         )
         .unwrap();
 
@@ -882,6 +910,7 @@ mod tests {
             u64::MAX,
             u64::MAX,
             None,
+            [0u8; 32],
         )
         .unwrap();
 

@@ -157,6 +157,7 @@ fn chain_validate_blocks_2_through_10() {
         let mut cost =
             CostAccumulator::new(JitCost::from_block_cost(params.max_block_cost).unwrap());
         let mut tx_cx = ergo_validation::TxValidationCtx {
+            chain_domain_id: [0u8; 32],
             ctx: &ctx,
             params: &params,
             cost: &mut cost,

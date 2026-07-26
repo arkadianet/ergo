@@ -234,6 +234,7 @@ fn run_range(range: &CostRange, params: &ProtocolParams, policy: &LocalPolicy) -
         };
 
         let mut tx_cx = ergo_validation::TxValidationCtx {
+            chain_domain_id: [0u8; 32],
             ctx: &ctx,
             params,
             cost: &mut cost,

@@ -272,6 +272,14 @@ pub fn build_budget_bounded_rent_claim(
     cost_ceiling: u64,
     size_ceiling: u64,
     reemission_rules: Option<&ReemissionRuleInputs>,
+    // Genesis (height-1) header id for the EIP-0045 `verifyStark` opcode's
+    // `snapshot.chainDomainId`, threaded from `generate_candidate` so the
+    // self-mined rent claim is validated against the same chain-domain id as
+    // the rest of the block candidate. A storage-rent spend bypasses the box's
+    // guard script (so `verifyStark` never runs here), but the value is carried
+    // for consistency with the block validator, which binds one id per block.
+    // `[0u8; 32]` is the fail-closed default.
+    chain_domain_id: [u8; 32],
 ) -> Result<Option<(CheckedTransaction, u64, u64)>, MiningError> {
     // Cap on the number of CLAIMABLE boxes. `build_rent_claim` caps on
     // claims (skipping unclaimable boxes), so shrinking this directly drops
@@ -305,6 +313,7 @@ pub fn build_budget_bounded_rent_claim(
         let mut cost_acc = CostAccumulator::recording_only();
         let checked = {
             let mut cx = TxValidationCtx {
+                chain_domain_id,
                 ctx,
                 params,
                 cost: &mut cost_acc,
@@ -539,6 +548,7 @@ mod tests {
         let mut cost =
             CostAccumulator::new(JitCost::from_block_cost(params.max_block_cost).unwrap());
         let mut cx = TxValidationCtx {
+            chain_domain_id: [0u8; 32],
             ctx: &ctx,
             params,
             cost: &mut cost,
@@ -896,6 +906,7 @@ mod tests {
             20_000,
             u64::MAX,
             None,
+            [0u8; 32],
         )
         .unwrap()
         .expect("at least one claim fits");
@@ -921,6 +932,7 @@ mod tests {
             u64::MAX,
             u64::MAX,
             None,
+            [0u8; 32],
         )
         .unwrap()
         .expect("claimable");
@@ -965,6 +977,7 @@ mod tests {
             25_000,
             u64::MAX,
             None,
+            [0u8; 32],
         )
         .expect("must not error on an oversized initial claim")
         .expect("a smaller fitting claim exists");

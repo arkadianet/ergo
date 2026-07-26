@@ -160,6 +160,7 @@ fn scala_sourced_rejection_parity() {
         let tx_bytes = hex::decode(&v.tx_hex).unwrap();
         let mut cost = CostAccumulator::recording_only();
         let mut tx_cx = ergo_validation::TxValidationCtx {
+            chain_domain_id: [0u8; 32],
             ctx: &ctx,
             params: &params,
             cost: &mut cost,

@@ -1411,6 +1411,7 @@ mod recheck_tests {
                 params: &self.params,
                 last_headers: &[],
                 reemission: None,
+                chain_domain_id: [0u8; 32],
             }
         }
     }

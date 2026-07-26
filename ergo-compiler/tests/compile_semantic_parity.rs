@@ -654,6 +654,7 @@ fn reduce_to_sigma_hex(tree: &ErgoTree, wire_bytes: &[u8]) -> Result<String, Str
             value_length_opt: None,
         }),
         ergo_tree_version: tree.version,
+        chain_domain_id: [0u8; 32],
         ..ReductionContext::minimal(0, 0)
     };
     match reduce_expr(&tree.body, &ctx, &tree.constants) {

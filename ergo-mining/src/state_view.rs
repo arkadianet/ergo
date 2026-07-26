@@ -52,6 +52,21 @@ pub trait CandidateStateView: UtxoView {
     fn get_header_bytes(&self, id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError>;
     /// Canonical header-chain id at `height` (`None` if absent).
     fn header_id_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError>;
+    /// This chain's genesis (height-1) header id for the EIP-0045 `verifyStark`
+    /// (0xB9) opcode's `snapshot.chainDomainId`. Same fail-closed semantics as
+    /// [`ergo_state::chain_domain_id`] (the block-application/mempool helper),
+    /// expressed over this view's own `header_id_at_height` accessor: a
+    /// missing/errored height-1 lookup degrades to `[0u8; 32]` so a
+    /// `verifyStark` proof bound to the real genesis id is rejected, never
+    /// spuriously accepted. Returns `[0u8; 32]` for a bare genesis being built
+    /// as block 1 (height-1 does not exist yet), which is fail-closed and
+    /// matches the apply path's default for the same state.
+    fn chain_domain_id(&self) -> [u8; 32] {
+        self.header_id_at_height(1)
+            .ok()
+            .flatten()
+            .unwrap_or([0u8; 32])
+    }
     /// Serialized block-section bytes by modifier id (`None` if absent).
     fn block_section(&self, modifier_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError>;
     /// Up to 10 applied-chain headers, tip-first; fewer near genesis, empty at

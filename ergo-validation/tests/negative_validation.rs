@@ -104,6 +104,7 @@ fn reject_no_inputs() {
     let params = ProtocolParams::mainnet_default();
     let policy = LocalPolicy::default_policy();
     let mut tx_cx = ergo_validation::TxValidationCtx {
+        chain_domain_id: [0u8; 32],
         ctx: &ctx,
         params: &params,
         cost: &mut cost,
@@ -129,6 +130,7 @@ fn reject_duplicate_inputs() {
     let params = ProtocolParams::mainnet_default();
     let policy = LocalPolicy::default_policy();
     let mut tx_cx = ergo_validation::TxValidationCtx {
+        chain_domain_id: [0u8; 32],
         ctx: &ctx,
         params: &params,
         cost: &mut cost,
@@ -154,6 +156,7 @@ fn reject_output_value_too_low() {
     let params = ProtocolParams::mainnet_default();
     let policy = LocalPolicy::default_policy();
     let mut tx_cx = ergo_validation::TxValidationCtx {
+        chain_domain_id: [0u8; 32],
         ctx: &ctx,
         params: &params,
         cost: &mut cost,
@@ -182,6 +185,7 @@ fn reject_missing_input_box() {
     let params = ProtocolParams::mainnet_default();
     let policy = LocalPolicy::default_policy();
     let mut tx_cx = ergo_validation::TxValidationCtx {
+        chain_domain_id: [0u8; 32],
         ctx: &ctx,
         params: &params,
         cost: &mut cost,
@@ -217,6 +221,7 @@ fn reject_erg_inflation() {
     let params = ProtocolParams::mainnet_default();
     let policy = LocalPolicy::default_policy();
     let mut tx_cx = ergo_validation::TxValidationCtx {
+        chain_domain_id: [0u8; 32],
         ctx: &ctx,
         params: &params,
         cost: &mut cost,
@@ -268,6 +273,7 @@ fn reject_invalid_token_minting() {
     let params = ProtocolParams::mainnet_default();
     let policy = LocalPolicy::default_policy();
     let mut tx_cx = ergo_validation::TxValidationCtx {
+        chain_domain_id: [0u8; 32],
         ctx: &ctx,
         params: &params,
         cost: &mut cost,
@@ -306,6 +312,7 @@ fn reject_erg_burn() {
     let params = ProtocolParams::mainnet_default();
     let policy = LocalPolicy::default_policy();
     let mut tx_cx = ergo_validation::TxValidationCtx {
+        chain_domain_id: [0u8; 32],
         ctx: &ctx,
         params: &params,
         cost: &mut cost,
@@ -360,6 +367,7 @@ fn reject_token_sum_over_i64_max() {
     let params = ProtocolParams::mainnet_default();
     let policy = LocalPolicy::default_policy();
     let mut tx_cx = ergo_validation::TxValidationCtx {
+        chain_domain_id: [0u8; 32],
         ctx: &ctx,
         params: &params,
         cost: &mut cost,
@@ -390,6 +398,7 @@ fn reject_no_outputs() {
     let params = ProtocolParams::mainnet_default();
     let policy = LocalPolicy::default_policy();
     let mut tx_cx = ergo_validation::TxValidationCtx {
+        chain_domain_id: [0u8; 32],
         ctx: &ctx,
         params: &params,
         cost: &mut cost,
@@ -439,6 +448,7 @@ fn reject_zero_amount_output_token() {
     let params = ProtocolParams::mainnet_default();
     let policy = LocalPolicy::default_policy();
     let mut tx_cx = ergo_validation::TxValidationCtx {
+        chain_domain_id: [0u8; 32],
         ctx: &ctx,
         params: &params,
         cost: &mut cost,
@@ -500,6 +510,7 @@ fn reject_trailing_bytes() {
     let params = ProtocolParams::mainnet_default();
     let policy = LocalPolicy::default_policy();
     let mut tx_cx = ergo_validation::TxValidationCtx {
+        chain_domain_id: [0u8; 32],
         ctx: &ctx,
         params: &params,
         cost: &mut cost,
@@ -548,6 +559,7 @@ fn allow_duplicate_data_inputs() {
     let params = ProtocolParams::mainnet_default();
     let policy = LocalPolicy::default_policy();
     let mut tx_cx = ergo_validation::TxValidationCtx {
+        chain_domain_id: [0u8; 32],
         ctx: &ctx,
         params: &params,
         cost: &mut cost,
