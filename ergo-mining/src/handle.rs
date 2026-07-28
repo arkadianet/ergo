@@ -29,10 +29,28 @@ use ergo_state::wallet::RewardKeyResolution;
 use ergo_validation::{ReemissionRuleInputs, VotingSettings};
 
 use crate::candidate::Candidate;
+use crate::config::ResolvedExtensionFields;
 use crate::emission_rules::MonetarySettings;
 use crate::engine::{BestTip, BuildReason, Template, TemplateIdentity};
 use crate::error::MiningError;
 use crate::extension_builder::validate_custom_extension_fields;
+
+/// The subset of a field set whose values are known without reading anything —
+/// used for the boot-time validation pass.
+fn statically_known(fields: &[crate::config::ExtensionFieldSource]) -> Vec<([u8; 2], Vec<u8>)> {
+    fields
+        .iter()
+        .map(|f| {
+            let v = match &f.value {
+                crate::config::ExtensionValueSource::Static(v) => v.clone(),
+                // Not yet readable; the size check runs per build. An empty
+                // stand-in still exercises the key's namespace/duplicate checks.
+                crate::config::ExtensionValueSource::File(_) => Vec::new(),
+            };
+            (f.key, v)
+        })
+        .collect()
+}
 use crate::reemission::ReemissionSettings;
 use crate::solution::{verify_solution, SolutionOutcome};
 use crate::work_message::{MinerSolution, WorkMessage};
@@ -144,7 +162,7 @@ pub struct MiningHandle {
     /// an Aegis `0xAE00` block commitment). Empty by default; set + validated via
     /// [`MiningHandle::with_extension_fields`]. `Arc` so every clone of the handle
     /// shares the one immutable config.
-    custom_extension_fields: Arc<Vec<([u8; 2], Vec<u8>)>>,
+    custom_extension_fields: Arc<Vec<crate::config::ExtensionFieldSource>>,
     /// Ids of pooled txs whose consensus re-validation failed
     /// during the most recent published Full build (suspected tip-invalid). The
     /// off-loop build worker records them here ([`MiningHandle::record_suspects`])
@@ -245,9 +263,13 @@ impl MiningHandle {
     /// builder-style like [`MiningHandle::with_rent_config`].
     pub fn with_extension_fields(
         mut self,
-        fields: Vec<([u8; 2], Vec<u8>)>,
+        fields: Vec<crate::config::ExtensionFieldSource>,
     ) -> Result<Self, MiningError> {
-        validate_custom_extension_fields(&fields)?;
+        // Everything knowable at boot: keys (namespace, duplicates) and the
+        // sizes of STATIC values. A `value_file` entry's bytes are checked per
+        // build in `resolve_extension_fields`, because the file is re-read then
+        // and is legitimately absent now.
+        validate_custom_extension_fields(&statically_known(&fields))?;
         self.custom_extension_fields = Arc::new(fields);
         Ok(self)
     }
@@ -572,10 +594,61 @@ impl MiningHandle {
         &self.voting_settings
     }
 
-    /// Operator-configured custom extension fields forwarded to the candidate
-    /// builder (empty unless set via [`MiningHandle::with_extension_fields`]).
-    pub fn custom_extension_fields(&self) -> &[([u8; 2], Vec<u8>)] {
-        &self.custom_extension_fields
+    /// Resolve the operator-configured custom extension fields for ONE
+    /// candidate build (empty unless set via
+    /// [`MiningHandle::with_extension_fields`]).
+    ///
+    /// Static entries are returned as configured. A `value_file` entry is
+    /// re-read here, which is what lets a merge-mined commitment track a moving
+    /// aux-chain tip without a node restart:
+    ///
+    /// - missing or blank file ⇒ the field is OMITTED. That is the steady state
+    ///   before the writer has published anything, and block production must
+    ///   not stall on it.
+    /// - malformed content ⇒ the build FAILS. The operator asked for a
+    ///   commitment, so mining a block that looks committed and is not would be
+    ///   worse than not mining one.
+    ///
+    /// The fully-resolved set is re-validated, so a file cannot smuggle in an
+    /// oversized value that a peer would reject.
+    pub fn resolve_extension_fields(&self) -> Result<ResolvedExtensionFields, MiningError> {
+        use crate::config::ExtensionValueSource;
+        let mut out = Vec::with_capacity(self.custom_extension_fields.len());
+        for field in self.custom_extension_fields.iter() {
+            let value = match &field.value {
+                ExtensionValueSource::Static(v) => v.clone(),
+                ExtensionValueSource::File(path) => match std::fs::read_to_string(path) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => {
+                        return Err(MiningError::InvalidConfig(format!(
+                            "[mining] extension field {:02x?} value_file {}: {e}",
+                            field.key,
+                            path.display()
+                        )))
+                    }
+                    Ok(raw) => {
+                        let trimmed = raw.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let body = trimmed
+                            .strip_prefix("0x")
+                            .or_else(|| trimmed.strip_prefix("0X"))
+                            .unwrap_or(trimmed);
+                        hex::decode(body).map_err(|e| {
+                            MiningError::InvalidConfig(format!(
+                                "[mining] extension field {:02x?} value_file {} is not hex: {e}",
+                                field.key,
+                                path.display()
+                            ))
+                        })?
+                    }
+                },
+            };
+            out.push((field.key, value));
+        }
+        validate_custom_extension_fields(&out)?;
+        Ok(out)
     }
 
     /// Resolve the reward pubkey as hex against current state. Unlike the old
@@ -593,6 +666,119 @@ impl MiningHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ExtensionFieldSource, ExtensionValueSource};
+
+    // ----- custom extension fields: per-build resolution -----
+
+    /// A plain handle; only the extension-field slot matters to these tests.
+    fn base_handle() -> MiningHandle {
+        MiningHandle::new(
+            [0x02u8; 33],
+            crate::emission_rules::MonetarySettings::mainnet(),
+            None,
+            ergo_crypto::difficulty::DifficultyParams::mainnet(),
+            ergo_validation::VotingSettings::mainnet(),
+        )
+    }
+
+    /// Build a handle carrying one `value_file`-sourced field under `0xAE00`.
+    fn handle_with_file(path: &std::path::Path) -> MiningHandle {
+        base_handle()
+            .with_extension_fields(vec![ExtensionFieldSource {
+                key: [0xAE, 0x00],
+                value: ExtensionValueSource::File(path.to_path_buf()),
+            }])
+            .expect("a file source validates at boot without existing")
+    }
+
+    fn tmp(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("ergo-extfield-{tag}-{}.hex", std::process::id()))
+    }
+
+    /// The point of the whole feature: rewriting the file changes what the NEXT
+    /// build commits, with no restart. A boot-time constant cannot express a
+    /// merge-mined tip, which moves every block.
+    #[test]
+    fn a_file_sourced_value_is_re_read_on_every_resolve() {
+        let p = tmp("moving");
+        std::fs::write(&p, "aabb").unwrap();
+        let h = handle_with_file(&p);
+        assert_eq!(
+            h.resolve_extension_fields().unwrap(),
+            vec![([0xAE, 0x00], vec![0xaa, 0xbb])]
+        );
+
+        std::fs::write(&p, "ccdd").unwrap();
+        assert_eq!(
+            h.resolve_extension_fields().unwrap(),
+            vec![([0xAE, 0x00], vec![0xcc, 0xdd])],
+            "the same handle must pick up the new value"
+        );
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// Absent or blank is the steady state before the writer publishes
+    /// anything; block production must not stall on it.
+    #[test]
+    fn a_missing_or_blank_file_commits_nothing() {
+        let p = tmp("absent");
+        std::fs::remove_file(&p).ok();
+        assert!(handle_with_file(&p)
+            .resolve_extension_fields()
+            .unwrap()
+            .is_empty());
+
+        std::fs::write(&p, "  \n").unwrap();
+        assert!(handle_with_file(&p)
+            .resolve_extension_fields()
+            .unwrap()
+            .is_empty());
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// Malformed content fails the build rather than quietly mining a block
+    /// that looks committed and is not.
+    #[test]
+    fn malformed_file_content_fails_the_build() {
+        let p = tmp("garbage");
+        std::fs::write(&p, "not hex at all").unwrap();
+        assert!(handle_with_file(&p).resolve_extension_fields().is_err());
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// A file value's SIZE is not knowable at boot, so the rule-404 cap has to
+    /// be enforced at resolve time — otherwise a file could smuggle in a value
+    /// that makes every candidate unacceptable to peers.
+    #[test]
+    fn an_oversized_file_value_is_rejected_at_resolve() {
+        let p = tmp("oversized");
+        let too_big = ergo_validation::block::EXTENSION_FIELD_VALUE_MAX_SIZE + 1;
+        std::fs::write(&p, "aa".repeat(too_big)).unwrap();
+        let err = handle_with_file(&p)
+            .resolve_extension_fields()
+            .expect_err("must reject");
+        assert!(format!("{err:?}").contains("404"), "{err:?}");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn a_static_value_still_resolves_unchanged() {
+        let h = base_handle()
+            .with_extension_fields(vec![ExtensionFieldSource {
+                key: [0xAE, 0x00],
+                value: ExtensionValueSource::Static(vec![0x01, 0x02]),
+            }])
+            .expect("valid");
+        assert_eq!(
+            h.resolve_extension_fields().unwrap(),
+            vec![([0xAE, 0x00], vec![0x01, 0x02])]
+        );
+    }
+
+    #[test]
+    fn no_configured_fields_resolves_empty() {
+        assert!(base_handle().resolve_extension_fields().unwrap().is_empty());
+    }
 
     // ----- helpers -----
 
