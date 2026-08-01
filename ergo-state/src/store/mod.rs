@@ -4,7 +4,7 @@
 //! chain_index + state_meta all in one redb write transaction.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ergo_primitives::digest::{ADDigest, Digest32};
@@ -658,6 +658,7 @@ pub struct StateMetrics {
 
 pub struct StateStore {
     db: Arc<Database>,
+    db_path: PathBuf,
     tree: AvlTree,
     height: u32,
     genesis_committed: bool,
@@ -869,6 +870,7 @@ impl StateStore {
     pub fn enable_persist_pipeline(&mut self, queue_depth: usize) {
         self.persist_pipeline = Some(crate::persist::PersistPipeline::new(
             Arc::clone(&self.db),
+            self.db_path.clone(),
             queue_depth,
             self.voting_settings.voting_length,
             self.blocks_to_keep,
@@ -937,6 +939,11 @@ impl StateStore {
     /// is shared via the arc.
     pub fn db_arc(&self) -> Arc<Database> {
         self.db.clone()
+    }
+
+    /// Path backing this store, exposed for structured diagnostics.
+    pub fn database_path(&self) -> &Path {
+        &self.db_path
     }
 
     /// Point-in-time snapshot of the store's read-only instrumentation

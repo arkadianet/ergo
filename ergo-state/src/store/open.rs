@@ -278,6 +278,7 @@ impl StateStore {
             difficulty_params: ergo_chain_spec::DifficultyParams::mainnet(),
             headers: crate::header_store::HeaderSectionTables::new(db.clone()),
             db,
+            db_path: path.to_path_buf(),
             tree,
             height,
             genesis_committed,

@@ -324,10 +324,17 @@ impl SyncExecutor {
         // been set by the caller (e.g., after detecting recent header timestamps).
         if !coordinator.sync_state().headers_chain_synced() {
             // Check if headers are near tip to auto-detect synced state
-            if let Ok(Some(meta)) = store.get_header_meta(&cs.best_header_id) {
-                coordinator
+            match store.get_header_meta(&cs.best_header_id) {
+                Ok(Some(meta)) => coordinator
                     .sync_state_mut()
-                    .check_headers_synced(meta.timestamp);
+                    .check_headers_synced(meta.timestamp),
+                Ok(None) => {}
+                Err(e) => super::report_sync_storage_failure(
+                    store,
+                    "startup",
+                    "best_header_metadata_lookup",
+                    &e,
+                ),
             }
             if !coordinator.sync_state().headers_chain_synced() {
                 info!("skipping recovery — headers not near tip");

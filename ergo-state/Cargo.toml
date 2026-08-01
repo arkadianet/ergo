@@ -11,7 +11,7 @@ publish    = false
 # Re-export crate-internal helpers (`apply_block_unchecked_for_test`,
 # `apply_block_checked_for_test`) to integration tests. Production
 # code never sets this.
-test-helpers = []
+test-helpers = ["dep:tracing-subscriber"]
 # Exposes `forced_full_recompute_digest` — a test-only oracle that
 # rebuilds the root digest from structure, ignoring stored child
 # labels. Used by the `avl_labels_oracle` integration tests to prove
@@ -38,6 +38,7 @@ redb              = { workspace = true, features = ["logging"] }
 serde             = { workspace = true, features = ["derive"] }
 thiserror         = { workspace = true }
 tracing           = { workspace = true }
+tracing-subscriber = { workspace = true, optional = true }
 
 [dev-dependencies]
 ergo-state        = { path = ".", features = ["test-helpers", "recompute-oracle"] }

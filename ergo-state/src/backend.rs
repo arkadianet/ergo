@@ -29,6 +29,8 @@
 //! reaches the trait surface yet.
 #![allow(dead_code)]
 
+use std::path::Path;
+
 use crate::chain::{ChainStateMeta, HeaderMeta};
 use crate::store::StateError;
 
@@ -265,6 +267,13 @@ pub enum StateBackendKind {
 }
 
 impl StateBackendKind {
+    pub fn database_path(&self) -> &Path {
+        match self {
+            Self::Utxo(store) => store.database_path(),
+            Self::Digest(store) => store.database_path(),
+        }
+    }
+
     /// Borrow the UTXO backend, or `None` for a digest backend.
     /// UTXO-only subsystems (mempool, wallet, indexer, snapshot,
     /// mining, popow) call this behind their mode gates.

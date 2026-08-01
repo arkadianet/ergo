@@ -13,13 +13,15 @@
 //! Backpressure: bounded channel. When full, the main thread blocks on
 //! send. This bounds memory from in-flight dirty sets.
 
+use std::error::Error;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 use redb::{Database, ReadableTable};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::store::{
     StateError, AVL_NODES, CHAIN_INDEX, CHAIN_STATE_META, HEADER_CHAIN_INDEX, HEADER_META,
@@ -245,6 +247,32 @@ pub(crate) struct PersistJob {
     pub wallet_payload: Option<crate::store::WalletApplyPayload>,
 }
 
+#[derive(Clone, Copy)]
+struct CommittedHeights {
+    full_block: u32,
+    header: u32,
+}
+
+impl CommittedHeights {
+    fn before(job: &PersistJob) -> Self {
+        Self {
+            full_block: job.old_best_full_block_height,
+            header: job.old_best_header_height,
+        }
+    }
+
+    fn after(job: &PersistJob) -> Self {
+        Self {
+            full_block: job.height,
+            header: if job.best_header_bumped {
+                job.height
+            } else {
+                job.old_best_header_height
+            },
+        }
+    }
+}
+
 /// One block-section payload to persist alongside the AVL / chain
 /// metadata in the same redb commit.
 #[derive(Clone)]
@@ -313,6 +341,133 @@ pub struct PersistPipeline {
 /// path to the existing `ibd_flush_interval` durability strategy.
 pub(crate) const MAX_BATCH_BLOCKS: usize = 50;
 
+#[derive(Clone, Copy)]
+struct PersistFailureContext<'a> {
+    db_path: &'a Path,
+    committed_full_block_height: Option<u32>,
+    committed_header_height: Option<u32>,
+    attempted_height: Option<u32>,
+}
+
+impl<'a> PersistFailureContext<'a> {
+    fn storage_context(
+        self,
+        operation: &'static str,
+    ) -> crate::storage_observability::StorageFailureContext<'a> {
+        crate::storage_observability::StorageFailureContext {
+            subsystem: "state",
+            component: "persist_worker",
+            database_path: Some(self.db_path),
+            operation,
+            best_full_block_height: self.committed_full_block_height,
+            best_header_height: self.committed_header_height,
+            attempted_height: self.attempted_height,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PersistBatchError {
+    operation: &'static str,
+    message: String,
+    source: Option<Box<dyn Error + Send + Sync>>,
+    observed: bool,
+}
+
+impl PersistBatchError {
+    fn unobserved(operation: &'static str, message: String) -> Self {
+        Self {
+            operation,
+            message,
+            source: None,
+            observed: false,
+        }
+    }
+
+    fn unobserved_with_source<E>(operation: &'static str, message: String, source: E) -> Self
+    where
+        E: Error + Send + Sync + 'static,
+    {
+        Self {
+            operation,
+            message,
+            source: Some(Box::new(source)),
+            observed: false,
+        }
+    }
+
+    fn with_message(mut self, message: String) -> Self {
+        self.message = message;
+        self
+    }
+
+    fn report_if_needed(&self, context: PersistFailureContext<'_>) {
+        if self.observed {
+            return;
+        }
+        crate::storage_observability::report_storage_failure(
+            &context.storage_context(self.operation),
+            self,
+        );
+    }
+}
+
+impl std::fmt::Display for PersistBatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl Error for PersistBatchError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.source
+            .as_deref()
+            .map(|source| source as &(dyn Error + 'static))
+    }
+}
+
+fn observe_persist_error<E>(
+    context: PersistFailureContext<'_>,
+    operation: &'static str,
+    error: E,
+) -> PersistBatchError
+where
+    E: Error + Send + Sync + 'static,
+{
+    let message = error.to_string();
+    crate::storage_observability::report_storage_failure(
+        &context.storage_context(operation),
+        &error,
+    );
+    PersistBatchError {
+        operation,
+        message,
+        source: Some(Box::new(error)),
+        observed: true,
+    }
+}
+
+trait ObservePersistError<T> {
+    fn observe_persist_error(
+        self,
+        context: PersistFailureContext<'_>,
+        operation: &'static str,
+    ) -> Result<T, PersistBatchError>;
+}
+
+impl<T, E> ObservePersistError<T> for Result<T, E>
+where
+    E: Error + Send + Sync + 'static,
+{
+    fn observe_persist_error(
+        self,
+        context: PersistFailureContext<'_>,
+        operation: &'static str,
+    ) -> Result<T, PersistBatchError> {
+        self.map_err(|error| observe_persist_error(context, operation, error))
+    }
+}
+
 impl PersistPipeline {
     /// Spawn the persist thread with a bounded job queue.
     ///
@@ -321,6 +476,7 @@ impl PersistPipeline {
     /// redb txn (see `MAX_BATCH_BLOCKS`). 64-128 is a good range.
     pub fn new(
         db: Arc<Database>,
+        db_path: PathBuf,
         queue_depth: usize,
         voting_length: u32,
         blocks_to_keep: i32,
@@ -336,6 +492,7 @@ impl PersistPipeline {
                 let _guard = WorkerWatchGuard(Arc::clone(&worker_watch));
                 Self::persist_loop(
                     db,
+                    db_path,
                     rx,
                     result_tx,
                     worker_watch,
@@ -431,12 +588,15 @@ impl PersistPipeline {
 
     fn persist_loop(
         db: Arc<Database>,
+        db_path: PathBuf,
         rx: Receiver<PersistJob>,
         result_tx: Sender<PersistResult>,
         watch: Arc<CommitWatch>,
         voting_length: u32,
         blocks_to_keep: i32,
     ) {
+        let mut committed_heights = None;
+
         loop {
             // Block on first job. Channel close ends the loop.
             let first = match rx.recv() {
@@ -464,9 +624,24 @@ impl PersistPipeline {
                 .map(|j| (j.avl_writes.len() + j.avl_deletes.len()) as u32)
                 .sum();
             let batch_size = batch.len();
+            let committed_before =
+                *committed_heights.get_or_insert_with(|| CommittedHeights::before(&batch[0]));
+            let committed_after = CommittedHeights::after(
+                batch
+                    .last()
+                    .expect("persist batches always contain the first received job"),
+            );
 
-            match Self::execute_batch(&db, batch, voting_length, blocks_to_keep) {
+            match Self::execute_batch_with_committed_heights(
+                &db,
+                &db_path,
+                batch,
+                voting_length,
+                blocks_to_keep,
+                Some(committed_before),
+            ) {
                 Ok(commit_ms) => {
+                    committed_heights = Some(committed_after);
                     if batch_size > 1 {
                         debug!(
                             n = batch_size,
@@ -504,7 +679,6 @@ impl PersistPipeline {
                 }
                 Err(e) => {
                     let last_h = *heights.last().unwrap_or(&0);
-                    warn!(n = batch_size, last_h, error = %e, "persist batch error");
                     // Bump the watch's error state FIRST so any waiter
                     // in `flush()` unblocks even if the result channel
                     // is full.
@@ -535,17 +709,60 @@ impl PersistPipeline {
     /// the LAST bumping job's tip to the FIRST bumping job's old base.
     /// Pruning uses the LAST job's `prune_below` (pruning is monotonic).
     /// Durability: Immediate iff ANY job in the batch is durable.
+    #[cfg(test)]
     fn execute_batch(
         db: &Database,
+        db_path: &Path,
         jobs: Vec<PersistJob>,
         voting_length: u32,
         blocks_to_keep: i32,
     ) -> Result<f64, String> {
+        let committed_heights = jobs.first().map(CommittedHeights::before);
+        Self::execute_batch_with_committed_heights(
+            db,
+            db_path,
+            jobs,
+            voting_length,
+            blocks_to_keep,
+            committed_heights,
+        )
+    }
+
+    fn execute_batch_with_committed_heights(
+        db: &Database,
+        db_path: &Path,
+        jobs: Vec<PersistJob>,
+        voting_length: u32,
+        blocks_to_keep: i32,
+        committed_heights: Option<CommittedHeights>,
+    ) -> Result<f64, String> {
+        let failure_context = PersistFailureContext {
+            db_path,
+            committed_full_block_height: committed_heights.map(|heights| heights.full_block),
+            committed_header_height: committed_heights.map(|heights| heights.header),
+            attempted_height: jobs.last().map(|job| job.height),
+        };
+        Self::execute_batch_inner(db, jobs, voting_length, blocks_to_keep, failure_context).map_err(
+            |error| {
+                error.report_if_needed(failure_context);
+                error.to_string()
+            },
+        )
+    }
+
+    fn execute_batch_inner(
+        db: &Database,
+        jobs: Vec<PersistJob>,
+        voting_length: u32,
+        blocks_to_keep: i32,
+        failure_context: PersistFailureContext<'_>,
+    ) -> Result<f64, PersistBatchError> {
         if jobs.is_empty() {
             return Ok(0.0);
         }
 
-        let mut write_txn = crate::begin_write_qr(db).map_err(|e| e.to_string())?;
+        let mut write_txn = crate::begin_write_qr(db)
+            .observe_persist_error(failure_context, "background_persist_begin_write")?;
 
         // Durability mode per batch:
         //   - `None`     : pure-memory commit, queued for next durable flush.
@@ -578,15 +795,19 @@ impl PersistPipeline {
         // 1. AVL_NODES — apply in job order so later blocks overwrite
         //    earlier writes on the same node id (redb insert is upsert).
         {
-            let mut avl_table = write_txn.open_table(AVL_NODES).map_err(|e| e.to_string())?;
+            let mut avl_table = write_txn
+                .open_table(AVL_NODES)
+                .observe_persist_error(failure_context, "background_persist_batch")?;
             for job in &jobs {
                 for (id, bytes) in &job.avl_writes {
                     avl_table
                         .insert(*id, bytes.as_slice())
-                        .map_err(|e| e.to_string())?;
+                        .observe_persist_error(failure_context, "background_persist_batch")?;
                 }
                 for id in &job.avl_deletes {
-                    avl_table.remove(*id).map_err(|e| e.to_string())?;
+                    avl_table
+                        .remove(*id)
+                        .observe_persist_error(failure_context, "background_persist_batch")?;
                 }
             }
         }
@@ -595,11 +816,13 @@ impl PersistPipeline {
         //    rollback_to(target) walks undo entries by height, so each block
         //    needs its own entry even when batched.
         {
-            let mut undo_table = write_txn.open_table(UNDO_LOG).map_err(|e| e.to_string())?;
+            let mut undo_table = write_txn
+                .open_table(UNDO_LOG)
+                .observe_persist_error(failure_context, "background_persist_batch")?;
             for job in &jobs {
                 undo_table
                     .insert(job.undo_key.as_slice(), job.undo_bytes.as_slice())
-                    .map_err(|e| e.to_string())?;
+                    .observe_persist_error(failure_context, "background_persist_batch")?;
             }
         }
 
@@ -609,19 +832,19 @@ impl PersistPipeline {
         {
             let mut meta_table = write_txn
                 .open_table(STATE_META)
-                .map_err(|e| e.to_string())?;
+                .observe_persist_error(failure_context, "background_persist_batch")?;
             meta_table
                 .insert("root", last.state_meta_bytes.as_slice())
-                .map_err(|e| e.to_string())?;
+                .observe_persist_error(failure_context, "background_persist_batch")?;
             meta_table
                 .insert("allocator", last.alloc_meta_bytes.as_slice())
-                .map_err(|e| e.to_string())?;
+                .observe_persist_error(failure_context, "background_persist_batch")?;
             meta_table
                 .insert(
                     crate::store::NODE_FORMAT_VERSION_KEY,
                     crate::store::NODE_FORMAT_V2,
                 )
-                .map_err(|e| e.to_string())?;
+                .observe_persist_error(failure_context, "background_persist_batch")?;
         }
 
         // 4. CHAIN_INDEX — one entry per job (height → header_id), so range
@@ -629,11 +852,11 @@ impl PersistPipeline {
         {
             let mut chain_table = write_txn
                 .open_table(CHAIN_INDEX)
-                .map_err(|e| e.to_string())?;
+                .observe_persist_error(failure_context, "background_persist_batch")?;
             for job in &jobs {
                 chain_table
                     .insert(job.height as u64, job.header_id.as_slice())
-                    .map_err(|e| e.to_string())?;
+                    .observe_persist_error(failure_context, "background_persist_batch")?;
             }
         }
 
@@ -644,10 +867,10 @@ impl PersistPipeline {
         {
             let mut cs_table = write_txn
                 .open_table(CHAIN_STATE_META)
-                .map_err(|e| e.to_string())?;
+                .observe_persist_error(failure_context, "background_persist_batch")?;
             cs_table
                 .insert("chain_state", last.chain_state_bytes.as_slice())
-                .map_err(|e| e.to_string())?;
+                .observe_persist_error(failure_context, "background_persist_batch")?;
         }
 
         // 6. HEADER_CHAIN_INDEX — rewrite once if any job in the batch
@@ -672,7 +895,7 @@ impl PersistPipeline {
             {
                 let mut m_table = write_txn
                     .open_table(HEADER_META)
-                    .map_err(|e| e.to_string())?;
+                    .observe_persist_error(failure_context, "background_persist_batch")?;
                 // Track each just-synthesized header so the next bump in
                 // the same batch links to it. The first bump links to the
                 // job's `parent_header_id` (which captures the pre-batch
@@ -681,7 +904,7 @@ impl PersistPipeline {
                 for job in jobs.iter().filter(|j| j.best_header_bumped) {
                     let present = m_table
                         .get(job.header_id.as_slice())
-                        .map_err(|e| e.to_string())?
+                        .observe_persist_error(failure_context, "background_persist_batch")?
                         .is_some();
                     if !present {
                         let parent_id = prev_header_id.unwrap_or(job.parent_header_id);
@@ -694,7 +917,7 @@ impl PersistPipeline {
                         };
                         m_table
                             .insert(job.header_id.as_slice(), meta.serialize().as_slice())
-                            .map_err(|e| e.to_string())?;
+                            .observe_persist_error(failure_context, "background_persist_batch")?;
                     }
                     prev_header_id = Some(job.header_id);
                 }
@@ -702,10 +925,10 @@ impl PersistPipeline {
 
             let m_table = write_txn
                 .open_table(HEADER_META)
-                .map_err(|e| e.to_string())?;
+                .observe_persist_error(failure_context, "background_persist_batch")?;
             let mut idx_table = write_txn
                 .open_table(HEADER_CHAIN_INDEX)
-                .map_err(|e| e.to_string())?;
+                .observe_persist_error(failure_context, "background_persist_batch")?;
             crate::store::rewrite_best_chain_into_index(
                 &mut idx_table,
                 &m_table,
@@ -713,28 +936,31 @@ impl PersistPipeline {
                 last_bump.height,
                 first_bump.old_best_header_height,
             )
-            .map_err(|e| e.to_string())?;
+            .observe_persist_error(failure_context, "background_persist_batch")?;
         }
 
         // 7. Undo prune — use the LAST job's `prune_below`. Pruning is
         //    monotonic: a higher prune_below subsumes any earlier value.
         if let Some(prune_below) = last.prune_below {
             let prune_upper = (prune_below + 1).to_be_bytes();
-            let mut undo_table = write_txn.open_table(UNDO_LOG).map_err(|e| e.to_string())?;
+            let mut undo_table = write_txn
+                .open_table(UNDO_LOG)
+                .observe_persist_error(failure_context, "background_persist_batch")?;
             let mut to_delete: Vec<Vec<u8>> = Vec::new();
             {
                 let range = undo_table
                     .range::<&[u8]>(..prune_upper.as_slice())
-                    .map_err(|e| e.to_string())?;
+                    .observe_persist_error(failure_context, "background_persist_batch")?;
                 for entry in range {
-                    let (key, _) = entry.map_err(|e| e.to_string())?;
+                    let (key, _) =
+                        entry.observe_persist_error(failure_context, "background_persist_batch")?;
                     to_delete.push(key.value().to_vec());
                 }
             }
             for key in &to_delete {
                 undo_table
                     .remove(key.as_slice())
-                    .map_err(|e| e.to_string())?;
+                    .observe_persist_error(failure_context, "background_persist_batch")?;
             }
         }
 
@@ -760,18 +986,21 @@ impl PersistPipeline {
             let mut current_min: u32 = {
                 let meta = write_txn
                     .open_table(crate::store::STATE_META)
-                    .map_err(|e| e.to_string())?;
+                    .observe_persist_error(failure_context, "background_persist_batch")?;
                 let bytes_opt = meta
                     .get(crate::store::MINIMAL_FULL_BLOCK_HEIGHT_KEY)
-                    .map_err(|e| e.to_string())?
+                    .observe_persist_error(failure_context, "background_persist_batch")?
                     .map(|g| g.value().to_vec());
                 drop(meta);
                 match bytes_opt {
                     Some(bytes) => {
                         if bytes.len() != 4 {
-                            return Err(format!(
-                                "minimal_full_block_height payload has unexpected length: {}",
-                                bytes.len()
+                            return Err(PersistBatchError::unobserved(
+                                "background_persist_prune_sentinel_decode",
+                                format!(
+                                    "minimal_full_block_height payload has unexpected length: {}",
+                                    bytes.len()
+                                ),
                             ));
                         }
                         let mut buf = [0u8; 4];
@@ -799,7 +1028,7 @@ impl PersistPipeline {
                         crate::store::StateStore::delete_block_sections_at_height_in_txn(
                             &write_txn, h,
                         )
-                        .map_err(|e| e.to_string())?;
+                        .observe_persist_error(failure_context, "background_persist_batch")?;
                     }
                     current_min = new_min;
                     sentinel_advanced = true;
@@ -810,7 +1039,7 @@ impl PersistPipeline {
                     &write_txn,
                     current_min,
                 )
-                .map_err(|e| e.to_string())?;
+                .observe_persist_error(failure_context, "background_persist_batch")?;
             }
         }
 
@@ -828,27 +1057,37 @@ impl PersistPipeline {
         {
             let mut t = write_txn
                 .open_table(crate::active_params::VOTED_PARAMS)
-                .map_err(|e| e.to_string())?;
+                .observe_persist_error(failure_context, "background_persist_batch")?;
             for job in &jobs {
                 if let Some(p) = &job.voted_params_row {
                     if !(job.height.is_multiple_of(voting_length) && job.height > 0) {
-                        return Err(format!(
-                            "voted_params_row supplied for non-epoch-start height {} \
-                             (voting_length={voting_length})",
-                            job.height
+                        return Err(PersistBatchError::unobserved(
+                            "background_persist_voted_params_epoch_gate",
+                            format!(
+                                "voted_params_row supplied for non-epoch-start height {} \
+                                 (voting_length={voting_length})",
+                                job.height
+                            ),
                         ));
                     }
                     if p.epoch_start_height != job.height {
-                        return Err(format!(
-                            "voted_params_row.epoch_start_height ({}) != block height ({})",
-                            p.epoch_start_height, job.height
+                        return Err(PersistBatchError::unobserved(
+                            "background_persist_voted_params_height_match",
+                            format!(
+                                "voted_params_row.epoch_start_height ({}) != block height ({})",
+                                p.epoch_start_height, job.height
+                            ),
                         ));
                     }
-                    let bytes = p
-                        .serialize()
-                        .map_err(|e| format!("voted_params at h={}: {e}", job.height))?;
+                    let bytes = p.serialize().map_err(|error| {
+                        PersistBatchError::unobserved_with_source(
+                            "background_persist_voted_params_serialize",
+                            format!("voted_params at h={}: {error}", job.height),
+                            error,
+                        )
+                    })?;
                     t.insert(p.epoch_start_height as u64, bytes.as_slice())
-                        .map_err(|e| e.to_string())?;
+                        .observe_persist_error(failure_context, "background_persist_batch")?;
                 }
             }
         }
@@ -883,9 +1122,25 @@ impl PersistPipeline {
                         &job.header_id,
                         &btxs,
                     )
-                    .map_err(|e| format!("wallet apply at h={}: {e}", job.height))?;
+                    .map_err(|error| {
+                        let message = format!("wallet apply at h={}: {error}", job.height);
+                        observe_persist_error(
+                            failure_context,
+                            "background_persist_wallet_apply",
+                            error,
+                        )
+                        .with_message(message)
+                    })?;
                     crate::wallet::maturity::promote_matured_boxes(&write_txn, job.height)
-                        .map_err(|e| format!("wallet maturity at h={}: {e}", job.height))?;
+                        .map_err(|error| {
+                            let message = format!("wallet maturity at h={}: {error}", job.height);
+                            observe_persist_error(
+                                failure_context,
+                                "background_persist_wallet_maturity",
+                                error,
+                            )
+                            .with_message(message)
+                        })?;
                 }
                 // Only when scans are registered — skips opening/creating the
                 // scan tables and the per-input spend-index probe otherwise.
@@ -897,13 +1152,23 @@ impl PersistPipeline {
                         job.height,
                         &job.header_id,
                     )
-                    .map_err(|e| format!("scan apply at h={}: {e}", job.height))?;
+                    .map_err(|error| {
+                        let message = format!("scan apply at h={}: {error}", job.height);
+                        observe_persist_error(
+                            failure_context,
+                            "background_persist_scan_apply",
+                            error,
+                        )
+                        .with_message(message)
+                    })?;
                 }
             }
         }
 
         let commit_start = std::time::Instant::now();
-        write_txn.commit().map_err(|e| e.to_string())?;
+        write_txn
+            .commit()
+            .observe_persist_error(failure_context, "background_persist_commit")?;
         Ok(commit_start.elapsed().as_secs_f64() * 1000.0)
     }
 }
@@ -965,6 +1230,8 @@ impl Drop for PersistPipeline {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    use crate::test_helpers::SharedBuf;
 
     // ----- helpers -----
 
@@ -1037,11 +1304,256 @@ mod tests {
         // voting_length is a safe default — the gate only fires on jobs
         // that carry `voted_params_row = Some(_)`, which the unit tests
         // here don't synthesize.
-        let p = PersistPipeline::new(db, queue_depth, 1024, -1);
+        let p = PersistPipeline::new(db, path, queue_depth, 1024, -1);
         (dir, p)
     }
 
+    fn capture_batch_failure(
+        db: &Database,
+        path: &Path,
+        jobs: Vec<PersistJob>,
+        voting_length: u32,
+        blocks_to_keep: i32,
+    ) -> (String, Vec<serde_json::Value>) {
+        let writer = SharedBuf::new();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(writer.clone())
+            .finish();
+
+        let error = tracing::subscriber::with_default(subscriber, || {
+            PersistPipeline::execute_batch(db, path, jobs, voting_length, blocks_to_keep)
+                .expect_err("batch must fail")
+        });
+        let output = String::from_utf8(writer.bytes()).unwrap();
+        let events = output
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        (error, events)
+    }
+
     // ----- happy path -----
+
+    #[test]
+    fn corrupt_prune_sentinel_batch_failure_emits_one_diagnostic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("persist.redb");
+        let db = Database::create(&path).unwrap();
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(crate::store::STATE_META).unwrap();
+            table
+                .insert(
+                    crate::store::MINIMAL_FULL_BLOCK_HEIGHT_KEY,
+                    &[1u8, 2, 3][..],
+                )
+                .unwrap();
+        }
+        write_txn.commit().unwrap();
+
+        let (error, events) = capture_batch_failure(&db, &path, vec![minimal_job(8)], 1024, 100);
+
+        assert!(error.contains("unexpected length"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0]["fields"]["operation"],
+            "background_persist_prune_sentinel_decode"
+        );
+    }
+
+    #[test]
+    fn voted_parameter_direct_failures_each_emit_one_diagnostic() {
+        let mut non_epoch = ergo_validation::active_params::scala_launch_mainnet();
+        non_epoch.epoch_start_height = 1;
+        let mut non_epoch_job = minimal_job(1);
+        non_epoch_job.voted_params_row = Some(non_epoch);
+
+        let mut wrong_height = ergo_validation::active_params::scala_launch_mainnet();
+        wrong_height.epoch_start_height = 0;
+        let mut wrong_height_job = minimal_job(1024);
+        wrong_height_job.voted_params_row = Some(wrong_height);
+
+        let mut invalid_codec = ergo_validation::active_params::scala_launch_mainnet();
+        invalid_codec.epoch_start_height = 1024;
+        invalid_codec.extra.push((1, 7));
+        let mut invalid_codec_job = minimal_job(1024);
+        invalid_codec_job.voted_params_row = Some(invalid_codec);
+
+        let cases = [
+            (
+                non_epoch_job,
+                "background_persist_voted_params_epoch_gate",
+                "non-epoch-start",
+            ),
+            (
+                wrong_height_job,
+                "background_persist_voted_params_height_match",
+                "epoch_start_height",
+            ),
+            (
+                invalid_codec_job,
+                "background_persist_voted_params_serialize",
+                "reserved id",
+            ),
+        ];
+
+        for (job, operation, expected_error) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("persist.redb");
+            let db = Database::create(&path).unwrap();
+            let (error, events) = capture_batch_failure(&db, &path, vec![job], 1024, -1);
+
+            assert!(error.contains(expected_error), "{error}");
+            assert_eq!(events.len(), 1, "{operation}");
+            assert_eq!(events[0]["fields"]["operation"], operation);
+        }
+    }
+
+    #[test]
+    fn typed_redb_batch_failure_is_not_reported_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("persist.redb");
+        let db = Database::create(&path).unwrap();
+        let write_txn = db.begin_write().unwrap();
+        {
+            let wrong_schema: redb::TableDefinition<&str, &str> =
+                redb::TableDefinition::new("avl_nodes");
+            write_txn.open_table(wrong_schema).unwrap();
+        }
+        write_txn.commit().unwrap();
+
+        let (_error, events) = capture_batch_failure(&db, &path, vec![minimal_job(1)], 1024, -1);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["fields"]["operation"], "background_persist_batch");
+    }
+
+    #[test]
+    fn batch_failure_reports_committed_and_attempted_heights() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("persist.redb");
+        let db = Database::create(&path).unwrap();
+
+        let mut first = minimal_job(701);
+        first.old_best_full_block_height = 700;
+        first.old_best_header_height = 900;
+        let mut last = minimal_job(702);
+        last.old_best_full_block_height = 701;
+        last.old_best_header_height = 900;
+        let mut params = ergo_validation::active_params::scala_launch_mainnet();
+        params.epoch_start_height = 702;
+        last.voted_params_row = Some(params);
+
+        let (_error, events) = capture_batch_failure(&db, &path, vec![first, last], 1024, -1);
+
+        assert_eq!(events.len(), 1);
+        let fields = &events[0]["fields"];
+        assert_eq!(fields["best_full_block_height"], 700);
+        assert_eq!(fields["best_header_height"], 900);
+        assert_eq!(fields["attempted_height"], 702);
+    }
+
+    #[test]
+    fn consecutive_failed_batches_keep_last_successful_worker_heights() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("persist.redb");
+        let db = Arc::new(Database::create(&path).unwrap());
+        let writer = SharedBuf::new();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(writer.clone())
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let (job_tx, job_rx) = bounded(4);
+        let (result_tx, result_rx) = bounded(4);
+        let watch = CommitWatch::new();
+        let worker_db = Arc::clone(&db);
+        let worker_path = path.clone();
+        let worker = std::thread::spawn(move || {
+            tracing::dispatcher::with_default(&dispatch, || {
+                PersistPipeline::persist_loop(
+                    worker_db,
+                    worker_path,
+                    job_rx,
+                    result_tx,
+                    watch,
+                    1024,
+                    -1,
+                );
+            });
+        });
+
+        let mut initial_success = minimal_job(800);
+        initial_success.old_best_full_block_height = 799;
+        initial_success.old_best_header_height = 900;
+        job_tx.send(initial_success).unwrap();
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            PersistResult::Ok { height: 800, .. }
+        ));
+
+        let mut reorg_success = minimal_job(700);
+        reorg_success.old_best_full_block_height = 800;
+        reorg_success.old_best_header_height = 650;
+        job_tx.send(reorg_success).unwrap();
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            PersistResult::Ok { height: 700, .. }
+        ));
+
+        let mut first = minimal_job(701);
+        first.old_best_full_block_height = 700;
+        first.old_best_header_height = 650;
+        let mut non_epoch = ergo_validation::active_params::scala_launch_mainnet();
+        non_epoch.epoch_start_height = 701;
+        first.voted_params_row = Some(non_epoch);
+        job_tx.send(first).unwrap();
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            PersistResult::Err { height: 701, .. }
+        ));
+
+        let mut second = minimal_job(1024);
+        second.old_best_full_block_height = 1023;
+        second.old_best_header_height = 1100;
+        let mut invalid_codec = ergo_validation::active_params::scala_launch_mainnet();
+        invalid_codec.epoch_start_height = 1024;
+        invalid_codec.extra.push((1, 7));
+        second.voted_params_row = Some(invalid_codec);
+        job_tx.send(second).unwrap();
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            PersistResult::Err { height: 1024, .. }
+        ));
+
+        drop(job_tx);
+        worker.join().unwrap();
+
+        let output = String::from_utf8(writer.bytes()).unwrap();
+        let events: Vec<serde_json::Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0]["fields"]["operation"],
+            "background_persist_voted_params_epoch_gate"
+        );
+        assert_eq!(
+            events[1]["fields"]["operation"],
+            "background_persist_voted_params_serialize"
+        );
+        assert_eq!(events[0]["fields"]["best_full_block_height"], 700);
+        assert_eq!(events[0]["fields"]["best_header_height"], 650);
+        assert_eq!(events[1]["fields"]["best_full_block_height"], 700);
+        assert_eq!(events[1]["fields"]["best_header_height"], 650);
+        assert_eq!(events[1]["fields"]["attempted_height"], 1024);
+    }
 
     #[test]
     fn flush_with_no_jobs_returns_immediately() {
@@ -1084,7 +1596,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("persist.redb");
         let db = Arc::new(Database::create(&path).unwrap());
-        let p = PersistPipeline::new(Arc::clone(&db), 4, 1024, -1);
+        let p = PersistPipeline::new(Arc::clone(&db), path.clone(), 4, 1024, -1);
 
         let tracked_tree = vec![0x00, 0x08, 0xCDu8, 0x02, 0xAA, 0xBB];
         let box_id = [0xA1u8; 32];
