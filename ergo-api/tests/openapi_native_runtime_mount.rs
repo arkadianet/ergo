@@ -639,7 +639,7 @@ async fn canonical_family_inventories_are_bidirectional_and_fully_mounted() {
     let scala_documented = scala_openapi_operations();
     assert_eq!(inventory.rust, rust_documented);
     assert_eq!(inventory.scala, scala_documented);
-    assert_eq!(inventory.rust.len(), 179);
+    assert_eq!(inventory.rust.len(), 180);
     assert_eq!(inventory.scala.len(), 125);
     assert!(inventory.rust.is_disjoint(&inventory.scala));
 

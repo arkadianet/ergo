@@ -10,7 +10,7 @@ use utoipa::ToSchema;
 use super::dto::unix_ms_to_iso;
 use super::extract::V1Query;
 use super::{parse_id32, V1State};
-use crate::v1::error::{v1_error, Reason};
+use crate::v1::error::{v1_error, Reason, V1Error};
 use crate::v1::pricing::{
     reference_spot, select_reference_pool, DiscoveryError, IndexerPoolDiscovery, PoolDiscovery,
 };
@@ -200,6 +200,22 @@ fn unpriced_item(token_id: String, reason: &str) -> PriceItem {
     }
 }
 
+/// `GET /api/v1/prices` — one token's deterministic Spectrum N2T reference
+/// spot price in ERG.
+#[utoipa::path(
+    get, path = "/api/v1/prices", tag = "prices",
+    params(
+        ("token_id" = String, Query, description = "64-char lowercase hex token id"),
+        ("quote" = Option<String>, Query, description = "Quote asset; defaults to ERG"),
+    ),
+    responses(
+        (status = 200, description = "Reference price or an unpriced reason", body = PricesResponse),
+        (status = 400, description = "Malformed token id, query, or unsupported quote", body = V1Error),
+        (status = 409, description = "Extra index disabled", body = V1Error),
+        (status = 500, description = "Price discovery index read failed", body = V1Error),
+        (status = 503, description = "Extra index unavailable or price discovery incomplete", body = V1Error),
+    ),
+)]
 pub async fn get_prices(
     State(state): State<V1State>,
     V1Query(query): V1Query<PricesQuery>,

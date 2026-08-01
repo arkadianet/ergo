@@ -2788,6 +2788,58 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/NodeVersion'
+  /api/v1/prices:
+    get:
+      tags:
+      - prices
+      summary: |-
+        `GET /api/v1/prices` — one token's deterministic Spectrum N2T reference
+        spot price in ERG.
+      operationId: get_prices
+      parameters:
+      - name: token_id
+        in: query
+        description: 64-char lowercase hex token id
+        required: true
+        schema:
+          type: string
+      - name: quote
+        in: query
+        description: Quote asset; defaults to ERG
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Reference price or an unpriced reason
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PricesResponse'
+        '400':
+          description: Malformed token id, query, or unsupported quote
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '409':
+          description: Extra index disabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Price discovery index read failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: Extra index unavailable or price discovery incomplete
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
   /api/v1/protocols:
     get:
       tags:
@@ -8299,6 +8351,109 @@ components:
           type: integer
           format: int32
           minimum: 0
+    PriceItem:
+      type: object
+      required:
+      - token_id
+      - priced
+      properties:
+        price:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/PriceValue'
+        priced:
+          type: boolean
+        reason:
+          type:
+          - string
+          - 'null'
+        source:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/PriceSource'
+        token_id:
+          type: string
+        warnings:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+    PricePathHop:
+      type: object
+      required:
+      - pool_box_id
+      - pool_type
+      properties:
+        pool_box_id:
+          type: string
+        pool_type:
+          type: string
+    PriceSource:
+      type: object
+      required:
+      - protocol
+      - pool_type
+      - pool_box_id
+      - path
+      properties:
+        path:
+          type: array
+          items:
+            $ref: '#/components/schemas/PricePathHop'
+        pool_box_id:
+          type: string
+        pool_type:
+          type: string
+        protocol:
+          type: string
+    PriceValue:
+      type: object
+      required:
+      - display
+      - raw
+      - token_decimals
+      properties:
+        display:
+          type: string
+        raw:
+          $ref: '#/components/schemas/RawPrice'
+        token_decimals:
+          type: integer
+          format: int32
+          minimum: 0
+    PricesQuery:
+      type: object
+      properties:
+        quote:
+          type:
+          - string
+          - 'null'
+        token_id:
+          type:
+          - string
+          - 'null'
+      additionalProperties: false
+    PricesResponse:
+      type: object
+      required:
+      - quote
+      - height
+      - timestamp
+      - items
+      properties:
+        height:
+          type: integer
+          format: int64
+          minimum: 0
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PriceItem'
+        quote:
+          type: string
+        timestamp:
+          type: string
     PrivateKeyRequest:
       type: object
       description: '`POST /api/v1/accounts/private-key` request. T2 (admin + loopback-preferred).'
@@ -8439,6 +8594,16 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/VotableParam'
+    RawPrice:
+      type: object
+      required:
+      - numerator
+      - denominator
+      properties:
+        denominator:
+          type: string
+        numerator:
+          type: string
     RawTransactionBytes:
       type: string
       format: binary
@@ -8498,6 +8663,7 @@ components:
       - bad_pubkey_length
       - bad_encoding
       - unsupported_hash_algo
+      - unsupported_quote
       - unsupported_intent
       - not_hot_reloadable
       - not_votable
@@ -8549,6 +8715,7 @@ components:
       - overloaded
       - shutting_down
       - route_unavailable
+      - pricing_unavailable
       - timeout
       - unauthorized
       - wrong_password
