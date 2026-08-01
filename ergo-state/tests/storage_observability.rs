@@ -2,7 +2,6 @@ use std::error::Error;
 use std::fmt;
 use std::io;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 use ergo_state::storage_observability::{
@@ -10,7 +9,7 @@ use ergo_state::storage_observability::{
     StorageHealth, StorageReport,
 };
 use ergo_state::store::StateError;
-use tracing_subscriber::fmt::MakeWriter;
+use ergo_state::test_helpers::SharedBuf;
 
 #[derive(Debug)]
 struct IncidentError {
@@ -290,33 +289,9 @@ fn reporter_previous_io_transitions_health_and_links_first_io() {
     assert_eq!(health.previous_io_failures_total, 1);
 }
 
-#[derive(Clone)]
-struct SharedBuf(Arc<Mutex<Vec<u8>>>);
-
-struct SharedWriter(Arc<Mutex<Vec<u8>>>);
-
-impl io::Write for SharedWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> MakeWriter<'a> for SharedBuf {
-    type Writer = SharedWriter;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        SharedWriter(self.0.clone())
-    }
-}
-
 #[test]
 fn reporter_emits_stable_structured_first_io_and_poison_transition_fields() {
-    let writer = SharedBuf(Arc::new(Mutex::new(Vec::new())));
+    let writer = SharedBuf::new();
     let subscriber = tracing_subscriber::fmt()
         .json()
         .with_ansi(false)
@@ -339,7 +314,7 @@ fn reporter_emits_stable_structured_first_io_and_poison_transition_fields() {
         );
     });
 
-    let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
+    let output = String::from_utf8(writer.bytes()).unwrap();
     let events: Vec<serde_json::Value> = output
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())

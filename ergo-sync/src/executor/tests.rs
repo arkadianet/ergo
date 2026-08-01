@@ -6,35 +6,10 @@ use ergo_primitives::group_element::{GroupElement, GROUP_ELEMENT_LENGTH};
 use ergo_primitives::writer::VlqWriter;
 use ergo_ser::autolykos::AutolykosSolution;
 use ergo_ser::header::{write_header, Header};
+use ergo_state::test_helpers::SharedBuf;
 use ergo_state::ChainStateRead;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::{Arc, Mutex};
-use tracing_subscriber::fmt::MakeWriter;
-
-#[derive(Clone)]
-struct SharedBuf(Arc<Mutex<Vec<u8>>>);
-
-struct SharedWriter(Arc<Mutex<Vec<u8>>>);
-
-impl io::Write for SharedWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> MakeWriter<'a> for SharedBuf {
-    type Writer = SharedWriter;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        SharedWriter(self.0.clone())
-    }
-}
 
 fn peer(port: u16) -> PeerId {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), port)
@@ -64,7 +39,7 @@ fn persist_failed_propagation_does_not_duplicate_worker_event() {
     let mut store = StateStore::open(&path).unwrap();
     store.initialize_genesis(&[]).unwrap();
     let store = ergo_state::StateBackendKind::Utxo(store);
-    let writer = SharedBuf(Arc::new(Mutex::new(Vec::new())));
+    let writer = SharedBuf::new();
     let subscriber = tracing_subscriber::fmt()
         .json()
         .with_ansi(false)
@@ -106,7 +81,7 @@ fn persist_failed_propagation_does_not_duplicate_worker_event() {
         );
     });
 
-    let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
+    let output = String::from_utf8(writer.bytes()).unwrap();
     let events: Vec<serde_json::Value> = output
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())

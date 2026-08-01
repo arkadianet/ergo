@@ -1229,37 +1229,11 @@ impl Drop for PersistPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io;
-    use std::sync::Mutex;
     use std::time::Duration;
 
-    use tracing_subscriber::fmt::MakeWriter;
+    use crate::test_helpers::SharedBuf;
 
     // ----- helpers -----
-
-    #[derive(Clone)]
-    struct SharedBuf(Arc<Mutex<Vec<u8>>>);
-
-    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl io::Write for SharedWriter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> MakeWriter<'a> for SharedBuf {
-        type Writer = SharedWriter;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            SharedWriter(self.0.clone())
-        }
-    }
 
     /// Build a minimal `PersistJob` at `height` whose execute_batch path
     /// writes only the redb tables that always populate (no AVL changes,
@@ -1341,7 +1315,7 @@ mod tests {
         voting_length: u32,
         blocks_to_keep: i32,
     ) -> (String, Vec<serde_json::Value>) {
-        let writer = SharedBuf(Arc::new(Mutex::new(Vec::new())));
+        let writer = SharedBuf::new();
         let subscriber = tracing_subscriber::fmt()
             .json()
             .with_ansi(false)
@@ -1353,7 +1327,7 @@ mod tests {
             PersistPipeline::execute_batch(db, path, jobs, voting_length, blocks_to_keep)
                 .expect_err("batch must fail")
         });
-        let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
+        let output = String::from_utf8(writer.bytes()).unwrap();
         let events = output
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
@@ -1487,7 +1461,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("persist.redb");
         let db = Arc::new(Database::create(&path).unwrap());
-        let writer = SharedBuf(Arc::new(Mutex::new(Vec::new())));
+        let writer = SharedBuf::new();
         let subscriber = tracing_subscriber::fmt()
             .json()
             .with_ansi(false)
@@ -1560,7 +1534,7 @@ mod tests {
         drop(job_tx);
         worker.join().unwrap();
 
-        let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
+        let output = String::from_utf8(writer.bytes()).unwrap();
         let events: Vec<serde_json::Value> = output
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())

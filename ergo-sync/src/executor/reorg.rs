@@ -612,7 +612,20 @@ impl SyncExecutor {
         // there's no rescan-in-progress to abort.
         let wallet_hook_arg = wallet_wiring.map(|w| w.hook);
         let rescan_guard_arg = wallet_wiring.map(|w| w.rescan_guard);
-        store.rollback_to(fork_height, wallet_hook_arg, rescan_guard_arg)?;
+        if let Err(e) = store.rollback_to(fork_height, wallet_hook_arg, rescan_guard_arg) {
+            warn!(
+                event = "full_block_reorg_failed",
+                old_height,
+                old_id = %old_id_hex,
+                fork_height,
+                fork_id = %fork_id_hex,
+                depth,
+                phase = "rollback_to",
+                error = %e,
+                "full-block reorg failed",
+            );
+            return Err(e);
+        }
         // Persistent header table is the source of truth for the rebuilt
         // cache after rollback. If hydration trips on integrity failure
         // here, we cannot proceed: the same corrupt row will fail any
