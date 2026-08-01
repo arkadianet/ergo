@@ -312,6 +312,23 @@ mod tests {
     }
 
     #[test]
+    fn accepts_fee_at_inclusive_bounds() {
+        for fee in [1, 1_000] {
+            let indexed_box = indexed_box(
+                fixture_tree_bytes(),
+                60_000_000,
+                vec![token(1, 1), token(2, 1_000_000), token(3, 2_000_000)],
+                Some(int_register(fee)),
+            );
+
+            let pool = decode_n2t_pool(&indexed_box)
+                .unwrap_or_else(|error| panic!("fee {fee} must decode, got {error:?}"));
+
+            assert_eq!(pool.fee_numerator, u32::try_from(fee).unwrap());
+        }
+    }
+
+    #[test]
     fn effective_reserve_is_exact_validated_subtraction() {
         let indexed_box = indexed_box(
             fixture_tree_bytes(),

@@ -118,10 +118,17 @@ fn prices_response<D: PoolDiscovery + ?Sized>(
     let snapshot = match discovery.discover(&query.token_id) {
         Ok(snapshot) => snapshot,
         Err(DiscoveryError::Read(error)) => {
+            // The underlying read error names internal store state, so it
+            // stays server-side; `detail` is the client's remediation hint.
+            tracing::warn!(
+                route = "/api/v1/prices",
+                error = %error,
+                "price discovery index read failed",
+            );
             return v1_error(
                 Reason::InternalError,
                 "price discovery could not read the index",
-                error.to_string(),
+                "retry the request; if it persists, check the node's indexer logs",
             );
         }
         Err(DiscoveryError::LimitExceeded) => {
@@ -441,10 +448,14 @@ mod tests {
             response.status(),
             axum::http::StatusCode::INTERNAL_SERVER_ERROR
         );
-        assert_eq!(
-            response_json(response).await["error"]["reason"],
-            "internal_error"
-        );
+        let json = response_json(response).await;
+        assert_eq!(json["error"]["reason"], "internal_error");
+        // The raw indexer error is logged, never echoed to the client.
+        let detail = json["error"]["detail"]
+            .as_str()
+            .expect("detail is a string");
+        assert!(!detail.contains("read failed"));
+        assert!(!detail.is_empty());
     }
 
     #[tokio::test]
