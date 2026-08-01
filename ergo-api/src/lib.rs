@@ -15,6 +15,7 @@
 //! traits — no concrete-type leak, and no dependency on the
 //! `ergo-indexer` writer crate (that stays a dev-dependency).
 
+pub mod api_family;
 pub mod auth;
 pub mod blockchain;
 pub mod compat;

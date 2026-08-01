@@ -29,46 +29,15 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{from_fn, Next},
     response::{IntoResponse, Redirect, Response},
-    routing::{get, head, post},
+    routing::{get, post},
     Json, Router,
 };
 use tokio::task::JoinHandle;
 use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::trace::TraceLayer;
 
-use crate::blockchain::{
-    balance_for_address_handler, balance_post_handler, block_by_header_id_handler,
-    blocks_by_header_ids_handler, box_by_id_handler, box_by_index_handler, box_range_get_handler,
-    box_range_post_handler, boxes_by_address_get_handler, boxes_by_address_post_handler,
-    boxes_by_ergo_tree_post_handler, boxes_by_template_hash_handler, boxes_by_token_id_handler,
-    boxes_unspent_by_address_get_handler, boxes_unspent_by_address_post_handler,
-    boxes_unspent_by_ergo_tree_post_handler, boxes_unspent_by_template_hash_handler,
-    boxes_unspent_by_token_id_handler, enforce_status_gate, indexed_height_handler,
-    storage_rent_eligible_handler, storage_rent_matures_at_handler,
-    storage_rent_matures_in_range_handler, token_by_id_handler, tokens_by_ids_handler,
-    transaction_range_get_handler, transaction_range_post_handler, tx_by_id_handler,
-    tx_by_index_handler, tx_detail_handler, txs_by_address_get_handler,
-    txs_by_address_post_handler, BlockchainState,
-};
+use crate::blockchain::BlockchainState;
 use crate::compat::handlers::{
-    block_by_id_handler as scala_block_by_id_handler,
-    block_by_ids_handler as scala_block_by_ids_handler,
-    block_ids_at_height_handler as scala_block_ids_at_height_handler,
-    block_transactions_by_id_handler as scala_block_transactions_by_id_handler,
-    chain_slice_handler as scala_chain_slice_handler,
-    header_by_id_handler as scala_header_by_id_handler,
-    header_ids_paged_handler as scala_header_ids_paged_handler, info_handler as scala_info_handler,
-    last_headers_handler as scala_last_headers_handler,
-    modifier_by_id_handler as scala_modifier_by_id_handler,
-    nipopow_header_by_height_handler as scala_nipopow_header_by_height_handler,
-    nipopow_header_by_id_handler as scala_nipopow_header_by_id_handler,
-    nipopow_proof_at_handler as scala_nipopow_proof_at_handler,
-    nipopow_proof_handler as scala_nipopow_proof_handler,
-    peers_all_handler as scala_peers_all_handler,
-    peers_connected_handler as scala_peers_connected_handler,
-    pool_contains_handler as scala_pool_contains_handler,
-    pool_tx_ids_handler as scala_pool_tx_ids_handler,
-    proof_for_tx_handler as scala_proof_for_tx_handler,
     utxo_box_by_id_handler as scala_utxo_box_by_id_handler,
     utxo_box_bytes_by_id_handler as scala_utxo_box_bytes_by_id_handler,
     utxo_genesis_handler as scala_utxo_genesis_handler,
@@ -90,23 +59,28 @@ use ergo_ser::address::NetworkPrefix;
 mod assets;
 mod handlers;
 mod openapi;
+mod route_registry;
+mod rust_api;
+mod scala_api;
 mod shared;
 
-pub use openapi::native_openapi_yaml;
 pub(crate) use openapi::NativeOpenApi;
+pub use openapi::{
+    established_openapi_operations, legacy_rust_openapi, merge_openapi_checked,
+    native_openapi_yaml, openapi_operations, rust_openapi, rust_openapi_yaml,
+    scala_openapi_operations, scala_openapi_yaml, v1_openapi_fragment, OpenApiMergeError,
+    RouteOperation,
+};
+pub use route_registry::ApiRouteInventory;
 pub(crate) use shared::{map_submit_error, submit_via_node};
 
 use assets::{
     components_css, dashboard_css, index, inter_variable_woff2, jetbrains_mono_woff2, js,
-    openapi_native_json, openapi_native_yaml, openapi_v1_json, openapi_v1_yaml_handler,
-    openapi_yaml, swagger, swagger_native, swagger_v1, tokens_css,
+    openapi_native_json, openapi_native_yaml, openapi_rust_json, openapi_rust_yaml,
+    openapi_scala_yaml, openapi_v1_json, openapi_v1_yaml_handler, openapi_yaml, swagger,
+    swagger_native, swagger_v1, tokens_css,
 };
-use handlers::{
-    difficulty_history_handler, events_handler, health_handler, host_handler, identity_handler,
-    info_handler, metrics_handler, miner_stats_handler, peers_connect_handler, peers_handler,
-    recent_blocks_handler, set_votes_handler, shutdown_handler, status_handler, sync_handler,
-    tip_handler, votes_handler, votes_history_handler,
-};
+use handlers::metrics_handler;
 
 /// Bundle of router/server dependencies threaded through every entry
 /// point on this module.
@@ -570,6 +544,16 @@ pub fn router_with_mempool_and_wallet_and_security(
     wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
 ) -> Router {
+    router_with_mempool_and_wallet_and_security_and_inventory(ctx, admin, wallet_admin, security).0
+}
+
+pub fn router_with_mempool_and_wallet_and_security_and_inventory(
+    ctx: ServerCtx,
+    admin: Option<Arc<dyn NodeAdmin>>,
+    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+) -> (Router, ApiRouteInventory) {
+    let mut inventory = ApiRouteInventory::default();
     let ServerCtx {
         read,
         compat,
@@ -641,616 +625,89 @@ pub fn router_with_mempool_and_wallet_and_security(
         .route("/swagger/native", get(swagger_native))
         .route("/swagger/v1", get(swagger_v1))
         .route("/api-docs/openapi.yaml", get(openapi_yaml))
+        .route("/api-docs/openapi-scala.yaml", get(openapi_scala_yaml))
+        .route("/api-docs/openapi-rust.yaml", get(openapi_rust_yaml))
+        .route("/api-docs/openapi-rust.json", get(openapi_rust_json))
         .route("/api-docs/openapi-native.yaml", get(openapi_native_yaml))
         .route("/api-docs/openapi-native.json", get(openapi_native_json))
         .route("/api-docs/openapi-v1.yaml", get(openapi_v1_yaml_handler))
         .route("/api-docs/openapi-v1.json", get(openapi_v1_json))
-        .route("/api/v1/info", get(info_handler))
-        .route("/api/v1/identity", get(identity_handler))
-        .route("/api/v1/host", get(host_handler))
-        .route("/api/v1/status", get(status_handler))
-        .route("/api/v1/votes", get(votes_handler))
-        .route("/api/v1/tip", get(tip_handler))
-        .route("/api/v1/blocks/recent", get(recent_blocks_handler))
-        .route("/api/v1/events", get(events_handler))
-        .route("/api/v1/sync", get(sync_handler))
-        .route("/api/v1/peers", get(peers_handler))
-        // `mempool/*` reads (summary, transactions[/{tx_id}]) are owned by the
-        // v1 product router (`crate::v1::v1_router`) — reshaped into the
-        // envelope + cursor. Not mounted here to avoid a route collision.
-        .route("/api/v1/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
         .with_state(read.clone());
+    let operator = route_registry::merge_family_router(
+        operator,
+        &mut inventory,
+        rust_api::legacy_router(read.clone()),
+    );
 
-    // Shutdown route mounts only when an admin handle is plumbed.
-    // Built as a separate Router<Arc<dyn NodeAdmin>> then state-
-    // erased via `with_state` so it can `merge` into the operator
-    // Router<()> without conflicting state types. Both the Scala-
-    // compat path (`/node/shutdown`) and the operator path
-    // (`/api/v1/node/shutdown`) are mounted.
-    let operator = if let Some(admin) = admin {
-        let admin_routes: Router = Router::new()
-            .route("/api/v1/node/shutdown", post(shutdown_handler))
-            .route("/node/shutdown", post(shutdown_handler))
-            // Operator voting write — auth-gated so only the operator can change
-            // what the node votes for (the read `GET /api/v1/votes` stays open).
-            .route("/api/v1/votes", post(set_votes_handler))
-            // Scala `ErgoPeersApiRoute.connect` is the one /peers route
-            // with `withAuth` — it rides the same admin + key gate.
-            .route("/peers/connect", post(peers_connect_handler))
-            // Scala gates the whole `node` pathPrefix (probed live:
-            // GET /node/zzz on the reference node → 403), so unknown
-            // `/node/*` subpaths keep rejecting on the key first. Real
-            // routes (not a fallback) so `route_layer` covers them.
-            .route(
-                "/node",
-                axum::routing::any(crate::auth::unknown_gated_subpath),
-            )
-            .route(
-                "/node/*rest",
-                axum::routing::any(crate::auth::unknown_gated_subpath),
-            )
-            .with_state(admin);
-        let admin_routes = match security.clone() {
-            Some(sec) => admin_routes.route_layer(axum::middleware::from_fn_with_state(
-                sec,
-                crate::auth::require_api_key,
-            )),
-            None => admin_routes,
-        };
-        operator.merge(admin_routes)
-    } else {
-        operator
-    };
+    let operator = route_registry::merge_family_router(
+        operator,
+        &mut inventory,
+        scala_api::admin_router(admin.clone(), security.clone()),
+    );
+    let operator = route_registry::merge_family_router(
+        operator,
+        &mut inventory,
+        rust_api::admin_router(admin.clone(), security.clone()),
+    );
 
-    // `/blockchain/*` mounts only when an indexer handle is plumbed.
-    // `/indexedHeight` always 200 — bypasses the status gate. The
-    // byId / byIndex routes are layered with `enforce_status_gate` so
-    // the `503 indexer-syncing` / `indexer-halted` envelopes
-    // short-circuit before any trait method runs.
-    let operator = if let Some(idx) = indexer.clone() {
-        let blockchain_state = BlockchainState {
+    let operator = if let Some(indexer) = indexer.clone() {
+        let state = BlockchainState {
             read: read.clone(),
-            indexer: idx,
+            indexer,
             network,
             chain: compat.clone(),
             mempool: mempool.clone(),
             chain_params: chain_params.clone(),
         };
-        let always_open: Router<BlockchainState> = Router::new()
-            .route("/blockchain/indexedHeight", get(indexed_height_handler))
-            // Operator health surface: indexedHeight + the self-repair
-            // markers + totals. Ungated for the same reason indexedHeight
-            // is — it must answer while syncing / repairing / halted.
-            .route(
-                "/api/v1/indexer/status",
-                get(crate::blockchain::indexer_status_handler),
-            )
-            // Resolved tx detail for the UI drawer. Ungated so the
-            // unconfirmed (pool) path works while the indexer is syncing.
-            .route("/api/v1/transactions/:tx_id/detail", get(tx_detail_handler));
-        // Tx routes mount only when both indexer and chain reader are
-        // plumbed — they require the chain reader to enrich `blockId` /
-        // `timestamp`. Box routes need only the indexer + network prefix.
-        let mut gated: Router<BlockchainState> = Router::new()
-            .route("/blockchain/box/byId/:box_id", get(box_by_id_handler))
-            .route("/blockchain/box/byIndex/:n", get(box_by_index_handler))
-            // Balance routes. POST takes a JSON-string body, GET takes
-            // the address as a path parameter. Both project
-            // `address_balance(tree_hash)` into the bare-balance envelope
-            // with the pre-overlay silent-downgrade `warning`.
-            .route("/blockchain/balance", post(balance_post_handler))
-            .route(
-                "/blockchain/balanceForAddress/:address",
-                get(balance_for_address_handler),
-            )
-            // Box byAddress paged routes. POST takes a JSON-string body,
-            // GET takes the address as a path parameter. Both project
-            // `address_boxes_paged` + `address_total_boxes` into the
-            // `{items, total}` envelope. Box routes mount unconditionally
-            // (no chain enrichment needed beyond network).
-            .route(
-                "/blockchain/box/byAddress",
-                post(boxes_by_address_post_handler),
-            )
-            .route(
-                "/blockchain/box/byAddress/:address",
-                get(boxes_by_address_get_handler),
-            )
-            // Unspent box byAddress paged routes. Same paging contract
-            // as /box/byAddress but with sortDirection plus the mempool
-            // overlay flags (`includeUnconfirmed`, `excludeMempoolSpent`).
-            // Wire shape is a bare array, not the {items, total}
-            // envelope. Mounts unconditionally — the unspent reader
-            // needs only the indexer + network, not chain.
-            .route(
-                "/blockchain/box/unspent/byAddress",
-                post(boxes_unspent_by_address_post_handler),
-            )
-            .route(
-                "/blockchain/box/unspent/byAddress/:address",
-                get(boxes_unspent_by_address_get_handler),
-            )
-            // byErgoTree dispatch routes (POST only). Hex-decode +
-            // parse + reserialize + blake2b256 the body to obtain the
-            // tree_hash, then dispatch into the same address-keyed
-            // reader methods used by /box/byAddress and
-            // /box/unspent/byAddress. Wire shapes match the address
-            // counterparts:
-            //   #24 → {items, total}
-            //   #25 → bare [IndexedErgoBox]
-            .route(
-                "/blockchain/box/byErgoTree",
-                post(boxes_by_ergo_tree_post_handler),
-            )
-            .route(
-                "/blockchain/box/unspent/byErgoTree",
-                post(boxes_unspent_by_ergo_tree_post_handler),
-            )
-            // byTemplateHash routes (#15, #16). Path-param hex template
-            // hash (no body). Wire shapes match the address counterparts:
-            //   #15 byTemplateHash         → {items, total}
-            //   #16 unspent/byTemplateHash → bare [IndexedErgoBox]
-            // Unknown templates return the empty envelope (Scala empty-
-            // IndexedContractTemplate fallback); bad-hex path params
-            // surface as 404 (Akka path-matcher rejection parity). The
-            // status gate fronts both routes.
-            .route(
-                "/blockchain/box/byTemplateHash/:hash",
-                get(boxes_by_template_hash_handler),
-            )
-            .route(
-                "/blockchain/box/unspent/byTemplateHash/:hash",
-                get(boxes_unspent_by_template_hash_handler),
-            )
-            // Token routes (#17, #18, #19, #20). Path-param hex tokenId
-            // for #17/#19/#20; #18 takes a JSON array of hex tokenIds in
-            // the body. Wire shapes:
-            //   #17 byId               → IndexedToken (404 on miss)
-            //   #18 tokens (POST)      → bare [IndexedToken]; misses dropped
-            //   #19 byTokenId          → {items, total}
-            //   #20 unspent/byTokenId  → bare [IndexedErgoBox]
-            // Bad-hex path params surface as 404 (Akka path-matcher
-            // parity); unknown tokens on #19/#20 return the empty
-            // envelope/array (Scala fallback parity). The status gate
-            // fronts all four routes.
-            .route("/blockchain/token/byId/:token_id", get(token_by_id_handler))
-            .route("/blockchain/tokens", post(tokens_by_ids_handler))
-            .route(
-                "/blockchain/box/byTokenId/:token_id",
-                get(boxes_by_token_id_handler),
-            )
-            .route(
-                "/blockchain/box/unspent/byTokenId/:token_id",
-                get(boxes_unspent_by_token_id_handler),
-            );
-        // Storage-rent eligibility (Rust-node-exclusive). Mounts only
-        // when the bridge supplied a `ChainParamsView`; otherwise the
-        // route returns a `404` per axum's default routing — matches
-        // the existing pattern for unwired routes.
-        if blockchain_state.chain_params.is_some() {
-            gated = gated
-                .route(
-                    "/blockchain/storageRent/eligibleAt/:height",
-                    get(storage_rent_eligible_handler),
-                )
-                .route(
-                    "/blockchain/storageRent/maturesAt/:height",
-                    get(storage_rent_matures_at_handler),
-                )
-                .route(
-                    "/blockchain/storageRent/maturesInRange",
-                    get(storage_rent_matures_in_range_handler),
-                );
-        }
-        if blockchain_state.chain.is_some() {
-            gated = gated
-                .route("/blockchain/transaction/byId/:tx_id", get(tx_by_id_handler))
-                .route(
-                    "/blockchain/transaction/byIndex/:n",
-                    get(tx_by_index_handler),
-                )
-                // Tx byAddress paged routes. Same paging contract as the
-                // box variant; tx routes additionally require the chain
-                // reader to enrich `blockId` / `timestamp`, so they sit
-                // inside the chain-conditional branch.
-                .route(
-                    "/blockchain/transaction/byAddress",
-                    post(txs_by_address_post_handler),
-                )
-                .route(
-                    "/blockchain/transaction/byAddress/:address",
-                    get(txs_by_address_get_handler),
-                )
-                // Global tx-id range view (#8). Scala mounts no method
-                // directive (`*`); we expose both GET and POST on the
-                // same handler. Returns a bare `[ModifierId]` array;
-                // chain reader is not required for the projection but
-                // we keep #8 grouped with the rest of the transaction
-                // routes so the family stays cohesive.
-                .route(
-                    "/blockchain/transaction/range",
-                    get(transaction_range_get_handler).post(transaction_range_post_handler),
-                )
-                // Global box-id range view (#9). Same Scala dispatch
-                // pattern as #8 (no method directive → both GET and POST
-                // accepted on one handler). Returns a bare `[ModifierId]`
-                // array of box ids, projected from `box.box_data.box_id()`
-                // over `boxes_by_global_range(lo, hi)`.
-                .route(
-                    "/blockchain/box/range",
-                    get(box_range_get_handler).post(box_range_post_handler),
-                )
-                // Block reassembly routes (#21, #22). Reassembles
-                // IndexedFullBlock from chain-side header/sections joined
-                // with per-tx IndexedErgoTransaction from the indexer.
-                // Both routes require the chain reader, so they sit
-                // inside the chain-conditional branch alongside the tx
-                // routes. The status gate fronts both via the layered
-                // middleware. Wire shapes:
-                //   #21 byHeaderId            → IndexedFullBlock (404 on miss)
-                //   #22 byHeaderIds (POST)    → bare [IndexedFullBlock];
-                //                               malformed/unknown ids dropped.
-                .route(
-                    "/blockchain/block/byHeaderId/:header_id",
-                    get(block_by_header_id_handler),
-                )
-                .route(
-                    "/blockchain/block/byHeaderIds",
-                    post(blocks_by_header_ids_handler),
-                );
-        }
-        // `route_layer`, not `layer`: the status gate must fire only on
-        // the routes registered above — a plain `layer` would also wrap
-        // this subtree's implicit fallback, which `merge` propagates
-        // router-wide (unknown paths would then 503 while the indexer
-        // catches up, the same capture bug as the api_key gate).
-        let gated = gated.route_layer(axum::middleware::from_fn_with_state(
-            blockchain_state.clone(),
-            enforce_status_gate,
-        ));
-        let blockchain = always_open.merge(gated).with_state(blockchain_state);
-        operator.merge(blockchain)
-    } else {
-        operator
-    };
-
-    // `POST /api/v1/mempool/{submit,check}` are aliases of the
-    // canonical `transactions/{submit,check}` handlers, owned by the v1 product
-    // router (`crate::v1::v1_router`). They mount unconditionally there
-    // and answer `409 submit_disabled` when no submit bridge is wired (the v1
-    // honest-reason posture), superseding the old conditional native mount.
-
-    // `/mining/*` mounts only when a NodeMining handle is plumbed
-    // (integrator sets `[mining].enabled = true` and constructs the
-    // bridge). All four routes are sourced from a single sub-router
-    // builder in `crate::mining` so the handler list lives there.
-    let operator = if let Some(m) = mining {
-        operator.merge(crate::mining::mining_router(m))
-    } else {
-        operator
-    };
-
-    // `/emission/at/{height}` mounts whenever the schedule view is
-    // wired (always, in production — static per-network math, valid in
-    // every node mode). Public by Scala parity: `EmissionApiRoute`
-    // carries no `withAuth`, so this merge happens entirely outside
-    // the gated subtrees.
-    let operator = if let Some(em) = emission {
-        operator.merge(crate::emission::emission_router(em))
-    } else {
-        operator
-    };
-
-    // `/emission/scripts` mounts when the chain spec carries verified
-    // script constants (mainnet). Same public posture as `/emission/at`.
-    let operator = if let Some(es) = emission_scripts {
-        operator.merge(crate::emission::emission_scripts_router(es))
-    } else {
-        operator
-    };
-
-    // `/utils/*` — Scala-parity stateless helper endpoints. Always
-    // mounted (no node-state dependency); single piece of operator
-    // config is `network` for address routes. Routes live in
-    // `crate::utils`; we wire them here against a `Router<NetworkPrefix>`
-    // and erase the state via `with_state` so the merged router stays
-    // `Router<()>`.
-    let utils_routes: Router<NetworkPrefix> = Router::new()
-        .route("/utils/seed", get(crate::utils::seed_default_handler))
-        .route(
-            "/utils/seed/:length",
-            get(crate::utils::seed_length_handler),
-        )
-        .route(
-            "/utils/hash/blake2b",
-            post(crate::utils::hash_blake2b_handler),
-        )
-        .route(
-            "/utils/rawToAddress/:pubkey_hex",
-            get(crate::utils::raw_to_address_handler),
-        )
-        .route(
-            "/utils/addressToRaw/:address",
-            get(crate::utils::address_to_raw_handler),
-        )
-        .route(
-            "/utils/address/:address",
-            get(crate::utils::validate_address_get_handler),
-        )
-        .route(
-            "/utils/address",
-            post(crate::utils::validate_address_post_handler),
-        )
-        .route(
-            "/utils/ergoTreeToAddress/:tree_hex",
-            get(crate::utils::ergo_tree_to_address_get_handler),
-        )
-        .route(
-            "/utils/ergoTreeToAddress",
-            post(crate::utils::ergo_tree_to_address_post_handler),
-        )
-        // `/script/*` decode endpoints (Scala ScriptApiRoute) — same
-        // `NetworkPrefix`-only state as the `/utils` address routes. The two
-        // compile-requiring members (p2sAddress / p2shAddress) mount just
-        // below as their own tuple-state sub-router (`crate::script`, M6);
-        // `executeWithContext` remains unimplemented.
-        .route(
-            "/script/addressToTree/:address",
-            get(crate::utils::script_address_to_tree_handler),
-        )
-        .route(
-            "/script/addressToBytes/:address",
-            get(crate::utils::script_address_to_bytes_handler),
+        let operator = route_registry::merge_family_router(
+            operator,
+            &mut inventory,
+            scala_api::indexer_router(state.clone()),
         );
-    let operator = operator.merge(utils_routes.with_state(network));
-
-    // `/script/p2sAddress` + `/script/p2shAddress` (Scala ScriptApiRoute's
-    // compile-requiring members, M6) — a separate tuple-state sub-router
-    // beside `utils_routes` above: these two need `Arc<dyn WalletAdmin>` in
-    // addition to `NetworkPrefix` (Scala's `keysToEnv`, `ScriptApiRoute.scala:
-    // 52-54, reads the wallet's tracked pubkeys server-side), a different
-    // state shape than the stateless decode-only routes just above. PUBLIC —
-    // Scala's `ScriptApiRoute` carries no `withAuth` (`ScriptApiRoute.scala:
-    // 38-46`), so this does NOT ride the api-key-gated `crate::wallet::
-    // router_with_security` subtree despite reading wallet state. Mirrors the
-    // `miner_stats_routes` tuple-state precedent below.
-    let script_routes: Router<(NetworkPrefix, Arc<dyn crate::wallet::WalletAdmin>)> = Router::new()
-        .route(
-            "/script/p2sAddress",
-            post(crate::script::p2s_address_handler),
+        route_registry::merge_family_router(
+            operator,
+            &mut inventory,
+            rust_api::indexer_router(state),
         )
-        .route(
-            "/script/p2shAddress",
-            post(crate::script::p2sh_address_handler),
-        );
-    let operator = operator.merge(script_routes.with_state((network, wallet_admin.clone())));
+    } else {
+        operator
+    };
 
-    let assembled: Router = match compat {
-        Some(c) => {
-            // Native miner-stats rides the same chain-reader handle as the
-            // Scala-compat routes but also needs the address-prefix byte,
-            // so it mounts as its own mini router with a tuple state.
-            let miner_stats_routes: Router = Router::new()
-                .route("/api/v1/mining/minerStats", get(miner_stats_handler))
-                .with_state((c.clone(), network));
-            // Route ordering note: axum 0.7 picks the most specific match
-            // automatically, but registering literal-segment routes
-            // (`/blocks`, `/blocks/at/...`, `/blocks/chainSlice`,
-            // `/blocks/lastHeaders/...`) before the catch-all
-            // `/blocks/:header_id` keeps the registration log readable.
-            let scala: Router = Router::new()
-                // Native difficulty history rides the same chain-reader
-                // state as the Scala-compat routes, so it is mounted here
-                // and stays conditional on `compat` being wired.
-                .route(
-                    "/api/v1/difficulty/history",
-                    get(difficulty_history_handler),
-                )
-                // Native votes-history rides the same chain-reader state as
-                // the Scala-compat routes (the timeline comes from the stored
-                // `voted_params` rows), so it is mounted here and stays
-                // conditional on `compat` being wired.
-                .route("/api/v1/votes/history", get(votes_history_handler))
-                .route("/info", get(scala_info_handler))
-                .route("/blocks", get(scala_header_ids_paged_handler))
-                .route("/blocks/at/:height", get(scala_block_ids_at_height_handler))
-                .route("/blocks/chainSlice", get(scala_chain_slice_handler))
-                .route(
-                    "/blocks/lastHeaders/:count",
-                    get(scala_last_headers_handler),
-                )
-                // POST `headerIds` registers before the `:header_id` capture
-                // so axum's literal-segment-first dispatch picks the literal
-                // even though method routing would also disambiguate.
-                .route("/blocks/headerIds", post(scala_block_by_ids_handler))
-                // `modifier/:id` registers before `:header_id` for the same
-                // literal-first reason. Both capture in the second segment.
-                .route(
-                    "/blocks/modifier/:modifier_id",
-                    get(scala_modifier_by_id_handler),
-                )
-                .route("/blocks/:header_id", get(scala_block_by_id_handler))
-                .route("/blocks/:header_id/header", get(scala_header_by_id_handler))
-                .route(
-                    "/blocks/:header_id/transactions",
-                    get(scala_block_transactions_by_id_handler),
-                )
-                .route(
-                    "/blocks/:header_id/proofFor/:tx_id",
-                    get(scala_proof_for_tx_handler),
-                )
-                // NiPoPoW serve surface (`NipopowApiRoute.scala:55-90`).
-                // All literal-prefixed, no capture collisions. The
-                // 3-segment proof route registers after the 2-segment
-                // one; axum disambiguates by arity.
-                .route(
-                    "/nipopow/popowHeaderById/:header_id",
-                    get(scala_nipopow_header_by_id_handler),
-                )
-                .route(
-                    "/nipopow/popowHeaderByHeight/:height",
-                    get(scala_nipopow_header_by_height_handler),
-                )
-                .route("/nipopow/proof/:m/:k", get(scala_nipopow_proof_handler))
-                .route(
-                    "/nipopow/proof/:m/:k/:header_id",
-                    get(scala_nipopow_proof_at_handler),
-                )
-                // Route ordering: the literal `/utxo/genesis` segment
-                // must register before the `:box_id` capture so axum
-                // doesn't misroute the literal as an id. The
-                // `/utxo/withPool/*` group sits beside `/utxo/byId*`
-                // because axum dispatches by the first non-matching
-                // segment — `withPool` is a literal that doesn't collide
-                // with `:box_id`. POST `byIds` mounts on the same path
-                // axum routes by method, no extra discrimination needed.
-                //
-                // `/utxo/*` mounts in one of two shapes depending on
-                // the state backend. Under Mode 1 (UTXO backend) the
-                // seven live handlers mount. Under Mode 5 (digest
-                // backend) the same seven (path, method) shapes mount
-                // with a 503 handler, so unknown `/utxo/*` paths
-                // still 404 and wrong methods still 405 — the
-                // Scala-compat surface stays intact for everything
-                // outside the seven known routes.
-                .merge(scala_utxo_subtree(utxo_reads_supported))
-                .route("/peers/all", get(scala_peers_all_handler))
-                .route("/peers/connected", get(scala_peers_connected_handler))
-                .route(
-                    "/peers/blacklisted",
-                    get(crate::compat::handlers::peers_blacklisted_handler),
-                )
-                .route(
-                    "/peers/status",
-                    get(crate::compat::handlers::peers_status_handler),
-                )
-                .route(
-                    "/peers/syncInfo",
-                    get(crate::compat::handlers::peers_sync_info_handler),
-                )
-                .route(
-                    "/peers/trackInfo",
-                    get(crate::compat::handlers::peers_track_info_handler),
-                )
-                .route(
-                    "/transactions/unconfirmed/transactionIds",
-                    get(scala_pool_tx_ids_handler),
-                )
-                // HEAD = presence probe (200/404). GET on the same
-                // path is rejected with 400 to match Scala 6.0.3RC1
-                // behaviour (parity probe 2026-05-19 — Scala accepts
-                // the method but returns 400 with a "use
-                // byTransactionId/{tx_id}" hint envelope). The wallet
-                // /explorer surface uses
-                // `/transactions/unconfirmed/byTransactionId/{tx_id}`
-                // for the full-tx GET; this path is reserved for the
-                // HEAD presence probe.
-                .route(
-                    "/transactions/unconfirmed/:tx_id",
-                    head(scala_pool_contains_handler)
-                        .get(crate::compat::handlers::pool_contains_get_hint_handler),
-                )
-                // Paged full-tx list. Sits at the bare `/unconfirmed`
-                // path so it doesn't collide with `/:tx_id` (axum
-                // routes them by exact-segment vs path-param shape).
-                .route(
-                    "/transactions/unconfirmed",
-                    get(crate::compat::handlers::pool_txs_paged_handler),
-                )
-                .route(
-                    "/transactions/unconfirmed/byTransactionId/:tx_id",
-                    get(crate::compat::handlers::pool_tx_by_id_handler),
-                )
-                .route(
-                    "/transactions/unconfirmed/byTransactionIds",
-                    axum::routing::post(crate::compat::handlers::pool_txs_by_ids_handler),
-                )
-                .route(
-                    "/transactions/unconfirmed/size",
-                    get(crate::compat::handlers::pool_size_handler),
-                )
-                .route(
-                    "/transactions/unconfirmed/byErgoTree",
-                    post(crate::compat::handlers::pool_txs_by_ergo_tree_handler),
-                )
-                .route(
-                    "/transactions/unconfirmed/byBoxId",
-                    post(crate::compat::handlers::pool_txs_by_box_id_handler),
-                )
-                .route(
-                    "/transactions/unconfirmed/byTokenId",
-                    post(crate::compat::handlers::pool_txs_by_token_id_handler),
-                )
-                .route(
-                    "/transactions/unconfirmed/byRegisters",
-                    post(crate::compat::handlers::pool_txs_by_registers_handler),
-                )
-                .route(
-                    "/transactions/poolHistogram",
-                    get(crate::compat::handlers::pool_fee_histogram_handler),
-                )
-                .route(
-                    "/transactions/getFee",
-                    get(crate::compat::handlers::pool_recommended_fee_handler),
-                )
-                .route(
-                    "/transactions/waitTime",
-                    get(crate::compat::handlers::pool_wait_time_handler),
-                )
-                .with_state(c);
-            let with_compat = operator.merge(scala).merge(miner_stats_routes);
-            // Scala-compat write surface. The hex-body and JSON-body
-            // variants share `NodeSubmit` state but dispatch through
-            // different bridge methods (`submit_transaction` vs
-            // `submit_transaction_json`).
-            if let Some(s) = submit {
-                let scala_writes: Router = Router::new()
-                    .route(
-                        "/transactions/bytes",
-                        post(crate::compat::transactions::submit_bytes_handler),
-                    )
-                    .route(
-                        "/transactions/checkBytes",
-                        post(crate::compat::transactions::check_bytes_handler),
-                    )
-                    .route(
-                        "/transactions",
-                        post(crate::compat::transactions::submit_handler),
-                    )
-                    .route(
-                        "/transactions/check",
-                        post(crate::compat::transactions::check_handler),
-                    )
-                    // `sendMinedBlock`. axum 0.7 dispatches GET and
-                    // POST on the same path independently, so the
-                    // existing read-side `GET /blocks` (header pagination,
-                    // line 603) and this POST live side-by-side without
-                    // ordering concerns.
-                    .route("/blocks", post(crate::compat::blocks::submit_handler))
-                    .with_state(s);
-                with_compat.merge(scala_writes)
-            } else {
-                with_compat
-            }
+    let operator = route_registry::merge_family_router(
+        operator,
+        &mut inventory,
+        scala_api::auxiliary_router(
+            network,
+            wallet_admin.clone(),
+            mining,
+            emission,
+            emission_scripts,
+        ),
+    );
+
+    let assembled = match compat {
+        Some(chain) => {
+            let scala = scala_api::compat_read_router(chain, utxo_reads_supported);
+            let scala = match submit {
+                Some(submit) => scala.merge(scala_api::compat_write_router(submit)),
+                None => scala,
+            };
+            route_registry::merge_family_router(operator, &mut inventory, scala)
         }
         None => operator,
     };
+    let assembled = route_registry::merge_family_router(
+        assembled,
+        &mut inventory,
+        rust_api::conditional_chain_router(v1_chain.clone(), network),
+    );
 
-    // `/wallet/ui*` — retired: the wallet is now a section of the dashboard SPA
-    // (`/#wallet`). These public paths 308-redirect there for bookmarks. Merged
-    // BEFORE the gated `/wallet/*` router below so the static `/wallet/ui` routes
-    // win over its `/wallet/*rest` catch-all (which would otherwise 403 them).
-    let assembled = assembled.merge(wallet_ui_router());
-
-    // `/wallet/*` — unconditionally mounted.
-    // The wallet admin is always wired (never Optional); read-only
-    // mirrors supply a `NoopWalletAdmin` so the routes return the
-    // zero-state status rather than 404.
-    let assembled = assembled.merge(crate::wallet::router_with_security(
-        wallet_admin.clone(),
-        security.clone(),
-    ));
+    let assembled = route_registry::merge_family_router(
+        assembled,
+        &mut inventory,
+        scala_api::wallet_router(wallet_admin.clone(), security.clone()),
+    );
     // The v1 T1 (operator) auth config — the same api-key gate the wallet
     // surface uses, reused for the `webhooks/*` management routes below.
     // Captured before `security` is consumed by the native wallet mount.
@@ -1259,13 +716,11 @@ pub fn router_with_mempool_and_wallet_and_security(
     // scan/accounts group (`/api/v1/scan/*` + `/api/v1/accounts/*`)
     // reuses the SAME wallet-admin bridge for scan + key operations.
     let v1_accounts_admin = wallet_admin.clone();
-    // Native `/api/v1/wallet/*` — a second adapter over the SAME wallet admin,
-    // gated by the same operator api-key (route_layer + catch-alls). Factual
-    // DTOs + EIP-27-aware balance; the Scala-compat router above is untouched.
-    let assembled = assembled.merge(crate::wallet::native::router_with_security(
-        wallet_admin,
-        security,
-    ));
+    let assembled = route_registry::merge_family_router(
+        assembled,
+        &mut inventory,
+        rust_api::wallet_router(wallet_admin, security),
+    );
 
     // Native `/api/v1/*` product API — the `chain/*` + `transactions/*` reads
     // group, the first consumer of the shared v1 primitives (error envelope,
@@ -1386,12 +841,6 @@ pub fn router_with_mempool_and_wallet_and_security(
         oracle: None,
         config: crate::v1::script::ScriptConfig::default(),
     };
-    let assembled = assembled.merge(crate::v1::script::script_router(
-        script_state,
-        v1_governor.clone(),
-        v1_auth.clone(),
-    ));
-    let assembled = assembled.merge(crate::v1::v1_router(v1_state.clone(), v1_governor.clone()));
     // Operator/control group (`node/*`, `network/*`, `mining/*`, `voting/*`).
     // Mixed tiers over one `OperatorState`: T0 reads share the same
     // per-node governor (`CheapRead`); T1/T2 controls ride the v1 api-key gate
@@ -1405,11 +854,6 @@ pub fn router_with_mempool_and_wallet_and_security(
         mining: v1_op_mining,
         network,
     };
-    let assembled = assembled.merge(crate::v1::operator_router(
-        v1_operator_state,
-        v1_governor.clone(),
-        v1_auth.clone(),
-    ));
     // Scan registry + account-abstraction group (`/api/v1/scan/*`,
     // `/api/v1/accounts/*`). T0 watch reads (governor), T1 scan +
     // watch writes + account/PSBT seams (`require_tier(Operator)`), T2 private-key
@@ -1418,20 +862,25 @@ pub fn router_with_mempool_and_wallet_and_security(
         admin: v1_accounts_admin,
         network,
     };
-    let assembled = assembled.merge(crate::v1::accounts_router(
-        v1_accounts_state,
-        v1_governor.clone(),
-        v1_auth.clone(),
-    ));
     // `POST /api/v1/batch` — a bounded read-only multiplexer over
     // the SAME `chain/*`/`boxes/*`/`tokens/*`/`addresses/*`/`mempool/*`/
     // `transactions/*`(reads)/`stats/*`/`diagnostics`/`light/*`/`protocols/*`
     // handlers just mounted above, dispatched in-process (never HTTP-to-
     // itself) through a second, restricted router built from the same
     // `V1State` + the same shared per-node governor.
-    let assembled = assembled.merge(crate::v1::batch_router(v1_state, v1_governor));
-    // Mount the T1 `webhooks/*` router under the operator api-key gate.
-    let assembled = assembled.merge(crate::v1::webhooks_router(v1_webhooks_state, v1_auth));
+    let assembled = route_registry::merge_family_router(
+        assembled,
+        &mut inventory,
+        rust_api::product_router(rust_api::ProductRouterState {
+            script: script_state,
+            api: v1_state,
+            operator: v1_operator_state,
+            accounts: v1_accounts_state,
+            webhooks: v1_webhooks_state,
+            governor: v1_governor,
+            auth: v1_auth,
+        }),
+    );
 
     // tower-http TraceLayer wraps every request in an INFO span carrying a
     // monotonic request id + method + path. Handler logs ride that span as
@@ -1447,7 +896,7 @@ pub fn router_with_mempool_and_wallet_and_security(
     // parameters we don't want promoted into higher-signal logs, and the
     // path alone identifies the endpoint for correlation. Sensitive
     // per-request detail belongs in sanitized handler-level logs.
-    assembled.layer(from_fn(spa_security_headers)).layer(
+    let router = assembled.layer(from_fn(spa_security_headers)).layer(
         TraceLayer::new_for_http()
             .make_span_with(|request: &Request| {
                 static HTTP_REQ_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -1485,7 +934,8 @@ pub fn router_with_mempool_and_wallet_and_security(
                     }
                 },
             ),
-    )
+    );
+    (router, inventory)
 }
 
 /// Public redirect routes for the retired `/wallet/ui*` paths → the dashboard

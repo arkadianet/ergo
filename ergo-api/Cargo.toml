@@ -1,6 +1,6 @@
 [package]
 name        = "ergo-api"
-description = "Operator-facing read-mostly HTTP API for the Ergo Rust node. Hosts the axum router that serves the Scala-compatible surface (`/info`, `/blocks/*`, `/transactions*`, `/utxo/*`, `/peers/*`, `/blockchain/*`, `/mining/*`, `/wallet/*`) plus the node-native `/api/v1/*` dashboard, including mutating routes (transaction + block submission, `/node/shutdown`, and wallet lifecycle/sending). Traits-only contract: the node implements the reader / submit / admin / chain-query traits against its runtime state and hands them in as trait objects — no concrete-type coupling."
+description = "Operator-facing read-mostly HTTP API for the Ergo Rust node. Hosts the axum router that serves the Scala API (`/info`, `/blocks/*`, `/transactions*`, `/utxo/*`, `/peers/*`, `/blockchain/*`, `/mining/*`, `/wallet/*`) plus the RUST API `/api/v1/*` dashboard, including mutating routes (transaction + block submission, `/node/shutdown`, and wallet lifecycle/sending). Traits-only contract: the node implements the reader / submit / admin / chain-query traits against its runtime state and hands them in as trait objects — no concrete-type coupling."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -43,6 +43,7 @@ reqwest            = { workspace = true, features = ["rustls-tls"] }
 # against a restricted `Router` via `tower::util::ServiceExt::oneshot` — the
 # established "never HTTP-to-itself" idiom for a router-internal multiplex.
 tower              = { workspace = true, features = ["util"] }
+serde_norway       = { workspace = true }
 
 [dev-dependencies]
 http-body-util  = { workspace = true }

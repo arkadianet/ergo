@@ -1,6 +1,6 @@
 # ergo-api
 
-**Purpose:** Operator-facing read-mostly HTTP/JSON server for the node. Hosts the axum router that serves the Scala-compatible surface (`/info`, `/blocks/*`, `/transactions*`, `/utxo/*`, `/peers/*`, `/utils/*`, `/blockchain/*`, `/mining/*`) and the node-native `/api/v1/*` dashboard surface, plus the `/wallet/*` API and the embedded browser UIs. Its contract with the rest of the workspace is a small set of `Arc<dyn …>` traits — the node implements them against a runtime snapshot and hands the trait objects to `serve`; `ergo-api` never reaches into node internals.
+**Purpose:** Operator-facing read-mostly HTTP/JSON server for the node. Hosts the axum router that serves the Scala API (`/info`, `/blocks/*`, `/transactions*`, `/utxo/*`, `/peers/*`, `/utils/*`, `/blockchain/*`, `/mining/*`) and the RUST API under `/api/v1/*`, plus the `/wallet/*` API and the embedded browser UIs. Its contract with the rest of the workspace is a small set of `Arc<dyn …>` traits — the node implements them against a runtime snapshot and hands the trait objects to `serve`; `ergo-api` never reaches into node internals.
 
 **Depends on (workspace):** ergo-indexer-types, ergo-ser, ergo-primitives, ergo-rest-json (plus dev-only: ergo-indexer)
 **Depended on by:** (see codemap index)
@@ -9,7 +9,8 @@
 ## Start here
 - `src/lib.rs` — the module tree + re-export list; the crate's public face in 40 lines.
 - `src/traits.rs` — the load-bearing seam: `NodeReadState`, `NodeSubmit`, `NodeAdmin`, `MempoolView`, `ChainParamsView`. Read this to understand the whole boundary.
-- `router_with_mempool_and_wallet_and_security` (`src/server.rs:527`) — the single function that assembles every route; the canonical map of what is mounted and under what condition.
+- `src/api_family.rs` — the canonical two-family descriptor table and documentation URLs.
+- `src/server/{scala_api,rust_api}.rs` — family-owned router composition; transport, assets, metrics, and shared singleton setup remain in `server/mod.rs`.
 - `src/compat/traits.rs` — `NodeChainQuery`, the live id-keyed read trait the Scala-compat surface needs (block/utxo/tx/peers/pool by id).
 - `src/types.rs` (module doc) — the wire DTO contract, especially the id-encoding rules (lowercase hex, 64 hex chars for ids, 66 for `state_root_avl`).
 
@@ -17,13 +18,17 @@
 - `src/lib.rs` — crate root: module tree + the curated re-export set.
 - `src/traits.rs` — node-implemented reader/submit/admin/mempool/chain-params traits + `Noop*` test impls; `PoolTxDetail` type alias.
 - `src/emission.rs` — Scala-compat `/emission/at/{height}` schedule view + `/emission/scripts` static P2S addresses; `EmissionSchedule` trait + `EmissionScriptsJson` type; public (no auth, mirrors Scala `EmissionApiRoute`).
-- `src/server.rs` — axum router assembly, all native `/api/v1/*` handlers, asset serving, the bind/serve entry points, graceful-shutdown contract, conditional route mounting, the `TraceLayer` request-id span, and the submit-error mapping helpers (`map_submit_error`, `submit_via_node`).
+- `src/server/mod.rs` — transport entry points, infrastructure routes, shared singleton setup, and final family-router merge.
+- `src/server/scala_api.rs` — Scala API facade: compatibility reads/writes, extra index, wallet, mining, emission, script, utility, and Scala-auth routes.
+- `src/server/rust_api.rs` — RUST API facade: legacy operator routes, Rust-only indexer/storage-rent routes, native wallet, and versioned product modules.
+- `src/server/route_registry.rs` — production router composition paired with per-family operation descriptors; capability-gated mounts contribute descriptors only when mounted.
+- `src/server/openapi.rs` — checked RUST fragment merge, established-contract migration with referenced schemas, canonical operation inventories, and Scala-only spec filtering.
 - `src/auth.rs` — `api_key`-header middleware (`require_api_key`), `ApiSecurity` (Blake2b-256 hex, constant-time compare), Scala-parity 403 envelope.
 - `src/mining.rs` — `/mining/*` sub-router + `NodeMining` trait + `MiningApiError`→HTTP mapping; `mining_router`, `NoopNodeMining`.
 - `src/utils.rs` — stateless `/utils/*` helpers (seed, blake2b hash, address ⇄ raw, address validation, ergoTree→address); pure functions of input + `NetworkPrefix`.
 - `src/web.rs` — compile-time-embedded static assets (dashboard HTML/CSS/JS, Swagger pages, openapi.yaml, JetBrains Mono font, wallet UI bundle).
-- `src/types.rs` — node-native wire DTOs (`Api*`, `SubmitError`/`SubmitMode`, `RawTransactionBytes`, difficulty series) with `utoipa::ToSchema` for the native OpenAPI spec.
-- `src/compat/` — Scala-compatible surface mounted at bare paths.
+- `src/types.rs` — node-native wire DTOs (`Api*`, `SubmitError`/`SubmitMode`, `RawTransactionBytes`, difficulty series) with `utoipa::ToSchema` for the RUST API OpenAPI spec.
+- `src/compat/` — Scala API surface mounted at bare paths.
   - `compat/traits.rs` — `NodeChainQuery` live-read trait + `UtxoBoxBytes` envelope.
   - `compat/types.rs` — `ScalaInfo` / `Parameters` + re-exports of the shared `ergo-rest-json` Scala DTOs.
   - `compat/handlers.rs` — `/info`, `/blocks/*`, `/utxo/*`, `/peers/*`, `/transactions/unconfirmed/*` GET handlers.

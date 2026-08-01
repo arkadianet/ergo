@@ -1,9 +1,15 @@
-//! OpenAPI aggregation for the Rust-native `/api/v1/*` surface:
-//! the [`NativeOpenApi`] derive, its `ApiKeyAuth` security addon, and
-//! the YAML serializer. The Scala-parity `openapi.yaml` is a separate,
-//! untouched surface (see [`super::assets`]).
+//! OpenAPI fragments and canonical family documents.
 
+use std::collections::BTreeSet;
+
+use utoipa::openapi::{
+    path::{HttpMethod, Operation, ParameterBuilder, ParameterIn},
+    schema::{ObjectBuilder, Type},
+    Components, Info, OpenApi as OpenApiDocument, Paths, Required,
+};
 use utoipa::OpenApi;
+
+use crate::api_family::RUST_API;
 
 use crate::types::{
     ApiBlockApplyError, ApiBootstrapStatus, ApiConfiguredVote, ApiDifficultyPoint,
@@ -24,14 +30,14 @@ use crate::types::{
 #[derive(OpenApi)]
 #[openapi(
     info(
-        title = "Ergo Rust Node — Native API",
-        description = "Rust-native operator API for the Ergo node (`/api/v1/*`). \
-This document describes the production-superset route set: the conditional routes \
+        title = "Ergo Rust Node — RUST API",
+        description = "Compatibility fragment for the original RUST API operator routes. \
+The canonical complete RUST API document is served at `/api-docs/openapi-rust.yaml`. \
+This fragment describes the production-superset route set: the conditional routes \
 (`/api/v1/node/shutdown`, \
 `/api/v1/difficulty/history`, `/api/v1/mining/minerStats`, `/api/v1/votes/history`) are mounted only when the node is wired with the matching \
 admin / chain-reader handles, so a given process may serve fewer routes than \
-appear here. The `mempool/*` product routes are documented in the v1 product \
-router. Query `GET /api/v1/health` to confirm a running node's state."
+appear here. Query `GET /api/v1/health` to confirm a running node's state."
     ),
     paths(
         super::handlers::info_handler,
@@ -201,6 +207,532 @@ impl utoipa::Modify for SecurityAddon {
             ))),
         );
     }
+}
+
+/// A documented HTTP operation in one API family.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RouteOperation {
+    pub path: String,
+    pub method: String,
+}
+
+impl RouteOperation {
+    pub fn new(path: impl Into<String>, method: impl AsRef<str>) -> Self {
+        Self {
+            path: path.into(),
+            method: method.as_ref().to_ascii_lowercase(),
+        }
+    }
+}
+
+/// A conflict that would make an OpenAPI merge ambiguous.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum OpenApiMergeError {
+    #[error("OpenAPI operation collision at {method} {path}")]
+    PathMethodCollision { path: String, method: String },
+    #[error("OpenAPI component conflict in {section}.{name}")]
+    ComponentConflict { section: String, name: String },
+    #[error("OpenAPI alias source is missing: {method} {path}")]
+    MissingSourceOperation { path: String, method: String },
+}
+
+const HTTP_METHODS: [&str; 8] = [
+    "get", "put", "post", "delete", "options", "head", "patch", "trace",
+];
+
+fn http_method_name(method: &HttpMethod) -> &'static str {
+    match method {
+        HttpMethod::Get => "get",
+        HttpMethod::Put => "put",
+        HttpMethod::Post => "post",
+        HttpMethod::Delete => "delete",
+        HttpMethod::Options => "options",
+        HttpMethod::Head => "head",
+        HttpMethod::Patch => "patch",
+        HttpMethod::Trace => "trace",
+    }
+}
+
+/// Merge `incoming` only when operations are disjoint and duplicate components
+/// are structurally identical.
+pub fn merge_openapi_checked(
+    base: &mut OpenApiDocument,
+    incoming: OpenApiDocument,
+) -> Result<(), OpenApiMergeError> {
+    let base_paths = serde_json::to_value(&base.paths).expect("OpenAPI paths serialize");
+    let incoming_paths = serde_json::to_value(&incoming.paths).expect("OpenAPI paths serialize");
+    if let (Some(base_paths), Some(incoming_paths)) =
+        (base_paths.as_object(), incoming_paths.as_object())
+    {
+        for (path, incoming_item) in incoming_paths {
+            let Some(base_item) = base_paths.get(path).and_then(serde_json::Value::as_object)
+            else {
+                continue;
+            };
+            let Some(incoming_item) = incoming_item.as_object() else {
+                continue;
+            };
+            for method in HTTP_METHODS {
+                if base_item.get(method).is_some_and(|v| !v.is_null())
+                    && incoming_item.get(method).is_some_and(|v| !v.is_null())
+                {
+                    return Err(OpenApiMergeError::PathMethodCollision {
+                        path: path.clone(),
+                        method: method.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    let base_components =
+        serde_json::to_value(&base.components).expect("OpenAPI components serialize");
+    let incoming_components =
+        serde_json::to_value(&incoming.components).expect("OpenAPI components serialize");
+    if let (Some(base_components), Some(incoming_components)) =
+        (base_components.as_object(), incoming_components.as_object())
+    {
+        for (section, incoming_entries) in incoming_components {
+            let Some(base_entries) = base_components
+                .get(section)
+                .and_then(serde_json::Value::as_object)
+            else {
+                continue;
+            };
+            let Some(incoming_entries) = incoming_entries.as_object() else {
+                continue;
+            };
+            for (name, incoming_value) in incoming_entries {
+                if let Some(base_value) = base_entries.get(name) {
+                    if base_value != incoming_value {
+                        return Err(OpenApiMergeError::ComponentConflict {
+                            section: section.clone(),
+                            name: name.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    base.merge(incoming);
+    Ok(())
+}
+
+pub fn legacy_rust_openapi() -> OpenApiDocument {
+    NativeOpenApi::openapi()
+}
+
+pub fn v1_openapi_fragment() -> OpenApiDocument {
+    crate::v1::openapi::V1OpenApi::openapi()
+}
+
+fn operation_for(
+    api: &OpenApiDocument,
+    path: &str,
+    method: HttpMethod,
+) -> Result<Operation, OpenApiMergeError> {
+    let item = api.paths.paths.get(path);
+    let operation = item.and_then(|item| match method {
+        HttpMethod::Get => item.get.as_ref(),
+        HttpMethod::Put => item.put.as_ref(),
+        HttpMethod::Post => item.post.as_ref(),
+        HttpMethod::Delete => item.delete.as_ref(),
+        HttpMethod::Options => item.options.as_ref(),
+        HttpMethod::Head => item.head.as_ref(),
+        HttpMethod::Patch => item.patch.as_ref(),
+        HttpMethod::Trace => item.trace.as_ref(),
+    });
+    operation
+        .cloned()
+        .ok_or_else(|| OpenApiMergeError::MissingSourceOperation {
+            path: path.to_string(),
+            method: http_method_name(&method).to_string(),
+        })
+}
+
+fn add_alias(
+    api: &mut OpenApiDocument,
+    source_path: &str,
+    target_path: &str,
+    method: HttpMethod,
+    operation_id: &str,
+) -> Result<(), OpenApiMergeError> {
+    let mut operation = operation_for(api, source_path, method.clone())?;
+    operation.operation_id = Some(operation_id.to_string());
+    api.paths
+        .add_path_operation(target_path, vec![method], operation);
+    Ok(())
+}
+
+fn add_path_parameters(operation: &mut Operation, path: &str) {
+    let parameters = operation.parameters.get_or_insert_with(Vec::new);
+    let mut rest = path;
+    while let Some(start) = rest.find('{') {
+        let after_start = &rest[start + 1..];
+        let Some(end) = after_start.find('}') else {
+            break;
+        };
+        let name = &after_start[..end];
+        parameters.push(
+            ParameterBuilder::new()
+                .name(name)
+                .parameter_in(ParameterIn::Path)
+                .required(Required::True)
+                .schema(Some(ObjectBuilder::new().schema_type(Type::String)))
+                .build(),
+        );
+        rest = &after_start[end + 1..];
+    }
+}
+
+fn collect_schema_references(value: &serde_json::Value, references: &mut BTreeSet<String>) {
+    match value {
+        serde_json::Value::String(value) => {
+            if let Some(name) = value.strip_prefix("#/components/schemas/") {
+                references.insert(name.to_string());
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_schema_references(value, references);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values() {
+                collect_schema_references(value, references);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn established_openapi_json() -> &'static serde_json::Value {
+    static SOURCE: std::sync::LazyLock<serde_json::Value> = std::sync::LazyLock::new(|| {
+        serde_norway::from_str(crate::web::OPENAPI_YAML)
+            .expect("established OpenAPI document must parse")
+    });
+    &SOURCE
+}
+
+pub fn established_openapi_operations() -> BTreeSet<RouteOperation> {
+    let mut operations = BTreeSet::new();
+    for (path, path_item) in established_openapi_json()["paths"]
+        .as_object()
+        .expect("established OpenAPI paths are present")
+    {
+        let path_item = path_item
+            .as_object()
+            .unwrap_or_else(|| panic!("established OpenAPI path item is invalid: {path}"));
+        for method in HTTP_METHODS {
+            if path_item.contains_key(method) {
+                operations.insert(RouteOperation::new(path, method));
+            }
+        }
+    }
+    operations
+}
+
+fn established_rust_contracts() -> OpenApiDocument {
+    const PATHS: [&str; 4] = [
+        "/api/v1/transactions/{txId}/detail",
+        "/blockchain/storageRent/eligibleAt/{height}",
+        "/blockchain/storageRent/maturesAt/{height}",
+        "/blockchain/storageRent/maturesInRange",
+    ];
+
+    let source = established_openapi_json();
+    let mut paths = Paths::new();
+    for path in PATHS {
+        let value = source["paths"]
+            .get(path)
+            .unwrap_or_else(|| panic!("established OpenAPI path is missing: {path}"));
+        let item = serde_json::from_value(value.clone()).unwrap_or_else(|error| {
+            panic!("established OpenAPI path is invalid ({path}): {error}")
+        });
+        paths.paths.insert(path.to_string(), item);
+    }
+
+    let mut references = BTreeSet::new();
+    collect_schema_references(
+        &serde_json::to_value(&paths).expect("established paths serialize"),
+        &mut references,
+    );
+    let source_schemas = source["components"]["schemas"]
+        .as_object()
+        .expect("established OpenAPI schemas are present");
+    let mut components = Components::new();
+    let mut pending: Vec<String> = references.iter().cloned().collect();
+    while let Some(name) = pending.pop() {
+        if components.schemas.contains_key(&name) {
+            continue;
+        }
+        let value = source_schemas
+            .get(&name)
+            .unwrap_or_else(|| panic!("referenced established schema is missing: {name}"));
+        let schema = serde_json::from_value(value.clone()).unwrap_or_else(|error| {
+            panic!("referenced established schema is invalid ({name}): {error}")
+        });
+        let mut nested = BTreeSet::new();
+        collect_schema_references(
+            &serde_json::to_value(&schema).expect("established schema serializes"),
+            &mut nested,
+        );
+        pending.extend(nested);
+        components.schemas.insert(name, schema);
+    }
+
+    let mut fragment = OpenApiDocument::new(
+        Info::new("Established RUST API contracts", "compatibility"),
+        paths,
+    );
+    fragment.components = Some(components);
+    fragment
+}
+
+pub(crate) fn supplemental_rust_operations() -> BTreeSet<RouteOperation> {
+    crate::v1::SUPPLEMENTAL_ROUTES
+        .iter()
+        .flat_map(|route| {
+            route
+                .methods
+                .iter()
+                .map(|method| RouteOperation::new(route.openapi_path, method))
+        })
+        .collect()
+}
+
+fn add_rust_only_operations(api: &mut OpenApiDocument) -> Result<(), OpenApiMergeError> {
+    add_alias(
+        api,
+        "/api/v1/transactions/submit",
+        crate::v1::MEMPOOL_SUBMIT_ALIAS.openapi_path,
+        HttpMethod::Post,
+        "mempool_submit",
+    )?;
+    add_alias(
+        api,
+        "/api/v1/transactions/check",
+        crate::v1::MEMPOOL_CHECK_ALIAS.openapi_path,
+        HttpMethod::Post,
+        "mempool_check",
+    )?;
+    add_alias(
+        api,
+        "/api/v1/boxes/by-address/{address}",
+        crate::v1::ADDRESS_BOXES_ALIAS.openapi_path,
+        HttpMethod::Get,
+        "address_boxes",
+    )?;
+    add_alias(
+        api,
+        "/api/v1/boxes/unspent/by-address/{address}",
+        crate::v1::ADDRESS_UNSPENT_ALIAS.openapi_path,
+        HttpMethod::Get,
+        "address_unspent_boxes",
+    )?;
+
+    let account_get = operation_for(api, "/api/v1/accounts", HttpMethod::Get)?;
+    let psbt_post = operation_for(api, "/api/v1/transactions-psbt", HttpMethod::Post)?;
+    for (path, method, source, operation_id) in [
+        (
+            crate::v1::ACCOUNTS_SEAM.openapi_path,
+            HttpMethod::Post,
+            &account_get,
+            "accounts_create",
+        ),
+        (
+            crate::v1::ACCOUNT_SEAM.openapi_path,
+            HttpMethod::Get,
+            &account_get,
+            "account_get",
+        ),
+        (
+            crate::v1::ACCOUNT_SEAM.openapi_path,
+            HttpMethod::Patch,
+            &account_get,
+            "account_patch",
+        ),
+        (
+            crate::v1::ACCOUNT_SEAM.openapi_path,
+            HttpMethod::Delete,
+            &account_get,
+            "account_delete",
+        ),
+        (
+            crate::v1::ACCOUNT_BALANCE_SEAM.openapi_path,
+            HttpMethod::Get,
+            &account_get,
+            "account_balance",
+        ),
+        (
+            crate::v1::ACCOUNT_ADDRESSES_SEAM.openapi_path,
+            HttpMethod::Get,
+            &account_get,
+            "account_addresses",
+        ),
+        (
+            crate::v1::ACCOUNT_ADDRESSES_SEAM.openapi_path,
+            HttpMethod::Post,
+            &account_get,
+            "account_address_create",
+        ),
+        (
+            crate::v1::PSBT_SEAM.openapi_path,
+            HttpMethod::Get,
+            &psbt_post,
+            "psbt_get",
+        ),
+        (
+            crate::v1::PSBT_CONTRIBUTIONS_SEAM.openapi_path,
+            HttpMethod::Post,
+            &psbt_post,
+            "psbt_contribute",
+        ),
+        (
+            crate::v1::PSBT_FINALIZE_SEAM.openapi_path,
+            HttpMethod::Post,
+            &psbt_post,
+            "psbt_finalize",
+        ),
+    ] {
+        let mut operation = source.clone();
+        operation.operation_id = Some(operation_id.to_string());
+        add_path_parameters(&mut operation, path);
+        api.paths.add_path_operation(path, vec![method], operation);
+    }
+    Ok(())
+}
+
+/// One canonical OpenAPI document for every RUST API operation.
+pub fn rust_openapi() -> Result<OpenApiDocument, OpenApiMergeError> {
+    let mut openapi = legacy_rust_openapi();
+    merge_openapi_checked(&mut openapi, v1_openapi_fragment())?;
+    merge_openapi_checked(&mut openapi, established_rust_contracts())?;
+    add_rust_only_operations(&mut openapi)?;
+    openapi.info.title = format!("Ergo Rust Node — {}", RUST_API.label);
+    openapi.info.description = Some(
+        "The complete Rust-native API, including legacy operator routes and all \
+         versioned `/api/v1/*` operations."
+            .to_string(),
+    );
+    Ok(openapi)
+}
+
+pub fn rust_openapi_yaml() -> String {
+    rust_openapi()
+        .expect("RUST API OpenAPI fragments must merge without conflicts")
+        .to_yaml()
+        .expect("OpenAPI YAML serialize")
+}
+
+pub fn openapi_operations(openapi: &OpenApiDocument) -> BTreeSet<RouteOperation> {
+    let paths = serde_json::to_value(&openapi.paths).expect("OpenAPI paths serialize");
+    let mut operations = BTreeSet::new();
+    let Some(paths) = paths.as_object() else {
+        return operations;
+    };
+    for (path, item) in paths {
+        let Some(item) = item.as_object() else {
+            continue;
+        };
+        for method in HTTP_METHODS {
+            if item.get(method).is_some_and(|value| !value.is_null()) {
+                operations.insert(RouteOperation::new(path, method));
+            }
+        }
+    }
+    operations
+}
+
+fn exclude_from_scala_openapi(path: &str) -> bool {
+    path.starts_with("/api/v1/")
+        || path.starts_with("/blockchain/storageRent/")
+        || matches!(
+            path,
+            "/transactions/unconfirmed/inputs/byBoxId/{boxId}"
+                | "/transactions/unconfirmed/outputs/byBoxId/{boxId}"
+                | "/transactions/unconfirmed/outputs/byErgoTree"
+                | "/transactions/unconfirmed/outputs/byTokenId/{tokenId}"
+                | "/transactions/unconfirmed/outputs/byRegisters"
+                | "/mining/candidateWithTxs"
+                | "/utxo/getBoxesBinaryProof"
+                | "/script/executeWithContext"
+        )
+}
+
+pub fn scala_openapi_yaml() -> &'static str {
+    static SCALA_OPENAPI: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let mut output = String::new();
+        let mut in_paths = false;
+        let mut skip_path = false;
+        let mut skip_rust_description = false;
+        for line in crate::web::OPENAPI_YAML.lines() {
+            if line == "    ## Rust-exclusive additions" {
+                skip_rust_description = true;
+                continue;
+            }
+            if skip_rust_description {
+                if line == "    ## Everything else" {
+                    skip_rust_description = false;
+                } else {
+                    continue;
+                }
+            }
+            if line == "paths:" {
+                in_paths = true;
+                skip_path = false;
+            } else if in_paths && !line.starts_with(' ') && !line.is_empty() {
+                in_paths = false;
+                skip_path = false;
+            } else if in_paths {
+                if let Some(path) = line
+                    .strip_prefix("  /")
+                    .and_then(|path| path.strip_suffix(':'))
+                {
+                    skip_path = exclude_from_scala_openapi(&format!("/{path}"));
+                }
+            }
+            if !skip_path {
+                output.push_str(line);
+                output.push('\n');
+            }
+        }
+        output
+            .replace(
+                "title: Ergo Node API — legacy compatibility document",
+                "title: Ergo Node — Scala API",
+            )
+            .replace(
+                "OpenAPI spec inherited from the Scala reference node. The Rust\n    node implements most of the Scala wire surface plus a small\n    Rust-exclusive operator overlay. This page is the authoritative\n    map of what this build serves: the sections below enumerate every\n    route that returns **404**, every config-gated route, and every\n    Rust-exclusive addition. Anything not called out here matches the\n    Scala wire shape (see **Everything else**).",
+                "OpenAPI spec for the Scala-compatible operations served by this node.\n    Rust-native operations are documented separately as the RUST API.",
+            )
+    });
+    SCALA_OPENAPI.as_str()
+}
+
+pub fn scala_openapi_operations() -> BTreeSet<RouteOperation> {
+    static OPERATIONS: std::sync::LazyLock<BTreeSet<RouteOperation>> =
+        std::sync::LazyLock::new(|| {
+            let document: serde_json::Value = serde_norway::from_str(scala_openapi_yaml())
+                .expect("Scala OpenAPI document must parse");
+            let mut operations = BTreeSet::new();
+            for (path, path_item) in document["paths"]
+                .as_object()
+                .expect("Scala OpenAPI paths are present")
+            {
+                let path_item = path_item
+                    .as_object()
+                    .unwrap_or_else(|| panic!("Scala OpenAPI path item is invalid: {path}"));
+                for method in HTTP_METHODS {
+                    if path_item.contains_key(method) {
+                        operations.insert(RouteOperation::new(path, method));
+                    }
+                }
+            }
+            operations
+        });
+    OPERATIONS.clone()
 }
 
 /// Serialise the native OpenAPI document to YAML.

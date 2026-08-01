@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
-  title: Ergo Rust Node — Native API
-  description: 'Rust-native operator API for the Ergo node (`/api/v1/*`). This document describes the production-superset route set: the conditional routes (`/api/v1/node/shutdown`, `/api/v1/difficulty/history`, `/api/v1/mining/minerStats`, `/api/v1/votes/history`) are mounted only when the node is wired with the matching admin / chain-reader handles, so a given process may serve fewer routes than appear here. The `mempool/*` product routes are documented in the v1 product router. Query `GET /api/v1/health` to confirm a running node''s state.'
+  title: Ergo Rust Node — RUST API
+  description: 'Compatibility fragment for the original RUST API operator routes. The canonical complete RUST API document is served at `/api-docs/openapi-rust.yaml`. This fragment describes the production-superset route set: the conditional routes (`/api/v1/node/shutdown`, `/api/v1/difficulty/history`, `/api/v1/mining/minerStats`, `/api/v1/votes/history`) are mounted only when the node is wired with the matching admin / chain-reader handles, so a given process may serve fewer routes than appear here. Query `GET /api/v1/health` to confirm a running node''s state.'
   license:
     name: MIT OR Apache-2.0
     identifier: MIT OR Apache-2.0

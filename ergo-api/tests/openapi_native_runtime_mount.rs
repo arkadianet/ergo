@@ -14,19 +14,35 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::body::{to_bytes, Body};
-use axum::http::{Method, Request, StatusCode};
+use axum::extract::MatchedPath;
+use axum::http::{HeaderValue, Method, Request, StatusCode};
+use axum::middleware::Next;
+use axum::response::Response;
 use ergo_api::auth::{ApiSecurity, API_KEY_HEADER};
-use ergo_api::compat::types::ScalaTransactionInput;
+use ergo_api::compat::types::{Parameters, ScalaFullBlock, ScalaInfo, ScalaTransactionInput};
+use ergo_api::compat::NodeChainQuery;
+use ergo_api::emission::{EmissionInfoJson, EmissionSchedule, EmissionScriptsJson};
+use ergo_api::mining::{MiningApiError, NodeMining};
 use ergo_api::server::{
-    router, router_with_mempool, router_with_mempool_and_wallet_and_security, ServerCtx,
+    established_openapi_operations, legacy_rust_openapi, openapi_operations, router,
+    router_with_mempool, router_with_mempool_and_wallet_and_security,
+    router_with_mempool_and_wallet_and_security_and_inventory, rust_openapi,
+    scala_openapi_operations, v1_openapi_fragment, RouteOperation, ServerCtx,
 };
-use ergo_api::traits::{NodeAdmin, NodeReadState, NodeSubmit, NoopMempoolView, NoopNodeAdmin};
+use ergo_api::traits::{
+    ChainParamsView, NodeAdmin, NodeReadState, NodeSubmit, NoopMempoolView, NoopNodeAdmin,
+};
 use ergo_api::types::{
     ApiFullBlockRef, ApiHeaderRef, ApiHealth, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction,
     ApiMempoolTransactions, ApiPeer, ApiStatus, ApiSyncStatus, ApiTip, ApiTxSource,
     ApiWeightFunction, HealthStatus, SubmitError, SubmitMode, SyncStateLabel,
 };
 use ergo_api::wallet::NoopWalletAdmin;
+use ergo_indexer_types::{
+    BalanceDto, BoxId, IndexedBoxDto, IndexedTokenDto, IndexedTxDto, IndexerQuery, IndexerStatus,
+    Page, SortDir, TemplateHash, TokenId, TreeHash, TxId,
+};
+use ergo_rest_json::mining::{AutolykosSolutionJson, WorkMessageJson};
 use ergo_ser::address::NetworkPrefix;
 use tower::ServiceExt;
 
@@ -158,6 +174,233 @@ impl NodeSubmit for StubSubmit {
     }
 }
 
+struct StubCompat;
+
+impl NodeChainQuery for StubCompat {
+    fn info(&self) -> ScalaInfo {
+        ScalaInfo {
+            last_mempool_update_time: 0,
+            current_time: 0,
+            network: "mainnet".into(),
+            name: "stub".into(),
+            state_type: "utxo".into(),
+            difficulty: 0,
+            best_full_header_id: String::new(),
+            best_header_id: String::new(),
+            peers_count: 0,
+            unconfirmed_count: 0,
+            app_version: "0.1.0".into(),
+            eip37_supported: true,
+            state_root: String::new(),
+            genesis_block_id: String::new(),
+            rest_api_url: None,
+            previous_full_header_id: String::new(),
+            full_height: 0,
+            headers_height: 0,
+            state_version: String::new(),
+            full_blocks_score: 0,
+            max_peer_height: 0,
+            launch_time: 0,
+            is_explorer: false,
+            last_seen_message_time: 0,
+            eip27_supported: true,
+            headers_score: 0,
+            parameters: Parameters {
+                output_cost: 0,
+                token_access_cost: 0,
+                max_block_cost: 0,
+                height: 0,
+                max_block_size: 0,
+                data_input_cost: 0,
+                block_version: 0,
+                input_cost: 0,
+                storage_fee_factor: 0,
+                subblocks_per_block: 0,
+                min_value_per_byte: 0,
+            },
+            is_mining: false,
+        }
+    }
+
+    fn header_ids_at_height(&self, _height: u32) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn full_block_by_id(&self, _header_id_hex: &str) -> Option<ScalaFullBlock> {
+        None
+    }
+}
+
+struct StubIndexer;
+
+impl IndexerQuery for StubIndexer {
+    fn indexed_height(&self) -> u64 {
+        0
+    }
+
+    fn status(&self) -> IndexerStatus {
+        IndexerStatus::CaughtUp
+    }
+
+    fn box_by_id(&self, _box_id: &BoxId) -> Option<IndexedBoxDto> {
+        None
+    }
+
+    fn box_by_global_index(&self, _n: u64) -> Option<IndexedBoxDto> {
+        None
+    }
+
+    fn boxes_by_global_range(&self, _lo: u64, _hi: u64) -> Vec<IndexedBoxDto> {
+        Vec::new()
+    }
+
+    fn tx_by_id(&self, _tx_id: &TxId) -> Option<IndexedTxDto> {
+        None
+    }
+
+    fn tx_by_global_index(&self, _n: u64) -> Option<IndexedTxDto> {
+        None
+    }
+
+    fn txs_by_global_range(&self, _lo: u64, _hi: u64) -> Vec<IndexedTxDto> {
+        Vec::new()
+    }
+
+    fn address_balance(&self, _tree_hash: &TreeHash) -> Option<BalanceDto> {
+        None
+    }
+
+    fn address_txs_paged(
+        &self,
+        _tree_hash: &TreeHash,
+        _p: Page,
+        _dir: SortDir,
+    ) -> Vec<IndexedTxDto> {
+        Vec::new()
+    }
+
+    fn address_boxes_paged(
+        &self,
+        _tree_hash: &TreeHash,
+        _p: Page,
+        _dir: SortDir,
+    ) -> Vec<IndexedBoxDto> {
+        Vec::new()
+    }
+
+    fn address_unspent_paged(
+        &self,
+        _tree_hash: &TreeHash,
+        _p: Page,
+        _dir: SortDir,
+    ) -> Vec<IndexedBoxDto> {
+        Vec::new()
+    }
+
+    fn address_total_txs(&self, _tree_hash: &TreeHash) -> u64 {
+        0
+    }
+
+    fn address_total_boxes(&self, _tree_hash: &TreeHash) -> u64 {
+        0
+    }
+
+    fn template_boxes_paged(&self, _template_hash: &TemplateHash, _p: Page) -> Vec<IndexedBoxDto> {
+        Vec::new()
+    }
+
+    fn template_unspent_paged(
+        &self,
+        _template_hash: &TemplateHash,
+        _p: Page,
+        _dir: SortDir,
+    ) -> Vec<IndexedBoxDto> {
+        Vec::new()
+    }
+
+    fn template_total_boxes(&self, _template_hash: &TemplateHash) -> u64 {
+        0
+    }
+
+    fn token_by_id(&self, _token_id: &TokenId) -> Option<IndexedTokenDto> {
+        None
+    }
+
+    fn tokens_by_ids(&self, _ids: &[TokenId]) -> Vec<IndexedTokenDto> {
+        Vec::new()
+    }
+
+    fn token_boxes_paged(&self, _token_id: &TokenId, _p: Page) -> Vec<IndexedBoxDto> {
+        Vec::new()
+    }
+
+    fn token_unspent_paged(
+        &self,
+        _token_id: &TokenId,
+        _p: Page,
+        _dir: SortDir,
+    ) -> Vec<IndexedBoxDto> {
+        Vec::new()
+    }
+
+    fn token_total_boxes(&self, _token_id: &TokenId) -> u64 {
+        0
+    }
+}
+
+struct StubChainParams;
+
+impl ChainParamsView for StubChainParams {
+    fn storage_fee_factor_for_validation_at(&self, _height: u32) -> Option<i32> {
+        Some(0)
+    }
+
+    fn compute_storage_fee(&self, box_bytes_len: i32, storage_fee_factor: i32) -> i32 {
+        box_bytes_len.wrapping_mul(storage_fee_factor)
+    }
+}
+
+struct StubMining;
+
+#[async_trait]
+impl NodeMining for StubMining {
+    async fn candidate(
+        &self,
+        _longpoll: Option<String>,
+    ) -> Result<Option<WorkMessageJson>, MiningApiError> {
+        Ok(None)
+    }
+
+    async fn submit_solution(
+        &self,
+        _solution: AutolykosSolutionJson,
+    ) -> Result<(), MiningApiError> {
+        Ok(())
+    }
+
+    async fn reward_address(&self) -> Result<String, MiningApiError> {
+        Ok(String::new())
+    }
+
+    async fn reward_pubkey(&self) -> Result<String, MiningApiError> {
+        Ok(String::new())
+    }
+}
+
+struct StubEmission;
+
+impl EmissionSchedule for StubEmission {
+    fn emission_info_at(&self, height: u32) -> EmissionInfoJson {
+        EmissionInfoJson {
+            height,
+            miner_reward: 0,
+            total_coins_issued: 0,
+            total_remain_coins: 0,
+            reemitted: 0,
+        }
+    }
+}
+
 // ----- route inventory -----
 
 /// The always-on native derive-mounted GET routes. The `mempool/*` reads moved
@@ -221,6 +464,76 @@ fn ctx(submit: Option<Arc<dyn NodeSubmit>>) -> ServerCtx {
     }
 }
 
+fn fully_wired_ctx() -> ServerCtx {
+    ServerCtx {
+        read: read(),
+        compat: Some(Arc::new(StubCompat)),
+        submit: Some(submit()),
+        indexer: Some(Arc::new(StubIndexer)),
+        mempool: Arc::new(NoopMempoolView::new()),
+        network: NetworkPrefix::Mainnet,
+        chain_params: Some(Arc::new(StubChainParams)),
+        mining: Some(Arc::new(StubMining)),
+        emission: Some(Arc::new(StubEmission)),
+        emission_scripts: Some(Arc::new(EmissionScriptsJson {
+            emission: String::new(),
+            reemission: String::new(),
+            pay2_reemission: String::new(),
+        })),
+        utxo_reads_supported: true,
+    }
+}
+
+fn indexer_without_chain_ctx() -> ServerCtx {
+    ServerCtx {
+        indexer: Some(Arc::new(StubIndexer)),
+        ..ctx(None)
+    }
+}
+
+fn chain_dependent_scala_operations() -> std::collections::BTreeSet<RouteOperation> {
+    [
+        ("/blockchain/transaction/byId/{txId}", "get"),
+        ("/blockchain/transaction/byIndex/{txIndex}", "get"),
+        ("/blockchain/transaction/byAddress", "post"),
+        ("/blockchain/transaction/byAddress/{address}", "get"),
+        ("/blockchain/transaction/range", "get"),
+        ("/blockchain/transaction/range", "post"),
+        ("/blockchain/box/range", "get"),
+        ("/blockchain/box/range", "post"),
+        ("/blockchain/block/byHeaderId/{headerId}", "get"),
+        ("/blockchain/block/byHeaderIds", "post"),
+    ]
+    .into_iter()
+    .map(|(path, method)| RouteOperation::new(path, method))
+    .collect()
+}
+
+fn always_mounted_scala_blockchain_operations() -> std::collections::BTreeSet<RouteOperation> {
+    [
+        ("/blockchain/indexedHeight", "get"),
+        ("/blockchain/box/byId/{boxId}", "get"),
+        ("/blockchain/box/byIndex/{boxIndex}", "get"),
+        ("/blockchain/balance", "post"),
+        ("/blockchain/balanceForAddress/{address}", "get"),
+        ("/blockchain/box/byAddress", "post"),
+        ("/blockchain/box/byAddress/{address}", "get"),
+        ("/blockchain/box/unspent/byAddress", "post"),
+        ("/blockchain/box/unspent/byAddress/{address}", "get"),
+        ("/blockchain/box/byErgoTree", "post"),
+        ("/blockchain/box/unspent/byErgoTree", "post"),
+        ("/blockchain/box/byTemplateHash/{hash}", "get"),
+        ("/blockchain/box/unspent/byTemplateHash/{hash}", "get"),
+        ("/blockchain/token/byId/{tokenId}", "get"),
+        ("/blockchain/tokens", "post"),
+        ("/blockchain/box/byTokenId/{tokenId}", "get"),
+        ("/blockchain/box/unspent/byTokenId/{tokenId}", "get"),
+    ]
+    .into_iter()
+    .map(|(path, method)| RouteOperation::new(path, method))
+    .collect()
+}
+
 async fn get(app: &axum::Router, path: &str) -> StatusCode {
     app.clone()
         .oneshot(
@@ -257,6 +570,243 @@ async fn assert_all_gets_mounted(app: &axum::Router) {
             StatusCode::OK,
             "GET {path} should be mounted and answer 200",
         );
+    }
+}
+
+fn probe_path(template: &str) -> String {
+    let mut path = template.to_string();
+    while let Some(start) = path.find('{') {
+        let end = path[start..]
+            .find('}')
+            .map(|offset| start + offset)
+            .unwrap();
+        let name = &path[start + 1..end];
+        let value = if name.contains("height")
+            || name.contains("index")
+            || name.contains("limit")
+            || name.contains("scan_id")
+        {
+            "0".to_string()
+        } else if name.contains("id") || name.contains("hash") {
+            "00".repeat(32)
+        } else {
+            "x".to_string()
+        };
+        path.replace_range(start..=end, &value);
+    }
+    path
+}
+
+async fn mark_matched_route(request: axum::extract::Request, next: Next) -> Response {
+    let matched = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|path| path.as_str().to_string());
+    let mut response = next.run(request).await;
+    if let Some(matched) = matched {
+        response.headers_mut().insert(
+            "x-ergo-route-matched",
+            HeaderValue::from_str(&matched).unwrap(),
+        );
+    }
+    response
+}
+
+async fn probe_operation(app: &axum::Router, operation: &RouteOperation) -> Response {
+    let method = Method::from_bytes(operation.method.to_ascii_uppercase().as_bytes()).unwrap();
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(probe_path(&operation.path))
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn canonical_family_inventories_are_bidirectional_and_fully_mounted() {
+    let (app, inventory) = router_with_mempool_and_wallet_and_security_and_inventory(
+        fully_wired_ctx(),
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        None,
+    );
+    let rust_documented = openapi_operations(&rust_openapi().expect("canonical RUST OpenAPI"));
+    let scala_documented = scala_openapi_operations();
+    assert_eq!(inventory.rust, rust_documented);
+    assert_eq!(inventory.scala, scala_documented);
+    assert_eq!(inventory.rust.len(), 179);
+    assert_eq!(inventory.scala.len(), 125);
+    assert!(inventory.rust.is_disjoint(&inventory.scala));
+
+    let app = app.layer(axum::middleware::from_fn(mark_matched_route));
+    for operation in inventory.rust.iter().chain(&inventory.scala) {
+        let documented_family_count = usize::from(rust_documented.contains(operation))
+            + usize::from(scala_documented.contains(operation));
+        assert_eq!(
+            documented_family_count, 1,
+            "{} {} has a production descriptor but is not documented in exactly one family",
+            operation.method, operation.path
+        );
+
+        let response = probe_operation(&app, operation).await;
+        let matched = response
+            .headers()
+            .get("x-ergo-route-matched")
+            .and_then(|value| value.to_str().ok());
+        assert!(
+            matched.is_some_and(|path| !path.contains('*')),
+            "{} {} has a production descriptor but is not mounted",
+            operation.method,
+            operation.path,
+        );
+        assert_ne!(
+            response.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "{} {} is mounted without its descriptor method",
+            operation.method,
+            operation.path,
+        );
+    }
+
+    let mut candidates = established_openapi_operations();
+    candidates.extend(openapi_operations(&legacy_rust_openapi()));
+    candidates.extend(openapi_operations(&v1_openapi_fragment()));
+    for operation in candidates {
+        let response = probe_operation(&app, &operation).await;
+        let matched = response
+            .headers()
+            .get("x-ergo-route-matched")
+            .and_then(|value| value.to_str().ok());
+        let mounted = response.status() != StatusCode::METHOD_NOT_ALLOWED
+            && matched.is_some_and(|path| !path.contains('*'));
+        if mounted {
+            let family_count = usize::from(inventory.scala.contains(&operation))
+                + usize::from(inventory.rust.contains(&operation));
+            assert_eq!(
+                family_count, 1,
+                "{} {} is mounted but not documented in exactly one family",
+                operation.method, operation.path
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn scala_blockchain_inventory_tracks_chain_capability() {
+    let (_, without_chain) = router_with_mempool_and_wallet_and_security_and_inventory(
+        indexer_without_chain_ctx(),
+        None,
+        Arc::new(NoopWalletAdmin),
+        None,
+    );
+    let (fully_wired, with_chain) = router_with_mempool_and_wallet_and_security_and_inventory(
+        fully_wired_ctx(),
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        None,
+    );
+
+    let chain_dependent = chain_dependent_scala_operations();
+    for operation in &chain_dependent {
+        assert!(
+            !without_chain.scala.contains(operation),
+            "{} {} must not be inventoried without a chain reader",
+            operation.method,
+            operation.path
+        );
+        assert!(
+            with_chain.scala.contains(operation),
+            "{} {} must be inventoried with a chain reader",
+            operation.method,
+            operation.path
+        );
+    }
+
+    let without_chain_blockchain: std::collections::BTreeSet<_> = without_chain
+        .scala
+        .iter()
+        .filter(|operation| operation.path.starts_with("/blockchain/"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        without_chain_blockchain,
+        always_mounted_scala_blockchain_operations()
+    );
+
+    let fully_wired = fully_wired.layer(axum::middleware::from_fn(mark_matched_route));
+    for operation in &chain_dependent {
+        let response = probe_operation(&fully_wired, operation).await;
+        let matched = response
+            .headers()
+            .get("x-ergo-route-matched")
+            .and_then(|value| value.to_str().ok());
+        assert!(
+            matched.is_some_and(|path| !path.contains('*')),
+            "{} {} is inventoried with a chain reader but not mounted",
+            operation.method,
+            operation.path
+        );
+        assert_ne!(
+            response.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "{} {} is mounted without its inventory method",
+            operation.method,
+            operation.path
+        );
+    }
+}
+
+#[test]
+fn production_inventory_tracks_aliases_and_all_conditional_rust_routes() {
+    let (_, base) = router_with_mempool_and_wallet_and_security_and_inventory(
+        ctx(None),
+        None,
+        Arc::new(NoopWalletAdmin),
+        None,
+    );
+    let (_, full) = router_with_mempool_and_wallet_and_security_and_inventory(
+        fully_wired_ctx(),
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        None,
+    );
+
+    let conditionals = full
+        .rust
+        .difference(&base.rust)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected = [
+        ("/api/v1/node/shutdown", "post"),
+        ("/api/v1/votes", "post"),
+        ("/api/v1/difficulty/history", "get"),
+        ("/api/v1/votes/history", "get"),
+        ("/api/v1/mining/minerStats", "get"),
+        ("/api/v1/indexer/status", "get"),
+        ("/api/v1/transactions/{txId}/detail", "get"),
+        ("/blockchain/storageRent/eligibleAt/{height}", "get"),
+        ("/blockchain/storageRent/maturesAt/{height}", "get"),
+        ("/blockchain/storageRent/maturesInRange", "get"),
+    ]
+    .into_iter()
+    .map(|(path, method)| ergo_api::server::RouteOperation::new(path, method))
+    .collect();
+    assert_eq!(conditionals, expected);
+
+    for (path, method) in [
+        ("/api/v1/mempool/submit", "post"),
+        ("/api/v1/mempool/check", "post"),
+        ("/api/v1/addresses/{address}/boxes", "get"),
+        ("/api/v1/addresses/{address}/unspent", "get"),
+    ] {
+        assert!(full
+            .rust
+            .contains(&ergo_api::server::RouteOperation::new(path, method)));
     }
 }
 

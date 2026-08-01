@@ -2,7 +2,7 @@
 <html lang="en" class="theme-dark">
 <head>
 <meta charset="utf-8">
-<title>ergo-rust-node — Native API Swagger</title>
+<title>ergo-rust-node — {{RUST_API_LABEL}} Swagger</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <!-- Theme tokens so the page chrome matches the dashboard. Swagger-UI's own
      widget keeps its default skin (deeper theming is out of scope). -->
@@ -38,21 +38,21 @@
 </head>
 <body>
 <div class="ergo-banner">
-  <strong>Native API:</strong> the Rust-native <code>/api/v1/*</code> surface —
-  independent of Scala parity. This spec is the production superset; the
-  conditional routes (mempool submit/check, node shutdown) may not be mounted
-  in a given process — query <code>/api/v1/health</code> for live state.
+  <strong>{{RUST_API_LABEL}}:</strong> the complete Rust-native surface,
+  combining the original operator routes with the versioned
+  <code>/api/v1/*</code> modules. Conditional routes remain visible in this
+  production-superset document; query <code>/api/v1/health</code> for live state.
   Set your <code>api_key</code> on the <a href="/">dashboard</a> (the Authorize
-  chip) to pre-authorize the gated endpoints below. See
-  <a href="/swagger">/swagger</a> for the Scala-parity spec, or <a href="/">/</a>
-  for the live dashboard.
+  chip) to pre-authorize the gated endpoints below. See the
+  <a href="{{SCALA_SWAGGER_URL}}">{{SCALA_API_LABEL}}</a> docs, or <a href="/">/</a> for the live
+  dashboard.
 </div>
 <div id="swagger-ui"></div>
 <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui-bundle.js" integrity="sha384-wmyclcVGX/WhUkdkATwhaK1X1JtiNrr2EoYJ+diV3vj4v6OC5yCeSu+yW13SYJep" crossorigin="anonymous"></script>
 <script>
 window.onload = () => {
   window.ui = SwaggerUIBundle({
-    url: "/api-docs/openapi-native.yaml",
+    url: "{{RUST_OPENAPI_URL}}",
     dom_id: "#swagger-ui",
     deepLinking: true,
     presets: [SwaggerUIBundle.presets.apis],

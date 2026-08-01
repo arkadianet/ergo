@@ -2,7 +2,7 @@ openapi: "3.0.2"
 
 info:
   version: "6.0.2"
-  title: Ergo Node API (Rust)
+  title: Ergo Node API — legacy compatibility document
   description: |
     OpenAPI spec inherited from the Scala reference node. The Rust
     node implements most of the Scala wire surface plus a small
@@ -18,11 +18,9 @@ info:
     deferred items are listed with their status; off-spec items
     are not on our roadmap.
 
-    **Script compile/execute (no ErgoScript compiler in this build):**
+    **Script execution not implemented:**
 
-    - `/script/p2sAddress`, `/script/p2shAddress`,
-      `/script/executeWithContext` — these compile or run ErgoScript
-      *source*, and this node ships no compiler.
+    - `/script/executeWithContext` is not mounted.
 
     (The stateless decoders `/script/addressToTree/{address}` and
     `/script/addressToBytes/{address}` ARE mounted — they match the
@@ -376,7 +374,7 @@ components:
       type: object
       description: >-
         One recent full block for the dashboard cockpit's "recent blocks" list
-        (newest-first). Snake_case (native surface). `size_bytes` sums the
+        (newest-first). Snake_case (RUST API). `size_bytes` sums the
         on-disk section byte lengths — header + blockTransactions + extension,
         plus adProofs when the node retains it (adProofs is optional in UTXO
         mode). A block whose required sections are missing, or whose any
@@ -411,7 +409,7 @@ components:
       type: object
       description: >-
         Inputs/outputs of a transaction resolved to addresses + values for the
-        UI detail drawer. Snake_case (native surface). No `confirmed` flag
+        UI detail drawer. Snake_case (RUST API). No `confirmed` flag
         (extra-index is not chain-state); fee omitted (shown on the mempool
         row).
       required:
@@ -1405,8 +1403,8 @@ components:
 
     WalletTransactionEntry:
       description: >-
-        A wallet/scan-related transaction reference. Node-native lean shape
-        (not the full Scala `WalletTransaction`): box-id references instead of
+        A wallet/scan-related transaction reference. RUST API lean shape
+        (not the full Scala API `WalletTransaction`): box-id references instead of
         embedded transaction bytes. `scanIds` is present on scan listings
         (`/wallet/transactionsByScanId` for user scans) and omitted on the
         wallet's own listings.
@@ -1444,7 +1442,7 @@ components:
 
     ScanBox:
       description: >-
-        A box tracked by a scan. Node-native lean shape (not the full Scala
+        A box tracked by a scan. RUST API lean shape (not the full Scala API
         `WalletBox`): `bytes` carries the hex-encoded serialized ErgoBox so
         clients that need the ergo tree / registers / assets can decode it.
       type: object
@@ -6920,8 +6918,8 @@ paths:
         in the mempool — to its inputs and outputs with addresses, values and
         tokens. Ungated so the unconfirmed path works while the indexer is
         still syncing. 404 when the id is present in neither surface. Field
-        names are snake_case (native-surface convention), not the camelCase
-        used by the Scala-compat schemas above. No `confirmed` flag is emitted
+        names are snake_case (RUST API convention), not the camelCase
+        used by the Scala API schemas above. No `confirmed` flag is emitted
         (the extra-index is not chain-state); fee is omitted (shown on the
         mempool row). Unresolved inputs emit null address/value/tokens.
       operationId: getTxDetail
@@ -6965,8 +6963,8 @@ paths:
         section bytes while `/api/v1/tip` reads the in-memory tip, during the
         async-persist window this list may briefly trail `/tip` by a block or
         two; it never advertises a block whose sections are not yet committed,
-        and self-heals as they commit. Field names are snake_case (native
-        surface). See `ApiRecentBlock` for `size_bytes` semantics.
+        and self-heals as they commit. Field names are snake_case (RUST API).
+        See `ApiRecentBlock` for `size_bytes` semantics.
       operationId: getRecentBlocks
       tags:
         - blockchain
