@@ -24,6 +24,7 @@ pub mod governor;
 pub mod mempool_depth;
 pub mod openapi;
 pub mod operator;
+pub mod pricing;
 pub mod realtime;
 pub mod routes;
 pub mod script;
