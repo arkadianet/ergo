@@ -51,6 +51,39 @@ pub(crate) const ORPHAN_HEADER_IBD_LOOKAHEAD: u32 = 60_000;
 /// SyncInfo keep surfacing genuinely missing parents.
 pub(crate) const ORPHAN_ROOT_WALK_MIN_INTERVAL: Duration = Duration::from_secs(1);
 
+fn report_header_failure(
+    store: &ergo_state::StateBackendKind,
+    peer: PeerId,
+    operation: &'static str,
+    error: &HeaderProcessError,
+) {
+    if let HeaderProcessError::Storage(state_error) = error {
+        super::report_sync_storage_failure(store, "header_pipeline", operation, state_error);
+        return;
+    }
+
+    let diagnostics = ergo_state::storage_observability::ErrorDiagnostics::from_error(error);
+    warn!(
+        event = "sync_header_validation_failed",
+        subsystem = "sync",
+        component = "header_pipeline",
+        operation,
+        peer = %peer,
+        error = %diagnostics.display,
+        error_debug = %diagnostics.debug,
+        error_chain = %diagnostics.chain,
+        "header validation failed",
+    );
+}
+
+fn report_header_flush_failure(
+    store: &ergo_state::StateBackendKind,
+    operation: &'static str,
+    error: &ergo_state::store::StateError,
+) {
+    super::report_sync_storage_failure(store, "header_pipeline", operation, error);
+}
+
 impl SyncExecutor {
     /// Run the full single-header validation pipeline for an
     /// out-of-band local header (e.g. the §12 `POST /blocks`
@@ -133,7 +166,7 @@ impl SyncExecutor {
                 self.header_perf.add_pow_wall(pow_ns);
                 self.header_perf.add_pow_cpu(pow_ns);
                 self.header_perf.add_headers(1);
-                warn!(peer = %peer, error = %e, "header validation failed");
+                report_header_failure(store, peer, "pre_validate_header", &e);
                 return vec![Action::Penalize {
                     peer,
                     penalty: Penalty::Misbehavior,
@@ -233,7 +266,7 @@ impl SyncExecutor {
                 Vec::new()
             }
             Err(e) => {
-                warn!(peer = %peer, error = %e, "header validation failed");
+                report_header_failure(store, peer, "finalize_header", &e);
                 vec![Action::Penalize {
                     peer,
                     penalty: Penalty::Misbehavior,
@@ -368,7 +401,7 @@ impl SyncExecutor {
                             );
                         }
                         Err(e) => {
-                            warn!(peer = %peer, error = %e, "header validation failed");
+                            report_header_failure(store, peer, "finalize_header_batch", &e);
                             actions.push(Action::Penalize {
                                 peer,
                                 penalty: Penalty::Misbehavior,
@@ -377,7 +410,7 @@ impl SyncExecutor {
                     }
                 }
                 Err(e) => {
-                    warn!(peer = %peer, error = %e, "header pre-validation failed");
+                    report_header_failure(store, peer, "pre_validate_header_batch", &e);
                     actions.push(Action::Penalize {
                         peer,
                         penalty: Penalty::Misbehavior,
@@ -392,9 +425,10 @@ impl SyncExecutor {
         // the batch. Continuing with a desynced in-memory/DB state is worse
         // than crashing. On restart, redb is consistent and we re-sync.
         let t_flush = Instant::now();
-        store
-            .flush_header_batch()
-            .expect("header batch flush failed — redb write error is fatal");
+        if let Err(error) = store.flush_header_batch() {
+            report_header_flush_failure(store, "flush_header_batch", &error);
+            panic!("header batch flush failed — redb write error is fatal: {error}");
+        }
         self.header_perf
             .add_flush(t_flush.elapsed().as_nanos() as u64);
 
@@ -560,9 +594,10 @@ impl SyncExecutor {
         // ahead of disk — same fatal class as the batch path's
         // flush at line ~1247. Match that behaviour: panic so a
         // fresh restart re-syncs from a consistent on-disk state.
-        store
-            .flush_header_batch()
-            .expect("orphan drain flush_header_batch failed — redb write error is fatal");
+        if let Err(error) = store.flush_header_batch() {
+            report_header_flush_failure(store, "flush_orphan_header_batch", &error);
+            panic!("orphan drain flush_header_batch failed — redb write error is fatal: {error}");
+        }
         // Suppress dead_code: keep the local set live until end of
         // function so cascade tracking is observable in trace.
         let _ = newly_installed_local;
@@ -763,10 +798,11 @@ impl SyncExecutor {
                 Ok(Some(_)) => continue, // parent already in store; drain will retry
                 Ok(None) => {}
                 Err(e) => {
-                    warn!(
-                        parent_id = %hex::encode(parent_id),
-                        error = %e,
-                        "get_header failed during parent-walk",
+                    super::report_sync_storage_failure(
+                        store,
+                        "header_pipeline",
+                        "orphan_parent_header_lookup",
+                        &e,
                     );
                     continue;
                 }

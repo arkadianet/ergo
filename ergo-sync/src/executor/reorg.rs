@@ -292,7 +292,12 @@ impl SyncExecutor {
                 // below re-derives it as a per-tick parent-mismatch warn.
                 Ok(ReorgOutcome::TooDeep) => break,
                 Err(e) => {
-                    warn!(error = %e, "full-block reorg failed");
+                    super::report_sync_storage_failure(
+                        store,
+                        "block_apply",
+                        "full_block_reorg",
+                        &e,
+                    );
                     break;
                 }
             }
@@ -303,7 +308,12 @@ impl SyncExecutor {
                 Ok(Some(id)) => id,
                 Ok(None) => break,
                 Err(e) => {
-                    warn!(height = next, error = %e, "best-chain lookup failed");
+                    super::report_sync_storage_failure(
+                        store,
+                        "block_apply",
+                        "best_chain_header_lookup",
+                        &e,
+                    );
                     break;
                 }
             };
@@ -320,7 +330,12 @@ impl SyncExecutor {
                 Ok(true) => break,
                 Ok(false) => {}
                 Err(e) => {
-                    warn!(height = next, error = %e, "invalidity lookup failed");
+                    super::report_sync_storage_failure(
+                        store,
+                        "block_apply",
+                        "invalidity_lookup",
+                        &e,
+                    );
                     break;
                 }
             }
@@ -329,10 +344,11 @@ impl SyncExecutor {
                 Ok(Some(meta)) => meta.parent_id,
                 Ok(None) => break,
                 Err(e) => {
-                    warn!(
-                        header_id = %hex::encode(header_id),
-                        error = %e,
-                        "failed to load header metadata",
+                    super::report_sync_storage_failure(
+                        store,
+                        "block_apply",
+                        "header_metadata_lookup",
+                        &e,
                     );
                     break;
                 }
@@ -356,7 +372,12 @@ impl SyncExecutor {
                     // `full_chain_fork_too_deep` warn, not a per-tick line.
                     Ok(ReorgOutcome::TooDeep) => break,
                     Err(e) => {
-                        warn!(error = %e, "full-block reorg failed");
+                        super::report_sync_storage_failure(
+                            store,
+                            "block_apply",
+                            "full_block_reorg",
+                            &e,
+                        );
                         break;
                     }
                 }
@@ -412,14 +433,19 @@ impl SyncExecutor {
                         }
                         Ok(ReorgOutcome::NotNeeded | ReorgOutcome::TooDeep) => break,
                         Err(e) => {
-                            warn!(error = %e, "full-block reorg failed");
+                            super::report_sync_storage_failure(
+                                store,
+                                "block_apply",
+                                "full_block_reorg",
+                                &e,
+                            );
                             break;
                         }
                     }
                 }
                 Err(e) => {
                     guard.failure();
-                    warn!(height = next, error = %e, "block apply failed");
+                    super::block_apply::report_block_process_failure(store, &header_id, &e);
                     self.record_block_apply_error(header_id, next, e.to_string());
                     self.invalidate_or_session_mark(store, coordinator, header_id, next, &e);
                     break;
@@ -477,7 +503,12 @@ impl SyncExecutor {
                 Ok(Some(id)) => id,
                 Ok(None) => continue,
                 Err(e) => {
-                    warn!(height = h, error = %e, "best-chain lookup failed");
+                    super::report_sync_storage_failure(
+                        store,
+                        "block_apply",
+                        "download_window_header_lookup",
+                        &e,
+                    );
                     continue;
                 }
             };
@@ -485,20 +516,29 @@ impl SyncExecutor {
             coordinator.sync_state_mut().add_pending_block(h, hid);
             // Register with assembly tracker so request_missing_sections
             // knows which section IDs to request.
-            if let Ok(Some(header_bytes)) = store.get_header(&hid) {
-                let mut r = ergo_primitives::reader::VlqReader::new(&header_bytes);
-                if let Ok(header) = ergo_ser::header::read_header(&mut r) {
-                    let expected = ExpectedSections::from_header(
-                        &hid,
-                        header.transactions_root.as_bytes(),
-                        header.extension_root.as_bytes(),
-                        header.ad_proofs_root.as_bytes(),
-                    );
-                    let requires_proofs = coordinator.requires_proofs();
-                    coordinator
-                        .assembly_mut()
-                        .register_header(expected, requires_proofs);
+            match store.get_header(&hid) {
+                Ok(Some(header_bytes)) => {
+                    let mut r = ergo_primitives::reader::VlqReader::new(&header_bytes);
+                    if let Ok(header) = ergo_ser::header::read_header(&mut r) {
+                        let expected = ExpectedSections::from_header(
+                            &hid,
+                            header.transactions_root.as_bytes(),
+                            header.extension_root.as_bytes(),
+                            header.ad_proofs_root.as_bytes(),
+                        );
+                        let requires_proofs = coordinator.requires_proofs();
+                        coordinator
+                            .assembly_mut()
+                            .register_header(expected, requires_proofs);
+                    }
                 }
+                Ok(None) => {}
+                Err(e) => super::report_sync_storage_failure(
+                    store,
+                    "block_apply",
+                    "download_window_header_read",
+                    &e,
+                ),
             }
         }
     }

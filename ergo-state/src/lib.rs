@@ -63,6 +63,7 @@ pub(crate) mod header_store;
 pub mod persist;
 pub mod reader;
 pub mod redb_util;
+pub mod storage_observability;
 pub mod store;
 pub mod wallet;
 
@@ -86,12 +87,49 @@ pub use digest_utxo_view::DigestUtxoView;
 
 /// Test-only re-exports gated behind the `test-helpers` feature.
 /// Not part of the public API.
-#[cfg(feature = "test-helpers")]
+#[cfg(any(test, feature = "test-helpers"))]
 pub mod test_helpers {
     use crate::store::{StateError, StateStore};
     use ergo_primitives::digest::ADDigest;
     use ergo_ser::transaction::Transaction;
     use ergo_validation::{ActiveProtocolParameters, CheckedTransaction};
+    use std::io;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone, Default)]
+    pub struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+
+    pub struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl SharedBuf {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        pub fn bytes(&self) -> Vec<u8> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl io::Write for SharedWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedBuf {
+        type Writer = SharedWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedWriter(Arc::clone(&self.0))
+        }
+    }
 
     impl StateStore {
         /// Apply transactions without validation type enforcement.

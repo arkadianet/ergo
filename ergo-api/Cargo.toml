@@ -61,3 +61,4 @@ ergo-indexer    = { workspace = true }
 # bytes through the indexer apply path before replaying captured Scala
 # responses through the router.
 tempfile        = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -25,7 +25,7 @@ use std::sync::Arc;
 use tracing::{error, info};
 
 use axum::{
-    extract::{Request, State},
+    extract::{MatchedPath, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{from_fn, Next},
     response::{IntoResponse, Redirect, Response},
@@ -529,6 +529,56 @@ pub fn router_with_mempool(ctx: ServerCtx, admin: Option<Arc<dyn NodeAdmin>>) ->
     )
 }
 
+fn make_http_span(request: &Request) -> tracing::Span {
+    static HTTP_REQ_SEQ: AtomicU64 = AtomicU64::new(0);
+    let req_id = HTTP_REQ_SEQ.fetch_add(1, Ordering::Relaxed);
+    let path = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str)
+        .unwrap_or("<unmatched>");
+    tracing::info_span!(
+        "http",
+        req_id,
+        method = %request.method(),
+        path,
+    )
+}
+
+fn log_http_response_failure(class: ServerErrorsFailureClass, latency: std::time::Duration) {
+    let latency_ms = latency.as_millis() as u64;
+    let status = match class {
+        ServerErrorsFailureClass::StatusCode(code) => Some(code),
+        _ => None,
+    };
+    let classification = class.to_string();
+    if status == Some(StatusCode::SERVICE_UNAVAILABLE) {
+        tracing::debug!(
+            event = "api_response_failure",
+            subsystem = "api",
+            component = "http_server",
+            operation = "serve_response",
+            status = status.map(|code| code.as_u16()).unwrap_or_default(),
+            status_available = status.is_some(),
+            classification,
+            latency_ms,
+            "API response unavailable",
+        );
+    } else {
+        tracing::error!(
+            event = "api_response_failure",
+            subsystem = "api",
+            component = "http_server",
+            operation = "serve_response",
+            status = status.map(|code| code.as_u16()).unwrap_or_default(),
+            status_available = status.is_some(),
+            classification,
+            latency_ms,
+            "API response failed",
+        );
+    }
+}
+
 /// Full-featured router builder: mempool overlay + explicit `WalletAdmin` +
 /// explicit `Option<Arc<ApiSecurity>>` gate. When `security` is `Some`,
 /// the `/wallet/*` subtree and both `/node/shutdown` aliases are wrapped
@@ -882,32 +932,13 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         }),
     );
 
-    // tower-http TraceLayer wraps every request in an INFO span carrying a
-    // monotonic request id + method + path. Handler logs ride that span as
-    // children, so a 5xx (e.g. the wallet boundary error log) is
-    // correlatable end-to-end to the exact request — even when concurrent
-    // requests interleave in the log. INFO (not the default DEBUG) so the
-    // span is live under the default filter and its fields attach to the
-    // error/warn events a failing request emits; the per-request
-    // started/finished events stay at their DEBUG default, so a healthy
-    // request still produces no INFO line of its own.
-    //
-    // Path only, never the full URI: query strings can carry caller
-    // parameters we don't want promoted into higher-signal logs, and the
-    // path alone identifies the endpoint for correlation. Sensitive
-    // per-request detail belongs in sanitized handler-level logs.
+    // INFO spans retain request correlation on failure events without
+    // adding per-request INFO lines. Matched route templates are code-defined
+    // and contain neither query strings nor user-supplied path values.
+    // Unmatched requests use a fixed label.
     let router = assembled.layer(from_fn(spa_security_headers)).layer(
         TraceLayer::new_for_http()
-            .make_span_with(|request: &Request| {
-                static HTTP_REQ_SEQ: AtomicU64 = AtomicU64::new(0);
-                let req_id = HTTP_REQ_SEQ.fetch_add(1, Ordering::Relaxed);
-                tracing::info_span!(
-                    "http",
-                    req_id,
-                    method = %request.method(),
-                    path = %request.uri().path(),
-                )
-            })
+            .make_span_with(make_http_span)
             // 503 is this API's expected-unavailability reply (e.g. the
             // tip-change gap on /mining/candidate, polled at 2 Hz by miners)
             // — operational, not a fault. Everything else keeps the
@@ -919,19 +950,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
                 |class: ServerErrorsFailureClass,
                  latency: std::time::Duration,
                  _span: &tracing::Span| {
-                    let latency_ms = latency.as_millis() as u64;
-                    // `classification` renders identically on both levels so
-                    // the field has one shape for log consumers.
-                    match &class {
-                        ServerErrorsFailureClass::StatusCode(code)
-                            if *code == StatusCode::SERVICE_UNAVAILABLE =>
-                        {
-                            tracing::debug!(classification = %class, latency_ms, "response failed");
-                        }
-                        _ => {
-                            tracing::error!(classification = %class, latency_ms, "response failed");
-                        }
-                    }
+                    log_http_response_failure(class, latency);
                 },
             ),
     );
@@ -1006,4 +1025,83 @@ async fn spa_security_headers(req: Request, next: Next) -> Response {
         apply_strict_static_headers(resp.headers_mut(), !is_font);
     }
     resp
+}
+
+#[cfg(test)]
+mod logging_tests {
+    use std::io;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use axum::body::Body;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    use super::*;
+
+    #[derive(Clone)]
+    struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for SharedWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedBuf {
+        type Writer = SharedWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedWriter(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn api_failure_log_is_structured_correlated_and_secret_free() {
+        let writer = SharedBuf(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_target(false)
+            .with_current_span(true)
+            .with_writer(writer.clone())
+            .finish();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/mempool/submit/wallet-seed?api_key=query-secret")
+            .header("api_key", "header-secret")
+            .body(Body::from("wallet-seed-and-full-transaction-payload"))
+            .unwrap();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let span = make_http_span(&request);
+            let _entered = span.enter();
+            log_http_response_failure(
+                ServerErrorsFailureClass::StatusCode(StatusCode::INTERNAL_SERVER_ERROR),
+                Duration::from_millis(17),
+            );
+        });
+
+        let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
+        assert!(!output.contains("query-secret"));
+        assert!(!output.contains("header-secret"));
+        assert!(!output.contains("wallet-seed"));
+        assert!(!output.contains("full-transaction-payload"));
+
+        let event: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+        assert_eq!(event["fields"]["event"], "api_response_failure");
+        assert_eq!(event["fields"]["subsystem"], "api");
+        assert_eq!(event["fields"]["component"], "http_server");
+        assert_eq!(event["fields"]["status"], 500);
+        assert_eq!(event["fields"]["latency_ms"], 17);
+        assert_eq!(event["span"]["method"], "POST");
+        assert_eq!(event["span"]["path"], "<unmatched>");
+        assert!(event["span"]["req_id"].is_number());
+    }
 }

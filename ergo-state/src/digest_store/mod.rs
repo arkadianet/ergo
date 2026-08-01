@@ -73,6 +73,7 @@
 #![allow(dead_code)]
 
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ergo_validation::{ActiveProtocolParameters, ErgoValidationSettings};
@@ -139,6 +140,7 @@ pub(crate) const EMPTY_AVL_DIGEST: [u8; 33] = [0u8; 33];
 #[derive(Debug)]
 pub struct DigestStateStore {
     db: Arc<Database>,
+    db_path: PathBuf,
     root_digest: [u8; 33],
     chain_state: ChainStateMeta,
     /// Network voting parameters (`voting_length` + soft-fork
@@ -178,6 +180,12 @@ mod rollback;
 mod voted_params;
 
 pub(crate) use voted_params::has_digest_verifier_markers;
+
+impl DigestStateStore {
+    pub fn database_path(&self) -> &Path {
+        &self.db_path
+    }
+}
 use voted_params::{
     require_genesis_voted_params_match_or_seed, require_genesis_voted_params_present,
     validate_voted_params_keys,

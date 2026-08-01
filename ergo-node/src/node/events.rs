@@ -684,7 +684,37 @@ fn inject_local_full_block(
                 detail: Some(format!("header rejected by validator: {e}")),
             });
         }
-        Err(e @ (HeaderProcessError::Storage(_) | HeaderProcessError::Deserialize(_))) => {
+        Err(e @ HeaderProcessError::Storage(_)) => {
+            let chain = state.store.chain_state_meta();
+            ergo_state::storage_observability::report_storage_failure(
+                &ergo_state::storage_observability::StorageFailureContext {
+                    subsystem: "mining",
+                    component: "mined_block_persistence",
+                    database_path: Some(state.store.database_path()),
+                    operation: "mined_block_store_header",
+                    best_full_block_height: Some(chain.best_full_block_height),
+                    best_header_height: Some(chain.best_header_height),
+                    attempted_height: None,
+                },
+                &e,
+            );
+            return Err(SubmitError {
+                reason: "internal_error".to_string(),
+                detail: Some(format!("local store error during header apply: {e}")),
+            });
+        }
+        Err(e @ HeaderProcessError::Deserialize(_)) => {
+            let diagnostics = ergo_state::storage_observability::ErrorDiagnostics::from_error(&e);
+            tracing::error!(
+                event = "mined_block_header_failure",
+                subsystem = "mining",
+                component = "mined_block_persistence",
+                operation = "mined_block_reparse_header",
+                error = %diagnostics.display,
+                error_debug = %diagnostics.debug,
+                error_chain = %diagnostics.chain,
+                "mined block header persistence failed",
+            );
             return Err(SubmitError {
                 reason: "internal_error".to_string(),
                 detail: Some(format!("local store error during header apply: {e}")),
@@ -697,9 +727,24 @@ fn inject_local_full_block(
         state
             .store
             .store_block_section_typed(id, bytes, type_id)
-            .map_err(|e| SubmitError {
-                reason: "internal_error".to_string(),
-                detail: Some(format!("store_block_section_typed (type {type_id}): {e}")),
+            .map_err(|e| {
+                let chain = state.store.chain_state_meta();
+                ergo_state::storage_observability::report_storage_failure(
+                    &ergo_state::storage_observability::StorageFailureContext {
+                        subsystem: "mining",
+                        component: "mined_block_persistence",
+                        database_path: Some(state.store.database_path()),
+                        operation: "mined_block_store_section",
+                        best_full_block_height: Some(chain.best_full_block_height),
+                        best_header_height: Some(chain.best_header_height),
+                        attempted_height: None,
+                    },
+                    &e,
+                );
+                SubmitError {
+                    reason: "internal_error".to_string(),
+                    detail: Some(format!("store_block_section_typed (type {type_id}): {e}")),
+                }
             })
     };
     persist(

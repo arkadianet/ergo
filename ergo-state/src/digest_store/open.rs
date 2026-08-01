@@ -146,6 +146,7 @@ impl DigestStateStore {
 
         Ok(Self {
             db,
+            db_path: path.to_path_buf(),
             root_digest: loaded.root_digest,
             chain_state: loaded.chain_state,
             voting_settings,

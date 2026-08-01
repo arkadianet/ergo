@@ -337,6 +337,43 @@ RUST_LOG=ergo_mempool=debug,info # mempool admission decisions
 RUST_LOG=ergo_p2p=debug,info     # P2P handshake / disconnect events
 ```
 
+### Storage failure events
+
+Storage diagnostics use stable `event` fields in both text and JSON logs:
+
+| Event | Meaning |
+|---|---|
+| `storage_io_failure` | The first observed redb I/O failure. This is the initiating fault; preserve this event. |
+| `storage_health_transition` | redb returned `PreviousIo`; the open database handle is poisoned and rejects later operations. |
+| `storage_operation_failed` | A non-I/O persistence failure, or a first failure after the handle was already poisoned. |
+| `storage_error_summary` | Periodic summary of identical suppressed repeats. |
+| `api_response_failure` | Safe HTTP boundary classification with request-span correlation; request bodies, query strings, path values, API keys, and headers are not logged. |
+
+The detailed storage events include `subsystem`, `component`, `database_path`,
+`operation`, `error`, `error_debug`, `error_chain`, `error_class`,
+`io_kind`, `raw_os_error`, and current full-block/header heights when
+available. Persist-worker events report worker-owned chain heights from the
+last successful batch and expose the final queued block as `attempted_height`.
+A `PreviousIo` transition also includes
+`initiating_io_observed`, `initiating_io_operation`, and the initiating errno
+when the original I/O event was seen by this process.
+
+For incident triage, find the earliest `storage_io_failure` for the database
+path and use its `io_kind`/`raw_os_error` to investigate the host or
+filesystem. Later `PreviousIo` messages are symptoms: redb deliberately keeps
+that handle unusable after an I/O failure. Do not treat a
+`storage_health_transition` as the root cause when an earlier
+`storage_io_failure` exists. Identical repeats emit once immediately, then at
+most one `storage_error_summary` per five minutes while failures continue;
+the summary carries the suppressed count and first/last-seen times. Suppression
+uses stable component, operation, database, and error-class identity rather
+than rendered IDs or heights. The global identity cache is capped at 128
+least-recently-used entries.
+
+The regular `node_heartbeat` event includes `storage_health`,
+`storage_io_failures_total`, `storage_previous_io_failures_total`, and
+`storage_errors_suppressed_total`. Healthy heartbeats remain a single line.
+
 ## Dry-running a transaction (the one recommended path)
 
 To validate an unsigned transaction against current state **without
