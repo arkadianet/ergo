@@ -17,6 +17,46 @@ use crate::coordinator::{Action, SyncCoordinator};
 
 use super::{ReorgOutcome, SyncExecutor};
 
+fn report_section_storage_failure(
+    store: &ergo_state::StateBackendKind,
+    operation: &'static str,
+    error: &ergo_state::store::StateError,
+) {
+    super::report_sync_storage_failure(store, "section_persistence", operation, error);
+}
+
+pub(super) fn report_block_process_failure(
+    store: &ergo_state::StateBackendKind,
+    block_id: &[u8; 32],
+    error: &BlockProcessError,
+) {
+    if let BlockProcessError::State(state_error) = error {
+        super::report_sync_storage_failure(
+            store,
+            "block_validation",
+            "validate_and_persist_block",
+            state_error,
+        );
+        return;
+    }
+
+    let chain = store.chain_state_meta();
+    let diagnostics = ergo_state::storage_observability::ErrorDiagnostics::from_error(error);
+    warn!(
+        event = "sync_block_validation_failed",
+        subsystem = "sync",
+        component = "block_validation",
+        operation = "validate_block",
+        block_id = %hex::encode(block_id),
+        error = %diagnostics.display,
+        error_debug = %diagnostics.debug,
+        error_chain = %diagnostics.chain,
+        best_full_block_height = chain.best_full_block_height,
+        best_header_height = chain.best_header_height,
+        "block validation failed",
+    );
+}
+
 impl SyncExecutor {
     pub(super) fn handle_assemble_block(
         &mut self,
@@ -34,7 +74,12 @@ impl SyncExecutor {
             // Wedged: nothing at or above the stuck tip can assemble/apply.
             Ok(ReorgOutcome::TooDeep) => return Vec::new(),
             Err(e) => {
-                warn!(error = %e, "full-block reorg check failed");
+                super::report_sync_storage_failure(
+                    store,
+                    "block_apply",
+                    "full_block_reorg_check",
+                    &e,
+                );
                 return Vec::new();
             }
         }
@@ -45,7 +90,12 @@ impl SyncExecutor {
             Ok(Some(best_id)) if best_id == *header_id => {}
             Ok(Some(_)) | Ok(None) => return Vec::new(),
             Err(e) => {
-                warn!(height = next_height, error = %e, "best-chain lookup failed");
+                super::report_sync_storage_failure(
+                    store,
+                    "block_apply",
+                    "best_chain_header_lookup",
+                    &e,
+                );
                 return Vec::new();
             }
         }
@@ -111,17 +161,18 @@ impl SyncExecutor {
                         self.try_apply_next_blocks(store, coordinator, Instant::now(), wallet_wiring);
                     }
                     Ok(ReorgOutcome::NotNeeded | ReorgOutcome::TooDeep) => {}
-                    Err(e) => warn!(error = %e, "full-block reorg failed"),
+                    Err(e) => super::report_sync_storage_failure(
+                        store,
+                        "block_apply",
+                        "full_block_reorg",
+                        &e,
+                    ),
                 }
                 Vec::new()
             }
             Err(e) => {
                 guard.failure();
-                warn!(
-                    block_id = %hex::encode(header_id),
-                    error = %e,
-                    "block validation failed",
-                );
+                report_block_process_failure(store, header_id, &e);
                 self.record_block_apply_error(*header_id, meta.height, e.to_string());
                 // Same classifier as try_apply_next_blocks: a definitive
                 // validation verdict durably invalidates the block + its
@@ -168,14 +219,7 @@ impl SyncExecutor {
         let sentinel = match store.read_minimal_full_block_height() {
             Ok(s) => s,
             Err(e) => {
-                // Fail-closed on unreadable sentinel; warn so
-                // operators see the partial-DB-failure
-                // degradation rather than a silent drop.
-                warn!(
-                    modifier_id = %hex::encode(modifier_id),
-                    error = %e,
-                    "Mode 3: sentinel read failed — dropping section delivery",
-                );
+                report_section_storage_failure(store, "sync_read_prune_sentinel", &e);
                 return Vec::new();
             }
         };
@@ -191,7 +235,7 @@ impl SyncExecutor {
                     return Vec::new();
                 }
                 Ok(Some(_)) => {} // height >= sentinel: accept
-                Ok(None) | Err(_) => {
+                Ok(None) => {
                     // Fail-closed: unindexed section in a
                     // sentinel-active store is either orphan or
                     // attacker. Drop silently (no peer penalty —
@@ -203,14 +247,14 @@ impl SyncExecutor {
                     );
                     return Vec::new();
                 }
+                Err(e) => {
+                    report_section_storage_failure(store, "sync_read_section_height", &e);
+                    return Vec::new();
+                }
             }
         }
         if let Err(e) = store.store_block_section_typed(modifier_id, section_bytes, section_type) {
-            warn!(
-                modifier_id = %hex::encode(modifier_id),
-                error = %e,
-                "failed to persist section",
-            );
+            report_section_storage_failure(store, "sync_store_block_section", &e);
         }
         Vec::new()
     }

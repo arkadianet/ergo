@@ -91,7 +91,9 @@ pub(super) fn emit_heartbeat(state: &mut NodeState, now: Instant) {
                     .unwrap_or(false)
             })
             .count();
+        let storage_health = ergo_state::storage_observability::storage_health_snapshot();
         info!(
+            event = "node_heartbeat",
             best_full_block_height = h,
             full_block_delta = dh,
             best_header_height = bh,
@@ -106,6 +108,10 @@ pub(super) fn emit_heartbeat(state: &mut NodeState, now: Instant) {
             req_ids = d_req_ids,
             recv = drecv,
             tip_state = %tip_state,
+            storage_health = storage_health.health.as_str(),
+            storage_io_failures_total = storage_health.io_failures_total,
+            storage_previous_io_failures_total = storage_health.previous_io_failures_total,
+            storage_errors_suppressed_total = storage_health.suppressed_total,
             "heartbeat tick",
         );
         state.last_beat_emit = now;

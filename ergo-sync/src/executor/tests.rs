@@ -7,7 +7,34 @@ use ergo_primitives::writer::VlqWriter;
 use ergo_ser::autolykos::AutolykosSolution;
 use ergo_ser::header::{write_header, Header};
 use ergo_state::ChainStateRead;
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::{Arc, Mutex};
+use tracing_subscriber::fmt::MakeWriter;
+
+#[derive(Clone)]
+struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+
+struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+impl io::Write for SharedWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> MakeWriter<'a> for SharedBuf {
+    type Writer = SharedWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        SharedWriter(self.0.clone())
+    }
+}
 
 fn peer(port: u16) -> PeerId {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), port)
@@ -28,6 +55,68 @@ fn open_initialized_store() -> StateStore {
     .unwrap();
     store.initialize_genesis(&[]).unwrap();
     store
+}
+
+#[test]
+fn persist_failed_propagation_does_not_duplicate_worker_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.redb");
+    let mut store = StateStore::open(&path).unwrap();
+    store.initialize_genesis(&[]).unwrap();
+    let store = ergo_state::StateBackendKind::Utxo(store);
+    let writer = SharedBuf(Arc::new(Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_ansi(false)
+        .with_target(false)
+        .with_writer(writer.clone())
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        ergo_state::storage_observability::report_storage_failure(
+            &ergo_state::storage_observability::StorageFailureContext {
+                subsystem: "state",
+                component: "persist_worker",
+                database_path: Some(&path),
+                operation: "background_persist_commit",
+                best_full_block_height: Some(100),
+                best_header_height: Some(120),
+                attempted_height: Some(101),
+            },
+            &io::Error::from_raw_os_error(13),
+        );
+
+        super::report_sync_storage_failure(
+            &store,
+            "section_persistence",
+            "sync_read_section_height",
+            &ergo_state::store::StateError::PersistFailed {
+                height: 101,
+                error: "already reported worker failure".to_string(),
+            },
+        );
+
+        super::report_sync_storage_failure(
+            &store,
+            "section_persistence",
+            "sync_store_block_section",
+            &ergo_state::store::StateError::StorageError(Box::new(redb::StorageError::Io(
+                io::Error::from_raw_os_error(28),
+            ))),
+        );
+    });
+
+    let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
+    let events: Vec<serde_json::Value> = output
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0]["fields"]["operation"],
+        "background_persist_commit"
+    );
+    assert_eq!(events[1]["fields"]["operation"], "sync_store_block_section");
 }
 
 /// Apply an empty block at `height` linked to `parent_id` and return

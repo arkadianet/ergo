@@ -58,6 +58,25 @@ use super::peer_actions::try_dial_peers;
 use super::state::{NodeState, PeerRegistry};
 use super::NodeError;
 
+fn report_boot_storage_failure(
+    db_path: &std::path::Path,
+    operation: &'static str,
+    error: &ergo_state::store::StateError,
+) {
+    ergo_state::storage_observability::report_storage_failure(
+        &ergo_state::storage_observability::StorageFailureContext {
+            subsystem: "node",
+            component: "state_boot",
+            database_path: Some(db_path),
+            operation,
+            best_full_block_height: None,
+            best_header_height: None,
+            attempted_height: None,
+        },
+        error,
+    );
+}
+
 /// Production entry point: installs signal handlers up front, builds
 /// the node via [`run_inner`], supervises the spawned action loop,
 /// and shuts down cleanly when SIGINT/SIGTERM/SIGHUP fires.
@@ -252,6 +271,7 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
     let want_sentinel = expected_sentinel(&config);
     if db_path.exists() {
         if let Some(recorded) = StateStore::peek_state_type(&db_path).map_err(|e| {
+            report_boot_storage_failure(&db_path, "peek_state_type", &e);
             Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("data_dir sentinel peek failed: {e}"),
@@ -295,7 +315,11 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
             ergo_validation::scala_launch_for_network(config.chain_spec.network),
             config.chain_spec.voting,
             ergo_chain_spec::GenesisParams::for_network(config.chain_spec.network).state_digest,
-        )?;
+        )
+        .map_err(|e| {
+            report_boot_storage_failure(&db_path, "open_digest_state", &e);
+            Box::new(e) as NodeError
+        })?;
         info!(
             path = %db_path.display(),
             state_type = config.state_type.as_str(),
@@ -329,7 +353,11 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
         cache_bytes,
         ergo_validation::scala_launch_for_network(config.chain_spec.network),
         config.chain_spec.voting,
-    )?;
+    )
+    .map_err(|e| {
+        report_boot_storage_failure(&db_path, "open_state", &e);
+        Box::new(e) as NodeError
+    })?;
     // Mode 3: propagate `[node] blocks_to_keep` into the store so
     // `persist_apply` + `execute_batch` know whether to evict
     // sub-sentinel sections on every forward apply. MUST happen

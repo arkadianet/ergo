@@ -12,12 +12,32 @@ use ergo_state::{ChainStateRead, HeaderSectionStore};
 use ergo_sync::coordinator::SyncCoordinator;
 use ergo_sync::executor::SyncExecutor;
 use tokio::task::JoinHandle;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::config::NodeConfig;
 use crate::indexer_chain::ChainReaderAdapter;
 
 use super::super::NodeError;
+
+fn report_sync_boot_failure(
+    store: &ergo_state::StateBackendKind,
+    operation: &'static str,
+    error: &(dyn std::error::Error + 'static),
+) {
+    let chain = store.chain_state_meta();
+    ergo_state::storage_observability::report_storage_failure(
+        &ergo_state::storage_observability::StorageFailureContext {
+            subsystem: "node",
+            component: "sync_boot",
+            database_path: Some(store.database_path()),
+            operation,
+            best_full_block_height: Some(chain.best_full_block_height),
+            best_header_height: Some(chain.best_header_height),
+            attempted_height: None,
+        },
+        error,
+    );
+}
 
 /// Everything [`setup`] produces, threaded into [`super::run_inner_with_backend`]'s
 /// `NodeState` construction and (for `chain_meta`/`bootstrap_kind`) the
@@ -352,21 +372,21 @@ pub(super) fn setup(
     // paths — so these four calls dispatch to whichever backend `store`
     // holds.
     if let Err(e) = executor.hydrate_from_store(store) {
-        error!(error = %e, "fatal: hydrate_from_store failed");
+        report_sync_boot_failure(store, "hydrate_from_store", &e);
         return Err(Box::new(e));
     }
     if let Err(e) = executor.hydrate_block_context(store) {
-        error!(error = %e, "fatal: hydrate_block_context failed");
+        report_sync_boot_failure(store, "hydrate_block_context", &e);
         return Err(Box::new(e));
     }
     if let Err(e) = executor.load_header_index(store) {
-        error!(error = %e, "fatal: load_header_index failed");
+        report_sync_boot_failure(store, "load_header_index", &e);
         return Err(Box::new(e));
     }
     let recovered = match executor.recover_coordinator(store, &mut coordinator) {
         Ok(n) => n,
         Err(e) => {
-            error!(error = %e, "fatal: recover_coordinator failed");
+            report_sync_boot_failure(store, "recover_coordinator", &e);
             return Err(Box::new(e));
         }
     };

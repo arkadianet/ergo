@@ -63,6 +63,7 @@ pub(crate) mod header_store;
 pub mod persist;
 pub mod reader;
 pub mod redb_util;
+pub mod storage_observability;
 pub mod store;
 pub mod wallet;
 

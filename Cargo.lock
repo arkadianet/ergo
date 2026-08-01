@@ -703,6 +703,7 @@ dependencies = [
  "tower",
  "tower-http 0.5.2",
  "tracing",
+ "tracing-subscriber",
  "utoipa",
 ]
 
@@ -984,6 +985,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1006,6 +1008,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

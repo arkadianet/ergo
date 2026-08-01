@@ -20,6 +20,7 @@ use ergo_crypto::difficulty::DifficultyParams;
 use ergo_p2p::peer::PeerId;
 
 use ergo_state::store::StateStore;
+use ergo_state::ChainStateRead;
 use ergo_validation::context::ProtocolParams;
 use ergo_validation::header::CheckedHeader;
 use ergo_validation::ReemissionRuleInputs;
@@ -43,6 +44,31 @@ pub use reorg::{DeepForkWedge, LastBlockApplyError};
 pub use startup::{HydrationError, StartupError};
 
 type StorageResult<T> = Result<T, ergo_state::store::StateError>;
+
+fn report_sync_storage_failure(
+    store: &ergo_state::StateBackendKind,
+    component: &'static str,
+    operation: &'static str,
+    error: &ergo_state::store::StateError,
+) {
+    if matches!(error, ergo_state::store::StateError::PersistFailed { .. }) {
+        return;
+    }
+
+    let chain = store.chain_state_meta();
+    ergo_state::storage_observability::report_storage_failure(
+        &ergo_state::storage_observability::StorageFailureContext {
+            subsystem: "sync",
+            component,
+            database_path: Some(store.database_path()),
+            operation,
+            best_full_block_height: Some(chain.best_full_block_height),
+            best_header_height: Some(chain.best_header_height),
+            attempted_height: None,
+        },
+        error,
+    );
+}
 
 /// The header-validation pipeline (`header_proc::finalize_header` and
 /// friends) is still typed against the concrete UTXO `StateStore`: it
