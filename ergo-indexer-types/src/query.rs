@@ -19,10 +19,31 @@ pub enum SortDir {
     Desc,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexerReadError {
+    message: String,
+}
+
+impl IndexerReadError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for IndexerReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for IndexerReadError {}
+
 /// Confirmed-only indexer reader surface. Mempool overlay is layered
-/// at the API handler, so this trait stays infallible — the router
-/// middleware gates every read on `status() == CaughtUp` before
-/// invoking any method here.
+/// at the API handler. Existing infallible reads retain their
+/// compatibility behavior; fallible adapters expose storage failures
+/// to callers that need to distinguish them from missing data.
 ///
 /// The full 25-route surface is declared up-front; per-phase
 /// implementations on `IndexerStore` fill in the methods
@@ -55,6 +76,11 @@ pub trait IndexerQuery: Send + Sync + 'static {
     }
 
     fn box_by_id(&self, box_id: &BoxId) -> Option<IndexedBoxDto>;
+
+    fn try_box_by_id(&self, box_id: &BoxId) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
+        Ok(self.box_by_id(box_id))
+    }
+
     fn box_by_global_index(&self, n: u64) -> Option<IndexedBoxDto>;
     fn boxes_by_global_range(&self, lo: u64, hi: u64) -> Vec<IndexedBoxDto>;
 
@@ -86,9 +112,27 @@ pub trait IndexerQuery: Send + Sync + 'static {
         p: Page,
         dir: SortDir,
     ) -> Vec<IndexedBoxDto>;
+
+    fn try_template_unspent_paged(
+        &self,
+        template_hash: &TemplateHash,
+        p: Page,
+        dir: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(self.template_unspent_paged(template_hash, p, dir))
+    }
+
     fn template_total_boxes(&self, template_hash: &TemplateHash) -> u64;
 
     fn token_by_id(&self, token_id: &TokenId) -> Option<IndexedTokenDto>;
+
+    fn try_token_by_id(
+        &self,
+        token_id: &TokenId,
+    ) -> Result<Option<IndexedTokenDto>, IndexerReadError> {
+        Ok(self.token_by_id(token_id))
+    }
+
     fn tokens_by_ids(&self, ids: &[TokenId]) -> Vec<IndexedTokenDto>;
     fn token_boxes_paged(&self, token_id: &TokenId, p: Page) -> Vec<IndexedBoxDto>;
     fn token_unspent_paged(&self, token_id: &TokenId, p: Page, dir: SortDir) -> Vec<IndexedBoxDto>;
@@ -254,3 +298,166 @@ pub struct IndexedTokenDto {
 /// Indexed block (header + transactions reassembly).
 #[derive(Debug, Clone)]
 pub struct IndexedBlockDto;
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct DefaultAdapterStub {
+        box_reads: AtomicUsize,
+        template_reads: AtomicUsize,
+        token_reads: AtomicUsize,
+    }
+
+    impl IndexerQuery for DefaultAdapterStub {
+        fn indexed_height(&self) -> u64 {
+            0
+        }
+
+        fn status(&self) -> IndexerStatus {
+            IndexerStatus::CaughtUp
+        }
+
+        fn box_by_id(&self, _box_id: &BoxId) -> Option<IndexedBoxDto> {
+            self.box_reads.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+
+        fn box_by_global_index(&self, _n: u64) -> Option<IndexedBoxDto> {
+            None
+        }
+
+        fn boxes_by_global_range(&self, _lo: u64, _hi: u64) -> Vec<IndexedBoxDto> {
+            Vec::new()
+        }
+
+        fn tx_by_id(&self, _tx_id: &TxId) -> Option<IndexedTxDto> {
+            None
+        }
+
+        fn tx_by_global_index(&self, _n: u64) -> Option<IndexedTxDto> {
+            None
+        }
+
+        fn txs_by_global_range(&self, _lo: u64, _hi: u64) -> Vec<IndexedTxDto> {
+            Vec::new()
+        }
+
+        fn address_balance(&self, _tree_hash: &TreeHash) -> Option<BalanceDto> {
+            None
+        }
+
+        fn address_txs_paged(
+            &self,
+            _tree_hash: &TreeHash,
+            _p: Page,
+            _dir: SortDir,
+        ) -> Vec<IndexedTxDto> {
+            Vec::new()
+        }
+
+        fn address_boxes_paged(
+            &self,
+            _tree_hash: &TreeHash,
+            _p: Page,
+            _dir: SortDir,
+        ) -> Vec<IndexedBoxDto> {
+            Vec::new()
+        }
+
+        fn address_unspent_paged(
+            &self,
+            _tree_hash: &TreeHash,
+            _p: Page,
+            _dir: SortDir,
+        ) -> Vec<IndexedBoxDto> {
+            Vec::new()
+        }
+
+        fn address_total_txs(&self, _tree_hash: &TreeHash) -> u64 {
+            0
+        }
+
+        fn address_total_boxes(&self, _tree_hash: &TreeHash) -> u64 {
+            0
+        }
+
+        fn template_boxes_paged(
+            &self,
+            _template_hash: &TemplateHash,
+            _p: Page,
+        ) -> Vec<IndexedBoxDto> {
+            Vec::new()
+        }
+
+        fn template_unspent_paged(
+            &self,
+            _template_hash: &TemplateHash,
+            _p: Page,
+            _dir: SortDir,
+        ) -> Vec<IndexedBoxDto> {
+            self.template_reads.fetch_add(1, Ordering::Relaxed);
+            Vec::new()
+        }
+
+        fn template_total_boxes(&self, _template_hash: &TemplateHash) -> u64 {
+            0
+        }
+
+        fn token_by_id(&self, _token_id: &TokenId) -> Option<IndexedTokenDto> {
+            self.token_reads.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+
+        fn tokens_by_ids(&self, _ids: &[TokenId]) -> Vec<IndexedTokenDto> {
+            Vec::new()
+        }
+
+        fn token_boxes_paged(&self, _token_id: &TokenId, _p: Page) -> Vec<IndexedBoxDto> {
+            Vec::new()
+        }
+
+        fn token_unspent_paged(
+            &self,
+            _token_id: &TokenId,
+            _p: Page,
+            _dir: SortDir,
+        ) -> Vec<IndexedBoxDto> {
+            Vec::new()
+        }
+
+        fn token_total_boxes(&self, _token_id: &TokenId) -> u64 {
+            0
+        }
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn fallible_defaults_delegate_to_existing_infallible_methods() {
+        let stub = DefaultAdapterStub::default();
+        let box_id = BoxId::from_bytes([0x11; 32]);
+        let template_hash = TemplateHash::from_bytes([0x22; 32]);
+        let token_id = TokenId::from_bytes([0x33; 32]);
+
+        assert_eq!(stub.try_box_by_id(&box_id), Ok(None));
+        assert_eq!(
+            stub.try_template_unspent_paged(
+                &template_hash,
+                Page {
+                    offset: 4,
+                    limit: 10,
+                },
+                SortDir::Asc,
+            ),
+            Ok(Vec::new())
+        );
+        assert_eq!(stub.try_token_by_id(&token_id), Ok(None));
+        assert_eq!(stub.box_reads.load(Ordering::Relaxed), 1);
+        assert_eq!(stub.template_reads.load(Ordering::Relaxed), 1);
+        assert_eq!(stub.token_reads.load(Ordering::Relaxed), 1);
+    }
+}
