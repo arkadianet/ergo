@@ -307,12 +307,51 @@ fn canonical_rust_openapi_preserves_all_storage_rent_contracts() {
     assert!(schemas["ApiError"].is_object());
 }
 
+fn operation_inventory_text(operations: &BTreeSet<RouteOperation>) -> String {
+    let mut text = operations
+        .iter()
+        .map(|op| format!("{} {}", op.method, op.path))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    text
+}
+
+fn load_operation_inventory_fixture(name: &str) -> String {
+    let path = format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name);
+    std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "could not read inventory fixture {path}: {error}\n\
+             Generate it with:\n  \
+             cargo test -p ergo-api --test api_family_inventory regenerate_operation_inventories -- --ignored --nocapture"
+        )
+    })
+}
+
+fn assert_operation_inventory_matches_fixture(
+    operations: &BTreeSet<RouteOperation>,
+    fixture_name: &str,
+) {
+    let actual = operation_inventory_text(operations);
+    let expected = load_operation_inventory_fixture(fixture_name);
+    assert_eq!(
+        actual, expected,
+        "{fixture_name} drifted from the checked-in (path, method) inventory.\n\
+         If this change is intentional, regenerate the fixture:\n  \
+         cargo test -p ergo-api --test api_family_inventory regenerate_operation_inventories -- --ignored --nocapture"
+    );
+}
+
 #[test]
 fn canonical_scala_and_rust_operation_inventories_are_disjoint() {
     let scala = scala_openapi_operations();
     let rust = openapi_operations(&rust_openapi().expect("canonical RUST OpenAPI must merge"));
     assert_eq!(scala.len(), 125);
     assert_eq!(rust.len(), 179);
+    assert_operation_inventory_matches_fixture(&scala, "api_family_scala_operations.txt");
+    assert_operation_inventory_matches_fixture(&rust, "api_family_rust_operations.txt");
 
     let overlap: Vec<_> = scala.intersection(&rust).collect();
     assert!(
@@ -334,5 +373,33 @@ fn canonical_scala_and_rust_operation_inventories_are_disjoint() {
         "/script/executeWithContext",
     ] {
         assert!(!scala.iter().any(|op| op.path == unmounted));
+    }
+}
+
+/// Rewrites the checked-in family inventory fixtures from the current OpenAPI
+/// documents. Ignored by default so a normal `cargo test` never mutates them.
+#[test]
+#[ignore = "writes golden inventory fixtures; run explicitly after an intentional inventory change"]
+fn regenerate_operation_inventories() {
+    let fixtures = [
+        (
+            "api_family_scala_operations.txt",
+            scala_openapi_operations(),
+        ),
+        (
+            "api_family_rust_operations.txt",
+            openapi_operations(&rust_openapi().expect("canonical RUST OpenAPI must merge")),
+        ),
+    ];
+    for (name, operations) in fixtures {
+        let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+        let text = operation_inventory_text(&operations);
+        std::fs::write(&path, &text)
+            .unwrap_or_else(|error| panic!("could not write inventory fixture {path}: {error}"));
+        eprintln!(
+            "regenerated {path} ({} operations, {} bytes)",
+            operations.len(),
+            text.len()
+        );
     }
 }
