@@ -146,6 +146,54 @@ fn canonical_rust_openapi_is_the_union_of_both_fragments_and_known_aliases() {
 }
 
 #[test]
+fn supplemental_seam_operations_are_method_specific() {
+    let document = canonical_json();
+    for (path, method, operation_id, summary) in [
+        (
+            "/api/v1/accounts",
+            "post",
+            "accounts_create",
+            "Create named account (unavailable)",
+        ),
+        (
+            "/api/v1/accounts/{account_id}",
+            "patch",
+            "account_patch",
+            "Update named account (unavailable)",
+        ),
+        (
+            "/api/v1/accounts/{account_id}",
+            "delete",
+            "account_delete",
+            "Delete named account (unavailable)",
+        ),
+        (
+            "/api/v1/transactions-psbt/{psbt_id}",
+            "get",
+            "psbt_get",
+            "Get PSBT session (unavailable)",
+        ),
+    ] {
+        let operation = get_operation(&document, path, method);
+        assert_eq!(operation["operationId"], operation_id);
+        assert_eq!(operation["summary"], summary);
+        assert!(
+            operation.get("requestBody").is_none(),
+            "{method} {path} does not consume a request body while unavailable"
+        );
+        assert_eq!(
+            response_statuses(operation),
+            BTreeSet::from(["503"]),
+            "{method} {path} must document the seam's actual response"
+        );
+        assert_eq!(
+            response_schema_ref(operation, "503"),
+            "#/components/schemas/V1Error"
+        );
+    }
+}
+
+#[test]
 fn canonical_rust_openapi_preserves_transaction_detail_contract() {
     let document = canonical_json();
     let operation = get_operation(&document, "/api/v1/transactions/{txId}/detail", "get");

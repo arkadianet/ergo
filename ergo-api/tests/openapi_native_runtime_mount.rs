@@ -580,7 +580,7 @@ fn probe_path(template: &str) -> String {
             .find('}')
             .map(|offset| start + offset)
             .unwrap();
-        let name = &path[start + 1..end];
+        let name = path[start + 1..end].to_ascii_lowercase();
         let value = if name.contains("height")
             || name.contains("index")
             || name.contains("limit")

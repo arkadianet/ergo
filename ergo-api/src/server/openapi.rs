@@ -502,6 +502,24 @@ pub(crate) fn supplemental_rust_operations() -> BTreeSet<RouteOperation> {
         .collect()
 }
 
+fn supplemental_seam_operation(
+    source: &Operation,
+    path: &str,
+    operation_id: &str,
+    summary: &str,
+    description: &str,
+) -> Operation {
+    let mut operation = Operation::new();
+    operation.tags = source.tags.clone();
+    operation.summary = Some(summary.to_string());
+    operation.description = Some(description.to_string());
+    operation.operation_id = Some(operation_id.to_string());
+    operation.responses = source.responses.clone();
+    operation.security = source.security.clone();
+    add_path_parameters(&mut operation, path);
+    operation
+}
+
 fn add_rust_only_operations(api: &mut OpenApiDocument) -> Result<(), OpenApiMergeError> {
     add_alias(
         api,
@@ -534,71 +552,90 @@ fn add_rust_only_operations(api: &mut OpenApiDocument) -> Result<(), OpenApiMerg
 
     let account_get = operation_for(api, "/api/v1/accounts", HttpMethod::Get)?;
     let psbt_post = operation_for(api, "/api/v1/transactions-psbt", HttpMethod::Post)?;
-    for (path, method, source, operation_id) in [
+    for (path, method, source, operation_id, summary, description) in [
         (
             crate::v1::ACCOUNTS_SEAM.openapi_path,
             HttpMethod::Post,
             &account_get,
             "accounts_create",
+            "Create named account (unavailable)",
+            "The named-accounts subsystem is not wired; this operation returns 503.",
         ),
         (
             crate::v1::ACCOUNT_SEAM.openapi_path,
             HttpMethod::Get,
             &account_get,
             "account_get",
+            "Get named account (unavailable)",
+            "The named-accounts subsystem is not wired; this operation returns 503.",
         ),
         (
             crate::v1::ACCOUNT_SEAM.openapi_path,
             HttpMethod::Patch,
             &account_get,
             "account_patch",
+            "Update named account (unavailable)",
+            "The named-accounts subsystem is not wired; this operation returns 503.",
         ),
         (
             crate::v1::ACCOUNT_SEAM.openapi_path,
             HttpMethod::Delete,
             &account_get,
             "account_delete",
+            "Delete named account (unavailable)",
+            "The named-accounts subsystem is not wired; this operation returns 503.",
         ),
         (
             crate::v1::ACCOUNT_BALANCE_SEAM.openapi_path,
             HttpMethod::Get,
             &account_get,
             "account_balance",
+            "Get named-account balance (unavailable)",
+            "The named-accounts subsystem is not wired; this operation returns 503.",
         ),
         (
             crate::v1::ACCOUNT_ADDRESSES_SEAM.openapi_path,
             HttpMethod::Get,
             &account_get,
             "account_addresses",
+            "List named-account addresses (unavailable)",
+            "The named-accounts subsystem is not wired; this operation returns 503.",
         ),
         (
             crate::v1::ACCOUNT_ADDRESSES_SEAM.openapi_path,
             HttpMethod::Post,
             &account_get,
             "account_address_create",
+            "Create named-account address (unavailable)",
+            "The named-accounts subsystem is not wired; this operation returns 503.",
         ),
         (
             crate::v1::PSBT_SEAM.openapi_path,
             HttpMethod::Get,
             &psbt_post,
             "psbt_get",
+            "Get PSBT session (unavailable)",
+            "The PSBT-session subsystem is not wired; this operation returns 503.",
         ),
         (
             crate::v1::PSBT_CONTRIBUTIONS_SEAM.openapi_path,
             HttpMethod::Post,
             &psbt_post,
             "psbt_contribute",
+            "Add PSBT contribution (unavailable)",
+            "The PSBT-session subsystem is not wired; this operation returns 503.",
         ),
         (
             crate::v1::PSBT_FINALIZE_SEAM.openapi_path,
             HttpMethod::Post,
             &psbt_post,
             "psbt_finalize",
+            "Finalize PSBT session (unavailable)",
+            "The PSBT-session subsystem is not wired; this operation returns 503.",
         ),
     ] {
-        let mut operation = source.clone();
-        operation.operation_id = Some(operation_id.to_string());
-        add_path_parameters(&mut operation, path);
+        let operation =
+            supplemental_seam_operation(source, path, operation_id, summary, description);
         api.paths.add_path_operation(path, vec![method], operation);
     }
     Ok(())
@@ -619,11 +656,20 @@ pub fn rust_openapi() -> Result<OpenApiDocument, OpenApiMergeError> {
     Ok(openapi)
 }
 
-pub fn rust_openapi_yaml() -> String {
-    rust_openapi()
-        .expect("RUST API OpenAPI fragments must merge without conflicts")
-        .to_yaml()
-        .expect("OpenAPI YAML serialize")
+pub fn rust_openapi_json() -> &'static OpenApiDocument {
+    static RUST_OPENAPI: std::sync::LazyLock<OpenApiDocument> = std::sync::LazyLock::new(|| {
+        rust_openapi().expect("RUST API OpenAPI fragments must merge without conflicts")
+    });
+    &RUST_OPENAPI
+}
+
+pub fn rust_openapi_yaml() -> &'static str {
+    static RUST_OPENAPI_YAML: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        rust_openapi_json()
+            .to_yaml()
+            .expect("OpenAPI YAML serialize")
+    });
+    RUST_OPENAPI_YAML.as_str()
 }
 
 pub fn openapi_operations(openapi: &OpenApiDocument) -> BTreeSet<RouteOperation> {
@@ -698,15 +744,23 @@ pub fn scala_openapi_yaml() -> &'static str {
                 output.push('\n');
             }
         }
-        output
-            .replace(
-                "title: Ergo Node API — legacy compatibility document",
-                "title: Ergo Node — Scala API",
-            )
-            .replace(
-                "OpenAPI spec inherited from the Scala reference node. The Rust\n    node implements most of the Scala wire surface plus a small\n    Rust-exclusive operator overlay. This page is the authoritative\n    map of what this build serves: the sections below enumerate every\n    route that returns **404**, every config-gated route, and every\n    Rust-exclusive addition. Anything not called out here matches the\n    Scala wire shape (see **Everything else**).",
-                "OpenAPI spec for the Scala-compatible operations served by this node.\n    Rust-native operations are documented separately as the RUST API.",
-            )
+        let title_source = "title: Ergo Node API — legacy compatibility document";
+        let title = output.replace(title_source, "title: Ergo Node — Scala API");
+        assert_ne!(
+            title, output,
+            "Scala OpenAPI title source literal is missing"
+        );
+
+        let description_source = "OpenAPI spec inherited from the Scala reference node. The Rust\n    node implements most of the Scala wire surface plus a small\n    Rust-exclusive operator overlay. This page is the authoritative\n    map of what this build serves: the sections below enumerate every\n    route that returns **404**, every config-gated route, and every\n    Rust-exclusive addition. Anything not called out here matches the\n    Scala wire shape (see **Everything else**).";
+        let description = title.replace(
+            description_source,
+            "OpenAPI spec for the Scala-compatible operations served by this node.\n    Rust-native operations are documented separately as the RUST API.",
+        );
+        assert_ne!(
+            description, title,
+            "Scala OpenAPI description source literal is missing"
+        );
+        description
     });
     SCALA_OPENAPI.as_str()
 }

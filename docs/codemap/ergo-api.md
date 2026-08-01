@@ -49,9 +49,9 @@
 - `MiningApiError` (enum) — categorized mining errors with the HTTP-status mapping (`InvalidPow`→400, `Unavailable`→503, `Timeout`→504, …) — `src/mining.rs:68`
 - `WalletAdmin` (trait) — async wallet lifecycle/reads/sending boundary — `src/wallet/mod.rs:38`
 - `ApiSecurity` (struct) + `require_api_key` (fn) — `api_key`-header auth: `hash_key` (Blake2b-256 hex), constant-time compare, Scala-parity 403 — `src/auth.rs:54`, `src/auth.rs:116`
-- `ServerCtx` (struct) — the dependency bundle threaded through every entry point; `Option` fields decide which route families mount — `src/server.rs:110`
-- `router_with_mempool_and_wallet_and_security` (fn) — the full router builder (mempool overlay + `WalletAdmin` + explicit `Option<ApiSecurity>` gate) — `src/server.rs:527`
-- `bind` / `serve_on` / `serve` / `serve_on_with_mempool_and_wallet_and_security` / `router_with_wallet` (fns) — listener + axum lifecycle, graceful-shutdown contract — `src/server.rs:153,178,291,243,474`
+- `ServerCtx` (struct) — the dependency bundle threaded through every entry point; `Option` fields decide which route families mount — `src/server/mod.rs:95`
+- `router_with_mempool_and_wallet_and_security` (fn) — the full router builder (mempool overlay + `WalletAdmin` + explicit `Option<ApiSecurity>` gate) — `src/server/mod.rs:541`
+- `bind` / `serve_on` / `serve` / `serve_on_with_mempool_and_wallet_and_security` / `router_with_wallet` (fns) — listener + axum lifecycle, graceful-shutdown contract — `src/server/mod.rs:138,181,305,246,488`
 - `mining_router` (fn) — builds the `/mining/*` sub-router merged in when mining is enabled — `src/mining.rs:169`
 - `BlockchainState` (struct) + `enforce_status_gate` (fn) — extra-index router state + the `503 indexer-syncing/-halted` gate — `src/blockchain.rs:105`, `src/blockchain.rs:258`
 - `ApiInfo` / `ApiIdentity` / `ApiStatus` / `ApiSubmitError` / `ApiNativeSubmitError` / `SubmitMode` / `ApiNodeEvents` / `ApiMinerStats` / `ApiMinerStat` (types) — native `/api/v1/*` wire DTOs — `src/types.rs`

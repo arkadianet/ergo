@@ -19,7 +19,7 @@ use ergo_api::compat::types::{
     ScalaFullBlock, ScalaHeader, ScalaInfo, ScalaMerkleProof, ScalaOutput, ScalaPeer,
     ScalaPeersStatus, ScalaPowSolutions, ScalaSyncInfoEntry, ScalaTrackInfo, ScalaTransaction,
 };
-use ergo_api::server::router;
+use ergo_api::server::{native_openapi_yaml, router, rust_openapi_yaml};
 use ergo_api::traits::NodeReadState;
 use ergo_api::types::{
     ApiFullBlockRef, ApiHeaderRef, ApiHealth, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction,
@@ -863,13 +863,17 @@ async fn api_docs_present_only_scala_and_rust_api_families() {
     let scala_spec = text_get(app.clone(), "/api-docs/openapi-scala.yaml").await;
     assert!(scala_spec.contains("title: Ergo Node — Scala API"));
 
-    for path in ["/api-docs/openapi-native.yaml", "/api-docs/openapi-v1.yaml"] {
-        let rust_spec = text_get(app.clone(), path).await;
-        assert!(
-            rust_spec.contains("title: Ergo Rust Node — RUST API"),
-            "{path} must use the RUST API title"
-        );
-    }
+    let native_spec = text_get(app.clone(), "/api-docs/openapi-native.yaml").await;
+    assert_eq!(native_spec, native_openapi_yaml());
+    let v1_spec = text_get(app.clone(), "/api-docs/openapi-v1.yaml").await;
+    assert_eq!(v1_spec, ergo_api::v1::openapi::v1_openapi_yaml());
+
+    let rust_yaml = text_get(app.clone(), "/api-docs/openapi-rust.yaml").await;
+    assert_eq!(rust_yaml, rust_openapi_yaml());
+    assert!(rust_yaml.contains("title: Ergo Rust Node — RUST API"));
+    let rust_json = text_get(app, "/api-docs/openapi-rust.json").await;
+    let rust_json: serde_json::Value = serde_json::from_str(&rust_json).unwrap();
+    assert_eq!(rust_json["info"]["title"], "Ergo Rust Node — RUST API");
 }
 
 #[tokio::test]

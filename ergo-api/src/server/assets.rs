@@ -10,7 +10,9 @@ use axum::{
 };
 use utoipa::OpenApi;
 
-use super::openapi::{native_openapi_yaml, rust_openapi, rust_openapi_yaml, scala_openapi_yaml};
+use super::openapi::{
+    native_openapi_yaml, rust_openapi_json, rust_openapi_yaml, scala_openapi_yaml,
+};
 use super::NativeOpenApi;
 use crate::web::{
     index_html, rust_swagger_html, scala_swagger_html, COMPONENTS_CSS, DASHBOARD_CSS,
@@ -55,11 +57,7 @@ pub(super) async fn openapi_rust_yaml() -> Response {
 }
 
 pub(super) async fn openapi_rust_json() -> Response {
-    (
-        StatusCode::OK,
-        Json(rust_openapi().expect("RUST API OpenAPI fragments must merge")),
-    )
-        .into_response()
+    (StatusCode::OK, Json(rust_openapi_json())).into_response()
 }
 
 /// Rust-native `/api/v1/*` OpenAPI spec as YAML, generated from the

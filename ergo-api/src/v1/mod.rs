@@ -100,7 +100,7 @@ supplemental_route!(
     ACCOUNTS_SEAM,
     "/api/v1/accounts",
     "/api/v1/accounts",
-    ["post"]
+    ["get", "post"]
 );
 supplemental_route!(
     ACCOUNT_SEAM,
