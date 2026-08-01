@@ -19,7 +19,7 @@ use ergo_api::compat::types::{
     ScalaFullBlock, ScalaHeader, ScalaInfo, ScalaMerkleProof, ScalaOutput, ScalaPeer,
     ScalaPeersStatus, ScalaPowSolutions, ScalaSyncInfoEntry, ScalaTrackInfo, ScalaTransaction,
 };
-use ergo_api::server::router;
+use ergo_api::server::{native_openapi_yaml, router, rust_openapi_yaml};
 use ergo_api::traits::NodeReadState;
 use ergo_api::types::{
     ApiFullBlockRef, ApiHeaderRef, ApiHealth, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction,
@@ -676,6 +676,16 @@ async fn json_get(app: axum::Router, path: &str) -> (StatusCode, serde_json::Val
     (status, value)
 }
 
+async fn text_get(app: axum::Router, path: &str) -> String {
+    let resp = app
+        .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "{path} must be served");
+    let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
 async fn json_post(
     app: axum::Router,
     path: &str,
@@ -786,14 +796,14 @@ async fn swagger_ui_and_openapi_spec_are_served() {
     let body = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
     let html = std::str::from_utf8(&body).unwrap();
     assert!(
-        html.contains("/api-docs/openapi.yaml"),
-        "swagger page must reference spec url"
+        html.contains("/api-docs/openapi-scala.yaml"),
+        "Swagger page must reference the canonical Scala spec"
     );
 
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/api-docs/openapi.yaml")
+                .uri("/api-docs/openapi-scala.yaml")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -812,6 +822,89 @@ async fn swagger_ui_and_openapi_spec_are_served() {
         yaml.starts_with("openapi:"),
         "spec must start with openapi key"
     );
+}
+
+#[tokio::test]
+async fn api_docs_present_only_scala_and_rust_api_families() {
+    let read: Arc<dyn NodeReadState> = Arc::new(StubReadState);
+    let app = router(
+        read,
+        None,
+        None,
+        None,
+        ergo_ser::address::NetworkPrefix::Mainnet,
+    );
+
+    let dashboard = text_get(app.clone(), "/").await;
+    assert!(dashboard.contains(r#"href="/swagger">Scala API ↗"#));
+    assert!(dashboard.contains(r#"href="/swagger/native">RUST API ↗"#));
+    assert!(!dashboard.contains(r#"href="/swagger/v1">"#));
+    assert!(!dashboard.contains("Native API"));
+    assert!(!dashboard.contains("V1 API"));
+
+    let scala_swagger = text_get(app.clone(), "/swagger").await;
+    assert!(scala_swagger.contains("<title>ergo-rust-node — Scala API Swagger</title>"));
+    assert!(scala_swagger.contains("<strong>Scala API:</strong>"));
+
+    for path in ["/swagger/native", "/swagger/v1"] {
+        let rust_swagger = text_get(app.clone(), path).await;
+        assert!(
+            rust_swagger.contains("<title>ergo-rust-node — RUST API Swagger</title>"),
+            "{path} must use the RUST API title"
+        );
+        assert!(
+            rust_swagger.contains("<strong>RUST API:</strong>"),
+            "{path} must use the RUST API heading"
+        );
+        assert!(!rust_swagger.contains("Native API"));
+        assert!(!rust_swagger.contains("<strong>v1 API:</strong>"));
+    }
+
+    let scala_spec = text_get(app.clone(), "/api-docs/openapi-scala.yaml").await;
+    assert!(scala_spec.contains("title: Ergo Node — Scala API"));
+
+    let native_spec = text_get(app.clone(), "/api-docs/openapi-native.yaml").await;
+    assert_eq!(native_spec, native_openapi_yaml());
+    let v1_spec = text_get(app.clone(), "/api-docs/openapi-v1.yaml").await;
+    assert_eq!(v1_spec, ergo_api::v1::openapi::v1_openapi_yaml());
+
+    let rust_yaml = text_get(app.clone(), "/api-docs/openapi-rust.yaml").await;
+    assert_eq!(rust_yaml, rust_openapi_yaml());
+    assert!(rust_yaml.contains("title: Ergo Rust Node — RUST API"));
+    let rust_json = text_get(app, "/api-docs/openapi-rust.json").await;
+    let rust_json: serde_json::Value = serde_json::from_str(&rust_json).unwrap();
+    assert_eq!(rust_json["info"]["title"], "Ergo Rust Node — RUST API");
+}
+
+#[tokio::test]
+async fn canonical_family_docs_are_unified_and_disjoint() {
+    let read: Arc<dyn NodeReadState> = Arc::new(StubReadState);
+    let app = router(
+        read,
+        None,
+        None,
+        None,
+        ergo_ser::address::NetworkPrefix::Mainnet,
+    );
+
+    let rust_native = text_get(app.clone(), "/swagger/native").await;
+    let rust_v1 = text_get(app.clone(), "/swagger/v1").await;
+    assert_eq!(
+        rust_native, rust_v1,
+        "both compatibility URLs must serve the same RUST API page"
+    );
+    assert!(rust_native.contains(r#"url: "/api-docs/openapi-rust.yaml""#));
+
+    let rust_spec = text_get(app.clone(), "/api-docs/openapi-rust.yaml").await;
+    assert!(rust_spec.contains("title: Ergo Rust Node — RUST API"));
+    assert!(rust_spec.contains("/api/v1/info:"));
+    assert!(rust_spec.contains("/api/v1/chain/blocks:"));
+    assert!(rust_spec.contains("/blockchain/storageRent/eligibleAt/{height}:"));
+
+    let scala_spec = text_get(app, "/api-docs/openapi-scala.yaml").await;
+    assert!(scala_spec.contains("title: Ergo Node — Scala API"));
+    assert!(!scala_spec.contains("  /api/v1/"));
+    assert!(!scala_spec.contains("  /blockchain/storageRent/"));
 }
 
 fn build_compat_app() -> axum::Router {

@@ -10,31 +10,54 @@ use axum::{
 };
 use utoipa::OpenApi;
 
-use super::openapi::native_openapi_yaml;
+use super::openapi::{
+    native_openapi_yaml, rust_openapi_json, rust_openapi_yaml, scala_openapi_yaml,
+};
 use super::NativeOpenApi;
 use crate::web::{
-    COMPONENTS_CSS, DASHBOARD_CSS, INDEX_HTML, INTER_VARIABLE_WOFF2, JETBRAINS_MONO_WOFF2,
-    NATIVE_SWAGGER_HTML, OPENAPI_YAML, SWAGGER_HTML, TOKENS_CSS, V1_SWAGGER_HTML,
+    index_html, rust_swagger_html, scala_swagger_html, COMPONENTS_CSS, DASHBOARD_CSS,
+    INTER_VARIABLE_WOFF2, JETBRAINS_MONO_WOFF2, OPENAPI_YAML, TOKENS_CSS,
 };
 
 pub(super) async fn index() -> Html<&'static str> {
-    Html(INDEX_HTML)
+    Html(index_html())
 }
 
 pub(super) async fn swagger() -> Html<&'static str> {
-    Html(SWAGGER_HTML)
+    Html(scala_swagger_html())
 }
 
 pub(super) async fn swagger_native() -> Html<&'static str> {
-    Html(NATIVE_SWAGGER_HTML)
+    Html(rust_swagger_html())
 }
 
 pub(super) async fn swagger_v1() -> Html<&'static str> {
-    Html(V1_SWAGGER_HTML)
+    Html(rust_swagger_html())
 }
 
 pub(super) async fn openapi_yaml() -> Response {
     ([(header::CONTENT_TYPE, "application/yaml")], OPENAPI_YAML).into_response()
+}
+
+pub(super) async fn openapi_scala_yaml() -> Response {
+    (
+        [(header::CONTENT_TYPE, "application/yaml")],
+        scala_openapi_yaml(),
+    )
+        .into_response()
+}
+
+pub(super) async fn openapi_rust_yaml() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/yaml")],
+        rust_openapi_yaml(),
+    )
+        .into_response()
+}
+
+pub(super) async fn openapi_rust_json() -> Response {
+    (StatusCode::OK, Json(rust_openapi_json())).into_response()
 }
 
 /// Rust-native `/api/v1/*` OpenAPI spec as YAML, generated from the

@@ -106,11 +106,12 @@ The first run performs a full Initial Block Download from genesis; subsequent
 runs resume from the persisted tip. The node also serves a dependency-free
 operator web dashboard at the REST bind address (`http://127.0.0.1:9099/` by
 default) — a single-page app with Overview (live charts + event feed),
-Explorer, Peers, Mempool, Mining, Voting, and Wallet sections — plus a Swagger
-UI at `/swagger`; wallet actions require the API key. For a ~20-minute clean-DB
-boot, enable Mode 2 + NiPoPoW. The full build / test / run / configuration
-surface — profiles, feature-gated tests, the config reference, observability —
-is in [`docs/overview.md`](./docs/overview.md).
+Explorer, Peers, Mempool, Mining, Voting, and Wallet sections — plus Scala API
+docs at `/swagger` and RUST API docs at `/swagger/native`; wallet actions
+require the API key. For a ~20-minute clean-DB boot, enable Mode 2 + NiPoPoW.
+The full build / test / run / configuration surface — profiles, feature-gated
+tests, the config reference, observability — is in
+[`docs/overview.md`](./docs/overview.md).
 
 ## Correctness
 

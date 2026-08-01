@@ -1,18 +1,45 @@
 //! Static UI assets, embedded at compile time.
 //!
-//! v1 ships a self-contained dashboard (`index.html`) plus a Swagger UI
-//! page that loads the Scala node's OpenAPI spec. No build step, no
-//! node_modules, no npm. Files live under `ergo-api/web/` and are
-//! editable with any text editor.
+//! The crate ships a self-contained dashboard plus Swagger pages. No build
+//! step, node_modules, or npm is required.
 
 pub const INDEX_HTML: &str = include_str!("../web/index.html");
 pub const SWAGGER_HTML: &str = include_str!("../web/swagger.html");
 pub const NATIVE_SWAGGER_HTML: &str = include_str!("../web/swagger-native.html");
-pub const V1_SWAGGER_HTML: &str = include_str!("../web/swagger-v1.html");
 pub const OPENAPI_YAML: &str = include_str!("../web/openapi.yaml");
 pub const TOKENS_CSS: &str = include_str!("../web/tokens.css");
 pub const COMPONENTS_CSS: &str = include_str!("../web/components.css");
 pub const DASHBOARD_CSS: &str = include_str!("../web/dashboard.css");
+
+fn render_family_metadata(template: &str) -> String {
+    use crate::api_family::{RUST_API, SCALA_API};
+
+    template
+        .replace("{{SCALA_API_LABEL}}", SCALA_API.label)
+        .replace("{{SCALA_SWAGGER_URL}}", SCALA_API.swagger_url)
+        .replace("{{SCALA_OPENAPI_URL}}", SCALA_API.openapi_url)
+        .replace("{{RUST_API_LABEL}}", RUST_API.label)
+        .replace("{{RUST_SWAGGER_URL}}", RUST_API.swagger_url)
+        .replace("{{RUST_OPENAPI_URL}}", RUST_API.openapi_url)
+}
+
+pub fn index_html() -> &'static str {
+    static HTML: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| render_family_metadata(INDEX_HTML));
+    HTML.as_str()
+}
+
+pub fn scala_swagger_html() -> &'static str {
+    static HTML: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| render_family_metadata(SWAGGER_HTML));
+    HTML.as_str()
+}
+
+pub fn rust_swagger_html() -> &'static str {
+    static HTML: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| render_family_metadata(NATIVE_SWAGGER_HTML));
+    HTML.as_str()
+}
 
 // ES modules for the overhauled dashboard, served under `/js/`.
 pub const JS_API_CLIENT: &str = include_str!("../web/js/api-client.js");

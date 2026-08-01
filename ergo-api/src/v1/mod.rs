@@ -55,6 +55,104 @@ pub use webhooks::{
     WebhookSink, WebhooksHandle, WebhooksState,
 };
 
+#[derive(Clone, Copy)]
+pub(crate) struct SupplementalRoute {
+    pub axum_path: &'static str,
+    pub openapi_path: &'static str,
+    pub methods: &'static [&'static str],
+}
+
+macro_rules! supplemental_route {
+    ($name:ident, $axum:literal, $openapi:literal, [$($method:literal),+ $(,)?]) => {
+        pub(crate) const $name: SupplementalRoute = SupplementalRoute {
+            axum_path: $axum,
+            openapi_path: $openapi,
+            methods: &[$($method),+],
+        };
+    };
+}
+
+supplemental_route!(
+    MEMPOOL_SUBMIT_ALIAS,
+    "/api/v1/mempool/submit",
+    "/api/v1/mempool/submit",
+    ["post"]
+);
+supplemental_route!(
+    MEMPOOL_CHECK_ALIAS,
+    "/api/v1/mempool/check",
+    "/api/v1/mempool/check",
+    ["post"]
+);
+supplemental_route!(
+    ADDRESS_BOXES_ALIAS,
+    "/api/v1/addresses/:address/boxes",
+    "/api/v1/addresses/{address}/boxes",
+    ["get"]
+);
+supplemental_route!(
+    ADDRESS_UNSPENT_ALIAS,
+    "/api/v1/addresses/:address/unspent",
+    "/api/v1/addresses/{address}/unspent",
+    ["get"]
+);
+supplemental_route!(
+    ACCOUNTS_SEAM,
+    "/api/v1/accounts",
+    "/api/v1/accounts",
+    ["get", "post"]
+);
+supplemental_route!(
+    ACCOUNT_SEAM,
+    "/api/v1/accounts/:account_id",
+    "/api/v1/accounts/{account_id}",
+    ["get", "patch", "delete"]
+);
+supplemental_route!(
+    ACCOUNT_BALANCE_SEAM,
+    "/api/v1/accounts/:account_id/balance",
+    "/api/v1/accounts/{account_id}/balance",
+    ["get"]
+);
+supplemental_route!(
+    ACCOUNT_ADDRESSES_SEAM,
+    "/api/v1/accounts/:account_id/addresses",
+    "/api/v1/accounts/{account_id}/addresses",
+    ["get", "post"]
+);
+supplemental_route!(
+    PSBT_SEAM,
+    "/api/v1/transactions-psbt/:psbt_id",
+    "/api/v1/transactions-psbt/{psbt_id}",
+    ["get"]
+);
+supplemental_route!(
+    PSBT_CONTRIBUTIONS_SEAM,
+    "/api/v1/transactions-psbt/:psbt_id/contributions",
+    "/api/v1/transactions-psbt/{psbt_id}/contributions",
+    ["post"]
+);
+supplemental_route!(
+    PSBT_FINALIZE_SEAM,
+    "/api/v1/transactions-psbt/:psbt_id/finalize",
+    "/api/v1/transactions-psbt/{psbt_id}/finalize",
+    ["post"]
+);
+
+pub(crate) const SUPPLEMENTAL_ROUTES: &[SupplementalRoute] = &[
+    MEMPOOL_SUBMIT_ALIAS,
+    MEMPOOL_CHECK_ALIAS,
+    ADDRESS_BOXES_ALIAS,
+    ADDRESS_UNSPENT_ALIAS,
+    ACCOUNTS_SEAM,
+    ACCOUNT_SEAM,
+    ACCOUNT_BALANCE_SEAM,
+    ACCOUNT_ADDRESSES_SEAM,
+    PSBT_SEAM,
+    PSBT_CONTRIBUTIONS_SEAM,
+    PSBT_FINALIZE_SEAM,
+];
+
 use axum::extract::ConnectInfo;
 use axum::http::Request;
 use std::net::{IpAddr, SocketAddr};

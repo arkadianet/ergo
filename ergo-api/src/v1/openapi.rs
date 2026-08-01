@@ -1,9 +1,8 @@
 //! The v1 product-API OpenAPI document (`/api/v1/*`, distinct from the older
 //! pre-v1 [`crate::server::NativeOpenApi`] surface — wallet/mining/votes/
-//! indexer/node — that this derive does NOT re-document). v1 is its own
-//! product surface, so it gets its own spec + Swagger page
-//! (`/swagger/v1`, `/api-docs/openapi-v1.yaml`) rather than being folded
-//! into the pre-v1 doc.
+//! indexer/node — that this derive does NOT re-document). This remains a
+//! compatibility fragment at `/api-docs/openapi-v1.yaml`; the canonical RUST
+//! API document merges it with the legacy operator fragment.
 //!
 //! Registers every `#[utoipa::path]`-annotated handler across
 //! `crate::v1::{routes,accounts,operator,script,webhooks,realtime}` — see
@@ -39,13 +38,13 @@ impl utoipa::Modify for V1SecurityAddon {
 #[derive(OpenApi)]
 #[openapi(
     info(
-        title = "Ergo Rust Node — v1 API",
-        description = "The Rust-native v1 product API (`/api/v1/*`): chain/boxes/tokens/addresses/mempool/transactions \
+        title = "Ergo Rust Node — RUST API",
+        description = "Compatibility fragment for RUST API product routes under `/api/v1/*`: chain/boxes/tokens/addresses/mempool/transactions \
 reads, tx-intelligence (build/simulate/fee-estimate/status), the ErgoScript playground (`script/*`), semantic decode \
 (`protocols/*`, `boxes/decode`), light-client trustless-sync proofs (`light/*`), time-series analytics (`stats/*`), \
 operator diagnostics, webhooks, real-time WebSocket subscriptions, the scan/accounts surface, and node/network/mining/voting \
-operator controls. Distinct from the pre-v1 native surface documented at `/swagger/native` (wallet/mining/votes/indexer/node) \
-— the two specs are additive, not overlapping. Every v1 error follows the nested error envelope \
+operator controls. The canonical complete document is served at `/api-docs/openapi-rust.yaml`. \
+Every error from these routes follows the nested error envelope \
 (`error.reason`/`error.message`/`error.detail`); `reason` is the stable machine-readable field to switch on. Query \
 `GET /api/v1/node/health` to confirm a running node's state."
     ),

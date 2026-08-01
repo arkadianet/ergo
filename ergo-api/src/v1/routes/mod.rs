@@ -453,8 +453,14 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
         )
         // O1: aliases of the canonical transactions/{submit,check} — SAME
         // handler, second mount (no duplicated logic).
-        .route("/api/v1/mempool/submit", post(transactions::submit))
-        .route("/api/v1/mempool/check", post(transactions::check))
+        .route(
+            super::MEMPOOL_SUBMIT_ALIAS.axum_path,
+            post(transactions::submit),
+        )
+        .route(
+            super::MEMPOOL_CHECK_ALIAS.axum_path,
+            post(transactions::check),
+        )
         // ----- boxes/* -----
         .route("/api/v1/boxes/range", get(boxes::box_range))
         // Off-chain semantic decode (stateless) + the singleton state one-shot.
@@ -512,11 +518,11 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
             get(addresses::transactions),
         )
         .route(
-            "/api/v1/addresses/:address/boxes",
+            super::ADDRESS_BOXES_ALIAS.axum_path,
             get(boxes::boxes_by_address),
         )
         .route(
-            "/api/v1/addresses/:address/unspent",
+            super::ADDRESS_UNSPENT_ALIAS.axum_path,
             get(boxes::boxes_unspent_by_address),
         )
         // ----- light/* trustless-sync proofs -----

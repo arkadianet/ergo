@@ -88,11 +88,11 @@ project:
   external state); a `difftest` structured campaign runs 50 000 iterations of the
   `ergo-difftest` differential harness with an 80 % generator-coverage gate
   (hermetic — no JVM oracle required).
-- **Generated API spec, snapshot-tested.** The Rust-native `/api/v1/*` surface
-  is OpenAPI-documented from the handler annotations (served at
-  `/api-docs/openapi-native.yaml`, browsable at `/swagger/native`); a snapshot
-  test pins the generated YAML against a golden file, so an un-mirrored
-  handler/DTO change fails CI.
+- **Generated API specs, inventory-tested.** `/api-docs/openapi-scala.yaml`
+  contains only Scala API operations. `/api-docs/openapi-rust.yaml` safely
+  merges the legacy operator and versioned RUST API fragments; merge tests
+  reject method collisions and unequal duplicate components. The original
+  `openapi-native` and `openapi-v1` URLs remain available for compatibility.
 - **Supply-chain auditors.** CI runs `cargo-audit` (RustSec advisories),
   `cargo-deny` (licenses/duplicates/advisories per
   [`../deny.toml`](../deny.toml)), and `cargo-machete` (unused deps).
@@ -205,8 +205,8 @@ With the bundled default config the node:
   `[api.security].api_key_hash` (mandatory at config-load whenever the API
   server is enabled).
 - Serves browser UIs at `/` (operator dashboard) and `/wallet/ui` (wallet), plus
-  Swagger UIs at `/swagger` (Scala-compatible surface) and `/swagger/native`
-  (operator `/api/v1/*` surface).
+  Scala API docs at `/swagger` and RUST API docs at `/swagger/native`.
+  `/swagger/v1` is a compatibility URL for the same RUST API page.
 - Uses the bundled mainnet seed list plus any `[peers].known`.
 
 The first run performs an Initial Block Download (IBD) from genesis; subsequent

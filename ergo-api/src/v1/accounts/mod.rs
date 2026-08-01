@@ -522,29 +522,26 @@ pub fn accounts_router(
         .route("/api/v1/accounts/watch", post(watch_register))
         .route("/api/v1/accounts/watch/:scan_id", delete(watch_delete))
         // named accounts (seam)
-        .route("/api/v1/accounts", get(accounts_seam).post(accounts_seam))
         .route(
-            "/api/v1/accounts/:account_id",
+            super::ACCOUNTS_SEAM.axum_path,
+            get(accounts_seam).post(accounts_seam),
+        )
+        .route(
+            super::ACCOUNT_SEAM.axum_path,
             get(accounts_seam)
                 .patch(accounts_seam)
                 .delete(accounts_seam),
         )
-        .route("/api/v1/accounts/:account_id/balance", get(accounts_seam))
+        .route(super::ACCOUNT_BALANCE_SEAM.axum_path, get(accounts_seam))
         .route(
-            "/api/v1/accounts/:account_id/addresses",
+            super::ACCOUNT_ADDRESSES_SEAM.axum_path,
             get(accounts_seam).post(accounts_seam),
         )
         // PSBT (seam)
         .route("/api/v1/transactions-psbt", post(psbt_seam))
-        .route("/api/v1/transactions-psbt/:psbt_id", get(psbt_seam))
-        .route(
-            "/api/v1/transactions-psbt/:psbt_id/contributions",
-            post(psbt_seam),
-        )
-        .route(
-            "/api/v1/transactions-psbt/:psbt_id/finalize",
-            post(psbt_seam),
-        )
+        .route(super::PSBT_SEAM.axum_path, get(psbt_seam))
+        .route(super::PSBT_CONTRIBUTIONS_SEAM.axum_path, post(psbt_seam))
+        .route(super::PSBT_FINALIZE_SEAM.axum_path, post(psbt_seam))
         .route_layer(axum::middleware::from_fn_with_state(
             auth.state(Tier::Operator),
             require_tier,
