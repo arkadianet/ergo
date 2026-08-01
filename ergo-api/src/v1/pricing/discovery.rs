@@ -8,7 +8,6 @@ use ergo_indexer_types::{
 
 use super::types::token_decimals_from_r6;
 
-const PAGE_SIZE: u32 = 100;
 const CANDIDATE_LIMIT: u32 = 5_000;
 
 pub(crate) trait PricingIndex: Send + Sync {
@@ -96,55 +95,28 @@ fn discover_once<I: PricingIndex + ?Sized>(
     discovery: &IndexerPoolDiscovery<'_, I>,
     token_id: &TokenId,
 ) -> Result<(Vec<SpectrumN2TPool>, Option<u32>), DiscoveryError> {
-    let mut pools = Vec::new();
-    let mut candidate_count = 0u32;
-    let mut reached_limit = true;
-
-    for offset in (0..CANDIDATE_LIMIT).step_by(PAGE_SIZE as usize) {
-        let candidates = discovery.index.template_unspent_paged(
-            &discovery.template_hash,
-            Page {
-                offset,
-                limit: PAGE_SIZE,
-            },
-            SortDir::Asc,
-        )?;
-        let page_len =
-            u32::try_from(candidates.len()).map_err(|_| DiscoveryError::LimitExceeded)?;
-        candidate_count = candidate_count
-            .checked_add(page_len)
-            .ok_or(DiscoveryError::LimitExceeded)?;
-        if candidate_count > CANDIDATE_LIMIT {
-            return Err(DiscoveryError::LimitExceeded);
-        }
-
-        for candidate in candidates {
-            if let Ok(pool) = decode_n2t_pool(&candidate) {
-                if pool.token_y == *token_id {
-                    pools.push(pool);
-                }
-            }
-        }
-
-        if page_len < PAGE_SIZE {
-            reached_limit = false;
-            break;
-        }
+    // One bulk read, then filter in memory. `template_unspent_paged` re-reads
+    // and re-filters the template's whole box-entry list on every call, so
+    // walking the candidate set page by page would rescan the template once
+    // per page. The read asks for `CANDIDATE_LIMIT + 1`: the extra entry is
+    // the over-limit probe, so a saturated candidate set is still rejected.
+    let candidates = discovery.index.template_unspent_paged(
+        &discovery.template_hash,
+        Page {
+            offset: 0,
+            limit: CANDIDATE_LIMIT.saturating_add(1),
+        },
+        SortDir::Asc,
+    )?;
+    if candidates.len() > CANDIDATE_LIMIT as usize {
+        return Err(DiscoveryError::LimitExceeded);
     }
 
-    if reached_limit {
-        let probe = discovery.index.template_unspent_paged(
-            &discovery.template_hash,
-            Page {
-                offset: CANDIDATE_LIMIT,
-                limit: 1,
-            },
-            SortDir::Asc,
-        )?;
-        if !probe.is_empty() {
-            return Err(DiscoveryError::LimitExceeded);
-        }
-    }
+    let pools: Vec<SpectrumN2TPool> = candidates
+        .iter()
+        .filter_map(|candidate| decode_n2t_pool(candidate).ok())
+        .filter(|pool| pool.token_y == *token_id)
+        .collect();
 
     let token_decimals = if pools.is_empty() {
         None
@@ -231,9 +203,9 @@ mod tests {
     struct StubIndex {
         heights: Mutex<HeightScript>,
         height_samples: Mutex<Vec<u64>>,
-        first_page: Result<Vec<IndexedBoxDto>, IndexerReadError>,
-        full_candidate: Option<IndexedBoxDto>,
-        probe_hit: bool,
+        bulk_read: Result<Vec<IndexedBoxDto>, IndexerReadError>,
+        saturating_candidate: Option<IndexedBoxDto>,
+        over_limit: bool,
         token: Result<Option<IndexedTokenDto>, IndexerReadError>,
         boxes: Vec<(BoxId, Result<Option<IndexedBoxDto>, IndexerReadError>)>,
         reads: Mutex<Vec<Read>>,
@@ -247,9 +219,9 @@ mod tests {
             Self {
                 heights: Mutex::new(HeightScript { values, last }),
                 height_samples: Mutex::new(Vec::new()),
-                first_page: Ok(Vec::new()),
-                full_candidate: None,
-                probe_hit: false,
+                bulk_read: Ok(Vec::new()),
+                saturating_candidate: None,
+                over_limit: false,
                 token: Ok(None),
                 boxes: Vec::new(),
                 reads: Mutex::new(Vec::new()),
@@ -257,19 +229,21 @@ mod tests {
             }
         }
 
-        fn with_first_page(mut self, page: Vec<IndexedBoxDto>) -> Self {
-            self.first_page = Ok(page);
+        fn with_candidates(mut self, candidates: Vec<IndexedBoxDto>) -> Self {
+            self.bulk_read = Ok(candidates);
             self
         }
 
-        fn with_page_error(mut self, message: &str) -> Self {
-            self.first_page = Err(IndexerReadError::new(message));
+        fn with_read_error(mut self, message: &str) -> Self {
+            self.bulk_read = Err(IndexerReadError::new(message));
             self
         }
 
-        fn with_full_pages(mut self, candidate: IndexedBoxDto, probe_hit: bool) -> Self {
-            self.full_candidate = Some(candidate);
-            self.probe_hit = probe_hit;
+        /// Fill the bulk read to exactly `CANDIDATE_LIMIT` candidates, or to
+        /// one past it when `over_limit` — the case discovery must reject.
+        fn with_saturated_candidates(mut self, candidate: IndexedBoxDto, over_limit: bool) -> Self {
+            self.saturating_candidate = Some(candidate);
+            self.over_limit = over_limit;
             self
         }
 
@@ -322,20 +296,12 @@ mod tests {
                 .push(Read::Page(page.offset, page.limit, dir));
             self.hashes.lock().unwrap().push(*hash);
 
-            if let Some(candidate) = &self.full_candidate {
-                if page.offset < 5_000 && page.limit == 100 {
-                    return Ok(vec![candidate.clone(); 100]);
-                }
-                if page.offset == 5_000 && page.limit == 1 {
-                    return Ok(self
-                        .probe_hit
-                        .then(|| candidate.clone())
-                        .into_iter()
-                        .collect());
-                }
+            if let Some(candidate) = &self.saturating_candidate {
+                let filled = CANDIDATE_LIMIT as usize + usize::from(self.over_limit);
+                return Ok(vec![candidate.clone(); filled.min(page.limit as usize)]);
             }
-            if page.offset == 0 && page.limit == 100 {
-                return self.first_page.clone();
+            if page.offset == 0 {
+                return self.bulk_read.clone();
             }
             Ok(Vec::new())
         }
@@ -458,11 +424,10 @@ mod tests {
         }
     }
 
-    fn expected_cap_pages() -> Vec<(u32, u32, SortDir)> {
-        (0..50)
-            .map(|page| (page * 100, 100, SortDir::Asc))
-            .chain(std::iter::once((5_000, 1, SortDir::Asc)))
-            .collect()
+    /// Discovery reads the candidate set exactly once, asking for one entry
+    /// past `CANDIDATE_LIMIT` so a saturated set is still detectable.
+    fn expected_bulk_read() -> Vec<(u32, u32, SortDir)> {
+        vec![(0, CANDIDATE_LIMIT + 1, SortDir::Asc)]
     }
 
     fn page_reads(index: &StubIndex) -> Vec<(u32, u32, SortDir)> {
@@ -510,8 +475,8 @@ mod tests {
     }
 
     #[test]
-    fn ascending_scan_stops_after_short_page() {
-        let index = StubIndex::new([700_000, 700_000]).with_first_page(vec![invalid_pool_box()]);
+    fn candidate_set_is_read_in_one_template_scan() {
+        let index = StubIndex::new([700_000, 700_000]).with_candidates(vec![invalid_pool_box()]);
         let token_id = TokenId::from_bytes([3; 32]);
 
         let snapshot = IndexerPoolDiscovery::new(&index)
@@ -519,7 +484,10 @@ mod tests {
             .unwrap();
 
         assert!(snapshot.pools.is_empty());
-        assert_eq!(page_reads(&index), vec![(0, 100, SortDir::Asc)]);
+        assert_eq!(
+            page_reads(&index),
+            vec![(0, CANDIDATE_LIMIT + 1, SortDir::Asc)]
+        );
         let expected_hash = TemplateHash::from_bytes(
             hex::decode(SPECTRUM_N2T_V1_TEMPLATE_HASH_HEX)
                 .unwrap()
@@ -534,7 +502,7 @@ mod tests {
         let requested_id = TokenId::from_bytes([3; 32]);
         let requested = pool_box(3, 1);
         let expected_box_id = requested.box_data.box_id().unwrap();
-        let index = StubIndex::new([700_000, 700_000]).with_first_page(vec![
+        let index = StubIndex::new([700_000, 700_000]).with_candidates(vec![
             requested,
             pool_box(4, 5),
             invalid_pool_box(),
@@ -550,8 +518,9 @@ mod tests {
     }
 
     #[test]
-    fn five_thousand_candidates_probe_miss_is_complete() {
-        let index = StubIndex::new([700_000, 700_000]).with_full_pages(invalid_pool_box(), false);
+    fn candidate_set_at_the_limit_is_complete() {
+        let index =
+            StubIndex::new([700_000, 700_000]).with_saturated_candidates(invalid_pool_box(), false);
         let token_id = TokenId::from_bytes([3; 32]);
 
         let snapshot = IndexerPoolDiscovery::new(&index)
@@ -559,13 +528,13 @@ mod tests {
             .unwrap();
 
         assert!(snapshot.pools.is_empty());
-        assert_eq!(page_reads(&index), expected_cap_pages());
+        assert_eq!(page_reads(&index), expected_bulk_read());
     }
 
     #[test]
     fn no_supported_pool_skips_metadata_reads() {
         let index = StubIndex::new([700_000, 700_000])
-            .with_first_page(vec![pool_box(4, 5)])
+            .with_candidates(vec![pool_box(4, 5)])
             .with_token_error("metadata must not be read");
         let token_id = TokenId::from_bytes([3; 32]);
 
@@ -574,7 +543,10 @@ mod tests {
             .unwrap();
 
         assert!(snapshot.pools.is_empty());
-        assert_eq!(index.reads(), vec![Read::Page(0, 100, SortDir::Asc)]);
+        assert_eq!(
+            index.reads(),
+            vec![Read::Page(0, CANDIDATE_LIMIT + 1, SortDir::Asc)]
+        );
     }
 
     #[test]
@@ -582,7 +554,7 @@ mod tests {
         let token_id = TokenId::from_bytes([3; 32]);
         let creation_box_id = BoxId::from_bytes([9; 32]);
         let index = StubIndex::new([700_000, 700_000])
-            .with_first_page(vec![pool_box(3, 1)])
+            .with_candidates(vec![pool_box(3, 1)])
             .with_token(Some(token_dto(token_id, creation_box_id)))
             .with_box(
                 creation_box_id,
@@ -597,7 +569,7 @@ mod tests {
         assert_eq!(
             index.reads(),
             vec![
-                Read::Page(0, 100, SortDir::Asc),
+                Read::Page(0, CANDIDATE_LIMIT + 1, SortDir::Asc),
                 Read::Token(token_id),
                 Read::Box(creation_box_id),
             ]
@@ -607,7 +579,7 @@ mod tests {
     #[test]
     fn missing_token_metadata_returns_unknown_decimals() {
         let token_id = TokenId::from_bytes([3; 32]);
-        let index = StubIndex::new([700_000, 700_000]).with_first_page(vec![pool_box(3, 1)]);
+        let index = StubIndex::new([700_000, 700_000]).with_candidates(vec![pool_box(3, 1)]);
 
         let snapshot = IndexerPoolDiscovery::new(&index)
             .discover(&token_id)
@@ -616,7 +588,10 @@ mod tests {
         assert_eq!(snapshot.token_decimals, None);
         assert_eq!(
             index.reads(),
-            vec![Read::Page(0, 100, SortDir::Asc), Read::Token(token_id)]
+            vec![
+                Read::Page(0, CANDIDATE_LIMIT + 1, SortDir::Asc),
+                Read::Token(token_id)
+            ]
         );
     }
 
@@ -625,7 +600,7 @@ mod tests {
         let token_id = TokenId::from_bytes([3; 32]);
         let creation_box_id = BoxId::from_bytes([9; 32]);
         let index = StubIndex::new([700_000, 700_000])
-            .with_first_page(vec![pool_box(3, 1)])
+            .with_candidates(vec![pool_box(3, 1)])
             .with_token(Some(token_dto(token_id, creation_box_id)))
             .with_box(creation_box_id, Ok(Some(mint_box(None))));
 
@@ -641,7 +616,7 @@ mod tests {
         let token_id = TokenId::from_bytes([3; 32]);
         let creation_box_id = BoxId::from_bytes([9; 32]);
         let index = StubIndex::new([700_000, 700_000])
-            .with_first_page(vec![pool_box(3, 1)])
+            .with_candidates(vec![pool_box(3, 1)])
             .with_token(Some(token_dto(token_id, creation_box_id)))
             .with_box(
                 creation_box_id,
@@ -659,7 +634,7 @@ mod tests {
     fn moved_height_retries_complete_attempt() {
         let token_id = TokenId::from_bytes([3; 32]);
         let index = StubIndex::new([700_000, 700_001, 700_001, 700_001])
-            .with_first_page(vec![pool_box(3, 1)]);
+            .with_candidates(vec![pool_box(3, 1)]);
 
         let snapshot = IndexerPoolDiscovery::new(&index)
             .discover(&token_id)
@@ -672,7 +647,10 @@ mod tests {
         );
         assert_eq!(
             page_reads(&index),
-            vec![(0, 100, SortDir::Asc), (0, 100, SortDir::Asc)]
+            vec![
+                (0, CANDIDATE_LIMIT + 1, SortDir::Asc),
+                (0, CANDIDATE_LIMIT + 1, SortDir::Asc)
+            ]
         );
         assert_eq!(
             index
@@ -701,19 +679,19 @@ mod tests {
     // ----- error paths -----
 
     #[test]
-    fn five_thousand_candidates_probe_hit_exceeds_limit() {
-        let index = StubIndex::new([700_000]).with_full_pages(invalid_pool_box(), true);
+    fn candidate_set_past_the_limit_is_rejected() {
+        let index = StubIndex::new([700_000]).with_saturated_candidates(invalid_pool_box(), true);
         let token_id = TokenId::from_bytes([3; 32]);
 
         let result = IndexerPoolDiscovery::new(&index).discover(&token_id);
 
         assert_eq!(result, Err(DiscoveryError::LimitExceeded));
-        assert_eq!(page_reads(&index), expected_cap_pages());
+        assert_eq!(page_reads(&index), expected_bulk_read());
     }
 
     #[test]
     fn template_read_error_propagates() {
-        let index = StubIndex::new([700_000]).with_page_error("template read failed");
+        let index = StubIndex::new([700_000]).with_read_error("template read failed");
         let token_id = TokenId::from_bytes([3; 32]);
 
         let error = IndexerPoolDiscovery::new(&index)
@@ -727,7 +705,7 @@ mod tests {
     fn token_read_error_propagates() {
         let token_id = TokenId::from_bytes([3; 32]);
         let index = StubIndex::new([700_000])
-            .with_first_page(vec![pool_box(3, 1)])
+            .with_candidates(vec![pool_box(3, 1)])
             .with_token_error("token read failed");
 
         let error = IndexerPoolDiscovery::new(&index)
@@ -742,7 +720,7 @@ mod tests {
         let token_id = TokenId::from_bytes([3; 32]);
         let creation_box_id = BoxId::from_bytes([9; 32]);
         let index = StubIndex::new([700_000])
-            .with_first_page(vec![pool_box(3, 1)])
+            .with_candidates(vec![pool_box(3, 1)])
             .with_token(Some(token_dto(token_id, creation_box_id)))
             .with_box(
                 creation_box_id,
@@ -761,7 +739,7 @@ mod tests {
         let token_id = TokenId::from_bytes([3; 32]);
         let creation_box_id = BoxId::from_bytes([9; 32]);
         let index = StubIndex::new([700_000])
-            .with_first_page(vec![pool_box(3, 1)])
+            .with_candidates(vec![pool_box(3, 1)])
             .with_token(Some(token_dto(token_id, creation_box_id)));
 
         let error = IndexerPoolDiscovery::new(&index)

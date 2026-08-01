@@ -431,30 +431,26 @@ fn token_id() -> TokenId {
     TokenId::from_bytes([0xaa; 32])
 }
 
-fn short_page(result: Result<Vec<IndexedBoxDto>, IndexerReadError>) -> ScriptedPage {
+/// Discovery's candidate cap (private to `ergo_api::v1::pricing`); it reads
+/// one entry past the cap so a saturated candidate set stays detectable.
+const CANDIDATE_LIMIT: u32 = 5_000;
+
+/// The single bulk candidate read discovery performs per attempt.
+fn bulk_read(result: Result<Vec<IndexedBoxDto>, IndexerReadError>) -> ScriptedPage {
     ScriptedPage {
         offset: 0,
-        limit: 100,
+        limit: CANDIDATE_LIMIT + 1,
         dir: SortDir::Asc,
         result,
     }
 }
 
-fn cap_pages(candidate: &IndexedBoxDto) -> Vec<ScriptedPage> {
-    (0..50)
-        .map(|page| ScriptedPage {
-            offset: page * 100,
-            limit: 100,
-            dir: SortDir::Asc,
-            result: Ok(vec![candidate.clone(); 100]),
-        })
-        .chain(std::iter::once(ScriptedPage {
-            offset: 5_000,
-            limit: 1,
-            dir: SortDir::Asc,
-            result: Ok(vec![candidate.clone()]),
-        }))
-        .collect()
+/// A candidate set one past the cap — the case discovery must reject.
+fn over_limit_read(candidate: &IndexedBoxDto) -> Vec<ScriptedPage> {
+    vec![bulk_read(Ok(vec![
+        candidate.clone();
+        CANDIDATE_LIMIT as usize + 1
+    ]))]
 }
 
 fn app(indexer: Option<Arc<dyn IndexerQuery>>) -> Router {
@@ -496,7 +492,7 @@ fn reason(body: &Value) -> &str {
 
 #[tokio::test]
 async fn prices_no_liquidity_returns_200_unpriced() {
-    let indexer = StubIndexer::new([HEIGHT, HEIGHT]).with_pages(vec![short_page(Ok(Vec::new()))]);
+    let indexer = StubIndexer::new([HEIGHT, HEIGHT]).with_pages(vec![bulk_read(Ok(Vec::new()))]);
 
     let (status, body) = get(
         Some(Arc::new(indexer)),
@@ -518,7 +514,7 @@ async fn prices_no_liquidity_returns_200_unpriced() {
 #[tokio::test]
 async fn prices_unknown_decimals_returns_200_decimals_unknown() {
     let indexer = StubIndexer::new([HEIGHT, HEIGHT])
-        .with_pages(vec![short_page(Ok(vec![pool_box()]))])
+        .with_pages(vec![bulk_read(Ok(vec![pool_box()]))])
         .with_token(token_id(), Ok(None));
 
     let (status, body) = get(
@@ -544,7 +540,7 @@ async fn prices_valid_returns_reduced_raw_and_provenance() {
     let mint = mint_box();
     let mint_box_id = mint.box_data.box_id().unwrap();
     let indexer = StubIndexer::new([HEIGHT, HEIGHT])
-        .with_pages(vec![short_page(Ok(vec![pool]))])
+        .with_pages(vec![bulk_read(Ok(vec![pool]))])
         .with_token(
             token_id(),
             Ok(Some(IndexedTokenDto {
@@ -631,7 +627,7 @@ async fn prices_unsupported_quote_returns_400_unsupported_quote() {
 
 #[tokio::test]
 async fn prices_read_error_returns_500_internal_error() {
-    let indexer = StubIndexer::new([HEIGHT]).with_pages(vec![short_page(Err(
+    let indexer = StubIndexer::new([HEIGHT]).with_pages(vec![bulk_read(Err(
         IndexerReadError::new("template read failed"),
     ))]);
 
@@ -648,7 +644,7 @@ async fn prices_read_error_returns_500_internal_error() {
 #[tokio::test]
 async fn prices_cap_returns_503_pricing_unavailable() {
     let candidate = pool_box();
-    let indexer = StubIndexer::new([HEIGHT]).with_pages(cap_pages(&candidate));
+    let indexer = StubIndexer::new([HEIGHT]).with_pages(over_limit_read(&candidate));
 
     let (status, body) = get(
         Some(Arc::new(indexer)),
@@ -663,7 +659,7 @@ async fn prices_cap_returns_503_pricing_unavailable() {
 #[tokio::test]
 async fn prices_unstable_returns_503_pricing_unavailable() {
     let indexer = StubIndexer::new([HEIGHT, HEIGHT + 1, HEIGHT + 2, HEIGHT + 3])
-        .with_pages(vec![short_page(Ok(Vec::new())), short_page(Ok(Vec::new()))]);
+        .with_pages(vec![bulk_read(Ok(Vec::new())), bulk_read(Ok(Vec::new()))]);
 
     let (status, body) = get(
         Some(Arc::new(indexer)),
