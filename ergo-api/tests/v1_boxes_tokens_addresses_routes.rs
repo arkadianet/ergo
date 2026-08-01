@@ -395,15 +395,15 @@ async fn protocols_list_advertises_registry_capabilities() {
         .expect("sigmausd registered");
     assert_eq!(sigusd["decodable"], serde_json::json!(true));
     assert_eq!(sigusd["family"], "bank");
-    // Stubs are advertised but honestly not decodable (no fabricated support).
+    // Spectrum N2T v1 is available through one exact-tree matcher.
     let spectrum = body["items"]
         .as_array()
         .unwrap()
         .iter()
         .find(|p| p["protocol_id"] == "spectrum")
-        .expect("spectrum registered as a stub");
-    assert_eq!(spectrum["decodable"], serde_json::json!(false));
-    assert_eq!(spectrum["matcher_count"], serde_json::json!(0));
+        .expect("spectrum registered");
+    assert_eq!(spectrum["decodable"], serde_json::json!(true));
+    assert_eq!(spectrum["matcher_count"], serde_json::json!(1));
 }
 
 #[tokio::test]
