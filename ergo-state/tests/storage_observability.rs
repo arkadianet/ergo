@@ -28,6 +28,22 @@ impl Error for IncidentError {
     }
 }
 
+/// The errno the io fixtures are built from. Both the `ErrorKind` it maps to
+/// and its message are platform-defined — 13 is `EACCES`/"Permission denied"
+/// on unix but `ERROR_INVALID_DATA`/`Uncategorized` on Windows — so the tests
+/// below derive both from `std` instead of pinning the unix spellings. What
+/// they assert is that `from_error` walks the chain and surfaces the nested
+/// io error's own kind, errno, and message.
+const IO_ERRNO: i32 = 13;
+
+fn io_errno_kind() -> String {
+    format!("{:?}", io::Error::from_raw_os_error(IO_ERRNO).kind())
+}
+
+fn io_errno_message() -> String {
+    io::Error::from_raw_os_error(IO_ERRNO).to_string()
+}
+
 fn io_incident(errno: i32) -> IncidentError {
     IncidentError {
         source: StateError::TransactionError(Box::new(redb::TransactionError::Storage(
@@ -189,16 +205,19 @@ fn reporter_capacity_uses_lru_eviction() {
 
 #[test]
 fn diagnostics_nested_redb_io_retains_errno_kind_and_chain() {
-    let error = io_incident(13);
+    let error = io_incident(IO_ERRNO);
 
     let diagnostics = ErrorDiagnostics::from_error(&error);
 
     assert_eq!(diagnostics.class, StorageErrorClass::Io);
-    assert_eq!(diagnostics.io_kind.as_deref(), Some("PermissionDenied"));
-    assert_eq!(diagnostics.raw_os_error, Some(13));
+    assert_eq!(
+        diagnostics.io_kind.as_deref(),
+        Some(io_errno_kind().as_str())
+    );
+    assert_eq!(diagnostics.raw_os_error, Some(IO_ERRNO));
     assert!(diagnostics.chain.contains("state persistence incident"));
     assert!(diagnostics.chain.contains("redb transaction error"));
-    assert!(diagnostics.chain.contains("Permission denied"));
+    assert!(diagnostics.chain.contains(&io_errno_message()));
 }
 
 #[test]
@@ -257,7 +276,7 @@ fn reporter_repeats_are_suppressed_then_summarized_with_exact_count() {
 #[test]
 fn reporter_previous_io_transitions_health_and_links_first_io() {
     let reporter = StorageFailureReporter::new(Duration::from_secs(30));
-    let io_error = io_incident(13);
+    let io_error = io_incident(IO_ERRNO);
     let previous_io = previous_io_incident();
 
     reporter.record_at(&context("write_pages"), &io_error, UNIX_EPOCH);
@@ -281,7 +300,7 @@ fn reporter_previous_io_transitions_health_and_links_first_io() {
         transition.initiating_io_operation.as_deref(),
         Some("write_pages")
     );
-    assert_eq!(transition.initiating_io_raw_os_error, Some(13));
+    assert_eq!(transition.initiating_io_raw_os_error, Some(IO_ERRNO));
 
     let health = reporter.health_snapshot();
     assert_eq!(health.health, StorageHealth::Poisoned);
@@ -301,7 +320,7 @@ fn reporter_emits_stable_structured_first_io_and_poison_transition_fields() {
     let reporter = StorageFailureReporter::new(Duration::from_secs(30));
 
     tracing::subscriber::with_default(subscriber, || {
-        reporter.report_at(&context("write_pages"), &io_incident(13), UNIX_EPOCH);
+        reporter.report_at(&context("write_pages"), &io_incident(IO_ERRNO), UNIX_EPOCH);
         reporter.report_at(
             &context("begin_write"),
             &previous_io_incident(),
@@ -309,7 +328,7 @@ fn reporter_emits_stable_structured_first_io_and_poison_transition_fields() {
         );
         reporter.report_at(
             &context("write_pages"),
-            &io_incident(13),
+            &io_incident(IO_ERRNO),
             UNIX_EPOCH + Duration::from_secs(31),
         );
     });
@@ -328,14 +347,14 @@ fn reporter_emits_stable_structured_first_io_and_poison_transition_fields() {
     assert_eq!(io_fields["database_path"], "/var/lib/ergo/state.redb");
     assert_eq!(io_fields["operation"], "write_pages");
     assert_eq!(io_fields["error_class"], "io");
-    assert_eq!(io_fields["io_kind"], "PermissionDenied");
-    assert_eq!(io_fields["raw_os_error"], 13);
+    assert_eq!(io_fields["io_kind"], io_errno_kind());
+    assert_eq!(io_fields["raw_os_error"], IO_ERRNO);
     assert_eq!(io_fields["best_full_block_height"], 1_234);
     assert_eq!(io_fields["best_header_height"], 1_240);
     assert!(io_fields["error_chain"]
         .as_str()
         .unwrap()
-        .contains("Permission denied"));
+        .contains(&io_errno_message()));
 
     let poisoned_fields = &events[1]["fields"];
     assert_eq!(poisoned_fields["event"], "storage_health_transition");
@@ -343,7 +362,7 @@ fn reporter_emits_stable_structured_first_io_and_poison_transition_fields() {
     assert_eq!(poisoned_fields["handle_usable"], false);
     assert_eq!(poisoned_fields["initiating_io_observed"], true);
     assert_eq!(poisoned_fields["initiating_io_operation"], "write_pages");
-    assert_eq!(poisoned_fields["initiating_io_raw_os_error"], 13);
+    assert_eq!(poisoned_fields["initiating_io_raw_os_error"], IO_ERRNO);
 
     let summary_fields = &events[2]["fields"];
     assert_eq!(summary_fields["event"], "storage_error_summary");
