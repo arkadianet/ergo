@@ -656,9 +656,10 @@ impl NodeConfig {
             per_peer_cost_budget: def.per_peer_cost_budget,
             unresolved_cache_size: def.unresolved_cache_size,
             unresolved_cache_ttl_seconds: def.unresolved_cache_ttl_seconds,
-            // Staging pool (package admission) — internal tuning, not
+            // Staging pool (package admission). The master switch is an
+            // operator knob; the caps below are internal tuning, not
             // operator-configurable via TOML/CLI.
-            staging_enabled: def.staging_enabled,
+            staging_enabled: tm.staging_enabled.unwrap_or(def.staging_enabled),
             staging_max_count: def.staging_max_count,
             staging_max_bytes: def.staging_max_bytes,
             staging_max_count_per_peer: def.staging_max_count_per_peer,

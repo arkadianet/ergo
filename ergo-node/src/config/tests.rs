@@ -472,6 +472,9 @@ fn mempool_section_missing_uses_defaults() {
         def.min_relay_fee_nano_erg
     );
     assert_eq!(cfg.mempool_sort_policy, "cost");
+    // The staging/package-admission path is opt-in: OFF unless the
+    // operator sets [mempool] staging_enabled = true.
+    assert!(!cfg.mempool_config.staging_enabled);
 }
 
 #[test]
@@ -530,6 +533,7 @@ fn mempool_knobs_from_toml() {
          min_relay_fee_nano_erg = 2000000\n\
          ibd_gate_block_lag = 20\n\
          rebroadcast_count = 7\n\
+         staging_enabled = true\n\
          \n[peers]\nknown = [\"127.0.0.1:9030\"]\n",
     );
     let cli = minimal_cli(Some(&path));
@@ -538,6 +542,7 @@ fn mempool_knobs_from_toml() {
     assert_eq!(cfg.mempool_config.min_relay_fee_nano_erg, 2_000_000);
     assert_eq!(cfg.mempool_config.ibd_gate_block_lag, 20);
     assert_eq!(cfg.mempool_config.rebroadcast_count, 7);
+    assert!(cfg.mempool_config.staging_enabled);
     // unset fields still default
     assert_eq!(
         cfg.mempool_config.max_pool_bytes,
