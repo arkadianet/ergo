@@ -186,6 +186,7 @@ of `disabled` — whenever the node has no UTXO box state, i.e. under
 | `max_tx_cost` | u64 | `4900000` | Maximum single-transaction cost (matches the Scala mainnet override). Must be at least 1. |
 | `ibd_gate_block_lag` | u32 | `10` | Block-lag threshold that gates mempool admission while the node is still catching up during initial sync. |
 | `rebroadcast_count` | usize | `3` | Number of surviving unconfirmed transactions re-advertised per tip-change recheck (Scala `MempoolAuditor` `rebroadcastCount`). Re-broadcast rotates oldest-`last_checked_at` first. `0` disables re-broadcast. |
+| `staging_enabled` | bool | `false` | Master switch for the staging pool: orphan/held-parent staging, package admission, and package RBF. Off by default; when off, admission behaves exactly as it did before staging existed. The staging capacity/fairness caps are internal tuning and not configurable. |
 
 ## `[indexer]`
 

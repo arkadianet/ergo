@@ -71,6 +71,17 @@ impl UnresolvedCache {
         self.entries.contains_key(key)
     }
 
+    /// Drop the suppression entry for `bytes`, if present. Used when the
+    /// staging pool promotes an orphan: the same bytes are about to be
+    /// re-validated through admission, so the step-3 unresolved-cache gate
+    /// must not short-circuit them as `RecentlyUnresolved`.
+    pub fn remove(&mut self, bytes: &[u8]) {
+        let key = Self::key_of(bytes);
+        if self.entries.remove(&key).is_some() {
+            self.by_insertion.retain(|(k, _)| k != &key);
+        }
+    }
+
     /// Record an unresolved-input drop. Keyed on raw bytes hash so a
     /// different peer re-sending the same bytes hits the cache.
     pub fn insert(&mut self, bytes: &[u8], now: Instant) {

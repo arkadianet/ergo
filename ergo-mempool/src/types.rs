@@ -260,6 +260,37 @@ pub struct MempoolConfig {
     pub per_peer_cost_budget: u64,
     pub unresolved_cache_size: usize,
     pub unresolved_cache_ttl_seconds: u64,
+
+    // ── Staging pool (package admission) ──────────────────────────────
+    /// Master switch for the orphan/held staging pool + package admission.
+    /// When `false`, admission behaves exactly as before staging existed.
+    pub staging_enabled: bool,
+    /// Max staged entries (orphan + held combined). Memory bound.
+    pub staging_max_count: usize,
+    /// Max total staged tx bytes (orphan + held combined). Memory bound.
+    pub staging_max_bytes: usize,
+    /// Per-peer staged-entry count allotment. Flood fairness.
+    pub staging_max_count_per_peer: usize,
+    /// Per-peer staged bytes allotment. Flood fairness.
+    pub staging_max_bytes_per_peer: usize,
+    /// Fan-out cap: max staged txs waiting on a single box (cascade-bomb
+    /// bound).
+    pub staging_max_waiters_per_input: usize,
+    /// Max full-revalidation attempts for one staged tx before it is
+    /// dropped. CPU bound per tx.
+    pub staging_max_reevals: u16,
+    /// Max transactions in one assembled package (walk bound).
+    pub staging_max_package_txs: usize,
+    /// Max aggregate validation cost of one package (re-eval bound). A package
+    /// whose `Σcost` exceeds this is rejected. Defaults to roughly one block's
+    /// cost budget (design §4.3).
+    pub staging_max_package_cost: u64,
+    /// Wall-clock TTL (seconds) for a staged tx.
+    pub staging_ttl_seconds: u64,
+    /// Block-count horizon: a staged tx is dropped once the tip has
+    /// advanced this many blocks past its staging height. Primary
+    /// "still relevant" bound (Ergo has no protocol tx-validity window).
+    pub staging_max_blocks: u32,
 }
 
 impl Default for MempoolConfig {
@@ -286,6 +317,35 @@ impl Default for MempoolConfig {
             per_peer_cost_budget: 10_000_000,
             unresolved_cache_size: 4_096,
             unresolved_cache_ttl_seconds: 60,
+            // Staging pool — human-confirmed bounds. OPT-IN: the orphan/held
+            // staging + package-admission path defaults OFF until it is proven
+            // in the wild; when disabled, admission behaves exactly as it did
+            // before staging existed.
+            staging_enabled: false,
+            staging_max_count: 2_048,
+            staging_max_bytes: 8 * 1024 * 1024,
+            staging_max_count_per_peer: 128,
+            staging_max_bytes_per_peer: 1024 * 1024,
+            staging_max_waiters_per_input: 64,
+            staging_max_reevals: 4,
+            staging_max_package_txs: 24,
+            staging_max_package_cost: 8_000_000, // ≈ mainnet max_block_cost
+
+            staging_ttl_seconds: 300,
+            staging_max_blocks: 4,
+        }
+    }
+}
+
+impl MempoolConfig {
+    /// Project the staging-related config fields into [`StagingCaps`].
+    pub fn staging_caps(&self) -> crate::staging::StagingCaps {
+        crate::staging::StagingCaps {
+            max_count: self.staging_max_count,
+            max_bytes: self.staging_max_bytes,
+            max_count_per_peer: self.staging_max_count_per_peer,
+            max_bytes_per_peer: self.staging_max_bytes_per_peer,
+            max_waiters_per_input: self.staging_max_waiters_per_input,
         }
     }
 }

@@ -3,16 +3,26 @@
 //! unresolved caches, and the revalidation queue, and drives them via the
 //! admission / reorg / revalidation free functions.
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use tracing::{debug, info};
 
-use crate::admission::{self, AdmissionOutcome, CheckOutcome, RejectReason, Validator};
+use ergo_primitives::cost::{CostAccumulator, JitCost};
+use ergo_primitives::digest::Digest32;
+use ergo_ser::ergo_box::ErgoBox;
+use ergo_validation::{TxValidationCtx, TxValidationRules};
+
+use crate::admission::{
+    self, AdmissionOutcome, CheckOutcome, RejectReason, Validated, ValidationErr, Validator,
+};
 use crate::budget::CostBudgets;
 use crate::invalidation::InvalidationCache;
-use crate::pool::{Entry, OrderedPool};
+use crate::overlay::{CommittedOnly, PoolUtxoOverlay};
+use crate::pool::{Entry, FamilyBounds, OrderedPool};
 use crate::reorg;
 use crate::revalidation::{topological_demote_order, RevalidationQueue};
+use crate::staging::StagingPool;
 use crate::telemetry::{
     emit_tracing_for_admission, emit_tracing_for_check, emit_tracing_for_pool_actions,
 };
@@ -22,7 +32,26 @@ use crate::types::{
 };
 use crate::unresolved::UnresolvedCache;
 use crate::weight::WeightFunction;
+use crate::weight::WeightInputs;
 use crate::MempoolObserver;
+
+/// One member of an assembled package: a fully-validated transaction whose
+/// facts (weight, cost, materialized outputs) are known, ready for the atomic
+/// multi-insert in [`Mempool::commit_package`]. Held ancestors contribute
+/// their retained `HeldFacts`; the arriving child contributes its just-
+/// computed `Validated`.
+struct PackageMember {
+    tx_id: TxId,
+    bytes: Arc<[u8]>,
+    input_box_ids: Vec<Digest32>,
+    output_box_ids: Vec<Digest32>,
+    outputs: Vec<ErgoBox>,
+    fee: u64,
+    weight: u64,
+    size_bytes: u32,
+    cost: u64,
+    source: TxSource,
+}
 
 /// Top-level mempool handle. Bundles all the sub-components so callers
 /// don't thread six pieces through every call site. Production wiring
@@ -50,6 +79,11 @@ pub struct Mempool {
     /// Only ever fed from the hard-invalid arm, so a transient
     /// unresolved-input (demoted-parent) tx is never enqueued here.
     pending_orphan_eviction: Vec<TxId>,
+    /// Brief holding store for orphans (child-before-parent) and held
+    /// parents/singles (parent-before-child) that cannot be admitted yet.
+    /// A side effect of `process` alone — `check` (`/check`) never touches
+    /// it — and it never gossips. See [`crate::staging`].
+    staging: StagingPool,
 }
 
 impl Mempool {
@@ -65,6 +99,7 @@ impl Mempool {
             std::time::Duration::from_secs(config.unresolved_cache_ttl_seconds),
         );
         let revalidation = RevalidationQueue::new(config.revalidation_max_depth);
+        let staging = StagingPool::new(config.staging_caps());
         Self {
             pool: OrderedPool::with_capacity(config.max_pool_size),
             config,
@@ -76,7 +111,19 @@ impl Mempool {
             revalidation,
             observer: None,
             pending_orphan_eviction: Vec::new(),
+            staging,
         }
+    }
+
+    /// Number of transactions currently held in the staging pool
+    /// (orphans + held). Read-only operator surface.
+    pub fn staging_len(&self) -> usize {
+        self.staging.len()
+    }
+
+    /// Total bytes held in the staging pool.
+    pub fn staging_bytes(&self) -> usize {
+        self.staging.total_bytes()
     }
 
     /// Install (or clear, with `None`) the telemetry observer. Cheap — one
@@ -210,17 +257,29 @@ impl Mempool {
             );
             return (outcome, Vec::new());
         }
-        let mut cx = admission::AdmissionCtx {
-            tip_ctx,
-            config: &self.config,
-            pool: &mut self.pool,
-            budgets: &mut self.budgets,
-            invalidated: &mut self.invalidation,
-            unresolved: &mut self.unresolved,
-            weight_fn: &*self.weight_fn,
+        let mut held_out: Option<admission::HeldCandidate> = None;
+        let (outcome, mut actions) = {
+            let mut cx = admission::AdmissionCtx {
+                tip_ctx,
+                config: &self.config,
+                pool: &mut self.pool,
+                budgets: &mut self.budgets,
+                invalidated: &mut self.invalidation,
+                unresolved: &mut self.unresolved,
+                weight_fn: &*self.weight_fn,
+            };
+            admission::process_capturing_held(
+                tx_bytes,
+                source.clone(),
+                now,
+                &mut cx,
+                validator,
+                &mut held_out,
+            )
         };
-        let (outcome, actions) =
-            admission::process(tx_bytes, source.clone(), now, &mut cx, validator);
+        // Emit the PARENT admission's tracing/observer BEFORE any staging
+        // side effect, so resolution's own per-child tracing (emitted inside
+        // `resolve_orphans`) is not double-counted against this outcome.
         emit_tracing_for_admission(
             &outcome,
             &actions,
@@ -230,7 +289,839 @@ impl Mempool {
             self.observer.as_deref(),
             self.tip,
         );
+
+        // ── Staging side effects — `process` ONLY (never `check`) ────────
+        // Staging never gossips; the only `BroadcastInv` here come from
+        // `resolve_orphans` promoting a child through the real commit path.
+        if self.config.staging_enabled {
+            match &outcome {
+                AdmissionOutcome::Admitted { tx_id, .. } => {
+                    // Parent arrived → resolve orphans waiting on its outputs.
+                    let trigger_outputs = self
+                        .pool
+                        .get(tx_id)
+                        .map(|e| e.outputs.clone())
+                        .unwrap_or_default();
+                    if !trigger_outputs.is_empty() {
+                        let child_actions =
+                            self.resolve_orphans(trigger_outputs, now, tip_ctx, validator);
+                        actions.extend(child_actions);
+                    }
+                }
+                AdmissionOutcome::Rejected {
+                    reason: RejectReason::UnresolvedInput,
+                } => {
+                    // The child's input(s) don't resolve against pool/committed
+                    // state. First try to complete a PACKAGE: if a missing input
+                    // is created by a HELD staged ancestor, assemble
+                    // {held ancestors…, child} and run the package decision
+                    // (P4). Only if that isn't applicable do we fall back to
+                    // holding the child as a plain orphan (P2).
+                    match self.try_package(tx_bytes, &source, now, tip_ctx, validator) {
+                        Some(pkg_actions) => actions.extend(pkg_actions),
+                        None => self.stage_orphan(tx_bytes, &source, now, tip_ctx, validator),
+                    }
+                }
+                AdmissionOutcome::Rejected {
+                    reason: RejectReason::DoubleSpendLoser | RejectReason::PoolFull,
+                } => {
+                    // A fully-validated parent that lost the fee/capacity or
+                    // double-spend gate → hold it briefly so a booster child
+                    // can complete an admissible package. `held_out` is `Some`
+                    // exactly for these two boostable rejections (never for the
+                    // oversize `PoolFull`, which a package cannot rescue).
+                    if let Some(hc) = held_out.take() {
+                        // Data-input box-ids (for block-advance pruning) come
+                        // from a cheap structural peek — `Validated` doesn't
+                        // carry them.
+                        let data_inputs = validator
+                            .peek_structure(tx_bytes)
+                            .map(|s| s.data_input_box_ids)
+                            .unwrap_or_default();
+                        self.stage_held_candidate(hc, tx_bytes, data_inputs, &source, now, tip_ctx);
+                    }
+                }
+                _ => {}
+            }
+        }
         (outcome, actions)
+    }
+
+    /// Which regular inputs of `input_box_ids` are NOT yet resolvable — i.e.
+    /// neither created by an in-pool tx (`by_output`) nor present in the
+    /// committed UTXO view. This uses the pool's `by_output` INDEX (not a
+    /// materialized overlay), so it is cheap and needs no `ErgoBox`es.
+    fn missing_inputs(
+        &self,
+        input_box_ids: &[Digest32],
+        utxo: &dyn ergo_validation::UtxoView,
+    ) -> Vec<Digest32> {
+        input_box_ids
+            .iter()
+            .filter(|b| self.pool.parent_for_output(b).is_none() && utxo.get_box(b).is_none())
+            .copied()
+            .collect()
+    }
+
+    /// Stage an incoming child (that just failed admission with
+    /// `UnresolvedInput`) as an orphan, keyed by its still-missing inputs.
+    /// Deserialize-only work (a `peek_structure`); no script validation, so
+    /// no `CostBudgets` charge is owed here. A stage refusal (cap hit,
+    /// duplicate) is non-fatal — the tx is simply not held.
+    fn stage_orphan<V: Validator>(
+        &mut self,
+        tx_bytes: &[u8],
+        source: &TxSource,
+        now: std::time::Instant,
+        tip_ctx: &admission::TipContext<'_>,
+        validator: &V,
+    ) {
+        let Ok(s) = validator.peek_structure(tx_bytes) else {
+            return; // unparseable — nothing to stage (admission already handled)
+        };
+        let missing = self.missing_inputs(&s.input_box_ids, tip_ctx.utxo);
+        if missing.is_empty() {
+            return; // resolvable now — not actually an orphan
+        }
+        let _ = self.staging.stage_orphan(
+            s.tx_id,
+            Arc::from(tx_bytes),
+            s.input_box_ids,
+            s.data_input_box_ids,
+            s.output_box_ids,
+            s.fee,
+            tx_bytes.len() as u32,
+            missing,
+            source.clone(),
+            now,
+            tip_ctx.tip,
+        );
+    }
+
+    /// Hold a fully-validated tx that lost the fee/capacity or double-spend
+    /// gate (a [`HeldCandidate`]) in the staging pool. The tx was already
+    /// validated with its cost charged, so this stages deserialize-derived
+    /// facts only — no further validation, no `CostBudgets` charge owed. A
+    /// stage refusal (cap hit, duplicate) is non-fatal — the tx is simply not
+    /// held. Its materialized outputs are retained so a later descendant can
+    /// resolve against them when assembling a package.
+    fn stage_held_candidate(
+        &mut self,
+        hc: admission::HeldCandidate,
+        tx_bytes: &[u8],
+        data_input_box_ids: Vec<Digest32>,
+        source: &TxSource,
+        now: std::time::Instant,
+        tip_ctx: &admission::TipContext<'_>,
+    ) {
+        let v = hc.validated;
+        let _ = self.staging.stage_held(
+            v.tx_id,
+            Arc::from(tx_bytes),
+            v.input_box_ids,
+            data_input_box_ids,
+            v.output_box_ids,
+            v.fee,
+            v.size_bytes,
+            hc.weight,
+            v.consumed_cost,
+            v.outputs,
+            source.clone(),
+            now,
+            tip_ctx.tip,
+        );
+    }
+
+    /// A tx was admitted (or a cascade child was): its `trigger_outputs` are
+    /// now spendable, so re-attempt any orphan waiting on them, cascading to
+    /// deeper waiters. Bounded by a per-trigger cost budget
+    /// (`mempool_cleanup_cost_mult × params.max_block_cost`); over-budget
+    /// waiters are DEFERRED (left staged), never dropped. Each attempt is
+    /// bounded work: a cheap resolvability pre-check (via the pool's
+    /// `by_output` index) gates the full re-validation, and the actual script
+    /// cost is charged to `CostBudgets` inside `admission::process` exactly
+    /// like any admission (upholding the no-free-oracle invariant). Emits its
+    /// OWN per-child tracing/observer and returns the child actions
+    /// (`BroadcastInv` etc.) for the caller to route.
+    fn resolve_orphans<V: Validator>(
+        &mut self,
+        trigger_outputs: Vec<Digest32>,
+        now: std::time::Instant,
+        tip_ctx: &admission::TipContext<'_>,
+        validator: &V,
+    ) -> Vec<MempoolAction> {
+        let mut out_actions: Vec<MempoolAction> = Vec::new();
+        if self.staging.is_empty() {
+            return out_actions;
+        }
+        let cost_cap: u128 = u128::from(self.config.mempool_cleanup_cost_mult)
+            .saturating_mul(u128::from(tip_ctx.params.max_block_cost));
+        let max_tx_cost = self.config.max_tx_cost;
+        let max_reevals = self.config.staging_max_reevals;
+        let mut cost_acc: u128 = 0;
+
+        // Seed the work-queue with the orphans waiting on the trigger outputs.
+        let mut queued: HashSet<TxId> = HashSet::new();
+        let mut work: VecDeque<TxId> = VecDeque::new();
+        for out in &trigger_outputs {
+            for w in self.staging.waiters_on(out) {
+                if queued.insert(*w) {
+                    work.push_back(*w);
+                }
+            }
+        }
+
+        while let Some(child_id) = work.pop_front() {
+            if cost_acc >= cost_cap {
+                break; // per-trigger budget spent; remainder deferred (still staged)
+            }
+            let Some(staged) = self.staging.get(&child_id).cloned() else {
+                continue; // already promoted/pruned earlier this pass
+            };
+            // Cheap resolvability pre-check: every regular input must now be a
+            // pool output or a committed box, else leave it staged (no attempt,
+            // no reeval charge) — another parent has yet to arrive.
+            let still_missing = self.missing_inputs(&staged.input_box_ids, tip_ctx.utxo);
+            if !still_missing.is_empty() {
+                continue;
+            }
+            // Attempt full admission. Charge the per-trigger budget up front
+            // (bounded by max_tx_cost per attempt); the real script cost is
+            // charged to CostBudgets inside admission::process.
+            cost_acc = cost_acc.saturating_add(u128::from(max_tx_cost));
+            let bytes = staged.bytes.clone();
+            self.staging.remove(&child_id);
+            // Lift the unresolved-cache suppression so the step-3 gate does
+            // not short-circuit this re-validation as RecentlyUnresolved.
+            self.unresolved.remove(&bytes);
+            let mut held_out: Option<admission::HeldCandidate> = None;
+            let (outcome, child_actions) = {
+                let mut cx = admission::AdmissionCtx {
+                    tip_ctx,
+                    config: &self.config,
+                    pool: &mut self.pool,
+                    budgets: &mut self.budgets,
+                    invalidated: &mut self.invalidation,
+                    unresolved: &mut self.unresolved,
+                    weight_fn: &*self.weight_fn,
+                };
+                admission::process_capturing_held(
+                    &bytes,
+                    staged.source.clone(),
+                    now,
+                    &mut cx,
+                    validator,
+                    &mut held_out,
+                )
+            };
+            emit_tracing_for_admission(
+                &outcome,
+                &child_actions,
+                &staged.source,
+                self.pool.len(),
+                self.pool.total_bytes(),
+                self.observer.as_deref(),
+                self.tip,
+            );
+            match &outcome {
+                AdmissionOutcome::Admitted { tx_id, .. } => {
+                    // Cascade: enqueue orphans waiting on this child's outputs.
+                    let outs = self
+                        .pool
+                        .get(tx_id)
+                        .map(|e| e.outputs.clone())
+                        .unwrap_or_default();
+                    for o in &outs {
+                        for w in self.staging.waiters_on(o) {
+                            if queued.insert(*w) {
+                                work.push_back(*w);
+                            }
+                        }
+                    }
+                }
+                AdmissionOutcome::Rejected { .. } => {
+                    let missing = self.missing_inputs(&staged.input_box_ids, tip_ctx.utxo);
+                    let next_reeval = staged.reeval_count.saturating_add(1);
+                    if !missing.is_empty() && next_reeval < max_reevals {
+                        // Still an orphan (a deeper ancestor is missing) →
+                        // re-stage, bounded by the reeval cap. Preserve the
+                        // original `staged_at`/`staged_height` so TTL and the
+                        // block horizon do not renew on retry.
+                        let _ = self.staging.stage_orphan(
+                            staged.tx_id,
+                            bytes.clone(),
+                            staged.input_box_ids.clone(),
+                            staged.data_input_box_ids.clone(),
+                            staged.output_box_ids.clone(),
+                            staged.fee,
+                            staged.size_bytes,
+                            missing,
+                            staged.source.clone(),
+                            staged.staged_at,
+                            TipPointer {
+                                height: staged.staged_height,
+                                header_id: staged.staged_tip_id,
+                            },
+                        );
+                        self.staging.bump_reeval(&staged.tx_id, next_reeval);
+                    } else if let Some(hc) = held_out.take() {
+                        // Fully resolvable now, but lost the fee/capacity or
+                        // double-spend gate → convert to a HELD entry so its own
+                        // future descendant can complete a package. Preserve the
+                        // original staging clock/height (no horizon renewal).
+                        let v = hc.validated;
+                        let _ = self.staging.stage_held(
+                            v.tx_id,
+                            bytes.clone(),
+                            v.input_box_ids,
+                            staged.data_input_box_ids.clone(),
+                            v.output_box_ids,
+                            v.fee,
+                            v.size_bytes,
+                            hc.weight,
+                            v.consumed_cost,
+                            v.outputs,
+                            staged.source.clone(),
+                            staged.staged_at,
+                            TipPointer {
+                                height: staged.staged_height,
+                                header_id: staged.staged_tip_id,
+                            },
+                        );
+                    }
+                }
+            }
+            out_actions.extend(child_actions);
+        }
+        out_actions
+    }
+
+    /// A child failed single-tx admission with `UnresolvedInput`. Try to
+    /// complete a PACKAGE around it: if each unresolved input is created by a
+    /// HELD staged ancestor, assemble `{held ancestors…, child}`, validate the
+    /// child against an overlay that includes those held outputs (cost charged
+    /// to `CostBudgets` — no free oracle), score the package as a unit, and run
+    /// the package admission / RBF decision.
+    ///
+    /// Returns:
+    /// * `None` — not a package situation (no held ancestor, or a deeper
+    ///   non-held ancestor is still missing). The caller falls back to holding
+    ///   the child as a plain orphan.
+    /// * `Some(actions)` — the package path handled the child. Either the
+    ///   package was admitted (actions carry the members' `BroadcastInv` +
+    ///   any incumbent `RevokeBroadcast`, plus cascade promotions), or it was
+    ///   rejected and the child was itself held for a future descendant
+    ///   (empty broadcast actions). In neither case is the child re-staged as
+    ///   an orphan.
+    fn try_package<V: Validator>(
+        &mut self,
+        c_bytes: &[u8],
+        source: &TxSource,
+        now: std::time::Instant,
+        tip_ctx: &admission::TipContext<'_>,
+        validator: &V,
+    ) -> Option<Vec<MempoolAction>> {
+        let s = validator.peek_structure(c_bytes).ok()?;
+        // Walk up to the HELD staged ancestors, ancestors-first. `None` if a
+        // missing input has no held creator (a plain orphan) or the walk
+        // exceeds `max_package_txs` / `max_family_depth`.
+        let held_order = self.collect_held_ancestors(&s.input_box_ids, tip_ctx)?;
+        if held_order.is_empty() {
+            return None;
+        }
+
+        // Build the overlay + the held-ancestor members incrementally,
+        // ancestors-first. A held ancestor whose tip has MOVED since it was
+        // staged (by header id — see the gate below) is RE-VALIDATED at the
+        // current tip before inclusion (M1 / FIX A): a height-, context-, or
+        // data-input-dependent parent can go invalid while held, and cached
+        // `HeldFacts` must never launder a now-invalid tx into the pool. Each
+        // re-validation is charged to `CostBudgets` (no free oracle),
+        // and runs against the overlay built from this ancestor's OWN (already
+        // re-validated) ancestors. A held ancestor that no longer validates is
+        // evicted from staging and the whole package aborted.
+        let mut overlay: HashMap<Digest32, ErgoBox> = self.pool.output_map();
+        let mut members: Vec<PackageMember> = Vec::with_capacity(held_order.len() + 1);
+        for hid in &held_order {
+            // Snapshot from staging, then drop the borrow before any `&mut self`
+            // (charge / remove). `Ok` = usable cached member; `Err` = the bytes
+            // + source to re-validate.
+            let cached_or_reval: Result<PackageMember, (Arc<[u8]>, TxSource)> = {
+                let st = self.staging.get(hid)?;
+                let facts = st.validated.as_ref()?;
+                // Freshness keyed on tip IDENTITY (header id), not height: a
+                // same-height reorg changes `header_id` while `height` is
+                // unchanged, and a context-sensitive parent (reading
+                // CONTEXT.headers / preHeader) could have gone invalid, so ANY
+                // tip change forces re-validation.
+                if st.staged_tip_id == tip_ctx.tip.header_id {
+                    Ok(PackageMember {
+                        tx_id: st.tx_id,
+                        bytes: st.bytes.clone(),
+                        input_box_ids: st.input_box_ids.clone(),
+                        output_box_ids: st.output_box_ids.clone(),
+                        outputs: facts.outputs.clone(),
+                        fee: st.fee,
+                        weight: facts.weight,
+                        size_bytes: st.size_bytes,
+                        cost: facts.cost,
+                        source: st.source.clone(),
+                    })
+                } else {
+                    Err((st.bytes.clone(), st.source.clone()))
+                }
+            };
+            let member = match cached_or_reval {
+                Ok(m) => m,
+                Err((bytes, src)) => {
+                    match self.validate_package_child(&bytes, &overlay, &src, tip_ctx, validator) {
+                        Ok(v) => {
+                            let w = self.weight_fn.compute(WeightInputs {
+                                tx_id: &v.tx_id,
+                                fee: v.fee,
+                                size_bytes: v.size_bytes,
+                                cost: v.consumed_cost,
+                            });
+                            PackageMember {
+                                tx_id: v.tx_id,
+                                bytes,
+                                input_box_ids: v.input_box_ids,
+                                output_box_ids: v.output_box_ids,
+                                outputs: v.outputs,
+                                fee: v.fee,
+                                weight: w,
+                                size_bytes: v.size_bytes,
+                                cost: v.consumed_cost,
+                                source: src,
+                            }
+                        }
+                        // Stale/invalid at the new tip → evict it and abort: the
+                        // child's ancestor chain is broken.
+                        Err(_) => {
+                            self.staging.remove(hid);
+                            return Some(Vec::new());
+                        }
+                    }
+                }
+            };
+            // Publish this member's outputs so the next ancestor / the child can
+            // resolve against them.
+            for (i, oid) in member.output_box_ids.iter().enumerate() {
+                if let Some(b) = member.outputs.get(i) {
+                    overlay.insert(*oid, b.clone());
+                }
+            }
+            members.push(member);
+        }
+
+        // Validate the child against the fully-built overlay. Script eval —
+        // charged to CostBudgets regardless of verdict (no free oracle).
+        let c_validated =
+            match self.validate_package_child(c_bytes, &overlay, source, tip_ctx, validator) {
+                Ok(v) => v,
+                // A deeper ancestor is still genuinely missing → let the caller
+                // hold the child as a plain orphan instead.
+                Err(ValidationErr::UnresolvedInput) | Err(ValidationErr::UnresolvedDataInput) => {
+                    return None
+                }
+                // Hard-invalid (or other) → drop the child; the held ancestors stay.
+                Err(_) => return Some(Vec::new()),
+            };
+        let c_weight = self.weight_fn.compute(WeightInputs {
+            tx_id: &c_validated.tx_id,
+            fee: c_validated.fee,
+            size_bytes: c_validated.size_bytes,
+            cost: c_validated.consumed_cost,
+        });
+
+        members.push(PackageMember {
+            tx_id: c_validated.tx_id,
+            bytes: Arc::from(c_bytes),
+            input_box_ids: c_validated.input_box_ids.clone(),
+            output_box_ids: c_validated.output_box_ids.clone(),
+            outputs: c_validated.outputs.clone(),
+            fee: c_validated.fee,
+            weight: c_weight,
+            size_bytes: c_validated.size_bytes,
+            cost: c_validated.consumed_cost,
+            source: source.clone(),
+        });
+
+        // Per-member observability data captured before the vec is consumed.
+        let member_meta: Vec<(TxId, u64, u32, u64)> = members
+            .iter()
+            .map(|m| (m.tx_id, m.fee, m.size_bytes, m.weight))
+            .collect();
+
+        match self.commit_package(members, tip_ctx) {
+            Some(evicted) => {
+                // Package admitted: the held ancestors are now pooled — drop
+                // them from staging.
+                for hid in &held_order {
+                    self.staging.remove(hid);
+                }
+                // Lift the child's unresolved-cache suppression (it was recorded
+                // when the child first failed `UnresolvedInput`), so a later
+                // re-arrival of the same bytes is not spuriously declined.
+                self.unresolved.remove(c_bytes);
+                let mut actions: Vec<MempoolAction> = Vec::new();
+                if !evicted.is_empty() {
+                    actions.push(MempoolAction::RevokeBroadcast {
+                        tx_ids: evicted.clone(),
+                    });
+                    actions.push(MempoolAction::Observe {
+                        event: ObservedEvent::Evicted {
+                            tx_ids: evicted,
+                            reason: EvictionReason::DoubleSpendWinner,
+                        },
+                    });
+                }
+                // Advertise every newly-pooled member and fire the admitted
+                // observer/journal per member (staging itself never gossips —
+                // these go out only because the package really entered the
+                // pool via the atomic commit).
+                for (tx_id, fee, size, weight) in &member_meta {
+                    actions.push(MempoolAction::BroadcastInv {
+                        tx_id: *tx_id,
+                        // Exclude the peer that sent the child (which triggered
+                        // this package), matching the single-tx `except: peer`
+                        // so members aren't re-advertised back to that peer.
+                        except: source.peer(),
+                    });
+                    actions.push(MempoolAction::Observe {
+                        event: ObservedEvent::Admitted {
+                            tx_id: *tx_id,
+                            weight: *weight,
+                            fee: *fee,
+                            size: *size,
+                        },
+                    });
+                    if let Some(obs) = self.observer.as_deref() {
+                        obs.on_admitted(*tx_id, *fee, *size);
+                    }
+                }
+                emit_tracing_for_pool_actions(&actions, self.observer.as_deref(), self.tip);
+                // Cascade: the newly-pooled members' outputs may resolve other
+                // waiting orphans.
+                let member_outputs: Vec<Digest32> = member_meta
+                    .iter()
+                    .filter_map(|(id, _, _, _)| self.pool.get(id).map(|e| e.outputs.clone()))
+                    .flatten()
+                    .collect();
+                let cascade = self.resolve_orphans(member_outputs, now, tip_ctx, validator);
+                actions.extend(cascade);
+                Some(actions)
+            }
+            None => {
+                // Package rejected. The child validated, so hold IT (so a future
+                // descendant can complete a bigger/better package); the held
+                // ancestors remain staged untouched.
+                let _ = self.staging.stage_held(
+                    c_validated.tx_id,
+                    Arc::from(c_bytes),
+                    c_validated.input_box_ids,
+                    s.data_input_box_ids,
+                    c_validated.output_box_ids,
+                    c_validated.fee,
+                    c_validated.size_bytes,
+                    c_weight,
+                    c_validated.consumed_cost,
+                    c_validated.outputs,
+                    source.clone(),
+                    now,
+                    tip_ctx.tip,
+                );
+                Some(Vec::new())
+            }
+        }
+    }
+
+    /// Walk up from `inputs` collecting the HELD staged ancestors that create
+    /// them, in ancestors-first (post-order) order. Returns `None` if any input
+    /// that isn't resolvable against pool/committed state has no held creator
+    /// (i.e. the package can't be completed — the child is a plain orphan), or
+    /// if the walk exceeds `staging_max_package_txs` / `max_family_depth`.
+    fn collect_held_ancestors(
+        &self,
+        inputs: &[Digest32],
+        tip_ctx: &admission::TipContext<'_>,
+    ) -> Option<Vec<TxId>> {
+        let mut order: Vec<TxId> = Vec::new();
+        let mut seen: HashSet<TxId> = HashSet::new();
+        for input in inputs {
+            self.collect_held_rec(input, tip_ctx, &mut order, &mut seen, 0)?;
+        }
+        Some(order)
+    }
+
+    fn collect_held_rec(
+        &self,
+        input: &Digest32,
+        tip_ctx: &admission::TipContext<'_>,
+        order: &mut Vec<TxId>,
+        seen: &mut HashSet<TxId>,
+        depth: usize,
+    ) -> Option<()> {
+        // Resolvable against pool/committed → an external input, not part of
+        // the package.
+        if self.pool.parent_for_output(input).is_some() || tip_ctx.utxo.get_box(input).is_some() {
+            return Some(());
+        }
+        if depth > self.config.max_family_depth {
+            return None; // walk too deep
+        }
+        // Must be created by a HELD staged tx to be part of a package.
+        let creator = self.staging.creator_of(input)?;
+        let st = self.staging.get(&creator)?;
+        if !st.is_held() {
+            return None; // created by an orphan → package cannot be completed
+        }
+        if seen.contains(&creator) {
+            return Some(()); // already collected (diamond) — keep first position
+        }
+        // Recurse into this ancestor's inputs FIRST (post-order → ancestors
+        // land before dependents).
+        let ancestor_inputs = st.input_box_ids.clone();
+        for i in &ancestor_inputs {
+            self.collect_held_rec(i, tip_ctx, order, seen, depth + 1)?;
+        }
+        if seen.insert(creator) {
+            // Bound total members (held ancestors + the arriving child).
+            if order.len() + 2 > self.config.staging_max_package_txs {
+                return None;
+            }
+            order.push(creator);
+        }
+        Some(())
+    }
+
+    /// Validate a package child against an overlay that includes the held
+    /// ancestors' outputs, charging the consumed cost to `CostBudgets` on BOTH
+    /// the pass and fail paths (identical metering to normal admission — no
+    /// free oracle).
+    fn validate_package_child<V: Validator>(
+        &mut self,
+        c_bytes: &[u8],
+        overlay: &HashMap<Digest32, ErgoBox>,
+        source: &TxSource,
+        tip_ctx: &admission::TipContext<'_>,
+        validator: &V,
+    ) -> Result<Validated, ValidationErr> {
+        let cap = JitCost::from_block_cost(self.config.max_tx_cost)
+            .map_err(|_| ValidationErr::CostExceeded)?;
+        let mut cost = CostAccumulator::new(cap);
+        let overlay_view = PoolUtxoOverlay::new(tip_ctx.utxo, overlay);
+        let committed_view = CommittedOnly::new(tip_ctx.utxo);
+        let mut tx_cx = TxValidationCtx {
+            ctx: tip_ctx.tx_context,
+            params: tip_ctx.params,
+            cost: &mut cost,
+            last_headers: tip_ctx.last_headers,
+            rules: TxValidationRules {
+                reemission: tip_ctx.reemission,
+            },
+        };
+        let res = validator.validate(c_bytes, &overlay_view, &committed_view, &mut tx_cx);
+        // Charge regardless of verdict — the invariant is that no staging
+        // operation runs script validation without charging CostBudgets.
+        self.budgets.charge(source.peer(), cost.consumed());
+        res
+    }
+
+    /// Decide + atomically commit a package (members ancestors-first, each
+    /// fully validated). Runs entirely on a `clone_for_staging` copy so a
+    /// rejected package leaves the live pool untouched.
+    ///
+    /// Admission gate:
+    /// * **Package RBF** (any member conflicts with a pooled tx): accept iff
+    ///   **R1** the package's aggregate feerate > the conflict closure's AND
+    ///   **R2** the package's aggregate absolute fee > the closure's. Both
+    ///   required (anti-pinning). On accept the closure is evicted (debiting).
+    /// * **Threshold** (no conflict): if the insert would overflow the pool,
+    ///   the package's aggregate weight must beat the pool's current lowest.
+    ///
+    /// Then the members are inserted ancestors-first, each member's weight is
+    /// CPFP-credited up its ancestors (descendants-first so a child lifts its
+    /// parents), and the post-boost lowest is evicted until the budgets fit —
+    /// but NEVER a package member (if a member would be the eviction victim the
+    /// whole package is rejected). Returns the evicted incumbent ids on
+    /// success, or `None` if the package can't be admitted.
+    fn commit_package(
+        &mut self,
+        members: Vec<PackageMember>,
+        _tip_ctx: &admission::TipContext<'_>,
+    ) -> Option<Vec<TxId>> {
+        let bounds = FamilyBounds::new(
+            self.config.max_family_depth,
+            self.config.max_family_ops,
+            self.config.max_family_update_ms,
+        );
+        let max_depth = self.config.max_family_depth;
+
+        // ── Intra-package double-spend guard ─────────────────────────────
+        // No box may be spent by two members: that would seat a double-spend
+        // in the pool (two spenders of one box), corrupt `by_input`, and
+        // gossip both. Dedup across EVERY member's inputs (internal +
+        // external); reject the whole package all-or-nothing if any box
+        // repeats — the live pool is untouched and nothing is emitted.
+        // (`OrderedPool::insert` also rejects an input already spent by a
+        // POOLED tx; this guard additionally catches two members that share
+        // an input neither of which is pooled yet.)
+        {
+            let mut spent: HashSet<Digest32> = HashSet::new();
+            for m in &members {
+                for i in &m.input_box_ids {
+                    if !spent.insert(*i) {
+                        return None; // intra-package double-spend
+                    }
+                }
+            }
+        }
+
+        let pkg_fee: u64 = members
+            .iter()
+            .map(|m| m.fee)
+            .fold(0u64, |a, f| a.saturating_add(f));
+        let pkg_size: usize = members.iter().map(|m| m.size_bytes as usize).sum();
+        let pkg_cost: u64 = members
+            .iter()
+            .map(|m| m.cost)
+            .fold(0u64, |a, c| a.saturating_add(c));
+        // Aggregate-cost bound (re-eval DoS bound): a package whose total
+        // validation cost exceeds the cap is rejected before any mutation.
+        if pkg_cost > self.config.staging_max_package_cost {
+            return None;
+        }
+        let last_id = members.last().map(|m| m.tx_id)?;
+        let pkg_weight = self.weight_fn.compute(WeightInputs {
+            tx_id: &last_id,
+            fee: pkg_fee,
+            size_bytes: pkg_size.min(u32::MAX as usize) as u32,
+            cost: pkg_cost,
+        });
+
+        // Conflict detection over the package's EXTERNAL inputs (inputs not
+        // created within the package).
+        let internal_outputs: HashSet<Digest32> = members
+            .iter()
+            .flat_map(|m| m.output_box_ids.iter().copied())
+            .collect();
+        let external_inputs: Vec<Digest32> = members
+            .iter()
+            .flat_map(|m| m.input_box_ids.iter().copied())
+            .filter(|b| !internal_outputs.contains(b))
+            .collect();
+        let conflicts = self.pool.conflicts_for_inputs(&external_inputs);
+
+        // ONE `clone_for_staging` for the whole decision — the same O(pool)
+        // cost the single-tx eviction path pays. The RBF conflict closure is
+        // removed from THIS clone while its aggregates are measured; if the
+        // package is rejected the clone is simply discarded (never swapped into
+        // the live pool), so no separate probe clone is needed.
+        let mut staged = self.pool.clone_for_staging();
+        let mut evicted: Vec<TxId> = Vec::new();
+
+        if !conflicts.is_empty() {
+            // ── Package RBF (R1 ∧ R2) ────────────────────────────────────
+            // Remove the incumbent conflict closure from the (real) clone ONCE,
+            // capturing the removed entries to compute the RBF aggregates.
+            let mut inc_fee: u64 = 0;
+            let mut inc_size: usize = 0;
+            let mut inc_cost: u64 = 0;
+            let mut inc_seen: HashSet<TxId> = HashSet::new();
+            let mut removed_incumbents: Vec<TxId> = Vec::new();
+            for c in &conflicts {
+                for e in staged.remove_with_descendants_debiting(c, max_depth, bounds) {
+                    if inc_seen.insert(e.tx_id) {
+                        inc_fee = inc_fee.saturating_add(e.fee);
+                        inc_size += e.size_bytes as usize;
+                        inc_cost = inc_cost.saturating_add(e.cost);
+                        removed_incumbents.push(e.tx_id);
+                    }
+                }
+            }
+            let inc_weight = self.weight_fn.compute(WeightInputs {
+                tx_id: &conflicts[0],
+                fee: inc_fee,
+                size_bytes: inc_size.min(u32::MAX as usize) as u32,
+                cost: inc_cost,
+            });
+            // R1: strictly higher aggregate feerate. R2: strictly higher
+            // aggregate absolute fee (the anti-pinning teeth). BOTH required.
+            if !(pkg_weight > inc_weight && pkg_fee > inc_fee) {
+                return None; // clone discarded — live pool untouched
+            }
+            // Accepted: the closure is already removed from `staged`.
+            evicted = removed_incumbents;
+        } else {
+            // ── Threshold case ───────────────────────────────────────────
+            let would_overflow = staged.len() + members.len() > self.config.max_pool_size
+                || staged.total_bytes() + pkg_size > self.config.max_pool_bytes;
+            if would_overflow {
+                if let Some(low) = staged.lowest_weight() {
+                    if pkg_weight <= low {
+                        return None; // package still underpriced as a unit
+                    }
+                }
+            }
+        }
+
+        // Insert members ancestors-first, computing each one's in-pool parents
+        // from the (already-inserted) earlier members + committed pool state.
+        for m in &members {
+            let mut parents: Vec<TxId> = Vec::new();
+            let mut seen_p = HashSet::new();
+            for input in &m.input_box_ids {
+                if let Some(p) = staged.parent_for_output(input) {
+                    if seen_p.insert(p) {
+                        parents.push(p);
+                    }
+                }
+            }
+            let entry = Entry::new(
+                m.tx_id,
+                m.bytes.clone(),
+                m.input_box_ids.clone(),
+                m.output_box_ids.clone(),
+                parents,
+                m.fee,
+                m.weight,
+                m.size_bytes,
+                m.cost,
+                m.source.clone(),
+            )
+            .with_output_boxes(m.outputs.clone());
+            if staged.insert(entry).is_err() {
+                return None; // (unreachable) collision → reject, discard clone
+            }
+        }
+
+        // CPFP credit: descendants-first so a child's weight lifts its parents,
+        // exactly as single-tx admission credits an ancestor family.
+        for m in members.iter().rev() {
+            staged.update_family(&m.input_box_ids, i128::from(m.weight), bounds);
+        }
+
+        // Evict the post-boost lowest until the budgets fit — but a package
+        // member must never be the victim (else the package didn't really fit).
+        let member_ids: HashSet<TxId> = members.iter().map(|m| m.tx_id).collect();
+        while staged.len() > self.config.max_pool_size
+            || staged.total_bytes() > self.config.max_pool_bytes
+        {
+            let Some(low) = staged.lowest_tx_id() else {
+                break;
+            };
+            if member_ids.contains(&low) {
+                return None; // a member would be evicted → reject the package
+            }
+            for e in staged.remove_with_descendants_debiting(&low, max_depth, bounds) {
+                evicted.push(e.tx_id);
+            }
+        }
+
+        // Every member survived → adopt the staged pool atomically.
+        self.pool = staged;
+        Some(evicted)
     }
 
     /// Run admission steps 0-14 on `tx_bytes` *without committing*.
@@ -306,6 +1197,30 @@ impl Mempool {
         );
         self.tip = Some(new_tip);
 
+        // ── Block-advance staging prune ──────────────────────────────────
+        // Drop staged txs whose input was confirmed-and-consumed on-chain
+        // (can never be admitted) and any past their TTL / block-count
+        // horizon. Staged entries were never gossiped or pooled, so this
+        // emits no actions. `/check` never stages, so nothing here leaks.
+        let staging_pruned = if self.config.staging_enabled {
+            let mut pruned = self
+                .staging
+                .prune_spent_inputs(&diff.applied_spent_inputs)
+                .len();
+            pruned += self
+                .staging
+                .prune_expired(
+                    t0,
+                    new_tip.height,
+                    std::time::Duration::from_secs(self.config.staging_ttl_seconds),
+                    self.config.staging_max_blocks,
+                )
+                .len();
+            pruned
+        } else {
+            0
+        };
+
         // Per-action evictions log first so dashboards show the cause
         // before the summary.
         emit_tracing_for_pool_actions(&actions, self.observer.as_deref(), Some(new_tip));
@@ -329,6 +1244,8 @@ impl Mempool {
             pool_size = self.pool.len(),
             pool_bytes = self.pool.total_bytes(),
             revalidation_pending = self.revalidation.len(),
+            staging_pending = self.staging.len(),
+            staging_pruned,
             duration_ms = t0.elapsed().as_millis() as u64,
             "mempool tip change processed",
         );
@@ -934,6 +1851,15 @@ impl Mempool {
         &self.pool
     }
 
+    /// Test-only: is `bytes` currently suppressed by the unresolved-input
+    /// cache? Used to assert the package path lifts that suppression on admit.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn unresolved_contains(&self, bytes: &[u8]) -> bool {
+        self.unresolved
+            .contains_key(&crate::unresolved::UnresolvedCache::key_of(bytes))
+    }
+
     /// Test-only: mutable pool access. Production code writes through
     /// the method surface above; this is for unit tests that seed
     /// state before exercising a specific transition. The cfg-gate
@@ -956,3 +1882,5 @@ impl Mempool {
 
 #[cfg(test)]
 mod recheck_tests;
+#[cfg(test)]
+mod staging_tests;

@@ -36,6 +36,7 @@ pub mod pool;
 pub mod reorg;
 pub mod revalidation;
 pub mod snapshot;
+pub mod staging;
 mod telemetry;
 pub mod types;
 pub mod unresolved;
@@ -46,7 +47,7 @@ pub use admission::{
     AdmissionOutcome, CheckOutcome, RejectReason, Validated, ValidationErr, Validator,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub use admission::{MockPlan, MockValidator};
+pub use admission::{MockPlan, MockStructure, MockValidator};
 pub use budget::{BudgetVerdict, CostBudgets};
 pub use invalidation::{InvalidationCache, InvalidationReason, LookupResult};
 pub use mempool::Mempool;

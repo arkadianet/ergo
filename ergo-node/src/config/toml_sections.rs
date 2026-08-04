@@ -213,6 +213,11 @@ pub(super) struct TomlMempool {
     /// recheck (Scala `MempoolAuditor` `rebroadcastCount`, default 3). 0
     /// disables re-broadcast.
     pub(super) rebroadcast_count: Option<usize>,
+    /// Master switch for the staging pool (orphan/held-parent staging +
+    /// package admission + package RBF). Defaults to `false`; when off,
+    /// admission behaves exactly as it did before staging existed. The
+    /// staging caps themselves stay internal tuning.
+    pub(super) staging_enabled: Option<bool>,
 }
 
 #[derive(serde::Deserialize, Default, Debug)]
