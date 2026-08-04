@@ -18,6 +18,8 @@
 //! `GET /api/v1/protocols` for roadmap visibility but never falsely match a box
 //! or emit fabricated state.
 
+use super::decoders::spectrum::SPECTRUM_N2T_V1_TREE_HASH_HEX;
+
 /// Which key a matcher compares against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchKind {
@@ -70,6 +72,8 @@ impl ProtocolFamily {
 pub enum DecoderId {
     /// The SigmaUSD / AgeUSD bank box (register + token layout verified).
     SigmaUsdBank,
+    /// A Spectrum N2T v1 pool with the exact deployed contract tree.
+    SpectrumN2T,
 }
 
 /// One matcher rule: a key of `kind`, the `box_role` it identifies, and the
@@ -118,9 +122,16 @@ const SIGUSD_MATCHERS: &[ContractMatcher] = &[ContractMatcher {
     decoder: DecoderId::SigmaUsdBank,
 }];
 
+const SPECTRUM_MATCHERS: &[ContractMatcher] = &[ContractMatcher {
+    kind: MatchKind::TreeHash,
+    key: SPECTRUM_N2T_V1_TREE_HASH_HEX,
+    box_role: "n2t_pool",
+    decoder: DecoderId::SpectrumN2T,
+}];
+
 /// The static registry. Order is stable (it is the `GET /api/v1/protocols`
-/// listing order). SigmaUSD is fully decodable; the rest are discoverable
-/// stubs until their layouts are verified + oracle-tested.
+/// listing order). SigmaUSD and Spectrum N2T v1 are fully decodable; the
+/// remaining entries are stubs until their layouts are verified and tested.
 pub static REGISTRY: &[ProtocolEntry] = &[
     ProtocolEntry {
         id: "sigmausd",
@@ -139,11 +150,11 @@ pub static REGISTRY: &[ProtocolEntry] = &[
         name: "Spectrum Finance",
         family: ProtocolFamily::AmmPool,
         version: "v1",
-        matchers: &[],
+        matchers: SPECTRUM_MATCHERS,
         reference: "https://spectrum.fi",
-        decodable: false,
-        note: "recognized; full AMM-pool decode TODO (pool template hashes + \
-               reserve/LP register layout not yet verified from source)",
+        decodable: true,
+        note: "Spectrum N2T v1 pools are matched by exact deployed tree hash; \
+               reserves and fee decode only after strict token, R4, and value validation",
     },
     ProtocolEntry {
         id: "dexy",

@@ -8,7 +8,7 @@ use crate::store::IndexerStore;
 use crate::{BoxId, TemplateHash, TokenId, TreeHash, TxId};
 use ergo_indexer_types::{
     BalanceDto, IndexedBoxDto, IndexedTokenDto, IndexedTxDto, IndexerHaltReason, IndexerHealthDto,
-    IndexerQuery, IndexerStatus, Page, SortDir, StorageRentEligibleDto,
+    IndexerQuery, IndexerReadError, IndexerStatus, Page, SortDir, StorageRentEligibleDto,
 };
 
 /// Public read-side handle wired into `ergo-api`. Holds the in-memory
@@ -227,6 +227,17 @@ impl IndexerQuery for IndexerHandle {
             )
             .ok()
             .flatten()
+    }
+
+    fn try_box_by_id(&self, box_id: &BoxId) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
+        let store = self
+            .inner
+            .store
+            .as_ref()
+            .ok_or_else(|| IndexerReadError::new("indexer store is unavailable"))?;
+        store
+            .read_box(box_id)
+            .map_err(|error| IndexerReadError::new(error.to_string()))
     }
     fn box_by_global_index(&self, n: u64) -> Option<IndexedBoxDto> {
         let store = self.inner.store.as_ref()?;
@@ -482,6 +493,30 @@ impl IndexerQuery for IndexerHandle {
             .filter_map(|&entry| dereference_box(store.as_ref(), entry))
             .collect()
     }
+
+    fn try_template_unspent_paged(
+        &self,
+        h: &TemplateHash,
+        p: Page,
+        dir: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        let store = self
+            .inner
+            .store
+            .as_ref()
+            .ok_or_else(|| IndexerReadError::new("indexer store is unavailable"))?;
+        let Some(entries) = store
+            .read_template_box_entries(h)
+            .map_err(|error| IndexerReadError::new(error.to_string()))?
+        else {
+            return Ok(Vec::new());
+        };
+        let unspent: Vec<i64> = entries.into_iter().filter(|&entry| entry > 0).collect();
+        slice_paged(&unspent, p, dir)
+            .into_iter()
+            .map(|entry| try_dereference_box(store.as_ref(), entry))
+            .collect()
+    }
     fn template_total_boxes(&self, h: &TemplateHash) -> u64 {
         let Some(store) = self.inner.store.as_ref() else {
             return 0;
@@ -514,6 +549,21 @@ impl IndexerQuery for IndexerHandle {
                 None
             }
         }
+    }
+
+    fn try_token_by_id(
+        &self,
+        token_id: &TokenId,
+    ) -> Result<Option<IndexedTokenDto>, IndexerReadError> {
+        let store = self
+            .inner
+            .store
+            .as_ref()
+            .ok_or_else(|| IndexerReadError::new("indexer store is unavailable"))?;
+        store
+            .read_token(token_id)
+            .map(|token| token.as_ref().map(token_to_dto))
+            .map_err(|error| IndexerReadError::new(error.to_string()))
     }
     fn tokens_by_ids(&self, ids: &[TokenId]) -> Vec<IndexedTokenDto> {
         let Some(store) = self.inner.store.as_ref() else {
@@ -772,6 +822,26 @@ fn dereference_box(store: &IndexerStore, entry: i64) -> Option<IndexedBoxDto> {
     }
 }
 
+fn try_dereference_box(
+    store: &IndexerStore,
+    entry: i64,
+) -> Result<IndexedBoxDto, IndexerReadError> {
+    let n = entry.unsigned_abs();
+    let id = store
+        .read_numeric_box(n)
+        .map_err(|error| IndexerReadError::new(error.to_string()))?
+        .ok_or_else(|| IndexerReadError::new(format!("numeric box row {n} is missing")))?;
+    store
+        .read_box(&id)
+        .map_err(|error| IndexerReadError::new(error.to_string()))?
+        .ok_or_else(|| {
+            IndexerReadError::new(format!(
+                "indexed box row {} is missing",
+                hex::encode(id.as_bytes())
+            ))
+        })
+}
+
 /// Project a persisted `IndexedToken` to the wire DTO. Per
 /// `IndexedToken::from_box` (token.rs:75-112), all five `Option` fields
 /// are pinned to `Some(_)` for well-formed records; missing R4/R5/R6
@@ -829,6 +899,197 @@ mod tests {
         h.set_indexed_height(1234);
         assert!(h.is_caught_up());
         assert_eq!(h.indexed_height(), 1234);
+    }
+
+    mod fallible_reads {
+        use super::*;
+        use crate::segment::Segment;
+        use crate::segment_id::token_unique_id;
+        use crate::store::{TestRawRow, TestRawRows};
+        use crate::template::{write_indexed_template, IndexedTemplate};
+        use ergo_primitives::digest::Digest32;
+        use ergo_primitives::writer::VlqWriter;
+        use tempfile::TempDir;
+
+        // ----- helpers -----
+
+        fn d(seed: u8) -> Digest32 {
+            Digest32::from_bytes([seed; 32])
+        }
+
+        fn handle_with_store() -> (IndexerHandle, TempDir) {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("indexer.redb");
+            let (store, _) = crate::store::IndexerStore::open(&path).unwrap();
+            (IndexerHandle::with_store(store, 0), tmp)
+        }
+
+        fn template_row(template_hash: TemplateHash, boxes: Vec<i64>) -> Vec<u8> {
+            let mut writer = VlqWriter::new();
+            write_indexed_template(
+                &mut writer,
+                &IndexedTemplate {
+                    template_hash,
+                    segment: Segment {
+                        boxes,
+                        ..Segment::empty()
+                    },
+                },
+            );
+            writer.result()
+        }
+
+        fn page() -> Page {
+            Page {
+                offset: 0,
+                limit: 100,
+            }
+        }
+
+        // ----- happy path -----
+
+        #[test]
+        fn fallible_template_read_returns_empty_for_unknown_template() {
+            let (handle, _tmp) = handle_with_store();
+
+            assert_eq!(
+                handle
+                    .try_template_unspent_paged(&d(0x11), page(), SortDir::Asc)
+                    .unwrap(),
+                Vec::new()
+            );
+        }
+
+        // ----- error paths -----
+
+        #[test]
+        fn halted_handle_fallible_reads_report_unavailable() {
+            let handle = IndexerHandle::halted(IndexerHaltReason::DbCorruption);
+
+            assert_eq!(
+                handle.try_box_by_id(&d(0x21)).unwrap_err().to_string(),
+                "indexer store is unavailable"
+            );
+            assert_eq!(
+                handle
+                    .try_template_unspent_paged(&d(0x22), page(), SortDir::Asc)
+                    .unwrap_err()
+                    .to_string(),
+                "indexer store is unavailable"
+            );
+            assert_eq!(
+                handle.try_token_by_id(&d(0x23)).unwrap_err().to_string(),
+                "indexer store is unavailable"
+            );
+        }
+
+        #[test]
+        fn fallible_template_read_errors_when_numeric_box_row_is_missing() {
+            let (handle, _tmp) = handle_with_store();
+            let template_hash = d(0x31);
+            let template_bytes = template_row(template_hash, vec![7]);
+            handle
+                .store()
+                .unwrap()
+                .write_test_raw_rows(TestRawRows {
+                    indexed_template: Some(TestRawRow {
+                        key: template_hash.as_bytes(),
+                        value: &template_bytes,
+                    }),
+                    ..TestRawRows::default()
+                })
+                .unwrap();
+
+            assert_eq!(
+                handle
+                    .try_template_unspent_paged(&template_hash, page(), SortDir::Asc)
+                    .unwrap_err()
+                    .to_string(),
+                "numeric box row 7 is missing"
+            );
+            assert!(handle
+                .template_unspent_paged(&template_hash, page(), SortDir::Asc)
+                .is_empty());
+        }
+
+        #[test]
+        fn fallible_template_read_errors_when_indexed_box_row_is_missing() {
+            let (handle, _tmp) = handle_with_store();
+            let template_hash = d(0x41);
+            let box_id = d(0x42);
+            let template_bytes = template_row(template_hash, vec![7]);
+            let numeric_key = 7u64.to_be_bytes();
+            handle
+                .store()
+                .unwrap()
+                .write_test_raw_rows(TestRawRows {
+                    indexed_template: Some(TestRawRow {
+                        key: template_hash.as_bytes(),
+                        value: &template_bytes,
+                    }),
+                    numeric_box: Some(TestRawRow {
+                        key: &numeric_key,
+                        value: box_id.as_bytes(),
+                    }),
+                    ..TestRawRows::default()
+                })
+                .unwrap();
+
+            assert_eq!(
+                handle
+                    .try_template_unspent_paged(&template_hash, page(), SortDir::Asc)
+                    .unwrap_err()
+                    .to_string(),
+                format!(
+                    "indexed box row {} is missing",
+                    hex::encode(box_id.as_bytes())
+                )
+            );
+            assert!(handle
+                .template_unspent_paged(&template_hash, page(), SortDir::Asc)
+                .is_empty());
+        }
+
+        #[test]
+        fn fallible_box_read_preserves_storage_failure() {
+            let (handle, _tmp) = handle_with_store();
+            let box_id = d(0x51);
+            handle
+                .store()
+                .unwrap()
+                .write_test_raw_rows(TestRawRows {
+                    indexed_box: Some(TestRawRow {
+                        key: box_id.as_bytes(),
+                        value: &[0xFF],
+                    }),
+                    ..TestRawRows::default()
+                })
+                .unwrap();
+
+            assert!(handle.try_box_by_id(&box_id).is_err());
+            assert!(handle.box_by_id(&box_id).is_none());
+        }
+
+        #[test]
+        fn fallible_token_read_preserves_storage_failure() {
+            let (handle, _tmp) = handle_with_store();
+            let token_id = d(0x61);
+            let token_key = token_unique_id(&token_id);
+            handle
+                .store()
+                .unwrap()
+                .write_test_raw_rows(TestRawRows {
+                    indexed_token: Some(TestRawRow {
+                        key: token_key.as_bytes(),
+                        value: &[0xFF],
+                    }),
+                    ..TestRawRows::default()
+                })
+                .unwrap();
+
+            assert!(handle.try_token_by_id(&token_id).is_err());
+            assert!(handle.token_by_id(&token_id).is_none());
+        }
     }
 
     mod address_balance {

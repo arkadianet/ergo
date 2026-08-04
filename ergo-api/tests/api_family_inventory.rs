@@ -146,6 +146,63 @@ fn canonical_rust_openapi_is_the_union_of_both_fragments_and_known_aliases() {
 }
 
 #[test]
+fn canonical_rust_openapi_preserves_prices_contract() {
+    let document = canonical_json();
+    let operations = openapi_operations(&rust_openapi().expect("canonical RUST OpenAPI"));
+    assert_eq!(
+        operations
+            .iter()
+            .filter(|operation| operation.path == "/api/v1/prices" && operation.method == "get")
+            .count(),
+        1
+    );
+
+    let operation = get_operation(&document, "/api/v1/prices", "get");
+    assert_eq!(operation["tags"], serde_json::json!(["prices"]));
+
+    let token_id = parameter(operation, "token_id");
+    assert_eq!(token_id["in"], "query");
+    assert_eq!(token_id["required"], true);
+    assert_eq!(token_id["schema"]["type"], "string");
+
+    let quote = parameter(operation, "quote");
+    assert_eq!(quote["in"], "query");
+    assert!(!quote["required"].as_bool().unwrap_or(false));
+    assert_eq!(quote["schema"]["type"], "string");
+
+    assert_eq!(
+        response_statuses(operation),
+        BTreeSet::from(["200", "400", "409", "500", "503"])
+    );
+    assert_eq!(
+        response_schema_ref(operation, "200"),
+        "#/components/schemas/PricesResponse"
+    );
+    for status in ["400", "409", "500", "503"] {
+        assert_eq!(
+            response_schema_ref(operation, status),
+            "#/components/schemas/V1Error"
+        );
+    }
+
+    let schemas = &document["components"]["schemas"];
+    for schema in [
+        "PriceItem",
+        "PricePathHop",
+        "PriceSource",
+        "PriceValue",
+        "PricesQuery",
+        "PricesResponse",
+        "RawPrice",
+    ] {
+        assert!(
+            schemas[schema].is_object(),
+            "missing prices schema {schema}"
+        );
+    }
+}
+
+#[test]
 fn supplemental_seam_operations_are_method_specific() {
     let document = canonical_json();
     for (path, method, operation_id, summary) in [
@@ -349,7 +406,7 @@ fn canonical_scala_and_rust_operation_inventories_are_disjoint() {
     let scala = scala_openapi_operations();
     let rust = openapi_operations(&rust_openapi().expect("canonical RUST OpenAPI must merge"));
     assert_eq!(scala.len(), 125);
-    assert_eq!(rust.len(), 179);
+    assert_eq!(rust.len(), 180);
     assert_operation_inventory_matches_fixture(&scala, "api_family_scala_operations.txt");
     assert_operation_inventory_matches_fixture(&rust, "api_family_rust_operations.txt");
 

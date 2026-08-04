@@ -44,10 +44,14 @@ reqwest            = { workspace = true, features = ["rustls-tls"] }
 # established "never HTTP-to-itself" idiom for a router-internal multiplex.
 tower              = { workspace = true, features = ["util"] }
 serde_norway       = { workspace = true }
+num-bigint          = { workspace = true }
+num-integer         = { workspace = true }
+num-traits          = { workspace = true }
 
 [dev-dependencies]
 http-body-util  = { workspace = true }
 bs58            = { workspace = true }
+proptest        = { workspace = true }
 # WS transport integration test for `/api/v1/ws`: a real client over a real
 # upgrade (the axum `ws` feature already pulls tokio-tungstenite 0.24 into the
 # lock; these are dev-only so the production build is untouched).

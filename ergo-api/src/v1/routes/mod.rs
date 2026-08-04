@@ -22,6 +22,7 @@ pub(crate) mod diagnostics;
 pub(crate) mod extract;
 pub(crate) mod light;
 pub(crate) mod mempool;
+pub(crate) mod prices;
 pub(crate) mod stats;
 pub(crate) mod tokens;
 pub(crate) mod transactions;
@@ -536,6 +537,8 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
             "/api/v1/light/membership-proof",
             get(light::membership_proof),
         )
+        // ----- prices -----
+        .route("/api/v1/prices", get(prices::get_prices))
         // ----- stats/* time-series analytics (§3.14) -----
         .route("/api/v1/stats/supply", get(stats::supply))
         .route(

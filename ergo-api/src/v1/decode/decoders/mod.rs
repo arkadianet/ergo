@@ -4,6 +4,7 @@
 //! registry entry + a `test-vectors/decode/` oracle.
 
 pub mod sigmausd;
+pub mod spectrum;
 
 use super::registry::DecoderId;
 use super::service::DecodeInput;
@@ -15,6 +16,10 @@ pub fn render_state(decoder: DecoderId, input: &DecodeInput, matched_key: &str) 
     match decoder {
         DecoderId::SigmaUsdBank => {
             let r = sigmausd::decode_state(input, matched_key);
+            (r.state, r.downgraded)
+        }
+        DecoderId::SpectrumN2T => {
+            let r = spectrum::decode_state(input);
             (r.state, r.downgraded)
         }
     }

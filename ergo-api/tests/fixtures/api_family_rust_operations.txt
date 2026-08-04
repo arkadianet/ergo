@@ -95,6 +95,7 @@ get /api/v1/node/sync
 get /api/v1/node/tip
 get /api/v1/node/version
 get /api/v1/peers
+get /api/v1/prices
 get /api/v1/protocols
 get /api/v1/protocols/{protocol_id}
 get /api/v1/protocols/{protocol_id}/state

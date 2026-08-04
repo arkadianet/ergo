@@ -76,6 +76,21 @@ pub struct StoreHealthSnapshot {
     pub repair_skipped: u64,
 }
 
+#[cfg(test)]
+pub(crate) struct TestRawRow<'a> {
+    pub key: &'a [u8],
+    pub value: &'a [u8],
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct TestRawRows<'a> {
+    pub indexed_template: Option<TestRawRow<'a>>,
+    pub numeric_box: Option<TestRawRow<'a>>,
+    pub indexed_box: Option<TestRawRow<'a>>,
+    pub indexed_token: Option<TestRawRow<'a>>,
+}
+
 impl IndexerStore {
     /// Open the indexer DB at `path`, applying the wipe/resume
     /// table:
@@ -184,6 +199,31 @@ impl IndexerStore {
     /// The undo-retention window (max serviceable rollback depth).
     pub fn rollback_window(&self) -> u64 {
         self.rollback_window
+    }
+
+    #[cfg(test)]
+    pub(crate) fn write_test_raw_rows(&self, rows: TestRawRows<'_>) -> Result<(), IndexerError> {
+        use crate::store::tables::{INDEXED_BOX, INDEXED_TEMPLATE, INDEXED_TOKEN, NUMERIC_BOX};
+
+        let write_txn = self.db.begin_write()?;
+        if let Some(row) = rows.indexed_template {
+            let mut table = write_txn.open_table(INDEXED_TEMPLATE)?;
+            table.insert(row.key, row.value)?;
+        }
+        if let Some(row) = rows.numeric_box {
+            let mut table = write_txn.open_table(NUMERIC_BOX)?;
+            table.insert(row.key, row.value)?;
+        }
+        if let Some(row) = rows.indexed_box {
+            let mut table = write_txn.open_table(INDEXED_BOX)?;
+            table.insert(row.key, row.value)?;
+        }
+        if let Some(row) = rows.indexed_token {
+            let mut table = write_txn.open_table(INDEXED_TOKEN)?;
+            table.insert(row.key, row.value)?;
+        }
+        write_txn.commit()?;
+        Ok(())
     }
 
     /// Cumulative count of redb cache evictions for the indexer DB.

@@ -87,6 +87,7 @@ pub enum Reason {
     BadPubkeyLength,
     BadEncoding,
     UnsupportedHashAlgo,
+    UnsupportedQuote,
     /// Well-formed but not-yet-supported tx intent. Maps to **422**, not
     /// 400: the documented `unsupported_intent` shape flips 422→200
     /// additively as new intents ship, without ever changing meaning.
@@ -157,6 +158,7 @@ pub enum Reason {
     /// mirroring the frozen compat `route_disabled`→503 mapping in
     /// `server::map_submit_error`.
     RouteUnavailable,
+    PricingUnavailable,
     /// Upstream/handler timeout. Maps to **504 Gateway Timeout** to mirror
     /// the frozen `server::map_submit_error` mapping for the same reason.
     Timeout,
@@ -240,6 +242,7 @@ impl Reason {
             | BadPubkeyLength
             | BadEncoding
             | UnsupportedHashAlgo
+            | UnsupportedQuote
             | NotHotReloadable
             | NotVotable
             | OutOfRange
@@ -293,7 +296,8 @@ impl Reason {
             | BlockPruned
             | Overloaded
             | ShuttingDown
-            | RouteUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            | RouteUnavailable
+            | PricingUnavailable => StatusCode::SERVICE_UNAVAILABLE,
 
             // 401 — authentication required / wrong credential
             Unauthorized | WrongPassword => StatusCode::UNAUTHORIZED,
@@ -456,6 +460,7 @@ mod tests {
             (BadPubkeyLength, "bad_pubkey_length", br),
             (BadEncoding, "bad_encoding", br),
             (UnsupportedHashAlgo, "unsupported_hash_algo", br),
+            (UnsupportedQuote, "unsupported_quote", br),
             (NotHotReloadable, "not_hot_reloadable", br),
             (NotVotable, "not_votable", br),
             (OutOfRange, "out_of_range", br),
@@ -523,6 +528,7 @@ mod tests {
             (Overloaded, "overloaded", su),
             (ShuttingDown, "shutting_down", su),
             (RouteUnavailable, "route_unavailable", su),
+            (PricingUnavailable, "pricing_unavailable", su),
             (Timeout, "timeout", StatusCode::GATEWAY_TIMEOUT),
             // auth / tier
             (Unauthorized, "unauthorized", ua),
@@ -602,11 +608,11 @@ mod tests {
     }
 
     #[test]
-    fn contract_covers_exactly_one_hundred_eleven_reasons_no_duplicates() {
+    fn contract_covers_exactly_one_hundred_thirteen_reasons_no_duplicates() {
         use std::collections::BTreeSet;
         let rows = contract();
-        assert_eq!(rows.len(), 111, "expected 111 canonical reasons");
+        assert_eq!(rows.len(), 113, "expected 113 canonical reasons");
         let wires: BTreeSet<&str> = rows.iter().map(|(_, w, _)| *w).collect();
-        assert_eq!(wires.len(), 111, "wire strings must be unique");
+        assert_eq!(wires.len(), 113, "wire strings must be unique");
     }
 }
