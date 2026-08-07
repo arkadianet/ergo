@@ -87,7 +87,17 @@ pub fn write_ergo_tree(w: &mut VlqWriter, tree: &ErgoTree) -> Result<(), WriteEr
     // A soft-fork-wrapped (unparsed) tree re-emits its preserved original bytes
     // verbatim — header + size + body, byte-identical to the wire form — exactly
     // as Scala re-serializes an `UnparsedErgoTree` from its kept `propositionBytes`.
+    //
+    // Refuse an empty preserved region: Scala can wrap with `numBytes == 0`
+    // (negative declared size), but emitting `[]` makes the next decode fail
+    // with `UnexpectedEnd` and is never a re-decodable tree. Callers treat this
+    // as `WriteRejected` rather than a codec Bug.
     if let crate::opcode::Expr::Unparsed(raw) = &tree.body {
+        if raw.is_empty() {
+            return Err(WriteError::InvalidData(
+                "UnparsedErgoTree with empty propositionBytes cannot be serialized".into(),
+            ));
+        }
         w.put_bytes(raw);
         return Ok(());
     }

@@ -80,6 +80,16 @@ infrastructure.
   `/mining/*` open): external miner integrations must now send the `api_key`
   header they already need for any other operator route. Pinned by
   `ergo-api/tests/mining_auth_gate.rs`.
+### Fixed
+
+- **Nightly fuzz round-trip Bugs.** Empty `UnparsedErgoTree` propositionBytes
+  no longer serialize to `[]` (`WriteError` instead). Size-0 size-delimited
+  trees are refused when writing box candidates (Bug #19 structural advance
+  was eating the following VLQ height). `IrNode` `PartialEq` treats
+  `0x83` boolean-constant `ConcreteCollection` as equal to packed `0x85`
+  `BoolCollection` after Scala-style compaction.
+
+
 
 ## [0.5.3] - 2026-07-19
 

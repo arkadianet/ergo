@@ -438,6 +438,26 @@ fn negative_declared_size_wraps_with_scala_numbytes() {
     }
 }
 
+/// Empty `UnparsedErgoTree` propositionBytes (Scala `numBytes == 0`) must not
+/// serialize to `[]` — re-decode would hard-fail with `UnexpectedEnd`. Nightly
+/// cargo-fuzz `ergo_tree` crash regression.
+#[test]
+fn empty_unparsed_tree_write_rejected() {
+    let bytes = hex::decode("08faffffff0f0204").unwrap();
+    let mut r = VlqReader::new(&bytes);
+    let tree = read_ergo_tree(&mut r).expect("negative size -6 wraps with empty bytes");
+    assert!(
+        matches!(&tree.body, Expr::Unparsed(raw) if raw.is_empty()),
+        "expected empty Unparsed body"
+    );
+    let mut w = VlqWriter::new();
+    let err = write_ergo_tree(&mut w, &tree).expect_err("empty Unparsed must not serialize");
+    assert!(
+        err.to_string().contains("empty propositionBytes"),
+        "unexpected error: {err}"
+    );
+}
+
 /// A segregated constants COUNT past i32::MAX is read non-exact (Scala
 /// `getUInt().toInt`): it wraps negative and yields ZERO constants, so the
 /// tree PARSES (here to `sigmaProp(true)`), it is NOT hard-rejected. Oracle

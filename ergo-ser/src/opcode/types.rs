@@ -42,12 +42,54 @@ pub enum Expr {
 
 /// One opcode-tagged IR node: the dispatch byte plus the typed payload
 /// the parser produced for that opcode's argument pattern.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct IrNode {
     /// Dispatch byte that selected this node's argument pattern.
     pub opcode: u8,
     /// Decoded arguments matching the opcode's expected shape.
     pub payload: Payload,
+}
+
+impl PartialEq for IrNode {
+    fn eq(&self, other: &Self) -> bool {
+        if self.opcode == other.opcode && self.payload == other.payload {
+            return true;
+        }
+        // Scala's `ConcreteCollection.isBooleanConstants` serializes an all-
+        // boolean-constant `0x83` collection as packed `0x85`. After write→read
+        // the AST is `BoolCollection` while the original parse of the `0x83`
+        // form stays `ConcreteCollection` — same value, different shape. Treat
+        // them as equal so round-trip structure checks match the wire semantics.
+        match (self.bool_const_bits(), other.bool_const_bits()) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl IrNode {
+    /// Bits of a `Coll[Boolean]` of constants, whether parsed as `0x83`
+    /// `ConcreteCollection` or packed `0x85` `BoolCollection`.
+    fn bool_const_bits(&self) -> Option<Vec<bool>> {
+        match (self.opcode, &self.payload) {
+            (0x85, Payload::BoolCollection { bits }) => Some(bits.clone()),
+            (0x83, Payload::ConcreteCollection { elem_type, items })
+                if *elem_type == SigmaType::SBoolean =>
+            {
+                items
+                    .iter()
+                    .map(|it| match it {
+                        Expr::Const {
+                            tpe: SigmaType::SBoolean,
+                            val: SigmaValue::Boolean(b),
+                        } => Some(*b),
+                        _ => None,
+                    })
+                    .collect()
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Decoded argument payload for an [`IrNode`]. Variants correspond

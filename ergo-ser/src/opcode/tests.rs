@@ -462,6 +462,31 @@ fn roundtrip_bool_collection() {
     roundtrip(&body, false);
 }
 
+/// `0x83` empty `Coll[Boolean]` of constants serializes as packed `0x85 00`
+/// (Scala `isBooleanConstants`; empty `forall` is vacuous). After re-parse the
+/// AST is `BoolCollection`, but `PartialEq` must treat it as equal to the
+/// original `ConcreteCollection` — nightly fuzz "structure changed" regression.
+#[test]
+fn empty_bool_const_collection_eq_after_0x85_compaction() {
+    let original = Expr::Op(IrNode {
+        opcode: 0x83,
+        payload: Payload::ConcreteCollection {
+            elem_type: SigmaType::SBoolean,
+            items: vec![],
+        },
+    });
+    let mut w = VlqWriter::new();
+    write_body(&mut w, &original, false).unwrap();
+    let packed = w.result();
+    assert_eq!(packed, vec![0x85, 0x00], "empty bool-const coll packs to 85 00");
+    let mut r = VlqReader::new(&packed);
+    let decoded = parse_body(&mut r, 0).unwrap();
+    assert_eq!(
+        decoded, original,
+        "0x83 empty bool-const coll must equal re-parsed 0x85 form"
+    );
+}
+
 #[test]
 fn roundtrip_tuple() {
     let items = vec![

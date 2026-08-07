@@ -15,6 +15,7 @@ use super::{check_token_count, ErgoBoxCandidate};
 /// Writes the raw ErgoTree bytes directly (no length prefix), matching
 /// the Scala/sigma-rust wire format.
 pub fn write_ergo_box_candidate(w: &mut VlqWriter, c: &ErgoBoxCandidate) -> Result<(), WriteError> {
+    super::reject_opaque_tree_before_box_tail(&c.ergo_tree_bytes)?;
     w.put_u64(c.value);
     w.put_bytes(&c.ergo_tree_bytes);
     w.put_u32(c.creation_height);
@@ -87,7 +88,7 @@ pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ergo_tree::ErgoTree;
+    use crate::ergo_tree::{read_ergo_tree, ErgoTree};
     use crate::opcode::Expr;
     use crate::register::{AdditionalRegisters, RegisterValue};
     use crate::sigma_type::SigmaType;
@@ -163,6 +164,32 @@ mod tests {
         let mut r = VlqReader::new(&bytes);
         let res = read_ergo_box_candidate(&mut r);
         assert!(res.is_ok(), "v0-no-size box script must parse, got {res:?}");
+    }
+
+    /// Size-0 Unparsed tree (`header‖0x00`) before a VLQ height cannot be
+    /// re-emitted: Bug #19 structural advance absorbs the height on re-decode.
+    /// Nightly fuzz `ergo_box_candidate` / `transaction` crash regression.
+    #[test]
+    fn write_rejects_size_zero_unparsed_tree() {
+        let tree_bytes = hex::decode("eb00").unwrap();
+        let mut tr = VlqReader::new(&tree_bytes);
+        let tree = read_ergo_tree(&mut tr).expect("size-0 tree wraps");
+        let candidate = ErgoBoxCandidate::from_trusted_raw_parts(
+            235,
+            tree,
+            tree_bytes,
+            11_620,
+            vec![],
+            AdditionalRegisters::empty(),
+            vec![0],
+        );
+        let mut w = VlqWriter::new();
+        let err = write_ergo_box_candidate(&mut w, &candidate)
+            .expect_err("size-0 Unparsed tree must not precede box-tail fields");
+        assert!(
+            err.to_string().contains("declared size 0"),
+            "unexpected error: {err}"
+        );
     }
 
     // ----- round-trips -----
