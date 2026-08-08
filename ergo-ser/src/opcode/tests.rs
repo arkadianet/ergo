@@ -478,7 +478,11 @@ fn empty_bool_const_collection_eq_after_0x85_compaction() {
     let mut w = VlqWriter::new();
     write_body(&mut w, &original, false).unwrap();
     let packed = w.result();
-    assert_eq!(packed, vec![0x85, 0x00], "empty bool-const coll packs to 85 00");
+    assert_eq!(
+        packed,
+        vec![0x85, 0x00],
+        "empty bool-const coll packs to 85 00"
+    );
     let mut r = VlqReader::new(&packed);
     let decoded = parse_body(&mut r, 0).unwrap();
     assert_eq!(
