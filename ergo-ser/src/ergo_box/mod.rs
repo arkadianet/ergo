@@ -30,32 +30,6 @@ pub use whole::{
     box_id_with, parse_ergo_box_bytes, read_ergo_box, serialize_ergo_box, write_ergo_box,
 };
 
-/// Reject ErgoTree wire forms that cannot safely precede box-tail VLQ fields.
-///
-/// A size-delimited tree with declared size `0` soft-fork-wraps to a two-byte
-/// `header‖0x00` Unparsed region. On re-decode, Bug #19 structural body advance
-/// can absorb the following `creation_height` VLQ as a "body", desynchronizing
-/// the box tail (EOF / bogus register count). Empty tree bytes have the same
-/// hazard. Encode-time rejection surfaces as difftest `WriteRejected`, not Bug.
-pub(crate) fn reject_opaque_tree_before_box_tail(bytes: &[u8]) -> Result<(), WriteError> {
-    if bytes.is_empty() {
-        return Err(WriteError::InvalidData(
-            "empty ergo_tree_bytes cannot precede box-tail fields".into(),
-        ));
-    }
-    const SIZE_FLAG: u8 = 0x08;
-    if bytes[0] & SIZE_FLAG == 0 {
-        return Ok(());
-    }
-    let mut r = VlqReader::new(&bytes[1..]);
-    if matches!(r.get_uint_to_i32(), Ok(0)) {
-        return Err(WriteError::InvalidData(
-            "size-delimited ErgoTree with declared size 0 cannot precede box-tail fields".into(),
-        ));
-    }
-    Ok(())
-}
-
 /// Parsed box candidate with a structured ErgoTree.
 ///
 /// The ErgoTree is stored in parsed form AND as raw bytes. The raw bytes

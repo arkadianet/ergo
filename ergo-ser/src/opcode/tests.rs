@@ -489,6 +489,71 @@ fn empty_bool_const_collection_eq_after_0x85_compaction() {
         decoded, original,
         "0x83 empty bool-const coll must equal re-parsed 0x85 form"
     );
+    assert_eq!(original, decoded, "PartialEq must be symmetric");
+}
+
+#[test]
+fn non_empty_bool_const_collection_eq_after_0x85_compaction() {
+    let bits = [true, false, true];
+    let original = Expr::Op(IrNode {
+        opcode: 0x83,
+        payload: Payload::ConcreteCollection {
+            elem_type: SigmaType::SBoolean,
+            items: bits
+                .iter()
+                .map(|b| Expr::Const {
+                    tpe: SigmaType::SBoolean,
+                    val: SigmaValue::Boolean(*b),
+                })
+                .collect(),
+        },
+    });
+    let packed_form = Expr::Op(IrNode {
+        opcode: 0x85,
+        payload: Payload::BoolCollection {
+            bits: bits.to_vec(),
+        },
+    });
+    assert_eq!(original, packed_form);
+    assert_eq!(packed_form, original);
+    let mut w = VlqWriter::new();
+    write_body(&mut w, &original, false).unwrap();
+    let packed = w.result();
+    let mut r = VlqReader::new(&packed);
+    let decoded = parse_body(&mut r, 0).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn bool_const_collection_neq_when_bits_or_items_differ() {
+    let empty_83 = Expr::Op(IrNode {
+        opcode: 0x83,
+        payload: Payload::ConcreteCollection {
+            elem_type: SigmaType::SBoolean,
+            items: vec![],
+        },
+    });
+    let one_85 = Expr::Op(IrNode {
+        opcode: 0x85,
+        payload: Payload::BoolCollection { bits: vec![true] },
+    });
+    assert_ne!(empty_83, one_85);
+
+    let mixed_83 = Expr::Op(IrNode {
+        opcode: 0x83,
+        payload: Payload::ConcreteCollection {
+            elem_type: SigmaType::SBoolean,
+            items: vec![Expr::Op(IrNode {
+                opcode: 0xA3, // HEIGHT — not a Const
+                payload: Payload::Zero,
+            })],
+        },
+    });
+    let one_bit = Expr::Op(IrNode {
+        opcode: 0x85,
+        payload: Payload::BoolCollection { bits: vec![false] },
+    });
+    assert_ne!(mixed_83, one_bit);
 }
 
 #[test]

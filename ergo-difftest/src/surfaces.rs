@@ -27,11 +27,18 @@ pub struct Surface {
 }
 
 /// read+write fixed-point check shared by every (decode, encode) pair.
-fn rw_check<T, D, E>(input: &[u8], decode: D, encode: E) -> Outcome
+///
+/// `is_soft_fork_opaque` marks values whose body is a size-delimited
+/// `UnparsedErgoTree`. For those, Bug #19 structural body advance after a
+/// canonical re-encode of following VLQ fields can desynchronize re-decode
+/// — Scala shares that hazard, so difftest reports [`Outcome::WriteRejected`]
+/// rather than [`Outcome::Bug`].
+fn rw_check<T, D, E, F>(input: &[u8], decode: D, encode: E, is_soft_fork_opaque: F) -> Outcome
 where
     T: PartialEq + std::fmt::Debug,
     D: Fn(&mut VlqReader) -> Result<T, ReadError>,
     E: Fn(&mut VlqWriter, &T) -> Result<(), WriteError>,
+    F: Fn(&T) -> bool,
 {
     let mut r1 = VlqReader::new(input);
     let v1 = match decode(&mut r1) {
@@ -40,8 +47,8 @@ where
     };
 
     // Re-encode the parsed value. An intentional WriteError (e.g. a name/count
-    // that overflows the single-byte wire field) is allowed — the JVM throws on
-    // the same overflow — so it is not a bug.
+    // that overflows the single-byte wire field, or non-self-delimiting
+    // UnparsedErgoTree propositionBytes) is allowed — not a Rust-only Bug.
     let mut w1 = VlqWriter::new();
     if encode(&mut w1, &v1).is_err() {
         return Outcome::WriteRejected;
@@ -67,6 +74,13 @@ where
             if msg.contains("type recursion depth") {
                 return Outcome::WriteRejected;
             }
+            // Bug #19 (known-bug-catalog): size-delimited soft-fork wrap +
+            // canonical rewrite of subsequent VLQ fields can flip wrap→structural
+            // on re-parse and desync the stream. Scala shares the hazard; the
+            // consensus writers still emit verbatim Unparsed bytes for id-parity.
+            if is_soft_fork_opaque(&v1) {
+                return Outcome::WriteRejected;
+            }
             return Outcome::bug(format!("re-decode of own output failed: {msg}"), &b1);
         }
     };
@@ -86,11 +100,41 @@ where
     Outcome::Accepted
 }
 
+fn tree_is_unparsed(tree: &ergo_ser::ergo_tree::ErgoTree) -> bool {
+    matches!(tree.body, ergo_ser::opcode::Expr::Unparsed(_))
+}
+
+fn box_candidate_is_unparsed(c: &ergo_ser::ergo_box::ErgoBoxCandidate) -> bool {
+    tree_is_unparsed(c.ergo_tree())
+}
+
+fn box_is_unparsed(b: &ergo_ser::ergo_box::ErgoBox) -> bool {
+    box_candidate_is_unparsed(&b.candidate)
+}
+
+fn tx_has_unparsed(tx: &ergo_ser::transaction::Transaction) -> bool {
+    tx.output_candidates.iter().any(box_candidate_is_unparsed)
+}
+
+fn unsigned_tx_has_unparsed(tx: &ergo_ser::transaction::UnsignedTransaction) -> bool {
+    tx.output_candidates.iter().any(box_candidate_is_unparsed)
+}
+
+fn block_txs_have_unparsed(bt: &ergo_ser::block_transactions::BlockTransactions) -> bool {
+    bt.transactions.iter().any(tx_has_unparsed)
+}
+
 macro_rules! rw {
     ($name:literal, $decode:path, $encode:path) => {
         Surface {
             name: $name,
-            run: Box::new(|b| rw_check(b, $decode, $encode)),
+            run: Box::new(|b| rw_check(b, $decode, $encode, |_| false)),
+        }
+    };
+    ($name:literal, $decode:path, $encode:path, soft_fork = $pred:expr) => {
+        Surface {
+            name: $name,
+            run: Box::new(|b| rw_check(b, $decode, $encode, $pred)),
         }
     };
 }
@@ -115,7 +159,8 @@ pub fn registry(only: Option<&str>) -> Vec<Surface> {
         rw!(
             "ergo_tree",
             ergo_tree::read_ergo_tree,
-            ergo_tree::write_ergo_tree
+            ergo_tree::write_ergo_tree,
+            soft_fork = tree_is_unparsed
         ),
         // Eval-rich ErgoTree bodies (the `sigma_expr` generator) are ErgoTree
         // wire bytes, so hermetically they run the SAME read/write fixed-point
@@ -125,34 +170,40 @@ pub fn registry(only: Option<&str>) -> Vec<Surface> {
         rw!(
             "sigma_expr",
             ergo_tree::read_ergo_tree,
-            ergo_tree::write_ergo_tree
+            ergo_tree::write_ergo_tree,
+            soft_fork = tree_is_unparsed
         ),
         rw!(
             "ergo_box_candidate",
             ergo_box::read_ergo_box_candidate,
-            ergo_box::write_ergo_box_candidate
+            ergo_box::write_ergo_box_candidate,
+            soft_fork = box_candidate_is_unparsed
         ),
         rw!(
             "ergo_box",
             ergo_box::read_ergo_box,
-            ergo_box::write_ergo_box
+            ergo_box::write_ergo_box,
+            soft_fork = box_is_unparsed
         ),
         rw!(
             "transaction",
             transaction::read_transaction,
-            transaction::write_transaction
+            transaction::write_transaction,
+            soft_fork = tx_has_unparsed
         ),
         rw!(
             "unsigned_transaction",
             transaction::read_unsigned_transaction,
-            transaction::write_unsigned_transaction
+            transaction::write_unsigned_transaction,
+            soft_fork = unsigned_tx_has_unparsed
         ),
         // Block / header sections.
         rw!("header", header::read_header, header::write_header),
         rw!(
             "block_transactions",
             block_transactions::read_block_transactions,
-            block_transactions::write_block_transactions
+            block_transactions::write_block_transactions,
+            soft_fork = block_txs_have_unparsed
         ),
         rw!(
             "extension",
@@ -196,28 +247,43 @@ pub fn registry(only: Option<&str>) -> Vec<Surface> {
         Surface {
             name: "ad_proofs",
             run: Box::new(|b| {
-                rw_check(b, ad_proofs::read_ad_proofs, |w, v| {
-                    ad_proofs::write_ad_proofs(w, v);
-                    Ok(())
-                })
+                rw_check(
+                    b,
+                    ad_proofs::read_ad_proofs,
+                    |w, v| {
+                        ad_proofs::write_ad_proofs(w, v);
+                        Ok(())
+                    },
+                    |_| false,
+                )
             }),
         },
         Surface {
             name: "token",
             run: Box::new(|b| {
-                rw_check(b, token::read_token, |w, v| {
-                    token::write_token(w, v);
-                    Ok(())
-                })
+                rw_check(
+                    b,
+                    token::read_token,
+                    |w, v| {
+                        token::write_token(w, v);
+                        Ok(())
+                    },
+                    |_| false,
+                )
             }),
         },
         Surface {
             name: "nbits_difficulty",
             run: Box::new(|b| {
-                rw_check(b, difficulty::read_nbits, |w, v| {
-                    difficulty::write_nbits(w, *v);
-                    Ok(())
-                })
+                rw_check(
+                    b,
+                    difficulty::read_nbits,
+                    |w, v| {
+                        difficulty::write_nbits(w, *v);
+                        Ok(())
+                    },
+                    |_| false,
+                )
             }),
         },
         Surface {
@@ -227,6 +293,7 @@ pub fn registry(only: Option<&str>) -> Vec<Surface> {
                     b,
                     |r| autolykos::read_solution(r, 1),
                     autolykos::write_solution,
+                    |_| false,
                 )
             }),
         },
@@ -237,6 +304,7 @@ pub fn registry(only: Option<&str>) -> Vec<Surface> {
                     b,
                     |r| autolykos::read_solution(r, 2),
                     autolykos::write_solution,
+                    |_| false,
                 )
             }),
         },
@@ -364,7 +432,7 @@ mod tests {
     #[test]
     fn rw_check_flags_non_fixed_point() {
         assert!(matches!(
-            rw_check(&[5], decode_u8, encode_drifting),
+            rw_check(&[5], decode_u8, encode_drifting, |_| false),
             Outcome::Bug(_)
         ));
     }
@@ -374,13 +442,34 @@ mod tests {
     #[test]
     fn rw_check_accepts_fixed_point() {
         assert_eq!(
-            rw_check(&[5], decode_u8, encode_identity),
+            rw_check(&[5], decode_u8, encode_identity, |_| false),
             Outcome::Accepted
         );
     }
 
     #[test]
     fn rw_check_rejects_empty_without_bug() {
-        assert_eq!(rw_check(&[], decode_u8, encode_identity), Outcome::Rejected);
+        assert_eq!(
+            rw_check(&[], decode_u8, encode_identity, |_| false),
+            Outcome::Rejected
+        );
+    }
+
+    #[test]
+    fn rw_check_soft_fork_opaque_redecode_is_write_rejected() {
+        fn decode_ok(r: &mut VlqReader) -> Result<u8, ReadError> {
+            r.get_u8()
+        }
+        fn encode_empty(_w: &mut VlqWriter, _v: &u8) -> Result<(), WriteError> {
+            Ok(()) // emits nothing → re-decode UnexpectedEnd
+        }
+        assert_eq!(
+            rw_check(&[5], decode_ok, encode_empty, |_| true),
+            Outcome::WriteRejected
+        );
+        assert!(matches!(
+            rw_check(&[5], decode_ok, encode_empty, |_| false),
+            Outcome::Bug(_)
+        ));
     }
 }

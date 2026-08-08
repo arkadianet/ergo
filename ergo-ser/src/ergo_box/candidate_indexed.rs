@@ -17,7 +17,6 @@ pub fn write_ergo_box_candidate_indexed(
     c: &ErgoBoxCandidate,
     token_id_table: &[TokenId],
 ) -> Result<(), WriteError> {
-    super::reject_opaque_tree_before_box_tail(&c.ergo_tree_bytes)?;
     w.put_u64(c.value);
     w.put_bytes(&c.ergo_tree_bytes);
     w.put_u32(c.creation_height);

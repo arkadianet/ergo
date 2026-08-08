@@ -82,12 +82,14 @@ infrastructure.
   `ergo-api/tests/mining_auth_gate.rs`.
 ### Fixed
 
-- **Nightly fuzz round-trip Bugs.** Empty `UnparsedErgoTree` propositionBytes
-  no longer serialize to `[]` (`WriteError` instead). Size-0 size-delimited
-  trees are refused when writing box candidates (Bug #19 structural advance
-  was eating the following VLQ height). `IrNode` `PartialEq` treats
-  `0x83` boolean-constant `ConcreteCollection` as equal to packed `0x85`
-  `BoolCollection` after Scala-style compaction.
+- **Nightly fuzz round-trip classification (Bug #19).** Non-self-delimiting
+  `UnparsedErgoTree` propositionBytes (empty / mid-VLQ truncations) refuse
+  `write_ergo_tree` (`WriteError` → difftest `WriteRejected`). Soft-fork-opaque
+  box/tx re-decode failures after canonical VLQ rewrite are classified as
+  `WriteRejected` in the hermetic harness — Scala shares that reshape hazard,
+  and consensus box writers still emit preserved tree bytes for id-parity.
+  `IrNode` `PartialEq` treats `0x83` boolean-constant `ConcreteCollection` as
+  equal to packed `0x85` `BoolCollection` after Scala-style compaction.
 
 
 
