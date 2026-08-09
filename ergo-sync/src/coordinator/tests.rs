@@ -802,6 +802,59 @@ fn timed_out_block_modifier_still_penalizes_and_rerequests() {
 }
 
 #[test]
+fn final_hard_timeout_still_penalizes_without_same_tick_rerequest() {
+    // Exhausted hard timeouts must still emit NonDelivery (and retain
+    // type info for body-streak gating) but must NOT be re-requested
+    // in the same check_timeouts pass — fresh Unknown → request happens
+    // on a later scheduling tick.
+    let mut coord = SyncCoordinator::new(0);
+    let mut now = Instant::now();
+    let p1 = peer(9030);
+    let p2 = peer(9031);
+    let header_id = mk(1);
+    let type_id = ModifierTypeId::Header.as_byte();
+
+    // Drive retry_count to MAX_RETRIES - 1 via the delivery tracker
+    // directly (avoids cancel_peer double-counting retries).
+    for _ in 0..(ergo_p2p::delivery::MAX_RETRIES - 1) {
+        assert_eq!(
+            coord
+                .delivery_mut_for_test()
+                .request(p1, type_id, &[header_id], now),
+            vec![header_id]
+        );
+        let later = now + ergo_p2p::delivery::DELIVERY_TIMEOUT + Duration::from_secs(1);
+        let result = coord
+            .delivery_mut_for_test()
+            .check_timeouts_gated(later, None);
+        assert!(result.exhausted.is_empty());
+        now = later + Duration::from_secs(1);
+    }
+
+    assert_eq!(
+        coord
+            .delivery_mut_for_test()
+            .request(p1, type_id, &[header_id], now),
+        vec![header_id]
+    );
+    let later = now + ergo_p2p::delivery::DELIVERY_TIMEOUT + Duration::from_secs(1);
+    let actions = coord.check_timeouts(later, &[p2]);
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::Penalize { peer, penalty: Penalty::NonDelivery } if *peer == p1
+        )),
+        "final exhausted hard timeout must still NonDelivery-penalize; actions={actions:?}"
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::SendToPeer { code: 22, .. })),
+        "exhausted id must not be re-requested in the same timeout pass; actions={actions:?}"
+    );
+}
+
+#[test]
 fn orphan_parent_request_revives_exhausted_header_id() {
     // Scala-parity (2Q): after MAX_RETRIES the modifier returns
     // to Unknown status (not the old permanent-Failed state).

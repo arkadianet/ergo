@@ -96,15 +96,21 @@ pub struct CancelResult {
 /// Result of checking for timed-out deliveries.
 #[derive(Debug)]
 pub struct TimeoutResult {
-    /// (peer, modifier_ids) that can be retried from a different peer.
+    /// Peer-scoped timed-out ids. Includes both re-requestable ids and
+    /// exhausted hard timeouts (so the coordinator can still attribute
+    /// the final NonDelivery penalty). Callers must exclude
+    /// [`Self::exhausted`] from same-tick re-request.
     pub retryable: Vec<(PeerId, Vec<[u8; 32]>)>,
-    /// Modifier IDs that have exceeded MAX_RETRIES and are permanently failed.
+    /// Modifier IDs that have exceeded MAX_RETRIES. Still present in
+    /// [`Self::retryable`] for penalty attribution; not re-requested
+    /// this tick. Status returns to Unknown (Scala parity).
     pub exhausted: Vec<[u8; 32]>,
     /// Timed-out modifier IDs that should attract a NonDelivery penalty
     /// (and retry-count increment). Empty for "soft" timeouts where the
     /// node has received *some* modifier from anywhere since the request
     /// was issued — Scala `checkDelivery` connectivity gate
-    /// (`ri.requestTime < lastModifierGotTime`).
+    /// (`ri.requestTime < lastModifierGotTime`). Includes the final
+    /// exhausted attempt.
     pub penalize: HashSet<[u8; 32]>,
 }
 
@@ -445,15 +451,24 @@ impl DeliveryTracker {
                     let count = self.retry_count.entry(id).or_insert(0);
                     *count += 1;
                     if *count >= MAX_RETRIES {
+                        // Clear retry bookkeeping but keep the
+                        // recently_released type shadow so the
+                        // coordinator can still classify the id
+                        // (header vs body) when emitting the final
+                        // NonDelivery / delivery-streak outcome.
+                        // The id also stays in the peer-scoped
+                        // `retryable` bucket below for that penalty
+                        // pass; the coordinator excludes `exhausted`
+                        // from same-tick re-request. Not inserted
+                        // into `self.failed` — Scala-parity Unknown.
                         self.retry_count.remove(&id);
-                        self.recently_released.remove(&id);
                         exhausted.push(id);
-                        // NOTE: deliberately NOT inserting into
-                        // `self.failed`. Scala-parity: section becomes
-                        // Unknown and is eligible for re-request.
-                        continue;
                     }
                 }
+                // Peer-scoped for both soft re-request and hard
+                // penalty attribution (including the final exhausted
+                // attempt). Exhausted ids are filtered out of
+                // re-request by the coordinator.
                 retryable.entry(peer).or_default().push(id);
             }
         }

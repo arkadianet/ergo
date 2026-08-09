@@ -271,21 +271,31 @@ pub(super) fn handle_sync_tick(state: &mut NodeState) {
             // Step C path: if eligible, send a single-anchor V1 SyncInfo
             // (Scala interprets as `Fork`, returns up to 400 novel IDs).
             // Otherwise fall back to the standard tip-tail payload.
-            if !try_send_anchor_sync_info(state, &peer_id, now) {
+            // Stamp last_sync_sent / dispatch stats only after a real
+            // send — a serialize failure must leave the peer eligible
+            // for the next cadence tick (warn + retry), not burn the
+            // MinSyncInterval / outdated clocks.
+            let sent = if try_send_anchor_sync_info(state, &peer_id, now) {
+                true
+            } else {
                 match ergo_sync::coordinator::build_sync_info_payload(sv, &state.store) {
                     Ok(payload) => {
                         send_to_peer(state, &peer_id, message::CODE_SYNC_INFO, payload);
+                        true
                     }
                     Err(e) => {
-                        warn!(peer = %peer_id, error = %e, "failed to serialize SyncInfo; skipping send")
+                        warn!(peer = %peer_id, error = %e, "failed to serialize SyncInfo; skipping send");
+                        false
                     }
                 }
+            };
+            if sent {
+                state
+                    .coordinator
+                    .sync_state_mut()
+                    .mark_sync_sent(peer_id, now);
+                state.coordinator.note_sync_info_dispatched(peer_id);
             }
-            state
-                .coordinator
-                .sync_state_mut()
-                .mark_sync_sent(peer_id, now);
-            state.coordinator.note_sync_info_dispatched(peer_id);
         }
     }
 

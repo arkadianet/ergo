@@ -226,17 +226,30 @@ fn retry_exhaustion_returns_to_unknown_scala_parity() {
             );
             assert!(result.exhausted.is_empty());
         } else {
+            // Exhausted ids stay in the peer-scoped retryable bucket
+            // so the coordinator can emit the final NonDelivery
+            // penalty; they are also listed in `exhausted` so the
+            // same tick skips re-request.
             assert!(
-                result.retryable.is_empty(),
-                "attempt {attempt}: exhausted means moved out of retry bucket",
+                result
+                    .retryable
+                    .iter()
+                    .any(|(peer, ids)| *peer == p && ids.contains(&id(1))),
+                "attempt {attempt}: exhausted id must remain peer-scoped for penalty",
             );
             assert_eq!(result.exhausted, vec![id(1)]);
+            assert!(
+                result.penalize.contains(&id(1)),
+                "final hard timeout must still be marked for NonDelivery"
+            );
+            // Type shadow retained for body-vs-header classification.
+            assert_eq!(tracker.modifier_type(&id(1)), Some(101));
         }
     }
 
     // After exhaustion, status is Unknown (Scala parity), NOT a
     // permanent "Failed" state. The exhausted return is for
-    // caller logging only.
+    // caller logging + same-tick re-request filtering.
     assert_eq!(tracker.status(&id(1)), ModifierStatus::Unknown);
 
     // Re-requesting after exhaustion succeeds — id is eligible

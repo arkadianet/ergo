@@ -694,8 +694,25 @@ impl SyncCoordinator {
                     });
                 }
             }
-            info!(peer = %failed_peer, count = block_ids.len(), hard = hard_ids.len(), "modifier delivery timed out, retrying with other peers");
-            all_retryable.extend_from_slice(&block_ids);
+            // Same-tick re-request excludes exhausted ids — those have
+            // spent their retry budget. They remain in `retryable` only
+            // so this pass can still emit the final NonDelivery /
+            // delivery-streak outcome (and read modifier_type from the
+            // retained type shadow). Fresh re-request happens later via
+            // the normal Unknown → request_missing_sections path.
+            let rerequest_ids: Vec<[u8; 32]> = block_ids
+                .iter()
+                .copied()
+                .filter(|id| !result.exhausted.contains(id))
+                .collect();
+            info!(
+                peer = %failed_peer,
+                count = block_ids.len(),
+                hard = hard_ids.len(),
+                rerequest = rerequest_ids.len(),
+                "modifier delivery timed out, retrying with other peers"
+            );
+            all_retryable.extend_from_slice(&rerequest_ids);
             failed_peers.push(*failed_peer);
         }
 
