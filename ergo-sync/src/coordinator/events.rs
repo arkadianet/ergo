@@ -33,8 +33,22 @@ impl SyncCoordinator {
     ) -> Vec<Action> {
         let mut actions = Vec::new();
 
-        let (peer_header_ids, peer_headers, peer_height) = match sync_info {
-            SyncInfo::V1 { header_ids } => (header_ids.clone(), Vec::new(), None),
+        // Peer chain status — Scala `ErgoHistory.compare` /
+        // `compareV1` / `compareV2`, plus cumulative-score refinement
+        // when the peer tip is already in our store (Scala's
+        // `// todo: check difficulty?` on the Older branch). Branch on
+        // the SyncInfo variant so empty lists reach each comparator's
+        // Younger rule (rather than an emptiness guard that short-
+        // circuits to Unknown).
+        let (peer_header_ids, peer_headers, peer_height, status) = match sync_info {
+            SyncInfo::V1 { header_ids } => {
+                let ids = header_ids.clone();
+                let status =
+                    ergo_p2p::sync::compare_sync_info_v1(&ids, &chain.best_header_id(), |id| {
+                        chain.has_header(id)
+                    });
+                (ids, Vec::new(), None, status)
+            }
             SyncInfo::V2 { headers } => {
                 // V2 carries raw headers (newest-first). IDs from
                 // blake2b256; tip height from a real header parse when
@@ -45,51 +59,27 @@ impl SyncCoordinator {
                     let mut r = ergo_primitives::reader::VlqReader::new(bytes);
                     ergo_ser::header::read_header(&mut r).ok().map(|h| h.height)
                 });
-                (ids, headers.clone(), tip_height)
+                let tip_id = ids.first().copied().unwrap_or([0u8; 32]);
+                let tip_score = chain.header_score_for(&tip_id);
+                let status = match tip_height {
+                    Some(h) => ergo_p2p::sync::compare_sync_info_v2(
+                        ergo_p2p::sync::SyncInfoV2Compare {
+                            peer_tip_id: tip_id,
+                            peer_height: h,
+                            peer_header_ids: &ids,
+                            our_best_id: chain.best_header_id(),
+                            our_best_height: chain.best_header_height(),
+                            peer_tip_score: tip_score.as_deref(),
+                            our_best_score: &chain.best_header_score(),
+                        },
+                        |id| chain.has_header(id),
+                    ),
+                    // Corrupt / unparseable tip bytes: do not guess
+                    // Equal/Younger/Older from tip-id heuristics.
+                    None => PeerChainStatus::Unknown,
+                };
+                (ids, headers.clone(), tip_height, status)
             }
-        };
-
-        // Peer chain status — Scala `ErgoHistory.compare` /
-        // `compareV1` / `compareV2`, plus cumulative-score refinement
-        // when the peer tip is already in our store (Scala's
-        // `// todo: check difficulty?` on the Older branch).
-        let status = if !peer_header_ids.is_empty() && peer_headers.is_empty() {
-            // V1: ID containment. Tip may be first (Rust newest-first
-            // outbound) or last (Scala oldest-first) — accept either.
-            ergo_p2p::sync::compare_sync_info_v1(&peer_header_ids, &chain.best_header_id(), |id| {
-                chain.has_header(id)
-            })
-        } else if !peer_headers.is_empty() {
-            let tip_id = peer_header_ids.first().copied().unwrap_or([0u8; 32]);
-            let tip_score = chain.header_score_for(&tip_id);
-            match peer_height {
-                Some(h) => ergo_p2p::sync::compare_sync_info_v2(
-                    ergo_p2p::sync::SyncInfoV2Compare {
-                        peer_tip_id: tip_id,
-                        peer_height: h,
-                        peer_header_ids: &peer_header_ids,
-                        our_best_id: chain.best_header_id(),
-                        our_best_height: chain.best_header_height(),
-                        peer_tip_score: tip_score.as_deref(),
-                        our_best_score: &chain.best_header_score(),
-                    },
-                    |id| chain.has_header(id),
-                ),
-                None => {
-                    // Unparseable tip bytes (tests / corrupt): tip-id
-                    // heuristic — Equal / Younger-on-chain / Older.
-                    let our_best = chain.best_header_id();
-                    if tip_id == our_best {
-                        PeerChainStatus::Equal
-                    } else if chain.is_on_best_chain(&tip_id) {
-                        PeerChainStatus::Younger
-                    } else {
-                        PeerChainStatus::Older
-                    }
-                }
-            }
-        } else {
-            PeerChainStatus::Unknown
         };
 
         // Record the per-peer snapshot before dispatching actions.
@@ -397,6 +387,7 @@ impl SyncCoordinator {
         type_id: u8,
         modifier_id: [u8; 32],
         data: Vec<u8>,
+        now: Instant,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
 
@@ -440,7 +431,9 @@ impl SyncCoordinator {
                 // Scala `lastModifierGotTime` — any accepted modifier
                 // (header / body / tx) advances the connectivity clock
                 // used by the NonDelivery gate in `check_timeouts`.
-                self.last_modifier_got_time = Some(Instant::now());
+                // Use the caller-provided `now` so tests (and production
+                // event loops) stay deterministic.
+                self.last_modifier_got_time = Some(now);
                 if delivered_body {
                     actions.push(Action::NoteDeliveryOutcome {
                         peer,

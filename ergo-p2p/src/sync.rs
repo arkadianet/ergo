@@ -79,6 +79,12 @@ pub const MAX_DOWNLOAD_WINDOW_CLAMP: usize = 100_000;
 /// 36_000_000 ms.
 const DEFAULT_HEADER_FRESHNESS_THRESHOLD_MS: u64 = 12_000_000;
 
+/// Receive-side anti-spam floor between inbound SyncInfo from the same
+/// peer. Scala `ErgoNodeViewSynchronizer.PerPeerSyncLockTime = 100` ms —
+/// `processSync` drops arrivals within this window of the previous
+/// accepted inbound SyncInfo.
+pub const PER_PEER_SYNC_LOCK_TIME: Duration = Duration::from_millis(100);
+
 /// Minimum interval between **proactive** SyncInfo sends to the same
 /// peer. Scala `ErgoSyncTracker.MinSyncInterval = 20.seconds`.
 /// Reciprocal replies to inbound SyncInfo intentionally ignore this
@@ -122,6 +128,10 @@ pub struct SyncState {
     /// also stamp this map. Pruned in `forget_peer_sync` on
     /// disconnect to keep the map bounded by live peers.
     last_sync_sent: HashMap<PeerId, Instant>,
+    /// Last time we **accepted** an inbound SyncInfo from each peer.
+    /// Drives the receive-side [`PER_PEER_SYNC_LOCK_TIME`] anti-spam
+    /// floor (Scala `lastSyncGetTime` / `PerPeerSyncLockTime`).
+    last_sync_received: HashMap<PeerId, Instant>,
     /// Minimum interval between **proactive** SyncInfo sends to the
     /// same peer. Defaults to [`MIN_SYNC_INTERVAL`] (20 s). Not to be
     /// confused with Scala's receive-side `PerPeerSyncLockTime`
@@ -197,6 +207,7 @@ impl SyncState {
             best_known_header_height: best_full_block_height,
             best_full_block_height,
             last_sync_sent: HashMap::new(),
+            last_sync_received: HashMap::new(),
             // Proactive per-peer SyncInfo floor (Scala MinSyncInterval).
             // Reciprocal replies bypass this via the coordinator's
             // syncSendNeeded path; do not lower this to "feed the
@@ -341,10 +352,28 @@ impl SyncState {
         self.last_sync_sent.insert(peer, now);
     }
 
-    /// Drop the per-peer SyncInfo timestamp on disconnect so the map
-    /// stays bounded by live peer count. Idempotent.
+    /// Admit an inbound SyncInfo under the receive-side
+    /// [`PER_PEER_SYNC_LOCK_TIME`] floor. Returns `false` (and leaves
+    /// the floor unchanged) when the peer is still within the window of
+    /// their last accepted inbound SyncInfo — callers should drop the
+    /// message without running classification / reciprocal reply.
+    /// On accept, stamps `last_sync_received` so Older/Fork ping-pong
+    /// cannot run at transport speed.
+    pub fn try_accept_inbound_sync(&mut self, peer: PeerId, now: Instant) -> bool {
+        if let Some(prev) = self.last_sync_received.get(&peer) {
+            if now.duration_since(*prev) <= PER_PEER_SYNC_LOCK_TIME {
+                return false;
+            }
+        }
+        self.last_sync_received.insert(peer, now);
+        true
+    }
+
+    /// Drop the per-peer SyncInfo timestamps on disconnect so the maps
+    /// stay bounded by live peer count. Idempotent.
     pub fn forget_peer_sync(&mut self, peer: &PeerId) {
         self.last_sync_sent.remove(peer);
+        self.last_sync_received.remove(peer);
     }
 
     /// Check if a header's timestamp indicates the header chain is
@@ -499,7 +528,9 @@ pub fn compare_sync_info_v2(
         if let Some(ps) = peer_tip_score {
             return match score_cmp(ps, our_best_score) {
                 std::cmp::Ordering::Greater => PeerChainStatus::Older,
-                std::cmp::Ordering::Equal => PeerChainStatus::Equal,
+                // Equal cumulative score at differing heights is not a
+                // true Equal tip — route through fork resolution.
+                std::cmp::Ordering::Equal => PeerChainStatus::Fork,
                 std::cmp::Ordering::Less => {
                     if peer_header_ids.iter().skip(1).any(&we_contain) {
                         PeerChainStatus::Fork
@@ -757,6 +788,34 @@ mod tests {
             |_| false,
         );
         assert_eq!(status_ahead, PeerChainStatus::Older);
+        // Equal score at differing heights → Fork (not Equal).
+        let status_tie = compare_sync_info_v2(
+            SyncInfoV2Compare {
+                peer_tip_id: tip,
+                peer_height: 200,
+                peer_header_ids: &[tip, mk_id(5)],
+                our_best_id: mk_id(7),
+                our_best_height: 100,
+                peer_tip_score: Some(&[2]),
+                our_best_score: &[2],
+            },
+            |id| *id == mk_id(5),
+        );
+        assert_eq!(status_tie, PeerChainStatus::Fork);
+    }
+
+    #[test]
+    fn inbound_sync_lock_time_gates_accept() {
+        let mut state = SyncState::new(0);
+        let now = Instant::now();
+        let p: PeerId = "127.0.0.1:9030".parse().unwrap();
+        assert!(state.try_accept_inbound_sync(p, now));
+        assert!(!state.try_accept_inbound_sync(p, now + Duration::from_millis(50)));
+        assert!(!state.try_accept_inbound_sync(p, now + PER_PEER_SYNC_LOCK_TIME));
+        assert!(state
+            .try_accept_inbound_sync(p, now + PER_PEER_SYNC_LOCK_TIME + Duration::from_millis(1)));
+        state.forget_peer_sync(&p);
+        assert!(state.try_accept_inbound_sync(p, now + Duration::from_millis(1)));
     }
 
     #[test]

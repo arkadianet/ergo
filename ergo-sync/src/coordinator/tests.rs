@@ -3,7 +3,6 @@ use ergo_p2p::delivery::ModifierStatus;
 use ergo_p2p::message::{self, SyncInfo};
 use ergo_p2p::peer::SyncVersion;
 use ergo_p2p::types::{InvData, ModifierTypeId};
-use ergo_primitives::digest::blake2b256;
 use ergo_ser::modifier_id::ExpectedSections;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -173,8 +172,13 @@ fn on_modifier_received_rejects_spam() {
     let p = peer(9030);
 
     // Receive an unrequested modifier
-    let actions =
-        coord.on_modifier_received(p, ModifierTypeId::Header.as_byte(), mk(99), vec![1, 2, 3]);
+    let actions = coord.on_modifier_received(
+        p,
+        ModifierTypeId::Header.as_byte(),
+        mk(99),
+        vec![1, 2, 3],
+        Instant::now(),
+    );
     assert!(actions.iter().any(|a| matches!(
         a,
         Action::Penalize {
@@ -199,8 +203,13 @@ fn on_modifier_received_accepts_requested() {
     coord.on_inv(p, &inv, &chain, now);
 
     // Now deliver it
-    let actions =
-        coord.on_modifier_received(p, ModifierTypeId::Header.as_byte(), mk(1), vec![10, 20, 30]);
+    let actions = coord.on_modifier_received(
+        p,
+        ModifierTypeId::Header.as_byte(),
+        mk(1),
+        vec![10, 20, 30],
+        now,
+    );
     assert!(actions
         .iter()
         .any(|a| matches!(a, Action::ValidateHeader { .. })));
@@ -225,8 +234,13 @@ fn on_modifier_received_rejects_wire_type_mismatch() {
     coord.on_inv(p, &inv, &chain, now);
 
     // Deliver the same id but claim it's a Header (mismatched type).
-    let actions =
-        coord.on_modifier_received(p, ModifierTypeId::Header.as_byte(), mk(7), vec![1, 2, 3]);
+    let actions = coord.on_modifier_received(
+        p,
+        ModifierTypeId::Header.as_byte(),
+        mk(7),
+        vec![1, 2, 3],
+        now,
+    );
     assert!(
         actions.iter().any(|a| matches!(
             a,
@@ -252,6 +266,7 @@ fn on_modifier_received_rejects_wire_type_mismatch() {
         ModifierTypeId::BlockTransactions.as_byte(),
         mk(7),
         vec![1, 2, 3],
+        Instant::now(),
     );
     assert!(
         !ok.iter().any(|a| matches!(
@@ -292,6 +307,7 @@ fn block_section_accept_records_delivery_success_outcome() {
         ModifierTypeId::BlockTransactions.as_byte(),
         tx_id,
         vec![1],
+        now,
     );
     assert!(
         actions.iter().any(|a| matches!(
@@ -316,8 +332,13 @@ fn header_accept_does_not_record_delivery_outcome() {
         ids: vec![mk(1)],
     };
     coord.on_inv(p, &inv, &chain, now);
-    let actions =
-        coord.on_modifier_received(p, ModifierTypeId::Header.as_byte(), mk(1), vec![10, 20, 30]);
+    let actions = coord.on_modifier_received(
+        p,
+        ModifierTypeId::Header.as_byte(),
+        mk(1),
+        vec![10, 20, 30],
+        now,
+    );
     assert!(
         !actions
             .iter()
@@ -349,6 +370,7 @@ fn mislabeled_header_delivery_does_not_reset_streak() {
         ModifierTypeId::BlockTransactions.as_byte(),
         mk(1),
         vec![10, 20, 30],
+        now,
     );
     assert!(
         !actions
@@ -535,6 +557,7 @@ fn mode_6_on_modifier_received_drops_section_payloads() {
         ModifierTypeId::BlockTransactions.as_byte(),
         mk(1),
         vec![0xAA; 32],
+        Instant::now(),
     );
     assert!(
         !actions
@@ -578,6 +601,7 @@ fn section_arrival_triggers_assembly() {
         ModifierTypeId::BlockTransactions.as_byte(),
         tx_id,
         vec![1],
+        now,
     );
     assert!(!actions
         .iter()
@@ -590,7 +614,7 @@ fn section_arrival_triggers_assembly() {
     };
     coord.on_inv(p, &inv_ext, &chain, now);
     let actions =
-        coord.on_modifier_received(p, ModifierTypeId::Extension.as_byte(), ext_id, vec![2]);
+        coord.on_modifier_received(p, ModifierTypeId::Extension.as_byte(), ext_id, vec![2], now);
     assert!(
         actions
             .iter()
@@ -1110,6 +1134,7 @@ fn section_delivery_ordering_persist_both_before_assemble() {
         ModifierTypeId::BlockTransactions.as_byte(),
         tx_id,
         vec![1],
+        now,
     );
     let tx_persist_idx = after_tx.iter().position(|a| {
         matches!(a,
@@ -1135,7 +1160,7 @@ fn section_delivery_ordering_persist_both_before_assemble() {
     };
     coord.on_inv(p, &inv_ext, &chain, now);
     let after_ext =
-        coord.on_modifier_received(p, ModifierTypeId::Extension.as_byte(), ext_id, vec![2]);
+        coord.on_modifier_received(p, ModifierTypeId::Extension.as_byte(), ext_id, vec![2], now);
     let ext_persist_idx = after_ext.iter().position(|a| {
         matches!(a,
             Action::PersistSection { modifier_id, .. } if *modifier_id == ext_id
@@ -1168,8 +1193,13 @@ fn wrong_peer_modifier_ordering_penalty_before_any_send() {
     let p = peer(9030);
     let mod_id = mk(42);
 
-    let actions =
-        coord.on_modifier_received(p, ModifierTypeId::Header.as_byte(), mod_id, vec![0; 10]);
+    let actions = coord.on_modifier_received(
+        p,
+        ModifierTypeId::Header.as_byte(),
+        mod_id,
+        vec![0; 10],
+        Instant::now(),
+    );
 
     let penalize_idx = actions
         .iter()
@@ -2098,7 +2128,7 @@ fn hol_hedge_win_does_not_failure_mark_the_slow_peer() {
     );
 
     // p_fast wins the race: credited with a success outcome.
-    let win = coord.on_modifier_received(p_fast, tx_type, tx_section, vec![1]);
+    let win = coord.on_modifier_received(p_fast, tx_type, tx_section, vec![1], t0);
     assert!(
         win.iter().any(|a| matches!(
             a,
@@ -2346,24 +2376,52 @@ fn s1_bucketed_vs_old_emit_different_shapes() {
     );
 }
 
-/// Build a fake header byte stream that hashes to the given id.
-/// We don't need a valid Ergo header here — `on_sync_info` only
-/// computes blake2b256 of the bytes as the modifier ID for the
-/// commonPoint check. Returning the id concatenated with itself
-/// gives a stable byte string per id; we store the inverse mapping
-/// (`bytes_to_id`) so test assertions can recover.
+/// Opaque unparseable bytes (blake2b256 is still a stable tip id).
+/// Used only for the Unknown/unparseable-tip path.
 fn fake_header_bytes(id: [u8; 32]) -> Vec<u8> {
-    // Find a 33+ byte input whose blake2b256 equals `id` is hard;
-    // instead, we treat the test's "peer header bytes" as opaque
-    // and pre-register the (computed_id → height) mapping below.
-    // The bytes themselves are anything — we'll compute blake2b256
-    // and use that as the synthetic peer-header ID, then teach the
-    // MockChain that id lives at the chosen height.
     id.to_vec()
 }
 
-fn id_for_bytes(bytes: &[u8]) -> [u8; 32] {
-    *blake2b256(bytes).as_bytes()
+/// Well-formed V2 SyncInfo header bytes at `height`, salted so distinct
+/// peers get distinct tip ids. Classification requires a real parse.
+fn parseable_header_at(height: u32, salt: u8) -> (Vec<u8>, [u8; 32]) {
+    use ergo_primitives::digest::{ADDigest, Digest32, ModifierId};
+    use ergo_primitives::group_element::GroupElement;
+    use ergo_ser::autolykos::AutolykosSolution;
+    use ergo_ser::header::{serialize_header, Header};
+
+    let root = |seed: u8| {
+        let mut b = [0u8; 32];
+        b[..4].copy_from_slice(&height.to_be_bytes());
+        b[4] = salt;
+        b[5] = seed;
+        b
+    };
+    let mut parent = [0u8; 32];
+    parent[0] = salt;
+    let mut state_root_bytes = [0u8; 33];
+    state_root_bytes[0] = salt;
+    let mut nonce = [0xAAu8; 8];
+    nonce[0] = salt;
+    let header = Header {
+        version: 2,
+        parent_id: ModifierId::from_bytes(parent),
+        ad_proofs_root: Digest32::from_bytes(root(0xAD)),
+        state_root: ADDigest::from_bytes(state_root_bytes),
+        transactions_root: Digest32::from_bytes(root(0x77)),
+        timestamp: 1_700_000_000_000 + u64::from(height),
+        n_bits: 0x1d00ffff,
+        height,
+        extension_root: Digest32::from_bytes(root(0xEE)),
+        votes: [0u8; 3],
+        unparsed_bytes: vec![],
+        solution: AutolykosSolution::V2 {
+            pk: GroupElement::from_bytes([0x02; 33]),
+            nonce,
+        },
+    };
+    let (bytes, id) = serialize_header(&header).expect("serialize test header");
+    (bytes, *id.as_bytes())
 }
 
 #[test]
@@ -2372,8 +2430,6 @@ fn on_sync_info_v2_younger_emits_inv_with_continuation_ids() {
     // is at height 105. We expect Inv(Header) with ids for heights
     // 101..=105 (5 entries) sent to the peer.
     let mut chain = MockChain::new(105, 100);
-    let our_tip_id = [42u8; 32];
-    chain.best_header_id = our_tip_id;
     // Set up our chain at heights 100..=105
     let mut our_ids = Vec::new();
     for h in 100u32..=105 {
@@ -2384,19 +2440,14 @@ fn on_sync_info_v2_younger_emits_inv_with_continuation_ids() {
         our_ids.push(id);
     }
     chain.best_header_id = our_ids[5]; // h=105 is our tip
-                                       // Mark h=105 as on best chain (already done by add_best_chain_header)
 
-    // Peer sends V2 SyncInfo with their last header at h=100 on our
-    // best chain. Since blake is one-way, register a synthetic bytes
-    // blob's real id at that height and send those bytes.
-    let peer_bytes = fake_header_bytes([0xABu8; 32]);
-    let synthetic_top_id = id_for_bytes(&peer_bytes);
-    // Re-add the synthetic id at h=100 and remove the one we put there
-    chain.height_to_id.insert(100, synthetic_top_id);
-    chain.id_to_height.insert(synthetic_top_id, 100);
-    chain.best_chain_ids.insert(synthetic_top_id);
-    chain.known_headers.insert(synthetic_top_id);
-    // Now is_on_best_chain(synthetic_top_id) is true and lives at h=100.
+    // Peer sends a parseable V2 tip at h=100; register that tip id on
+    // our best chain so compareV2 classifies Younger.
+    let (peer_bytes, peer_tip_id) = parseable_header_at(100, 0xAB);
+    chain.height_to_id.insert(100, peer_tip_id);
+    chain.id_to_height.insert(peer_tip_id, 100);
+    chain.best_chain_ids.insert(peer_tip_id);
+    chain.known_headers.insert(peer_tip_id);
 
     let mut coord = SyncCoordinator::new(0);
     let p = peer(9030);
@@ -2450,8 +2501,7 @@ fn on_sync_info_v2_younger_emits_inv_with_continuation_ids() {
 fn on_sync_info_v2_equal_no_inv() {
     // Peer's tip == our tip → Equal, no Inv emitted.
     let mut chain = MockChain::new(100, 100);
-    let peer_bytes = fake_header_bytes([0x77u8; 32]);
-    let our_tip_id = id_for_bytes(&peer_bytes);
+    let (peer_bytes, our_tip_id) = parseable_header_at(100, 0x77);
     chain.best_header_id = our_tip_id;
     chain.add_best_chain_header(100, our_tip_id);
 
@@ -2481,11 +2531,10 @@ fn on_sync_info_v2_equal_no_inv() {
 // ----- caught-up-to-peers headers-synced fallback -----
 
 /// A MockChain whose tip == the returned peer bytes' id, so a peer echoing
-/// those bytes classifies as `Equal` (header-id match).
+/// those bytes classifies as `Equal` (header-id + height match).
 fn equal_tip_chain() -> (MockChain, Vec<u8>) {
     let mut chain = MockChain::new(100, 100);
-    let peer_bytes = fake_header_bytes([0x77u8; 32]);
-    let our_tip_id = id_for_bytes(&peer_bytes);
+    let (peer_bytes, our_tip_id) = parseable_header_at(100, 0x77);
     chain.best_header_id = our_tip_id;
     chain.add_best_chain_header(100, our_tip_id);
     (chain, peer_bytes)
@@ -2570,16 +2619,15 @@ fn caught_up_fallback_requires_multiple_equal_peers() {
 
 #[test]
 fn caught_up_fallback_tolerates_a_single_noisy_older_peer() {
-    // The DoS guard: a single peer sending non-overlapping/garbage V2 SyncInfo
-    // is classified Older, but two honest Equal peers outnumber it, so the
-    // fallback still flips (the stall isn't held hostage by one noisy peer).
+    // The DoS guard: a single peer claiming a higher tip is classified
+    // Older, but two honest Equal peers outnumber it, so the fallback
+    // still flips (the stall isn't held hostage by one noisy peer).
     let (chain, peer_bytes) = equal_tip_chain();
     let mut coord = SyncCoordinator::new(0);
     let t0 = Instant::now();
     note_equal_peer(&mut coord, &chain, &peer_bytes, 9030, t0);
     note_equal_peer(&mut coord, &chain, &peer_bytes, 9031, t0);
-    // No-overlap header → on_sync_info's Older default.
-    let older_bytes = fake_header_bytes([0x99u8; 32]);
+    let (older_bytes, _) = parseable_header_at(200, 0x99);
     note_equal_peer(&mut coord, &chain, &older_bytes, 9032, t0);
     assert!(
         coord.try_mark_caught_up_to_peers(t0, chain.best_header_id),
@@ -2597,7 +2645,7 @@ fn caught_up_fallback_blocked_when_older_peers_outnumber_equal() {
     note_equal_peer(&mut coord, &chain, &peer_bytes, 9031, t0);
     // Three peers ahead of us (Older) > two Equal.
     for (i, port) in [9032u16, 9033, 9034].iter().enumerate() {
-        let older_bytes = fake_header_bytes([0x90u8 + i as u8; 32]);
+        let (older_bytes, _) = parseable_header_at(200, 0x90 + i as u8);
         note_equal_peer(&mut coord, &chain, &older_bytes, *port, t0);
     }
     assert!(
@@ -2608,15 +2656,13 @@ fn caught_up_fallback_blocked_when_older_peers_outnumber_equal() {
 
 /// A chain with our tip at height 105 plus a lower header at 100 on our best
 /// chain. A peer echoing the height-105 bytes reads `Equal`; one echoing the
-/// height-100 bytes reads `Younger` (overlaps our chain, newest != our tip).
+/// height-100 bytes reads `Younger` (lower tip height).
 fn tip_chain_with_lower_overlap() -> (MockChain, Vec<u8>, Vec<u8>) {
     let mut chain = MockChain::new(105, 105);
-    let equal_bytes = fake_header_bytes([0x55u8; 32]);
-    let tip_id = id_for_bytes(&equal_bytes);
+    let (equal_bytes, tip_id) = parseable_header_at(105, 0x55);
     chain.best_header_id = tip_id;
     chain.add_best_chain_header(105, tip_id);
-    let younger_bytes = fake_header_bytes([0x44u8; 32]);
-    let younger_id = id_for_bytes(&younger_bytes);
+    let (younger_bytes, younger_id) = parseable_header_at(100, 0x44);
     chain.add_best_chain_header(100, younger_id);
     (chain, equal_bytes, younger_bytes)
 }
@@ -2673,16 +2719,13 @@ fn caught_up_fallback_ignores_stale_observations() {
 }
 
 #[test]
-fn on_sync_info_v2_unknown_peer_falls_through_to_older_path() {
-    // Peer's headers are NOT on our chain (Fork or Unknown). We
-    // shouldn't emit Inv extension; the existing reciprocal-SyncInfo
-    // dance handles catchup.
+fn on_sync_info_v2_unparseable_tip_classifies_unknown() {
+    // Unparseable tip bytes must not guess Equal/Younger/Older.
     let mut chain = MockChain::new(100, 100);
     chain.best_header_id = [42u8; 32];
     chain.add_best_chain_header(100, [42u8; 32]);
 
     let unknown_bytes = fake_header_bytes([0xFFu8; 32]);
-    // Note: id_for_bytes(&unknown_bytes) is NOT on our chain.
 
     let mut coord = SyncCoordinator::new(0);
     let p = peer(9030);
@@ -2696,6 +2739,12 @@ fn on_sync_info_v2_unknown_peer_falls_through_to_older_path() {
         Instant::now(),
     );
 
+    let status = coord
+        .peer_sync_snapshots()
+        .get(&p)
+        .expect("peer snapshot recorded")
+        .status;
+    assert_eq!(status, ergo_p2p::sync::PeerChainStatus::Unknown);
     let inv_count = actions
         .iter()
         .filter(|a| {
@@ -2704,19 +2753,14 @@ fn on_sync_info_v2_unknown_peer_falls_through_to_older_path() {
             )
         })
         .count();
-    assert_eq!(
-        inv_count, 0,
-        "peer with no overlap should fall through to Older path, no Inv extension"
-    );
+    assert_eq!(inv_count, 0, "Unknown must not emit Inv extension");
 }
 
 #[test]
 fn on_sync_info_v2_offchain_tip_with_older_common_classifies_older() {
     // Peer's TIP (newest header) is off our chain, but an OLDER header of
     // theirs IS on our chain (they forked/advanced above a shared ancestor).
-    // Classification keys on the TIP: this is Older (fetch their continuation),
-    // NOT Younger. The old `.any()` logic misread the shared older header as
-    // "peer is behind us" and would have emitted a catch-up Inv.
+    // Classification keys on tip height: peer tip height > ours → Older.
     let mut chain = MockChain::new(105, 105);
     for h in 100u32..=105 {
         let mut id = [0u8; 32];
@@ -2725,16 +2769,14 @@ fn on_sync_info_v2_offchain_tip_with_older_common_classifies_older() {
         chain.add_best_chain_header(h, id);
     }
 
-    // A shared older peer header that maps onto our best chain at h=102.
-    let common_bytes = fake_header_bytes([0xC0u8; 32]);
-    let common_id = id_for_bytes(&common_bytes);
+    let (common_bytes, common_id) = parseable_header_at(102, 0xC0);
     chain.height_to_id.insert(102, common_id);
     chain.id_to_height.insert(common_id, 102);
     chain.best_chain_ids.insert(common_id);
     chain.known_headers.insert(common_id);
 
-    // Peer's tip: off our chain (never inserted into any chain set).
-    let tip_bytes = fake_header_bytes([0xEEu8; 32]);
+    // Peer's tip: higher height, not in our store (no score refine).
+    let (tip_bytes, _) = parseable_header_at(200, 0xEE);
 
     let mut coord = SyncCoordinator::new(0);
     let p = peer(9030);
@@ -2773,12 +2815,11 @@ fn on_sync_info_v2_younger_caps_at_400_ids() {
         chain.add_best_chain_header(h, id);
     }
 
-    let peer_bytes = fake_header_bytes([0x11u8; 32]);
-    let synthetic_top_id = id_for_bytes(&peer_bytes);
-    chain.height_to_id.insert(100, synthetic_top_id);
-    chain.id_to_height.insert(synthetic_top_id, 100);
-    chain.best_chain_ids.insert(synthetic_top_id);
-    chain.known_headers.insert(synthetic_top_id);
+    let (peer_bytes, peer_tip_id) = parseable_header_at(100, 0x11);
+    chain.height_to_id.insert(100, peer_tip_id);
+    chain.id_to_height.insert(peer_tip_id, 100);
+    chain.best_chain_ids.insert(peer_tip_id);
+    chain.known_headers.insert(peer_tip_id);
 
     let mut coord = SyncCoordinator::new(0);
     let p = peer(9030);
@@ -3200,11 +3241,12 @@ fn single_peer_ibd_reciprocal_syncinfo_bypasses_min_interval() {
     // peers_to_sync_with, but reciprocal replies ignore that floor.
     coord.sync_state_mut().mark_sync_sent(p, now);
 
+    let (older_bytes, _) = parseable_header_at(200, 0xFF);
     let actions = coord.on_sync_info(
         p,
         SyncVersion::V2,
         &SyncInfo::V2 {
-            headers: vec![fake_header_bytes([0xFFu8; 32])],
+            headers: vec![older_bytes],
         },
         &chain,
         now + Duration::from_millis(10),
@@ -3238,10 +3280,8 @@ fn timeout_penalizes_when_nothing_received_since_request() {
         .unwrap()
         .as_millis() as u64;
     coord.on_header_validated(p, mk(1), 101, recent_ts, expected, now);
-    // No subsequent accept → last_modifier_got_time stays None (or is
-    // only set if on_header_validated went through on_modifier_received —
-    // it doesn't). Clear any accidental clock.
-    coord.set_last_modifier_got_time_for_test(None);
+    // No subsequent accept → last_modifier_got_time stays None
+    // (on_header_validated does not stamp the connectivity clock).
 
     let later = now + ergo_p2p::delivery::DELIVERY_TIMEOUT + Duration::from_secs(1);
     let actions = coord.check_timeouts(later, &[]);
@@ -3275,8 +3315,21 @@ fn timeout_no_penalty_when_modifier_received_meanwhile() {
         .as_millis() as u64;
     coord.on_header_validated(p, mk(1), 101, recent_ts, expected, now);
 
-    // Connectivity clock advances past the request time.
-    coord.set_last_modifier_got_time_for_test(Some(now + Duration::from_secs(1)));
+    // Connectivity clock advances past the request time via a real accept.
+    let chain = MockChain::new(101, 100);
+    let other = mk(99);
+    let inv = InvData {
+        type_id: ModifierTypeId::Header.as_byte(),
+        ids: vec![other],
+    };
+    coord.on_inv(p, &inv, &chain, now);
+    coord.on_modifier_received(
+        p,
+        ModifierTypeId::Header.as_byte(),
+        other,
+        vec![1],
+        now + Duration::from_secs(1),
+    );
 
     let later = now + ergo_p2p::delivery::DELIVERY_TIMEOUT + Duration::from_secs(1);
     let actions = coord.check_timeouts(later, &[]);

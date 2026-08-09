@@ -442,12 +442,6 @@ impl SyncCoordinator {
         &mut self.delivery
     }
 
-    /// Test-only: set the connectivity clock used by the NonDelivery gate.
-    #[doc(hidden)]
-    pub fn set_last_modifier_got_time_for_test(&mut self, at: Option<std::time::Instant>) {
-        self.last_modifier_got_time = at;
-    }
-
     /// True when any tracked peer is classified `Older` (ahead of us).
     /// Drives the SyncInfo broadcast regime: IBD cadence while seniors
     /// exist, stable cadence once they clear — Scala
