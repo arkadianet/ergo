@@ -881,6 +881,13 @@ async fn run_inner_with_backend(
         anchor_builder_cancel_tx: tokio::sync::watch::channel(false).0,
         anchor_scheduler: AnchorScheduler::new(),
         enable_anchor_scheduler: config.enable_anchor_scheduler,
+        sync_interval: config.sync_interval,
+        sync_interval_stable: config.sync_interval_stable,
+        // Seed in the past so the first SyncInfo fanout is not delayed
+        // by a full IBD interval after boot.
+        last_sync_broadcast: Instant::now()
+            .checked_sub(config.sync_interval)
+            .unwrap_or_else(Instant::now),
         anchor_tip_cursor: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         snapshot_state: super::snapshot_state::SnapshotState::new(),
         snapshot_bootstrap: ergo_sync::snapshot_bootstrap::SnapshotBootstrap::new(),

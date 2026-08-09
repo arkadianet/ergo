@@ -133,6 +133,12 @@ pub struct NodeConfig {
     pub ibd_flush_interval: u32,
     /// Download window size in blocks (Sync-S3 default 384).
     pub download_window: usize,
+    /// Global SyncInfo broadcast cadence while in IBD.
+    /// Default [`ergo_p2p::sync::DEFAULT_SYNC_INTERVAL`] (5 s).
+    pub sync_interval: std::time::Duration,
+    /// Global SyncInfo broadcast cadence once stable (headers caught up).
+    /// Default [`ergo_p2p::sync::DEFAULT_SYNC_INTERVAL_STABLE`] (15 s).
+    pub sync_interval_stable: std::time::Duration,
     /// redb + AVL arena page cache, in bytes. None → use store default.
     pub cache_bytes: Option<usize>,
     /// Script-validation checkpoint: blocks at or below this height skip

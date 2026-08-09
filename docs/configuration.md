@@ -98,6 +98,8 @@ the fast clean-database boot path.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `download_window` | usize | `384` | Number of blocks ahead of the validated tip to keep pending for section download. Must be at least 1 and no greater than 100000. |
+| `sync_interval_secs` | u64 | `5` | Global SyncInfo broadcast cadence while in IBD (Scala `scorex.network.syncInterval`). Distinct from the per-peer 20 s `MinSyncInterval` floor and from reciprocal SyncInfo replies. |
+| `sync_interval_stable_secs` | u64 | `15` | Global SyncInfo broadcast cadence once headers are caught up (Scala mainnet `syncIntervalStable`). |
 | `enable_anchor_scheduler` | bool | `false` | Opt-in: dispatch single-anchor `SyncInfo` to REST-capable peers from the anchor map instead of the local recent-header tail. Enable only once the anchor map is observed healthy. |
 
 ## `[store]`

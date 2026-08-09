@@ -2,11 +2,32 @@
 //!
 //! Provides `PeerChainStatus`, the `SyncState` download-window
 //! tracker, and a height-based chain comparison function. The full
-//! sync coordinator (cumulative-difficulty fork choice, continuation
-//! header application from `SyncInfoV2`, sync action emission, and
-//! integration with header validation + `ergo-state`) lives in
-//! `ergo-sync`; this module only carries the per-peer state surface
-//! the coordinator drives.
+//! sync coordinator (continuation header application from
+//! `SyncInfoV2`, sync action emission, peer-subset SyncInfo
+//! selection, and integration with header validation + `ergo-state`)
+//! lives in `ergo-sync`; this module only carries the per-peer state
+//! surface the coordinator drives.
+//!
+//! # SyncInfo send cadence (Scala parity)
+//!
+//! Scala's proactive SyncInfo fanout is **not** 100 ms. The 100 ms
+//! constant `PerPeerSyncLockTime` in `ErgoNodeViewSynchronizer` is a
+//! **receive-side** anti-spam filter (`processSync` drops inbound
+//! SyncInfo arriving within 100 ms of the previous one). The real
+//! send-side knobs are:
+//!
+//! * [`MIN_SYNC_INTERVAL`] (20 s) — per-peer floor between proactive
+//!   SyncInfo sends (`ErgoSyncTracker.MinSyncInterval`)
+//! * [`SYNC_THRESHOLD`] (1 min) — peers whose last send is older are
+//!   "outdated" and get priority in `peersToSyncWith`
+//! * [`CLEAR_THRESHOLD`] (3 min) — stalled peer statuses reset to
+//!   `Unknown`
+//! * Global tick: [`DEFAULT_SYNC_INTERVAL`] (5 s IBD) /
+//!   [`DEFAULT_SYNC_INTERVAL_STABLE`] (15 s) from `application.conf`
+//!
+//! Reciprocal SyncInfo replies to inbound SyncInfo (and the
+//! post-header-progress kick) bypass the 20 s floor — that pull-model
+//! response path is what keeps a 1–2 peer IBD pipeline fed.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -58,6 +79,31 @@ pub const MAX_DOWNLOAD_WINDOW_CLAMP: usize = 100_000;
 /// 36_000_000 ms.
 const DEFAULT_HEADER_FRESHNESS_THRESHOLD_MS: u64 = 12_000_000;
 
+/// Minimum interval between **proactive** SyncInfo sends to the same
+/// peer. Scala `ErgoSyncTracker.MinSyncInterval = 20.seconds`.
+/// Reciprocal replies to inbound SyncInfo intentionally ignore this
+/// floor (see module docs).
+pub const MIN_SYNC_INTERVAL: Duration = Duration::from_secs(20);
+
+/// A peer whose last SyncInfo send is older than this is "outdated"
+/// and is preferred by `peersToSyncWith`. Scala
+/// `ErgoSyncTracker.SyncThreshold = 1.minute`.
+pub const SYNC_THRESHOLD: Duration = Duration::from_secs(60);
+
+/// After this much silence since the last SyncInfo **send**, the
+/// peer's chain status is cleared back to `Unknown`. Scala
+/// `ErgoSyncTracker.ClearThreshold = 3.minutes`.
+pub const CLEAR_THRESHOLD: Duration = Duration::from_secs(180);
+
+/// Default global SyncInfo broadcast cadence while in IBD. Scala
+/// `application.conf` `scorex.network.syncInterval = 5s`.
+pub const DEFAULT_SYNC_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Default global SyncInfo broadcast cadence once synced (stable
+/// regime). Scala mainnet `syncIntervalStable = 15s` (testnet uses
+/// 30s; we expose the knob under `[sync]` so operators can match).
+pub const DEFAULT_SYNC_INTERVAL_STABLE: Duration = Duration::from_secs(15);
+
 /// Sync state for header-first sync.
 #[derive(Debug)]
 pub struct SyncState {
@@ -69,17 +115,17 @@ pub struct SyncState {
     /// Our best validated full block height (from the state store).
     best_full_block_height: u32,
     /// Last time we sent a SyncInfo message to each peer, keyed by
-    /// PeerId. Per-peer timer (not global) so the broadcast loop can
-    /// keep every peer's Inv pump primed independently — without it,
-    /// a single global throttle leaves most peers silent and the
-    /// header request fanout collapses to ~1-2 active peers per
-    /// sync_interval window. Pruned in `forget_peer_sync` on
+    /// PeerId. Drives the per-peer [`MIN_SYNC_INTERVAL`] floor for
+    /// proactive fanout and the [`SYNC_THRESHOLD`] /
+    /// [`CLEAR_THRESHOLD`] aging used by subset selection. Reciprocal
+    /// SyncInfo replies (inbound SyncInfo / post-header-progress)
+    /// also stamp this map. Pruned in `forget_peer_sync` on
     /// disconnect to keep the map bounded by live peers.
     last_sync_sent: HashMap<PeerId, Instant>,
-    /// Minimum interval between SyncInfo messages to the same peer.
-    /// Set to 100ms to feed Invs from many peers per sync_tick —
-    /// equal to Scala's per-peer debounce (`PerPeerSyncLockTime`),
-    /// so reference-node peers accept the cadence without penalty.
+    /// Minimum interval between **proactive** SyncInfo sends to the
+    /// same peer. Defaults to [`MIN_SYNC_INTERVAL`] (20 s). Not to be
+    /// confused with Scala's receive-side `PerPeerSyncLockTime`
+    /// (100 ms anti-spam filter on inbound SyncInfo).
     sync_interval: Duration,
     /// Whether the header chain is synced with the network.
     /// Block section downloads only begin after this flips to true.
@@ -151,14 +197,12 @@ impl SyncState {
             best_known_header_height: best_full_block_height,
             best_full_block_height,
             last_sync_sent: HashMap::new(),
-            // Per-peer SyncInfo cadence. 100ms dispatches at
-            // Scala's PerPeerSyncLockTime floor so the peer-side
-            // `continuationIdsV1` index lookup is invoked up to 10× per
-            // second per peer. Each invocation produces a 400-ID Inv at
-            // trivial peer-side cost (~12.8 KB), so 60 peers × 10
-            // Invs/sec = 240k discovered IDs/sec — the upper-bound
-            // pipeline width before byte download.
-            sync_interval: Duration::from_millis(100),
+            // Proactive per-peer SyncInfo floor (Scala MinSyncInterval).
+            // Reciprocal replies bypass this via the coordinator's
+            // syncSendNeeded path; do not lower this to "feed the
+            // pipeline" — that starves other peers with broadcast spam
+            // and misattributes Scala's receive-side 100 ms filter.
+            sync_interval: MIN_SYNC_INTERVAL,
             headers_chain_synced: false,
             download_window: download_window.clamp(1, MAX_DOWNLOAD_WINDOW_CLAMP),
             header_freshness_threshold_ms,
@@ -250,14 +294,46 @@ impl SyncState {
         self.best_known_header_height > self.best_full_block_height + 10
     }
 
-    /// Whether we should send a SyncInfo message to `peer` now
-    /// (respects per-peer interval). True if we've never asked this
-    /// peer or if `sync_interval` has elapsed since the last send.
+    /// Whether a **proactive** SyncInfo send to `peer` is allowed now
+    /// under [`MIN_SYNC_INTERVAL`]. True if we've never asked this peer
+    /// or if `sync_interval` has elapsed since the last send.
+    ///
+    /// Reciprocal replies to inbound SyncInfo must **not** consult this
+    /// — Scala's `sendSyncToPeer` stamps `lastSyncSentTime` but does not
+    /// gate on `MinSyncInterval` (only `peersToSyncWith` does).
     pub fn should_send_sync(&self, peer: PeerId, now: Instant) -> bool {
         match self.last_sync_sent.get(&peer) {
             Some(t) => now.duration_since(*t) >= self.sync_interval,
             None => true,
         }
+    }
+
+    /// True when we have never sent SyncInfo to `peer`, or the last
+    /// send is older than [`SYNC_THRESHOLD`]. Scala
+    /// `ErgoSyncTracker.notSyncedOrOutdated`.
+    pub fn not_synced_or_outdated(&self, peer: PeerId, now: Instant) -> bool {
+        match self.last_sync_sent.get(&peer) {
+            None => true,
+            Some(t) => now.duration_since(*t) > SYNC_THRESHOLD,
+        }
+    }
+
+    /// True when the last SyncInfo send to `peer` is older than
+    /// [`SYNC_THRESHOLD`]. Peers never contacted are **not** outdated
+    /// (they are simply unknown) — matches Scala `outdatedPeers`.
+    pub fn is_outdated(&self, peer: PeerId, now: Instant) -> bool {
+        self.last_sync_sent
+            .get(&peer)
+            .is_some_and(|t| now.duration_since(*t) > SYNC_THRESHOLD)
+    }
+
+    /// True when the last SyncInfo send to `peer` is older than
+    /// [`CLEAR_THRESHOLD`]. Used to reset stalled chain-status entries
+    /// back to `Unknown` (Scala `clearOldStatuses`).
+    pub fn status_clear_due(&self, peer: PeerId, now: Instant) -> bool {
+        self.last_sync_sent
+            .get(&peer)
+            .is_some_and(|t| now.duration_since(*t) > CLEAR_THRESHOLD)
     }
 
     /// Record that we sent a SyncInfo message to `peer`.
@@ -323,17 +399,17 @@ impl SyncState {
 
 /// Preliminary comparison of a peer's SyncInfo headers against our chain.
 ///
-/// **Limitation**: this uses header height for Older/Fork classification,
-/// NOT cumulative difficulty. Ergo's fork choice rule is heaviest chain
-/// by cumulative difficulty, not tallest. A proper fork-choice decision
-/// requires `cumulative_score` from the store, which the sync
-/// coordinator in `ergo-sync` consults; this preliminary classifier is
-/// only used for the initial Equal/Younger/Unknown decision.
+/// **Limitation (deferred)**: Older/Fork classification is height-based
+/// here, not cumulative-difficulty. Ergo's fork choice
+/// (`ErgoHistory.compare` / `org.ergoplatform.consensus`) picks the
+/// heaviest chain by cumulative score. Threading `best_header_score`
+/// through `ChainView` and this comparator is deferred to a follow-up —
+/// it needs store plumbing beyond the Tier-1 scheduling/penalty work.
+/// Until then the Older vs Fork distinction remains approximate;
+/// Equal/Younger/Unknown classification from tip-on-chain checks is
+/// still sound.
 ///
-/// This function is sufficient for initial sync status classification
-/// (Equal/Younger/Unknown) and for detecting that a peer has headers we
-/// don't. The Older vs Fork distinction is approximate until cumulative
-/// difficulty is consulted.
+/// TODO(p2p-parity): cumulative-difficulty compare via ChainView score.
 ///
 /// `our_chain_contains` returns true if we have a header ID on our best chain.
 /// `our_best_height` is our best header height.
@@ -524,11 +600,11 @@ mod tests {
         // Marking p1 must not affect p2's timer — that's the whole
         // point of the per-peer split.
         state.mark_sync_sent(p1, now);
-        assert!(!state.should_send_sync(p1, now + Duration::from_millis(50)));
+        assert!(!state.should_send_sync(p1, now + Duration::from_secs(10)));
         assert!(state.should_send_sync(p2, now));
 
-        // Same peer is eligible again after sync_interval (100ms).
-        assert!(state.should_send_sync(p1, now + Duration::from_millis(150)));
+        // Same peer is eligible again after MinSyncInterval (20s).
+        assert!(state.should_send_sync(p1, now + MIN_SYNC_INTERVAL));
     }
 
     #[test]
@@ -538,9 +614,29 @@ mod tests {
         let p: PeerId = "127.0.0.1:9030".parse().unwrap();
 
         state.mark_sync_sent(p, now);
-        assert!(!state.should_send_sync(p, now + Duration::from_millis(50)));
+        assert!(!state.should_send_sync(p, now + Duration::from_secs(1)));
 
         state.forget_peer_sync(&p);
-        assert!(state.should_send_sync(p, now + Duration::from_millis(50)));
+        assert!(state.should_send_sync(p, now + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn outdated_and_clear_thresholds() {
+        let mut state = SyncState::new(0);
+        let now = Instant::now();
+        let p: PeerId = "127.0.0.1:9030".parse().unwrap();
+
+        // Never contacted: not-synced, but not "outdated" (no send yet).
+        assert!(state.not_synced_or_outdated(p, now));
+        assert!(!state.is_outdated(p, now));
+        assert!(!state.status_clear_due(p, now));
+
+        state.mark_sync_sent(p, now);
+        assert!(!state.not_synced_or_outdated(p, now + Duration::from_secs(30)));
+        assert!(!state.is_outdated(p, now + Duration::from_secs(30)));
+
+        assert!(state.is_outdated(p, now + SYNC_THRESHOLD + Duration::from_secs(1)));
+        assert!(state.not_synced_or_outdated(p, now + SYNC_THRESHOLD + Duration::from_secs(1)));
+        assert!(state.status_clear_due(p, now + CLEAR_THRESHOLD + Duration::from_secs(1)));
     }
 }

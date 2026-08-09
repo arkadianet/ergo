@@ -62,15 +62,13 @@ pub(super) async fn action_loop(
     // original 30s cadence once the deficit is small (see
     // `DIAL_SLOW_PERIOD`).
     let mut dial_tick = tokio::time::interval(Duration::from_secs(5));
-    // Outer cadence for `handle_sync_tick`: dispatch SyncInfo, run
-    // delivery-timeout checks, advance block apply, refresh missing-
-    // section requests, emit the [sync] heartbeat. 1s is the
-    // empirical sweet spot — both 500ms and 250ms attempts dropped
-    // sustained throughput by fragmenting per-batch coalescing. The
-    // per-peer Lever 1 throttle (250ms) plus immediate-after-Modifier
-    // dispatch handle per-peer reactivity; the outer tick exists for
-    // periodic catch-up of unresponsive peers and unconditional
-    // heartbeat emission.
+    // Outer cadence for `handle_sync_tick`: delivery-timeout checks,
+    // block apply, missing-section refresh, heartbeat. 1s is the
+    // empirical sweet spot for those. Proactive SyncInfo fanout inside
+    // the tick is separately gated by `[sync] sync_interval_secs` /
+    // `sync_interval_stable_secs` (Scala 5s/15s) and `peersToSyncWith`
+    // subset selection; reciprocal SyncInfo replies keep single-peer
+    // IBD fed off this timer.
     let mut sync_tick = tokio::time::interval(Duration::from_secs(1));
     let mut mempool_tick = tokio::time::interval(Duration::from_millis(mempool_tick_ms));
     // Memory observability: enabled by `ERGO_MEM_CSV=<path>`. When

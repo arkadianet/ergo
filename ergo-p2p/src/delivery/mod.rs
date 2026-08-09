@@ -9,7 +9,9 @@
 //!   lower (large blocks / slow links need headroom, and an over-tight
 //!   timeout causes false timeouts -> wasted re-requests + spurious
 //!   NonDelivery penalties / body-streak increments).
-//! - On timeout: NonDelivery penalty, reassign to different peer
+//! - On timeout: NonDelivery penalty **only when** no modifier has been
+//!   accepted anywhere since the request (`requested_at >=
+//!   last_modifier_got_time`); otherwise soft re-request. Then reassign.
 //! - On duplicate delivery: ignore, no penalty
 //! - On partial delivery: accept what arrived, re-request remainder
 //! - Max in-flight requests per peer: 1200 (see [`MAX_IN_FLIGHT_PER_PEER`],
@@ -98,6 +100,12 @@ pub struct TimeoutResult {
     pub retryable: Vec<(PeerId, Vec<[u8; 32]>)>,
     /// Modifier IDs that have exceeded MAX_RETRIES and are permanently failed.
     pub exhausted: Vec<[u8; 32]>,
+    /// Timed-out modifier IDs that should attract a NonDelivery penalty
+    /// (and retry-count increment). Empty for "soft" timeouts where the
+    /// node has received *some* modifier from anywhere since the request
+    /// was issued — Scala `checkDelivery` connectivity gate
+    /// (`ri.requestTime < lastModifierGotTime`).
+    pub penalize: HashSet<[u8; 32]>,
 }
 
 /// A single in-flight request.
@@ -353,13 +361,36 @@ impl DeliveryTracker {
     /// Check for timed-out requests. Returns a `TimeoutResult` with:
     /// - `retryable`: (peer, ids) that can be re-requested from a different peer
     /// - `exhausted`: ids that have exceeded MAX_RETRIES (marked as Failed)
+    /// - `penalize`: ids whose timeout should attract NonDelivery
+    ///
+    /// `last_modifier_got_time` gates retry-count increments and the
+    /// `penalize` set (Scala `checkDelivery`,
+    /// ErgoNodeViewSynchronizer.scala:1258-1264): when the node has
+    /// accepted any modifier *after* the request was issued
+    /// (`requested_at < last_got`), the slow peer is re-requested
+    /// without a penalty or retry bump — connectivity is demonstrably
+    /// fine elsewhere. Pass `None` when no modifier has ever been
+    /// accepted (every timeout penalizes).
     pub fn check_timeouts(&mut self, now: Instant) -> TimeoutResult {
-        let mut by_peer: HashMap<PeerId, Vec<[u8; 32]>> = HashMap::new();
+        self.check_timeouts_gated(now, None)
+    }
+
+    /// Gated variant of [`Self::check_timeouts`]. See that method for
+    /// the `last_modifier_got_time` semantics.
+    pub fn check_timeouts_gated(
+        &mut self,
+        now: Instant,
+        last_modifier_got_time: Option<Instant>,
+    ) -> TimeoutResult {
+        let mut by_peer: HashMap<PeerId, Vec<([u8; 32], Instant)>> = HashMap::new();
         let mut to_remove = Vec::new();
 
         for (id, req) in &self.inflight {
             if now.duration_since(req.requested_at) > DELIVERY_TIMEOUT {
-                by_peer.entry(req.peer).or_default().push(*id);
+                by_peer
+                    .entry(req.peer)
+                    .or_default()
+                    .push((*id, req.requested_at));
                 to_remove.push(*id);
             }
         }
@@ -379,7 +410,8 @@ impl DeliveryTracker {
             }
         }
 
-        // Increment retry counts and partition into retryable vs exhausted.
+        // Increment retry counts (when penalizing) and partition into
+        // retryable vs exhausted.
         //
         // Scala parity (CheckDelivery handler in
         // ErgoNodeViewSynchronizer.scala:1278-1289): when
@@ -398,21 +430,31 @@ impl DeliveryTracker {
         // workaround.
         let mut retryable: HashMap<PeerId, Vec<[u8; 32]>> = HashMap::new();
         let mut exhausted = Vec::new();
+        let mut penalize = HashSet::new();
 
         for (peer, ids) in by_peer {
-            for id in ids {
-                let count = self.retry_count.entry(id).or_insert(0);
-                *count += 1;
-                if *count >= MAX_RETRIES {
-                    self.retry_count.remove(&id);
-                    self.recently_released.remove(&id);
-                    exhausted.push(id);
-                    // NOTE: deliberately NOT inserting into
-                    // `self.failed`. Scala-parity: section becomes
-                    // Unknown and is eligible for re-request.
-                } else {
-                    retryable.entry(peer).or_default().push(id);
+            for (id, requested_at) in ids {
+                // Scala: `ri.requestTime < lastModifierGotTime` → soft
+                // (no penalty, checks unchanged). Otherwise hard.
+                let hard = match last_modifier_got_time {
+                    None => true,
+                    Some(last_got) => requested_at >= last_got,
+                };
+                if hard {
+                    penalize.insert(id);
+                    let count = self.retry_count.entry(id).or_insert(0);
+                    *count += 1;
+                    if *count >= MAX_RETRIES {
+                        self.retry_count.remove(&id);
+                        self.recently_released.remove(&id);
+                        exhausted.push(id);
+                        // NOTE: deliberately NOT inserting into
+                        // `self.failed`. Scala-parity: section becomes
+                        // Unknown and is eligible for re-request.
+                        continue;
+                    }
                 }
+                retryable.entry(peer).or_default().push(id);
             }
         }
 
@@ -426,6 +468,7 @@ impl DeliveryTracker {
         TimeoutResult {
             retryable: retryable.into_iter().collect(),
             exhausted,
+            penalize,
         }
     }
 

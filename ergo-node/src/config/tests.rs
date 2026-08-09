@@ -89,8 +89,12 @@ fn sync_section_missing_uses_defaults() {
 
 #[test]
 fn sync_section_parses_explicit_values() {
-    let cfg = parse("[sync]\ndownload_window = 64\n");
+    let cfg = parse(
+        "[sync]\ndownload_window = 64\nsync_interval_secs = 7\nsync_interval_stable_secs = 21\n",
+    );
     assert_eq!(cfg.sync.download_window, Some(64));
+    assert_eq!(cfg.sync.sync_interval_secs, Some(7));
+    assert_eq!(cfg.sync.sync_interval_stable_secs, Some(21));
 }
 
 #[test]
@@ -123,6 +127,11 @@ fn load_default_download_window_is_p2p_default() {
     let cli = minimal_cli(Some(&toml));
     let cfg = NodeConfig::load(cli).expect("load");
     assert_eq!(cfg.download_window, ergo_p2p::sync::DOWNLOAD_WINDOW);
+    assert_eq!(cfg.sync_interval, ergo_p2p::sync::DEFAULT_SYNC_INTERVAL);
+    assert_eq!(
+        cfg.sync_interval_stable,
+        ergo_p2p::sync::DEFAULT_SYNC_INTERVAL_STABLE
+    );
 }
 
 #[test]

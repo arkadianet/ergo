@@ -22,9 +22,9 @@ use crate::anchor_map::ANCHOR_INTERVAL;
 
 /// Maximum age of an outstanding `(peer, anchor_height)` claim before
 /// the scheduler reclaims the slot. Per design constants. Effective
-/// dispatch cadence per peer is `max(per-peer-throttle, sync_tick) =
-/// max(1s, 3s) = 3s`, so a peer assigned an anchor has roughly 3
-/// dispatch opportunities to deliver before the slot is reclaimed.
+/// proactive SyncInfo cadence is the global IBD/stable interval (5s/15s)
+/// gated by MinSyncInterval (20s); reciprocal replies still give an
+/// assigned peer additional chances to deliver before reclaim.
 pub const ANCHOR_REASSIGN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Defense-in-depth cap: never assign an anchor whose 400-ID response

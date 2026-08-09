@@ -367,6 +367,14 @@ pub(super) struct TomlSync {
     /// Blocks ahead of validated tip to keep pending download. See
     /// [`ergo_p2p::sync::DOWNLOAD_WINDOW`] for the default.
     pub(super) download_window: Option<usize>,
+    /// Global SyncInfo broadcast cadence while in IBD, in seconds.
+    /// Scala `scorex.network.syncInterval` (default 5). See
+    /// [`ergo_p2p::sync::DEFAULT_SYNC_INTERVAL`].
+    pub(super) sync_interval_secs: Option<u64>,
+    /// Global SyncInfo broadcast cadence once headers are caught up,
+    /// in seconds. Scala mainnet `syncIntervalStable` (default 15).
+    /// See [`ergo_p2p::sync::DEFAULT_SYNC_INTERVAL_STABLE`].
+    pub(super) sync_interval_stable_secs: Option<u64>,
     /// Step C feature flag — when `true`, the per-peer SyncInfo
     /// dispatch crafts a single-anchor `lastHeaderIds` from the
     /// REST-built anchor map for REST-capable peers (instead of our

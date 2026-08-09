@@ -2987,3 +2987,230 @@ fn on_header_validated_accumulates_first_deliverer_and_drains_once() {
         "take_first_deliverers must drain (mem::take) the buffer",
     );
 }
+
+// ----- Tier-1 P2P parity: sync subset selection + conditional NonDelivery -----
+
+fn seed_peer_status(
+    coord: &mut SyncCoordinator,
+    p: PeerId,
+    status: ergo_p2p::sync::PeerChainStatus,
+    now: Instant,
+) {
+    coord.peer_sync.insert(
+        p,
+        PeerSyncSnapshot {
+            status,
+            peer_height: Some(100),
+            observed_at: now,
+            observed_best_header_id: [0u8; 32],
+        },
+    );
+}
+
+#[test]
+fn peers_to_sync_with_prefers_outdated() {
+    // Scala peersToSyncWith: when any peer is outdated (> SyncThreshold),
+    // sync with those only — Equal/Younger/etc. that are fresh are skipped.
+    let mut coord = SyncCoordinator::new(0);
+    let now = Instant::now();
+    let outdated = peer(9030);
+    let fresh_equal = peer(9031);
+    seed_peer_status(
+        &mut coord,
+        outdated,
+        ergo_p2p::sync::PeerChainStatus::Equal,
+        now,
+    );
+    seed_peer_status(
+        &mut coord,
+        fresh_equal,
+        ergo_p2p::sync::PeerChainStatus::Equal,
+        now,
+    );
+    // Outdated = last send older than SYNC_THRESHOLD.
+    coord.sync_state_mut().mark_sync_sent(
+        outdated,
+        now.checked_sub(ergo_p2p::sync::SYNC_THRESHOLD + Duration::from_secs(1))
+            .expect("test clock far enough from boot"),
+    );
+    coord.sync_state_mut().mark_sync_sent(fresh_equal, now);
+
+    let selected = coord.peers_to_sync_with(&[outdated, fresh_equal], now, 0);
+    assert_eq!(selected, vec![outdated]);
+}
+
+#[test]
+fn peers_to_sync_with_unknown_one_older_all_fork() {
+    // Non-outdated branch: Unknown + one random Older + all Fork,
+    // filtered by MinSyncInterval.
+    let mut coord = SyncCoordinator::new(0);
+    let now = Instant::now();
+    let unknown = peer(9030);
+    let older_a = peer(9031);
+    let older_b = peer(9032);
+    let fork = peer(9033);
+    let equal = peer(9034);
+    seed_peer_status(
+        &mut coord,
+        unknown,
+        ergo_p2p::sync::PeerChainStatus::Unknown,
+        now,
+    );
+    seed_peer_status(
+        &mut coord,
+        older_a,
+        ergo_p2p::sync::PeerChainStatus::Older,
+        now,
+    );
+    seed_peer_status(
+        &mut coord,
+        older_b,
+        ergo_p2p::sync::PeerChainStatus::Older,
+        now,
+    );
+    seed_peer_status(&mut coord, fork, ergo_p2p::sync::PeerChainStatus::Fork, now);
+    seed_peer_status(
+        &mut coord,
+        equal,
+        ergo_p2p::sync::PeerChainStatus::Equal,
+        now,
+    );
+
+    let connected = vec![unknown, older_a, older_b, fork, equal];
+    // seed=0 → first Older in sorted order (older_a < older_b by port).
+    let selected = coord.peers_to_sync_with(&connected, now, 0);
+    assert!(selected.contains(&unknown), "Unknown must be selected");
+    assert!(selected.contains(&fork), "Fork must be selected");
+    assert!(
+        selected.contains(&older_a) && !selected.contains(&older_b),
+        "exactly one Older (seed 0 → older_a); got {selected:?}"
+    );
+    assert!(!selected.contains(&equal), "Equal must not be selected");
+
+    // MinSyncInterval filter: after a recent send, that peer drops out.
+    coord.sync_state_mut().mark_sync_sent(unknown, now);
+    let selected2 = coord.peers_to_sync_with(&connected, now + Duration::from_secs(1), 0);
+    assert!(
+        !selected2.contains(&unknown),
+        "peer within MinSyncInterval must be filtered out"
+    );
+}
+
+#[test]
+fn single_peer_ibd_reciprocal_syncinfo_bypasses_min_interval() {
+    // Single-peer IBD progress depends on reciprocal SyncInfo replies
+    // (Scala sendSyncToPeer from processSync), which must NOT be gated
+    // by MinSyncInterval. After we just sent SyncInfo, an inbound Older
+    // SyncInfo must still elicit our reply.
+    let mut chain = MockChain::new(100, 100);
+    chain.best_header_id = [42u8; 32];
+    chain.add_best_chain_header(100, [42u8; 32]);
+
+    let mut coord = SyncCoordinator::new(0);
+    let p = peer(9030);
+    let now = Instant::now();
+    // Simulate a proactive send just now — MinSyncInterval would block
+    // peers_to_sync_with, but reciprocal replies ignore that floor.
+    coord.sync_state_mut().mark_sync_sent(p, now);
+
+    let actions = coord.on_sync_info(
+        p,
+        SyncVersion::V2,
+        &SyncInfo::V2 {
+            headers: vec![fake_header_bytes([0xFFu8; 32])],
+        },
+        &chain,
+        now + Duration::from_millis(10),
+    );
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::SendToPeer { code, .. } if *code == message::CODE_SYNC_INFO
+        )),
+        "reciprocal SyncInfo must fire for Older even within MinSyncInterval; actions={actions:?}"
+    );
+    // Proactive subset selection still respects the 20 s floor.
+    assert!(
+        coord
+            .peers_to_sync_with(&[p], now + Duration::from_secs(1), 0)
+            .is_empty(),
+        "proactive fanout must still respect MinSyncInterval"
+    );
+}
+
+#[test]
+fn timeout_penalizes_when_nothing_received_since_request() {
+    // Hard NonDelivery: no modifier accepted since the request → penalty
+    // + body-streak failure outcome.
+    let mut coord = SyncCoordinator::new(100);
+    let now = Instant::now();
+    let p = peer(9030);
+    let expected = ExpectedSections::from_header(&mk(1), &mk(10), &mk(11), &mk(12));
+    let recent_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    coord.on_header_validated(p, mk(1), 101, recent_ts, expected, now);
+    // No subsequent accept → last_modifier_got_time stays None (or is
+    // only set if on_header_validated went through on_modifier_received —
+    // it doesn't). Clear any accidental clock.
+    coord.set_last_modifier_got_time_for_test(None);
+
+    let later = now + ergo_p2p::delivery::DELIVERY_TIMEOUT + Duration::from_secs(1);
+    let actions = coord.check_timeouts(later, &[]);
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::Penalize { peer, penalty: Penalty::NonDelivery } if *peer == p
+        )),
+        "hard timeout must NonDelivery-penalize"
+    );
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::NoteDeliveryOutcome { peer, succeeded: false } if *peer == p
+        )),
+        "hard body timeout must emit delivery-streak failure"
+    );
+}
+
+#[test]
+fn timeout_no_penalty_when_modifier_received_meanwhile() {
+    // Soft NonDelivery gate: another modifier was accepted after the
+    // request → re-request without penalty or streak failure.
+    let mut coord = SyncCoordinator::new(100);
+    let now = Instant::now();
+    let p = peer(9030);
+    let expected = ExpectedSections::from_header(&mk(1), &mk(10), &mk(11), &mk(12));
+    let recent_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    coord.on_header_validated(p, mk(1), 101, recent_ts, expected, now);
+
+    // Connectivity clock advances past the request time.
+    coord.set_last_modifier_got_time_for_test(Some(now + Duration::from_secs(1)));
+
+    let later = now + ergo_p2p::delivery::DELIVERY_TIMEOUT + Duration::from_secs(1);
+    let actions = coord.check_timeouts(later, &[]);
+    assert!(
+        !actions.iter().any(|a| matches!(
+            a,
+            Action::Penalize {
+                penalty: Penalty::NonDelivery,
+                ..
+            }
+        )),
+        "soft timeout must not NonDelivery-penalize; actions={actions:?}"
+    );
+    assert!(
+        !actions.iter().any(|a| matches!(
+            a,
+            Action::NoteDeliveryOutcome {
+                succeeded: false,
+                ..
+            }
+        )),
+        "soft timeout must not emit delivery-streak failure"
+    );
+}

@@ -12,8 +12,11 @@
 //!    re-request missing sections inside the download window.
 //!    Includes a head-of-line hedge for the next-sequential block
 //!    when its sections have been inflight > 8 s.
-//! 4. Send `SyncInfo` to each peer whose per-peer timer elapsed —
+//! 4. Proactive `SyncInfo` fanout on the global IBD/stable cadence
+//!    (default 5 s / 15 s) to the Scala `peersToSyncWith` subset —
 //!    Step C anchor variant if eligible, otherwise tip-tail payload.
+//!    Reciprocal SyncInfo replies (inbound SyncInfo / post-header-
+//!    progress) are handled off this tick and keep single-peer IBD fed.
 //! 5. Emit the operator heartbeat (always — surfaces stalls).
 //! 6. Publish the operator-API snapshot.
 //!
@@ -222,41 +225,68 @@ pub(super) fn handle_sync_tick(state: &mut NodeState) {
         flush_actions(state, hol_actions);
     }
 
-    // 4. Send SyncInfo to each connected peer whose per-peer timer
-    //    has elapsed. Per-peer (not global) so every peer's Inv pump
-    //    stays primed independently — without this filter the global
-    //    timer collapsed header request fanout to ~1-2 active peers
-    //    per interval. The collect()-then-iter pattern dodges a
-    //    borrow conflict between coordinator (read for filter, mut
-    //    for mark_sync_sent) and peer_manager.
-    let peer_list: Vec<(PeerId, SyncVersion)> = state
-        .peer_manager
-        .connected_peers()
-        .map(|p| (p.addr, p.sync_version))
-        .filter(|(addr, _)| state.registry.peers.contains_key(addr))
-        .filter(|(addr, _)| state.coordinator.sync_state().should_send_sync(*addr, now))
-        .collect();
-    for (peer_id, sv) in peer_list {
-        // Step C path: if eligible, send a single-anchor V1 SyncInfo
-        // (Scala interprets as `Fork`, returns up to 400 novel IDs).
-        // Otherwise fall back to the standard tip-tail payload.
-        // `chain` is acquired inside the fallback branch so the
-        // outer `&state.store` borrow doesn't conflict with the
-        // `&mut state` taken by `try_send_anchor_sync_info`.
-        if !try_send_anchor_sync_info(state, &peer_id, now) {
-            match ergo_sync::coordinator::build_sync_info_payload(sv, &state.store) {
-                Ok(payload) => {
-                    send_to_peer(state, &peer_id, message::CODE_SYNC_INFO, payload);
-                }
-                Err(e) => {
-                    warn!(peer = %peer_id, error = %e, "failed to serialize SyncInfo; skipping send")
+    // 4. Proactive SyncInfo fanout — Scala `sendSync` +
+    //    `peersToSyncWith` (ErgoSyncTracker.scala:180-205,
+    //    ErgoNodeViewSynchronizer.scala:342-360).
+    //
+    //    Global cadence: IBD → `sync_interval` (default 5 s), stable →
+    //    `sync_interval_stable` (default 15 s). The outer sync_tick
+    //    still runs every 1 s for timeouts/HOL/heartbeat; only this
+    //    fanout is gated. Peer subset (not all-peer broadcast):
+    //    outdated peers, else Unknown + one random Older + all Fork,
+    //    each respecting MinSyncInterval (20 s).
+    //
+    //    Single-peer IBD is kept fed by the reciprocal SyncInfo path
+    //    in `on_sync_info` / post-header-progress dispatch — those
+    //    bypass both the global cadence and MinSyncInterval.
+    let broadcast_interval = if state.coordinator.is_ibd() {
+        state.sync_interval
+    } else {
+        state.sync_interval_stable
+    };
+    if now.duration_since(state.last_sync_broadcast) >= broadcast_interval {
+        state.last_sync_broadcast = now;
+
+        let connected: Vec<(PeerId, SyncVersion)> = state
+            .peer_manager
+            .connected_peers()
+            .map(|p| (p.addr, p.sync_version))
+            .filter(|(addr, _)| state.registry.peers.contains_key(addr))
+            .collect();
+        let connected_addrs: Vec<PeerId> = connected.iter().map(|(a, _)| *a).collect();
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let selected = state
+            .coordinator
+            .peers_to_sync_with(&connected_addrs, now, seed);
+        // collect()-then-iter: avoid borrow conflict between
+        // coordinator (mark_sync_sent) and peer_manager / registry.
+        let peer_list: Vec<(PeerId, SyncVersion)> = connected
+            .into_iter()
+            .filter(|(addr, _)| selected.contains(addr))
+            .collect();
+        for (peer_id, sv) in peer_list {
+            // Step C path: if eligible, send a single-anchor V1 SyncInfo
+            // (Scala interprets as `Fork`, returns up to 400 novel IDs).
+            // Otherwise fall back to the standard tip-tail payload.
+            if !try_send_anchor_sync_info(state, &peer_id, now) {
+                match ergo_sync::coordinator::build_sync_info_payload(sv, &state.store) {
+                    Ok(payload) => {
+                        send_to_peer(state, &peer_id, message::CODE_SYNC_INFO, payload);
+                    }
+                    Err(e) => {
+                        warn!(peer = %peer_id, error = %e, "failed to serialize SyncInfo; skipping send")
+                    }
                 }
             }
+            state
+                .coordinator
+                .sync_state_mut()
+                .mark_sync_sent(peer_id, now);
+            state.coordinator.note_sync_info_dispatched(peer_id);
         }
-        state
-            .coordinator
-            .sync_state_mut()
-            .mark_sync_sent(peer_id, now);
     }
 
     // 5. Heartbeat: always fires so a stalled sync is visible.

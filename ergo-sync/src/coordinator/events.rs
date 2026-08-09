@@ -112,6 +112,13 @@ impl SyncCoordinator {
                     .and_then(|id| chain.header_height_for(id))
             }
         };
+        // Capture prior status for Scala `syncSendNeeded` before we
+        // overwrite the snapshot (ErgoSyncTracker.updateStatus).
+        let old_status = self
+            .peer_sync
+            .get(&peer)
+            .map(|s| s.status)
+            .unwrap_or(PeerChainStatus::Unknown);
         self.peer_sync.insert(
             peer,
             PeerSyncSnapshot {
@@ -183,37 +190,41 @@ impl SyncCoordinator {
                         actions.push(Action::ValidateHeader { peer, header_bytes });
                     }
                 }
-                // Also request more headers if we need them. Per-peer
-                // throttle: this only debounces our SyncInfo to *this*
-                // peer; the broadcast loop in node.rs handles the
-                // others independently.
-                if self.sync_state.should_send_sync(peer, now) {
-                    match build_sync_info_payload(sync_version, chain) {
-                        Ok(our_sync) => {
-                            actions.push(Action::SendToPeer {
-                                peer,
-                                code: message::CODE_SYNC_INFO,
-                                payload: our_sync,
-                            });
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "failed to serialize SyncInfo; skipping send")
-                        }
-                    }
-                    // Throttle regardless of the serialization outcome: an
-                    // (unreachable-from-valid-state) failure must still back off
-                    // to the next window rather than retry — and warn — every
-                    // tick. Matches the original always-mark-after-attempt path.
-                    self.sync_state.mark_sync_sent(peer, now);
-                }
             }
             PeerChainStatus::Equal | PeerChainStatus::Unknown | PeerChainStatus::Nonsense => {
-                // No-op: equal chains need no sync; Unknown/Nonsense are
-                // handled by the peer_manager's penalty/disconnect paths,
-                // not by Log-level tracing here.
+                // Status-specific Inv/continuation is a no-op here;
+                // reciprocal SyncInfo may still fire via syncSendNeeded.
             }
         }
-        let _ = peer; // kept for future Log reintroduction if useful
+
+        // Reciprocal SyncInfo — Scala `syncSendNeeded` in
+        // `processSyncV1`/`processSyncV2` (ErgoSyncTracker.updateStatus
+        // + ErgoNodeViewSynchronizer.scala:444-447 / 490-493):
+        //   (oldStatus != status) || notSyncedOrOutdated || Older || Fork
+        // This path deliberately ignores MinSyncInterval: it is the
+        // pull-model reply that keeps a 1–2 peer IBD pipeline fed when
+        // the proactive 20 s / subset fanout would otherwise starve it.
+        let sync_send_needed = old_status != status
+            || self.sync_state.not_synced_or_outdated(peer, now)
+            || status == PeerChainStatus::Older
+            || status == PeerChainStatus::Fork;
+        if sync_send_needed {
+            match build_sync_info_payload(sync_version, chain) {
+                Ok(our_sync) => {
+                    actions.push(Action::SendToPeer {
+                        peer,
+                        code: message::CODE_SYNC_INFO,
+                        payload: our_sync,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to serialize SyncInfo; skipping send")
+                }
+            }
+            // Stamp regardless of serialization outcome so a persistent
+            // failure cannot warn-spam every inbound SyncInfo.
+            self.sync_state.mark_sync_sent(peer, now);
+        }
 
         actions
     }
@@ -429,6 +440,10 @@ impl SyncCoordinator {
                     .modifier_type(&modifier_id)
                     .is_some_and(ModifierTypeId::is_block_body_section);
                 self.delivery.mark_received(&modifier_id);
+                // Scala `lastModifierGotTime` — any accepted modifier
+                // (header / body / tx) advances the connectivity clock
+                // used by the NonDelivery gate in `check_timeouts`.
+                self.last_modifier_got_time = Some(Instant::now());
                 if delivered_body {
                     actions.push(Action::NoteDeliveryOutcome {
                         peer,
@@ -613,9 +628,17 @@ impl SyncCoordinator {
     /// `eligible_peers`. All peers that just failed are excluded from the
     /// redistribution so retried IDs are spread across responsive peers
     /// using the same bucketed partitioner as `request_missing_sections_bucketed`.
+    ///
+    /// NonDelivery / delivery-streak failure outcomes are **conditional**
+    /// on the Scala connectivity gate: only modifiers whose
+    /// `request_time >= last_modifier_got_time` (nothing accepted from
+    /// anywhere since the request) attract a penalty. Soft timeouts still
+    /// re-request.
     pub fn check_timeouts(&mut self, now: Instant, eligible_peers: &[PeerId]) -> Vec<Action> {
         let mut actions = Vec::new();
-        let result = self.delivery.check_timeouts(now);
+        let result = self
+            .delivery
+            .check_timeouts_gated(now, self.last_modifier_got_time);
 
         let tx_type = ModifierTypeId::Transaction.as_byte();
         let mut all_retryable: Vec<[u8; 32]> = Vec::new();
@@ -625,7 +648,7 @@ impl SyncCoordinator {
             // a timed-out MEMPOOL TRANSACTION is just forgotten — it may
             // legitimately have left the peer's mempool, so there is "no
             // reason to penalize the peer" and no re-request. Block sections
-            // and headers keep the aggressive penalize + re-request path.
+            // and headers keep the (conditionally) penalize + re-request path.
             // The just-timed-out ids sit in the tracker's recently-released
             // shadow, so `modifier_type` still resolves their requested class.
             let (tx_ids, block_ids): (Vec<[u8; 32]>, Vec<[u8; 32]>) = ids
@@ -642,26 +665,36 @@ impl SyncCoordinator {
             if block_ids.is_empty() {
                 continue;
             }
-            actions.push(Action::Penalize {
-                peer: *failed_peer,
-                penalty: Penalty::NonDelivery,
-            });
-            // Body-only download-quality streak (separate from the decaying
-            // score, which NonDelivery can't move past DEGRADED_THRESHOLD).
-            // Only block-BODY section timeouts count: a peer that stalls on
-            // bodies but keeps answering the constant header/mempool-tx flow
-            // must still accrue toward degradation.
-            if block_ids.iter().any(|id| {
-                self.delivery
-                    .modifier_type(id)
-                    .is_some_and(ModifierTypeId::is_block_body_section)
-            }) {
-                actions.push(Action::NoteDeliveryOutcome {
+            // Hard vs soft: penalize only when at least one timed-out
+            // block modifier is in the delivery tracker's `penalize` set
+            // (request_time >= last_modifier_got_time). Soft timeouts
+            // still re-request — a slow-but-working peer must not be
+            // NonDelivery-penalized or delivery-streak-deprioritized
+            // while the node is otherwise receiving data.
+            let hard_ids: Vec<[u8; 32]> = block_ids
+                .iter()
+                .copied()
+                .filter(|id| result.penalize.contains(id))
+                .collect();
+            if !hard_ids.is_empty() {
+                actions.push(Action::Penalize {
                     peer: *failed_peer,
-                    succeeded: false,
+                    penalty: Penalty::NonDelivery,
                 });
+                // Body-only download-quality streak (separate from the
+                // decaying score). Gated the same way as NonDelivery.
+                if hard_ids.iter().any(|id| {
+                    self.delivery
+                        .modifier_type(id)
+                        .is_some_and(ModifierTypeId::is_block_body_section)
+                }) {
+                    actions.push(Action::NoteDeliveryOutcome {
+                        peer: *failed_peer,
+                        succeeded: false,
+                    });
+                }
             }
-            info!(peer = %failed_peer, count = block_ids.len(), "modifier delivery timed out, retrying with other peers");
+            info!(peer = %failed_peer, count = block_ids.len(), hard = hard_ids.len(), "modifier delivery timed out, retrying with other peers");
             all_retryable.extend_from_slice(&block_ids);
             failed_peers.push(*failed_peer);
         }
