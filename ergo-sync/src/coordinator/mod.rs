@@ -7,11 +7,11 @@
 //!
 //! Integrates: DeliveryTracker, AssemblyTracker, SyncState, PeerChainStatus.
 //!
-//! **Limitation**: fork choice currently uses height-based comparison for V1
-//! and treats V2 peers as Older when they send headers.
-//! TODO(p2p-parity): cumulative-difficulty comparison via a ChainView
-//! score accessor — deferred from the Tier-1 scheduling/penalty PR
-//! (needs store plumbing; see `ergo_p2p::sync::compare_sync_info`).
+//! Peer SyncInfo classification follows Scala `ErgoHistory.compare`
+//! (height / ID rules). When a V2 tip is already in our store, we also
+//! compare cumulative scores (`ChainView::header_score_for`) — the
+//! refinement Scala leaves as `// todo: check difficulty?` on the Older
+//! branch. Unknown tips still cannot carry score on the wire.
 
 use ergo_p2p::assembly::AssemblyTracker;
 use ergo_p2p::delivery::DeliveryTracker;
@@ -122,6 +122,11 @@ pub trait ChainView {
     /// compute the height of a common ancestor when constructing a
     /// continuation extension.
     fn header_height_for(&self, header_id: &[u8; 32]) -> Option<u32>;
+    /// Cumulative score of our best header (BE `BigUint` bytes). Used
+    /// when refining SyncInfo Older/Fork once a peer tip is in-store.
+    fn best_header_score(&self) -> Vec<u8>;
+    /// Cumulative score for a known header id, if we have its meta.
+    fn header_score_for(&self, header_id: &[u8; 32]) -> Option<Vec<u8>>;
 }
 
 // ---- Coordinator ----
@@ -441,6 +446,17 @@ impl SyncCoordinator {
     #[doc(hidden)]
     pub fn set_last_modifier_got_time_for_test(&mut self, at: Option<std::time::Instant>) {
         self.last_modifier_got_time = at;
+    }
+
+    /// True when any tracked peer is classified `Older` (ahead of us).
+    /// Drives the SyncInfo broadcast regime: IBD cadence while seniors
+    /// exist, stable cadence once they clear — Scala
+    /// `ErgoSyncTracker.numOfSeniors` / "switching to stable regime".
+    pub fn has_older_peers(&self) -> bool {
+        use ergo_p2p::sync::PeerChainStatus;
+        self.peer_sync
+            .values()
+            .any(|s| s.status == PeerChainStatus::Older)
     }
 
     /// Peers that should receive a proactive SyncInfo this tick.

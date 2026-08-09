@@ -914,6 +914,12 @@ fn executor_timeout_reassigns_via_peer_manager() {
         fn header_height_for(&self, _: &[u8; 32]) -> Option<u32> {
             None
         }
+        fn best_header_score(&self) -> Vec<u8> {
+            vec![0]
+        }
+        fn header_score_for(&self, _: &[u8; 32]) -> Option<Vec<u8>> {
+            None
+        }
     }
 
     // Request modifier from p1
@@ -986,6 +992,12 @@ fn executor_disconnect_reassigns_via_peer_manager() {
             ergo_state::chain::HeightLookup::AboveTip
         }
         fn header_height_for(&self, _: &[u8; 32]) -> Option<u32> {
+            None
+        }
+        fn best_header_score(&self) -> Vec<u8> {
+            vec![0]
+        }
+        fn header_score_for(&self, _: &[u8; 32]) -> Option<Vec<u8>> {
             None
         }
     }

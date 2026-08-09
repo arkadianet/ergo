@@ -397,22 +397,127 @@ impl SyncState {
     }
 }
 
-/// Preliminary comparison of a peer's SyncInfo headers against our chain.
+/// Compare BE `BigUint` score byte slices (no leading-zero padding).
+/// Longer length ⇒ larger value, matching `BigUint::to_bytes_be`.
+fn score_cmp(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    match a.len().cmp(&b.len()) {
+        std::cmp::Ordering::Equal => a.cmp(b),
+        other => other,
+    }
+}
+
+/// SyncInfo V1 comparison — Scala `ErgoHistoryReader.compareV1`.
 ///
-/// **Limitation (deferred)**: Older/Fork classification is height-based
-/// here, not cumulative-difficulty. Ergo's fork choice
-/// (`ErgoHistory.compare` / `org.ergoplatform.consensus`) picks the
-/// heaviest chain by cumulative score. Threading `best_header_score`
-/// through `ChainView` and this comparator is deferred to a follow-up —
-/// it needs store plumbing beyond the Tier-1 scheduling/penalty work.
-/// Until then the Older vs Fork distinction remains approximate;
-/// Equal/Younger/Unknown classification from tip-on-chain checks is
-/// still sound.
+/// Tip may be at either end of `peer_header_ids`: Scala emits
+/// oldest-first (tip = last), Rust outbound is newest-first (tip =
+/// first). Equal if our tip matches either end; Older if our tip is
+/// elsewhere in their list; Fork if we know any of their ids; else Older
+/// (far ahead / unknown).
 ///
-/// TODO(p2p-parity): cumulative-difficulty compare via ChainView score.
+/// `we_contain` is any known header (not only best-chain) — matches
+/// Scala `historyStorage.contains`.
+pub fn compare_sync_info_v1(
+    peer_header_ids: &[[u8; 32]],
+    our_best_id: &[u8; 32],
+    we_contain: impl Fn(&[u8; 32]) -> bool,
+) -> PeerChainStatus {
+    if peer_header_ids.is_empty() {
+        // They have nothing; we have a tip ⇒ Younger. (Empty/empty is
+        // handled by the caller when we also have no tip.)
+        return PeerChainStatus::Younger;
+    }
+    let tip_first = peer_header_ids.first().copied();
+    let tip_last = peer_header_ids.last().copied();
+    if tip_first == Some(*our_best_id) || tip_last == Some(*our_best_id) {
+        return PeerChainStatus::Equal;
+    }
+    if peer_header_ids.iter().any(|id| id == our_best_id) {
+        return PeerChainStatus::Older;
+    }
+    if peer_header_ids.iter().any(&we_contain) {
+        PeerChainStatus::Fork
+    } else {
+        // No overlap — assume far ahead (Scala compareV1).
+        PeerChainStatus::Older
+    }
+}
+
+/// Inputs for [`compare_sync_info_v2`] (grouped to keep the call site
+/// readable and under clippy's argument cap).
+pub struct SyncInfoV2Compare<'a> {
+    pub peer_tip_id: [u8; 32],
+    pub peer_height: u32,
+    /// Newest-first peer header ids from the SyncInfo payload.
+    pub peer_header_ids: &'a [[u8; 32]],
+    pub our_best_id: [u8; 32],
+    pub our_best_height: u32,
+    /// In-store cumulative score of the peer tip, when known.
+    pub peer_tip_score: Option<&'a [u8]>,
+    pub our_best_score: &'a [u8],
+}
+
+/// SyncInfo V2 comparison — Scala `ErgoHistoryReader.compareV2`, with
+/// cumulative-score refinement when `peer_tip_score` is known (in-store
+/// tip). Wire SyncInfo carries height + headers but not cumulative
+/// score; unknown tips keep the height-based Older branch.
 ///
-/// `our_chain_contains` returns true if we have a header ID on our best chain.
-/// `our_best_height` is our best header height.
+/// `we_contain` matches Scala `commonPoint` (`contains`, not
+/// best-chain-only).
+pub fn compare_sync_info_v2(
+    args: SyncInfoV2Compare<'_>,
+    we_contain: impl Fn(&[u8; 32]) -> bool,
+) -> PeerChainStatus {
+    let SyncInfoV2Compare {
+        peer_tip_id,
+        peer_height,
+        peer_header_ids,
+        our_best_id,
+        our_best_height,
+        peer_tip_score,
+        our_best_score,
+    } = args;
+    if peer_header_ids.is_empty() {
+        return PeerChainStatus::Younger;
+    }
+    if peer_height == our_best_height {
+        if peer_tip_id == our_best_id {
+            return PeerChainStatus::Equal;
+        }
+        // Equal height, different tip: Fork if we share any ancestor
+        // in their list (skip tip — already known off-chain).
+        let common = peer_header_ids.iter().skip(1).any(&we_contain);
+        return if common {
+            PeerChainStatus::Fork
+        } else {
+            PeerChainStatus::Unknown
+        };
+    }
+    if peer_height > our_best_height {
+        // Scala: Older (+ todo check difficulty). When we already hold
+        // the tip, refine by cumulative score — a higher height with
+        // ≤ our score is not ahead of us.
+        if let Some(ps) = peer_tip_score {
+            return match score_cmp(ps, our_best_score) {
+                std::cmp::Ordering::Greater => PeerChainStatus::Older,
+                std::cmp::Ordering::Equal => PeerChainStatus::Equal,
+                std::cmp::Ordering::Less => {
+                    if peer_header_ids.iter().skip(1).any(&we_contain) {
+                        PeerChainStatus::Fork
+                    } else {
+                        PeerChainStatus::Unknown
+                    }
+                }
+            };
+        }
+        return PeerChainStatus::Older;
+    }
+    // peer_height < our_best_height
+    PeerChainStatus::Younger
+}
+
+/// Legacy height/tip-on-chain helper retained for call sites that still
+/// pass an optional peer height without a tip-score context. Prefer
+/// [`compare_sync_info_v1`] / [`compare_sync_info_v2`].
 pub fn compare_sync_info(
     peer_header_ids: &[[u8; 32]],
     peer_best_height: Option<u32>,
@@ -423,29 +528,24 @@ pub fn compare_sync_info(
         return PeerChainStatus::Unknown;
     }
 
-    // Check if the peer's most recent header is on our chain
-    let newest_id = &peer_header_ids[0]; // headers are newest-first in V2
+    let newest_id = &peer_header_ids[0];
     let newest_on_our_chain = our_chain_contains(newest_id);
 
     if newest_on_our_chain {
-        // Peer's tip is on our chain
         match peer_best_height {
             Some(h) if h == our_best_height => PeerChainStatus::Equal,
             Some(h) if h < our_best_height => PeerChainStatus::Younger,
-            Some(_) => PeerChainStatus::Nonsense, // claims higher but their tip is on our chain at lower height
-            None => PeerChainStatus::Younger,     // V1 without height info — assume younger
+            Some(_) => PeerChainStatus::Nonsense,
+            None => PeerChainStatus::Younger,
         }
     } else {
-        // Peer's tip is NOT on our chain. Check if any of their headers are.
         let any_on_our_chain = peer_header_ids.iter().skip(1).any(&our_chain_contains);
         if any_on_our_chain {
-            // We share a common ancestor but diverge → Fork or Older
             match peer_best_height {
                 Some(h) if h > our_best_height => PeerChainStatus::Older,
                 _ => PeerChainStatus::Fork,
             }
         } else {
-            // No common headers at all
             match peer_best_height {
                 Some(h) if h > our_best_height => PeerChainStatus::Older,
                 _ => PeerChainStatus::Nonsense,
@@ -584,6 +684,79 @@ mod tests {
     fn compare_empty_is_unknown() {
         let status = compare_sync_info(&[], None, 100, |_| false);
         assert_eq!(status, PeerChainStatus::Unknown);
+    }
+
+    #[test]
+    fn compare_v1_tip_at_either_end_is_equal() {
+        let our = mk_id(5);
+        // Scala oldest-first: tip last.
+        assert_eq!(
+            compare_sync_info_v1(&[mk_id(1), our], &our, |_| false),
+            PeerChainStatus::Equal
+        );
+        // Rust newest-first: tip first.
+        assert_eq!(
+            compare_sync_info_v1(&[our, mk_id(1)], &our, |_| false),
+            PeerChainStatus::Equal
+        );
+    }
+
+    #[test]
+    fn compare_v1_our_tip_in_list_is_older() {
+        let our = mk_id(5);
+        assert_eq!(
+            compare_sync_info_v1(&[mk_id(9), our, mk_id(1)], &our, |_| false),
+            PeerChainStatus::Older
+        );
+    }
+
+    #[test]
+    fn compare_v2_equal_height_fork() {
+        let status = compare_sync_info_v2(
+            SyncInfoV2Compare {
+                peer_tip_id: mk_id(99),
+                peer_height: 100,
+                peer_header_ids: &[mk_id(99), mk_id(5)],
+                our_best_id: mk_id(7),
+                our_best_height: 100,
+                peer_tip_score: None,
+                our_best_score: &[1],
+            },
+            |id| *id == mk_id(5),
+        );
+        assert_eq!(status, PeerChainStatus::Fork);
+    }
+
+    #[test]
+    fn compare_v2_score_refines_claimed_older() {
+        // Peer claims height ahead, but in-store tip score is not greater.
+        let tip = mk_id(99);
+        let status = compare_sync_info_v2(
+            SyncInfoV2Compare {
+                peer_tip_id: tip,
+                peer_height: 200,
+                peer_header_ids: &[tip, mk_id(5)],
+                our_best_id: mk_id(7),
+                our_best_height: 100,
+                peer_tip_score: Some(&[1]),
+                our_best_score: &[2],
+            },
+            |id| *id == mk_id(5),
+        );
+        assert_eq!(status, PeerChainStatus::Fork);
+        let status_ahead = compare_sync_info_v2(
+            SyncInfoV2Compare {
+                peer_tip_id: tip,
+                peer_height: 200,
+                peer_header_ids: &[tip],
+                our_best_id: mk_id(7),
+                our_best_height: 100,
+                peer_tip_score: Some(&[5]),
+                our_best_score: &[2],
+            },
+            |_| false,
+        );
+        assert_eq!(status_ahead, PeerChainStatus::Older);
     }
 
     #[test]

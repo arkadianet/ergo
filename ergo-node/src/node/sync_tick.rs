@@ -239,7 +239,11 @@ pub(super) fn handle_sync_tick(state: &mut NodeState) {
     //    Single-peer IBD is kept fed by the reciprocal SyncInfo path
     //    in `on_sync_info` / post-header-progress dispatch — those
     //    bypass both the global cadence and MinSyncInterval.
-    let broadcast_interval = if state.coordinator.is_ibd() {
+    // Regime switch: Scala keys stable cadence on `numOfSeniors() == 0`
+    // (no Older peers), not on full-block catch-up. Using `has_older_peers`
+    // matches that header-sync regime; `is_ibd()` (body backlog) would
+    // keep the 5 s tick through the entire post-header block download.
+    let broadcast_interval = if state.coordinator.has_older_peers() {
         state.sync_interval
     } else {
         state.sync_interval_stable

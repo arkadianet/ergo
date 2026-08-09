@@ -27,6 +27,8 @@ struct MockChain {
     best_chain_ids: std::collections::HashSet<[u8; 32]>,
     height_to_id: std::collections::HashMap<u32, [u8; 32]>,
     id_to_height: std::collections::HashMap<[u8; 32], u32>,
+    best_header_score: Vec<u8>,
+    id_to_score: std::collections::HashMap<[u8; 32], Vec<u8>>,
 }
 
 impl MockChain {
@@ -39,6 +41,8 @@ impl MockChain {
             best_chain_ids: std::collections::HashSet::new(),
             height_to_id: std::collections::HashMap::new(),
             id_to_height: std::collections::HashMap::new(),
+            best_header_score: vec![1],
+            id_to_score: std::collections::HashMap::new(),
         }
     }
 
@@ -89,6 +93,12 @@ impl ChainView for MockChain {
     }
     fn header_height_for(&self, id: &[u8; 32]) -> Option<u32> {
         self.id_to_height.get(id).copied()
+    }
+    fn best_header_score(&self) -> Vec<u8> {
+        self.best_header_score.clone()
+    }
+    fn header_score_for(&self, id: &[u8; 32]) -> Option<Vec<u8>> {
+        self.id_to_score.get(id).cloned()
     }
 }
 
@@ -3058,6 +3068,30 @@ fn seed_peer_status(
             observed_best_header_id: [0u8; 32],
         },
     );
+}
+
+#[test]
+fn has_older_peers_tracks_header_sync_regime() {
+    let mut coord = SyncCoordinator::new(0);
+    let now = Instant::now();
+    assert!(
+        !coord.has_older_peers(),
+        "no snapshots ⇒ stable regime (no seniors)"
+    );
+    seed_peer_status(
+        &mut coord,
+        peer(9030),
+        ergo_p2p::sync::PeerChainStatus::Equal,
+        now,
+    );
+    assert!(!coord.has_older_peers());
+    seed_peer_status(
+        &mut coord,
+        peer(9031),
+        ergo_p2p::sync::PeerChainStatus::Older,
+        now,
+    );
+    assert!(coord.has_older_peers(), "one Older peer ⇒ IBD regime");
 }
 
 #[test]

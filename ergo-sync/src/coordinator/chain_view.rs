@@ -110,6 +110,17 @@ impl ChainView for ergo_state::store::StateStore {
             .flatten()
             .map(|m| m.height)
     }
+
+    fn best_header_score(&self) -> Vec<u8> {
+        self.chain_state().best_header_score.clone()
+    }
+
+    fn header_score_for(&self, header_id: &[u8; 32]) -> Option<Vec<u8>> {
+        self.get_header_meta(header_id)
+            .ok()
+            .flatten()
+            .map(|m| m.cumulative_score)
+    }
 }
 
 /// `ChainView` over the Mode 5 digest backend. Mirrors the
@@ -217,6 +228,18 @@ impl ChainView for ergo_state::DigestStateStore {
             .flatten()
             .map(|m| m.height)
     }
+
+    fn best_header_score(&self) -> Vec<u8> {
+        self.chain_state().best_header_score.clone()
+    }
+
+    fn header_score_for(&self, header_id: &[u8; 32]) -> Option<Vec<u8>> {
+        use ergo_state::HeaderSectionStore;
+        self.get_header_meta(header_id)
+            .ok()
+            .flatten()
+            .map(|m| m.cumulative_score)
+    }
 }
 
 /// `ChainView` over the runtime backend enum: match-forward every
@@ -307,6 +330,20 @@ impl ChainView for ergo_state::StateBackendKind {
         match self {
             ergo_state::StateBackendKind::Utxo(s) => s.header_height_for(header_id),
             ergo_state::StateBackendKind::Digest(d) => d.header_height_for(header_id),
+        }
+    }
+
+    fn best_header_score(&self) -> Vec<u8> {
+        match self {
+            ergo_state::StateBackendKind::Utxo(s) => s.best_header_score(),
+            ergo_state::StateBackendKind::Digest(d) => d.best_header_score(),
+        }
+    }
+
+    fn header_score_for(&self, header_id: &[u8; 32]) -> Option<Vec<u8>> {
+        match self {
+            ergo_state::StateBackendKind::Utxo(s) => s.header_score_for(header_id),
+            ergo_state::StateBackendKind::Digest(d) => d.header_score_for(header_id),
         }
     }
 }

@@ -36,56 +36,57 @@ impl SyncCoordinator {
         let (peer_header_ids, peer_headers, peer_height) = match sync_info {
             SyncInfo::V1 { header_ids } => (header_ids.clone(), Vec::new(), None),
             SyncInfo::V2 { headers } => {
-                // V2 carries raw headers. Compute IDs (blake2b256 of bytes)
-                // for both classification and the commonPoint walk; heights
-                // come from our own store via header_height_for once we
-                // find a peer header that's on our best chain.
+                // V2 carries raw headers (newest-first). IDs from
+                // blake2b256; tip height from a real header parse when
+                // the bytes are well-formed.
                 let ids: Vec<[u8; 32]> =
                     headers.iter().map(|h| *blake2b256(h).as_bytes()).collect();
-                (ids, headers.clone(), None)
+                let tip_height = headers.first().and_then(|bytes| {
+                    let mut r = ergo_primitives::reader::VlqReader::new(bytes);
+                    ergo_ser::header::read_header(&mut r).ok().map(|h| h.height)
+                });
+                (ids, headers.clone(), tip_height)
             }
         };
 
-        // Determine peer's chain status.
-        //
-        // V1 path uses the existing height-based heuristic with the
-        // ID overlap predicate.
-        //
-        // V2 path: peer headers are newest-first (Scala convention), so
-        // peer_header_ids[0] is the peer's tip. Classification keys on the
-        // TIP, mirroring `compare_sync_info` (the V1 comparator):
-        //   * tip == our best_header → Equal.
-        //   * tip is on our best chain but isn't our tip → Younger (their
-        //     tip lives below us; they're strictly behind).
-        //   * tip is NOT on our chain → Older, even if an OLDER peer header
-        //     is on our chain: an off-chain tip above a shared ancestor
-        //     means the peer has headers we don't (ahead or on a fork), so
-        //     we must take the Older path (continuation-header shortcut +
-        //     reciprocal SyncInfo) to fetch them. Using `.any()` here would
-        //     misread such an ahead/fork peer as Younger and suppress the
-        //     continuation request.
+        // Peer chain status — Scala `ErgoHistory.compare` /
+        // `compareV1` / `compareV2`, plus cumulative-score refinement
+        // when the peer tip is already in our store (Scala's
+        // `// todo: check difficulty?` on the Older branch).
         let status = if !peer_header_ids.is_empty() && peer_headers.is_empty() {
-            // V1: ID-only comparison
-            ergo_p2p::sync::compare_sync_info(
-                &peer_header_ids,
-                peer_height,
-                chain.best_header_height(),
-                |id| chain.is_on_best_chain(id),
-            )
+            // V1: ID containment. Tip may be first (Rust newest-first
+            // outbound) or last (Scala oldest-first) — accept either.
+            ergo_p2p::sync::compare_sync_info_v1(&peer_header_ids, &chain.best_header_id(), |id| {
+                chain.has_header(id)
+            })
         } else if !peer_headers.is_empty() {
-            let our_best = chain.best_header_id();
-            let newest_id = peer_header_ids.first().copied().unwrap_or([0u8; 32]);
-            if newest_id == our_best {
-                PeerChainStatus::Equal
-            } else if chain.is_on_best_chain(&newest_id) {
-                // Peer's TIP is on our chain but below our tip — strictly behind.
-                PeerChainStatus::Younger
-            } else {
-                // Tip not on our chain → peer is ahead or forked. Older path
-                // handles catchup; if on a fork, find_continuation_header
-                // returns None and the reciprocal SyncInfo keeps the dance
-                // going.
-                PeerChainStatus::Older
+            let tip_id = peer_header_ids.first().copied().unwrap_or([0u8; 32]);
+            let tip_score = chain.header_score_for(&tip_id);
+            match peer_height {
+                Some(h) => ergo_p2p::sync::compare_sync_info_v2(
+                    ergo_p2p::sync::SyncInfoV2Compare {
+                        peer_tip_id: tip_id,
+                        peer_height: h,
+                        peer_header_ids: &peer_header_ids,
+                        our_best_id: chain.best_header_id(),
+                        our_best_height: chain.best_header_height(),
+                        peer_tip_score: tip_score.as_deref(),
+                        our_best_score: &chain.best_header_score(),
+                    },
+                    |id| chain.has_header(id),
+                ),
+                None => {
+                    // Unparseable tip bytes (tests / corrupt): tip-id
+                    // heuristic — Equal / Younger-on-chain / Older.
+                    let our_best = chain.best_header_id();
+                    if tip_id == our_best {
+                        PeerChainStatus::Equal
+                    } else if chain.is_on_best_chain(&tip_id) {
+                        PeerChainStatus::Younger
+                    } else {
+                        PeerChainStatus::Older
+                    }
+                }
             }
         } else {
             PeerChainStatus::Unknown
@@ -103,14 +104,10 @@ impl SyncCoordinator {
         // via `peer_height` already destructured above.
         let inferred_peer_height: Option<u32> = match peer_height {
             Some(h) => Some(h),
-            None => {
-                // V2 inference: find newest peer-header on our best
-                // chain (assumed newest-first per Scala convention).
-                peer_header_ids
-                    .iter()
-                    .find(|id| chain.is_on_best_chain(id))
-                    .and_then(|id| chain.header_height_for(id))
-            }
+            None => peer_header_ids
+                .iter()
+                .find(|id| chain.is_on_best_chain(id))
+                .and_then(|id| chain.header_height_for(id)),
         };
         // Capture prior status for Scala `syncSendNeeded` before we
         // overwrite the snapshot (ErgoSyncTracker.updateStatus).
