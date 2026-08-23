@@ -1001,6 +1001,7 @@ dependencies = [
  "ergo-crypto",
  "ergo-p2p",
  "ergo-primitives",
+ "ergo-rest-json",
  "ergo-ser",
  "ergo-state",
  "ergo-validation",

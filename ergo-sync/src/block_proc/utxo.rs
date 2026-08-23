@@ -177,6 +177,19 @@ pub(super) fn process_block_utxo(
     let mut r = VlqReader::new(&ext_bytes);
     let extension = read_extension(&mut r)
         .map_err(|e| BlockProcessError::Deserialize(format!("extension: {e:?}")))?;
+
+    // 2c. ADProofs binding — UTXO-mode counterpart of Scala's
+    // "Regenerated proofHash is not equal to the declared one" check.
+    // Without it, a full block could declare an arbitrary
+    // `adProofsRoot` (or omit the section entirely) and still validate:
+    // live mainnet divergence at h1,853,301 (block 437601cd…), which
+    // this node applied for 697s before reorging away. The section must
+    // exist, be filed under the id derived from the declared root,
+    // carry this header's id, and hash (blake2b256 of the proof bytes)
+    // exactly to that declared root. This is the integrity binding; full
+    // regeneration parity (recompute the proofs from the parent AVL and
+    // compare) remains tracked separately. Runs AFTER the genesis
+    // early-return: block 1 carries no ADProofs section by construction.
     let t_sections = t0.elapsed();
 
     // 3. Genesis block (height 1): no parent exists.
@@ -189,6 +202,25 @@ pub(super) fn process_block_utxo(
             checked_header: None,
         });
     }
+
+    // 2c. ADProofs binding — UTXO-mode counterpart of Scala's
+    // "Regenerated proofHash is not equal to the declared one" check.
+    // Without it, a full block could declare an arbitrary
+    // `adProofsRoot` (or omit the section entirely) and still validate:
+    // live mainnet divergence at h1,853,301 (block 437601cd…), which
+    // this node applied for 697s before reorging away. The section must
+    // exist, be filed under the id derived from the declared root,
+    // carry this header's id, and hash (blake2b256 of the proof bytes)
+    // exactly to that declared root. This is the integrity binding; full
+    // regeneration parity (recompute the proofs from the parent AVL and
+    // compare) remains tracked separately.
+    let ad_proof_section = store.get_block_section(&expected.ad_proofs_id)?.ok_or(
+        BlockProcessError::SectionNotFound {
+            type_id: ergo_ser::modifier_id::TYPE_AD_PROOFS,
+            modifier_id: expected.ad_proofs_id,
+        },
+    )?;
+    verify_ad_proofs_binding(&header, &header_id_computed, &ad_proof_section)?;
 
     // Voted parameters: at epoch starts, run the full
     // epoch-extension validation before constructing CheckedHeader.
@@ -477,3 +509,49 @@ pub(super) fn process_block_utxo(
         checked_header: Some(validated_header),
     })
 }
+
+/// ADProofs integrity binding for the UTXO path: the section must exist,
+/// decode cleanly under the id derived from the header's declared
+/// `adProofsRoot`, carry this header's id, and hash to that root.
+///
+/// This is deliberately NOT full Scala parity yet — Scala regenerates the
+/// proofs from the parent UTXO set and compares those; that requires AVL
+/// proof generation during apply and is tracked separately. What this
+/// check closes is the trivially-exploitable gap where a block declares
+/// any root (or ships no proofs at all) and still validates.
+fn verify_ad_proofs_binding(
+    header: &ergo_ser::header::Header,
+    header_id_computed: &[u8; 32],
+    section_bytes: &[u8],
+) -> Result<(), BlockProcessError> {
+    let mut reader = VlqReader::new(section_bytes);
+    let ad_proofs = ergo_ser::ad_proofs::read_ad_proofs(&mut reader)
+        .map_err(|e| BlockProcessError::Deserialize(format!("ad_proofs section: {e:?}")))?;
+    if !reader.is_empty() {
+        return Err(BlockProcessError::Deserialize(format!(
+            "ADProofs section has {} trailing byte(s) after the proof",
+            reader.remaining()
+        )));
+    }
+    if ad_proofs.header_id.as_bytes() != header_id_computed {
+        return Err(BlockProcessError::Deserialize(format!(
+            "ADProofs section carries header_id {} but is filed under header {}",
+            hex::encode(ad_proofs.header_id.as_bytes()),
+            hex::encode(header_id_computed),
+        )));
+    }
+
+    let declared_root = *header.ad_proofs_root.as_bytes();
+    let computed_root = *ergo_primitives::digest::blake2b256(&ad_proofs.proof_bytes).as_bytes();
+    if computed_root != declared_root {
+        return Err(BlockProcessError::AdProofsHashMismatch {
+            header_id: *header_id_computed,
+            declared_root,
+            computed_root,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod ad_proofs_binding_tests;
