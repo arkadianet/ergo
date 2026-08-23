@@ -16,6 +16,17 @@ infrastructure.
 
 ## [Unreleased]
 
+### Changed
+
+- **Hygiene: `/utils/seed` entropy now drawn from `OsRng`** (policy
+  consistency with every other security-relevant RNG site), **batch-Merkle
+  proof count arithmetic is overflow-checked** (portability hardening on the
+  wire decoder), **wallet secret files are created atomically with mode
+  0600** on Unix (closing the write-then-chmod TOCTOU window; Windows keeps
+  plain writes), and **the decrypted BIP39 seed no longer leaves an
+  unzeroized stack copy** in `unlock()`.
+
+
 ### Fixed
 
 - **Consensus: header solution `pk` was never curve-checked (v2+ headers) —

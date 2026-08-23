@@ -122,8 +122,19 @@ pub fn deserialize_batch_merkle_proof(bytes: &[u8]) -> Result<BatchMerkleProof, 
     let num_indices = u32::from_be_bytes(bytes[0..4].try_into().expect("4 bytes")) as usize;
     let num_proofs = u32::from_be_bytes(bytes[4..8].try_into().expect("4 bytes")) as usize;
 
-    let indices_size = num_indices * 36; // 4-byte index + 32-byte digest
-    let proofs_size = num_proofs * 33; // 32-byte digest + 1-byte side
+    // 4-byte index + 32-byte digest per index; 32-byte digest +
+    // 1-byte side per proof. Checked: the counts come straight off
+    // the wire and must not overflow usize (32-bit targets).
+    let indices_size = num_indices.checked_mul(36).ok_or_else(|| {
+        WriteError::InvalidData(format!(
+            "BatchMerkleProof: size overflow — {num_indices} indices × 36 bytes"
+        ))
+    })?;
+    let proofs_size = num_proofs.checked_mul(33).ok_or_else(|| {
+        WriteError::InvalidData(format!(
+            "BatchMerkleProof: size overflow — {num_proofs} proofs × 33 bytes"
+        ))
+    })?;
     let expected_total = 8 + indices_size + proofs_size;
     if bytes.len() != expected_total {
         return Err(WriteError::InvalidData(format!(
