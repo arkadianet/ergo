@@ -436,12 +436,13 @@ impl SecretStorage {
         // Decrypt the SEED bytes (64 bytes). Validate length explicitly
         // — anything else means corrupt or wrong-format file.
         let seed_bytes = crate::encryption::decrypt(&key, &iv, &ciphertext, &auth_tag)?;
-        let seed: [u8; 64] = seed_bytes.as_slice().try_into().map_err(|_| {
-            WalletError::SecretFile(format!(
-                "decrypted seed must be 64 bytes, got {}",
-                seed_bytes.len(),
-            ))
-        })?;
+        let seed: zeroize::Zeroizing<[u8; 64]> =
+            zeroize::Zeroizing::new(seed_bytes.as_slice().try_into().map_err(|_| {
+                WalletError::SecretFile(format!(
+                    "decrypted seed must be 64 bytes, got {}",
+                    seed_bytes.len(),
+                ))
+            })?);
 
         // Derive the master key directly from the seed bytes — no
         // mnemonic involvement at unlock time. Branch on use_pre_1627
@@ -449,10 +450,13 @@ impl SecretStorage {
         let use_pre_1627 = secret.use_pre_1627_key_derivation;
         let master = if use_pre_1627 {
             UnlockedMaster::Legacy(
-                crate::extended_key::ExtendedSecretKeyLegacy::derive_master_key(&seed)?,
+                crate::extended_key::ExtendedSecretKeyLegacy::derive_master_key(seed.as_slice())?,
             )
         } else {
-            UnlockedMaster::Modern(ExtendedSecretKey::derive_master_key(&seed, false)?)
+            UnlockedMaster::Modern(ExtendedSecretKey::derive_master_key(
+                seed.as_slice(),
+                false,
+            )?)
         };
 
         self.unlocked = Some(UnlockedSecret {
@@ -555,17 +559,28 @@ impl SecretStorage {
         let path = self.secret_dir.join(&filename);
         let json = serde_json::to_string_pretty(&secret)
             .map_err(|e| WalletError::SecretFile(format!("serialize: {e}")))?;
-        std::fs::write(&path, json)
-            .map_err(|e| WalletError::SecretFile(format!("write {path:?}: {e}")))?;
-
-        // chmod 0o600 on Unix; restricted ACL on Windows is more involved,
-        // skip for now.
+        // create_new + mode(0o600) closes the write-then-chmod window
+        // where the file briefly exists with default permissions;
+        // restricted ACL on Windows is more involved, skip for now
+        // (plain write).
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let perm = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(&path, perm)
-                .map_err(|e| WalletError::SecretFile(format!("chmod 0o600 {path:?}: {e}")))?;
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+                .map_err(|e| WalletError::SecretFile(format!("create {path:?}: {e}")))?;
+            file.write_all(json.as_bytes())
+                .map_err(|e| WalletError::SecretFile(format!("write {path:?}: {e}")))?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&path, json)
+                .map_err(|e| WalletError::SecretFile(format!("write {path:?}: {e}")))?;
         }
 
         // Cache so subsequent unlock() doesn't re-read the file.

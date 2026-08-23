@@ -83,7 +83,7 @@ pub(crate) fn bad_request(detail: impl Into<String>) -> Response {
 
 fn fresh_seed_hex(length: usize) -> String {
     let mut buf = vec![0u8; length];
-    rand::thread_rng().fill_bytes(&mut buf);
+    rand::rngs::OsRng.fill_bytes(&mut buf);
     hex::encode(&buf)
 }
 
