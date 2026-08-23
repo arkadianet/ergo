@@ -16,6 +16,21 @@ infrastructure.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Consensus: header solution `pk` was never curve-checked (v2+ headers) —
+  accept-invalid chain-split vector.** Scala rejects a header whose Autolykos
+  solution `pk` is an off-curve point or an invalid SEC1 prefix at deserialize
+  time (`GroupElementSerializer.parse`); the v2+ PoW hit never touches `pk`
+  bytes (`powHit` depends only on `(msg, nonce, height)`), so this node parsed
+  such a header cleanly and accepted it on PoW strength alone. Header ingestion
+  (`pre_validate_header`) now drains the parse-time group-element sideband and
+  runs the JVM-matching accept rule *before* PoW, giving a poisoned pk its own
+  specific rejection verdict. The transaction path already enforced the same
+  rule; v1 solutions were independently covered by their EC decode. Pinned by
+  unit tests plus ingestion tests covering off-curve/bad-prefix rejection,
+  check ordering against PoW, and curated mainnet v2 headers still passing.
+
 ## [0.5.3] - 2026-07-19
 
 The refactor-and-harden release: a workspace-wide split of oversized source
