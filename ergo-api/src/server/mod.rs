@@ -733,6 +733,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
             mining,
             emission,
             emission_scripts,
+            security.clone(),
         ),
     );
 
