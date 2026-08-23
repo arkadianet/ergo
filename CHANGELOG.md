@@ -60,6 +60,15 @@ infrastructure.
   Scala-parity 9-entry window.
 ### Changed
 
+- **Security: wallet `unlock` and `check` now enforce a failed-attempt budget.**
+  Five failed attempts within 60 s lock the operation for 300 s, returning the
+  previously-defined-but-unwired `RateLimited` error as HTTP 429. Previously
+  password/phrase guessing against `/wallet/unlock`, `/api/v1/wallet/unlock`,
+  and `/api/v1/wallet/check` was unlimited (each guess still costing a PBKDF2
+  run). Enforcement lives in the wallet writer task, so every surface shares
+  one budget per operation; successful operations reset it. Pinned by unit
+  tests on the limiter policy.
+
 - **Security: the Scala-compat `/mining/*` routes are now api_key-gated.**
   `GET /mining/candidate` (including its longpoll hold), `POST /mining/solution`,
   `GET /mining/rewardAddress`, and `GET /mining/rewardPublicKey` previously

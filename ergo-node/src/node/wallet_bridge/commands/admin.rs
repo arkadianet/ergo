@@ -14,6 +14,83 @@ use ergo_api::wallet::WalletAdminError;
 
 use super::WriterContext;
 
+/// Failed-attempt budget for a sensitive wallet operation, enforced in the
+/// writer task so every surface (compat `/wallet/unlock`, native
+/// `/api/v1/wallet/unlock`, future callers) shares one choke point.
+///
+/// Policy: at most [`Self::MAX_FAILURES`] failures inside
+/// [`Self::WINDOW`]; exceeding the budget locks the operation for
+/// [`Self::LOCKOUT`]. A success (or an unrelated error) resets the
+/// window. Lockout trips produce [`WalletAdminError::RateLimited`] →
+/// HTTP 429 — the variant existed for exactly this purpose but was never
+/// constructed (audit finding M-4: unlimited online password guessing
+/// against `/wallet/unlock`, each guess still costing a PBKDF2 run).
+///
+/// Instances live in the wallet writer loop (single logical owner); the
+/// inner state sits behind a mutex only because the async handlers hold
+/// `&Self` across await points, which requires `Sync`. Time is injected
+/// (`*_at(now)`) so tests can drive the clock without sleeping.
+pub(crate) struct AttemptLimiter {
+    inner: std::sync::Mutex<AttemptLimiterState>,
+}
+
+#[derive(Default)]
+struct AttemptLimiterState {
+    window_start: Option<std::time::Instant>,
+    failures: u32,
+    locked_until: Option<std::time::Instant>,
+}
+
+impl AttemptLimiter {
+    pub(crate) const MAX_FAILURES: u32 = 5;
+    pub(crate) const WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+    pub(crate) const LOCKOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+    pub(crate) const fn new() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(AttemptLimiterState {
+                window_start: None,
+                failures: 0,
+                locked_until: None,
+            }),
+        }
+    }
+
+    /// `Ok(())` when the operation may proceed; `Err(())` while locked out.
+    pub(crate) fn gate_at(&self, now: std::time::Instant) -> Result<(), ()> {
+        let mut st = self.inner.lock().expect("attempt limiter poisoned");
+        if let Some(until) = st.locked_until {
+            if now < until {
+                return Err(());
+            }
+            // Lockout expired — start fresh.
+            *st = AttemptLimiterState::default();
+        }
+        Ok(())
+    }
+
+    pub(crate) fn record_failure_at(&self, now: std::time::Instant) {
+        let mut st = self.inner.lock().expect("attempt limiter poisoned");
+        let in_window = match st.window_start {
+            Some(start) => now.duration_since(start) <= Self::WINDOW,
+            None => false,
+        };
+        if !in_window {
+            st.window_start = Some(now);
+            st.failures = 0;
+        }
+        st.failures += 1;
+        if st.failures >= Self::MAX_FAILURES {
+            st.locked_until = Some(now + Self::LOCKOUT);
+        }
+    }
+
+    pub(crate) fn record_success(&self) {
+        let mut st = self.inner.lock().expect("attempt limiter poisoned");
+        *st = AttemptLimiterState::default();
+    }
+}
+
 pub(crate) async fn status(
     ctx: &WriterContext<'_>,
     reply: oneshot::Sender<Result<WalletStatus, WalletAdminError>>,
@@ -255,9 +332,15 @@ pub(crate) async fn rescan(
 
 pub(crate) async fn unlock(
     ctx: &WriterContext<'_>,
+    limiter: &AttemptLimiter,
     pass: String,
     reply: oneshot::Sender<Result<(), WalletAdminError>>,
 ) {
+    if limiter.gate_at(std::time::Instant::now()).is_err() {
+        tracing::warn!("wallet unlock rejected: failed-attempt budget exhausted");
+        let _ = reply.send(Err(WalletAdminError::RateLimited));
+        return;
+    }
     let mut storage = ctx.storage.write();
     let mut state = ctx.state.write();
     let result = crate::wallet_boot::WalletBootService::unlock_and_sync(
@@ -275,6 +358,17 @@ pub(crate) async fn unlock(
         }
         other => WalletAdminError::Internal(other.to_string()),
     });
+    drop(storage);
+    drop(state);
+    match &result {
+        Ok(()) => limiter.record_success(),
+        Err(WalletAdminError::WrongPassword) => {
+            limiter.record_failure_at(std::time::Instant::now())
+        }
+        // Uninitialized / internal errors are not guess feedback — leave
+        // the budget untouched.
+        Err(_) => {}
+    }
     let _ = reply.send(result);
 }
 
@@ -291,12 +385,27 @@ pub(crate) async fn lock(
 
 pub(crate) async fn check(
     ctx: &WriterContext<'_>,
+    limiter: &AttemptLimiter,
     mnemonic: String,
     mnemonic_pass: String,
     reply: oneshot::Sender<Result<bool, WalletAdminError>>,
 ) {
+    // `check` is a yes/no oracle over the recovery phrase — the same
+    // brute-force surface as unlock, so it shares the failed-attempt
+    // budget (a mismatch counts as a failure; a match resets it).
+    if limiter.gate_at(std::time::Instant::now()).is_err() {
+        tracing::warn!("wallet check rejected: failed-attempt budget exhausted");
+        let _ = reply.send(Err(WalletAdminError::RateLimited));
+        return;
+    }
     let storage = ctx.storage.read();
     let matched = storage.check_seed(&mnemonic, &mnemonic_pass);
+    drop(storage);
+    if matched {
+        limiter.record_success();
+    } else {
+        limiter.record_failure_at(std::time::Instant::now());
+    }
     let _ = reply.send(Ok(matched));
 }
 
@@ -1279,5 +1388,75 @@ mod tests {
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].token_id, hex::encode(TOK_B));
         assert_eq!(assets[0].amount, 2);
+    }
+}
+
+#[cfg(test)]
+mod attempt_limiter_tests {
+    use super::AttemptLimiter;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn allows_below_budget_and_locks_at_max_failures() {
+        let limiter = AttemptLimiter::new();
+        let t0 = Instant::now();
+        for i in 0..AttemptLimiter::MAX_FAILURES {
+            assert!(
+                limiter.gate_at(t0 + Duration::from_secs(i.into())).is_ok(),
+                "attempt {i} inside budget must pass the gate"
+            );
+            limiter.record_failure_at(t0 + Duration::from_secs(i.into()));
+        }
+        // Budget exhausted → locked, even immediately.
+        assert!(limiter.gate_at(t0 + Duration::from_secs(10)).is_err());
+    }
+
+    #[test]
+    fn lockout_expires_and_state_resets() {
+        let limiter = AttemptLimiter::new();
+        let t0 = Instant::now();
+        for i in 0..AttemptLimiter::MAX_FAILURES {
+            limiter.record_failure_at(t0 + Duration::from_secs(i.into()));
+        }
+        // Lockout runs from the LAST failure (t0+4s), not the first.
+        let last_failure = t0 + Duration::from_secs(AttemptLimiter::MAX_FAILURES as u64 - 1);
+        assert!(limiter
+            .gate_at(last_failure + Duration::from_secs(1))
+            .is_err());
+        let unlock_at = last_failure + AttemptLimiter::LOCKOUT + Duration::from_secs(1);
+        assert!(limiter.gate_at(unlock_at).is_ok(), "lockout must expire");
+        // Fresh window after expiry: a single new failure must not lock.
+        limiter.record_failure_at(unlock_at);
+        assert!(limiter.gate_at(unlock_at + Duration::from_secs(1)).is_ok());
+    }
+
+    #[test]
+    fn success_resets_the_window() {
+        let limiter = AttemptLimiter::new();
+        let t0 = Instant::now();
+        for i in 0..(AttemptLimiter::MAX_FAILURES - 1) {
+            limiter.record_failure_at(t0 + Duration::from_secs(i.into()));
+        }
+        limiter.record_success();
+        // Full fresh budget available again.
+        for i in 0..(AttemptLimiter::MAX_FAILURES - 1) {
+            limiter.record_failure_at(t0 + Duration::from_secs(30 + i as u64));
+        }
+        assert!(limiter.gate_at(t0 + Duration::from_secs(60)).is_ok());
+    }
+
+    #[test]
+    fn failures_outside_the_window_do_not_accumulate() {
+        let limiter = AttemptLimiter::new();
+        let t0 = Instant::now();
+        for i in 0..(AttemptLimiter::MAX_FAILURES - 1) {
+            limiter.record_failure_at(t0 + Duration::from_secs(i.into()));
+        }
+        // Past WINDOW since the first failure: a new window starts, so
+        // this failure is #1 of a fresh budget — no lockout.
+        limiter.record_failure_at(t0 + AttemptLimiter::WINDOW + Duration::from_secs(1));
+        assert!(limiter
+            .gate_at(t0 + AttemptLimiter::WINDOW + Duration::from_secs(2))
+            .is_ok());
     }
 }
