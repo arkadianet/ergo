@@ -1260,6 +1260,11 @@ pub async fn run_wallet_writer(
         submit_handle: &submit_handle,
         mempool: &mempool,
     };
+    // Sensitive-op failed-attempt budgets, owned by this loop (the single
+    // choke point every wallet surface funnels through). See
+    // `commands::admin::AttemptLimiter`.
+    let unlock_limiter = commands::admin::AttemptLimiter::new();
+    let check_limiter = commands::admin::AttemptLimiter::new();
     while let Some(cmd) = rx.recv().await {
         match cmd {
             WalletCommand::Status { reply } => commands::admin::status(&ctx, reply).await,
@@ -1283,14 +1288,14 @@ pub async fn run_wallet_writer(
                 commands::admin::rescan(&ctx, from_height, reply).await
             }
             WalletCommand::Unlock { pass, reply } => {
-                commands::admin::unlock(&ctx, pass, reply).await
+                commands::admin::unlock(&ctx, &unlock_limiter, pass, reply).await
             }
             WalletCommand::Lock { reply } => commands::admin::lock(&ctx, reply).await,
             WalletCommand::Check {
                 mnemonic,
                 mnemonic_pass,
                 reply,
-            } => commands::admin::check(&ctx, mnemonic, mnemonic_pass, reply).await,
+            } => commands::admin::check(&ctx, &check_limiter, mnemonic, mnemonic_pass, reply).await,
             WalletCommand::UpdateChangeAddress { address, reply } => {
                 commands::admin::update_change_address(&ctx, address, reply).await
             }
