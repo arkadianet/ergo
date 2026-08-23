@@ -103,6 +103,14 @@ pub(super) fn handle_sync_tick(state: &mut NodeState) {
         flush_actions(state, actions);
     }
 
+    // 2b. Sweep expired bans (internally cadence-gated to ~hourly; between
+    // sweeps this is a cheap no-op). Keeps the ban list and its persisted
+    // rows bounded without waiting for a restart.
+    let swept = state.peer_manager.sweep_expired_bans(now);
+    if swept > 0 {
+        info!(count = swept, "swept expired bans");
+    }
+
     // 2.5 Level-triggered headers-synced fallback (deliberate, consensus-safe
     // divergence from Scala). `check_headers_synced` flips the latch only on
     // the edge of validating a header that is *fresh* per `header.isNew`; on an
