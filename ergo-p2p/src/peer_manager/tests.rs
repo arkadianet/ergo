@@ -1294,3 +1294,107 @@ fn peers_for_sharing_excludes_non_routable_declared_addresses() {
     assert_eq!(sd.addr, vec![213, 239, 193, 208]);
     assert_eq!(sd.port, 9030);
 }
+
+// ---- ban-list bounds (audit M-6) ----
+
+fn addr_of(o: [u8; 4]) -> IpAddr {
+    IpAddr::from(o)
+}
+
+fn sock(ip: IpAddr) -> SocketAddr {
+    SocketAddr::from((ip, 9000))
+}
+
+#[test]
+fn ban_cap_evicts_soonest_expiring_first_and_keeps_recent() {
+    let mut mgr = PeerManager::new(1);
+    let now = Instant::now();
+
+    // One long-lived (permanent) ban among many short ones: under cap
+    // pressure the short-lived entries must evict first.
+    mgr.record_ban(addr_of([9, 9, 9, 9]), now, true);
+    for i in 0..MAX_BANS - 1 {
+        let octets = [(i & 0xff) as u8, ((i >> 8) & 0xff) as u8, 1, 1];
+        mgr.record_ban(addr_of(octets), now, false);
+    }
+    assert_eq!(mgr.bans.len(), MAX_BANS);
+
+    // Five more: cap pressure evicts five soonest-expiring entries.
+    for i in 0..5 {
+        let octets = [7, 7, 7, i as u8];
+        mgr.record_ban(
+            addr_of(octets),
+            now + Duration::from_secs(i as u64 * 60),
+            false,
+        );
+        assert_eq!(mgr.bans.len(), MAX_BANS, "cap must hold after insert {i}");
+        assert!(
+            mgr.bans.contains_key(&IpAddr::from([9, 9, 9, 9])),
+            "the farthest-expiring (permanent) ban must never be the eviction victim"
+        );
+    }
+
+    // Every survivor is still an active ban at record time.
+    for ip in mgr.bans.keys() {
+        assert!(mgr.is_banned(&sock(*ip), now));
+    }
+}
+
+#[test]
+fn sweep_removes_expired_but_keeps_unexpired_and_permanent() {
+    let mut mgr = PeerManager::new(2);
+    let now = Instant::now();
+    mgr.record_ban(addr_of([192, 168, 1, 1]), now, false); // 30 min default
+    mgr.record_ban(addr_of([192, 168, 1, 2]), now, true); // 1 year
+    mgr.record_ban(addr_of([192, 168, 1, 3]), now, false); // 30 min default
+
+    let after = now + Duration::from_secs(31 * 60);
+    let swept = mgr.sweep_expired_bans(after);
+    assert_eq!(swept, 2, "both 30-min bans are expired and must be swept");
+    assert!(!mgr.is_banned(&sock(addr_of([192, 168, 1, 1])), after));
+    assert!(!mgr.is_banned(&sock(addr_of([192, 168, 1, 3])), after));
+    assert!(
+        mgr.is_banned(&sock(addr_of([192, 168, 1, 2])), after),
+        "permanent ban survives the sweep"
+    );
+
+    // Cadence gate: an immediate second call is a no-op even if new bans
+    // have already expired again.
+    mgr.record_ban(addr_of([192, 168, 1, 4]), now, false); // expires before `after`
+    assert_eq!(mgr.sweep_expired_bans(after), 0, "inside sweep interval");
+    assert!(mgr.bans.contains_key(&IpAddr::from([192, 168, 1, 4])));
+    let swept = mgr.sweep_expired_bans(after + BAN_SWEEP_INTERVAL);
+    assert_eq!(swept, 1, "next scheduled sweep collects it");
+    assert!(!mgr.bans.contains_key(&IpAddr::from([192, 168, 1, 4])));
+}
+
+#[test]
+fn persisted_ban_rows_stay_within_cap_across_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peers.redb");
+    let book = std::sync::Arc::new(AddressBook::open_at(&path).unwrap());
+
+    let mut mgr = PeerManager::new(3);
+    mgr.set_address_book(book.clone());
+    let now = Instant::now();
+    for i in 0..10u32 {
+        mgr.record_ban(
+            addr_of([10, 0, (i >> 8) as u8, (i & 0xff) as u8]),
+            now,
+            false,
+        );
+    }
+    // Drive cap pressure well below MAX_BANS to keep the redb write count
+    // small while exercising the same eviction path production uses.
+    mgr.enforce_ban_cap_to(4);
+    drop(mgr);
+    drop(book);
+
+    let reopened = AddressBook::open_at(&path).unwrap();
+    let loaded = reopened.load_all().unwrap();
+    assert!(
+        loaded.bans.len() <= 4,
+        "persisted rows must be evicted alongside in-memory entries, got {}",
+        loaded.bans.len()
+    );
+}

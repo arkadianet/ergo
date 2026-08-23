@@ -47,6 +47,23 @@ use known_peer::{backoff_for, known_peer_keep_priority};
 
 // ---- PeerManager ----
 
+/// Hard cap on the ban list, in memory and mirrored to the persisted BANS
+/// table. Without it, an adversary holding an IPv6 /64 can mint unlimited
+/// source addresses and each handshake-reject (1-year "permanent" ban)
+/// adds a resident entry plus a durable redb row — slow-burn memory/disk
+/// exhaustion across restarts (audit M-6). 10k entries at ~100 B/row is a
+/// few MB of state; genuine ban pressure on honest deployments sits
+/// orders of magnitude below this. Eviction order: soonest-expiring first
+/// (temporary bans before permanent), so the least-valuable entries leave
+/// first and the cap degrades gracefully instead of refusing new bans.
+pub(crate) const MAX_BANS: usize = 10_000;
+
+/// Cadence for the expired-ban sweep. Expired entries stop being enforced
+/// immediately (`is_banned` checks `until`), but without a sweep they stay
+/// resident until process restart. One hour keeps memory tidy at trivial
+/// cost; the sweep is O(n) over a map capped at [`MAX_BANS`].
+pub(crate) const BAN_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
 pub struct PeerManager {
     peers: HashMap<PeerId, PeerInfo>,
     /// Ban list: IP → ban expiry. Separate from peers so bans survive disconnection.
@@ -60,6 +77,9 @@ pub struct PeerManager {
     /// surfaced — the in-memory state remains authoritative for the
     /// session, persistence is best-effort restore-on-restart.
     book: Option<Arc<AddressBook>>,
+    /// Next scheduled expired-ban sweep. `None` until the first sweep is
+    /// due — an empty ban list needs no sweeping.
+    next_ban_sweep: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +101,7 @@ impl PeerManager {
             our_session_id: session_id,
             limits,
             book: None,
+            next_ban_sweep: None,
         }
     }
 
@@ -857,6 +878,55 @@ impl PeerManager {
             },
         );
         self.persist_ban(ip, duration, count, permanent);
+        self.enforce_ban_cap_to(MAX_BANS);
+    }
+
+    /// Keep the ban list within `max`, evicting soonest-expiring entries
+    /// first (temporary before permanent — `permanent` bans carry a 1-year
+    /// `until`, so pure expiry ordering already deprioritizes them).
+    /// Evicted IPs are dropped from the persisted table too, so both
+    /// representations stay within cap. Production passes [`MAX_BANS`];
+    /// tests pass a smaller bound to exercise the eviction path without
+    /// ten thousand redb writes.
+    fn enforce_ban_cap_to(&mut self, max: usize) {
+        while self.bans.len() > max {
+            let Some(victim) = self
+                .bans
+                .iter()
+                .min_by_key(|(_, entry)| entry.until)
+                .map(|(ip, _)| *ip)
+            else {
+                break;
+            };
+            self.bans.remove(&victim);
+            self.unban_persisted(victim);
+        }
+    }
+
+    /// Remove every expired entry from the ban list and its persisted rows.
+    ///
+    /// Expired bans are already unenforced (`is_banned` / `currently_banned_ips`
+    /// compare against `until`), so this is pure hygiene: without it, entries
+    /// linger in memory until restart and their redb rows forever. Cadence is
+    /// gated internally to [`BAN_SWEEP_INTERVAL`] — the first call runs
+    /// immediately, later calls between sweeps are cheap no-ops. Returns the
+    /// number of entries removed.
+    pub fn sweep_expired_bans(&mut self, now: Instant) -> usize {
+        match self.next_ban_sweep {
+            Some(next) if now < next => return 0,
+            _ => self.next_ban_sweep = Some(now + BAN_SWEEP_INTERVAL),
+        }
+        let expired: Vec<IpAddr> = self
+            .bans
+            .iter()
+            .filter(|(_, entry)| now >= entry.until)
+            .map(|(ip, _)| *ip)
+            .collect();
+        for ip in &expired {
+            self.bans.remove(ip);
+            self.unban_persisted(*ip);
+        }
+        expired.len()
     }
 
     fn count_by_direction(&self, dir: Direction) -> usize {

@@ -78,6 +78,18 @@ impl PeerManager {
         }
     }
 
+    /// Best-effort delete of a ban's persisted row (cap eviction + expiry
+    /// sweep). Errors are logged, not surfaced — same contract as every
+    /// other write-through hook.
+    pub(super) fn unban_persisted(&self, ip: IpAddr) {
+        let Some(book) = self.book.as_ref() else {
+            return;
+        };
+        if let Err(e) = book.unban(ip) {
+            warn!(ip = %ip, op = "unban", error = %e, "address_book write failed");
+        }
+    }
+
     pub(super) fn persist_ban(&self, ip: IpAddr, duration: Duration, count: u32, permanent: bool) {
         let Some(book) = self.book.as_ref() else {
             return;
