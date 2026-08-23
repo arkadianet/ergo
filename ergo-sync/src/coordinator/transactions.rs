@@ -62,10 +62,22 @@ impl SyncCoordinator {
     ///   Accept  → mark received + hand off to the mempool
     ///   Ignore  → duplicate delivery, drop silently
     ///   Reject  → unsolicited modifier, penalize sender
-    pub fn on_transaction_received(&mut self, peer: PeerId, tx_id: &[u8; 32]) -> DeliveryAction {
+    ///
+    /// An accepted tx advances `last_modifier_got_time` exactly like
+    /// [`SyncCoordinator::on_modifier_received`] — Scala's
+    /// `lastModifierGotTime` covers every accepted modifier type, and a
+    /// stalled NonDelivery gate must not fire on a peer that is actively
+    /// delivering transactions.
+    pub fn on_transaction_received(
+        &mut self,
+        peer: PeerId,
+        tx_id: &[u8; 32],
+        now: Instant,
+    ) -> DeliveryAction {
         let action = self.delivery.on_received(tx_id, &peer);
         if let DeliveryAction::Accept = action {
             self.delivery.mark_received(tx_id);
+            self.last_modifier_got_time = Some(now);
         }
         action
     }

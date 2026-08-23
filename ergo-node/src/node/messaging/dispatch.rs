@@ -608,7 +608,10 @@ fn handle_modifier_batch(
                 });
                 continue;
             }
-            match state.coordinator.on_transaction_received(peer, &mod_id) {
+            match state
+                .coordinator
+                .on_transaction_received(peer, &mod_id, now)
+            {
                 DA::Accept => {
                     // NB: a tx delivery deliberately does NOT
                     // touch the body-only download-failure

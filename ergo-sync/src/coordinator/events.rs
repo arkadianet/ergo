@@ -59,24 +59,34 @@ impl SyncCoordinator {
                     let mut r = ergo_primitives::reader::VlqReader::new(bytes);
                     ergo_ser::header::read_header(&mut r).ok().map(|h| h.height)
                 });
-                let tip_id = ids.first().copied().unwrap_or([0u8; 32]);
-                let tip_score = chain.header_score_for(&tip_id);
-                let status = match tip_height {
-                    Some(h) => ergo_p2p::sync::compare_sync_info_v2(
-                        ergo_p2p::sync::SyncInfoV2Compare {
-                            peer_tip_id: tip_id,
-                            peer_height: h,
-                            peer_header_ids: &ids,
-                            our_best_id: chain.best_header_id(),
-                            our_best_height: chain.best_header_height(),
-                            peer_tip_score: tip_score.as_deref(),
-                            our_best_score: &chain.best_header_score(),
-                        },
-                        |id| chain.has_header(id),
-                    ),
-                    // Corrupt / unparseable tip bytes: do not guess
-                    // Equal/Younger/Older from tip-id heuristics.
-                    None => PeerChainStatus::Unknown,
+                let status = if ids.is_empty() {
+                    // Empty SyncInfoV2: the comparator's own empty-rule is
+                    // Younger (Scala parity — a peer with no headers has
+                    // nothing). This guard must precede the tip-height
+                    // match, or the None arm below would shadow it into
+                    // Unknown for an empty-but-well-formed message.
+                    PeerChainStatus::Younger
+                } else {
+                    let tip_id = ids.first().copied().unwrap_or([0u8; 32]);
+                    let tip_score = chain.header_score_for(&tip_id);
+                    match tip_height {
+                        Some(h) => ergo_p2p::sync::compare_sync_info_v2(
+                            ergo_p2p::sync::SyncInfoV2Compare {
+                                peer_tip_id: tip_id,
+                                peer_height: h,
+                                peer_header_ids: &ids,
+                                our_best_id: chain.best_header_id(),
+                                our_best_height: chain.best_header_height(),
+                                peer_tip_score: tip_score.as_deref(),
+                                our_best_score: &chain.best_header_score(),
+                            },
+                            |id| chain.has_header(id),
+                        ),
+                        // Corrupt / unparseable tip bytes on a non-empty
+                        // message: do not guess Equal/Younger/Older from
+                        // tip-id heuristics.
+                        None => PeerChainStatus::Unknown,
+                    }
                 };
                 (ids, headers.clone(), tip_height, status)
             }
@@ -203,14 +213,17 @@ impl SyncCoordinator {
                         code: message::CODE_SYNC_INFO,
                         payload: our_sync,
                     });
+                    // Stamp only on the successful send path: the timestamp
+                    // means "this peer last received a SyncInfo from us",
+                    // so a serialization failure (which emitted no action)
+                    // must leave it untouched and let the next inbound
+                    // SyncInfo retry.
+                    self.sync_state.mark_sync_sent(peer, now);
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to serialize SyncInfo; skipping send")
                 }
             }
-            // Stamp regardless of serialization outcome so a persistent
-            // failure cannot warn-spam every inbound SyncInfo.
-            self.sync_state.mark_sync_sent(peer, now);
         }
 
         actions
