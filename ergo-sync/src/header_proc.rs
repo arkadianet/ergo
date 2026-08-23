@@ -154,6 +154,16 @@ pub fn pre_validate_header(header_bytes: &[u8]) -> Result<PreValidatedHeader, He
     let header =
         read_header(&mut reader).map_err(|e| HeaderProcessError::Deserialize(format!("{e:?}")))?;
 
+    // JVM parity: Scala curve-checks every group element at deserialize
+    // time, including the Autolykos solution pk. The v2+ PoW hit depends
+    // only on (msg, nonce, height), so without this drain an off-curve or
+    // bad-prefix pk would parse cleanly, pass PoW, and split the chain
+    // against JVM nodes. Runs before PoW so a poisoned pk is rejected on
+    // its own (cheapest-specific) verdict.
+    let group_elements = reader.take_group_elements();
+    ergo_validation::header::validate_header_group_elements(&group_elements)
+        .map_err(HeaderProcessError::Validation)?;
+
     let parent_id = *header.parent_id.as_bytes();
     let height = header.height;
 

@@ -167,6 +167,22 @@ pub enum HeaderValidationError {
     #[error("PoW verification failed: {0}")]
     Pow(#[from] PowError),
 
+    /// Scala curve-checks every group element at deserialize time
+    /// (`GroupElementSerializer.parse`: `0x00`-lead identity accepted, any
+    /// other lead must decompress to an on-curve SecP256K1 point). The
+    /// ser layer stores point bytes unvalidated and defers the check to
+    /// the crypto-capable layers; for headers this fires when a point
+    /// recorded during the parse — notably the Autolykos solution `pk` —
+    /// fails that accept rule.
+    #[error(
+        "invalid group element in header solution: {} (Scala GroupElementSerializer.parse rejects it)",
+        hex::encode(encoding)
+    )]
+    InvalidGroupElement {
+        /// The rejected 33-byte SEC1 encoding.
+        encoding: [u8; 33],
+    },
+
     #[error("difficulty check failed: {0}")]
     Difficulty(#[from] DifficultyError),
 
@@ -328,6 +344,28 @@ impl PowCheckedHeader {
     }
 }
 
+/// Curve-check the group elements recorded on the reader sideband while a
+/// header was parsed.
+///
+/// Scala validates every `GroupElement` while deserializing a header —
+/// including the Autolykos solution `pk`, whose bytes the v2+ PoW hit never
+/// touches (`powHit` depends only on `(msg, nonce, height)`). Without this
+/// check a header carrying an off-curve point or an invalid SEC1 prefix as
+/// `pk` parses cleanly, passes PoW, and is accepted here while every JVM
+/// node rejects it at deserialize: an accept-invalid chain split. The
+/// JVM-matching accept rule lives in
+/// [`ergo_sigma::evaluator::validate_group_element`] (shared with the
+/// transaction-path equivalent in `crate::tx::ge`); v1 solutions are
+/// independently covered by the EC decode inside `check_pow_v1`, so running
+/// their recorded points through here too is harmless idempotence.
+pub fn validate_header_group_elements(points: &[[u8; 33]]) -> Result<(), HeaderValidationError> {
+    for ge in points {
+        ergo_sigma::evaluator::validate_group_element(*ge)
+            .map_err(|_| HeaderValidationError::InvalidGroupElement { encoding: *ge })?;
+    }
+    Ok(())
+}
+
 /// Validate a header against its parent and chain context, consuming a
 /// PoW proof so PoW is not re-verified.
 ///
@@ -384,4 +422,52 @@ pub fn validate_header(
 ) -> Result<CheckedHeader, HeaderValidationError> {
     let pow_checked = PowCheckedHeader::verify_pow(header, header_id)?;
     validate_header_after_pow(pow_checked, parent_id, parent, epoch_headers, config)
+}
+
+#[cfg(test)]
+mod group_element_tests {
+    use super::*;
+
+    /// Generator point, SEC1-compressed (on-curve).
+    const G_X: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    fn hx(s: &str) -> [u8; 33] {
+        let v: Vec<u8> = (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect();
+        v.try_into().unwrap()
+    }
+
+    #[test]
+    fn on_curve_point_accepted() {
+        assert!(validate_header_group_elements(&[hx(G_X)]).is_ok());
+    }
+
+    #[test]
+    fn identity_point_accepted() {
+        // 0x00-lead is the identity — Scala accepts it.
+        assert!(validate_header_group_elements(&[[0u8; 33]]).is_ok());
+    }
+
+    #[test]
+    fn off_curve_point_rejected_with_encoding_echoed() {
+        // 0x02-lead with x = 0 has no y on SecP256K1 → off-curve.
+        let bad = hx(&format!("02{}", "00".repeat(32)));
+        match validate_header_group_elements(&[bad]) {
+            Err(HeaderValidationError::InvalidGroupElement { encoding }) => {
+                assert_eq!(encoding, bad);
+            }
+            other => panic!("expected InvalidGroupElement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bad_sec1_prefix_rejected() {
+        let bad = hx(&format!("04{}", "00".repeat(32)));
+        assert!(matches!(
+            validate_header_group_elements(&[bad]),
+            Err(HeaderValidationError::InvalidGroupElement { .. })
+        ));
+    }
 }
