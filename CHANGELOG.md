@@ -30,6 +30,23 @@ infrastructure.
   rule; v1 solutions were independently covered by their EC decode. Pinned by
   unit tests plus ingestion tests covering off-curve/bad-prefix rejection,
   check ordering against PoW, and curated mainnet v2 headers still passing.
+- **Consensus: `CONTEXT.headers` exposed 10 headers during block validation; Scala
+  exposes 9.** Scala's `ErgoStateContext` splits its stored window
+  (`sigmaPreHeader = lastHeaders.head`, `sigmaLastHeaders = lastHeaders.drop(1)`),
+  so scripts validating block `H` see only `[H-1 … H-9]` and `CONTEXT.headers(9)`
+  throws — while this node fed all 10 (`[H-1 … H-10]`) into script eval. Because
+  `CONTEXT.headers.size` is script-observable, the divergence cut both ways; on
+  live mainnet (2026-08-17/18, heights 1,853,462–1,853,480) it let this node
+  accept-and-apply 15 blocks the reference node rejected as malformed (~10.6 h
+  cumulatively on an invalid tip; recovery was by cumulative work, never by
+  validation). Block validation now truncates the evaluator window to the first
+  9 headers at a single choke point covering the sequential, parallel, and
+  reorg-replay paths; candidate construction and mempool admission keep their
+  correct 10-entry `UpcomingStateContext` window. Pinned by an oracle test
+  driven by the captured incident vectors
+  (`test-vectors/mainnet/context_headers_1853478/`): the poison transaction
+  verifies under the legacy 10-entry window and is rejected under the
+  Scala-parity 9-entry window.
 
 ## [0.5.3] - 2026-07-19
 

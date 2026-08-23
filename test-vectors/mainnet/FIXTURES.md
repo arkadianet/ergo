@@ -42,6 +42,7 @@ skip-if-missing and re-run after re-extraction. Committed mainnet: 101 MB → 20
 | `block_836113.json` | `diagnose_block_836113` | a specific gnarly block |
 | `blocks_1_5.json`, `blocks_700000_700010.json` | merkle-root, full-block, auction, multi-tx-ordering | genesis-era + 700k-era block shapes |
 | `voted_params_softfork_blobs.json` | voting/softfork param decode | **soft-fork** param transitions |
+| `context_headers_1853478/` (dir + README; reject/accept blocks, poison tx, spent boxes, 10 ancestors, Scala context dump) | `context_headers_window_parity.rs` (ergo-validation) | **CONTEXT.headers 9-vs-10 window**: live 2026-08-17/18 accept-invalid incident, h1,853,462–480 — Scala `ErgoStateContext` exposes 9 headers to scripts during block validation (`sigmaLastHeaders = lastHeaders.drop(1)`), candidate/mempool keeps 10 (`UpcomingStateContext`) |
 
 ## Curated type fixtures (script/proof/tx shapes) — count-pinned CI corpora
 | file | backs | type covered |

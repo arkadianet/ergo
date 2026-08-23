@@ -21,6 +21,42 @@ use super::overlay::BlockUtxoOverlay;
 use super::size::check_block_transactions_size;
 use super::{BlockValidationContext, BlockValidationError, CheckedBlock};
 
+/// Number of headers the evaluator must expose as `CONTEXT.headers` while
+/// validating a block: **9**, not 10.
+///
+/// Scala `ErgoStateContext.process(header, ext)` stores
+/// `newHeaders = header +: lastHeaders.take(LastHeadersInContext - 1)` (10
+/// entries, block-under-validation first), then splits it:
+/// `sigmaPreHeader = lastHeaders.head` (the block being validated) and
+/// `sigmaLastHeaders = lastHeaders.drop(1)` — the remaining 9 ancestors.
+/// `CONTEXT.headers(9)` therefore throws
+/// `ArrayIndexOutOfBoundsException` and Scala rejects the block.
+///
+/// The candidate / mempool surface is deliberately different:
+/// `UpcomingStateContext` overrides `sigmaLastHeaders` with the *whole* 10
+/// entry sequence because the block being built travels separately in
+/// `predictedHeader`. That asymmetry is why `CandidateValidationContext`
+/// keeps its `[Header; 10]` window and mempool admission keeps 10, while
+/// this module must truncate to 9. Divergence here is consensus-critical in
+/// both directions (`CONTEXT.headers.size` is script-observable): live
+/// mainnet incident 2026-08-17/18, heights 1,853,462–1,853,480, where this
+/// node accepted 15 poisoned blocks Scala rejected via `headers(9)`
+/// fallback scripts (oracle vectors under
+/// `test-vectors/mainnet/context_headers_1853478/`).
+const HEADERS_IN_BLOCK_SCRIPT_CONTEXT: usize = 9;
+
+/// Extract the evaluator-visible header window from the caller-supplied
+/// context window. Callers pass up to 10 tip-first headers starting at the
+/// block's parent; only the first
+/// [`HEADERS_IN_BLOCK_SCRIPT_CONTEXT`] reach `CONTEXT.headers`.
+fn eval_last_headers(ctx_window: &[CheckedHeader]) -> Vec<ergo_ser::header::Header> {
+    ctx_window
+        .iter()
+        .take(HEADERS_IN_BLOCK_SCRIPT_CONTEXT)
+        .map(|ch| ch.header().clone())
+        .collect()
+}
+
 /// Validate a full block: section linkage + tx root + ext root + all txs.
 ///
 /// The header is accepted as a [`CheckedHeader`], constructed either via
@@ -196,12 +232,10 @@ pub fn validate_full_block(
     )?;
 
     // 5. Per-tx validation with intra-block UTXO overlay
-    // Extract raw headers for the tx validation layer (which takes &[Header]).
-    let raw_last_headers: Vec<ergo_ser::header::Header> = ctx
-        .last_headers
-        .iter()
-        .map(|ch| ch.header().clone())
-        .collect();
+    // Scala-parity header window: only the first 9 ancestors reach the
+    // evaluator (`sigmaLastHeaders = lastHeaders.drop(1)`); see
+    // `HEADERS_IN_BLOCK_SCRIPT_CONTEXT`.
+    let raw_last_headers: Vec<ergo_ser::header::Header> = eval_last_headers(ctx.last_headers);
     let tx_ctx = TransactionContext {
         height: header.height,
         miner_pubkey: *header.solution.pk().as_bytes(),
@@ -483,11 +517,8 @@ fn validate_full_block_parallel_impl(
     // Layered parallel tx validation
     let layering = build_tx_layers(txs)?;
 
-    let raw_last_headers: Vec<ergo_ser::header::Header> = ctx
-        .last_headers
-        .iter()
-        .map(|ch| ch.header().clone())
-        .collect();
+    // Same Scala-parity truncation as the sequential path above.
+    let raw_last_headers: Vec<ergo_ser::header::Header> = eval_last_headers(ctx.last_headers);
     let tx_ctx = TransactionContext {
         height: header.height,
         miner_pubkey: *header.solution.pk().as_bytes(),
@@ -722,4 +753,63 @@ pub fn validate_full_block_parallel_with_costs(
         None,
     )
     .map(|block| (block, costs))
+}
+
+#[cfg(test)]
+mod context_window_tests {
+    use super::*;
+    use ergo_primitives::digest::{Digest32, ModifierId};
+    use ergo_ser::header::Header;
+
+    /// Minimal header — `trust_me` skips validation and
+    /// `eval_last_headers` only clones headers out.
+    fn test_header(height: u32) -> Header {
+        Header {
+            version: 2,
+            parent_id: ModifierId::from_bytes([0; 32]),
+            ad_proofs_root: Digest32::from_bytes([0; 32]),
+            transactions_root: Digest32::from_bytes([0; 32]),
+            state_root: ergo_primitives::digest::ADDigest::from_bytes([0; 33]),
+            timestamp: 0,
+            extension_root: Digest32::from_bytes([0; 32]),
+            n_bits: 0,
+            height,
+            votes: [0; 3],
+            unparsed_bytes: Vec::new(),
+            solution: ergo_ser::autolykos::AutolykosSolution::V2 {
+                pk: ergo_primitives::group_element::GroupElement::from_bytes([0x02; 33]),
+                nonce: [0; 8],
+            },
+        }
+    }
+
+    #[test]
+    fn eval_window_truncates_ten_to_nine_scala_parity() {
+        // Production loaders hand us up to 10 tip-first headers
+        // ([H-1..H-10]); the evaluator must see exactly the first 9
+        // ([H-1..H-9]) per ErgoStateContext drop(1).
+        let window: Vec<CheckedHeader> = (0..10u8)
+            .map(|i| CheckedHeader::trust_me(test_header(100 - i as u32), [i; 32]))
+            .collect();
+        let eval = eval_last_headers(&window);
+        assert_eq!(eval.len(), HEADERS_IN_BLOCK_SCRIPT_CONTEXT);
+        assert_eq!(eval.len(), 9);
+        for (i, h) in eval.iter().enumerate() {
+            assert_eq!(h.height, 100 - i as u32, "order must stay tip-first");
+        }
+        // The spurious H-10 entry must not survive.
+        assert!(eval.iter().all(|h| h.height > 90));
+    }
+
+    #[test]
+    fn eval_window_tolerates_shorter_chains() {
+        // Near genesis the loader stops early; truncation must not panic.
+        let window: Vec<CheckedHeader> = (0..4u8)
+            .map(|i| CheckedHeader::trust_me(test_header(10 - i as u32), [i; 32]))
+            .collect();
+        let eval = eval_last_headers(&window);
+        assert_eq!(eval.len(), 4);
+        assert_eq!(eval[0].height, 10);
+        assert_eq!(eval[3].height, 7);
+    }
 }
