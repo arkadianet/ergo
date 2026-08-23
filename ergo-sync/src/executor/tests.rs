@@ -865,6 +865,50 @@ fn setup_two_peers(now: Instant) -> (PeerManager, PeerId, PeerId) {
     (mgr, p1, p2)
 }
 
+/// Empty chain view for delivery/reassign tests that only need Inv admission.
+struct EmptyChain;
+impl crate::coordinator::ChainView for EmptyChain {
+    fn best_header_id(&self) -> [u8; 32] {
+        [0; 32]
+    }
+    fn best_header_height(&self) -> u32 {
+        0
+    }
+    fn best_full_block_height(&self) -> u32 {
+        0
+    }
+    fn is_on_best_chain(&self, _: &[u8; 32]) -> bool {
+        false
+    }
+    fn has_header(&self, _: &[u8; 32]) -> bool {
+        false
+    }
+    fn has_block_section(&self, _: &[u8; 32]) -> bool {
+        false
+    }
+    fn is_invalid(&self, _: &[u8; 32]) -> bool {
+        false
+    }
+    fn recent_header_ids(&self, _: usize) -> Vec<[u8; 32]> {
+        vec![]
+    }
+    fn recent_header_bytes(&self, _: usize) -> Vec<Vec<u8>> {
+        vec![]
+    }
+    fn header_id_at_height(&self, _: u32) -> ergo_state::chain::HeightLookup {
+        ergo_state::chain::HeightLookup::AboveTip
+    }
+    fn header_height_for(&self, _: &[u8; 32]) -> Option<u32> {
+        None
+    }
+    fn best_header_score(&self) -> Vec<u8> {
+        vec![0]
+    }
+    fn header_score_for(&self, _: &[u8; 32]) -> Option<Vec<u8>> {
+        None
+    }
+}
+
 #[test]
 fn executor_timeout_reassigns_via_peer_manager() {
     use ergo_p2p::types::{InvData, ModifierTypeId};
@@ -877,44 +921,6 @@ fn executor_timeout_reassigns_via_peer_manager() {
         DifficultyParams::mainnet(),
     );
     let mut coordinator = SyncCoordinator::new(0);
-
-    // Mock chain for on_inv
-    struct EmptyChain;
-    impl crate::coordinator::ChainView for EmptyChain {
-        fn best_header_id(&self) -> [u8; 32] {
-            [0; 32]
-        }
-        fn best_header_height(&self) -> u32 {
-            0
-        }
-        fn best_full_block_height(&self) -> u32 {
-            0
-        }
-        fn is_on_best_chain(&self, _: &[u8; 32]) -> bool {
-            false
-        }
-        fn has_header(&self, _: &[u8; 32]) -> bool {
-            false
-        }
-        fn has_block_section(&self, _: &[u8; 32]) -> bool {
-            false
-        }
-        fn is_invalid(&self, _: &[u8; 32]) -> bool {
-            false
-        }
-        fn recent_header_ids(&self, _: usize) -> Vec<[u8; 32]> {
-            vec![]
-        }
-        fn recent_header_bytes(&self, _: usize) -> Vec<Vec<u8>> {
-            vec![]
-        }
-        fn header_id_at_height(&self, _: u32) -> ergo_state::chain::HeightLookup {
-            ergo_state::chain::HeightLookup::AboveTip
-        }
-        fn header_height_for(&self, _: &[u8; 32]) -> Option<u32> {
-            None
-        }
-    }
 
     // Request modifier from p1
     let inv = InvData {
@@ -952,43 +958,6 @@ fn executor_disconnect_reassigns_via_peer_manager() {
         DifficultyParams::mainnet(),
     );
     let mut coordinator = SyncCoordinator::new(0);
-
-    struct EmptyChain;
-    impl crate::coordinator::ChainView for EmptyChain {
-        fn best_header_id(&self) -> [u8; 32] {
-            [0; 32]
-        }
-        fn best_header_height(&self) -> u32 {
-            0
-        }
-        fn best_full_block_height(&self) -> u32 {
-            0
-        }
-        fn is_on_best_chain(&self, _: &[u8; 32]) -> bool {
-            false
-        }
-        fn has_header(&self, _: &[u8; 32]) -> bool {
-            false
-        }
-        fn has_block_section(&self, _: &[u8; 32]) -> bool {
-            false
-        }
-        fn is_invalid(&self, _: &[u8; 32]) -> bool {
-            false
-        }
-        fn recent_header_ids(&self, _: usize) -> Vec<[u8; 32]> {
-            vec![]
-        }
-        fn recent_header_bytes(&self, _: usize) -> Vec<Vec<u8>> {
-            vec![]
-        }
-        fn header_id_at_height(&self, _: u32) -> ergo_state::chain::HeightLookup {
-            ergo_state::chain::HeightLookup::AboveTip
-        }
-        fn header_height_for(&self, _: &[u8; 32]) -> Option<u32> {
-            None
-        }
-    }
 
     // Request 2 modifiers from p1
     let inv = InvData {

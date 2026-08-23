@@ -118,7 +118,7 @@ fn process_header_modifier_batch(
             batch_actions.extend(
                 state
                     .coordinator
-                    .on_modifier_received(peer, type_id, mod_id, data),
+                    .on_modifier_received(peer, type_id, mod_id, data, now),
             );
         }
         contributing_peers.push(peer);

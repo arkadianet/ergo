@@ -159,6 +159,11 @@ fn make_state_with_backend(
         anchor_builder_cancel_tx: tokio::sync::watch::channel(false).0,
         anchor_scheduler: AnchorScheduler::new(),
         enable_anchor_scheduler: false,
+        sync_interval: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL,
+        sync_interval_stable: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL_STABLE,
+        last_sync_broadcast: Instant::now()
+            .checked_sub(ergo_p2p::sync::DEFAULT_SYNC_INTERVAL)
+            .unwrap_or_else(Instant::now),
         anchor_tip_cursor: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         snapshot_state: super::snapshot_state::SnapshotState::new(),
         snapshot_bootstrap: ergo_sync::snapshot_bootstrap::SnapshotBootstrap::new(),
@@ -745,6 +750,8 @@ fn cfg_with_mode(
         p2p_nipopows: 2,
         ibd_flush_interval: 0,
         download_window: 1,
+        sync_interval: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL,
+        sync_interval_stable: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL_STABLE,
         cache_bytes: None,
         script_validation_checkpoint: None,
         genesis_id: None,

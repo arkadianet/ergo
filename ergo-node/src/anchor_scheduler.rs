@@ -21,10 +21,11 @@ use ergo_p2p::peer::PeerId;
 use crate::anchor_map::ANCHOR_INTERVAL;
 
 /// Maximum age of an outstanding `(peer, anchor_height)` claim before
-/// the scheduler reclaims the slot. Per design constants. Effective
-/// dispatch cadence per peer is `max(per-peer-throttle, sync_tick) =
-/// max(1s, 3s) = 3s`, so a peer assigned an anchor has roughly 3
-/// dispatch opportunities to deliver before the slot is reclaimed.
+/// the scheduler reclaims the slot. Kept at 10 s — intentionally
+/// **below** [`ergo_p2p::sync::MIN_SYNC_INTERVAL`] (20 s) — so a silent
+/// peer loses the claim before a second proactive SyncInfo could fire.
+/// Responding peers get further attempts via reciprocal SyncInfo
+/// (inbound sync / post-header-progress), which bypass the 20 s floor.
 pub const ANCHOR_REASSIGN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Defense-in-depth cap: never assign an anchor whose 400-ID response

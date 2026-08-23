@@ -33,62 +33,53 @@ impl SyncCoordinator {
     ) -> Vec<Action> {
         let mut actions = Vec::new();
 
-        let (peer_header_ids, peer_headers, peer_height) = match sync_info {
-            SyncInfo::V1 { header_ids } => (header_ids.clone(), Vec::new(), None),
+        // Peer chain status — Scala `ErgoHistory.compare` /
+        // `compareV1` / `compareV2`, plus cumulative-score refinement
+        // when the peer tip is already in our store (Scala's
+        // `// todo: check difficulty?` on the Older branch). Branch on
+        // the SyncInfo variant so empty lists reach each comparator's
+        // Younger rule (rather than an emptiness guard that short-
+        // circuits to Unknown).
+        let (peer_header_ids, peer_headers, peer_height, status) = match sync_info {
+            SyncInfo::V1 { header_ids } => {
+                let ids = header_ids.clone();
+                let status =
+                    ergo_p2p::sync::compare_sync_info_v1(&ids, &chain.best_header_id(), |id| {
+                        chain.has_header(id)
+                    });
+                (ids, Vec::new(), None, status)
+            }
             SyncInfo::V2 { headers } => {
-                // V2 carries raw headers. Compute IDs (blake2b256 of bytes)
-                // for both classification and the commonPoint walk; heights
-                // come from our own store via header_height_for once we
-                // find a peer header that's on our best chain.
+                // V2 carries raw headers (newest-first). IDs from
+                // blake2b256; tip height from a real header parse when
+                // the bytes are well-formed.
                 let ids: Vec<[u8; 32]> =
                     headers.iter().map(|h| *blake2b256(h).as_bytes()).collect();
-                (ids, headers.clone(), None)
+                let tip_height = headers.first().and_then(|bytes| {
+                    let mut r = ergo_primitives::reader::VlqReader::new(bytes);
+                    ergo_ser::header::read_header(&mut r).ok().map(|h| h.height)
+                });
+                let tip_id = ids.first().copied().unwrap_or([0u8; 32]);
+                let tip_score = chain.header_score_for(&tip_id);
+                let status = match tip_height {
+                    Some(h) => ergo_p2p::sync::compare_sync_info_v2(
+                        ergo_p2p::sync::SyncInfoV2Compare {
+                            peer_tip_id: tip_id,
+                            peer_height: h,
+                            peer_header_ids: &ids,
+                            our_best_id: chain.best_header_id(),
+                            our_best_height: chain.best_header_height(),
+                            peer_tip_score: tip_score.as_deref(),
+                            our_best_score: &chain.best_header_score(),
+                        },
+                        |id| chain.has_header(id),
+                    ),
+                    // Corrupt / unparseable tip bytes: do not guess
+                    // Equal/Younger/Older from tip-id heuristics.
+                    None => PeerChainStatus::Unknown,
+                };
+                (ids, headers.clone(), tip_height, status)
             }
-        };
-
-        // Determine peer's chain status.
-        //
-        // V1 path uses the existing height-based heuristic with the
-        // ID overlap predicate.
-        //
-        // V2 path: peer headers are newest-first (Scala convention), so
-        // peer_header_ids[0] is the peer's tip. Classification keys on the
-        // TIP, mirroring `compare_sync_info` (the V1 comparator):
-        //   * tip == our best_header → Equal.
-        //   * tip is on our best chain but isn't our tip → Younger (their
-        //     tip lives below us; they're strictly behind).
-        //   * tip is NOT on our chain → Older, even if an OLDER peer header
-        //     is on our chain: an off-chain tip above a shared ancestor
-        //     means the peer has headers we don't (ahead or on a fork), so
-        //     we must take the Older path (continuation-header shortcut +
-        //     reciprocal SyncInfo) to fetch them. Using `.any()` here would
-        //     misread such an ahead/fork peer as Younger and suppress the
-        //     continuation request.
-        let status = if !peer_header_ids.is_empty() && peer_headers.is_empty() {
-            // V1: ID-only comparison
-            ergo_p2p::sync::compare_sync_info(
-                &peer_header_ids,
-                peer_height,
-                chain.best_header_height(),
-                |id| chain.is_on_best_chain(id),
-            )
-        } else if !peer_headers.is_empty() {
-            let our_best = chain.best_header_id();
-            let newest_id = peer_header_ids.first().copied().unwrap_or([0u8; 32]);
-            if newest_id == our_best {
-                PeerChainStatus::Equal
-            } else if chain.is_on_best_chain(&newest_id) {
-                // Peer's TIP is on our chain but below our tip — strictly behind.
-                PeerChainStatus::Younger
-            } else {
-                // Tip not on our chain → peer is ahead or forked. Older path
-                // handles catchup; if on a fork, find_continuation_header
-                // returns None and the reciprocal SyncInfo keeps the dance
-                // going.
-                PeerChainStatus::Older
-            }
-        } else {
-            PeerChainStatus::Unknown
         };
 
         // Record the per-peer snapshot before dispatching actions.
@@ -103,15 +94,18 @@ impl SyncCoordinator {
         // via `peer_height` already destructured above.
         let inferred_peer_height: Option<u32> = match peer_height {
             Some(h) => Some(h),
-            None => {
-                // V2 inference: find newest peer-header on our best
-                // chain (assumed newest-first per Scala convention).
-                peer_header_ids
-                    .iter()
-                    .find(|id| chain.is_on_best_chain(id))
-                    .and_then(|id| chain.header_height_for(id))
-            }
+            None => peer_header_ids
+                .iter()
+                .find(|id| chain.is_on_best_chain(id))
+                .and_then(|id| chain.header_height_for(id)),
         };
+        // Capture prior status for Scala `syncSendNeeded` before we
+        // overwrite the snapshot (ErgoSyncTracker.updateStatus).
+        let old_status = self
+            .peer_sync
+            .get(&peer)
+            .map(|s| s.status)
+            .unwrap_or(PeerChainStatus::Unknown);
         self.peer_sync.insert(
             peer,
             PeerSyncSnapshot {
@@ -183,37 +177,41 @@ impl SyncCoordinator {
                         actions.push(Action::ValidateHeader { peer, header_bytes });
                     }
                 }
-                // Also request more headers if we need them. Per-peer
-                // throttle: this only debounces our SyncInfo to *this*
-                // peer; the broadcast loop in node.rs handles the
-                // others independently.
-                if self.sync_state.should_send_sync(peer, now) {
-                    match build_sync_info_payload(sync_version, chain) {
-                        Ok(our_sync) => {
-                            actions.push(Action::SendToPeer {
-                                peer,
-                                code: message::CODE_SYNC_INFO,
-                                payload: our_sync,
-                            });
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "failed to serialize SyncInfo; skipping send")
-                        }
-                    }
-                    // Throttle regardless of the serialization outcome: an
-                    // (unreachable-from-valid-state) failure must still back off
-                    // to the next window rather than retry — and warn — every
-                    // tick. Matches the original always-mark-after-attempt path.
-                    self.sync_state.mark_sync_sent(peer, now);
-                }
             }
             PeerChainStatus::Equal | PeerChainStatus::Unknown | PeerChainStatus::Nonsense => {
-                // No-op: equal chains need no sync; Unknown/Nonsense are
-                // handled by the peer_manager's penalty/disconnect paths,
-                // not by Log-level tracing here.
+                // Status-specific Inv/continuation is a no-op here;
+                // reciprocal SyncInfo may still fire via syncSendNeeded.
             }
         }
-        let _ = peer; // kept for future Log reintroduction if useful
+
+        // Reciprocal SyncInfo — Scala `syncSendNeeded` in
+        // `processSyncV1`/`processSyncV2` (ErgoSyncTracker.updateStatus
+        // + ErgoNodeViewSynchronizer.scala:444-447 / 490-493):
+        //   (oldStatus != status) || notSyncedOrOutdated || Older || Fork
+        // This path deliberately ignores MinSyncInterval: it is the
+        // pull-model reply that keeps a 1–2 peer IBD pipeline fed when
+        // the proactive 20 s / subset fanout would otherwise starve it.
+        let sync_send_needed = old_status != status
+            || self.sync_state.not_synced_or_outdated(peer, now)
+            || status == PeerChainStatus::Older
+            || status == PeerChainStatus::Fork;
+        if sync_send_needed {
+            match build_sync_info_payload(sync_version, chain) {
+                Ok(our_sync) => {
+                    actions.push(Action::SendToPeer {
+                        peer,
+                        code: message::CODE_SYNC_INFO,
+                        payload: our_sync,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to serialize SyncInfo; skipping send")
+                }
+            }
+            // Stamp regardless of serialization outcome so a persistent
+            // failure cannot warn-spam every inbound SyncInfo.
+            self.sync_state.mark_sync_sent(peer, now);
+        }
 
         actions
     }
@@ -389,6 +387,7 @@ impl SyncCoordinator {
         type_id: u8,
         modifier_id: [u8; 32],
         data: Vec<u8>,
+        now: Instant,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
 
@@ -429,6 +428,12 @@ impl SyncCoordinator {
                     .modifier_type(&modifier_id)
                     .is_some_and(ModifierTypeId::is_block_body_section);
                 self.delivery.mark_received(&modifier_id);
+                // Scala `lastModifierGotTime` — any accepted modifier
+                // (header / body / tx) advances the connectivity clock
+                // used by the NonDelivery gate in `check_timeouts`.
+                // Use the caller-provided `now` so tests (and production
+                // event loops) stay deterministic.
+                self.last_modifier_got_time = Some(now);
                 if delivered_body {
                     actions.push(Action::NoteDeliveryOutcome {
                         peer,
@@ -613,9 +618,17 @@ impl SyncCoordinator {
     /// `eligible_peers`. All peers that just failed are excluded from the
     /// redistribution so retried IDs are spread across responsive peers
     /// using the same bucketed partitioner as `request_missing_sections_bucketed`.
+    ///
+    /// NonDelivery / delivery-streak failure outcomes are **conditional**
+    /// on the Scala connectivity gate: only modifiers whose
+    /// `request_time >= last_modifier_got_time` (nothing accepted from
+    /// anywhere since the request) attract a penalty. Soft timeouts still
+    /// re-request.
     pub fn check_timeouts(&mut self, now: Instant, eligible_peers: &[PeerId]) -> Vec<Action> {
         let mut actions = Vec::new();
-        let result = self.delivery.check_timeouts(now);
+        let result = self
+            .delivery
+            .check_timeouts_gated(now, self.last_modifier_got_time);
 
         let tx_type = ModifierTypeId::Transaction.as_byte();
         let mut all_retryable: Vec<[u8; 32]> = Vec::new();
@@ -625,7 +638,7 @@ impl SyncCoordinator {
             // a timed-out MEMPOOL TRANSACTION is just forgotten — it may
             // legitimately have left the peer's mempool, so there is "no
             // reason to penalize the peer" and no re-request. Block sections
-            // and headers keep the aggressive penalize + re-request path.
+            // and headers keep the (conditionally) penalize + re-request path.
             // The just-timed-out ids sit in the tracker's recently-released
             // shadow, so `modifier_type` still resolves their requested class.
             let (tx_ids, block_ids): (Vec<[u8; 32]>, Vec<[u8; 32]>) = ids
@@ -642,27 +655,54 @@ impl SyncCoordinator {
             if block_ids.is_empty() {
                 continue;
             }
-            actions.push(Action::Penalize {
-                peer: *failed_peer,
-                penalty: Penalty::NonDelivery,
-            });
-            // Body-only download-quality streak (separate from the decaying
-            // score, which NonDelivery can't move past DEGRADED_THRESHOLD).
-            // Only block-BODY section timeouts count: a peer that stalls on
-            // bodies but keeps answering the constant header/mempool-tx flow
-            // must still accrue toward degradation.
-            if block_ids.iter().any(|id| {
-                self.delivery
-                    .modifier_type(id)
-                    .is_some_and(ModifierTypeId::is_block_body_section)
-            }) {
-                actions.push(Action::NoteDeliveryOutcome {
+            // Hard vs soft: penalize only when at least one timed-out
+            // block modifier is in the delivery tracker's `penalize` set
+            // (request_time >= last_modifier_got_time). Soft timeouts
+            // still re-request — a slow-but-working peer must not be
+            // NonDelivery-penalized or delivery-streak-deprioritized
+            // while the node is otherwise receiving data.
+            let hard_ids: Vec<[u8; 32]> = block_ids
+                .iter()
+                .copied()
+                .filter(|id| result.penalize.contains(id))
+                .collect();
+            if !hard_ids.is_empty() {
+                actions.push(Action::Penalize {
                     peer: *failed_peer,
-                    succeeded: false,
+                    penalty: Penalty::NonDelivery,
                 });
+                // Body-only download-quality streak (separate from the
+                // decaying score). Gated the same way as NonDelivery.
+                if hard_ids.iter().any(|id| {
+                    self.delivery
+                        .modifier_type(id)
+                        .is_some_and(ModifierTypeId::is_block_body_section)
+                }) {
+                    actions.push(Action::NoteDeliveryOutcome {
+                        peer: *failed_peer,
+                        succeeded: false,
+                    });
+                }
             }
-            info!(peer = %failed_peer, count = block_ids.len(), "modifier delivery timed out, retrying with other peers");
-            all_retryable.extend_from_slice(&block_ids);
+            // Same-tick re-request excludes exhausted ids — those have
+            // spent their retry budget. They remain in `retryable` only
+            // so this pass can still emit the final NonDelivery /
+            // delivery-streak outcome (and read modifier_type from the
+            // retained type shadow). Fresh re-request happens later via
+            // the normal Unknown → request_missing_sections path.
+            let rerequest_ids: Vec<[u8; 32]> = block_ids
+                .iter()
+                .copied()
+                .filter(|id| !result.exhausted.contains(id))
+                .collect();
+            info!(
+                peer = %failed_peer,
+                count = block_ids.len(),
+                hard = hard_ids.len(),
+                rerequest = rerequest_ids.len(),
+                "modifier delivery timed out, retrying with other peers"
+            );
+            all_retryable.extend_from_slice(&rerequest_ids);
             failed_peers.push(*failed_peer);
         }
 

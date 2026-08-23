@@ -703,8 +703,8 @@ fn executor_end_to_end_block_2() {
     coordinator.on_inv(peer, &inv_ext, chain_view, now);
 
     // Deliver the sections
-    let tx_actions = coordinator.on_modifier_received(peer, 102, tx_section_id, bt_bytes);
-    let ext_actions = coordinator.on_modifier_received(peer, 108, ext_section_id, ext_bytes);
+    let tx_actions = coordinator.on_modifier_received(peer, 102, tx_section_id, bt_bytes, now);
+    let ext_actions = coordinator.on_modifier_received(peer, 108, ext_section_id, ext_bytes, now);
 
     // Execute all resulting actions (PersistSection + possibly AssembleBlock)
     let mut all_actions = tx_actions;
@@ -1033,8 +1033,9 @@ fn executor_post_restart_block_processing() {
         coordinator.on_inv(peer, &inv_ext, chain_view, now);
 
         // Deliver sections through coordinator
-        let tx_actions = coordinator.on_modifier_received(peer, 102, tx_section_id, bt6_bytes);
-        let ext_actions = coordinator.on_modifier_received(peer, 108, ext_section_id, ext6_bytes);
+        let tx_actions = coordinator.on_modifier_received(peer, 102, tx_section_id, bt6_bytes, now);
+        let ext_actions =
+            coordinator.on_modifier_received(peer, 108, ext_section_id, ext6_bytes, now);
 
         // Execute all actions through the executor
         let mut all_actions = tx_actions;

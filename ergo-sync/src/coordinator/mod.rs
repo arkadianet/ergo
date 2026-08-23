@@ -7,10 +7,11 @@
 //!
 //! Integrates: DeliveryTracker, AssemblyTracker, SyncState, PeerChainStatus.
 //!
-//! **Limitation**: fork choice currently uses height-based comparison for V1
-//! and treats V2 peers as Older when they send headers. Cumulative-difficulty
-//! comparison is queued for a follow-up pass; ChainView will need a method
-//! exposing cumulative score when that work lands.
+//! Peer SyncInfo classification follows Scala `ErgoHistory.compare`
+//! (height / ID rules). When a V2 tip is already in our store, we also
+//! compare cumulative scores (`ChainView::header_score_for`) — the
+//! refinement Scala leaves as `// todo: check difficulty?` on the Older
+//! branch. Unknown tips still cannot carry score on the wire.
 
 use ergo_p2p::assembly::AssemblyTracker;
 use ergo_p2p::delivery::DeliveryTracker;
@@ -121,6 +122,11 @@ pub trait ChainView {
     /// compute the height of a common ancestor when constructing a
     /// continuation extension.
     fn header_height_for(&self, header_id: &[u8; 32]) -> Option<u32>;
+    /// Cumulative score of our best header (BE `BigUint` bytes). Used
+    /// when refining SyncInfo Older/Fork once a peer tip is in-store.
+    fn best_header_score(&self) -> Vec<u8>;
+    /// Cumulative score for a known header id, if we have its meta.
+    fn header_score_for(&self, header_id: &[u8; 32]) -> Option<Vec<u8>>;
 }
 
 // ---- Coordinator ----
@@ -141,9 +147,10 @@ pub struct NetStats {
     pub inv_ids_admitted: u64,
     pub inv_ids_capped_per_peer: u64,
     /// Distinct peers we received any header-payload from in this
-    /// tick. If only a handful of 60 peers ever reply, the install
-    /// pipeline starves between bursts even though we dispatch
-    /// SyncInfo to every peer per Lever-1 cadence.
+    /// tick. If only a handful of connected peers ever reply, the
+    /// install pipeline starves between bursts even though we
+    /// dispatch SyncInfo on the global cadence to the
+    /// `peersToSyncWith` subset.
     pub peers_with_response: std::collections::HashSet<PeerId>,
     /// Distinct peers we sent any SyncInfo to in this tick. Compare
     /// with `peers_with_response` to detect silent peers.
@@ -240,6 +247,13 @@ pub struct SyncCoordinator {
     /// otherwise. Default `false` (UTXO/full node) — set by the node at boot for
     /// the digest-verifier backend. Independent of `headers_only`.
     requires_proofs: bool,
+    /// Timestamp of the last **accepted** modifier of any type (header,
+    /// block section, or tx). Gates NonDelivery penalties on delivery
+    /// timeout: Scala `lastModifierGotTime` in
+    /// `ErgoNodeViewSynchronizer` (`checkDelivery` only penalizes when
+    /// `ri.requestTime >= lastModifierGotTime`). `None` until the first
+    /// accept — every timeout then penalizes.
+    last_modifier_got_time: Option<std::time::Instant>,
 }
 
 impl SyncCoordinator {
@@ -275,6 +289,7 @@ impl SyncCoordinator {
             peer_sync: std::collections::HashMap::new(),
             first_deliverers: Vec::new(),
             requires_proofs: false,
+            last_modifier_got_time: None,
         }
     }
 
@@ -306,6 +321,7 @@ impl SyncCoordinator {
             peer_sync: std::collections::HashMap::new(),
             first_deliverers: Vec::new(),
             requires_proofs: false,
+            last_modifier_got_time: None,
         }
     }
 
@@ -424,6 +440,92 @@ impl SyncCoordinator {
     #[doc(hidden)]
     pub fn delivery_mut_for_test(&mut self) -> &mut DeliveryTracker {
         &mut self.delivery
+    }
+
+    /// True when any tracked peer is classified `Older` (ahead of us).
+    /// Drives the SyncInfo broadcast regime: IBD cadence while seniors
+    /// exist, stable cadence once they clear — Scala
+    /// `ErgoSyncTracker.numOfSeniors` / "switching to stable regime".
+    pub fn has_older_peers(&self) -> bool {
+        use ergo_p2p::sync::PeerChainStatus;
+        self.peer_sync
+            .values()
+            .any(|s| s.status == PeerChainStatus::Older)
+    }
+
+    /// Peers that should receive a proactive SyncInfo this tick.
+    ///
+    /// Scala `ErgoSyncTracker.peersToSyncWith` (ErgoSyncTracker.scala:180-205):
+    /// 1. Clear stalled statuses (`ClearThreshold` = 3 min since last send
+    ///    → status back to `Unknown`).
+    /// 2. If any peer is outdated (`SyncThreshold` = 1 min since last send),
+    ///    sync with those.
+    /// 3. Otherwise: all `Unknown` + one random `Older` + all `Fork`,
+    ///    filtered by `MinSyncInterval` (20 s).
+    ///
+    /// `connected` is the live peer set (handshaken). `seed` picks the
+    /// random Older peer (same "caller chooses entropy" pattern as
+    /// `PeerManager::select_peer_for_gossip`). Does **not** stamp
+    /// `last_sync_sent` — the caller marks after a successful send.
+    pub fn peers_to_sync_with(
+        &mut self,
+        connected: &[PeerId],
+        now: std::time::Instant,
+        seed: u64,
+    ) -> Vec<PeerId> {
+        use ergo_p2p::sync::PeerChainStatus;
+
+        // (1) ClearThreshold: stalled status → Unknown.
+        for peer in connected {
+            if self.sync_state.status_clear_due(*peer, now) {
+                if let Some(snap) = self.peer_sync.get_mut(peer) {
+                    snap.status = PeerChainStatus::Unknown;
+                    snap.peer_height = None;
+                }
+            }
+        }
+
+        // (2) Outdated peers take priority.
+        let outdated: Vec<PeerId> = connected
+            .iter()
+            .copied()
+            .filter(|p| self.sync_state.is_outdated(*p, now))
+            .collect();
+        if !outdated.is_empty() {
+            return outdated;
+        }
+
+        // (3) Unknown + one random Older + all Fork, MinSyncInterval filter.
+        let mut unknowns = Vec::new();
+        let mut forks = Vec::new();
+        let mut elders = Vec::new();
+        for peer in connected {
+            let status = self
+                .peer_sync
+                .get(peer)
+                .map(|s| s.status)
+                .unwrap_or(PeerChainStatus::Unknown);
+            match status {
+                PeerChainStatus::Unknown => unknowns.push(*peer),
+                PeerChainStatus::Fork => forks.push(*peer),
+                PeerChainStatus::Older => elders.push(*peer),
+                PeerChainStatus::Equal | PeerChainStatus::Younger | PeerChainStatus::Nonsense => {}
+            }
+        }
+
+        let mut selected = unknowns;
+        if !elders.is_empty() {
+            // Stable order before indexing so the seed is deterministic
+            // across HashMap iteration noise.
+            elders.sort();
+            selected.push(elders[(seed as usize) % elders.len()]);
+        }
+        selected.extend(forks);
+
+        selected
+            .into_iter()
+            .filter(|p| self.sync_state.should_send_sync(*p, now))
+            .collect()
     }
 }
 

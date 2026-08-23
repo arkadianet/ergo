@@ -2,11 +2,32 @@
 //!
 //! Provides `PeerChainStatus`, the `SyncState` download-window
 //! tracker, and a height-based chain comparison function. The full
-//! sync coordinator (cumulative-difficulty fork choice, continuation
-//! header application from `SyncInfoV2`, sync action emission, and
-//! integration with header validation + `ergo-state`) lives in
-//! `ergo-sync`; this module only carries the per-peer state surface
-//! the coordinator drives.
+//! sync coordinator (continuation header application from
+//! `SyncInfoV2`, sync action emission, peer-subset SyncInfo
+//! selection, and integration with header validation + `ergo-state`)
+//! lives in `ergo-sync`; this module only carries the per-peer state
+//! surface the coordinator drives.
+//!
+//! # SyncInfo send cadence (Scala parity)
+//!
+//! Scala's proactive SyncInfo fanout is **not** 100 ms. The 100 ms
+//! constant `PerPeerSyncLockTime` in `ErgoNodeViewSynchronizer` is a
+//! **receive-side** anti-spam filter (`processSync` drops inbound
+//! SyncInfo arriving within 100 ms of the previous one). The real
+//! send-side knobs are:
+//!
+//! * [`MIN_SYNC_INTERVAL`] (20 s) — per-peer floor between proactive
+//!   SyncInfo sends (`ErgoSyncTracker.MinSyncInterval`)
+//! * [`SYNC_THRESHOLD`] (1 min) — peers whose last send is older are
+//!   "outdated" and get priority in `peersToSyncWith`
+//! * [`CLEAR_THRESHOLD`] (3 min) — stalled peer statuses reset to
+//!   `Unknown`
+//! * Global tick: [`DEFAULT_SYNC_INTERVAL`] (5 s IBD) /
+//!   [`DEFAULT_SYNC_INTERVAL_STABLE`] (15 s) from `application.conf`
+//!
+//! Reciprocal SyncInfo replies to inbound SyncInfo (and the
+//! post-header-progress kick) bypass the 20 s floor — that pull-model
+//! response path is what keeps a 1–2 peer IBD pipeline fed.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -58,6 +79,37 @@ pub const MAX_DOWNLOAD_WINDOW_CLAMP: usize = 100_000;
 /// 36_000_000 ms.
 const DEFAULT_HEADER_FRESHNESS_THRESHOLD_MS: u64 = 12_000_000;
 
+/// Receive-side anti-spam floor between inbound SyncInfo from the same
+/// peer. Scala `ErgoNodeViewSynchronizer.PerPeerSyncLockTime = 100` ms —
+/// `processSync` drops arrivals within this window of the previous
+/// accepted inbound SyncInfo.
+pub const PER_PEER_SYNC_LOCK_TIME: Duration = Duration::from_millis(100);
+
+/// Minimum interval between **proactive** SyncInfo sends to the same
+/// peer. Scala `ErgoSyncTracker.MinSyncInterval = 20.seconds`.
+/// Reciprocal replies to inbound SyncInfo intentionally ignore this
+/// floor (see module docs).
+pub const MIN_SYNC_INTERVAL: Duration = Duration::from_secs(20);
+
+/// A peer whose last SyncInfo send is older than this is "outdated"
+/// and is preferred by `peersToSyncWith`. Scala
+/// `ErgoSyncTracker.SyncThreshold = 1.minute`.
+pub const SYNC_THRESHOLD: Duration = Duration::from_secs(60);
+
+/// After this much silence since the last SyncInfo **send**, the
+/// peer's chain status is cleared back to `Unknown`. Scala
+/// `ErgoSyncTracker.ClearThreshold = 3.minutes`.
+pub const CLEAR_THRESHOLD: Duration = Duration::from_secs(180);
+
+/// Default global SyncInfo broadcast cadence while in IBD. Scala
+/// `application.conf` `scorex.network.syncInterval = 5s`.
+pub const DEFAULT_SYNC_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Default global SyncInfo broadcast cadence once synced (stable
+/// regime). Scala mainnet `syncIntervalStable = 15s` (testnet uses
+/// 30s; we expose the knob under `[sync]` so operators can match).
+pub const DEFAULT_SYNC_INTERVAL_STABLE: Duration = Duration::from_secs(15);
+
 /// Sync state for header-first sync.
 #[derive(Debug)]
 pub struct SyncState {
@@ -69,17 +121,21 @@ pub struct SyncState {
     /// Our best validated full block height (from the state store).
     best_full_block_height: u32,
     /// Last time we sent a SyncInfo message to each peer, keyed by
-    /// PeerId. Per-peer timer (not global) so the broadcast loop can
-    /// keep every peer's Inv pump primed independently — without it,
-    /// a single global throttle leaves most peers silent and the
-    /// header request fanout collapses to ~1-2 active peers per
-    /// sync_interval window. Pruned in `forget_peer_sync` on
+    /// PeerId. Drives the per-peer [`MIN_SYNC_INTERVAL`] floor for
+    /// proactive fanout and the [`SYNC_THRESHOLD`] /
+    /// [`CLEAR_THRESHOLD`] aging used by subset selection. Reciprocal
+    /// SyncInfo replies (inbound SyncInfo / post-header-progress)
+    /// also stamp this map. Pruned in `forget_peer_sync` on
     /// disconnect to keep the map bounded by live peers.
     last_sync_sent: HashMap<PeerId, Instant>,
-    /// Minimum interval between SyncInfo messages to the same peer.
-    /// Set to 100ms to feed Invs from many peers per sync_tick —
-    /// equal to Scala's per-peer debounce (`PerPeerSyncLockTime`),
-    /// so reference-node peers accept the cadence without penalty.
+    /// Last time we **accepted** an inbound SyncInfo from each peer.
+    /// Drives the receive-side [`PER_PEER_SYNC_LOCK_TIME`] anti-spam
+    /// floor (Scala `lastSyncGetTime` / `PerPeerSyncLockTime`).
+    last_sync_received: HashMap<PeerId, Instant>,
+    /// Minimum interval between **proactive** SyncInfo sends to the
+    /// same peer. Defaults to [`MIN_SYNC_INTERVAL`] (20 s). Not to be
+    /// confused with Scala's receive-side `PerPeerSyncLockTime`
+    /// (100 ms anti-spam filter on inbound SyncInfo).
     sync_interval: Duration,
     /// Whether the header chain is synced with the network.
     /// Block section downloads only begin after this flips to true.
@@ -151,14 +207,13 @@ impl SyncState {
             best_known_header_height: best_full_block_height,
             best_full_block_height,
             last_sync_sent: HashMap::new(),
-            // Per-peer SyncInfo cadence. 100ms dispatches at
-            // Scala's PerPeerSyncLockTime floor so the peer-side
-            // `continuationIdsV1` index lookup is invoked up to 10× per
-            // second per peer. Each invocation produces a 400-ID Inv at
-            // trivial peer-side cost (~12.8 KB), so 60 peers × 10
-            // Invs/sec = 240k discovered IDs/sec — the upper-bound
-            // pipeline width before byte download.
-            sync_interval: Duration::from_millis(100),
+            last_sync_received: HashMap::new(),
+            // Proactive per-peer SyncInfo floor (Scala MinSyncInterval).
+            // Reciprocal replies bypass this via the coordinator's
+            // syncSendNeeded path; do not lower this to "feed the
+            // pipeline" — that starves other peers with broadcast spam
+            // and misattributes Scala's receive-side 100 ms filter.
+            sync_interval: MIN_SYNC_INTERVAL,
             headers_chain_synced: false,
             download_window: download_window.clamp(1, MAX_DOWNLOAD_WINDOW_CLAMP),
             header_freshness_threshold_ms,
@@ -250,9 +305,13 @@ impl SyncState {
         self.best_known_header_height > self.best_full_block_height + 10
     }
 
-    /// Whether we should send a SyncInfo message to `peer` now
-    /// (respects per-peer interval). True if we've never asked this
-    /// peer or if `sync_interval` has elapsed since the last send.
+    /// Whether a **proactive** SyncInfo send to `peer` is allowed now
+    /// under [`MIN_SYNC_INTERVAL`]. True if we've never asked this peer
+    /// or if `sync_interval` has elapsed since the last send.
+    ///
+    /// Reciprocal replies to inbound SyncInfo must **not** consult this
+    /// — Scala's `sendSyncToPeer` stamps `lastSyncSentTime` but does not
+    /// gate on `MinSyncInterval` (only `peersToSyncWith` does).
     pub fn should_send_sync(&self, peer: PeerId, now: Instant) -> bool {
         match self.last_sync_sent.get(&peer) {
             Some(t) => now.duration_since(*t) >= self.sync_interval,
@@ -260,15 +319,61 @@ impl SyncState {
         }
     }
 
+    /// True when we have never sent SyncInfo to `peer`, or the last
+    /// send is older than [`SYNC_THRESHOLD`]. Scala
+    /// `ErgoSyncTracker.notSyncedOrOutdated`.
+    pub fn not_synced_or_outdated(&self, peer: PeerId, now: Instant) -> bool {
+        match self.last_sync_sent.get(&peer) {
+            None => true,
+            Some(t) => now.duration_since(*t) > SYNC_THRESHOLD,
+        }
+    }
+
+    /// True when the last SyncInfo send to `peer` is older than
+    /// [`SYNC_THRESHOLD`]. Peers never contacted are **not** outdated
+    /// (they are simply unknown) — matches Scala `outdatedPeers`.
+    pub fn is_outdated(&self, peer: PeerId, now: Instant) -> bool {
+        self.last_sync_sent
+            .get(&peer)
+            .is_some_and(|t| now.duration_since(*t) > SYNC_THRESHOLD)
+    }
+
+    /// True when the last SyncInfo send to `peer` is older than
+    /// [`CLEAR_THRESHOLD`]. Used to reset stalled chain-status entries
+    /// back to `Unknown` (Scala `clearOldStatuses`).
+    pub fn status_clear_due(&self, peer: PeerId, now: Instant) -> bool {
+        self.last_sync_sent
+            .get(&peer)
+            .is_some_and(|t| now.duration_since(*t) > CLEAR_THRESHOLD)
+    }
+
     /// Record that we sent a SyncInfo message to `peer`.
     pub fn mark_sync_sent(&mut self, peer: PeerId, now: Instant) {
         self.last_sync_sent.insert(peer, now);
     }
 
-    /// Drop the per-peer SyncInfo timestamp on disconnect so the map
-    /// stays bounded by live peer count. Idempotent.
+    /// Admit an inbound SyncInfo under the receive-side
+    /// [`PER_PEER_SYNC_LOCK_TIME`] floor. Returns `false` (and leaves
+    /// the floor unchanged) when the peer is still within the window of
+    /// their last accepted inbound SyncInfo — callers should drop the
+    /// message without running classification / reciprocal reply.
+    /// On accept, stamps `last_sync_received` so Older/Fork ping-pong
+    /// cannot run at transport speed.
+    pub fn try_accept_inbound_sync(&mut self, peer: PeerId, now: Instant) -> bool {
+        if let Some(prev) = self.last_sync_received.get(&peer) {
+            if now.duration_since(*prev) <= PER_PEER_SYNC_LOCK_TIME {
+                return false;
+            }
+        }
+        self.last_sync_received.insert(peer, now);
+        true
+    }
+
+    /// Drop the per-peer SyncInfo timestamps on disconnect so the maps
+    /// stay bounded by live peer count. Idempotent.
     pub fn forget_peer_sync(&mut self, peer: &PeerId) {
         self.last_sync_sent.remove(peer);
+        self.last_sync_received.remove(peer);
     }
 
     /// Check if a header's timestamp indicates the header chain is
@@ -321,22 +426,129 @@ impl SyncState {
     }
 }
 
-/// Preliminary comparison of a peer's SyncInfo headers against our chain.
+/// Compare BE `BigUint` score byte slices (no leading-zero padding).
+/// Longer length ⇒ larger value, matching `BigUint::to_bytes_be`.
+fn score_cmp(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    match a.len().cmp(&b.len()) {
+        std::cmp::Ordering::Equal => a.cmp(b),
+        other => other,
+    }
+}
+
+/// SyncInfo V1 comparison — Scala `ErgoHistoryReader.compareV1`.
 ///
-/// **Limitation**: this uses header height for Older/Fork classification,
-/// NOT cumulative difficulty. Ergo's fork choice rule is heaviest chain
-/// by cumulative difficulty, not tallest. A proper fork-choice decision
-/// requires `cumulative_score` from the store, which the sync
-/// coordinator in `ergo-sync` consults; this preliminary classifier is
-/// only used for the initial Equal/Younger/Unknown decision.
+/// Tip may be at either end of `peer_header_ids`: Scala emits
+/// oldest-first (tip = last), Rust outbound is newest-first (tip =
+/// first). Equal if our tip matches either end; Older if our tip is
+/// elsewhere in their list; Fork if we know any of their ids; else Older
+/// (far ahead / unknown).
 ///
-/// This function is sufficient for initial sync status classification
-/// (Equal/Younger/Unknown) and for detecting that a peer has headers we
-/// don't. The Older vs Fork distinction is approximate until cumulative
-/// difficulty is consulted.
+/// `we_contain` is any known header (not only best-chain) — matches
+/// Scala `historyStorage.contains`.
+pub fn compare_sync_info_v1(
+    peer_header_ids: &[[u8; 32]],
+    our_best_id: &[u8; 32],
+    we_contain: impl Fn(&[u8; 32]) -> bool,
+) -> PeerChainStatus {
+    if peer_header_ids.is_empty() {
+        // They have nothing; we have a tip ⇒ Younger. (Empty/empty is
+        // handled by the caller when we also have no tip.)
+        return PeerChainStatus::Younger;
+    }
+    let tip_first = peer_header_ids.first().copied();
+    let tip_last = peer_header_ids.last().copied();
+    if tip_first == Some(*our_best_id) || tip_last == Some(*our_best_id) {
+        return PeerChainStatus::Equal;
+    }
+    if peer_header_ids.iter().any(|id| id == our_best_id) {
+        return PeerChainStatus::Older;
+    }
+    if peer_header_ids.iter().any(&we_contain) {
+        PeerChainStatus::Fork
+    } else {
+        // No overlap — assume far ahead (Scala compareV1).
+        PeerChainStatus::Older
+    }
+}
+
+/// Inputs for [`compare_sync_info_v2`] (grouped to keep the call site
+/// readable and under clippy's argument cap).
+pub struct SyncInfoV2Compare<'a> {
+    pub peer_tip_id: [u8; 32],
+    pub peer_height: u32,
+    /// Newest-first peer header ids from the SyncInfo payload.
+    pub peer_header_ids: &'a [[u8; 32]],
+    pub our_best_id: [u8; 32],
+    pub our_best_height: u32,
+    /// In-store cumulative score of the peer tip, when known.
+    pub peer_tip_score: Option<&'a [u8]>,
+    pub our_best_score: &'a [u8],
+}
+
+/// SyncInfo V2 comparison — Scala `ErgoHistoryReader.compareV2`, with
+/// cumulative-score refinement when `peer_tip_score` is known (in-store
+/// tip). Wire SyncInfo carries height + headers but not cumulative
+/// score; unknown tips keep the height-based Older branch.
 ///
-/// `our_chain_contains` returns true if we have a header ID on our best chain.
-/// `our_best_height` is our best header height.
+/// `we_contain` matches Scala `commonPoint` (`contains`, not
+/// best-chain-only).
+pub fn compare_sync_info_v2(
+    args: SyncInfoV2Compare<'_>,
+    we_contain: impl Fn(&[u8; 32]) -> bool,
+) -> PeerChainStatus {
+    let SyncInfoV2Compare {
+        peer_tip_id,
+        peer_height,
+        peer_header_ids,
+        our_best_id,
+        our_best_height,
+        peer_tip_score,
+        our_best_score,
+    } = args;
+    if peer_header_ids.is_empty() {
+        return PeerChainStatus::Younger;
+    }
+    if peer_height == our_best_height {
+        if peer_tip_id == our_best_id {
+            return PeerChainStatus::Equal;
+        }
+        // Equal height, different tip: Fork if we share any ancestor
+        // in their list (skip tip — already known off-chain).
+        let common = peer_header_ids.iter().skip(1).any(&we_contain);
+        return if common {
+            PeerChainStatus::Fork
+        } else {
+            PeerChainStatus::Unknown
+        };
+    }
+    if peer_height > our_best_height {
+        // Scala: Older (+ todo check difficulty). When we already hold
+        // the tip, refine by cumulative score — a higher height with
+        // ≤ our score is not ahead of us.
+        if let Some(ps) = peer_tip_score {
+            return match score_cmp(ps, our_best_score) {
+                std::cmp::Ordering::Greater => PeerChainStatus::Older,
+                // Equal cumulative score at differing heights is not a
+                // true Equal tip — route through fork resolution.
+                std::cmp::Ordering::Equal => PeerChainStatus::Fork,
+                std::cmp::Ordering::Less => {
+                    if peer_header_ids.iter().skip(1).any(&we_contain) {
+                        PeerChainStatus::Fork
+                    } else {
+                        PeerChainStatus::Unknown
+                    }
+                }
+            };
+        }
+        return PeerChainStatus::Older;
+    }
+    // peer_height < our_best_height
+    PeerChainStatus::Younger
+}
+
+/// Legacy height/tip-on-chain helper retained for call sites that still
+/// pass an optional peer height without a tip-score context. Prefer
+/// [`compare_sync_info_v1`] / [`compare_sync_info_v2`].
 pub fn compare_sync_info(
     peer_header_ids: &[[u8; 32]],
     peer_best_height: Option<u32>,
@@ -347,29 +559,24 @@ pub fn compare_sync_info(
         return PeerChainStatus::Unknown;
     }
 
-    // Check if the peer's most recent header is on our chain
-    let newest_id = &peer_header_ids[0]; // headers are newest-first in V2
+    let newest_id = &peer_header_ids[0];
     let newest_on_our_chain = our_chain_contains(newest_id);
 
     if newest_on_our_chain {
-        // Peer's tip is on our chain
         match peer_best_height {
             Some(h) if h == our_best_height => PeerChainStatus::Equal,
             Some(h) if h < our_best_height => PeerChainStatus::Younger,
-            Some(_) => PeerChainStatus::Nonsense, // claims higher but their tip is on our chain at lower height
-            None => PeerChainStatus::Younger,     // V1 without height info — assume younger
+            Some(_) => PeerChainStatus::Nonsense,
+            None => PeerChainStatus::Younger,
         }
     } else {
-        // Peer's tip is NOT on our chain. Check if any of their headers are.
         let any_on_our_chain = peer_header_ids.iter().skip(1).any(&our_chain_contains);
         if any_on_our_chain {
-            // We share a common ancestor but diverge → Fork or Older
             match peer_best_height {
                 Some(h) if h > our_best_height => PeerChainStatus::Older,
                 _ => PeerChainStatus::Fork,
             }
         } else {
-            // No common headers at all
             match peer_best_height {
                 Some(h) if h > our_best_height => PeerChainStatus::Older,
                 _ => PeerChainStatus::Nonsense,
@@ -511,6 +718,107 @@ mod tests {
     }
 
     #[test]
+    fn compare_v1_tip_at_either_end_is_equal() {
+        let our = mk_id(5);
+        // Scala oldest-first: tip last.
+        assert_eq!(
+            compare_sync_info_v1(&[mk_id(1), our], &our, |_| false),
+            PeerChainStatus::Equal
+        );
+        // Rust newest-first: tip first.
+        assert_eq!(
+            compare_sync_info_v1(&[our, mk_id(1)], &our, |_| false),
+            PeerChainStatus::Equal
+        );
+    }
+
+    #[test]
+    fn compare_v1_our_tip_in_list_is_older() {
+        let our = mk_id(5);
+        assert_eq!(
+            compare_sync_info_v1(&[mk_id(9), our, mk_id(1)], &our, |_| false),
+            PeerChainStatus::Older
+        );
+    }
+
+    #[test]
+    fn compare_v2_equal_height_fork() {
+        let status = compare_sync_info_v2(
+            SyncInfoV2Compare {
+                peer_tip_id: mk_id(99),
+                peer_height: 100,
+                peer_header_ids: &[mk_id(99), mk_id(5)],
+                our_best_id: mk_id(7),
+                our_best_height: 100,
+                peer_tip_score: None,
+                our_best_score: &[1],
+            },
+            |id| *id == mk_id(5),
+        );
+        assert_eq!(status, PeerChainStatus::Fork);
+    }
+
+    #[test]
+    fn compare_v2_score_refines_claimed_older() {
+        // Peer claims height ahead, but in-store tip score is not greater.
+        let tip = mk_id(99);
+        let status = compare_sync_info_v2(
+            SyncInfoV2Compare {
+                peer_tip_id: tip,
+                peer_height: 200,
+                peer_header_ids: &[tip, mk_id(5)],
+                our_best_id: mk_id(7),
+                our_best_height: 100,
+                peer_tip_score: Some(&[1]),
+                our_best_score: &[2],
+            },
+            |id| *id == mk_id(5),
+        );
+        assert_eq!(status, PeerChainStatus::Fork);
+        let status_ahead = compare_sync_info_v2(
+            SyncInfoV2Compare {
+                peer_tip_id: tip,
+                peer_height: 200,
+                peer_header_ids: &[tip],
+                our_best_id: mk_id(7),
+                our_best_height: 100,
+                peer_tip_score: Some(&[5]),
+                our_best_score: &[2],
+            },
+            |_| false,
+        );
+        assert_eq!(status_ahead, PeerChainStatus::Older);
+        // Equal score at differing heights → Fork (not Equal).
+        let status_tie = compare_sync_info_v2(
+            SyncInfoV2Compare {
+                peer_tip_id: tip,
+                peer_height: 200,
+                peer_header_ids: &[tip, mk_id(5)],
+                our_best_id: mk_id(7),
+                our_best_height: 100,
+                peer_tip_score: Some(&[2]),
+                our_best_score: &[2],
+            },
+            |id| *id == mk_id(5),
+        );
+        assert_eq!(status_tie, PeerChainStatus::Fork);
+    }
+
+    #[test]
+    fn inbound_sync_lock_time_gates_accept() {
+        let mut state = SyncState::new(0);
+        let now = Instant::now();
+        let p: PeerId = "127.0.0.1:9030".parse().unwrap();
+        assert!(state.try_accept_inbound_sync(p, now));
+        assert!(!state.try_accept_inbound_sync(p, now + Duration::from_millis(50)));
+        assert!(!state.try_accept_inbound_sync(p, now + PER_PEER_SYNC_LOCK_TIME));
+        assert!(state
+            .try_accept_inbound_sync(p, now + PER_PEER_SYNC_LOCK_TIME + Duration::from_millis(1)));
+        state.forget_peer_sync(&p);
+        assert!(state.try_accept_inbound_sync(p, now + Duration::from_millis(1)));
+    }
+
+    #[test]
     fn sync_interval_respected_per_peer() {
         let mut state = SyncState::new(0);
         let now = Instant::now();
@@ -524,11 +832,11 @@ mod tests {
         // Marking p1 must not affect p2's timer — that's the whole
         // point of the per-peer split.
         state.mark_sync_sent(p1, now);
-        assert!(!state.should_send_sync(p1, now + Duration::from_millis(50)));
+        assert!(!state.should_send_sync(p1, now + Duration::from_secs(10)));
         assert!(state.should_send_sync(p2, now));
 
-        // Same peer is eligible again after sync_interval (100ms).
-        assert!(state.should_send_sync(p1, now + Duration::from_millis(150)));
+        // Same peer is eligible again after MinSyncInterval (20s).
+        assert!(state.should_send_sync(p1, now + MIN_SYNC_INTERVAL));
     }
 
     #[test]
@@ -538,9 +846,29 @@ mod tests {
         let p: PeerId = "127.0.0.1:9030".parse().unwrap();
 
         state.mark_sync_sent(p, now);
-        assert!(!state.should_send_sync(p, now + Duration::from_millis(50)));
+        assert!(!state.should_send_sync(p, now + Duration::from_secs(1)));
 
         state.forget_peer_sync(&p);
-        assert!(state.should_send_sync(p, now + Duration::from_millis(50)));
+        assert!(state.should_send_sync(p, now + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn outdated_and_clear_thresholds() {
+        let mut state = SyncState::new(0);
+        let now = Instant::now();
+        let p: PeerId = "127.0.0.1:9030".parse().unwrap();
+
+        // Never contacted: not-synced, but not "outdated" (no send yet).
+        assert!(state.not_synced_or_outdated(p, now));
+        assert!(!state.is_outdated(p, now));
+        assert!(!state.status_clear_due(p, now));
+
+        state.mark_sync_sent(p, now);
+        assert!(!state.not_synced_or_outdated(p, now + Duration::from_secs(30)));
+        assert!(!state.is_outdated(p, now + Duration::from_secs(30)));
+
+        assert!(state.is_outdated(p, now + SYNC_THRESHOLD + Duration::from_secs(1)));
+        assert!(state.not_synced_or_outdated(p, now + SYNC_THRESHOLD + Duration::from_secs(1)));
+        assert!(state.status_clear_due(p, now + CLEAR_THRESHOLD + Duration::from_secs(1)));
     }
 }

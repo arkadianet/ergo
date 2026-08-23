@@ -464,6 +464,27 @@ impl NodeConfig {
             ));
         }
 
+        // Global SyncInfo broadcast cadence (Scala syncInterval /
+        // syncIntervalStable). Distinct from the per-peer MinSyncInterval
+        // (20 s) and from the 1 s outer sync_tick that still drives
+        // delivery-timeout / HOL / heartbeat work.
+        let sync_interval_secs = toml_cfg
+            .sync
+            .sync_interval_secs
+            .unwrap_or(ergo_p2p::sync::DEFAULT_SYNC_INTERVAL.as_secs());
+        let sync_interval_stable_secs = toml_cfg
+            .sync
+            .sync_interval_stable_secs
+            .unwrap_or(ergo_p2p::sync::DEFAULT_SYNC_INTERVAL_STABLE.as_secs());
+        if sync_interval_secs == 0 {
+            return Err("[sync] sync_interval_secs = 0; use >= 1".into());
+        }
+        if sync_interval_stable_secs == 0 {
+            return Err("[sync] sync_interval_stable_secs = 0; use >= 1".into());
+        }
+        let sync_interval = std::time::Duration::from_secs(sync_interval_secs);
+        let sync_interval_stable = std::time::Duration::from_secs(sync_interval_stable_secs);
+
         let cache_bytes = cli.cache_bytes.or(toml_cfg.store.cache_bytes);
 
         // Checkpoint resolution priority: CLI > TOML > network default.
@@ -898,6 +919,8 @@ impl NodeConfig {
             p2p_nipopows,
             ibd_flush_interval: cli.ibd_flush_interval,
             download_window,
+            sync_interval,
+            sync_interval_stable,
             cache_bytes,
             script_validation_checkpoint,
             genesis_id,

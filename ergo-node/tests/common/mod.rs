@@ -50,6 +50,8 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
         p2p_nipopows: 2,
         ibd_flush_interval: 0,
         download_window: ergo_p2p::sync::DOWNLOAD_WINDOW,
+        sync_interval: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL,
+        sync_interval_stable: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL_STABLE,
         cache_bytes: None,
         script_validation_checkpoint: chain_spec.bootstrap.checkpoint,
         genesis_id: chain_spec.genesis.header_id,

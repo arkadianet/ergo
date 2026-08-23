@@ -85,6 +85,10 @@ known = [
 [sync]
 # Blocks ahead of best_full_block to keep section downloads pending.
 download_window = 384
+# Global SyncInfo broadcast cadence (Scala syncInterval / syncIntervalStable).
+# Per-peer MinSyncInterval remains 20s; reciprocal SyncInfo replies bypass both.
+# sync_interval_secs = 5
+# sync_interval_stable_secs = 15
 
 [store]
 # redb + AVL arena page cache in bytes. Omit to use the binary default.

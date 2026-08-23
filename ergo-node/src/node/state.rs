@@ -223,6 +223,16 @@ pub(crate) struct NodeState {
     /// Step C feature flag mirrored from `NodeConfig` so the dispatch
     /// loop can short-circuit without re-reading config.
     pub(super) enable_anchor_scheduler: bool,
+    /// Global SyncInfo broadcast cadence while in IBD (`[sync]
+    /// sync_interval_secs`, default 5 s).
+    pub(super) sync_interval: std::time::Duration,
+    /// Global SyncInfo broadcast cadence once stable (`[sync]
+    /// sync_interval_stable_secs`, default 15 s).
+    pub(super) sync_interval_stable: std::time::Duration,
+    /// Last time the proactive SyncInfo fanout ran. Seeded in the past
+    /// at boot so the first eligible tick fires immediately. Distinct
+    /// from the 1 s outer sync_tick (timeouts / HOL / heartbeat).
+    pub(super) last_sync_broadcast: Instant,
     /// Live `best_header_height` cursor handed to the anchor builder
     /// so it can scan frontier-first (start each pass at the current
     /// tip rather than at h=0). Updated by the heartbeat tick. The

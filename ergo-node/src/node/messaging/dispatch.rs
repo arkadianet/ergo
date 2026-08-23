@@ -52,6 +52,18 @@ pub(in crate::node) fn handle_message(
     match code {
         message::CODE_SYNC_INFO => match message::deserialize_sync_info(payload) {
             Ok(sync_info) => {
+                // Scala PerPeerSyncLockTime: drop inbound SyncInfo that
+                // arrives within 100 ms of the last accepted one from
+                // this peer (deserialize already succeeded — anti-spam
+                // only gates classification / reciprocal reply).
+                if !state
+                    .coordinator
+                    .sync_state_mut()
+                    .try_accept_inbound_sync(peer, now)
+                {
+                    debug!(peer = %peer, "spammy SyncInfo; dropping");
+                    return vec![];
+                }
                 let sv = state
                     .registry
                     .peers
@@ -664,7 +676,7 @@ fn handle_modifier_batch(
         batch_actions.extend(
             state
                 .coordinator
-                .on_modifier_received(peer, type_id, mod_id, data),
+                .on_modifier_received(peer, type_id, mod_id, data, now),
         );
     }
     let cs_before = state.store.chain_state_meta();
