@@ -1,0 +1,173 @@
+[
+ {
+  "time_aest": "02:07:37.576",
+  "header_id": "437601cd2079a33a859798eb28e4799cf8286a5a9639a75100d9c145dd7486f7",
+  "first_error": "java.lang.Exception: Regenerated proofHash is not equal to the declared one",
+  "height": 1853301,
+  "rust_has_header": true,
+  "rust_has_full_block": true,
+  "rust_block_has_poison_tx": false
+ },
+ {
+  "time_aest": "07:45:37.554",
+  "header_id": "3a01145708a6c46193247554fd9aefd966905d4adfe11666e92ec0af6711c2d3",
+  "first_error": "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. b44970ed3658fdb8681487089f29adbd0c7343",
+  "height": 1853462,
+  "rust_has_header": true,
+  "rust_has_full_block": true,
+  "rust_block_has_poison_tx": true
+ },
+ {
+  "time_aest": "08:07:32.719",
+  "header_id": "26cdcfa98a59477ade6e72dc168f86f9826322e0a23697e3876dfcf18b7cc575",
+  "first_error": "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. b44970ed3658fdb8681487089f29adbd0c7343",
+  "height": 1853464,
+  "rust_has_header": true,
+  "rust_has_full_block": true,
+  "rust_block_has_poison_tx": true
+ },
+ {
+  "time_aest": "09:26:07.576",
+  "header_id": "71c0b121ea8ca8a340c321299a75a251c15b870a2ca0c43c4300105f4c2b0ee1",
+  "first_error": "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. b44970ed3658fdb8681487089f29adbd0c7343",
+  "height": 1853465,
+  "rust_has_header": true,
+  "rust_has_full_block": true,
+  "rust_block_has_poison_tx": true
+ },
+ {
+  "time_aest": "09:44:59.589",
+  "header_id": "4d0cb8868aaa21215f4f073f06e7d8f824ea2b563c586632748f31ade2c46f4a",
+  "first_error": "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. b44970ed3658fdb8681487089f29adbd0c7343",
+  "height": 1853466,
+  "rust_has_header": true,
+  "rust_has_full_block": true,
+  "rust_block_has_poison_tx": true
+ },
+ {
+  "time_aest": "11:45:52.806",
+  "header_id": "db0e2b13ca6d5088c31e33515c4847323300a6483fefb43b3edbca4f268481bc",
+  "first_error": "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. b44970ed3658fdb8681487089f29adbd0c7343",
+  "height": 1853467,
+  "rust_has_header": true,
+  "rust_has_full_block": true,
+  "rust_block_has_poison_tx": true
+ },
+ {
+  "time_aest": "11:46:05.003",
+  "header_id": "28955f070e3b42244e68975ab162c011f2f3da084893e095c9a2990ab159a1ac",
+  "first_error": "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. b44970ed3658fdb8681487089f29adbd0c7343",
+  "height": null,
+  "rust_has_header": false,
+  "rust_has_full_block": false,
+  "rust_block_has_poison_tx": false
+ },
+ {
+  "time_aest": "11:58:45.323",
+  "header_id": "d2c67cd4e68dd809238da4d2fa76c2311d30a73ff5df5a65fe7387e41947c1c4",
+  "first_error": "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. b44970ed3658fdb8681487089f29adbd0c7343",
+  "height": 1853468,
+  "rust_has_header": true,
+  "rust_has_full_block": true,
+  "rust_block_has_poison_tx": true
+ },
+ {
+  "time_aest": "12:30:34.571",
+  "header_id": "c7288f06a15853f0ae5a7ef8685353ae1959b5930e19e7059805b06b2a349304",
+  "first_error": "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. b44970ed3658fdb8681487089f29adbd0c7343",
+  "height": 1853469,
+  "rust_has_header": true,
+  "rust_has_full_block": true,
+  "rust_block_has_poison_tx": true
+ },
+ {
+  "time_aest": "12:44:41.366",
+  "header_id": "5dd78c8cb95fde59f72752400d0d1947e1f95b834823a242e42ee9ecfc05ee8f",
+  "first_error": "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. b44970ed3658fdb8681487089f29adbd0c7343",
+  "height": 1853470,
+  "rust_has_header": true,
+  "rust_has_full_block": true,
+  "rust_block_has_poison_tx": true
+ },
+ {
+  "time_aest": "13:28:23.729",
+  "header_id": "59d5e6dba71b9e53f6cafe09baf1ecdf1928c6587e3655d26fdd78b527333484",
+  "first_error": "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. b44970ed3658fdb8681487089f29adbd0c7343",
+  "height": 1853471,
+  "rust_has_header": true,
+  "rust_has_full_block": true,
+  "rust_block_has_poison_tx": true
+ },
+ {
+  "time_aest": "13:37:54.906",
+  "header_id": "2b15502c288937474974018d71e1e37efc5c859f7c9737058e221df98a871b27",
+  "first_error": "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. b44970ed3658fdb8681487089f29adbd0c7343",
+  "height": null,
+  "rust_has_header": false,
+  "rust_has_full_block": false,
+  "rust_block_has_poison_tx": false
+ },
+ {
+  "time_aest": "14:45:52.662",
+  "header_id": "35e8e446b153bcfd212d70a120e358ffa6df893ba1b642c742edce45cc446c8a",
+  "first_error": "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. b44970ed3658fdb8681487089f29adbd0c7343",
+  "height": 1853474,
+  "rust_has_header": true,
+  "rust_has_full_block": true,
+  "rust_block_has_poison_tx": true
+ },
+ {
+  "time_aest": "17:00:49.541",
+  "header_id": "015f65a0f58bc9f37c49f33edc5504eaf8ffcf56568bba19e3ff87f3ad05ba14",
+  "first_error": "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. b44970ed3658fdb8681487089f29adbd0c7343",
+  "height": 1853476,
+  "rust_has_header": true,
+  "rust_has_full_block": true,
+  "rust_block_has_poison_tx": true
+ },
+ {
+  "time_aest": "18:00:48.825",
+  "header_id": "40ca92622d5f4677219ac1b5368d20f4ae87796c07d72db6d0dfe857c5ff36ab",
+  "first_error": "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. b44970ed3658fdb8681487089f29adbd0c7343",
+  "height": 1853477,
+  "rust_has_header": true,
+  "rust_has_full_block": true,
+  "rust_block_has_poison_tx": true
+ },
+ {
+  "time_aest": "18:38:57.544",
+  "header_id": "cb0df53bd9aaa0add20e92a1d50ee8802e15752c0df904c3cfe6b345e6f1c8df",
+  "first_error": "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. b44970ed3658fdb8681487089f29adbd0c7343",
+  "height": 1853478,
+  "rust_has_header": true,
+  "rust_has_full_block": true,
+  "rust_block_has_poison_tx": true
+ },
+ {
+  "time_aest": "18:39:38.380",
+  "header_id": "cfd2ae0a5fc89611c1e0d35ddf8f3ffb62a55cc527ca3bd358f2e5deebf057f9",
+  "first_error": "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. b44970ed3658fdb8681487089f29adbd0c7343",
+  "height": null,
+  "rust_has_header": false,
+  "rust_has_full_block": false,
+  "rust_block_has_poison_tx": false
+ },
+ {
+  "time_aest": "18:49:55.642",
+  "header_id": "e2c62f4cdbead0187b6c8fc7bb2fa74b3d24f73cfc2b1bf979b3ef7cd4c0668f",
+  "first_error": "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. b44970ed3658fdb8681487089f29adbd0c7343",
+  "height": 1853479,
+  "rust_has_header": true,
+  "rust_has_full_block": true,
+  "rust_block_has_poison_tx": true
+ },
+ {
+  "time_aest": "19:07:22.609",
+  "header_id": "34a80c7f763ed6404484fc1e6eab3e14f388708925efce022110e534fe567421",
+  "first_error": "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. b44970ed3658fdb8681487089f29adbd0c7343",
+  "height": 1853480,
+  "rust_has_header": true,
+  "rust_has_full_block": true,
+  "rust_block_has_poison_tx": true
+ }
+]

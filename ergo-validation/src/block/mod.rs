@@ -152,7 +152,15 @@ pub struct BlockValidationContext<'a> {
     /// `currentParameters.softForkStartingHeight.isEmpty`), and
     /// the rule trivially passes.
     pub soft_fork_state: Option<SoftForkState>,
-    /// Last ~10 validated headers for `CONTEXT.headers` in script evaluation.
+    /// Recent validated headers, tip-first starting at this block's
+    /// parent (`[H-1, H-2, …]`), for `CONTEXT.headers` in script
+    /// evaluation. Callers may supply up to 10 entries (matching Scala's
+    /// `ErgoStateContext` `lastHeaders` window); the validator exposes
+    /// only the first 9 to the evaluator — Scala's
+    /// `sigmaLastHeaders = lastHeaders.drop(1)` rule — so that
+    /// `CONTEXT.headers(9)` fails exactly as it does on the JVM. The
+    /// candidate/mempool surface keeps all 10 (`UpcomingStateContext`
+    /// parity); see `validate::HEADERS_IN_BLOCK_SCRIPT_CONTEXT`.
     pub last_headers: &'a [CheckedHeader],
     /// Optional script-validation checkpoint. When `Some((height, id))`:
     ///   - For blocks at or below `height`, per-input ErgoScript evaluation

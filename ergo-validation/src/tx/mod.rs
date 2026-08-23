@@ -55,7 +55,12 @@ pub struct TxValidationCtx<'a> {
     pub params: &'a ProtocolParams,
     /// JIT cost accumulator. Mutated by every opcode that charges cost.
     pub cost: &'a mut CostAccumulator,
-    /// Last 10 block headers for evaluator `CONTEXT.headers`.
+    /// Block headers for evaluator `CONTEXT.headers`, tip-first. The
+    /// count is caller-defined: block validation passes exactly 9
+    /// (`sigmaLastHeaders = lastHeaders.drop(1)` Scala parity), while
+    /// candidate/mempool admission passes 10 (`UpcomingStateContext`
+    /// parity). Scripts observe `headers.size`, so the two surfaces must
+    /// never silently converge.
     pub last_headers: &'a [ergo_ser::header::Header],
     /// Network-constant consensus rules applied inside this validation
     /// (currently EIP-27 re-emission). Default is "no extra rules", which
