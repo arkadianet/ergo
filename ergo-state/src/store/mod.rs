@@ -2876,6 +2876,42 @@ impl StateStore {
         Ok((new_root, proof_bytes, snapshot_tip_id))
     }
 
+    /// Regenerate the ADProofs bytes for `transactions` applied at the
+    /// current tip — the validator-side twin of [`Self::candidate_dry_run`].
+    ///
+    /// Same canonical op stream (data-input lookups in transaction order,
+    /// then removes, then inserts — see `store/dry_run.rs`), same prover
+    /// hydration, same self-check: the generated proof must verifier-replay
+    /// from the parent root to the claimed post-root. Returns
+    /// `(post_state_root, raw_proof_bytes)`; the caller hashes the proof
+    /// bytes and compares against the header's declared `adProofsRoot`
+    /// (Scala "Regenerated proofHash is not equal to the declared one").
+    ///
+    /// Never mutates `self.tree`, the redb file, or `chain_state`.
+    pub fn regenerate_ad_proofs(
+        &self,
+        transactions: &[ergo_ser::transaction::Transaction],
+    ) -> Result<(ADDigest, Vec<u8>), StateError> {
+        let txs: Vec<&ergo_ser::transaction::Transaction> = transactions.iter().collect();
+        let (to_remove, to_insert) = Self::build_utxo_changes_raw(&txs)?;
+        let to_lookup: Vec<[u8; 32]> = transactions
+            .iter()
+            .flat_map(|t| t.data_inputs.iter().map(|d| *d.box_id.as_bytes()))
+            .collect();
+        let parent_root = self.tree.root_digest();
+        let (new_root, proof_bytes) =
+            dry_run::apply_change_set_via_prover(&self.tree, &to_lookup, &to_remove, &to_insert)?;
+        dry_run::self_check_candidate_proof(
+            &parent_root,
+            &to_lookup,
+            &to_remove,
+            &to_insert,
+            &proof_bytes,
+            &new_root,
+        )?;
+        Ok((new_root, proof_bytes))
+    }
+
     /// Active protocol parameters + cumulative validation settings at the
     /// current best-full-block tip. Returns owned clones so the caller can
     /// pass them across thread boundaries (e.g. into a mining task).

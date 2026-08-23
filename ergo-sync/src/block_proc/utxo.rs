@@ -203,24 +203,29 @@ pub(super) fn process_block_utxo(
         });
     }
 
-    // 2c. ADProofs binding — UTXO-mode counterpart of Scala's
+    // 2c. Full proofHash parity — UTXO-mode counterpart of Scala's
     // "Regenerated proofHash is not equal to the declared one" check.
-    // Without it, a full block could declare an arbitrary
-    // `adProofsRoot` (or omit the section entirely) and still validate:
-    // live mainnet divergence at h1,853,301 (block 437601cd…), which
-    // this node applied for 697s before reorging away. The section must
-    // exist, be filed under the id derived from the declared root,
-    // carry this header's id, and hash (blake2b256 of the proof bytes)
-    // exactly to that declared root. This is the integrity binding; full
-    // regeneration parity (recompute the proofs from the parent AVL and
-    // compare) remains tracked separately.
-    let ad_proof_section = store.get_block_section(&expected.ad_proofs_id)?.ok_or(
-        BlockProcessError::SectionNotFound {
-            type_id: ergo_ser::modifier_id::TYPE_AD_PROOFS,
-            modifier_id: expected.ad_proofs_id,
-        },
-    )?;
-    verify_ad_proofs_binding(&header, &header_id_computed, &ad_proof_section)?;
+    // The declared `adProofsRoot` is verified by REGENERATING the proofs:
+    // the block's transactions are replayed against a scratch copy of the
+    // parent AVL tree (canonical op stream — data-input lookups, removes,
+    // inserts) and the prover's emitted bytes must hash exactly to the
+    // declared root. A block that ships no proofs, garbage proofs, or a
+    // self-consistent-but-false root/proof pair is rejected. Live mainnet
+    // divergence at h1,853,301 (block 437601cd…, applied here for 697s)
+    // was the no-binding version of this hole.
+    //
+    // The ADProofs *section* itself is pure data availability in this
+    // mode: it may be absent from storage without affecting validity,
+    // exactly as in digest mode's download semantics.
+    let regenerated = store.regenerate_ad_proofs(&block_txs.transactions)?;
+    let regenerated_root = *ergo_primitives::digest::blake2b256(&regenerated.1).as_bytes();
+    if regenerated_root != *header.ad_proofs_root.as_bytes() {
+        return Err(BlockProcessError::AdProofsHashMismatch {
+            header_id: header_id_computed,
+            declared_root: *header.ad_proofs_root.as_bytes(),
+            computed_root: regenerated_root,
+        });
+    }
 
     // Voted parameters: at epoch starts, run the full
     // epoch-extension validation before constructing CheckedHeader.
@@ -510,48 +515,214 @@ pub(super) fn process_block_utxo(
     })
 }
 
-/// ADProofs integrity binding for the UTXO path: the section must exist,
-/// decode cleanly under the id derived from the header's declared
-/// `adProofsRoot`, carry this header's id, and hash to that root.
-///
-/// This is deliberately NOT full Scala parity yet — Scala regenerates the
-/// proofs from the parent UTXO set and compares those; that requires AVL
-/// proof generation during apply and is tracked separately. What this
-/// check closes is the trivially-exploitable gap where a block declares
-/// any root (or ships no proofs at all) and still validates.
-fn verify_ad_proofs_binding(
-    header: &ergo_ser::header::Header,
-    header_id_computed: &[u8; 32],
-    section_bytes: &[u8],
-) -> Result<(), BlockProcessError> {
-    let mut reader = VlqReader::new(section_bytes);
-    let ad_proofs = ergo_ser::ad_proofs::read_ad_proofs(&mut reader)
-        .map_err(|e| BlockProcessError::Deserialize(format!("ad_proofs section: {e:?}")))?;
-    if !reader.is_empty() {
-        return Err(BlockProcessError::Deserialize(format!(
-            "ADProofs section has {} trailing byte(s) after the proof",
-            reader.remaining()
-        )));
-    }
-    if ad_proofs.header_id.as_bytes() != header_id_computed {
-        return Err(BlockProcessError::Deserialize(format!(
-            "ADProofs section carries header_id {} but is filed under header {}",
-            hex::encode(ad_proofs.header_id.as_bytes()),
-            hex::encode(header_id_computed),
-        )));
-    }
-
-    let declared_root = *header.ad_proofs_root.as_bytes();
-    let computed_root = *ergo_primitives::digest::blake2b256(&ad_proofs.proof_bytes).as_bytes();
-    if computed_root != declared_root {
-        return Err(BlockProcessError::AdProofsHashMismatch {
-            header_id: *header_id_computed,
-            declared_root,
-            computed_root,
-        });
-    }
-    Ok(())
-}
-
 #[cfg(test)]
-mod ad_proofs_binding_tests;
+mod ad_proofs_regeneration_tests {
+    use super::*;
+    use ergo_primitives::digest::{Digest32, ModifierId};
+    use ergo_primitives::reader::VlqReader;
+    use ergo_ser::address::NetworkPrefix;
+    use ergo_ser::ergo_box::{serialize_ergo_box, ErgoBoxCandidate};
+    use ergo_ser::ergo_tree::read_ergo_tree;
+    use ergo_ser::register::{AdditionalRegisters, RegisterValue};
+    use ergo_ser::sigma_value::read_constant;
+    use ergo_state::store::StateStore;
+    use std::collections::BTreeMap;
+
+    const VEC_DIR: &str = "../test-vectors/mainnet";
+
+    #[derive(serde::Deserialize)]
+    struct GenesisBoxJson {
+        #[serde(rename = "boxId")]
+        _box_id: String,
+        value: u64,
+        #[serde(rename = "ergoTree")]
+        ergo_tree: String,
+        #[serde(rename = "creationHeight")]
+        creation_height: u32,
+        #[serde(rename = "transactionId")]
+        transaction_id: String,
+        index: u16,
+        #[serde(rename = "additionalRegisters", default)]
+        additional_registers: BTreeMap<String, String>,
+    }
+
+    fn parse_genesis_box(json: &GenesisBoxJson) -> ergo_ser::ergo_box::ErgoBox {
+        let tree_bytes = hex::decode(&json.ergo_tree).unwrap();
+        let mut r = VlqReader::new(&tree_bytes);
+        let ergo_tree = read_ergo_tree(&mut r).unwrap();
+        let mut reg_vec: Vec<(usize, RegisterValue)> = Vec::new();
+        for (key, val_hex) in &json.additional_registers {
+            let reg_idx = match key.as_str() {
+                "R4" => 0,
+                "R5" => 1,
+                "R6" => 2,
+                "R7" => 3,
+                "R8" => 4,
+                "R9" => 5,
+                _ => panic!("unknown register {key}"),
+            };
+            let val_bytes = hex::decode(val_hex).unwrap();
+            let mut vr = VlqReader::new(&val_bytes);
+            let (tpe, value) = read_constant(&mut vr).unwrap();
+            reg_vec.push((reg_idx, RegisterValue { tpe, value }));
+        }
+        reg_vec.sort_by_key(|(idx, _)| *idx);
+        let registers = AdditionalRegisters {
+            registers: reg_vec.into_iter().map(|(_, rv)| rv).collect(),
+        };
+        let candidate = ErgoBoxCandidate::new(
+            json.value,
+            ergo_tree,
+            json.creation_height,
+            Vec::new(),
+            registers,
+        )
+        .unwrap();
+        let tx_id_bytes: [u8; 32] = hex::decode(&json.transaction_id)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        ergo_ser::ergo_box::ErgoBox {
+            candidate,
+            transaction_id: ModifierId::from_bytes(tx_id_bytes),
+            index: json.index,
+        }
+    }
+
+    /// Store at mainnet h=1: real genesis boxes + real block-1 tx applied.
+    fn store_at_height_1() -> StateStore {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+        let genesis_data =
+            std::fs::read_to_string(format!("{VEC_DIR}/genesis_boxes.json")).unwrap();
+        let genesis_boxes: Vec<GenesisBoxJson> = serde_json::from_str(&genesis_data).unwrap();
+        let boxes: Vec<([u8; 32], Vec<u8>)> = genesis_boxes
+            .iter()
+            .map(|jb| {
+                let b = parse_genesis_box(jb);
+                let id = *b.box_id().unwrap().as_bytes();
+                (id, serialize_ergo_box(&b).unwrap())
+            })
+            .collect();
+        store.initialize_genesis(&boxes).unwrap();
+
+        // Apply real mainnet block 1 so the tree matches the chain at h=1.
+        let tx_data: Vec<serde_json::Value> = serde_json::from_str(
+            &std::fs::read_to_string(format!("{VEC_DIR}/transactions_1_10.json")).unwrap(),
+        )
+        .unwrap();
+        let digests_data: Vec<serde_json::Value> = serde_json::from_str(
+            &std::fs::read_to_string(format!("{VEC_DIR}/utxo_digests_1_10.json")).unwrap(),
+        )
+        .unwrap();
+        let tx1_hex = tx_data
+            .iter()
+            .find(|t| t["height"].as_u64().unwrap() == 1)
+            .unwrap()["bytes"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let digest1: [u8; 33] = {
+            let d = digests_data
+                .iter()
+                .find(|d| d["height"].as_u64().unwrap() == 1)
+                .unwrap();
+            hex::decode(d["stateRoot"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap()
+        };
+        let headers: Vec<serde_json::Value> = serde_json::from_str(
+            &std::fs::read_to_string(format!("{VEC_DIR}/headers_1_2000.json")).unwrap(),
+        )
+        .unwrap();
+        let h1_entry = headers
+            .iter()
+            .find(|x| x["height"].as_u64() == Some(1))
+            .unwrap();
+        let h1_bytes = hex::decode(h1_entry["bytes"].as_str().unwrap()).unwrap();
+        let h1_id = *blake2b256(&h1_bytes).as_bytes();
+        let tx1 = read_transaction_from_hex(&tx1_hex);
+        store
+            .apply_block_unchecked_for_test(
+                1,
+                &h1_id,
+                &ergo_primitives::digest::ADDigest::from_bytes(digest1),
+                &[tx1],
+            )
+            .unwrap();
+        // Keep the tempdir alive for the store's lifetime via leak-by-forget
+        // semantics is unnecessary: StateStore owns its redb handle and the
+        // dir only needs to outlive `store`, which it does within this scope.
+        drop(dir); // redb file already opened; deletion deferred to scope end
+        store
+    }
+
+    fn read_transaction_from_hex(hex_str: &str) -> ergo_ser::transaction::Transaction {
+        let bytes = hex::decode(hex_str).unwrap();
+        ergo_ser::transaction::read_transaction(&mut VlqReader::new(&bytes)).unwrap()
+    }
+
+    fn header_at(height: u64) -> ergo_ser::header::Header {
+        let headers: Vec<serde_json::Value> = serde_json::from_str(
+            &std::fs::read_to_string(format!("{VEC_DIR}/headers_1_2000.json")).unwrap(),
+        )
+        .unwrap();
+        let entry = headers
+            .iter()
+            .find(|x| x["height"].as_u64() == Some(height))
+            .unwrap();
+        let bytes = hex::decode(entry["bytes"].as_str().unwrap()).unwrap();
+        read_header(&mut VlqReader::new(&bytes)).unwrap()
+    }
+
+    fn tx_at(height: u64) -> ergo_ser::transaction::Transaction {
+        let tx_data: Vec<serde_json::Value> = serde_json::from_str(
+            &std::fs::read_to_string(format!("{VEC_DIR}/transactions_1_10.json")).unwrap(),
+        )
+        .unwrap();
+        let hex_str = tx_data
+            .iter()
+            .find(|t| t["height"].as_u64().unwrap() == height)
+            .unwrap()["bytes"]
+            .as_str()
+            .unwrap();
+        read_transaction_from_hex(hex_str)
+    }
+
+    #[test]
+    fn regenerated_proof_hash_matches_mainnet_declared_root() {
+        // The full-parity oracle: replaying block 2's txs against the real
+        // h=1 tree must emit proof bytes whose blake2b256 equals the root
+        // mainnet declared in header 2. This is exactly what
+        // process_block_utxo now enforces on every block.
+        let store = store_at_height_1();
+        let h2 = header_at(2);
+        let tx2 = tx_at(2);
+
+        let (_new_root, proof_bytes) = store.regenerate_ad_proofs(&[tx2]).unwrap();
+        let computed = *blake2b256(&proof_bytes).as_bytes();
+        assert_eq!(
+            computed,
+            *h2.ad_proofs_root.as_bytes(),
+            "regenerated proofHash must equal mainnet's declared adProofsRoot"
+        );
+    }
+
+    #[test]
+    fn tampered_transaction_changes_regenerated_hash() {
+        // A mutated tx produces different AVL operations ⇒ a different
+        // proofHash ⇒ the declared root no longer binds. This is the exact
+        // property that makes forged receipt/seal pairs impossible.
+        let store = store_at_height_1();
+        let h2 = header_at(2);
+        let mut tx2 = tx_at(2);
+        tx2.output_candidates[0].value += 1;
+
+        let (_new_root, proof_bytes) = store.regenerate_ad_proofs(&[tx2]).unwrap();
+        let computed = *blake2b256(&proof_bytes).as_bytes();
+        assert_ne!(computed, *h2.ad_proofs_root.as_bytes());
+        let _ = NetworkPrefix::Mainnet; // keep import honest if unused above
+        let _ = Digest32::from_bytes([0u8; 32]);
+    }
+}
