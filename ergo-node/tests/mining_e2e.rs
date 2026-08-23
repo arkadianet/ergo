@@ -420,6 +420,11 @@ struct HttpResponse {
 
 /// Send one `Connection: close` request to `addr` and read the whole response.
 /// `body` is `None` for GET, `Some(json)` for a JSON POST.
+///
+/// Every request carries the `api_key` matching the harness config's
+/// Blake2b256("hello") hash: since `/mining/*` became api_key-gated
+/// (audit M-2), unauthenticated calls get 403 before any handler runs.
+/// Ungated routes ignore the header.
 async fn http_request(
     addr: std::net::SocketAddr,
     method: &str,
@@ -432,10 +437,12 @@ async fn http_request(
     let req = match body {
         Some(b) => format!(
             "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
-             Content-Length: {len}\r\nConnection: close\r\n\r\n{b}",
+             Content-Length: {len}\r\napi_key: hello\r\nConnection: close\r\n\r\n{b}",
             len = b.len(),
         ),
-        None => format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+        None => format!(
+            "{method} {path} HTTP/1.1\r\nHost: {addr}\r\napi_key: hello\r\nConnection: close\r\n\r\n"
+        ),
     };
     stream
         .write_all(req.as_bytes())

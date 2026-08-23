@@ -47,6 +47,19 @@ infrastructure.
   (`test-vectors/mainnet/context_headers_1853478/`): the poison transaction
   verifies under the legacy 10-entry window and is rejected under the
   Scala-parity 9-entry window.
+### Changed
+
+- **Security: the Scala-compat `/mining/*` routes are now api_key-gated.**
+  `GET /mining/candidate` (including its longpoll hold), `POST /mining/solution`,
+  `GET /mining/rewardAddress`, and `GET /mining/rewardPublicKey` previously
+  mounted with no authentication — a drift the v1 API design doc flagged for
+  closure. Solution submission drives the block pipeline, the longpoll holds
+  an API task, and the reward routes expose the miner payout identity, so all
+  four now sit behind the same `api_key` gate as `/node/shutdown`. This is a
+  deliberate hardening over the Scala reference node (which leaves
+  `/mining/*` open): external miner integrations must now send the `api_key`
+  header they already need for any other operator route. Pinned by
+  `ergo-api/tests/mining_auth_gate.rs`.
 
 ## [0.5.3] - 2026-07-19
 

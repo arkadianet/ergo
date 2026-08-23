@@ -81,12 +81,27 @@ pub(super) fn auxiliary_router(
     mining: Option<Arc<dyn crate::mining::NodeMining>>,
     emission: Option<Arc<dyn crate::emission::EmissionSchedule>>,
     emission_scripts: Option<Arc<crate::emission::EmissionScriptsJson>>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
 ) -> FamilyRouter {
     let documented = super::scala_openapi_operations();
     let mut operations = std::collections::BTreeSet::new();
     let mut router = Router::new();
     if let Some(mining) = mining {
-        router = router.merge(crate::mining::mining_router(mining));
+        // `/mining/*` is operator surface: `POST /mining/solution` injects a
+        // PoW solution into the block pipeline, the longpoll candidate read
+        // holds an API task, and the reward routes leak the miner payout
+        // identity. Gate it behind the api_key like `/node/shutdown` —
+        // Scala leaves these open, but our own v1 design doc flagged that
+        // as drift to close, not parity to keep.
+        let mined = crate::mining::mining_router(mining);
+        let mined = match &security {
+            Some(security) => mined.route_layer(axum::middleware::from_fn_with_state(
+                security.clone(),
+                crate::auth::require_api_key,
+            )),
+            None => mined,
+        };
+        router = router.merge(mined);
         operations.extend(
             documented
                 .iter()

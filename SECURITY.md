@@ -101,14 +101,16 @@ The auth gate covers exactly two route families:
 |---|---|
 | `/wallet/*` (the wallet JSON API) | All read routes (`/info`, `/blocks/*`, `/peers/*`, `/utxo/*`, `/blockchain/*`, `/api/v1/*` reads) |
 | `POST /node/shutdown` and `POST /api/v1/node/shutdown` | Transaction/block submission (`POST /transactions*`, `POST /blocks`, `POST /api/v1/mempool/{submit,check}`) |
-| | `/mining/*`, `/utils/*`, `/metrics`, the dashboard, and `/wallet/ui*` |
+| `/mining/*` — candidate, **solution submission**, reward address/pubkey (hardening over Scala, which leaves these open) | `/utils/*`, `/metrics`, the dashboard, and `/wallet/ui*` |
 
-This narrow gate is **deliberate Scala parity**: the Scala reference node
-leaves submission and read routes unauthenticated. The consequence is that
-when `public_bind = true` is set on a routable interface, transaction and
-block submission, mining solution submission, and `/metrics` are all
-publicly callable. The config-load error string spells this out before you
-can bring the node up on a non-loopback address. Keep `/metrics` on
+This narrow gate is **deliberate Scala parity**, with one deliberate
+divergence: the Scala reference node leaves `/mining/*` unauthenticated,
+but this node gates it (solution submission drives the block pipeline and
+the reward routes expose the miner payout identity). The consequence of
+the remaining open surface is that when `public_bind = true` is set on a
+routable interface, transaction and block submission, and `/metrics`, are
+all publicly callable. The config-load error string spells this out before
+you can bring the node up on a non-loopback address. Keep `/metrics` on
 loopback or behind an authenticated proxy.
 
 > Note: enabling a non-loopback bind currently produces no runtime warning
