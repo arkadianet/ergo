@@ -2625,3 +2625,81 @@ fn memory_sample_digest_backend_emits_zeroed_arena_row() {
         assert_eq!(row[idx], "0", "digest backend must zero-fill {col}");
     }
 }
+
+// ---- SyncInfo stamp = transport DISPATCH success (PR #251 follow-up) ----
+
+fn register_connected_peer(
+    state: &mut NodeState,
+    peer: ergo_p2p::peer::PeerId,
+) -> tokio::sync::mpsc::Receiver<ergo_p2p::framing::MessageFrame> {
+    let (tx, rx) = mpsc::channel(8);
+    state.registry.peers.insert(
+        peer,
+        super::state::PeerRuntime {
+            sync_version: SyncVersion::V2,
+            outbound_tx: tx,
+        },
+    );
+    rx
+}
+
+#[test]
+fn sync_info_dispatch_success_stamps_last_sync_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 9, 1)), 9030);
+    let mut rx = register_connected_peer(&mut state, peer);
+
+    assert!(
+        state
+            .coordinator
+            .sync_state_mut()
+            .not_synced_or_outdated(peer, Instant::now()),
+        "peer starts not-synced (never dispatched to)"
+    );
+
+    flush_actions(
+        &mut state,
+        vec![Action::SendToPeer {
+            peer,
+            code: message::CODE_SYNC_INFO,
+            payload: vec![0x01],
+        }],
+    );
+
+    // The frame was accepted by the channel; drain it to prove dispatch.
+    let frame = rx.try_recv().expect("SyncInfo frame must be queued");
+    assert_eq!(frame.code, message::CODE_SYNC_INFO);
+    assert!(
+        !state
+            .coordinator
+            .sync_state_mut()
+            .not_synced_or_outdated(peer, Instant::now()),
+        "successful dispatch must stamp last_sync_sent"
+    );
+}
+
+#[test]
+fn sync_info_failed_dispatch_does_not_stamp_last_sync_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    // Peer NOT registered in the registry ⇒ try_send fails (closed/absent).
+    let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 9, 2)), 9030);
+
+    flush_actions(
+        &mut state,
+        vec![Action::SendToPeer {
+            peer,
+            code: message::CODE_SYNC_INFO,
+            payload: vec![0x01],
+        }],
+    );
+
+    assert!(
+        state
+            .coordinator
+            .sync_state_mut()
+            .not_synced_or_outdated(peer, Instant::now()),
+        "failed dispatch must leave the timestamp untouched"
+    );
+}

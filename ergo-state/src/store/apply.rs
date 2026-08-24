@@ -335,6 +335,53 @@ impl StateStore {
         )
     }
 
+    /// Test-only: generate the canonical type-104 ADProofs section for
+    /// `transactions` applied at the current tip, framed with `header_id`,
+    /// ready to store under
+    /// `compute_section_id(TYPE_AD_PROOFS, header_id, blake2b256(proof_bytes))`.
+    ///
+    /// Same prover path as [`Self::candidate_dry_run`] (canonical op stream:
+    /// data-input lookups, removes, inserts — see `store/dry_run.rs`). Exists
+    /// for integration fixtures that hold only wire bytes and cannot mint
+    /// [`CheckedTransaction`]s, yet must store an ADProofs section consistent
+    /// with a real mainnet header. If the generated proof's hash does NOT
+    /// equal the fixture header's declared root, the fixture fails loudly —
+    /// exactly the oracle property wanted.
+    #[cfg(feature = "test-helpers")]
+    pub fn ad_proofs_section_for_test(
+        &self,
+        header_id: [u8; 32],
+        transactions: &[Transaction],
+    ) -> Result<Vec<u8>, StateError> {
+        let txs: Vec<&Transaction> = transactions.iter().collect();
+        let (to_remove, to_insert) = Self::build_utxo_changes_raw(&txs)?;
+        let to_lookup: Vec<[u8; 32]> = transactions
+            .iter()
+            .flat_map(|t| t.data_inputs.iter().map(|d| *d.box_id.as_bytes()))
+            .collect();
+        let parent_root = self.tree.root_digest();
+        let (_new_root, proof_bytes) = crate::store::dry_run::apply_change_set_via_prover(
+            &self.tree, &to_lookup, &to_remove, &to_insert,
+        )?;
+        crate::store::dry_run::self_check_candidate_proof(
+            &parent_root,
+            &to_lookup,
+            &to_remove,
+            &to_insert,
+            &proof_bytes,
+            &_new_root,
+        )?;
+        let mut w = ergo_primitives::writer::VlqWriter::new();
+        ergo_ser::ad_proofs::write_ad_proofs(
+            &mut w,
+            &ergo_ser::ad_proofs::ADProofs {
+                header_id: ergo_primitives::digest::ModifierId::from_bytes(header_id),
+                proof_bytes,
+            },
+        );
+        Ok(w.result())
+    }
+
     /// Build UTXO change maps from checked transactions (precomputed tx_id).
     /// `pub(crate)` so the three consumers share one net-change-set
     /// construction: `candidate_dry_run` (UTXO AVL-prover dry-run), Mode 1

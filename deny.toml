@@ -57,13 +57,7 @@ yanked       = "deny"
 # migrating off bincode would break the on-disk format of existing operator
 # wallet DBs. Mirrored in the cargo-audit step (.github/workflows/ci.yml).
 # Revisit if a CVE is ever filed against bincode 1.3.3.
-# RUSTSEC-2026-0253 (lru 0.16.4, LruCache::pop panic-safety → potential UAF):
-# no patched 0.16.x release exists. The trigger requires a stored KEY whose
-# Drop impl panics during pop(); our only usage is the AVL+ node read cache in
-# ergo-state/src/avl/arena.rs with integer-newtype keys and plain-data AvlNode
-# values — no Drop impls at all, so the precondition is unreachable here. Drop
-# this entry and bump lru as soon as a patched version is published.
-ignore       = ["RUSTSEC-2025-0141", "RUSTSEC-2026-0253"]
+ignore       = ["RUSTSEC-2025-0141"]
 
 [sources]
 # Only crates.io. If we ever pull from a git URL, the URL must be
