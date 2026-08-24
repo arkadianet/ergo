@@ -28,8 +28,9 @@ infrastructure.
   delivery-tracker depths (`ergo_dl_*`, including the M-7 leak
   indicator), orphan-buffer sizes, ban/address-book counts, mining
   solution verdict counters, and resident set size (`ergo_rss_kb`) —
-  alongside the existing chain/mempool series. Values are read live at
-  scrape time via the snapshot publisher. **Breaking for external
+  alongside the existing chain/mempool series. Values are read from the
+  latest published snapshot and refresh when the snapshot publisher
+  publishes a new one. **Breaking for external
   builders of `ergo_node::snapshot::{NodeSnapshot, SnapshotParts}` struct
   literals**: both gain required `gauges` / `sync_gauges` fields —
   pre-1.0 policy applies (breaking changes between minors); populate
