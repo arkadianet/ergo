@@ -15,8 +15,6 @@ concurrency:
 # Least privilege: every job here only reads the repo (build/test/lint/audit).
 permissions:
   contents: read
-  # sccache's GitHub Actions cache backend writes through the cache API.
-  actions: write
 
 env:
   # CI speed levers (biggest win on the 2-core Windows runner):
@@ -31,6 +29,13 @@ jobs:
   check:
     name: Check, clippy, test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Job-scoped so audit/deny/machete legs never see RUSTC_WRAPPER without
+    # a sccache binary installed. Declared here rather than appended to
+    # GITHUB_ENV from a run step — no shell differences between bash and
+    # pwsh on the Windows runner.
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
     strategy:
       fail-fast: false
       matrix:
@@ -52,11 +57,7 @@ jobs:
       # Cross-run compilation cache on top of rust-cache: rust-cache restores
       # dependency artifacts, sccache also caches *workspace* crates whose
       # sources changed — the common case for PR iterations.
-      - uses: mozilla/sccache-action@v0.0.9
-      - name: sccache setup
-        run: |
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+      - uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
