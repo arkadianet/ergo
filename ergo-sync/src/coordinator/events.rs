@@ -23,6 +23,7 @@ use super::{Action, ChainView, PeerSyncSnapshot, SyncCoordinator};
 impl SyncCoordinator {
     /// Process an incoming SyncInfo message from a peer.
     /// Returns actions to execute.
+    #[tracing::instrument(skip_all, fields(peer = %peer))]
     pub fn on_sync_info(
         &mut self,
         peer: PeerId,

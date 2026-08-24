@@ -44,8 +44,7 @@ Message text is a short verb phrase; all data lives in fields.
 [logging]
 default_level = "info"          # used when RUST_LOG is unset
 
-# Per-module overrides (validated at load). ONE target and ONE level
-# per entry — comma-joined multi-directives belong in RUST_LOG:
+# Per-module overrides (validated at load):
 [logging.modules]
 "ergo_sync::executor" = "debug"
 "ergo_p2p::delivery"  = "trace"
@@ -76,8 +75,19 @@ jq 'select(.fields.block == "7c7587…")' logs/ergo-node.$(date +%F).log
 jq 'select(.fields.peer == "1.2.3.4:9030")' logs/ergo-node.*.log
 
 # All rejections with reasons:
-jq 'select(.level=="WARN" or .level=="ERROR")' | jq -r '.fields.code // .message'
+jq 'select(.level=="WARN" or .level=="ERROR)' | jq -r '.fields.code // .message'
 ```
+
+## Spans (phase 2)
+
+The block pipeline is instrumented: `pre_validate_header`,
+`process_block_utxo`, `handle_assemble_block`, and `on_sync_info` open
+spans carrying the canonical fields (`block`, `height`, `peer`). The
+JSON file layer embeds current-span + span-list on every event inside
+them, so one jq select on `.fields.block` returns a block's whole
+story. Wallet lifecycle (`unlocked` / `locked` / unlock failure) and
+mining solution verdicts log at INFO; handshake completions and seed
+checks at DEBUG.
 
 ## Chatter ledger (triage decisions)
 

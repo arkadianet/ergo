@@ -17,7 +17,7 @@ use ergo_state::wallet::RewardKeyResolution;
 use ergo_state::ChainStateRead;
 use ergo_sync::coordinator::Action;
 use tokio::sync::watch;
-use tracing::warn;
+use tracing::{info, warn};
 
 use super::peer_actions::flush_actions;
 use super::NodeState;
@@ -418,6 +418,16 @@ pub(super) fn handle_mining_request(
                     return;
                 }
             };
+            // Verdict line for the operator timeline (logging contract:
+            // one INFO per meaningful transition, outcome as a field).
+            info!(
+                verdict = match &outcome {
+                    ergo_mining::solution::SolutionOutcome::Accepted(_) => "accepted",
+                    ergo_mining::solution::SolutionOutcome::InvalidPow => "invalid_pow",
+                    ergo_mining::solution::SolutionOutcome::StaleParent { .. } => "stale_parent",
+                },
+                "mining solution verified"
+            );
             let block = match outcome {
                 ergo_mining::solution::SolutionOutcome::Accepted(b) => b,
                 ergo_mining::solution::SolutionOutcome::InvalidPow => {
