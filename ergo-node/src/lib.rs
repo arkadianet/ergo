@@ -13,6 +13,7 @@ pub mod indexer_chain;
 pub mod mem_csv;
 pub mod mem_probe;
 pub mod mem_smaps;
+pub mod metrics_counters;
 pub mod mining_bridge;
 pub mod node;
 pub mod notifier;

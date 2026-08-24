@@ -73,6 +73,7 @@ pub struct NodeSnapshot {
     /// the highest `voted_params` row with `key <= best_full_block.height`.
     /// Always populated post-`StateStore::open` (genesis row guarantees
     /// at least key 0 exists). Used by `/info.parameters`.
+    pub gauges: ergo_api::ApiSyncGauges,
     pub active_params: ergo_validation::ActiveProtocolParameters,
     /// Pool-created output boxes indexed by `box_id`, supplying the
     /// overlay for `/utxo/withPool/*`. Cloned from `Mempool::pool_output_overlay`
@@ -205,6 +206,7 @@ impl NodeSnapshot {
             difficulty: "0".to_string(),
         };
         Self {
+            gauges: ergo_api::ApiSyncGauges::default(),
             status: ApiStatus {
                 bootstrap: None,
                 sync_state: SyncStateLabel::Disconnected,
@@ -315,6 +317,8 @@ pub struct SnapshotParts<'a> {
     pub download_window: u32,
     pub pending_blocks: u32,
     pub recovery_done: bool,
+    /// Live subsystem gauges for `/metrics` (issue #257).
+    pub sync_gauges: ergo_api::ApiSyncGauges,
     pub peer_count: u32,
     pub mempool_size: u32,
     pub mempool_total_bytes: u64,

@@ -530,3 +530,37 @@ mod tests {
         }
     }
 }
+
+/// Live subsystem gauges for `/metrics` (issue #257 attribution work).
+/// Sourced from the delivery tracker, orphan buffer, peer manager, and
+/// the mining solution verdict counters. All monotonic-ish sizes; values
+/// are process-lifetime except the depth-style gauges which fluctuate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ApiSyncGauges {
+    /// Modifier ids with an outstanding delivery request.
+    pub dl_inflight: u64,
+    /// Peers owning at least one in-flight request.
+    pub dl_peers_inflight: u64,
+    /// Recently-received id FIFO (duplicate-suppression window).
+    pub dl_received: u64,
+    /// Late-acceptance allowances (M-7 leak indicator).
+    pub dl_late_acceptable: u64,
+    /// Released-shadow TTL entries.
+    pub dl_recently_released: u64,
+    /// Distinct orphan-header id groups currently buffered.
+    pub orphan_groups: u64,
+    /// Total buffered orphan header entries.
+    pub orphan_headers: u64,
+    /// Live ban entries (in-memory map).
+    pub bans: u64,
+    /// Address-book pool size.
+    pub known_addrs: u64,
+    /// Mining solutions verified as `accepted` since boot.
+    pub solutions_accepted: u64,
+    /// Solutions rejected as invalid PoW since boot.
+    pub solutions_invalid_pow: u64,
+    /// Solutions rejected as stale parent since boot.
+    pub solutions_stale_parent: u64,
+    /// Resident set size, KiB (Linux; 0 elsewhere).
+    pub rss_kb: u64,
+}

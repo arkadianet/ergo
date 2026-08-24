@@ -388,6 +388,9 @@ pub(super) async fn metrics_handler(State(read): State<Arc<dyn NodeReadState>>) 
     let info = read.info();
     let status = read.status();
     let mempool = read.mempool_summary();
+    // Live subsystem gauges (issue #257): delivery-tracker depths, orphan
+    // buffer, ban/address-book counts, mining verdict counters, RSS.
+    let g = read.sync_gauges();
 
     let body = format!(
         "\
@@ -460,6 +463,45 @@ ergo_node_last_applied_height {last_applied_height}
 # HELP ergo_node_last_apply_age_ms Age of the last finished apply attempt in ms (-1 if none).
 # TYPE ergo_node_last_apply_age_ms gauge
 ergo_node_last_apply_age_ms {last_apply_age_ms}
+# HELP ergo_dl_inflight Modifier ids with an outstanding delivery request.
+# TYPE ergo_dl_inflight gauge
+ergo_dl_inflight {dl_inflight}
+# HELP ergo_dl_peers_inflight Peers owning at least one in-flight request.
+# TYPE ergo_dl_peers_inflight gauge
+ergo_dl_peers_inflight {dl_peers_inflight}
+# HELP ergo_dl_received Recently-received id FIFO size (duplicate suppression).
+# TYPE ergo_dl_received gauge
+ergo_dl_received {dl_received}
+# HELP ergo_dl_late_acceptable Late-acceptance allowances (M-7 leak indicator).
+# TYPE ergo_dl_late_acceptable gauge
+ergo_dl_late_acceptable {dl_late_acceptable}
+# HELP ergo_dl_recently_released Released-shadow TTL entries.
+# TYPE ergo_dl_recently_released gauge
+ergo_dl_recently_released {dl_recently_released}
+# HELP ergo_orphan_groups Distinct orphan header id groups buffered.
+# TYPE ergo_orphan_groups gauge
+ergo_orphan_groups {orphan_groups}
+# HELP ergo_orphan_headers Total buffered orphan header entries.
+# TYPE ergo_orphan_headers gauge
+ergo_orphan_headers {orphan_headers}
+# HELP ergo_bans Live ban entries.
+# TYPE ergo_bans gauge
+ergo_bans {bans}
+# HELP ergo_known_addrs Address-book pool size.
+# TYPE ergo_known_addrs gauge
+ergo_known_addrs {known_addrs}
+# HELP ergo_solutions_accepted_total Mining solutions accepted since boot.
+# TYPE ergo_solutions_accepted_total counter
+ergo_solutions_accepted_total {solutions_accepted}
+# HELP ergo_solutions_invalid_pow_total Solutions rejected as invalid PoW since boot.
+# TYPE ergo_solutions_invalid_pow_total counter
+ergo_solutions_invalid_pow_total {solutions_invalid_pow}
+# HELP ergo_solutions_stale_parent_total Solutions rejected as stale parent since boot.
+# TYPE ergo_solutions_stale_parent_total counter
+ergo_solutions_stale_parent_total {solutions_stale_parent}
+# HELP ergo_rss_kb Resident set size, KiB (Linux; 0 elsewhere).
+# TYPE ergo_rss_kb gauge
+ergo_rss_kb {rss_kb}
 ",
         uptime = info.uptime_seconds,
         bh = status.best_header_height,
@@ -498,6 +540,19 @@ ergo_node_last_apply_age_ms {last_apply_age_ms}
             .last_apply_age_ms
             .map(|a| a as i64)
             .unwrap_or(-1),
+        dl_inflight = g.dl_inflight,
+        dl_peers_inflight = g.dl_peers_inflight,
+        dl_received = g.dl_received,
+        dl_late_acceptable = g.dl_late_acceptable,
+        dl_recently_released = g.dl_recently_released,
+        orphan_groups = g.orphan_groups,
+        orphan_headers = g.orphan_headers,
+        bans = g.bans,
+        known_addrs = g.known_addrs,
+        solutions_accepted = g.solutions_accepted,
+        solutions_invalid_pow = g.solutions_invalid_pow,
+        solutions_stale_parent = g.solutions_stale_parent,
+        rss_kb = g.rss_kb,
     );
 
     // Shadow-validation series — emitted only when the mode is enabled, so

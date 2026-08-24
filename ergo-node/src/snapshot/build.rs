@@ -142,6 +142,7 @@ pub(super) fn build_snapshot(
 
     let _ = p.now_unix_ms;
     NodeSnapshot {
+        gauges: p.sync_gauges,
         info,
         status,
         tip,

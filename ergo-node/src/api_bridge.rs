@@ -283,6 +283,10 @@ impl SnapshotReadState {
 }
 
 impl NodeReadState for SnapshotReadState {
+    fn sync_gauges(&self) -> ergo_api::ApiSyncGauges {
+        self.handle.load().gauges
+    }
+
     fn info(&self) -> ApiInfo {
         self.handle.load().info.clone()
     }
