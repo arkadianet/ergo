@@ -14,8 +14,8 @@ use ergo_ser::ergo_box::ErgoBox;
 use crate::compat::types::{ScalaFullBlock, ScalaTransactionInput};
 use crate::types::{
     ApiHealth, ApiHost, ApiIdentity, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction,
-    ApiMempoolTransactions, ApiPeer, ApiRecentBlock, ApiStatus, ApiSyncStatus, ApiTip, ApiVotes,
-    SubmitError, SubmitMode,
+    ApiMempoolTransactions, ApiPeer, ApiRecentBlock, ApiStatus, ApiSyncGauges, ApiSyncStatus,
+    ApiTip, ApiVotes, SubmitError, SubmitMode,
 };
 
 /// Snapshot-read surface the node implements for the API server.
@@ -49,6 +49,12 @@ pub trait NodeReadState: Send + Sync {
         self.mempool_transactions().weight_function
     }
     fn health(&self) -> ApiHealth;
+
+    /// Live subsystem gauges for `/metrics`. Default zeros so test
+    /// fixtures and embedders compile unchanged; the node overrides it.
+    fn sync_gauges(&self) -> ApiSyncGauges {
+        ApiSyncGauges::default()
+    }
     /// Captured at boot from `NodeConfig` + the hardcoded `Mode` peer-feature.
     /// Default impl returns an empty identity so test fixtures that don't
     /// care about it don't have to be updated; the production

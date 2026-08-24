@@ -429,12 +429,17 @@ pub(super) fn handle_mining_request(
                 "mining solution verified"
             );
             let block = match outcome {
-                ergo_mining::solution::SolutionOutcome::Accepted(b) => b,
+                ergo_mining::solution::SolutionOutcome::Accepted(b) => {
+                    crate::metrics_counters::incr_accepted();
+                    b
+                }
                 ergo_mining::solution::SolutionOutcome::InvalidPow => {
+                    crate::metrics_counters::incr_invalid_pow();
                     let _ = reply.send(Err(ergo_api::MiningApiError::InvalidPow));
                     return;
                 }
                 ergo_mining::solution::SolutionOutcome::StaleParent { .. } => {
+                    crate::metrics_counters::incr_stale_parent();
                     let _ = reply.send(Err(ergo_api::MiningApiError::StaleParent));
                     return;
                 }

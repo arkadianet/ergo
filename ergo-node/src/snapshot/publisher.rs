@@ -176,6 +176,7 @@ mod tests {
     ) -> SnapshotParts<'a> {
         SnapshotParts {
             now_unix_ms: 0,
+            sync_gauges: Default::default(),
             snapshot_built_at: Instant::now(),
             best_header_height: header_h,
             best_header_id: header_id,

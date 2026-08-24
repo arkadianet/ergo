@@ -427,6 +427,34 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
         }
     };
 
+    // Live subsystem gauges (issue #257): delivery tracker, orphan buffer,
+    // peer/ban/address-book counts, mining verdict counters, RSS. Computed
+    // at publish time so /metrics reads fresh values on every scrape.
+    let dg = state.coordinator.delivery_gauges();
+    let (orphan_groups, orphan_headers) = state.executor.orphan_header_gauges();
+    let (bans, _peers_count, known_addrs) = state.peer_manager.gauge_counts();
+    let solutions = crate::metrics_counters::solutions_snapshot();
+    let rss_kb = {
+        #[cfg(target_os = "linux")]
+        {
+            std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|status| {
+                    status.lines().find(|l| l.starts_with("VmRSS:")).map(|l| {
+                        l.split_whitespace()
+                            .nth(1)
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .unwrap_or(0)
+                    })
+                })
+                .unwrap_or(0)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            0
+        }
+    };
+
     let parts = SnapshotParts {
         now_unix_ms,
         snapshot_built_at: now,
@@ -445,6 +473,21 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
         download_window,
         pending_blocks,
         recovery_done,
+        sync_gauges: ergo_api::ApiSyncGauges {
+            dl_inflight: dg.inflight as u64,
+            dl_peers_inflight: dg.peers_with_inflight as u64,
+            dl_received: dg.received_set as u64,
+            dl_late_acceptable: dg.late_acceptable as u64,
+            dl_recently_released: dg.recently_released as u64,
+            orphan_groups: orphan_groups as u64,
+            orphan_headers: orphan_headers as u64,
+            bans: bans as u64,
+            known_addrs: known_addrs as u64,
+            solutions_accepted: solutions.0,
+            solutions_invalid_pow: solutions.1,
+            solutions_stale_parent: solutions.2,
+            rss_kb,
+        },
         peer_count,
         mempool_size,
         mempool_total_bytes,
