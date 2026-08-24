@@ -159,6 +159,7 @@ fn make_state_with_backend(
         indexer_handle: None,
         anchor_map: anchor_map::AnchorMap::new(),
         rest_peer_urls: std::sync::Arc::new(std::sync::RwLock::new(RestPeers::new())),
+        rest_url_reject_warned: Default::default(),
         anchor_builder_cancel_tx: tokio::sync::watch::channel(false).0,
         anchor_scheduler: AnchorScheduler::new(),
         enable_anchor_scheduler: false,
@@ -765,6 +766,7 @@ fn cfg_with_mode(
         indexer_config: IndexerConfig::default(),
         enable_anchor_scheduler: false,
         logging: LoggingConfig {
+            modules: Default::default(),
             default_level: "info".into(),
             format: LoggingFormat::Text,
             file: None,

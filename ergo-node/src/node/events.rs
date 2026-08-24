@@ -312,12 +312,30 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
                                     }
                                 }
                                 Err(e) => {
-                                    warn!(
-                                        peer = %addr,
-                                        url = %url,
-                                        error = %e,
-                                        "peer REST url rejected",
-                                    );
+                                    // Warn once per (peer, url); repeats
+                                    // downgrade to debug — a misconfigured
+                                    // peer re-announcing the same bad URL
+                                    // must not flood the operator log
+                                    // (logging-audit triage).
+                                    if should_emit_rest_url_reject(
+                                        &mut state.rest_url_reject_warned,
+                                        addr,
+                                        url,
+                                    ) {
+                                        warn!(
+                                            peer = %addr,
+                                            url = %url,
+                                            error = %e,
+                                            "peer REST url rejected",
+                                        );
+                                    } else {
+                                        debug!(
+                                            peer = %addr,
+                                            url = %url,
+                                            error = %e,
+                                            "peer REST url rejected (repeat)",
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -806,5 +824,53 @@ fn inject_local_full_block(
                 "validator rejected the header before persistence — check chain context (parent, nBits, height)".into(),
             ),
         })
+    }
+}
+
+/// First-sight gate for `peer REST url rejected` warnings: true exactly
+/// once per (peer, url) pair per session; repeats return false so the
+/// event downgrades to debug. Bounded by the same natural cap as the
+/// connected-peer set.
+fn should_emit_rest_url_reject(
+    seen: &mut std::collections::HashSet<(std::net::SocketAddr, String)>,
+    peer: std::net::SocketAddr,
+    url: &str,
+) -> bool {
+    seen.insert((peer, url.to_string()))
+}
+
+#[cfg(test)]
+mod rest_url_warn_tests {
+    use super::should_emit_rest_url_reject;
+    use std::collections::HashSet;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    #[test]
+    fn warns_once_then_downgrades_per_peer_url_pair() {
+        let mut seen = HashSet::new();
+        let p = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9030);
+        assert!(should_emit_rest_url_reject(
+            &mut seen,
+            p,
+            "https://x.example"
+        ));
+        assert!(!should_emit_rest_url_reject(
+            &mut seen,
+            p,
+            "https://x.example"
+        ));
+        // Same peer, different URL: a NEW misconfiguration deserves a line.
+        assert!(should_emit_rest_url_reject(
+            &mut seen,
+            p,
+            "https://y.example"
+        ));
+        // Different peer, same URL: also new.
+        let q = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 9030);
+        assert!(should_emit_rest_url_reject(
+            &mut seen,
+            q,
+            "https://x.example"
+        ));
     }
 }

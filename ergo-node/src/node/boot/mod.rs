@@ -881,6 +881,7 @@ async fn run_inner_with_backend(
         indexer_handle: sync.indexer_handle.clone(),
         anchor_map: anchor_map::AnchorMap::new(),
         rest_peer_urls: std::sync::Arc::new(std::sync::RwLock::new(RestPeers::new())),
+        rest_url_reject_warned: Default::default(),
         anchor_builder_cancel_tx: tokio::sync::watch::channel(false).0,
         anchor_scheduler: AnchorScheduler::new(),
         enable_anchor_scheduler: config.enable_anchor_scheduler,

@@ -828,6 +828,20 @@ impl NodeConfig {
             EnvFilter::try_new(&default_level).map_err(|e| {
                 format!("[logging] default_level {default_level:?} is not a valid filter: {e}")
             })?;
+            let modules = match &tl.modules {
+                Some(map) => {
+                    for (target, level) in map {
+                        let directive = format!("{target}={level}");
+                        if let Err(e) = EnvFilter::try_new(&directive) {
+                            return Err(format!(
+                                "[logging.modules] {directive:?} is not a valid filter: {e}"
+                            ));
+                        }
+                    }
+                    map.clone()
+                }
+                None => Default::default(),
+            };
             let format = match tl.format.as_deref().unwrap_or("text") {
                 "text" => LoggingFormat::Text,
                 "json" => LoggingFormat::Json,
@@ -884,11 +898,24 @@ impl NodeConfig {
                 if max_files == 0 {
                     return Err("[logging.file] max_files must be >= 1".into());
                 }
+                // File sink defaults to JSON: the on-disk archive is the
+                // machine-queryable primary (jq / Loki / Splunk); humans
+                // tail the console layer, which stays text by default.
+                let file_format = match tf.format.as_deref().unwrap_or("json") {
+                    "text" => LoggingFormat::Text,
+                    "json" => LoggingFormat::Json,
+                    other => {
+                        return Err(format!(
+                            "[logging.file] format {other:?} must be one of \"text\" | \"json\""
+                        ))
+                    }
+                };
                 Some(LoggingFileConfig {
                     dir,
                     prefix,
                     rotation,
                     max_files,
+                    format: file_format,
                 })
             } else {
                 None
@@ -896,6 +923,7 @@ impl NodeConfig {
             LoggingConfig {
                 default_level,
                 format,
+                modules,
                 file,
             }
         };

@@ -109,6 +109,10 @@ pub(super) struct TomlLogging {
     pub(super) format: Option<String>,
     /// Optional file output. Absent = stderr only.
     pub(super) file: Option<TomlLoggingFile>,
+    /// Per-module level overrides layered on `default_level`.
+    /// Keys are target paths (`"ergo_sync::executor"`), values are level
+    /// filter directives (`"debug"`, `"warn"`, `"off"`, or a full filter).
+    pub(super) modules: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(serde::Deserialize, Default, Debug)]
@@ -126,6 +130,9 @@ pub(super) struct TomlLoggingFile {
     /// Number of rotated files retained — older files deleted on
     /// rotate. Default: 14 (two weeks of daily rotation).
     pub(super) max_files: Option<usize>,
+    /// On-disk event format for this file sink: `"text"` | `"json"`.
+    /// Default **`"json"`** — machine-queryable primary archive.
+    pub(super) format: Option<String>,
 }
 
 /// `[indexer]` TOML section: opt-in extra-index parity.

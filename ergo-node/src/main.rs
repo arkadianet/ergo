@@ -109,8 +109,10 @@ fn init_tracing(cfg: &LoggingConfig) -> Option<WorkerGuard> {
     // Per-layer filters yield identical filtering behavior here because
     // both layers share the same filter expression.
     let mk_filter = || -> EnvFilter {
+        // RUST_LOG wins when the operator sets it; otherwise the config's
+        // default_level + [logging.modules] overrides.
         EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new(cfg.default_level.as_str()))
+            .unwrap_or_else(|_| EnvFilter::new(cfg.env_filter_directive()))
     };
 
     let stderr_layer: Box<dyn Layer<Registry> + Send + Sync> = match cfg.format {
@@ -135,7 +137,7 @@ fn init_tracing(cfg: &LoggingConfig) -> Option<WorkerGuard> {
 
     let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = vec![stderr_layer];
     let guard = if let Some(file) = &cfg.file {
-        match build_file_layer(file, cfg.format) {
+        match build_file_layer(file, &cfg.env_filter_directive()) {
             Ok((file_layer, g)) => {
                 layers.push(file_layer);
                 Some(g)
@@ -161,7 +163,7 @@ fn init_tracing(cfg: &LoggingConfig) -> Option<WorkerGuard> {
 
 fn build_file_layer(
     file: &ergo_node::config::LoggingFileConfig,
-    format: LoggingFormat,
+    directive: &str,
 ) -> Result<(Box<dyn Layer<Registry> + Send + Sync>, WorkerGuard), String> {
     std::fs::create_dir_all(&file.dir).map_err(|e| {
         format!(
@@ -203,10 +205,10 @@ fn build_file_layer(
         .finish(appender);
 
     let env_filter = || -> EnvFilter {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(directive))
     };
 
-    let layer: Box<dyn Layer<Registry> + Send + Sync> = match format {
+    let layer: Box<dyn Layer<Registry> + Send + Sync> = match file.format {
         LoggingFormat::Text => Box::new(
             fmt::layer()
                 .with_target(true)

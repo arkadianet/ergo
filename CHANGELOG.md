@@ -16,7 +16,30 @@ infrastructure.
 
 ## [Unreleased]
 
+### Added
+
+- **First-class logging, phase 1** (design: `dev-docs/logging-overhaul-DESIGN.md`).
+  `[logging.modules]` — per-module level overrides validated at load
+  (e.g. `"ergo_sync::executor" = "debug"`); `RUST_LOG` still wins when set.
+  `docs/logging.md` — the written contract: canonical fields, level table,
+  jq forensics recipes, chatter ledger.
+
 ### Changed
+
+- **Logging file sink defaults to JSON.** The on-disk archive is the
+  machine-queryable primary (jq / Loki / Splunk); console stays text by
+  default. Set `[logging.file] format = "text"` to restore the old shape.
+  File sink now also honors `RUST_LOG`/module overrides instead of a
+  hardcoded `info`.
+- **Heartbeat flood tamed.** During active sync the operator heartbeat
+  respects a 5 s minimum spacing between progress lines (idle nodes keep
+  the once-per-minute pulse) — previously ~1 line/second during IBD.
+- **New minute-cadence `node_gauges` log line**: delivery-tracker depths,
+  orphan-buffer size, peer/ban/address-book counts, mempool depth — the
+  memory-attribution telemetry for issue #257.
+- **`peer REST url rejected` warns once per (peer, URL)**; repeats demote
+  to debug.
+
 - **Hygiene: `/utils/seed` entropy now drawn from `OsRng`** (policy
   consistency with every other security-relevant RNG site), **batch-Merkle
   proof count arithmetic is overflow-checked** (portability hardening on the

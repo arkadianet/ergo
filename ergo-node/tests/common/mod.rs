@@ -73,6 +73,7 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
         indexer_config: IndexerConfig::default(),
         enable_anchor_scheduler: false, // matches NodeConfig::load default
         logging: LoggingConfig {
+            modules: Default::default(),
             default_level: "info".into(),
             format: LoggingFormat::Text,
             file: None,
