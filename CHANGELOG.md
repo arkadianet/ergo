@@ -23,6 +23,17 @@ infrastructure.
   (e.g. `"ergo_sync::executor" = "debug"`); `RUST_LOG` still wins when set.
   `docs/logging.md` — the written contract: canonical fields, level table,
   jq forensics recipes, chatter ledger.
+- **`/metrics` subsystem-gauge series (logging overhaul phase 3).** The
+  Prometheus endpoint now exports the #257 attribution gauges —
+  delivery-tracker depths (`ergo_dl_*`, including the M-7 leak
+  indicator), orphan-buffer sizes, ban/address-book counts, mining
+  solution verdict counters, and resident set size (`ergo_rss_kb`) —
+  alongside the existing chain/mempool series. Values are read live at
+  scrape time via the snapshot publisher. **Breaking for external
+  builders of `ergo_node::snapshot::{NodeSnapshot, SnapshotParts}` struct
+  literals**: both gain required `gauges` / `sync_gauges` fields —
+  pre-1.0 policy applies (breaking changes between minors); populate
+  `ApiSyncGauges::default()` when hand-assembling.
 
 ### Changed
 
