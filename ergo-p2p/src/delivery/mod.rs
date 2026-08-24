@@ -716,3 +716,34 @@ impl Default for DeliveryTracker {
 
 #[cfg(test)]
 mod tests;
+
+/// Point-in-time sizes for operator gauges (audit #257): each counter maps
+/// to a known bounded-memory lever or a leak indicator.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeliveryGauges {
+    /// Modifier ids with an outstanding request.
+    pub inflight: usize,
+    /// Peers currently owning at least one in-flight request.
+    pub peers_with_inflight: usize,
+    /// Recently-received id FIFO (duplicate-suppression window).
+    pub received_set: usize,
+    /// Late-acceptance allowances (the M-7 leak indicator).
+    pub late_acceptable: usize,
+    /// Released-shadow TTL entries.
+    pub recently_released: usize,
+}
+
+impl DeliveryTracker {
+    /// Snapshot the bounded-memory-relevant sizes. O(1) per field except
+    /// `peer_inflight_count`, which is a map fold — cheap at the observed
+    /// peer counts, called once per gauge interval only.
+    pub fn gauges(&self) -> DeliveryGauges {
+        DeliveryGauges {
+            inflight: self.inflight.len(),
+            peers_with_inflight: self.peer_inflight_count.len(),
+            received_set: self.received_set.len(),
+            late_acceptable: self.late_acceptable.len(),
+            recently_released: self.recently_released.len(),
+        }
+    }
+}

@@ -82,3 +82,12 @@ impl SyncCoordinator {
         action
     }
 }
+
+impl SyncCoordinator {
+    /// Gauge passthrough for the delivery tracker (see
+    /// [`ergo_p2p::delivery::DeliveryGauges`]). Lives on the coordinator so
+    /// the node's gauge tick never needs a second mutable borrow path.
+    pub fn delivery_gauges(&self) -> ergo_p2p::delivery::DeliveryGauges {
+        self.delivery.gauges()
+    }
+}

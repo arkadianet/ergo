@@ -24,7 +24,7 @@
 //! `flush_actions`, `cleanup_disconnected_peer`, `send_to_peer`, and the
 //! sibling `heartbeat` / `snapshot_emit` / `sync_helpers` submodules.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ergo_p2p::handshake::PeerFeature;
 use ergo_p2p::message;
@@ -40,8 +40,13 @@ use super::snapshot_emit::publish_snapshot;
 use super::sync_helpers::try_send_anchor_sync_info;
 use super::{cleanup_disconnected_peer, flush_actions, send_to_peer, NodeState};
 
+/// Cadence for the subsystem-gauge line (audit #257): one structured
+/// snapshot per minute gives RSS/leak attribution without flooding.
+const GAUGE_INTERVAL: Duration = Duration::from_secs(60);
+
 pub(super) fn handle_sync_tick(state: &mut NodeState) {
     let now = Instant::now();
+    maybe_emit_gauges(state, now);
 
     // 0-pre. NiPoPoW bootstrap. Runs BEFORE Mode 2 discovery so the
     // proof apply can complete before snapshot manifest verification
@@ -1010,4 +1015,42 @@ fn refresh_api_identity(state: &mut NodeState) {
              API may report stale state until the next successful refresh",
         );
     }
+}
+
+/// Emit one structured subsystem-gauge line per [`GAUGE_INTERVAL`].
+///
+/// Every counter here is a known memory lever or leak indicator (issue
+/// #257): delivery-tracker maps, orphan buffer, peer/ban/address-book
+/// containers, mempool depth. Static cadence anchor follows the
+/// `RESCAN_IN_PROGRESS` static precedent — the action loop is the single
+/// caller, so a process-wide millisecond anchor is sufficient and avoids
+/// growing `NodeState`'s constructor surface again.
+fn maybe_emit_gauges(state: &mut NodeState, now: Instant) {
+    static LAST_GAUGE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let base = BASE.get_or_init(Instant::now);
+    let rel_ms = now.duration_since(*base).as_millis() as u64;
+    let last = LAST_GAUGE_MS.load(std::sync::atomic::Ordering::Relaxed);
+    if last != 0 && rel_ms.saturating_sub(last) < GAUGE_INTERVAL.as_millis() as u64 {
+        return;
+    }
+    LAST_GAUGE_MS.store(rel_ms, std::sync::atomic::Ordering::Relaxed);
+
+    let dg = state.coordinator.delivery_gauges();
+    let (orphan_groups, orphan_headers) = state.executor.orphan_header_gauges();
+    let (peers, bans, known_addrs) = state.peer_manager.gauge_counts();
+    let mempool_txs = state.mempool.size();
+
+    info!(
+        target: "node_gauges",
+        peers, bans, known_addrs, mempool_txs,
+        dl_inflight = dg.inflight,
+        dl_peers_inflight = dg.peers_with_inflight,
+        dl_received = dg.received_set,
+        dl_late_acceptable = dg.late_acceptable,
+        dl_recently_released = dg.recently_released,
+        orphan_groups,
+        orphan_headers,
+        "subsystem gauges"
+    );
 }

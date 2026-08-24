@@ -135,6 +135,8 @@ pub(crate) struct NodeState {
     /// (which advances every tick to keep the per-tick perf-timing rates
     /// honest).
     pub(super) last_beat_emit: Instant,
+    /// Last PROGRESS-triggered beat (5 s floor between progress lines).
+    pub(super) last_beat_progress_emit: Instant,
     pub(super) last_beat_height: u32,
     pub(super) last_beat_headers: u32,
     // Sync-S0 rename for truth: req_messages counts RequestModifier messages
