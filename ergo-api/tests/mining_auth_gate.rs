@@ -106,6 +106,15 @@ fn post(path: &str) -> Request<Body> {
         .unwrap()
 }
 
+fn post_json(path: &str, json: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json")
+        .body(Body::from(json.to_owned()))
+        .unwrap()
+}
+
 fn with_key(mut req: Request<Body>) -> Request<Body> {
     req.headers_mut()
         .insert(API_KEY_HEADER, PLAINTEXT_KEY.parse().unwrap());
@@ -130,12 +139,25 @@ async fn mining_candidate_403_without_key_503_with_key() {
 }
 
 #[tokio::test]
-async fn mining_solution_post_403_without_key() {
+async fn mining_solution_gated_403_then_503_with_key() {
     // The mutating route: solution submission must never answer without
     // the key. (An empty body would be a 4xx decode error at the handler;
     // a 403 here can only come from the gate.)
     let resp = app().oneshot(post("/mining/solution")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // With the key and a well-formed solution body, the request reaches
+    // the NoopNodeMining handler, which reports the mining subsystem
+    // unavailable (503) — proving the gate opened for the mutating route
+    // too, not just the reads.
+    let resp = app()
+        .oneshot(with_key(post_json(
+            "/mining/solution",
+            r#"{"n":"0001020304050607"}"#,
+        )))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]

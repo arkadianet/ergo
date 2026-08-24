@@ -82,12 +82,15 @@ For remote operator access, the recommended deployment is to keep the
 bind on loopback and front it with an authenticated reverse proxy, rather
 than setting `public_bind = true`.
 
-### `api_key` gates `/wallet/*` and `/node/shutdown` only
+### `api_key` gates three route families: `/wallet/*`, `/node/shutdown`, `/mining/*`
 
 Authentication uses an `api_key` HTTP header. The configured
 `[api.security] api_key_hash` is the lowercase Base16 of
 `Blake2b256(secret)`; the node hashes the incoming header bytes the same
 way and compares in constant time, returning HTTP `403` on any mismatch.
+Exactly three route families sit behind the gate — the wallet JSON API,
+the node shutdown control, and the mining surface — as the table below
+spells out; everything else is unauthenticated by design.
 This header name, hash, and rejection envelope match the Scala reference
 node.
 
