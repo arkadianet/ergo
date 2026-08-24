@@ -10,6 +10,15 @@ on:
 permissions:
   contents: read
 
+env:
+  # CI speed levers (biggest win on the 2-core Windows runner):
+  # - line-tables-only backtraces instead of full debuginfo: MSVC codegen
+  #   and linking shrink dramatically; panic messages still carry locations.
+  # - incremental off: cargo's own guidance for shared-cache CI —
+  #   incremental artifacts don't survive cache round-trips and bloat them.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   check:
     name: Check, clippy, test (${{ matrix.os }})
@@ -35,14 +44,18 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
-      - name: cargo check
-        run: cargo check --all
+      # NOTE: no separate `cargo check --all` step — clippy runs check
+      # under the hood, so a standalone check pass is pure duplicate work.
 
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: cargo test
-        run: cargo test --all
+      - uses: taiki-e/install-action@nextest
+
+      # nextest: per-test processes with better parallelism; skips doctests,
+      # which the ubuntu leg below covers explicitly so coverage is retained.
+      - name: cargo nextest run
+        run: cargo nextest run --all
 
       # `cargo test --all` above does not build with --features cost-trace,
       # so the feature-gated recording sites in `ergo-sigma` do not get
@@ -55,6 +68,12 @@ jobs:
       # wrong identifier and breaking the build under the feature.
       - name: cargo test (cost-trace feature)
         run: cargo test -p ergo-sigma --features cost-trace --test cost_trace_smoke --test traced_untraced_parity
+
+      # Doctest coverage lives on the fastest runner only — every other leg
+      # already exercises the same crates via nextest above.
+      - name: doc tests (ubuntu only)
+        if: runner.os == 'Linux'
+        run: cargo test --all --doc
 
   audit:
     name: cargo-audit (security advisories)
