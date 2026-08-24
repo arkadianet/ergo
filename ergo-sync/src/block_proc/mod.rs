@@ -65,11 +65,12 @@ pub enum BlockProcessError {
         header_id: [u8; 32],
         ad_proofs_id: [u8; 32],
     },
-    /// UTXO mode: the block's ADProofs section does not hash to the
-    /// header's declared `adProofsRoot` (Scala's "Regenerated proofHash is
-    /// not equal to the declared one" family). Unlike
+    /// UTXO mode: the ADProofs regenerated from the block's transactions
+    /// against the parent UTXO set do not hash to the header's declared
+    /// `adProofsRoot` (Scala's "Regenerated proofHash is not equal to the
+    /// declared one" family). Unlike
     /// [`BlockProcessError::AdProofsUnavailable`], this IS block
-    /// invalidity — a miner declared a root its own section doesn't
+    /// invalidity — a miner declared a root its own transactions don't
     /// produce — so the header must be marked invalid, not retried.
     #[error(
         "ADProofs hash mismatch for header {}: declared {}, computed {}",

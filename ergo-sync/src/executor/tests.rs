@@ -1076,6 +1076,20 @@ fn is_validation_verdict_true_for_header_meta_and_epoch_extension() {
         is_validation_verdict(&epoch_ext),
         "extension/epoch-rule failure is a verdict"
     );
+
+    // Regenerated-proof-hash contradiction is Scala's "Regenerated proofHash
+    // is not equal to the declared one" reject — definitive block invalidity,
+    // so a mismatching block must take the durable invalidation path instead
+    // of being retried forever.
+    let ad_mismatch = BlockProcessError::AdProofsHashMismatch {
+        header_id: id(0xCC),
+        declared_root: id(0x01),
+        computed_root: id(0x02),
+    };
+    assert!(
+        is_validation_verdict(&ad_mismatch),
+        "ADProofs hash mismatch is a verdict"
+    );
 }
 
 #[test]

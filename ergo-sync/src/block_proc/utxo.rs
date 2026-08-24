@@ -178,18 +178,6 @@ pub(super) fn process_block_utxo(
     let extension = read_extension(&mut r)
         .map_err(|e| BlockProcessError::Deserialize(format!("extension: {e:?}")))?;
 
-    // 2c. ADProofs binding — UTXO-mode counterpart of Scala's
-    // "Regenerated proofHash is not equal to the declared one" check.
-    // Without it, a full block could declare an arbitrary
-    // `adProofsRoot` (or omit the section entirely) and still validate:
-    // live mainnet divergence at h1,853,301 (block 437601cd…), which
-    // this node applied for 697s before reorging away. The section must
-    // exist, be filed under the id derived from the declared root,
-    // carry this header's id, and hash (blake2b256 of the proof bytes)
-    // exactly to that declared root. This is the integrity binding; full
-    // regeneration parity (recompute the proofs from the parent AVL and
-    // compare) remains tracked separately. Runs AFTER the genesis
-    // early-return: block 1 carries no ADProofs section by construction.
     let t_sections = t0.elapsed();
 
     // 3. Genesis block (height 1): no parent exists.
