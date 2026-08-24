@@ -115,6 +115,8 @@ async fn metrics_renders_subsystem_gauge_series() {
         "ergo_bans 0",
         "ergo_known_addrs 0",
         "ergo_solutions_accepted_total 0",
+        "ergo_solutions_invalid_pow_total 0",
+        "ergo_solutions_stale_parent_total 0",
         "ergo_rss_kb 0",
     ] {
         assert!(

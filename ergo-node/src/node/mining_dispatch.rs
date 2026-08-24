@@ -457,6 +457,10 @@ pub(super) fn handle_mining_request(
             ) {
                 Ok(pair) => pair,
                 Err(ergo_mining::submit::MiningSubmitError::StaleParent { .. }) => {
+                    // Fresh-at-verify but tip moved before persist: still a
+                    // stale-parent submission — count it once here so the
+                    // two arms never double-count one solution.
+                    crate::metrics_counters::incr_stale_parent();
                     let _ = reply.send(Err(ergo_api::MiningApiError::StaleParent));
                     return;
                 }
