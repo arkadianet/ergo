@@ -519,6 +519,14 @@ fn non_empty_bool_const_collection_eq_after_0x85_compaction() {
     let mut w = VlqWriter::new();
     write_body(&mut w, &original, false).unwrap();
     let packed = w.result();
+    // Compaction must actually fire: the all-boolean-constant 0x83
+    // collection re-emits as packed 0x85.
+    assert_eq!(
+        packed.first(),
+        Some(&0x85),
+        "expected packed BoolCollection opcode byte, got {:#04x}",
+        packed.first().unwrap_or(&0)
+    );
     let mut r = VlqReader::new(&packed);
     let decoded = parse_body(&mut r, 0).unwrap();
     assert_eq!(decoded, original);
