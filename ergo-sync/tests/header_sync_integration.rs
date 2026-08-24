@@ -657,7 +657,7 @@ fn executor_end_to_end_block_2() {
     let tx2 = read_transaction(&mut VlqReader::new(&hex::decode(tx2_hex).unwrap())).unwrap();
     let bt = ergo_ser::block_transactions::BlockTransactions {
         header_id: ergo_primitives::digest::ModifierId::from_bytes(h2_id),
-        transactions: vec![tx2],
+        transactions: vec![tx2.clone()],
     };
     let bt_bytes = {
         let mut w = VlqWriter::new();
@@ -698,6 +698,21 @@ fn executor_end_to_end_block_2() {
         type_id: 108,
         ids: vec![ext_section_id],
     };
+    // ADProofs section: generated from this fixture's own state (genesis +
+    // block 1 applied) via the production prover path. Doubles as an oracle:
+    // the generated proof must hash to mainnet's declared adProofsRoot.
+    // ADProofs section: generated from this fixture's own state (genesis +
+    // block 1 applied) via the production prover path, then stored directly.
+    // Doubles as an oracle: the generated proof must hash to mainnet's
+    // declared adProofsRoot, or process_block will (correctly) reject it.
+    let utxo = store.as_utxo_mut().unwrap();
+    let ad_section = utxo
+        .ad_proofs_section_for_test(h2_id, std::slice::from_ref(&tx2))
+        .expect("fixture ADProofs generation for block 2");
+    let ad_section_id = compute_section_id(104, &h2_id, h2.ad_proofs_root.as_bytes());
+    utxo.store_block_section(&ad_section_id, &ad_section)
+        .unwrap();
+
     let chain_view = &store;
     coordinator.on_inv(peer, &inv_tx, chain_view, now);
     coordinator.on_inv(peer, &inv_ext, chain_view, now);
@@ -987,7 +1002,7 @@ fn executor_post_restart_block_processing() {
         let tx6 = read_transaction(&mut VlqReader::new(&hex::decode(tx6_hex).unwrap())).unwrap();
         let bt6 = ergo_ser::block_transactions::BlockTransactions {
             header_id: ergo_primitives::digest::ModifierId::from_bytes(h6_id),
-            transactions: vec![tx6],
+            transactions: vec![tx6.clone()],
         };
         let bt6_bytes = {
             let mut w = VlqWriter::new();
@@ -1018,6 +1033,16 @@ fn executor_post_restart_block_processing() {
         // Compute section IDs
         let tx_section_id = compute_section_id(102, &h6_id, h6.transactions_root.as_bytes());
         let ext_section_id = compute_section_id(108, &h6_id, h6.extension_root.as_bytes());
+
+        // ADProofs section: generated from the fixture state at h=5 via the
+        // production prover path — same oracle property as the block-2 test.
+        let utxo = store.as_utxo_mut().unwrap();
+        let ad6_section = utxo
+            .ad_proofs_section_for_test(h6_id, std::slice::from_ref(&tx6))
+            .expect("fixture ADProofs generation for block 6");
+        let ad_section_id = compute_section_id(104, &h6_id, h6.ad_proofs_root.as_bytes());
+        utxo.store_block_section(&ad_section_id, &ad6_section)
+            .unwrap();
 
         // Register sections as requested via coordinator
         let chain_view = &store;
