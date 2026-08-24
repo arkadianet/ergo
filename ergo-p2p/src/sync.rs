@@ -347,7 +347,10 @@ impl SyncState {
             .is_some_and(|t| now.duration_since(*t) > CLEAR_THRESHOLD)
     }
 
-    /// Record that we sent a SyncInfo message to `peer`.
+    /// Record that a SyncInfo message was successfully **dispatched** to
+    /// `peer` (the transport accepted the frame). This is dispatch success,
+    /// not peer receipt — no acknowledgment exists at this layer. Callers
+    /// must not stamp on construction or serialization alone.
     pub fn mark_sync_sent(&mut self, peer: PeerId, now: Instant) {
         self.last_sync_sent.insert(peer, now);
     }

@@ -2898,7 +2898,7 @@ fn on_transaction_received_accepts_from_requesting_peer() {
     let mut coord = SyncCoordinator::new(0);
     let now = Instant::now();
     let _ = coord.request_transactions(peer(1), &[mk(30)], now);
-    let verdict = coord.on_transaction_received(peer(1), &mk(30));
+    let verdict = coord.on_transaction_received(peer(1), &mk(30), now);
     assert!(matches!(
         verdict,
         ergo_p2p::delivery::DeliveryAction::Accept
@@ -2908,8 +2908,9 @@ fn on_transaction_received_accepts_from_requesting_peer() {
 #[test]
 fn on_transaction_received_rejects_unsolicited() {
     let mut coord = SyncCoordinator::new(0);
+    let now = Instant::now();
     // Peer sends a tx we never requested.
-    let verdict = coord.on_transaction_received(peer(9), &mk(99));
+    let verdict = coord.on_transaction_received(peer(9), &mk(99), now);
     assert!(matches!(
         verdict,
         ergo_p2p::delivery::DeliveryAction::RejectSpam
@@ -2921,8 +2922,8 @@ fn on_transaction_received_ignores_duplicate_after_accept() {
     let mut coord = SyncCoordinator::new(0);
     let now = Instant::now();
     let _ = coord.request_transactions(peer(1), &[mk(40)], now);
-    let _ = coord.on_transaction_received(peer(1), &mk(40));
-    let verdict = coord.on_transaction_received(peer(1), &mk(40));
+    let _ = coord.on_transaction_received(peer(1), &mk(40), now);
+    let verdict = coord.on_transaction_received(peer(1), &mk(40), now);
     assert!(matches!(
         verdict,
         ergo_p2p::delivery::DeliveryAction::Ignore
@@ -3353,4 +3354,146 @@ fn timeout_no_penalty_when_modifier_received_meanwhile() {
         )),
         "soft timeout must not emit delivery-streak failure"
     );
+}
+
+// ---- PR #237 review follow-ups ----
+
+#[test]
+fn accepted_tx_advances_last_modifier_got_time() {
+    let mut coord = SyncCoordinator::new(0);
+    let now = Instant::now();
+    assert!(coord.last_modifier_got_time.is_none());
+    let _ = coord.request_transactions(peer(1), &[mk(50)], now);
+    let verdict = coord.on_transaction_received(peer(1), &mk(50), now);
+    assert!(matches!(
+        verdict,
+        ergo_p2p::delivery::DeliveryAction::Accept
+    ));
+    // Scala lastModifierGotTime parity: an accepted tx must feed the
+    // NonDelivery gate's connectivity clock, exactly like an accepted
+    // header/body via on_modifier_received.
+    assert_eq!(coord.last_modifier_got_time, Some(now));
+}
+
+#[test]
+fn ignored_and_rejected_tx_do_not_advance_last_modifier_got_time() {
+    let mut coord = SyncCoordinator::new(0);
+    let now = Instant::now();
+    // Unsolicited → RejectSpam.
+    let _ = coord.on_transaction_received(peer(9), &mk(99), now);
+    assert!(coord.last_modifier_got_time.is_none());
+}
+
+#[test]
+fn on_sync_info_v2_empty_headers_classifies_younger() {
+    // Empty SyncInfoV2 must reach the comparator's empty-rule (Younger,
+    // Scala parity) instead of being shadowed into Unknown by the
+    // unparseable-tip guard.
+    let mut chain = MockChain::new(100, 100);
+    let (_peer_bytes, tip_id) = parseable_header_at(100, 0x11);
+    chain.best_header_id = tip_id;
+    chain.add_best_chain_header(100, tip_id);
+
+    let mut coord = SyncCoordinator::new(0);
+    let p = peer(9040);
+    let _ = coord.on_sync_info(
+        p,
+        SyncVersion::V2,
+        &SyncInfo::V2 { headers: vec![] },
+        &chain,
+        Instant::now(),
+    );
+    let status = coord.peer_sync.get(&p).expect("snapshot recorded").status;
+    assert_eq!(
+        status,
+        ergo_p2p::sync::PeerChainStatus::Younger,
+        "empty V2 headers must classify the peer as Younger, got {status:?}"
+    );
+    // Sanity anchor for the same code path: a NON-empty message with an
+    // unparseable tip stays Unknown (the guard this fix must not erase).
+    let mut coord2 = SyncCoordinator::new(1);
+    let p2 = peer(9041);
+    let _ = coord2.on_sync_info(
+        p2,
+        SyncVersion::V2,
+        &SyncInfo::V2 {
+            headers: vec![vec![0xff, 0x00]],
+        },
+        &chain,
+        Instant::now(),
+    );
+    let status2 = coord2.peer_sync.get(&p2).expect("snapshot recorded").status;
+    assert_eq!(status2, ergo_p2p::sync::PeerChainStatus::Unknown);
+}
+
+#[test]
+fn serialization_failure_does_not_stamp_sync_sent() {
+    use super::ChainView;
+
+    // A chain whose V1 recent-ids overflow the serializer's cap forces
+    // build_sync_info_payload to fail deterministically.
+    struct OversizeV1Chain;
+    impl ChainView for OversizeV1Chain {
+        fn best_header_id(&self) -> [u8; 32] {
+            [7u8; 32]
+        }
+        fn best_header_height(&self) -> u32 {
+            100
+        }
+        fn best_full_block_height(&self) -> u32 {
+            100
+        }
+        fn is_on_best_chain(&self, _header_id: &[u8; 32]) -> bool {
+            false
+        }
+        fn has_header(&self, _header_id: &[u8; 32]) -> bool {
+            false
+        }
+        fn has_block_section(&self, _modifier_id: &[u8; 32]) -> bool {
+            false
+        }
+        fn is_invalid(&self, _header_id: &[u8; 32]) -> bool {
+            false
+        }
+        fn recent_header_ids(&self, _count: usize) -> Vec<[u8; 32]> {
+            vec![[0u8; 32]; 1002] // > MAX_SYNC_V1_IDS + 1 => TooManyHeaders
+        }
+        fn recent_header_bytes(&self, _count: usize) -> Vec<Vec<u8>> {
+            Vec::new()
+        }
+        fn header_id_at_height(&self, _height: u32) -> ergo_state::chain::HeightLookup {
+            ergo_state::chain::HeightLookup::AboveTip
+        }
+        fn header_height_for(&self, _header_id: &[u8; 32]) -> Option<u32> {
+            None
+        }
+        fn best_header_score(&self) -> Vec<u8> {
+            Vec::new()
+        }
+        fn header_score_for(&self, _header_id: &[u8; 32]) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    let now = Instant::now();
+    let mut coord = SyncCoordinator::new(0);
+    let p = peer(9042);
+    let actions = coord.on_sync_info(
+        p,
+        SyncVersion::V1,
+        &SyncInfo::V1 {
+            header_ids: vec![[9u8; 32]],
+        },
+        &OversizeV1Chain,
+        now,
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::SendToPeer { .. })),
+        "a failed serialization must not emit a send"
+    );
+    // The failure path must NOT stamp the peer: not_synced_or_outdated
+    // stays true so the next inbound SyncInfo retries the reply.
+    assert!(coord.sync_state_mut().not_synced_or_outdated(p, now));
 }

@@ -288,6 +288,16 @@ pub(super) fn flush_actions(state: &mut NodeState, actions: Vec<Action>) {
                     state.peer_manager.disconnect(&peer);
                     cleanup_disconnected_peer(state, &peer);
                     flush_actions(state, disc_actions);
+                } else if code == message::CODE_SYNC_INFO {
+                    // Scala `lastSyncSentTime` parity, stamped on
+                    // TRANSPORT DISPATCH success (registry accepted the
+                    // frame). Not action construction, and not a claim
+                    // of peer receipt — no acknowledgment exists at this
+                    // layer. Serialization failures never construct an
+                    // action; connection closure / full channel fail the
+                    // dispatch above and leave the timestamp untouched so
+                    // the next inbound SyncInfo retries the reply.
+                    state.coordinator.sync_state_mut().mark_sync_sent(peer, now);
                 }
             }
             Action::Penalize { peer, penalty } => {
