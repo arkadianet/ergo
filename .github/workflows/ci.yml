@@ -6,9 +6,17 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Iteration speed: a new push to the same branch cancels the superseded
+# run instead of queueing behind it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # Least privilege: every job here only reads the repo (build/test/lint/audit).
 permissions:
   contents: read
+  # sccache's GitHub Actions cache backend writes through the cache API.
+  actions: write
 
 env:
   # CI speed levers (biggest win on the 2-core Windows runner):
@@ -41,14 +49,26 @@ jobs:
         with:
           key: ${{ matrix.os }}
 
+      # Cross-run compilation cache on top of rust-cache: rust-cache restores
+      # dependency artifacts, sccache also caches *workspace* crates whose
+      # sources changed — the common case for PR iterations.
+      - uses: mozilla/sccache-action@v0.0.9
+      - name: sccache setup
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
       # NOTE: no separate `cargo check --all` step — clippy runs check
       # under the hood, so a standalone check pass is pure duplicate work.
 
+      # Default-feature linting here; the full --all-features lint runs once
+      # on ubuntu below (feature combos don't vary meaningfully per-OS, and
+      # --all-features materially grows the dependency graph per leg).
       - name: cargo clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - uses: taiki-e/install-action@nextest
 
@@ -74,6 +94,21 @@ jobs:
       - name: doc tests (ubuntu only)
         if: runner.os == 'Linux'
         run: cargo test --all --doc
+
+  clippy-all-features:
+    name: clippy (--all-features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy-all-features
+      - name: cargo clippy (all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   audit:
     name: cargo-audit (security advisories)
