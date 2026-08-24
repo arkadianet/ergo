@@ -87,7 +87,19 @@ pub fn write_ergo_tree(w: &mut VlqWriter, tree: &ErgoTree) -> Result<(), WriteEr
     // A soft-fork-wrapped (unparsed) tree re-emits its preserved original bytes
     // verbatim — header + size + body, byte-identical to the wire form — exactly
     // as Scala re-serializes an `UnparsedErgoTree` from its kept `propositionBytes`.
+    //
+    // Refuse propositionBytes that are not self-delimiting on re-parse (empty
+    // `numBytes == 0` regions, or mid-VLQ truncations from negative declared
+    // size). Emitting those makes the next decode fail with `UnexpectedEnd`.
+    // Callers / difftest treat this as `WriteRejected`, not a codec Bug.
+    // Box writers do NOT go through this path for Unparsed trees — they emit
+    // preserved `ergo_tree_bytes` verbatim for Scala id-parity.
     if let crate::opcode::Expr::Unparsed(raw) = &tree.body {
+        if !unparsed_proposition_bytes_self_delimiting(raw) {
+            return Err(WriteError::InvalidData(
+                "UnparsedErgoTree propositionBytes are not self-delimiting on re-parse".into(),
+            ));
+        }
         w.put_bytes(raw);
         return Ok(());
     }
@@ -110,6 +122,19 @@ pub fn write_ergo_tree(w: &mut VlqWriter, tree: &ErgoTree) -> Result<(), WriteEr
         write_ergo_tree_body(w, tree)?;
     }
     Ok(())
+}
+
+/// `true` when `raw` re-parses as an ErgoTree that consumes every byte.
+/// Empty slices and mid-VLQ truncations return `false`.
+fn unparsed_proposition_bytes_self_delimiting(raw: &[u8]) -> bool {
+    if raw.is_empty() {
+        return false;
+    }
+    let mut r = ergo_primitives::reader::VlqReader::new(raw);
+    match read_ergo_tree(&mut r) {
+        Ok(_) => r.is_empty(),
+        Err(_) => false,
+    }
 }
 
 fn write_ergo_tree_body(w: &mut VlqWriter, tree: &ErgoTree) -> Result<(), WriteError> {

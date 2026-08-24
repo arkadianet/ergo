@@ -37,9 +37,12 @@ pub enum Outcome {
     Rejected,
     /// Decode succeeded and all invariants held.
     Accepted,
-    /// Decode succeeded but re-encode intentionally refused (e.g. a field that
-    /// overflows the single-byte wire form). The JVM throws on the same input,
-    /// so this is not a bug.
+    /// Decode succeeded but the round-trip is intentionally non-Bug:
+    /// * re-encode refused a field that overflows a single-byte wire form
+    ///   (JVM throws on the same overflow), or
+    /// * re-decode of own output failed for a **documented Scala-shared**
+    ///   reshape hazard (Bug #19 size-delimited soft-fork wrap / type-depth
+    ///   soft cap). Not a Rust-only codec inconsistency.
     WriteRejected,
     /// An invariant was violated (or the decode panicked). Carries a
     /// human-readable detail including the offending bytes.

@@ -67,6 +67,11 @@ resurrects one bug; the generator must produce an input the differential flags.
   Trigger: pre-v3 tree with a MethodCall to a v6-only method id.
 - **#19 declared-size** — revert ergo_tree.rs to `get_u32_exact`+`get_bytes(size)`.
   Trigger: size-delimited tree whose declared size ≠ actual body length.
+  **Harness note (2026-08):** soft-fork-opaque (`UnparsedErgoTree`) values that
+  fail re-decode after a canonical rewrite of following VLQ fields are reported
+  as difftest `WriteRejected`, not `Bug` — Scala shares the wrap→structural
+  reshape. Consensus box/tx writers still emit preserved `propositionBytes`
+  verbatim for `box_id` / `bytes_to_sign` parity.
 - **#20 vlq-count-exact** — ergo_tree.rs constants-count `get_uint_to_i32()` →
   `get_u32_exact()`. Trigger: constants-count VLQ just above `i32::MAX` (`80 80 80 80 08`).
 - **#21 sunsignedbigint-type** — remove the version gate on type code 9 in

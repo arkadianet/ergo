@@ -87,7 +87,7 @@ pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ergo_tree::ErgoTree;
+    use crate::ergo_tree::{read_ergo_tree, ErgoTree};
     use crate::opcode::Expr;
     use crate::register::{AdditionalRegisters, RegisterValue};
     use crate::sigma_type::SigmaType;
@@ -163,6 +163,62 @@ mod tests {
         let mut r = VlqReader::new(&bytes);
         let res = read_ergo_box_candidate(&mut r);
         assert!(res.is_ok(), "v0-no-size box script must parse, got {res:?}");
+    }
+
+    /// Size-0 Unparsed trees remain writable: Scala re-emits
+    /// `UnparsedErgoTree.propositionBytes` verbatim (incl. `header‖0x00`).
+    /// The Bug #19 re-decode hazard after canonical height rewrite is handled
+    /// in the difftest harness as `WriteRejected`, not by rejecting here on
+    /// consensus id / bytes_to_sign paths.
+    #[test]
+    fn write_preserves_size_zero_unparsed_tree_bytes() {
+        let tree_bytes = hex::decode("eb00").unwrap();
+        let mut tr = VlqReader::new(&tree_bytes);
+        let tree = read_ergo_tree(&mut tr).expect("size-0 tree wraps");
+        let candidate = ErgoBoxCandidate::from_trusted_raw_parts(
+            235,
+            tree,
+            tree_bytes.clone(),
+            11_620,
+            vec![],
+            AdditionalRegisters::empty(),
+            vec![0],
+        );
+        let mut w = VlqWriter::new();
+        write_ergo_box_candidate(&mut w, &candidate).expect("Scala-parity write must succeed");
+        let out = w.result();
+        // value 235 = 0xeb, then tree eb00, then height 11620 = e45a, tokens 0, regs 0
+        assert!(
+            out.windows(2).any(|w| w == tree_bytes.as_slice()),
+            "preserved tree bytes must appear in the encoding: {}",
+            hex::encode(&out)
+        );
+    }
+
+    /// Indexed writer likewise preserves size-0 Unparsed tree bytes.
+    #[test]
+    fn indexed_write_preserves_size_zero_unparsed_tree_bytes() {
+        let tree_bytes = hex::decode("cb00").unwrap();
+        let mut tr = VlqReader::new(&tree_bytes);
+        let tree = read_ergo_tree(&mut tr).expect("size-0 tree wraps");
+        let candidate = ErgoBoxCandidate::from_trusted_raw_parts(
+            1,
+            tree,
+            tree_bytes.clone(),
+            115,
+            vec![],
+            AdditionalRegisters::empty(),
+            vec![0],
+        );
+        let mut w = VlqWriter::new();
+        write_ergo_box_candidate_indexed(&mut w, &candidate, &[])
+            .expect("indexed Scala-parity write must succeed");
+        let out = w.result();
+        assert!(
+            out.windows(2).any(|w| w == tree_bytes.as_slice()),
+            "preserved tree bytes must appear in the encoding: {}",
+            hex::encode(&out)
+        );
     }
 
     // ----- round-trips -----

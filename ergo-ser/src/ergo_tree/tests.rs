@@ -438,6 +438,34 @@ fn negative_declared_size_wraps_with_scala_numbytes() {
     }
 }
 
+/// Empty / truncated `UnparsedErgoTree` propositionBytes must not serialize —
+/// re-decode would hard-fail with `UnexpectedEnd`. Covers empty `numBytes`
+/// (declared size −6) and mid-VLQ cuts (declared size −1/−2).
+#[test]
+fn non_self_delimiting_unparsed_tree_write_rejected() {
+    for hex in [
+        "08faffffff0f0204", // size -6 → empty propositionBytes
+        "08ffffffff0f0204", // size -1 → mid-VLQ cut (5 bytes)
+        "08feffffff0f0204", // size -2 → mid-VLQ cut (4 bytes)
+    ] {
+        let bytes = hex::decode(hex).unwrap();
+        let mut r = VlqReader::new(&bytes);
+        let tree = read_ergo_tree(&mut r).unwrap_or_else(|e| panic!("{hex} must wrap: {e:?}"));
+        assert!(
+            matches!(&tree.body, Expr::Unparsed(_)),
+            "{hex}: expected Unparsed"
+        );
+        let mut w = VlqWriter::new();
+        let err = write_ergo_tree(&mut w, &tree).expect_err(&format!(
+            "{hex}: non-self-delimiting Unparsed must not serialize"
+        ));
+        assert!(
+            err.to_string().contains("not self-delimiting"),
+            "{hex}: unexpected error: {err}"
+        );
+    }
+}
+
 /// A segregated constants COUNT past i32::MAX is read non-exact (Scala
 /// `getUInt().toInt`): it wraps negative and yields ZERO constants, so the
 /// tree PARSES (here to `sigmaProp(true)`), it is NOT hard-rejected. Oracle

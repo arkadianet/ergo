@@ -17,7 +17,6 @@ infrastructure.
 ## [Unreleased]
 
 ### Changed
-
 - **Hygiene: `/utils/seed` entropy now drawn from `OsRng`** (policy
   consistency with every other security-relevant RNG site), **batch-Merkle
   proof count arithmetic is overflow-checked** (portability hardening on the
@@ -26,9 +25,28 @@ infrastructure.
   plain writes), and **the decrypted BIP39 seed no longer leaves an
   unzeroized stack copy** in `unlock()`.
 
+- **Security: wallet `unlock` and `check` now enforce a failed-attempt budget.**
+  Five failed attempts within 60 s lock the operation for 300 s, returning the
+  previously-defined-but-unwired `RateLimited` error as HTTP 429. Previously
+  password/phrase guessing against `/wallet/unlock`, `/api/v1/wallet/unlock`,
+  and `/api/v1/wallet/check` was unlimited (each guess still costing a PBKDF2
+  run). Enforcement lives in the wallet writer task, so every surface shares
+  one budget per operation; successful operations reset it. Pinned by unit
+  tests on the limiter policy.
+
+- **Security: the Scala-compat `/mining/*` routes are now api_key-gated.**
+  `GET /mining/candidate` (including its longpoll hold), `POST /mining/solution`,
+  `GET /mining/rewardAddress`, and `GET /mining/rewardPublicKey` previously
+  mounted with no authentication — a drift the v1 API design doc flagged for
+  closure. Solution submission drives the block pipeline, the longpoll holds
+  an API task, and the reward routes expose the miner payout identity, so all
+  four now sit behind the same `api_key` gate as `/node/shutdown`. This is a
+  deliberate hardening over the Scala reference node (which leaves
+  `/mining/*` open): external miner integrations must now send the `api_key`
+  header they already need for any other operator route. Pinned by
+  `ergo-api/tests/mining_auth_gate.rs`.
 
 ### Fixed
-
 - **Consensus: header solution `pk` was never curve-checked (v2+ headers) —
   accept-invalid chain-split vector.** Scala rejects a header whose Autolykos
   solution `pk` is an off-curve point or an invalid SEC1 prefix at deserialize
@@ -58,29 +76,15 @@ infrastructure.
   (`test-vectors/mainnet/context_headers_1853478/`): the poison transaction
   verifies under the legacy 10-entry window and is rejected under the
   Scala-parity 9-entry window.
-### Changed
 
-- **Security: wallet `unlock` and `check` now enforce a failed-attempt budget.**
-  Five failed attempts within 60 s lock the operation for 300 s, returning the
-  previously-defined-but-unwired `RateLimited` error as HTTP 429. Previously
-  password/phrase guessing against `/wallet/unlock`, `/api/v1/wallet/unlock`,
-  and `/api/v1/wallet/check` was unlimited (each guess still costing a PBKDF2
-  run). Enforcement lives in the wallet writer task, so every surface shares
-  one budget per operation; successful operations reset it. Pinned by unit
-  tests on the limiter policy.
-
-- **Security: the Scala-compat `/mining/*` routes are now api_key-gated.**
-  `GET /mining/candidate` (including its longpoll hold), `POST /mining/solution`,
-  `GET /mining/rewardAddress`, and `GET /mining/rewardPublicKey` previously
-  mounted with no authentication — a drift the v1 API design doc flagged for
-  closure. Solution submission drives the block pipeline, the longpoll holds
-  an API task, and the reward routes expose the miner payout identity, so all
-  four now sit behind the same `api_key` gate as `/node/shutdown`. This is a
-  deliberate hardening over the Scala reference node (which leaves
-  `/mining/*` open): external miner integrations must now send the `api_key`
-  header they already need for any other operator route. Pinned by
-  `ergo-api/tests/mining_auth_gate.rs`.
-
+- **Nightly fuzz round-trip classification (Bug #19).** Non-self-delimiting
+  `UnparsedErgoTree` propositionBytes (empty / mid-VLQ truncations) refuse
+  `write_ergo_tree` (`WriteError` → difftest `WriteRejected`). Soft-fork-opaque
+  box/tx re-decode failures after canonical VLQ rewrite are classified as
+  `WriteRejected` in the hermetic harness — Scala shares that reshape hazard,
+  and consensus box writers still emit preserved tree bytes for id-parity.
+  `IrNode` `PartialEq` treats `0x83` boolean-constant `ConcreteCollection` as
+  equal to packed `0x85` `BoolCollection` after Scala-style compaction.
 ## [0.5.3] - 2026-07-19
 
 The refactor-and-harden release: a workspace-wide split of oversized source
