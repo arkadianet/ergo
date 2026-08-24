@@ -213,12 +213,14 @@ impl SyncCoordinator {
                         code: message::CODE_SYNC_INFO,
                         payload: our_sync,
                     });
-                    // Stamp only on the successful send path: the timestamp
-                    // means "this peer last received a SyncInfo from us",
-                    // so a serialization failure (which emitted no action)
-                    // must leave it untouched and let the next inbound
-                    // SyncInfo retry.
-                    self.sync_state.mark_sync_sent(peer, now);
+                    // NOTE: last_sync_sent is NOT stamped here. Action
+                    // construction is not dispatch: the transport write
+                    // happens in ergo-node's flush_actions, and only a
+                    // successful registry send may stamp
+                    // (lastSyncSentTime semantics). A serialization
+                    // failure emits no action at all; a failed dispatch
+                    // leaves the timestamp untouched so the next inbound
+                    // SyncInfo retries the reply.
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to serialize SyncInfo; skipping send")
