@@ -830,7 +830,23 @@ impl NodeConfig {
             })?;
             let modules = match &tl.modules {
                 Some(map) => {
+                    // One target + one level per entry. A value containing
+                    // ',' would splice extra top-level directives into the
+                    // shared filter (mis-scoping every later module), so
+                    // reject it outright — multi-directive setups belong
+                    // in RUST_LOG.
                     for (target, level) in map {
+                        if target.contains(',') || target.contains('=') {
+                            return Err(format!(
+                                "[logging.modules] target {target:?} must be a bare module path"
+                            ));
+                        }
+                        if level.contains(',') {
+                            return Err(format!(
+                                "[logging.modules] value {level:?} for {target:?} must be a \
+                                 single level — comma-joined directives belong in RUST_LOG"
+                            ));
+                        }
                         let directive = format!("{target}={level}");
                         if let Err(e) = EnvFilter::try_new(&directive) {
                             return Err(format!(

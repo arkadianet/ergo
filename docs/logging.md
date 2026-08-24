@@ -44,7 +44,8 @@ Message text is a short verb phrase; all data lives in fields.
 [logging]
 default_level = "info"          # used when RUST_LOG is unset
 
-# Per-module overrides (validated at load):
+# Per-module overrides (validated at load). ONE target and ONE level
+# per entry — comma-joined multi-directives belong in RUST_LOG:
 [logging.modules]
 "ergo_sync::executor" = "debug"
 "ergo_p2p::delivery"  = "trace"
@@ -75,7 +76,7 @@ jq 'select(.fields.block == "7c7587…")' logs/ergo-node.$(date +%F).log
 jq 'select(.fields.peer == "1.2.3.4:9030")' logs/ergo-node.*.log
 
 # All rejections with reasons:
-jq 'select(.level=="WARN" or .level=="ERROR)' | jq -r '.fields.code // .message'
+jq 'select(.level=="WARN" or .level=="ERROR")' | jq -r '.fields.code // .message'
 ```
 
 ## Chatter ledger (triage decisions)

@@ -351,6 +351,10 @@ pub(super) fn cleanup_disconnected_peer(state: &mut NodeState, peer: &PeerId) {
     if let Ok(mut g) = state.rest_peer_urls.write() {
         g.remove(peer);
     }
+    // Step B2: drop this peer's REST-url rejection-warn rows too, so a
+    // churned address cannot accumulate stale entries in the bounded
+    // warn set (logging-audit review follow-up).
+    state.rest_url_reject_warned.retain_peer(peer);
     // Step C: release any anchor claims this peer was holding so
     // the slots are immediately available to other peers (rather
     // than waiting out `ANCHOR_REASSIGN_TIMEOUT`).
