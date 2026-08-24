@@ -698,24 +698,8 @@ fn executor_end_to_end_block_2() {
         type_id: 108,
         ids: vec![ext_section_id],
     };
-    // ADProofs section: generated from this fixture's own state (genesis +
-    // block 1 applied) via the production prover path. Doubles as an oracle:
-    // the generated proof must hash to mainnet's declared adProofsRoot.
-    // ADProofs section: generated from this fixture's own state (genesis +
-    // block 1 applied) via the production prover path, then stored directly.
-    // Doubles as an oracle: the generated proof must hash to mainnet's
-    // declared adProofsRoot, or process_block will (correctly) reject it.
-    let utxo = store.as_utxo_mut().unwrap();
-    let ad_section = utxo
-        .ad_proofs_section_for_test(h2_id, std::slice::from_ref(&tx2))
-        .expect("fixture ADProofs generation for block 2");
-    let ad_section_id = compute_section_id(104, &h2_id, h2.ad_proofs_root.as_bytes());
-    utxo.store_block_section(&ad_section_id, &ad_section)
-        .unwrap();
-
-    let chain_view = &store;
-    coordinator.on_inv(peer, &inv_tx, chain_view, now);
-    coordinator.on_inv(peer, &inv_ext, chain_view, now);
+    coordinator.on_inv(peer, &inv_tx, &store, now);
+    coordinator.on_inv(peer, &inv_ext, &store, now);
 
     // Deliver the sections
     let tx_actions = coordinator.on_modifier_received(peer, 102, tx_section_id, bt_bytes, now);

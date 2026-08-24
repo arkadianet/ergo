@@ -89,13 +89,17 @@ fn utxo_header_store_mut(store: &mut ergo_state::StateBackendKind) -> &mut State
 /// apply — versus a transient/IO/consistency failure that must NOT poison
 /// the branch (it might be our bug, a stale local root, or missing data).
 ///
-/// Only the three consensus-rule verdicts qualify. `Deserialize`,
-/// `HeaderNotFound`, `ParentNotFound`, and `State` are data/IO/consistency
-/// paths (a stored section that won't parse could be disk corruption, not a
-/// bad block); `DigestApply` is session-scoped by its own contract. When in
-/// doubt we do NOT invalidate — the conservative direction, since a wrongly
-/// persisted invalidity would permanently orphan a valid chain, whereas a
-/// missed one only leaves the (correct) session mark.
+/// Only the consensus-rule verdicts qualify: `Validation`, `HeaderMeta`,
+/// `EpochExtension`, and `AdProofsHashMismatch` (the regenerated proof
+/// hash contradicting the header's declared `adProofsRoot` is exactly
+/// Scala's "Regenerated proofHash is not equal to the declared one"
+/// reject). `Deserialize`, `HeaderNotFound`, `ParentNotFound`, and `State`
+/// are data/IO/consistency paths (a stored section that won't parse could
+/// be disk corruption, not a bad block); `DigestApply` is session-scoped by
+/// its own contract. When in doubt we do NOT invalidate — the conservative
+/// direction, since a wrongly persisted invalidity would permanently orphan
+/// a valid chain, whereas a missed one only leaves the (correct) session
+/// mark.
 ///
 /// Scala mirror: `ErgoNodeViewHolder.applyState` reports invalid on ANY
 /// `applyModifier` `Failure`; the Rust node is deliberately stricter about
@@ -108,6 +112,7 @@ fn is_validation_verdict(e: &BlockProcessError) -> bool {
         BlockProcessError::Validation(_)
             | BlockProcessError::HeaderMeta(_)
             | BlockProcessError::EpochExtension(_)
+            | BlockProcessError::AdProofsHashMismatch { .. }
     )
 }
 
