@@ -108,6 +108,7 @@ fn load_last_headers(
 /// AVL+ box arena. This is the original `process_block` body, unchanged —
 /// the UTXO path stays byte-for-byte equivalent to the pre-Mode-5 code.
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(skip_all, fields(block = %hex::encode(header_id), height = tracing::field::Empty))]
 pub(super) fn process_block_utxo(
     store: &mut StateStore,
     header_id: &[u8; 32],
@@ -145,6 +146,7 @@ pub(super) fn process_block_utxo(
     let mut r = VlqReader::new(&header_bytes);
     let header = read_header(&mut r)
         .map_err(|e| BlockProcessError::Deserialize(format!("header: {e:?}")))?;
+    tracing::Span::current().record("height", header.height);
     let height = header.height;
     let state_root = header.state_root;
     let t_header = t0.elapsed();

@@ -148,11 +148,15 @@ impl PreValidatedHeader {
 /// Phase 1 of header processing: parse + PoW verify. Pure computation,
 /// no DB access, safe to run in parallel via rayon. Does not need a
 /// `DifficultyParams` — PoW dispatch is on the solution variant (Scala parity).
+#[tracing::instrument(skip_all, fields(block = tracing::field::Empty, height = tracing::field::Empty))]
 pub fn pre_validate_header(header_bytes: &[u8]) -> Result<PreValidatedHeader, HeaderProcessError> {
     let header_id = *blake2b256(header_bytes).as_bytes();
     let mut reader = VlqReader::new(header_bytes);
     let header =
         read_header(&mut reader).map_err(|e| HeaderProcessError::Deserialize(format!("{e:?}")))?;
+    let span = tracing::Span::current();
+    span.record("block", hex::encode(header_id));
+    span.record("height", header.height);
 
     // JVM parity: Scala curve-checks every group element at deserialize
     // time, including the Autolykos solution pk. The v2+ PoW hit depends

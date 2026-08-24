@@ -5,6 +5,7 @@
 use std::sync::atomic::Ordering;
 
 use tokio::sync::oneshot;
+use tracing::{debug, info, warn};
 
 use ergo_api::wallet::types::{
     Page, TokenBalance, WalletAddressList, WalletBalances, WalletBoxesPage, WalletStatus,
@@ -361,9 +362,13 @@ pub(crate) async fn unlock(
     drop(storage);
     drop(state);
     match &result {
-        Ok(()) => limiter.record_success(),
+        Ok(()) => {
+            limiter.record_success();
+            info!("wallet unlocked");
+        }
         Err(WalletAdminError::WrongPassword) => {
-            limiter.record_failure_at(std::time::Instant::now())
+            limiter.record_failure_at(std::time::Instant::now());
+            warn!("wallet unlock failed: wrong password");
         }
         // Uninitialized / internal errors are not guess feedback — leave
         // the budget untouched.
@@ -380,6 +385,7 @@ pub(crate) async fn lock(
     let mut state = ctx.state.write();
     storage.lock();
     state.set_unlocked(false);
+    info!("wallet locked");
     let _ = reply.send(Ok(()));
 }
 
@@ -406,6 +412,7 @@ pub(crate) async fn check(
     } else {
         limiter.record_failure_at(std::time::Instant::now());
     }
+    debug!(matched, "wallet seed check completed");
     let _ = reply.send(Ok(matched));
 }
 

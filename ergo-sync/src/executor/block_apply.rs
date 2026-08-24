@@ -58,6 +58,7 @@ pub(super) fn report_block_process_failure(
 }
 
 impl SyncExecutor {
+    #[tracing::instrument(skip_all, fields(block = %hex::encode(header_id)))]
     pub(super) fn handle_assemble_block(
         &mut self,
         header_id: &[u8; 32],
