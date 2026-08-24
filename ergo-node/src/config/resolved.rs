@@ -221,8 +221,27 @@ pub struct LoggingConfig {
     pub default_level: String,
     /// On-wire format. Validated at load time; main.rs branches on it.
     pub format: LoggingFormat,
+    /// Per-module level overrides (see `[logging.modules]`).
+    pub modules: std::collections::BTreeMap<String, String>,
     /// Optional rolling-file output. `None` = stderr only.
     pub file: Option<LoggingFileConfig>,
+}
+
+impl LoggingConfig {
+    /// Build the EnvFilter directive string: `default_level` plus one
+    /// `target=level` pair per `[logging.modules]` entry. Used whenever
+    /// `RUST_LOG` is unset; `RUST_LOG` always wins when present.
+    pub fn env_filter_directive(&self) -> String {
+        let mut d = String::with_capacity(64);
+        d.push_str(self.default_level.as_str());
+        for (target, level) in &self.modules {
+            d.push(',');
+            d.push_str(target);
+            d.push('=');
+            d.push_str(level);
+        }
+        d
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,4 +265,7 @@ pub struct LoggingFileConfig {
     pub rotation: String,
     /// Number of rotated files retained.
     pub max_files: usize,
+    /// Event format for this sink. Default Json (machine archive);
+    /// Text remains available for tail-friendly files.
+    pub format: LoggingFormat,
 }

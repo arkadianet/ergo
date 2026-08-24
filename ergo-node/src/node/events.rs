@@ -312,12 +312,26 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
                                     }
                                 }
                                 Err(e) => {
-                                    warn!(
-                                        peer = %addr,
-                                        url = %url,
-                                        error = %e,
-                                        "peer REST url rejected",
-                                    );
+                                    // Warn once per (peer, url); repeats
+                                    // downgrade to debug — a misconfigured
+                                    // peer re-announcing the same bad URL
+                                    // must not flood the operator log
+                                    // (logging-audit triage).
+                                    if state.rest_url_reject_warned.should_warn(addr, url) {
+                                        warn!(
+                                            peer = %addr,
+                                            url = %url,
+                                            error = %e,
+                                            "peer REST url rejected",
+                                        );
+                                    } else {
+                                        debug!(
+                                            peer = %addr,
+                                            url = %url,
+                                            error = %e,
+                                            "peer REST url rejected (repeat)",
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -806,5 +820,112 @@ fn inject_local_full_block(
                 "validator rejected the header before persistence — check chain context (parent, nBits, height)".into(),
             ),
         })
+    }
+}
+
+/// Cap on remembered (peer, url) rejection pairs. Sized above the
+/// connected-peer limit so every live peer can hold several distinct bad
+/// URLs; on overflow the set clears rather than grows — worst case a
+/// duplicate warn after wrap (logging-audit bound, review follow-up).
+pub(super) const REST_URL_WARN_CAP: usize = 1024;
+
+/// First-sight gate for `peer REST url rejected` warnings: true exactly
+/// once per (peer, url) pair per connection session; repeats return false
+/// so the event downgrades to debug. Entries for a disconnected peer are
+/// dropped on cleanup (`retain_peer`), keeping the set bounded by live
+/// peers × distinct bad URLs.
+#[derive(Default)]
+pub(super) struct RestUrlWarnSet {
+    seen: std::collections::HashSet<(std::net::SocketAddr, String)>,
+}
+
+impl RestUrlWarnSet {
+    pub(super) fn should_warn(&mut self, peer: std::net::SocketAddr, url: &str) -> bool {
+        if self.seen.len() >= REST_URL_WARN_CAP {
+            self.seen.clear();
+        }
+        self.seen.insert((peer, url.to_string()))
+    }
+
+    /// Drop every entry for `peer` — called from disconnect cleanup so a
+    /// churned address cannot accumulate stale rows.
+    pub(super) fn retain_peer(&mut self, peer: &std::net::SocketAddr) {
+        self.seen.retain(|(p, _)| p != peer);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.seen.len()
+    }
+}
+
+#[cfg(test)]
+mod rest_url_warn_tests {
+    use super::{RestUrlWarnSet, REST_URL_WARN_CAP};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    fn addr(o: [u8; 4], port: u16) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::from(o)), port)
+    }
+
+    #[test]
+    fn warns_once_then_downgrades_per_peer_url_pair() {
+        let mut seen = RestUrlWarnSet::default();
+        let p = addr([10, 0, 0, 1], 9030);
+        assert!(seen.should_warn(p, "https://x.example"));
+        assert!(!seen.should_warn(p, "https://x.example"));
+        // Same peer, different URL: a NEW misconfiguration deserves a line.
+        assert!(seen.should_warn(p, "https://y.example"));
+        // Different peer, same URL: also new.
+        let q = addr([10, 0, 0, 2], 9030);
+        assert!(seen.should_warn(q, "https://x.example"));
+    }
+
+    #[test]
+    fn retain_peer_drops_only_that_peer() {
+        let mut seen = RestUrlWarnSet::default();
+        let a = addr([10, 0, 1, 1], 9030);
+        let b = addr([10, 0, 1, 2], 9030);
+        seen.should_warn(a, "https://bad");
+        seen.should_warn(b, "https://bad");
+        seen.retain_peer(&a);
+        assert!(!seen.should_warn(b, "https://bad"), "other peer untouched");
+        assert!(seen.should_warn(a, "https://bad"), "dropped peer re-warns");
+    }
+
+    #[test]
+    fn repeated_reconnects_with_unique_urls_stay_bounded() {
+        // The reviewer scenario: one address reconnects over and over,
+        // each session announcing a fresh bad URL. Disconnect cleanup
+        // drops the old row, so the set tracks only live sessions — and
+        // the hard cap guarantees the bound even if cleanup never fires.
+        let mut seen = RestUrlWarnSet::default();
+        let p = addr([10, 0, 2, 1], 9030);
+        for session in 0..(REST_URL_WARN_CAP as u16 + 50) {
+            let url = format!("https://evil-{session}.example");
+            assert!(
+                seen.should_warn(p, &url),
+                "fresh URL in a fresh session must warn (session {session})"
+            );
+            // Simulate disconnect cleanup after each session.
+            seen.retain_peer(&p);
+            assert!(seen.len() <= 1, "cleanup must keep the set at live rows");
+        }
+        assert!(seen.len() <= 1);
+    }
+
+    #[test]
+    fn hard_cap_clears_instead_of_growing() {
+        let mut seen = RestUrlWarnSet::default();
+        for i in 0..(REST_URL_WARN_CAP as u64 + 5) {
+            let o = (i % 256) as u8;
+            let p = addr([10, 1, (i / 256) as u8, o], 9030);
+            let _ = seen.should_warn(p, &format!("https://{i}.example"));
+        }
+        assert!(
+            seen.len() <= REST_URL_WARN_CAP,
+            "cap must hold: {}",
+            seen.len()
+        );
     }
 }

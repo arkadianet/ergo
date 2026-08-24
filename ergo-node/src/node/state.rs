@@ -208,6 +208,9 @@ pub(crate) struct NodeState {
     /// action loop holds the lock only briefly and the background
     /// builder snapshots-then-releases — no long-held async borrows.
     pub(super) rest_peer_urls: std::sync::Arc<std::sync::RwLock<RestPeers>>,
+    /// (peer, url) pairs already warned about for REST-url rejection —
+    /// first sight warns, repeats downgrade to debug.
+    pub(super) rest_url_reject_warned: crate::node::events::RestUrlWarnSet,
     /// Latched cancellation channel for the anchor builder. The
     /// `watch::Sender` is held by `RunHandle` (drop or explicit
     /// shutdown sends `true`); the builder holds a `Receiver` and
