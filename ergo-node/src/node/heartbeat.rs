@@ -20,13 +20,29 @@ use super::NodeState;
 /// already stalled still emits on its first tick.
 pub(super) const HEARTBEAT_IDLE_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Minimum spacing between two PROGRESS-triggered beats. During active
+/// sync `progressed` is true every tick, so without this floor the line
+/// fires once per second (~3,600 near-duplicate lines/hour) and drowns
+/// every other signal in the log. 5 s keeps live progress visible while
+/// cutting the flood ~5×; idle/stalled nodes still pulse on the idle
+/// interval below.
+pub(super) const HEARTBEAT_PROGRESS_MIN_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Whether the operator `heartbeat tick` line should emit this tick:
-/// on any sync progress, or once `HEARTBEAT_IDLE_INTERVAL` has elapsed
-/// since the last emission. Progress always wins, so active sync keeps
-/// its per-tick progress lines; idle/stalled state pulses once per
-/// interval. Pure so the cadence is unit-testable without a NodeState.
-fn should_emit_beat(progressed: bool, since_last_emit: Duration) -> bool {
-    progressed || since_last_emit >= HEARTBEAT_IDLE_INTERVAL
+/// on sync progress — but no more often than
+/// [`HEARTBEAT_PROGRESS_MIN_INTERVAL`] — or once `HEARTBEAT_IDLE_INTERVAL`
+/// has elapsed since the last emission. Pure so the cadence is
+/// unit-testable without a NodeState.
+fn should_emit_beat(
+    progressed: bool,
+    since_last_emit: Duration,
+    since_last_progress_emit: Duration,
+) -> bool {
+    if progressed {
+        since_last_progress_emit >= HEARTBEAT_PROGRESS_MIN_INTERVAL
+    } else {
+        since_last_emit >= HEARTBEAT_IDLE_INTERVAL
+    }
 }
 
 pub(super) fn emit_heartbeat(state: &mut NodeState, now: Instant) {
@@ -55,7 +71,12 @@ pub(super) fn emit_heartbeat(state: &mut NodeState, now: Instant) {
     // (tip_state) and the connected-peer scans run only when we emit, not
     // every tick.
     let progressed = dh > 0 || dbh > 0;
-    if should_emit_beat(progressed, now.duration_since(state.last_beat_emit)) {
+    let since_progress = now.duration_since(state.last_beat_progress_emit);
+    if should_emit_beat(
+        progressed,
+        now.duration_since(state.last_beat_emit),
+        since_progress,
+    ) {
         let d_req_msgs = state
             .req_messages_total
             .saturating_sub(state.last_beat_req_messages);
@@ -115,6 +136,9 @@ pub(super) fn emit_heartbeat(state: &mut NodeState, now: Instant) {
             "heartbeat tick",
         );
         state.last_beat_emit = now;
+        if progressed {
+            state.last_beat_progress_emit = now;
+        }
     }
 
     // [net] Pipeline-shape diagnostics (instrumented 2026-05-05) —
@@ -341,19 +365,34 @@ mod tests {
     // ----- happy path -----
 
     #[test]
-    fn should_emit_beat_on_progress_ignores_cadence() {
-        // Sync progress always emits, even a moment after the last line —
-        // active sync keeps its per-tick progress visibility.
-        assert!(should_emit_beat(true, Duration::ZERO));
-        assert!(should_emit_beat(true, HEARTBEAT_IDLE_INTERVAL / 2));
+    fn should_emit_beat_on_progress_respects_floor() {
+        // Progress emits on the first tick, but the 5 s floor suppresses
+        // the per-second flood during sustained sync (audit #257 finding).
+        assert!(should_emit_beat(
+            true,
+            Duration::ZERO,
+            HEARTBEAT_PROGRESS_MIN_INTERVAL
+        ));
+        assert!(!should_emit_beat(true, Duration::ZERO, Duration::ZERO));
+        assert!(!should_emit_beat(
+            true,
+            HEARTBEAT_IDLE_INTERVAL / 2,
+            Duration::from_secs(1)
+        ));
+        assert!(should_emit_beat(
+            true,
+            HEARTBEAT_IDLE_INTERVAL / 2,
+            HEARTBEAT_PROGRESS_MIN_INTERVAL
+        ));
     }
 
     #[test]
     fn should_emit_beat_idle_below_interval_suppresses() {
-        assert!(!should_emit_beat(false, Duration::ZERO));
+        assert!(!should_emit_beat(false, Duration::ZERO, Duration::ZERO));
         assert!(!should_emit_beat(
             false,
-            HEARTBEAT_IDLE_INTERVAL - Duration::from_millis(1)
+            HEARTBEAT_IDLE_INTERVAL - Duration::from_millis(1),
+            Duration::ZERO
         ));
     }
 
@@ -363,10 +402,15 @@ mod tests {
         // is also the freshly-booted-stalled case: `boot` seeds
         // `last_beat_emit` one interval in the past, so the first idle
         // tick lands here and the stall stays visible from tick one.
-        assert!(should_emit_beat(false, HEARTBEAT_IDLE_INTERVAL));
         assert!(should_emit_beat(
             false,
-            HEARTBEAT_IDLE_INTERVAL + Duration::from_secs(1)
+            HEARTBEAT_IDLE_INTERVAL,
+            HEARTBEAT_PROGRESS_MIN_INTERVAL
+        ));
+        assert!(should_emit_beat(
+            false,
+            HEARTBEAT_IDLE_INTERVAL + Duration::from_secs(1),
+            HEARTBEAT_PROGRESS_MIN_INTERVAL
         ));
     }
 }

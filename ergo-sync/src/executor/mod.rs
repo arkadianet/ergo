@@ -513,3 +513,15 @@ impl SyncExecutor {
 
 #[cfg(test)]
 mod tests;
+
+impl SyncExecutor {
+    /// Orphan-header buffer gauges: (distinct header-id groups, total
+    /// buffered entries). The buffer is hard-capped, but its live size is
+    /// the primary RSS-attribution signal during header-first sync.
+    pub fn orphan_header_gauges(&self) -> (usize, usize) {
+        (
+            self.orphan_headers.len(),
+            self.orphan_headers.values().map(Vec::len).sum(),
+        )
+    }
+}

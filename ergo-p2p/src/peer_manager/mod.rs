@@ -936,3 +936,15 @@ impl PeerManager {
 
 #[cfg(test)]
 mod tests;
+
+impl PeerManager {
+    /// Operator gauge snapshot: connected peers, live ban entries, and
+    /// address-book pool size. O(1) — all three are container lengths.
+    pub fn gauge_counts(&self) -> (usize, usize, usize) {
+        (
+            self.peers.len(),
+            self.bans.len(),
+            self.known_addresses.len(),
+        )
+    }
+}

@@ -136,6 +136,9 @@ fn make_state_with_backend(
         last_beat_emit: Instant::now()
             .checked_sub(crate::node::heartbeat::HEARTBEAT_IDLE_INTERVAL)
             .unwrap_or_else(Instant::now),
+        last_beat_progress_emit: Instant::now()
+            .checked_sub(crate::node::heartbeat::HEARTBEAT_PROGRESS_MIN_INTERVAL)
+            .unwrap_or_else(Instant::now),
         last_beat_height: 0,
         last_beat_headers: 0,
         req_messages_total: 0,
