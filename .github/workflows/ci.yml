@@ -99,8 +99,22 @@ jobs:
       # Default-feature linting here; the full --all-features lint runs once
       # on ubuntu below (feature combos don't vary meaningfully per-OS, and
       # --all-features materially grows the dependency graph per leg).
-      - name: cargo clippy
+      # Full lint on ubuntu; the platform legs lint only the crate that has
+      # platform-gated code. All 11 `cfg(windows)` / `cfg(target_os)` sites in
+      # the workspace live in `ergo-node` (mem_probe, mem_smaps, mem_maps,
+      # boot, incidents, sync_tick, snapshot_emit) and none are in tests, so a
+      # workspace-wide clippy on windows/macos re-lints platform-invariant
+      # code that ubuntu already covers — and the nextest build below then
+      # compiles all of it again anyway (check and build artifacts don't
+      # share). Narrowing keeps every platform-specific lint while dropping
+      # ~85s on windows and ~40s on macos.
+      - name: cargo clippy (workspace, ubuntu)
+        if: runner.os == 'Linux'
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo clippy (platform-gated crate)
+        if: runner.os != 'Linux'
+        run: cargo clippy --all-targets -p ergo-node -- -D warnings
 
       - uses: taiki-e/install-action@nextest
 
