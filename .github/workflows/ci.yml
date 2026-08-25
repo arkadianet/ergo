@@ -106,8 +106,10 @@ jobs:
       # workspace-wide clippy on windows/macos re-lints platform-invariant
       # code that ubuntu already covers — and the nextest build below then
       # compiles all of it again anyway (check and build artifacts don't
-      # share). Narrowing keeps every platform-specific lint while dropping
-      # ~85s on windows and ~40s on macos.
+      # share). Narrowing keeps every platform-specific lint. Measured saving
+      # is modest -- 91s -> 49s on windows, 51s -> 34s on macos -- because
+      # ergo-node depends on nearly every crate, so `-p ergo-node` still
+      # type-checks the whole graph and only skips other crates' test targets.
       - name: cargo clippy (workspace, ubuntu)
         if: runner.os == 'Linux'
         run: cargo clippy --all-targets -- -D warnings
