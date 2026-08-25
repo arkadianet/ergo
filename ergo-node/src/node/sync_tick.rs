@@ -1041,8 +1041,48 @@ fn maybe_emit_gauges(state: &mut NodeState, now: Instant) {
     let (peers, bans, known_addrs) = state.peer_manager.gauge_counts();
     let mempool_txs = state.mempool.size();
 
+    // RSS KiB (Linux; 0 elsewhere) — pairs the gauge line with the
+    // ergo_rss_kb /metrics series for attribution.
+    let rss_kb = {
+        #[cfg(target_os = "linux")]
+        {
+            std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|status| {
+                    status.lines().find_map(|l| {
+                        l.strip_prefix("VmRSS:")
+                            .and_then(|rest| rest.split_whitespace().next())
+                            .and_then(|v| v.parse::<u64>().ok())
+                    })
+                })
+                .unwrap_or(0)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            0u64
+        }
+    };
+
+    // Feed the incident ring's last-gauges slot so error snapshots carry
+    // fresh attribution even between gauge ticks.
+    crate::incidents::set_last_gauges(
+        serde_json::json!({
+            "dl_inflight": dg.inflight,
+            "dl_late_acceptable": dg.late_acceptable,
+            "dl_received": dg.received_set,
+            "orphan_headers": orphan_headers,
+            "peers": peers,
+            "bans": bans,
+            "known_addrs": known_addrs,
+            "mempool_txs": mempool_txs,
+            "rss_kb": rss_kb,
+        })
+        .to_string(),
+    );
+
     info!(
         target: "node_gauges",
+        rss_kb,
         peers, bans, known_addrs, mempool_txs,
         dl_inflight = dg.inflight,
         dl_peers_inflight = dg.peers_with_inflight,

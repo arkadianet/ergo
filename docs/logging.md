@@ -89,6 +89,14 @@ story. Wallet lifecycle (`unlocked` / `locked` / unlock failure) and
 mining solution verdicts log at INFO; handshake completions and seed
 checks at DEBUG.
 
+## Incident snapshots
+
+On the first ERROR with a given code (5-minute dedupe window per code),
+the node writes `<data_dir>/incidents/incident-<ts>-<seq>.json`: the
+last ~500 structured events, latest subsystem gauges, RSS KiB, and build
+version in one attachable file. Newest 10 retained. Attach it verbatim
+to bug reports — it is the fastest path to diagnosis.
+
 ## Chatter ledger (triage decisions)
 
 | line | disposition |

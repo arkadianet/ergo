@@ -135,7 +135,12 @@ fn init_tracing(cfg: &LoggingConfig) -> Option<WorkerGuard> {
         ),
     };
 
-    let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = vec![stderr_layer];
+    let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = vec![
+        stderr_layer,
+        // Incident capture ring: INFO+ events into the bounded buffer that
+        // powers automatic error snapshots (see incidents.rs).
+        Box::new(ergo_node::incidents::CaptureLayer),
+    ];
     let guard = if let Some(file) = &cfg.file {
         match build_file_layer(file, &cfg.env_filter_directive()) {
             Ok((file_layer, g)) => {

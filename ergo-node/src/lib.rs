@@ -9,6 +9,7 @@ pub mod anchor_scheduler;
 pub mod api_bridge;
 pub mod config;
 pub mod genesis;
+pub mod incidents;
 pub mod indexer_chain;
 pub mod mem_csv;
 pub mod mem_probe;
