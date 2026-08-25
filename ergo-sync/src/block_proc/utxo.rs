@@ -10,6 +10,7 @@ use tracing::debug;
 
 use ergo_primitives::digest::blake2b256;
 use ergo_primitives::reader::VlqReader;
+use ergo_ser::ad_proofs::read_ad_proofs;
 use ergo_ser::block_transactions::read_block_transactions_with_group_elements;
 use ergo_ser::extension::read_extension;
 use ergo_ser::header::read_header;
@@ -195,26 +196,84 @@ pub(super) fn process_block_utxo(
 
     // 2c. Full proofHash parity — UTXO-mode counterpart of Scala's
     // "Regenerated proofHash is not equal to the declared one" check.
-    // The declared `adProofsRoot` is verified by REGENERATING the proofs:
-    // the block's transactions are replayed against a scratch copy of the
-    // parent AVL tree (canonical op stream — data-input lookups, removes,
-    // inserts) and the prover's emitted bytes must hash exactly to the
-    // declared root. A block that ships no proofs, garbage proofs, or a
-    // self-consistent-but-false root/proof pair is rejected. Live mainnet
-    // divergence at h1,853,301 (block 437601cd…, applied here for 697s)
-    // was the no-binding version of this hole.
     //
-    // The ADProofs *section* itself is pure data availability in this
-    // mode: it may be absent from storage without affecting validity,
-    // exactly as in digest mode's download semantics.
-    let regenerated = store.regenerate_ad_proofs(&block_txs.transactions)?;
-    let regenerated_root = *ergo_primitives::digest::blake2b256(&regenerated.1).as_bytes();
-    if regenerated_root != *header.ad_proofs_root.as_bytes() {
-        return Err(BlockProcessError::AdProofsHashMismatch {
-            header_id: header_id_computed,
-            declared_root: *header.ad_proofs_root.as_bytes(),
-            computed_root: regenerated_root,
-        });
+    // Policy VerifyShipped (production boot): the block's ADProofs
+    // section is verified directly at O(block size) cost —
+    //   a) blake2b256(shipped bytes) == header.ad_proofs_root;
+    //   b) replaying the block's net box changes through those bytes
+    //      must carry the parent state root exactly to
+    //      `header.state_root` (digest-mode verifier seam, bound to
+    //      this header's section id).
+    // A missing section is DATA AVAILABILITY (`AdProofsUnavailable`),
+    // never invalidity: coordinator `requires_proofs` gating means the
+    // section is requested alongside txs+extension and apply retries
+    // when it lands. This mirrors Scala, where a UTXO node cannot
+    // apply a block whose ADProofs have not arrived.
+    //
+    // A block that ships garbage proofs or a self-consistent-but-false
+    // root/proof pair is rejected. Live mainnet divergence at h1,853,301
+    // (block 437601cd…, applied here for 697s) was the no-binding
+    // version of this hole; both checks bind the shipped bytes.
+    //
+    // Issue #264: Regenerate (the legacy default) REGENERATES proofs by
+    // hydrating the ENTIRE AVL arena into a prover graph per applied
+    // block — O(tree size) time and heap — wedging archival catch-up
+    // near tip. Kept only as an explicit opt-out for deployments that
+    // cannot download ADProofs sections.
+    match store.ad_proofs_apply_policy() {
+        ergo_state::store::AdProofsApplyPolicy::VerifyShipped => {
+            let section_bytes = store.get_block_section(&expected.ad_proofs_id)?.ok_or(
+                BlockProcessError::AdProofsUnavailable {
+                    header_id: header_id_computed,
+                    ad_proofs_id: expected.ad_proofs_id,
+                },
+            )?;
+            // Decode the framed section (header_id ‖ len ‖ proof) — same
+            // wire form digest mode consumes. The declared root binds the
+            // INNER proof bytes (Scala ADProofs.proofDigest), not the
+            // framing.
+            let mut reader = VlqReader::new(&section_bytes);
+            let ad_proofs = read_ad_proofs(&mut reader)
+                .map_err(|e| BlockProcessError::Deserialize(format!("ad_proofs section: {e:?}")))?;
+            if !reader.is_empty() {
+                return Err(BlockProcessError::Deserialize(format!(
+                    "ADProofs section has {} trailing byte(s) after the proof",
+                    reader.remaining()
+                )));
+            }
+            if ad_proofs.header_id.as_bytes() != &header_id_computed {
+                return Err(BlockProcessError::Deserialize(format!(
+                    "ADProofs section carries header_id {} but is filed under header {}",
+                    hex::encode(ad_proofs.header_id.as_bytes()),
+                    hex::encode(header_id_computed),
+                )));
+            }
+            let computed_proof_hash = *blake2b256(&ad_proofs.proof_bytes).as_bytes();
+            if computed_proof_hash != *header.ad_proofs_root.as_bytes() {
+                return Err(BlockProcessError::AdProofsHashMismatch {
+                    header_id: header_id_computed,
+                    declared_root: *header.ad_proofs_root.as_bytes(),
+                    computed_root: computed_proof_hash,
+                });
+            }
+            store.verify_shipped_ad_proofs(
+                expected.ad_proofs_id,
+                &ad_proofs.proof_bytes,
+                &header,
+                &block_txs.transactions,
+            )?;
+        }
+        ergo_state::store::AdProofsApplyPolicy::Regenerate => {
+            let regenerated = store.regenerate_ad_proofs(&block_txs.transactions)?;
+            let regenerated_root = *blake2b256(&regenerated.1).as_bytes();
+            if regenerated_root != *header.ad_proofs_root.as_bytes() {
+                return Err(BlockProcessError::AdProofsHashMismatch {
+                    header_id: header_id_computed,
+                    declared_root: *header.ad_proofs_root.as_bytes(),
+                    computed_root: regenerated_root,
+                });
+            }
+        }
     }
 
     // Voted parameters: at epoch starts, run the full

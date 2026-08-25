@@ -290,6 +290,9 @@ impl StateStore {
             ibd_mode: false,
             ibd_blocks_since_flush: 0,
             ibd_flush_interval: 0,
+            // Legacy default; production boot flips to VerifyShipped for
+            // UTXO backends alongside coordinator `requires_proofs`.
+            ad_proofs_apply_policy: super::AdProofsApplyPolicy::Regenerate,
             persist_pipeline: None,
             mode2_trust_first_epoch,
             init_launch_params: launch_params,

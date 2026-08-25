@@ -135,7 +135,9 @@ impl SyncCoordinator {
         // reduces P2P overhead and avoids overwhelming the peer.
         let mut tx_ids: Vec<[u8; 32]> = Vec::new();
         let mut ext_ids: Vec<[u8; 32]> = Vec::new();
-        // Digest-verifier (Mode 5) only; empty and unused for a UTXO node.
+        // ADProofs bucket: consumed by digest-verifier (Mode 5) replay
+        // AND by UTXO shipped-section verification (issue #264); empty
+        // for Mode 6 / when requires_proofs is off.
         let mut ad_proofs_ids: Vec<[u8; 32]> = Vec::new();
 
         for pending in blocks_to_download {

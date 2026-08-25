@@ -70,6 +70,16 @@ pub enum StateError {
     CommitError(#[source] Box<redb::CommitError>),
     #[error("state digest mismatch: computed {computed}, expected {expected}")]
     DigestMismatch { computed: String, expected: String },
+    /// Shipped-ADProofs transition replay failed during UTXO-mode block
+    /// application (issue #264 fast path). The proof bytes hashed correctly
+    /// to the header's declared `adProofsRoot`, but driving the block's net
+    /// box changes through those proof bytes did not reproduce
+    /// `header.state_root`. This is block invalidity, NOT data availability.
+    #[error("shipped ad_proofs transition replay failed: {source}")]
+    AdProofsReplayFailed {
+        #[source]
+        source: Box<crate::digest_apply::DigestApplyError>,
+    },
     /// Voted-params migrate (v1→v2 row rewrite) reported a failure
     /// in `compute_epoch_votes_via_txn`. The underlying error type
     /// is already stringified at the votes boundary
