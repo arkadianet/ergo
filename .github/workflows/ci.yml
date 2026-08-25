@@ -44,6 +44,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Windows is the CI critical path: the same 6453 tests cost 459s of CPU
+      # on ubuntu and 4728s here. The gap is not compute — 5528 sub-0.1s tests
+      # sum to 92s on both — it is disk. Storage-backed tests (`ergo-state`,
+      # `ergo-sync`, `ergo-indexer` drive 1000 sequential redb write txns each)
+      # run 14-31x slower, and two multipliers stack:
+      #   1. Defender real-time scanning inspects every artifact and db write.
+      #   2. `tempfile::tempdir()` follows %TEMP% to the C: OS disk, while the
+      #      workspace and target dir live on the fast D: volume.
+      # Both are environment, not test semantics — nothing is skipped or
+      # weakened here. Failures are non-fatal: if Defender is unavailable or
+      # tamper-protected on a future image, the leg still runs, just slowly.
+      - name: Windows I/O tuning (Defender exclusions, temp on workspace volume)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          try {
+            Add-MpPreference -ExclusionPath `
+              "$env:GITHUB_WORKSPACE", "$env:RUNNER_TEMP", `
+              "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup" -ErrorAction Stop
+            Add-MpPreference -ExclusionProcess `
+              "cargo.exe", "rustc.exe", "link.exe", "sccache.exe", "cargo-nextest.exe" -ErrorAction Stop
+            Write-Host "Defender exclusions registered."
+          } catch {
+            Write-Host "::warning::Defender exclusions unavailable: $($_.Exception.Message)"
+          }
+          # Redirect the temp dir onto the same volume as the workspace so
+          # `tempfile::tempdir()` stops paying C:-disk latency per redb commit.
+          "TMP=$env:RUNNER_TEMP"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TEMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "TMP/TEMP -> $env:RUNNER_TEMP"
+
       # Toolchain is pinned via rust-toolchain.toml at the repo root.
       - uses: dtolnay/rust-toolchain@master
         with:
