@@ -36,22 +36,10 @@ jobs:
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
-      # Job-level, so it overrides the workflow-level default per platform.
-      CARGO_PROFILE_DEV_DEBUG: ${{ matrix.debuginfo }}
     strategy:
       fail-fast: false
       matrix:
-        # `debuginfo` is per-OS: MSVC emits a PDB per test binary and that
-        # linking is a large share of the windows build. Windows failures are
-        # reproduced on the ubuntu leg, which keeps line-tables-only, so the
-        # line numbers stay available where they are actually read.
-        include:
-          - os: ubuntu-latest
-            debuginfo: line-tables-only
-          - os: macos-latest
-            debuginfo: line-tables-only
-          - os: windows-latest
-            debuginfo: "0"
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
       - uses: actions/checkout@v4
