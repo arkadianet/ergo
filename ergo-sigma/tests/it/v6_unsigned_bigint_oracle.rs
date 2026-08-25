@@ -20,7 +20,7 @@ use ergo_ser::ergo_tree::read_ergo_tree;
 use ergo_ser::sigma_type::SigmaType;
 
 const SCRIPT_HEX: &str =
-    include_str!("../../test-vectors/testnet/v6_unsigned_bigint_script_h210076.hex");
+    include_str!("../../../test-vectors/testnet/v6_unsigned_bigint_script_h210076.hex");
 
 fn parse_tree() -> ergo_ser::ergo_tree::ErgoTree {
     let hex = SCRIPT_HEX.trim();

@@ -16,7 +16,7 @@
 //!    the install path, logging the resume.
 
 #[allow(dead_code)]
-mod common;
+use crate::common;
 
 use ergo_primitives::digest::{ADDigest, Digest32, ModifierId};
 use ergo_primitives::group_element::GroupElement;

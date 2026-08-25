@@ -21,7 +21,7 @@
 //! cross-crate plumbing.
 
 #[allow(dead_code)]
-mod common;
+use crate::common;
 
 use ergo_state::store::StateStore;
 use ergo_state::test_helpers::nipopow_proof_dense_from_2;

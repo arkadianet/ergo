@@ -7,7 +7,7 @@
 //! `ergo-api/tests/submit_routes.rs` — duplicating it here would only
 //! re-test the router.
 
-mod common;
+use crate::common;
 
 use std::time::Duration;
 

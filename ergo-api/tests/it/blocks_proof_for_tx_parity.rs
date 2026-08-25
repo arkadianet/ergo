@@ -1,23 +1,21 @@
-//! Shape parity for `/blocks/{header_id}`.
+//! Shape parity for `GET /blocks/{headerId}/proofFor/{txId}`.
 //!
-//! Scala emits a single JSON object reassembled from the header,
-//! blockTransactions, extension, and (optional) adProofs sections. This
-//! test pins the *encoder* surface: given a `ScalaFullBlock` parsed from
-//! a captured Scala response at h=700000, our serde renames and Option
-//! handling must round-trip the value back to a byte-for-byte equivalent
-//! JSON document. The bridge logic (bytes -> DTO) is tested separately
-//! in `ergo-node`.
+//! Mirrors `BlocksApiRoute.scala:78-91, 155-157`. Wire shape per
+//! `ApiCodecs.scala:48-60`:
+//! ```json
+//! { "leafData": "<hex>", "levels": [["<hex>", 0|1], ...] }
+//! ```
+//! Empty siblings (odd-paired) serialize as `""`.
 //!
-//! 404 paths covered: unknown id and malformed hex. The bridge collapses
-//! both cases into `None`, which the handler translates to 404 with a
-//! minimal error body.
+//! Crypto correctness lives in `ergo-crypto` unit tests; this file
+//! pins the JSON wire format and 404 paths.
 
 use std::sync::Arc;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use ergo_api::compat::traits::NodeChainQuery;
-use ergo_api::compat::types::{Parameters, ScalaFullBlock, ScalaInfo};
+use ergo_api::compat::types::{Parameters, ScalaFullBlock, ScalaInfo, ScalaMerkleProof};
 use ergo_api::server::router;
 use ergo_api::traits::NodeReadState;
 use ergo_api::types::{
@@ -27,8 +25,7 @@ use ergo_api::types::{
 };
 use tower::ServiceExt;
 
-const FIXTURE_700K: &str = include_str!("fixtures/scala/blocks/700000.json");
-const HEADER_ID_700K: &str = "54dd49ffbb32d35d8d6c41f3b427c68ac3cec91f6718fb7a50ec0d18d36e982a";
+const FIXTURE_700K: &str = include_str!("../fixtures/scala/blocks/700000.json");
 
 struct StubReadState;
 impl NodeReadState for StubReadState {
@@ -113,17 +110,10 @@ impl NodeReadState for StubReadState {
     }
 }
 
-struct StubCompat {
-    full_block_700k: ScalaFullBlock,
-}
+const HEADER_ID_KNOWN: &str = "54dd49ffbb32d35d8d6c41f3b427c68ac3cec91f6718fb7a50ec0d18d36e982a";
+const TX_ID_IN_BLOCK: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 
-impl StubCompat {
-    fn from_fixture() -> Self {
-        let full_block_700k: ScalaFullBlock =
-            serde_json::from_str(FIXTURE_700K).expect("fixture must parse as ScalaFullBlock");
-        Self { full_block_700k }
-    }
-}
+struct StubCompat;
 
 impl NodeChainQuery for StubCompat {
     fn info(&self) -> ScalaInfo {
@@ -175,9 +165,18 @@ impl NodeChainQuery for StubCompat {
         Vec::new()
     }
 
-    fn full_block_by_id(&self, header_id_hex: &str) -> Option<ScalaFullBlock> {
-        if header_id_hex == HEADER_ID_700K {
-            Some(self.full_block_700k.clone())
+    fn full_block_by_id(&self, _header_id_hex: &str) -> Option<ScalaFullBlock> {
+        None
+    }
+
+    fn proof_for_tx(&self, header_id_hex: &str, tx_id_hex: &str) -> Option<ScalaMerkleProof> {
+        if header_id_hex == HEADER_ID_KNOWN && tx_id_hex == TX_ID_IN_BLOCK {
+            // A 2-leaf proof at index 0: leafData=tx_id, one level
+            // with sibling=leaf_hash(other_tx), side=0.
+            Some(ScalaMerkleProof {
+                leaf_data: TX_ID_IN_BLOCK.to_string(),
+                levels: vec![("aa".repeat(32), 0)],
+            })
         } else {
             None
         }
@@ -200,8 +199,10 @@ async fn json_get(app: axum::Router, path: &str) -> (StatusCode, serde_json::Val
 }
 
 fn build_app() -> axum::Router {
+    // Validate fixture parses; not consumed by these tests directly.
+    let _: ScalaFullBlock = serde_json::from_str(FIXTURE_700K).expect("fixture parses");
     let read: Arc<dyn NodeReadState> = Arc::new(StubReadState);
-    let compat: Arc<dyn NodeChainQuery> = Arc::new(StubCompat::from_fixture());
+    let compat: Arc<dyn NodeChainQuery> = Arc::new(StubCompat);
     router(
         read,
         Some(compat),
@@ -212,38 +213,49 @@ fn build_app() -> axum::Router {
 }
 
 #[tokio::test]
-async fn known_header_id_matches_scala_exactly() {
-    let scala: serde_json::Value =
-        serde_json::from_str(FIXTURE_700K).expect("parse fixture as JSON value");
-    let path = format!("/blocks/{HEADER_ID_700K}");
-    let (status, ours) = json_get(build_app(), &path).await;
+async fn known_proof_returns_scala_shape() {
+    let path = format!("/blocks/{HEADER_ID_KNOWN}/proofFor/{TX_ID_IN_BLOCK}");
+    let (status, body) = json_get(build_app(), &path).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(scala, ours, "h=700000 full block must match Scala exactly");
+    let leaf_data = body.get("leafData").and_then(|v| v.as_str()).unwrap_or("");
+    assert_eq!(leaf_data, TX_ID_IN_BLOCK);
+    let levels = body.get("levels").and_then(|v| v.as_array()).unwrap();
+    assert_eq!(levels.len(), 1);
+    let level0 = levels[0].as_array().unwrap();
+    assert_eq!(level0.len(), 2, "each level is [hex_sibling, side_byte]");
+    assert!(level0[0].is_string(), "sibling is a hex string");
+    assert!(level0[1].is_number(), "side is a numeric byte");
 }
 
 #[tokio::test]
-async fn unknown_header_id_returns_404() {
+async fn unknown_header_returns_404() {
     let unknown = "0".repeat(64);
-    let path = format!("/blocks/{unknown}");
+    let path = format!("/blocks/{unknown}/proofFor/{TX_ID_IN_BLOCK}");
     let (status, _) = json_get(build_app(), &path).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn malformed_hex_returns_404() {
-    // 64 chars but contains a non-hex digit. The bridge rejects it as
-    // unparseable, which the handler folds into 404 (same surface as a
-    // truly unknown id — Scala behaves the same way).
-    let bad = format!("zz{}", "0".repeat(62));
-    let path = format!("/blocks/{bad}");
+async fn tx_not_in_block_returns_404() {
+    let other_tx = "f".repeat(64);
+    let path = format!("/blocks/{HEADER_ID_KNOWN}/proofFor/{other_tx}");
     let (status, _) = json_get(build_app(), &path).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn wrong_length_id_returns_404() {
-    let too_short = "ab".repeat(20); // 40 chars
-    let path = format!("/blocks/{too_short}");
-    let (status, _) = json_get(build_app(), &path).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+async fn empty_sibling_serializes_as_empty_string() {
+    // Pin the wire shape for the single-leaf / odd-paired empty
+    // sibling case. The DTO uses Vec<(String, u8)>; empty hex must
+    // remain an empty string after JSON round-trip — matches Scala's
+    // `Base16.encode([])` = "" per `ApiCodecs.scala:50`.
+    let proof = ScalaMerkleProof {
+        leaf_data: "ab".repeat(32),
+        levels: vec![(String::new(), 0)],
+    };
+    let json = serde_json::to_value(&proof).unwrap();
+    let levels = json.get("levels").unwrap().as_array().unwrap();
+    let entry = levels[0].as_array().unwrap();
+    assert_eq!(entry[0].as_str().unwrap(), "");
+    assert_eq!(entry[1].as_u64().unwrap(), 0);
 }

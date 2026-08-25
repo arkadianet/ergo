@@ -1,10 +1,16 @@
-//! Shape parity for `/blocks/at/{height}`.
+//! Shape parity for `/blocks/{header_id}`.
 //!
-//! Scala emits a JSON array of unprefixed lowercase hex header IDs. We
-//! verify the response shape (always an array of hex strings) plus a
-//! known-stable height where mainnet has no orphans, so the array is a
-//! single-element exact match. Empty-array responses for genesis (h=0)
-//! and out-of-range heights are also pinned.
+//! Scala emits a single JSON object reassembled from the header,
+//! blockTransactions, extension, and (optional) adProofs sections. This
+//! test pins the *encoder* surface: given a `ScalaFullBlock` parsed from
+//! a captured Scala response at h=700000, our serde renames and Option
+//! handling must round-trip the value back to a byte-for-byte equivalent
+//! JSON document. The bridge logic (bytes -> DTO) is tested separately
+//! in `ergo-node`.
+//!
+//! 404 paths covered: unknown id and malformed hex. The bridge collapses
+//! both cases into `None`, which the handler translates to 404 with a
+//! minimal error body.
 
 use std::sync::Arc;
 
@@ -21,11 +27,8 @@ use ergo_api::types::{
 };
 use tower::ServiceExt;
 
-const FIXTURE_700K: &str = include_str!("fixtures/scala/blocks_at/700000.json");
-const FIXTURE_GENESIS_PRE: &str = include_str!("fixtures/scala/blocks_at/0.json");
-const FIXTURE_OUT_OF_RANGE: &str = include_str!("fixtures/scala/blocks_at/99999999.json");
-
-const HEIGHT_700K_HEADER: &str = "54dd49ffbb32d35d8d6c41f3b427c68ac3cec91f6718fb7a50ec0d18d36e982a";
+const FIXTURE_700K: &str = include_str!("../fixtures/scala/blocks/700000.json");
+const HEADER_ID_700K: &str = "54dd49ffbb32d35d8d6c41f3b427c68ac3cec91f6718fb7a50ec0d18d36e982a";
 
 struct StubReadState;
 impl NodeReadState for StubReadState {
@@ -110,7 +113,18 @@ impl NodeReadState for StubReadState {
     }
 }
 
-struct StubCompat;
+struct StubCompat {
+    full_block_700k: ScalaFullBlock,
+}
+
+impl StubCompat {
+    fn from_fixture() -> Self {
+        let full_block_700k: ScalaFullBlock =
+            serde_json::from_str(FIXTURE_700K).expect("fixture must parse as ScalaFullBlock");
+        Self { full_block_700k }
+    }
+}
+
 impl NodeChainQuery for StubCompat {
     fn info(&self) -> ScalaInfo {
         ScalaInfo {
@@ -157,17 +171,16 @@ impl NodeChainQuery for StubCompat {
         }
     }
 
-    fn header_ids_at_height(&self, height: u32) -> Vec<String> {
-        match height {
-            700_000 => vec![HEIGHT_700K_HEADER.to_string()],
-            // Mirror Scala: h=0 is below genesis (genesis is height 1),
-            // and out-of-range heights both yield empty arrays.
-            _ => Vec::new(),
-        }
+    fn header_ids_at_height(&self, _height: u32) -> Vec<String> {
+        Vec::new()
     }
 
-    fn full_block_by_id(&self, _header_id_hex: &str) -> Option<ScalaFullBlock> {
-        None
+    fn full_block_by_id(&self, header_id_hex: &str) -> Option<ScalaFullBlock> {
+        if header_id_hex == HEADER_ID_700K {
+            Some(self.full_block_700k.clone())
+        } else {
+            None
+        }
     }
 }
 
@@ -188,7 +201,7 @@ async fn json_get(app: axum::Router, path: &str) -> (StatusCode, serde_json::Val
 
 fn build_app() -> axum::Router {
     let read: Arc<dyn NodeReadState> = Arc::new(StubReadState);
-    let compat: Arc<dyn NodeChainQuery> = Arc::new(StubCompat);
+    let compat: Arc<dyn NodeChainQuery> = Arc::new(StubCompat::from_fixture());
     router(
         read,
         Some(compat),
@@ -199,57 +212,38 @@ fn build_app() -> axum::Router {
 }
 
 #[tokio::test]
-async fn known_height_matches_scala_exactly() {
-    let scala: serde_json::Value = serde_json::from_str(FIXTURE_700K).expect("parse fixture");
-    let (status, ours) = json_get(build_app(), "/blocks/at/700000").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(scala, ours, "h=700000 must match Scala exactly");
-}
-
-#[tokio::test]
-async fn pre_genesis_height_returns_empty_array() {
+async fn known_header_id_matches_scala_exactly() {
     let scala: serde_json::Value =
-        serde_json::from_str(FIXTURE_GENESIS_PRE).expect("parse fixture");
-    let (status, ours) = json_get(build_app(), "/blocks/at/0").await;
+        serde_json::from_str(FIXTURE_700K).expect("parse fixture as JSON value");
+    let path = format!("/blocks/{HEADER_ID_700K}");
+    let (status, ours) = json_get(build_app(), &path).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(
-        scala.as_array().unwrap().is_empty(),
-        "scala fixture is empty"
-    );
-    assert_eq!(scala, ours, "h=0 must match Scala (empty array)");
+    assert_eq!(scala, ours, "h=700000 full block must match Scala exactly");
 }
 
 #[tokio::test]
-async fn out_of_range_height_returns_empty_array() {
-    let scala: serde_json::Value =
-        serde_json::from_str(FIXTURE_OUT_OF_RANGE).expect("parse fixture");
-    let (status, ours) = json_get(build_app(), "/blocks/at/99999999").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        scala, ours,
-        "out-of-range height must match Scala (empty array)"
-    );
+async fn unknown_header_id_returns_404() {
+    let unknown = "0".repeat(64);
+    let path = format!("/blocks/{unknown}");
+    let (status, _) = json_get(build_app(), &path).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn negative_height_is_rejected() {
-    // Scala uses `IntNumber` which rejects negative values. axum's `Path<u32>`
-    // rejects them with 400 too, so the surface contract matches even though
-    // the error body shape differs.
-    let (status, _) = json_get(build_app(), "/blocks/at/-1").await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "negative heights must be rejected",
-    );
+async fn malformed_hex_returns_404() {
+    // 64 chars but contains a non-hex digit. The bridge rejects it as
+    // unparseable, which the handler folds into 404 (same surface as a
+    // truly unknown id — Scala behaves the same way).
+    let bad = format!("zz{}", "0".repeat(62));
+    let path = format!("/blocks/{bad}");
+    let (status, _) = json_get(build_app(), &path).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn non_numeric_height_is_rejected() {
-    let (status, _) = json_get(build_app(), "/blocks/at/abc").await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "non-numeric heights must be rejected",
-    );
+async fn wrong_length_id_returns_404() {
+    let too_short = "ab".repeat(20); // 40 chars
+    let path = format!("/blocks/{too_short}");
+    let (status, _) = json_get(build_app(), &path).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

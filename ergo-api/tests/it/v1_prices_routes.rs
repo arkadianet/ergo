@@ -348,7 +348,7 @@ impl IndexerQuery for StubIndexer {
 }
 
 fn fixture_tree_bytes() -> Vec<u8> {
-    hex::decode(include_str!("fixtures/spectrum_n2t_v1_ergo_tree.hex").trim()).unwrap()
+    hex::decode(include_str!("../fixtures/spectrum_n2t_v1_ergo_tree.hex").trim()).unwrap()
 }
 
 fn int_register(value: i32) -> RegisterValue {

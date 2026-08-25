@@ -6,7 +6,7 @@
 
 use redb::{ReadableTable, ReadableTableMetadata};
 
-mod wallet_e2e_helpers;
+use crate::wallet_e2e_helpers;
 use wallet_e2e_helpers::TestWallet;
 
 #[test]

@@ -309,7 +309,7 @@ fn normalize_path(path: &str) -> String {
 /// path lines are at column 2 (`  /blockchain/...:`) and method lines
 /// are at column 4 (`    get:`, `    post:`).
 fn parse_openapi_paths() -> BTreeMap<String, BTreeSet<String>> {
-    const YAML: &str = include_str!("../web/openapi.yaml");
+    const YAML: &str = include_str!("../../web/openapi.yaml");
     let mut result: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut current_path: Option<String> = None;
     for line in YAML.lines() {

@@ -67,10 +67,4 @@ name              = "multi_sig_inline"
 path              = "tests/multi_sig_inline.rs"
 required-features = ["test-utils"]
 
-[[test]]
-name = "proving_scala_oracle"
-path = "tests/proving_scala_oracle.rs"
 
-[[test]]
-name = "multi_sig_oracle"
-path = "tests/multi_sig_oracle.rs"

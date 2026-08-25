@@ -26,7 +26,7 @@
 // not a live node) but is shared with other integration tests. Silence
 // dead-code on the unused helpers in this compilation unit only.
 #[allow(dead_code)]
-mod common;
+use crate::common;
 
 use ergo_node::run_inner;
 

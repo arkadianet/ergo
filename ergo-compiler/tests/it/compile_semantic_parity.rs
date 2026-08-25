@@ -1353,7 +1353,7 @@ struct Request {
 /// (`compile_probes.txt`, the Task-11 wave-1 GraphBuilding gate vectors —
 /// provenance notes in that file).
 fn capture_requests() -> Vec<Request> {
-    let seed = include_str!("../../test-vectors/ergoscript/typer/golden_seed.txt");
+    let seed = include_str!("../../../test-vectors/ergoscript/typer/golden_seed.txt");
     let mut seen = std::collections::BTreeSet::new();
     let mut requests = Vec::new();
     for line in seed.lines() {
@@ -1388,7 +1388,7 @@ fn capture_requests() -> Vec<Request> {
             probe: false,
         });
     }
-    let probes = include_str!("../../test-vectors/ergoscript/compile/compile_probes.txt");
+    let probes = include_str!("../../../test-vectors/ergoscript/compile/compile_probes.txt");
     for line in probes.lines() {
         if line.starts_with('#') || line.trim().is_empty() {
             continue;

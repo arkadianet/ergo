@@ -56,7 +56,7 @@
 //! for the new tip — exercising a build whose parent is a real applied block's
 //! canonical extension.
 
-mod common;
+use crate::common;
 
 use std::time::Duration;
 

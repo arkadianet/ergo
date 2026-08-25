@@ -1,21 +1,17 @@
-//! Shape parity for `GET /blocks/modifier/{modifierId}`.
+//! Shape parity for `/blocks/at/{height}`.
 //!
-//! Mirrors `BlocksApiRoute.scala:151-153` → `getModifierById`. The
-//! endpoint returns a bare-object body whose shape depends on the
-//! variant — header / blockTransactions / extension / adProofs — with
-//! no discriminator field. Untagged enum (`ScalaBlockSection`)
-//! preserves that wire shape.
-//!
-//! 404 paths covered: unknown id and malformed hex (handler folds both
-//! into `None`, matching Scala's `ApiResponse(Option[BlockSection])`
-//! → `404` per `ApiResponse.scala:30-31`).
+//! Scala emits a JSON array of unprefixed lowercase hex header IDs. We
+//! verify the response shape (always an array of hex strings) plus a
+//! known-stable height where mainnet has no orphans, so the array is a
+//! single-element exact match. Empty-array responses for genesis (h=0)
+//! and out-of-range heights are also pinned.
 
 use std::sync::Arc;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use ergo_api::compat::traits::NodeChainQuery;
-use ergo_api::compat::types::{Parameters, ScalaBlockSection, ScalaFullBlock, ScalaInfo};
+use ergo_api::compat::types::{Parameters, ScalaFullBlock, ScalaInfo};
 use ergo_api::server::router;
 use ergo_api::traits::NodeReadState;
 use ergo_api::types::{
@@ -25,8 +21,11 @@ use ergo_api::types::{
 };
 use tower::ServiceExt;
 
-const FIXTURE_700K: &str = include_str!("fixtures/scala/blocks/700000.json");
-const HEADER_ID_700K: &str = "54dd49ffbb32d35d8d6c41f3b427c68ac3cec91f6718fb7a50ec0d18d36e982a";
+const FIXTURE_700K: &str = include_str!("../fixtures/scala/blocks_at/700000.json");
+const FIXTURE_GENESIS_PRE: &str = include_str!("../fixtures/scala/blocks_at/0.json");
+const FIXTURE_OUT_OF_RANGE: &str = include_str!("../fixtures/scala/blocks_at/99999999.json");
+
+const HEIGHT_700K_HEADER: &str = "54dd49ffbb32d35d8d6c41f3b427c68ac3cec91f6718fb7a50ec0d18d36e982a";
 
 struct StubReadState;
 impl NodeReadState for StubReadState {
@@ -111,18 +110,7 @@ impl NodeReadState for StubReadState {
     }
 }
 
-struct StubCompat {
-    full_block_700k: ScalaFullBlock,
-}
-
-impl StubCompat {
-    fn from_fixture() -> Self {
-        let full_block_700k: ScalaFullBlock =
-            serde_json::from_str(FIXTURE_700K).expect("fixture must parse as ScalaFullBlock");
-        Self { full_block_700k }
-    }
-}
-
+struct StubCompat;
 impl NodeChainQuery for StubCompat {
     fn info(&self) -> ScalaInfo {
         ScalaInfo {
@@ -169,47 +157,16 @@ impl NodeChainQuery for StubCompat {
         }
     }
 
-    fn header_ids_at_height(&self, _height: u32) -> Vec<String> {
-        Vec::new()
+    fn header_ids_at_height(&self, height: u32) -> Vec<String> {
+        match height {
+            700_000 => vec![HEIGHT_700K_HEADER.to_string()],
+            // Mirror Scala: h=0 is below genesis (genesis is height 1),
+            // and out-of-range heights both yield empty arrays.
+            _ => Vec::new(),
+        }
     }
 
     fn full_block_by_id(&self, _header_id_hex: &str) -> Option<ScalaFullBlock> {
-        None
-    }
-
-    fn modifier_by_id(&self, modifier_id_hex: &str) -> Option<ScalaBlockSection> {
-        // Stub dispatch table: 700k header id → header variant; the
-        // tx_id from the fixture's blockTransactions → that variant;
-        // the extension headerId match → extension variant; the
-        // adProofs id (digest) → adProofs variant. Mainnet bridges
-        // resolve via MODIFIER_TYPE_INDEX; here we hardcode the four
-        // known matches to pin the wire shape per variant.
-        if modifier_id_hex == HEADER_ID_700K {
-            return Some(ScalaBlockSection::Header(Box::new(
-                self.full_block_700k.header.clone(),
-            )));
-        }
-        if modifier_id_hex == self.full_block_700k.block_transactions.header_id {
-            // The blockTransactions section's `headerId` field is the
-            // parent header id, not the section id. Use the
-            // transactionsId from the header for the section-id lookup.
-            return None;
-        }
-        if modifier_id_hex == self.full_block_700k.header.transactions_id {
-            return Some(ScalaBlockSection::BlockTransactions(
-                self.full_block_700k.block_transactions.clone(),
-            ));
-        }
-        if modifier_id_hex == self.full_block_700k.header.extension_id {
-            return Some(ScalaBlockSection::Extension(
-                self.full_block_700k.extension.clone(),
-            ));
-        }
-        if let Some(ad) = &self.full_block_700k.ad_proofs {
-            if modifier_id_hex == self.full_block_700k.header.ad_proofs_id {
-                return Some(ScalaBlockSection::AdProofs(ad.clone()));
-            }
-        }
         None
     }
 }
@@ -231,7 +188,7 @@ async fn json_get(app: axum::Router, path: &str) -> (StatusCode, serde_json::Val
 
 fn build_app() -> axum::Router {
     let read: Arc<dyn NodeReadState> = Arc::new(StubReadState);
-    let compat: Arc<dyn NodeChainQuery> = Arc::new(StubCompat::from_fixture());
+    let compat: Arc<dyn NodeChainQuery> = Arc::new(StubCompat);
     router(
         read,
         Some(compat),
@@ -242,55 +199,57 @@ fn build_app() -> axum::Router {
 }
 
 #[tokio::test]
-async fn header_id_dispatches_to_header_variant() {
-    let path = format!("/blocks/modifier/{HEADER_ID_700K}");
-    let (status, body) = json_get(build_app(), &path).await;
+async fn known_height_matches_scala_exactly() {
+    let scala: serde_json::Value = serde_json::from_str(FIXTURE_700K).expect("parse fixture");
+    let (status, ours) = json_get(build_app(), "/blocks/at/700000").await;
     assert_eq!(status, StatusCode::OK);
-    let header_id = body.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-    assert_eq!(header_id, HEADER_ID_700K);
-    // Variant marker — Scala's bare-object shape: header has `powSolutions`,
-    // sections do not.
-    assert!(body.get("powSolutions").is_some());
-    assert!(body.get("transactions").is_none());
-    assert!(body.get("fields").is_none());
+    assert_eq!(scala, ours, "h=700000 must match Scala exactly");
 }
 
 #[tokio::test]
-async fn transactions_id_dispatches_to_block_transactions_variant() {
-    let stub = StubCompat::from_fixture();
-    let tx_section_id = stub.full_block_700k.header.transactions_id.clone();
-    let path = format!("/blocks/modifier/{tx_section_id}");
-    let (status, body) = json_get(build_app(), &path).await;
+async fn pre_genesis_height_returns_empty_array() {
+    let scala: serde_json::Value =
+        serde_json::from_str(FIXTURE_GENESIS_PRE).expect("parse fixture");
+    let (status, ours) = json_get(build_app(), "/blocks/at/0").await;
     assert_eq!(status, StatusCode::OK);
-    // BlockTransactions has `transactions` array, no powSolutions.
-    assert!(body.get("transactions").is_some());
-    assert!(body.get("powSolutions").is_none());
+    assert!(
+        scala.as_array().unwrap().is_empty(),
+        "scala fixture is empty"
+    );
+    assert_eq!(scala, ours, "h=0 must match Scala (empty array)");
 }
 
 #[tokio::test]
-async fn extension_id_dispatches_to_extension_variant() {
-    let stub = StubCompat::from_fixture();
-    let ext_id = stub.full_block_700k.header.extension_id.clone();
-    let path = format!("/blocks/modifier/{ext_id}");
-    let (status, body) = json_get(build_app(), &path).await;
+async fn out_of_range_height_returns_empty_array() {
+    let scala: serde_json::Value =
+        serde_json::from_str(FIXTURE_OUT_OF_RANGE).expect("parse fixture");
+    let (status, ours) = json_get(build_app(), "/blocks/at/99999999").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.get("fields").is_some());
-    assert!(body.get("transactions").is_none());
-    assert!(body.get("powSolutions").is_none());
+    assert_eq!(
+        scala, ours,
+        "out-of-range height must match Scala (empty array)"
+    );
 }
 
 #[tokio::test]
-async fn unknown_id_returns_404() {
-    let unknown = "0".repeat(64);
-    let path = format!("/blocks/modifier/{unknown}");
-    let (status, _) = json_get(build_app(), &path).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+async fn negative_height_is_rejected() {
+    // Scala uses `IntNumber` which rejects negative values. axum's `Path<u32>`
+    // rejects them with 400 too, so the surface contract matches even though
+    // the error body shape differs.
+    let (status, _) = json_get(build_app(), "/blocks/at/-1").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "negative heights must be rejected",
+    );
 }
 
 #[tokio::test]
-async fn malformed_hex_returns_404() {
-    let bad = format!("zz{}", "0".repeat(62));
-    let path = format!("/blocks/modifier/{bad}");
-    let (status, _) = json_get(build_app(), &path).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+async fn non_numeric_height_is_rejected() {
+    let (status, _) = json_get(build_app(), "/blocks/at/abc").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "non-numeric heights must be rejected",
+    );
 }

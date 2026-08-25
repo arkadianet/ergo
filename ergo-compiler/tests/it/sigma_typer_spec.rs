@@ -176,7 +176,7 @@ fn typefail(src: &str, class: &str) {
 /// seed.  The seed is embedded at compile time, so the shape assertions cannot
 /// silently drift from the authoritative capture; §15 records are swept here.
 fn seed_ok(verb: &str, src: &str) -> String {
-    let seed = include_str!("../../test-vectors/ergoscript/typer/golden_seed.txt");
+    let seed = include_str!("../../../test-vectors/ergoscript/typer/golden_seed.txt");
     for line in seed.lines() {
         if line.starts_with('#') || line.trim().is_empty() {
             continue;

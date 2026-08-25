@@ -10,7 +10,7 @@
 
 use ergo_api::compat::types::{Parameters, ScalaInfo};
 
-const SCALA_FIXTURE: &str = include_str!("fixtures/scala/info.json");
+const SCALA_FIXTURE: &str = include_str!("../fixtures/scala/info.json");
 
 fn sample_info() -> ScalaInfo {
     ScalaInfo {

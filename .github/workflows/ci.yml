@@ -132,8 +132,12 @@ jobs:
       # Coverage is narrow but enough to catch the common regression class
       # — a feature-gated `cost_trace::record(...)` site referencing the
       # wrong identifier and breaking the build under the feature.
+      # Both files now live in the crate's single `it` binary, so they are
+      # selected by module filter rather than by `--test <file>`.
       - name: cargo test (cost-trace feature)
-        run: cargo test -p ergo-sigma --features cost-trace --test cost_trace_smoke --test traced_untraced_parity
+        run: |
+          cargo test -p ergo-sigma --features cost-trace --test it -- cost_trace_smoke::
+          cargo test -p ergo-sigma --features cost-trace --test it -- traced_untraced_parity::
 
       # Doctest coverage lives on the fastest runner only — every other leg
       # already exercises the same crates via nextest above.

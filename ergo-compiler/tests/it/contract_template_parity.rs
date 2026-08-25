@@ -16,7 +16,7 @@
 use ergo_compiler::{compile_contract, NetworkPrefix};
 use serde_json::Value;
 
-const SEED: &str = include_str!("../../test-vectors/ergoscript/contract/contract_seed.json");
+const SEED: &str = include_str!("../../../test-vectors/ergoscript/contract/contract_seed.json");
 
 fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()

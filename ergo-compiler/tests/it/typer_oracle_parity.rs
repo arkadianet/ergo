@@ -282,7 +282,7 @@ fn assert_err(result: Result<String, CompileError>, verb: &str, src: &str) -> Co
 /// ensures we exercise at least 85 accept records (adding §16 to §1..§15).
 #[test]
 fn seed_accept_records_byte_parity() {
-    let seed = include_str!("../../test-vectors/ergoscript/typer/golden_seed.txt");
+    let seed = include_str!("../../../test-vectors/ergoscript/typer/golden_seed.txt");
     let mut checked = 0usize;
     for line in seed.lines() {
         let Some((verb, src, expected)) = parse_seed_line(line) else {
@@ -321,7 +321,7 @@ fn seed_accept_records_byte_parity() {
 /// the committed oracle exception class.
 #[test]
 fn seed_reject_records_class_parity() {
-    let seed = include_str!("../../test-vectors/ergoscript/typer/golden_seed.txt");
+    let seed = include_str!("../../../test-vectors/ergoscript/typer/golden_seed.txt");
     let mut checked = 0usize;
     for line in seed.lines() {
         let Some((verb, src, expected)) = parse_seed_line(line) else {
@@ -411,7 +411,7 @@ fn v2_gated_sources_reject_method_not_found() {
 #[test]
 fn v2_numeric_method_owner_is_snumerictype() {
     // v2: shared SNumericType container — byte-match the committed §21 seed records.
-    let seed = include_str!("../../test-vectors/ergoscript/typer/golden_seed.txt");
+    let seed = include_str!("../../../test-vectors/ergoscript/typer/golden_seed.txt");
     let mut checked = 0usize;
     for line in seed.lines() {
         let Some((verb, src, expected)) = parse_seed_line(line) else {
@@ -493,7 +493,7 @@ fn gap_check_edge_vectors() {
     // Refutes the cannonQ-harvest claim flagged CRITICAL in m2-gap.md check (d) —
     // oracle wraps the RESULT.
     let seed_expected = {
-        let seed = include_str!("../../test-vectors/ergoscript/typer/golden_seed.txt");
+        let seed = include_str!("../../../test-vectors/ergoscript/typer/golden_seed.txt");
         seed.lines()
             .filter_map(|l| parse_seed_line(l))
             .find(|(verb, src, exp)| {
@@ -528,7 +528,7 @@ fn seed_live_oracle_parity() {
     use std::io::{BufRead, BufReader, Write};
     use std::process::{Command, Stdio};
 
-    let seed = include_str!("../../test-vectors/ergoscript/typer/golden_seed.txt");
+    let seed = include_str!("../../../test-vectors/ergoscript/typer/golden_seed.txt");
     let oracle_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("scripts/jvm_typer_oracle");
