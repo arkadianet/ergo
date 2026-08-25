@@ -1190,12 +1190,14 @@ fn status_overlays_live_telemetry_values() {
     );
 
     // Before the first telemetry sample: live fields stay None so
-    // /metrics falls back to snapshot sources (review of #267).
+    // /metrics falls back to snapshot sources (review of #267), and
+    // info() keeps the snapshot uptime.
     let pre = read.status();
     assert_eq!(pre.rss_kb_live, None);
     assert_eq!(pre.uptime_seconds_live, None);
     assert_eq!(pre.apply_age_ms, None);
     assert!(!pre.apply_wedged);
+    assert_eq!(read.info().uptime_seconds, 9_999);
 
     // Simulate a wedged-apply sample from the telemetry thread.
     telemetry.store_sample(5_350_000, 7_800, Some(900_000), true);
@@ -1205,6 +1207,9 @@ fn status_overlays_live_telemetry_values() {
     assert_eq!(s.uptime_seconds_live, Some(7_800));
     assert_eq!(s.apply_age_ms, Some(900_000));
     assert!(s.apply_wedged);
+    // /api/v1/info overlays the live uptime once a sample exists
+    // (review of #267, second round).
+    assert_eq!(read.info().uptime_seconds, 7_800);
 }
 
 /// `votes()` projects the snapshot's active params into the votable-parameter

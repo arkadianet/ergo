@@ -294,7 +294,16 @@ impl NodeReadState for SnapshotReadState {
     }
 
     fn info(&self) -> ApiInfo {
-        self.handle.load().info.clone()
+        let mut info = self.handle.load().info.clone();
+        // Issue #266 review: `/api/v1/info` must not report starved
+        // uptime — overlay the live sample when one has landed, same
+        // guard as `status()`. The compat Scala-parity `/info`
+        // (`NodeChainQuery`) path is intentionally left on its own
+        // source.
+        if self.telemetry.has_sampled() {
+            info.uptime_seconds = self.telemetry.uptime_secs();
+        }
+        info
     }
 
     fn votes(&self) -> ergo_api::ApiVotes {

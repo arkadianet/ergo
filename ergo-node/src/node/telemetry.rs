@@ -80,9 +80,11 @@ impl LiveTelemetry {
 
     /// Whether at least one sample has landed. The API bridge gates the
     /// live overlays on this so pre-first-tick (or dead-thread) reads
-    /// fall back to snapshot values rather than zeros.
+    /// fall back to snapshot values rather than zeros. Acquire pairs
+    /// with the Release store in `store_sample`: observing `true`
+    /// guarantees the sampled field values are visible.
     pub fn has_sampled(&self) -> bool {
-        self.sampled.load(Ordering::Relaxed)
+        self.sampled.load(Ordering::Acquire)
     }
 
     /// Record one telemetry sample. Called by the spawned thread each
@@ -101,7 +103,10 @@ impl LiveTelemetry {
         self.apply_age_ms
             .store(apply_age_ms.unwrap_or(-1), Ordering::Relaxed);
         self.apply_wedged.store(apply_wedged, Ordering::Relaxed);
-        self.sampled.store(true, Ordering::Relaxed);
+        // Release: the payload stores above must be visible to any
+        // reader that observes `sampled == true` (Acquire in
+        // `has_sampled`) — message-passing, not just eventual visibility.
+        self.sampled.store(true, Ordering::Release);
     }
 }
 
