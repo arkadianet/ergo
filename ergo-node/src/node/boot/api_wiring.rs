@@ -89,12 +89,21 @@ pub(super) fn build_scaffold(
     // the auth-gated `POST /api/v1/votes` updates all three at once).
     let voting_targets_slot =
         std::sync::Arc::new(std::sync::RwLock::new(config.voting_targets.clone()));
+    // Starvation-free telemetry thread (issue #266): samples process RSS,
+    // uptime, and wall-clock apply age on a plain thread the action loop
+    // cannot starve, so /metrics stays truthful while a long synchronous
+    // apply has frozen the snapshot publisher.
+    let live_telemetry = crate::node::telemetry::spawn(
+        executor.apply_phase_metrics(),
+        std::time::Duration::from_secs(5),
+    );
     let read_state: Arc<dyn ergo_api::NodeReadState> = SnapshotReadState::new(
         snapshot_publisher.handle(),
         identity_slot.clone(),
         host_paths,
         voting_targets_slot.clone(),
         executor.apply_phase_metrics(),
+        live_telemetry,
     )
     .into_dyn();
     let submit_bridge: Arc<dyn ergo_api::NodeSubmit> =

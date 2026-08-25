@@ -16,6 +16,10 @@ pub struct ApplyPhaseMetrics {
     last_applied_height: AtomicU32,
     /// Unix ms of last finished attempt; `0` = never.
     last_finished_unix_ms: AtomicU64,
+    /// Unix ms when the CURRENTLY running apply began; `0` = idle. Read by
+    /// the starvation-free telemetry thread to compute wall-clock apply age
+    /// (issue #266) without touching the runtime.
+    current_started_unix_ms: AtomicU64,
 }
 
 /// RAII: sets `in_progress` for the duration of one `process_block` call.
@@ -29,6 +33,8 @@ pub struct ApplyPhaseGuard<'a> {
 impl ApplyPhaseMetrics {
     pub fn begin(&self) -> ApplyPhaseGuard<'_> {
         self.in_progress.store(true, Ordering::Release);
+        self.current_started_unix_ms
+            .store(unix_now_ms(), Ordering::Release);
         ApplyPhaseGuard {
             metrics: self,
             started: Instant::now(),
@@ -38,6 +44,11 @@ impl ApplyPhaseMetrics {
 
     pub fn in_progress(&self) -> bool {
         self.in_progress.load(Ordering::Acquire)
+    }
+
+    /// Unix ms when the currently running apply began (`0` = idle).
+    pub fn current_started_unix_ms(&self) -> u64 {
+        self.current_started_unix_ms.load(Ordering::Acquire)
     }
 
     pub fn last_duration_ms(&self) -> u64 {
@@ -83,6 +94,9 @@ impl ApplyPhaseGuard<'_> {
         if let Some(h) = height {
             self.metrics.last_applied_height.store(h, Ordering::Relaxed);
         }
+        self.metrics
+            .current_started_unix_ms
+            .store(0, Ordering::Release);
         self.metrics.in_progress.store(false, Ordering::Release);
     }
 }
@@ -139,5 +153,24 @@ mod tests {
         m.begin().success(10);
         m.begin().failure();
         assert_eq!(m.last_applied_height(), 10);
+    }
+
+    /// Issue #266: the wall-clock apply start must be observable by the
+    /// starvation-free telemetry thread — set on `begin`, reset to 0 on
+    /// both success and drop paths.
+    #[test]
+    fn current_started_unix_ms_tracks_apply_window() {
+        let m = ApplyPhaseMetrics::default();
+        assert_eq!(m.current_started_unix_ms(), 0);
+        let g = m.begin();
+        assert!(m.current_started_unix_ms() > 0);
+        g.success(1);
+        assert_eq!(m.current_started_unix_ms(), 0);
+
+        {
+            let _g = m.begin();
+            assert!(m.current_started_unix_ms() > 0);
+        }
+        assert_eq!(m.current_started_unix_ms(), 0);
     }
 }

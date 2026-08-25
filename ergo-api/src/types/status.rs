@@ -51,6 +51,30 @@ pub struct ApiStatus {
     /// Scala reference node). Present only when the mode is enabled.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub shadow: Option<ApiShadowStatus>,
+    /// Live RSS KiB sampled by the starvation-free telemetry thread
+    /// (issue #266). `None` when no sampler is wired; `/metrics` then
+    /// falls back to the snapshot-published value, which can go stale
+    /// while a long apply starves the runtime.
+    #[serde(default)]
+    pub rss_kb_live: Option<u64>,
+    /// Live process uptime seconds from the telemetry thread. `None`
+    /// when no sampler is wired; `/metrics` falls back to the snapshot
+    /// value for the same staleness reason.
+    #[serde(default)]
+    pub uptime_seconds_live: Option<u64>,
+    /// Wall-clock age of the CURRENTLY running full-block apply in ms.
+    /// `None` = idle at last telemetry sample. Unlike
+    /// `last_apply_age_ms` (finished attempts only), this advances even
+    /// when the apply has starved the runtime — it is computed from the
+    /// apply's start timestamp by a thread nothing can starve.
+    #[serde(default)]
+    pub apply_age_ms: Option<i64>,
+    /// Wall-clock wedge: the running apply has exceeded the telemetry
+    /// threshold (`telemetry::APPLY_WEDGED_THRESHOLD`). This is the
+    /// alarm that must fire while everything else is frozen — do not
+    /// confuse with `sync_wedged` (terminal deep-fork).
+    #[serde(default)]
+    pub apply_wedged: bool,
     /// Monotonic count of unconfirmed-tx ids this node REQUESTED from peers
     /// in response to a tx-typed `Inv` (the
     /// `ergo_node_mempool_tx_requested_total` Prometheus counter source).

@@ -454,6 +454,12 @@ ergo_node_last_reorg_age_ms {last_reorg_age_ms}
 # HELP ergo_node_apply_in_progress 1 while a full-block process_block is running on the action loop.
 # TYPE ergo_node_apply_in_progress gauge
 ergo_node_apply_in_progress {apply_in_progress}
+# HELP ergo_node_apply_age_ms Wall-clock age of the CURRENTLY running full-block apply in ms (-1 = idle). Sampled by the starvation-free telemetry thread, so it advances even when the apply has starved the runtime (issue #266).
+# TYPE ergo_node_apply_age_ms gauge
+ergo_node_apply_age_ms {apply_age_ms}
+# HELP ergo_node_apply_wedged 1 when the currently running full-block apply has exceeded the wall-clock wedge threshold — sampled by a thread nothing on the runtime can starve (issue #266). Not the terminal deep-fork wedge (ergo_node_sync_wedged).
+# TYPE ergo_node_apply_wedged gauge
+ergo_node_apply_wedged {apply_wedged}
 # HELP ergo_node_last_apply_duration_ms Wall ms of the last finished full-block apply attempt.
 # TYPE ergo_node_last_apply_duration_ms gauge
 ergo_node_last_apply_duration_ms {last_apply_duration_ms}
@@ -503,7 +509,9 @@ ergo_solutions_stale_parent_total {solutions_stale_parent}
 # TYPE ergo_rss_kb gauge
 ergo_rss_kb {rss_kb}
 ",
-        uptime = info.uptime_seconds,
+        uptime = status
+            .uptime_seconds_live
+            .unwrap_or(info.uptime_seconds),
         bh = status.best_header_height,
         bfb = status.best_full_block_height,
         gap = status.headers_ahead_of_full_blocks,
@@ -534,6 +542,8 @@ ergo_rss_kb {rss_kb}
                 .unwrap_or(-1)
         },
         apply_in_progress = if status.apply_in_progress { 1 } else { 0 },
+        apply_age_ms = status.apply_age_ms.unwrap_or(-1),
+        apply_wedged = if status.apply_wedged { 1 } else { 0 },
         last_apply_duration_ms = status.last_apply_duration_ms,
         last_applied_height = status.last_applied_height,
         last_apply_age_ms = status
@@ -552,7 +562,7 @@ ergo_rss_kb {rss_kb}
         solutions_accepted = g.solutions_accepted,
         solutions_invalid_pow = g.solutions_invalid_pow,
         solutions_stale_parent = g.solutions_stale_parent,
-        rss_kb = g.rss_kb,
+        rss_kb = status.rss_kb_live.unwrap_or(g.rss_kb),
     );
 
     // Shadow-validation series — emitted only when the mode is enabled, so

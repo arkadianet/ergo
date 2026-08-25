@@ -2346,11 +2346,29 @@ components:
       - mempool_size
       - snapshot_age_ms
       properties:
+        apply_age_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Wall-clock age of the CURRENTLY running full-block apply in ms.
+            `None` = idle at last telemetry sample. Unlike
+            `last_apply_age_ms` (finished attempts only), this advances even
+            when the apply has starved the runtime — it is computed from the
+            apply's start timestamp by a thread nothing can starve.
         apply_in_progress:
           type: boolean
           description: |-
             `1` while the action loop is inside full-block `process_block`
             (`ergo_node_apply_in_progress`). Live atomic — not snapshot-stale.
+        apply_wedged:
+          type: boolean
+          description: |-
+            Wall-clock wedge: the running apply has exceeded the telemetry
+            threshold (`telemetry::APPLY_WEDGED_THRESHOLD`). This is the
+            alarm that must fire while everything else is frozen — do not
+            confuse with `sync_wedged` (terminal deep-fork).
         best_full_block_height:
           type: integer
           format: int32
@@ -2475,6 +2493,17 @@ components:
             Session-total tip-replacement reorgs detected by the operator event
             differ (`ergo_node_reorg_total`).
           minimum: 0
+        rss_kb_live:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Live RSS KiB sampled by the starvation-free telemetry thread
+            (issue #266). `None` when no sampler is wired; `/metrics` then
+            falls back to the snapshot-published value, which can go stale
+            while a long apply starves the runtime.
+          minimum: 0
         shadow:
           oneOf:
           - type: 'null'
@@ -2498,6 +2527,16 @@ components:
               it and will not apply another block. A persistent `Some(_)` is an
               operator page — the only recovery is a resync (wipe the data dir
               and sync fresh). `None` in normal operation.
+        uptime_seconds_live:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Live process uptime seconds from the telemetry thread. `None`
+            when no sampler is wired; `/metrics` falls back to the snapshot
+            value for the same staleness reason.
+          minimum: 0
     ApiSubmitError:
       type: object
       description: |-

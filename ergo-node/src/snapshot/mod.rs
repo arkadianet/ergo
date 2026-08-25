@@ -230,6 +230,10 @@ impl NodeSnapshot {
                 last_apply_duration_ms: 0,
                 last_applied_height: 0,
                 last_apply_age_ms: None,
+                rss_kb_live: None,
+                uptime_seconds_live: None,
+                apply_age_ms: None,
+                apply_wedged: false,
             },
             tip: ApiTip {
                 best_header: header_ref,
