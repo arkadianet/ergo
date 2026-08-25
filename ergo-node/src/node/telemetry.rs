@@ -28,13 +28,31 @@ pub const APPLY_WEDGED_THRESHOLD: Duration = Duration::from_secs(600);
 
 /// Atomics overlaid onto `/metrics` by the API bridge. All readers are
 /// wait-free; the writer is the telemetry thread.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct LiveTelemetry {
     rss_kb: AtomicU64,
     uptime_secs: AtomicU64,
-    /// Age of the currently running apply; `-1` = idle.
+    /// Age of the currently running apply; `-1` = idle (also the
+    /// constructed state — a pre-first-tick read must not read as a
+    /// bogus 0 ms age).
     apply_age_ms: AtomicI64,
     apply_wedged: AtomicBool,
+    /// Set on the first `store_sample` — until then the bridge leaves
+    /// the live fields `None` so `/metrics` falls back to snapshot
+    /// sources instead of serving pre-sample zeros (review of #267).
+    sampled: AtomicBool,
+}
+
+impl Default for LiveTelemetry {
+    fn default() -> Self {
+        Self {
+            rss_kb: AtomicU64::new(0),
+            uptime_secs: AtomicU64::new(0),
+            apply_age_ms: AtomicI64::new(-1),
+            apply_wedged: AtomicBool::new(false),
+            sampled: AtomicBool::new(false),
+        }
+    }
 }
 
 impl LiveTelemetry {
@@ -60,9 +78,17 @@ impl LiveTelemetry {
         self.apply_wedged.load(Ordering::Relaxed)
     }
 
+    /// Whether at least one sample has landed. The API bridge gates the
+    /// live overlays on this so pre-first-tick (or dead-thread) reads
+    /// fall back to snapshot values rather than zeros.
+    pub fn has_sampled(&self) -> bool {
+        self.sampled.load(Ordering::Relaxed)
+    }
+
     /// Record one telemetry sample. Called by the spawned thread each
     /// tick; also the seam tests use to simulate samples without a
-    /// thread (`age_wedged = None` ⇒ idle).
+    /// thread (`age_wedged = None` ⇒ idle). Marks the telemetry as
+    /// sampled, enabling the bridge's live overlays.
     pub fn store_sample(
         &self,
         rss_kb: u64,
@@ -75,6 +101,7 @@ impl LiveTelemetry {
         self.apply_age_ms
             .store(apply_age_ms.unwrap_or(-1), Ordering::Relaxed);
         self.apply_wedged.store(apply_wedged, Ordering::Relaxed);
+        self.sampled.store(true, Ordering::Relaxed);
     }
 }
 
@@ -94,17 +121,12 @@ fn classify_apply(
 }
 
 fn read_rss_kb() -> u64 {
-    // /proc/self/statm field 1 = resident pages. Cheaper than smaps and
-    // sufficient for the gauge (smaps attribution lives in mem_smaps.rs).
-    match std::fs::read_to_string("/proc/self/statm") {
-        Ok(s) => s
-            .split_whitespace()
-            .nth(1)
-            .and_then(|p| p.parse::<u64>().ok())
-            .map(|pages| pages * 4096 / 1024)
-            .unwrap_or(0),
-        Err(_) => 0,
-    }
+    // Kernel-computed resident total from smaps_rollup — no page-size
+    // assumption (a statm-pages × 4096 conversion under-reports 4-16× on
+    // non-4K-page hosts). None ⇒ non-Linux; the documented 0 fallback.
+    crate::mem_smaps::read_smaps_rollup()
+        .map(|r| r.rss_kb)
+        .unwrap_or(0)
 }
 
 fn unix_now_ms() -> u64 {
@@ -215,14 +237,34 @@ mod tests {
     }
 
     #[test]
-    fn statm_reader_returns_nonzero_on_linux_or_zero_elsewhere() {
-        // Ground-truth smoke: on Linux this must read our own RSS; on
-        // other platforms the documented 0 fallback holds.
+    fn rss_reader_returns_nonzero_on_linux_or_zero_elsewhere() {
+        // Ground-truth smoke: on Linux smaps_rollup must yield our own
+        // RSS (kernel-computed, no page-size assumption); on other
+        // platforms the documented 0 fallback holds.
         let kb = read_rss_kb();
         if cfg!(target_os = "linux") {
-            assert!(kb > 0, "statm RSS should be positive on Linux, got {kb}");
+            assert!(kb > 0, "rollup RSS should be positive on Linux, got {kb}");
         } else {
             assert_eq!(kb, 0);
         }
+    }
+
+    /// Review of #267: until the first sample lands, `has_sampled` is
+    /// false so the bridge leaves the live fields None and `/metrics`
+    /// falls back to snapshot sources instead of serving zeros.
+    #[test]
+    fn has_sampled_gates_pre_first_tick_reads() {
+        let t = LiveTelemetry::default();
+        assert!(!t.has_sampled());
+        assert_eq!(t.rss_kb(), 0);
+        assert_eq!(t.uptime_secs(), 0);
+        assert_eq!(t.apply_age_ms(), None);
+
+        t.store_sample(1_234, 56, None, false);
+        assert!(t.has_sampled());
+        // Idle sample: age stays None (not a bogus 0).
+        assert_eq!(t.apply_age_ms(), None);
+        t.store_sample(2_345, 57, Some(42_000), false);
+        assert_eq!(t.apply_age_ms(), Some(42_000));
     }
 }

@@ -416,11 +416,15 @@ impl NodeReadState for SnapshotReadState {
         s.last_apply_age_ms = self.apply_phase.last_apply_age_ms();
         // Starvation-free telemetry (issue #266): RSS / uptime / running-
         // apply age sampled by a plain thread, so these stay truthful even
-        // while a long apply has starved the snapshot publisher.
-        s.rss_kb_live = Some(self.telemetry.rss_kb());
-        s.uptime_seconds_live = Some(self.telemetry.uptime_secs());
-        s.apply_age_ms = self.telemetry.apply_age_ms();
-        s.apply_wedged = self.telemetry.apply_wedged();
+        // while a long apply has starved the snapshot publisher. Gated on
+        // the first sample landing — before that the snapshot fallbacks
+        // win instead of serving pre-sample zeros (review of #267).
+        if self.telemetry.has_sampled() {
+            s.rss_kb_live = Some(self.telemetry.rss_kb());
+            s.uptime_seconds_live = Some(self.telemetry.uptime_secs());
+            s.apply_age_ms = self.telemetry.apply_age_ms();
+            s.apply_wedged = self.telemetry.apply_wedged();
+        }
         s
     }
 

@@ -1189,6 +1189,14 @@ fn status_overlays_live_telemetry_values() {
         telemetry.clone(),
     );
 
+    // Before the first telemetry sample: live fields stay None so
+    // /metrics falls back to snapshot sources (review of #267).
+    let pre = read.status();
+    assert_eq!(pre.rss_kb_live, None);
+    assert_eq!(pre.uptime_seconds_live, None);
+    assert_eq!(pre.apply_age_ms, None);
+    assert!(!pre.apply_wedged);
+
     // Simulate a wedged-apply sample from the telemetry thread.
     telemetry.store_sample(5_350_000, 7_800, Some(900_000), true);
 
