@@ -53,6 +53,37 @@ struct PackageMember {
     source: TxSource,
 }
 
+/// Compare `TxSource` by kind (and peer id for `Peer`), without requiring
+/// `PartialEq` on the enum (peers carry addresses).
+fn tx_source_same_kind(a: &TxSource, b: &TxSource) -> bool {
+    match (a, b) {
+        (TxSource::Peer(x), TxSource::Peer(y)) => x == y,
+        (TxSource::Api, TxSource::Api)
+        | (TxSource::Wallet, TxSource::Wallet)
+        | (TxSource::DemotedFromBlock, TxSource::DemotedFromBlock)
+        | (TxSource::RentCollector, TxSource::RentCollector) => true,
+        _ => false,
+    }
+}
+
+/// Result of [`Mempool::admit_family_atomic`].
+///
+/// Empty on ANY failure (the family is admitted all-or-nothing): an empty
+/// `tx_ids` means the live pool is untouched and nothing should reach the
+/// wire. On full success it carries the admitted ids (parent-first) and the
+/// pool's action transcript for the caller to route + flush — crucially the
+/// `BroadcastInv`(s) that announce the family, plus any `RevokeBroadcast`/
+/// `Observe` events the parent's commit produced (e.g. a double-spend loser
+/// it displaced). Those actions are withheld until the WHOLE family is in the
+/// pool, so peers never see a half-family.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FamilyAdmit {
+    /// Admitted tx ids, parent first then child (if any). Empty on failure.
+    pub tx_ids: Vec<TxId>,
+    /// Actions to route + flush — only populated on full success.
+    pub broadcast_actions: Vec<MempoolAction>,
+}
+
 /// Top-level mempool handle. Bundles all the sub-components so callers
 /// don't thread six pieces through every call site. Production wiring
 /// holds one `Mempool` on `NodeState` and drives it via the three
@@ -161,6 +192,68 @@ impl Mempool {
     /// not reach through the doc-hidden test pool accessor.
     pub fn iter_transactions(&self) -> impl Iterator<Item = &Entry> {
         self.pool.iter_prioritized()
+    }
+
+    /// Tx ids currently resident in the pool with the given source tag.
+    /// Used by the rent-collector survivor re-announce path to re-emit Inv
+    /// for still-pooled families without tracking a separate id list.
+    pub fn resident_txids_by_source(&self, source: &TxSource) -> Vec<TxId> {
+        self.iter_transactions()
+            .filter(|e| tx_source_same_kind(&e.source, source))
+            .map(|e| e.tx_id)
+            .collect()
+    }
+
+    /// Drop every pooled tx tagged `source` (and their descendants), emitting
+    /// `RevokeBroadcast` + `Evicted`. Used on the rent-collector tip path so
+    /// a CPFP-boosted prior-height family cannot block a fresh claim before
+    /// the full-pool recheck runs.
+    pub fn evict_by_source(&mut self, source: &TxSource) -> Vec<MempoolAction> {
+        let ids = self.resident_txids_by_source(source);
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        let bounds = crate::pool::FamilyBounds::new(
+            self.config.max_family_depth,
+            self.config.max_family_ops,
+            self.config.max_family_update_ms,
+        );
+        let max_depth = self.config.max_family_depth;
+        let mut removed_ids = Vec::new();
+        for id in ids {
+            if !self.pool.contains(&id) {
+                continue;
+            }
+            for e in self
+                .pool
+                .remove_with_descendants_debiting(&id, max_depth, bounds)
+            {
+                removed_ids.push(e.tx_id);
+            }
+        }
+        if removed_ids.is_empty() {
+            return Vec::new();
+        }
+        let actions = vec![
+            MempoolAction::RevokeBroadcast {
+                tx_ids: removed_ids.clone(),
+            },
+            MempoolAction::Observe {
+                event: ObservedEvent::Evicted {
+                    tx_ids: removed_ids,
+                    reason: EvictionReason::RentCollectorRefresh,
+                },
+            },
+        ];
+        emit_tracing_for_pool_actions(&actions, self.observer.as_deref(), self.tip);
+        actions
+    }
+
+    /// Origin tag of a pooled tx, if present. Used by Inv fanout to prefer
+    /// priority peers for `RentCollector` broadcasts without exposing the
+    /// raw pool.
+    pub fn source_of(&self, tx_id: &TxId) -> Option<&TxSource> {
+        self.pool.get(tx_id).map(|e| &e.source)
     }
 
     pub fn contains(&self, tx_id: &TxId) -> bool {
@@ -1878,9 +1971,627 @@ impl Mempool {
     pub fn weight_fn(&self) -> &dyn WeightFunction {
         &*self.weight_fn
     }
+
+    /// Admit a parent and (optionally) its CPFP child as ONE all-or-nothing
+    /// transaction over the pool, withholding every wire broadcast until the
+    /// whole family is in the pool.
+    ///
+    /// Atomicity is achieved by staging on a FULL `OrderedPool` clone (via
+    /// `clone_for_staging`): the parent admission can itself evict low-weight
+    /// entries or replace double-spend losers and rekey surviving ancestors'
+    /// #139 family weights during its commit, so a "remove the parent on child
+    /// failure" rollback is insufficient — it could not restore those victims
+    /// or reconstruct the ancestor weight credits/debits. Instead the parent
+    /// then the child are applied to the CLONE, and the clone is swapped in as
+    /// the live pool ONLY if both succeed. On ANY failure the clone is dropped,
+    /// the live pool is untouched, and nothing is emitted.
+    ///
+    /// No early broadcast: `admission::process` emits each tx's `BroadcastInv`
+    /// (and the parent's commit may emit `RevokeBroadcast`/`Observe` for a
+    /// displaced loser), but those land on the clone's transcript and are
+    /// returned in [`FamilyAdmit::broadcast_actions`] for the caller to route
+    /// then flush ONLY on full success — so peers never see a half-family. The
+    /// caller must flush them; unlike `admit_api_transaction` this method does
+    /// not touch the wire itself.
+    ///
+    /// `child_bytes == None` ⇒ single-tx atomic admit (parent-only shapes):
+    /// admit the parent, return its broadcast actions on success, drop the
+    /// clone on failure.
+    ///
+    /// Anti-DoS bookkeeping (cost budgets, invalidation / unresolved caches) is
+    /// mutated in place per mempool invariant #7 — a rejected family still
+    /// charges cost and records the failed id, exactly as a plain
+    /// `process`/`check` rejection would. Only the POOL is staged-and-swapped.
+    ///
+    /// Intended for peer-less local sources (`RentCollector`): on the failure
+    /// path a `Peer` source's `Penalize` actions would be silently dropped
+    /// (returned actions are surfaced only on full success), so this method is
+    /// not sound for a peer source — see the `debug_assert!` below.
+    pub fn admit_family_atomic<V: Validator>(
+        &mut self,
+        parent_bytes: &[u8],
+        child_bytes: Option<&[u8]>,
+        source: TxSource,
+        now: std::time::Instant,
+        tip_ctx: &admission::TipContext<'_>,
+        validator: &V,
+    ) -> FamilyAdmit {
+        debug_assert!(
+            !source.is_peer(),
+            "admit_family_atomic is for peer-less local sources (RentCollector); \
+             a Peer source would lose its Penalize on rollback"
+        );
+        // Disabled / digest mode: nothing admits. Mirror process/check's
+        // short-circuit (no pool clone, no emission).
+        if !self.config.enabled {
+            emit_tracing_for_admission(
+                &AdmissionOutcome::Rejected {
+                    reason: RejectReason::Disabled,
+                },
+                &[],
+                &source,
+                self.pool.len(),
+                self.pool.total_bytes(),
+                self.observer.as_deref(),
+                self.tip,
+            );
+            return FamilyAdmit::default();
+        }
+
+        // Stage on a full clone of the live pool. Anti-DoS state stays live
+        // (mutated by the staged admissions per invariant #7); only the pool
+        // is swapped in on success.
+        let mut staged = self.pool.clone_for_staging();
+        let mut tx_ids: Vec<TxId> = Vec::with_capacity(2);
+        let mut broadcast_actions: Vec<MempoolAction> = Vec::new();
+
+        // Deferred tracing: a parent that admits on the CLONE must NOT be
+        // traced until the commit decision — if the child later fails the
+        // family rolls back and the parent never lands, so an admit (and its
+        // bundled eviction/replacement/broadcast) traced at parent-admit time
+        // would be a phantom event for a tx that did not land. Buffer the
+        // parent's outcome + actions + the staged pool sizes captured right
+        // after its admit; emit them only after the swap. Child admits are
+        // buffered the same way (its sizes captured right after the child
+        // admit) to preserve the existing per-tx size semantics.
+        struct DeferredEmit {
+            outcome: AdmissionOutcome,
+            actions: Vec<MempoolAction>,
+            pool_size: usize,
+            pool_bytes: usize,
+        }
+
+        // ── Parent ───────────────────────────────────────────────────────
+        let (parent_outcome, parent_actions) = {
+            let mut cx = admission::AdmissionCtx {
+                tip_ctx,
+                config: &self.config,
+                pool: &mut staged,
+                budgets: &mut self.budgets,
+                invalidated: &mut self.invalidation,
+                unresolved: &mut self.unresolved,
+                weight_fn: &*self.weight_fn,
+            };
+            admission::process(parent_bytes, source.clone(), now, &mut cx, validator)
+        };
+        let deferred_parent = match parent_outcome {
+            AdmissionOutcome::Rejected { .. } => {
+                // A real rejection (no family forms) — trace it now and drop
+                // the clone: live pool untouched.
+                emit_tracing_for_admission(
+                    &parent_outcome,
+                    &parent_actions,
+                    &source,
+                    staged.len(),
+                    staged.total_bytes(),
+                    self.observer.as_deref(),
+                    self.tip,
+                );
+                return FamilyAdmit::default();
+            }
+            AdmissionOutcome::Admitted { tx_id, .. } => {
+                tx_ids.push(tx_id);
+                broadcast_actions.extend(parent_actions.iter().cloned());
+                // Defer the admit trace against the staged sizes as they
+                // stand right after the parent admit.
+                DeferredEmit {
+                    pool_size: staged.len(),
+                    pool_bytes: staged.total_bytes(),
+                    outcome: parent_outcome,
+                    actions: parent_actions,
+                }
+            }
+        };
+
+        // ── Child (optional) ──────────────────────────────────────────────
+        let mut deferred_child: Option<DeferredEmit> = None;
+        if let Some(child_bytes) = child_bytes {
+            let (child_outcome, child_actions) = {
+                let mut cx = admission::AdmissionCtx {
+                    tip_ctx,
+                    config: &self.config,
+                    pool: &mut staged,
+                    budgets: &mut self.budgets,
+                    invalidated: &mut self.invalidation,
+                    unresolved: &mut self.unresolved,
+                    weight_fn: &*self.weight_fn,
+                };
+                admission::process(child_bytes, source.clone(), now, &mut cx, validator)
+            };
+            match child_outcome {
+                AdmissionOutcome::Rejected { .. } => {
+                    // Half-family → rollback: trace the CHILD's rejection (real
+                    // — it explains why the family failed) but NOT the parent's
+                    // admit (phantom), then drop the clone. Live pool untouched.
+                    emit_tracing_for_admission(
+                        &child_outcome,
+                        &child_actions,
+                        &source,
+                        staged.len(),
+                        staged.total_bytes(),
+                        self.observer.as_deref(),
+                        self.tip,
+                    );
+                    return FamilyAdmit::default();
+                }
+                AdmissionOutcome::Admitted { tx_id, .. } => {
+                    tx_ids.push(tx_id);
+                    broadcast_actions.extend(child_actions.iter().cloned());
+                    deferred_child = Some(DeferredEmit {
+                        pool_size: staged.len(),
+                        pool_bytes: staged.total_bytes(),
+                        outcome: child_outcome,
+                        actions: child_actions,
+                    });
+                }
+            }
+        }
+
+        // ── Commit: whole family admitted — swap the clone in as the live
+        //    pool, THEN emit the buffered admit traces (parent first, then the
+        //    child) so operator logs + metrics fire only for txs that landed.
+        self.pool = staged;
+        emit_tracing_for_admission(
+            &deferred_parent.outcome,
+            &deferred_parent.actions,
+            &source,
+            deferred_parent.pool_size,
+            deferred_parent.pool_bytes,
+            self.observer.as_deref(),
+            self.tip,
+        );
+        if let Some(child) = deferred_child {
+            emit_tracing_for_admission(
+                &child.outcome,
+                &child.actions,
+                &source,
+                child.pool_size,
+                child.pool_bytes,
+                self.observer.as_deref(),
+                self.tip,
+            );
+        }
+        FamilyAdmit {
+            tx_ids,
+            broadcast_actions,
+        }
+    }
 }
 
 #[cfg(test)]
 mod recheck_tests;
 #[cfg(test)]
 mod staging_tests;
+
+#[cfg(test)]
+mod family_admit_tests {
+    //! Unit tests for `Mempool::admit_family_atomic` (Phase 0.5).
+    //!
+    //! Pin the all-or-nothing contract: a half-family must NOT leak to the
+    //! wire, and a child failure must roll the WHOLE pool back — including any
+    //! entry the parent admission evicted — with zero `Inv`/`RevokeBroadcast`
+    //! side effects. A policy surface, so expected behavior is derived from the
+    //! admission/eviction semantics, not from mainnet bytes.
+
+    use super::*;
+    use crate::admission::{MockPlan, MockValidator, Validated};
+    use crate::pool::Entry;
+    use crate::weight::ByCost;
+    use ergo_primitives::digest::Digest32;
+    use ergo_ser::ergo_box::ErgoBox;
+    use ergo_validation::{ProtocolParams, TransactionContext, UtxoView};
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    fn d(b: u8) -> Digest32 {
+        Digest32::from_bytes([b; 32])
+    }
+
+    /// Empty committed UTXO view — the mock validator does not consult it (it
+    /// returns canned `Validated`s), so admission's input resolution is driven
+    /// entirely by the planned `input_box_ids` + the pool overlay.
+    struct EmptyUtxo;
+    impl UtxoView for EmptyUtxo {
+        fn get_box(&self, _: &Digest32) -> Option<ErgoBox> {
+            None
+        }
+    }
+
+    fn dummy_tx_context(height: u32) -> TransactionContext {
+        TransactionContext {
+            height,
+            miner_pubkey: [0u8; 33],
+            pre_header_timestamp: 0,
+            activated_script_version: 2,
+            pre_header_version: 3,
+            pre_header_parent_id: [0u8; 32],
+            pre_header_n_bits: 0,
+            pre_header_votes: [0u8; 3],
+        }
+    }
+
+    struct TestTip {
+        tx_context: TransactionContext,
+        params: ProtocolParams,
+    }
+    impl TestTip {
+        fn new() -> Self {
+            Self {
+                tx_context: dummy_tx_context(1000),
+                params: ProtocolParams::mainnet_default(),
+            }
+        }
+        fn view<'a>(&'a self, utxo: &'a dyn UtxoView) -> admission::TipContext<'a> {
+            admission::TipContext {
+                tip: TipPointer {
+                    height: 1000,
+                    header_id: d(0xFF),
+                },
+                best_header_height: 1000,
+                best_full_block_height: 1000,
+                utxo,
+                tx_context: &self.tx_context,
+                params: &self.params,
+                last_headers: &[],
+                reemission: None,
+            }
+        }
+    }
+
+    fn mempool_with(cfg: MempoolConfig) -> Mempool {
+        Mempool::new(cfg, Box::new(ByCost))
+    }
+
+    /// A `MockPlan` that admits `bytes` as tx `tx_id` spending `input` and
+    /// creating `output`, with `fee` (>= min-relay so it clears the gate).
+    fn ok_plan(
+        tx_id: Digest32,
+        input: Digest32,
+        output: Digest32,
+        fee: u64,
+        size: u32,
+    ) -> MockPlan {
+        MockPlan {
+            result: Ok(Validated {
+                tx_id,
+                input_box_ids: vec![input],
+                output_box_ids: vec![output],
+                outputs: vec![],
+                fee,
+                size_bytes: size,
+                consumed_cost: 10_000,
+            }),
+            charge: 10_000,
+            peek_fee: None,
+            peek_tx_id: None,
+        }
+    }
+
+    /// Seed a standalone pool entry directly (bypassing admission) so a test
+    /// can stage a pre-existing victim the parent admission will displace.
+    fn seed(mp: &mut Mempool, tx_id: Digest32, input: Digest32, output: Digest32, weight: u64) {
+        let entry = Entry::new(
+            tx_id,
+            Arc::from(vec![tx_id.as_bytes()[0]; 20].into_boxed_slice()),
+            vec![input],
+            vec![output],
+            vec![],
+            1_000_000,
+            weight,
+            20,
+            10_000,
+            TxSource::Api,
+        );
+        mp.pool_mut().insert(entry).unwrap();
+    }
+
+    fn broadcast_invs(actions: &[MempoolAction]) -> Vec<TxId> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                MempoolAction::BroadcastInv { tx_id, .. } => Some(*tx_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Full success: parent + child both admit, the pool ends up with both,
+    /// and the returned `broadcast_actions` carry BOTH `BroadcastInv`s (so the
+    /// caller advertises the whole family at once). `tx_ids` is parent-first.
+    #[test]
+    fn family_admit_broadcasts_only_on_full_success() {
+        let utxo = EmptyUtxo;
+        let tt = TestTip::new();
+        let mut mp = mempool_with(MempoolConfig::default());
+
+        let parent = b"parent_tx".to_vec();
+        let child = b"child_tx".to_vec();
+        // Child spends the parent's output (id 0xB0) — a real CPFP edge.
+        let v = MockValidator::new()
+            .plan(
+                parent.clone(),
+                ok_plan(d(1), d(0xA0), d(0xB0), 1_000_000, 9),
+            )
+            .plan(child.clone(), ok_plan(d(2), d(0xB0), d(0xC0), 5_000_000, 8));
+
+        let tip = tt.view(&utxo);
+        let out = mp.admit_family_atomic(
+            &parent,
+            Some(&child),
+            TxSource::RentCollector,
+            Instant::now(),
+            &tip,
+            &v,
+        );
+
+        assert_eq!(out.tx_ids, vec![d(1), d(2)], "parent-first id order");
+        assert!(mp.contains(&d(1)), "parent must be in the pool");
+        assert!(mp.contains(&d(2)), "child must be in the pool");
+        let invs = broadcast_invs(&out.broadcast_actions);
+        assert!(
+            invs.contains(&d(1)) && invs.contains(&d(2)),
+            "both family members must be advertised on full success, got {invs:?}",
+        );
+        mp.pool().check_invariants();
+    }
+
+    #[test]
+    fn resident_txids_by_source_returns_rent_collector_ids_only() {
+        let utxo = EmptyUtxo;
+        let tt = TestTip::new();
+        let mut mp = mempool_with(MempoolConfig::default());
+        let parent = b"parent_tx".to_vec();
+        let child = b"child_tx".to_vec();
+        let v = MockValidator::new()
+            .plan(
+                parent.clone(),
+                ok_plan(d(1), d(0xA0), d(0xB0), 1_000_000, 9),
+            )
+            .plan(child.clone(), ok_plan(d(2), d(0xB0), d(0xC0), 5_000_000, 8));
+        let tip = tt.view(&utxo);
+        let _ = mp.admit_family_atomic(
+            &parent,
+            Some(&child),
+            TxSource::RentCollector,
+            Instant::now(),
+            &tip,
+            &v,
+        );
+        // Seed a non-rent entry that must not appear in the scan.
+        seed(&mut mp, d(99), d(0xD0), d(0xE0), 50);
+
+        let ids = mp.resident_txids_by_source(&TxSource::RentCollector);
+        assert_eq!(ids.len(), 2, "parent + child");
+        assert!(ids.contains(&d(1)) && ids.contains(&d(2)));
+        assert!(!ids.contains(&d(99)));
+    }
+
+    #[test]
+    fn evict_by_source_removes_rent_collector_family_and_emits_revoke() {
+        let utxo = EmptyUtxo;
+        let tt = TestTip::new();
+        let mut mp = mempool_with(MempoolConfig::default());
+        let parent = b"parent_tx".to_vec();
+        let child = b"child_tx".to_vec();
+        let v = MockValidator::new()
+            .plan(
+                parent.clone(),
+                ok_plan(d(1), d(0xA0), d(0xB0), 1_000_000, 9),
+            )
+            .plan(child.clone(), ok_plan(d(2), d(0xB0), d(0xC0), 5_000_000, 8));
+        let tip = tt.view(&utxo);
+        let _ = mp.admit_family_atomic(
+            &parent,
+            Some(&child),
+            TxSource::RentCollector,
+            Instant::now(),
+            &tip,
+            &v,
+        );
+        seed(&mut mp, d(99), d(0xD0), d(0xE0), 50);
+
+        let actions = mp.evict_by_source(&TxSource::RentCollector);
+        assert!(!mp.contains(&d(1)) && !mp.contains(&d(2)));
+        assert!(mp.contains(&d(99)), "non-RC entries must survive");
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                MempoolAction::RevokeBroadcast { tx_ids }
+                    if tx_ids.contains(&d(1)) && tx_ids.contains(&d(2))
+            )),
+            "must revoke the RC family: {actions:?}"
+        );
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                MempoolAction::Observe {
+                    event: ObservedEvent::Evicted {
+                        reason: EvictionReason::RentCollectorRefresh,
+                        ..
+                    }
+                }
+            )),
+            "must observe RentCollectorRefresh: {actions:?}"
+        );
+    }
+
+    /// Child failure restores the WHOLE pool — including an entry the parent
+    /// admission evicted (here a double-spend loser the parent replaced) — and
+    /// emits NOTHING (no `BroadcastInv`, no `RevokeBroadcast`). Proves the
+    /// stage-on-clone rollback restores victims a "remove the parent" rollback
+    /// could not.
+    #[test]
+    fn child_fail_restores_pool_and_emits_nothing() {
+        let utxo = EmptyUtxo;
+        let tt = TestTip::new();
+        let mut mp = mempool_with(MempoolConfig::default());
+
+        // Pre-existing low-weight victim spending box 0xA0.
+        seed(&mut mp, d(10), d(0xA0), d(0xF0), 100);
+        assert!(mp.contains(&d(10)));
+        let rev_before = mp.revision();
+
+        let parent = b"parent_tx".to_vec();
+        let child = b"child_tx".to_vec();
+        // Parent is a heavier double-spend of box 0xA0 → it REPLACES victim d(10)
+        // during commit (evicts it + emits RevokeBroadcast on the clone).
+        // Child then FAILS validation (unconfigured bytes → Deserialize).
+        let v = MockValidator::new().plan(
+            parent.clone(),
+            ok_plan(d(1), d(0xA0), d(0xB0), 50_000_000, 9),
+        );
+        // `child` intentionally has NO plan ⇒ the mock rejects it.
+
+        let tip = tt.view(&utxo);
+        let out = mp.admit_family_atomic(
+            &parent,
+            Some(&child),
+            TxSource::RentCollector,
+            Instant::now(),
+            &tip,
+            &v,
+        );
+
+        assert!(out.tx_ids.is_empty(), "no ids on a failed family");
+        assert!(
+            out.broadcast_actions.is_empty(),
+            "a failed family must emit no actions, got {:?}",
+            out.broadcast_actions,
+        );
+        // The evicted victim is BACK and the parent never landed.
+        assert!(
+            mp.contains(&d(10)),
+            "the parent-evicted victim must be restored on child failure",
+        );
+        assert!(
+            !mp.contains(&d(1)),
+            "the parent must not leak into the pool"
+        );
+        assert_eq!(
+            mp.revision(),
+            rev_before,
+            "live pool revision must be unchanged (clone dropped)",
+        );
+        assert_eq!(mp.size(), 1, "only the restored victim remains");
+        mp.pool().check_invariants();
+    }
+
+    /// Positive control for `child_fail_restores_pool_and_emits_nothing`: the
+    /// SAME heavier double-spend parent, admitted ALONE (child = None), really
+    /// does evict the seeded victim and emit its `RevokeBroadcast`. This proves
+    /// the parent admission in the child-fail test had a genuine eviction to
+    /// roll back, not a no-op.
+    #[test]
+    fn parent_double_spend_evicts_victim_when_admitted_alone() {
+        let utxo = EmptyUtxo;
+        let tt = TestTip::new();
+        let mut mp = mempool_with(MempoolConfig::default());
+        seed(&mut mp, d(10), d(0xA0), d(0xF0), 100);
+
+        let parent = b"parent_tx".to_vec();
+        let v = MockValidator::new().plan(
+            parent.clone(),
+            ok_plan(d(1), d(0xA0), d(0xB0), 50_000_000, 9),
+        );
+        let tip = tt.view(&utxo);
+        let out = mp.admit_family_atomic(
+            &parent,
+            None,
+            TxSource::RentCollector,
+            Instant::now(),
+            &tip,
+            &v,
+        );
+
+        assert_eq!(out.tx_ids, vec![d(1)]);
+        assert!(
+            !mp.contains(&d(10)),
+            "victim must be evicted by the replacement"
+        );
+        assert!(mp.contains(&d(1)));
+        assert!(
+            out.broadcast_actions.iter().any(|a| matches!(
+                a,
+                MempoolAction::RevokeBroadcast { tx_ids } if tx_ids.contains(&d(10))
+            )),
+            "the evicted victim's RevokeBroadcast must be returned on success",
+        );
+        mp.pool().check_invariants();
+    }
+
+    /// `child_bytes == None` ⇒ single-tx atomic admit: the parent admits, its
+    /// broadcast action is returned, and `tx_ids` carries only the parent.
+    #[test]
+    fn parent_only_admit_when_child_none() {
+        let utxo = EmptyUtxo;
+        let tt = TestTip::new();
+        let mut mp = mempool_with(MempoolConfig::default());
+
+        let parent = b"parent_tx".to_vec();
+        let v = MockValidator::new().plan(
+            parent.clone(),
+            ok_plan(d(1), d(0xA0), d(0xB0), 2_000_000, 9),
+        );
+
+        let tip = tt.view(&utxo);
+        let out = mp.admit_family_atomic(
+            &parent,
+            None,
+            TxSource::RentCollector,
+            Instant::now(),
+            &tip,
+            &v,
+        );
+
+        assert_eq!(out.tx_ids, vec![d(1)], "only the parent id");
+        assert!(mp.contains(&d(1)));
+        assert_eq!(broadcast_invs(&out.broadcast_actions), vec![d(1)]);
+        mp.pool().check_invariants();
+    }
+
+    /// Parent failure (lone or family): nothing admits, nothing emitted, pool
+    /// untouched. The single-tx None path's failure arm.
+    #[test]
+    fn parent_fail_admits_nothing() {
+        let utxo = EmptyUtxo;
+        let tt = TestTip::new();
+        let mut mp = mempool_with(MempoolConfig::default());
+        let rev_before = mp.revision();
+
+        // Unconfigured parent bytes ⇒ the mock rejects.
+        let v = MockValidator::new();
+        let tip = tt.view(&utxo);
+        let out = mp.admit_family_atomic(
+            b"unplanned",
+            Some(b"child"),
+            TxSource::RentCollector,
+            Instant::now(),
+            &tip,
+            &v,
+        );
+        assert!(out.tx_ids.is_empty());
+        assert!(out.broadcast_actions.is_empty());
+        assert_eq!(mp.size(), 0);
+        assert_eq!(mp.revision(), rev_before);
+    }
+}

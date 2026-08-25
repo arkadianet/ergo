@@ -99,6 +99,12 @@ pub struct ApiStatus {
     /// (`ergo_node_last_apply_age_ms`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_apply_age_ms: Option<u64>,
+    /// Monotonic count of successful storage-rent-collector broadcasts since
+    /// node start (the `ergo_node_rent_collector_broadcasts_total` Prometheus
+    /// counter source). Session-scoped — resets on restart, which `rate()`
+    /// handles. `0` when the collector is disabled or has never broadcast.
+    #[serde(default)]
+    pub rent_collector_broadcasts_total: u64,
 }
 
 /// A block this node rejected during apply, surfaced to operators. Distinct

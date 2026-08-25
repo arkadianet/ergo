@@ -502,6 +502,9 @@ ergo_solutions_stale_parent_total {solutions_stale_parent}
 # HELP ergo_rss_kb Resident set size, KiB (Linux; 0 elsewhere).
 # TYPE ergo_rss_kb gauge
 ergo_rss_kb {rss_kb}
+# HELP ergo_node_rent_collector_broadcasts_total Successful storage-rent-collector broadcasts since node start.
+# TYPE ergo_node_rent_collector_broadcasts_total counter
+ergo_node_rent_collector_broadcasts_total {rent_broadcasts}
 ",
         uptime = info.uptime_seconds,
         bh = status.best_header_height,
@@ -553,6 +556,7 @@ ergo_rss_kb {rss_kb}
         solutions_invalid_pow = g.solutions_invalid_pow,
         solutions_stale_parent = g.solutions_stale_parent,
         rss_kb = g.rss_kb,
+        rent_broadcasts = status.rent_collector_broadcasts_total,
     );
 
     // Shadow-validation series — emitted only when the mode is enabled, so

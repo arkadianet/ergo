@@ -9,6 +9,7 @@
 
 use std::time::{Duration, Instant};
 
+use ergo_mempool::types::TxSource;
 use ergo_mempool::ErgoValidator;
 use ergo_state::{ChainStateRead, HeaderSectionStore};
 use tokio::sync::{mpsc, oneshot};
@@ -127,6 +128,34 @@ pub(super) async fn action_loop(
         mining_last_recovery = Some(Instant::now());
     }
 
+    // Prime the mempool notifier so the FIRST committed-tip change after start
+    // EMITS rather than Initializes. The biased select can apply a block via
+    // `sync_tick`/event ingest on the very first iteration, before any
+    // `mempool_tick` has initialized the notifier; without priming, that first
+    // applied tip would poll as `Initialized` (tip_changed = false) and the
+    // on-apply collector trigger below would silently skip it. Mempool implies
+    // UTXO mode (digest gates the subsystem off), matching `handle_mempool_tick`.
+    if state.mempool.config().enabled {
+        let _ = state.mempool_notifier.poll(
+            state
+                .store
+                .as_utxo()
+                .expect("utxo-only: mempool subsystem is gated off in digest mode"),
+        );
+    }
+
+    // Committed full-block tip id, tracked across iterations so the post-arm
+    // block can fire the storage-rent collector the instant a block is applied
+    // — see the event-driven trigger after the mining-signal block below. The
+    // full-block id changes on a new block AND on an equal-height reorg, so it
+    // is the right "a block was applied" signal. `chain_state_meta` is an
+    // in-memory projection (no DB read) available on the backend in both UTXO
+    // and digest modes.
+    let mut last_committed_tip = state.store.chain_state_meta().best_full_block_id;
+    // Header tip id for speculative RC: build/cache when header advances one
+    // ahead of full; discard on flip. Same in-memory meta projection.
+    let mut last_header_tip = state.store.chain_state_meta().best_header_id;
+
     loop {
         tokio::select! {
             biased;
@@ -199,7 +228,8 @@ pub(super) async fn action_loop(
             // invariant #7.
             Some(req) = submit_rx.recv() => {
                 let now = Instant::now();
-                let result = admit_api_transaction(&mut state, &req.bytes, req.mode, now);
+                let result =
+                    admit_api_transaction(&mut state, &req.bytes, req.mode, TxSource::Api, now);
                 let _ = req.reply.send(result);
             }
             // Mining requests (candidate fetch / solution submit).
@@ -288,6 +318,30 @@ pub(super) async fn action_loop(
                     // Startup is only used at the prime call above, never here.
                     BuildReason::Startup => {}
                 }
+            }
+        }
+
+        // Speculative RC + event-driven tip-apply collect. Gated on collector
+        // enabled (same as before) so we skip the meta projection when off.
+        if state.rent_collector.is_some() {
+            let cs = state.store.chain_state_meta();
+
+            // Header advanced: speculate when exactly one ahead of full;
+            // otherwise discard (IBD multi-ahead / equal-height flip).
+            if cs.best_header_id != last_header_tip {
+                last_header_tip = cs.best_header_id;
+                if cs.best_header_height == cs.best_full_block_height.saturating_add(1) {
+                    super::rent_collector::speculate_on_new_header(&mut state);
+                } else if cs.best_header_id != cs.best_full_block_id {
+                    super::rent_collector::discard_speculative_cache(&mut state, "header_tip_flip");
+                }
+            }
+
+            // Full tip applied: note timing, then run mempool tick (collect).
+            if cs.best_full_block_id != last_committed_tip {
+                last_committed_tip = cs.best_full_block_id;
+                super::rent_collector::note_tip_apply(&mut state, cs.best_full_block_height);
+                handle_mempool_tick(&mut state, mining.as_ref().map(|w| &w.handle));
             }
         }
     }
@@ -417,6 +471,14 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
         return;
     }
 
+    // Survivor re-announce for still-pooled RentCollector families.
+    // Between blocks only — on a tip-change tick the prior-height family is
+    // about to be evicted by recheck, so re-Inv'ing it would advertise txs
+    // a peer cannot fetch after eviction. Spec: "Between blocks, every ~25s".
+    if !tip_changed {
+        super::rent_collector::maybe_reannounce_rent_families(state);
+    }
+
     // Always drain the off-loop builder's suspect slot so it never goes stale.
     // On a TIP CHANGE we discard it: Component A's full `recheck_and_evict`
     // re-validates the WHOLE pool (the suspect set is a subset), so a separate
@@ -434,7 +496,12 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
     let need_recheck = tip_changed && state.mempool.size() > 0;
     let need_suspects = !tip_changed && !suspects.is_empty();
     let need_drain = state.mempool.revalidation_pending() > 0;
-    if !(need_recheck || need_suspects || need_drain) {
+    // The storage-rent collector runs on every tip change when enabled. It
+    // must be in the early-return predicate so an EMPTY pool (where
+    // `need_recheck` is false) still builds the tip context and reaches the
+    // collector below.
+    let need_collect = tip_changed && state.rent_collector.is_some();
+    if !maintenance_needed(need_recheck, need_suspects, need_drain, need_collect) {
         return;
     }
 
@@ -442,6 +509,24 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
         return;
     };
     let now = Instant::now();
+
+    // Tip-path first-occupancy: clear OUR stale RentCollector family, then
+    // collect + Inv BEFORE the full-pool recheck. Preserves the invariant
+    // that a CPFP-boosted prior-height family cannot block a fresh claim
+    // via strict-`>` replacement, without waiting on full recheck latency.
+    if need_collect {
+        let tip_h = state.store.chain_state_meta().best_full_block_height;
+        if state.rent_fo.tip_apply_at.is_none() {
+            super::rent_collector::note_tip_apply(state, tip_h);
+        }
+        let evict_actions = state.mempool.evict_by_source(&TxSource::RentCollector);
+        if !evict_actions.is_empty() {
+            let routed = route_mempool_actions(state, evict_actions);
+            flush_actions(state, routed);
+        }
+        super::rent_collector::collect_and_broadcast(state, &owned);
+    }
+
     let actions = {
         let tip_ctx = owned.as_mempool_ctx(
             state
@@ -450,7 +535,7 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
                 .expect("utxo-only: mempool subsystem is gated off in digest mode"),
         );
         let mut actions = Vec::new();
-        // A or B first (clean the existing pool)...
+        // A or B after collect so first-occupancy Inv already left.
         if need_recheck {
             // Component A: full-pool recheck-and-evict — the Scala
             // `MempoolAuditor`/`CleanupWorker` end-result via a per-block full
@@ -488,6 +573,22 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
         let routed = route_mempool_actions(state, actions);
         flush_actions(state, routed);
     }
+}
+
+/// Whether `handle_mempool_tick` must build the tip context and run a
+/// maintenance pass this tick, vs early-return. Any one of the four needs
+/// is sufficient. Factored out (and unit-tested) so the storage-rent
+/// `need_collect` term can't silently be dropped from the predicate — that
+/// regression would make the collector skip an EMPTY-mempool tip change
+/// (where `need_recheck` is false), the exact bug the early-return fix
+/// guards against.
+fn maintenance_needed(
+    need_recheck: bool,
+    need_suspects: bool,
+    need_drain: bool,
+    need_collect: bool,
+) -> bool {
+    need_recheck || need_suspects || need_drain || need_collect
 }
 
 /// Reconcile the mempool when a tip-change diff could not be computed.
@@ -613,6 +714,60 @@ mod tests {
             mempool.size(),
             0,
             "active pool emptied — no stale/confirmed tx is served or relayed",
+        );
+    }
+
+    /// Guards the early-return fix: on a tip change with the rent collector
+    /// enabled, the maintenance predicate must pass EVEN WITH AN EMPTY POOL
+    /// (where `need_recheck` / `need_suspects` are false and the queue is
+    /// empty), so the collector is reached. Without `need_collect` in the
+    /// predicate this returns false and the collector never runs.
+    #[test]
+    fn empty_mempool_still_collects() {
+        // Empty pool on a tip change with the collector on: only need_collect
+        // is set, yet maintenance must run.
+        assert!(
+            maintenance_needed(
+                /* need_recheck */ false, /* need_suspects */ false,
+                /* need_drain */ false, /* need_collect */ true,
+            ),
+            "an enabled collector on an empty-pool tip change must not be skipped",
+        );
+        // Sanity: with the collector off and no other work, the tick
+        // early-returns (the pre-fix behavior for an empty pool).
+        assert!(
+            !maintenance_needed(false, false, false, false),
+            "no work + collector off ⇒ early return",
+        );
+        // Each other need independently triggers a pass.
+        assert!(maintenance_needed(true, false, false, false));
+        assert!(maintenance_needed(false, true, false, false));
+        assert!(maintenance_needed(false, false, true, false));
+    }
+
+    /// The collector is gated by the caller's fully-synced check: on a fresh
+    /// (best_full_block_height == 0) store the `!fully_synced` early-return in
+    /// `handle_mempool_tick` fires BEFORE the collector, so even with the
+    /// collector enabled nothing is admitted while not fully synced.
+    #[test]
+    fn not_fully_synced_broadcasts_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_state(&tmp.path().join("s.redb"));
+        // Enable the collector so only the sync gate could stop it.
+        state.rent_collector = Some(ergo_mining::config::RentCollectorConfig {
+            enabled: true,
+            ..ergo_mining::config::RentCollectorConfig::default()
+        });
+        state.rent_proceeds_key = ergo_mining::handle::RewardKeySource::Wallet;
+
+        // Fresh store ⇒ best_full_block_height == 0 ⇒ not fully synced ⇒
+        // handle_mempool_tick returns before the collector.
+        handle_mempool_tick(&mut state, None);
+
+        assert_eq!(
+            state.mempool.size(),
+            0,
+            "not fully synced ⇒ the collector never runs",
         );
     }
 }

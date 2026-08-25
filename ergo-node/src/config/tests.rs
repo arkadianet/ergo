@@ -1339,6 +1339,127 @@ fn claim_storage_rent_with_indexer_loads() {
     assert!(cfg.indexer_config.enabled);
 }
 
+// ----- [mining.rent_collector] cross-section gate -----
+
+#[test]
+fn rent_collector_without_indexer_rejected() {
+    // The collector enumerates eligible rent boxes only from the extra-index,
+    // so enabling it with the indexer off would silently collect nothing —
+    // config-load rejects the combo. A pinned pubkey is set so the
+    // proceeds-key half of the gate is satisfied and the indexer half is the
+    // one that fires. Utxo Mode 1 (defaults) so the digest gates do not
+    // pre-empt.
+    let path = write_toml(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [mining]\nminer_public_key_hex = \"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\"\n\
+         [mining.rent_collector]\nenabled = true\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let err = NodeConfig::load(cli).expect_err("rent_collector without indexer must reject");
+    assert!(err.contains("rent_collector"), "must name the field: {err}");
+    assert!(
+        err.contains("[indexer]"),
+        "must point at the indexer: {err}"
+    );
+}
+
+#[test]
+fn rent_collector_without_resolvable_proceeds_key_rejected() {
+    // The collector pays net rent to a proceeds key resolved from the SAME
+    // source as the miner reward: a pinned `miner_public_key_hex` if set, else
+    // the wallet's EIP-3 key. With NO pubkey AND the API disabled (so no wallet
+    // exists at runtime), there is no resolvable key — reject. Indexer enabled
+    // so the indexer half of the gate is satisfied and the proceeds-key half is
+    // the one that fires.
+    let path = write_toml(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [api]\ndisabled = true\n\
+         [indexer]\nenabled = true\n\
+         [mining.rent_collector]\nenabled = true\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let err = NodeConfig::load(cli)
+        .expect_err("rent_collector without a resolvable proceeds key must reject");
+    assert!(err.contains("rent_collector"), "must name the field: {err}");
+    assert!(
+        err.contains("proceeds key"),
+        "must explain the missing proceeds key: {err}"
+    );
+}
+
+#[test]
+fn rent_collector_with_pinned_pubkey_no_wallet_loads() {
+    // Pinned pubkey resolves the proceeds key statically, so the collector
+    // loads even with the API (and thus the wallet) disabled — the collector is
+    // decoupled from `[mining].enabled` and from the wallet.
+    let path = write_toml(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [api]\ndisabled = true\n\
+         [indexer]\nenabled = true\n\
+         [mining]\nminer_public_key_hex = \"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\"\n\
+         [mining.rent_collector]\nenabled = true\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let cfg = NodeConfig::load(cli)
+        .expect("rent_collector + indexer + pinned pubkey (no wallet) must load");
+    assert!(cfg.mining_config.rent_collector.enabled);
+    assert!(cfg.indexer_config.enabled);
+    // Mining itself stays OFF — the collector runs decoupled from it.
+    assert!(!cfg.mining_config.enabled);
+}
+
+#[test]
+fn rent_collector_with_wallet_no_pubkey_loads() {
+    // No pinned pubkey, but the API is enabled (the default), so a wallet
+    // exists at runtime to resolve the EIP-3 proceeds key — loads.
+    let path = write_toml(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [indexer]\nenabled = true\n\
+         [mining.rent_collector]\nenabled = true\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let cfg = NodeConfig::load(cli)
+        .expect("rent_collector + indexer + wallet (API enabled, no pubkey) must load");
+    assert!(cfg.mining_config.rent_collector.enabled);
+    assert!(cfg.indexer_config.enabled);
+    assert!(cfg.mining_config.miner_public_key_hex.is_none());
+}
+
+#[test]
+fn rent_collector_toml_round_trips_min_profit() {
+    // The full TOML surface reaches the resolved config: enabled, the safety
+    // cap, and `min_profit_nanoerg` all plumb end to end.
+    let path = write_toml(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [indexer]\nenabled = true\n\
+         [mining.rent_collector]\nenabled = true\nmax_claims = 256\nmin_profit_nanoerg = 7000000\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let cfg = NodeConfig::load(cli).expect("rent_collector TOML must load");
+    let rc = &cfg.mining_config.rent_collector;
+    assert!(rc.enabled);
+    assert_eq!(rc.max_claims, 256);
+    assert_eq!(rc.min_profit_nanoerg, 7_000_000);
+}
+
+#[test]
+fn rent_collector_observed_competitor_bound_rejected() {
+    // The unimplemented fee bound is rejected at config-load (via the
+    // crate-local `MiningConfig::validate`, surfaced through the node load).
+    let path = write_toml(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [indexer]\nenabled = true\n\
+         [mining]\nminer_public_key_hex = \"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\"\n\
+         [mining.rent_collector]\nenabled = true\nfee_bound = \"observed_competitor\"\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let err = NodeConfig::load(cli).expect_err("observed_competitor bound must reject");
+    assert!(
+        err.contains("observed_competitor"),
+        "must name the unimplemented bound: {err}"
+    );
+}
+
 #[test]
 fn mempool_force_off_helper_covers_mode_5_truth_row() {
     // Direct truth-row test of `mempool_force_off_for_mode` for

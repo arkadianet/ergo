@@ -21,6 +21,8 @@ pub mod error;
 pub mod extension_builder;
 pub mod handle;
 pub mod reemission;
+pub mod rent_broadcast;
+pub mod rent_fee_formula;
 pub mod reward_script;
 pub mod solution;
 pub mod state_view;
@@ -29,9 +31,14 @@ pub mod submit;
 pub mod tx_selection;
 pub mod work_message;
 
-pub use config::MiningConfig;
+pub use config::{FeeBound, MiningConfig, RentCollectorConfig};
 pub use emission_rules::{
     emission_at_height, miners_reward_at_height, MonetarySettings, COINS_IN_ONE_ERGO,
 };
 pub use error::MiningError;
+pub use rent_broadcast::{
+    build_broadcast_claim, jitter_offset_bps, jittered_parent_fee_per_input, BroadcastClaim,
+    FeeInputs,
+};
+pub use rent_fee_formula::{unbeatable_child_fee, FeeFactors, FeeFormulaError};
 pub use reward_script::{reward_output_script, reward_output_script_from_hex, REWARD_SCRIPT_LEN};

@@ -120,6 +120,136 @@ infrastructure.
   and consensus box writers still emit preserved tree bytes for id-parity.
   `IrNode` `PartialEq` treats `0x83` boolean-constant `ConcreteCollection` as
   equal to packed `0x85` `BoolCollection` after Scala-style compaction.
+- **Decisive vs public priority Inv-ACK metrics.** Tip-ack summary now
+  splits assembler-tier reach from public priority noise:
+  - `decisive_ack_peers` / `decisive_ack_total` — RequestModifier from
+    `[mining.rent_collector].decisive_peers` (e.g. sticky 2miners
+    `51.89.64.232:{29030,29031,39030,39031}`)
+  - `public_priority_ack_peers` / `public_priority_ack_total` — other
+    `priority_peers` ACKs (k1pool / fasthub / Hero public, etc.)
+  - `builder_reach_miss` is **true only when decisive ACKs are 0** (public
+    priority ACKs alone must not clear the miss)
+  - `rent_collector_decisive_inv_ack` / `rent_collector_public_priority_inv_ack`
+  - `rent_collector_private_path_hint` when parents still pooled and
+    decisive assemblers were silent (ops signal for fee=0 private 021 path)
+  - `connected_decisive_ips` on `tip_ack_summary`
+  Journalctl:
+  ```
+  journalctl -u ergo-node -o cat --since '6h' \
+    | grep -E 'rent_collector_(tip_to_inv|decisive_inv_ack|public_priority_inv_ack|tip_ack_summary|builder_reach_miss|unconfirmed_at_tip|private_path_hint|sticky_dial_|submit_)'
+  ```
+  Ops recipe for `021_private_win`: on-chain 9eip/021 proceeds tx whose
+  txid never appeared in local mempool arrivals while RC parents sat
+  `unconfirmed_at_tip` / `private_path_hint` the prior tip.
+- **Sticky dial instrumentation + repair.** Priority/decisive dials emit
+  `rent_collector_sticky_dial_attempt|ok|fail|skip|displace` with handshake
+  failure reasons. Sticky backoff capped at 2min (was 2hr generic). One
+  port per sticky IP per dial cycle. Missing sticky peers are dialed even
+  at outbound capacity (displace a non-priority outbound). Chronically
+  failing sticky IPs (e.g. remote-closed 51.89) dial **after** healthier
+  sticky peers in the same cycle.
+- **Assembler-tier REST submit hook.** `[mining.rent_collector].submit_urls`
+  — fire-and-forget `POST {url}/transactions/bytes` (JSON hex string,
+  pool_inject parity) for admitted RC family txs. Empty = off.
+  **Unsolicited P2P `Modifiers` are not pushed** (protocol `RejectSpam`);
+  Inv + RequestModifier remains the P2P path; REST is the ban-safe push.
+  Hardened submit client:
+  - parent-then-child order per URL (admit order, not HashSet)
+  - URLs fan out in parallel; only HTTP **200** is `submit_ok` (400 ≠ success)
+  - optional `submit_verified` via `GET …/unconfirmed/byTransactionId/{txid}`
+  - `submit_demote_hint` when a URL yields 0 accepts for a family
+  - reject logs include a bounded `detail` body snippet
+- **Decisive-first Inv fanout.** `order_peers_for_inv` puts
+  `decisive_peers` ahead of other `priority_peers` (fixes
+  `first_priority_inv_peer` always being a public Hero sentry).
+
+### Added (prior fleet / tip instrumentation)
+
+- **Builder-landing Inv-ACK tip summary.** On each tip advance, if the prior
+  tip Inv'd RC txids, emit ops-visible aggregates before counters reset:
+  - `rent_collector_tip_ack_summary` — now includes decisive/public split
+    (see above); legacy `priority_ack_*` field names replaced
+  - `rent_collector_builder_reach_miss` — warn when a parent is still
+    unconfirmed at the next tip with **0** decisive RequestModifiers
+  - `rent_collector_unconfirmed_at_tip` — still pooled despite decisive ACKs
+- **Header-triggered speculative rent collector.** When the header tip
+  advances exactly one height ahead of the full-block tip, the node builds
+  and caches claim families against the pre-apply live UTXO, then admits
+  **only after tip apply** if the tip matches and inputs are still live.
+  Cache is discarded on tip mismatch, reorg/tip-flip, or spent inputs —
+  never admit pre-apply. Log events:
+  - `rent_collector_speculative_enabled` (boot)
+  - `rent_collector_speculative_built`
+  - `rent_collector_speculative_discard` (`reason=…`)
+  - `rent_collector_speculative_admit_miss`
+- **First-occupancy tip→Inv + miner Inv-ACK instrumentation.** Structured
+  tracing for the tip race (journalctl-grep these `event=` names):
+  - `rent_collector_tip_to_inv` — ms from tip apply → collect_start →
+    admit → first Inv (`speculative_hit`, `txid_prefix`, tip height,
+    `first_decisive_inv` / `decisive_inv_peer`)
+  - `rent_collector_decisive_inv_ack` / `rent_collector_public_priority_inv_ack`
+  - `rent_collector_inv_ack` — non-priority peer RequestModifier (debug)
+
+### Fixed
+
+- **Rent collector resolves against the live tip, not a lagging
+  `CommittedSnapshot`.** Materializing eligible boxes from the durable
+  snapshot (which can trail the in-memory applied tip) then admitting
+  against live UTXO yielded `UnresolvedInput` and skipped the tip race
+  (~42 misses / 12h on canary). Collect now uses the same live
+  `StateStore` view admission uses; mining candidates still use the
+  durable snapshot for dry-run stability.
+- **Rent re-announce skips tip-change ticks.** Re-Inv of still-pooled
+  `RentCollector` families runs only between blocks (`!tip_changed`), so a
+  tip tick never advertises a prior-height family that the same tick's
+  recheck is about to evict.
+- **Speculative Hit skips proceeds-key resolution** on the tip→Inv path
+  (key resolve only on rebuild), keeping admit-only-post-apply.
+
+### Added (fleet)
+
+- **In-node rent collector fleet upgrade (private).** Coverage /
+  propagation features on `[mining.rent_collector]`:
+  - `max_families_per_tip` (default **8**) — chunk overflow eligible boxes
+    into ≤N input-disjoint claim families per tip change (`1` = historical
+    single-family behavior). Family 1 still fires on the critical path;
+    overflow is bounded by `collect_time_budget_ms`.
+  - `collect_time_budget_ms` (default **40**, ceiling **200**) — wall-clock
+    budget for families 2..N after family 1; `0` ⇒ only family 1.
+  - `reannounce_interval_ms` (default **25000**) — re-emit Inv for still-
+    pooled `RentCollector` parent+child txs between tip changes (`0` =
+    disabled). Live-pool scan is self-pruning.
+  - `jitter_bps` / `jitter_seed` (default off) — deterministic per-node
+    ±bps fee jitter on `parent_fee_per_input_nanoerg`. Active only when
+    both are set; `jitter_bps > 5000` is rejected at config-load.
+- **`[mining.rent_collector].priority_peers`** — curated miner listening
+  addrs used for (1) sticky reserved outbound dials (considered first by
+  `addresses_to_connect`, still subject to backoff) and (2) preferential
+  Inv fanout for `TxSource::RentCollector` only (match by IP so alternate
+  ports of the same miner host still prefer). Empty = historical order.
+  Prefer graduated builders (2miners / Hero / k1pool / erg-pool) over
+  relay-only eutxo mesh; fasthubs last.
+- **`[mining.rent_collector].decisive_peers`** — assembler-tier subset for
+  Inv-first + decisive ACK metrics (see Unreleased metrics above).
+- **`[mining.rent_collector].submit_urls`** — optional REST inject bases.
+- **Tip-path first-occupancy:** on tip change, targeted
+  `evict_by_source(RentCollector)` → collect + Inv → then full-pool
+  recheck. Clears CPFP-boosted prior-height families without waiting on
+  full recheck latency (`EvictionReason::RentCollectorRefresh`).
+
+### Changed
+
+- **⚠ Binary-swap activates new defaults.** Absent TOML keys fall to the
+  new serde defaults, so swapping this binary turns on chunking (8) and
+  a 40ms overflow budget + re-announce (25s) before any toml edit. Jitter
+  stays off until a per-node `jitter_seed` is set. For a no-behavior-change
+  binary-only swap, set `max_families_per_tip = 1`,
+  `collect_time_budget_ms = 0`, and `reannounce_interval_ms = 0`
+  explicitly first.
+- **⚠ `rent_collector_broadcasts_total` is now per-family**, not per tip
+  (up to `max_families_per_tip` increments per tip). Canary dashboards
+  will show ~N× the prior broadcast rate without N× tip-fires.
+
 ## [0.5.3] - 2026-07-19
 
 The refactor-and-harden release: a workspace-wide split of oversized source

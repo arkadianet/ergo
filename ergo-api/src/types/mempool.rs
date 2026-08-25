@@ -133,10 +133,15 @@ impl TryFrom<&str> for ApiWeightFunction {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ApiTxSource {
-    Peer { addr: String },
+    Peer {
+        addr: String,
+    },
     Api,
     Wallet,
     DemotedFromBlock,
+    /// Locally-originated storage-rent auto-collection claim. Serializes as
+    /// `{"kind":"rent_collector"}`.
+    RentCollector,
 }
 
 /// Submission mode picks the commit boundary inside the shared admission
@@ -237,6 +242,7 @@ mod tests {
             (ApiTxSource::Api, "api"),
             (ApiTxSource::Wallet, "wallet"),
             (ApiTxSource::DemotedFromBlock, "demoted_from_block"),
+            (ApiTxSource::RentCollector, "rent_collector"),
         ];
         for (variant, kind) in cases {
             let json = serde_json::to_value(variant).unwrap();
@@ -262,6 +268,7 @@ mod tests {
             ApiTxSource::Api,
             ApiTxSource::Wallet,
             ApiTxSource::DemotedFromBlock,
+            ApiTxSource::RentCollector,
         ];
         for original in cases {
             let json = serde_json::to_string(&original).unwrap();

@@ -43,7 +43,7 @@ pub use limits::{
 };
 pub use routability::{declared_to_socket, is_routable_for_p2p};
 
-use known_peer::{backoff_for, known_peer_keep_priority};
+use known_peer::{backoff_for, known_peer_keep_priority, sticky_backoff_for};
 
 // ---- PeerManager ----
 
@@ -69,6 +69,10 @@ pub struct PeerManager {
     /// Ban list: IP → ban expiry. Separate from peers so bans survive disconnection.
     bans: HashMap<IpAddr, BanEntry>,
     known_addresses: Vec<KnownPeer>,
+    /// Operator-curated miner / priority addrs. Preferentially selected by
+    /// [`Self::addresses_to_connect`] (sticky reserved dials) so they are
+    /// not lost behind gossip insertion order. Empty = historical behaviour.
+    priority_peers: Vec<SocketAddr>,
     our_session_id: i64,
     limits: PeerLimits,
     /// Persistent address book. Optional so tests and callers that don't
@@ -98,11 +102,51 @@ impl PeerManager {
             peers: HashMap::new(),
             bans: HashMap::new(),
             known_addresses: Vec::new(),
+            priority_peers: Vec::new(),
             our_session_id: session_id,
             limits,
             book: None,
             next_ban_sweep: None,
         }
+    }
+
+    /// Replace the sticky priority-peer dial list. Also seeds each addr into
+    /// `known_addresses` as [`PeerOrigin::Seed`] so dial cycles can reach
+    /// them even when absent from `[peers].known`.
+    pub fn set_priority_peers(&mut self, peers: Vec<SocketAddr>) {
+        for addr in &peers {
+            self.add_known_address(*addr, PeerOrigin::Seed);
+        }
+        self.priority_peers = peers;
+    }
+
+    /// Operator-configured priority peer listening addresses.
+    pub fn priority_peers(&self) -> &[SocketAddr] {
+        &self.priority_peers
+    }
+
+    /// How many priority peers are currently connected (exact `SocketAddr`
+    /// match — outbound dials use the listening addr as `PeerId`).
+    pub fn connected_priority_count(&self) -> usize {
+        self.priority_peers
+            .iter()
+            .filter(|addr| self.peers.contains_key(addr))
+            .count()
+    }
+
+    /// Distinct priority-peer IPs with at least one live session (inbound
+    /// or outbound). Prefer this for ops — Inv preference matches by IP,
+    /// and inbound peers rarely share the configured listening port.
+    pub fn connected_priority_ip_count(&self) -> usize {
+        let priority_ips: std::collections::HashSet<_> =
+            self.priority_peers.iter().map(|a| a.ip()).collect();
+        let mut seen = std::collections::HashSet::new();
+        for peer in self.peers.keys() {
+            if priority_ips.contains(&peer.ip()) {
+                seen.insert(peer.ip());
+            }
+        }
+        seen.len()
     }
 
     /// Attach a persistent address book. Subsequent lifecycle hooks
@@ -753,20 +797,159 @@ impl PeerManager {
     /// budget and starve gossiped alternatives — observed in production
     /// as peer count stuck at 3-4 despite an outbound target and successful
     /// gossip Peers replies adding 8+ addresses.
+    ///
+    /// Priority peers (see [`Self::set_priority_peers`]) are considered
+    /// first when connectable, so miner listening addrs are not starved
+    /// by gossip insertion order. Sticky peers use a softer backoff
+    /// (capped at 2min) so a TCP-open / handshake-fail assembler is
+    /// retried instead of disappearing for 2hr. Within sticky dials,
+    /// at most one port per IP is selected per cycle (rotate via
+    /// failure count) so four 2miners ports don't all burn into backoff
+    /// on the same failed attempt.
     pub fn addresses_to_connect(&self, now: Instant, limit: usize) -> Vec<SocketAddr> {
-        self.known_addresses
-            .iter()
-            .filter(|k| {
-                if let (Some(last), n) = (k.last_failure, k.consecutive_failures) {
-                    if n > 0 && now.duration_since(last) < backoff_for(n) {
-                        return false;
-                    }
+        if limit == 0 {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(limit);
+        let mut seen = std::collections::HashSet::new();
+        let mut sticky_ips_taken = std::collections::HashSet::new();
+        let priority_set: std::collections::HashSet<_> =
+            self.priority_peers.iter().copied().collect();
+
+        let connectable = |k: &KnownPeer, sticky: bool| -> bool {
+            if let (Some(last), n) = (k.last_failure, k.consecutive_failures) {
+                let window = if sticky {
+                    sticky_backoff_for(n)
+                } else {
+                    backoff_for(n)
+                };
+                if n > 0 && now.duration_since(last) < window {
+                    return false;
                 }
-                self.check_can_connect(k.addr, now).is_ok()
-            })
-            .take(limit)
-            .map(|k| k.addr)
-            .collect()
+            }
+            self.check_can_connect(k.addr, now).is_ok()
+        };
+
+        // Sticky reserved: priority peers first when eligible (one port/IP).
+        // Also skip IPs that already have any live/pending session — Inv
+        // preference matches by IP, and multi-port thrash was burning
+        // sticky backoff on 2miners.
+        for addr in &self.priority_peers {
+            if out.len() >= limit {
+                break;
+            }
+            if !seen.insert(*addr) {
+                continue;
+            }
+            if sticky_ips_taken.contains(&addr.ip())
+                || self.peers.keys().any(|p| p.ip() == addr.ip())
+            {
+                continue;
+            }
+            let eligible = self
+                .known_addresses
+                .iter()
+                .find(|k| k.addr == *addr)
+                .is_some_and(|k| connectable(k, true));
+            if eligible {
+                sticky_ips_taken.insert(addr.ip());
+                out.push(*addr);
+            }
+        }
+
+        for k in &self.known_addresses {
+            if out.len() >= limit {
+                break;
+            }
+            if !seen.insert(k.addr) {
+                continue;
+            }
+            let sticky = priority_set.contains(&k.addr);
+            if sticky && sticky_ips_taken.contains(&k.addr.ip()) {
+                continue;
+            }
+            if connectable(k, sticky) {
+                if sticky {
+                    sticky_ips_taken.insert(k.addr.ip());
+                }
+                out.push(k.addr);
+            }
+        }
+        out
+    }
+
+    /// Priority / sticky addrs that are not currently connected and are
+    /// past sticky backoff. Capacity is intentionally NOT checked here —
+    /// the dial loop may displace a non-priority outbound to free a slot.
+    pub fn sticky_peers_needing_dial(&self, now: Instant) -> Vec<SocketAddr> {
+        let mut out = Vec::new();
+        let mut ips_taken = std::collections::HashSet::new();
+        for addr in &self.priority_peers {
+            if self.peers.contains_key(addr) {
+                continue;
+            }
+            // Already have a live session to this IP (any port) — sticky
+            // Inv preference matches by IP, so one session is enough.
+            if self.peers.keys().any(|p| p.ip() == addr.ip()) {
+                continue;
+            }
+            if ips_taken.contains(&addr.ip()) {
+                continue;
+            }
+            let Some(k) = self.known_addresses.iter().find(|k| k.addr == *addr) else {
+                continue;
+            };
+            if let (Some(last), n) = (k.last_failure, k.consecutive_failures) {
+                if n > 0 && now.duration_since(last) < sticky_backoff_for(n) {
+                    continue;
+                }
+            }
+            // Skip ban / already-connected / per-ip (other ports) — but
+            // allow "at max_connections" so the caller can displace.
+            if self.is_banned(addr, now) {
+                continue;
+            }
+            let ip_count = self
+                .peers
+                .values()
+                .filter(|p| p.addr.ip() == addr.ip())
+                .count();
+            if ip_count >= self.limits.per_ip_limit {
+                continue;
+            }
+            ips_taken.insert(addr.ip());
+            out.push(*addr);
+        }
+        // Deprioritize chronically failing sticky IPs (e.g. remote-closed
+        // 51.89 assembler ports) so productive sticky peers dial first.
+        out.sort_by_key(|addr| {
+            self.known_addresses
+                .iter()
+                .find(|k| k.addr == *addr)
+                .map(|k| k.consecutive_failures)
+                .unwrap_or(0)
+        });
+        out
+    }
+
+    /// Pick a non-priority outbound peer to disconnect so a sticky dial
+    /// can take its slot when at capacity. Prefers the oldest Active
+    /// outbound that is not a priority IP.
+    pub fn pick_non_priority_outbound_to_displace(&self) -> Option<PeerId> {
+        let priority_ips: std::collections::HashSet<_> =
+            self.priority_peers.iter().map(|a| a.ip()).collect();
+        self.peers
+            .iter()
+            .filter(|(_, p)| p.direction == Direction::Outbound)
+            .filter(|(addr, _)| !priority_ips.contains(&addr.ip()))
+            .min_by_key(|(_, p)| p.connected_at)
+            .map(|(addr, _)| *addr)
+    }
+
+    /// Whether the peer table is at the configured `max_connections`
+    /// ceiling (no room for another register without a displace).
+    pub fn at_connection_capacity(&self) -> bool {
+        self.peers.len() >= self.limits.max_connections
     }
 
     /// Whether we need more outbound connections.

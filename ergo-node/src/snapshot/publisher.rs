@@ -232,6 +232,7 @@ mod tests {
             mempool_tx_requested_total: 0,
             mempool_peer_tx_admitted_total: 0,
             mempool_peer_tx_rejected_total: 0,
+            rent_collector_broadcasts_total: 0,
         }
     }
 
@@ -497,6 +498,7 @@ mod tests {
             age_ms: 42,
         });
         parts.block_apply_errors_total = 3;
+        parts.rent_collector_broadcasts_total = 7;
         publisher.publish(parts);
         let snap = publisher.handle().load_full();
         let e = snap
@@ -507,6 +509,8 @@ mod tests {
         assert_eq!(e.height, 1234);
         assert_eq!(e.reason, "tx invalid");
         assert_eq!(snap.status.block_apply_errors_total, 3);
+        // 5.1: the rent-collector counter rides the same parts → status path.
+        assert_eq!(snap.status.rent_collector_broadcasts_total, 7);
         assert_eq!(snap.health.status, HealthStatus::Rejecting);
 
         // No rejection set above ⇒ the three new mempool-gossip counters

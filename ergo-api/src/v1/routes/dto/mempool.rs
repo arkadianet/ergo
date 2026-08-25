@@ -42,6 +42,7 @@ pub(crate) fn mempool_source_str(source: &ApiTxSource) -> &'static str {
         ApiTxSource::Api => "api",
         ApiTxSource::Wallet => "wallet",
         ApiTxSource::DemotedFromBlock => "demoted_from_block",
+        ApiTxSource::RentCollector => "rent_collector",
     }
 }
 

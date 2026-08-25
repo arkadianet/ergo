@@ -230,6 +230,7 @@ impl NodeSnapshot {
                 last_apply_duration_ms: 0,
                 last_applied_height: 0,
                 last_apply_age_ms: None,
+                rent_collector_broadcasts_total: 0,
             },
             tip: ApiTip {
                 best_header: header_ref,
@@ -414,6 +415,9 @@ pub struct SnapshotParts<'a> {
     /// Monotonic count of peer-sourced txs rejected by admission, for
     /// the `ergo_node_mempool_peer_tx_rejected_total` Prometheus counter.
     pub mempool_peer_tx_rejected_total: u64,
+    /// Phase 5.1: monotonic successful rent-collector broadcast count, for the
+    /// `ergo_node_rent_collector_broadcasts_total` Prometheus counter.
+    pub rent_collector_broadcasts_total: u64,
 }
 
 /// Compute the canonical `now_unix_ms` for snapshot timestamps.

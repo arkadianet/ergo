@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use ergo_p2p::message;
 use ergo_p2p::peer::{PeerId, Penalty, PenaltyOutcome};
 use ergo_sync::coordinator::Action;
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 use crate::peer_loop;
 
@@ -95,6 +95,12 @@ pub(super) fn try_dial_peers(state: &mut NodeState) {
         state.last_gossip_at = now;
     }
 
+    // Sticky reserved: always try to (re)dial missing priority/decisive
+    // peers, even when outbound deficit is 0 — displace a non-priority
+    // outbound if needed so assembler sessions are not starved behind a
+    // full gossip mesh.
+    dial_sticky_peers(state, now);
+
     let deficit = state.peer_manager.outbound_deficit();
     if deficit == 0 {
         return;
@@ -158,17 +164,82 @@ pub(super) fn try_dial_peers(state: &mut NodeState) {
     }
 
     for addr in addrs {
-        match state.peer_manager.register_outbound(addr, now) {
-            Ok(()) => {
-                debug!(peer = %addr, deficit = deficit, "attempting dial");
-                tokio::spawn(peer_loop::dial_task(
-                    addr,
-                    state.magic,
-                    state.our_handshake.clone(),
-                    state.event_tx.clone(),
-                ));
+        spawn_outbound_dial(state, addr, deficit, now);
+    }
+
+    let priority_connected = state.peer_manager.connected_priority_count();
+    if priority_connected > 0 {
+        debug!(
+            connected = priority_connected,
+            configured = state.peer_manager.priority_peers().len(),
+            "priority miner peers connected"
+        );
+    }
+}
+
+/// Dial missing sticky/priority peers, displacing a non-priority outbound
+/// when at the connection ceiling.
+fn dial_sticky_peers(state: &mut NodeState, now: Instant) {
+    let sticky = state.peer_manager.sticky_peers_needing_dial(now);
+    if sticky.is_empty() {
+        return;
+    }
+    for addr in sticky {
+        // Free a slot if needed before register_outbound.
+        if state.peer_manager.at_connection_capacity() {
+            if let Some(victim) = state.peer_manager.pick_non_priority_outbound_to_displace() {
+                info!(
+                    event = "rent_collector_sticky_displace",
+                    victim = %victim,
+                    sticky = %addr,
+                    "displacing non-priority outbound for sticky dial"
+                );
+                // Drop registry channel so the peer task exits; peer_manager
+                // disconnect clears the slot.
+                state.registry.peers.remove(&victim);
+                state.peer_manager.disconnect(&victim);
+            } else {
+                debug!(
+                    peer = %addr,
+                    "sticky dial skipped: at capacity and no non-priority victim"
+                );
+                continue;
             }
-            Err(e) => {
+        }
+        spawn_outbound_dial(state, addr, state.peer_manager.outbound_deficit(), now);
+    }
+}
+
+fn spawn_outbound_dial(state: &mut NodeState, addr: PeerId, deficit: usize, now: Instant) {
+    match state.peer_manager.register_outbound(addr, now) {
+        Ok(()) => {
+            let is_priority = state.peer_manager.priority_peers().contains(&addr);
+            if is_priority {
+                info!(
+                    event = "rent_collector_sticky_dial_attempt",
+                    peer = %addr,
+                    deficit = deficit,
+                    "attempting dial (priority peer)"
+                );
+            } else {
+                debug!(peer = %addr, deficit = deficit, "attempting dial");
+            }
+            tokio::spawn(peer_loop::dial_task(
+                addr,
+                state.magic,
+                state.our_handshake.clone(),
+                state.event_tx.clone(),
+            ));
+        }
+        Err(e) => {
+            if state.peer_manager.priority_peers().contains(&addr) {
+                warn!(
+                    event = "rent_collector_sticky_dial_skip",
+                    peer = %addr,
+                    error = %e,
+                    "cannot register sticky outbound dial"
+                );
+            } else {
                 debug!(peer = %addr, error = %e, "cannot register outbound dial");
             }
         }

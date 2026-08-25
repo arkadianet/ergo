@@ -245,3 +245,163 @@ fn admit_pre_parse_reject_omits_tx_id() {
         "tx_id should be Empty on size-cap reject, got recorded id in:\n{output}"
     );
 }
+
+// ----- family-admit tracing: defer to the commit decision -----
+//
+// `admit_family_atomic` stages parent + child on a pool clone and only
+// swaps the clone in on full success. The admit/eviction/broadcast
+// tracing for the parent must be DEFERRED to the commit decision: if the
+// child later fails the family rolls back and the parent never lands, so
+// a `mempool_tx_admitted` (or `mempool_tx_evicted`/`_replaced`) logged at
+// parent-admit time would be a phantom event for a tx that didn't land.
+
+/// A `MockPlan` that admits `bytes` as `tx_id_byte`, spending `input` and
+/// creating `output`, with the given `fee`.
+fn family_plan(
+    bytes: &'static [u8],
+    tx_id_byte: u8,
+    input: u8,
+    output: u8,
+    fee: u64,
+) -> (Vec<u8>, MockPlan) {
+    (
+        bytes.to_vec(),
+        MockPlan {
+            result: Ok(Validated {
+                tx_id: id(tx_id_byte),
+                input_box_ids: vec![id(input)],
+                output_box_ids: vec![id(output)],
+                outputs: vec![],
+                fee,
+                size_bytes: bytes.len() as u32,
+                consumed_cost: 10_000,
+            }),
+            charge: 10_000,
+            peek_fee: None,
+            peek_tx_id: None,
+        },
+    )
+}
+
+/// Seed a standalone low-weight pool entry the parent admission will
+/// displace (double-spend replacement), so the parent's clone-admit emits
+/// an eviction/replacement that must NOT be traced on the rollback path.
+fn seed_victim(mp: &mut Mempool, tx_id_byte: u8, input: u8, output: u8, weight: u64) {
+    let tx_id = id(tx_id_byte);
+    let entry = ergo_mempool::Entry::new(
+        tx_id,
+        std::sync::Arc::from(vec![tx_id_byte; 20].into_boxed_slice()),
+        vec![id(input)],
+        vec![id(output)],
+        vec![],
+        1_000_000,
+        weight,
+        20,
+        10_000,
+        TxSource::Api,
+    );
+    mp.pool_mut().insert(entry).unwrap();
+}
+
+#[test]
+fn family_child_fail_emits_no_phantom_parent_admit() {
+    let utxo = EmptyUtxo;
+    let txc = tx_ctx();
+    let params = ProtocolParams::mainnet_default();
+    let ctx = tip_ctx(&txc, &params, &utxo);
+
+    let (out, output) = capture_spans(|| {
+        let mut mempool = Mempool::new(MempoolConfig::default(), Box::new(ByCost));
+        // Pre-existing low-weight victim spending box 0xA0; the heavier
+        // parent double-spends it ⇒ its clone-admit would evict/replace
+        // the victim (an eviction trace we must NOT emit on rollback).
+        seed_victim(&mut mempool, 0x10, 0xA0, 0xF0, 100);
+
+        // Parent admits on the clone (heavier double-spend of 0xA0).
+        // Child has NO plan ⇒ the mock rejects it ⇒ half-family rollback.
+        let (pb, pp) = family_plan(b"family_parent", 0x01, 0xA0, 0xB0, 50_000_000);
+        let v = MockValidator::new().plan(pb, pp);
+
+        mempool.admit_family_atomic(
+            b"family_parent",
+            Some(b"family_child"),
+            TxSource::RentCollector,
+            Instant::now(),
+            &ctx,
+            &v,
+        )
+    });
+
+    // The family failed: nothing landed.
+    assert!(out.tx_ids.is_empty(), "no ids on a failed family");
+    assert!(
+        out.broadcast_actions.is_empty(),
+        "no actions on a failed family"
+    );
+
+    // The CHILD's rejection IS a real event worth logging.
+    assert!(
+        output.contains("mempool_tx_rejected"),
+        "the child rejection must be traced, in:\n{output}"
+    );
+    // The parent's admit is PHANTOM — it never landed in the live pool.
+    assert!(
+        !output.contains("mempool_tx_admitted"),
+        "no phantom parent admit may be traced on rollback, in:\n{output}"
+    );
+    // Neither may the parent's clone-side eviction/replacement of the victim.
+    assert!(
+        !output.contains("mempool_tx_evicted"),
+        "no phantom eviction may be traced on rollback, in:\n{output}"
+    );
+    assert!(
+        !output.contains("mempool_tx_replaced"),
+        "no phantom replacement may be traced on rollback, in:\n{output}"
+    );
+}
+
+#[test]
+fn family_full_success_emits_admit_for_both() {
+    let utxo = EmptyUtxo;
+    let txc = tx_ctx();
+    let params = ProtocolParams::mainnet_default();
+    let ctx = tip_ctx(&txc, &params, &utxo);
+
+    let (out, output) = capture_spans(|| {
+        let mut mempool = Mempool::new(MempoolConfig::default(), Box::new(ByCost));
+        // Parent admits; child spends the parent's output (a real CPFP edge).
+        let (pb, pp) = family_plan(b"family_parent", 0x01, 0xA0, 0xB0, 1_000_000);
+        let (cb, cp) = family_plan(b"family_child", 0x02, 0xB0, 0xC0, 5_000_000);
+        let v = MockValidator::new().plan(pb, pp).plan(cb, cp);
+
+        mempool.admit_family_atomic(
+            b"family_parent",
+            Some(b"family_child"),
+            TxSource::RentCollector,
+            Instant::now(),
+            &ctx,
+            &v,
+        )
+    });
+
+    assert_eq!(
+        out.tx_ids,
+        vec![id(0x01), id(0x02)],
+        "parent-first id order"
+    );
+    // Both family members must be traced as admitted on full success.
+    assert!(
+        output.contains("mempool_tx_admitted"),
+        "an admit must be traced on full success, in:\n{output}"
+    );
+    let parent_hex = hex::encode([0x01u8; 32]);
+    let child_hex = hex::encode([0x02u8; 32]);
+    assert!(
+        output.contains(&parent_hex),
+        "parent admit trace (tx_id={parent_hex}) missing, in:\n{output}"
+    );
+    assert!(
+        output.contains(&child_hex),
+        "child admit trace (tx_id={child_hex}) missing, in:\n{output}"
+    );
+}

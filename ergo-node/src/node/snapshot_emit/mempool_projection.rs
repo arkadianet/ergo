@@ -31,6 +31,7 @@ pub(super) fn project_mempool_transactions(
                 TxSource::Api => ApiTxSource::Api,
                 TxSource::Wallet => ApiTxSource::Wallet,
                 TxSource::DemotedFromBlock => ApiTxSource::DemotedFromBlock,
+                TxSource::RentCollector => ApiTxSource::RentCollector,
             };
             ApiMempoolTransaction {
                 tx_id: hex::encode(entry.tx_id.as_bytes()),

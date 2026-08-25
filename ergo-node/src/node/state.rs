@@ -332,6 +332,32 @@ pub(crate) struct NodeState {
     /// Mirrors "mining wiring exists" for the snapshot emitter (the wiring
     /// itself lives on the action loop, out of the emitter's reach).
     pub(super) mining_enabled: bool,
+    /// Storage-rent auto-collection config. `Some` exactly when
+    /// `[mining.rent_collector] enabled = true` — the action loop's
+    /// post-apply trigger checks `is_some()` to decide whether to run the
+    /// collector (and to keep the early-return predicate from skipping it on
+    /// an empty mempool). DECOUPLED from `[mining].enabled`: the collector
+    /// can run with mining off. `None` when disabled.
+    pub(super) rent_collector: Option<ergo_mining::config::RentCollectorConfig>,
+    /// Proceeds-key source for the rent collector, reused from the miner
+    /// reward-key resolution (a pinned `[mining].miner_public_key_hex` or the
+    /// wallet's EIP-3 first-address key), resolved against `store` at each
+    /// collection tick. Built at boot whenever the collector is enabled,
+    /// regardless of `[mining].enabled`. Unused (and harmlessly `Wallet`)
+    /// when `rent_collector` is `None`.
+    pub(super) rent_proceeds_key: ergo_mining::handle::RewardKeySource,
+    /// Monotonic count of SUCCESSFUL rent-collector broadcasts since node
+    /// start (one per family whose atomic admit produced relay actions).
+    /// Surfaced as the `ergo_node_rent_collector_broadcasts_total` Prometheus
+    /// counter via the snapshot status; session-scoped (resets on restart,
+    /// which `rate()` handles). Bumped in `rent_collector::collect_and_broadcast`.
+    pub(super) rent_collector_broadcasts_total: u64,
+    /// Last time we re-emitted Inv for resident `RentCollector` families.
+    /// Drives `[mining.rent_collector].reannounce_interval_ms` on the
+    /// mempool tick (between tip changes).
+    pub(super) last_rent_reannounce: Instant,
+    /// Speculative RC cache + tip→Inv / Inv-ACK first-occupancy metrics.
+    pub(super) rent_fo: super::rent_collector::RentFirstOccupancyMetrics,
     /// Active mempool priority-weight function converted at boot to its
     /// wire form. Snapshot ticks read this directly — no per-tick
     /// `&str` → enum conversion. Surfaced on

@@ -611,6 +611,151 @@ fn dial_success_resets_backoff_state() {
 }
 
 #[test]
+fn addresses_to_connect_prefers_priority_peers_first() {
+    // Sticky reserved: a priority peer listed AFTER a crowd of gossip
+    // seeds must still win the dial budget when connectable.
+    let mut mgr = PeerManager::new(1);
+    let now = Instant::now();
+    let crowd: Vec<_> = (1..=8).map(|i| addr(203, 0, 113, i, 9030)).collect();
+    for a in &crowd {
+        mgr.add_known_address(*a, PeerOrigin::Gossip);
+    }
+    let miner = addr(51, 89, 64, 232, 29030);
+    mgr.set_priority_peers(vec![miner]);
+
+    let candidates = mgr.addresses_to_connect(now, 3);
+    assert_eq!(
+        candidates[0], miner,
+        "priority peer must dial first: {candidates:?}"
+    );
+    assert_eq!(candidates.len(), 3);
+    assert!(
+        candidates[1..].iter().all(|c| crowd.contains(c)),
+        "remaining slots filled from known pool"
+    );
+}
+
+#[test]
+fn connected_priority_count_tracks_exact_addr_match() {
+    let mut mgr = PeerManager::new(1);
+    let now = Instant::now();
+    let miner = addr(51, 89, 64, 232, 29030);
+    mgr.set_priority_peers(vec![miner]);
+    assert_eq!(mgr.connected_priority_count(), 0);
+    mgr.register_outbound(miner, now).unwrap();
+    assert_eq!(mgr.connected_priority_count(), 1);
+}
+
+#[test]
+fn connected_priority_ip_count_matches_inbound_ephemeral_port() {
+    // Inv preference matches by IP; inbound peers arrive on ephemeral ports.
+    let mut mgr = PeerManager::new(1);
+    let now = Instant::now();
+    let listening = addr(51, 89, 64, 232, 29030);
+    let inbound = addr(51, 89, 64, 232, 52331);
+    mgr.set_priority_peers(vec![listening]);
+    assert_eq!(mgr.connected_priority_ip_count(), 0);
+    assert_eq!(mgr.connected_priority_count(), 0);
+    mgr.register_inbound(inbound, now).unwrap();
+    assert_eq!(
+        mgr.connected_priority_ip_count(),
+        1,
+        "inbound on same IP counts for ops connectivity"
+    );
+    assert_eq!(
+        mgr.connected_priority_count(),
+        0,
+        "exact listening-addr match still 0 for inbound ephemeral"
+    );
+}
+
+#[test]
+fn addresses_to_connect_sticky_one_port_per_ip() {
+    // Four 2miners ports must not all be selected in one cycle — one
+    // session per IP is enough for Inv preference, and burning all four
+    // into backoff on a shared failure was the sticky dial death spiral.
+    let limits = PeerLimits {
+        per_ip_limit: 6,
+        ..PeerLimits::default()
+    };
+    let mut mgr = PeerManager::new_with_limits(1, limits);
+    let now = Instant::now();
+    let ports = [29030u16, 29031, 39030, 39031];
+    let peers: Vec<_> = ports.iter().map(|p| addr(51, 89, 64, 232, *p)).collect();
+    mgr.set_priority_peers(peers.clone());
+    let candidates = mgr.addresses_to_connect(now, 10);
+    let same_ip: Vec<_> = candidates
+        .iter()
+        .filter(|a| a.ip() == peers[0].ip())
+        .collect();
+    assert_eq!(
+        same_ip.len(),
+        1,
+        "exactly one sticky port per IP per cycle: {candidates:?}"
+    );
+    assert_eq!(
+        same_ip[0], &peers[0],
+        "first listed port wins when all eligible"
+    );
+}
+
+#[test]
+fn sticky_peers_needing_dial_skips_when_ip_already_connected() {
+    let limits = PeerLimits {
+        per_ip_limit: 6,
+        ..PeerLimits::default()
+    };
+    let mut mgr = PeerManager::new_with_limits(1, limits);
+    let now = Instant::now();
+    let a = addr(51, 89, 64, 232, 29030);
+    let b = addr(51, 89, 64, 232, 29031);
+    mgr.set_priority_peers(vec![a, b]);
+    mgr.register_outbound(a, now).unwrap();
+    assert!(
+        mgr.sticky_peers_needing_dial(now).is_empty(),
+        "other ports of same IP must not re-dial when one session is live"
+    );
+}
+
+#[test]
+fn sticky_peers_needing_dial_deprioritizes_high_failure_ips() {
+    let mut mgr = PeerManager::new(1);
+    let now = Instant::now();
+    let noisy = addr(51, 89, 64, 232, 29030);
+    let healthy = addr(51, 222, 248, 90, 9030);
+    mgr.set_priority_peers(vec![noisy, healthy]);
+    // Past sticky backoff so both are eligible; noisy has more failures.
+    for _ in 0..4 {
+        mgr.mark_dial_failed(&noisy, now);
+    }
+    mgr.mark_dial_failed(&healthy, now);
+    let later = now + std::time::Duration::from_secs(130);
+    let order = mgr.sticky_peers_needing_dial(later);
+    assert_eq!(
+        order,
+        vec![healthy, noisy],
+        "lower consecutive_failures must dial first"
+    );
+}
+
+#[test]
+fn sticky_backoff_retries_sooner_than_generic() {
+    let mut mgr = PeerManager::new(1);
+    let now = Instant::now();
+    let miner = addr(51, 89, 64, 232, 29030);
+    mgr.set_priority_peers(vec![miner]);
+    mgr.mark_dial_failed(&miner, now);
+    // Generic first backoff is 30s; sticky is 15s.
+    assert!(
+        mgr.addresses_to_connect(now + std::time::Duration::from_secs(10), 10)
+            .is_empty(),
+        "still in sticky 15s window"
+    );
+    let after = mgr.addresses_to_connect(now + std::time::Duration::from_secs(16), 10);
+    assert_eq!(after, vec![miner], "sticky peer eligible again after 15s");
+}
+
+#[test]
 fn needs_outbound_tracks_target() {
     let mut mgr = PeerManager::new(1);
     let now = Instant::now();

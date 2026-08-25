@@ -616,7 +616,34 @@ async fn run_inner_with_backend(
     boot_sentinel: u32,
 ) -> Result<RunHandle, NodeError> {
     // Phase 1: peer manager + address book + known-peer seeding.
-    let (session_id, peer_manager) = peers::setup(&config);
+    let (session_id, mut peer_manager) = peers::setup(&config);
+    // Sticky dial + Inv preference for rent-collector miner peers (no-op when
+    // empty / collector off — `set_priority_peers` still seeds known addrs).
+    // Decisive peers are listed first so dial + Inv preference hit assemblers
+    // before public priority / fasthubs.
+    {
+        let rc = &config.mining_config.rent_collector;
+        let mut sticky = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for a in rc.decisive_peers.iter().chain(rc.priority_peers.iter()) {
+            if seen.insert(*a) {
+                sticky.push(*a);
+            }
+        }
+        if !sticky.is_empty() {
+            let n_priority = rc.priority_peers.len();
+            let n_decisive = rc.decisive_peers.len();
+            let n_submit = rc.submit_urls.len();
+            peer_manager.set_priority_peers(sticky);
+            info!(
+                event = "rent_collector_peers_configured",
+                priority_peers = n_priority,
+                decisive_peers = n_decisive,
+                submit_urls = n_submit,
+                "rent-collector priority/decisive peers configured (sticky dial + Inv preference)"
+            );
+        }
+    }
 
     // Phase 2: sync coordinator/executor, IBD/persist pipeline, indexer,
     // shadow validation, hydrate/recover, NiPoPoW resume classification.
@@ -817,6 +844,47 @@ async fn run_inner_with_backend(
         None
     };
 
+    // Storage-rent auto-collection wiring. DECOUPLED from `[mining].enabled`:
+    // when the collector is enabled the proceeds-key source is built here
+    // regardless of the mining subsystem (it reuses the SAME reward-key
+    // source — a pinned `[mining].miner_public_key_hex` or the wallet's
+    // EIP-3 key). The config-load cross-section gate already required the
+    // indexer AND a resolvable proceeds key when the collector is enabled;
+    // the runtime resolution happens per-tick against the live store.
+    //
+    // The proceeds key is decoded ONLY when the collector is enabled: it is
+    // consumed exclusively by the collector (gate 1 returns early when
+    // `rent_collector` is `None`, before touching the key). Decoding it
+    // unconditionally would regress boot — a malformed
+    // `[mining].miner_public_key_hex` would fail startup even on a node that
+    // uses neither mining nor the collector. When the collector is off we
+    // default to `RewardKeySource::Wallet` (never resolved). A malformed key
+    // still fails boot when mining is on (`MiningConfig::validate`) or when
+    // the collector is on (here, via `reward_key_source_from_config`).
+    let (rent_collector, rent_proceeds_key) = if config.mining_config.rent_collector.enabled {
+        let proceeds_key = mining::reward_key_source_from_config(
+            config.mining_config.miner_public_key_hex.as_ref(),
+        )?;
+        match &proceeds_key {
+            ergo_mining::handle::RewardKeySource::Pinned(pk) => {
+                info!(pk = %hex::encode(pk), "rent-collector enabled (configured proceeds key)");
+            }
+            ergo_mining::handle::RewardKeySource::Wallet => {
+                info!("rent-collector enabled (wallet-resolved proceeds key)");
+            }
+        }
+        info!(
+            event = "rent_collector_speculative_enabled",
+            "rent-collector: header-triggered speculative cache + tip→Inv metrics enabled"
+        );
+        (
+            Some(config.mining_config.rent_collector.clone()),
+            proceeds_key,
+        )
+    } else {
+        (None, ergo_mining::handle::RewardKeySource::Wallet)
+    };
+
     let mut state = NodeState {
         store,
         coordinator,
@@ -924,6 +992,11 @@ async fn run_inner_with_backend(
         // authoritative gate — it matches the expression that determined whether
         // to enter the `if config.mining_config.enabled` arm.
         mining_enabled: mining_subsystem.handle.is_some(),
+        rent_collector,
+        rent_proceeds_key,
+        rent_collector_broadcasts_total: 0,
+        last_rent_reannounce: Instant::now(),
+        rent_fo: super::rent_collector::RentFirstOccupancyMetrics::default(),
         api_weight_function,
         recent_blocks_cache: None,
         network: config.chain_spec.network_params.address_prefix,

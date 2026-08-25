@@ -23,6 +23,7 @@ fn source_tag(source: &TxSource) -> &'static str {
         TxSource::Peer(_) => "peer",
         TxSource::Wallet => "local",
         TxSource::DemotedFromBlock => "revalidation",
+        TxSource::RentCollector => "rent_collector",
     }
 }
 
@@ -166,10 +167,14 @@ pub(crate) fn emit_tracing_for_admission(
     tip: Option<TipPointer>,
 ) {
     let src = source_tag(source);
-    // User-initiated sources (`Api`, `Wallet`) log at `info!`;
-    // per-peer churn (`Peer`, `DemotedFromBlock`) drops to `debug!`
-    // to keep the default operator stream readable on busy networks.
-    let is_api = matches!(source, TxSource::Api | TxSource::Wallet);
+    // User-initiated / locally-originated sources (`Api`, `Wallet`,
+    // `RentCollector`) log at `info!`; per-peer churn (`Peer`,
+    // `DemotedFromBlock`) drops to `debug!` to keep the default operator
+    // stream readable on busy networks.
+    let is_api = matches!(
+        source,
+        TxSource::Api | TxSource::Wallet | TxSource::RentCollector
+    );
 
     match outcome {
         AdmissionOutcome::Admitted { tx_id, fee, size } => {
@@ -256,10 +261,14 @@ pub(crate) fn emit_tracing_for_check(
     pool_bytes: usize,
 ) {
     let src = source_tag(source);
-    // User-initiated sources (`Api`, `Wallet`) log at `info!`;
-    // per-peer churn (`Peer`, `DemotedFromBlock`) drops to `debug!`
-    // to keep the default operator stream readable on busy networks.
-    let is_api = matches!(source, TxSource::Api | TxSource::Wallet);
+    // User-initiated / locally-originated sources (`Api`, `Wallet`,
+    // `RentCollector`) log at `info!`; per-peer churn (`Peer`,
+    // `DemotedFromBlock`) drops to `debug!` to keep the default operator
+    // stream readable on busy networks.
+    let is_api = matches!(
+        source,
+        TxSource::Api | TxSource::Wallet | TxSource::RentCollector
+    );
 
     match outcome {
         CheckOutcome::WouldAdmit {
@@ -327,4 +336,25 @@ pub(crate) fn emit_tracing_for_check(
     // though `actions` in practice carries no `Evicted`/`Replaced` events
     // for this outcome.
     emit_tracing_for_pool_actions(actions, None, None);
+}
+
+#[cfg(test)]
+mod source_tag_tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    /// `source_tag` maps every `TxSource` variant to its stable journal
+    /// string. Pins the `RentCollector` arm (`"rent_collector"`) so a future
+    /// taxonomy edit can't silently drop it; the exhaustive match makes the
+    /// compiler force this arm to exist, but the string value is a wire/log
+    /// contract worth pinning explicitly.
+    #[test]
+    fn source_tag_covers_all_variants_incl_rent_collector() {
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9000);
+        assert_eq!(source_tag(&TxSource::Peer(peer)), "peer");
+        assert_eq!(source_tag(&TxSource::Api), "api");
+        assert_eq!(source_tag(&TxSource::Wallet), "local");
+        assert_eq!(source_tag(&TxSource::DemotedFromBlock), "revalidation");
+        assert_eq!(source_tag(&TxSource::RentCollector), "rent_collector");
+    }
 }

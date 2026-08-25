@@ -403,7 +403,7 @@ pub fn build_budget_bounded_rent_claim(
 /// Build a storage-rent input for `b`: its real `box_id`, an empty
 /// spending proof, and context-extension variable 127 naming the
 /// recreated/destination output index.
-fn rent_input(b: &ErgoBox, output_idx: usize) -> Result<Input, MiningError> {
+pub(crate) fn rent_input(b: &ErgoBox, output_idx: usize) -> Result<Input, MiningError> {
     let box_id = b.box_id().map_err(|e| MiningError::IdComputation {
         op: "rent_input_box_id",
         reason: format!("{e:?}"),
@@ -434,7 +434,7 @@ fn rent_input(b: &ErgoBox, output_idx: usize) -> Result<Input, MiningError> {
 /// Parse the canonical (non-segregated) P2PK tree for `miner_pubkey`. Rent
 /// proceeds go to a plain P2PK — NOT the delayed miner-reward script (the
 /// 720-block delay is an emission/fee-proposition rule, not a rent rule).
-fn parse_p2pk_tree(miner_pubkey: &[u8; 33]) -> Result<ErgoTree, MiningError> {
+pub(crate) fn parse_p2pk_tree(miner_pubkey: &[u8; 33]) -> Result<ErgoTree, MiningError> {
     let bytes = build_p2pk_tree_bytes(miner_pubkey).map_err(|e| MiningError::IdComputation {
         op: "rent_p2pk_tree",
         reason: format!("{e:?}"),
@@ -446,7 +446,7 @@ fn parse_p2pk_tree(miner_pubkey: &[u8; 33]) -> Result<ErgoTree, MiningError> {
     })
 }
 
-fn build_p2pk_box(
+pub(crate) fn build_p2pk_box(
     value: u64,
     tree: &ErgoTree,
     height: u32,
@@ -469,7 +469,7 @@ fn build_p2pk_box(
 /// the full on-chain box length is the candidate body plus the 32-byte
 /// transaction id and the VLQ-`u16` output index, and the min value is
 /// that length times `min_value_per_byte`.
-fn box_min_value_and_size(
+pub(crate) fn box_min_value_and_size(
     candidate: &ErgoBoxCandidate,
     output_index: usize,
     min_value_per_byte: u64,
@@ -621,6 +621,32 @@ mod tests {
 
     fn box_size_on_chain(candidate: &ErgoBoxCandidate, index: usize) -> usize {
         box_min_value_and_size(candidate, index, 0).unwrap().1
+    }
+
+    // ----- anchor parity (Phase 1c) -----
+
+    /// `00 08 d3` = `Const(SSigmaProp, TrivialProp::true)` — an
+    /// anyone-can-spend SigmaProp root. Phase 1b's CPFP child spends this
+    /// anchor output, so its exact 3-byte encoding is pinned here: it must
+    /// parse and round-trip (parse → serialize) back to the same bytes.
+    #[test]
+    fn anchor_tree_is_0008d3_and_round_trips() {
+        use ergo_primitives::reader::VlqReader;
+        use ergo_primitives::writer::VlqWriter;
+        use ergo_ser::ergo_tree::{read_ergo_tree, write_ergo_tree};
+
+        let anchor_bytes = vec![0x00u8, 0x08, 0xd3];
+
+        let mut r = VlqReader::new(&anchor_bytes);
+        let tree = read_ergo_tree(&mut r).expect("0008d3 anchor must parse");
+
+        let mut w = VlqWriter::new();
+        write_ergo_tree(&mut w, &tree).expect("anchor tree must serialize");
+        assert_eq!(
+            w.result(),
+            anchor_bytes,
+            "the 0008d3 anyone-can-spend anchor must round-trip to its exact 3-byte encoding",
+        );
     }
 
     // ----- happy path -----

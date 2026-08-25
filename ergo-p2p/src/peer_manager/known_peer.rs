@@ -86,6 +86,12 @@ pub const MAX_KNOWN_ADDRESSES: usize = 5000;
 /// cycle within ~minutes, freeing the budget for gossiped peers.
 const DIAL_BACKOFF_SECS: &[u64] = &[30, 120, 600, 1800, 7200];
 
+/// Softer schedule for sticky / priority miner peers: 15s → 30s → 60s →
+/// 2min cap. Without this, a handshake-failing builder (TCP-open but
+/// session never sticks) disappears for up to 2hr and preferential Inv
+/// never reaches the assembler.
+const STICKY_DIAL_BACKOFF_SECS: &[u64] = &[15, 30, 60, 120];
+
 /// Periodic peer-gossip interval. Matches Scala's
 /// `scorexSettings.network.getPeersInterval` default of 2 minutes. The
 /// orchestrator (ergo-node `sync_tick`) is expected to call
@@ -109,4 +115,9 @@ pub(super) fn known_peer_keep_priority(p: &KnownPeer) -> (bool, bool, i64) {
 pub(super) fn backoff_for(failures: u32) -> std::time::Duration {
     let idx = (failures.saturating_sub(1) as usize).min(DIAL_BACKOFF_SECS.len() - 1);
     std::time::Duration::from_secs(DIAL_BACKOFF_SECS[idx])
+}
+
+pub(super) fn sticky_backoff_for(failures: u32) -> std::time::Duration {
+    let idx = (failures.saturating_sub(1) as usize).min(STICKY_DIAL_BACKOFF_SECS.len() - 1);
+    std::time::Duration::from_secs(STICKY_DIAL_BACKOFF_SECS[idx])
 }

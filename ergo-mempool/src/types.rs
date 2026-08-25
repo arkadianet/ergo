@@ -23,6 +23,12 @@ pub enum TxSource {
     Api,
     Wallet,
     DemotedFromBlock,
+    /// Locally-originated storage-rent auto-collection claim. Peer-less (so
+    /// `peer()` is `None`, like `Api`/`Wallet`), and — unlike
+    /// `DemotedFromBlock` — NOT exempt from the anti-DoS cost budget: a rent
+    /// claim is new local work, so an over-budget one is simply rejected back
+    /// to the collector rather than draining the pool.
+    RentCollector,
 }
 
 impl TxSource {
@@ -120,6 +126,10 @@ pub enum EvictionReason {
     /// Evicted by the proactive tip-revalidation pass: the tx (or a cascade
     /// descendant of one) is no longer valid at the new tip.
     TipInvalid,
+    /// Prior-height `RentCollector` family cleared before a fresh tip claim
+    /// so a CPFP-boosted stale parent cannot beat the new claim via
+    /// strict-`>` replacement. Tip-path first-occupancy only.
+    RentCollectorRefresh,
 }
 
 /// Pointer to a committed-state tip. Carried by the notifier so
@@ -347,5 +357,26 @@ impl MempoolConfig {
             max_bytes_per_peer: self.staging_max_bytes_per_peer,
             max_waiters_per_input: self.staging_max_waiters_per_input,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `RentCollector` source is peer-less: it carries no `PeerId`, so
+    /// `is_peer()` is false and `peer()` is `None` — identical to the other
+    /// locally-originated sources (`Api`, `Wallet`, `DemotedFromBlock`). This
+    /// matters because the family-broadcast path routes its `BroadcastInv`s
+    /// with `except: None`, advertising the claim to every connected peer.
+    #[test]
+    fn txsource_rentcollector_is_peerless() {
+        let src = TxSource::RentCollector;
+        assert!(!src.is_peer(), "RentCollector must not be a peer source");
+        assert_eq!(
+            src.peer(),
+            None,
+            "RentCollector carries no PeerId, so peer() is None",
+        );
     }
 }

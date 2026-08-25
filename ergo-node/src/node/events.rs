@@ -295,6 +295,20 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
             {
                 Ok(()) => {
                     state.peer_manager.mark_dial_succeeded(&addr, now);
+                    if state.peer_manager.priority_peers().contains(&addr)
+                        || state
+                            .peer_manager
+                            .priority_peers()
+                            .iter()
+                            .any(|p| p.ip() == addr.ip())
+                    {
+                        info!(
+                            event = "rent_collector_sticky_dial_ok",
+                            peer = %addr,
+                            version = ?peer_spec.version,
+                            "sticky/priority peer handshake succeeded"
+                        );
+                    }
                     // Step B: ingest the peer's REST URL into the
                     // shared map keyed by PeerId. Validate strictly
                     // before storage so the builder never sees
@@ -451,7 +465,18 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
             flush_actions(state, missing_actions);
         }
 
-        PeerEvent::ConnectFailed { addr } => {
+        PeerEvent::ConnectFailed { addr, reason } => {
+            let is_priority = state.peer_manager.priority_peers().contains(&addr);
+            if is_priority {
+                warn!(
+                    event = "rent_collector_sticky_dial_fail",
+                    peer = %addr,
+                    reason = %reason,
+                    "sticky/priority peer dial failed"
+                );
+            } else {
+                debug!(peer = %addr, reason = %reason, "dial failed");
+            }
             state.peer_manager.disconnect(&addr);
             state.peer_manager.mark_dial_failed(&addr, now);
         }

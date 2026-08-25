@@ -556,6 +556,7 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
         mempool_tx_requested_total: state.mempool_tx_requested_total,
         mempool_peer_tx_admitted_total: state.mempool_peer_tx_admitted_total,
         mempool_peer_tx_rejected_total: state.mempool_peer_tx_rejected_total,
+        rent_collector_broadcasts_total: state.rent_collector_broadcasts_total,
     };
 
     if let Some(pub_) = state.snapshot_publisher.as_mut() {

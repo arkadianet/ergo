@@ -113,16 +113,42 @@ pub(in crate::node) fn handle_message(
             Ok(inv) => {
                 let type_id = inv.type_id;
                 let hits: Vec<([u8; 32], Vec<u8>)> = match ModifierTypeId::from_byte(type_id) {
-                    Some(ModifierTypeId::Transaction) => inv
-                        .ids
-                        .iter()
-                        .filter_map(|id| {
-                            state
-                                .mempool
-                                .get_bytes(&Digest32::from_bytes(*id))
-                                .map(|b| (*id, b.to_vec()))
-                        })
-                        .collect(),
+                    Some(ModifierTypeId::Transaction) => {
+                        let hits: Vec<([u8; 32], Vec<u8>)> = inv
+                            .ids
+                            .iter()
+                            .filter_map(|id| {
+                                state
+                                    .mempool
+                                    .get_bytes(&Digest32::from_bytes(*id))
+                                    .map(|b| (*id, b.to_vec()))
+                            })
+                            .collect();
+                        // Inv-ACK proxy for first-occupancy: classify
+                        // decisive vs public-priority RequestModifiers.
+                        if !hits.is_empty() && state.rent_collector.is_some() {
+                            let (decisive_ips, priority_ips) = {
+                                let cfg = state.rent_collector.as_ref().unwrap();
+                                let decisive: std::collections::HashSet<_> =
+                                    cfg.decisive_peers.iter().map(|a| a.ip()).collect();
+                                let priority: std::collections::HashSet<_> =
+                                    cfg.priority_peers.iter().map(|a| a.ip()).collect();
+                                (decisive, priority)
+                            };
+                            let is_decisive = decisive_ips.contains(&peer.ip());
+                            let is_priority = priority_ips.contains(&peer.ip());
+                            for (id, _) in &hits {
+                                super::super::rent_collector::note_priority_inv_ack(
+                                    state,
+                                    peer.ip(),
+                                    id,
+                                    is_priority,
+                                    is_decisive,
+                                );
+                            }
+                        }
+                        hits
+                    }
                     Some(ModifierTypeId::Header) => inv
                         .ids
                         .iter()

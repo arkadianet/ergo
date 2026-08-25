@@ -79,8 +79,7 @@ use ergo_mining::error::MiningError;
 use ergo_mining::handle::MiningHandle;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_state::reader::ChainStoreReader;
-use ergo_state::store::{BaseDisposition, CommittedSnapshot, DryRunBase};
-use ergo_validation::UtxoView;
+use ergo_state::store::{BaseDisposition, DryRunBase};
 use tokio::sync::{oneshot, watch};
 use tracing::{debug, error, info, warn};
 
@@ -119,9 +118,17 @@ const MAX_RENT_PAGES: u32 = 4;
 /// unavailable, the chain is younger than one storage period, or the index
 /// query fails — rent is policy, and a policy failure must never block
 /// candidate production.
-fn resolve_eligible_rent_boxes(
+///
+/// `utxo` is the view boxes are materialized against. The mining candidate
+/// path passes a [`CommittedSnapshot`] (stable dry-run tip). The post-apply
+/// rent collector MUST pass the **live** [`StateStore`] UTXO view — the
+/// durable snapshot can trail the in-memory tip by the persist-pipeline
+/// depth, and materializing from a lagging snapshot then admitting against
+/// the live tip yields `UnresolvedInput` (spent-at-tip boxes still visible
+/// in the stale snapshot). That miss costs the tip race.
+pub(crate) fn resolve_eligible_rent_boxes(
     indexer: Option<&ergo_indexer::IndexerHandle>,
-    snapshot: &CommittedSnapshot,
+    utxo: &dyn ergo_validation::UtxoView,
     candidate_height: u32,
     max_claims: u32,
 ) -> Vec<ErgoBox> {
@@ -149,7 +156,7 @@ fn resolve_eligible_rent_boxes(
                 ergo_indexer::SortDir::Asc,
             )
         },
-        |id| snapshot.get_box(id),
+        |id| utxo.get_box(id),
         max_claims,
     )
 }
@@ -182,7 +189,7 @@ fn resolve_eligible_rent_boxes(
 ///   that move across the page boundary mid-scan; the worst case is collecting
 ///   fewer boxes than `max_claims`, which is fine — rent is opt-in policy and
 ///   correctness never depends on collecting every eligible box.
-fn page_rent_boxes<E: std::fmt::Debug>(
+pub(crate) fn page_rent_boxes<E: std::fmt::Debug>(
     mut fetch_page: impl FnMut(u32, u32) -> Result<Vec<StorageRentEligibleDto>, E>,
     resolve_box: impl Fn(&ergo_primitives::digest::Digest32) -> Option<ErgoBox>,
     max_claims: u32,
@@ -869,6 +876,71 @@ mod tests {
             "front-deletion gap under-collects; missed boxes stay eligible for the next build"
         );
         assert_eq!(fetches.get(), 2);
+    }
+
+    // ----- shared enumeration call-through (Phase 2) -----
+    //
+    // `resolve_eligible_rent_boxes` / `page_rent_boxes` are `pub(crate)` so the
+    // post-block-apply rent collector (Phase 3) can enumerate eligible boxes
+    // through the exact same path the mining-candidate build uses. This test
+    // pins that the now-shared enumeration is callable as a crate-internal entry
+    // and yields the candidate path's box set, with zero behavior change.
+
+    #[test]
+    fn shared_enumeration_yields_candidate_box_set() {
+        // The candidate path's box set is whatever `resolve_eligible_rent_boxes`
+        // returns, which forwards the index page + caller UTXO resolver into the
+        // shared `page_rent_boxes` engine. The Phase 3 collector enumerates via
+        // the same `page_rent_boxes` (live tip view; mining uses the durable
+        // snapshot). Pin that a collector-style call and a candidate-style call
+        // over identical inputs (rows, resolver, cap) produce the identical
+        // eligible-box set — the call-through is the same function with the
+        // same result for both callers.
+        let rows = [row(1), row(2), row(3)];
+        let live = [1u8, 2, 3];
+        let cap = 4;
+
+        // Candidate-path enumeration (what the build closure consumes).
+        let candidate_fetches = Cell::new(0);
+        let candidate_set = page_rent_boxes(pager(&rows, &candidate_fetches), resolver(&live), cap);
+
+        // Collector-path enumeration (the Phase 3 call site), same inputs.
+        let collector_fetches = Cell::new(0);
+        let collector_set = page_rent_boxes(pager(&rows, &collector_fetches), resolver(&live), cap);
+
+        let ids = |bs: &[ErgoBox]| -> Vec<[u8; 32]> {
+            bs.iter().map(|b| *b.transaction_id.as_bytes()).collect()
+        };
+        assert_eq!(
+            ids(&candidate_set),
+            ids(&collector_set),
+            "shared enumeration must yield the candidate path's box set",
+        );
+        assert_eq!(candidate_set.len(), 3);
+        assert_eq!(candidate_fetches.get(), collector_fetches.get());
+    }
+
+    /// Regression: indexer rows naming boxes spent at the live tip must be
+    /// dropped by the live UTXO resolver — never materialized into a claim
+    /// that admits as `UnresolvedInput` and burns the tip race.
+    ///
+    /// VPS canary (tip ~1834515): collect used a lagging `CommittedSnapshot`
+    /// while admission used the in-memory tip; spent-at-tip boxes still
+    /// resolved from the snapshot, then failed admit immediately after
+    /// recheck. Filtering against the live view is the fix; this pins the
+    /// filter contract the collector now shares with that view.
+    #[test]
+    fn page_rent_boxes_drops_ids_absent_from_live_utxo_view() {
+        let rows = [row(1), row(2), row(3)];
+        // Box 2 spent at tip / absent from live view; indexer still lists it.
+        let live_only = [1u8, 3];
+        let out = page_rent_boxes(pager(&rows, &Cell::new(0)), resolver(&live_only), 4);
+        let seeds: Vec<u8> = out.iter().map(|b| b.transaction_id.as_bytes()[0]).collect();
+        assert_eq!(
+            seeds,
+            vec![1, 3],
+            "absent-from-live ids must be skipped, not built into a doomed claim",
+        );
     }
 
     // ----- full_refresh_adds_nothing predicate -----

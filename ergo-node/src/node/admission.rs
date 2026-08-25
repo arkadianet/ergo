@@ -23,6 +23,12 @@ use super::{flush_actions, NodeState};
 /// connected peer except the source; `Penalize` becomes
 /// `Action::Penalize` for `peer_manager` consumption; `Observe` is
 /// already traced at the source so it's a structural no-op here.
+///
+/// For txs still tagged [`TxSource::RentCollector`] in the pool, peer
+/// order prefers configured `[mining.rent_collector].decisive_peers`
+/// first, then other `priority_peers` (match by IP) so assembler Inv
+/// lands before public priority / gossip mesh. Other sources keep
+/// HashMap iteration order.
 pub(super) fn route_mempool_actions(
     state: &mut NodeState,
     actions: Vec<MempoolAction>,
@@ -45,7 +51,8 @@ pub(super) fn route_mempool_actions(
                         continue;
                     }
                 };
-                for peer in state.registry.peers.keys().copied().collect::<Vec<_>>() {
+                let peers = inv_fanout_peers(state, &tx_id);
+                for peer in peers {
                     if Some(peer) == except {
                         continue;
                     }
@@ -88,6 +95,53 @@ pub(super) fn route_mempool_actions(
         }
     }
     out
+}
+
+/// Connected peers for one Inv, optionally decisive-then-priority for
+/// `RentCollector` sources.
+fn inv_fanout_peers(state: &NodeState, tx_id: &ergo_mempool::types::TxId) -> Vec<PeerId> {
+    let peers = state.registry.peers.keys().copied();
+    let prefer = state
+        .mempool
+        .source_of(tx_id)
+        .is_some_and(|s| matches!(s, TxSource::RentCollector));
+    let (decisive, priority) = state
+        .rent_collector
+        .as_ref()
+        .map(|c| (c.decisive_peers.as_slice(), c.priority_peers.as_slice()))
+        .unwrap_or((&[], &[]));
+    if prefer && (!decisive.is_empty() || !priority.is_empty()) {
+        order_peers_for_inv(peers, decisive, priority)
+    } else {
+        peers.collect()
+    }
+}
+
+/// Partition `peers` so decisive IPs come first, then other priority IPs,
+/// then the rest (stable within each partition). Pure helper — unit-tested.
+pub(super) fn order_peers_for_inv(
+    peers: impl IntoIterator<Item = PeerId>,
+    decisive: &[std::net::SocketAddr],
+    priority: &[std::net::SocketAddr],
+) -> Vec<PeerId> {
+    use std::collections::HashSet;
+    let decisive_ips: HashSet<_> = decisive.iter().map(|a| a.ip()).collect();
+    let priority_ips: HashSet<_> = priority.iter().map(|a| a.ip()).collect();
+    let mut dec = Vec::new();
+    let mut pref = Vec::new();
+    let mut rest = Vec::new();
+    for peer in peers {
+        if decisive_ips.contains(&peer.ip()) {
+            dec.push(peer);
+        } else if priority_ips.contains(&peer.ip()) {
+            pref.push(peer);
+        } else {
+            rest.push(peer);
+        }
+    }
+    dec.append(&mut pref);
+    dec.append(&mut rest);
+    dec
 }
 
 pub(super) fn admit_transaction(
@@ -156,10 +210,16 @@ pub(super) fn admit_transaction(
     route_mempool_actions(state, actions)
 }
 
-/// Drive an API submission through the same admission pipeline peers
-/// use. `Broadcast` mode runs `Mempool::process` (steps 0–14 then
-/// commit then Inv); `CheckOnly` runs `Mempool::check` (steps 0–14,
-/// no commit, no Inv). Both still mutate the anti-DoS bookkeeping.
+/// Drive a locally-originated submission through the same admission
+/// pipeline peers use. `Broadcast` mode runs `Mempool::process` (steps
+/// 0–14 then commit then Inv); `CheckOnly` runs `Mempool::check` (steps
+/// 0–14, no commit, no Inv). Both still mutate the anti-DoS bookkeeping.
+///
+/// `source` distinguishes the originator for log-level + journal-tag
+/// routing: the REST/wallet submit channel passes `TxSource::Api`; a
+/// later phase's storage-rent collector calls this directly with
+/// `TxSource::RentCollector`. All non-peer sources flush their `Inv`
+/// here (the peer path flushes via its own caller).
 ///
 /// Returns the hex-encoded tx_id on success; on rejection, returns
 /// the wire-shaped `SubmitError`.
@@ -167,6 +227,7 @@ pub(super) fn admit_api_transaction(
     state: &mut NodeState,
     bytes: &[u8],
     mode: SubmitMode,
+    source: TxSource,
     now: Instant,
 ) -> Result<String, SubmitError> {
     // No admission pipeline without a mempool (digest mode, or mempool
@@ -194,7 +255,7 @@ pub(super) fn admit_api_transaction(
                             ));
                         state
                             .mempool
-                            .process(bytes, TxSource::Api, now, &tip_ctx, &ErgoValidator)
+                            .process(bytes, source.clone(), now, &tip_ctx, &ErgoValidator)
                     };
                 let tx_id = match outcome {
                     AdmissionOutcome::Admitted { tx_id, .. } => Ok(hex::encode(tx_id.as_bytes())),
@@ -211,7 +272,7 @@ pub(super) fn admit_api_transaction(
                             ));
                         state
                             .mempool
-                            .check(bytes, TxSource::Api, now, &tip_ctx, &ErgoValidator)
+                            .check(bytes, source.clone(), now, &tip_ctx, &ErgoValidator)
                     };
                 let tx_id = match outcome {
                     CheckOutcome::WouldAdmit { validated, .. } => {
@@ -312,5 +373,72 @@ pub(super) fn reject_to_submit_error(reason: RejectReason) -> SubmitError {
     SubmitError {
         reason: reason_str.to_string(),
         detail,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::order_peers_for_inv;
+    use std::net::SocketAddr;
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn order_peers_for_inv_puts_priority_ips_first_preserving_rest_order() {
+        let peers = vec![
+            addr("10.0.0.1:9030"),
+            addr("51.89.64.232:5555"), // same IP as priority, different port
+            addr("10.0.0.2:9030"),
+            addr("94.232.212.33:9030"),
+            addr("10.0.0.3:9030"),
+        ];
+        let priority = vec![addr("51.89.64.232:29030"), addr("94.232.212.33:9030")];
+        let ordered = order_peers_for_inv(peers, &[], &priority);
+        assert_eq!(
+            ordered,
+            vec![
+                addr("51.89.64.232:5555"),
+                addr("94.232.212.33:9030"),
+                addr("10.0.0.1:9030"),
+                addr("10.0.0.2:9030"),
+                addr("10.0.0.3:9030"),
+            ]
+        );
+    }
+
+    #[test]
+    fn order_peers_for_inv_puts_decisive_before_other_priority() {
+        let peers = vec![
+            addr("91.218.244.89:9030"), // public priority (Hero sentry)
+            addr("10.0.0.1:9030"),
+            addr("51.89.64.232:4444"),  // decisive IP, ephemeral port
+            addr("94.232.212.33:9030"), // public priority
+        ];
+        let decisive = vec![addr("51.89.64.232:29030")];
+        let priority = vec![
+            addr("91.218.244.89:9030"),
+            addr("94.232.212.33:9030"),
+            addr("51.89.64.232:29030"),
+        ];
+        let ordered = order_peers_for_inv(peers, &decisive, &priority);
+        assert_eq!(
+            ordered,
+            vec![
+                addr("51.89.64.232:4444"),
+                addr("91.218.244.89:9030"),
+                addr("94.232.212.33:9030"),
+                addr("10.0.0.1:9030"),
+            ]
+        );
+    }
+
+    #[test]
+    fn order_peers_for_inv_empty_priority_preserves_input_order() {
+        let peers = vec![addr("10.0.0.1:1"), addr("10.0.0.2:2")];
+        assert_eq!(order_peers_for_inv(peers.clone(), &[], &[]), peers);
     }
 }

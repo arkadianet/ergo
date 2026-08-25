@@ -65,6 +65,26 @@ pub enum RewardKeySource {
     Wallet,
 }
 
+impl RewardKeySource {
+    /// Resolve this key source against current persisted state. `Pinned` is
+    /// always [`RewardKeyResolution::Ready`]; `Wallet` delegates to the
+    /// wallet's EIP-3 resolver ([`RewardKeyResolution::Pending`] until the
+    /// wallet is initialized, [`RewardKeyResolution::Corrupt`] if tracking is
+    /// inconsistent).
+    ///
+    /// Callable WITHOUT a [`MiningHandle`] so the storage-rent collector can
+    /// resolve its proceeds key with mining disabled (it reuses the same
+    /// reward-key source, decoupled from `[mining].enabled`).
+    /// [`MiningHandle::resolve_reward_key`] delegates here so the two paths
+    /// stay byte-identical.
+    pub fn resolve(&self, state: &StateStore) -> RewardKeyResolution {
+        match self {
+            RewardKeySource::Pinned(pk) => RewardKeyResolution::Ready(*pk),
+            RewardKeySource::Wallet => state.resolve_eip3_reward_key(),
+        }
+    }
+}
+
 /// Mutable cache state — wrapped in an `RwLock` inside `MiningHandle`.
 ///
 /// Bounded-ring design: `templates` holds the last
@@ -511,10 +531,7 @@ impl MiningHandle {
     /// (`Pending` until the wallet is initialized, `Corrupt` if tracking is
     /// inconsistent). Used by candidate refresh and the reward endpoints.
     pub fn resolve_reward_key(&self, state: &StateStore) -> RewardKeyResolution {
-        match self.reward_key {
-            RewardKeySource::Pinned(pk) => RewardKeyResolution::Ready(pk),
-            RewardKeySource::Wallet => state.resolve_eip3_reward_key(),
-        }
+        self.reward_key.resolve(state)
     }
 
     /// Run the API-side solution pre-check against every cached template,

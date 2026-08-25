@@ -55,6 +55,21 @@ fn openapi_native_matches_snapshot() {
     }
 }
 
+/// The generated `ApiTxSource` schema enumerates the `rent_collector`
+/// variant. Pins that the storage-rent auto-collection source reaches the
+/// published spec — a client generating types off the OpenAPI document must
+/// see it. Asserts against the freshly-derived YAML (not just the golden
+/// file) so a future enum edit that the `ToSchema` derive can't pick up
+/// fails here independently of the snapshot diff.
+#[test]
+fn openapi_enum_has_rent_collector() {
+    let actual = native_openapi_yaml();
+    assert!(
+        actual.contains("- rent_collector"),
+        "generated OpenAPI must enumerate the rent_collector ApiTxSource variant",
+    );
+}
+
 // ----- regeneration tool -----
 
 /// Rewrites the golden file from the current derive output. Ignored by

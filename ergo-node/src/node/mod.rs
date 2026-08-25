@@ -39,6 +39,7 @@ mod messaging;
 mod mining_dispatch;
 mod mining_engine;
 mod peer_actions;
+mod rent_collector;
 mod reorg_history;
 mod shadow_watch;
 mod snapshot_emit;

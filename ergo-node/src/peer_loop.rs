@@ -36,6 +36,9 @@ pub enum PeerEvent {
     },
     ConnectFailed {
         addr: SocketAddr,
+        /// Operator-visible cause: `connect_error`, `connect_timeout`,
+        /// `handshake_error:…`, `handshake_timeout`, etc.
+        reason: String,
     },
     /// A peer dialed our listener. The action loop must call
     /// `register_inbound` to apply per-IP / per-subnet / max-inbound
@@ -98,12 +101,22 @@ pub async fn dial_task(
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
             debug!(peer = %addr, error = %e, "dial failed: connect error");
-            let _ = event_tx.send(PeerEvent::ConnectFailed { addr }).await;
+            let _ = event_tx
+                .send(PeerEvent::ConnectFailed {
+                    addr,
+                    reason: format!("connect_error:{e}"),
+                })
+                .await;
             return;
         }
         Err(_) => {
             debug!(peer = %addr, "dial failed: connect timeout");
-            let _ = event_tx.send(PeerEvent::ConnectFailed { addr }).await;
+            let _ = event_tx
+                .send(PeerEvent::ConnectFailed {
+                    addr,
+                    reason: "connect_timeout".into(),
+                })
+                .await;
             return;
         }
     };
@@ -156,7 +169,14 @@ async fn emit_handshake_outcome(
         }
         Err(e) => {
             debug!(peer = %addr, role = role, error = %e, "handshake failed");
-            let _ = event_tx.send(PeerEvent::ConnectFailed { addr }).await;
+            let reason = if e.contains("timeout") || e.contains("Timeout") {
+                format!("handshake_timeout:{e}")
+            } else {
+                format!("handshake_error:{e}")
+            };
+            let _ = event_tx
+                .send(PeerEvent::ConnectFailed { addr, reason })
+                .await;
         }
     }
 }

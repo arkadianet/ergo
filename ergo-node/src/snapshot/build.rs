@@ -90,6 +90,7 @@ pub(super) fn build_snapshot(
         last_apply_duration_ms: 0,
         last_applied_height: 0,
         last_apply_age_ms: None,
+        rent_collector_broadcasts_total: p.rent_collector_broadcasts_total,
     };
 
     let tip = ApiTip {

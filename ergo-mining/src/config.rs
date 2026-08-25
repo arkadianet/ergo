@@ -93,6 +93,188 @@ pub struct MiningConfig {
     /// Validated at startup via [`MiningConfig::validate`].
     #[serde(default)]
     pub extension_fields: Vec<CustomExtensionField>,
+
+    /// `[mining.rent_collector]` — the storage-rent auto-collection
+    /// subsystem. Distinct from `claim_storage_rent` (which sweeps rent into
+    /// the node's OWN mined block): the collector broadcasts fee-paying
+    /// storage-rent claims to the mempool after applying EVERY block (every
+    /// synced tip change), not only blocks the node didn't mine. Rent on
+    /// blocks the node doesn't win is collected by self-clean: a broadcast
+    /// after a self-mined block double-spends the free in-block self-claim, so
+    /// if the node mines the next block too the broadcast is evicted unmined
+    /// (no fee); when another miner mines next, the broadcast collects. Off by
+    /// default. See [`RentCollectorConfig`].
+    #[serde(default)]
+    pub rent_collector: RentCollectorConfig,
+}
+
+/// Fee-bound strategy for the rent-collector's CPFP child fee.
+///
+/// Serde renames to lower snake_case so the TOML reads
+/// `fee_bound = "unbeatable"` / `fee_bound = "observed_competitor"`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FeeBound {
+    /// Pay the deterministic *unbeatable* child fee: the family is sized so no
+    /// competing claim on the same boxes can out-weigh it under the mempool's
+    /// fee-per-cost / fee-per-size ordering (the formula in Phase 1b). The
+    /// default — and the only IMPLEMENTED bound.
+    #[default]
+    Unbeatable,
+    /// Pay just enough to beat the cheapest OBSERVED competing claim. A future
+    /// stub: NOT yet implemented, so config-load validation rejects it (a
+    /// config must not be able to silently select an unimplemented bound).
+    ObservedCompetitor,
+}
+
+/// `[mining.rent_collector]` configuration: the storage-rent
+/// auto-collection subsystem (broadcast fee-paying claims after applying
+/// EVERY block; self-clean handles the node's own blocks).
+///
+/// Mirrors the `claim_storage_rent` / `max_storage_rent_claims` conventions
+/// on [`MiningConfig`]: per-field `#[serde(default …)]` so a present-but-
+/// partial `[mining.rent_collector]` table fills omitted fields, plus a
+/// hand-written [`Default`] impl kept in sync so a programmatically- or
+/// CLI-built config (which starts from `Default`, not a deserialized table)
+/// gets the same values.
+///
+/// The cross-section validation (enabling it requires the indexer AND a
+/// resolvable proceeds key — the same `RewardKeySource` the miner reward uses)
+/// lives at the NODE config-load level, alongside the existing indexer gates;
+/// the self-contained parts (the `fee_bound` rejection, and the configured
+/// `miner_public_key_hex` well-formedness) are reused from
+/// [`MiningConfig::validate`].
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RentCollectorConfig {
+    /// `false` (default): the collector is disabled. `true`: after the node
+    /// applies EVERY block (every synced tip change, fully synced + UTXO
+    /// mode) — not gated on whether the node mined it — it enumerates eligible
+    /// storage-rent boxes, builds fee-paying claims, and admits them to the
+    /// local mempool (a broadcast after a self-mined block self-cleans). Enabling
+    /// it requires the indexer AND a resolvable proceeds key (checked at node
+    /// config-load).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Fee-bound strategy for the CPFP child fee. Default (and only
+    /// implemented value) [`FeeBound::Unbeatable`].
+    #[serde(default)]
+    pub fee_bound: FeeBound,
+
+    /// Upper ceiling on rent boxes swept into one broadcast family. A safety
+    /// cap, NOT the real limit: the builder bounds each family by the mempool
+    /// per-tx cost/size budget, claiming the oldest eligible boxes that fit.
+    /// Mirrors `max_storage_rent_claims`' style; same default (4096).
+    #[serde(default = "default_max_storage_rent_claims")]
+    pub max_claims: u32,
+
+    /// Minimum net ERG profit (nanoErg) a claim family must clear after fees
+    /// and every output's dust before it is broadcast. Default `0` = "claim
+    /// any *affordable* box" (still subject to the hard affordability gate —
+    /// gross rent must cover the fees + dust). Raise it to skip marginal
+    /// boxes whose rent barely exceeds the cost of claiming them.
+    #[serde(default)]
+    pub min_profit_nanoerg: u64,
+
+    /// Flat fee the recreate-bearing PARENT transaction pays, per input box
+    /// claimed (nanoErg). Raised above the relay floor so the parent is
+    /// mineable STANDALONE by any fee-sorting pool: Ergo gossips transactions
+    /// individually (no package relay), so a CPFP child can never lift a
+    /// min-fee parent across the network — only miners that already hold BOTH
+    /// family txs and do family-weight ordering would include it. The parent
+    /// fee is `max(min_relay_fee, this * num_input_boxes)`; when the family is
+    /// batched, the unbeatable child fee auto-adjusts down as the parent
+    /// carries more of the weight. Default 0.01 ERG/input. Raise it to win
+    /// more contested claims, lower it to keep more of the collected rent.
+    #[serde(default = "default_parent_fee_per_input_nanoerg")]
+    pub parent_fee_per_input_nanoerg: u64,
+
+    /// Cap on input-disjoint claim families built per tip change. `1`
+    /// reproduces the historical single-family path; default `8` chunks
+    /// overflow eligible boxes into additional families (still bounded by
+    /// `max_claims` total and [`Self::collect_time_budget_ms`]). Binary-swap
+    /// without a TOML key activates this.
+    #[serde(default = "default_max_families_per_tip")]
+    pub max_families_per_tip: u32,
+
+    /// Wall-clock budget (ms) for overflow families after family 1 on a tip
+    /// (and for speculative header builds). Family 1 is uncapped; families
+    /// 2..N stop when this elapses. Default `40`. `0` ⇒ only family 1.
+    /// Ceiling-checked at validate (`≤ 200`).
+    #[serde(default = "default_collect_time_budget_ms")]
+    pub collect_time_budget_ms: u64,
+
+    /// Re-emit Inv for still-pooled `RentCollector` families every N ms
+    /// between tip changes. `0` disables. Default 25000.
+    #[serde(default = "default_reannounce_interval_ms")]
+    pub reannounce_interval_ms: u64,
+
+    /// ± basis points applied to `parent_fee_per_input_nanoerg` when
+    /// `jitter_seed` is also set (e.g. `300` = ±3%). `0` (default) disables
+    /// jitter. Ceiling-checked at validate (`≤ 5000`).
+    #[serde(default)]
+    pub jitter_bps: u32,
+
+    /// Per-node seed for deterministic fee jitter. Jitter is active iff
+    /// `jitter_bps > 0` AND this is `Some`. Operator must set a DISTINCT
+    /// value per fleet node. Absent seed with `jitter_bps > 0` leaves
+    /// jitter inactive (not an error).
+    #[serde(default)]
+    pub jitter_seed: Option<u64>,
+
+    /// Miner / builder peers that get preferential treatment for
+    /// first-occupancy: sticky reserved outbound dials, and RentCollector
+    /// Inv fanout ordered so these IPs receive `SendToPeer(Inv)` first
+    /// (after [`Self::decisive_peers`]). Empty (default) = historical
+    /// HashMap / insertion-order behaviour. Typically curated pool
+    /// listening addrs already in `[peers].known`.
+    #[serde(default)]
+    pub priority_peers: Vec<std::net::SocketAddr>,
+
+    /// Assembler-tier / sticky decider peers (e.g. 2miners
+    /// `51.89.64.232:{29030,29031,39030,39031}`). Subset of (or overlap
+    /// with) [`Self::priority_peers`]. Used for:
+    /// (1) Inv fanout before other priority IPs,
+    /// (2) `decisive_ack` metrics — `builder_reach_miss` only when these
+    /// ACK count is 0 (public priority ACKs alone must not clear the miss).
+    /// Empty = no decisive set (every priority ACK counts as public-only;
+    /// `builder_reach_miss` stays true whenever parents are still pooled).
+    #[serde(default)]
+    pub decisive_peers: Vec<std::net::SocketAddr>,
+
+    /// Optional REST base URLs for assembler-tier delivery of admitted
+    /// RentCollector family txs (`POST {url}/transactions/bytes` with a
+    /// JSON string of hex — Scala/pool-inject parity). Empty (default) =
+    /// P2P Inv only. Unsolicited P2P `Modifiers` are protocol-spam
+    /// (`RejectSpam`); REST is the ban-safe push path.
+    #[serde(default)]
+    pub submit_urls: Vec<String>,
+}
+
+impl Default for RentCollectorConfig {
+    /// Mirrors the per-field serde defaults so a `Default`-built config (the
+    /// missing-section / programmatic path) matches a fully-defaulted
+    /// `[mining.rent_collector]` table: off, the `Unbeatable` bound, the 4096
+    /// safety cap, a zero profit floor, fleet chunking/re-announce defaults
+    /// (`max_families_per_tip=8`, `collect_time_budget_ms=40`), and jitter
+    /// off. Kept in sync with the `#[serde(default …)]` attributes above.
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            fee_bound: FeeBound::Unbeatable,
+            max_claims: default_max_storage_rent_claims(),
+            min_profit_nanoerg: 0,
+            parent_fee_per_input_nanoerg: default_parent_fee_per_input_nanoerg(),
+            max_families_per_tip: default_max_families_per_tip(),
+            collect_time_budget_ms: default_collect_time_budget_ms(),
+            reannounce_interval_ms: default_reannounce_interval_ms(),
+            jitter_bps: 0,
+            jitter_seed: None,
+            priority_peers: Vec::new(),
+            decisive_peers: Vec::new(),
+            submit_urls: Vec::new(),
+        }
+    }
 }
 
 /// One operator-configured custom extension field, as hex strings in the
@@ -117,6 +299,30 @@ fn default_max_storage_rent_claims() -> u32 {
     4096
 }
 
+fn default_parent_fee_per_input_nanoerg() -> u64 {
+    10_000_000 // 0.01 ERG per input box
+}
+
+fn default_max_families_per_tip() -> u32 {
+    8
+}
+
+fn default_collect_time_budget_ms() -> u64 {
+    40
+}
+
+fn default_reannounce_interval_ms() -> u64 {
+    25_000
+}
+
+/// Soft ceiling on `jitter_bps` (±50%). Rejected at validate rather than
+/// silently distorting fees.
+pub const MAX_JITTER_BPS: u32 = 5000;
+
+/// Soft ceiling on `collect_time_budget_ms` (200ms). Higher values risk
+/// stalling the tip-path action loop behind overflow packing.
+pub const MAX_COLLECT_TIME_BUDGET_MS: u64 = 200;
+
 impl Default for MiningConfig {
     /// Mirrors the per-field serde defaults so a programmatically- or
     /// CLI-built config (which starts from `Default`, not a deserialized TOML
@@ -137,6 +343,7 @@ impl Default for MiningConfig {
             max_storage_rent_claims: default_max_storage_rent_claims(),
             candidate_base_cache: false,
             extension_fields: Vec::new(),
+            rent_collector: RentCollectorConfig::default(),
         }
     }
 }
@@ -152,14 +359,37 @@ impl MiningConfig {
     /// subsystem is spawned so a misconfigured node refuses to start
     /// rather than silently failing later.
     pub fn validate(&self) -> Result<(), MiningError> {
-        if !self.enabled {
+        // Jitter / budget ceilings are independent of enablement — a
+        // nonsensical value in the TOML must reject at load rather than
+        // wait for enable.
+        if self.rent_collector.jitter_bps > MAX_JITTER_BPS {
+            return Err(MiningError::InvalidConfig(format!(
+                "[mining.rent_collector].jitter_bps must be ≤ {MAX_JITTER_BPS} (got {}); \
+                 values above ±50% are rejected rather than silently distorting fees",
+                self.rent_collector.jitter_bps,
+            )));
+        }
+        if self.rent_collector.collect_time_budget_ms > MAX_COLLECT_TIME_BUDGET_MS {
+            return Err(MiningError::InvalidConfig(format!(
+                "[mining.rent_collector].collect_time_budget_ms must be ≤ {MAX_COLLECT_TIME_BUDGET_MS} \
+                 (got {}); higher values risk stalling the tip-path action loop",
+                self.rent_collector.collect_time_budget_ms,
+            )));
+        }
+        // Nothing to validate when neither the miner nor the rent collector is
+        // on — both subsystems are off, so the rest is moot. The collector is
+        // DECOUPLED from `[mining].enabled` (it can run with mining off), so a
+        // bare `!self.enabled` early-return would skip its checks.
+        if !self.enabled && !self.rent_collector.enabled {
             return Ok(());
         }
         // `miner_public_key_hex` is OPTIONAL: when absent, the reward key is
         // resolved from the wallet's EIP-3 first-address key at candidate time
         // (Scala parity — see ergo-mining handle `RewardKeySource::Wallet`).
         // But a value that IS present must be well-formed (66 hex chars → 33
-        // bytes), validated early at startup rather than failing later.
+        // bytes), validated early at startup rather than failing later. The
+        // rent collector reuses this SAME reward key as its proceeds key, so
+        // the check runs whenever either subsystem is enabled.
         if let Some(pk_hex) = self.miner_public_key_hex.as_ref() {
             match hex::decode(pk_hex) {
                 Ok(bytes) if bytes.len() == 33 => {}
@@ -175,6 +405,24 @@ impl MiningConfig {
                     )));
                 }
             }
+        }
+        // Rent-collector self-contained checks (the cross-section indexer +
+        // resolvable-proceeds-key gate lives at the node config-load level).
+        // Reject the unimplemented `observed_competitor` bound so a config
+        // can't silently select a fee bound the builder does not implement.
+        if self.rent_collector.enabled
+            && self.rent_collector.fee_bound == FeeBound::ObservedCompetitor
+        {
+            return Err(MiningError::InvalidConfig(
+                "[mining.rent_collector].fee_bound = \"observed_competitor\" is not yet \
+                 implemented; only \"unbeatable\" is supported."
+                    .into(),
+            ));
+        }
+        // The remaining checks gate the MINER itself; skip them when only the
+        // rent collector is enabled (mining can be off).
+        if !self.enabled {
+            return Ok(());
         }
         if !self.use_external_miner {
             return Err(MiningError::InvalidConfig(
@@ -472,5 +720,261 @@ mod tests {
         "#;
         let parsed: MiningConfig = toml::from_str(toml_src).expect("parse");
         assert!(parsed.candidate_base_cache);
+    }
+
+    // ----- rent_collector -----
+
+    #[test]
+    fn rent_collector_defaults_are_off_and_unbeatable() {
+        // A fully-defaulted MiningConfig (the CLI / missing-section path)
+        // gets the rent collector OFF, the only-implemented `Unbeatable`
+        // bound, the safety-cap default, a zero profit floor, the
+        // 0.01 ERG/input self-sufficient parent fee, fleet chunking +
+        // collect budget + re-announce ON, and jitter OFF (needs an
+        // explicit per-node seed).
+        let cfg = MiningConfig::default();
+        let rc = &cfg.rent_collector;
+        assert!(!rc.enabled, "rent collector is opt-in (off by default)");
+        assert_eq!(rc.fee_bound, FeeBound::Unbeatable);
+        assert_eq!(rc.max_claims, default_max_storage_rent_claims());
+        assert_eq!(rc.min_profit_nanoerg, 0);
+        assert_eq!(rc.parent_fee_per_input_nanoerg, 10_000_000);
+        assert_eq!(rc.max_families_per_tip, default_max_families_per_tip());
+        assert_eq!(rc.collect_time_budget_ms, default_collect_time_budget_ms());
+        assert_eq!(rc.reannounce_interval_ms, default_reannounce_interval_ms());
+        assert_eq!(rc.jitter_bps, 0);
+        assert_eq!(rc.jitter_seed, None);
+        assert!(rc.priority_peers.is_empty());
+        assert!(rc.decisive_peers.is_empty());
+        assert!(rc.submit_urls.is_empty());
+    }
+
+    #[test]
+    fn rent_collector_parses_explicit_parent_fee_per_input() {
+        // An explicit `parent_fee_per_input_nanoerg` in the table round-trips
+        // (not just the serde default), so the operator can tune the
+        // self-sufficient parent fee from config.
+        let rc: RentCollectorConfig =
+            toml::from_str("enabled = true\nparent_fee_per_input_nanoerg = 25000000\n")
+                .expect("table with explicit parent fee parses");
+        assert!(rc.enabled);
+        assert_eq!(rc.parent_fee_per_input_nanoerg, 25_000_000);
+        // The other fields still fall back to their defaults.
+        assert_eq!(rc.fee_bound, FeeBound::Unbeatable);
+        assert_eq!(rc.max_claims, default_max_storage_rent_claims());
+    }
+
+    #[test]
+    fn rent_collector_default_matches_serde_field_defaults() {
+        // A present-but-empty `[mining.rent_collector]` table must
+        // deserialize to exactly the same values as `RentCollectorConfig`'s
+        // `Default` — the per-field serde defaults and the hand-written
+        // `Default` impl must not drift (mirrors `MiningConfig`).
+        let from_default = RentCollectorConfig::default();
+        let from_empty_table: RentCollectorConfig =
+            toml::from_str("").expect("empty table parses via field defaults");
+        assert_eq!(from_default, from_empty_table);
+    }
+
+    #[test]
+    fn rent_collector_self_validation_rejects_observed_competitor_bound() {
+        // `ObservedCompetitor` is a documented future stub — the only
+        // implemented bound is `Unbeatable`. Selecting the unimplemented
+        // bound must be rejected at config-load so it can't silently win.
+        let cfg = MiningConfig {
+            rent_collector: RentCollectorConfig {
+                enabled: true,
+                fee_bound: FeeBound::ObservedCompetitor,
+                ..RentCollectorConfig::default()
+            },
+            ..MiningConfig::default()
+        };
+        let err = cfg
+            .validate()
+            .expect_err("observed_competitor bound must reject");
+        assert!(
+            matches!(err, MiningError::InvalidConfig(ref m) if m.contains("observed_competitor")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rent_collector_self_validation_reuses_pubkey_wellformedness() {
+        // The self-contained part of the proceeds-key check: a configured
+        // `miner_public_key_hex` that is malformed must still be rejected by
+        // `MiningConfig::validate` even when mining itself is disabled but the
+        // rent collector is enabled (the collector reuses the reward key).
+        let cfg = MiningConfig {
+            enabled: false,
+            miner_public_key_hex: Some("nothex!!".into()),
+            rent_collector: RentCollectorConfig {
+                enabled: true,
+                ..RentCollectorConfig::default()
+            },
+            ..MiningConfig::default()
+        };
+        let err = cfg
+            .validate()
+            .expect_err("malformed pubkey must reject even with mining off");
+        assert!(
+            matches!(err, MiningError::InvalidConfig(ref m) if m.contains("valid hex")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rent_collector_self_validation_passes_with_unbeatable_bound() {
+        // Enabling the collector with the implemented bound passes the
+        // crate-local self-validation (the cross-section indexer + proceeds-key
+        // gate lives at the node level, tested there).
+        let cfg = MiningConfig {
+            rent_collector: RentCollectorConfig {
+                enabled: true,
+                fee_bound: FeeBound::Unbeatable,
+                ..RentCollectorConfig::default()
+            },
+            ..MiningConfig::default()
+        };
+        cfg.validate()
+            .expect("enabled collector with unbeatable bound self-validates");
+    }
+
+    #[test]
+    fn toml_round_trips_rent_collector_including_min_profit() {
+        // The full TOML surface: `[mining.rent_collector]` parses end to end,
+        // including `min_profit_nanoerg`, and the snake_case `fee_bound`
+        // renames round-trip.
+        let toml_src = r#"
+            enabled = true
+
+            [rent_collector]
+            enabled = true
+            fee_bound = "unbeatable"
+            max_claims = 1024
+            min_profit_nanoerg = 5000000
+        "#;
+        let parsed: MiningConfig = toml::from_str(toml_src).expect("parse");
+        let rc = &parsed.rent_collector;
+        assert!(rc.enabled);
+        assert_eq!(rc.fee_bound, FeeBound::Unbeatable);
+        assert_eq!(rc.max_claims, 1024);
+        assert_eq!(rc.min_profit_nanoerg, 5_000_000);
+
+        // Re-serialize and re-parse to confirm the round-trip is stable
+        // (the snake_case `fee_bound` rename survives a serialize pass).
+        let reser = toml::to_string(&parsed).expect("serialize");
+        let reparsed: MiningConfig = toml::from_str(&reser).expect("re-parse");
+        assert_eq!(parsed, reparsed);
+    }
+
+    #[test]
+    fn toml_rent_collector_defaults_when_section_absent() {
+        // A `[mining]` table with no `[mining.rent_collector]` subsection
+        // gets the field-level `#[serde(default)]` — the whole struct's
+        // `Default` (off, Unbeatable, cap default, profit 0).
+        let toml_src = r#"
+            enabled = true
+        "#;
+        let parsed: MiningConfig = toml::from_str(toml_src).expect("parse");
+        assert_eq!(parsed.rent_collector, RentCollectorConfig::default());
+    }
+
+    #[test]
+    fn fee_bound_serde_renames_to_snake_case() {
+        // `observed_competitor` parses to the stub variant (it is then
+        // rejected by validation, tested above); the rename is lower
+        // snake_case, not the PascalCase Rust identifier.
+        #[derive(Deserialize)]
+        struct Wrap {
+            fee_bound: FeeBound,
+        }
+        let parsed: Wrap = toml::from_str(r#"fee_bound = "observed_competitor""#).expect("parse");
+        assert_eq!(parsed.fee_bound, FeeBound::ObservedCompetitor);
+        // PascalCase must NOT parse (rename is in force).
+        assert!(toml::from_str::<Wrap>(r#"fee_bound = "Unbeatable""#).is_err());
+    }
+
+    #[test]
+    fn rent_collector_parses_fleet_knobs() {
+        let rc: RentCollectorConfig = toml::from_str(
+            "max_families_per_tip = 2\n\
+             collect_time_budget_ms = 50\n\
+             reannounce_interval_ms = 10000\n\
+             jitter_bps = 300\n\
+             jitter_seed = 42\n\
+             priority_peers = [\"51.89.64.232:29030\", \"94.232.212.33:9030\"]\n\
+             decisive_peers = [\"51.89.64.232:29030\", \"51.89.64.232:29031\"]\n\
+             submit_urls = [\"http://127.0.0.1:9053\"]\n",
+        )
+        .expect("fleet knobs parse");
+        assert_eq!(rc.max_families_per_tip, 2);
+        assert_eq!(rc.collect_time_budget_ms, 50);
+        assert_eq!(rc.reannounce_interval_ms, 10_000);
+        assert_eq!(rc.jitter_bps, 300);
+        assert_eq!(rc.jitter_seed, Some(42));
+        assert_eq!(
+            rc.priority_peers,
+            vec![
+                "51.89.64.232:29030".parse().unwrap(),
+                "94.232.212.33:9030".parse().unwrap(),
+            ]
+        );
+        assert_eq!(
+            rc.decisive_peers,
+            vec![
+                "51.89.64.232:29030".parse().unwrap(),
+                "51.89.64.232:29031".parse().unwrap(),
+            ]
+        );
+        assert_eq!(rc.submit_urls, vec!["http://127.0.0.1:9053".to_string()]);
+    }
+
+    #[test]
+    fn rent_collector_self_validation_rejects_jitter_bps_above_ceiling() {
+        let cfg = MiningConfig {
+            rent_collector: RentCollectorConfig {
+                jitter_bps: MAX_JITTER_BPS + 1,
+                ..RentCollectorConfig::default()
+            },
+            ..MiningConfig::default()
+        };
+        let err = cfg
+            .validate()
+            .expect_err("jitter_bps above ceiling must reject");
+        assert!(
+            matches!(err, MiningError::InvalidConfig(ref m) if m.contains("jitter_bps")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rent_collector_self_validation_rejects_collect_time_budget_above_ceiling() {
+        let cfg = MiningConfig {
+            rent_collector: RentCollectorConfig {
+                collect_time_budget_ms: MAX_COLLECT_TIME_BUDGET_MS + 1,
+                ..RentCollectorConfig::default()
+            },
+            ..MiningConfig::default()
+        };
+        let err = cfg
+            .validate()
+            .expect_err("collect_time_budget_ms above ceiling must reject");
+        assert!(
+            matches!(err, MiningError::InvalidConfig(ref m) if m.contains("collect_time_budget_ms")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rent_collector_self_validation_accepts_jitter_bps_at_ceiling() {
+        let cfg = MiningConfig {
+            rent_collector: RentCollectorConfig {
+                jitter_bps: MAX_JITTER_BPS,
+                jitter_seed: Some(1),
+                ..RentCollectorConfig::default()
+            },
+            ..MiningConfig::default()
+        };
+        cfg.validate().expect("jitter_bps at ceiling is accepted");
     }
 }

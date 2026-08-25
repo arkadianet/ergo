@@ -2468,6 +2468,15 @@ components:
           type: integer
           format: int32
           minimum: 0
+        rent_collector_broadcasts_total:
+          type: integer
+          format: int64
+          description: |-
+            Monotonic count of successful storage-rent-collector broadcasts since
+            node start (the `ergo_node_rent_collector_broadcasts_total` Prometheus
+            counter source). Session-scoped — resets on restart, which `rate()`
+            handles. `0` when the collector is disabled or has never broadcast.
+          minimum: 0
         reorgs_total:
           type: integer
           format: int64
@@ -2664,6 +2673,17 @@ components:
             type: string
             enum:
             - demoted_from_block
+      - type: object
+        description: |-
+          Locally-originated storage-rent auto-collection claim. Serializes as
+          `{"kind":"rent_collector"}`.
+        required:
+        - kind
+        properties:
+          kind:
+            type: string
+            enum:
+            - rent_collector
       description: |-
         Where a mempool transaction entered our pool. Tagged union — clients
         switch on `kind` and read `addr` only for `peer`.

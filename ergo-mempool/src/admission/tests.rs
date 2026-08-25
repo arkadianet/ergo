@@ -282,6 +282,48 @@ fn wallet_source_still_gated_by_global_budget() {
 }
 
 #[test]
+fn rentcollector_tx_is_globally_budget_gated() {
+    // Like Wallet, RentCollector is peer-less (so only the GLOBAL gate ever
+    // applies) but is NEW LOCAL WORK — a rejection just bounces back to the
+    // collector, not an irreversible drain — so it is NOT exempt: an
+    // over-budget rent claim STILL gets GlobalBudgetExhausted. The anti-DoS
+    // exemption stays scoped to DemotedFromBlock only.
+    let utxo = EmptyUtxo;
+    let c = ctx();
+    let (mut pool, mut b, mut inv, mut unr) = fresh();
+    b.charge(None, 1_000_000_000_000); // exhaust the global budget
+    let cfg = default_config();
+    let w = ByCost;
+    let v = validator_accepting(b"bytes", id(1), 5_000_000); // never reached
+    let tip = c.view(&utxo);
+    let mut cx = AdmissionCtx {
+        tip_ctx: &tip,
+        config: &cfg,
+        pool: &mut pool,
+        budgets: &mut b,
+        invalidated: &mut inv,
+        unresolved: &mut unr,
+        weight_fn: &w,
+    };
+    let (out, _) = process(
+        b"bytes",
+        TxSource::RentCollector,
+        Instant::now(),
+        &mut cx,
+        &v,
+    );
+    assert!(
+        matches!(
+            out,
+            AdmissionOutcome::Rejected {
+                reason: RejectReason::GlobalBudgetExhausted
+            }
+        ),
+        "RentCollector stays gated by the global budget (exemption is demoted-only)"
+    );
+}
+
+#[test]
 fn size_cap_rejects_with_penalty() {
     let utxo = EmptyUtxo;
     let c = ctx();

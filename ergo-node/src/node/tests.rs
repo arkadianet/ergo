@@ -181,6 +181,11 @@ fn make_state_with_backend(
         installed_snapshot: None,
         wallet_hook: None,
         mining_enabled: false,
+        rent_collector: None,
+        rent_proceeds_key: ergo_mining::handle::RewardKeySource::Wallet,
+        rent_collector_broadcasts_total: 0,
+        last_rent_reannounce: Instant::now(),
+        rent_fo: super::rent_collector::RentFirstOccupancyMetrics::default(),
         api_weight_function: ergo_api::types::ApiWeightFunction::Cost,
         recent_blocks_cache: None,
         network: ergo_ser::address::NetworkPrefix::Mainnet,
@@ -2578,8 +2583,14 @@ fn api_submit_without_mempool_rejects_disabled() {
 
     use ergo_api::types::SubmitMode;
     for mode in [SubmitMode::Broadcast, SubmitMode::CheckOnly] {
-        let err = super::admission::admit_api_transaction(&mut state, &[0u8; 8], mode, now)
-            .expect_err("mempool-off admission must reject");
+        let err = super::admission::admit_api_transaction(
+            &mut state,
+            &[0u8; 8],
+            mode,
+            ergo_mempool::types::TxSource::Api,
+            now,
+        )
+        .expect_err("mempool-off admission must reject");
         assert_eq!(err.reason, "disabled", "{mode:?} should reject as disabled");
     }
 }

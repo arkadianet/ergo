@@ -50,7 +50,7 @@ pub use admission::{
 pub use admission::{MockPlan, MockStructure, MockValidator};
 pub use budget::{BudgetVerdict, CostBudgets};
 pub use invalidation::{InvalidationCache, InvalidationReason, LookupResult};
-pub use mempool::Mempool;
+pub use mempool::{FamilyAdmit, Mempool};
 pub use overlay::{CommittedOnly, PoolUtxoOverlay};
 pub use pool::{Entry, OrderedPool, PoolError};
 pub use reorg::{on_tip_change, tick_revalidation};

@@ -777,6 +777,54 @@ impl NodeConfig {
             return Err(format!("[mining]: {e}"));
         }
 
+        // [mining.rent_collector] cross-section gate. The self-contained parts
+        // (the `fee_bound` rejection, and `miner_public_key_hex`
+        // well-formedness) are already enforced by `mining_config.validate()`
+        // above. The two CROSS-SECTION preconditions live here, where the
+        // resolved `[indexer]` and `[api]` sections are visible:
+        //
+        // 1. The indexer must be enabled. The collector enumerates eligible
+        //    storage-rent boxes only from the extra-index (same source as
+        //    `claim_storage_rent`), so with the indexer off it would silently
+        //    collect nothing — reject the combo rather than let it no-op.
+        //    Mirrors the `claim_storage_rent` gate above. (Enabling the indexer
+        //    in turn needs a full archive via the R2 gates, transitively
+        //    pinning the collector to Mode 1.)
+        //
+        // 2. A resolvable proceeds key. The collector pays net rent to a
+        //    proceeds key resolved from the SAME source as the miner reward
+        //    (`RewardKeySource`): a pinned `[mining].miner_public_key_hex` if
+        //    set, else the wallet's EIP-3 first-address key. This is DECOUPLED
+        //    from `[mining].enabled` — the collector can run with mining off.
+        //    At config-load the static check is: a key is resolvable iff a
+        //    pubkey is pinned OR a wallet exists. A wallet exists only when the
+        //    API server is enabled (`api_bind.is_some()`) — the keyless EIP-3
+        //    wallet is created alongside the wallet-admin surface at boot
+        //    (`boot.rs` API block); with the API off there is no wallet to
+        //    resolve a key from at runtime. (A pinned pubkey is already
+        //    validated well-formed by `mining_config.validate()`.)
+        if mining_config.rent_collector.enabled {
+            if !indexer_enabled {
+                return Err("[mining.rent_collector] enabled = true requires [indexer] \
+                     enabled = true — storage-rent-eligible boxes are enumerated only \
+                     from the extra-index, so the collector collects nothing without it. \
+                     Enable the indexer or set [mining.rent_collector] enabled = false."
+                    .to_string());
+            }
+            let proceeds_key_resolvable =
+                mining_config.miner_public_key_hex.is_some() || api_bind.is_some();
+            if !proceeds_key_resolvable {
+                return Err(
+                    "[mining.rent_collector] enabled = true requires a resolvable \
+                     proceeds key — set [mining] miner_public_key_hex to a pinned reward \
+                     pubkey, or enable the API server (the EIP-3 wallet that resolves the \
+                     key exists only when the API is enabled). The collector pays net rent \
+                     to this key, so it cannot start without one."
+                        .to_string(),
+                );
+            }
+        }
+
         // [voting] — operator on-chain voting policy. Resolve each
         // `[voting.targets]` parameter NAME to its votable id; an unknown or
         // non-votable name (blockVersion, soft-fork, typo) is a startup error.

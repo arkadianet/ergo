@@ -21,6 +21,34 @@ pub(super) struct MiningSubsystem {
     pub bridge: Option<std::sync::Arc<dyn ergo_api::NodeMining>>,
 }
 
+/// Decode the reward-key source from `[mining].miner_public_key_hex`: a
+/// `Pinned` 33-byte pubkey when configured (malformed hex / wrong length
+/// fails fast here), else `Wallet` (resolve the EIP-3 first-address key at
+/// runtime). Shared by the mining subsystem AND the storage-rent collector
+/// (which reuses the same source as its proceeds key), so the decode +
+/// error handling lives in one place and the collector works with
+/// `[mining].enabled = false`.
+pub(super) fn reward_key_source_from_config(
+    miner_public_key_hex: Option<&String>,
+) -> Result<ergo_mining::handle::RewardKeySource, NodeError> {
+    match miner_public_key_hex {
+        Some(pk_hex) => {
+            let pk_bytes = hex::decode(pk_hex).map_err(|e| -> NodeError {
+                format!("[mining] miner_public_key_hex hex decode: {e}").into()
+            })?;
+            let miner_pk: [u8; 33] = pk_bytes.as_slice().try_into().map_err(|_| -> NodeError {
+                format!(
+                    "[mining] miner_public_key_hex must be 33 bytes, got {}",
+                    pk_bytes.len()
+                )
+                .into()
+            })?;
+            Ok(ergo_mining::handle::RewardKeySource::Pinned(miner_pk))
+        }
+        None => Ok(ergo_mining::handle::RewardKeySource::Wallet),
+    }
+}
+
 /// Build the mining subsystem when `[mining].enabled = true`; both fields
 /// are `None` otherwise (the action-loop arm rejects stray requests with
 /// 503 and `/mining/*` routes are not mounted).
@@ -38,22 +66,8 @@ pub(super) fn build_subsystem(
     // Reward-key source: an operator-configured pubkey if present, else
     // resolve the wallet's EIP-3 first-address key lazily at candidate
     // time (Scala parity). Malformed configured hex still fails fast here.
-    let reward_key = match config.mining_config.miner_public_key_hex.as_ref() {
-        Some(pk_hex) => {
-            let pk_bytes = hex::decode(pk_hex).map_err(|e| -> NodeError {
-                format!("[mining] miner_public_key_hex hex decode: {e}").into()
-            })?;
-            let miner_pk: [u8; 33] = pk_bytes.as_slice().try_into().map_err(|_| -> NodeError {
-                format!(
-                    "[mining] miner_public_key_hex must be 33 bytes, got {}",
-                    pk_bytes.len()
-                )
-                .into()
-            })?;
-            ergo_mining::handle::RewardKeySource::Pinned(miner_pk)
-        }
-        None => ergo_mining::handle::RewardKeySource::Wallet,
-    };
+    let reward_key =
+        reward_key_source_from_config(config.mining_config.miner_public_key_hex.as_ref())?;
     let handle = ergo_mining::handle::MiningHandle::with_reward_key(
         reward_key,
         config.chain_spec.monetary,
