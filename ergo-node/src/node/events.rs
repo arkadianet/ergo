@@ -841,10 +841,17 @@ pub(super) struct RestUrlWarnSet {
 
 impl RestUrlWarnSet {
     pub(super) fn should_warn(&mut self, peer: std::net::SocketAddr, url: &str) -> bool {
+        let key = (peer, url.to_string());
+        // An already-known pair stays suppressed even at cap — clearing
+        // before the contains-check would re-warn a repeat AND wipe every
+        // other peer's suppression state.
+        if self.seen.contains(&key) {
+            return false;
+        }
         if self.seen.len() >= REST_URL_WARN_CAP {
             self.seen.clear();
         }
-        self.seen.insert((peer, url.to_string()))
+        self.seen.insert(key)
     }
 
     /// Drop every entry for `peer` — called from disconnect cleanup so a

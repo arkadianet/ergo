@@ -193,7 +193,9 @@ impl<S: Subscriber> Layer<S> for CaptureLayer {
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("{}|{}", meta.target(), message));
             // Dedupe decision on the emitting thread (cheap map ops).
-            if error_due(&code, unix_ms_now()) {
+            // Monotonic clock for the dedupe window: a wall-clock step
+            // backwards must not suppress errors until wall time catches up.
+            if error_due(&code, rel_ms_now()) {
                 // Push FIRST so the ring snapshot includes the triggering
                 // event itself (message, target, structured fields).
                 let line = serde_json::Value::Object(obj.clone()).to_string();
@@ -272,6 +274,10 @@ fn write_snapshot(dir: &PathBuf, ts_unix_ms: u64, code: &str, events: &[String],
     // atomically (create_new) so two concurrent triggers can never
     // truncate each other's snapshot.
     use std::io::ErrorKind;
+    // A failed write must not leave a partial JSON file for retention to
+    // treat as the newest valid snapshot — remove it, and only prune older
+    // files when THIS snapshot fully landed.
+    let mut wrote_snapshot = false;
     for _attempt in 0..8 {
         let seq = SNAP_SEQ.fetch_add(1, Ordering::Relaxed);
         let file_name = format!("incident-{ts_unix_ms}-{seq:06}.json");
@@ -281,16 +287,26 @@ fn write_snapshot(dir: &PathBuf, ts_unix_ms: u64, code: &str, events: &[String],
             .create_new(true)
             .open(&path)
         {
-            Ok(mut f) => {
-                let body = doc.to_string();
-                let _ = f.write_all(body.as_bytes());
-                break;
-            }
+            Ok(mut f) => match f
+                .write_all(doc.to_string().as_bytes())
+                .and_then(|_| f.flush())
+            {
+                Ok(()) => {
+                    wrote_snapshot = true;
+                    break;
+                }
+                Err(_) => {
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
+            },
             Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
             Err(_) => break,
         }
     }
-    enforce_retention(dir);
+    if wrote_snapshot {
+        enforce_retention(dir);
+    }
 }
 
 /// Keep the newest [`RETAIN`] `incident-*.json` files.
@@ -310,10 +326,18 @@ fn enforce_retention(dir: &PathBuf) {
             .collect(),
         Err(_) => return,
     };
-    // Sequence suffixes are not zero-padded, so lexical name order is no
-    // longer chronological — sort by modification time instead.
+    // Sort by the timestamp + sequence parsed FROM THE NAME: mtimes can
+    // collide or be touched externally, and sequence suffixes are not
+    // zero-padded so lexical order lies about chronology.
+    fn name_key(name: &str) -> Option<(u64, u64)> {
+        let stem = name.strip_prefix("incident-")?.strip_suffix(".json")?;
+        let mut parts = stem.split('-');
+        let ms = parts.next()?.parse::<u64>().ok()?;
+        let seq = parts.next().unwrap_or("0").parse::<u64>().ok()?;
+        Some((ms, seq))
+    }
     while files.len() > RETAIN {
-        files.sort_by_key(|(_, m)| m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH));
+        files.sort_by_key(|(name, _)| name_key(name).unwrap_or((u64::MAX, u64::MAX)));
         let oldest = files.remove(0);
         let _ = fs::remove_file(dir.join(&oldest.0));
     }
