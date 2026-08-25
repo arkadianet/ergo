@@ -61,9 +61,11 @@ impl AssemblyTracker {
 
     /// Register expected sections for a header (call after header is validated).
     ///
-    /// `requires_ad_proofs` is `true` for a digest-verifier (Mode 5) node, which
-    /// needs the ADProofs section to apply the block; a UTXO node passes `false`
-    /// (completion never waits for ADProofs, so its behavior is unchanged).
+    /// `requires_ad_proofs` is `true` whenever block application consumes
+    /// the ADProofs section: digest-verifier (Mode 5) nodes replay it to
+    /// resolve input boxes, and UTXO nodes verify the shipped section
+    /// against the declared roots (issue #264). Completion then waits for
+    /// ADProofs, so apply never runs before the section lands.
     pub fn register_header(&mut self, expected: ExpectedSections, requires_ad_proofs: bool) {
         let hid = expected.header_id;
         if self.headers.contains_key(&hid) {

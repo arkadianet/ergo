@@ -734,6 +734,34 @@ pub struct StateStore {
     /// prune seams, the `rollback_to` depth guard, and the tx-diff LCA
     /// walk caps.
     rollback_window: u32,
+    /// UTXO-mode `adProofsRoot` validation strategy (issue #264).
+    /// Defaults to [`AdProofsApplyPolicy::Regenerate`] (legacy);
+    /// production boot wires [`AdProofsApplyPolicy::VerifyShipped`]
+    /// alongside coordinator `requires_proofs` so catch-up verifies
+    /// shipped sections at O(block size) instead of hydrating the
+    /// entire arena per block.
+    ad_proofs_apply_policy: AdProofsApplyPolicy,
+}
+
+/// How UTXO-mode block application validates a block's declared
+/// `adProofsRoot` (issue #264). Boot selects per deployment shape;
+/// the default preserves legacy behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdProofsApplyPolicy {
+    /// Regenerate proof bytes from the block's transactions against a
+    /// fully hydrated copy of the parent AVL tree, then compare hashes.
+    /// Correct but O(tree size) time and heap PER BLOCK — prohibitive
+    /// on archival-scale trees during catch-up (multi-GB anon RSS,
+    /// minutes-to-hours per block near tip).
+    Regenerate,
+    /// Verify the SHIPPED ADProofs section at O(block size): the bytes
+    /// must hash to `adProofsRoot`, and replaying the block's net box
+    /// changes through them must carry the parent state root exactly to
+    /// `stateRoot`. A missing section surfaces as data availability
+    /// (`BlockProcessError::AdProofsUnavailable`), never regeneration —
+    /// matching Scala, where a UTXO node cannot apply a block whose
+    /// ADProofs have not arrived.
+    VerifyShipped,
 }
 
 impl StateStore {
@@ -1768,6 +1796,19 @@ impl StateStore {
     /// reorg-resolver can never need a pruned block.
     pub fn set_blocks_to_keep(&mut self, blocks_to_keep: i32) {
         self.blocks_to_keep = blocks_to_keep;
+    }
+
+    /// Select how UTXO-mode block application validates the declared
+    /// `adProofsRoot` (see [`AdProofsApplyPolicy`]). Boot wires this
+    /// BEFORE sync starts, mirroring `set_blocks_to_keep`; tests use
+    /// the default unless opted in.
+    pub fn set_ad_proofs_apply_policy(&mut self, policy: AdProofsApplyPolicy) {
+        self.ad_proofs_apply_policy = policy;
+    }
+
+    /// Active UTXO-mode `adProofsRoot` validation strategy.
+    pub fn ad_proofs_apply_policy(&self) -> AdProofsApplyPolicy {
+        self.ad_proofs_apply_policy
     }
 
     /// Override the undo-retention window captured at `open`
@@ -2910,6 +2951,57 @@ impl StateStore {
             &new_root,
         )?;
         Ok((new_root, proof_bytes))
+    }
+
+    /// Verify a block's SHIPPED ADProofs against its declared
+    /// roots — O(block size), no arena hydration.
+    ///
+    /// Consensus semantics match Scala's `UtxoState` proofHash check:
+    /// the shipped proof payload must hash to `header.ad_proofs_root`
+    /// and the block's net box changes, replayed through it, must carry
+    /// the parent state root exactly to `header.state_root`.
+    /// Unlike [`Self::regenerate_ad_proofs`] this never materializes the
+    /// AVL arena into the prover graph, so it is safe to run per applied
+    /// block during catch-up (issue #264: regeneration is O(tree size)
+    /// time + heap per block).
+    ///
+    /// `proof_bytes` is the PARSED AVL batch-proof payload (no section
+    /// framing — the caller strips `header_id ‖ len` via
+    /// `read_ad_proofs`, exactly as digest mode does).
+    /// `ad_proofs_section_id` must be the id under which the section is
+    /// stored (`ExpectedSections::ad_proofs_id`); the verifier re-binds
+    /// it to this header before trusting the bytes.
+    ///
+    /// The caller performs the cheap `blake2b256(proof) == adProofsRoot`
+    /// check itself so a mismatch can surface as the same typed error
+    /// the regeneration path produced.
+    pub fn verify_shipped_ad_proofs(
+        &self,
+        ad_proofs_section_id: [u8; 32],
+        proof_bytes: &[u8],
+        header: &ergo_ser::header::Header,
+        transactions: &[ergo_ser::transaction::Transaction],
+    ) -> Result<(), StateError> {
+        let txs: Vec<&ergo_ser::transaction::Transaction> = transactions.iter().collect();
+        let (to_remove, to_insert) = Self::build_utxo_changes_raw(&txs)?;
+        let to_lookup: Vec<[u8; 32]> = transactions
+            .iter()
+            .flat_map(|t| t.data_inputs.iter().map(|d| *d.box_id.as_bytes()))
+            .collect();
+        let parent_root = self.tree.root_digest();
+        crate::digest_apply::DigestProofVerifier::apply_block_in_memory(
+            ad_proofs_section_id,
+            proof_bytes,
+            header,
+            parent_root.as_bytes(),
+            &to_lookup,
+            &to_remove,
+            &to_insert,
+        )
+        .map(|_| ())
+        .map_err(|e| StateError::AdProofsReplayFailed {
+            source: Box::new(e),
+        })
     }
 
     /// Active protocol parameters + cumulative validation settings at the

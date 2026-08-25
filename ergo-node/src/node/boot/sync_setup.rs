@@ -101,13 +101,20 @@ pub(super) fn setup(
             .block_timing
             .header_freshness_threshold_ms(),
     );
-    // Mode 5 (digest-verifier): the digest backend keeps no UTXO set, so block
-    // application needs the ADProofs section (the UTXO-set transformation
-    // proofs) — schedule it alongside transactions + extension. Scala
-    // `stateType.requireProofs`. Mode 6 (headers-only) never applies blocks, so
-    // it stays on the two-section path.
-    if matches!(store, ergo_state::StateBackendKind::Digest(_)) && !headers_only {
+    // Modes 1/2/3 (UTXO) and Mode 5 (digest-verifier): block application
+    // consumes the ADProofs section — Scala `stateType.requireProofs` is
+    // true for both. UTXO-mode validation verifies the SHIPPED section
+    // against the declared roots at O(block size) (issue #264 fast
+    // path); coordinator `requires_proofs` makes delivery request the
+    // section alongside txs+extension and keeps assembly from signaling
+    // the block complete until it lands. Mode 6 (headers-only) never
+    // applies blocks, so it stays on the two-section path.
+    if !headers_only {
         coordinator.set_requires_proofs(true);
+        if let ergo_state::StateBackendKind::Utxo(utxo_store) = store {
+            utxo_store
+                .set_ad_proofs_apply_policy(ergo_state::store::AdProofsApplyPolicy::VerifyShipped);
+        }
     }
     // Operator escape hatch (sibling of ERGO_BAN_HEADERS): force the
     // headers-chain-synced latch at boot so block downloads start even
