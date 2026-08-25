@@ -246,6 +246,7 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
     validate_runtime_mode_support(&config)?;
     let db_path = config.data_dir.join("state.redb");
     std::fs::create_dir_all(&config.data_dir)?;
+    crate::incidents::set_incident_dir(config.data_dir.join("incidents"));
 
     // 1. Open store
     let cache_bytes = config
