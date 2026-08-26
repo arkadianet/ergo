@@ -1285,6 +1285,10 @@ fn peers_for_sharing_excludes_non_routable_declared_addresses() {
         .unwrap();
 
     let shared = mgr.peers_for_sharing(100, 0);
+    assert!(
+        shared.len() <= MAX_SHARED_PEER_SPECS,
+        "share count must stay below Scala's 64-spec parse limit, got {shared:?}"
+    );
     assert_eq!(
         shared.len(),
         1,
@@ -1293,6 +1297,50 @@ fn peers_for_sharing_excludes_non_routable_declared_addresses() {
     let sd = shared[0].declared_address.as_ref().unwrap();
     assert_eq!(sd.addr, vec![213, 239, 193, 208]);
     assert_eq!(sd.port, 9030);
+}
+
+/// Asking for more than [`MAX_SHARED_PEER_SPECS`] must still yield at
+/// most that many specs: a Scala receiver parses Peers with
+/// `require(length <= 64)` (BasicMessagesRepo.scala:56-58) and any parse
+/// failure means a permanent (10-year) IP ban, so an oversized reply is
+/// never acceptable regardless of the caller's limit.
+#[test]
+fn peers_for_sharing_clamps_to_max_shared_peer_specs() {
+    use crate::handshake::DeclaredAddress;
+    let mut mgr = PeerManager::new(42);
+    let now = Instant::now();
+    let mk_spec = |declared: Option<DeclaredAddress>| PeerSpec {
+        agent_name: "ergo-reference".into(),
+        version: crate::handshake::Version::NIPOPOW,
+        node_name: "n".into(),
+        declared_address: declared,
+        features: Vec::new(),
+    };
+    // Distinct first/second octets keep each registration in its own /16
+    // so the per-subnet cap doesn't reject them.
+    let eligible = MAX_SHARED_PEER_SPECS + 12;
+    for i in 0..eligible {
+        let octets = [213u8, (i as u8) + 1, i as u8, 9];
+        let a = addr(octets[0], octets[1], octets[2], octets[3], 9030);
+        mgr.register_outbound(a, now).unwrap();
+        mgr.mark_tcp_connected(&a);
+        mgr.complete_handshake(
+            &a,
+            mk_spec(Some(DeclaredAddress {
+                addr: octets.to_vec(),
+                port: 9030,
+            })),
+            None,
+            now,
+        )
+        .unwrap();
+    }
+    let shared = mgr.peers_for_sharing(eligible, 0);
+    assert_eq!(
+        shared.len(),
+        MAX_SHARED_PEER_SPECS,
+        "asking for {eligible} must be clamped to MAX_SHARED_PEER_SPECS"
+    );
 }
 
 // ---- ban-list bounds (audit M-6) ----

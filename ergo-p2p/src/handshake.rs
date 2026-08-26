@@ -110,7 +110,7 @@ fn serialize_feature_body(feature: &PeerFeature) -> (u8, Vec<u8>) {
             (FEATURE_SESSION_ID, buf)
         }
         PeerFeature::RestApiUrl { url } => {
-            let url_bytes = url.as_bytes();
+            let url_bytes = truncate_to_u8(url.as_bytes());
             let mut w = VlqWriter::new();
             w.put_u8(url_bytes.len() as u8);
             w.put_bytes(url_bytes);
@@ -287,10 +287,25 @@ pub struct DeclaredAddress {
     pub port: u32,
 }
 
+/// Longest prefix of `bytes` whose length fits the one-byte `shortString`
+/// length prefix, snapped back to a UTF-8 char boundary. Writing
+/// `len as u8` while emitting every byte would wrap the prefix and desync
+/// the receiver's parser — Scala escalates handshake parse failures to a
+/// permanent IP ban (PeerConnectionHandler.scala:104-106).
+fn truncate_to_u8(bytes: &[u8]) -> &[u8] {
+    let mut end = bytes.len().min(u8::MAX as usize);
+    if end < bytes.len() {
+        while end > 0 && bytes[end] & 0xC0 == 0x80 {
+            end -= 1;
+        }
+    }
+    &bytes[..end]
+}
+
 /// Serialize a PeerSpec into the given writer (used by both Handshake and Peers).
 pub fn serialize_peer_spec_to(spec: &PeerSpec, w: &mut VlqWriter) {
     // shortString: byte(len) + UTF-8
-    let agent_bytes = spec.agent_name.as_bytes();
+    let agent_bytes = truncate_to_u8(spec.agent_name.as_bytes());
     w.put_u8(agent_bytes.len() as u8);
     w.put_bytes(agent_bytes);
 
@@ -300,7 +315,7 @@ pub fn serialize_peer_spec_to(spec: &PeerSpec, w: &mut VlqWriter) {
     w.put_u8(spec.version.patch);
 
     // shortString: node_name
-    let name_bytes = spec.node_name.as_bytes();
+    let name_bytes = truncate_to_u8(spec.node_name.as_bytes());
     w.put_u8(name_bytes.len() as u8);
     w.put_bytes(name_bytes);
 
@@ -317,9 +332,13 @@ pub fn serialize_peer_spec_to(spec: &PeerSpec, w: &mut VlqWriter) {
         }
     }
 
-    // Features: byte(count) + Feature[]
-    w.put_u8(spec.features.len() as u8);
-    for feature in &spec.features {
+    // Features: byte(count) + Feature[]. The count byte is SIGNED on the
+    // wire (Scala parses it with getByte + require(>=0), and our
+    // deserializer mirrors that via `as i8`), so counts above 127 are
+    // unrepresentable — serialize at most 127 features and drop the rest.
+    let feature_cap = (u8::MAX as usize) / 2; // 127: keep the signed byte non-negative
+    w.put_u8(spec.features.len().min(feature_cap) as u8);
+    for feature in spec.features.iter().take(feature_cap) {
         let (id, body) = serialize_feature_body(feature);
         w.put_u8(id);
         w.put_u16(body.len() as u16); // VLQ UShort
@@ -798,5 +817,80 @@ mod tests {
             }
             _ => panic!("expected Mode"),
         }
+    }
+
+    /// shortString fields carry a one-byte length prefix; over-long
+    /// inputs must be truncated on a UTF-8 boundary rather than wrapping
+    /// the prefix (a wrapped prefix desyncs the receiving parser, which
+    /// Scala escalates to a permanent IP ban). Pins the 255-byte ceiling
+    /// and mid-char snapping.
+    #[test]
+    fn peer_spec_string_fields_truncate_to_u8_prefix() {
+        fn spec_with(agent: &str, name: &str) -> Handshake {
+            Handshake {
+                time: 1,
+                peer_spec: PeerSpec {
+                    agent_name: agent.into(),
+                    version: Version::NIPOPOW,
+                    node_name: name.into(),
+                    declared_address: None,
+                    features: Vec::new(),
+                },
+            }
+        }
+        // Exactly 255 ASCII bytes roundtrip unchanged.
+        let s255 = "a".repeat(255);
+        let bytes = serialize_handshake(&spec_with("a", &s255));
+        let (parsed, _) = deserialize_handshake_with_consumed(&bytes).unwrap();
+        assert_eq!(parsed.peer_spec.node_name.len(), 255);
+
+        // 400 ASCII bytes truncate to 255.
+        let s400 = "b".repeat(400);
+        let bytes = serialize_handshake(&spec_with(&s400, "n"));
+        let (parsed, _) = deserialize_handshake_with_consumed(&bytes).unwrap();
+        assert_eq!(parsed.peer_spec.agent_name.len(), 255);
+
+        // Multi-byte truncation snaps to a char boundary: "é" is 2 bytes,
+        // so 128 of them are 256 bytes and a naive cut at 255 splits the
+        // final char.
+        let multi = "é".repeat(128);
+        let bytes = serialize_handshake(&spec_with("a", &multi));
+        let (parsed, _) = deserialize_handshake_with_consumed(&bytes).unwrap();
+        assert_eq!(parsed.peer_spec.node_name, "é".repeat(127));
+    }
+
+    #[test]
+    fn rest_api_url_feature_body_truncates_to_u8() {
+        let url = format!("http://example.com/{}", "p".repeat(300));
+        let (id, body) = serialize_feature_body(&PeerFeature::RestApiUrl { url });
+        assert_eq!(id, FEATURE_REST_API_URL);
+        assert_eq!(body[0] as usize, u8::MAX as usize);
+        assert_eq!(body.len(), 1 + u8::MAX as usize);
+    }
+
+    /// The feature-count byte is signed on the wire (Scala getByte +
+    /// require(>=0)), so counts above 127 are unrepresentable; over-long
+    /// lists must be capped, not wrapped.
+    #[test]
+    fn peer_spec_feature_count_caps_at_127() {
+        let features: Vec<PeerFeature> = (0..300u16)
+            .map(|i| PeerFeature::Unknown {
+                feature_id: 200 + (i % 50) as u8,
+                data: vec![1, 2, 3],
+            })
+            .collect();
+        let hs = Handshake {
+            time: 1,
+            peer_spec: PeerSpec {
+                agent_name: "a".into(),
+                version: Version::NIPOPOW,
+                node_name: "n".into(),
+                declared_address: None,
+                features,
+            },
+        };
+        let bytes = serialize_handshake(&hs);
+        let (parsed, _) = deserialize_handshake_with_consumed(&bytes).unwrap();
+        assert_eq!(parsed.peer_spec.features.len(), (u8::MAX as usize) / 2);
     }
 }
