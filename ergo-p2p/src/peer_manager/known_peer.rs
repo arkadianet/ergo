@@ -86,11 +86,22 @@ pub const MAX_KNOWN_ADDRESSES: usize = 5000;
 /// cycle within ~minutes, freeing the budget for gossiped peers.
 const DIAL_BACKOFF_SECS: &[u64] = &[30, 120, 600, 1800, 7200];
 
-/// Softer schedule for sticky / priority miner peers: 15s → 30s → 60s →
-/// 2min cap. Without this, a handshake-failing builder (TCP-open but
-/// session never sticks) disappears for up to 2hr and preferential Inv
-/// never reaches the assembler.
-const STICKY_DIAL_BACKOFF_SECS: &[u64] = &[15, 30, 60, 120];
+/// Softer schedule for sticky / priority miner peers. The first three
+/// steps stay fast (15s → 30s → 60s) so a transiently restarting builder
+/// is re-joined within a minute and preferential Inv reaches the
+/// assembler; from the fourth failure on the schedule converges onto the
+/// normal [`DIAL_BACKOFF_SECS`] tail instead of capping at 2 minutes,
+/// so a peer that is not accepting sessions is retried at standard
+/// exponential-backoff cadence rather than indefinitely often.
+const STICKY_DIAL_BACKOFF_SECS: &[u64] = &[15, 30, 60, 600, 1800, 7200];
+
+/// A sticky/priority peer with at least this many consecutive dial
+/// failures is treated as dormant: `sticky_peers_needing_dial` stops
+/// proposing it, so we stop dialing peers that persistently do not
+/// accept sessions. Dormancy derives purely from `consecutive_failures`,
+/// so `mark_dial_succeeded` (which zeroes the counter) revives the peer
+/// automatically.
+pub const STICKY_PRUNE_FAILURES: u32 = 60;
 
 /// Periodic peer-gossip interval. Matches Scala's
 /// `scorexSettings.network.getPeersInterval` default of 2 minutes. The
