@@ -160,10 +160,11 @@ pub(super) fn hedge_request_modifiers(
                     if !hedge_peers.is_empty() {
                         // Register hedge peers as late-acceptable for
                         // these IDs so their responses Accept.
-                        state
-                            .coordinator
-                            .delivery_mut()
-                            .register_hedge_peers(&inv.ids, &hedge_peers);
+                        state.coordinator.delivery_mut().register_hedge_peers(
+                            &inv.ids,
+                            &hedge_peers,
+                            Instant::now(),
+                        );
                         // Emit a duplicate RequestModifier per hedge peer.
                         for hp in hedge_peers {
                             out.push(Action::SendToPeer {
