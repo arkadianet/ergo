@@ -9,6 +9,7 @@ use std::time::Instant;
 use ergo_p2p::handshake::PeerSpec;
 use ergo_p2p::message;
 use ergo_p2p::peer::{PeerId, Penalty, SyncVersion};
+use ergo_p2p::peer_manager::MAX_SHARED_PEER_SPECS;
 use ergo_p2p::throttle::LimiterVerdict;
 use ergo_p2p::types::{InvData, ModifierTypeId, ModifiersData};
 use ergo_primitives::digest::Digest32;
@@ -238,7 +239,13 @@ pub(in crate::node) fn handle_message(
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0);
-            let spec_refs = state.peer_manager.peers_for_sharing(100, seed);
+            // Scala parses inbound Peers with `require(length <= 64)`
+            // (BasicMessagesRepo.scala:56-58); a longer list is a parse
+            // failure and earns us a permanent IP ban, so share at most
+            // MAX_SHARED_PEER_SPECS.
+            let spec_refs = state
+                .peer_manager
+                .peers_for_sharing(MAX_SHARED_PEER_SPECS, seed);
             let specs: Vec<PeerSpec> = spec_refs.into_iter().cloned().collect();
             let payload = message::serialize_peers(&specs);
             send_to_peer(state, &peer, message::CODE_PEERS, payload);

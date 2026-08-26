@@ -64,6 +64,15 @@ pub(crate) const MAX_BANS: usize = 10_000;
 /// cost; the sweep is O(n) over a map capped at [`MAX_BANS`].
 pub(crate) const BAN_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
+/// Upper bound on PeerSpec entries included in one outbound `Peers`
+/// reply. Scala parses inbound Peers with
+/// `require(length <= maxPeerSpecObjects = 64)`
+/// (BasicMessagesRepo.scala:56-58) and escalates any parse failure to
+/// `PenalizePeer(PermanentPenalty)` (Synchronizer.scala:38-41) — a 10-year
+/// IP blacklist closing all connections. Scala itself only sends
+/// `maxToSend / 8` = 8 specs, so clamping well below 64 costs nothing.
+pub const MAX_SHARED_PEER_SPECS: usize = 48;
+
 pub struct PeerManager {
     peers: HashMap<PeerId, PeerInfo>,
     /// Ban list: IP → ban expiry. Separate from peers so bans survive disconnection.
@@ -699,6 +708,10 @@ impl PeerManager {
     /// adding a `rand` dependency. The eligible set is first sorted
     /// by declared-address bytes for determinism, then the return is
     /// the rotation starting at `seed % len`.
+    ///
+    /// The share count is additionally clamped to [`MAX_SHARED_PEER_SPECS`]
+    /// regardless of `limit`: a Scala peer permanently bans any sender of a
+    /// `Peers` message it fails to parse.
     pub fn peers_for_sharing(&self, limit: usize, seed: u64) -> Vec<&PeerSpec> {
         let mut eligible: Vec<&PeerSpec> = self
             .peers
@@ -724,7 +737,7 @@ impl PeerManager {
             aa.cmp(&bb)
         });
         let start = (seed as usize) % eligible.len();
-        let take = limit.min(eligible.len());
+        let take = limit.min(MAX_SHARED_PEER_SPECS).min(eligible.len());
         (0..take)
             .map(|i| eligible[(start + i) % eligible.len()])
             .collect()
