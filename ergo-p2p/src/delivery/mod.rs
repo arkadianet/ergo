@@ -60,6 +60,14 @@ const MAX_RECEIVED_ENTRIES: usize = 10_000;
 /// relative to `DELIVERY_TIMEOUT` so nothing in active use is ever swept.
 const RELEASED_SHADOW_TTL: Duration = Duration::from_secs(60);
 
+/// How long a `late_acceptable` allowance lives. Mirrors
+/// [`RELEASED_SHADOW_TTL`]: an answer later than this can no longer be
+/// "late" in any useful sense — the section has either left the assembly
+/// window or been abandoned, and keeping the allowance forever leaks
+/// entries (issue #245 / audit M-7) while risking a stale allowance
+/// suppressing a legitimate future RejectSpam.
+const LATE_ACCEPTABLE_TTL: Duration = Duration::from_secs(60);
+
 /// Status of a modifier in the delivery pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModifierStatus {
@@ -131,6 +139,14 @@ struct InflightRequest {
     hedge_count: u8,
 }
 
+/// A `late_acceptable` entry: the peers still allowed to answer, and
+/// when the allowance was first granted (for the TTL sweep).
+#[derive(Debug)]
+struct LateAllowance {
+    peers: HashSet<PeerId>,
+    first_seen: Instant,
+}
+
 /// Tracks modifier delivery state across all peers.
 pub struct DeliveryTracker {
     /// Modifier ID → in-flight request (if currently requested).
@@ -150,7 +166,13 @@ pub struct DeliveryTracker {
     /// but the peer may still legally answer a request we sent earlier. Keep
     /// those peers here so useful late data is accepted instead of discarded
     /// as unsolicited spam.
-    late_acceptable: HashMap<[u8; 32], HashSet<PeerId>>,
+    ///
+    /// Entries carry their first-seen time and are swept by
+    /// `check_timeouts` after [`LATE_ACCEPTABLE_TTL`] — an allowance
+    /// that old can never correspond to a useful answer, and without
+    /// the sweep the map grows for the node's lifetime (issue #245 /
+    /// audit M-7: abandoned IDs left permanent entries).
+    late_acceptable: HashMap<[u8; 32], LateAllowance>,
     /// Last-known `modifier_type` for IDs whose `inflight` entry was
     /// removed by `check_timeouts` / `cancel_peer`. Lets retry-bucket
     /// classifiers read the original requested type AFTER the
@@ -403,7 +425,7 @@ impl DeliveryTracker {
 
         for id in &to_remove {
             if let Some(req) = self.inflight.remove(id) {
-                self.allow_late_delivery(*id, req.peer);
+                self.allow_late_delivery(*id, req.peer, now);
                 // Stash the modifier_type for the retry-bucket
                 // classifier after the inflight entry is gone.
                 self.recently_released.insert(*id, (req.modifier_type, now));
@@ -479,6 +501,11 @@ impl DeliveryTracker {
         // the coordinator is about to re-request is never touched.
         self.recently_released
             .retain(|_, (_, released_at)| now.duration_since(*released_at) < RELEASED_SHADOW_TTL);
+        // Issue #245 / audit M-7: sweep stale late-delivery allowances —
+        // abandoned IDs previously kept their entries for the node's
+        // lifetime.
+        self.late_acceptable
+            .retain(|_, allowance| now.duration_since(allowance.first_seen) < LATE_ACCEPTABLE_TTL);
 
         TimeoutResult {
             retryable: retryable.into_iter().collect(),
@@ -574,15 +601,28 @@ impl DeliveryTracker {
                 }
             }
             *self.peer_inflight_count.entry(new_peer).or_insert(0) += 1;
-            self.allow_late_delivery(*id, old_peer);
+            self.allow_late_delivery(*id, old_peer, now);
             true
         } else {
             false
         }
     }
 
-    fn allow_late_delivery(&mut self, id: [u8; 32], peer: PeerId) {
-        self.late_acceptable.entry(id).or_default().insert(peer);
+    fn allow_late_delivery(&mut self, id: [u8; 32], peer: PeerId, now: Instant) {
+        match self.late_acceptable.get_mut(&id) {
+            Some(allowance) => {
+                allowance.peers.insert(peer);
+            }
+            None => {
+                self.late_acceptable.insert(
+                    id,
+                    LateAllowance {
+                        peers: HashSet::from([peer]),
+                        first_seen: now,
+                    },
+                );
+            }
+        }
     }
 
     /// **Hedged delivery registration.** After sending
@@ -602,10 +642,10 @@ impl DeliveryTracker {
     /// with a primary as a race-for-fastest-delivery strategy.
     /// Both populate the same `late_acceptable` map; the receive
     /// path treats them identically.
-    pub fn register_hedge_peers(&mut self, ids: &[[u8; 32]], peers: &[PeerId]) {
+    pub fn register_hedge_peers(&mut self, ids: &[[u8; 32]], peers: &[PeerId], now: Instant) {
         for id in ids {
             for &peer in peers {
-                self.allow_late_delivery(*id, peer);
+                self.allow_late_delivery(*id, peer, now);
             }
         }
     }
@@ -613,7 +653,7 @@ impl DeliveryTracker {
     fn late_delivery_allowed(&self, id: &[u8; 32], peer: &PeerId) -> bool {
         self.late_acceptable
             .get(id)
-            .is_some_and(|peers| peers.contains(peer))
+            .is_some_and(|allowance| allowance.peers.contains(peer))
     }
 
     /// Test-only: force a modifier back to Unknown, bypassing the

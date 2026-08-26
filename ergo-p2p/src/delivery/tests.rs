@@ -479,6 +479,30 @@ fn timeout_late_delivery_from_requested_peer_is_accepted() {
     assert_eq!(tracker.on_received(&id(1), &p), DeliveryAction::Accept);
 }
 
+/// Issue #245 / audit M-7: late-delivery allowances must expire.
+/// An ID that times out and is then abandoned (never re-requested,
+/// never received) previously kept its allowance for the node's
+/// lifetime — unbounded growth (measured ~160 entries/hour at tip on
+/// mainnet) and a stale allowance could suppress a future legitimate
+/// RejectSpam. After the TTL sweep the entry is gone and the same
+/// delivery is unsolicited spam again.
+#[test]
+fn late_acceptance_expires_after_ttl_sweep() {
+    let mut tracker = DeliveryTracker::new();
+    let now = Instant::now();
+    let p = peer(9030);
+
+    tracker.request(p, 101, &[id(1)], now);
+    tracker.check_timeouts(now + DELIVERY_TIMEOUT + Duration::from_secs(1));
+    assert_eq!(tracker.on_received(&id(1), &p), DeliveryAction::Accept);
+
+    // Well past LATE_ACCEPTABLE_TTL: the next timeout sweep reclaims it.
+    let later = now + DELIVERY_TIMEOUT + LATE_ACCEPTABLE_TTL + Duration::from_secs(10);
+    let result = tracker.check_timeouts(later);
+    assert!(result.retryable.is_empty() && result.exhausted.is_empty());
+    assert_eq!(tracker.on_received(&id(1), &p), DeliveryAction::RejectSpam);
+}
+
 #[test]
 fn forget_timed_out_keeps_late_acceptance_so_a_late_tx_is_not_penalized() {
     // P1 forgets a timed-out mempool tx without penalty/re-request. But
