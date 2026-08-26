@@ -77,6 +77,10 @@ pub struct SnapshotReadState {
     voting_targets: std::sync::Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
     /// Live apply-phase gauges from `SyncExecutor` (not snapshot-stale).
     apply_phase: std::sync::Arc<ergo_sync::ApplyPhaseMetrics>,
+    /// Starvation-free sampler output (issue #266): process RSS, uptime,
+    /// and wall-clock apply age/wedge, written by a plain thread nothing
+    /// on the runtime can starve. Overlaid onto `/metrics` per request.
+    telemetry: std::sync::Arc<crate::node::telemetry::LiveTelemetry>,
 }
 
 /// Filesystem paths the `/api/v1/host` handler needs to compute per-call
@@ -260,6 +264,7 @@ impl SnapshotReadState {
         host_paths: HostPaths,
         voting_targets: std::sync::Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
         apply_phase: std::sync::Arc<ergo_sync::ApplyPhaseMetrics>,
+        telemetry: std::sync::Arc<crate::node::telemetry::LiveTelemetry>,
     ) -> Self {
         Self {
             handle,
@@ -267,6 +272,7 @@ impl SnapshotReadState {
             host_paths,
             voting_targets,
             apply_phase,
+            telemetry,
         }
     }
 
@@ -288,7 +294,16 @@ impl NodeReadState for SnapshotReadState {
     }
 
     fn info(&self) -> ApiInfo {
-        self.handle.load().info.clone()
+        let mut info = self.handle.load().info.clone();
+        // Issue #266 review: `/api/v1/info` must not report starved
+        // uptime — overlay the live sample when one has landed, same
+        // guard as `status()`. The compat Scala-parity `/info`
+        // (`NodeChainQuery`) path is intentionally left on its own
+        // source.
+        if self.telemetry.has_sampled() {
+            info.uptime_seconds = self.telemetry.uptime_secs();
+        }
+        info
     }
 
     fn votes(&self) -> ergo_api::ApiVotes {
@@ -408,6 +423,17 @@ impl NodeReadState for SnapshotReadState {
         s.last_apply_duration_ms = self.apply_phase.last_duration_ms();
         s.last_applied_height = self.apply_phase.last_applied_height();
         s.last_apply_age_ms = self.apply_phase.last_apply_age_ms();
+        // Starvation-free telemetry (issue #266): RSS / uptime / running-
+        // apply age sampled by a plain thread, so these stay truthful even
+        // while a long apply has starved the snapshot publisher. Gated on
+        // the first sample landing — before that the snapshot fallbacks
+        // win instead of serving pre-sample zeros (review of #267).
+        if self.telemetry.has_sampled() {
+            s.rss_kb_live = Some(self.telemetry.rss_kb());
+            s.uptime_seconds_live = Some(self.telemetry.uptime_secs());
+            s.apply_age_ms = self.telemetry.apply_age_ms();
+            s.apply_wedged = self.telemetry.apply_wedged();
+        }
         s
     }
 

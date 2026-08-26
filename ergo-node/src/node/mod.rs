@@ -46,6 +46,7 @@ mod snapshot_state;
 mod state;
 mod sync_helpers;
 mod sync_tick;
+pub(crate) mod telemetry;
 mod tip_context;
 mod util;
 pub mod wallet_bridge;

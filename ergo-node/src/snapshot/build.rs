@@ -90,6 +90,14 @@ pub(super) fn build_snapshot(
         last_apply_duration_ms: 0,
         last_applied_height: 0,
         last_apply_age_ms: None,
+        // Live-telemetry overlays (issue #266): filled per-request by
+        // SnapshotReadState::status() from the starvation-free sampler;
+        // None/false here means "no sampler wired" and `/metrics` falls
+        // back to snapshot-sourced values.
+        rss_kb_live: None,
+        uptime_seconds_live: None,
+        apply_age_ms: None,
+        apply_wedged: false,
     };
 
     let tip = ApiTip {

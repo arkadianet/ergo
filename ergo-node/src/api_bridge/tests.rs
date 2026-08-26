@@ -1110,6 +1110,7 @@ fn read_state_with_slot_and_apply(
         host_paths,
         voting_targets,
         apply_phase,
+        std::sync::Arc::new(crate::node::telemetry::LiveTelemetry::default()),
     )
 }
 
@@ -1146,6 +1147,69 @@ fn status_overlays_live_apply_phase_metrics() {
     assert_eq!(after.last_applied_height, 42);
     assert!(after.last_apply_duration_ms < 5_000);
     assert!(after.last_apply_age_ms.is_some());
+}
+
+/// Issue #266: the starvation-free telemetry atomics overlay onto
+/// `ApiStatus` per request, so RSS / uptime / running-apply age / wedge
+/// verdict stay truthful even when a long apply has starved the snapshot
+/// publisher (whose stale values must NOT win).
+#[test]
+fn status_overlays_live_telemetry_values() {
+    use ergo_api::NodeReadState;
+
+    let dir = tempfile::tempdir().unwrap();
+    let telemetry = std::sync::Arc::new(crate::node::telemetry::LiveTelemetry::default());
+    let api_info = ergo_api::types::ApiInfo {
+        agent_name: "test".into(),
+        node_name: "test".into(),
+        network: "mainnet".into(),
+        version: "0.0.0".into(),
+        started_at_unix_ms: 0,
+        // Stale snapshot uptime that the live overlay must beat.
+        uptime_seconds: 9_999,
+        target_block_interval_ms: 120_000,
+    };
+    let publisher = crate::snapshot::SnapshotPublisher::new(
+        api_info,
+        std::time::Instant::now(),
+        ergo_api::types::ApiWeightFunction::Cost,
+    );
+    let identity_slot: crate::api_bridge::IdentitySlot =
+        std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(ApiIdentity::default()));
+    let read = SnapshotReadState::new(
+        publisher.handle(),
+        identity_slot,
+        HostPaths {
+            state_db: dir.path().join("s.redb"),
+            index_db: dir.path().join("i.redb"),
+            data_dir: dir.path().to_path_buf(),
+        },
+        std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
+        std::sync::Arc::new(ergo_sync::ApplyPhaseMetrics::default()),
+        telemetry.clone(),
+    );
+
+    // Before the first telemetry sample: live fields stay None so
+    // /metrics falls back to snapshot sources (review of #267), and
+    // info() keeps the snapshot uptime.
+    let pre = read.status();
+    assert_eq!(pre.rss_kb_live, None);
+    assert_eq!(pre.uptime_seconds_live, None);
+    assert_eq!(pre.apply_age_ms, None);
+    assert!(!pre.apply_wedged);
+    assert_eq!(read.info().uptime_seconds, 9_999);
+
+    // Simulate a wedged-apply sample from the telemetry thread.
+    telemetry.store_sample(5_350_000, 7_800, Some(900_000), true);
+
+    let s = read.status();
+    assert_eq!(s.rss_kb_live, Some(5_350_000));
+    assert_eq!(s.uptime_seconds_live, Some(7_800));
+    assert_eq!(s.apply_age_ms, Some(900_000));
+    assert!(s.apply_wedged);
+    // /api/v1/info overlays the live uptime once a sample exists
+    // (review of #267, second round).
+    assert_eq!(read.info().uptime_seconds, 7_800);
 }
 
 /// `votes()` projects the snapshot's active params into the votable-parameter
