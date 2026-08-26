@@ -725,11 +725,12 @@ fn sticky_peers_needing_dial_deprioritizes_high_failure_ips() {
     let healthy = addr(51, 222, 248, 90, 9030);
     mgr.set_priority_peers(vec![noisy, healthy]);
     // Past sticky backoff so both are eligible; noisy has more failures.
+    // The window must clear the escalated 4th-failure step (10 min).
     for _ in 0..4 {
         mgr.mark_dial_failed(&noisy, now);
     }
     mgr.mark_dial_failed(&healthy, now);
-    let later = now + std::time::Duration::from_secs(130);
+    let later = now + std::time::Duration::from_secs(700);
     let order = mgr.sticky_peers_needing_dial(later);
     assert_eq!(
         order,
@@ -1541,5 +1542,102 @@ fn persisted_ban_rows_stay_within_cap_across_reopen() {
         loaded.bans.len() <= 4,
         "persisted rows must be evicted alongside in-memory entries, got {}",
         loaded.bans.len()
+    );
+}
+
+// ---- sticky-dial backoff escalation + dormancy (ban-exposure audit) ----
+
+/// The sticky schedule keeps fast early steps but must converge onto the
+/// normal schedule's long tail: an indefinite <=120s redial loop against
+/// hosts that refuse our handshakes kept per-IP rate filters at
+/// pool-operated nodes permanently tripped (observed in production as
+/// pre-handshake blacklisting of arm IPs).
+#[test]
+fn sticky_backoff_converges_to_normal_schedule_tail() {
+    assert_eq!(sticky_backoff_for(1), Duration::from_secs(15));
+    assert_eq!(sticky_backoff_for(2), Duration::from_secs(30));
+    assert_eq!(sticky_backoff_for(3), Duration::from_secs(60));
+    let mut prev = 0u64;
+    for f in 1..=64u32 {
+        let d = sticky_backoff_for(f).as_secs();
+        assert!(d >= prev, "backoff must not decrease at failure {f}");
+        prev = d;
+    }
+    assert_eq!(
+        prev,
+        backoff_for(u32::MAX).as_secs(),
+        "sticky schedule must end at the normal dial cap"
+    );
+    assert_eq!(sticky_backoff_for(u32::MAX), backoff_for(u32::MAX));
+}
+
+/// A priority peer with >= STICKY_PRUNE_FAILURES consecutive failures is
+/// dormant: not proposed for sticky dials even well past any backoff
+/// window. Dormancy derives purely from consecutive_failures, so a
+/// successful handshake revives it.
+#[test]
+fn sticky_peer_goes_dormant_at_prune_threshold_and_revives_on_success() {
+    let mut mgr = PeerManager::new(1);
+    let now = Instant::now();
+    let miner = addr(51, 89, 64, 232, 29030);
+    mgr.set_priority_peers(vec![miner]);
+    mgr.add_known_address(miner, PeerOrigin::Seed);
+
+    // Well past every backoff window so ONLY the dormancy rule can
+    // exclude the peer below the threshold.
+    let later = now + Duration::from_secs(7200 * 8);
+    for i in 1..STICKY_PRUNE_FAILURES {
+        mgr.mark_dial_failed(&miner, now + Duration::from_secs(i as u64));
+        assert!(
+            mgr.sticky_peers_needing_dial(later).contains(&miner),
+            "below threshold the peer must stay dialable (failure {i})"
+        );
+    }
+    mgr.mark_dial_failed(&miner, now);
+    assert!(
+        !mgr.sticky_peers_needing_dial(later).contains(&miner),
+        "at STICKY_PRUNE_FAILURES the peer must be dormant"
+    );
+    mgr.mark_dial_succeeded(&miner, later);
+    assert!(
+        mgr.sticky_peers_needing_dial(later).contains(&miner),
+        "success resets consecutive_failures and revives the peer"
+    );
+}
+
+/// Asking `peers_for_sharing` for more than MAX_SHARED_PEER_SPECS still
+/// yields at most that many: Scala parses Peers with
+/// `require(length <= 64)` and parse failure means permanent ban.
+#[test]
+fn peers_for_sharing_clamps_to_max_shared_peer_specs() {
+    use crate::handshake::DeclaredAddress;
+    let mut mgr = PeerManager::new(42);
+    let now = Instant::now();
+    let mk_spec = |octets: [u8; 4]| PeerSpec {
+        agent_name: "ergo-reference".into(),
+        version: crate::handshake::Version::NIPOPOW,
+        node_name: "n".into(),
+        declared_address: Some(DeclaredAddress {
+            addr: octets.to_vec(),
+            port: 9030,
+        }),
+        features: Vec::new(),
+    };
+    // Distinct second octet per peer keeps each registration in its own
+    // /16 so the per-subnet cap doesn't reject them.
+    let eligible = MAX_SHARED_PEER_SPECS + 12;
+    for i in 0..eligible {
+        let octets = [213u8, (i as u8) + 1, i as u8, 9];
+        let a = addr(octets[0], octets[1], octets[2], octets[3], 9030);
+        mgr.register_outbound(a, now).unwrap();
+        mgr.mark_tcp_connected(&a);
+        mgr.complete_handshake(&a, mk_spec(octets), None, now)
+            .unwrap();
+    }
+    let shared = mgr.peers_for_sharing(eligible, 0);
+    assert_eq!(
+        shared.len(),
+        MAX_SHARED_PEER_SPECS,
+        "asking for {eligible} must clamp to MAX_SHARED_PEER_SPECS"
     );
 }

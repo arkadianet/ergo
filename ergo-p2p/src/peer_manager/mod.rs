@@ -36,6 +36,7 @@ pub mod routability;
 // rewriting every importer.
 pub use known_peer::{
     AddKnownOutcome, KnownPeer, PeerOrigin, GOSSIP_INTERVAL, MAX_KNOWN_ADDRESSES,
+    STICKY_PRUNE_FAILURES,
 };
 pub use limits::{
     ConnectError, PeerLimits, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_INBOUND, DEFAULT_PER_IP_LIMIT,
@@ -63,6 +64,15 @@ pub(crate) const MAX_BANS: usize = 10_000;
 /// resident until process restart. One hour keeps memory tidy at trivial
 /// cost; the sweep is O(n) over a map capped at [`MAX_BANS`].
 pub(crate) const BAN_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+/// Upper bound on PeerSpec entries included in one outbound `Peers`
+/// reply. Scala parses inbound Peers with
+/// `require(length <= maxPeerSpecObjects = 64)`
+/// (BasicMessagesRepo.scala:56-58) and escalates any parse failure to
+/// `PenalizePeer(PermanentPenalty)` (Synchronizer.scala:38-41) — a 10-year
+/// IP blacklist closing all connections. Scala itself only sends
+/// `maxToSend / 8` = 8 specs, so clamping well below 64 costs nothing.
+pub const MAX_SHARED_PEER_SPECS: usize = 48;
 
 pub struct PeerManager {
     peers: HashMap<PeerId, PeerInfo>,
@@ -719,6 +729,17 @@ impl PeerManager {
         self.persist_failure(*addr);
     }
 
+    /// Consecutive dial failures recorded for `addr` (0 if unknown or
+    /// last dial succeeded). Lets callers detect the crossing of
+    /// thresholds such as [`STICKY_PRUNE_FAILURES`].
+    pub fn consecutive_failures(&self, addr: &SocketAddr) -> u32 {
+        self.known_addresses
+            .iter()
+            .find(|k| k.addr == *addr)
+            .map(|k| k.consecutive_failures)
+            .unwrap_or(0)
+    }
+
     /// Record a successful handshake. Clears the backoff state so future
     /// failures start fresh from the shortest delay.
     pub fn mark_dial_succeeded(&mut self, addr: &SocketAddr, now: Instant) {
@@ -768,7 +789,7 @@ impl PeerManager {
             aa.cmp(&bb)
         });
         let start = (seed as usize) % eligible.len();
-        let take = limit.min(eligible.len());
+        let take = limit.min(MAX_SHARED_PEER_SPECS).min(eligible.len());
         (0..take)
             .map(|i| eligible[(start + i) % eligible.len()])
             .collect()
@@ -899,6 +920,14 @@ impl PeerManager {
             let Some(k) = self.known_addresses.iter().find(|k| k.addr == *addr) else {
                 continue;
             };
+            // Dormant: persistently-refused sticky peer. Handshake-level
+            // refusals at pool-operated hosts are per-IP blacklists that
+            // do not age out; redialing them forever only re-trips their
+            // rate filters (and burns dial budget). Success zeroes
+            // `consecutive_failures`, which revives the peer.
+            if k.consecutive_failures >= STICKY_PRUNE_FAILURES {
+                continue;
+            }
             if let (Some(last), n) = (k.last_failure, k.consecutive_failures) {
                 if n > 0 && now.duration_since(last) < sticky_backoff_for(n) {
                     continue;

@@ -467,6 +467,7 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
 
         PeerEvent::ConnectFailed { addr, reason } => {
             let is_priority = state.peer_manager.priority_peers().contains(&addr);
+            let failures_before = state.peer_manager.consecutive_failures(&addr);
             if is_priority {
                 warn!(
                     event = "rent_collector_sticky_dial_fail",
@@ -479,6 +480,21 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
             }
             state.peer_manager.disconnect(&addr);
             state.peer_manager.mark_dial_failed(&addr, now);
+            // One-time log when a sticky peer goes dormant (see
+            // STICKY_PRUNE_FAILURES): persistently refused hosts stop
+            // being dialed until a handshake succeeds again.
+            if is_priority
+                && failures_before < ergo_p2p::peer_manager::STICKY_PRUNE_FAILURES
+                && state.peer_manager.consecutive_failures(&addr)
+                    >= ergo_p2p::peer_manager::STICKY_PRUNE_FAILURES
+            {
+                warn!(
+                    event = "rent_collector_sticky_pruned",
+                    peer = %addr,
+                    consecutive_failures = failures_before + 1,
+                    "sticky/priority peer dormant: persistently refused; no longer dialing until it accepts a handshake"
+                );
+            }
         }
 
         PeerEvent::InboundConnect { peer_addr, stream } => {
