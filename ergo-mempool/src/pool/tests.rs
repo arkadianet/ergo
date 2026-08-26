@@ -594,3 +594,40 @@ fn saturating_apply_floors_at_zero_and_ceils_at_u64_max() {
     );
     assert_eq!(saturating_apply(u64::MAX, -i128::from(u64::MAX)), 0);
 }
+
+// ----- duplicate-id invariant across rekeys (upstream #2439 analogue) -----
+
+/// The reference client's ordered tx pool could hold the same tx id twice
+/// (upstream ergo#2439), double-counting it in priority order. Ours must
+/// stay 1:1 between `ordered` and `by_tx_id` through the mutation that
+/// most plausibly breaks it — a family-weight rekey — and a re-insert of
+/// a live id must be rejected as `Duplicate` both before and after the
+/// rekey. Iteration yields each id exactly once, so block candidates can
+/// never double-count fees.
+#[test]
+fn duplicate_insert_rejected_after_family_weight_rekey_and_iteration_is_unique() {
+    let mut p = OrderedPool::with_capacity(8);
+    // parent(1) ← child(2): child spends parent's output 11.
+    p.insert(mk_entry(1, 10, &[10], &[11], &[])).unwrap();
+    p.insert(mk_entry(2, 10, &[11], &[12], &[1])).unwrap();
+    p.check_invariants();
+
+    // Pre-rekey: re-inserting a seated id is rejected.
+    let err = p.insert(mk_entry(1, 99, &[90], &[91], &[])).unwrap_err();
+    assert!(matches!(err, PoolError::Duplicate(_)));
+
+    // Rekey child (and its parent) via the family-weight walk.
+    p.update_family(&[digest(11)], i128::from(70u64), wide_bounds());
+    p.check_invariants();
+
+    // Post-rekey: still rejected, and every id appears exactly once in
+    // priority order.
+    let err = p.insert(mk_entry(2, 777, &[92], &[93], &[])).unwrap_err();
+    assert!(matches!(err, PoolError::Duplicate(_)));
+
+    let ids: Vec<_> = p.iter_prioritized().map(|e| e.tx_id).collect();
+    let unique: std::collections::HashSet<_> = ids.iter().collect();
+    assert_eq!(unique.len(), ids.len(), "duplicate id in priority order");
+    assert_eq!(ids.len(), 2);
+    p.check_invariants();
+}
