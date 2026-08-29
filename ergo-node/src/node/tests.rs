@@ -156,6 +156,7 @@ fn make_state_with_backend(
         last_gossip_at: Instant::now()
             .checked_sub(ergo_p2p::peer_manager::GOSSIP_INTERVAL)
             .unwrap_or_else(Instant::now),
+        last_starve_warn_at: None,
         indexer_handle: None,
         anchor_map: anchor_map::AnchorMap::new(),
         rest_peer_urls: std::sync::Arc::new(std::sync::RwLock::new(RestPeers::new())),

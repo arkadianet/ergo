@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use ergo_p2p::message;
 use ergo_p2p::peer::{PeerId, Penalty, PenaltyOutcome};
 use ergo_sync::coordinator::Action;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::peer_loop;
 
@@ -40,6 +40,24 @@ const DIAL_FAST_THRESHOLD: usize = 8;
 /// Matches the original 30s cadence — gentle to the network in steady
 /// state, where churn is rare.
 const DIAL_SLOW_PERIOD: Duration = Duration::from_secs(30);
+
+/// Minimum spacing between bootstrap-starved WARNs. A node whose every
+/// known address is inside its dial-backoff window AND has no connected
+/// peers has no discovery surface; without this gate the condition
+/// would log once per 5s dial tick for as long as the drought lasts.
+/// 5 minutes keeps a multi-hour starvation visible without spamming —
+/// and the first occurrence always warns immediately.
+const STARVE_WARN_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Whether this dial cycle may emit the bootstrap-starved WARN: first
+/// sight always fires, repeats are suppressed until
+/// [`STARVE_WARN_INTERVAL`] has elapsed since the previous one.
+fn starve_warn_due(last_warn: Option<Instant>, now: Instant) -> bool {
+    match last_warn {
+        None => true,
+        Some(t) => now.duration_since(t) >= STARVE_WARN_INTERVAL,
+    }
+}
 
 /// Decide how many connected peers to fan a `GetPeers` request to this
 /// dial cycle.
@@ -134,6 +152,25 @@ pub(super) fn try_dial_peers(state: &mut NodeState) {
             .filter(|addr| state.registry.peers.contains_key(addr))
             .collect();
         let fanout = getpeers_fanout(addrs.len(), want, gossip_targets.len());
+        // Dead-end detection: zero dial candidates (every known address
+        // is inside its dial-backoff window) AND zero connected peers —
+        // there is no discovery surface left. GetPeers has no one to
+        // ask, and the next dial attempt is gated by the exponential
+        // backoff (up to the 2h cap), so at the default `info` log level
+        // — where the per-dial traces are debug-only — the node looks
+        // frozen at peers = 0. Observed in a v0.5.3 testnet soak whose
+        // bundled seeds went dark: three refused dials, then silence.
+        if addrs.is_empty()
+            && gossip_targets.is_empty()
+            && starve_warn_due(state.last_starve_warn_at, now)
+        {
+            state.last_starve_warn_at = Some(now);
+            warn!(
+                deficit = deficit,
+                known_addresses = state.peer_manager.known_addresses_len(),
+                "peer bootstrap starved: no dial candidates (all known addresses in dial-backoff) and no connected peers — no discovery surface; check seed reachability or configure [peers] known"
+            );
+        }
         if fanout > 0 {
             // Rotate the start offset so we don't keep hitting the same
             // leading peers each cycle — spreads discovery load and pulls a
@@ -367,7 +404,8 @@ pub(super) fn send_to_peer(state: &NodeState, peer: &PeerId, code: u8, payload: 
 
 #[cfg(test)]
 mod tests {
-    use super::{getpeers_fanout, GOSSIP_FANOUT};
+    use super::{getpeers_fanout, starve_warn_due, GOSSIP_FANOUT, STARVE_WARN_INTERVAL};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn healthy_pool_asks_no_one() {
@@ -389,5 +427,18 @@ mod tests {
         assert_eq!(getpeers_fanout(3, 32, 100), GOSSIP_FANOUT);
         // ...but never more peers than are actually connected.
         assert_eq!(getpeers_fanout(3, 32, 2), 2);
+    }
+
+    #[test]
+    fn starve_warn_fires_on_first_sight_then_gates() {
+        let now = Instant::now();
+        // First starved cycle always warns...
+        assert!(starve_warn_due(None, now));
+        // ...repeats inside the interval are suppressed...
+        let recent = now.checked_sub(Duration::from_secs(60)).unwrap();
+        assert!(!starve_warn_due(Some(recent), now));
+        // ...and the warn re-fires once the interval has elapsed.
+        let stale = now.checked_sub(STARVE_WARN_INTERVAL).unwrap();
+        assert!(starve_warn_due(Some(stale), now));
     }
 }

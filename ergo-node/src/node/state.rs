@@ -187,6 +187,12 @@ pub(crate) struct NodeState {
     /// dial-tick's deficit gate, so the gossip fires even when our
     /// outbound pool is healthy. Mirrors Scala `PeerSynchronizer`.
     pub(super) last_gossip_at: Instant,
+    /// Last time the dial cycle emitted the bootstrap-starved WARN
+    /// (`peer_actions::try_dial_peers`). `None` until the first starved
+    /// cycle; repeat warns are gated by `STARVE_WARN_INTERVAL` so a
+    /// long discovery drought logs one line per interval, not one per
+    /// 5s tick.
+    pub(super) last_starve_warn_at: Option<Instant>,
     /// Cheap clone of the indexer handle so the slice-2 memory sampler
     /// can read `indexed_height`, `status`, and redb evictions without
     /// going through the API or owning a separate read txn. `None` when

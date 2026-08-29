@@ -720,16 +720,19 @@ impl BootstrapParams {
         }
     }
 
-    /// Testnet defaults at v6.0.3+. Seed peers from upstream
-    /// `testnet.conf` after PR #2252 — three public testnet nodes
-    /// on `:9023`. Checkpoint is `None`: the previous PaiNet
-    /// checkpoint at `h = 91_320` was removed alongside the
-    /// network reset, and the new chain hasn't published one yet.
+    /// Testnet defaults. Seed peers verified live against a synced
+    /// Scala 6.0.3 testnet node (2026-08) after the upstream
+    /// `testnet.conf` `:9023` set went dark — every `:9023` address
+    /// now refuses TCP, which left fresh boots pinned at `peers = 0`
+    /// (no discovery surface, dead seeds only re-dialed on capped
+    /// backoff). Checkpoint is `None`: the previous PaiNet checkpoint
+    /// at `h = 91_320` was removed alongside the network reset, and
+    /// the new chain hasn't published one yet.
     pub fn testnet() -> Self {
         let seed_strs = [
-            "213.239.193.208:9023",
-            "168.138.185.215:9023",
-            "192.234.196.165:9023",
+            "178.104.182.94:9040",
+            "128.253.41.110:9020",
+            "176.9.15.237:9021",
         ];
         Self {
             seed_peers: seed_strs
@@ -1045,12 +1048,20 @@ mod tests {
 
     #[test]
     fn bootstrap_testnet_has_three_seeds_and_no_checkpoint() {
-        // v6.0.3 testnet.conf — three known peers on :9023, no
-        // node.checkpoint section (the PaiNet h=91_320 checkpoint
-        // was retired by PR #2252).
+        // Verified live 2026-08 against a synced Scala 6.0.3 testnet
+        // node, after the upstream `testnet.conf` `:9023` set went
+        // dark. No checkpoint (the PaiNet h=91_320 checkpoint was
+        // retired by PR #2252).
         let p = BootstrapParams::testnet();
-        assert_eq!(p.seed_peers.len(), 3);
-        assert!(p.seed_peers.iter().all(|a| a.port() == 9023));
+        let expected: Vec<SocketAddr> = [
+            "178.104.182.94:9040",
+            "128.253.41.110:9020",
+            "176.9.15.237:9021",
+        ]
+        .iter()
+        .map(|s| s.parse().unwrap())
+        .collect();
+        assert_eq!(p.seed_peers, expected);
         assert!(p.checkpoint.is_none());
     }
 
