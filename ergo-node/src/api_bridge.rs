@@ -286,6 +286,49 @@ impl SnapshotReadState {
             .saturating_duration_since(produced_at)
             .as_millis() as u64
     }
+
+    /// On-disk sizes of the two redb stores, probed per call. Plain
+    /// files, so the on-disk size is `metadata().len()`. The indexer
+    /// file is absent when `[indexer] enabled = false`, which produces
+    /// `None` for that half.
+    fn db_sizes(&self) -> (Option<u64>, Option<u64>) {
+        let state = std::fs::metadata(&self.host_paths.state_db)
+            .map(|m| m.len())
+            .ok();
+        let index = std::fs::metadata(&self.host_paths.index_db)
+            .map(|m| m.len())
+            .ok();
+        (state, index)
+    }
+
+    /// Free / total bytes on the filesystem holding the data dir — the
+    /// disk whose mount-point is a longest-prefix match of data_dir
+    /// (in case data_dir lives on a sub-mount).
+    ///
+    /// On Windows, `std::fs::canonicalize` returns paths prefixed
+    /// with the `\\?\` extended-length namespace (e.g.
+    /// `\\?\C:\Users\...\ergo-data`), while sysinfo's mount points
+    /// come back as bare drive roots (e.g. `C:\`). `Path::starts_with`
+    /// compares path components, not byte prefixes, so the extended
+    /// namespace prefix kills the match. Strip it before comparing.
+    fn disk_space(&self) -> (Option<u64>, Option<u64>) {
+        let disks = sysinfo::Disks::new_with_refreshed_list();
+        let canonical_data = std::fs::canonicalize(&self.host_paths.data_dir)
+            .map(strip_extended_length_prefix)
+            .unwrap_or_else(|_| self.host_paths.data_dir.clone());
+        let mut best_match: Option<&sysinfo::Disk> = None;
+        let mut best_len = 0usize;
+        for disk in &disks {
+            let mp = disk.mount_point();
+            if canonical_data.starts_with(mp) && mp.as_os_str().len() > best_len {
+                best_len = mp.as_os_str().len();
+                best_match = Some(disk);
+            }
+        }
+        best_match
+            .map(|d| (Some(d.available_space()), Some(d.total_space())))
+            .unwrap_or((None, None))
+    }
 }
 
 impl NodeReadState for SnapshotReadState {
@@ -352,15 +395,7 @@ impl NodeReadState for SnapshotReadState {
     }
 
     fn host(&self) -> ApiHost {
-        // `state.redb` and `indexer.redb` are plain files; their on-disk
-        // size is `metadata().len()`. The indexer file is absent when
-        // `[indexer] enabled = false`, which produces `None`.
-        let state_db_bytes = std::fs::metadata(&self.host_paths.state_db)
-            .map(|m| m.len())
-            .ok();
-        let index_db_bytes = std::fs::metadata(&self.host_paths.index_db)
-            .map(|m| m.len())
-            .ok();
+        let (state_db_bytes, index_db_bytes) = self.db_sizes();
 
         // Process RSS via sysinfo. Refresh only the current process; this
         // avoids enumerating every process on the host on each handler call.
@@ -374,32 +409,7 @@ impl NodeReadState for SnapshotReadState {
             sys.process(p).map(|proc| proc.memory())
         });
 
-        // Disk space — find the disk whose mount-point is a prefix of
-        // data_dir (longest match wins, in case data_dir lives on a
-        // sub-mount).
-        //
-        // On Windows, `std::fs::canonicalize` returns paths prefixed
-        // with the `\\?\` extended-length namespace (e.g.
-        // `\\?\C:\Users\...\ergo-data`), while sysinfo's mount points
-        // come back as bare drive roots (e.g. `C:\`). `Path::starts_with`
-        // compares path components, not byte prefixes, so the extended
-        // namespace prefix kills the match. Strip it before comparing.
-        let disks = sysinfo::Disks::new_with_refreshed_list();
-        let canonical_data = std::fs::canonicalize(&self.host_paths.data_dir)
-            .map(strip_extended_length_prefix)
-            .unwrap_or_else(|_| self.host_paths.data_dir.clone());
-        let mut best_match: Option<&sysinfo::Disk> = None;
-        let mut best_len = 0usize;
-        for disk in &disks {
-            let mp = disk.mount_point();
-            if canonical_data.starts_with(mp) && mp.as_os_str().len() > best_len {
-                best_len = mp.as_os_str().len();
-                best_match = Some(disk);
-            }
-        }
-        let (disk_free_bytes, disk_total_bytes) = best_match
-            .map(|d| (Some(d.available_space()), Some(d.total_space())))
-            .unwrap_or((None, None));
+        let (disk_free_bytes, disk_total_bytes) = self.disk_space();
 
         ApiHost {
             rss_bytes,
@@ -434,6 +444,14 @@ impl NodeReadState for SnapshotReadState {
             s.apply_age_ms = self.telemetry.apply_age_ms();
             s.apply_wedged = self.telemetry.apply_wedged();
         }
+        // Storage gauges (measure-first, #257): on-disk size of the two
+        // redb stores plus disk headroom around the data dir. Same
+        // per-call probes the `/host` card uses — two stat calls and a
+        // mount-table scan, cheap at dashboard / scrape cadence. Surfaced
+        // so data-dir growth (bytes per synced height) is measured, not
+        // guessed.
+        (s.state_db_bytes, s.index_db_bytes) = self.db_sizes();
+        (s.disk_free_bytes, s.disk_total_bytes) = self.disk_space();
         s
     }
 

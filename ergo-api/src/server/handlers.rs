@@ -508,6 +508,18 @@ ergo_solutions_stale_parent_total {solutions_stale_parent}
 # HELP ergo_rss_kb Resident set size, KiB (Linux; 0 elsewhere).
 # TYPE ergo_rss_kb gauge
 ergo_rss_kb {rss_kb}
+# HELP ergo_state_db_bytes On-disk size of state.redb (0 when absent).
+# TYPE ergo_state_db_bytes gauge
+ergo_state_db_bytes {state_db_bytes}
+# HELP ergo_index_db_bytes On-disk size of indexer.redb (0 when indexer disabled/absent).
+# TYPE ergo_index_db_bytes gauge
+ergo_index_db_bytes {index_db_bytes}
+# HELP ergo_disk_free_bytes Free bytes on the filesystem holding the data dir (0 when undetermined).
+# TYPE ergo_disk_free_bytes gauge
+ergo_disk_free_bytes {disk_free_bytes}
+# HELP ergo_disk_total_bytes Total bytes on the filesystem holding the data dir (0 when undetermined).
+# TYPE ergo_disk_total_bytes gauge
+ergo_disk_total_bytes {disk_total_bytes}
 ",
         uptime = status
             .uptime_seconds_live
@@ -563,6 +575,10 @@ ergo_rss_kb {rss_kb}
         solutions_invalid_pow = g.solutions_invalid_pow,
         solutions_stale_parent = g.solutions_stale_parent,
         rss_kb = status.rss_kb_live.unwrap_or(g.rss_kb),
+        state_db_bytes = status.state_db_bytes.unwrap_or(0),
+        index_db_bytes = status.index_db_bytes.unwrap_or(0),
+        disk_free_bytes = status.disk_free_bytes.unwrap_or(0),
+        disk_total_bytes = status.disk_total_bytes.unwrap_or(0),
     );
 
     // Shadow-validation series — emitted only when the mode is enabled, so

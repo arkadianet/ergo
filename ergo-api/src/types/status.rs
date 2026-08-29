@@ -69,6 +69,25 @@ pub struct ApiStatus {
     /// apply's start timestamp by a thread nothing can starve.
     #[serde(default)]
     pub apply_age_ms: Option<i64>,
+    /// On-disk size of `state.redb` in bytes, probed per status read.
+    /// `None` when the file is absent (never synced / failed to open).
+    /// The `ergo_state_db_bytes` Prometheus gauge source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_db_bytes: Option<u64>,
+    /// On-disk size of the indexer redb in bytes, probed per status
+    /// read. `None` when `[indexer] enabled = false` or the file is
+    /// absent. The `ergo_index_db_bytes` Prometheus gauge source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_db_bytes: Option<u64>,
+    /// Free bytes on the filesystem holding the data dir, probed per
+    /// status read. `None` when the mount could not be determined. The
+    /// `ergo_disk_free_bytes` Prometheus gauge source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_free_bytes: Option<u64>,
+    /// Total bytes on the filesystem holding the data dir, probed per
+    /// status read. The `ergo_disk_total_bytes` Prometheus gauge source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_total_bytes: Option<u64>,
     /// Wall-clock wedge: the running apply has exceeded the telemetry
     /// threshold (`telemetry::APPLY_WEDGED_THRESHOLD`). This is the
     /// alarm that must fire while everything else is frozen — do not

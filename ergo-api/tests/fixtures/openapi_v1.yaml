@@ -5739,9 +5739,38 @@ components:
               transitions to normal block sync. Operators rendering the
               dashboard panel should treat `Some(_)` as "show the
               bootstrap card, hide the normal block-sync pipeline row".
+        disk_free_bytes:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Free bytes on the filesystem holding the data dir, probed per
+            status read. `None` when the mount could not be determined. The
+            `ergo_disk_free_bytes` Prometheus gauge source.
+          minimum: 0
+        disk_total_bytes:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Total bytes on the filesystem holding the data dir, probed per
+            status read. The `ergo_disk_total_bytes` Prometheus gauge source.
+          minimum: 0
         headers_ahead_of_full_blocks:
           type: integer
           format: int32
+          minimum: 0
+        index_db_bytes:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            On-disk size of the indexer redb in bytes, probed per status
+            read. `None` when `[indexer] enabled = false` or the file is
+            absent. The `ergo_index_db_bytes` Prometheus gauge source.
           minimum: 0
         last_applied_height:
           type: integer
@@ -5856,6 +5885,16 @@ components:
         snapshot_age_ms:
           type: integer
           format: int64
+          minimum: 0
+        state_db_bytes:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            On-disk size of `state.redb` in bytes, probed per status read.
+            `None` when the file is absent (never synced / failed to open).
+            The `ergo_state_db_bytes` Prometheus gauge source.
           minimum: 0
         sync_state:
           $ref: '#/components/schemas/SyncStateLabel'

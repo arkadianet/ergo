@@ -98,6 +98,12 @@ pub(super) fn build_snapshot(
         uptime_seconds_live: None,
         apply_age_ms: None,
         apply_wedged: false,
+        // Storage probes are per-request only (SnapshotReadState::status());
+        // absent from the published snapshot by design.
+        state_db_bytes: None,
+        index_db_bytes: None,
+        disk_free_bytes: None,
+        disk_total_bytes: None,
     };
 
     let tip = ApiTip {
