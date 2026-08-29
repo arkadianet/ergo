@@ -194,6 +194,7 @@ impl DigestProofVerifier {
         proof_bytes: &[u8],
         header: &Header,
         parent_state_root: &[u8; 33],
+        max_num_operations: Option<usize>,
     ) -> Result<Self, DigestApplyError> {
         // 1. Root hash check.
         let computed_root = blake2b256(proof_bytes);
@@ -246,7 +247,23 @@ impl DigestProofVerifier {
         // stack-local value.
         let proof_owned = proof_bytes.to_vec();
         let parent_owned = parent_state_root.to_vec();
-        let construct = || AvlVerifier::new(&parent_owned, &proof_owned, BOX_ID_KEY_LENGTH, None);
+        // Scala parity (`ADProofs.verify`, ergo-core): the verifier is
+        // constructed with `maxNumOperations = Some(changes.operations.size)`.
+        // The bound caps the proof's node count at construction time
+        // (scrypto Appendix B formula), rejecting self-consistent proofs
+        // padded with extra nodes — SANTA `adverse-malicious-extra-nodes`
+        // class. `max_deletes` stays None on both sides (defaults to
+        // `max_num_operations`).
+        let construct = || {
+            AvlVerifier::new(
+                &parent_owned,
+                &proof_owned,
+                BOX_ID_KEY_LENGTH,
+                None,
+                max_num_operations,
+                None,
+            )
+        };
         let inner_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(construct))
             .map_err(|panic_payload| {
                 let reason = panic_payload
@@ -446,8 +463,14 @@ impl DigestProofVerifier {
         to_remove: &BTreeMap<[u8; 32], ()>,
         to_insert: &BTreeMap<[u8; 32], Vec<u8>>,
     ) -> Result<[u8; 33], DigestApplyError> {
-        let mut verifier =
-            DigestProofVerifier::new(modifier_id, proof_bytes, header, parent_state_root)?;
+        let op_count = to_lookup.len() + to_remove.len() + to_insert.len();
+        let mut verifier = DigestProofVerifier::new(
+            modifier_id,
+            proof_bytes,
+            header,
+            parent_state_root,
+            Some(op_count),
+        )?;
         verifier.apply_net_box_changes(to_lookup, to_remove, to_insert)?;
         let computed = verifier.finalize_digest();
         let expected: &[u8; 33] = header.state_root.as_bytes();
@@ -476,8 +499,14 @@ impl DigestProofVerifier {
         to_remove: &BTreeMap<[u8; 32], ()>,
         to_insert: &BTreeMap<[u8; 32], Vec<u8>>,
     ) -> Result<([u8; 33], ResolvedBoxes), DigestApplyError> {
-        let mut verifier =
-            DigestProofVerifier::new(modifier_id, proof_bytes, header, parent_state_root)?;
+        let op_count = to_lookup.len() + to_remove.len() + to_insert.len();
+        let mut verifier = DigestProofVerifier::new(
+            modifier_id,
+            proof_bytes,
+            header,
+            parent_state_root,
+            Some(op_count),
+        )?;
         let resolved = verifier.apply_net_box_changes_resolving(to_lookup, to_remove, to_insert)?;
         let computed = verifier.finalize_digest();
         let expected: &[u8; 33] = header.state_root.as_bytes();
@@ -569,6 +598,7 @@ mod tests {
             proof_bytes,
             &header,
             &empty_avl_digest(),
+            None,
         ) {
             Ok(_) => panic!("must reject"),
             Err(e) => e,
@@ -598,6 +628,7 @@ mod tests {
             proof_bytes,
             &header,
             &empty_avl_digest(),
+            None,
         ) {
             Ok(_) => panic!("must reject foreign modifier_id"),
             Err(e) => e,
@@ -650,6 +681,7 @@ mod tests {
             proof_bytes,
             &header,
             &empty_avl_digest(),
+            None,
         ) {
             Ok(_) => panic!("must reject"),
             Err(e) => e,

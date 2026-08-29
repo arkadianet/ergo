@@ -193,7 +193,21 @@ pub(crate) fn self_check_candidate_proof(
 
     let parent_bytes = parent_root.as_bytes().to_vec();
     let proof_owned = proof.to_vec();
-    let construct = || ergo_sigma::avl::AvlVerifier::new(&parent_bytes, &proof_owned, 32, None);
+    // Same bound Scala's `ADProofs.verify` passes for the equivalent
+    // op stream (`maxNumOperations = Some(changes.operations.size)`,
+    // netted per `ErgoState.stateChanges`). Fail-safe direction for
+    // the miner: a bound that rejects only withholds a candidate.
+    let op_count = to_lookup.len() + to_remove.len() + to_insert.len();
+    let construct = || {
+        ergo_sigma::avl::AvlVerifier::new(
+            &parent_bytes,
+            &proof_owned,
+            32,
+            None,
+            Some(op_count),
+            None,
+        )
+    };
     let verifier_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(construct))
         .map_err(|panic_payload| {
             let reason = panic_payload
@@ -516,9 +530,15 @@ mod tests {
             apply_change_set_via_prover(&tree, &lookups, &to_remove, &to_insert)
                 .expect("dry-run with lookups");
 
-        let mut verifier =
-            ergo_sigma::avl::AvlVerifier::new(parent_root.as_bytes(), &proof, 32, None)
-                .expect("verifier construction from generated proof");
+        let mut verifier = ergo_sigma::avl::AvlVerifier::new(
+            parent_root.as_bytes(),
+            &proof,
+            32,
+            None,
+            Some(lookups.len() + to_remove.len() + to_insert.len()),
+            None,
+        )
+        .expect("verifier construction from generated proof");
         for k in &lookups {
             verifier.lookup(k).expect("lookup replay");
         }

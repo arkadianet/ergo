@@ -99,7 +99,7 @@ fn run_vector(v: &Vector) -> (bool, Option<Vec<u8>>) {
     // Failure => digest None). Op-time panics, by contrast, are contained inside
     // `AvlVerifier` itself, so the ops below need no catch here.
     let mut verifier = match catch_unwind(AssertUnwindSafe(|| {
-        AvlVerifier::new(&digest, &proof, v.key_length, v.value_length)
+        AvlVerifier::new(&digest, &proof, v.key_length, v.value_length, None, None)
     })) {
         Ok(Ok(w)) => w,
         _ => return (false, None),

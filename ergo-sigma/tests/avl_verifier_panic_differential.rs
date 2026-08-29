@@ -166,7 +166,7 @@ fn run_raw(start: &[u8], proof: &[u8], op: &Op) -> Option<(bool, Option<Vec<u8>>
 /// wrapper (a fix failure). `Some((ok, digest))` = the wrapper contained it.
 fn run_wrapped(start: &[u8], proof: &[u8], op: &Op) -> Option<(bool, Option<Vec<u8>>)> {
     catch_unwind(AssertUnwindSafe(|| {
-        let mut w = match AvlVerifier::new(start, proof, 32, None) {
+        let mut w = match AvlVerifier::new(start, proof, 32, None, None, None) {
             Ok(w) => w,
             Err(_) => return (false, None),
         };

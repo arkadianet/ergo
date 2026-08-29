@@ -93,11 +93,28 @@ impl AvlVerifier {
     /// `proof`: serialized batch proof bytes.
     /// `key_length`: fixed key length in bytes.
     /// `value_length_opt`: optional fixed value length.
+    /// `max_num_operations` / `max_deletes`: optional operation-count
+    /// bounds (scrypto `BatchAVLVerifier` semantics: a proof is capped
+    /// at a node count derived from the bound, so an over-large proof
+    /// is rejected AT CONSTRUCTION; `max_deletes` defaults to
+    /// `max_num_operations` when `None`). The crate implements the
+    /// bound but it is opt-in: callers that do not pass one get NO
+    /// node-count cap. Parity map:
+    /// - block-level ADProofs verification → `Some(op_count)`, matching
+    ///   Scala `ADProofs.verify` (`maxNumOperations = Some(
+    ///   changes.operations.size)`, changes netted per
+    ///   `ErgoState.stateChanges`);
+    /// - script-level evaluation → `None`, matching Scala
+    ///   `CAvlTreeVerifier.apply` (no bounds);
+    /// - SANTA authds adverse vectors rely on the bound to reject
+    ///   self-consistent proofs padded with extra nodes.
     pub fn new(
         digest: &[u8],
         proof: &[u8],
         key_length: usize,
         value_length_opt: Option<usize>,
+        max_num_operations: Option<usize>,
+        max_deletes: Option<usize>,
     ) -> Result<Self, String> {
         let digest = bytes::Bytes::from(digest.to_vec());
         let proof = bytes::Bytes::from(proof.to_vec());
@@ -124,8 +141,8 @@ impl AvlVerifier {
                     key_length,
                     value_length_opt,
                 ),
-                None,
-                None,
+                max_num_operations,
+                max_deletes,
             )
         })) {
             Ok(Ok(v)) => Ok(AvlVerifier(Some(v))),
@@ -316,6 +333,44 @@ mod tests {
         }
     }
 
+    // ----- SANTA authds regression: adverse-malicious-extra-nodes -----
+
+    /// SANTA authds vector `AvlVerify.ergots_corpus/adverse-malicious-extra-nodes`
+    /// (oracle: scrypto 3.0.0, blessed `proof_accepted = false`). The proof
+    /// carries a self-consistent tree padded with extra nodes; with the
+    /// operation bound declared in the vector's settings
+    /// (`max_num_operations = 0` → scrypto caps the proof at 1 node) the
+    /// crate must reject AT CONSTRUCTION. Without a bound the crate accepts
+    /// (and the lookup would return attacker-chosen bytes) — that is the
+    /// JVM-parity behaviour for script-level evaluation, where Scala's
+    /// `CAvlTreeVerifier.apply` passes no bound; block-level verification
+    /// always passes `Some(op_count)` (see `digest_apply.rs`).
+    #[test]
+    fn santa_adverse_extra_nodes_rejected_under_operation_bound() {
+        let digest =
+            hex::decode("215197cff0244d874639dab08e97913fa0b1979192b264a64f4f24f9ac132e7a02")
+                .unwrap();
+        let proof = hex::decode(
+            "03fbf12f7c13a9bd41c97bcb4073995069741012a975a254df1d2fc3519d9b7503020202020202020202020202020202020202020202020202020202020202020202030303030303030303030303030303030303030303030303030303030303030300000008020202020202020203752a2fcab8542e5360a9df7074ed5ff3f0f89938218370923775e6cbc35add0a00000402",
+        )
+        .unwrap();
+
+        // scrypto parity: settings declare max_num_operations = 0 → the
+        // verifier must refuse to construct (proof_accepted = false).
+        let verdict = AvlVerifier::new(&digest, &proof, 32, None, Some(0), None);
+        assert!(
+            verdict.is_err(),
+            "malicious extra-nodes proof must be rejected under the declared operation bound"
+        );
+
+        // Without a bound construction succeeds (documented JVM-eval
+        // parity) — pinned so a future strictness change is deliberate.
+        assert!(
+            AvlVerifier::new(&digest, &proof, 32, None, None, None).is_ok(),
+            "unbounded construction is the JVM script-eval parity behaviour"
+        );
+    }
+
     // ----- happy path -----
 
     #[test]
@@ -337,7 +392,7 @@ mod tests {
             .expect("prover remove");
         let proof = prover.generate_proof().to_vec();
         let mut verifier =
-            AvlVerifier::new(&parent, &proof, 32, None).expect("verifier construction");
+            AvlVerifier::new(&parent, &proof, 32, None, None, None).expect("verifier construction");
         let result = verifier.remove_with_presence(&key);
         assert_eq!(result, Ok(true), "present-key remove must return Ok(true)");
     }
@@ -364,7 +419,7 @@ mod tests {
             .expect("prover remove");
         let proof = prover.generate_proof().to_vec();
         let mut verifier =
-            AvlVerifier::new(&parent, &proof, 32, None).expect("verifier construction");
+            AvlVerifier::new(&parent, &proof, 32, None, None, None).expect("verifier construction");
         let uncovered = [0x99u8; 32];
         let result = verifier.remove_with_presence(&uncovered);
         assert_eq!(
@@ -425,8 +480,8 @@ mod tests {
             .expect("prover lookup");
         let lookup_proof = lp.generate_proof().to_vec();
 
-        let mut verifier =
-            AvlVerifier::new(&parent, &lookup_proof, 32, None).expect("verifier construction");
+        let mut verifier = AvlVerifier::new(&parent, &lookup_proof, 32, None, None, None)
+            .expect("verifier construction");
 
         // (1) Fail closed, do not panic.
         assert_eq!(
@@ -505,7 +560,7 @@ mod tests {
         for (i, bad) in corruptions.iter().enumerate() {
             // Construction may panic (caught upstream by digest_apply) or Err.
             let constructed = catch_unwind(AssertUnwindSafe(|| {
-                AvlVerifier::new(&parent, bad, 32, None)
+                AvlVerifier::new(&parent, bad, 32, None, None, None)
             }));
             if let Ok(Ok(mut verifier)) = constructed {
                 survived_construction += 1;
@@ -580,8 +635,8 @@ mod tests {
         for (i, k) in adversarial.iter().enumerate() {
             // Fresh verifier per op: construction is guaranteed (valid proof),
             // and the single op below is the "first op" digest_apply would run.
-            let mut v =
-                AvlVerifier::new(&parent, &good_proof, 32, None).expect("valid proof constructs");
+            let mut v = AvlVerifier::new(&parent, &good_proof, 32, None, None, None)
+                .expect("valid proof constructs");
             let panicked = catch_unwind(AssertUnwindSafe(|| match i % 4 {
                 0 => {
                     let _ = v.lookup(k);
@@ -610,8 +665,8 @@ mod tests {
         // insert) on one verifier, legitimately consuming proof stream, THEN
         // fall off the witnessed access paths with adversarial ops. None may
         // panic. Guaranteed non-vacuous: the valid proof always constructs.
-        let mut v =
-            AvlVerifier::new(&parent, &good_proof, 32, None).expect("valid proof constructs");
+        let mut v = AvlVerifier::new(&parent, &good_proof, 32, None, None, None)
+            .expect("valid proof constructs");
         let post_consumption_panicked = catch_unwind(AssertUnwindSafe(|| {
             let _ = v.lookup(&key_a); // uncovered lookup → Err
             let _ = v.remove_returning_value(&key_b); // witnessed remove → Ok (consumes stream)
