@@ -365,6 +365,8 @@ pub fn registry(only: Option<&str>) -> Vec<Surface> {
                     &frame.proof,
                     frame.key_len as usize,
                     frame.value_len_opt.map(|n| n as usize),
+                    None,
+                    None,
                 ) {
                     Ok(v) => v,
                     Err(_) => return Outcome::Rejected,

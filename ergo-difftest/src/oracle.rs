@@ -529,6 +529,8 @@ fn verify_avl_verdict(bytes: &[u8]) -> (Verdict, usize) {
         &frame.proof,
         frame.key_len as usize,
         frame.value_len_opt.map(|n| n as usize),
+        None,
+        None,
     ) {
         Ok(v) => v,
         Err(e) => return (Verdict::Reject(format!("construction: {e}")), consumed),

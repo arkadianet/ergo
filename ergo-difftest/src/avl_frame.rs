@@ -395,8 +395,9 @@ mod tests {
         assert_eq!(decoded, frame);
 
         // Structural assertion: the GUARDED verifier must reject, not panic.
-        let mut verifier = AvlVerifier::new(&frame.starting_digest, &frame.proof, 32, None)
-            .expect("construction from valid-shaped proof");
+        let mut verifier =
+            AvlVerifier::new(&frame.starting_digest, &frame.proof, 32, None, None, None)
+                .expect("construction from valid-shaped proof");
         let result = verifier.remove(&key_a);
         assert_eq!(
             result,

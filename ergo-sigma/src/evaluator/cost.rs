@@ -679,6 +679,15 @@ pub(crate) fn make_avl_verifier(
         proof,
         avl.key_length as usize,
         avl.value_length_opt.map(|v| v as usize),
+        // NO operation bound: Scala's script-level verifier
+        // (`CAvlTreeVerifier.apply`, sigma master) constructs
+        // `BatchAVLVerifier` from `(digest, proof, keyLength,
+        // valueLengthOpt)` only — `maxNumOperations`/`maxDeletes` are
+        // never passed on the evaluation path. The bound is a
+        // block-level-verification concept (`ADProofs.verify`); adding
+        // one here would reject proofs the reference accepts.
+        None,
+        None,
     )
     .map_err(|e| EvalError::TypeError {
         expected: "valid AVL proof",
