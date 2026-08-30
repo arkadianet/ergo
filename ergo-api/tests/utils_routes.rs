@@ -283,7 +283,9 @@ async fn validate_address_rejects_wrong_network() {
 #[tokio::test]
 async fn ergo_tree_to_address_p2pk_round_trips() {
     // Canonical P2PK tree bytes: `[0x00, 0x08, 0xCD, <pubkey_33B>]`.
-    let pubkey = [0x05u8; 33];
+    // (Valid SEC1 lead: the wire prefix rule is JVM GroupElementSerializer
+    // parity — a 0x05-lead point would 400 here, as on Scala.)
+    let pubkey = [0x02u8; 33];
     let mut tree_bytes = vec![0x00u8, 0x08, 0xCD];
     tree_bytes.extend_from_slice(&pubkey);
     let tree_hex = hex::encode(&tree_bytes);
@@ -302,7 +304,8 @@ async fn ergo_tree_to_address_p2pk_round_trips() {
 
 #[tokio::test]
 async fn ergo_tree_to_address_post_accepts_json_string_body() {
-    let pubkey = [0x06u8; 33];
+    // Valid SEC1 lead (see the round-trip test above).
+    let pubkey = [0x03u8; 33];
     let mut tree_bytes = vec![0x00u8, 0x08, 0xCD];
     tree_bytes.extend_from_slice(&pubkey);
     let tree_hex = hex::encode(&tree_bytes);

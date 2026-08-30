@@ -85,7 +85,24 @@ mod tests {
 
     #[test]
     fn bad_prefix_point_rejected() {
-        let ges = ges_for_p2pk_output(&format!("04{}", "00".repeat(32)));
-        assert!(validate_group_elements(&ges).is_err());
+        // Since the wire prefix rule landed in `read_group_element`, a
+        // bad-prefix point now fails the PARSE itself (earlier than the
+        // sideband check — which remains load-bearing for off-curve
+        // valid-prefix points, see `off_curve_point_rejected`). Pin the
+        // parse-time rejection: such a box can never even deserialize.
+        let bytes = {
+            let mut w = VlqWriter::new();
+            w.put_u64(1_000_000);
+            w.put_bytes(&hx(&format!("0008cd04{}", "00".repeat(32)))); // P2PK ergoTree
+            w.put_u32(0);
+            w.put_u8(0); // tokens
+            w.put_u8(0); // registers
+            w.result()
+        };
+        let mut r = VlqReader::new(&bytes);
+        assert!(
+            read_ergo_box_candidate(&mut r).is_err(),
+            "bad-prefix point must fail at parse (JVM rejects at deserialize)"
+        );
     }
 }

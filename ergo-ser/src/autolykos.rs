@@ -161,6 +161,25 @@ mod tests {
 
     // ----- properties -----
 
+    /// SEC1 lead byte `read_group_element` accepts: identity (0x00) or a
+    /// compressed point (0x02/0x03) — byte-exact with Scala
+    /// `GroupElementSerializer.parse`. Generators for point-valued fields
+    /// must draw the lead from this set (the remaining 32 bytes stay
+    /// arbitrary: the wire layer does not curve-check).
+    fn sec1_point_bytes() -> impl proptest::strategy::Strategy<Value = Vec<u8>> {
+        use proptest::strategy::Strategy as _;
+        (
+            proptest::prelude::prop::sample::select(vec![0x00u8, 0x02, 0x03]),
+            proptest::collection::vec(proptest::prelude::any::<u8>(), 32..=32),
+        )
+            .prop_map(|(lead, rest)| {
+                let mut v = Vec::with_capacity(33);
+                v.push(lead);
+                v.extend(rest);
+                v
+            })
+    }
+
     proptest::proptest! {
         /// Round-trip property for AutolykosSolution::V2: for any
         /// 33-byte pk bytes and 8-byte nonce, `read_solution ∘
@@ -169,7 +188,7 @@ mod tests {
         /// property catches any drift in the field order or length.
         #[test]
         fn proptest_solution_v2_roundtrips(
-            pk_bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 33..=33),
+            pk_bytes in sec1_point_bytes(),
             nonce_bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 8..=8),
         ) {
             let pk_arr: [u8; 33] = pk_bytes.try_into().unwrap();
@@ -195,8 +214,8 @@ mod tests {
         /// test; this property covers everything below the cap.
         #[test]
         fn proptest_solution_v1_roundtrips_within_d_cap(
-            pk_bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 33..=33),
-            w_bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 33..=33),
+            pk_bytes in sec1_point_bytes(),
+            w_bytes in sec1_point_bytes(),
             nonce_bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 8..=8),
             d in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..=255),
         ) {
