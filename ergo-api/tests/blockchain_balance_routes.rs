@@ -222,7 +222,10 @@ async fn get_balance_for_address_overlays_confirmed_and_unconfirmed() {
     // must show confirmed=100, unconfirmed=50. The mempool view never
     // subtracts from confirmed even if a pool tx were spending the
     // user's confirmed boxes (that's the [inherited] Scala behavior).
-    let pubkey = [0x04; 33];
+    // (Lead byte 0x02: a 0x04-lead "point" is an invalid SEC1 encoding the
+    // wire layer now rejects byte-exact with the JVM — such a box could never
+    // reach this route on a real chain.)
+    let pubkey = [0x02; 33];
     let (addr, tree_hash) = p2pk_address_and_hash(pubkey);
     let stub_idx = StubIndexer::caught_up().with_balance(
         tree_hash,
@@ -293,6 +296,14 @@ async fn get_balance_for_address_400_on_bad_address() {
 // ---------------- helpers ---------------------------------------------------
 
 fn p2pk_tree(pubkey: [u8; 33]) -> (ErgoTree, Vec<u8>) {
+    // Fixture "pubkeys" are identity tags; normalize the SEC1 lead byte so
+    // the tree parses under the wire prefix rule (0x00/0x02/0x03 only) the
+    // JVM enforces at deserialize. Tail bytes keep the tags distinct.
+    let mut pubkey = pubkey;
+    pubkey[0] = match pubkey[0] {
+        0x00 | 0x02 | 0x03 => pubkey[0],
+        _ => 0x02,
+    };
     let tree = ErgoTree {
         version: 0,
         has_size: false,

@@ -1717,3 +1717,68 @@ fn size_delimited_body_nested_high_version_sbox_trusted_vs_strict() {
     read_ergo_tree(&mut trusted)
         .expect("trusted must accept a stored size-delimited body with a nested high-version tree");
 }
+
+// ----- SANTA wire/v6: SHeader-as-constant family (JVM sigma-state 6.0.3 blessings) -----
+
+/// The two over-accepts the SANTA board graded red for us, plus their accept
+/// twins — pinned byte-for-byte from `vectors/wire/v6/authored/*.json`
+/// (blessed_by `jvm:sigma-state-6.0.3`).
+///
+/// - `Box.softfork_header_constant_reject`: a box whose propBytes are a
+///   size-flagged v2 tree with one segregated SHeader constant. Scala's
+///   SHeader DataSerializer arm throws a SerializerException, which escapes
+///   the soft-fork `UnparsedErgoTree` fallback → the JVM REJECTS the box. We
+///   accepted while the gate error funneled into the generic body-error wrap
+///   (accept-invalid: a box every JVM node refuses would enter our UTXO set).
+/// - `ErgoTree.sheader_constant_v3_malformed_pk_reject`: a v3 SHeader constant
+///   whose AutolykosSolution pk carries an invalid SEC1 prefix (0x05). Scala's
+///   `GroupElementSerializer.parse` fails the decode and the SHeader arm
+///   re-raises as SerializerException → reject. We accepted because the wire
+///   layer stored point bytes unvalidated.
+mod santa_wire_v6 {
+    use super::*;
+
+    #[test]
+    fn box_with_segregated_sheader_constant_rejects() {
+        let bytes = hex::decode(
+            "c0843d1adb01016802000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0843d0000000000000000000000000000000000000000000000000000000000000000070239b8010000000000000000000000000000000000000000000000000000000000000000000000000000000001000000017300000000000000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .unwrap();
+        let mut r = VlqReader::new(&bytes);
+        assert!(
+            crate::ergo_box::read_ergo_box(&mut r).is_err(),
+            "a box whose tree carries a segregated SHeader constant at tree version 2 must be REJECTED (JVM rejects: the SHeader serializer error escapes the soft-fork fallback)"
+        );
+    }
+
+    #[test]
+    fn v3_sheader_constant_with_malformed_pk_rejects() {
+        // pk lead byte 0x05: GroupElementSerializer only decodes identity
+        // (0x00) or compressed (0x02/0x03).
+        let bytes = hex::decode(
+            "1bdb01016802000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0843d0000000000000000000000000000000000000000000000000000000000000000070239b8010000000005000000000000000000000000000000000000000000000000000000000000000000000001000000017300",
+        )
+        .unwrap();
+        let mut r = VlqReader::new(&bytes);
+        assert!(
+            read_ergo_tree(&mut r).is_err(),
+            "a v3 SHeader constant with a malformed pk prefix must be REJECTED (JVM rejects)"
+        );
+    }
+
+    #[test]
+    fn v3_sheader_constant_with_valid_pk_still_parses() {
+        // The accept twin: same shape, pk prefix 0x00-truncated identity... the
+        // JVM-blessed accept vector carries a well-formed Header value; parse
+        // must succeed AND round-trip (the board grades it roundtrip-ok).
+        let bytes = hex::decode(
+            "1bdb01016802000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0843d0000000000000000000000000000000000000000000000000000000000000000070239b8010000000000000000000000000000000000000000000000000000000000000000000000000000000001000000017300",
+        )
+        .unwrap();
+        let mut r = VlqReader::new(&bytes);
+        let tree = read_ergo_tree(&mut r).expect("v3 SHeader constant with a valid pk must parse");
+        let mut w = ergo_primitives::writer::VlqWriter::new();
+        crate::ergo_tree::write_ergo_tree(&mut w, &tree).expect("re-serialize");
+        assert_eq!(w.result(), bytes, "round-trip must be identity");
+    }
+}

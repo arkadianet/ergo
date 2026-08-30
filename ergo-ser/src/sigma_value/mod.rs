@@ -398,7 +398,20 @@ pub(crate) fn read_value_at_depth(
         // that have the ErgoTree version (the evaluator's value-materialization
         // boundary and the tree-constant parser), NOT here, so a stray
         // pre-v3 SHeader constant cannot slip through ungated.
-        SigmaType::SHeader => Ok(SigmaValue::Header(Box::new(crate::header::read_header(r)?))),
+        //
+        // Parse failures here are HARD rejections: Scala's SHeader arm catches
+        // the underlying decode error (e.g. GroupElementSerializer's
+        // IllegalArgumentException on a malformed autolykos pk) and re-raises
+        // it as a SerializerException, which `deserializeErgoTree`'s catch
+        // (ValidationException / IllegalArgumentException /
+        // ReaderPositionLimitExceeded) does NOT cover — the tree is rejected,
+        // never wrapped. SANTA wire/v6
+        // `ErgoTree.sheader_constant_v3_malformed_pk_reject`: the JVM rejects
+        // a v3 SHeader constant whose pk carries an invalid SEC1 prefix; we
+        // accepted while this surfaced as a wrap-able InvalidData.
+        SigmaType::SHeader => crate::header::read_header(r)
+            .map(|h| SigmaValue::Header(Box::new(h)))
+            .map_err(|e| ReadError::HardReject(format!("SHeader value: {e}"))),
         SigmaType::SFunc { .. } => Err(ReadError::InvalidData(
             "SFunc value deserialization is not supported".into(),
         )),

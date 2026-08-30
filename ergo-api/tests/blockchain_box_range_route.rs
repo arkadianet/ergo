@@ -126,6 +126,14 @@ async fn range_200_post_get_parity() {
 // ---- helpers --------------------------------------------------------------
 
 fn p2pk_tree(pubkey: [u8; 33]) -> ErgoTree {
+    // Fixture "pubkeys" are identity tags; normalize the SEC1 lead byte so
+    // the tree parses under the wire prefix rule (0x00/0x02/0x03 only) the
+    // JVM enforces at deserialize. Tail bytes keep the tags distinct.
+    let mut pubkey = pubkey;
+    pubkey[0] = match pubkey[0] {
+        0x00 | 0x02 | 0x03 => pubkey[0],
+        _ => 0x02,
+    };
     ErgoTree {
         version: 0,
         has_size: false,

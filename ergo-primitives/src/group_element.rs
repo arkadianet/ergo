@@ -26,10 +26,30 @@ impl GroupElement {
 /// deserializer that reads a group element must go through this — that is what
 /// makes the curve check complete (the Scala reference curve-checks each point
 /// while deserializing; we collect at the same points and validate later).
+///
+/// The SEC1 lead byte is validated HERE, byte-exact with Scala
+/// `GroupElementSerializer.parse`: that decoder can only produce the identity
+/// (`0x00` lead) or a compressed point (`0x02`/`0x03` lead); any other lead is
+/// a guaranteed decode failure (its `IllegalArgumentException` is re-raised by
+/// `DataSerializer` as a `SerializerException`, which the soft-fork wrap does
+/// not catch — so an SHeader constant carrying one rejects the whole tree,
+/// SANTA wire/v6 `ErgoTree.sheader_constant_v3_malformed_pk_reject`). The
+/// on-curve check for `0x02`/`0x03` points stays deferred to the sideband
+/// consumer — that is the documented architecture (crypto-free wire layer);
+/// the identity/prefix dimension is enforced at parse because it needs no
+/// curve math.
 pub fn read_group_element(
     r: &mut crate::reader::VlqReader,
 ) -> Result<GroupElement, crate::reader::ReadError> {
     let bytes = r.get_array::<GROUP_ELEMENT_LENGTH>()?;
+    match bytes[0] {
+        0x00 | 0x02 | 0x03 => {}
+        other => {
+            return Err(crate::reader::ReadError::InvalidData(format!(
+                "invalid SEC1 point prefix {other:#04x} — GroupElementSerializer only decodes identity (0x00) or compressed (0x02/0x03)"
+            )));
+        }
+    }
     r.record_group_element(bytes);
     Ok(GroupElement::from_bytes(bytes))
 }

@@ -332,9 +332,14 @@ fn parse_body(
             // SHeader value deserialization is gated on isV3OrLaterErgoTreeVersion
             // (Scala DataSerializer.deserialize(SHeader)), per materialized
             // header: a segregated constant carrying a header in a pre-v3 tree
-            // is rejected; an empty Coll[Header] is accepted.
+            // is rejected; an empty Coll[Header] is accepted. Scala's SHeader
+            // arm throws a SerializerException (NOT a ValidationException), so
+            // it escapes the deserializeErgoTree catch — HARD reject, never
+            // wrap (SANTA wire/v6 `Box.softfork_header_constant_reject`: the
+            // JVM rejects the whole box; we accepted while this funneled into
+            // the generic body-error wrap).
             if version < 3 && val.contains_header() {
-                return Err(ReadError::InvalidData(format!(
+                return Err(ReadError::HardReject(format!(
                     "SHeader value requires ErgoTree version >= 3 (got {version})"
                 )));
             }

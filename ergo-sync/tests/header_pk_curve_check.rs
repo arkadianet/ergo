@@ -67,17 +67,33 @@ fn off_curve_pk_rejected_before_pow() {
 
 /// Invalid SEC1 prefix (uncompressed 0x04 where only compressed encodings
 /// are accepted) must be rejected the same way.
+///
+/// NOTE: since the wire prefix rule landed in `read_group_element`
+/// (0x00/0x02/0x03 only — JVM `GroupElementSerializer.parse` parity), the
+/// rejection now fires EARLIER, at header deserialize
+/// (`HeaderProcessError::Deserialize`), before the curve-check stage. The
+/// old `InvalidGroupElement` verdict remains reachable for on-prefix
+/// off-curve points (see `off_curve_pk_rejected_before_pow`).
 #[test]
 fn bad_prefix_pk_rejected_before_pow() {
     let mut bad = [0u8; 33];
     bad[0] = 0x04;
     let bytes = v2_header_bytes_with_pk(bad);
-    assert!(matches!(
-        pre_validate_header(&bytes),
-        Err(HeaderProcessError::Validation(
-            HeaderValidationError::InvalidGroupElement { .. }
-        ))
-    ));
+    match pre_validate_header(&bytes) {
+        // Wire-layer rejection (parse-time prefix rule) — the expected path now.
+        Err(HeaderProcessError::Deserialize(msg)) => {
+            assert!(
+                msg.contains("invalid SEC1 point prefix"),
+                "deserialize error must name the prefix rule: {msg}"
+            );
+        }
+        // Belt-and-suspenders: the curve-check stage still rejects bad encodings.
+        Err(HeaderProcessError::Validation(HeaderValidationError::InvalidGroupElement {
+            ..
+        })) => {}
+        Err(other) => panic!("expected deserialize/validation reject, got {other}"),
+        Ok(_) => panic!("bad-prefix pk must not pass ingestion"),
+    }
 }
 
 /// Positive control for check ordering: the same crafted header with an

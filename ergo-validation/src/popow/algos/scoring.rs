@@ -69,7 +69,22 @@ pub fn max_level_of(header: &Header) -> u32 {
         return 0;
     }
 
-    let level = required_f.log2() - real_f.log2();
+    // JVM `NipopowAlgos.log2` is `math.log(x) / math.log(2)` — the natural
+    // logarithm ratio, NOT Rust's `f64::log2`. IEEE 754 makes the two diverge
+    // when `x` is an exact power of two: Rust's single-instruction log2
+    // returns exactly N, while ln(2^N)/ln(2) carries a 1-ULP rounding error
+    // (e.g. ln(2^251)/ln(2) = 251.00000000000003), flipping the truncated
+    // μ-level by one. That one level rewrites the superchain selection and
+    // every interlinks vector after it (SANTA nipopow/any/authored,
+    // `NipopowAlgos.jvm-chain-32` — first divergence at height 23). Real PoW
+    // hits are hash outputs, never exact powers of two, so this cannot fire
+    // on a live chain — but the JVM-parity form is the contract.
+    #[inline]
+    fn log2_scala(x: f64) -> f64 {
+        x.ln() / std::f64::consts::LN_2
+    }
+
+    let level = log2_scala(required_f) - log2_scala(real_f);
     if !level.is_finite() || level <= 0.0 {
         tracing::debug!(level, "popow: non-finite or non-positive mu-level in max_level_of; degrading header to level 0");
         return 0;
