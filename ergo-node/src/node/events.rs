@@ -387,6 +387,7 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
                 addr,
                 conn,
                 state.event_tx.clone(),
+                state.event_byte_budget.clone(),
                 outbound_rx,
                 peer_bytes_in,
                 peer_bytes_out,

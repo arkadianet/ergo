@@ -695,6 +695,10 @@ async fn run_inner_with_backend(
     // arrivals from 60+ concurrent peers without back-pressuring
     // the per-peer read tasks.
     let (event_tx, event_rx) = mpsc::channel::<PeerEvent>(4096);
+    // Audit M-5: payload bytes in flight through the channel are capped
+    // (256 MiB) — readers block on acquisition (TCP backpressure) instead
+    // of queueing unbounded 8 MB frames behind a busy action loop.
+    let event_byte_budget = crate::peer_loop::new_event_byte_budget();
 
     // API submission channel. Bounded so a misbehaving client can't
     // queue-pressure the main loop. Capacity
@@ -827,6 +831,7 @@ async fn run_inner_with_backend(
         peer_manager,
         registry: PeerRegistry::new(),
         event_tx: event_tx.clone(),
+        event_byte_budget: event_byte_budget.clone(),
         magic: config.chain_spec.network_params.magic,
         our_handshake,
         mempool,
