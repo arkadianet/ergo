@@ -234,6 +234,10 @@ impl NodeSnapshot {
                 uptime_seconds_live: None,
                 apply_age_ms: None,
                 apply_wedged: false,
+                state_db_bytes: None,
+                index_db_bytes: None,
+                disk_free_bytes: None,
+                disk_total_bytes: None,
             },
             tip: ApiTip {
                 best_header: header_ref,

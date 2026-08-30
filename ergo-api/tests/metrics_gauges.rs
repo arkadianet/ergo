@@ -118,6 +118,12 @@ async fn metrics_renders_subsystem_gauge_series() {
         "ergo_solutions_invalid_pow_total 0",
         "ergo_solutions_stale_parent_total 0",
         "ergo_rss_kb 0",
+        // Storage gauges render even when the probes are absent (stub
+        // status): absence → 0, documented in each HELP line.
+        "ergo_state_db_bytes 0",
+        "ergo_index_db_bytes 0",
+        "ergo_disk_free_bytes 0",
+        "ergo_disk_total_bytes 0",
     ] {
         assert!(
             text.contains(series),

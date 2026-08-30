@@ -291,7 +291,15 @@ pub(super) async fn bind(
     };
 
     let scala_static = ScalaCompatStatic {
-        name: format!("ergo-rust-{}-{}", api_info.network, api_info.version),
+        // Scala /info `name` = the configured `nodeName`
+        // (mainnet.conf:127 defaults it to "ergo-mainnet-"${scorex.network.appVersion},
+        // operators override it) — so ours must be the configured
+        // node_name too, not a synthesized network/version string. This
+        // is also the same value the handshake PeerSpec and the native
+        // /api/v1/info already advertise; it was the only surface that
+        // ignored it, so a configured name couldn't survive an upgrade
+        // (v0.5.3 soak finding).
+        name: config.node_name.clone(),
         app_version: api_info.version.clone(),
         network: api_info.network.clone(),
         launch_time_unix_ms: api_info.started_at_unix_ms,

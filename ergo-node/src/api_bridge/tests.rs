@@ -1212,6 +1212,42 @@ fn status_overlays_live_telemetry_values() {
     assert_eq!(read.info().uptime_seconds, 7_800);
 }
 
+/// Measure-first (#257): `status()` probes the two redb stores and the
+/// data-dir filesystem on every call, so data-dir growth (bytes per
+/// synced height) is observable on /metrics rather than guessed. Absent
+/// files must read as `None`, present files as their exact byte length.
+#[test]
+fn status_probes_storage_sizes_per_call() {
+    use ergo_api::NodeReadState;
+
+    let dir = tempfile::tempdir().unwrap();
+    let read = read_state_for_host(HostPaths {
+        state_db: dir.path().join("s.redb"),
+        index_db: dir.path().join("i.redb"),
+        data_dir: dir.path().to_path_buf(),
+    });
+
+    // Nothing on disk yet: both stores are absent, but the filesystem
+    // probe still resolves for a real temp dir.
+    let pre = read.status();
+    assert_eq!(pre.state_db_bytes, None);
+    assert_eq!(pre.index_db_bytes, None);
+    let (free, total) = (pre.disk_free_bytes, pre.disk_total_bytes);
+    assert!(
+        free.is_some() && total.is_some(),
+        "disk probe failed on a real temp dir"
+    );
+    assert!(free.unwrap() <= total.unwrap());
+
+    // Files appear (node synced / indexer enabled): exact byte lengths,
+    // re-probed per call — a stale snapshot value would be the bug.
+    std::fs::write(dir.path().join("s.redb"), [0u8; 1234]).unwrap();
+    std::fs::write(dir.path().join("i.redb"), [0u8; 567]).unwrap();
+    let post = read.status();
+    assert_eq!(post.state_db_bytes, Some(1234));
+    assert_eq!(post.index_db_bytes, Some(567));
+}
+
 /// `votes()` projects the snapshot's active params into the votable-parameter
 /// set (scala_launch has subblocks_per_block = None → ids 1..=8, no id 9, never
 /// blockVersion), with bounds straight from the shared recompute table.
