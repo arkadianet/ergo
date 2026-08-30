@@ -374,8 +374,8 @@ pub fn registry(only: Option<&str>) -> Vec<Surface> {
                 for op in &frame.ops {
                     let r = match op {
                         AvlOp::Lookup { key } => verifier.lookup(key).map(|_| ()),
-                        AvlOp::Insert { key, value } => verifier.insert(key, value),
-                        AvlOp::Update { key, value } => verifier.update(key, value),
+                        AvlOp::Insert { key, value } => verifier.insert(key, value).map(|_| ()),
+                        AvlOp::Update { key, value } => verifier.update(key, value).map(|_| ()),
                         AvlOp::Remove { key } => verifier.remove(key),
                     };
                     if r.is_err() {

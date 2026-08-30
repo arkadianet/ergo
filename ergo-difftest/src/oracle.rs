@@ -539,8 +539,8 @@ fn verify_avl_verdict(bytes: &[u8]) -> (Verdict, usize) {
     for (i, op) in frame.ops.iter().enumerate() {
         let result = match op {
             AvlOp::Lookup { key } => verifier.lookup(key).map(|_| ()),
-            AvlOp::Insert { key, value } => verifier.insert(key, value),
-            AvlOp::Update { key, value } => verifier.update(key, value),
+            AvlOp::Insert { key, value } => verifier.insert(key, value).map(|_| ()),
+            AvlOp::Update { key, value } => verifier.update(key, value).map(|_| ()),
             AvlOp::Remove { key } => verifier.remove(key),
         };
         if result.is_err() {

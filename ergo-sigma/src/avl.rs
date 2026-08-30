@@ -10,7 +10,7 @@
 use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
 use ergo_avltree_rust::batch_avl_verifier::BatchAVLVerifier;
 use ergo_avltree_rust::batch_node::{AVLTree, Node, NodeHeader};
-use ergo_avltree_rust::operation::{KeyValue, Operation};
+use ergo_avltree_rust::operation::{KeyDelta, KeyValue, Operation};
 use std::cell::Cell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -204,26 +204,33 @@ impl AvlVerifier {
         })
     }
 
-    /// Update an existing key with a new value. Returns Ok(true) on success.
-    pub fn update(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
+    /// Update an existing key with a new value. Returns the OLD value the
+    /// proof witnessed for the key (scrypto `performOneOperation` semantics:
+    /// the value associated with the key BEFORE the operation). `Ok(None)`
+    /// is unreachable on success — an Update of an absent key is an op
+    /// failure (`Err(())`), mirroring scrypto's `update_fn` "Key does not
+    /// exists" error.
+    pub fn update(&mut self, key: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>, ()> {
         self.guarded(|bv| {
             bv.perform_one_operation(&Operation::Update(KeyValue {
                 key: bytes::Bytes::from(key.to_vec()),
                 value: bytes::Bytes::from(value.to_vec()),
             }))
-            .map(|_| ())
+            .map(|old| old.map(|v| v.to_vec()))
             .map_err(|_| ())
         })
     }
 
-    /// Insert a new key-value pair. Returns Ok(()) on success.
-    pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
+    /// Insert a new key-value pair. Returns the OLD value (`Ok(None)` on
+    /// success — an Insert of an existing key is an op failure, mirroring
+    /// scrypto's `update_fn` "Key already exists" error).
+    pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>, ()> {
         self.guarded(|bv| {
             bv.perform_one_operation(&Operation::Insert(KeyValue {
                 key: bytes::Bytes::from(key.to_vec()),
                 value: bytes::Bytes::from(value.to_vec()),
             }))
-            .map(|_| ())
+            .map(|old| old.map(|v| v.to_vec()))
             .map_err(|_| ())
         })
     }
@@ -231,14 +238,59 @@ impl AvlVerifier {
     /// Insert a new entry OR overwrite an existing one for the same
     /// key. Backs the EIP-50 v6 `SAvlTree.insertOrUpdate` MethodCall
     /// (Scala `SAvlTreeMethods.insertOrUpdateMethod` at
-    /// `methods.scala:1671-1686`). Returns Ok(()) on success.
-    pub fn insert_or_update(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
+    /// `methods.scala:1671-1686`). Returns the OLD value the proof
+    /// witnessed: `Some(old)` when an existing entry was overwritten,
+    /// `None` when the key was absent (fresh insert).
+    pub fn insert_or_update(&mut self, key: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>, ()> {
         self.guarded(|bv| {
             bv.perform_one_operation(&Operation::InsertOrUpdate(KeyValue {
                 key: bytes::Bytes::from(key.to_vec()),
                 value: bytes::Bytes::from(value.to_vec()),
             }))
-            .map(|_| ())
+            .map(|old| old.map(|v| v.to_vec()))
+            .map_err(|_| ())
+        })
+    }
+
+    /// Remove a key if present; a no-op success on an absent key (scrypto
+    /// `Operation::RemoveIfExists`: the absent case does NOT fail, unlike
+    /// [`Self::remove`]). Returns the OLD value the proof witnessed —
+    /// `Some(old)` when the key existed, `None` when it did not.
+    pub fn remove_if_exists(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, ()> {
+        self.guarded(|bv| {
+            bv.perform_one_operation(&Operation::RemoveIfExists(bytes::Bytes::from(key.to_vec())))
+                .map(|old| old.map(|v| v.to_vec()))
+                .map_err(|_| ())
+        })
+    }
+
+    /// scrypto `Operation::UpdateLongBy`: interpret the key's value as a
+    /// big-endian i64 and add `delta` — failing if the result is negative,
+    /// removing the key when the result is exactly zero, and treating an
+    /// absent key as 0 (insert with `delta` if positive, fail if negative,
+    /// no-op if zero). Returns the OLD value the proof witnessed.
+    pub fn update_long_by(&mut self, key: &[u8], delta: i64) -> Result<Option<Vec<u8>>, ()> {
+        self.guarded(|bv| {
+            bv.perform_one_operation(&Operation::UpdateLongBy(KeyDelta {
+                key: bytes::Bytes::from(key.to_vec()),
+                delta,
+            }))
+            .map(|old| old.map(|v| v.to_vec()))
+            .map_err(|_| ())
+        })
+    }
+
+    /// scrypto `Operation::UnknownModification`: an identity op — the tree
+    /// is unchanged and the CURRENT value for the key is returned (the
+    /// operation's `update_fn` passes `old_value` through). Serves the
+    /// SANTA authds corpus entry class of the same name; there is no
+    /// ErgoTree surface for it.
+    pub fn unknown_modification(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, ()> {
+        self.guarded(|bv| {
+            bv.perform_one_operation(&Operation::UnknownModification(bytes::Bytes::from(
+                key.to_vec(),
+            )))
+            .map(|old| old.map(|v| v.to_vec()))
             .map_err(|_| ())
         })
     }

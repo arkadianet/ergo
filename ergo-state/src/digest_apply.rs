@@ -286,6 +286,7 @@ impl DigestProofVerifier {
     fn insert(&mut self, box_id: &[u8; 32], box_bytes: &[u8]) -> Result<(), DigestApplyError> {
         self.inner
             .insert(box_id, box_bytes)
+            .map(|_| ()) // a successful Insert never has an old value
             .map_err(|_| DigestApplyError::VerifierOpFailed {
                 op: "insert",
                 key: hex::encode(box_id),
