@@ -5,10 +5,17 @@
 //!
 //! Subcommands:
 //! - `generate [--strength 24]` — create a fresh mnemonic, print mnemonic + miner_public_key_hex
-//! - `import --mnemonic "<words>"` — validate + show miner_public_key_hex
-//! - `derive --mnemonic "<words>" --path "m/44'/429'/0'/0/N"` — show pubkey at custom path
-//! - `pubkey --mnemonic "<words>"` — print just the mining pubkey hex
+//! - `import [--mnemonic-file <path|-]` — validate + show miner_public_key_hex
+//! - `derive [--mnemonic-file <path|-] --path "m/44'/429'/0'/0/N"` — show pubkey at custom path
+//! - `pubkey [--mnemonic-file <path|-]` — print just the mining pubkey hex
 //! - `address --pubkey <hex> [--network mainnet|testnet]` — pubkey → P2PK address
+//!
+//! The recovery phrase is read from `--mnemonic-file` (path or `-` for
+//! stdin) or an interactive prompt. Passing it as a raw `--mnemonic` argv
+//! value is possible for scripted use but is gated behind
+//! `--dangerously-pass-mnemonic-via-argv`: argv is world-readable through
+//! `/proc/<pid>/cmdline` for the process lifetime and persists in shell
+//! history and CI logs (audit M-3).
 
 use clap::{Parser, Subcommand, ValueEnum};
 use ergo_ser::address::NetworkPrefix;
@@ -17,7 +24,9 @@ use ergo_wallet::derivation::DerivationPath;
 use ergo_wallet::error::WalletError;
 use ergo_wallet::extended_key::ExtendedSecretKey;
 use ergo_wallet::mnemonic::{Mnemonic, MnemonicStrength};
+use std::io::{Read, Write};
 use std::process::ExitCode;
+use zeroize::Zeroizing;
 
 #[derive(Parser, Debug)]
 #[command(name = "ergo-wallet", version, about = "Ergo HD wallet CLI")]
@@ -47,41 +56,130 @@ struct GenerateArgs {
     strength: u8,
 }
 
+/// Recovery-phrase source (audit M-3). argv is world-readable through
+/// `/proc/<pid>/cmdline` for the process lifetime, persists in shell
+/// history, and is frequently captured by CI logs / crash reporters — the
+/// recovery phrase is the highest-value secret in the system. The default
+/// source is an interactive stdin prompt; scripts should pipe the phrase
+/// via `--mnemonic-file` (`-` reads stdin).
+#[derive(clap::Args, Debug)]
+struct MnemonicSource {
+    /// Read the recovery phrase from a file (`-` = stdin). Trailing
+    /// whitespace/newline is trimmed.
+    #[arg(long, value_name = "PATH")]
+    mnemonic_file: Option<String>,
+
+    /// Recovery phrase via argv. World-readable while the process runs
+    /// (/proc/<pid>/cmdline) and persists in shell history / CI logs.
+    /// Requires --dangerously-pass-mnemonic-via-argv.
+    #[arg(long)]
+    mnemonic: Option<String>,
+
+    /// Explicit gate required to accept --mnemonic from argv.
+    #[arg(long)]
+    dangerously_pass_mnemonic_via_argv: bool,
+}
+
+impl MnemonicSource {
+    /// Resolve the recovery phrase from the configured source, wrapped in
+    /// `Zeroizing` so the buffer is wiped on drop.
+    fn read(&self) -> Result<Zeroizing<String>, WalletError> {
+        if let Some(path) = &self.mnemonic_file {
+            let content = if path == "-" {
+                let mut buf = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut buf)
+                    .map_err(|e| WalletError::CliSecretSource(format!("stdin read failed: {e}")))?;
+                buf
+            } else {
+                std::fs::read_to_string(path).map_err(|e| {
+                    WalletError::CliSecretSource(format!("mnemonic file {path:?}: {e}"))
+                })?
+            };
+            let trimmed = content.trim();
+            if trimmed.is_empty() {
+                return Err(WalletError::CliSecretSource(
+                    "mnemonic source is empty".into(),
+                ));
+            }
+            return Ok(Zeroizing::new(trimmed.to_string()));
+        }
+
+        if let Some(argv_phrase) = &self.mnemonic {
+            if !self.dangerously_pass_mnemonic_via_argv {
+                return Err(WalletError::CliSecretSource(
+                    "refusing --mnemonic from argv: it is world-readable via /proc/<pid>/cmdline, \
+                     persists in shell history, and is captured by CI logs. Pipe it instead: \
+                     `--mnemonic-file -` (stdin) or `--mnemonic-file <path>`. If you truly need \
+                     argv, pass --dangerously-pass-mnemonic-via-argv."
+                        .into(),
+                ));
+            }
+            let trimmed = argv_phrase.trim();
+            if trimmed.is_empty() {
+                return Err(WalletError::CliSecretSource(
+                    "mnemonic source is empty".into(),
+                ));
+            }
+            return Ok(Zeroizing::new(trimmed.to_string()));
+        }
+
+        // Default: interactive stdin prompt.
+        eprint!("Enter recovery phrase (12-24 words), then press Enter: ");
+        std::io::stderr().flush().ok();
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| WalletError::CliSecretSource(format!("stdin read failed: {e}")))?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return Err(WalletError::CliSecretSource("no mnemonic entered".into()));
+        }
+        Ok(Zeroizing::new(trimmed.to_string()))
+    }
+}
+
 #[derive(clap::Args, Debug)]
 struct ImportArgs {
-    #[arg(long)]
-    mnemonic: String,
+    #[command(flatten)]
+    source: MnemonicSource,
     /// Optional BIP39 passphrase. Default is empty (matches mnemonics
     /// created without a passphrase). If your mnemonic was created
     /// with a passphrase, you MUST supply it here or this command
-    /// will derive the WRONG wallet silently.
+    /// will derive the WRONG wallet silently. NOTE: the passphrase is
+    /// not spend-capable without the phrase, but it also transits argv —
+    /// prefer piping the phrase and using an empty passphrase.
     #[arg(long, default_value = "")]
     passphrase: String,
 }
 
 #[derive(clap::Args, Debug)]
 struct DeriveArgs {
-    #[arg(long)]
-    mnemonic: String,
+    #[command(flatten)]
+    source: MnemonicSource,
     /// BIP32 path, e.g. `m/44'/429'/0'/0/0`.
     #[arg(long, default_value = "m/44'/429'/0'/0/0")]
     path: String,
     /// Optional BIP39 passphrase. Default is empty (matches mnemonics
     /// created without a passphrase). If your mnemonic was created
     /// with a passphrase, you MUST supply it here or this command
-    /// will derive the WRONG wallet silently.
+    /// will derive the WRONG wallet silently. NOTE: the passphrase is
+    /// not spend-capable without the phrase, but it also transits argv —
+    /// prefer piping the phrase and using an empty passphrase.
     #[arg(long, default_value = "")]
     passphrase: String,
 }
 
 #[derive(clap::Args, Debug)]
 struct PubkeyArgs {
-    #[arg(long)]
-    mnemonic: String,
+    #[command(flatten)]
+    source: MnemonicSource,
     /// Optional BIP39 passphrase. Default is empty (matches mnemonics
     /// created without a passphrase). If your mnemonic was created
     /// with a passphrase, you MUST supply it here or this command
-    /// will derive the WRONG wallet silently.
+    /// will derive the WRONG wallet silently. NOTE: the passphrase is
+    /// not spend-capable without the phrase, but it also transits argv —
+    /// prefer piping the phrase and using an empty passphrase.
     #[arg(long, default_value = "")]
     passphrase: String,
 }
@@ -151,8 +249,8 @@ fn generate(a: GenerateArgs) -> Result<(), WalletError> {
         n => return Err(WalletError::UnsupportedWordCount(n as usize)),
     };
     let m = Mnemonic::generate(strength)?;
-    let seed = m.to_seed("");
-    let pk = ergo_wallet::miner_pubkey_for_seed(&seed)?;
+    let seed = Zeroizing::new(m.to_seed(""));
+    let pk = ergo_wallet::miner_pubkey_for_seed(seed.as_ref())?;
     let pk_hex = hex::encode(pk);
 
     println!("{}-word mnemonic:", a.strength);
@@ -169,9 +267,10 @@ fn generate(a: GenerateArgs) -> Result<(), WalletError> {
 }
 
 fn import(a: ImportArgs) -> Result<(), WalletError> {
-    let m = Mnemonic::import(&a.mnemonic)?;
-    let seed = m.to_seed(&a.passphrase);
-    let pk = ergo_wallet::miner_pubkey_for_seed(&seed)?;
+    let phrase = a.source.read()?;
+    let m = Mnemonic::import(&phrase)?;
+    let seed = Zeroizing::new(m.to_seed(&a.passphrase));
+    let pk = ergo_wallet::miner_pubkey_for_seed(seed.as_ref())?;
     println!("Mnemonic validates.");
     println!("miner_public_key_hex: {}", hex::encode(pk));
     println!();
@@ -181,9 +280,10 @@ fn import(a: ImportArgs) -> Result<(), WalletError> {
 }
 
 fn derive(a: DeriveArgs) -> Result<(), WalletError> {
-    let m = Mnemonic::import(&a.mnemonic)?;
-    let seed = m.to_seed(&a.passphrase);
-    let master = ExtendedSecretKey::derive_master_key(&seed, false)?;
+    let phrase = a.source.read()?;
+    let m = Mnemonic::import(&phrase)?;
+    let seed = Zeroizing::new(m.to_seed(&a.passphrase));
+    let master = ExtendedSecretKey::derive_master_key(seed.as_ref(), false)?;
     let path: DerivationPath = a.path.parse()?;
     let leaf = master.derive_at_path(&path)?;
     let pk_hex = hex::encode(leaf.public_key().compressed_bytes());
@@ -193,9 +293,10 @@ fn derive(a: DeriveArgs) -> Result<(), WalletError> {
 }
 
 fn pubkey(a: PubkeyArgs) -> Result<(), WalletError> {
-    let m = Mnemonic::import(&a.mnemonic)?;
-    let seed = m.to_seed(&a.passphrase);
-    let pk = ergo_wallet::miner_pubkey_for_seed(&seed)?;
+    let phrase = a.source.read()?;
+    let m = Mnemonic::import(&phrase)?;
+    let seed = Zeroizing::new(m.to_seed(&a.passphrase));
+    let pk = ergo_wallet::miner_pubkey_for_seed(seed.as_ref())?;
     // Single line, 66-char hex. Shell-pipe-friendly. Post-1627 only;
     // pre-1627 legacy wallet support not yet implemented.
     println!("{}", hex::encode(pk));

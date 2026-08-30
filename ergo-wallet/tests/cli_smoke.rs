@@ -1,9 +1,17 @@
 //! Smoke tests for the `ergo-wallet` CLI binary. Drives the actual
 //! compiled binary via `assert_cmd` — covers the end-to-end argument
 //! parsing + dispatch path that unit tests skip.
+//!
+//! Recovery-phrase sources (audit M-3): the safe paths pipe the phrase
+//! via `--mnemonic-file -` (stdin) or an interactive prompt; raw argv is
+//! gated behind `--dangerously-pass-mnemonic-via-argv` and covered by its
+//! own tests below.
 
 use assert_cmd::Command;
 use predicates::str;
+
+const MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon \
+                         abandon abandon abandon abandon abandon about";
 
 // ----- happy path -----
 
@@ -35,12 +43,8 @@ fn generate_24_words_prints_mnemonic_and_pubkey() {
 fn pubkey_subcommand_outputs_66_chars_then_newline() {
     let output = Command::cargo_bin("ergo-wallet")
         .unwrap()
-        .args([
-            "pubkey",
-            "--mnemonic",
-            "abandon abandon abandon abandon abandon abandon \
-             abandon abandon abandon abandon abandon about",
-        ])
+        .args(["pubkey", "--mnemonic-file", "-"])
+        .write_stdin(MNEMONIC)
         .assert()
         .success()
         .get_output()
@@ -61,12 +65,12 @@ fn derive_at_custom_path_prints_path_and_pubkey() {
         .unwrap()
         .args([
             "derive",
-            "--mnemonic",
-            "abandon abandon abandon abandon abandon abandon \
-             abandon abandon abandon abandon abandon about",
+            "--mnemonic-file",
+            "-",
             "--path",
             "m/44'/429'/0'/0/3",
         ])
+        .write_stdin(MNEMONIC)
         .assert()
         .success()
         .stdout(str::contains("path: m/44'/429'/0'/0/3"))
@@ -78,12 +82,8 @@ fn address_mainnet_starts_with_9() {
     // First derive a pubkey, then feed it to address.
     let pk_out = Command::cargo_bin("ergo-wallet")
         .unwrap()
-        .args([
-            "pubkey",
-            "--mnemonic",
-            "abandon abandon abandon abandon abandon abandon \
-             abandon abandon abandon abandon abandon about",
-        ])
+        .args(["pubkey", "--mnemonic-file", "-"])
+        .write_stdin(MNEMONIC)
         .assert()
         .success()
         .get_output()
@@ -104,12 +104,11 @@ fn pubkey_with_passphrase_differs_from_empty() {
     // Same mnemonic, different passphrases → different pubkeys.
     // Regression guard: the CLI MUST honour --passphrase rather than
     // hard-coding it empty.
-    let mnemonic = "abandon abandon abandon abandon abandon abandon \
-                    abandon abandon abandon abandon abandon about";
     let without = String::from_utf8(
         Command::cargo_bin("ergo-wallet")
             .unwrap()
-            .args(["pubkey", "--mnemonic", mnemonic])
+            .args(["pubkey", "--mnemonic-file", "-"])
+            .write_stdin(MNEMONIC)
             .assert()
             .success()
             .get_output()
@@ -122,7 +121,8 @@ fn pubkey_with_passphrase_differs_from_empty() {
     let with_pass = String::from_utf8(
         Command::cargo_bin("ergo-wallet")
             .unwrap()
-            .args(["pubkey", "--mnemonic", mnemonic, "--passphrase", "TREZOR"])
+            .args(["pubkey", "--mnemonic-file", "-", "--passphrase", "TREZOR"])
+            .write_stdin(MNEMONIC)
             .assert()
             .success()
             .get_output()
@@ -141,21 +141,97 @@ fn pubkey_with_passphrase_differs_from_empty() {
     assert_eq!(with_pass.len(), 66);
 }
 
+/// Interactive prompt is the DEFAULT source: no --mnemonic-file, no
+/// --mnemonic — the phrase arrives on stdin either way (the prompt reads
+/// a line; piping satisfies it).
+#[test]
+fn default_source_reads_stdin_prompt() {
+    Command::cargo_bin("ergo-wallet")
+        .unwrap()
+        .args(["pubkey"])
+        .write_stdin(MNEMONIC)
+        .assert()
+        .success()
+        .stdout(str::contains(
+            "02b7da363cb84d41d10193c97e4fcdc35189e12ff963e39f386aba766fa796ea50",
+        ));
+}
+
+// ----- gated argv (audit M-3) -----
+
+/// `--mnemonic` WITHOUT the gate must be refused with an actionable
+/// message naming the safe alternatives.
+#[test]
+fn mnemonic_argv_without_gate_is_refused() {
+    Command::cargo_bin("ergo-wallet")
+        .unwrap()
+        .args(["pubkey", "--mnemonic", MNEMONIC])
+        .assert()
+        .failure()
+        .stderr(str::contains("refusing --mnemonic from argv"))
+        .stderr(str::contains("--mnemonic-file"));
+}
+
+/// The explicit gate keeps scripted argv use possible — same pubkey as
+/// the stdin path (semantics unchanged, only the source differs).
+#[test]
+fn mnemonic_argv_with_gate_matches_stdin_path() {
+    let via_argv = String::from_utf8(
+        Command::cargo_bin("ergo-wallet")
+            .unwrap()
+            .args([
+                "pubkey",
+                "--mnemonic",
+                MNEMONIC,
+                "--dangerously-pass-mnemonic-via-argv",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone(),
+    )
+    .unwrap();
+    let via_stdin = String::from_utf8(
+        Command::cargo_bin("ergo-wallet")
+            .unwrap()
+            .args(["pubkey", "--mnemonic-file", "-"])
+            .write_stdin(MNEMONIC)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone(),
+    )
+    .unwrap();
+    assert_eq!(via_argv, via_stdin);
+}
+
 // ----- error paths -----
 
 #[test]
 fn import_with_bad_checksum_exits_nonzero() {
     Command::cargo_bin("ergo-wallet")
         .unwrap()
-        .args([
-            "import",
-            "--mnemonic",
+        .args(["import", "--mnemonic-file", "-"])
+        .write_stdin(
             "abandon abandon abandon abandon abandon abandon \
              abandon abandon abandon abandon abandon abandon",
-        ])
+        )
         .assert()
         .failure()
         .stderr(str::contains("error:"));
+}
+
+#[test]
+fn empty_mnemonic_source_is_refused() {
+    Command::cargo_bin("ergo-wallet")
+        .unwrap()
+        .args(["pubkey", "--mnemonic-file", "-"])
+        .write_stdin("   \n")
+        .assert()
+        .failure()
+        .stderr(str::contains("mnemonic source is empty"));
 }
 
 #[test]
