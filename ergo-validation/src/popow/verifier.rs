@@ -126,6 +126,27 @@ impl NipopowVerifier {
             return NipopowVerificationResult::MalformedHeader;
         }
 
+        // Group-element pre-gate (issue #248 — audit H-1 tail): the
+        // proof's headers bypass the normal `pre_validate_header`
+        // ingestion gate — `apply_popow_proof` writes them straight into
+        // HEADERS — so the curve check Scala performs at deserialize must
+        // run here. The SEC1 prefix dimension already rejects at parse
+        // (`read_group_element`, JVM `GroupElementSerializer` parity);
+        // this closes the on-curve dimension for valid-prefix points.
+        // Classified as `ValidationError` (the messaging layer penalizes
+        // it as misbehavior), same as the other structural failures.
+        let mut points: Vec<[u8; 33]> = Vec::new();
+        for ph in &new_proof.prefix {
+            push_solution_points(&ph.header.solution, &mut points);
+        }
+        push_solution_points(&new_proof.suffix_head.header.solution, &mut points);
+        for h in &new_proof.suffix_tail {
+            push_solution_points(&h.solution, &mut points);
+        }
+        if crate::header::validate_header_group_elements(&points).is_err() {
+            return NipopowVerificationResult::ValidationError;
+        }
+
         // Genesis check first. Scala uses `headersChain.head.id` which
         // is the FIRST header of the proof — prefix.head if prefix is
         // non-empty, else suffix_head.
@@ -200,6 +221,17 @@ impl NipopowVerifier {
 
 // ---- internal helpers ----
 
+/// Collect the group elements a header's autolykos solution carries —
+/// the miner pk, plus the `w` commitment on v1 solutions. These are the
+/// points the JVM curve-checks at header deserialize; the proof headers
+/// bypass that gate, so the verifier drains them itself.
+fn push_solution_points(sol: &ergo_ser::autolykos::AutolykosSolution, out: &mut Vec<[u8; 33]>) {
+    out.push(*sol.pk().as_bytes());
+    if let ergo_ser::autolykos::AutolykosSolution::V1 { w, .. } = sol {
+        out.push(*w.as_bytes());
+    }
+}
+
 fn header_id_first(proof: &NipopowProof) -> Result<[u8; 32], ergo_ser::error::WriteError> {
     // `headers_chain[0]` = prefix.first().map(.header).unwrap_or(suffix_head.header).
     let first = if let Some(p) = proof.prefix.first() {
@@ -220,7 +252,9 @@ fn header_id_first(proof: &NipopowProof) -> Result<[u8; 32], ergo_ser::error::Wr
 mod tests {
     use super::*;
     use ergo_primitives::digest::ModifierId;
+    use ergo_primitives::group_element::GroupElement;
     use ergo_primitives::reader::VlqReader;
+    use ergo_ser::autolykos::AutolykosSolution;
     use ergo_ser::header::read_header;
     use ergo_ser::popow_header::PoPowHeader;
 
@@ -274,6 +308,33 @@ mod tests {
     }
 
     // ----- happy path -----
+
+    /// Issue #248 (audit H-1 tail): proof headers bypass
+    /// `pre_validate_header` wholesale, so the verifier must curve-check
+    /// the embedded solutions itself. An off-curve pk (valid 0x02 prefix,
+    /// X = 0 — no y with y² = x³ + 7) must be rejected as
+    /// `ValidationError` BEFORE the proof can become the bootstrap best.
+    #[test]
+    fn proof_with_off_curve_pk_rejected() {
+        let mut p = valid_proof();
+        let off_curve = GroupElement::from_bytes({
+            let mut b = [0u8; 33];
+            b[0] = 0x02;
+            b
+        });
+        match &mut p.suffix_head.header.solution {
+            AutolykosSolution::V1 { pk, .. } => *pk = off_curve,
+            AutolykosSolution::V2 { pk, .. } => *pk = off_curve,
+        }
+        let mut v = NipopowVerifier::new(None, mainnet_config());
+        assert!(matches!(
+            v.process(p),
+            NipopowVerificationResult::ValidationError
+        ));
+        // The rejected proof must not become the bootstrap best.
+        assert!(v.best_proof().is_none());
+        assert_eq!(v.proofs_processed(), 0);
+    }
 
     #[test]
     fn empty_verifier_accepts_first_valid_proof_as_better_chain() {
