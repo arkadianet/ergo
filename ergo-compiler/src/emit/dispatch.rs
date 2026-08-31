@@ -44,6 +44,7 @@ impl Scope {
             T::LastBlockUtxoRootHash { .. } => self.emit_method_call(
                 &TypedExpr::Context {
                     tpe: SType::SContext,
+                    pos: 0,
                 },
                 &MethodRef {
                     owner: "Context".to_string(),
@@ -55,6 +56,7 @@ impl Scope {
             T::GroupGenerator { .. } => self.emit_method_call(
                 &TypedExpr::Global {
                     tpe: SType::SGlobal,
+                    pos: 0,
                 },
                 &MethodRef {
                     owner: "SigmaDslBuilder".to_string(),
@@ -66,7 +68,7 @@ impl Scope {
 
             // ── constants: always the constant path (incl. Booleans — see the
             //    module docs; never the 0x7F/0x80 True/False opcodes) ──────────
-            T::Constant { value, tpe } => {
+            T::Constant { value, tpe, .. } => {
                 let (tpe, val) = map_const(value, tpe)?;
                 Ok(Expr::Const { tpe, val })
             }
@@ -168,14 +170,14 @@ impl Scope {
             ),
 
             // ── numeric casts ─────────────────────────────────────────────────
-            T::Upcast { input, tpe } => node(
+            T::Upcast { input, tpe, .. } => node(
                 0x7E,
                 Payload::NumericCast {
                     input: Box::new(self.emit(input)?),
                     tpe: map_type(tpe)?,
                 },
             ),
-            T::Downcast { input, tpe } => node(
+            T::Downcast { input, tpe, .. } => node(
                 0x7D,
                 Payload::NumericCast {
                     input: Box::new(self.emit(input)?),
@@ -292,7 +294,7 @@ impl Scope {
             T::OptionIsDefined { input, .. } => node(0xE6, self.one(input)?),
 
             // ── context access ────────────────────────────────────────────────
-            T::GetVar { var_id, tpe } => {
+            T::GetVar { var_id, tpe, .. } => {
                 // Node type is SOption(V) (transformers.scala:576); the wire
                 // carries the INNER V (Scala GetVarSerializer writes
                 // `tpe.elemType`; ergo-ser's parse arm reads one bare type).
@@ -307,14 +309,16 @@ impl Scope {
                     },
                 )
             }
-            T::DeserializeContext { id, tpe } => node(
+            T::DeserializeContext { id, tpe, .. } => node(
                 0xD4,
                 Payload::DeserializeContext {
                     id: *id as u8,
                     tpe: map_type(tpe)?,
                 },
             ),
-            T::DeserializeRegister { reg, tpe, default } => node(
+            T::DeserializeRegister {
+                reg, tpe, default, ..
+            } => node(
                 0xD5,
                 Payload::DeserializeRegister {
                     reg_id: *reg as u8,
@@ -418,6 +422,7 @@ impl Scope {
                 field,
                 res_type,
                 tpe,
+                ..
             } => self.emit_select(obj, field, res_type.as_ref(), tpe),
             T::MethodCall {
                 obj,

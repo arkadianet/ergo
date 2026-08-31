@@ -49,17 +49,25 @@
 //! post-6.0.2 commit) and is **NOT** implemented here.  `{ val x: Long = 1; x }`
 //! ACCEPTS with `x: SInt` (oracle-confirmed, golden_seed §11).
 //!
-//! # Positions (deviation D-T7)
+//! # Positions (D-T7 lifted)
 //!
-//! `TypedExpr` carries no source positions (binder.rs; positions surface only in
-//! `BindError`).  Every `TyperError` therefore reports `pos = 0` (E12).  This is
-//! consistent with the parity policy: reject **class** is graded, reject
-//! `line:col` is advisory and captured from the JVM oracle (E5, golden_seed §3).
-//! Ledger: `lib.rs` § "Known M2 deviations" D-T7.
+//! Every `TyperError` cites the source offset of the node the error is ABOUT —
+//! the same node Scala's per-site `xxx.sourceContext` citations name
+//! (SigmaTyper.scala:58-533): the checked child (`c.sourceContext` for the If
+//! condition, `r.sourceContext` for operand mismatches, `index.sourceContext`
+//! for array/tuple indexing) or the node being processed (`mc.sourceContext`,
+//! `app.sourceContext`, `sel.sourceContext`, `lam.sourceContext`). Nodes with
+//! no source construct (predef/environment constants) carry `0` — Scala's
+//! SourceContext stays unset for those and the oracle prints `0:0`. This is
+//! the same policy as `BindError`/`ParseError`; reject **class** remains the
+//! graded fact and reject `line:col` stays advisory (E5). Positions ride on
+//! [`TypedExpr`] (typed.rs); rebuilt nodes inherit the position of the node
+//! being rewritten (Scala's `currentSrcCtx` pinning), so typed children carry
+//! their bound-tree offsets. Ledger: `lib.rs` § "Known M2 deviations" D-T7.
 
 use crate::span::Pos;
 use crate::stype::SType;
-use crate::typed::{expr_contains_untyped_node, node_tpe, product_prefix, TypedExpr};
+use crate::typed::{expr_contains_untyped_node, node_pos, node_tpe, product_prefix, TypedExpr};
 use crate::typer::is_collection_like;
 use crate::typer::{TypeEnv, TyperCtx};
 
@@ -117,7 +125,10 @@ pub enum TyperError {
 }
 
 impl TyperError {
-    /// Source offset of the error (always `0` — see the module deviation note).
+    /// Source offset of the error — the node the error is about (see the
+    /// module doc's Positions section). `0` when the cited node has no source
+    /// construct (predef/environment constants; Scala leaves SourceContext
+    /// unset and the oracle prints `0:0`).
     pub fn pos(&self) -> Pos {
         match self {
             TyperError::TyperException { pos, .. }
@@ -143,25 +154,27 @@ impl TyperError {
         }
     }
 
-    // ----- constructors (pos is always 0; see module note) -----
+    // ----- constructors (pos = the cited node's source offset; see the
+    // module doc's Positions section and SigmaTyper.scala's per-site
+    // `xxx.sourceContext` citations) -----
 
-    fn typer(msg: String) -> Self {
-        TyperError::TyperException { pos: 0, msg }
+    fn typer(pos: Pos, msg: String) -> Self {
+        TyperError::TyperException { pos, msg }
     }
-    fn invalid_binary(msg: String) -> Self {
-        TyperError::InvalidBinaryOperationParameters { pos: 0, msg }
+    fn invalid_binary(pos: Pos, msg: String) -> Self {
+        TyperError::InvalidBinaryOperationParameters { pos, msg }
     }
-    fn invalid_unary(msg: String) -> Self {
-        TyperError::InvalidUnaryOperationParameters { pos: 0, msg }
+    fn invalid_unary(pos: Pos, msg: String) -> Self {
+        TyperError::InvalidUnaryOperationParameters { pos, msg }
     }
-    fn method_not_found(msg: String) -> Self {
-        TyperError::MethodNotFound { pos: 0, msg }
+    fn method_not_found(pos: Pos, msg: String) -> Self {
+        TyperError::MethodNotFound { pos, msg }
     }
-    fn non_applicable(msg: String) -> Self {
-        TyperError::NonApplicableMethod { pos: 0, msg }
+    fn non_applicable(pos: Pos, msg: String) -> Self {
+        TyperError::NonApplicableMethod { pos, msg }
     }
-    fn not_implemented(msg: String) -> Self {
-        TyperError::NotImplementedError { pos: 0, msg }
+    fn not_implemented(pos: Pos, msg: String) -> Self {
+        TyperError::NotImplementedError { pos, msg }
     }
 }
 
@@ -242,10 +255,13 @@ pub fn assign_type(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedE
     );
     // .ensuring(v => v.tpe != NoType, ...) (SigmaTyper.scala:541-542)
     if *node_tpe(&result) == SType::NoType {
-        return Err(TyperError::typer(format!(
-            "Errors found while assigning types: {} assigned NoType",
-            product_prefix(&result)
-        )));
+        return Err(TyperError::typer(
+            node_pos(&result),
+            format!(
+                "Errors found while assigning types: {} assigned NoType",
+                product_prefix(&result)
+            ),
+        ));
     }
     Ok(result)
 }
@@ -259,23 +275,33 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
     match e {
         // §1.1 Block (E1-lenient) — SigmaTyper.scala:54-66
         Block {
-            bindings, result, ..
-        } => assign_block(env, bindings, *result, ctx),
+            bindings,
+            result,
+            pos,
+            ..
+        } => assign_block(env, bindings, *result, pos, ctx),
 
         // §1.2 Tuple — SigmaTyper.scala:68-69
-        Tuple { items, .. } => {
+        Tuple { items, pos, .. } => {
             let typed = type_all(env, items, ctx)?;
             let tpe = SType::STuple(typed.iter().map(|i| node_tpe(i).clone()).collect());
-            Ok(Tuple { items: typed, tpe })
+            Ok(Tuple {
+                items: typed,
+                tpe,
+                pos,
+            })
         }
 
         // §1.3 ConcreteCollection — SigmaTyper.scala:71-73 + assignConcreteCollection:545-556
         ConcreteCollection {
-            items, elem_type, ..
-        } => assign_concrete_collection(env, items, elem_type, ctx),
+            items,
+            elem_type,
+            pos,
+            ..
+        } => assign_concrete_collection(env, items, elem_type, pos, ctx),
 
         // §1.4 Ident — SigmaTyper.scala:75-86
-        Ident { name, .. } => assign_ident(&name, env, ctx),
+        Ident { name, pos, .. } => assign_ident(&name, pos, env, ctx),
 
         // §1.5 Select(obj, n, None) — the resolver — SigmaTyper.scala:88-122.
         // Only res_type == None reaches here; Some(_) is a §1.24 passthrough.
@@ -292,8 +318,9 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
             args,
             given_res_type,
             body,
+            pos,
             ..
-        } => assign_lambda(env, tpe_params, args, given_res_type, body, ctx),
+        } => assign_lambda(env, tpe_params, args, given_res_type, body, pos, ctx),
 
         // §1.7-1.10 Apply arms — SigmaTyper.scala:137-300.
         Apply { func, args, .. } => assign_apply(env, *func, args, ctx),
@@ -315,8 +342,8 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
         } => assign_if(env, *condition, *true_branch, *false_branch, ctx),
 
         // §1.14 AND/OR — SigmaTyper.scala:451-461
-        AND { input, .. } => assign_and_or(env, *input, true, ctx),
-        OR { input, .. } => assign_and_or(env, *input, false, ctx),
+        AND { input, pos, .. } => assign_and_or(env, *input, true, pos, ctx),
+        OR { input, pos, .. } => assign_and_or(env, *input, false, pos, ctx),
 
         // §1.15 relations — SigmaTyper.scala:463-468
         GE { left, right, .. } => bimap(
@@ -390,10 +417,12 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
             *left,
             *right,
             |l, r| {
+                let pos = node_pos(&l);
                 Ok(TypedExpr::Xor {
                     left: Box::new(l),
                     right: Box::new(r),
                     tpe: coll_byte(),
+                    pos,
                 })
             },
             coll_byte(),
@@ -406,10 +435,12 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
             *left,
             *right,
             |l, r| {
+                let pos = node_pos(&l);
                 Ok(TypedExpr::MultiplyGroup {
                     left: Box::new(l),
                     right: Box::new(r),
                     tpe: SType::SGroupElement,
+                    pos,
                 })
             },
             SType::SGroupElement,
@@ -431,14 +462,20 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
         SizeOf { input, .. } => {
             let c1 = assign_type(env, *input, ctx)?;
             if !is_collection_like(node_tpe(&c1)) {
-                return Err(TyperError::typer(format!(
-                    "Invalid operation SizeOf: expected Collection argument; actual: {:?}",
-                    node_tpe(&c1)
-                )));
+                // SigmaTyper.scala:505: `col.sourceContext`
+                return Err(TyperError::typer(
+                    node_pos(&c1),
+                    format!(
+                        "Invalid operation SizeOf: expected Collection argument; actual: {:?}",
+                        node_tpe(&c1)
+                    ),
+                ));
             }
+            let sz_pos = node_pos(&c1);
             Ok(SizeOf {
                 input: Box::new(c1),
                 tpe: SType::SInt,
+                pos: sz_pos,
             })
         }
 
@@ -446,27 +483,39 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
         SigmaPropIsProven { input, .. } => {
             let p1 = assign_type(env, *input, ctx)?;
             if !matches!(node_tpe(&p1), SType::SSigmaProp) {
-                return Err(TyperError::typer(format!(
-                    "Invalid operation IsValid: expected SigmaProp; actual: {:?}",
-                    node_tpe(&p1)
-                )));
+                // SigmaTyper.scala:511: `p.sourceContext`
+                return Err(TyperError::typer(
+                    node_pos(&p1),
+                    format!(
+                        "Invalid operation IsValid: expected SigmaProp; actual: {:?}",
+                        node_tpe(&p1)
+                    ),
+                ));
             }
+            let sp_pos = node_pos(&p1);
             Ok(SigmaPropIsProven {
                 input: Box::new(p1),
                 tpe: SType::SBoolean,
+                pos: sp_pos,
             })
         }
         SigmaPropBytes { input, .. } => {
             let p1 = assign_type(env, *input, ctx)?;
             if !matches!(node_tpe(&p1), SType::SSigmaProp) {
-                return Err(TyperError::typer(format!(
-                    "Invalid operation ProofBytes: expected SigmaProp; actual: {:?}",
-                    node_tpe(&p1)
-                )));
+                // SigmaTyper.scala:517: `p.sourceContext`
+                return Err(TyperError::typer(
+                    node_pos(&p1),
+                    format!(
+                        "Invalid operation ProofBytes: expected SigmaProp; actual: {:?}",
+                        node_tpe(&p1)
+                    ),
+                ));
             }
+            let pb_pos = node_pos(&p1);
             Ok(SigmaPropBytes {
                 input: Box::new(p1),
                 tpe: coll_byte(),
+                pos: pb_pos,
             })
         }
 
@@ -480,6 +529,7 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
                 Ok(TypedExpr::LogicalNot {
                     input: Box::new(i),
                     tpe: SType::SBoolean,
+                    pos: 0,
                 })
             },
             SType::SBoolean,
@@ -494,6 +544,7 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
                 Ok(TypedExpr::Negation {
                     input: Box::new(i),
                     tpe,
+                    pos: 0,
                 })
             },
             tt(),
@@ -508,6 +559,7 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
                 Ok(TypedExpr::BitInversion {
                     input: Box::new(i),
                     tpe,
+                    pos: 0,
                 })
             },
             tt(),
@@ -564,6 +616,7 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
             if let MethodCall { args, .. } = &node {
                 if args.iter().any(expr_contains_untyped_node) {
                     return Err(TyperError::typer(
+                        node_pos(&node),
                         "serialize: argument contains an unresolved (NoType) node that the \
                          reference s-expression printer cannot render (RuntimeException)"
                             .to_string(),
@@ -573,11 +626,11 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
             Ok(node)
         }
 
-        // §1.25 fallthrough — SigmaTyper.scala:539-540
-        other => Err(TyperError::typer(format!(
-            "Don't know how to assignType({})",
-            product_prefix(&other)
-        ))),
+        // §1.25 fallthrough — SigmaTyper.scala:539-540 (`v.sourceContext`)
+        other => Err(TyperError::typer(
+            node_pos(&other),
+            format!("Don't know how to assignType({})", product_prefix(&other)),
+        )),
     }
 }
 
@@ -697,12 +750,14 @@ mod tests {
         TypedExpr::Constant {
             value: ConstPayload::Int(v),
             tpe: SType::SInt,
+            pos: 0,
         }
     }
     fn bool_const(v: bool) -> TypedExpr {
         TypedExpr::Constant {
             value: ConstPayload::Bool(v),
             tpe: SType::SBoolean,
+            pos: 0,
         }
     }
 
@@ -803,8 +858,10 @@ mod tests {
             body: Some(Box::new(TypedExpr::Ident {
                 name: "x".to_string(),
                 tpe: SType::NoType,
+                pos: 0,
             })),
             tpe: SType::NoType,
+            pos: 0,
         };
         let typed = assign_type(&TypeEnv::new(), lam, &ctx()).expect("types");
         assert_eq!(
@@ -822,6 +879,7 @@ mod tests {
             given_res_type: SType::NoType,
             body: Some(Box::new(int_const(1))),
             tpe: SType::NoType,
+            pos: 0,
         };
         let err = assign_type(&TypeEnv::new(), lam, &ctx()).expect_err("must fail");
         assert_eq!(err.class_tag(), "TyperException");
@@ -837,8 +895,10 @@ mod tests {
             body: Some(Box::new(TypedExpr::Ident {
                 name: "x".to_string(),
                 tpe: SType::NoType,
+                pos: 0,
             })),
             tpe: SType::NoType,
+            pos: 0,
         };
         let err = assign_type(&TypeEnv::new(), lam, &ctx()).expect_err("must fail");
         assert_eq!(err.class_tag(), "TyperException");
@@ -853,10 +913,12 @@ mod tests {
             items: vec![bool_const(true), bool_const(false)],
             elem_type: SType::SBoolean,
             tpe: SType::SColl(Box::new(SType::SBoolean)),
+            pos: 0,
         };
         let node = TypedExpr::AND {
             input: Box::new(coll),
             tpe: SType::NoType,
+            pos: 0,
         };
         let typed = assign_type(&TypeEnv::new(), node, &ctx()).expect("types");
         assert!(matches!(typed, TypedExpr::AND { .. }));
@@ -870,10 +932,12 @@ mod tests {
             items: vec![int_const(1)],
             elem_type: SType::SInt,
             tpe: SType::SColl(Box::new(SType::SInt)),
+            pos: 0,
         };
         let node = TypedExpr::AND {
             input: Box::new(coll),
             tpe: SType::NoType,
+            pos: 0,
         };
         let err = assign_type(&TypeEnv::new(), node, &ctx()).expect_err("fail");
         assert_eq!(err.class_tag(), "TyperException");
@@ -886,10 +950,12 @@ mod tests {
             items: vec![int_const(1), int_const(2)],
             elem_type: SType::SInt,
             tpe: SType::SColl(Box::new(SType::SInt)),
+            pos: 0,
         };
         let node = TypedExpr::SizeOf {
             input: Box::new(coll),
             tpe: SType::NoType,
+            pos: 0,
         };
         let typed = assign_type(&TypeEnv::new(), node, &ctx()).expect("types");
         assert_eq!(node_tpe(&typed), &SType::SInt);
@@ -901,10 +967,12 @@ mod tests {
         let prop = TypedExpr::Constant {
             value: ConstPayload::ProveDlog([0x02; 33]),
             tpe: SType::SSigmaProp,
+            pos: 0,
         };
         let node = TypedExpr::SigmaPropIsProven {
             input: Box::new(prop),
             tpe: SType::NoType,
+            pos: 0,
         };
         let typed = assign_type(&TypeEnv::new(), node, &ctx()).expect("types");
         assert_eq!(node_tpe(&typed), &SType::SBoolean);
@@ -913,6 +981,7 @@ mod tests {
         let bad = TypedExpr::SigmaPropIsProven {
             input: Box::new(bool_const(true)),
             tpe: SType::NoType,
+            pos: 0,
         };
         assert_eq!(
             assign_type(&TypeEnv::new(), bad, &ctx())
@@ -929,6 +998,7 @@ mod tests {
             left: Box::new(int_const(1)),
             right: Box::new(int_const(2)),
             tpe: SType::NoType,
+            pos: 0,
         };
         assert_eq!(
             assign_type(&TypeEnv::new(), bad, &ctx())
@@ -962,9 +1032,13 @@ mod tests {
     fn bimap_comparison_non_numeric_errors_invalid_binary() {
         // GE(Height, true) constructed directly (the parser's `>=` -> GE node).
         let node = TypedExpr::GE {
-            left: Box::new(TypedExpr::Height { tpe: SType::SInt }),
+            left: Box::new(TypedExpr::Height {
+                tpe: SType::SInt,
+                pos: 0,
+            }),
             right: Box::new(bool_const(true)),
             tpe: SType::SBoolean,
+            pos: 0,
         };
         let err = assign_type(&TypeEnv::new(), node, &ctx()).expect_err("fail");
         assert_eq!(err.class_tag(), "InvalidBinaryOperationParameters");
@@ -985,10 +1059,12 @@ mod tests {
         let ge = TypedExpr::Constant {
             value: ConstPayload::GroupElement([0x02u8; 33]),
             tpe: SType::SGroupElement,
+            pos: 0,
         };
         let node = TypedExpr::LogicalNot {
             input: Box::new(ge),
             tpe: SType::SBoolean,
+            pos: 0,
         };
         let err = assign_type(&TypeEnv::new(), node, &ctx()).expect_err("fail");
         assert_eq!(err.class_tag(), "InvalidUnaryOperationParameters");
@@ -1072,10 +1148,12 @@ mod tests {
             obj: Box::new(TypedExpr::Ident {
                 name: "f".to_string(),
                 tpe: SType::NoType,
+                pos: 0,
             }),
             field: "x".to_string(),
             res_type: None,
             tpe: SType::NoType,
+            pos: 0,
         };
         let env = tenv(&[(
             "f",
@@ -1095,6 +1173,7 @@ mod tests {
         let node = TypedExpr::Ident {
             name: "nope".to_string(),
             tpe: SType::NoType,
+            pos: 0,
         };
         let err = assign_type(&TypeEnv::new(), node, &ctx()).expect_err("fail");
         assert_eq!(err.class_tag(), "TyperException");
@@ -1543,9 +1622,11 @@ mod tests {
                     range: Box::new(SType::SLong),
                     tpe_params: vec![],
                 },
+                pos: 0,
             }),
             type_args: vec![SType::SLong],
             tpe: SType::NoType,
+            pos: 0,
         };
         let env = tenv(&[(
             "f",
@@ -1740,11 +1821,13 @@ mod tests {
         let ba = |v: Vec<i8>| TypedExpr::Constant {
             value: ConstPayload::ByteColl(v),
             tpe: SType::SColl(Box::new(SType::SByte)),
+            pos: 0,
         };
         let node = TypedExpr::Xor {
             left: Box::new(ba(vec![1, 2])),
             right: Box::new(ba(vec![3, 4])),
             tpe: SType::NoType,
+            pos: 0,
         };
         let typed = assign_type(&tenv(&[]), node, &ctx()).expect("types");
         assert!(matches!(typed, TypedExpr::Xor { .. }));
@@ -1757,11 +1840,13 @@ mod tests {
         let ge = || TypedExpr::Constant {
             value: ConstPayload::GroupElement([0x02u8; 33]),
             tpe: SType::SGroupElement,
+            pos: 0,
         };
         let node = TypedExpr::MultiplyGroup {
             left: Box::new(ge()),
             right: Box::new(ge()),
             tpe: SType::NoType,
+            pos: 0,
         };
         let typed = assign_type(&tenv(&[]), node, &ctx()).expect("types");
         assert_eq!(node_tpe(&typed), &SType::SGroupElement);
@@ -1773,6 +1858,7 @@ mod tests {
         let node = TypedExpr::BitInversion {
             input: Box::new(int_const(1)),
             tpe: SType::NoType,
+            pos: 0,
         };
         let typed = assign_type(&tenv(&[]), node, &ctx()).expect("types");
         assert!(matches!(typed, TypedExpr::BitInversion { .. }));
@@ -1786,6 +1872,7 @@ mod tests {
         let node = TypedExpr::Negation {
             input: Box::new(bool_const(true)),
             tpe: SType::NoType,
+            pos: 0,
         };
         let err = assign_type(&tenv(&[]), node, &ctx()).expect_err("fail");
         assert_eq!(err.class_tag(), "InvalidUnaryOperationParameters");

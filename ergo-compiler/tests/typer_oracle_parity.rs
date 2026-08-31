@@ -269,6 +269,81 @@ fn assert_err(result: Result<String, CompileError>, verb: &str, src: &str) -> Co
     }
 }
 
+/// Sources whose recorded oracle REJECT position our `pos()` deliberately does
+/// not reproduce (verdict + class parity still hold).  Each entry states why.
+/// The oracle's `REJECT <line>:<col>` token is advisory (E5) — this test pins
+/// the advisory channel so positions stay USEFUL for tooling, without making
+/// them consensus-graded facts.
+const POSITION_DEVIATION_SOURCES: &[(&str, &str)] = &[
+    // Scala's MethodNotFound cites `obj.sourceContext` (SigmaTyper.scala:93) —
+    // the Height CASE-OBJECT singleton's write-once SourceContext
+    // (values.scala:81-90, TyperOracle.scala Risk R1). That slot is JVM-global
+    // mutable state: its value depends on which source touched the singleton
+    // first (in batch mode the position CHANGES across sources; the fresh-JVM
+    // capture records 1:5, an artifact of the singleton mechanism itself).
+    // This port deliberately does not replicate write-once singletons — the
+    // error cites the Ident's real offset (1:1) instead.
+    (
+        "HEIGHT.foo",
+        "cites the Height case-object singleton's write-once SourceContext (Risk R1)",
+    ),
+];
+
+/// Every `REJECT` record with a non-`0:0` oracle position: our
+/// `CompileError::pos()` must convert (span::line_col) to the SAME `line:col`
+/// the JVM oracle recorded for that source (fresh-JVM capture — see
+/// TyperOracle.scala Risk R1; batch accept grading is unaffected).  Sources in
+/// [`POSITION_DEVIATION_SOURCES`] are excluded with a stated reason.
+#[test]
+fn seed_reject_records_position_parity() {
+    let seed = include_str!("../../test-vectors/ergoscript/typer/golden_seed.txt");
+    let mut checked = 0usize;
+    let mut mismatches: Vec<String> = Vec::new();
+    for line in seed.lines() {
+        let Some((verb, src, expected)) = parse_seed_line(line) else {
+            continue;
+        };
+        let Some(rest) = expected.strip_prefix("REJECT ") else {
+            continue; // OK / ERR records elsewhere
+        };
+        if V2_REJECT_SOURCES.contains(&src) {
+            continue; // §6 duplicates — same sources as §4 at v3
+        }
+        // rest = "<line>:<col> <ExClass>" or just "<line>:<col>" (rare)
+        let pos_token = rest.split_whitespace().next().unwrap_or("0:0");
+        let Some((oracle_line, oracle_col)) = pos_token
+            .split_once(':')
+            .and_then(|(l, c)| Some((l.parse::<u32>().ok()?, c.parse::<u32>().ok()?)))
+        else {
+            continue;
+        };
+        if (oracle_line, oracle_col) == (0, 0) {
+            continue; // oracle itself has no SourceContext (route/runtime throws)
+        }
+        if POSITION_DEVIATION_SOURCES.iter().any(|&(s, _)| s == src) {
+            continue;
+        }
+        let err = assert_err(typecheck_verb(verb, src, 3), verb, src);
+        let (got_line, got_col) = ergo_compiler::span::line_col(src, err.pos());
+        if (got_line, got_col) != (oracle_line, oracle_col) {
+            mismatches.push(format!(
+                "{verb} {src:?}: oracle {oracle_line}:{oracle_col}, rust {got_line}:{got_col} (pos {})"
+            , err.pos()));
+        }
+        checked += 1;
+    }
+    assert!(
+        checked >= 20,
+        "swept only {checked} positioned reject records — seed may have shrunk"
+    );
+    assert!(
+        mismatches.is_empty(),
+        "{} position mismatch(es) (oracle line:col vs rust):\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
+    );
+}
+
 // =============================================================================
 // Deliverable 1 + 2: Golden-seed battery.
 // =============================================================================

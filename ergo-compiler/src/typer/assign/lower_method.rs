@@ -1,5 +1,5 @@
 use crate::stype::SType;
-use crate::typed::{MethodRef, TypedExpr};
+use crate::typed::{node_pos, MethodRef, TypedExpr};
 use crate::typer::methods::owner_name_for_method;
 
 /// The shared method/property irBuilder lowering catalog.
@@ -19,6 +19,9 @@ pub(crate) fn lower_method(
     tree_version: u8,
 ) -> TypedExpr {
     let b = Box::new;
+    // The lowered node replaces the whole method-call construct, which starts
+    // at its receiver (Scala pins `currentSrcCtx` = the receiver's node).
+    let obj_pos = node_pos(&obj);
     let mut it = args.clone().into_iter();
     match (recv, name) {
         // ── SGlobal custom irBuilders (method-on-Global receiver form) ────────
@@ -28,7 +31,7 @@ pub(crate) fn lower_method(
         // `process_global_method`; this arm matches the receiver-method dispatch.  All
         // other SGlobal methods (serialize/some/none/...) are MethodCallIrBuilder and
         // fall through to the generic MethodCall below.
-        (SType::SGlobal, "groupGenerator") => TypedExpr::GroupGenerator { tpe: ret },
+        (SType::SGlobal, "groupGenerator") => TypedExpr::GroupGenerator { tpe: ret, pos: 0 },
         (SType::SGlobal, "xor") => {
             let left = it.next().expect("Global.xor left arg");
             let right = it.next().expect("Global.xor right arg");
@@ -36,42 +39,50 @@ pub(crate) fn lower_method(
                 left: b(left),
                 right: b(right),
                 tpe: ret,
+                pos: obj_pos,
             }
         }
         // ── SOption custom irBuilders ─────────────────────────────────────────
         (SType::SOption(_), "get") => TypedExpr::OptionGet {
             input: b(obj),
             tpe: ret,
+            pos: obj_pos,
         },
         (SType::SOption(_), "isDefined") => TypedExpr::OptionIsDefined {
             input: b(obj),
             tpe: ret,
+            pos: obj_pos,
         },
         (SType::SOption(_), "getOrElse") => TypedExpr::OptionGetOrElse {
             input: b(obj),
             default: b(it.next().expect("getOrElse arg")),
             tpe: ret,
+            pos: obj_pos,
         },
         // ── SCollection custom irBuilders ─────────────────────────────────────
         (SType::SColl(_), "map") => TypedExpr::MapCollection {
             input: b(obj),
             mapper: b(it.next().expect("map arg")),
             tpe: ret,
+            pos: obj_pos,
         },
         (SType::SColl(_), "filter") => TypedExpr::Filter {
             input: b(obj),
             condition: b(it.next().expect("filter arg")),
             tpe: ret,
+            pos: obj_pos,
         },
         (SType::SColl(_), "exists") => TypedExpr::Exists {
             input: b(obj),
             condition: b(it.next().expect("exists arg")),
             tpe: ret,
+            pos: obj_pos,
         },
         (SType::SColl(_), "forall") => TypedExpr::ForAll {
             input: b(obj),
             condition: b(it.next().expect("forall arg")),
             tpe: ret,
+            pos: obj_pos,
         },
         (SType::SColl(_), "fold") => {
             let zero = it.next().expect("fold zero");
@@ -81,6 +92,7 @@ pub(crate) fn lower_method(
                 zero: b(zero),
                 fold_op: b(fold_op),
                 tpe: ret,
+                pos: obj_pos,
             }
         }
         (SType::SColl(_), "slice") => {
@@ -91,12 +103,14 @@ pub(crate) fn lower_method(
                 from: b(from),
                 until: b(until),
                 tpe: ret,
+                pos: obj_pos,
             }
         }
         (SType::SColl(_), "append") => TypedExpr::Append {
             input: b(obj),
             col2: b(it.next().expect("append arg")),
             tpe: ret,
+            pos: obj_pos,
         },
         (SType::SColl(_), "getOrElse") => {
             let index = it.next().expect("getOrElse index");
@@ -106,6 +120,7 @@ pub(crate) fn lower_method(
                 index: b(index),
                 default: Some(b(default)),
                 tpe: ret,
+                pos: obj_pos,
             }
         }
         // ── SGroupElement custom irBuilders ──────────────────────────────────
@@ -113,11 +128,13 @@ pub(crate) fn lower_method(
             left: b(obj),
             right: b(it.next().expect("exp arg")),
             tpe: ret,
+            pos: obj_pos,
         },
         (SType::SGroupElement, "multiply") => TypedExpr::MultiplyGroup {
             left: b(obj),
             right: b(it.next().expect("multiply arg")),
             tpe: ret,
+            pos: obj_pos,
         },
         // ── everything else: MethodCall(obj, %Owner.name, args, {}) ──────────
         _ => {
@@ -133,6 +150,7 @@ pub(crate) fn lower_method(
                 args,
                 type_subst: vec![],
                 tpe: ret,
+                pos: obj_pos,
             }
         }
     }

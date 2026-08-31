@@ -59,10 +59,12 @@ pub(crate) fn assign_apply(
         );
     }
     // §1.9 — Apply(Ident, args) if SGlobalMethods.hasMethod(ident.name).
-    if let TypedExpr::Ident { name, .. } = &func {
+    if let TypedExpr::Ident { name, pos, .. } = &func {
         if let Some(method) = global_method(name, ctx.tree_version) {
             let new_args = type_all(env, args, ctx)?;
-            return process_global_method(&method, new_args);
+            // The call construct starts at the callee Ident (Scala passes the
+            // application's srcCtx into processGlobalMethod, :38-48).
+            return process_global_method(&method, new_args, *pos);
         }
     }
     // §1.10 — generic application.
@@ -98,20 +100,28 @@ pub(crate) fn assign_apply_explicit_method(
 
     let new_obj = assign_type(env, obj, ctx)?;
     let t_obj = node_tpe(&new_obj).clone();
+    // The Select/Apply construct starts at its receiver; Scala cites
+    // `sel.sourceContext` / `obj.sourceContext` (SigmaTyper.scala:121,93,162).
+    let sel_pos = node_pos(&new_obj);
     let new_args = type_all(env, n_args, ctx)?;
     if !container_exists(&t_obj) {
-        return Err(TyperError::typer(format!(
-            "Cannot get field '{field}' in the object of non-product type {t_obj:?}"
-        )));
+        return Err(TyperError::typer(
+            sel_pos,
+            format!("Cannot get field '{field}' in the object of non-product type {t_obj:?}"),
+        ));
     }
     let method = get_method(&t_obj, &field, ctx.tree_version).ok_or_else(|| {
-        TyperError::method_not_found(format!(
-            "Cannot find method '{field}' in the object of Product type {t_obj:?}"
-        ))
+        TyperError::method_not_found(
+            sel_pos,
+            format!("Cannot find method '{field}' in the object of Product type {t_obj:?}"),
+        )
     })?;
     // subst = Map(genFunTpe.tpeParams.head.ident -> rangeTpe) (SigmaTyper.scala:156).
     let tparam = method.stype.tpe_params.first().ok_or_else(|| {
-        TyperError::typer(format!("Method '{field}' has no type parameter for [T]"))
+        TyperError::typer(
+            sel_pos,
+            format!("Method '{field}' has no type parameter for [T]"),
+        )
     })?;
     let subst: TypeSubst = std::iter::once((tparam.clone(), range_tpe.clone())).collect();
     let concr = apply_subst_func(&method.stype, &subst);
@@ -123,9 +133,13 @@ pub(crate) fn assign_apply_explicit_method(
             .zip(&actual_types)
             .all(|(ea, na)| *ea == SType::SAny || ea == na)
     {
-        return Err(TyperError::typer(format!(
-            "For method {field} expected args: {expected_args:?}; actual: {actual_types:?}"
-        )));
+        // SigmaTyper.scala:162: `sel.sourceContext`
+        return Err(TyperError::typer(
+            sel_pos,
+            format!(
+                "For method {field} expected args: {expected_args:?}; actual: {actual_types:?}"
+            ),
+        ));
     }
     if method.has_ir_builder {
         // Scala routes through the method's OWN irBuilder —
@@ -159,11 +173,13 @@ pub(crate) fn assign_apply_explicit_method(
             field,
             res_type: Some(concr_ty.clone()),
             tpe: concr_ty,
+            pos: sel_pos,
         };
         Ok(TypedExpr::Apply {
             func: Box::new(sel),
             args: new_args,
             tpe: concr.range,
+            pos: sel_pos,
         })
     }
 }
@@ -190,11 +206,14 @@ pub(crate) fn assign_apply_select(
         n_original
     };
     // newSel = assignType(Select(obj, n, resType)) — re-runs §1.5.
+    // The Select construct starts at its receiver (`sel.sourceContext`).
+    let sel_pos = node_pos(&obj);
     let sel = TypedExpr::Select {
         obj: Box::new(obj.clone()),
         field: n.clone(),
         res_type,
         tpe: SType::NoType,
+        pos: sel_pos,
     };
     let new_sel = assign_type(env, sel, ctx)?;
     match node_tpe(&new_sel).clone() {
@@ -224,9 +243,12 @@ pub(crate) fn assign_apply_select(
                             // predef-IR `getVar(1)` → `Option[T]` still ACCEPTS on both
                             // sides — that path does not reach here.
                             if method.explicit_type_args || stype_has_free_type_var(&concr_range) {
-                                return Err(TyperError::typer(format!(
-                                    "Method '{n}' is type-parametric and requires an explicit type argument [T]"
-                                )));
+                                return Err(TyperError::typer(
+                                    sel_pos,
+                                    format!(
+                                        "Method '{n}' is type-parametric and requires an explicit type argument [T]"
+                                    ),
+                                ));
                             }
                             // expectedArgs = concrFunTpe.tDom (receiver already dropped).
                             if concr_dom.len() != new_arg_types.len()
@@ -235,9 +257,13 @@ pub(crate) fn assign_apply_select(
                                     .zip(&new_arg_types)
                                     .all(|(ea, na)| *ea == SType::SAny || ea == na)
                             {
-                                return Err(TyperError::typer(format!(
-                                    "For method {n} expected args: {concr_dom:?}; actual: {new_arg_types:?}"
-                                )));
+                                // SigmaTyper.scala:208: `sel.sourceContext`
+                                return Err(TyperError::typer(
+                                    sel_pos,
+                                    format!(
+                                        "For method {n} expected args: {concr_dom:?}; actual: {new_arg_types:?}"
+                                    ),
+                                ));
                             }
                             Ok(lower_method(
                                 &t_obj,
@@ -255,27 +281,37 @@ pub(crate) fn assign_apply_select(
                                 field: n,
                                 res_type: Some(concr.clone()),
                                 tpe: concr,
+                                pos: sel_pos,
                             };
                             Ok(TypedExpr::Apply {
                                 func: Box::new(sel2),
                                 args: new_args,
                                 tpe: concr_range.clone(),
+                                pos: sel_pos,
                             })
                         }
                     }
                 }
-                None => Err(TyperError::typer(format!(
-                    "Invalid argument type of application: expected {arg_types:?}; actual: {new_arg_types:?}"
-                ))),
+                None => {
+                    // SigmaTyper.scala:219: `sel.sourceContext`
+                    Err(TyperError::typer(
+                        sel_pos,
+                        format!(
+                            "Invalid argument type of application: expected {arg_types:?}; actual: {new_arg_types:?}"
+                        ),
+                    ))
+                }
             }
         }
         // else -> mkApply(newSel, newArgs) (newSel is not a function type).
         other => {
             let tpe = apply_result_tpe(&other);
+            let func_pos = node_pos(&new_sel); // the Apply starts at its callee
             Ok(TypedExpr::Apply {
                 func: Box::new(new_sel),
                 args: new_args,
                 tpe,
+                pos: func_pos,
             })
         }
     }
@@ -289,12 +325,16 @@ pub(crate) fn assign_apply_generic(
     args: Vec<TypedExpr>,
     ctx: &TyperCtx,
 ) -> Result<TypedExpr, TyperError> {
+    // Citation: SigmaTyper.scala:237/259/296 `app.sourceContext` — the Apply
+    // node starts at its callee.
+    let app_pos = node_pos(&f);
     let new_f = assign_type(env, f, ctx)?;
     match node_tpe(&new_f).clone() {
         // Predefined function application (SigmaTyper.scala:233-259).
         SType::SFunc { dom, range, .. } => {
             if args.len() != dom.len() {
                 return Err(TyperError::typer(
+                    app_pos,
                     "Invalid argument type of application: invalid number of arguments".to_string(),
                 ));
             }
@@ -302,9 +342,13 @@ pub(crate) fn assign_apply_generic(
             let adapted = adapt_apply_args(&new_f, typed_args, ctx)?;
             let actual: Vec<SType> = adapted.iter().map(|a| node_tpe(a).clone()).collect();
             if unify_type_lists(&dom, &actual).is_none() {
-                return Err(TyperError::typer(format!(
-                    "Invalid argument type of application: expected {dom:?}; actual after typing: {actual:?}"
-                )));
+                // SigmaTyper.scala:259: `app.sourceContext`
+                return Err(TyperError::typer(
+                    app_pos,
+                    format!(
+                        "Invalid argument type of application: expected {dom:?}; actual after typing: {actual:?}"
+                    ),
+                ));
             }
             // PredefinedFuncApply post-wrapper (SigmaTyper.scala:297-299).
             if let TypedExpr::Ident { name, .. } = &new_f {
@@ -316,15 +360,20 @@ pub(crate) fn assign_apply_generic(
                 func: Box::new(new_f),
                 args: adapted,
                 tpe: *range,
+                pos: app_pos,
             })
         }
         // Collection indexing `coll(i)` (SigmaTyper.scala:261-277).
         SType::SColl(elem) => assign_collection_index(env, new_f, args, *elem, ctx),
         // Tuple indexing `tup(i)` (SigmaTyper.scala:278-294).
         SType::STuple(items) => assign_tuple_index(env, new_f, args, items, ctx),
-        other => Err(TyperError::typer(format!(
-            "Invalid array application: array type is expected but was {other:?}"
-        ))),
+        other => {
+            // SigmaTyper.scala:296: `app.sourceContext`
+            Err(TyperError::typer(
+                app_pos,
+                format!("Invalid array application: array type is expected but was {other:?}"),
+            ))
+        }
     }
 }
 
@@ -336,40 +385,52 @@ pub(crate) fn assign_collection_index(
     elem: SType,
     ctx: &TyperCtx,
 ) -> Result<TypedExpr, TyperError> {
+    // Citation: SigmaTyper.scala:276 `app.sourceContext`; the Apply starts at
+    // its callee (the collection).
+    let app_pos = node_pos(&new_f);
     if args.len() != 1 {
         return Err(TyperError::typer(
+            app_pos,
             "Invalid argument of array application: expected integer value".to_string(),
         ));
     }
     let index = args.pop().unwrap();
+    let idx_pos = node_pos(&index);
     // Seq(c @ Constant(index, _: SNumericType)) -> IntConstant(SInt.upcast(index)).
     if let Some((payload, ctype)) = numeric_constant_parts(&index) {
         let folded = const_upcast(&payload, &ctype, &SType::SInt, ctx.tree_version)
-            .map_err(build_to_typer)?;
+            .map_err(|be| build_to_typer(be, idx_pos))?;
         return Ok(TypedExpr::ByIndex {
             input: Box::new(new_f),
             index: Box::new(TypedExpr::Constant {
                 value: folded,
                 tpe: SType::SInt,
+                pos: idx_pos,
             }),
             default: None,
             tpe: elem,
+            pos: app_pos,
         });
     }
     // Seq(index) -> typedIndex.upcastTo(SInt) if numeric, else error.
     let typed_index = assign_type(env, index, ctx)?;
     if !is_numeric(node_tpe(&typed_index)) {
-        return Err(TyperError::typer(format!(
-            "Invalid argument type of array application: expected numeric type; actual: {:?}",
-            node_tpe(&typed_index)
-        )));
+        // SigmaTyper.scala:273: `index.sourceContext`
+        return Err(TyperError::typer(
+            node_pos(&typed_index),
+            format!(
+                "Invalid argument type of array application: expected numeric type; actual: {:?}",
+                node_tpe(&typed_index)
+            ),
+        ));
     }
-    let idx = upcast_to(typed_index, &SType::SInt).map_err(build_to_typer)?;
+    let idx = upcast_to(typed_index, &SType::SInt).map_err(|be| build_to_typer(be, app_pos))?;
     Ok(TypedExpr::ByIndex {
         input: Box::new(new_f),
         index: Box::new(idx),
         default: None,
         tpe: elem,
+        pos: app_pos,
     })
 }
 
@@ -381,48 +442,61 @@ pub(crate) fn assign_tuple_index(
     items: Vec<SType>,
     ctx: &TyperCtx,
 ) -> Result<TypedExpr, TyperError> {
+    // Citation: SigmaTyper.scala:293 `app.sourceContext`.
+    let app_pos = node_pos(&new_f);
     if args.len() != 1 {
         return Err(TyperError::typer(
+            app_pos,
             "Invalid argument of tuple application: expected integer value".to_string(),
         ));
     }
     let index = args.pop().unwrap();
+    let idx_pos = node_pos(&index);
     // Seq(Constant(index, _: SNumericType)) -> SelectField(tup, SByte.downcast(index)+1).
     if let Some((payload, ctype)) = numeric_constant_parts(&index) {
         let narrowed = const_downcast(&payload, &ctype, &SType::SByte, ctx.tree_version)
-            .map_err(build_to_typer)?;
+            .map_err(|be| build_to_typer(be, idx_pos))?;
         let byte_idx = match narrowed {
             ConstPayload::Byte(v) => v,
             _ => unreachable!("const_downcast to SByte yields a Byte payload"),
         };
         let field_index = byte_idx as i16 + 1; // 1-based
         if field_index < 1 || field_index as usize > items.len() {
-            return Err(TyperError::typer(format!(
-                "Invalid tuple field index {field_index} for tuple of arity {}",
-                items.len()
-            )));
+            return Err(TyperError::typer(
+                idx_pos,
+                format!(
+                    "Invalid tuple field index {field_index} for tuple of arity {}",
+                    items.len()
+                ),
+            ));
         }
         let tpe = items[(field_index as usize) - 1].clone();
         return Ok(TypedExpr::SelectField {
             input: Box::new(new_f),
             field_index: field_index as i8,
             tpe,
+            pos: app_pos,
         });
     }
     // Seq(index) non-const -> mkByIndex(new_f.asCollection[SAny], upcastTo(SInt), None).
     let typed_index = assign_type(env, index, ctx)?;
     if !is_numeric(node_tpe(&typed_index)) {
-        return Err(TyperError::typer(format!(
-            "Invalid argument type of tuple application: expected numeric type; actual: {:?}",
-            node_tpe(&typed_index)
-        )));
+        // SigmaTyper.scala:290: `typedIndex.sourceContext`
+        return Err(TyperError::typer(
+            node_pos(&typed_index),
+            format!(
+                "Invalid argument type of tuple application: expected numeric type; actual: {:?}",
+                node_tpe(&typed_index)
+            ),
+        ));
     }
-    let idx = upcast_to(typed_index, &SType::SInt).map_err(build_to_typer)?;
+    let idx = upcast_to(typed_index, &SType::SInt).map_err(|be| build_to_typer(be, app_pos))?;
     Ok(TypedExpr::ByIndex {
         input: Box::new(new_f),
         index: Box::new(idx),
         default: None,
         tpe: SType::SAny,
+        pos: app_pos,
     })
 }
 
@@ -433,6 +507,9 @@ pub(crate) fn assign_apply_types(
     type_args: Vec<SType>,
     ctx: &TyperCtx,
 ) -> Result<TypedExpr, TyperError> {
+    // Citation: SigmaTyper.scala:428/437 — `app.sourceContext` / `input.sourceContext`;
+    // the ApplyTypes node starts at its input.
+    let app_pos = node_pos(&input);
     let new_input = assign_type(env, input, ctx)?;
     match node_tpe(&new_input).clone() {
         SType::SFunc { dom, range, .. } => {
@@ -440,10 +517,13 @@ pub(crate) fn assign_apply_types(
             // first-appearance order (robust for parser-built empty-param SFuncs too).
             let tpe_params = free_type_vars(&dom, &range);
             if tpe_params.len() != type_args.len() {
-                return Err(TyperError::typer(format!(
-                    "Wrong number of type arguments: expected {tpe_params:?} but provided {type_args:?}. \
-                     Note that partial application of type parameters is not supported."
-                )));
+                return Err(TyperError::typer(
+                    app_pos,
+                    format!(
+                        "Wrong number of type arguments: expected {tpe_params:?} but provided {type_args:?}. \
+                         Note that partial application of type parameters is not supported."
+                    ),
+                ));
             }
             let subst: TypeSubst = tpe_params.into_iter().zip(type_args).collect();
             let concr = apply_subst(node_tpe(&new_input), &subst);
@@ -457,19 +537,31 @@ pub(crate) fn assign_apply_types(
                         field,
                         res_type: Some(r.clone()),
                         tpe: r,
+                        pos: app_pos,
                     })
                 }
                 TypedExpr::Ident { name, .. } => {
                     // mkIdent(name, concrFunTpe).
-                    Ok(TypedExpr::Ident { name, tpe: concr })
+                    Ok(TypedExpr::Ident {
+                        name,
+                        tpe: concr,
+                        pos: app_pos,
+                    })
                 }
-                other => Err(TyperError::typer(format!(
-                    "Invalid application of type arguments: unexpected input {}",
-                    product_prefix(&other)
-                ))),
+                other => {
+                    // SigmaTyper.scala:437: `input.sourceContext`
+                    Err(TyperError::typer(
+                        node_pos(&other),
+                        format!(
+                            "Invalid application of type arguments: unexpected input {}",
+                            product_prefix(&other)
+                        ),
+                    ))
+                }
             }
         }
         _ => Err(TyperError::typer(
+            app_pos,
             "Invalid application of type arguments: function doesn't have type parameters"
                 .to_string(),
         )),
@@ -536,6 +628,7 @@ pub(crate) fn adapt_sigma_prop_to_boolean(
                 TypedExpr::ConcreteCollection {
                     items: inner_items,
                     elem_type: inner_elem,
+                    pos,
                     ..
                 },
                 Some(e),
@@ -558,6 +651,7 @@ pub(crate) fn adapt_sigma_prop_to_boolean(
                         tpe: SType::SColl(Box::new(inner_elem.clone())),
                         items: adapted,
                         elem_type: inner_elem,
+                        pos,
                     });
                 } else {
                     out.push(finalize_collection(adapted)?);
@@ -565,9 +659,11 @@ pub(crate) fn adapt_sigma_prop_to_boolean(
             }
             // (it, SBoolean) where it.tpe == SSigmaProp -> SigmaPropIsProven(it).
             (it, Some(e)) if *e == SType::SBoolean && *node_tpe(&it) == SType::SSigmaProp => {
+                let pos = node_pos(&it);
                 out.push(TypedExpr::SigmaPropIsProven {
                     input: Box::new(it),
                     tpe: SType::SBoolean,
+                    pos,
                 });
             }
             (it, _) => out.push(it),
@@ -579,6 +675,10 @@ pub(crate) fn adapt_sigma_prop_to_boolean(
 /// `assignConcreteCollection(cc, items)` over ALREADY-TYPED items (no re-typing) —
 /// SigmaTyper.scala:545-556.  Computes the element type via msgTypeOf.
 pub(crate) fn finalize_collection(items: Vec<TypedExpr>) -> Result<TypedExpr, TyperError> {
+    // The collection node starts at its first item (Scala cites
+    // `cc.sourceContext`, assignConcreteCollection) — same offset. An empty
+    // collection has no item to cite (0 = unset SourceContext).
+    let cc_pos = items.first().map(node_pos).unwrap_or(0);
     let mut types: Vec<SType> = Vec::new();
     for it in &items {
         let t = node_tpe(it).clone();
@@ -588,19 +688,22 @@ pub(crate) fn finalize_collection(items: Vec<TypedExpr>) -> Result<TypedExpr, Ty
     }
     let t_item = if items.is_empty() {
         return Err(TyperError::typer(
+            cc_pos,
             "Undefined type of empty collection".to_string(),
         ));
     } else {
         msg_type_of(&types).ok_or_else(|| {
-            TyperError::typer(format!(
-                "All element of array should have the same type but found {types:?}"
-            ))
+            TyperError::typer(
+                cc_pos,
+                format!("All element of array should have the same type but found {types:?}"),
+            )
         })?
     };
     Ok(TypedExpr::ConcreteCollection {
         tpe: SType::SColl(Box::new(t_item.clone())),
         items,
         elem_type: t_item,
+        pos: cc_pos,
     })
 }
 
@@ -623,7 +726,7 @@ pub(crate) fn numeric_const_value(e: &TypedExpr) -> Option<i64> {
 /// `None`.  Mirrors the `Constant(index, _: SNumericType)` match arms.
 pub(crate) fn numeric_constant_parts(e: &TypedExpr) -> Option<(ConstPayload, SType)> {
     match e {
-        TypedExpr::Constant { value, tpe } => match value {
+        TypedExpr::Constant { value, tpe, .. } => match value {
             ConstPayload::Byte(_)
             | ConstPayload::Short(_)
             | ConstPayload::Int(_)
@@ -647,14 +750,19 @@ pub(crate) fn narrow_numeric_const_to(
     target: &SType,
     tree_version: u8,
 ) -> Result<TypedExpr, TyperError> {
+    let c_pos = node_pos(e);
     let (payload, ctype) = numeric_constant_parts(e).ok_or_else(|| {
-        TyperError::typer("narrow_numeric_const_to: not a numeric constant".to_string())
+        TyperError::typer(
+            c_pos,
+            "narrow_numeric_const_to: not a numeric constant".to_string(),
+        )
     })?;
-    let narrowed =
-        const_downcast(&payload, &ctype, target, tree_version).map_err(build_to_typer)?;
+    let narrowed = const_downcast(&payload, &ctype, target, tree_version)
+        .map_err(|be| build_to_typer(be, c_pos))?;
     Ok(TypedExpr::Constant {
         value: narrowed,
         tpe: target.clone(),
+        pos: c_pos,
     })
 }
 
@@ -705,6 +813,8 @@ pub(crate) fn free_type_vars(dom: &[SType], range: &SType) -> Vec<String> {
 
 /// Map a builder-layer error to a typer exception (the `mkByIndex`/`upcastTo`
 /// paths are outside `bimap`, so their throws surface as generic rejections).
-pub(crate) fn build_to_typer(be: BuildError) -> TyperError {
-    TyperError::typer(format!("{be:?}"))
+/// `pos` cites the node whose builder call failed (Scala pins `currentSrcCtx`
+/// to that node, which is what the builder's throw reports).
+pub(crate) fn build_to_typer(be: BuildError, pos: Pos) -> TyperError {
+    TyperError::typer(pos, format!("{be:?}"))
 }

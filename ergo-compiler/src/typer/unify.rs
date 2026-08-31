@@ -29,7 +29,7 @@
 use std::collections::BTreeMap;
 
 use crate::stype::SType;
-use crate::typed::{node_tpe, ConstPayload, TypedExpr};
+use crate::typed::{node_pos, node_tpe, ConstPayload, TypedExpr};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public types
@@ -472,9 +472,14 @@ pub fn upcast_to(expr: TypedExpr, target: &SType) -> Result<TypedExpr, BuildErro
     if &src == target {
         return Ok(expr);
     }
+    // The inserted Upcast inherits its input's source offset (Scala pins
+    // `currentSrcCtx` to the operand being upcast), so position-aware
+    // consumers see the operand's source construct either way.
+    let pos = node_pos(&expr);
     Ok(TypedExpr::Upcast {
         input: Box::new(expr),
         tpe: target.clone(),
+        pos,
     })
 }
 
@@ -818,6 +823,7 @@ mod tests {
         TypedExpr::Constant {
             value: ConstPayload::Int(v),
             tpe: SType::SInt,
+            pos: 0,
         }
     }
 
@@ -825,6 +831,7 @@ mod tests {
         TypedExpr::Constant {
             value: ConstPayload::Long(v),
             tpe: SType::SLong,
+            pos: 0,
         }
     }
 
@@ -832,6 +839,7 @@ mod tests {
         TypedExpr::Constant {
             value: ConstPayload::Byte(v),
             tpe: SType::SByte,
+            pos: 0,
         }
     }
 
@@ -839,6 +847,7 @@ mod tests {
         TypedExpr::Constant {
             value: ConstPayload::Bool(v),
             tpe: SType::SBoolean,
+            pos: 0,
         }
     }
 
@@ -1332,6 +1341,7 @@ mod tests {
             TypedExpr::Upcast {
                 input: Box::new(e),
                 tpe: SType::SLong,
+                pos: 0,
             }
         );
     }
@@ -1699,6 +1709,7 @@ mod tests {
         let expected_r2 = TypedExpr::Upcast {
             input: Box::new(int_const(1)),
             tpe: SType::SLong,
+            pos: 0,
         };
         assert_eq!(r2, expected_r2);
         // The ArithOp node itself (Plus opcode = -102):
@@ -1707,6 +1718,7 @@ mod tests {
             right: Box::new(r2),
             opcode: ARITH_PLUS,
             tpe: SType::SLong,
+            pos: 0,
         };
         assert_eq!(node_tpe(&arith), &SType::SLong);
     }

@@ -33,23 +33,29 @@ pub(crate) fn assign_method_call_like(
     let new_obj = assign_type(env, obj, ctx)?;
     let new_args = type_all(env, args, ctx)?;
     let recv = node_tpe(&new_obj).clone();
+    // Citation: SigmaTyper.scala cites `mc.sourceContext` for the whole-node
+    // errors (:326,336,345,…) and `r.sourceContext` for operand mismatches.
+    // The MethodCallLike node starts at its receiver, so the typed receiver's
+    // offset IS the mc offset.
+    let mc_pos = node_pos(&new_obj);
     match &recv {
         // SCollectionType[a] (:306-337).
-        SType::SColl(_) => mcl_collection(new_obj, recv, &name, new_args, ctx),
+        SType::SColl(_) => mcl_collection(new_obj, recv, &name, new_args, mc_pos, ctx),
         // SGroupElement (:338-346).
-        SType::SGroupElement => mcl_group_element(new_obj, &name, new_args),
+        SType::SGroupElement => mcl_group_element(new_obj, &name, new_args, mc_pos),
         // SSigmaProp (:364-387).
-        SType::SSigmaProp => mcl_sigma_prop(new_obj, &name, new_args),
+        SType::SSigmaProp => mcl_sigma_prop(new_obj, &name, new_args, mc_pos),
         // SBoolean (:388-408).
-        SType::SBoolean => mcl_boolean(new_obj, &name, new_args),
+        SType::SBoolean => mcl_boolean(new_obj, &name, new_args, mc_pos),
         // SString (:409-418).
-        SType::SString => mcl_string(new_obj, &name, new_args),
+        SType::SString => mcl_string(new_obj, &name, new_args, mc_pos),
         // SNumericType (:347-362) — SByte/SShort/SInt/SLong/SBigInt/SUnsignedBigInt.
-        t if is_numeric(t) => mcl_numeric(env, ctx, new_obj, &name, new_args),
+        t if is_numeric(t) => mcl_numeric(env, ctx, new_obj, &name, new_args, mc_pos),
         // else (:419-420) — a valid operator on an unsupported receiver.
-        t => Err(TyperError::typer(format!(
-            "Invalid operation MethodCallLike({name}) on type {t:?}"
-        ))),
+        t => Err(TyperError::typer(
+            mc_pos,
+            format!("Invalid operation MethodCallLike({name}) on type {t:?}"),
+        )),
     }
 }
 
@@ -59,6 +65,7 @@ pub(crate) fn mcl_collection(
     recv: SType,
     name: &str,
     new_args: Vec<TypedExpr>,
+    mc_pos: Pos,
     ctx: &TyperCtx,
 ) -> Result<TypedExpr, TyperError> {
     // ("++", Seq(r)): exact-type Append (:307-311).
@@ -70,12 +77,17 @@ pub(crate) fn mcl_collection(
                 input: Box::new(new_obj),
                 col2: Box::new(r),
                 tpe: recv,
+                pos: mc_pos,
             });
         }
-        return Err(TyperError::typer(format!(
-            "Invalid argument type for {name}, expected {recv:?} but was {:?}",
-            node_tpe(&r)
-        )));
+        // SigmaTyper.scala:311: `r.sourceContext`
+        return Err(TyperError::typer(
+            node_pos(&r),
+            format!(
+                "Invalid argument type for {name}, expected {recv:?} but was {:?}",
+                node_tpe(&r)
+            ),
+        ));
     }
     // (SCollectionMethods(method), _): resolve a collection method by name (:312-333).
     // Reachable in practice only via the postfix-ident form (`xs size`) — no infix
@@ -94,10 +106,14 @@ pub(crate) fn mcl_collection(
                     // EQUALITY check on the tail (:319-323).
                     let concr = apply_subst_func(&method.stype, &subst);
                     if new_arg_types.as_slice() != concr.dom_tail() {
-                        return Err(TyperError::typer(format!(
-                            "Invalid method {name} argument type: expected {:?}; actual: {new_arg_types:?}",
-                            concr.dom_tail()
-                        )));
+                        // SigmaTyper.scala:323: `mc.sourceContext`
+                        return Err(TyperError::typer(
+                            mc_pos,
+                            format!(
+                                "Invalid method {name} argument type: expected {:?}; actual: {new_arg_types:?}",
+                                concr.dom_tail()
+                            ),
+                        ));
                     }
                     // irBuilder(lowerMethodCalls).lift(...).getOrElse(mkMethodCall(subst))
                     // (:330-333).  lowerMethodCalls is always true in our typer.  The
@@ -113,17 +129,21 @@ pub(crate) fn mcl_collection(
                     );
                     Ok(thread_method_subst(lowered, &subst))
                 }
-                // None: unification failed (:325-326).
-                None => Err(TyperError::typer(format!(
-                    "Invalid argument type of method call MethodCallLike({name}): expected {:?}; actual: {actual_types:?}",
-                    method.stype.dom
-                ))),
+                // None: unification failed (:325-326: `mc.sourceContext`).
+                None => Err(TyperError::typer(
+                    mc_pos,
+                    format!(
+                        "Invalid argument type of method call MethodCallLike({name}): expected {:?}; actual: {actual_types:?}",
+                        method.stype.dom
+                    ),
+                )),
             }
         }
-        // else: unknown symbol (:335-336).
-        None => Err(TyperError::non_applicable(format!(
-            "Unknown symbol {name}, which is used as operation with arguments on {recv:?}"
-        ))),
+        // else: unknown symbol (:335-336: `mc.sourceContext`).
+        None => Err(TyperError::non_applicable(
+            mc_pos,
+            format!("Unknown symbol {name}, which is used as operation with arguments on {recv:?}"),
+        )),
     }
 }
 
@@ -132,6 +152,7 @@ pub(crate) fn mcl_group_element(
     new_obj: TypedExpr,
     name: &str,
     new_args: Vec<TypedExpr>,
+    mc_pos: Pos,
 ) -> Result<TypedExpr, TyperError> {
     // ("*", Seq(r)): GroupElement-only MultiplyGroup (:339-343).
     if name == "*" && new_args.len() == 1 {
@@ -142,17 +163,23 @@ pub(crate) fn mcl_group_element(
                 left: Box::new(new_obj),
                 right: Box::new(r),
                 tpe: SType::SGroupElement,
+                pos: mc_pos,
             });
         }
-        return Err(TyperError::typer(format!(
-            "Invalid argument type for {name}, expected GroupElement but was {:?}",
-            node_tpe(&r)
-        )));
+        // SigmaTyper.scala:343: `r.sourceContext`
+        return Err(TyperError::typer(
+            node_pos(&r),
+            format!(
+                "Invalid argument type for {name}, expected GroupElement but was {:?}",
+                node_tpe(&r)
+            ),
+        ));
     }
-    // else (:344-345).
-    Err(TyperError::non_applicable(format!(
-        "Unknown symbol {name}, which is used as (GroupElement) {name} (args)"
-    )))
+    // else (:344-345: `mc.sourceContext`).
+    Err(TyperError::non_applicable(
+        mc_pos,
+        format!("Unknown symbol {name}, which is used as (GroupElement) {name} (args)"),
+    ))
 }
 
 /// Receiver `SNumericType` (SigmaTyper.scala:347-362).
@@ -162,6 +189,7 @@ pub(crate) fn mcl_numeric(
     new_obj: TypedExpr,
     name: &str,
     new_args: Vec<TypedExpr>,
+    mc_pos: Pos,
 ) -> Result<TypedExpr, TyperError> {
     // ("+"|"*"|"^"|">>"|"<<"|">>>", Seq(r)) (:348).  `-`/`/`/`%` never arrive here
     // (the parser emits ArithOp for those); `|`/`&` emit BitOp directly.
@@ -171,11 +199,15 @@ pub(crate) fn mcl_numeric(
         let r = it.next().unwrap();
         // r.tpe: numeric → bimap; non-numeric → InvalidBinaryOperationParameters (:357-358).
         if !is_numeric(node_tpe(&r)) {
-            return Err(TyperError::invalid_binary(format!(
-                "Invalid argument type for {name}, expected {:?} but was {:?}",
-                node_tpe(&new_obj),
-                node_tpe(&r)
-            )));
+            // SigmaTyper.scala:358: `r.sourceContext`
+            return Err(TyperError::invalid_binary(
+                node_pos(&r),
+                format!(
+                    "Invalid argument type for {name}, expected {:?} but was {:?}",
+                    node_tpe(&new_obj),
+                    node_tpe(&r)
+                ),
+            ));
         }
         // Dispatch to the mk* node builder via bimap(env, op, l, r)(mk)(tT, tT) (:349-356).
         // `+`/`*` → mkPlus/mkMultiply (arithOp: upcast then ArithOp).
@@ -201,19 +233,23 @@ pub(crate) fn mcl_numeric(
                 if is_arith {
                     let (l, r) = arith_op(l, r)?;
                     let tpe = node_tpe(&l).clone();
+                    let pos = node_pos(&l);
                     Ok(TypedExpr::ArithOp {
                         left: Box::new(l),
                         right: Box::new(r),
                         opcode,
                         tpe,
+                        pos,
                     })
                 } else {
                     let tpe = node_tpe(&l).clone();
+                    let pos = node_pos(&l);
                     Ok(TypedExpr::BitOp {
                         left: Box::new(l),
                         right: Box::new(r),
                         opcode,
                         tpe,
+                        pos,
                     })
                 }
             },
@@ -221,11 +257,14 @@ pub(crate) fn mcl_numeric(
             tt(),
         );
     }
-    // else (:360-361).
-    Err(TyperError::non_applicable(format!(
-        "Unknown symbol {name}, which is used as ({:?}) {name} (args)",
-        node_tpe(&new_obj)
-    )))
+    // else (:360-361: `mc.sourceContext`).
+    Err(TyperError::non_applicable(
+        mc_pos,
+        format!(
+            "Unknown symbol {name}, which is used as ({:?}) {name} (args)",
+            node_tpe(&new_obj)
+        ),
+    ))
 }
 
 /// Receiver `SSigmaProp` (SigmaTyper.scala:364-387).
@@ -233,6 +272,7 @@ pub(crate) fn mcl_sigma_prop(
     new_obj: TypedExpr,
     name: &str,
     new_args: Vec<TypedExpr>,
+    mc_pos: Pos,
 ) -> Result<TypedExpr, TyperError> {
     // ("||"|"&&"|"^", Seq(r)) (:365).
     if matches!(name, "||" | "&&" | "^") && new_args.len() == 1 {
@@ -246,34 +286,41 @@ pub(crate) fn mcl_sigma_prop(
                     field: "isProven".to_string(),
                     res_type: Some(SType::SBoolean),
                     tpe: SType::SBoolean,
+                    pos: mc_pos,
                 };
-                Ok(build_bin_bool(a, r, name))
+                Ok(build_bin_bool(a, r, name, mc_pos))
             }
             // rhs SigmaProp: SigmaOr/SigmaAnd(Seq(a,b)); `^` is NotImplementedError (:374-381).
             SType::SSigmaProp => match name {
                 "||" => Ok(TypedExpr::SigmaOr {
                     items: vec![new_obj, r],
                     tpe: SType::SSigmaProp,
+                    pos: mc_pos,
                 }),
                 "&&" => Ok(TypedExpr::SigmaAnd {
                     items: vec![new_obj, r],
                     tpe: SType::SSigmaProp,
+                    pos: mc_pos,
                 }),
+                // Scala:379 throws with NO source context — pos stays 0.
                 "^" => Err(TyperError::not_implemented(
+                    0,
                     "Xor operation is not defined between SigmaProps".to_string(),
                 )),
                 _ => unreachable!("guarded by matches!"),
             },
-            // else (:382-383).
-            other => Err(TyperError::typer(format!(
-                "Invalid argument type for {name}, expected SigmaProp but was {other:?}"
-            ))),
+            // else (:382-383: `r.sourceContext`).
+            other => Err(TyperError::typer(
+                node_pos(&r),
+                format!("Invalid argument type for {name}, expected SigmaProp but was {other:?}"),
+            )),
         };
     }
-    // else (:385-386).
-    Err(TyperError::non_applicable(format!(
-        "Unknown symbol {name}, which is used as (SigmaProp) {name} (args)"
-    )))
+    // else (:385-386: `mc.sourceContext`).
+    Err(TyperError::non_applicable(
+        mc_pos,
+        format!("Unknown symbol {name}, which is used as (SigmaProp) {name} (args)"),
+    ))
 }
 
 /// Receiver `SBoolean` (SigmaTyper.scala:388-408).
@@ -281,6 +328,7 @@ pub(crate) fn mcl_boolean(
     new_obj: TypedExpr,
     name: &str,
     new_args: Vec<TypedExpr>,
+    mc_pos: Pos,
 ) -> Result<TypedExpr, TyperError> {
     // ("||"|"&&"|"^", Seq(r)) (:389).
     if matches!(name, "||" | "&&" | "^") && new_args.len() == 1 {
@@ -288,27 +336,30 @@ pub(crate) fn mcl_boolean(
         let r = it.next().unwrap();
         return match node_tpe(&r) {
             // rhs Boolean: Bin*(newObj, r) (:390-394).
-            SType::SBoolean => Ok(build_bin_bool(new_obj, r, name)),
+            SType::SBoolean => Ok(build_bin_bool(new_obj, r, name, mc_pos)),
             // rhs SigmaProp: coerce the RIGHT sigma via Select(isProven), then Bin* (:395-402).
             SType::SSigmaProp => {
                 let b = TypedExpr::Select {
-                    obj: Box::new(r),
+                    obj: Box::new(r.clone()),
                     field: "isProven".to_string(),
                     res_type: Some(SType::SBoolean),
                     tpe: SType::SBoolean,
+                    pos: node_pos(&r),
                 };
-                Ok(build_bin_bool(new_obj, b, name))
+                Ok(build_bin_bool(new_obj, b, name, mc_pos))
             }
-            // else (:403-404).
-            other => Err(TyperError::typer(format!(
-                "Invalid argument type for {name}, expected Boolean but was {other:?}"
-            ))),
+            // else (:403-404: `r.sourceContext`).
+            other => Err(TyperError::typer(
+                node_pos(&r),
+                format!("Invalid argument type for {name}, expected Boolean but was {other:?}"),
+            )),
         };
     }
-    // else (:406-407).
-    Err(TyperError::non_applicable(format!(
-        "Unknown symbol {name}, which is used as (Boolean) {name} (args)"
-    )))
+    // else (:406-407: `mc.sourceContext`).
+    Err(TyperError::non_applicable(
+        mc_pos,
+        format!("Unknown symbol {name}, which is used as (Boolean) {name} (args)"),
+    ))
 }
 
 /// The JVM `.toString` of a constant payload, for the `String + <const>` fold
@@ -395,6 +446,7 @@ pub(crate) fn mcl_string(
     new_obj: TypedExpr,
     name: &str,
     new_args: Vec<TypedExpr>,
+    mc_pos: Pos,
 ) -> Result<TypedExpr, TyperError> {
     // ("+", Seq(r)): compile-time concat fold → StringConstant (:410-414).
     if name == "+" && new_args.len() == 1 {
@@ -422,6 +474,7 @@ pub(crate) fn mcl_string(
                 return Ok(TypedExpr::Constant {
                     value: ConstPayload::String(format!("{cl}{rs}")),
                     tpe: SType::SString,
+                    pos: mc_pos,
                 });
             }
             // Reproducibility boundary (D-T12 residual, narrowed at M3 Task 4): a
@@ -436,26 +489,46 @@ pub(crate) fn mcl_string(
         // Non-constant RHS (Height/Select/EQ/ConcreteCollection/…), or a Constant
         // RHS with a non-reproducible payload → InvalidBinaryOperationParameters
         // (:413-414).  A non-constant LHS likewise reaches here.
-        return Err(TyperError::invalid_binary(format!(
-            "Invalid argument type for {name}, expected String but was {:?}",
-            node_tpe(&r)
-        )));
+        // SigmaTyper.scala:414: `r.sourceContext`
+        return Err(TyperError::invalid_binary(
+            node_pos(&r),
+            format!(
+                "Invalid argument type for {name}, expected String but was {:?}",
+                node_tpe(&r)
+            ),
+        ));
     }
-    // else (:416-417).
-    Err(TyperError::non_applicable(format!(
-        "Unknown symbol {name}, which is used as (String) {name} (args)"
-    )))
+    // else (:416-417: `mc.sourceContext`).
+    Err(TyperError::non_applicable(
+        mc_pos,
+        format!("Unknown symbol {name}, which is used as (String) {name} (args)"),
+    ))
 }
 
 /// Build `BinOr`/`BinAnd`/`BinXor(l, r)` for the `||`/`&&`/`^` bool ops (§1.11
 /// SigmaProp/Boolean arms).  Result type is always `SBoolean`.
-pub(crate) fn build_bin_bool(l: TypedExpr, r: TypedExpr, op: &str) -> TypedExpr {
+pub(crate) fn build_bin_bool(l: TypedExpr, r: TypedExpr, op: &str, mc_pos: Pos) -> TypedExpr {
     let (left, right) = (Box::new(l), Box::new(r));
     let tpe = SType::SBoolean;
     match op {
-        "||" => TypedExpr::BinOr { left, right, tpe },
-        "&&" => TypedExpr::BinAnd { left, right, tpe },
-        "^" => TypedExpr::BinXor { left, right, tpe },
+        "||" => TypedExpr::BinOr {
+            left,
+            right,
+            tpe,
+            pos: mc_pos,
+        },
+        "&&" => TypedExpr::BinAnd {
+            left,
+            right,
+            tpe,
+            pos: mc_pos,
+        },
+        "^" => TypedExpr::BinXor {
+            left,
+            right,
+            tpe,
+            pos: mc_pos,
+        },
         _ => unreachable!("build_bin_bool only called for ||/&&/^"),
     }
 }
@@ -474,6 +547,7 @@ pub(crate) fn thread_method_subst(node: TypedExpr, subst: &TypeSubst) -> TypedEx
             method,
             args,
             tpe,
+            pos,
             ..
         } => TypedExpr::MethodCall {
             obj,
@@ -481,6 +555,7 @@ pub(crate) fn thread_method_subst(node: TypedExpr, subst: &TypeSubst) -> TypedEx
             args,
             type_subst: subst.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             tpe,
+            pos,
         },
         other => other,
     }
@@ -496,6 +571,7 @@ pub(crate) fn thread_method_subst(node: TypedExpr, subst: &TypeSubst) -> TypedEx
 pub(crate) fn process_global_method(
     method: &SMethodDesc,
     args: Vec<TypedExpr>,
+    call_pos: Pos,
 ) -> Result<TypedExpr, TyperError> {
     // A1 (accept-invalid fix): a bare `fromBigEndianBytes(a)` / `deserializeTo(a)` /
     // `some(x)` / `none()` call (§1.9 `Apply(Ident)` → SGlobal method) without an
@@ -507,14 +583,18 @@ pub(crate) fn process_global_method(
     // Oracle-pinned; boundary: predef `getVar(1)` → `Option[T]` is NOT an SGlobal
     // method and does not reach here.
     if method.explicit_type_args || stype_has_free_type_var(&method.stype.range) {
-        return Err(TyperError::typer(format!(
-            "Global method '{}' is type-parametric and requires an explicit type argument [T]",
-            method.name
-        )));
+        return Err(TyperError::typer(
+            call_pos,
+            format!(
+                "Global method '{}' is type-parametric and requires an explicit type argument [T]",
+                method.name
+            ),
+        ));
     }
     match method.name {
         "groupGenerator" if args.is_empty() => Ok(TypedExpr::GroupGenerator {
             tpe: SType::SGroupElement,
+            pos: call_pos,
         }),
         "xor" if args.len() == 2 => {
             let mut it = args.into_iter();
@@ -524,11 +604,13 @@ pub(crate) fn process_global_method(
                 left: Box::new(left),
                 right: Box::new(right),
                 tpe: SType::SColl(Box::new(SType::SByte)),
+                pos: call_pos,
             })
         }
         _ => Ok(TypedExpr::MethodCall {
             obj: Box::new(TypedExpr::Global {
                 tpe: SType::SGlobal,
+                pos: 0, // synthesized receiver — no source construct of its own
             }),
             method: MethodRef {
                 owner: "SigmaDslBuilder".to_string(),
@@ -537,6 +619,7 @@ pub(crate) fn process_global_method(
             args,
             type_subst: vec![],
             tpe: method.stype.range.clone(),
+            pos: call_pos,
         }),
     }
 }

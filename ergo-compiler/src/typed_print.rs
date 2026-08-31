@@ -378,6 +378,7 @@ fn collect_frontend(e: &TypedExpr) -> Vec<String> {
             field,
             res_type,
             tpe,
+            ..
         } => {
             let mut fields = vec![print_typed(obj), format!("'{}'", field)];
             let stripped = match res_type {
@@ -665,6 +666,7 @@ mod tests {
         TypedExpr::Constant {
             value: ConstPayload::Int(v),
             tpe: SType::SInt,
+            pos: 0,
         }
     }
 
@@ -672,6 +674,7 @@ mod tests {
         TypedExpr::Constant {
             value: ConstPayload::Long(v),
             tpe: SType::SLong,
+            pos: 0,
         }
     }
 
@@ -679,11 +682,15 @@ mod tests {
         TypedExpr::Constant {
             value: ConstPayload::Bool(b),
             tpe: SType::SBoolean,
+            pos: 0,
         }
     }
 
     fn height() -> TypedExpr {
-        TypedExpr::Height { tpe: SType::SInt }
+        TypedExpr::Height {
+            tpe: SType::SInt,
+            pos: 0,
+        }
     }
 
     fn int_gt(left: TypedExpr, right: TypedExpr) -> TypedExpr {
@@ -691,6 +698,7 @@ mod tests {
             left: Box::new(left),
             right: Box::new(right),
             tpe: SType::SBoolean,
+            pos: 0,
         }
     }
 
@@ -829,6 +837,7 @@ mod tests {
         let e = TypedExpr::BoolToSigmaProp {
             value: Box::new(int_gt(height(), int_const(100))),
             tpe: SType::SSigmaProp,
+            pos: 0,
         };
         assert_eq!(print_typed(&e), seed_expected("sigmaProp(HEIGHT > 100)"));
     }
@@ -839,18 +848,21 @@ mod tests {
         let x_ident = TypedExpr::Ident {
             name: "x".to_string(),
             tpe: SType::SInt,
+            pos: 0,
         };
         let val_x = TypedExpr::ValNode {
             name: "x".to_string(),
             given_type: SType::SInt,
             body: Box::new(height()),
             tpe: SType::SInt,
+            pos: 0,
         };
         let result = int_gt(x_ident, int_const(5));
         let e = TypedExpr::Block {
             bindings: vec![val_x],
             result: Box::new(result),
             tpe: SType::SBoolean,
+            pos: 0,
         };
         assert_eq!(print_typed(&e), seed_expected("{ val x = HEIGHT; x > 5 }"));
     }
@@ -861,12 +873,14 @@ mod tests {
         let b_ident = TypedExpr::Ident {
             name: "b".to_string(),
             tpe: SType::SBox,
+            pos: 0,
         };
         let select_value = TypedExpr::Select {
             obj: Box::new(b_ident),
             field: "value".to_string(),
             res_type: Some(SType::SLong),
             tpe: SType::SLong,
+            pos: 0,
         };
         let lambda = TypedExpr::Lambda {
             tpe_params: vec![],
@@ -878,14 +892,17 @@ mod tests {
                 range: Box::new(SType::SLong),
                 tpe_params: vec![],
             },
+            pos: 0,
         };
         let inputs = TypedExpr::Inputs {
             tpe: SType::SColl(Box::new(SType::SBox)),
+            pos: 0,
         };
         let e = TypedExpr::MapCollection {
             input: Box::new(inputs),
             mapper: Box::new(lambda),
             tpe: SType::SColl(Box::new(SType::SLong)),
+            pos: 0,
         };
         assert_eq!(
             print_typed(&e),
@@ -899,15 +916,18 @@ mod tests {
         let a = TypedExpr::Constant {
             value: ConstPayload::ByteColl(vec![1, 2]),
             tpe: SType::SColl(Box::new(SType::SByte)),
+            pos: 0,
         };
         let b = TypedExpr::Constant {
             value: ConstPayload::ByteColl(vec![3, 4]),
             tpe: SType::SColl(Box::new(SType::SByte)),
+            pos: 0,
         };
         let e = TypedExpr::Append {
             input: Box::new(a),
             col2: Box::new(b),
             tpe: SType::SColl(Box::new(SType::SByte)),
+            pos: 0,
         };
         assert_eq!(print_typed(&e), seed_expected("a ++ b"));
     }
@@ -918,12 +938,14 @@ mod tests {
         let upcast = TypedExpr::Upcast {
             input: Box::new(int_const(1)),
             tpe: SType::SLong,
+            pos: 0,
         };
         let e = TypedExpr::ArithOp {
             left: Box::new(long_const(1)),
             right: Box::new(upcast),
             opcode: ARITH_PLUS,
             tpe: SType::SLong,
+            pos: 0,
         };
         assert_eq!(print_typed(&e), seed_expected("1L + 1"));
     }
@@ -936,18 +958,21 @@ mod tests {
             field: "toByte".to_string(),
             res_type: Some(SType::SByte),
             tpe: SType::SByte,
+            pos: 0,
         };
         let sel2 = TypedExpr::Select {
             obj: Box::new(int_const(2)),
             field: "toByte".to_string(),
             res_type: Some(SType::SByte),
             tpe: SType::SByte,
+            pos: 0,
         };
         let e = TypedExpr::ArithOp {
             left: Box::new(sel1),
             right: Box::new(sel2),
             opcode: ARITH_PLUS,
             tpe: SType::SByte,
+            pos: 0,
         };
         assert_eq!(print_typed(&e), seed_expected("1.toByte + 2.toByte"));
     }
@@ -959,11 +984,13 @@ mod tests {
             left: Box::new(int_const(1)),
             right: Box::new(int_const(1)),
             tpe: SType::SBoolean,
+            pos: 0,
         };
         let e = TypedExpr::BinAnd {
             left: Box::new(bool_const(true)),
             right: Box::new(eq_node),
             tpe: SType::SBoolean,
+            pos: 0,
         };
         assert_eq!(print_typed(&e), seed_expected("true && (1 == 1)"));
     }
@@ -976,11 +1003,13 @@ mod tests {
             left: Box::new(height()),
             right: Box::new(int_const(9)),
             tpe: SType::SBoolean,
+            pos: 0,
         };
         let e = TypedExpr::BinAnd {
             left: Box::new(gt),
             right: Box::new(lt),
             tpe: SType::SBoolean,
+            pos: 0,
         };
         assert_eq!(print_typed(&e), seed_expected("HEIGHT>5 && HEIGHT<9"));
     }
@@ -992,6 +1021,7 @@ mod tests {
             items: vec![int_const(1), int_const(2), int_const(3)],
             elem_type: SType::SInt,
             tpe: SType::SColl(Box::new(SType::SInt)),
+            pos: 0,
         };
         assert_eq!(print_typed(&e), seed_expected("Coll(1, 2, 3)"));
     }
@@ -1002,15 +1032,18 @@ mod tests {
         let col1 = TypedExpr::Constant {
             value: ConstPayload::LongColl(vec![1, 2]),
             tpe: SType::SColl(Box::new(SType::SLong)),
+            pos: 0,
         };
         let x_ident = TypedExpr::Ident {
             name: "x".to_string(),
             tpe: SType::SLong,
+            pos: 0,
         };
         let body = TypedExpr::GT {
             left: Box::new(x_ident),
             right: Box::new(long_const(1)),
             tpe: SType::SBoolean,
+            pos: 0,
         };
         let lambda = TypedExpr::Lambda {
             tpe_params: vec![],
@@ -1022,11 +1055,13 @@ mod tests {
                 range: Box::new(SType::SBoolean),
                 tpe_params: vec![],
             },
+            pos: 0,
         };
         let e = TypedExpr::Exists {
             input: Box::new(col1),
             condition: Box::new(lambda),
             tpe: SType::SBoolean,
+            pos: 0,
         };
         assert_eq!(
             print_typed(&e),
@@ -1040,6 +1075,7 @@ mod tests {
         let e = TypedExpr::MethodCall {
             obj: Box::new(TypedExpr::Global {
                 tpe: SType::SGlobal,
+                pos: 0,
             }),
             method: MethodRef {
                 owner: "SigmaDslBuilder".to_string(),
@@ -1048,6 +1084,7 @@ mod tests {
             args: vec![int_const(1)],
             type_subst: vec![],
             tpe: SType::SColl(Box::new(SType::SByte)),
+            pos: 0,
         };
         assert_eq!(print_typed(&e), seed_expected("Global.serialize(1)"));
     }
@@ -1058,6 +1095,7 @@ mod tests {
         let e = TypedExpr::MethodCall {
             obj: Box::new(TypedExpr::Global {
                 tpe: SType::SGlobal,
+                pos: 0,
             }),
             method: MethodRef {
                 owner: "SigmaDslBuilder".to_string(),
@@ -1066,6 +1104,7 @@ mod tests {
             args: vec![int_const(1)],
             type_subst: vec![("T".to_string(), SType::SInt)],
             tpe: SType::SOption(Box::new(SType::SInt)),
+            pos: 0,
         };
         assert_eq!(print_typed(&e), seed_expected("Global.some[Int](1)"));
     }
@@ -1076,10 +1115,12 @@ mod tests {
         let get_var = TypedExpr::GetVar {
             var_id: 1,
             tpe: SType::SOption(Box::new(SType::SAvlTree)),
+            pos: 0,
         };
         let option_get = TypedExpr::OptionGet {
             input: Box::new(get_var),
             tpe: SType::SAvlTree,
+            pos: 0,
         };
         let e = TypedExpr::MethodCall {
             obj: Box::new(option_get),
@@ -1090,6 +1131,7 @@ mod tests {
             args: vec![],
             type_subst: vec![],
             tpe: SType::SColl(Box::new(SType::SByte)),
+            pos: 0,
         };
         assert_eq!(
             print_typed(&e),
@@ -1110,6 +1152,7 @@ mod tests {
         let e = TypedExpr::MethodCall {
             obj: Box::new(TypedExpr::Global {
                 tpe: SType::SGlobal,
+                pos: 0,
             }),
             method: MethodRef {
                 owner: "SigmaDslBuilder".to_string(),
@@ -1118,6 +1161,7 @@ mod tests {
             args: vec![],
             type_subst: vec![("T".to_string(), SType::SInt)],
             tpe: SType::SOption(Box::new(SType::SInt)),
+            pos: 0,
         };
         assert_eq!(print_typed(&e), seed_expected("Global.none[Int]()"));
     }
@@ -1127,28 +1171,37 @@ mod tests {
     #[test]
     fn singleton_singletons_render_without_fields() {
         assert_eq!(
-            print_typed(&TypedExpr::Height { tpe: SType::SInt }),
+            print_typed(&TypedExpr::Height {
+                tpe: SType::SInt,
+                pos: 0
+            }),
             "(Height:Int)"
         );
         assert_eq!(
-            print_typed(&TypedExpr::Self_ { tpe: SType::SBox }),
+            print_typed(&TypedExpr::Self_ {
+                tpe: SType::SBox,
+                pos: 0
+            }),
             "(Self:Box)"
         );
         assert_eq!(
             print_typed(&TypedExpr::Inputs {
-                tpe: SType::SColl(Box::new(SType::SBox))
+                tpe: SType::SColl(Box::new(SType::SBox)),
+                pos: 0,
             }),
             "(Inputs:Coll[Box])"
         );
         assert_eq!(
             print_typed(&TypedExpr::Global {
-                tpe: SType::SGlobal
+                tpe: SType::SGlobal,
+                pos: 0,
             }),
             "(Global:SigmaDslBuilder)"
         );
         assert_eq!(
             print_typed(&TypedExpr::LastBlockUtxoRootHash {
-                tpe: SType::SAvlTree
+                tpe: SType::SAvlTree,
+                pos: 0,
             }),
             "(LastBlockUtxoRootHash:AvlTree)"
         );
@@ -1172,6 +1225,7 @@ mod tests {
         let mc = TypedExpr::MethodCall {
             obj: Box::new(TypedExpr::Global {
                 tpe: SType::SGlobal,
+                pos: 0,
             }),
             method: MethodRef {
                 owner: "SigmaDslBuilder".to_string(),
@@ -1180,6 +1234,7 @@ mod tests {
             args: vec![],
             type_subst: subst,
             tpe: SType::SUnit,
+            pos: 0,
         };
         // Comma-separated: `{#T->#Int,#U->#Long}`.
         let s = print_typed(&mc);
@@ -1193,6 +1248,7 @@ mod tests {
         let e = TypedExpr::Constant {
             value: ConstPayload::BigInt("5".to_string()),
             tpe: SType::SBigInt,
+            pos: 0,
         };
         assert_eq!(print_typed(&e), "(ConstantNode:BigInt (CBigInt @5))");
     }
@@ -1208,6 +1264,7 @@ mod tests {
         let e = TypedExpr::Constant {
             value: ConstPayload::GroupElement(bytes),
             tpe: SType::SGroupElement,
+            pos: 0,
         };
         let expected = "(ConstantNode:GroupElement (CGroupElement (Ecp @(79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8,1))))";
         assert_eq!(print_typed(&e), expected);
@@ -1228,6 +1285,7 @@ mod tests {
         let e = TypedExpr::Constant {
             value: ConstPayload::ProveDlog(bytes),
             tpe: SType::SSigmaProp,
+            pos: 0,
         };
         let expected = "(ConstantNode:SigmaProp (CSigmaProp (ProveDlog (Ecp @(f28773c2d975288bc7d1d205c3748651b075fbc6610e58cddeeddf8f19405aa8,ab0902e8d880a89758212eb65cdaf473a1a06da521fa91f29b5cb52db03ed81,1)))))";
         assert_eq!(print_typed(&e), expected);
@@ -1238,6 +1296,7 @@ mod tests {
         let e = TypedExpr::Constant {
             value: ConstPayload::ByteColl(vec![]),
             tpe: SType::SColl(Box::new(SType::SByte)),
+            pos: 0,
         };
         assert_eq!(print_typed(&e), "(ConstantNode:Coll[Byte] <>)");
     }
@@ -1253,6 +1312,7 @@ mod tests {
         let e = TypedExpr::Constant {
             value: ConstPayload::Unit,
             tpe: SType::SUnit,
+            pos: 0,
         };
         assert_eq!(print_typed(&e), seed_expected("()"));
     }
@@ -1267,6 +1327,7 @@ mod tests {
         let e = TypedExpr::Constant {
             value: ConstPayload::String("abcd".to_string()),
             tpe: SType::SString,
+            pos: 0,
         };
         assert_eq!(print_typed(&e), seed_expected("\"ab\" + \"cd\""));
     }
@@ -1288,9 +1349,11 @@ mod tests {
                     range: Box::new(SType::SLong),
                     tpe_params: vec![],
                 },
+                pos: 0,
             }),
             type_args: vec![SType::SLong, SType::SInt],
             tpe: SType::SLong,
+            pos: 0,
         };
         let s = print_typed(&e);
         assert_eq!(s, "(ApplyTypes:Long (Ident:() => Long 'f') [#Long #Int])");
@@ -1309,6 +1372,7 @@ mod tests {
             name: "foo".to_string(),
             args: vec![int_const(1)],
             tpe: SType::NoType,
+            pos: 0,
         };
         let s = print_typed(&e);
         assert_eq!(

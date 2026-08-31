@@ -141,41 +141,49 @@ pub fn lift(v: &EnvValue) -> Result<TypedExpr, GroupElementError> {
         EnvValue::Bool(b) => TypedExpr::Constant {
             value: ConstPayload::Bool(*b),
             tpe: SType::SBoolean,
+            pos: 0,
         },
         // Platform.scala:27 — Byte → ByteConstant
         EnvValue::Byte(n) => TypedExpr::Constant {
             value: ConstPayload::Byte(*n),
             tpe: SType::SByte,
+            pos: 0,
         },
         // Platform.scala:29 — Short → ShortConstant
         EnvValue::Short(n) => TypedExpr::Constant {
             value: ConstPayload::Short(*n),
             tpe: SType::SShort,
+            pos: 0,
         },
         // Platform.scala:31 — Int → IntConstant
         EnvValue::Int(n) => TypedExpr::Constant {
             value: ConstPayload::Int(*n),
             tpe: SType::SInt,
+            pos: 0,
         },
         // Platform.scala:33 — Long → LongConstant
         EnvValue::Long(n) => TypedExpr::Constant {
             value: ConstPayload::Long(*n),
             tpe: SType::SLong,
+            pos: 0,
         },
         // Platform.scala:35 — sigma.BigInt → BigIntConstant; decimal string form
         EnvValue::BigInt(s) => TypedExpr::Constant {
             value: ConstPayload::BigInt(s.clone()),
             tpe: SType::SBigInt,
+            pos: 0,
         },
         // Platform.scala:51-52 — Coll[Byte] / Array[Byte] → ByteArrayConstant
         EnvValue::ByteArray(v) => TypedExpr::Constant {
             value: ConstPayload::ByteColl(v.clone()),
             tpe: SType::SColl(Box::new(SType::SByte)),
+            pos: 0,
         },
         // Platform.scala:55-56 — Coll[Long] / Array[Long] → LongArrayConstant
         EnvValue::LongArray(v) => TypedExpr::Constant {
             value: ConstPayload::LongColl(v.clone()),
             tpe: SType::SColl(Box::new(SType::SLong)),
+            pos: 0,
         },
         // Platform.scala:39-41 — GroupElement → GroupElementConstant.
         // D-T5: on-curve check (rejects off-curve AND identity — see the
@@ -189,12 +197,14 @@ pub fn lift(v: &EnvValue) -> Result<TypedExpr, GroupElementError> {
             TypedExpr::Constant {
                 value: ConstPayload::GroupElement(bytes),
                 tpe: SType::SGroupElement,
+                pos: 0,
             }
         }
         // Platform.scala:45-47 — SigmaProp → SigmaPropConstant (opaque M2)
         EnvValue::SigmaProp(s) => TypedExpr::Constant {
             value: ConstPayload::SigmaProp(s.clone()),
             tpe: SType::SSigmaProp,
+            pos: 0,
         },
         // ScriptApiRoute.scala:52-54 keysToEnv — ProveDlog → a REAL, emittable
         // SigmaPropConstant(ProveDlog(pk)). Same on-curve check as GroupElement
@@ -208,6 +218,7 @@ pub fn lift(v: &EnvValue) -> Result<TypedExpr, GroupElementError> {
             TypedExpr::Constant {
                 value: ConstPayload::ProveDlog(*pubkey),
                 tpe: SType::SSigmaProp,
+                pos: 0,
             }
         }
     })
@@ -245,6 +256,7 @@ mod tests {
             TypedExpr::Constant {
                 value: ConstPayload::Bool(true),
                 tpe: SType::SBoolean,
+                pos: 0,
             }
         );
     }
@@ -259,6 +271,7 @@ mod tests {
             TypedExpr::Constant {
                 value: ConstPayload::Byte(-5i8),
                 tpe: SType::SByte,
+                pos: 0,
             }
         );
     }
@@ -271,6 +284,7 @@ mod tests {
             TypedExpr::Constant {
                 value: ConstPayload::Short(300i16),
                 tpe: SType::SShort,
+                pos: 0,
             }
         );
     }
@@ -283,6 +297,7 @@ mod tests {
             TypedExpr::Constant {
                 value: ConstPayload::Int(42),
                 tpe: SType::SInt,
+                pos: 0,
             }
         );
     }
@@ -295,6 +310,7 @@ mod tests {
             TypedExpr::Constant {
                 value: ConstPayload::Long(1_000_000i64),
                 tpe: SType::SLong,
+                pos: 0,
             }
         );
     }
@@ -308,6 +324,7 @@ mod tests {
             TypedExpr::Constant {
                 value: ConstPayload::BigInt("5".to_string()),
                 tpe: SType::SBigInt,
+                pos: 0,
             }
         );
         // Verify printer output matches seed §4: `(ConstantNode:BigInt (CBigInt @5))`
@@ -323,6 +340,7 @@ mod tests {
             TypedExpr::Constant {
                 value: ConstPayload::ByteColl(vec![1i8, 2i8]),
                 tpe: SType::SColl(Box::new(SType::SByte)),
+                pos: 0,
             }
         );
         // Printer must produce `(ConstantNode:Coll[Byte] <@1 @2>)`
@@ -339,6 +357,7 @@ mod tests {
             TypedExpr::Constant {
                 value: ConstPayload::LongColl(vec![1i64, 2i64]),
                 tpe: SType::SColl(Box::new(SType::SLong)),
+                pos: 0,
             }
         );
         // Printer must produce `(ConstantNode:Coll[Long] <@1 @2>)`
@@ -356,6 +375,7 @@ mod tests {
             TypedExpr::Constant {
                 value: ConstPayload::GroupElement(*ge.as_bytes()),
                 tpe: SType::SGroupElement,
+                pos: 0,
             }
         );
         // Printer must decompress to the oracle's affine form (golden_seed.txt L54).
@@ -373,6 +393,7 @@ mod tests {
             TypedExpr::Constant {
                 value: ConstPayload::SigmaProp("opaque".to_string()),
                 tpe: SType::SSigmaProp,
+                pos: 0,
             }
         );
     }
@@ -390,6 +411,7 @@ mod tests {
             TypedExpr::Constant {
                 value: ConstPayload::ProveDlog(pk),
                 tpe: SType::SSigmaProp,
+                pos: 0,
             }
         );
         // Same decompressed-Ecp printer form as `binder.rs::bind_pk`'s

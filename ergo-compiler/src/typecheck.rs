@@ -13,12 +13,15 @@
 //!
 //! # Error shape (E9 + E12)
 //!
-//! [`CompileError`] tags the failing phase.  `Parse`/`Bind` carry real source
-//! positions (`pos()` is meaningful); `Type` errors carry `pos ≡ 0` — the typer is
-//! the single, documented phase-level position gap (E12): `TypedExpr` nodes hold no
-//! positions, so a typer rejection cannot cite one.  The accept/reject verdict and
-//! the exception CLASS are the parity-relevant facts (E5 makes reject positions
-//! advisory).
+//! [`CompileError`] tags the failing phase.  Every USER-facing reject
+//! (`Parse`/`Bind`/`Type`) carries a REAL source offset (`pos()` is meaningful):
+//! `Type` errors cite the node the typer is rejecting — positions ride on
+//! [`TypedExpr`] (typed.rs) and mirror Scala's per-site `sourceContext`
+//! citations. The post-typecheck variants (`Root`/`Emit`/`Write`) still return
+//! `0`: they operate on position-less IR nodes, and the route-level Scala
+//! throws carry no SourceContext (the oracle records `0:0` for them). The
+//! accept/reject verdict and the exception CLASS remain the graded facts (E5
+//! makes reject positions advisory).
 
 use ergo_ser::address::NetworkPrefix;
 
@@ -40,7 +43,8 @@ use crate::typer::{assign_type, predefined_env, TyperCtx, TyperError};
 /// - [`CompileError::Bind`] — `BinderException` family (incl. `InvalidArguments`,
 ///   PK address decode), carries a real position.
 /// - [`CompileError::Type`] — `TyperException` family (incl. `MethodNotFound`,
-///   `NonApplicableMethod`, …); `pos()` is always `0` (E12).
+///   `NonApplicableMethod`, …); `pos()` cites the offending node (E12 lifted;
+///   `typer/assign/mod.rs` module doc has the per-site citation table).
 ///
 /// The M3 `compile()` pipeline (`tree.rs`) adds four post-typecheck variants:
 /// - [`CompileError::Root`] — the typed root is neither `Boolean` nor
@@ -98,11 +102,12 @@ pub enum CompileError {
 impl CompileError {
     /// The 1-based source offset of the error.
     ///
-    /// `Parse`/`Bind` return the real offset; `Type` returns `0` — `TypedExpr`
-    /// carries no positions, so typer rejections have no citable position (E12).
-    /// The post-typecheck phases (`Root`/`Emit`/`Write`) also return `0`: they
-    /// operate on position-less typed/IR nodes (and the oracle agrees — the
-    /// route's root-type throw grades as `REJECT 0:0 Exception`).
+    /// `Parse`/`Bind`/`Type` return the real offset of the offending construct
+    /// (`Type` cites the node the typer rejected — E12 lifted, see
+    /// `typer/assign/mod.rs`). The post-typecheck phases (`Root`/`Emit`/
+    /// `Write`) return `0`: they operate on position-less IR nodes, and the
+    /// route-level Scala throws carry no SourceContext (the oracle records
+    /// `REJECT 0:0 Exception` for them).
     pub fn pos(&self) -> Pos {
         match self {
             CompileError::Parse(e) => e.pos(),
@@ -284,12 +289,20 @@ mod tests {
     }
 
     #[test]
-    fn typecheck_type_error_is_type_phase_pos_zero() {
+    fn typecheck_type_error_cites_offending_node_offset() {
         // `HEIGHT && true` — Boolean-op on a non-Boolean receiver (§1.11).
         let err = tc("HEIGHT && true").expect_err("typer must fail");
         assert!(matches!(err, CompileError::Type(_)));
-        // E12: typer rejections carry pos == 0.
+        // The NonApplicableMethod cites the MethodCallLike node, which starts
+        // at its receiver `HEIGHT` (byte 0 == 1:1 — the oracle's recorded
+        // position, golden_seed.txt §1.11).
         assert_eq!(err.pos(), 0);
+        // A mid-source typer rejection cites the offending node, not 0: the
+        // If-condition error cites the condition (`HEIGHT` at byte 4 == 1:5,
+        // the oracle's recorded position for this source).
+        let err = tc("if (HEIGHT) 1 else 2").expect_err("typer must fail");
+        assert!(matches!(err, CompileError::Type(_)));
+        assert_eq!(err.pos(), 4);
     }
 
     #[test]

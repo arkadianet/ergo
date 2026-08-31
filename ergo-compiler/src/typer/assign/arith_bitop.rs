@@ -30,9 +30,12 @@ pub(crate) fn assign_arith(
         ARITH_MIN => "min",
         ARITH_MAX => "max",
         _ => {
-            return Err(TyperError::typer(format!(
-                "Don't know how to assignType(ArithOp opcode {opcode})"
-            )))
+            // Scala has no arm for an unknown opcode -> §1.25 fallthrough
+            // (`v.sourceContext`); the op node starts at its left operand.
+            return Err(TyperError::typer(
+                node_pos(&left),
+                format!("Don't know how to assignType(ArithOp opcode {opcode})"),
+            ));
         }
     };
     // mk*: arith_op (upcast, no constraint) then ArithOp; tpe = left.tpe post-upcast.
@@ -45,11 +48,13 @@ pub(crate) fn assign_arith(
         move |l, r| {
             let (l, r) = arith_op(l, r)?;
             let tpe = node_tpe(&l).clone();
+            let pos = node_pos(&l);
             Ok(TypedExpr::ArithOp {
                 left: Box::new(l),
                 right: Box::new(r),
                 opcode,
                 tpe,
+                pos,
             })
         },
         tt(),
@@ -69,9 +74,12 @@ pub(crate) fn assign_bitop(
         BIT_AND => "&",
         BIT_XOR => "^",
         _ => {
-            return Err(TyperError::typer(format!(
-                "Don't know how to assignType(BitOp opcode {opcode})"
-            )))
+            // §1.25 fallthrough citation (`v.sourceContext`); the op node
+            // starts at its left operand.
+            return Err(TyperError::typer(
+                node_pos(&left),
+                format!("Don't know how to assignType(BitOp opcode {opcode})"),
+            ));
         }
     };
     // mkBitOr/And/Xor build BitOp DIRECTLY — NO upcast (SigmaBuilder.scala:630-637;
@@ -84,11 +92,13 @@ pub(crate) fn assign_bitop(
         right,
         move |l, r| {
             let tpe = node_tpe(&l).clone();
+            let pos = node_pos(&l);
             Ok(TypedExpr::BitOp {
                 left: Box::new(l),
                 right: Box::new(r),
                 opcode,
                 tpe,
+                pos,
             })
         },
         tt(),
@@ -112,13 +122,37 @@ pub(crate) fn build_relation(
     op: RelOp,
 ) -> Result<TypedExpr, BuildError> {
     let (l, r) = comparison_op(l, r)?;
+    // The relation node starts at its (possibly upcast) left operand; an
+    // inserted Upcast inherits its input's offset (unify.rs), so this is the
+    // source left operand's start either way.
+    let pos = node_pos(&l);
     let (left, right) = (Box::new(l), Box::new(r));
     let tpe = SType::SBoolean;
     Ok(match op {
-        RelOp::Ge => TypedExpr::GE { left, right, tpe },
-        RelOp::Le => TypedExpr::LE { left, right, tpe },
-        RelOp::Gt => TypedExpr::GT { left, right, tpe },
-        RelOp::Lt => TypedExpr::LT { left, right, tpe },
+        RelOp::Ge => TypedExpr::GE {
+            left,
+            right,
+            tpe,
+            pos,
+        },
+        RelOp::Le => TypedExpr::LE {
+            left,
+            right,
+            tpe,
+            pos,
+        },
+        RelOp::Gt => TypedExpr::GT {
+            left,
+            right,
+            tpe,
+            pos,
+        },
+        RelOp::Lt => TypedExpr::LT {
+            left,
+            right,
+            tpe,
+            pos,
+        },
     })
 }
 
@@ -129,11 +163,22 @@ pub(crate) fn build_equality(
     is_eq: bool,
 ) -> Result<TypedExpr, BuildError> {
     let (l, r) = equality_op(l, r)?;
+    let pos = node_pos(&l);
     let (left, right) = (Box::new(l), Box::new(r));
     let tpe = SType::SBoolean;
     Ok(if is_eq {
-        TypedExpr::EQ { left, right, tpe }
+        TypedExpr::EQ {
+            left,
+            right,
+            tpe,
+            pos,
+        }
     } else {
-        TypedExpr::NEQ { left, right, tpe }
+        TypedExpr::NEQ {
+            left,
+            right,
+            tpe,
+            pos,
+        }
     })
 }
