@@ -139,4 +139,11 @@ pub enum WalletError {
     /// counter can never wrap to a reserved/zero id and overwrite a live scan.
     #[error("scan id space exhausted (u16::MAX reached)")]
     ScanRegistryFull,
+
+    /// CLI secret-source misuse or I/O failure (audit M-3): a recovery
+    /// phrase passed via argv without the explicit
+    /// `--dangerously-pass-mnemonic-via-argv` gate, or an unreadable
+    /// mnemonic file / empty stdin prompt.
+    #[error("{0}")]
+    CliSecretSource(String),
 }
