@@ -83,6 +83,7 @@ thiserror   = "2"
 tokio       = "1"
 async-trait = "0.1"
 zeroize    = { version = "1", features = ["derive"] }
+rpassword  = "7"
 
 # Storage / data structures
 redb              = "2"

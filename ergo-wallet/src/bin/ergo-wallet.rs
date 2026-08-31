@@ -24,7 +24,7 @@ use ergo_wallet::derivation::DerivationPath;
 use ergo_wallet::error::WalletError;
 use ergo_wallet::extended_key::ExtendedSecretKey;
 use ergo_wallet::mnemonic::{Mnemonic, MnemonicStrength};
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::process::ExitCode;
 use zeroize::Zeroizing;
 
@@ -83,59 +83,90 @@ struct MnemonicSource {
 impl MnemonicSource {
     /// Resolve the recovery phrase from the configured source, wrapped in
     /// `Zeroizing` so the buffer is wiped on drop.
+    ///
+    /// Source selection: the argv gate is validated FIRST — an ungated
+    /// `--mnemonic` is refused even when `--mnemonic-file` is also given
+    /// (a file source must not launder an argv-exposed phrase), and
+    /// supplying both sources is a conflict. Interactive input uses a
+    /// no-echo TTY read (the phrase must not land in terminal scrollback);
+    /// piped stdin keeps the plain read.
     fn read(&self) -> Result<Zeroizing<String>, WalletError> {
+        // Argv gate — before ANY source selection, so `--mnemonic` is
+        // never honored ungated, regardless of other flags.
+        if self.mnemonic.is_some() && !self.dangerously_pass_mnemonic_via_argv {
+            return Err(WalletError::CliSecretSource(
+                "refusing --mnemonic from argv: it is world-readable via /proc/<pid>/cmdline, \
+                 persists in shell history, and is captured by CI logs. Pipe it instead: \
+                 `--mnemonic-file -` (stdin) or `--mnemonic-file <path>`. If you truly need \
+                 argv, pass --dangerously-pass-mnemonic-via-argv."
+                    .into(),
+            ));
+        }
+        if self.mnemonic_file.is_some() && self.mnemonic.is_some() {
+            return Err(WalletError::CliSecretSource(
+                "conflicting mnemonic sources: pass either --mnemonic-file or --mnemonic, \
+                 not both"
+                    .into(),
+            ));
+        }
+
         if let Some(path) = &self.mnemonic_file {
+            // `Zeroizing` from allocation time: the raw file/stdin content
+            // holds the phrase and must be wiped along with the copy.
             let content = if path == "-" {
-                let mut buf = String::new();
+                let mut buf = Zeroizing::new(String::new());
                 std::io::stdin()
-                    .read_to_string(&mut buf)
+                    .read_to_string(&mut *buf)
                     .map_err(|e| WalletError::CliSecretSource(format!("stdin read failed: {e}")))?;
                 buf
             } else {
-                std::fs::read_to_string(path).map_err(|e| {
+                Zeroizing::new(std::fs::read_to_string(path).map_err(|e| {
                     WalletError::CliSecretSource(format!("mnemonic file {path:?}: {e}"))
-                })?
+                })?)
             };
-            let trimmed = content.trim();
+            let trimmed = content.trim().to_string();
             if trimmed.is_empty() {
                 return Err(WalletError::CliSecretSource(
                     "mnemonic source is empty".into(),
                 ));
             }
-            return Ok(Zeroizing::new(trimmed.to_string()));
+            return Ok(Zeroizing::new(trimmed));
         }
 
         if let Some(argv_phrase) = &self.mnemonic {
-            if !self.dangerously_pass_mnemonic_via_argv {
-                return Err(WalletError::CliSecretSource(
-                    "refusing --mnemonic from argv: it is world-readable via /proc/<pid>/cmdline, \
-                     persists in shell history, and is captured by CI logs. Pipe it instead: \
-                     `--mnemonic-file -` (stdin) or `--mnemonic-file <path>`. If you truly need \
-                     argv, pass --dangerously-pass-mnemonic-via-argv."
-                        .into(),
-                ));
-            }
-            let trimmed = argv_phrase.trim();
+            let trimmed = argv_phrase.trim().to_string();
             if trimmed.is_empty() {
                 return Err(WalletError::CliSecretSource(
                     "mnemonic source is empty".into(),
                 ));
             }
-            return Ok(Zeroizing::new(trimmed.to_string()));
+            return Ok(Zeroizing::new(trimmed));
         }
 
-        // Default: interactive stdin prompt.
+        // Default: interactive prompt. On a TTY read WITHOUT echo — the
+        // phrase must not land in terminal scrollback or session
+        // recordings; piped stdin (non-TTY) keeps the plain line read so
+        // `echo <phrase> | ergo-wallet pubkey` keeps working.
         eprint!("Enter recovery phrase (12-24 words), then press Enter: ");
         std::io::stderr().flush().ok();
-        let mut line = String::new();
+        if std::io::stdin().is_terminal() {
+            let phrase = rpassword::read_password()
+                .map_err(|e| WalletError::CliSecretSource(format!("stdin read failed: {e}")))?;
+            let trimmed = phrase.trim().to_string();
+            if trimmed.is_empty() {
+                return Err(WalletError::CliSecretSource("no mnemonic entered".into()));
+            }
+            return Ok(Zeroizing::new(trimmed));
+        }
+        let mut line = Zeroizing::new(String::new());
         std::io::stdin()
-            .read_line(&mut line)
+            .read_line(&mut *line)
             .map_err(|e| WalletError::CliSecretSource(format!("stdin read failed: {e}")))?;
-        let trimmed = line.trim();
+        let trimmed = line.trim().to_string();
         if trimmed.is_empty() {
             return Err(WalletError::CliSecretSource("no mnemonic entered".into()));
         }
-        Ok(Zeroizing::new(trimmed.to_string()))
+        Ok(Zeroizing::new(trimmed))
     }
 }
 

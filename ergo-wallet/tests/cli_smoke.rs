@@ -172,6 +172,40 @@ fn mnemonic_argv_without_gate_is_refused() {
         .stderr(str::contains("--mnemonic-file"));
 }
 
+/// The gate is validated BEFORE source selection: `--mnemonic-file` must
+/// not launder an ungated argv phrase (the argv exposure exists regardless
+/// of which source wins).
+#[test]
+fn mnemonic_argv_without_gate_refused_even_with_file() {
+    Command::cargo_bin("ergo-wallet")
+        .unwrap()
+        .args(["pubkey", "--mnemonic", MNEMONIC, "--mnemonic-file", "-"])
+        .write_stdin(MNEMONIC)
+        .assert()
+        .failure()
+        .stderr(str::contains("refusing --mnemonic from argv"));
+}
+
+/// Supplying both sources is a conflict — silently picking one would
+/// hide which phrase was actually used.
+#[test]
+fn conflicting_sources_are_refused() {
+    Command::cargo_bin("ergo-wallet")
+        .unwrap()
+        .args([
+            "pubkey",
+            "--mnemonic",
+            MNEMONIC,
+            "--dangerously-pass-mnemonic-via-argv",
+            "--mnemonic-file",
+            "-",
+        ])
+        .write_stdin(MNEMONIC)
+        .assert()
+        .failure()
+        .stderr(str::contains("conflicting mnemonic sources"));
+}
+
 /// The explicit gate keeps scripted argv use possible — same pubkey as
 /// the stdin path (semantics unchanged, only the source differs).
 #[test]
