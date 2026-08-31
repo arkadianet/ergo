@@ -116,7 +116,7 @@ impl MnemonicSource {
             let content = if path == "-" {
                 let mut buf = Zeroizing::new(String::new());
                 std::io::stdin()
-                    .read_to_string(&mut *buf)
+                    .read_to_string(&mut buf)
                     .map_err(|e| WalletError::CliSecretSource(format!("stdin read failed: {e}")))?;
                 buf
             } else {
@@ -160,7 +160,7 @@ impl MnemonicSource {
         }
         let mut line = Zeroizing::new(String::new());
         std::io::stdin()
-            .read_line(&mut *line)
+            .read_line(&mut line)
             .map_err(|e| WalletError::CliSecretSource(format!("stdin read failed: {e}")))?;
         let trimmed = line.trim().to_string();
         if trimmed.is_empty() {
