@@ -72,14 +72,48 @@ The map handed to consumers is keyed by the **preorder index of the IR tree**
 (`0` = root, DFS children in payload field order):
 
 ```rust
-pub struct SourceMap(BTreeMap<u64, Pos>); // absent key = synthesized node
+pub struct SourceMap {
+    offsets: BTreeMap<u64, Pos>, // absent key = synthesized node
+    node_count: u64,             // consumer asserts its walk agrees
+}
 ```
 
 Preorder index is the only identity available on BOTH sides of the wire:
 - emit can assign it (zip of `Expr` and the origin tree);
 - the forge lift walks the same tree (it parses the ErgoTree bytes with
-  `ergo_ser::opcode::parse_expr` and lifts to its `Node` AST) and can compute
-  the identical index while lifting, attaching `pos` to each lifted node.
+  `ergo_ser::opcode::parse_expr` and lifts to its `Node` AST).
+
+**The index MUST come from one shared walk — not be recomputed on each side.**
+An earlier draft of this doc had the lift "compute the identical index while
+lifting". That contract is unsound, and it fails silently rather than loudly.
+Verified against the forge lift as it stands today:
+
+- `lift()` returns `L::Raw` at `MAX_LIFT_DEPTH` **without descending**
+  (`ergo-sandbox/src/decompile.rs`). Every IR node in the skipped subtree is
+  never visited, so an independently-maintained counter drifts by that
+  subtree's size for the whole remainder of the walk — every citation after the
+  first deep contract points at the wrong node, with no test that would notice.
+- `lift_const` recurses through collection elements that live inside a single
+  `Expr::Const` and are not separate IR nodes, so the lift's recursion shape is
+  not the IR's node shape.
+- Any later early-return or child reordering in `lift_op` breaks alignment the
+  same way.
+
+Required instead — one canonical walk in `ergo-ser`, consumed by both sides:
+
+```rust
+// ergo-ser
+pub fn preorder(root: &Expr) -> impl Iterator<Item = (u64, &Expr)>;
+```
+
+Emit keys its origin tree from this iterator; the lift takes ids **from** it
+rather than deriving its own. Ids then travel with nodes, so truncation and
+restructuring cannot desync anything.
+
+**Alignment must also be checkable.** `SourceMap` carries the total IR node
+count (and ideally a per-index opcode tag or hash) so a consumer whose walk
+disagrees fails loudly. Silent mis-citation in an auditing tool is worse than
+no citation at all.
 
 A serialized-BYTE-OFFSET keying was considered and rejected: byte offsets are
 only known after serialization, emit-time nodes have no stable address to
@@ -112,10 +146,16 @@ v0 header prefix, matching what `parse_expr` returns to the lift. Serialization
 
 ### 4. Consumer contract (ergo-forge side)
 
-- The lift computes each node's preorder id while lifting and attaches
-  `map.get(id)` as the node's source offset; findings on lifted nodes then
-  cite `line_col(source, pos)` (the same conversion the compiler exports via
-  `ergo_compiler::span::line_col`).
+- The lift takes each node's id from the shared `ergo_ser::preorder` walk (NOT
+  from its own counter — see §2) and stores it on the lifted node as `ir_id`.
+  The forge spec adds that slot in its P2.5 AST split
+  (`docs/superpowers/specs/2026-08-31-lift-target-ast-design.md`), deliberately
+  as an **id rather than a `Pos`**: a contract lifted from a mainnet address has
+  no source and therefore no map, but still needs stable node identity for lint
+  findings. Source citation is a lookup layered on top — `map.get(node.ir_id)`,
+  then `line_col(source, pos)` via `ergo_compiler::span::line_col`.
+- The consumer asserts its walk length equals `SourceMap::node_count` before
+  citing anything, and reports a tooling bug if not.
 - Nodes absent from the map (synthesized: inserted Upcasts, CSE-materialized
   ValDefs, placeholder wiring) must NOT be citable — workbench lints either
   skip them or attach to the nearest mapped ancestor (lift-side policy).
@@ -136,6 +176,9 @@ hand-computed offsets).
 
 ## Estimate
 
+- Shared `ergo_ser::preorder` walk: small, but land it FIRST — both this crate
+  and the forge lift key off it, and it is the thing that makes the contract
+  sound.
 - `Origin`/`OriginTree` + `node()` threading: ~60 mechanical call-site edits in
   `emit/*`.
 - Preorder-id zip + `SourceMap` + API: small, self-contained.
