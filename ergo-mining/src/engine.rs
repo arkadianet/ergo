@@ -304,6 +304,10 @@ pub fn build_and_publish(
     // selection (suspected tip-invalid). Populated by `generate_candidate` on
     // the Full path; recorded to the handle on publish so the node loop can
     // re-validate and evict them. Empty for Minimal builds.
+    // Resolve the custom extension fields for THIS build: a `value_file`
+    // source is re-read here, so a merge-mining commitment tracks a moving aux
+    // tip without a restart.
+    let custom_extension_fields = handle.resolve_extension_fields()?;
     let mut suspects: Vec<Digest32> = Vec::new();
     let built = match base {
         Some(slot) => {
@@ -320,7 +324,7 @@ pub fn build_and_publish(
                 eligible_rent_boxes.as_slice(),
                 &voting_targets,
                 handle.voting_settings(),
-                handle.custom_extension_fields(),
+                &custom_extension_fields,
                 &mut suspects,
             );
             // Read disposition from the view regardless of whether the build
@@ -341,7 +345,7 @@ pub fn build_and_publish(
             eligible_rent_boxes.as_slice(),
             &voting_targets,
             handle.voting_settings(),
-            handle.custom_extension_fields(),
+            &custom_extension_fields,
             &mut suspects,
         )?,
     };

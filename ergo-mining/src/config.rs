@@ -5,8 +5,30 @@ use serde::{Deserialize, Serialize};
 use crate::error::MiningError;
 
 /// Resolved custom extension fields — `(2-byte key, value bytes)` pairs,
-/// as consumed by [`crate::handle::MiningHandle::with_extension_fields`].
+/// the form the candidate builder consumes.
 pub type ResolvedExtensionFields = Vec<([u8; 2], Vec<u8>)>;
+
+/// Where a custom extension field's value comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtensionValueSource {
+    /// A fixed value from the config. Known at boot, never changes.
+    Static(Vec<u8>),
+    /// A file re-read on EVERY candidate build.
+    ///
+    /// This is what merge-mining needs: the committed value is the auxiliary
+    /// chain's current tip, which moves every block, so a boot-time constant
+    /// cannot express it. The writer (the aux chain's own node, or an operator
+    /// driving a settlement) rewrites the file and the next candidate picks it
+    /// up — no node restart.
+    File(std::path::PathBuf),
+}
+
+/// A custom extension field resolved to its key plus the source of its value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionFieldSource {
+    pub key: [u8; 2],
+    pub value: ExtensionValueSource,
+}
 
 /// Configuration for the mining subsystem.
 ///
@@ -88,21 +110,40 @@ pub struct MiningConfig {
     /// candidate's Extension section (the general merge-mining / commitment
     /// hook — e.g. an Aegis `0xAE00` block commitment). Empty by default
     /// (opt-in — it adds bytes to every block). Each entry is a hex `key`
-    /// (2 bytes / 4 hex chars) and hex `value` (≤ 64 bytes); the key's first
-    /// byte must not be a protocol-reserved namespace (`0x00`/`0x01`/`0x02`).
+    /// (2 bytes / 4 hex chars) and EITHER a hex `value` (≤ 64 bytes) or a
+    /// `value_file` re-read per candidate build; the key's first byte must not
+    /// be a protocol-reserved namespace (`0x00`/`0x01`/`0x02`).
     /// Validated at startup via [`MiningConfig::validate`].
     #[serde(default)]
     pub extension_fields: Vec<CustomExtensionField>,
 }
 
 /// One operator-configured custom extension field, as hex strings in the
-/// `[mining]` TOML (`{ key = "ae00", value = "01…" }`).
+/// `[mining]` TOML. Exactly one of `value` / `value_file` must be set:
+///
+/// ```toml
+/// # fixed for the node's lifetime
+/// extension_fields = [{ key = "ae00", value = "01aabb" }]
+/// # re-read on every candidate build (merge-mining: the aux tip moves)
+/// extension_fields = [{ key = "ae00", value_file = "/run/aegis/mm-commit.hex" }]
+/// ```
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CustomExtensionField {
     /// 2-byte extension key as hex (4 hex chars), e.g. `"ae00"`.
     pub key: String,
-    /// Field value as hex (≤ 64 bytes → ≤ 128 hex chars).
-    pub value: String,
+    /// Field value as hex (≤ 64 bytes → ≤ 128 hex chars). Mutually exclusive
+    /// with [`Self::value_file`].
+    #[serde(default)]
+    pub value: Option<String>,
+    /// Path to a file holding the value as hex, RE-READ on every candidate
+    /// build. Mutually exclusive with [`Self::value`].
+    ///
+    /// A missing or blank file commits NOTHING for this field (the steady
+    /// state before the writer has published anything — it must not stall
+    /// block production), while malformed content fails the build rather than
+    /// quietly mining a block that looks committed and is not.
+    #[serde(default)]
+    pub value_file: Option<String>,
 }
 
 fn default_candidate_interval_ms() -> u64 {
@@ -190,20 +231,37 @@ impl MiningConfig {
                 self.block_candidate_generation_interval_ms,
             )));
         }
-        // Custom extension fields: hex-decodable (below) and consensus-legal
-        // (rule 404 size, reserved-namespace guard, rule 405 no-duplicates).
-        crate::extension_builder::validate_custom_extension_fields(
-            &self.resolve_extension_fields()?,
-        )?;
+        // Custom extension fields: hex-decodable, exactly one value source
+        // (below), and consensus-legal for everything knowable now — the
+        // reserved-namespace guard and rule 405 duplicates, plus rule 404 size
+        // for STATIC values. A `value_file` entry's size is checked per build,
+        // where the bytes actually exist (`MiningHandle::resolve_extension_fields`).
+        let sources = self.resolve_extension_fields()?;
+        let statically_known: Vec<([u8; 2], Vec<u8>)> = sources
+            .iter()
+            .map(|f| {
+                let v = match &f.value {
+                    ExtensionValueSource::Static(v) => v.clone(),
+                    ExtensionValueSource::File(_) => Vec::new(),
+                };
+                (f.key, v)
+            })
+            .collect();
+        crate::extension_builder::validate_custom_extension_fields(&statically_known)?;
         Ok(())
     }
 
-    /// Decode the configured custom extension fields from their hex form into
-    /// `(key, value)` byte pairs for [`crate::handle::MiningHandle::with_extension_fields`].
-    /// Fails on malformed hex or a key that is not exactly 2 bytes. Deeper
-    /// consensus checks (size / namespace / duplicates) are applied by
-    /// [`crate::extension_builder::validate_custom_extension_fields`].
-    pub fn resolve_extension_fields(&self) -> Result<ResolvedExtensionFields, MiningError> {
+    /// Decode the configured custom extension fields into their key + value
+    /// SOURCE. Fails on malformed hex, a key that is not exactly 2 bytes, or an
+    /// entry that sets neither or both of `value` / `value_file`.
+    ///
+    /// A `value_file` entry's contents are deliberately NOT read here: the file
+    /// is re-read per candidate build (that is the whole point), and it is
+    /// legitimately absent at boot. Deeper consensus checks (size / namespace /
+    /// duplicates) are applied by
+    /// [`crate::extension_builder::validate_custom_extension_fields`] over the
+    /// fully-resolved set.
+    pub fn resolve_extension_fields(&self) -> Result<Vec<ExtensionFieldSource>, MiningError> {
         self.extension_fields
             .iter()
             .map(|field| {
@@ -219,13 +277,31 @@ impl MiningConfig {
                         field.key
                     ))
                 })?;
-                let value = hex::decode(&field.value).map_err(|e| {
-                    MiningError::InvalidConfig(format!(
-                        "[mining] extension field {:?} value is not valid hex: {e}",
-                        field.key
-                    ))
-                })?;
-                Ok((key, value))
+                let value = match (&field.value, &field.value_file) {
+                    (Some(hex_value), None) => {
+                        ExtensionValueSource::Static(hex::decode(hex_value).map_err(|e| {
+                            MiningError::InvalidConfig(format!(
+                                "[mining] extension field {:?} value is not valid hex: {e}",
+                                field.key
+                            ))
+                        })?)
+                    }
+                    (None, Some(path)) => ExtensionValueSource::File(path.into()),
+                    (None, None) => {
+                        return Err(MiningError::InvalidConfig(format!(
+                            "[mining] extension field {:?} sets neither `value` nor `value_file`",
+                            field.key
+                        )))
+                    }
+                    (Some(_), Some(_)) => {
+                        return Err(MiningError::InvalidConfig(format!(
+                            "[mining] extension field {:?} sets both `value` and `value_file`; \
+                             they are mutually exclusive",
+                            field.key
+                        )))
+                    }
+                };
+                Ok(ExtensionFieldSource { key, value })
             })
             .collect()
     }
@@ -247,17 +323,86 @@ mod tests {
 
     // ----- custom extension fields -----
 
+    /// A field with only `key`/`value` set — the pre-existing TOML shape — must
+    /// keep resolving exactly as before, since real configs are written that way.
     #[test]
     fn resolve_extension_fields_decodes_hex_pairs() {
         let cfg = MiningConfig {
             extension_fields: vec![CustomExtensionField {
                 key: "ae00".into(),
-                value: "01aabb".into(),
+                value: Some("01aabb".into()),
+                value_file: None,
             }],
             ..Default::default()
         };
         let resolved = cfg.resolve_extension_fields().expect("valid hex");
-        assert_eq!(resolved, vec![([0xAE, 0x00], vec![0x01, 0xaa, 0xbb])]);
+        assert_eq!(
+            resolved,
+            vec![ExtensionFieldSource {
+                key: [0xAE, 0x00],
+                value: ExtensionValueSource::Static(vec![0x01, 0xaa, 0xbb]),
+            }]
+        );
+    }
+
+    /// The existing TOML shape must still deserialize untouched — `value_file`
+    /// is additive, so a config written before it existed keeps working.
+    #[test]
+    fn a_pre_existing_static_toml_entry_still_deserializes() {
+        let f: CustomExtensionField = toml::from_str(
+            r#"key = "ae00"
+value = "01aabb""#,
+        )
+        .expect("the old shape parses");
+        assert_eq!(f.value.as_deref(), Some("01aabb"));
+        assert!(f.value_file.is_none());
+    }
+
+    #[test]
+    fn resolve_extension_fields_takes_a_file_source_without_reading_it() {
+        // The file is deliberately NOT read at config time: it is re-read per
+        // candidate build and is legitimately absent at boot.
+        let cfg = MiningConfig {
+            extension_fields: vec![CustomExtensionField {
+                key: "ae00".into(),
+                value: None,
+                value_file: Some("/definitely/not/here.hex".into()),
+            }],
+            ..Default::default()
+        };
+        let resolved = cfg.resolve_extension_fields().expect("no read at boot");
+        assert_eq!(
+            resolved,
+            vec![ExtensionFieldSource {
+                key: [0xAE, 0x00],
+                value: ExtensionValueSource::File("/definitely/not/here.hex".into()),
+            }]
+        );
+        // And a missing file must not make the node refuse to start.
+        cfg.validate()
+            .expect("an absent value_file is not a boot error");
+    }
+
+    #[test]
+    fn an_entry_must_set_exactly_one_value_source() {
+        let neither = MiningConfig {
+            extension_fields: vec![CustomExtensionField {
+                key: "ae00".into(),
+                value: None,
+                value_file: None,
+            }],
+            ..Default::default()
+        };
+        assert!(neither.resolve_extension_fields().is_err(), "neither");
+        let both = MiningConfig {
+            extension_fields: vec![CustomExtensionField {
+                key: "ae00".into(),
+                value: Some("aa".into()),
+                value_file: Some("/tmp/x.hex".into()),
+            }],
+            ..Default::default()
+        };
+        assert!(both.resolve_extension_fields().is_err(), "both");
     }
 
     #[test]
@@ -268,7 +413,8 @@ mod tests {
             miner_public_key_hex: None,
             extension_fields: vec![CustomExtensionField {
                 key: "0001".into(),
-                value: "aa".into(),
+                value: Some("aa".into()),
+                value_file: None,
             }],
             ..Default::default()
         };
@@ -277,7 +423,8 @@ mod tests {
         let short_key = MiningConfig {
             extension_fields: vec![CustomExtensionField {
                 key: "ae".into(),
-                value: "aa".into(),
+                value: Some("aa".into()),
+                value_file: None,
             }],
             ..Default::default()
         };

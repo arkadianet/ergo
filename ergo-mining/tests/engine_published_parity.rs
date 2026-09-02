@@ -694,10 +694,14 @@ fn build_and_publish_threads_handle_custom_extension_field() {
         "the custom field must change the candidate's msg (else the test is vacuous)",
     );
 
-    // Engine path: the field is configured on the HANDLE, which the engine reads
-    // via `custom_extension_fields()` and threads into `generate_candidate`.
+    // Engine path: the field is configured on the HANDLE, which the engine
+    // resolves per build (`resolve_extension_fields`) and threads into
+    // `generate_candidate`.
     let handle = handle(&regime)
-        .with_extension_fields(vec![custom.clone()])
+        .with_extension_fields(vec![ergo_mining::config::ExtensionFieldSource {
+            key: custom.0,
+            value: ergo_mining::config::ExtensionValueSource::Static(custom.1.clone()),
+        }])
         .expect("valid custom extension field");
     handle.set_best_tip(BestTip {
         parent_id: tip,
