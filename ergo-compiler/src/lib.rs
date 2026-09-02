@@ -1252,7 +1252,9 @@ pub use contract_parse::{
     parse_contract, ContractDoc, ContractParam, ContractSignature, ParameterDoc,
     ParsedContractTemplate,
 };
-pub use contract_template::{compile_contract, ContractError, ContractTemplate, Parameter};
+pub use contract_template::{
+    compile_contract, ApplyError, ContractError, ContractTemplate, Parameter,
+};
 pub use emit::{emit, emit_with_version, EmitError};
 pub use env::{lift, EnvValue, ScriptEnv};
 pub use error::ParseError;

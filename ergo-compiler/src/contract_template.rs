@@ -27,10 +27,11 @@
 //! stay declaration-ordered regardless (mirror `assemble`). ONLY the body's
 //! `ConstantPlaceholder` substitution follows the map order.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use ergo_primitives::writer::VlqWriter;
 use ergo_ser::address::NetworkPrefix;
+use ergo_ser::ergo_tree::ErgoTree;
 use ergo_ser::opcode::{write_expr, Expr as WireExpr, IrNode, Payload};
 use ergo_ser::sigma_type::{write_type, SigmaType};
 use ergo_ser::sigma_value::{write_value, SigmaValue};
@@ -89,6 +90,32 @@ pub enum ContractError {
     /// `@contract def f(a: Int, a: Long)` with `IllegalArgumentException`).
     #[error("parameter names must be unique; found duplicate parameter with name {name}")]
     DuplicateParamName { name: String },
+}
+
+/// Why [`ContractTemplate::apply`] refused to produce a tree. Each variant
+/// mirrors a `require(...)` in Scala's `applyTemplate`
+/// (`sdk/.../ContractTemplate.scala:147-181`), which throws
+/// `IllegalArgumentException` for the same conditions.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ApplyError {
+    /// A parameter with no default was not given a value
+    /// (`value for parameter `x` was not provided while it does not have a
+    /// default value`).
+    #[error("value for parameter `{name}` was not provided and it has no default")]
+    MissingParameter { name: String },
+    /// The value's type differs from the declared constant type
+    /// (`parameter type mismatch, expected T, got U`).
+    #[error("parameter `{name}`: type mismatch, expected {expected:?}, got {got:?}")]
+    TypeMismatch {
+        name: String,
+        expected: Box<SigmaType>,
+        got: Box<SigmaType>,
+    },
+    /// A value was supplied for a name that is not a template parameter.
+    /// Scala silently ignores extras; refusing them is stricter, never
+    /// looser, and catches the misspelling a caller would otherwise miss.
+    #[error("`{name}` is not a parameter of this template")]
+    UnknownParameter { name: String },
 }
 
 /// Compile an ErgoScript contract-template source into a [`ContractTemplate`].
@@ -250,6 +277,78 @@ fn literal_payload(e: &Expr) -> Option<ConstPayload> {
 }
 
 impl ContractTemplate {
+    /// Instantiate the template into an [`ErgoTree`] — Scala's
+    /// `ContractTemplate.applyTemplate(Some(version), paramValues)`
+    /// (`sdk/.../ContractTemplate.scala:147-181`).
+    ///
+    /// The constants table is rebuilt slot by slot: a slot whose parameter
+    /// was given a value takes it (type-checked against `constTypes[i]`),
+    /// otherwise the declared default; a slot with neither is an error. The
+    /// body is the template's `expressionTree` unchanged — its
+    /// `ConstantPlaceholder(i)` nodes now resolve against the new table. The
+    /// header is `setConstantSegregation(headerWithVersion(version))`, so
+    /// `has_size` follows Scala's rule of the size bit for version > 0.
+    ///
+    /// Byte parity is graded by `tests/contract_template_parity.rs` against
+    /// the JVM oracle's `ap` verb (`test-vectors/ergoscript/contract/apply_seed.json`).
+    pub fn apply(
+        &self,
+        tree_version: u8,
+        values: &BTreeMap<String, (SigmaType, SigmaValue)>,
+    ) -> Result<ErgoTree, ApplyError> {
+        for name in values.keys() {
+            if !self.parameters.iter().any(|p| &p.name == name) {
+                return Err(ApplyError::UnknownParameter { name: name.clone() });
+            }
+        }
+
+        let mut constants: Vec<(SigmaType, SigmaValue)> =
+            Vec::with_capacity(self.const_types.len());
+        for (i, tpe) in self.const_types.iter().enumerate() {
+            let param = self
+                .parameters
+                .iter()
+                .find(|p| p.constant_index as usize == i);
+            let given = param.and_then(|p| values.get(&p.name));
+            let value = match given {
+                Some((got, v)) => {
+                    if got != tpe {
+                        return Err(ApplyError::TypeMismatch {
+                            name: param.map(|p| p.name.clone()).unwrap_or_default(),
+                            expected: Box::new(tpe.clone()),
+                            got: Box::new(got.clone()),
+                        });
+                    }
+                    v.clone()
+                }
+                None => match self
+                    .const_values
+                    .as_ref()
+                    .and_then(|cv| cv.get(i))
+                    .and_then(|d| d.as_ref())
+                {
+                    Some((_, default)) => default.clone(),
+                    None => {
+                        return Err(ApplyError::MissingParameter {
+                            name: param
+                                .map(|p| p.name.clone())
+                                .unwrap_or_else(|| format!("#{i}")),
+                        })
+                    }
+                },
+            };
+            constants.push((tpe.clone(), value));
+        }
+
+        Ok(ErgoTree {
+            version: tree_version,
+            has_size: tree_version > 0,
+            constant_segregation: true,
+            constants,
+            body: self.expression_tree.clone(),
+        })
+    }
+
     /// Serialize the raw `expressionTree` value bytes
     /// (`ValueSerializer.serialize(expressionTree, w)`), the natural byte-exact
     /// oracle target (ContractTemplate JSON `expressionTree` field / binary

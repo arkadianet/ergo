@@ -1,0 +1,135 @@
+{
+  "_captured": "2026-09-03",
+  "_format": "verb ap; oracle reply verbatim. 'OK <hex>' = ErgoTreeSerializer.DefaultSerializer.serializeErgoTree(ContractTemplate.applyTemplate(Some(tree_version), values)) as Base16; 'REJECT 0:0 IllegalArgumentException <message>' for a failed require.",
+  "_source": "TyperOracle.scala ap verb, scala-cli sigma-state 6.0.2 (Scala 2.12.21, JVM 17), ORACLE_TREE_VERSION=3, ORACLE_NETWORK=testnet. Sources are the contract_seed.json vectors named by `vector`; `args` is name=Type:literal,... (empty = defaults only).",
+  "vectors": [
+    {
+      "name": "no_params_v0",
+      "vector": "bare_no_params",
+      "tree_version": 0,
+      "args": "",
+      "source": "/**\n * A contract with no parameters.\n */\n@contract def bare() = sigmaProp(HEIGHT > 1000)\n",
+      "oracle": "OK 1000d191a304d00f"
+    },
+    {
+      "name": "no_params_v3",
+      "vector": "bare_no_params",
+      "tree_version": 3,
+      "args": "",
+      "source": "/**\n * A contract with no parameters.\n */\n@contract def bare() = sigmaProp(HEIGHT > 1000)\n",
+      "oracle": "OK 1b0700d191a304d00f"
+    },
+    {
+      "name": "one_required_v0",
+      "vector": "one_param_no_default",
+      "tree_version": 0,
+      "args": "threshold=Int:1500",
+      "source": "/**\n * Height-locked contract.\n * @param threshold the minimum height\n */\n@contract def heightLock(threshold: Int) = sigmaProp(HEIGHT > threshold)\n",
+      "oracle": "OK 100104b817d191a37300"
+    },
+    {
+      "name": "one_required_v3",
+      "vector": "one_param_no_default",
+      "tree_version": 3,
+      "args": "threshold=Int:1500",
+      "source": "/**\n * Height-locked contract.\n * @param threshold the minimum height\n */\n@contract def heightLock(threshold: Int) = sigmaProp(HEIGHT > threshold)\n",
+      "oracle": "OK 1b090104b817d191a37300"
+    },
+    {
+      "name": "one_required_v1",
+      "vector": "one_param_no_default",
+      "tree_version": 1,
+      "args": "threshold=Int:1500",
+      "source": "/**\n * Height-locked contract.\n * @param threshold the minimum height\n */\n@contract def heightLock(threshold: Int) = sigmaProp(HEIGHT > threshold)\n",
+      "oracle": "OK 19090104b817d191a37300"
+    },
+    {
+      "name": "one_default_used",
+      "vector": "one_param_with_default",
+      "tree_version": 0,
+      "args": "",
+      "source": "/**\n * Height-locked contract with a default.\n * @param threshold the minimum height\n */\n@contract def heightLock(threshold: Int = 1000) = sigmaProp(HEIGHT > threshold)\n",
+      "oracle": "OK 100104d00fd191a37300"
+    },
+    {
+      "name": "one_default_overridden",
+      "vector": "one_param_with_default",
+      "tree_version": 0,
+      "args": "threshold=Int:7",
+      "source": "/**\n * Height-locked contract with a default.\n * @param threshold the minimum height\n */\n@contract def heightLock(threshold: Int = 1000) = sigmaProp(HEIGHT > threshold)\n",
+      "oracle": "OK 1001040ed191a37300"
+    },
+    {
+      "name": "mixed_default_used",
+      "vector": "mixed_default",
+      "tree_version": 0,
+      "args": "base=Long:10",
+      "source": "/**\n * One defaulted, one not.\n * @param base base value\n * @param delta the increment\n */\n@contract def mixed(base: Long, delta: Long = 5L) = sigmaProp(base + delta > 0L)\n",
+      "oracle": "OK 10020514050ad1919a730073010500"
+    },
+    {
+      "name": "mixed_both_given",
+      "vector": "mixed_default",
+      "tree_version": 3,
+      "args": "base=Long:10,delta=Long:1",
+      "source": "/**\n * One defaulted, one not.\n * @param base base value\n * @param delta the increment\n */\n@contract def mixed(base: Long, delta: Long = 5L) = sigmaProp(base + delta > 0L)\n",
+      "oracle": "OK 1b0e0205140502d1919a730073010500"
+    },
+    {
+      "name": "two_bool",
+      "vector": "two_params_bool",
+      "tree_version": 0,
+      "args": "enabled=Boolean:true,threshold=Int:5",
+      "source": "/**\n * Combines a parameter flag with a height check.\n * @param enabled whether the lock is active\n * @param threshold the minimum height\n */\n@contract def flagLock(enabled: Boolean, threshold: Int) = sigmaProp(enabled && HEIGHT > threshold)\n",
+      "oracle": "OK 10020101040ad1ed730091a37301"
+    },
+    {
+      "name": "four_params",
+      "vector": "four_params",
+      "tree_version": 0,
+      "args": "a=Int:1,b=Int:2,c=Int:3,d=Int:4",
+      "source": "/**\n * Four-parameter arithmetic gate.\n * @param a first\n * @param b second\n * @param c third\n * @param d fourth\n */\n@contract def gate4(a: Int, b: Int, c: Int, d: Int) = sigmaProp(a + b + c + d > 0)\n",
+      "oracle": "OK 10040402040404060408d1919a9a9a73007301730273030400"
+    },
+    {
+      "name": "five_params_hashorder",
+      "vector": "five_params",
+      "tree_version": 0,
+      "args": "a=Int:1,b=Int:2,c=Int:3,d=Int:4,e=Int:5",
+      "source": "/**\n * Five params \u2014 exercises the deferred HashMap-order path.\n * @param a a\n * @param b b\n * @param c c\n * @param d d\n * @param e e\n */\n@contract def gate5(a: Int, b: Int, c: Int, d: Int, e: Int) = sigmaProp(a + b + c + d + e > 0)\n",
+      "oracle": "OK 10050402040404060408040ad1919a9a9a9a730173027303730473000400"
+    },
+    {
+      "name": "five_hashorder_vec",
+      "vector": "five_hashorder",
+      "tree_version": 3,
+      "args": "alpha=Int:1,beta=Int:2,gamma=Int:3,delta=Int:4,epsilon=Int:5",
+      "source": "/**\n * Five SigmaProp params whose HashTrieMap iteration order (2.12) differs from\n * both declaration and alphabetical order \u2014 the recon's p5 discriminator.\n */\n@contract def gate5h(zeta: SigmaProp, alpha: SigmaProp, mike: SigmaProp, bravo: SigmaProp, oscar: SigmaProp) = zeta && alpha && mike && bravo && oscar\n",
+      "oracle": "REJECT 0:0 IllegalArgumentException requirement_failed:_value_for_parameter_`zeta`_was_not_provided_while_it_does_not_have_a_default_value."
+    },
+    {
+      "name": "str_defaults",
+      "vector": "str_multi_param",
+      "tree_version": 0,
+      "args": "",
+      "source": "/**\n * Mixed params with a string default carrying a comma and paren.\n */\n@contract def strMulti(a: Int = 1, s: String = \"x,y)\", b: Int = 2) = sigmaProp(HEIGHT > a && HEIGHT > b)\n",
+      "oracle": "OK 100304026604782c79290404d1ed91a3730091a37302"
+    },
+    {
+      "name": "missing_required",
+      "vector": "one_param_no_default",
+      "tree_version": 0,
+      "args": "",
+      "source": "/**\n * Height-locked contract.\n * @param threshold the minimum height\n */\n@contract def heightLock(threshold: Int) = sigmaProp(HEIGHT > threshold)\n",
+      "oracle": "REJECT 0:0 IllegalArgumentException requirement_failed:_value_for_parameter_`threshold`_was_not_provided_while_it_does_not_have_a_default_value."
+    },
+    {
+      "name": "type_mismatch",
+      "vector": "one_param_no_default",
+      "tree_version": 0,
+      "args": "threshold=Long:1500",
+      "source": "/**\n * Height-locked contract.\n * @param threshold the minimum height\n */\n@contract def heightLock(threshold: Int) = sigmaProp(HEIGHT > threshold)\n",
+      "oracle": "REJECT 0:0 IllegalArgumentException requirement_failed:_parameter_type_mismatch,_expected_SInt$,_got_SLong$"
+    }
+  ]
+}
