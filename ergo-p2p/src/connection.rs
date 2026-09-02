@@ -4,13 +4,15 @@
 //! Provides `read_message()` and `write_message()` that handle
 //! frame encoding/decoding, buffering, and checksum verification.
 
+use std::collections::HashSet;
 use std::io;
-use std::sync::Arc;
+use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 use crate::framing::{self, FrameError, FrameHeader, MessageFrame, HEADER_LENGTH};
 
@@ -32,6 +34,19 @@ pub const READ_BUF_SIZE: usize = 65_536;
 /// its reader — and whatever budget it has been admitted — until the
 /// 600 s inactivity sweep.
 pub const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a peer has to produce the FIRST byte of a body after its
+/// header is complete.
+///
+/// Deliberately much shorter than [`BODY_IDLE_TIMEOUT`]. A header costs
+/// 9 bytes and, for a frame too large to read in one go, claims a
+/// [`ReadBudget`] slot — so the cheapest attack on the slot pool is to
+/// send headers and nothing else. Holding a slot for 30 s on the
+/// strength of 9 bytes is far too generous; a peer that has just
+/// announced a frame is already sending it, so 5 s is ample for an
+/// honest one. Once any body byte arrives the per-progress
+/// [`BODY_IDLE_TIMEOUT`] takes over and slow senders are safe.
+pub const FIRST_BODY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Wire bytes ONE reader may hold while it is still waiting for more of
 /// its frame: the whole frame plus the read it has in flight.
@@ -68,21 +83,66 @@ pub const PER_READER_MAX: usize = framing::wire_len(MAX_PAYLOAD_SIZE) + READ_BUF
 ///    stuck mid-frame is cut loose by [`BODY_IDLE_TIMEOUT`]. So a
 ///    slot-holder's wait is always finite even when non-slot holders
 ///    have transiently taken more than the arithmetic reserves for them.
+/// 4. **One slot per remote address.** A single address cannot hold two
+///    slots at once, so occupying the pool costs an attacker one
+///    distinct address per slot — across at least ⌈slots/3⌉ different
+///    /16s, given the per-subnet connection limit. An honest peer
+///    streams one frame at a time and never meets this cap.
 #[derive(Clone)]
 pub struct ReadBudget {
     bytes: Arc<Semaphore>,
     slots: Arc<Semaphore>,
+    /// Remote addresses currently holding a slot, and the wakeup for
+    /// readers queued behind one. A `HashSet` guarded by a plain mutex:
+    /// the critical section is an insert or a remove, never an await.
+    ip_slots: Arc<Mutex<HashSet<IpAddr>>>,
+    ip_notify: Arc<Notify>,
+    capacity: usize,
+    /// Whether the one-slot-per-address cap applies. Always true in
+    /// production; tests that need many concurrent slot-holders turn it
+    /// off, since every loopback connection shares one address.
+    per_address_cap: bool,
 }
 
 impl ReadBudget {
     /// Build a budget of `budget_bytes`, with the slot count that keeps
     /// hold-and-wait readers collectively inside it.
+    ///
+    /// # Panics
+    ///
+    /// If `budget_bytes` cannot cover a single maximal frame. A budget
+    /// that small has no valid slot count: the final charge for a
+    /// maximal frame would exceed the semaphore's total permits and park
+    /// forever. Production runs 256 MiB against a 8.26 MB
+    /// [`PER_READER_MAX`].
     pub fn new(budget_bytes: usize) -> Self {
+        assert!(
+            budget_bytes >= PER_READER_MAX,
+            "read budget of {budget_bytes} B cannot admit one maximal frame ({PER_READER_MAX} B)"
+        );
+        Self::with_slots(budget_bytes, budget_bytes / PER_READER_MAX, true)
+    }
+
+    /// A budget for exercising the SLOT pool on its own: the
+    /// per-address cap is off, because every loopback connection shares
+    /// one address and would otherwise serialise the readers and hide
+    /// what the pool does. `slots: None` removes the pool as well —
+    /// the state this branch's deadlock lived in — so a negative control
+    /// can prove the workload still deadlocks without it. Never built by
+    /// production code.
+    #[cfg(test)]
+    pub fn for_slot_contention_test(budget_bytes: usize, slots: Option<usize>) -> Self {
+        Self::with_slots(budget_bytes, slots.unwrap_or(Semaphore::MAX_PERMITS), false)
+    }
+
+    fn with_slots(budget_bytes: usize, slots: usize, per_address_cap: bool) -> Self {
         Self {
             bytes: Arc::new(Semaphore::new(budget_bytes)),
-            // At least one, so a budget smaller than a single maximal
-            // frame still makes progress (serially) instead of stalling.
-            slots: Arc::new(Semaphore::new((budget_bytes / PER_READER_MAX).max(1))),
+            slots: Arc::new(Semaphore::new(slots)),
+            ip_slots: Arc::new(Mutex::new(HashSet::new())),
+            ip_notify: Arc::new(Notify::new()),
+            capacity: budget_bytes,
+            per_address_cap,
         }
     }
 
@@ -91,9 +151,57 @@ impl ReadBudget {
         &self.bytes
     }
 
+    /// Total bytes this budget can ever grant.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     /// Hold-and-wait reader slots not currently in use.
     pub fn slots_available(&self) -> usize {
         self.slots.available_permits()
+    }
+
+    /// Claim `ip`'s single slot entitlement, waiting — holding nothing —
+    /// until any earlier large frame from the same address finishes.
+    async fn claim_ip(&self, ip: IpAddr) -> IpClaim {
+        loop {
+            // Register for the wakeup BEFORE looking, or a release
+            // between the check and the wait would be missed.
+            let notified = self.ip_notify.notified();
+            if self.lock_ips().insert(ip) {
+                return IpClaim {
+                    ip,
+                    ip_slots: Arc::clone(&self.ip_slots),
+                    ip_notify: Arc::clone(&self.ip_notify),
+                };
+            }
+            notified.await;
+        }
+    }
+
+    fn lock_ips(&self) -> std::sync::MutexGuard<'_, HashSet<IpAddr>> {
+        // The guarded section cannot panic, so poisoning is unreachable;
+        // recovering rather than propagating keeps a poisoned lock from
+        // taking the whole P2P stack down if that ever changes.
+        self.ip_slots.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// One address's claim on the slot pool, released on drop — including
+/// when the reader is cancelled mid-frame.
+struct IpClaim {
+    ip: IpAddr,
+    ip_slots: Arc<Mutex<HashSet<IpAddr>>>,
+    ip_notify: Arc<Notify>,
+}
+
+impl Drop for IpClaim {
+    fn drop(&mut self) {
+        self.ip_slots
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.ip);
+        self.ip_notify.notify_waiters();
     }
 }
 
@@ -109,6 +217,11 @@ pub struct Connection {
     /// `read_buf` until the read returns.
     scratch: Box<[u8]>,
     body_idle_timeout: Duration,
+    first_body_timeout: Duration,
+    /// Remote address, resolved once at construction: the key for the
+    /// per-address slot cap. `None` only if the socket was already gone,
+    /// in which case the next read fails anyway.
+    peer_ip: Option<IpAddr>,
 }
 
 /// Failures produced by [`Connection::read_message`] /
@@ -155,12 +268,15 @@ impl Connection {
     }
 
     fn with_buf(stream: TcpStream, magic: [u8; 4], read_buf: Vec<u8>) -> Self {
+        let peer_ip = stream.peer_addr().ok().map(|addr| addr.ip());
         Self {
             stream,
             magic,
             read_buf,
             scratch: vec![0u8; READ_BUF_SIZE].into_boxed_slice(),
             body_idle_timeout: BODY_IDLE_TIMEOUT,
+            first_body_timeout: FIRST_BODY_TIMEOUT,
+            peer_ip,
         }
     }
 
@@ -169,6 +285,14 @@ impl Connection {
     /// the deadline firing shorten it.
     pub fn with_body_idle_timeout(mut self, timeout: Duration) -> Self {
         self.body_idle_timeout = timeout;
+        self
+    }
+
+    /// Override the deadline for the first byte of a body. Production
+    /// runs the [`FIRST_BODY_TIMEOUT`] default; tests that need to watch
+    /// a header-only staller lose its slot shorten it.
+    pub fn with_first_body_timeout(mut self, timeout: Duration) -> Self {
+        self.first_body_timeout = timeout;
         self
     }
 
@@ -303,22 +427,38 @@ impl Connection {
         let header = self.read_frame_header().await?;
         let want = framing::wire_len(header.payload_len);
 
-        // Rule 1 and 2 of `ReadBudget`: a frame that cannot be finished
-        // in a single read will have to top its charge up mid-flight, so
-        // it takes a slot FIRST — while holding no byte permits. A frame
-        // that fits one read charges once below and never waits holding
-        // anything, so it needs no slot and cannot queue behind block
-        // bodies.
+        // Rules 1, 2 and 4 of `ReadBudget`: a frame that cannot be
+        // finished in a single read will have to top its charge up
+        // mid-flight, so it takes admission FIRST — while holding no byte
+        // permits. A frame that fits one read charges once below and
+        // never waits holding anything, so it needs no admission at all
+        // and cannot queue behind block bodies.
+        //
+        // The waits are strictly ordered — address claim, then slot, then
+        // bytes — and nothing ever waits in the other direction, so the
+        // three cannot form a cycle.
+        let mut _claim = None;
         let _slot = match budget {
-            Some(budget) if want.saturating_sub(self.read_buf.len()) > READ_BUF_SIZE => Some(
-                Arc::clone(&budget.slots)
-                    .acquire_owned()
-                    .await
-                    .map_err(|_| ConnectionError::BudgetClosed)?,
-            ),
+            Some(budget) if want.saturating_sub(self.read_buf.len()) > READ_BUF_SIZE => {
+                if budget.per_address_cap {
+                    if let Some(ip) = self.peer_ip {
+                        _claim = Some(budget.claim_ip(ip).await);
+                    }
+                }
+                Some(
+                    Arc::clone(&budget.slots)
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| ConnectionError::BudgetClosed)?,
+                )
+            }
             _ => None,
         };
 
+        // Until the first body byte lands, the peer is on the short
+        // leash: a bare header must not hold a slot for the full
+        // no-progress deadline.
+        let mut body_started = false;
         let mut held: Option<OwnedSemaphorePermit> = None;
         loop {
             match framing::deserialize_frame(&self.magic, &self.read_buf) {
@@ -372,10 +512,18 @@ impl Connection {
                     }
 
                     // Per-read, so the deadline restarts on every byte a
-                    // slow-but-honest peer delivers.
-                    tokio::time::timeout(self.body_idle_timeout, self.fill(chunk))
+                    // slow-but-honest peer delivers — but the FIRST body
+                    // byte is on the short deadline, so a header-only
+                    // staller gives its slot back in seconds.
+                    let deadline = if body_started {
+                        self.body_idle_timeout
+                    } else {
+                        self.first_body_timeout
+                    };
+                    tokio::time::timeout(deadline, self.fill(chunk))
                         .await
                         .map_err(|_| ConnectionError::FrameStalled { got, want })??;
+                    body_started = true;
                 }
                 Err(e) => {
                     // Protocol error — clear buffer and return error
@@ -454,7 +602,41 @@ mod tests {
     /// instead of the production 30 s.
     async fn connected_pair_with_idle(idle: Duration) -> (Connection, Connection) {
         let (client, server) = connected_pair().await;
-        (client, server.with_body_idle_timeout(idle))
+        (
+            client,
+            server
+                .with_body_idle_timeout(idle)
+                .with_first_body_timeout(idle),
+        )
+    }
+
+    /// A loopback pair whose server side distinguishes the two deadlines.
+    async fn connected_pair_with_deadlines(
+        first_body: Duration,
+        idle: Duration,
+    ) -> (Connection, Connection) {
+        let (client, server) = connected_pair().await;
+        (
+            client,
+            server
+                .with_body_idle_timeout(idle)
+                .with_first_body_timeout(first_body),
+        )
+    }
+
+    /// One loopback connection whose server side is metered, with both
+    /// deadlines long enough to be irrelevant to the test.
+    async fn metered_pair() -> (TcpStream, Connection) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        (
+            client,
+            Connection::new(server, MAINNET_MAGIC)
+                .with_body_idle_timeout(Duration::from_secs(30))
+                .with_first_body_timeout(Duration::from_secs(30)),
+        )
     }
 
     /// The 9-byte framing header a frame with `payload_len` payload bytes
@@ -776,7 +958,7 @@ mod tests {
             .unwrap();
         server.read_frame_header().await.unwrap();
 
-        let budget = ReadBudget::new(MAX_PAYLOAD_SIZE);
+        let budget = ReadBudget::new(PER_READER_MAX);
         let observed = Arc::new(AtomicBool::new(false));
         let (probe_budget, probe_seen) = (budget.clone(), observed.clone());
         let probe = tokio::spawn(async move {
@@ -798,15 +980,12 @@ mod tests {
         assert!(observed.load(Ordering::Relaxed));
         assert_eq!(
             available,
-            MAX_PAYLOAD_SIZE - (HEADER_LENGTH + READ_BUF_SIZE),
+            PER_READER_MAX - (HEADER_LENGTH + READ_BUF_SIZE),
             "a bare header must hold the bytes it has plus one read chunk"
         );
         // Cancelling the read released both the bytes and the slot.
-        assert_eq!(budget.bytes().available_permits(), MAX_PAYLOAD_SIZE);
-        assert_eq!(
-            budget.slots_available(),
-            ReadBudget::new(MAX_PAYLOAD_SIZE).slots_available()
-        );
+        assert_eq!(budget.bytes().available_permits(), PER_READER_MAX);
+        assert_eq!(budget.slots_available(), 1);
         drop(client);
     }
 
@@ -821,7 +1000,7 @@ mod tests {
             client
         });
 
-        let budget = ReadBudget::new(MAX_PAYLOAD_SIZE);
+        let budget = ReadBudget::new(PER_READER_MAX);
         server.read_frame_header().await.unwrap();
         let (frame, permit) = server.read_frame_body_metered(&budget).await.unwrap();
         assert_eq!(frame.code, 9);
@@ -837,7 +1016,7 @@ mod tests {
             payload.len()
         );
         drop(permit);
-        assert_eq!(budget.bytes().available_permits(), MAX_PAYLOAD_SIZE);
+        assert_eq!(budget.bytes().available_permits(), PER_READER_MAX);
         let _client = writer.await.unwrap();
     }
 
@@ -914,5 +1093,267 @@ mod tests {
         let frame = waiting.await.unwrap().expect("frame after a long idle");
         assert_eq!(frame.code, 3);
         assert_eq!(frame.payload, vec![1, 2, 3]);
+    }
+
+    // ----- helpers: mixed-reader workload -----
+
+    const LARGE_READERS: usize = 40;
+    const SMALL_READERS: usize = 40;
+    const LARGE_FRAME: usize = 3 << 20;
+    /// Enough of each large frame to put every large reader mid-body,
+    /// holding permits and needing more, at the same moment.
+    const LARGE_PART_ONE: usize = 2 << 20;
+    const SMALL_FRAME: usize = 32 * 1024;
+
+    /// Drive `LARGE_READERS` readers whose senders pause mid-frame plus
+    /// `SMALL_READERS` single-chunk readers against `budget`, and return
+    /// how many finished within `watchdog` — `None` if they did not all
+    /// finish, which for this workload means they deadlocked.
+    async fn run_mixed_readers(budget: &ReadBudget, watchdog: Duration) -> Option<usize> {
+        // The senders' pause must actually exhaust the budget, or the
+        // deadlock this pins cannot form.
+        assert!(
+            LARGE_READERS * LARGE_PART_ONE > budget.capacity(),
+            "the paused senders must over-subscribe the budget"
+        );
+
+        let mut tasks = Vec::with_capacity(LARGE_READERS + SMALL_READERS);
+        for i in 0..LARGE_READERS {
+            let (mut client, mut server) = metered_pair().await;
+            let bytes = serialize_frame(
+                &MAINNET_MAGIC,
+                &MessageFrame {
+                    code: 88,
+                    payload: vec![i as u8; LARGE_FRAME],
+                },
+            );
+            let writer = tokio::spawn(async move {
+                client.write_all(&bytes[..LARGE_PART_ONE]).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                client.write_all(&bytes[LARGE_PART_ONE..]).await.unwrap();
+                client
+            });
+            let budget = budget.clone();
+            tasks.push(tokio::spawn(async move {
+                server.read_frame_header().await.unwrap();
+                let (frame, permit) = server.read_frame_body_metered(&budget).await.unwrap();
+                assert_eq!(frame.payload.len(), LARGE_FRAME);
+                // Drain, as the action loop does.
+                drop(permit);
+                let _client = writer.await.unwrap();
+            }));
+        }
+        for _ in 0..SMALL_READERS {
+            let (mut client, mut server) = metered_pair().await;
+            let bytes = serialize_frame(
+                &MAINNET_MAGIC,
+                &MessageFrame {
+                    code: 7,
+                    payload: vec![0x5A; SMALL_FRAME],
+                },
+            );
+            let writer = tokio::spawn(async move {
+                client.write_all(&bytes).await.unwrap();
+                client
+            });
+            let budget = budget.clone();
+            tasks.push(tokio::spawn(async move {
+                server.read_frame_header().await.unwrap();
+                let (frame, permit) = server.read_frame_body_metered(&budget).await.unwrap();
+                assert_eq!(frame.payload.len(), SMALL_FRAME);
+                drop(permit);
+                let _client = writer.await.unwrap();
+            }));
+        }
+
+        let total = tasks.len();
+        tokio::time::timeout(watchdog, async {
+            for task in tasks {
+                task.await.unwrap();
+            }
+            total
+        })
+        .await
+        .ok()
+    }
+
+    // ----- admission control -----
+
+    /// #280 P0 — the hold-and-wait deadlock. Readers charged per read
+    /// hold permits for what they have taken in and then wait for more.
+    /// Concurrent readers whose COMBINED demand exceeds the budget used
+    /// to split it between themselves, park needing one more chunk each,
+    /// and never complete — nothing is enqueued, so no payload is ever
+    /// dropped and no permit ever comes back. All P2P reading stops,
+    /// permanently.
+    ///
+    /// Forty large readers whose senders pause mid-frame put every one of
+    /// them in that state at the same moment (40 x 2 MiB of demand
+    /// against an 8-slot budget of 66 MB), and forty single-chunk readers
+    /// contend alongside them. Every reader must finish.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_readers_over_budget_all_complete() {
+        // Per-address cap off: every loopback reader shares one address,
+        // and this test is about the SLOT pool. The cap has its own test.
+        let budget = ReadBudget::for_slot_contention_test(8 * PER_READER_MAX, Some(8));
+        assert_eq!(budget.slots_available(), 8);
+        let done = run_mixed_readers(&budget, Duration::from_secs(60)).await;
+        assert_eq!(done, Some(LARGE_READERS + SMALL_READERS));
+        assert_eq!(
+            budget.bytes().available_permits(),
+            budget.capacity(),
+            "every byte permit is returned once the payloads are drained"
+        );
+        assert_eq!(budget.slots_available(), 8, "every slot is returned");
+    }
+
+    /// The negative control for the test above: the SAME workload with
+    /// the slot pool removed must deadlock. Without this, that test only
+    /// proves the workload runs — not that the pool is what carries it.
+    /// Bounded by a watchdog so a failure is a timeout, not a hung suite.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_readers_over_budget_deadlock_without_slot_pool() {
+        let budget = ReadBudget::for_slot_contention_test(8 * PER_READER_MAX, None);
+        let done = run_mixed_readers(&budget, Duration::from_secs(10)).await;
+        assert_eq!(
+            done, None,
+            "without the slot pool these readers must deadlock — if this \
+             passes, the pool is no longer what makes the workload finish"
+        );
+        assert!(
+            budget.bytes().available_permits() < PER_READER_MAX,
+            "the deadlocked readers should be holding the budget between them"
+        );
+    }
+
+    /// Rule 4: one slot per remote address. A second large frame from an
+    /// address already holding a slot waits for the first to finish, so
+    /// occupying the pool costs an attacker one address per slot rather
+    /// than one socket. An honest peer streams one frame at a time and
+    /// never meets the cap.
+    #[tokio::test]
+    async fn same_address_cannot_hold_two_slots() {
+        let budget = ReadBudget::new(PER_READER_MAX);
+        assert!(budget.slots_available() >= 1);
+
+        // Two connections from the same loopback address, each announcing
+        // a frame far too large for one read and then going quiet.
+        let (mut client_a, mut conn_a) = metered_pair().await;
+        let (mut client_b, mut conn_b) = metered_pair().await;
+        for client in [&mut client_a, &mut client_b] {
+            client
+                .write_all(&header_bytes(55, MAX_PAYLOAD_SIZE as i32))
+                .await
+                .unwrap();
+        }
+
+        let budget_a = budget.clone();
+        let first = tokio::spawn(async move {
+            conn_a.read_frame_header().await.unwrap();
+            let _ = conn_a.read_frame_body_metered(&budget_a).await;
+        });
+        // Let the first reader take the address's claim.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            budget.slots_available(),
+            0,
+            "the first reader holds the slot"
+        );
+
+        let budget_b = budget.clone();
+        let second = tokio::spawn(async move {
+            conn_b.read_frame_header().await.unwrap();
+            let _ = conn_b.read_frame_body_metered(&budget_b).await;
+            conn_b
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !second.is_finished(),
+            "a second large frame from the same address must wait"
+        );
+        assert_eq!(
+            budget.bytes().available_permits(),
+            budget.capacity() - (HEADER_LENGTH + READ_BUF_SIZE),
+            "the waiting reader must hold NO bytes — it waits before charging"
+        );
+
+        first.abort();
+        let _ = first.await;
+        // With the address free, the second reader takes the slot.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(budget.slots_available(), 0, "the slot passes to the waiter");
+        second.abort();
+        let _ = second.await;
+        assert_eq!(budget.slots_available(), 1, "and comes back on cancel");
+        drop((client_a, client_b));
+    }
+
+    /// A header costs 9 bytes but claims a slot, so a header-only staller
+    /// is the cheapest attack on the pool. The FIRST body byte is on a
+    /// deadline of its own, much shorter than the no-progress one, so
+    /// that slot comes back in seconds rather than in
+    /// `BODY_IDLE_TIMEOUT`.
+    #[tokio::test]
+    async fn header_only_staller_loses_its_slot_on_the_first_body_deadline() {
+        // First-body deadline an order of magnitude under the idle one,
+        // mirroring the production 5 s against 30 s.
+        let (mut client, mut server) =
+            connected_pair_with_deadlines(Duration::from_millis(150), Duration::from_secs(30))
+                .await;
+        client
+            .stream
+            .write_all(&header_bytes(55, MAX_PAYLOAD_SIZE as i32))
+            .await
+            .unwrap();
+
+        let budget = ReadBudget::new(PER_READER_MAX);
+        server.read_frame_header().await.unwrap();
+
+        let started = std::time::Instant::now();
+        let result = server.read_frame_body_metered(&budget).await;
+        assert!(
+            matches!(result, Err(ConnectionError::FrameStalled { .. })),
+            "expected FrameStalled, got {result:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the staller must lose its slot on the FIRST-body deadline, \
+             not the 30 s no-progress one (took {:?})",
+            started.elapsed()
+        );
+        assert_eq!(budget.slots_available(), 1, "the slot is returned");
+        drop(client);
+    }
+
+    /// ...while a body that is slow but alive is untouched by the short
+    /// first-byte deadline: it only has to START within it.
+    #[tokio::test]
+    async fn slow_but_live_body_survives_the_first_body_deadline() {
+        // The first byte arrives well inside 200 ms; the rest trickles
+        // over far longer than that, on the generous no-progress budget.
+        let (mut client, mut server) =
+            connected_pair_with_deadlines(Duration::from_millis(200), Duration::from_secs(30))
+                .await;
+
+        let payload = vec![0x77; 200_000];
+        let bytes = serialize_frame(&MAINNET_MAGIC, &MessageFrame { code: 31, payload });
+        let total = bytes.len();
+        let sender = tokio::spawn(async move {
+            for piece in bytes.chunks(total.div_ceil(20)) {
+                client.stream.write_all(piece).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+            client
+        });
+
+        let budget = ReadBudget::new(PER_READER_MAX);
+        server.read_frame_header().await.unwrap();
+        let (frame, _permit) = server
+            .read_frame_body_metered(&budget)
+            .await
+            .expect("a live slow body must survive the first-byte deadline");
+        assert_eq!(frame.code, 31);
+        assert_eq!(frame.payload.len(), 200_000);
+        let _client = sender.await.unwrap();
     }
 }

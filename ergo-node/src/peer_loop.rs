@@ -139,7 +139,7 @@ impl MeteredPayload {
         held: Option<tokio::sync::OwnedSemaphorePermit>,
         budget: &EventByteBudget,
     ) -> Self {
-        let need = charge_for(inner.len()) as usize;
+        let need = charge_for(inner.len(), budget.capacity()) as usize;
         let permit = match held {
             Some(mut permit) => {
                 // The read charged every wire byte it held plus a full
@@ -158,7 +158,7 @@ impl MeteredPayload {
             // The frame was already complete when the body phase began,
             // so nothing was charged for it. This acquisition holds no
             // permits while it waits, so it cannot deadlock.
-            None => acquire_budget(inner.len(), budget.bytes().clone()).await,
+            None => acquire_budget(inner.len(), budget.capacity(), budget.bytes().clone()).await,
         };
         Self {
             inner,
@@ -167,23 +167,22 @@ impl MeteredPayload {
     }
 }
 
-/// Permits one charge of `len` bytes costs.
+/// Permits one charge of `len` bytes costs against a budget of
+/// `capacity` bytes.
 ///
 /// Empty payloads still cost one permit so a flood of empty frames
 /// cannot bypass the budget entirely. Every call site charges at most
-/// one frame's worth of bytes — a payload bounded by `MAX_PAYLOAD_SIZE`,
-/// or a single `READ_BUF_SIZE` read chunk — so this fits `u32` with room
-/// to spare; the clamp to the budget's own size is belt-and-braces
-/// against a caller asking for more than the semaphore could ever grant,
-/// which would park forever rather than fail.
-fn charge_for(len: usize) -> u32 {
+/// one frame's worth of bytes — a payload bounded by `MAX_PAYLOAD_SIZE`
+/// — so this fits `u32` with room to spare; the clamp to the budget
+/// actually in hand is belt-and-braces against a request the semaphore
+/// could never grant, which would park forever rather than fail.
+fn charge_for(len: usize, capacity: usize) -> u32 {
     debug_assert!(
         len <= MAX_PAYLOAD_SIZE,
         "budget charge of {len} B exceeds one maximal frame"
     );
-    u32::try_from(len.max(1))
-        .unwrap_or(u32::MAX)
-        .min(EVENT_BYTE_BUDGET_MAX as u32)
+    let capped = len.max(1).min(capacity);
+    u32::try_from(capped).unwrap_or(u32::MAX)
 }
 
 /// Take a budget permit for `len` bytes, awaiting while the budget is
@@ -198,10 +197,11 @@ fn charge_for(len: usize) -> u32 {
 /// on drop wherever the event ends up.
 async fn acquire_budget(
     len: usize,
+    capacity: usize,
     budget: Arc<tokio::sync::Semaphore>,
 ) -> tokio::sync::OwnedSemaphorePermit {
     budget
-        .acquire_many_owned(charge_for(len))
+        .acquire_many_owned(charge_for(len, capacity))
         .await
         .expect("event byte budget semaphore is never closed")
 }
@@ -514,7 +514,7 @@ pub async fn peer_task(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ergo_p2p::connection::READ_BUF_SIZE;
+    use ergo_p2p::connection::{PER_READER_MAX, READ_BUF_SIZE};
     use ergo_p2p::framing::{HEADER_LENGTH, MAINNET_MAGIC};
     use tokio::io::AsyncWriteExt;
 
@@ -527,7 +527,8 @@ mod tests {
     }
 
     /// A connected loopback pair, server side wrapped as a `Connection`
-    /// with `idle` as its body no-progress deadline.
+    /// with `idle` as BOTH its first-body and its no-progress deadline —
+    /// tests that need to tell the two apart set them separately.
     async fn server_conn_with_idle(idle: Duration) -> (TcpStream, Connection) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -535,7 +536,9 @@ mod tests {
         let (server, _) = listener.accept().await.unwrap();
         (
             client,
-            Connection::new(server, MAINNET_MAGIC).with_body_idle_timeout(idle),
+            Connection::new(server, MAINNET_MAGIC)
+                .with_body_idle_timeout(idle)
+                .with_first_body_timeout(idle),
         )
     }
 
@@ -817,9 +820,9 @@ mod tests {
             client_conn
         });
 
-        // Sized so the frame fits with room for the one chunk that is
-        // outstanding mid-read, then held down to under a single chunk.
-        const BUDGET: usize = PAYLOAD_LEN + 2 * READ_BUF_SIZE;
+        // The smallest budget a `ReadBudget` admits — one maximal frame
+        // — then held down to under a single read chunk.
+        const BUDGET: usize = PER_READER_MAX;
         let budget = ReadBudget::new(BUDGET);
         let hold = budget
             .bytes()
@@ -865,7 +868,15 @@ mod tests {
     /// is what turns memory pressure into TCP backpressure.
     #[tokio::test]
     async fn acquisition_blocks_while_budget_exhausted() {
-        let budget = ReadBudget::new(2);
+        // Squeezed down to 2 free bytes rather than built small: a
+        // `ReadBudget` must always be able to admit a maximal frame.
+        let budget = new_event_byte_budget();
+        let squeeze = budget
+            .bytes()
+            .clone()
+            .acquire_many_owned((EVENT_BYTE_BUDGET_MAX - 2) as u32)
+            .await
+            .unwrap();
         let _hold = meter(vec![0u8; 2], &budget).await;
 
         let attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -885,6 +896,7 @@ mod tests {
         drop(_hold);
         let _p = task.await.unwrap();
         assert!(attempted.load(Ordering::Relaxed));
+        drop(squeeze);
     }
 
     /// #280: the body no-progress deadline is a peer-behaviour judgement,
@@ -931,105 +943,6 @@ mod tests {
         drop(client);
     }
 
-    /// #280 P0 — the hold-and-wait deadlock. Readers charged per read
-    /// hold permits for what they have taken in and then wait for more.
-    /// Concurrent readers whose COMBINED demand exceeds the budget used
-    /// to split it between themselves, park needing one more chunk each,
-    /// and never complete — nothing reaches the channel, so no payload is
-    /// ever dropped and no permit ever comes back. All P2P reading stops,
-    /// permanently.
-    ///
-    /// Forty concurrent readers of 1 MiB frames against a 25 MB budget is
-    /// that shape — 44 MB of concurrent demand for 25 MB of budget, and
-    /// under the unslotted code every one of them parks — so the slot
-    /// pool must get all forty through. Sizes are scaled down from the
-    /// production 256 MiB / 8 MB, which is the same ratio in 320 MB of
-    /// loopback traffic.
-    ///
-    /// Each reader drops its payload as soon as it has it, which is what
-    /// the action loop does when it drains the event; holding all forty
-    /// would exceed the budget by construction and prove nothing about
-    /// the readers.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_readers_over_budget_all_complete() {
-        const READERS: usize = 40;
-        const FRAME: usize = 1 << 20;
-        // Enough of each frame to put every reader mid-body at the same
-        // moment, holding permits and needing more.
-        const PART_ONE: usize = 700_000;
-        const BUDGET: usize = 25_000_000;
-
-        // The deadlock this pins needs every reader holding at once, so
-        // the senders deliver most of each frame, pause while the readers
-        // pile up against the budget, then finish. Checked at compile
-        // time so a later tweak to the sizes cannot quietly defuse it.
-        const _: () = assert!(READERS * PART_ONE > BUDGET);
-
-        let budget = ReadBudget::new(BUDGET);
-        let mut readers = Vec::with_capacity(READERS);
-        for i in 0..READERS {
-            let (mut client, mut server_conn) =
-                server_conn_with_idle(Duration::from_secs(30)).await;
-            let bytes = ergo_p2p::framing::serialize_frame(
-                &MAINNET_MAGIC,
-                &MessageFrame {
-                    code: 88,
-                    payload: vec![i as u8; FRAME],
-                },
-            );
-            let writer = tokio::spawn(async move {
-                client.write_all(&bytes[..PART_ONE]).await.unwrap();
-                tokio::time::sleep(Duration::from_millis(400)).await;
-                client.write_all(&bytes[PART_ONE..]).await.unwrap();
-                client
-            });
-            let reader_budget = budget.clone();
-            readers.push(tokio::spawn(async move {
-                let (code, payload) = read_metered_frame(&mut server_conn, &reader_budget)
-                    .await
-                    .expect("every reader must finish");
-                let seen = (code, payload.len(), payload[0]);
-                // Drain, as the action loop does.
-                drop(payload);
-                // Hold the writer open until its frame has been read.
-                let _client = writer.await.unwrap();
-                seen
-            }));
-        }
-
-        // Generous, but finite: a deadlock fails here instead of hanging
-        // the suite.
-        let all = tokio::time::timeout(Duration::from_secs(60), async {
-            let mut seen = Vec::with_capacity(READERS);
-            for reader in readers {
-                seen.push(reader.await.unwrap());
-            }
-            seen
-        })
-        .await
-        .expect("no reader may deadlock on the byte budget");
-
-        assert_eq!(all.len(), READERS);
-        for (i, (code, len, first)) in all.iter().enumerate() {
-            assert_eq!(*code, 88);
-            assert_eq!(*len, FRAME);
-            assert_eq!(
-                *first, i as u8,
-                "frames must not be crossed between readers"
-            );
-        }
-        assert_eq!(
-            budget.bytes().available_permits(),
-            BUDGET,
-            "every byte permit is returned once the payloads are drained"
-        );
-        assert_eq!(
-            budget.slots_available(),
-            ReadBudget::new(BUDGET).slots_available(),
-            "every slot is returned once its frame is delivered"
-        );
-    }
-
     /// The ordering rule that makes the deadlock argument sound: a frame
     /// that fits inside ONE read is charged once, up front, and never
     /// waits while holding permits — so it needs no slot, and header and
@@ -1071,7 +984,7 @@ mod tests {
     #[tokio::test]
     async fn budget_backpressure_longer_than_the_deadline_is_not_a_stall() {
         const FRAME: usize = 300_000;
-        const BUDGET: usize = FRAME + 2 * READ_BUF_SIZE;
+        const BUDGET: usize = PER_READER_MAX;
 
         // Deadline far shorter than the time we hold the budget shut,
         // but long enough that ordinary scheduling jitter once the budget
@@ -1114,10 +1027,18 @@ mod tests {
     /// never charge a payload nothing.
     #[test]
     fn charge_for_covers_every_legal_frame_size() {
-        assert_eq!(charge_for(0), 1, "an empty payload still costs a permit");
-        assert_eq!(charge_for(1), 1);
-        assert_eq!(charge_for(READ_BUF_SIZE), READ_BUF_SIZE as u32);
-        assert_eq!(charge_for(MAX_PAYLOAD_SIZE), MAX_PAYLOAD_SIZE as u32);
+        const CAP: usize = EVENT_BYTE_BUDGET_MAX;
+        assert_eq!(
+            charge_for(0, CAP),
+            1,
+            "an empty payload still costs a permit"
+        );
+        assert_eq!(charge_for(1, CAP), 1);
+        assert_eq!(charge_for(READ_BUF_SIZE, CAP), READ_BUF_SIZE as u32);
+        assert_eq!(charge_for(MAX_PAYLOAD_SIZE, CAP), MAX_PAYLOAD_SIZE as u32);
+        // Clamped to the budget IN HAND, not to the production constant:
+        // a smaller budget must never be asked for more than it holds.
+        assert_eq!(charge_for(MAX_PAYLOAD_SIZE, 1_000), 1_000);
         // Every legal charge is far below the budget, so no call is ever
         // clamped in practice — the clamp exists so an out-of-range ask
         // degrades to something the semaphore can actually grant rather
