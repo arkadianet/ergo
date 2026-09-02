@@ -70,7 +70,7 @@ pub struct MessageFrame {
 /// the same constants and pinned to it by `wire_len_matches_serialize_frame`
 /// so the two cannot drift. Used for per-peer byte accounting at the
 /// transport boundary (post-handshake framed-message bytes).
-pub fn wire_len(payload_len: usize) -> usize {
+pub const fn wire_len(payload_len: usize) -> usize {
     if payload_len > 0 {
         HEADER_LENGTH + CHECKSUM_LENGTH + payload_len
     } else {

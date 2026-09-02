@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ergo_api::SubmitError;
-use ergo_p2p::connection::{Connection, ConnectionError, MAX_PAYLOAD_SIZE};
+use ergo_p2p::connection::{Connection, ConnectionError, ReadBudget, MAX_PAYLOAD_SIZE};
 use ergo_p2p::framing::{wire_len, MessageFrame};
 use ergo_p2p::handshake::{
     deserialize_handshake_with_consumed, serialize_handshake, Handshake, PeerSpec,
@@ -48,11 +48,11 @@ pub enum PeerEvent {
     Disconnected {
         peer: SocketAddr,
         /// Score the peer before dropping it. `Some` when the disconnect
-        /// was the peer's own protocol violation — today a frame body it
-        /// declared and then stopped sending — so that an attacker who
-        /// reconnects and repeats it is banned rather than merely
-        /// dropped. `None` for ordinary socket errors and clean closes,
-        /// which say nothing about the peer's behavior.
+        /// was the peer's own failure — today a frame it started and then
+        /// stopped sending — so that a peer which reconnects and repeats
+        /// it is eventually banned rather than merely dropped. `None` for
+        /// ordinary socket errors and clean closes, which say nothing
+        /// about the peer's behavior.
         penalty: Option<Penalty>,
     },
     /// Locally-mined block submitted via `POST /blocks` (Scala-compat
@@ -105,12 +105,12 @@ pub enum PeerEvent {
 /// cannot acquire blocks BEFORE enqueueing — the socket stops being read,
 /// kernel buffers fill, and the TCP window closes on the sender. Memory
 /// pressure becomes transport backpressure instead of an OOM vector.
-pub type EventByteBudget = Arc<tokio::sync::Semaphore>;
+pub type EventByteBudget = ReadBudget;
 
 pub const EVENT_BYTE_BUDGET_MAX: usize = 256 * 1024 * 1024;
 
 pub fn new_event_byte_budget() -> EventByteBudget {
-    Arc::new(tokio::sync::Semaphore::new(EVENT_BYTE_BUDGET_MAX))
+    ReadBudget::new(EVENT_BYTE_BUDGET_MAX)
 }
 
 /// A message payload holding its byte-budget permit. The permit is
@@ -139,24 +139,26 @@ impl MeteredPayload {
         held: Option<tokio::sync::OwnedSemaphorePermit>,
         budget: &EventByteBudget,
     ) -> Self {
-        let need = charge_for(inner.len());
+        let need = charge_for(inner.len()) as usize;
         let permit = match held {
-            None => acquire_budget(inner.len(), budget.clone()).await,
             Some(mut permit) => {
+                // The read charged every wire byte it held plus a full
+                // final chunk, so it always covers the payload. Settling
+                // is therefore a RELEASE, never an acquisition: acquiring
+                // here would be a wait while holding permits, which is
+                // exactly the hold-and-wait the slot pool exists to
+                // prevent (and this path holds no slot by then).
                 let have = permit.num_permits();
-                match have.cmp(&(need as usize)) {
-                    std::cmp::Ordering::Less => {
-                        permit.merge(acquire_budget(need as usize - have, budget.clone()).await);
-                    }
-                    std::cmp::Ordering::Greater => {
-                        // `split` leaves `permit` holding exactly `need`
-                        // and hands back the excess, released on drop.
-                        drop(permit.split(have - need as usize));
-                    }
-                    std::cmp::Ordering::Equal => {}
+                debug_assert!(have >= need, "read charged {have} B for a {need} B payload");
+                if have > need {
+                    drop(permit.split(have - need));
                 }
                 permit
             }
+            // The frame was already complete when the body phase began,
+            // so nothing was charged for it. This acquisition holds no
+            // permits while it waits, so it cannot deadlock.
+            None => acquire_budget(inner.len(), budget.bytes().clone()).await,
         };
         Self {
             inner,
@@ -194,7 +196,10 @@ fn charge_for(len: usize) -> u32 {
 /// The permit is owned so it can be taken before the bytes it pays for
 /// exist, then merged with others and moved onto the payload, releasing
 /// on drop wherever the event ends up.
-async fn acquire_budget(len: usize, budget: EventByteBudget) -> tokio::sync::OwnedSemaphorePermit {
+async fn acquire_budget(
+    len: usize,
+    budget: Arc<tokio::sync::Semaphore>,
+) -> tokio::sync::OwnedSemaphorePermit {
     budget
         .acquire_many_owned(charge_for(len))
         .await
@@ -455,18 +460,20 @@ pub async fn peer_task(
                         }
                     }
                     Err(e) => {
-                        // A stalled body is a protocol violation, not a
-                        // dead socket: the peer declared bytes it then
-                        // refused to send, holding a reader and its
-                        // admitted budget. Score it so a repeat offender
-                        // is banned rather than free to reconnect.
+                        // A stall holds a reader and the budget it has
+                        // been charged, so it is scored — but a NAT reset
+                        // or a crash mid-frame looks identical to
+                        // deliberate withholding, so it gets the penalty
+                        // Scala uses for the analogous failure to deliver
+                        // (2 points), not the one for provable
+                        // misbehavior. Repetition still bans.
                         let penalty = match e {
-                            ConnectionError::BodyStalled { got, want } => {
+                            ConnectionError::FrameStalled { got, want } => {
                                 warn!(
                                     peer = %peer_id, got, want,
                                     "peer stalled mid-frame; disconnecting with penalty",
                                 );
-                                Some(Penalty::Misbehavior)
+                                Some(Penalty::NonDelivery)
                             }
                             _ => {
                                 debug!(peer = %peer_id, error = %e, "peer read error; disconnecting");
@@ -689,18 +696,18 @@ mod tests {
     #[tokio::test]
     async fn metered_payload_takes_and_releases_budget() {
         let budget = new_event_byte_budget();
-        let before = budget.available_permits();
+        let before = budget.bytes().available_permits();
 
         let payload = meter(vec![0xAB; 1_000], &budget).await;
         assert_eq!(
-            budget.available_permits(),
+            budget.bytes().available_permits(),
             before - 1_000,
             "acquisition must charge the payload's byte length"
         );
 
         drop(payload);
         assert_eq!(
-            budget.available_permits(),
+            budget.bytes().available_permits(),
             before,
             "drop must release the charged bytes"
         );
@@ -723,20 +730,25 @@ mod tests {
         });
 
         let budget = new_event_byte_budget();
-        let before = budget.available_permits();
+        let before = budget.bytes().available_permits();
         let (code, payload) = read_metered_frame(&mut server_conn, &budget)
             .await
             .expect("frame");
         assert_eq!(code, 88);
         assert_eq!(payload.len(), PAYLOAD_LEN);
         assert_eq!(
-            budget.available_permits(),
+            budget.bytes().available_permits(),
             before - PAYLOAD_LEN,
             "an enqueued payload holds exactly its own bytes"
         );
+        assert_eq!(
+            budget.slots_available(),
+            new_event_byte_budget().slots_available(),
+            "the reader slot is released with the frame"
+        );
 
         drop(payload);
-        assert_eq!(budget.available_permits(), before);
+        assert_eq!(budget.bytes().available_permits(), before);
         let _client = writer.await.unwrap();
     }
 
@@ -759,7 +771,8 @@ mod tests {
             .unwrap();
 
         let budget = new_event_byte_budget();
-        let before = budget.available_permits();
+        let before = budget.bytes().available_permits();
+        let slots_before = budget.slots_available();
         let reader_budget = budget.clone();
         let reader = tokio::spawn(async move {
             let _ = read_metered_frame(&mut server_conn, &reader_budget).await;
@@ -771,15 +784,17 @@ mod tests {
             "a body that never arrives cannot complete"
         );
         assert_eq!(
-            budget.available_permits(),
-            before - READ_BUF_SIZE,
-            "a bare header must hold one read chunk, not its declaration"
+            budget.bytes().available_permits(),
+            before - (HEADER_LENGTH + READ_BUF_SIZE),
+            "a bare header must hold the bytes it has plus one read chunk, not its declaration"
         );
 
-        // Dropping the parked reader releases the chunk: nothing strands.
+        // Dropping the parked reader releases the chunk AND the slot:
+        // nothing strands.
         reader.abort();
         let _ = reader.await;
-        assert_eq!(budget.available_permits(), before);
+        assert_eq!(budget.bytes().available_permits(), before);
+        assert_eq!(budget.slots_available(), slots_before);
         drop(client);
     }
 
@@ -805,8 +820,9 @@ mod tests {
         // Sized so the frame fits with room for the one chunk that is
         // outstanding mid-read, then held down to under a single chunk.
         const BUDGET: usize = PAYLOAD_LEN + 2 * READ_BUF_SIZE;
-        let budget: EventByteBudget = Arc::new(tokio::sync::Semaphore::new(BUDGET));
+        let budget = ReadBudget::new(BUDGET);
         let hold = budget
+            .bytes()
             .clone()
             .acquire_many_owned((BUDGET - 16) as u32)
             .await
@@ -834,12 +850,12 @@ mod tests {
         assert_eq!(code, 88);
         assert_eq!(payload.len(), PAYLOAD_LEN);
         assert_eq!(
-            budget.available_permits(),
+            budget.bytes().available_permits(),
             BUDGET - PAYLOAD_LEN,
             "the delivered payload holds exactly its own bytes"
         );
         drop(payload);
-        assert_eq!(budget.available_permits(), BUDGET);
+        assert_eq!(budget.bytes().available_permits(), BUDGET);
 
         let _client = writer.await.unwrap();
     }
@@ -849,7 +865,7 @@ mod tests {
     /// is what turns memory pressure into TCP backpressure.
     #[tokio::test]
     async fn acquisition_blocks_while_budget_exhausted() {
-        let budget: EventByteBudget = Arc::new(tokio::sync::Semaphore::new(2));
+        let budget = ReadBudget::new(2);
         let _hold = meter(vec![0u8; 2], &budget).await;
 
         let attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -905,14 +921,192 @@ mod tests {
                 assert_eq!(peer, peer_id);
                 assert_eq!(
                     penalty,
-                    Some(Penalty::Misbehavior),
-                    "a withheld body must be scored, not silently dropped"
+                    Some(Penalty::NonDelivery),
+                    "a withheld body is scored as non-delivery, not provable misbehavior"
                 );
             }
             _ => panic!("expected Disconnected"),
         }
         task.await.unwrap();
         drop(client);
+    }
+
+    /// #280 P0 — the hold-and-wait deadlock. Readers charged per read
+    /// hold permits for what they have taken in and then wait for more.
+    /// Concurrent readers whose COMBINED demand exceeds the budget used
+    /// to split it between themselves, park needing one more chunk each,
+    /// and never complete — nothing reaches the channel, so no payload is
+    /// ever dropped and no permit ever comes back. All P2P reading stops,
+    /// permanently.
+    ///
+    /// Forty concurrent readers of 1 MiB frames against a 25 MB budget is
+    /// that shape — 44 MB of concurrent demand for 25 MB of budget, and
+    /// under the unslotted code every one of them parks — so the slot
+    /// pool must get all forty through. Sizes are scaled down from the
+    /// production 256 MiB / 8 MB, which is the same ratio in 320 MB of
+    /// loopback traffic.
+    ///
+    /// Each reader drops its payload as soon as it has it, which is what
+    /// the action loop does when it drains the event; holding all forty
+    /// would exceed the budget by construction and prove nothing about
+    /// the readers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_readers_over_budget_all_complete() {
+        const READERS: usize = 40;
+        const FRAME: usize = 1 << 20;
+        // Enough of each frame to put every reader mid-body at the same
+        // moment, holding permits and needing more.
+        const PART_ONE: usize = 700_000;
+        const BUDGET: usize = 25_000_000;
+
+        // The deadlock this pins needs every reader holding at once, so
+        // the senders deliver most of each frame, pause while the readers
+        // pile up against the budget, then finish. Checked at compile
+        // time so a later tweak to the sizes cannot quietly defuse it.
+        const _: () = assert!(READERS * PART_ONE > BUDGET);
+
+        let budget = ReadBudget::new(BUDGET);
+        let mut readers = Vec::with_capacity(READERS);
+        for i in 0..READERS {
+            let (mut client, mut server_conn) =
+                server_conn_with_idle(Duration::from_secs(30)).await;
+            let bytes = ergo_p2p::framing::serialize_frame(
+                &MAINNET_MAGIC,
+                &MessageFrame {
+                    code: 88,
+                    payload: vec![i as u8; FRAME],
+                },
+            );
+            let writer = tokio::spawn(async move {
+                client.write_all(&bytes[..PART_ONE]).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                client.write_all(&bytes[PART_ONE..]).await.unwrap();
+                client
+            });
+            let reader_budget = budget.clone();
+            readers.push(tokio::spawn(async move {
+                let (code, payload) = read_metered_frame(&mut server_conn, &reader_budget)
+                    .await
+                    .expect("every reader must finish");
+                let seen = (code, payload.len(), payload[0]);
+                // Drain, as the action loop does.
+                drop(payload);
+                // Hold the writer open until its frame has been read.
+                let _client = writer.await.unwrap();
+                seen
+            }));
+        }
+
+        // Generous, but finite: a deadlock fails here instead of hanging
+        // the suite.
+        let all = tokio::time::timeout(Duration::from_secs(60), async {
+            let mut seen = Vec::with_capacity(READERS);
+            for reader in readers {
+                seen.push(reader.await.unwrap());
+            }
+            seen
+        })
+        .await
+        .expect("no reader may deadlock on the byte budget");
+
+        assert_eq!(all.len(), READERS);
+        for (i, (code, len, first)) in all.iter().enumerate() {
+            assert_eq!(*code, 88);
+            assert_eq!(*len, FRAME);
+            assert_eq!(
+                *first, i as u8,
+                "frames must not be crossed between readers"
+            );
+        }
+        assert_eq!(
+            budget.bytes().available_permits(),
+            BUDGET,
+            "every byte permit is returned once the payloads are drained"
+        );
+        assert_eq!(
+            budget.slots_available(),
+            ReadBudget::new(BUDGET).slots_available(),
+            "every slot is returned once its frame is delivered"
+        );
+    }
+
+    /// The ordering rule that makes the deadlock argument sound: a frame
+    /// that fits inside ONE read is charged once, up front, and never
+    /// waits while holding permits — so it needs no slot, and header and
+    /// transaction gossip cannot queue behind block bodies.
+    #[tokio::test]
+    async fn small_frame_reader_takes_no_slot() {
+        let (client, mut server_conn) = server_conn_with_idle(Duration::from_secs(30)).await;
+        let writer = tokio::spawn(async move {
+            let mut client_conn = Connection::new(client, MAINNET_MAGIC);
+            // Comfortably inside one READ_BUF_SIZE chunk.
+            client_conn.send(7, vec![0x5A; 1_024]).await.unwrap();
+            client_conn
+        });
+
+        let budget = new_event_byte_budget();
+        let slots = budget.slots_available();
+        let (code, payload) = read_metered_frame(&mut server_conn, &budget)
+            .await
+            .expect("frame");
+        assert_eq!(code, 7);
+        assert_eq!(payload.len(), 1_024);
+        assert_eq!(
+            budget.slots_available(),
+            slots,
+            "a single-read frame must never consume a hold-and-wait slot"
+        );
+        let _client = writer.await.unwrap();
+    }
+
+    /// P2-3(b): parking on an exhausted budget is BACKPRESSURE, not peer
+    /// inactivity. A reader held off the budget for many times the body
+    /// deadline must not blame the peer — no stall error, so no penalty.
+    ///
+    /// Real clock with an injected short deadline, not `tokio::time::pause`:
+    /// this crate deliberately avoids the paused clock around live
+    /// sockets (see `do_handshake_absolute_deadline_fires_on_slow_loris_trickle`),
+    /// where auto-advance can fire a timer while bytes are still in the
+    /// kernel.
+    #[tokio::test]
+    async fn budget_backpressure_longer_than_the_deadline_is_not_a_stall() {
+        const FRAME: usize = 300_000;
+        const BUDGET: usize = FRAME + 2 * READ_BUF_SIZE;
+
+        // Deadline far shorter than the time we hold the budget shut,
+        // but long enough that ordinary scheduling jitter once the budget
+        // frees cannot look like a stalled peer.
+        let (client, mut server_conn) = server_conn_with_idle(Duration::from_millis(150)).await;
+        let writer = tokio::spawn(async move {
+            let mut client_conn = Connection::new(client, MAINNET_MAGIC);
+            client_conn.send(21, vec![0xA5; FRAME]).await.unwrap();
+            client_conn
+        });
+
+        let budget = ReadBudget::new(BUDGET);
+        let hold = budget
+            .bytes()
+            .clone()
+            .acquire_many_owned((BUDGET - 8) as u32)
+            .await
+            .unwrap();
+
+        let reader_budget = budget.clone();
+        let reader =
+            tokio::spawn(async move { read_metered_frame(&mut server_conn, &reader_budget).await });
+
+        // Ten deadline periods parked on the budget.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!reader.is_finished(), "reader should still be parked");
+
+        drop(hold);
+        let (code, payload) = reader
+            .await
+            .unwrap()
+            .expect("backpressure must not be reported as a peer stall");
+        assert_eq!(code, 21);
+        assert_eq!(payload.len(), FRAME);
+        let _client = writer.await.unwrap();
     }
 
     /// The charge helper is the single place a byte count becomes a
