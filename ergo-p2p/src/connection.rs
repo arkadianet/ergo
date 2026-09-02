@@ -218,6 +218,17 @@ pub struct Connection {
     scratch: Box<[u8]>,
     body_idle_timeout: Duration,
     first_body_timeout: Duration,
+    /// Absolute deadline for the frame being received, kept ACROSS reads.
+    ///
+    /// A read is a `select!` branch in the peer task, so an outbound
+    /// message cancels it mid-frame. Re-arming the deadline on each call
+    /// would restart the clock every time that happened, and a node that
+    /// talks to a peer regularly would never accumulate enough silence to
+    /// notice it had stopped sending — a stalled peer could hold a slot
+    /// and its permits indefinitely. Holding the deadline here instead
+    /// means a cancelled read RESUMES it. Cleared on progress, and when
+    /// the frame completes or fails.
+    frame_deadline: Option<tokio::time::Instant>,
     /// Remote address, resolved once at construction: the key for the
     /// per-address slot cap. `None` only if the socket was already gone,
     /// in which case the next read fails anyway.
@@ -241,13 +252,18 @@ pub enum ConnectionError {
     #[error("payload too large: {0} bytes (max {MAX_PAYLOAD_SIZE})")]
     PayloadTooLarge(usize),
     /// Peer started a frame and then stopped sending: no further byte of
-    /// it arrived within [`BODY_IDLE_TIMEOUT`].
-    #[error("frame stalled: {got} of {want} bytes, no progress for {}s", BODY_IDLE_TIMEOUT.as_secs())]
+    /// it arrived before the deadline that applied.
+    #[error("frame stalled: {got} of {want} bytes, no progress for {after:?}")]
     FrameStalled {
         /// Wire bytes of this frame received so far.
         got: usize,
         /// Wire bytes the frame's header declared.
         want: usize,
+        /// The deadline that actually fired — [`FIRST_BODY_TIMEOUT`]
+        /// while a body has yet to start, [`BODY_IDLE_TIMEOUT`] once it
+        /// has (or whatever a test injected). Reported rather than
+        /// assumed, so an operator log names the rule that fired.
+        after: Duration,
     },
     /// The read-side byte budget was closed — the node is shutting down.
     #[error("event byte budget closed")]
@@ -276,6 +292,7 @@ impl Connection {
             scratch: vec![0u8; READ_BUF_SIZE].into_boxed_slice(),
             body_idle_timeout: BODY_IDLE_TIMEOUT,
             first_body_timeout: FIRST_BODY_TIMEOUT,
+            frame_deadline: None,
             peer_ip,
         }
     }
@@ -351,17 +368,15 @@ impl Connection {
                     } else {
                         // A frame has started. Silence now is a stall,
                         // on the same per-progress deadline as the body.
-                        tokio::time::timeout(self.body_idle_timeout, self.fill(READ_BUF_SIZE))
-                            .await
-                            .map_err(|_| ConnectionError::FrameStalled {
-                                got,
-                                want: HEADER_LENGTH,
-                            })??;
+                        let total = self.body_idle_timeout;
+                        self.fill_before_deadline(READ_BUF_SIZE, total, got, HEADER_LENGTH)
+                            .await?;
                     }
                 }
                 Err(e) => {
                     // Protocol error — clear buffer and return error
                     self.read_buf.clear();
+                    self.frame_deadline = None;
                     return Err(ConnectionError::Frame(e));
                 }
             }
@@ -440,25 +455,25 @@ impl Connection {
         let mut _claim = None;
         let _slot = match budget {
             Some(budget) if want.saturating_sub(self.read_buf.len()) > READ_BUF_SIZE => {
+                // Admission can block, and on a resumed read the frame's
+                // deadline is already ticking; that wait is ours, not the
+                // peer's, so it is credited back below.
+                let waiting_since = tokio::time::Instant::now();
                 if budget.per_address_cap {
                     if let Some(ip) = self.peer_ip {
                         _claim = Some(budget.claim_ip(ip).await);
                     }
                 }
-                Some(
-                    Arc::clone(&budget.slots)
-                        .acquire_owned()
-                        .await
-                        .map_err(|_| ConnectionError::BudgetClosed)?,
-                )
+                let slot = Arc::clone(&budget.slots)
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| ConnectionError::BudgetClosed)?;
+                self.credit_internal_wait(waiting_since.elapsed());
+                Some(slot)
             }
             _ => None,
         };
 
-        // Until the first body byte lands, the peer is on the short
-        // leash: a bare header must not hold a slot for the full
-        // no-progress deadline.
-        let mut body_started = false;
         let mut held: Option<OwnedSemaphorePermit> = None;
         loop {
             match framing::deserialize_frame(&self.magic, &self.read_buf) {
@@ -467,6 +482,8 @@ impl Connection {
                     if self.read_buf.len() <= READ_BUF_SIZE {
                         self.read_buf.shrink_to(READ_BUF_SIZE);
                     }
+                    // This frame is done; the next one arms its own.
+                    self.frame_deadline = None;
                     return Ok((frame, held));
                 }
                 Ok(None) => {
@@ -492,10 +509,13 @@ impl Connection {
                             // The shortfall never exceeds one chunk plus
                             // the header-phase overshoot, so the cast
                             // cannot truncate.
+                            let waiting_since = tokio::time::Instant::now();
                             let permit = Arc::clone(&budget.bytes)
                                 .acquire_many_owned((owed - paid) as u32)
                                 .await
                                 .map_err(|_| ConnectionError::BudgetClosed)?;
+                            // Budget backpressure is ours, not the peer's.
+                            self.credit_internal_wait(waiting_since.elapsed());
                             match &mut held {
                                 Some(existing) => existing.merge(permit),
                                 None => held = Some(permit),
@@ -511,26 +531,74 @@ impl Connection {
                         self.read_buf.reserve_exact(target - got);
                     }
 
-                    // Per-read, so the deadline restarts on every byte a
-                    // slow-but-honest peer delivers — but the FIRST body
-                    // byte is on the short deadline, so a header-only
-                    // staller gives its slot back in seconds.
-                    let deadline = if body_started {
+                    // Per-progress: the deadline restarts on every byte a
+                    // slow-but-honest peer delivers. Until the first body
+                    // byte lands the peer is on the short leash, so a bare
+                    // header cannot hold a slot for the full no-progress
+                    // deadline. Read from the BUFFER rather than a local
+                    // flag, so a read cancelled mid-frame resumes on the
+                    // right one instead of demoting a peer that has
+                    // already delivered body bytes back to the short leash.
+                    let total = if got > HEADER_LENGTH {
                         self.body_idle_timeout
                     } else {
                         self.first_body_timeout
                     };
-                    tokio::time::timeout(deadline, self.fill(chunk))
-                        .await
-                        .map_err(|_| ConnectionError::FrameStalled { got, want })??;
-                    body_started = true;
+                    self.fill_before_deadline(chunk, total, got, want).await?;
                 }
                 Err(e) => {
                     // Protocol error — clear buffer and return error
                     self.read_buf.clear();
+                    self.frame_deadline = None;
                     return Err(ConnectionError::Frame(e));
                 }
             }
+        }
+    }
+
+    /// Wait for one socket read of at most `limit` bytes, under the
+    /// deadline for the frame in progress.
+    ///
+    /// The deadline is armed once per stall window and RESUMED by later
+    /// calls, so cancelling a read cannot buy a silent peer more time.
+    /// Progress clears it; the next wait arms a fresh one.
+    async fn fill_before_deadline(
+        &mut self,
+        limit: usize,
+        total: Duration,
+        got: usize,
+        want: usize,
+    ) -> Result<(), ConnectionError> {
+        let deadline = *self
+            .frame_deadline
+            .get_or_insert_with(|| tokio::time::Instant::now() + total);
+        match tokio::time::timeout_at(deadline, self.fill(limit)).await {
+            Err(_) => {
+                self.frame_deadline = None;
+                Err(ConnectionError::FrameStalled {
+                    got,
+                    want,
+                    after: total,
+                })
+            }
+            Ok(result) => {
+                // Progress (or a hard error) ends this stall window.
+                self.frame_deadline = None;
+                result
+            }
+        }
+    }
+
+    /// Push an armed deadline out by `waited`.
+    ///
+    /// Time spent waiting on our OWN admission control — the byte budget,
+    /// a slot, an address claim — is backpressure, not peer silence, and
+    /// must not be charged to the peer. It only needs crediting when a
+    /// deadline is already armed, which happens when an earlier read of
+    /// this frame was cancelled.
+    fn credit_internal_wait(&mut self, waited: Duration) {
+        if let Some(deadline) = self.frame_deadline.as_mut() {
+            *deadline += waited;
         }
     }
 
@@ -934,9 +1002,14 @@ mod tests {
 
         let result = server.read_frame_body().await;
         match result {
-            Err(ConnectionError::FrameStalled { got, want }) => {
+            Err(ConnectionError::FrameStalled { got, want, after }) => {
                 assert_eq!(got, HEADER_LENGTH);
                 assert_eq!(want, framing::wire_len(4_096));
+                assert_eq!(
+                    after,
+                    Duration::from_millis(150),
+                    "the reported deadline must be the one that fired"
+                );
             }
             other => panic!("expected BodyStalled, got {other:?}"),
         }
@@ -1065,9 +1138,10 @@ mod tests {
         client.stream.write_all(&MAINNET_MAGIC).await.unwrap();
 
         match server.read_frame_header().await {
-            Err(ConnectionError::FrameStalled { got, want }) => {
+            Err(ConnectionError::FrameStalled { got, want, after }) => {
                 assert_eq!(got, MAGIC_LENGTH);
                 assert_eq!(want, HEADER_LENGTH);
+                assert_eq!(after, Duration::from_millis(150));
             }
             other => panic!("expected FrameStalled, got {other:?}"),
         }
@@ -1233,8 +1307,11 @@ mod tests {
     /// never meets the cap.
     #[tokio::test]
     async fn same_address_cannot_hold_two_slots() {
-        let budget = ReadBudget::new(PER_READER_MAX);
-        assert!(budget.slots_available() >= 1);
+        // TWO slots, so a blocked second reader can only be the
+        // per-address cap — with one slot it would park on the pool
+        // whether or not the cap existed, and rule 4 would go unpinned.
+        let budget = ReadBudget::new(2 * PER_READER_MAX);
+        assert_eq!(budget.slots_available(), 2);
 
         // Two connections from the same loopback address, each announcing
         // a frame far too large for one read and then going quiet.
@@ -1256,8 +1333,8 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(
             budget.slots_available(),
-            0,
-            "the first reader holds the slot"
+            1,
+            "the first reader holds one of two slots"
         );
 
         let budget_b = budget.clone();
@@ -1272,6 +1349,11 @@ mod tests {
             "a second large frame from the same address must wait"
         );
         assert_eq!(
+            budget.slots_available(),
+            1,
+            "a slot is FREE — the waiter is held by the address cap, not the pool"
+        );
+        assert_eq!(
             budget.bytes().available_permits(),
             budget.capacity() - (HEADER_LENGTH + READ_BUF_SIZE),
             "the waiting reader must hold NO bytes — it waits before charging"
@@ -1279,12 +1361,17 @@ mod tests {
 
         first.abort();
         let _ = first.await;
-        // With the address free, the second reader takes the slot.
+        // With the address free, the second reader claims it and takes a
+        // slot of its own.
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(budget.slots_available(), 0, "the slot passes to the waiter");
+        assert_eq!(
+            budget.slots_available(),
+            1,
+            "the claim passes to the waiter, which then takes a slot"
+        );
         second.abort();
         let _ = second.await;
-        assert_eq!(budget.slots_available(), 1, "and comes back on cancel");
+        assert_eq!(budget.slots_available(), 2, "and both come back on cancel");
         drop((client_a, client_b));
     }
 

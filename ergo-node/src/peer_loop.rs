@@ -468,9 +468,9 @@ pub async fn peer_task(
                         // (2 points), not the one for provable
                         // misbehavior. Repetition still bans.
                         let penalty = match e {
-                            ConnectionError::FrameStalled { got, want } => {
+                            ConnectionError::FrameStalled { got, want, after } => {
                                 warn!(
-                                    peer = %peer_id, got, want,
+                                    peer = %peer_id, got, want, ?after,
                                     "peer stalled mid-frame; disconnecting with penalty",
                                 );
                                 Some(Penalty::NonDelivery)
@@ -1020,6 +1020,83 @@ mod tests {
         assert_eq!(code, 21);
         assert_eq!(payload.len(), FRAME);
         let _client = writer.await.unwrap();
+    }
+
+    /// A read is a `select!` branch, so every outbound message cancels it
+    /// mid-frame. If the stall deadline were re-armed per call, a node
+    /// that talks to a peer regularly would restart the clock before it
+    /// ever ran out, and a peer that stopped mid-frame could hold its
+    /// slot and permits for as long as we kept sending — the deadline
+    /// would be unreachable in exactly the case it exists for.
+    ///
+    /// Here the peer delivers a partial body and stops while outbound
+    /// frames keep interrupting the read far faster than the deadline.
+    /// The disconnect must still arrive on the original deadline.
+    #[tokio::test]
+    async fn stalled_peer_is_disconnected_despite_outbound_traffic() {
+        const DEADLINE: Duration = Duration::from_millis(400);
+
+        let (mut client, server_conn) = server_conn_with_idle(DEADLINE).await;
+        // A header for a frame far too large to complete, plus a slice of
+        // its body: the peer is mid-body, then silent.
+        let mut opening = header_bytes(88, MAX_PAYLOAD_SIZE);
+        opening.extend_from_slice(&[0u8; 64]);
+        client.write_all(&opening).await.unwrap();
+
+        let peer_id: SocketAddr = "127.0.0.1:9032".parse().unwrap();
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (outbound_tx, outbound_rx) = mpsc::channel::<MessageFrame>(16);
+        let task = tokio::spawn(peer_task(
+            peer_id,
+            server_conn,
+            event_tx,
+            new_event_byte_budget(),
+            outbound_rx,
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+        ));
+
+        // Cancel the read every 40 ms — ten times per deadline period.
+        let chatter = tokio::spawn(async move {
+            loop {
+                if outbound_tx
+                    .send(MessageFrame {
+                        code: 1,
+                        payload: Vec::new(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+        });
+
+        // Generous next to the 400 ms deadline, but far short of the
+        // "never" a per-call deadline would produce.
+        let started = std::time::Instant::now();
+        let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("outbound traffic must not postpone the stall deadline")
+            .expect("event");
+        match event {
+            PeerEvent::Disconnected { peer, penalty } => {
+                assert_eq!(peer, peer_id);
+                assert_eq!(penalty, Some(Penalty::NonDelivery));
+            }
+            _ => panic!("expected Disconnected"),
+        }
+        assert!(
+            started.elapsed() < DEADLINE * 4,
+            "the disconnect must land on the ORIGINAL deadline, not a \
+             restarted one (took {:?})",
+            started.elapsed()
+        );
+
+        chatter.abort();
+        task.await.unwrap();
+        drop(client);
     }
 
     /// The charge helper is the single place a byte count becomes a
