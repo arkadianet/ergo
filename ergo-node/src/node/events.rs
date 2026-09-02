@@ -385,7 +385,7 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
 
             tokio::spawn(peer_loop::peer_task(
                 addr,
-                conn,
+                *conn,
                 state.event_tx.clone(),
                 state.event_byte_budget.clone(),
                 outbound_rx,

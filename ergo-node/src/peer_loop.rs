@@ -32,7 +32,15 @@ pub enum PeerEvent {
         addr: SocketAddr,
         peer_spec: PeerSpec,
         time: u64,
-        conn: Connection,
+        /// Boxed to keep this variant from dominating the enum's size.
+        /// A `Connection` embeds a `TcpStream` plus its read buffer and
+        /// per-frame deadline state, and a `TcpStream` is markedly larger
+        /// on Windows than on Unix — inline, this variant made every
+        /// `PeerEvent` in the 4096-deep channel that big, and tripped
+        /// `clippy::large_enum_variant` on the Windows CI leg alone.
+        /// One allocation per completed handshake, which is once per
+        /// peer; the hot `Message` path is untouched.
+        conn: Box<Connection>,
     },
     ConnectFailed {
         addr: SocketAddr,
@@ -286,7 +294,7 @@ async fn emit_handshake_outcome(
                     addr,
                     peer_spec,
                     time,
-                    conn,
+                    conn: Box::new(conn),
                 })
                 .await;
         }
@@ -557,6 +565,74 @@ mod tests {
     /// `HEADER_LENGTH` bytes are held, and that read is capped at
     /// `READ_BUF_SIZE`.
     const HEADER_PHASE_OVERSHOOT: usize = READ_BUF_SIZE + HEADER_LENGTH - 1;
+
+    /// `PeerEvent` is queued 4096 deep, so every variant pays the size of
+    /// the largest. `clippy::large_enum_variant` guards that at a default
+    /// threshold of 200 bytes between the largest variant and the next,
+    /// and it is enforced as `-D warnings` in CI.
+    ///
+    /// This test exists because that lint is PLATFORM-SENSITIVE, and CI
+    /// caught it on one leg only: a `TcpStream` is markedly larger on
+    /// Windows than on Unix, so `HandshakeComplete` holding a
+    /// `Connection` inline landed on a gap of exactly 200 on Linux —
+    /// inside the limit, lint silent — and well outside it on Windows.
+    ///
+    /// So the bound here is deliberately TIGHTER than clippy's. Sitting
+    /// on the line is what shipped the Windows failure in the first
+    /// place; a gap this side of `MAX_VARIANT_GAP` leaves room for the
+    /// same types to be laid out differently on another target. Checking
+    /// it as a test also means the numbers appear in the failure, on
+    /// whichever platform notices first.
+    ///
+    /// Keep the list in step with the enum; a variant missing here is
+    /// simply unchecked, not wrong.
+    #[test]
+    fn peer_event_variants_stay_inside_the_lint_threshold() {
+        use std::mem::size_of;
+
+        /// Headroom under clippy's 200 B, since variant layout varies by
+        /// target and only the tightest platform gets a warning.
+        const MAX_VARIANT_GAP: usize = 120;
+
+        // Payload of each variant, as a tuple of its field types.
+        let mut variants = [
+            ("TcpConnected", size_of::<SocketAddr>()),
+            (
+                "HandshakeComplete",
+                size_of::<(SocketAddr, PeerSpec, u64, Box<Connection>)>(),
+            ),
+            ("ConnectFailed", size_of::<SocketAddr>()),
+            ("InboundConnect", size_of::<(SocketAddr, TcpStream)>()),
+            (
+                "Disconnected",
+                size_of::<(SocketAddr, Option<ergo_p2p::peer::Penalty>)>(),
+            ),
+            (
+                "LocalFullBlock",
+                size_of::<(
+                    Vec<u8>,
+                    Vec<u8>,
+                    Vec<u8>,
+                    Option<Vec<u8>>,
+                    oneshot::Sender<Result<String, SubmitError>>,
+                )>(),
+            ),
+            ("Message", size_of::<(SocketAddr, u8, MeteredPayload)>()),
+        ];
+        variants.sort_by_key(|(_, size)| std::cmp::Reverse(*size));
+
+        let (largest, largest_size) = variants[0];
+        let (runner_up, runner_up_size) = variants[1];
+        assert!(
+            largest_size - runner_up_size <= MAX_VARIANT_GAP,
+            "PeerEvent::{largest} is {largest_size} B against {runner_up}'s \
+             {runner_up_size} B — a {} B gap, over the {MAX_VARIANT_GAP} B \
+             this crate allows (clippy's own limit is 200 B, and it is \
+             reached at different sizes on different targets). Box the \
+             oversized field rather than widening the bound.",
+            largest_size - runner_up_size,
+        );
+    }
 
     // ----- happy path -----
 
