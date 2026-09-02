@@ -379,12 +379,21 @@ fn reporter_emits_stable_structured_first_io_and_poison_transition_fields() {
 // These exercise the FREE `report_storage_failure` function, which is
 // backed by a single process-global reporter + counters (unlike the rest
 // of this file, which builds its own `StorageFailureReporter` instances
-// for isolation). Assertions use before/after deltas rather than exact
-// values: `cargo test` runs this binary's tests concurrently, and other
-// tests in this same file call `report_storage_failure` too.
+// for isolation). The counter-delta tests only need before/after
+// direction (immune to interleaving from other threads bumping the same
+// atomic). `last_storage_error()`, however, reads a single global "most
+// recent" slot that a concurrently-running sibling test can legitimately
+// overwrite between this test's write and its read (review fix P2-3) —
+// so every test in this group that touches `report_storage_failure`
+// serializes on `LAST_ERROR_TEST_LOCK`, not just the one asserting exact
+// content, since an unguarded sibling call is exactly what would race it.
+static LAST_ERROR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
 fn report_storage_failure_state_subsystem_increments_state_counter() {
+    let _guard = LAST_ERROR_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let (state_before, _indexer_before) = storage_error_totals();
     report_storage_failure(&context("counter_probe_state"), &io_incident(IO_ERRNO));
     let (state_after, _indexer_after) = storage_error_totals();
@@ -393,6 +402,9 @@ fn report_storage_failure_state_subsystem_increments_state_counter() {
 
 #[test]
 fn report_storage_failure_indexer_subsystem_increments_indexer_counter() {
+    let _guard = LAST_ERROR_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let indexer_context = StorageFailureContext {
         subsystem: "indexer",
         component: "indexer_task",
@@ -410,6 +422,9 @@ fn report_storage_failure_indexer_subsystem_increments_indexer_counter() {
 
 #[test]
 fn report_storage_failure_sets_last_storage_error_with_store_prefix() {
+    let _guard = LAST_ERROR_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let unique = DynamicFailure {
         height: 987_654,
         id: "last-storage-error-probe",

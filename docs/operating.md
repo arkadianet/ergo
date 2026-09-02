@@ -402,6 +402,31 @@ reopen/self-heal of the redb handle without a restart is explicitly out of
 scope — the signal is the point; use it to page or restart, don't wait for
 the node to recover on its own.
 
+`ergo_node_storage_errors_indexer_total` is effectively a 0→1 flag in
+practice, not a running tally: the indexer's polling task treats any
+genuine redb error as fatal and halts in-loop on the first one (see
+`IndexerStatus::Halted` / `/api/v1/indexer/status`), so this counter only
+ever climbs past 1 across a restart-into-another-failure sequence, never
+within one process's lifetime.
+
+**Live vs. snapshot-sourced (why this survives the wedge that motivated
+it).** `storage_errors_state_total`, `storage_errors_indexer_total`, and
+the state/indexer half of `last_storage_error` are read LIVE — straight
+from process-global atomics — on every `/api/v1/node/status` and
+`/metrics` call, the same way the starvation-free telemetry fields
+(`rss_kb_live` etc., issue #266) are. This is deliberate, not
+incidental: the exact failure this counter exists to catch (a poisoned
+redb handle during block apply) is also the one most likely to wedge the
+action loop, which is what publishes the periodic snapshot every other
+`/status` field is sourced from — a snapshot-sourced counter would freeze
+at its pre-wedge value forever, precisely when an operator needs it most.
+`storage_errors_peers_total` is the one exception: `ergo-p2p`'s
+`PeerManager` is owned single-threaded by the action loop and keeps its
+counter on plain (non-`Sync`) `Cell`/`RefCell` fields, so it cannot be
+read from the API task the way the state/indexer atomics can — it stays
+snapshot-sourced and can lag (or read stale) during a wedge, same as
+every other snapshot-fed field.
+
 ## Dry-running a transaction (the one recommended path)
 
 To validate an unsigned transaction against current state **without

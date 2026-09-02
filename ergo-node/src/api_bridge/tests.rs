@@ -1212,6 +1212,60 @@ fn status_overlays_live_telemetry_values() {
     assert_eq!(read.info().uptime_seconds, 7_800);
 }
 
+/// Issue #281 P0 fix: `storage_errors_state_total` / `_indexer_total` and
+/// `last_storage_error` must be visible through `status()` even when the
+/// action loop is wedged and has NOT published a new snapshot since the
+/// failure — that's exactly the incident scenario (a poisoned redb handle
+/// freezes `publish_snapshot`, and a snapshot-sourced counter would freeze
+/// with it while the underlying atomics keep climbing). This exercises the
+/// live read directly against the global `ergo_state::storage_observability`
+/// counters, bypassing the snapshot publisher entirely.
+#[test]
+fn status_reflects_live_storage_error_with_no_new_snapshot_published() {
+    use ergo_api::NodeReadState;
+
+    let dir = tempfile::tempdir().unwrap();
+    let read = read_state_for_host(HostPaths {
+        state_db: dir.path().join("s.redb"),
+        index_db: dir.path().join("i.redb"),
+        data_dir: dir.path().to_path_buf(),
+    });
+
+    // One snapshot published at construction time (inside SnapshotPublisher::new /
+    // read_state_for_host's helper) and never again — simulating the action
+    // loop wedging right after boot, before any storage failure occurred.
+    let before = read.status();
+    let before_state_total = before.storage_errors_state_total;
+
+    // Report a state-store failure through the SAME free function every
+    // real call site (sync/mining/boot) uses. No new snapshot is published.
+    let err = std::io::Error::other("simulated redb write failure");
+    ergo_state::storage_observability::report_storage_failure(
+        &ergo_state::storage_observability::StorageFailureContext {
+            subsystem: "sync",
+            component: "block_apply",
+            database_path: Some(dir.path()),
+            operation: "status_reflects_live_storage_error_probe",
+            best_full_block_height: None,
+            best_header_height: None,
+            attempted_height: None,
+        },
+        &err,
+    );
+
+    let after = read.status();
+    assert!(
+        after.storage_errors_state_total > before_state_total,
+        "live state counter must advance without a new snapshot: before={before_state_total}, after={}",
+        after.storage_errors_state_total
+    );
+    let last = after.last_storage_error.expect(
+        "last_storage_error must be populated from the live global, not the stale snapshot",
+    );
+    assert!(last.starts_with("state: "), "unexpected shape: {last}");
+    assert!(last.contains("simulated redb write failure"));
+}
+
 /// Measure-first (#257): `status()` probes the two redb stores and the
 /// data-dir filesystem on every call, so data-dir growth (bytes per
 /// synced height) is observable on /metrics rather than guessed. Absent

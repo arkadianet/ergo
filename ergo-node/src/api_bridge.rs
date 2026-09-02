@@ -452,6 +452,34 @@ impl NodeReadState for SnapshotReadState {
         // guessed.
         (s.state_db_bytes, s.index_db_bytes) = self.db_sizes();
         (s.disk_free_bytes, s.disk_total_bytes) = self.disk_space();
+        // Storage-error counters (issue #281, P0 review fix): the state
+        // and indexer buckets are process-global atomics in
+        // `ergo_state::storage_observability` — read live here exactly
+        // like the telemetry block above, NOT sourced from the published
+        // snapshot. This matters precisely in the incident scenario the
+        // issue is about: a poisoned redb handle wedges the action loop
+        // (`publish_snapshot` never runs again), so a snapshot-sourced
+        // counter would freeze at its pre-wedge value forever while the
+        // atomics keep climbing. The peers bucket CANNOT do this the same
+        // way — `PeerManager` uses `Cell`/`RefCell` (not `Sync`) because
+        // it's owned single-threaded by the action loop, so it stays
+        // snapshot-fed and can lag during a wedge; see docs/operating.md.
+        let (live_state_total, live_indexer_total) =
+            ergo_state::storage_observability::storage_error_totals();
+        s.storage_errors_state_total = live_state_total;
+        s.storage_errors_indexer_total = live_indexer_total;
+        if let Some((ts, message)) = ergo_state::storage_observability::last_storage_error() {
+            // Only override the snapshot's (peers-inclusive) merge when
+            // this live error is at least as new as the snapshot itself —
+            // otherwise the snapshot already reflects it (or a fresher
+            // peers-sourced one) and clobbering would lose that.
+            let now_unix_ms = unix_now_ms();
+            let snapshot_produced_unix_ms =
+                now_unix_ms.saturating_sub(self.age_ms(snap.produced_at));
+            if s.last_storage_error.is_none() || ts >= snapshot_produced_unix_ms {
+                s.last_storage_error = Some(message);
+            }
+        }
         s
     }
 

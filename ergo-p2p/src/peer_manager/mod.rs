@@ -73,6 +73,14 @@ pub(crate) const BAN_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// `maxToSend / 8` = 8 specs, so clamping well below 64 costs nothing.
 pub const MAX_SHARED_PEER_SPECS: usize = 48;
 
+/// Minimum gap between `storage_error` ERROR log lines for the SAME
+/// write-through operation (issue #281 review fix P2-1) — mirrors
+/// `ergo_state::storage_observability`'s `DEFAULT_SUMMARY_INTERVAL` so
+/// the two storage-failure logging paths throttle on the same cadence.
+/// The counter and `last_storage_error` are unaffected — every
+/// occurrence still counts, only the log line is rate-limited.
+pub const STORAGE_ERROR_LOG_INTERVAL_MS: u64 = 300_000;
+
 pub struct PeerManager {
     peers: HashMap<PeerId, PeerInfo>,
     /// Ban list: IP → ban expiry. Separate from peers so bans survive disconnection.
@@ -98,6 +106,17 @@ pub struct PeerManager {
     /// `(unix_ms, message)` of the most recent `peers.redb` write-through
     /// failure, for `ApiStatus.last_storage_error`.
     last_storage_error: std::cell::RefCell<Option<(u64, String)>>,
+    /// Per-op `(last_emit_unix_ms, suppressed_since_last_emit)` throttle
+    /// state for the `storage_error` ERROR event (issue #281 review
+    /// fix): mirrors the state store's `StorageFailureReporter` summary
+    /// interval so a poisoned/full `peers.redb` logs at most once per
+    /// [`STORAGE_ERROR_LOG_INTERVAL_MS`] per operation instead of once
+    /// per failed write — unthrottled, that floods the log (and amplifies
+    /// the very I/O fault causing it) for every housekeeping tick while
+    /// the book stays unwritable. The counter and `last_storage_error`
+    /// above are NOT throttled — every occurrence still counts and is
+    /// remembered; only the log line is rate-limited.
+    storage_error_log_state: std::cell::RefCell<HashMap<&'static str, (u64, u64)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +141,7 @@ impl PeerManager {
             next_ban_sweep: None,
             storage_error_count: std::cell::Cell::new(0),
             last_storage_error: std::cell::RefCell::new(None),
+            storage_error_log_state: std::cell::RefCell::new(HashMap::new()),
         }
     }
 

@@ -12,15 +12,20 @@ use crate::address_book::{AddressBookError, BanRecord, LastDirection};
 use crate::handshake::PeerSpec;
 use crate::peer::Direction;
 
-use super::{PeerManager, PeerOrigin};
+use super::{PeerManager, PeerOrigin, STORAGE_ERROR_LOG_INTERVAL_MS};
 
 impl PeerManager {
     /// Record one `peers.redb` write-through failure: bumps
-    /// `storage_error_count`, remembers it for `last_storage_error`, and
-    /// emits the structured `storage_error` ERROR event (issue #281) — a
-    /// stable `code` so the incident-snapshot trigger (#263) dedupes
-    /// repeats within its window instead of writing a fresh snapshot per
-    /// housekeeping tick while the book stays unwritable.
+    /// `storage_error_count`, remembers it for `last_storage_error`
+    /// (both unconditionally — every occurrence counts), and emits the
+    /// structured `storage_error` ERROR event (issue #281) at most once
+    /// per [`STORAGE_ERROR_LOG_INTERVAL_MS`] per `op` — a stable `code`
+    /// so the incident-snapshot trigger (#263) dedupes correctly, and a
+    /// throttle so a poisoned/full `peers.redb` doesn't flood one ERROR
+    /// line per failed write-through (review fix P2-1: unthrottled, that
+    /// amplifies the very I/O fault causing it). Occurrences suppressed
+    /// during the interval are counted and surfaced as `suppressed_count`
+    /// on the next emission for that `op`.
     pub(super) fn record_storage_error(
         &self,
         op: &'static str,
@@ -34,6 +39,18 @@ impl PeerManager {
         self.storage_error_count
             .set(self.storage_error_count.get() + 1);
         *self.last_storage_error.borrow_mut() = Some((now_ms, format!("peers: {e}")));
+
+        let mut log_state = self.storage_error_log_state.borrow_mut();
+        let entry = log_state.entry(op).or_insert((0, 0));
+        let (last_emit_ms, suppressed_count) = *entry;
+        let due = last_emit_ms == 0
+            || now_ms.saturating_sub(last_emit_ms) >= STORAGE_ERROR_LOG_INTERVAL_MS;
+        if !due {
+            entry.1 = suppressed_count.saturating_add(1);
+            return;
+        }
+        *entry = (now_ms, 0);
+        drop(log_state);
         tracing::error!(
             event = "storage_error",
             code = "storage_error:peers",
@@ -41,6 +58,7 @@ impl PeerManager {
             op,
             peer = %addr_or_ip,
             error = %e,
+            suppressed_count = suppressed_count,
             "address_book write failed",
         );
     }
