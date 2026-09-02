@@ -208,12 +208,18 @@
 //! - **E5 (oracle grading):** `ACCEPT` records grade s-expression byte equality; `REJECT`
 //!   records grade verdict + exception CLASS (advisory). Reject `line:col` is graded only
 //!   in fresh-JVM mode (`tc1.sh`) — batch mode contaminates singleton positions (R1).
-//! - **E12 (positions):** `TypedExpr` carries no source positions. Every [`TyperError`]
-//!   has `pos ≡ 0`. `Parse`/`Bind` errors DO carry positions — the typer is the sole
-//!   documented phase-level position gap (see D-T7 below). The 50 `typefail(env, x,
-//!   line, col)` assertions from `SigmaTyperTest.scala` port as class+verdict-only; each
-//!   original `(line, col)` is preserved in a comment in
-//!   `tests/sigma_typer_spec.rs` for a future position pass.
+//! - **E12 (positions, LIFTED):** `TypedExpr` now carries `pos` on every node
+//!   (typed.rs) — the Rust analogue of Scala's `Value._sourceContext`
+//!   (values.scala:81) without the write-once thread-local mechanism. Every
+//!   [`TyperError`] cites the node the error is ABOUT (the same node Scala's
+//!   per-site `xxx.sourceContext` citations name), and the always-on
+//!   `seed_reject_records_position_parity` test pins the channel against the
+//!   fresh-JVM oracle positions recorded in `golden_seed.txt` (the one
+//!   documented deviation: `HEIGHT.foo` — see `POSITION_DEVIATION_SOURCES`).
+//!   The 50 `typefail(env, x, line, col)` assertions from `SigmaTyperTest.scala`
+//!   port as class+verdict-only; each original `(line, col)` is preserved in a
+//!   comment in `tests/sigma_typer_spec.rs`. Oracle grading itself is
+//!   UNCHANGED (E5): verdict + class are graded, positions stay advisory.
 //!
 //! `SWEEP_SKIP` in `tests/typer_oracle_parity.rs` stays empty; it is the
 //! mechanism for any future rendering-only deviation (reject-side divergences
@@ -393,18 +399,23 @@
 //! (bytes-of-record, matching `ProveDlog`); the printer decompresses on
 //! demand. The emitter consumes the bytes directly.
 //!
-//! ### D-T7 — Typer error positions always 0 (E12)
+//! ### D-T7 — Typer error positions (LIFTED — was "always 0 (E12)")
 //!
-//! `TypedExpr` carries no source positions: every [`TyperError`] has `pos ≡ 0`.
-//! `Parse`/`Bind` errors DO carry real positions (from `span::line_col`).  The
-//! typer is therefore the sole documented phase-level position gap — the typer
-//! cannot cite a source location because no location was threaded through
-//! `TypedExpr` nodes.  Oracle reject positions for typer failures are advisory
-//! only (E5); the 50 `typefail(env, x, line, col)` assertions from
-//! `SigmaTyperTest.scala` are ported as class+verdict-only in
-//! `tests/sigma_typer_spec.rs`, with the original `(line, col)` preserved in
-//! comments for a future M3 position pass.
-//! Source: `typer/assign/mod.rs` module doc; `typecheck.rs` `CompileError` doc.
+//! `TypedExpr` nodes now carry `pos: Pos` (byte offset; `span.rs` converts to
+//! Scala's 1-based UTF-16 line:col on demand). The binder assigns each bound
+//! node the offset of the untyped `Expr` it was built from (env-substituted
+//! constants inherit the replaced `Ident`'s offset, mirroring `liftAny`'s
+//! `currentSrcCtx` pinning); typer rebuilds inherit the offset of the node
+//! being rewritten; synthesized nodes with no source construct (predef /
+//! environment constants, wire-deserialized nodes) carry `0` — the same unset
+//! SourceContext Scala leaves `Nullable.None`, printed `0:0` by the oracle.
+//! Every [`TyperError`] cites the node the error is about, per Scala's
+//! per-site citations (SigmaTyper.scala:58-533). Positions remain an
+//! ADDITIVE channel: oracle grading grades verdict + class only (E5), and
+//! `seed_reject_records_position_parity` pins the advisory channel against
+//! the seed's recorded fresh-JVM positions.
+//! Source: `typer/assign/mod.rs` module doc; `typed.rs` `TypedExpr` doc;
+//! `typecheck.rs` `CompileError` doc.
 //!
 //! ### D-T8 — BindError class-tag for irBuilder arg-shape mismatch
 //!

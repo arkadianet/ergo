@@ -25,6 +25,9 @@ pub(crate) fn bimap(
     t_arg: SType,
     t_res: SType,
 ) -> Result<TypedExpr, TyperError> {
+    // Citations: SigmaTyper.scala:577/585/593 all use `l.sourceContext` (the
+    // BOUND left operand).
+    let l_pos = node_pos(&l);
     let l1 = assign_type(env, l, ctx)?;
     let r1 = assign_type(env, r, ctx)?;
     let lt = node_tpe(&l1).clone();
@@ -44,21 +47,26 @@ pub(crate) fn bimap(
             tpe_params: vec![],
         };
         if unify_types(&pat, &act).is_none() {
-            return Err(TyperError::invalid_binary(format!(
-                "Invalid binary operation {op}: expected argument types ({t_arg:?}, {t_arg:?}); actual: ({lt:?}, {rt:?})"
-            )));
+            return Err(TyperError::invalid_binary(
+                l_pos,
+                format!(
+                    "Invalid binary operation {op}: expected argument types ({t_arg:?}, {t_arg:?}); actual: ({lt:?}, {rt:?})"
+                ),
+            ));
         }
     }
     // safeMkNode: the NoType-error and any thrown error BOTH rewrap to
     // InvalidBinaryOperationParameters (the error(...) throw is inside the try).
     match mk(l1, r1) {
-        Ok(node) if *node_tpe(&node) == SType::NoType => Err(TyperError::invalid_binary(format!(
-            "operation: {op}: No type can be assigned to expression"
-        ))),
+        Ok(node) if *node_tpe(&node) == SType::NoType => Err(TyperError::invalid_binary(
+            l_pos,
+            format!("operation: {op}: No type can be assigned to expression"),
+        )),
         Ok(node) => Ok(node),
-        Err(be) => Err(TyperError::invalid_binary(format!(
-            "operation: {op}: {be:?}"
-        ))),
+        Err(be) => Err(TyperError::invalid_binary(
+            l_pos,
+            format!("operation: {op}: {be:?}"),
+        )),
     }
 }
 
@@ -74,30 +82,46 @@ pub(crate) fn bimap2(
     r: TypedExpr,
     mk: impl FnOnce(TypedExpr, TypedExpr) -> Result<TypedExpr, BuildError>,
 ) -> Result<TypedExpr, TyperError> {
+    // Citation: SigmaTyper.scala:610 `l.sourceContext`.
+    let l_pos = node_pos(&l);
     let l1 = assign_type(env, l, ctx)?;
     let r1 = assign_type(env, r, ctx)?;
-    mk(l1, r1).map_err(|be| TyperError::invalid_binary(format!("operation {op}: {be:?}")))
+    mk(l1, r1).map_err(|be| TyperError::invalid_binary(l_pos, format!("operation {op}: {be:?}")))
 }
 
 /// `unmap[T](env, op, i)(newNode)(tArg)` (SigmaTyper.scala:616-628).
+///
+/// `pos` is the offset the BINDER assigned to the unary node itself (the
+/// operator's own offset, e.g. `!`/`-`/`~`) — distinct from `i_pos`, the
+/// bound input's offset used for the error-site citations below (unchanged,
+/// per SigmaTyper.scala:621/625). The built node is re-pinned to `pos` so a
+/// successfully-typed unary node carries its own source position rather than
+/// its child's.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn unmap(
     env: &TypeEnv,
     ctx: &TyperCtx,
     op: &str,
     i: TypedExpr,
+    pos: crate::span::Pos,
     mk: impl FnOnce(TypedExpr) -> Result<TypedExpr, BuildError>,
     t_arg: SType,
 ) -> Result<TypedExpr, TyperError> {
+    // Citations: SigmaTyper.scala:621/625 `i.sourceContext` (the BOUND input).
+    let i_pos = node_pos(&i);
     let i1 = assign_type(env, i, ctx)?;
     let it = node_tpe(&i1).clone();
     // !isNumType && tpe != tArg -> InvalidUnaryOperationParameters (any numeric
     // passes for !/-/~ via the isNumType short-circuit).
     if !is_numeric(&it) && it != t_arg {
-        return Err(TyperError::invalid_unary(format!(
-            "Invalid unary op {op}: expected argument type {t_arg:?}, actual: {it:?}"
-        )));
+        return Err(TyperError::invalid_unary(
+            i_pos,
+            format!("Invalid unary op {op}: expected argument type {t_arg:?}, actual: {it:?}"),
+        ));
     }
-    mk(i1).map_err(|be| TyperError::invalid_unary(format!("operation {op} error: {be:?}")))
+    mk(i1)
+        .map(|node| node.with_pos(pos))
+        .map_err(|be| TyperError::invalid_unary(i_pos, format!("operation {op} error: {be:?}")))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

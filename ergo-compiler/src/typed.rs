@@ -25,6 +25,7 @@
 //! - `ConstPayload` covers all literal types in the oracle demo env and common
 //!   script constants.
 
+use crate::span::Pos;
 use crate::stype::SType;
 
 /// A single type parameter ident for Lambda.tpe_params.
@@ -139,35 +140,55 @@ pub enum ConstPayload {
 /// (productIterator order), which is what the printer renders positionally.
 /// The `tpe` field records the node's assigned type for annotation + N2 and is
 /// NOT itself a printed field.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// The `pos` field is the node's SOURCE OFFSET (byte index into the original
+/// source text) — the Rust analogue of Scala's `Value._sourceContext`
+/// (values.scala:81), minus the thread-local write-once mechanism (which is
+/// unportable to wasm; positions here are plain immutable data):
+/// - nodes built by the binder carry the offset of the untyped `Expr`
+///   ([`crate::ast::Expr`]) they were built from;
+/// - nodes rebuilt by the typer inherit the offset of the node being
+///   rewritten (mirrors Scala's `currentSrcCtx` pinning, SigmaBuilder);
+/// - synthesized nodes with no source construct (predef/environment
+///   constants) carry `0` — Scala's SourceContext stays unset (`Nullable
+///   .None`) for those, which the oracle prints as `0:0`.
+///
+/// Positions are metadata riding alongside the tree: they are NOT rendered by
+/// `typed_print` (byte-parity with the oracle is untouched) and NOT part of
+/// [`PartialEq`] (shape and types only — see the hand-written impl).
+#[derive(Debug, Clone)]
 pub enum TypedExpr {
     // ── context singletons (values.scala) ────────────────────────────────────
     // case object Height/Self/… — no payload fields beyond the node type.
     /// `HEIGHT` — values.scala:1456 Height: SInt.
-    Height { tpe: SType },
+    Height { tpe: SType, pos: Pos },
     /// `SELF` — values.scala:1471 Self: SBox.
     /// Rust name `Self_` avoids the reserved keyword; productPrefix = "Self".
-    Self_ { tpe: SType },
+    Self_ { tpe: SType, pos: Pos },
     /// `INPUTS` — values.scala:1480 Inputs: SColl[SBox].
-    Inputs { tpe: SType },
+    Inputs { tpe: SType, pos: Pos },
     /// `OUTPUTS` — values.scala:1484 Outputs: SColl[SBox].
-    Outputs { tpe: SType },
+    Outputs { tpe: SType, pos: Pos },
     /// `CONTEXT` — values.scala:1447 Context: SContext.
-    Context { tpe: SType },
+    Context { tpe: SType, pos: Pos },
     /// `Global` — values.scala:1415 Global: SGlobal (prints as SigmaDslBuilder).
-    Global { tpe: SType },
+    Global { tpe: SType, pos: Pos },
     /// `MinerPubkey` — values.scala:1436 MinerPubkey: SColl[SByte].
-    MinerPubkey { tpe: SType },
+    MinerPubkey { tpe: SType, pos: Pos },
     /// `LastBlockUtxoRootHash` — values.scala:1490 LastBlockUtxoRootHash: SAvlTree.
-    LastBlockUtxoRootHash { tpe: SType },
+    LastBlockUtxoRootHash { tpe: SType, pos: Pos },
     /// `GroupGenerator` case object — values.scala:709.
-    GroupGenerator { tpe: SType },
+    GroupGenerator { tpe: SType, pos: Pos },
 
     // ── constants (values.scala: Constant[V]; productPrefix = "ConstantNode") ──
     // productIterator: [value, tpe]. N2: tpe field == node.tpe → ALWAYS stripped.
     /// All `Constant[V]` instances; Scala runtime productPrefix = "ConstantNode".
     /// (values.scala:421 `override def productPrefix = "ConstantNode"`)
-    Constant { value: ConstPayload, tpe: SType },
+    Constant {
+        value: ConstPayload,
+        tpe: SType,
+        pos: Pos,
+    },
 
     // ── frontend nodes ────────────────────────────────────────────────────────
     /// `Block(bindings: Seq[Val], result: SValue)` — values.scala:1079.
@@ -176,6 +197,7 @@ pub enum TypedExpr {
         bindings: Vec<TypedExpr>, // must be ValNode variants
         result: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
 
     /// `ValNode(name: String, givenType: SType, body: SValue)` — values.scala:1146.
@@ -186,12 +208,13 @@ pub enum TypedExpr {
         given_type: SType,
         body: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
 
     /// `Ident(name: String, tpe: SType)` — values.scala:1192.
     /// productIterator: [name, tpe].
     /// N2: tpe field == node.tpe → always stripped.
-    Ident { name: String, tpe: SType },
+    Ident { name: String, tpe: SType, pos: Pos },
 
     /// `Lambda(tpeParams, args, givenResType, body)` — values.scala:1395.
     /// productIterator: [tpeParams (Seq), args (Seq[(String,SType)]),
@@ -204,6 +227,7 @@ pub enum TypedExpr {
         given_res_type: SType,
         body: Option<Box<TypedExpr>>,
         tpe: SType,
+        pos: Pos,
     },
 
     /// `Select(obj, field, resType: Option[SType])` — values.scala:1165.
@@ -214,6 +238,7 @@ pub enum TypedExpr {
         field: String,
         res_type: Option<SType>,
         tpe: SType,
+        pos: Pos,
     },
 
     /// `Apply(func, args)` — values.scala:1213.
@@ -222,11 +247,16 @@ pub enum TypedExpr {
         func: Box<TypedExpr>,
         args: Vec<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
 
     /// `Tuple(items)` — values.scala:778.
     /// productIterator: [items (Seq[Value])].
-    Tuple { items: Vec<TypedExpr>, tpe: SType },
+    Tuple {
+        items: Vec<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
 
     /// `ConcreteCollection(items, elementType: V)` — values.scala:827.
     /// productIterator: [items (Seq), elementType (bare SType)].
@@ -235,6 +265,7 @@ pub enum TypedExpr {
         items: Vec<TypedExpr>,
         elem_type: SType,
         tpe: SType,
+        pos: Pos,
     },
 
     /// `If(condition, trueBranch, falseBranch)` — trees.scala:1302.
@@ -244,6 +275,7 @@ pub enum TypedExpr {
         true_branch: Box<TypedExpr>,
         false_branch: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
 
     // ── arithmetic / bitwise ops (trees.scala) ───────────────────────────────
@@ -257,6 +289,7 @@ pub enum TypedExpr {
         right: Box<TypedExpr>,
         opcode: i8,
         tpe: SType,
+        pos: Pos,
     },
 
     /// `BitOp(left, right, opCode: Byte)` — trees.scala:911.
@@ -269,17 +302,26 @@ pub enum TypedExpr {
         right: Box<TypedExpr>,
         opcode: i8,
         tpe: SType,
+        pos: Pos,
     },
 
     /// `Upcast(input, tpe: R)` — trees.scala:396.
     /// productIterator: [input (Value), tpe (SType)].
     /// N2: tpe field == node.tpe → always stripped.
-    Upcast { input: Box<TypedExpr>, tpe: SType },
+    Upcast {
+        input: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
 
     /// `Downcast(input, tpe: R)` — trees.scala:429.
     /// productIterator: [input (Value), tpe (SType)].
     /// N2: tpe field == node.tpe → always stripped.
-    Downcast { input: Box<TypedExpr>, tpe: SType },
+    Downcast {
+        input: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
 
     // ── relations (trees.scala:1090-1221) ────────────────────────────────────
     // All: productIterator [left, right]. No SType fields → nothing stripped.
@@ -288,36 +330,42 @@ pub enum TypedExpr {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `GE(left, right)`.
     GE {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `LT(left, right)`.
     LT {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `LE(left, right)`.
     LE {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `EQ(left, right)`.
     EQ {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `NEQ(left, right)`.
     NEQ {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
 
     // ── boolean ops (trees.scala:1242-1378) ──────────────────────────────────
@@ -326,27 +374,42 @@ pub enum TypedExpr {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `BinOr(left, right)` — trees.scala:1242.
     BinOr {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `BinXor(left, right)` — trees.scala:1284.
     BinXor {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `LogicalNot(input)` — trees.scala:1378.
-    LogicalNot { input: Box<TypedExpr>, tpe: SType },
+    LogicalNot {
+        input: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
 
     // ── unary numeric ops (trees.scala:881-915) ───────────────────────────────
     /// `Negation(input)` — trees.scala:881.
-    Negation { input: Box<TypedExpr>, tpe: SType },
+    Negation {
+        input: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
     /// `BitInversion(input)` — trees.scala:899.
-    BitInversion { input: Box<TypedExpr>, tpe: SType },
+    BitInversion {
+        input: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
 
     // ── collection transformers (transformers.scala) ──────────────────────────
     /// `MapCollection(input, mapper)` — transformers.scala:33.
@@ -354,12 +417,14 @@ pub enum TypedExpr {
         input: Box<TypedExpr>,
         mapper: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `Append(input, col2)` — transformers.scala:59.
     Append {
         input: Box<TypedExpr>,
         col2: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `Slice(input, from, until)` — transformers.scala:86.
     Slice {
@@ -367,24 +432,28 @@ pub enum TypedExpr {
         from: Box<TypedExpr>,
         until: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `Filter(input, condition)` — transformers.scala:117.
     Filter {
         input: Box<TypedExpr>,
         condition: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `Exists(input, condition)` — transformers.scala:155.
     Exists {
         input: Box<TypedExpr>,
         condition: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `ForAll(input, condition)` — transformers.scala:182.
     ForAll {
         input: Box<TypedExpr>,
         condition: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `Fold(input, zero, foldOp)` — transformers.scala:217.
     Fold {
@@ -392,6 +461,7 @@ pub enum TypedExpr {
         zero: Box<TypedExpr>,
         fold_op: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `ByIndex(input, index, default: Option[Value])` — transformers.scala:249.
     /// productIterator: [input, index, default].
@@ -401,6 +471,7 @@ pub enum TypedExpr {
         index: Box<TypedExpr>,
         default: Option<Box<TypedExpr>>,
         tpe: SType,
+        pos: Pos,
     },
     /// `SelectField(input, fieldIndex: Byte)` — transformers.scala:291.
     /// productIterator: [input, fieldIndex]. fieldIndex is 1-based.
@@ -408,31 +479,68 @@ pub enum TypedExpr {
         input: Box<TypedExpr>,
         field_index: i8,
         tpe: SType,
+        pos: Pos,
     },
     /// `SizeOf(input)` — transformers.scala:357.
-    SizeOf { input: Box<TypedExpr>, tpe: SType },
+    SizeOf {
+        input: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
 
     // ── sigma / boolean coercions ─────────────────────────────────────────────
     /// `BoolToSigmaProp(value)` — trees.scala:32. productIterator: [value].
-    BoolToSigmaProp { value: Box<TypedExpr>, tpe: SType },
+    BoolToSigmaProp {
+        value: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
     /// `SigmaPropIsProven(input)` — transformers.scala:321.
-    SigmaPropIsProven { input: Box<TypedExpr>, tpe: SType },
+    SigmaPropIsProven {
+        input: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
     /// `SigmaPropBytes(input)` — transformers.scala:332.
-    SigmaPropBytes { input: Box<TypedExpr>, tpe: SType },
+    SigmaPropBytes {
+        input: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
 
     // ── sigma combiners ───────────────────────────────────────────────────────
     /// `SigmaAnd(items: Seq[SigmaPropValue])` — trees.scala:127.
-    SigmaAnd { items: Vec<TypedExpr>, tpe: SType },
+    SigmaAnd {
+        items: Vec<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
     /// `SigmaOr(items: Seq[SigmaPropValue])` — trees.scala:158.
-    SigmaOr { items: Vec<TypedExpr>, tpe: SType },
+    SigmaOr {
+        items: Vec<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
 
     // ── collection-boolean gates ──────────────────────────────────────────────
     /// `AND(input: Value[SColl[SBoolean]])` — trees.scala:264.
-    AND { input: Box<TypedExpr>, tpe: SType },
+    AND {
+        input: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
     /// `OR(input: Value[SColl[SBoolean]])` — trees.scala:195.
-    OR { input: Box<TypedExpr>, tpe: SType },
+    OR {
+        input: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
     /// `XorOf(input: Value[SColl[SBoolean]])` — trees.scala:234.
-    XorOf { input: Box<TypedExpr>, tpe: SType },
+    XorOf {
+        input: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
 
     // ── group-element ops (trees.scala) ──────────────────────────────────────
     /// `MultiplyGroup(left, right)` — trees.scala:1050.
@@ -440,43 +548,55 @@ pub enum TypedExpr {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `Exponentiate(left, right)` — trees.scala:1028.
     Exponentiate {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `Xor(left, right)` — trees.scala:1001. Byte-array XOR.
     Xor {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
 
     // ── option ops (transformers.scala) ──────────────────────────────────────
     /// `OptionGet(input)` — transformers.scala:598. productIterator: [input].
-    OptionGet { input: Box<TypedExpr>, tpe: SType },
+    OptionGet {
+        input: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
     /// `OptionGetOrElse(input, default)` — transformers.scala:622.
     OptionGetOrElse {
         input: Box<TypedExpr>,
         default: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `OptionIsDefined(input)` — transformers.scala:653.
-    OptionIsDefined { input: Box<TypedExpr>, tpe: SType },
+    OptionIsDefined {
+        input: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
 
     // ── context access ────────────────────────────────────────────────────────
     /// `GetVar[V](varId: Byte, tpe: SOption[V])` — transformers.scala:576.
     /// productIterator: [varId (Byte), tpe (SOption[V])].
     /// N2: tpe = SOption(V) == GetVar.tpe = SOption(V) → always stripped.
     /// The node's type IS SOption(inner); inner is the variable's value type.
-    GetVar { var_id: i8, tpe: SType },
+    GetVar { var_id: i8, tpe: SType, pos: Pos },
 
     /// `DeserializeContext[V](id: Byte, tpe: V)` — transformers.scala:552.
     /// productIterator: [id (Byte), tpe (V: SType)].
     /// N2: tpe == node.tpe → always stripped.
-    DeserializeContext { id: i8, tpe: SType },
+    DeserializeContext { id: i8, tpe: SType, pos: Pos },
 
     /// `DeserializeRegister[V](reg: RegisterId, tpe: V, default: Option[V])` — transformers.scala:565.
     /// productIterator: [reg (Byte), tpe (V: SType), default (Option[Value])].
@@ -485,11 +605,16 @@ pub enum TypedExpr {
         reg: i8,
         tpe: SType,
         default: Option<Box<TypedExpr>>,
+        pos: Pos,
     },
 
     // ── predef irBuilder outputs ──────────────────────────────────────────────
     /// `CreateProveDlog(value)` — trees.scala:61.
-    CreateProveDlog { value: Box<TypedExpr>, tpe: SType },
+    CreateProveDlog {
+        value: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
     /// `CreateProveDHTuple(gv, hv, uv, vv)` — trees.scala:96.
     CreateProveDHTuple {
         gv: Box<TypedExpr>,
@@ -497,31 +622,58 @@ pub enum TypedExpr {
         uv: Box<TypedExpr>,
         vv: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `CalcBlake2b256(input)` — trees.scala:545.
-    CalcBlake2b256 { input: Box<TypedExpr>, tpe: SType },
+    CalcBlake2b256 {
+        input: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
     /// `CalcSha256(input)` — trees.scala:591.
-    CalcSha256 { input: Box<TypedExpr>, tpe: SType },
+    CalcSha256 {
+        input: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
     /// `ByteArrayToBigInt(input)` — trees.scala:493.
-    ByteArrayToBigInt { input: Box<TypedExpr>, tpe: SType },
+    ByteArrayToBigInt {
+        input: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
     /// `ByteArrayToLong(input)` — trees.scala:473.
-    ByteArrayToLong { input: Box<TypedExpr>, tpe: SType },
+    ByteArrayToLong {
+        input: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
     /// `LongToByteArray(input)` — trees.scala:453.
-    LongToByteArray { input: Box<TypedExpr>, tpe: SType },
+    LongToByteArray {
+        input: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
     /// `DecodePoint(input)` — trees.scala:513.
-    DecodePoint { input: Box<TypedExpr>, tpe: SType },
+    DecodePoint {
+        input: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
     /// `SubstConstants(scriptBytes, positions, newValues)` — trees.scala:624.
     SubstConstants {
         script_bytes: Box<TypedExpr>,
         positions: Box<TypedExpr>,
         new_values: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `AtLeast(bound, input)` — trees.scala:307.
     AtLeast {
         bound: Box<TypedExpr>,
         input: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `CreateAvlTree(operationFlags, digest, keyLength, valueLengthOpt)` — trees.scala:79.
     CreateAvlTree {
@@ -530,6 +682,7 @@ pub enum TypedExpr {
         key_length: Box<TypedExpr>,
         value_length_opt: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `TreeLookup(tree, key, proof)` — trees.scala:1322.
     TreeLookup {
@@ -537,9 +690,14 @@ pub enum TypedExpr {
         key: Box<TypedExpr>,
         proof: Box<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
     /// `ZKProofBlock(body)` — values.scala:1110.
-    ZKProofBlock { body: Box<TypedExpr>, tpe: SType },
+    ZKProofBlock {
+        body: Box<TypedExpr>,
+        tpe: SType,
+        pos: Pos,
+    },
 
     // ── MethodCall (values.scala:1313) ───────────────────────────────────────
     // productIterator: [obj (Value), method (SMethod), args (IndexedSeq), typeSubst (Map)].
@@ -554,6 +712,7 @@ pub enum TypedExpr {
         args: Vec<TypedExpr>,
         type_subst: Vec<(String, SType)>,
         tpe: SType,
+        pos: Pos,
     },
 
     // ── pre-typed / bound tree nodes (never appear in post-typecheck oracle output) ─
@@ -571,6 +730,7 @@ pub enum TypedExpr {
         input: Box<TypedExpr>,
         type_args: Vec<SType>,
         tpe: SType,
+        pos: Pos,
     },
 
     /// `MethodCallLike(obj, name, args)` — values.scala:1282.
@@ -583,6 +743,7 @@ pub enum TypedExpr {
         name: String,
         args: Vec<TypedExpr>,
         tpe: SType,
+        pos: Pos,
     },
 }
 
@@ -590,15 +751,15 @@ pub enum TypedExpr {
 /// Used by the printer for the `:TypeTermString` header and N2 checks.
 pub fn node_tpe(e: &TypedExpr) -> &SType {
     match e {
-        TypedExpr::Height { tpe }
-        | TypedExpr::Self_ { tpe }
-        | TypedExpr::Inputs { tpe }
-        | TypedExpr::Outputs { tpe }
-        | TypedExpr::Context { tpe }
-        | TypedExpr::Global { tpe }
-        | TypedExpr::MinerPubkey { tpe }
-        | TypedExpr::LastBlockUtxoRootHash { tpe }
-        | TypedExpr::GroupGenerator { tpe }
+        TypedExpr::Height { tpe, .. }
+        | TypedExpr::Self_ { tpe, .. }
+        | TypedExpr::Inputs { tpe, .. }
+        | TypedExpr::Outputs { tpe, .. }
+        | TypedExpr::Context { tpe, .. }
+        | TypedExpr::Global { tpe, .. }
+        | TypedExpr::MinerPubkey { tpe, .. }
+        | TypedExpr::LastBlockUtxoRootHash { tpe, .. }
+        | TypedExpr::GroupGenerator { tpe, .. }
         | TypedExpr::Constant { tpe, .. }
         | TypedExpr::Block { tpe, .. }
         | TypedExpr::ValNode { tpe, .. }
@@ -668,6 +829,1034 @@ pub fn node_tpe(e: &TypedExpr) -> &SType {
         | TypedExpr::MethodCall { tpe, .. }
         | TypedExpr::ApplyTypes { tpe, .. }
         | TypedExpr::MethodCallLike { tpe, .. } => tpe,
+    }
+}
+
+/// The node's source offset (byte index into the original source text).
+///
+/// Position SEMANTICS by origin: nodes built by the binder carry the offset
+/// of the untyped `Expr` they were built from (ast.rs `pos`); nodes rebuilt
+/// by the typer inherit the offset of the node being rewritten (mirrors
+/// Scala's `currentSrcCtx` pinning, SigmaBuilder); synthesized nodes with no
+/// source construct (predef/environment constants) carry `0` — the same
+/// `Nullable.None` SourceContext Scala leaves unset, which the oracle prints
+/// as `0:0`. NOT part of [`PartialEq`] (see the impl below).
+pub fn node_pos(e: &TypedExpr) -> Pos {
+    match e {
+        TypedExpr::Height { pos, .. }
+        | TypedExpr::Self_ { pos, .. }
+        | TypedExpr::Inputs { pos, .. }
+        | TypedExpr::Outputs { pos, .. }
+        | TypedExpr::Context { pos, .. }
+        | TypedExpr::Global { pos, .. }
+        | TypedExpr::MinerPubkey { pos, .. }
+        | TypedExpr::LastBlockUtxoRootHash { pos, .. }
+        | TypedExpr::GroupGenerator { pos, .. }
+        | TypedExpr::Constant { pos, .. }
+        | TypedExpr::Block { pos, .. }
+        | TypedExpr::ValNode { pos, .. }
+        | TypedExpr::Ident { pos, .. }
+        | TypedExpr::Lambda { pos, .. }
+        | TypedExpr::Select { pos, .. }
+        | TypedExpr::Apply { pos, .. }
+        | TypedExpr::Tuple { pos, .. }
+        | TypedExpr::ConcreteCollection { pos, .. }
+        | TypedExpr::If { pos, .. }
+        | TypedExpr::ArithOp { pos, .. }
+        | TypedExpr::BitOp { pos, .. }
+        | TypedExpr::Upcast { pos, .. }
+        | TypedExpr::Downcast { pos, .. }
+        | TypedExpr::GT { pos, .. }
+        | TypedExpr::GE { pos, .. }
+        | TypedExpr::LT { pos, .. }
+        | TypedExpr::LE { pos, .. }
+        | TypedExpr::EQ { pos, .. }
+        | TypedExpr::NEQ { pos, .. }
+        | TypedExpr::BinAnd { pos, .. }
+        | TypedExpr::BinOr { pos, .. }
+        | TypedExpr::BinXor { pos, .. }
+        | TypedExpr::LogicalNot { pos, .. }
+        | TypedExpr::Negation { pos, .. }
+        | TypedExpr::BitInversion { pos, .. }
+        | TypedExpr::MapCollection { pos, .. }
+        | TypedExpr::Append { pos, .. }
+        | TypedExpr::Slice { pos, .. }
+        | TypedExpr::Filter { pos, .. }
+        | TypedExpr::Exists { pos, .. }
+        | TypedExpr::ForAll { pos, .. }
+        | TypedExpr::Fold { pos, .. }
+        | TypedExpr::ByIndex { pos, .. }
+        | TypedExpr::SelectField { pos, .. }
+        | TypedExpr::SizeOf { pos, .. }
+        | TypedExpr::BoolToSigmaProp { pos, .. }
+        | TypedExpr::SigmaPropIsProven { pos, .. }
+        | TypedExpr::SigmaPropBytes { pos, .. }
+        | TypedExpr::SigmaAnd { pos, .. }
+        | TypedExpr::SigmaOr { pos, .. }
+        | TypedExpr::AND { pos, .. }
+        | TypedExpr::OR { pos, .. }
+        | TypedExpr::XorOf { pos, .. }
+        | TypedExpr::MultiplyGroup { pos, .. }
+        | TypedExpr::Exponentiate { pos, .. }
+        | TypedExpr::Xor { pos, .. }
+        | TypedExpr::OptionGet { pos, .. }
+        | TypedExpr::OptionGetOrElse { pos, .. }
+        | TypedExpr::OptionIsDefined { pos, .. }
+        | TypedExpr::GetVar { pos, .. }
+        | TypedExpr::DeserializeContext { pos, .. }
+        | TypedExpr::DeserializeRegister { pos, .. }
+        | TypedExpr::CreateProveDlog { pos, .. }
+        | TypedExpr::CreateProveDHTuple { pos, .. }
+        | TypedExpr::CalcBlake2b256 { pos, .. }
+        | TypedExpr::CalcSha256 { pos, .. }
+        | TypedExpr::ByteArrayToBigInt { pos, .. }
+        | TypedExpr::ByteArrayToLong { pos, .. }
+        | TypedExpr::LongToByteArray { pos, .. }
+        | TypedExpr::DecodePoint { pos, .. }
+        | TypedExpr::SubstConstants { pos, .. }
+        | TypedExpr::AtLeast { pos, .. }
+        | TypedExpr::CreateAvlTree { pos, .. }
+        | TypedExpr::TreeLookup { pos, .. }
+        | TypedExpr::ZKProofBlock { pos, .. }
+        | TypedExpr::MethodCall { pos, .. }
+        | TypedExpr::ApplyTypes { pos, .. }
+        | TypedExpr::MethodCallLike { pos, .. } => *pos,
+    }
+}
+
+impl TypedExpr {
+    /// Return a copy of `self` with the source offset set to `new_pos`, used
+    /// where a node is REBUILT from a differently-positioned source construct
+    /// (e.g. the binder substituting an env value for an `Ident` — Scala pins
+    /// the substituted node's `currentSrcCtx` to the replaced node's context).
+    pub fn with_pos(mut self, new_pos: Pos) -> TypedExpr {
+        match &mut self {
+            TypedExpr::Height { pos, .. } => *pos = new_pos,
+            TypedExpr::Self_ { pos, .. } => *pos = new_pos,
+            TypedExpr::Inputs { pos, .. } => *pos = new_pos,
+            TypedExpr::Outputs { pos, .. } => *pos = new_pos,
+            TypedExpr::Context { pos, .. } => *pos = new_pos,
+            TypedExpr::Global { pos, .. } => *pos = new_pos,
+            TypedExpr::MinerPubkey { pos, .. } => *pos = new_pos,
+            TypedExpr::LastBlockUtxoRootHash { pos, .. } => *pos = new_pos,
+            TypedExpr::GroupGenerator { pos, .. } => *pos = new_pos,
+            TypedExpr::Constant { pos, .. } => *pos = new_pos,
+            TypedExpr::Block { pos, .. } => *pos = new_pos,
+            TypedExpr::ValNode { pos, .. } => *pos = new_pos,
+            TypedExpr::Ident { pos, .. } => *pos = new_pos,
+            TypedExpr::Lambda { pos, .. } => *pos = new_pos,
+            TypedExpr::Select { pos, .. } => *pos = new_pos,
+            TypedExpr::Apply { pos, .. } => *pos = new_pos,
+            TypedExpr::Tuple { pos, .. } => *pos = new_pos,
+            TypedExpr::ConcreteCollection { pos, .. } => *pos = new_pos,
+            TypedExpr::If { pos, .. } => *pos = new_pos,
+            TypedExpr::ArithOp { pos, .. } => *pos = new_pos,
+            TypedExpr::BitOp { pos, .. } => *pos = new_pos,
+            TypedExpr::Upcast { pos, .. } => *pos = new_pos,
+            TypedExpr::Downcast { pos, .. } => *pos = new_pos,
+            TypedExpr::GT { pos, .. } => *pos = new_pos,
+            TypedExpr::GE { pos, .. } => *pos = new_pos,
+            TypedExpr::LT { pos, .. } => *pos = new_pos,
+            TypedExpr::LE { pos, .. } => *pos = new_pos,
+            TypedExpr::EQ { pos, .. } => *pos = new_pos,
+            TypedExpr::NEQ { pos, .. } => *pos = new_pos,
+            TypedExpr::BinAnd { pos, .. } => *pos = new_pos,
+            TypedExpr::BinOr { pos, .. } => *pos = new_pos,
+            TypedExpr::BinXor { pos, .. } => *pos = new_pos,
+            TypedExpr::LogicalNot { pos, .. } => *pos = new_pos,
+            TypedExpr::Negation { pos, .. } => *pos = new_pos,
+            TypedExpr::BitInversion { pos, .. } => *pos = new_pos,
+            TypedExpr::MapCollection { pos, .. } => *pos = new_pos,
+            TypedExpr::Append { pos, .. } => *pos = new_pos,
+            TypedExpr::Slice { pos, .. } => *pos = new_pos,
+            TypedExpr::Filter { pos, .. } => *pos = new_pos,
+            TypedExpr::Exists { pos, .. } => *pos = new_pos,
+            TypedExpr::ForAll { pos, .. } => *pos = new_pos,
+            TypedExpr::Fold { pos, .. } => *pos = new_pos,
+            TypedExpr::ByIndex { pos, .. } => *pos = new_pos,
+            TypedExpr::SelectField { pos, .. } => *pos = new_pos,
+            TypedExpr::SizeOf { pos, .. } => *pos = new_pos,
+            TypedExpr::BoolToSigmaProp { pos, .. } => *pos = new_pos,
+            TypedExpr::SigmaPropIsProven { pos, .. } => *pos = new_pos,
+            TypedExpr::SigmaPropBytes { pos, .. } => *pos = new_pos,
+            TypedExpr::SigmaAnd { pos, .. } => *pos = new_pos,
+            TypedExpr::SigmaOr { pos, .. } => *pos = new_pos,
+            TypedExpr::AND { pos, .. } => *pos = new_pos,
+            TypedExpr::OR { pos, .. } => *pos = new_pos,
+            TypedExpr::XorOf { pos, .. } => *pos = new_pos,
+            TypedExpr::MultiplyGroup { pos, .. } => *pos = new_pos,
+            TypedExpr::Exponentiate { pos, .. } => *pos = new_pos,
+            TypedExpr::Xor { pos, .. } => *pos = new_pos,
+            TypedExpr::OptionGet { pos, .. } => *pos = new_pos,
+            TypedExpr::OptionGetOrElse { pos, .. } => *pos = new_pos,
+            TypedExpr::OptionIsDefined { pos, .. } => *pos = new_pos,
+            TypedExpr::GetVar { pos, .. } => *pos = new_pos,
+            TypedExpr::DeserializeContext { pos, .. } => *pos = new_pos,
+            TypedExpr::DeserializeRegister { pos, .. } => *pos = new_pos,
+            TypedExpr::CreateProveDlog { pos, .. } => *pos = new_pos,
+            TypedExpr::CreateProveDHTuple { pos, .. } => *pos = new_pos,
+            TypedExpr::CalcBlake2b256 { pos, .. } => *pos = new_pos,
+            TypedExpr::CalcSha256 { pos, .. } => *pos = new_pos,
+            TypedExpr::ByteArrayToBigInt { pos, .. } => *pos = new_pos,
+            TypedExpr::ByteArrayToLong { pos, .. } => *pos = new_pos,
+            TypedExpr::LongToByteArray { pos, .. } => *pos = new_pos,
+            TypedExpr::DecodePoint { pos, .. } => *pos = new_pos,
+            TypedExpr::SubstConstants { pos, .. } => *pos = new_pos,
+            TypedExpr::AtLeast { pos, .. } => *pos = new_pos,
+            TypedExpr::CreateAvlTree { pos, .. } => *pos = new_pos,
+            TypedExpr::TreeLookup { pos, .. } => *pos = new_pos,
+            TypedExpr::ZKProofBlock { pos, .. } => *pos = new_pos,
+            TypedExpr::MethodCall { pos, .. } => *pos = new_pos,
+            TypedExpr::ApplyTypes { pos, .. } => *pos = new_pos,
+            TypedExpr::MethodCallLike { pos, .. } => *pos = new_pos,
+        }
+        self
+    }
+}
+
+/// Structural equality over shape and types — positions are deliberately
+/// EXCLUDED. Two nodes are equal iff they are the same variant with equal
+/// payloads; where a node was written in the source is metadata that rides
+/// alongside (same policy as the pre-position `TypedExpr`, where equality
+/// had no position to consult). Comparing tree shape must not depend on it.
+impl PartialEq for TypedExpr {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (TypedExpr::Height { tpe, .. }, TypedExpr::Height { tpe: otpe, .. }) => tpe == otpe,
+            (TypedExpr::Self_ { tpe, .. }, TypedExpr::Self_ { tpe: otpe, .. }) => tpe == otpe,
+            (TypedExpr::Inputs { tpe, .. }, TypedExpr::Inputs { tpe: otpe, .. }) => tpe == otpe,
+            (TypedExpr::Outputs { tpe, .. }, TypedExpr::Outputs { tpe: otpe, .. }) => tpe == otpe,
+            (TypedExpr::Context { tpe, .. }, TypedExpr::Context { tpe: otpe, .. }) => tpe == otpe,
+            (TypedExpr::Global { tpe, .. }, TypedExpr::Global { tpe: otpe, .. }) => tpe == otpe,
+            (TypedExpr::MinerPubkey { tpe, .. }, TypedExpr::MinerPubkey { tpe: otpe, .. }) => {
+                tpe == otpe
+            }
+            (
+                TypedExpr::LastBlockUtxoRootHash { tpe, .. },
+                TypedExpr::LastBlockUtxoRootHash { tpe: otpe, .. },
+            ) => tpe == otpe,
+            (
+                TypedExpr::GroupGenerator { tpe, .. },
+                TypedExpr::GroupGenerator { tpe: otpe, .. },
+            ) => tpe == otpe,
+            (
+                TypedExpr::Constant { value, tpe, .. },
+                TypedExpr::Constant {
+                    value: ovalue,
+                    tpe: otpe,
+                    ..
+                },
+            ) => value == ovalue && tpe == otpe,
+            (
+                TypedExpr::Block {
+                    bindings,
+                    result,
+                    tpe,
+                    ..
+                },
+                TypedExpr::Block {
+                    bindings: obindings,
+                    result: oresult,
+                    tpe: otpe,
+                    ..
+                },
+            ) => bindings == obindings && result == oresult && tpe == otpe,
+            (
+                TypedExpr::ValNode {
+                    name,
+                    given_type,
+                    body,
+                    tpe,
+                    ..
+                },
+                TypedExpr::ValNode {
+                    name: oname,
+                    given_type: ogiven_type,
+                    body: obody,
+                    tpe: otpe,
+                    ..
+                },
+            ) => name == oname && given_type == ogiven_type && body == obody && tpe == otpe,
+            (
+                TypedExpr::Ident { name, tpe, .. },
+                TypedExpr::Ident {
+                    name: oname,
+                    tpe: otpe,
+                    ..
+                },
+            ) => name == oname && tpe == otpe,
+            (
+                TypedExpr::Lambda {
+                    tpe_params,
+                    args,
+                    given_res_type,
+                    body,
+                    tpe,
+                    ..
+                },
+                TypedExpr::Lambda {
+                    tpe_params: otpe_params,
+                    args: oargs,
+                    given_res_type: ogiven_res_type,
+                    body: obody,
+                    tpe: otpe,
+                    ..
+                },
+            ) => {
+                tpe_params == otpe_params
+                    && args == oargs
+                    && given_res_type == ogiven_res_type
+                    && body == obody
+                    && tpe == otpe
+            }
+            (
+                TypedExpr::Select {
+                    obj,
+                    field,
+                    res_type,
+                    tpe,
+                    ..
+                },
+                TypedExpr::Select {
+                    obj: oobj,
+                    field: ofield,
+                    res_type: ores_type,
+                    tpe: otpe,
+                    ..
+                },
+            ) => obj == oobj && field == ofield && res_type == ores_type && tpe == otpe,
+            (
+                TypedExpr::Apply {
+                    func, args, tpe, ..
+                },
+                TypedExpr::Apply {
+                    func: ofunc,
+                    args: oargs,
+                    tpe: otpe,
+                    ..
+                },
+            ) => func == ofunc && args == oargs && tpe == otpe,
+            (
+                TypedExpr::Tuple { items, tpe, .. },
+                TypedExpr::Tuple {
+                    items: oitems,
+                    tpe: otpe,
+                    ..
+                },
+            ) => items == oitems && tpe == otpe,
+            (
+                TypedExpr::ConcreteCollection {
+                    items,
+                    elem_type,
+                    tpe,
+                    ..
+                },
+                TypedExpr::ConcreteCollection {
+                    items: oitems,
+                    elem_type: oelem_type,
+                    tpe: otpe,
+                    ..
+                },
+            ) => items == oitems && elem_type == oelem_type && tpe == otpe,
+            (
+                TypedExpr::If {
+                    condition,
+                    true_branch,
+                    false_branch,
+                    tpe,
+                    ..
+                },
+                TypedExpr::If {
+                    condition: ocondition,
+                    true_branch: otrue_branch,
+                    false_branch: ofalse_branch,
+                    tpe: otpe,
+                    ..
+                },
+            ) => {
+                condition == ocondition
+                    && true_branch == otrue_branch
+                    && false_branch == ofalse_branch
+                    && tpe == otpe
+            }
+            (
+                TypedExpr::ArithOp {
+                    left,
+                    right,
+                    opcode,
+                    tpe,
+                    ..
+                },
+                TypedExpr::ArithOp {
+                    left: oleft,
+                    right: oright,
+                    opcode: oopcode,
+                    tpe: otpe,
+                    ..
+                },
+            ) => left == oleft && right == oright && opcode == oopcode && tpe == otpe,
+            (
+                TypedExpr::BitOp {
+                    left,
+                    right,
+                    opcode,
+                    tpe,
+                    ..
+                },
+                TypedExpr::BitOp {
+                    left: oleft,
+                    right: oright,
+                    opcode: oopcode,
+                    tpe: otpe,
+                    ..
+                },
+            ) => left == oleft && right == oright && opcode == oopcode && tpe == otpe,
+            (
+                TypedExpr::Upcast { input, tpe, .. },
+                TypedExpr::Upcast {
+                    input: oinput,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && tpe == otpe,
+            (
+                TypedExpr::Downcast { input, tpe, .. },
+                TypedExpr::Downcast {
+                    input: oinput,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && tpe == otpe,
+            (
+                TypedExpr::GT {
+                    left, right, tpe, ..
+                },
+                TypedExpr::GT {
+                    left: oleft,
+                    right: oright,
+                    tpe: otpe,
+                    ..
+                },
+            ) => left == oleft && right == oright && tpe == otpe,
+            (
+                TypedExpr::GE {
+                    left, right, tpe, ..
+                },
+                TypedExpr::GE {
+                    left: oleft,
+                    right: oright,
+                    tpe: otpe,
+                    ..
+                },
+            ) => left == oleft && right == oright && tpe == otpe,
+            (
+                TypedExpr::LT {
+                    left, right, tpe, ..
+                },
+                TypedExpr::LT {
+                    left: oleft,
+                    right: oright,
+                    tpe: otpe,
+                    ..
+                },
+            ) => left == oleft && right == oright && tpe == otpe,
+            (
+                TypedExpr::LE {
+                    left, right, tpe, ..
+                },
+                TypedExpr::LE {
+                    left: oleft,
+                    right: oright,
+                    tpe: otpe,
+                    ..
+                },
+            ) => left == oleft && right == oright && tpe == otpe,
+            (
+                TypedExpr::EQ {
+                    left, right, tpe, ..
+                },
+                TypedExpr::EQ {
+                    left: oleft,
+                    right: oright,
+                    tpe: otpe,
+                    ..
+                },
+            ) => left == oleft && right == oright && tpe == otpe,
+            (
+                TypedExpr::NEQ {
+                    left, right, tpe, ..
+                },
+                TypedExpr::NEQ {
+                    left: oleft,
+                    right: oright,
+                    tpe: otpe,
+                    ..
+                },
+            ) => left == oleft && right == oright && tpe == otpe,
+            (
+                TypedExpr::BinAnd {
+                    left, right, tpe, ..
+                },
+                TypedExpr::BinAnd {
+                    left: oleft,
+                    right: oright,
+                    tpe: otpe,
+                    ..
+                },
+            ) => left == oleft && right == oright && tpe == otpe,
+            (
+                TypedExpr::BinOr {
+                    left, right, tpe, ..
+                },
+                TypedExpr::BinOr {
+                    left: oleft,
+                    right: oright,
+                    tpe: otpe,
+                    ..
+                },
+            ) => left == oleft && right == oright && tpe == otpe,
+            (
+                TypedExpr::BinXor {
+                    left, right, tpe, ..
+                },
+                TypedExpr::BinXor {
+                    left: oleft,
+                    right: oright,
+                    tpe: otpe,
+                    ..
+                },
+            ) => left == oleft && right == oright && tpe == otpe,
+            (
+                TypedExpr::LogicalNot { input, tpe, .. },
+                TypedExpr::LogicalNot {
+                    input: oinput,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && tpe == otpe,
+            (
+                TypedExpr::Negation { input, tpe, .. },
+                TypedExpr::Negation {
+                    input: oinput,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && tpe == otpe,
+            (
+                TypedExpr::BitInversion { input, tpe, .. },
+                TypedExpr::BitInversion {
+                    input: oinput,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && tpe == otpe,
+            (
+                TypedExpr::MapCollection {
+                    input, mapper, tpe, ..
+                },
+                TypedExpr::MapCollection {
+                    input: oinput,
+                    mapper: omapper,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && mapper == omapper && tpe == otpe,
+            (
+                TypedExpr::Append {
+                    input, col2, tpe, ..
+                },
+                TypedExpr::Append {
+                    input: oinput,
+                    col2: ocol2,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && col2 == ocol2 && tpe == otpe,
+            (
+                TypedExpr::Slice {
+                    input,
+                    from,
+                    until,
+                    tpe,
+                    ..
+                },
+                TypedExpr::Slice {
+                    input: oinput,
+                    from: ofrom,
+                    until: ountil,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && from == ofrom && until == ountil && tpe == otpe,
+            (
+                TypedExpr::Filter {
+                    input,
+                    condition,
+                    tpe,
+                    ..
+                },
+                TypedExpr::Filter {
+                    input: oinput,
+                    condition: ocondition,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && condition == ocondition && tpe == otpe,
+            (
+                TypedExpr::Exists {
+                    input,
+                    condition,
+                    tpe,
+                    ..
+                },
+                TypedExpr::Exists {
+                    input: oinput,
+                    condition: ocondition,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && condition == ocondition && tpe == otpe,
+            (
+                TypedExpr::ForAll {
+                    input,
+                    condition,
+                    tpe,
+                    ..
+                },
+                TypedExpr::ForAll {
+                    input: oinput,
+                    condition: ocondition,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && condition == ocondition && tpe == otpe,
+            (
+                TypedExpr::Fold {
+                    input,
+                    zero,
+                    fold_op,
+                    tpe,
+                    ..
+                },
+                TypedExpr::Fold {
+                    input: oinput,
+                    zero: ozero,
+                    fold_op: ofold_op,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && zero == ozero && fold_op == ofold_op && tpe == otpe,
+            (
+                TypedExpr::ByIndex {
+                    input,
+                    index,
+                    default,
+                    tpe,
+                    ..
+                },
+                TypedExpr::ByIndex {
+                    input: oinput,
+                    index: oindex,
+                    default: odefault,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && index == oindex && default == odefault && tpe == otpe,
+            (
+                TypedExpr::SelectField {
+                    input,
+                    field_index,
+                    tpe,
+                    ..
+                },
+                TypedExpr::SelectField {
+                    input: oinput,
+                    field_index: ofield_index,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && field_index == ofield_index && tpe == otpe,
+            (
+                TypedExpr::SizeOf { input, tpe, .. },
+                TypedExpr::SizeOf {
+                    input: oinput,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && tpe == otpe,
+            (
+                TypedExpr::BoolToSigmaProp { value, tpe, .. },
+                TypedExpr::BoolToSigmaProp {
+                    value: ovalue,
+                    tpe: otpe,
+                    ..
+                },
+            ) => value == ovalue && tpe == otpe,
+            (
+                TypedExpr::SigmaPropIsProven { input, tpe, .. },
+                TypedExpr::SigmaPropIsProven {
+                    input: oinput,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && tpe == otpe,
+            (
+                TypedExpr::SigmaPropBytes { input, tpe, .. },
+                TypedExpr::SigmaPropBytes {
+                    input: oinput,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && tpe == otpe,
+            (
+                TypedExpr::SigmaAnd { items, tpe, .. },
+                TypedExpr::SigmaAnd {
+                    items: oitems,
+                    tpe: otpe,
+                    ..
+                },
+            ) => items == oitems && tpe == otpe,
+            (
+                TypedExpr::SigmaOr { items, tpe, .. },
+                TypedExpr::SigmaOr {
+                    items: oitems,
+                    tpe: otpe,
+                    ..
+                },
+            ) => items == oitems && tpe == otpe,
+            (
+                TypedExpr::AND { input, tpe, .. },
+                TypedExpr::AND {
+                    input: oinput,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && tpe == otpe,
+            (
+                TypedExpr::OR { input, tpe, .. },
+                TypedExpr::OR {
+                    input: oinput,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && tpe == otpe,
+            (
+                TypedExpr::XorOf { input, tpe, .. },
+                TypedExpr::XorOf {
+                    input: oinput,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && tpe == otpe,
+            (
+                TypedExpr::MultiplyGroup {
+                    left, right, tpe, ..
+                },
+                TypedExpr::MultiplyGroup {
+                    left: oleft,
+                    right: oright,
+                    tpe: otpe,
+                    ..
+                },
+            ) => left == oleft && right == oright && tpe == otpe,
+            (
+                TypedExpr::Exponentiate {
+                    left, right, tpe, ..
+                },
+                TypedExpr::Exponentiate {
+                    left: oleft,
+                    right: oright,
+                    tpe: otpe,
+                    ..
+                },
+            ) => left == oleft && right == oright && tpe == otpe,
+            (
+                TypedExpr::Xor {
+                    left, right, tpe, ..
+                },
+                TypedExpr::Xor {
+                    left: oleft,
+                    right: oright,
+                    tpe: otpe,
+                    ..
+                },
+            ) => left == oleft && right == oright && tpe == otpe,
+            (
+                TypedExpr::OptionGet { input, tpe, .. },
+                TypedExpr::OptionGet {
+                    input: oinput,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && tpe == otpe,
+            (
+                TypedExpr::OptionGetOrElse {
+                    input,
+                    default,
+                    tpe,
+                    ..
+                },
+                TypedExpr::OptionGetOrElse {
+                    input: oinput,
+                    default: odefault,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && default == odefault && tpe == otpe,
+            (
+                TypedExpr::OptionIsDefined { input, tpe, .. },
+                TypedExpr::OptionIsDefined {
+                    input: oinput,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && tpe == otpe,
+            (
+                TypedExpr::GetVar { var_id, tpe, .. },
+                TypedExpr::GetVar {
+                    var_id: ovar_id,
+                    tpe: otpe,
+                    ..
+                },
+            ) => var_id == ovar_id && tpe == otpe,
+            (
+                TypedExpr::DeserializeContext { id, tpe, .. },
+                TypedExpr::DeserializeContext {
+                    id: oid, tpe: otpe, ..
+                },
+            ) => id == oid && tpe == otpe,
+            (
+                TypedExpr::DeserializeRegister {
+                    reg, tpe, default, ..
+                },
+                TypedExpr::DeserializeRegister {
+                    reg: oreg,
+                    tpe: otpe,
+                    default: odefault,
+                    ..
+                },
+            ) => reg == oreg && tpe == otpe && default == odefault,
+            (
+                TypedExpr::CreateProveDlog { value, tpe, .. },
+                TypedExpr::CreateProveDlog {
+                    value: ovalue,
+                    tpe: otpe,
+                    ..
+                },
+            ) => value == ovalue && tpe == otpe,
+            (
+                TypedExpr::CreateProveDHTuple {
+                    gv,
+                    hv,
+                    uv,
+                    vv,
+                    tpe,
+                    ..
+                },
+                TypedExpr::CreateProveDHTuple {
+                    gv: ogv,
+                    hv: ohv,
+                    uv: ouv,
+                    vv: ovv,
+                    tpe: otpe,
+                    ..
+                },
+            ) => gv == ogv && hv == ohv && uv == ouv && vv == ovv && tpe == otpe,
+            (
+                TypedExpr::CalcBlake2b256 { input, tpe, .. },
+                TypedExpr::CalcBlake2b256 {
+                    input: oinput,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && tpe == otpe,
+            (
+                TypedExpr::CalcSha256 { input, tpe, .. },
+                TypedExpr::CalcSha256 {
+                    input: oinput,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && tpe == otpe,
+            (
+                TypedExpr::ByteArrayToBigInt { input, tpe, .. },
+                TypedExpr::ByteArrayToBigInt {
+                    input: oinput,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && tpe == otpe,
+            (
+                TypedExpr::ByteArrayToLong { input, tpe, .. },
+                TypedExpr::ByteArrayToLong {
+                    input: oinput,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && tpe == otpe,
+            (
+                TypedExpr::LongToByteArray { input, tpe, .. },
+                TypedExpr::LongToByteArray {
+                    input: oinput,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && tpe == otpe,
+            (
+                TypedExpr::DecodePoint { input, tpe, .. },
+                TypedExpr::DecodePoint {
+                    input: oinput,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && tpe == otpe,
+            (
+                TypedExpr::SubstConstants {
+                    script_bytes,
+                    positions,
+                    new_values,
+                    tpe,
+                    ..
+                },
+                TypedExpr::SubstConstants {
+                    script_bytes: oscript_bytes,
+                    positions: opositions,
+                    new_values: onew_values,
+                    tpe: otpe,
+                    ..
+                },
+            ) => {
+                script_bytes == oscript_bytes
+                    && positions == opositions
+                    && new_values == onew_values
+                    && tpe == otpe
+            }
+            (
+                TypedExpr::AtLeast {
+                    bound, input, tpe, ..
+                },
+                TypedExpr::AtLeast {
+                    bound: obound,
+                    input: oinput,
+                    tpe: otpe,
+                    ..
+                },
+            ) => bound == obound && input == oinput && tpe == otpe,
+            (
+                TypedExpr::CreateAvlTree {
+                    operation_flags,
+                    digest,
+                    key_length,
+                    value_length_opt,
+                    tpe,
+                    ..
+                },
+                TypedExpr::CreateAvlTree {
+                    operation_flags: ooperation_flags,
+                    digest: odigest,
+                    key_length: okey_length,
+                    value_length_opt: ovalue_length_opt,
+                    tpe: otpe,
+                    ..
+                },
+            ) => {
+                operation_flags == ooperation_flags
+                    && digest == odigest
+                    && key_length == okey_length
+                    && value_length_opt == ovalue_length_opt
+                    && tpe == otpe
+            }
+            (
+                TypedExpr::TreeLookup {
+                    tree,
+                    key,
+                    proof,
+                    tpe,
+                    ..
+                },
+                TypedExpr::TreeLookup {
+                    tree: otree,
+                    key: okey,
+                    proof: oproof,
+                    tpe: otpe,
+                    ..
+                },
+            ) => tree == otree && key == okey && proof == oproof && tpe == otpe,
+            (
+                TypedExpr::ZKProofBlock { body, tpe, .. },
+                TypedExpr::ZKProofBlock {
+                    body: obody,
+                    tpe: otpe,
+                    ..
+                },
+            ) => body == obody && tpe == otpe,
+            (
+                TypedExpr::MethodCall {
+                    obj,
+                    method,
+                    args,
+                    type_subst,
+                    tpe,
+                    ..
+                },
+                TypedExpr::MethodCall {
+                    obj: oobj,
+                    method: omethod,
+                    args: oargs,
+                    type_subst: otype_subst,
+                    tpe: otpe,
+                    ..
+                },
+            ) => {
+                obj == oobj
+                    && method == omethod
+                    && args == oargs
+                    && type_subst == otype_subst
+                    && tpe == otpe
+            }
+            (
+                TypedExpr::ApplyTypes {
+                    input,
+                    type_args,
+                    tpe,
+                    ..
+                },
+                TypedExpr::ApplyTypes {
+                    input: oinput,
+                    type_args: otype_args,
+                    tpe: otpe,
+                    ..
+                },
+            ) => input == oinput && type_args == otype_args && tpe == otpe,
+            (
+                TypedExpr::MethodCallLike {
+                    obj,
+                    name,
+                    args,
+                    tpe,
+                    ..
+                },
+                TypedExpr::MethodCallLike {
+                    obj: oobj,
+                    name: oname,
+                    args: oargs,
+                    tpe: otpe,
+                    ..
+                },
+            ) => obj == oobj && name == oname && args == oargs && tpe == otpe,
+            // Different variants are never equal. Guard against a future variant
+            // that forgets to add its own match arm above: comparing a value to
+            // itself would then silently fall through here and read as unequal
+            // to itself. debug_assert catches that in debug/test builds.
+            (a, b) => {
+                debug_assert_ne!(
+                    std::mem::discriminant(a),
+                    std::mem::discriminant(b),
+                    "PartialEq arm missing for variant"
+                );
+                false
+            }
+        }
     }
 }
 
@@ -993,6 +2182,7 @@ mod tests {
         TypedExpr::Constant {
             value: ConstPayload::Int(v),
             tpe: SType::SInt,
+            pos: 0,
         }
     }
 
@@ -1000,6 +2190,7 @@ mod tests {
         TypedExpr::Constant {
             value: ConstPayload::Long(v),
             tpe: SType::SLong,
+            pos: 0,
         }
     }
 
@@ -1009,34 +2200,44 @@ mod tests {
     fn context_singletons_have_correct_prefixes() {
         // Verify product_prefix returns the correct Scala class name for each singleton.
         assert_eq!(
-            product_prefix(&TypedExpr::Height { tpe: SType::SInt }),
+            product_prefix(&TypedExpr::Height {
+                tpe: SType::SInt,
+                pos: 0
+            }),
             "Height"
         );
         assert_eq!(
-            product_prefix(&TypedExpr::Self_ { tpe: SType::SBox }),
+            product_prefix(&TypedExpr::Self_ {
+                tpe: SType::SBox,
+                pos: 0
+            }),
             "Self"
         );
         assert_eq!(
             product_prefix(&TypedExpr::Inputs {
-                tpe: SType::SColl(Box::new(SType::SBox))
+                tpe: SType::SColl(Box::new(SType::SBox)),
+                pos: 0,
             }),
             "Inputs"
         );
         assert_eq!(
             product_prefix(&TypedExpr::Global {
-                tpe: SType::SGlobal
+                tpe: SType::SGlobal,
+                pos: 0,
             }),
             "Global"
         );
         assert_eq!(
             product_prefix(&TypedExpr::Context {
-                tpe: SType::SContext
+                tpe: SType::SContext,
+                pos: 0,
             }),
             "Context"
         );
         assert_eq!(
             product_prefix(&TypedExpr::LastBlockUtxoRootHash {
-                tpe: SType::SAvlTree
+                tpe: SType::SAvlTree,
+                pos: 0,
             }),
             "LastBlockUtxoRootHash"
         );
@@ -1055,6 +2256,7 @@ mod tests {
         let mc = TypedExpr::MethodCall {
             obj: Box::new(TypedExpr::Global {
                 tpe: SType::SGlobal,
+                pos: 0,
             }),
             method: MethodRef {
                 owner: "SigmaDslBuilder".into(),
@@ -1063,6 +2265,7 @@ mod tests {
             args: vec![int_const(1)],
             type_subst: vec![],
             tpe: SType::SColl(Box::new(SType::SByte)),
+            pos: 0,
         };
         assert_eq!(product_prefix(&mc), "MethodCall");
     }
@@ -1070,7 +2273,10 @@ mod tests {
     #[test]
     fn node_tpe_returns_correct_type() {
         assert_eq!(
-            node_tpe(&TypedExpr::Height { tpe: SType::SInt }),
+            node_tpe(&TypedExpr::Height {
+                tpe: SType::SInt,
+                pos: 0
+            }),
             &SType::SInt
         );
         assert_eq!(node_tpe(&int_const(1)), &SType::SInt);
@@ -1081,6 +2287,7 @@ mod tests {
                 right: Box::new(long_const(2)),
                 opcode: ARITH_PLUS,
                 tpe: SType::SLong,
+                pos: 0,
             }),
             &SType::SLong
         );
@@ -1121,9 +2328,11 @@ mod tests {
             right: Box::new(TypedExpr::Upcast {
                 input: Box::new(int_const(1)),
                 tpe: SType::SLong,
+                pos: 0,
             }),
             opcode: ARITH_PLUS,
             tpe: SType::SLong,
+            pos: 0,
         };
         assert_eq!(e.clone(), e);
     }

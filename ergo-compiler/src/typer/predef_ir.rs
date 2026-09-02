@@ -104,8 +104,9 @@ use ergo_ser::opcode::{parse_expr, Expr as OpExpr, IrNode, Payload as OpPayload}
 use ergo_ser::sigma_type::SigmaType as WireType;
 use ergo_ser::sigma_value::{CollValue, SigmaBoolean, SigmaValue as WireValue};
 
+use crate::span::Pos;
 use crate::stype::SType;
-use crate::typed::{ConstPayload, MethodRef, TypedExpr};
+use crate::typed::{node_pos, ConstPayload, MethodRef, TypedExpr};
 use crate::typer::assign::{stype_has_free_type_var, TyperError};
 use crate::typer::methods::owner_name_for_type;
 use crate::typer::TypeEnv;
@@ -336,9 +337,9 @@ fn string_const(e: &TypedExpr) -> Option<&str> {
 }
 
 #[inline]
-fn typer_err(msg: impl Into<String>) -> TyperError {
+fn typer_err(pos: Pos, msg: impl Into<String>) -> TyperError {
     TyperError::TyperException {
-        pos: 0,
+        pos,
         msg: msg.into(),
     }
 }
@@ -359,6 +360,9 @@ pub fn predef_ir_builder(
     args: &[TypedExpr],
     tree_version: u8,
 ) -> Option<Result<TypedExpr, TyperError>> {
+    // The lowered node replaces the whole predef call, which starts at its
+    // callee Ident (Scala pins `currentSrcCtx` to the application).
+    let call_pos = node_pos(func);
     match name {
         // ── logical / threshold ──────────────────────────────────────────────
         // sigmaProp's Scala irBuilder is `case Seq(b: BoolValue @unchecked) =>
@@ -375,15 +379,18 @@ pub fn predef_ir_builder(
             Some(Ok(TypedExpr::BoolToSigmaProp {
                 value: Box::new(args[0].clone()),
                 tpe: SType::SSigmaProp,
+                pos: call_pos,
             }))
         }
         "allOf" => unary(args, coll(SType::SBoolean), |v| TypedExpr::AND {
             input: Box::new(v),
             tpe: SType::SBoolean,
+            pos: call_pos,
         }),
         "anyOf" => unary(args, coll(SType::SBoolean), |v| TypedExpr::OR {
             input: Box::new(v),
             tpe: SType::SBoolean,
+            pos: call_pos,
         }),
         // xorOf's Scala irBuilder is `case Seq(col: Coll[SBoolean] @unchecked) =>
         // mkXorOf(col)` (SigmaPredef.scala:72-77): `@unchecked` erases the element
@@ -399,11 +406,13 @@ pub fn predef_ir_builder(
             Some(Ok(TypedExpr::XorOf {
                 input: Box::new(args[0].clone()),
                 tpe: SType::SBoolean,
+                pos: call_pos,
             }))
         }
         "ZKProof" => unary(args, SType::SSigmaProp, |v| TypedExpr::ZKProofBlock {
             body: Box::new(v),
             tpe: SType::SBoolean,
+            pos: call_pos,
         }),
         "atLeast" => {
             // (_, Seq(bound: IntValue, arr: Coll[SigmaProp]))
@@ -417,6 +426,7 @@ pub fn predef_ir_builder(
                 bound: Box::new(args[0].clone()),
                 input: Box::new(args[1].clone()),
                 tpe: SType::SSigmaProp,
+                pos: call_pos,
             }))
         }
 
@@ -424,30 +434,37 @@ pub fn predef_ir_builder(
         "blake2b256" => unary(args, coll_byte(), |v| TypedExpr::CalcBlake2b256 {
             input: Box::new(v),
             tpe: coll_byte(),
+            pos: call_pos,
         }),
         "sha256" => unary(args, coll_byte(), |v| TypedExpr::CalcSha256 {
             input: Box::new(v),
             tpe: coll_byte(),
+            pos: call_pos,
         }),
         "byteArrayToBigInt" => unary(args, coll_byte(), |v| TypedExpr::ByteArrayToBigInt {
             input: Box::new(v),
             tpe: SType::SBigInt,
+            pos: call_pos,
         }),
         "byteArrayToLong" => unary(args, coll_byte(), |v| TypedExpr::ByteArrayToLong {
             input: Box::new(v),
             tpe: SType::SLong,
+            pos: call_pos,
         }),
         "decodePoint" => unary(args, coll_byte(), |v| TypedExpr::DecodePoint {
             input: Box::new(v),
             tpe: SType::SGroupElement,
+            pos: call_pos,
         }),
         "longToByteArray" => unary(args, SType::SLong, |v| TypedExpr::LongToByteArray {
             input: Box::new(v),
             tpe: coll_byte(),
+            pos: call_pos,
         }),
         "proveDlog" => unary(args, SType::SGroupElement, |v| TypedExpr::CreateProveDlog {
             value: Box::new(v),
             tpe: SType::SSigmaProp,
+            pos: call_pos,
         }),
 
         // ── multi-arg sigma / structures ─────────────────────────────────────
@@ -461,6 +478,7 @@ pub fn predef_ir_builder(
                 uv: Box::new(args[2].clone()),
                 vv: Box::new(args[3].clone()),
                 tpe: SType::SSigmaProp,
+                pos: call_pos,
             }))
         }
         "avlTree" => {
@@ -473,6 +491,7 @@ pub fn predef_ir_builder(
                 key_length: Box::new(args[2].clone()),
                 value_length_opt: Box::new(args[3].clone()),
                 tpe: SType::SAvlTree,
+                pos: call_pos,
             }))
         }
         "substConstants" => {
@@ -484,6 +503,7 @@ pub fn predef_ir_builder(
                 positions: Box::new(args[1].clone()),
                 new_values: Box::new(args[2].clone()),
                 tpe: coll_byte(),
+                pos: call_pos,
             }))
         }
 
@@ -498,6 +518,7 @@ pub fn predef_ir_builder(
             Some(Ok(TypedExpr::GetVar {
                 var_id: id as i8,
                 tpe: opt(rtpe.clone()),
+                pos: call_pos,
             }))
         }
         "executeFromVar" => {
@@ -510,15 +531,16 @@ pub fn predef_ir_builder(
             Some(Ok(TypedExpr::DeserializeContext {
                 id: id as i8,
                 tpe: rtpe,
+                pos: call_pos,
             }))
         }
-        "executeFromSelfReg" => execute_from_self_reg(func, args, None),
+        "executeFromSelfReg" => execute_from_self_reg(func, args, None, call_pos),
         "executeFromSelfRegWithDefault" => {
             if args.len() != 2 {
                 return None;
             }
             let default = args[1].clone();
-            execute_from_self_reg(func, &args[..1], Some(default))
+            execute_from_self_reg(func, &args[..1], Some(default), call_pos)
         }
         "getVarFromInput" => {
             // (Ident(_, SFunc(_, SOption(rtpe), _)), Seq(inputId, varId) numeric)
@@ -536,21 +558,22 @@ pub fn predef_ir_builder(
                 args.to_vec(),
                 vec![("T".to_string(), rtpe.clone())],
                 opt(rtpe),
+                call_pos,
             )))
         }
 
         // ── Global-method predef aliases → MethodCall(Global, …) ─────────────
-        "deserializeTo" => global_deserialize(func, args, "deserializeTo"),
-        "fromBigEndianBytes" => global_deserialize(func, args, "fromBigEndianBytes"),
+        "deserializeTo" => global_deserialize(func, args, "deserializeTo", call_pos),
+        "fromBigEndianBytes" => global_deserialize(func, args, "fromBigEndianBytes", call_pos),
 
         // ── compile-time constant decoders (oracle-verified) ─────────────────
         "bigInt" => {
             let s = string_const(args.first()?)?;
-            Some(parse_big_int(s, tree_version))
+            Some(parse_big_int(s, tree_version, call_pos))
         }
         "fromBase16" => {
             let s = string_const(args.first()?)?;
-            Some(decode_base16(s))
+            Some(decode_base16(s, call_pos))
         }
 
         // unsignedBigInt(s): reject negative literals (Scala InvalidArguments,
@@ -561,7 +584,7 @@ pub fn predef_ir_builder(
         // FIRST and rejects only `signum() < 0`, so `"-0"` ACCEPTs (§24(g)).
         "unsignedBigInt" => {
             let s = string_const(args.first()?)?;
-            Some(parse_unsigned_big_int(s))
+            Some(parse_unsigned_big_int(s, call_pos))
         }
         // fromBase58: reject if any char is outside the Bitcoin/Scorex Base58
         // alphabet (Scorex `Base58.decode(s).get` → AssertionError on bad char via
@@ -570,10 +593,11 @@ pub fn predef_ir_builder(
         "fromBase58" => {
             let s = string_const(args.first()?)?;
             match s.chars().find(|&c| !is_base58_char(c)) {
-                Some(bad) => Some(Err(typer_err(format!(
-                    "Wrong char in Base58 string: '{bad}'"
-                )))),
-                None => Some(decode_base58(s)),
+                Some(bad) => Some(Err(typer_err(
+                    call_pos,
+                    format!("Wrong char in Base58 string: '{bad}'"),
+                ))),
+                None => Some(decode_base58(s, call_pos)),
             }
         }
         // fromBase64: reject if any char is outside the Java standard Base64
@@ -583,8 +607,8 @@ pub fn predef_ir_builder(
         "fromBase64" => {
             let s = string_const(args.first()?)?;
             match validate_base64(s) {
-                Err(msg) => Some(Err(typer_err(msg))),
-                Ok(()) => Some(decode_base64(s)),
+                Err(msg) => Some(Err(typer_err(call_pos, msg))),
+                Ok(()) => Some(decode_base64(s, call_pos)),
             }
         }
         // deserialize[T](s): (D-T2) — see module docs.
@@ -593,11 +617,12 @@ pub fn predef_ir_builder(
             let target_tpe = func_range(func)?.clone();
             if stype_has_free_type_var(&target_tpe) {
                 return Some(Err(typer_err(
+                    call_pos,
                     "'deserialize' is type-parametric and requires an explicit type argument [T]"
                         .to_string(),
                 )));
             }
-            Some(deserialize_predef(s, &target_tpe, tree_version))
+            Some(deserialize_predef(s, &target_tpe, tree_version, call_pos))
         }
         // allZK/anyZK/outerJoin/serialize(binder-handled)/PK(binder-handled):
         // no typer-time irBuilder → fall through.
@@ -621,15 +646,20 @@ fn unary(
 
 /// The `Global` context node (receiver of the deserialize/serialize aliases).
 fn global_node() -> TypedExpr {
+    // Synthesized receiver — no source construct of its own (0 = unset
+    // SourceContext, what the oracle prints as `0:0`).
     TypedExpr::Global {
         tpe: SType::SGlobal,
+        pos: 0,
     }
 }
 
 /// The `Context` context node (receiver of `getVarFromInput`).
 fn context_node() -> TypedExpr {
+    // Synthesized receiver — see global_node.
     TypedExpr::Context {
         tpe: SType::SContext,
+        pos: 0,
     }
 }
 
@@ -641,6 +671,7 @@ fn method_call(
     args: Vec<TypedExpr>,
     type_subst: Vec<(String, SType)>,
     tpe: SType,
+    pos: Pos,
 ) -> TypedExpr {
     let owner = owner_name_for_type(recv).unwrap_or("?");
     TypedExpr::MethodCall {
@@ -652,6 +683,7 @@ fn method_call(
         args,
         type_subst,
         tpe,
+        pos,
     }
 }
 
@@ -663,6 +695,7 @@ fn global_deserialize(
     func: &TypedExpr,
     args: &[TypedExpr],
     name: &str,
+    pos: Pos,
 ) -> Option<Result<TypedExpr, TyperError>> {
     let res_type = func_range(func)?.clone();
     // A1 (accept-invalid fix): the bare `fromBigEndianBytes(a)` / `deserializeTo(a)`
@@ -672,9 +705,10 @@ fn global_deserialize(
     // explicit-`[T]` control (`fromBigEndianBytes[Int](a)`) resolves `res_type` to
     // a concrete type via §1.7/ApplyTypes and is unaffected.  Oracle-pinned.
     if stype_has_free_type_var(&res_type) {
-        return Some(Err(typer_err(format!(
-            "'{name}' is type-parametric and requires an explicit type argument [T]"
-        ))));
+        return Some(Err(typer_err(
+            pos,
+            format!("'{name}' is type-parametric and requires an explicit type argument [T]"),
+        )));
     }
     Some(Ok(method_call(
         global_node(),
@@ -683,6 +717,7 @@ fn global_deserialize(
         args.to_vec(),
         vec![("T".to_string(), res_type.clone())],
         res_type,
+        pos,
     )))
 }
 
@@ -694,6 +729,7 @@ fn execute_from_self_reg(
     func: &TypedExpr,
     args: &[TypedExpr],
     default: Option<TypedExpr>,
+    pos: Pos,
 ) -> Option<Result<TypedExpr, TyperError>> {
     // (Ident(_, SFunc(_, rtpe, _)), Seq(id: Constant[Numeric]))
     let rtpe = func_range(func)?.clone();
@@ -708,13 +744,17 @@ fn execute_from_self_reg(
             // WithDefault: out-of-range returns the default value verbatim.
             Some(d) => Some(Ok(d)),
             // bare: out-of-range throws InvalidArguments (mapped to TyperException).
-            None => Some(Err(typer_err(format!("Invalid register specified {idx}")))),
+            None => Some(Err(typer_err(
+                pos,
+                format!("Invalid register specified {idx}"),
+            ))),
         };
     }
     Some(Ok(TypedExpr::DeserializeRegister {
         reg: idx as i8,
         tpe: rtpe,
         default: default.map(Box::new),
+        pos,
     }))
 }
 
@@ -731,19 +771,20 @@ fn execute_from_self_reg(
 /// ArithmeticException` at v3, golden_seed.txt §24).  255-bit signed range is
 /// `[-2^255, 2^255-1]` (two's-complement `bitLength`; oracle-verified at both
 /// boundaries, golden_seed.txt §24).
-fn parse_big_int(s: &str, tree_version: u8) -> Result<TypedExpr, TyperError> {
+fn parse_big_int(s: &str, tree_version: u8, pos: Pos) -> Result<TypedExpr, TyperError> {
     if !is_decimal_integer(s) {
-        return Err(typer_err(format!("For input string: \"{s}\"")));
+        return Err(typer_err(pos, format!("For input string: \"{s}\"")));
     }
     let v: num_bigint::BigInt = s
         .parse()
-        .map_err(|_| typer_err(format!("For input string: \"{s}\"")))?;
+        .map_err(|_| typer_err(pos, format!("For input string: \"{s}\"")))?;
     if tree_version >= 3 && signed_bit_length(&v) > 255 {
-        return Err(typer_err(format!("Too big bigint value {v}")));
+        return Err(typer_err(pos, format!("Too big bigint value {v}")));
     }
     Ok(TypedExpr::Constant {
         value: ConstPayload::BigInt(v.to_string()),
         tpe: SType::SBigInt,
+        pos,
     })
 }
 
@@ -765,23 +806,30 @@ fn parse_big_int(s: &str, tree_version: u8) -> Result<TypedExpr, TyperError> {
 /// `bigInt`'s cap; oracle-verified at v2, golden_seed.txt §24).  256-bit
 /// unsigned range is `[0, 2^256-1]` (oracle-verified at both boundaries,
 /// golden_seed.txt §24).
-fn parse_unsigned_big_int(s: &str) -> Result<TypedExpr, TyperError> {
+fn parse_unsigned_big_int(s: &str, pos: Pos) -> Result<TypedExpr, TyperError> {
     if !is_decimal_integer(s) {
-        return Err(typer_err(format!("For input string: \"{s}\"")));
+        return Err(typer_err(pos, format!("For input string: \"{s}\"")));
     }
     let v: num_bigint::BigInt = s
         .parse()
-        .map_err(|_| typer_err(format!("For input string: \"{s}\"")))?;
+        .map_err(|_| typer_err(pos, format!("For input string: \"{s}\"")))?;
     if v.sign() == num_bigint::Sign::Minus {
-        return Err(typer_err(format!("Negative unsigned big integer: \"{s}\"")));
+        return Err(typer_err(
+            pos,
+            format!("Negative unsigned big integer: \"{s}\""),
+        ));
     }
     let v = v.magnitude();
     if v.bits() > 256 {
-        return Err(typer_err(format!("Too big unsigned big int value {v}")));
+        return Err(typer_err(
+            pos,
+            format!("Too big unsigned big int value {v}"),
+        ));
     }
     Ok(TypedExpr::Constant {
         value: ConstPayload::UnsignedBigInt(v.to_string()),
         tpe: SType::SUnsignedBigInt,
+        pos,
     })
 }
 
@@ -812,22 +860,26 @@ fn is_decimal_integer(s: &str) -> bool {
 
 /// `fromBase16(s)` → `ByteArrayConstant(Base16.decode(s).get)`.  Even-length hex,
 /// case-insensitive; bytes stored as signed `i8` (matching `ByteColl`).
-fn decode_base16(s: &str) -> Result<TypedExpr, TyperError> {
+fn decode_base16(s: &str, pos: Pos) -> Result<TypedExpr, TyperError> {
     if !s.len().is_multiple_of(2) {
-        return Err(typer_err(format!("invalid base16 length: {}", s.len())));
+        return Err(typer_err(
+            pos,
+            format!("invalid base16 length: {}", s.len()),
+        ));
     }
     let mut bytes = Vec::with_capacity(s.len() / 2);
     let raw = s.as_bytes();
     let mut i = 0;
     while i < raw.len() {
-        let hi = hex_nibble(raw[i]).ok_or_else(|| typer_err("invalid base16 digit"))?;
-        let lo = hex_nibble(raw[i + 1]).ok_or_else(|| typer_err("invalid base16 digit"))?;
+        let hi = hex_nibble(raw[i]).ok_or_else(|| typer_err(pos, "invalid base16 digit"))?;
+        let lo = hex_nibble(raw[i + 1]).ok_or_else(|| typer_err(pos, "invalid base16 digit"))?;
         bytes.push(((hi << 4) | lo) as i8);
         i += 2;
     }
     Ok(TypedExpr::Constant {
         value: ConstPayload::ByteColl(bytes),
         tpe: coll_byte(),
+        pos,
     })
 }
 
@@ -838,13 +890,14 @@ fn decode_base16(s: &str) -> Result<TypedExpr, TyperError> {
 /// [`is_base58_char`], so decode failure here would indicate a `bs58` internal
 /// bug, not a user input error — mapped to `TyperError` defensively rather than
 /// via `expect`, to avoid a panic on any unforeseen edge case.
-fn decode_base58(s: &str) -> Result<TypedExpr, TyperError> {
+fn decode_base58(s: &str, pos: Pos) -> Result<TypedExpr, TyperError> {
     let bytes = bs58::decode(s)
         .into_vec()
-        .map_err(|e| typer_err(format!("invalid base58 string: {e}")))?;
+        .map_err(|e| typer_err(pos, format!("invalid base58 string: {e}")))?;
     Ok(TypedExpr::Constant {
         value: ConstPayload::ByteColl(bytes.into_iter().map(|b| b as i8).collect()),
         tpe: coll_byte(),
+        pos,
     })
 }
 
@@ -861,15 +914,21 @@ fn deserialize_predef(
     s: &str,
     target_tpe: &SType,
     tree_version: u8,
+    pos: Pos,
 ) -> Result<TypedExpr, TyperError> {
     let bytes = bs58::decode(s)
         .into_vec()
-        .map_err(|e| typer_err(format!("deserialize: invalid Base58 string: {e}")))?;
+        .map_err(|e| typer_err(pos, format!("deserialize: invalid Base58 string: {e}")))?;
     let mut r = VlqReader::new(&bytes);
-    let op = parse_expr(&mut r, 0, tree_version)
-        .map_err(|e| typer_err(format!("deserialize: malformed serialized value: {e:?}")))?;
+    let op = parse_expr(&mut r, 0, tree_version).map_err(|e| {
+        typer_err(
+            pos,
+            format!("deserialize: malformed serialized value: {e:?}"),
+        )
+    })?;
     let typed = unlower_expr(&op).ok_or_else(|| {
         typer_err(
+            pos,
             "deserialize: the decoded value is a shape this compiler's opcode-IR reverse \
              mapping does not (yet) cover — supported: constants and the bare context/global \
              singleton primitives; composite expressions (BinOps, MethodCalls, …) are not"
@@ -877,10 +936,13 @@ fn deserialize_predef(
         )
     })?;
     if crate::typed::node_tpe(&typed) != target_tpe {
-        return Err(typer_err(format!(
-            "deserialize: wrong type after deserialization, expected {target_tpe:?}, got {:?}",
-            crate::typed::node_tpe(&typed)
-        )));
+        return Err(typer_err(
+            pos,
+            format!(
+                "deserialize: wrong type after deserialization, expected {target_tpe:?}, got {:?}",
+                crate::typed::node_tpe(&typed)
+            ),
+        ));
     }
     Ok(typed)
 }
@@ -896,34 +958,48 @@ fn unlower_expr(op: &OpExpr) -> Option<TypedExpr> {
             Some(TypedExpr::Constant {
                 value: payload,
                 tpe: stype,
+                pos: 0,
             })
         }
         OpExpr::Op(IrNode {
             opcode,
             payload: OpPayload::Zero,
         }) => match *opcode {
-            0xA3 => Some(TypedExpr::Height { tpe: SType::SInt }),
+            0xA3 => Some(TypedExpr::Height {
+                tpe: SType::SInt,
+                pos: 0,
+            }),
             0xA4 => Some(TypedExpr::Inputs {
                 tpe: SType::SColl(Box::new(SType::SBox)),
+                pos: 0,
             }),
             0xA5 => Some(TypedExpr::Outputs {
                 tpe: SType::SColl(Box::new(SType::SBox)),
+                pos: 0,
             }),
-            0xA7 => Some(TypedExpr::Self_ { tpe: SType::SBox }),
+            0xA7 => Some(TypedExpr::Self_ {
+                tpe: SType::SBox,
+                pos: 0,
+            }),
             0xAC => Some(TypedExpr::MinerPubkey {
                 tpe: SType::SColl(Box::new(SType::SByte)),
+                pos: 0,
             }),
             0xA6 => Some(TypedExpr::LastBlockUtxoRootHash {
                 tpe: SType::SAvlTree,
+                pos: 0,
             }),
             0xFE => Some(TypedExpr::Context {
                 tpe: SType::SContext,
+                pos: 0,
             }),
             0xDD => Some(TypedExpr::Global {
                 tpe: SType::SGlobal,
+                pos: 0,
             }),
             0x82 => Some(TypedExpr::GroupGenerator {
                 tpe: SType::SGroupElement,
+                pos: 0,
             }),
             _ => None,
         },
@@ -1010,13 +1086,14 @@ fn group_element_bytes(ge: &GroupElement) -> &[u8; 33] {
 /// has already run [`validate_base64`], so decode failure here would indicate
 /// an engine-config mismatch, not a user input error — mapped to `TyperError`
 /// defensively rather than via `expect`.
-fn decode_base64(s: &str) -> Result<TypedExpr, TyperError> {
+fn decode_base64(s: &str, pos: Pos) -> Result<TypedExpr, TyperError> {
     let bytes = JAVA_BASE64
         .decode(s)
-        .map_err(|e| typer_err(format!("invalid base64 string: {e}")))?;
+        .map_err(|e| typer_err(pos, format!("invalid base64 string: {e}")))?;
     Ok(TypedExpr::Constant {
         value: ConstPayload::ByteColl(bytes.into_iter().map(|b| b as i8).collect()),
         tpe: coll_byte(),
+        pos,
     })
 }
 
@@ -1124,24 +1201,28 @@ mod tests {
         TypedExpr::Ident {
             name: name.to_string(),
             tpe: func(dom, range),
+            pos: 0,
         }
     }
     fn byte_const(v: i8) -> TypedExpr {
         TypedExpr::Constant {
             value: ConstPayload::Byte(v),
             tpe: SType::SByte,
+            pos: 0,
         }
     }
     fn str_const(s: &str) -> TypedExpr {
         TypedExpr::Constant {
             value: ConstPayload::String(s.to_string()),
             tpe: SType::SString,
+            pos: 0,
         }
     }
     fn bytecoll(v: Vec<i8>) -> TypedExpr {
         TypedExpr::Constant {
             value: ConstPayload::ByteColl(v),
             tpe: coll_byte(),
+            pos: 0,
         }
     }
 
@@ -1191,6 +1272,7 @@ mod tests {
         let b = TypedExpr::Constant {
             value: ConstPayload::Bool(true),
             tpe: SType::SBoolean,
+            pos: 0,
         };
         let out = predef_ir_builder("sigmaProp", &f, &[b], 3)
             .unwrap()
@@ -1209,8 +1291,10 @@ mod tests {
             value: Box::new(TypedExpr::Constant {
                 value: ConstPayload::Bool(true),
                 tpe: SType::SBoolean,
+                pos: 0,
             }),
             tpe: SType::SSigmaProp,
+            pos: 0,
         };
         let out = predef_ir_builder("sigmaProp", &f, &[inner], 3)
             .unwrap()
@@ -1233,11 +1317,14 @@ mod tests {
                 value: Box::new(TypedExpr::Constant {
                     value: ConstPayload::Bool(true),
                     tpe: SType::SBoolean,
+                    pos: 0,
                 }),
                 tpe: SType::SSigmaProp,
+                pos: 0,
             }],
             elem_type: SType::SSigmaProp,
             tpe: coll(SType::SSigmaProp),
+            pos: 0,
         };
         let out = predef_ir_builder("xorOf", &f, &[sp_coll], 3)
             .unwrap()
@@ -1250,6 +1337,7 @@ mod tests {
         let non_coll = TypedExpr::Constant {
             value: ConstPayload::Bool(true),
             tpe: SType::SBoolean,
+            pos: 0,
         };
         assert!(predef_ir_builder("xorOf", &f, &[non_coll], 3).is_none());
     }
@@ -1285,6 +1373,7 @@ mod tests {
         let non_const = TypedExpr::Ident {
             name: "x".to_string(),
             tpe: SType::SByte,
+            pos: 0,
         };
         assert!(predef_ir_builder("getVar", &f, &[non_const], 3).is_none());
     }
@@ -1306,6 +1395,7 @@ mod tests {
         let id = TypedExpr::Constant {
             value: ConstPayload::Int(99),
             tpe: SType::SInt,
+            pos: 0,
         };
         let res = predef_ir_builder("executeFromSelfReg", &f, &[id], 3).unwrap();
         assert!(res.is_err());
@@ -1386,6 +1476,7 @@ mod tests {
             TypedExpr::Constant {
                 value: ConstPayload::Int(5),
                 tpe: SType::SInt,
+                pos: 0,
             }
         );
     }
@@ -1399,7 +1490,13 @@ mod tests {
         let out = predef_ir_builder("deserialize", &f, &[str_const("3p")], 3)
             .unwrap()
             .unwrap();
-        assert_eq!(out, TypedExpr::Height { tpe: SType::SInt });
+        assert_eq!(
+            out,
+            TypedExpr::Height {
+                tpe: SType::SInt,
+                pos: 0
+            }
+        );
     }
 
     /// Invalid Base58 char → `TyperError` (Scala: `Base58.decode(str).get` →

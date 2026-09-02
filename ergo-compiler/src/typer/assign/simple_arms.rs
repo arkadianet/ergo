@@ -14,25 +14,29 @@ pub(crate) fn assign_block(
     env: &TypeEnv,
     bindings: Vec<TypedExpr>,
     result: TypedExpr,
+    block_pos: Pos,
     ctx: &TyperCtx,
 ) -> Result<TypedExpr, TyperError> {
     let mut cur_env = env.clone();
     let mut new_binds = Vec::with_capacity(bindings.len());
     for b in bindings {
-        let (name, body) = match b {
-            TypedExpr::ValNode { name, body, .. } => (name, *body),
+        let (name, body, v_pos) = match b {
+            TypedExpr::ValNode {
+                name, body, pos, ..
+            } => (name, *body, pos),
             other => {
-                return Err(TyperError::typer(format!(
-                    "Block binding is not a Val: {}",
-                    product_prefix(&other)
-                )))
+                return Err(TyperError::typer(
+                    node_pos(&other),
+                    format!("Block binding is not a Val: {}", product_prefix(&other)),
+                ))
             }
         };
-        // Duplicate-name check (SigmaTyper.scala:58-59).
+        // Duplicate-name check (SigmaTyper.scala:58-59: `v.sourceContext`).
         if let Some(prev) = cur_env.get(&name) {
-            return Err(TyperError::typer(format!(
-                "Variable {name} already defined ({name} = {prev:?}"
-            )));
+            return Err(TyperError::typer(
+                v_pos,
+                format!("Variable {name} already defined ({name} = {prev:?}"),
+            ));
         }
         let b1 = assign_type(&cur_env, body, ctx)?;
         let b1_tpe = node_tpe(&b1).clone();
@@ -45,6 +49,7 @@ pub(crate) fn assign_block(
             given_type: b1_tpe.clone(),
             body: Box::new(b1),
             tpe: b1_tpe,
+            pos: v_pos,
         });
     }
     let result1 = assign_type(&cur_env, result, ctx)?;
@@ -53,6 +58,7 @@ pub(crate) fn assign_block(
         bindings: new_binds,
         result: Box::new(result1),
         tpe,
+        pos: block_pos,
     })
 }
 
@@ -64,6 +70,7 @@ pub(crate) fn assign_concrete_collection(
     env: &TypeEnv,
     items: Vec<TypedExpr>,
     elem_type: SType,
+    cc_pos: Pos,
     ctx: &TyperCtx,
 ) -> Result<TypedExpr, TyperError> {
     let is_empty = items.is_empty();
@@ -78,25 +85,31 @@ pub(crate) fn assign_concrete_collection(
     }
     let t_item = if is_empty {
         if elem_type == SType::NoType {
+            // SigmaTyper.scala:549: `cc.sourceContext`
             return Err(TyperError::typer(
+                cc_pos,
                 "Undefined type of empty collection".to_string(),
             ));
         }
         elem_type
     } else {
-        // msgTypeOf(types) (SigmaTyper.scala:552): folds msgType — collections do
-        // NOT numeric-widen across elements ([1, 2L] -> None -> error).
+        // msgTypeOf(types) (SigmaTyper.scala:552-553): folds msgType — collections
+        // do NOT numeric-widen across elements ([1, 2L] -> None -> error);
+        // `cc.sourceContext`.
         msg_type_of(&types).ok_or_else(|| {
-            TyperError::typer(format!(
-                "All element of array should have the same type but found {types:?}"
-            ))
+            TyperError::typer(
+                cc_pos,
+                format!("All element of array should have the same type but found {types:?}"),
+            )
         })?
     };
     let tpe = SType::SColl(Box::new(t_item.clone()));
+    // SigmaTyper.scala:556: the rebuilt collection inherits `cc.sourceContext`.
     Ok(TypedExpr::ConcreteCollection {
         items: new_items,
         elem_type: t_item,
         tpe,
+        pos: cc_pos,
     })
 }
 
@@ -106,6 +119,7 @@ pub(crate) fn assign_concrete_collection(
 
 pub(crate) fn assign_ident(
     name: &str,
+    pos: Pos,
     env: &TypeEnv,
     ctx: &TyperCtx,
 ) -> Result<TypedExpr, TyperError> {
@@ -114,6 +128,7 @@ pub(crate) fn assign_ident(
         return Ok(TypedExpr::Ident {
             name: name.to_string(),
             tpe: t.clone(),
+            pos,
         });
     }
     // None -> SGlobalMethods.method(n): a no-arg global property (tDom.length==1,
@@ -123,13 +138,14 @@ pub(crate) fn assign_ident(
     // properties fall back to a MethodCall(Global, …).
     if let Some(method) = global_method(name, ctx.tree_version) {
         if method.stype.dom.len() == 1 {
-            return process_global_method(&method, vec![]);
+            return process_global_method(&method, vec![], pos);
         }
     }
-    // else -> error (SigmaTyper.scala:84)
-    Err(TyperError::typer(format!(
-        "Cannot assign type for variable '{name}' because it is not found in env"
-    )))
+    // else -> error (SigmaTyper.scala:84: `bound.sourceContext`)
+    Err(TyperError::typer(
+        pos,
+        format!("Cannot assign type for variable '{name}' because it is not found in env"),
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -140,6 +156,7 @@ pub(crate) fn assign_select(
     env: &TypeEnv,
     obj: TypedExpr,
     field: String,
+    sel_pos: Pos,
     ctx: &TyperCtx,
 ) -> Result<TypedExpr, TyperError> {
     let new_obj = assign_type(env, obj, ctx)?;
@@ -147,16 +164,23 @@ pub(crate) fn assign_select(
     // newObj.tpe must be SProduct (SigmaTyper.scala:90-91); container_exists is
     // true for every SProduct (incl. the empty SBoolean/SString/SAny/SUnit
     // containers), false for non-product types (SFunc/NoType/STypeVar/...).
+    // Citations: SigmaTyper.scala:121 `sel.sourceContext` for the non-product
+    // error (the bound Select's OWN position — `sel_pos`); SigmaTyper.scala:93
+    // `obj.sourceContext` for MethodNotFound below (the receiver's position).
+    // These are two different citations in the reference, not the same one.
+    let obj_pos = node_pos(&new_obj);
     if !container_exists(&t_obj) {
-        return Err(TyperError::typer(format!(
-            "Cannot get field '{field}' in the object of non-product type {t_obj:?}"
-        )));
+        return Err(TyperError::typer(
+            sel_pos,
+            format!("Cannot get field '{field}' in the object of non-product type {t_obj:?}"),
+        ));
     }
     // getMethod(tNewObj, n) — None -> MethodNotFound (incl. empty containers, E4).
     let method = get_method(&t_obj, &field, ctx.tree_version).ok_or_else(|| {
-        TyperError::method_not_found(format!(
-            "Cannot find method '{field}' in the object of Product type {t_obj:?}"
-        ))
+        TyperError::method_not_found(
+            obj_pos,
+            format!("Cannot find method '{field}' in the object of Product type {t_obj:?}"),
+        )
     })?;
 
     // Compute tRes (SigmaTyper.scala:97-107).  Every descriptor has an SFunc
@@ -209,6 +233,7 @@ pub(crate) fn assign_select(
             field,
             res_type: Some(t_res.clone()),
             tpe: t_res,
+            pos: sel_pos,
         })
     }
 }
@@ -223,14 +248,16 @@ pub(crate) fn assign_lambda(
     args: Vec<(String, SType)>,
     given_res_type: SType,
     body: Option<Box<TypedExpr>>,
+    lam_pos: Pos,
     ctx: &TyperCtx,
 ) -> Result<TypedExpr, TyperError> {
-    // Args must be fully annotated (SigmaTyper.scala:125-127).
+    // Args must be fully annotated (SigmaTyper.scala:125-127: `lam.sourceContext`).
     for (name, arg_t) in &args {
         if *arg_t == SType::NoType {
-            return Err(TyperError::typer(format!(
-                "Invalid function: undefined type of argument {name}"
-            )));
+            return Err(TyperError::typer(
+                lam_pos,
+                format!("Invalid function: undefined type of argument {name}"),
+            ));
         }
     }
     // lambdaEnv = env ++ args (SigmaTyper.scala:128)
@@ -246,10 +273,14 @@ pub(crate) fn assign_lambda(
     if given_res_type != SType::NoType {
         if let Some(b) = &new_body {
             if given_res_type != *node_tpe(b) {
-                return Err(TyperError::typer(format!(
-                    "Invalid function: resulting expression type {:?} doesn't equal declared type {given_res_type:?}",
-                    node_tpe(b)
-                )));
+                // SigmaTyper.scala:132: `lam.sourceContext`
+                return Err(TyperError::typer(
+                    lam_pos,
+                    format!(
+                        "Invalid function: resulting expression type {:?} doesn't equal declared type {given_res_type:?}",
+                        node_tpe(b)
+                    ),
+                ));
             }
         }
     }
@@ -269,6 +300,7 @@ pub(crate) fn assign_lambda(
         given_res_type: result_type,
         body: new_body,
         tpe,
+        pos: lam_pos,
     })
 }
 
@@ -276,11 +308,13 @@ pub(crate) fn assign_lambda(
 // §1.13 If, §1.14 AND/OR, §1.19 Exponentiate, §1.20 ByIndex
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn assign_if(
     env: &TypeEnv,
     c: TypedExpr,
     t: TypedExpr,
     e: TypedExpr,
+    if_pos: Pos,
     ctx: &TyperCtx,
 ) -> Result<TypedExpr, TyperError> {
     let c1 = assign_type(env, c, ctx)?;
@@ -289,23 +323,32 @@ pub(crate) fn assign_if(
     let tpe = node_tpe(&t1).clone(); // If.tpe = trueBranch.tpe
                                      // Condition check first, then branch-equality (SigmaTyper.scala:445-448).
     if !matches!(node_tpe(&c1), SType::SBoolean) {
-        return Err(TyperError::typer(format!(
-            "Invalid type of condition in If: expected Boolean; actual: {:?}",
-            node_tpe(&c1)
-        )));
+        // SigmaTyper.scala:446: `c.sourceContext`
+        return Err(TyperError::typer(
+            node_pos(&c1),
+            format!(
+                "Invalid type of condition in If: expected Boolean; actual: {:?}",
+                node_tpe(&c1)
+            ),
+        ));
     }
     if node_tpe(&t1) != node_tpe(&e1) {
-        return Err(TyperError::typer(format!(
-            "Invalid type of condition If: both branches should have the same type but was {:?} and {:?}",
-            node_tpe(&t1),
-            node_tpe(&e1)
-        )));
+        // SigmaTyper.scala:448: `t1.sourceContext`
+        return Err(TyperError::typer(
+            node_pos(&t1),
+            format!(
+                "Invalid type of condition If: both branches should have the same type but was {:?} and {:?}",
+                node_tpe(&t1),
+                node_tpe(&e1)
+            ),
+        ));
     }
     Ok(TypedExpr::If {
         condition: Box::new(c1),
         true_branch: Box::new(t1),
         false_branch: Box::new(e1),
         tpe,
+        pos: if_pos,
     })
 }
 
@@ -313,6 +356,7 @@ pub(crate) fn assign_and_or(
     env: &TypeEnv,
     input: TypedExpr,
     is_and: bool,
+    op_pos: Pos,
     ctx: &TyperCtx,
 ) -> Result<TypedExpr, TyperError> {
     let input1 = assign_type(env, input, ctx)?;
@@ -320,20 +364,23 @@ pub(crate) fn assign_and_or(
     let ok = matches!(node_tpe(&input1), SType::SColl(e) if **e == SType::SBoolean);
     if !ok {
         let opn = if is_and { "AND" } else { "OR" };
-        return Err(TyperError::typer(format!(
-            "Invalid operation {opn}: {:?}",
-            node_tpe(&input1)
-        )));
+        // SigmaTyper.scala:454/460: `op.sourceContext`
+        return Err(TyperError::typer(
+            op_pos,
+            format!("Invalid operation {opn}: {:?}", node_tpe(&input1)),
+        ));
     }
     Ok(if is_and {
         TypedExpr::AND {
             input: Box::new(input1),
             tpe: SType::SBoolean,
+            pos: op_pos,
         }
     } else {
         TypedExpr::OR {
             input: Box::new(input1),
             tpe: SType::SBoolean,
+            pos: op_pos,
         }
     })
 }
@@ -343,40 +390,52 @@ pub(crate) fn assign_exponentiate(
     ctx: &TyperCtx,
     left: TypedExpr,
     right: TypedExpr,
+    exp_pos: Pos,
 ) -> Result<TypedExpr, TyperError> {
     let l1 = assign_type(env, left, ctx)?;
     let r1 = assign_type(env, right, ctx)?;
     // require exactly (SGroupElement, SBigInt) (SigmaTyper.scala:488-489)
     if !matches!(node_tpe(&l1), SType::SGroupElement) || !matches!(node_tpe(&r1), SType::SBigInt) {
-        return Err(TyperError::typer(format!(
-            "Invalid binary operation Exponentiate: expected argument types (GroupElement, BigInt); actual: ({:?}, {:?})",
-            node_tpe(&l1),
-            node_tpe(&r1)
-        )));
+        // SigmaTyper.scala:489: `l.sourceContext`
+        return Err(TyperError::typer(
+            node_pos(&l1),
+            format!(
+                "Invalid binary operation Exponentiate: expected argument types (GroupElement, BigInt); actual: ({:?}, {:?})",
+                node_tpe(&l1),
+                node_tpe(&r1)
+            ),
+        ));
     }
     Ok(TypedExpr::Exponentiate {
         left: Box::new(l1),
         right: Box::new(r1),
         tpe: SType::SGroupElement,
+        pos: exp_pos,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn assign_byindex(
     env: &TypeEnv,
     ctx: &TyperCtx,
     input: TypedExpr,
     index: Box<TypedExpr>,
     default: Option<Box<TypedExpr>>,
+    bi_pos: Pos,
 ) -> Result<TypedExpr, TyperError> {
     let c1 = assign_type(env, input, ctx)?;
     // require isCollectionLike (SigmaTyper.scala:494)
     let elem = match coll_elem(node_tpe(&c1)) {
         Some(e) => e.clone(),
         None => {
-            return Err(TyperError::typer(format!(
-                "Invalid operation ByIndex: expected Collection argument type; actual: {:?}",
-                node_tpe(&c1)
-            )))
+            // SigmaTyper.scala:495: `col.sourceContext`
+            return Err(TyperError::typer(
+                node_pos(&c1),
+                format!(
+                    "Invalid operation ByIndex: expected Collection argument type; actual: {:?}",
+                    node_tpe(&c1)
+                ),
+            ));
         }
     };
     // default value type must match the element type (SigmaTyper.scala:497-498).
@@ -387,10 +446,14 @@ pub(crate) fn assign_byindex(
     // Ledger: lib.rs § "Known M2 deviations" D-T11.
     if let Some(v) = &default {
         if *node_tpe(v) != elem {
-            return Err(TyperError::typer(format!(
-                "Invalid operation ByIndex: expected default value type ({elem:?}); actual: ({:?})",
-                node_tpe(v)
-            )));
+            // SigmaTyper.scala:498: `v.sourceContext`
+            return Err(TyperError::typer(
+                node_pos(v),
+                format!(
+                    "Invalid operation ByIndex: expected default value type ({elem:?}); actual: ({:?})",
+                    node_tpe(v)
+                ),
+            ));
         }
     }
     Ok(TypedExpr::ByIndex {
@@ -398,5 +461,6 @@ pub(crate) fn assign_byindex(
         index,
         default,
         tpe: elem,
+        pos: bi_pos,
     })
 }

@@ -308,6 +308,7 @@ mod tests {
         TypedExpr::Constant {
             value: ConstPayload::Int(v),
             tpe: SType::SInt,
+            pos: 0,
         }
     }
 
@@ -315,6 +316,7 @@ mod tests {
         TypedExpr::Constant {
             value: ConstPayload::Long(v),
             tpe: SType::SLong,
+            pos: 0,
         }
     }
 
@@ -322,6 +324,7 @@ mod tests {
         TypedExpr::Constant {
             value: ConstPayload::Bool(v),
             tpe: SType::SBoolean,
+            pos: 0,
         }
     }
 
@@ -329,6 +332,7 @@ mod tests {
         TypedExpr::Constant {
             value: ConstPayload::ByteColl(v),
             tpe: scoll(SType::SByte),
+            pos: 0,
         }
     }
 
@@ -725,6 +729,7 @@ mod tests {
             left: Box::new(bool_c(true)),
             right: Box::new(bool_c(false)),
             tpe: SType::SBoolean,
+            pos: 0,
         };
         let ir = rt_node(&node, 0x93);
         let bytes = wire_roundtrip(&ir);
@@ -767,6 +772,7 @@ mod tests {
             right: Box::new(int_c(2)),
             opcode: crate::typed::BIT_SHIFT_LEFT,
             tpe: SType::SInt,
+            pos: 0,
         };
         assert!(matches!(
             emit(&node),
@@ -835,6 +841,7 @@ mod tests {
             input: Box::new(tc("(1, 2L)")),
             field_index: 2,
             tpe: SType::SLong,
+            pos: 0,
         };
         rt_node(&node, 0x8C);
     }
@@ -899,6 +906,7 @@ mod tests {
         let node = TypedExpr::Downcast {
             input: Box::new(long_c(1)),
             tpe: SType::SInt,
+            pos: 0,
         };
         let ir = rt_node(&node, 0x7D);
         match &ir {
@@ -972,8 +980,10 @@ mod tests {
         let node = TypedExpr::SizeOf {
             input: Box::new(TypedExpr::Inputs {
                 tpe: scoll(SType::SBox),
+                pos: 0,
             }),
             tpe: SType::SInt,
+            pos: 0,
         };
         rt_node(&node, 0xB1);
     }
@@ -1170,6 +1180,7 @@ mod tests {
                 input: Box::new(input.clone()),
                 mapper: Box::new(f.clone()),
                 tpe: scoll(SType::SLong),
+                pos: 0,
             },
             0xAD,
         );
@@ -1178,6 +1189,7 @@ mod tests {
                 input: Box::new(input.clone()),
                 condition: Box::new(f.clone()),
                 tpe: SType::SBoolean,
+                pos: 0,
             },
             0xAE,
         );
@@ -1186,6 +1198,7 @@ mod tests {
                 input: Box::new(input.clone()),
                 condition: Box::new(f.clone()),
                 tpe: SType::SBoolean,
+                pos: 0,
             },
             0xAF,
         );
@@ -1194,6 +1207,7 @@ mod tests {
                 input: Box::new(input.clone()),
                 condition: Box::new(f.clone()),
                 tpe: scoll(SType::SByte),
+                pos: 0,
             },
             0xB5,
         );
@@ -1203,6 +1217,7 @@ mod tests {
                 zero: Box::new(long_c(0)),
                 fold_op: Box::new(f),
                 tpe: SType::SLong,
+                pos: 0,
             },
             0xB0,
         );
@@ -1269,6 +1284,7 @@ mod tests {
             &TypedExpr::SigmaPropBytes {
                 input: Box::new(tc("proveDlog(g1)")),
                 tpe: scoll(SType::SByte),
+                pos: 0,
             },
             0xD0,
         );
@@ -1276,6 +1292,7 @@ mod tests {
             &TypedExpr::SigmaPropIsProven {
                 input: Box::new(tc("proveDlog(g1)")),
                 tpe: SType::SBoolean,
+                pos: 0,
             },
             0xCF,
         );
@@ -1377,10 +1394,12 @@ mod tests {
         let node = TypedExpr::TreeLookup {
             tree: Box::new(TypedExpr::LastBlockUtxoRootHash {
                 tpe: SType::SAvlTree,
+                pos: 0,
             }),
             key: Box::new(byte_coll_c(vec![1])),
             proof: Box::new(byte_coll_c(vec![2])),
             tpe: SType::SOption(Box::new(scoll(SType::SByte))),
+            pos: 0,
         };
         rt_node(&node, 0xB7);
     }
@@ -1858,6 +1877,7 @@ mod tests {
             left: Box::new(int_c(1)),
             right: Box::new(long_c(2)),
             tpe: SType::SBoolean,
+            pos: 0,
         };
         let ir = rt_node(&node, 0x91);
         match &ir {
@@ -1876,6 +1896,7 @@ mod tests {
             right: Box::new(int_c(1)),
             opcode: crate::typed::ARITH_PLUS,
             tpe: SType::SLong,
+            pos: 0,
         };
         let ir = rt_node(&node, 0x9A);
         match &ir {
@@ -1902,6 +1923,7 @@ mod tests {
             right: Box::new(long_c(2)),
             opcode: BIT_OR,
             tpe: SType::SLong,
+            pos: 0,
         };
         assert!(matches!(
             emit(&node),
@@ -1918,9 +1940,11 @@ mod tests {
             index: Box::new(TypedExpr::Constant {
                 value: ConstPayload::Byte(1),
                 tpe: SType::SByte,
+                pos: 0,
             }),
             default: None,
             tpe: SType::SByte,
+            pos: 0,
         };
         let ir = rt_node(&node, 0xB2);
         match &ir {
@@ -1958,11 +1982,13 @@ mod tests {
             operation_flags: Box::new(TypedExpr::Constant {
                 value: ConstPayload::Byte(0),
                 tpe: SType::SByte,
+                pos: 0,
             }),
             digest: Box::new(byte_coll_c(vec![0; 33])),
             key_length: Box::new(int_c(1)),
             value_length_opt: Box::new(int_c(1)),
             tpe: SType::SAvlTree,
+            pos: 0,
         };
         assert_eq!(
             emit(&node).unwrap_err(),
@@ -1975,6 +2001,7 @@ mod tests {
         let node = TypedExpr::ZKProofBlock {
             body: Box::new(tc("proveDlog(g1)")),
             tpe: SType::SBoolean,
+            pos: 0,
         };
         assert_eq!(
             emit(&node).unwrap_err(),
@@ -2002,6 +2029,7 @@ mod tests {
             input: Box::new(int_c(1)),
             type_args: vec![SType::SInt],
             tpe: SType::SInt,
+            pos: 0,
         };
         assert!(matches!(emit(&at).unwrap_err(), EmitError::InvalidShape(_)));
         let mcl = TypedExpr::MethodCallLike {
@@ -2009,6 +2037,7 @@ mod tests {
             name: "+".to_string(),
             args: vec![int_c(2)],
             tpe: SType::NoType,
+            pos: 0,
         };
         assert!(matches!(
             emit(&mcl).unwrap_err(),
@@ -2039,6 +2068,7 @@ mod tests {
         let one = TypedExpr::Tuple {
             items: vec![int_c(1)],
             tpe: SType::STuple(vec![SType::SInt]),
+            pos: 0,
         };
         assert!(matches!(
             emit(&one).unwrap_err(),
@@ -2047,6 +2077,7 @@ mod tests {
         let many = TypedExpr::Tuple {
             items: (0..256).map(int_c).collect(),
             tpe: SType::STuple(vec![SType::SInt; 256]),
+            pos: 0,
         };
         assert!(matches!(
             emit(&many).unwrap_err(),
@@ -2061,6 +2092,7 @@ mod tests {
         let node = TypedExpr::GetVar {
             var_id: 1,
             tpe: SType::SInt,
+            pos: 0,
         };
         assert!(matches!(
             emit(&node).unwrap_err(),
@@ -2082,6 +2114,7 @@ mod tests {
                 range: Box::new(SType::SInt),
                 tpe_params: vec![],
             },
+            pos: 0,
         };
         assert!(matches!(
             emit(&node).unwrap_err(),
@@ -2105,6 +2138,7 @@ mod tests {
                 range: Box::new(SType::SInt),
                 tpe_params: vec![],
             },
+            pos: 0,
         };
         assert!(matches!(
             emit(&node).unwrap_err(),
@@ -2117,6 +2151,7 @@ mod tests {
         let node = TypedExpr::Ident {
             name: "ghost".to_string(),
             tpe: SType::SInt,
+            pos: 0,
         };
         assert!(matches!(
             emit(&node).unwrap_err(),
@@ -2144,12 +2179,15 @@ mod tests {
                         range: Box::new(SType::SSigmaProp),
                         tpe_params: vec![],
                     },
+                    pos: 0,
                 }),
                 args: vec![TypedExpr::Constant {
                     value: ConstPayload::ByteColl(vec![]),
                     tpe: SType::SColl(Box::new(SType::SSigmaProp)),
+                    pos: 0,
                 }],
                 tpe: SType::SSigmaProp,
+                pos: 0,
             };
             match emit(&node).unwrap_err() {
                 EmitError::GraphBuildingReject { class, what } => {
@@ -2170,6 +2208,7 @@ mod tests {
             given_type: SType::SInt,
             body: Box::new(int_c(1)),
             tpe: SType::SInt,
+            pos: 0,
         };
         assert!(matches!(
             emit(&node).unwrap_err(),
@@ -2183,6 +2222,7 @@ mod tests {
             bindings: vec![int_c(1)],
             result: Box::new(int_c(2)),
             tpe: SType::SInt,
+            pos: 0,
         };
         assert!(matches!(
             emit(&node).unwrap_err(),
@@ -2199,6 +2239,7 @@ mod tests {
             field: "getRegV5".to_string(),
             res_type: None,
             tpe: SType::SInt,
+            pos: 0,
         };
         match emit(&node).unwrap_err() {
             EmitError::UnsupportedNode(msg) => {
@@ -2229,6 +2270,7 @@ mod tests {
             args: vec![],
             type_subst: vec![],
             tpe: SType::SInt,
+            pos: 0,
         };
         match emit(&node).unwrap_err() {
             EmitError::UnsupportedNode(msg) => assert!(
@@ -2252,6 +2294,7 @@ mod tests {
             args: vec![int_c(4)],
             type_subst: vec![],
             tpe: SType::SOption(Box::new(SType::SInt)),
+            pos: 0,
         };
         assert!(matches!(
             emit(&node).unwrap_err(),
@@ -2273,6 +2316,7 @@ mod tests {
             args: vec![],
             type_subst: vec![],
             tpe: scoll(SType::SLong),
+            pos: 0,
         };
         assert!(matches!(
             emit(&node).unwrap_err(),
@@ -2286,6 +2330,7 @@ mod tests {
             func: Box::new(int_c(1)),
             args: vec![int_c(2)],
             tpe: SType::SInt,
+            pos: 0,
         };
         assert!(matches!(
             emit(&node).unwrap_err(),

@@ -31,9 +31,12 @@
 //! - Rule 11 outputs `LogicalNot(Select(_, "isDefined"))` — "isDefined" is not
 //!   a rule pattern.
 //!
-//! Scala's `SrcCtxCallbackRewriter` source-context propagation has no
-//! equivalent here: `TypedExpr` carries no positions (positions surface only in
-//! `BindError`), so nothing is lost by not porting it.
+//! Scala's `SrcCtxCallbackRewriter` source-context propagation IS ported:
+//! every bound node records the offset of the untyped `Expr` it was built
+//! from (the `pos` field on [`TypedExpr`], typed.rs); env-substituted values
+//! inherit the replaced `Ident`'s offset (Scala pins `currentSrcCtx` to the
+//! replaced node). Errors surface them via `BindError`/`TyperError` and the
+//! typed tree carries them for downstream tooling.
 //!
 //! # Error-order faithfulness
 //!
@@ -130,22 +133,27 @@ fn bind_expr(
         Expr::IntConst { value, .. } => Ok(TypedExpr::Constant {
             value: ConstPayload::Int(*value),
             tpe: SType::SInt,
+            pos: e.pos(),
         }),
         Expr::LongConst { value, .. } => Ok(TypedExpr::Constant {
             value: ConstPayload::Long(*value),
             tpe: SType::SLong,
+            pos: e.pos(),
         }),
         Expr::BoolConst { value, .. } => Ok(TypedExpr::Constant {
             value: ConstPayload::Bool(*value),
             tpe: SType::SBoolean,
+            pos: e.pos(),
         }),
         Expr::StringConst { value, .. } => Ok(TypedExpr::Constant {
             value: ConstPayload::String(value.clone()),
             tpe: SType::SString,
+            pos: e.pos(),
         }),
         Expr::UnitConst { .. } => Ok(TypedExpr::Constant {
             value: ConstPayload::Unit,
             tpe: SType::SUnit,
+            pos: e.pos(),
         }),
 
         // ── Rule 1: Ident(n, NoType) — env substitution + global names ─────
@@ -157,6 +165,7 @@ fn bind_expr(
                 return Ok(TypedExpr::Ident {
                     name: name.clone(),
                     tpe: tpe.clone(),
+                    pos: e.pos(),
                 });
             }
             // 1a. ScriptEnv lookup — env takes priority over ALL global names.
@@ -167,42 +176,62 @@ fn bind_expr(
             // or identity `GroupElement` literal — see `env::lift`'s doc for
             // why this has no oracle-observed Scala counterpart to mirror.
             if let Some(v) = env.get(name) {
-                return lift(v).map_err(|e| BindError::InvalidArguments {
-                    msg: format!("GroupElement literal {name:?}: {e}"),
-                    pos: *pos,
+                // Scala's liftAny (SigmaBinder.scala:39-40 → SigmaBuilder.scala:219)
+                // builds the substituted node under `currentSrcCtx` = the replaced
+                // Ident's context — the substituted node cites the IDENT's source
+                // position (oracle: `col1 ++ a` rejects at the `a`).
+                return lift(v).map(|node| node.with_pos(*pos)).map_err(|e| {
+                    BindError::InvalidArguments {
+                        msg: format!("GroupElement literal {name:?}: {e}"),
+                        pos: *pos,
+                    }
                 });
             }
             // 1b. Global name substitution (SigmaBinder.scala:42-51).
             Ok(match name.as_str() {
-                "HEIGHT" => TypedExpr::Height { tpe: SType::SInt },
+                "HEIGHT" => TypedExpr::Height {
+                    tpe: SType::SInt,
+                    pos: e.pos(),
+                },
                 "MinerPubkey" => TypedExpr::MinerPubkey {
                     tpe: SType::SColl(Box::new(SType::SByte)),
+                    pos: e.pos(),
                 },
                 "INPUTS" => TypedExpr::Inputs {
                     tpe: SType::SColl(Box::new(SType::SBox)),
+                    pos: e.pos(),
                 },
                 "OUTPUTS" => TypedExpr::Outputs {
                     tpe: SType::SColl(Box::new(SType::SBox)),
+                    pos: e.pos(),
                 },
                 "LastBlockUtxoRootHash" => TypedExpr::LastBlockUtxoRootHash {
                     tpe: SType::SAvlTree,
+                    pos: e.pos(),
                 },
                 "EmptyByteArray" => TypedExpr::Constant {
                     value: ConstPayload::ByteColl(vec![]),
                     tpe: SType::SColl(Box::new(SType::SByte)),
+                    pos: e.pos(),
                 },
-                "SELF" => TypedExpr::Self_ { tpe: SType::SBox },
+                "SELF" => TypedExpr::Self_ {
+                    tpe: SType::SBox,
+                    pos: e.pos(),
+                },
                 "CONTEXT" => TypedExpr::Context {
                     tpe: SType::SContext,
+                    pos: e.pos(),
                 },
                 "Global" => TypedExpr::Global {
                     tpe: SType::SGlobal,
+                    pos: e.pos(),
                 },
                 // Unresolved: survives to the typer (predef funcs, block vals,
                 // lambda params — SigmaBinder.scala:51 `case _ => None`).
                 _ => TypedExpr::Ident {
                     name: name.clone(),
                     tpe: SType::NoType,
+                    pos: e.pos(),
                 },
             })
         }
@@ -222,10 +251,12 @@ fn bind_expr(
                     field: "isDefined".to_string(),
                     res_type: None,
                     tpe: product_method_tpe(&obj_tpe, "isDefined", tree_version),
+                    pos: e.pos(),
                 };
                 Ok(TypedExpr::LogicalNot {
                     input: Box::new(inner),
-                    tpe: SType::SBoolean, // trees.scala:1378
+                    tpe: SType::SBoolean, // trees.scala:1378,
+                    pos: e.pos(),
                 })
             } else {
                 Ok(TypedExpr::Select {
@@ -233,6 +264,7 @@ fn bind_expr(
                     field: field.clone(),
                     res_type: None, // always None at parse time
                     tpe: declared_select_tpe(&obj_tpe, field, tree_version),
+                    pos: e.pos(),
                 })
             }
         }
@@ -260,6 +292,7 @@ fn bind_expr(
                 input: Box::new(input_b),
                 type_args: type_args.clone(),
                 tpe,
+                pos: e.pos(),
             })
         }
 
@@ -278,6 +311,7 @@ fn bind_expr(
                 name: name.clone(),
                 args: args_b,
                 tpe: SType::NoType,
+                pos: e.pos(),
             })
         }
 
@@ -310,6 +344,7 @@ fn bind_expr(
                     range: Box::new(range),
                     tpe_params: vec![],
                 },
+                pos: e.pos(),
             })
         }
 
@@ -329,18 +364,22 @@ fn bind_expr(
                 given_type: vd.given_type.clone(),
                 body: Box::new(body_b),
                 tpe,
+                pos: e.pos(),
             })
         }
 
         // ── Rules 7-8: Block ────────────────────────────────────────────────
         Expr::Block {
-            bindings, result, ..
+            bindings,
+            result,
+            pos,
+            ..
         } => {
             // Rule 7: { e } → e (SigmaBinder.scala:88). Fires before rule 8.
             if bindings.is_empty() {
                 return bind_expr(env, result, network, tree_version);
             }
-            bind_block(env, bindings, result, network, tree_version)
+            bind_block(env, bindings, result, *pos, network, tree_version)
         }
 
         // ── mechanical conversions (no binder rule; tpe defs from ast.rs) ──
@@ -353,6 +392,7 @@ fn bind_expr(
             Ok(TypedExpr::Tuple {
                 items: items_b,
                 tpe,
+                pos: e.pos(),
             })
         }
         Expr::If {
@@ -370,6 +410,7 @@ fn bind_expr(
                 true_branch: Box::new(t),
                 false_branch: Box::new(f),
                 tpe,
+                pos: e.pos(),
             })
         }
         Expr::LogicalNot { input, .. } => {
@@ -377,6 +418,7 @@ fn bind_expr(
             Ok(TypedExpr::LogicalNot {
                 input: Box::new(input_b),
                 tpe: SType::SBoolean,
+                pos: e.pos(),
             })
         }
         Expr::Negation { input, .. } => {
@@ -385,6 +427,7 @@ fn bind_expr(
             Ok(TypedExpr::Negation {
                 input: Box::new(input_b),
                 tpe,
+                pos: e.pos(),
             })
         }
         Expr::BitInversion { input, .. } => {
@@ -393,6 +436,7 @@ fn bind_expr(
             Ok(TypedExpr::BitInversion {
                 input: Box::new(input_b),
                 tpe,
+                pos: e.pos(),
             })
         }
         Expr::Relation {
@@ -406,31 +450,37 @@ fn bind_expr(
                     left: l,
                     right: r,
                     tpe,
+                    pos: e.pos(),
                 },
                 RelKind::Neq => TypedExpr::NEQ {
                     left: l,
                     right: r,
                     tpe,
+                    pos: e.pos(),
                 },
                 RelKind::Ge => TypedExpr::GE {
                     left: l,
                     right: r,
                     tpe,
+                    pos: e.pos(),
                 },
                 RelKind::Gt => TypedExpr::GT {
                     left: l,
                     right: r,
                     tpe,
+                    pos: e.pos(),
                 },
                 RelKind::Le => TypedExpr::LE {
                     left: l,
                     right: r,
                     tpe,
+                    pos: e.pos(),
                 },
                 RelKind::Lt => TypedExpr::LT {
                     left: l,
                     right: r,
                     tpe,
+                    pos: e.pos(),
                 },
             })
         }
@@ -450,6 +500,7 @@ fn bind_expr(
                 right: Box::new(r),
                 opcode,
                 tpe,
+                pos: e.pos(),
             })
         }
         Expr::BitOp {
@@ -467,6 +518,7 @@ fn bind_expr(
                 right: Box::new(r),
                 opcode,
                 tpe,
+                pos: e.pos(),
             })
         }
     }
@@ -502,11 +554,12 @@ fn bind_apply(
                 items: args,
                 elem_type: elem.clone(),
                 tpe: SType::SColl(Box::new(elem)),
+                pos: apply_pos,
             });
         }
     }
 
-    if let TypedExpr::Ident { name, tpe } = &func {
+    if let TypedExpr::Ident { name, tpe, .. } = &func {
         match name.as_str() {
             // Rule 3: Coll(a, b, …) → ConcreteCollection(args, args(0).tpe)
             // (SigmaBinder.scala:60-62). Scala's pattern is Ident("Coll", _)
@@ -521,6 +574,7 @@ fn bind_apply(
                     items: args,
                     elem_type: elem.clone(),
                     tpe: SType::SColl(Box::new(elem)),
+                    pos: apply_pos,
                 });
             }
             // Rules 4-5: min/max (SigmaBinder.scala:65-78). Exactly 2 args →
@@ -538,6 +592,7 @@ fn bind_apply(
                         right: Box::new(r),
                         opcode,
                         tpe,
+                        pos: apply_pos,
                     });
                 }
                 return Err(BindError::InvalidArguments {
@@ -565,6 +620,7 @@ fn bind_apply(
         func: Box::new(func),
         args,
         tpe,
+        pos: apply_pos,
     })
 }
 
@@ -603,6 +659,7 @@ fn bind_pk(args: Vec<TypedExpr>, pos: Pos, network: NetworkPrefix) -> Result<Typ
             Ok(TypedExpr::Constant {
                 value: ConstPayload::ProveDlog(pubkey),
                 tpe: SType::SSigmaProp,
+                pos,
             })
         }
         _ => Err(BindError::InvalidArguments {
@@ -675,6 +732,7 @@ fn bind_serialize(args: Vec<TypedExpr>, pos: Pos) -> Result<TypedExpr, BindError
     Ok(TypedExpr::MethodCall {
         obj: Box::new(TypedExpr::Global {
             tpe: SType::SGlobal,
+            pos,
         }),
         method: MethodRef {
             owner: "SigmaDslBuilder".to_string(),
@@ -683,6 +741,7 @@ fn bind_serialize(args: Vec<TypedExpr>, pos: Pos) -> Result<TypedExpr, BindError
         args,
         type_subst: vec![],
         tpe: SType::SColl(Box::new(SType::SByte)),
+        pos,
     })
 }
 
@@ -697,6 +756,7 @@ fn bind_block(
     env: &ScriptEnv,
     bindings: &[ValDef],
     result: &Expr,
+    block_pos: Pos,
     network: NetworkPrefix,
     tree_version: u8,
 ) -> Result<TypedExpr, BindError> {
@@ -731,6 +791,7 @@ fn bind_block(
             given_type: filled.clone(),
             body: Box::new(b1),
             tpe: filled,
+            pos: vd.pos,
         });
     }
     let tpe = node_tpe(&result_b).clone(); // Block.tpe = result.tpe
@@ -738,6 +799,7 @@ fn bind_block(
         bindings: new_binds,
         result: Box::new(result_b),
         tpe,
+        pos: block_pos,
     })
 }
 
@@ -771,6 +833,7 @@ mod tests {
         TypedExpr::Constant {
             value: ConstPayload::Int(v),
             tpe: SType::SInt,
+            pos: 0,
         }
     }
 
@@ -778,6 +841,7 @@ mod tests {
         TypedExpr::Constant {
             value: ConstPayload::Long(v),
             tpe: SType::SLong,
+            pos: 0,
         }
     }
 
@@ -825,42 +889,60 @@ mod tests {
     #[test]
     fn rule1_global_names_substitute_singletons() {
         let cases: &[(&str, TypedExpr)] = &[
-            ("HEIGHT", TypedExpr::Height { tpe: SType::SInt }),
+            (
+                "HEIGHT",
+                TypedExpr::Height {
+                    tpe: SType::SInt,
+                    pos: 0,
+                },
+            ),
             (
                 "MinerPubkey",
                 TypedExpr::MinerPubkey {
                     tpe: SType::SColl(Box::new(SType::SByte)),
+                    pos: 0,
                 },
             ),
             (
                 "INPUTS",
                 TypedExpr::Inputs {
                     tpe: SType::SColl(Box::new(SType::SBox)),
+                    pos: 0,
                 },
             ),
             (
                 "OUTPUTS",
                 TypedExpr::Outputs {
                     tpe: SType::SColl(Box::new(SType::SBox)),
+                    pos: 0,
                 },
             ),
             (
                 "LastBlockUtxoRootHash",
                 TypedExpr::LastBlockUtxoRootHash {
                     tpe: SType::SAvlTree,
+                    pos: 0,
                 },
             ),
-            ("SELF", TypedExpr::Self_ { tpe: SType::SBox }),
+            (
+                "SELF",
+                TypedExpr::Self_ {
+                    tpe: SType::SBox,
+                    pos: 0,
+                },
+            ),
             (
                 "CONTEXT",
                 TypedExpr::Context {
                     tpe: SType::SContext,
+                    pos: 0,
                 },
             ),
             (
                 "Global",
                 TypedExpr::Global {
                     tpe: SType::SGlobal,
+                    pos: 0,
                 },
             ),
         ];
@@ -877,6 +959,7 @@ mod tests {
             TypedExpr::Constant {
                 value: ConstPayload::ByteColl(vec![]),
                 tpe: SType::SColl(Box::new(SType::SByte)),
+                pos: 0,
             }
         );
     }
@@ -889,6 +972,7 @@ mod tests {
             TypedExpr::Ident {
                 name: "foo".to_string(),
                 tpe: SType::NoType,
+                pos: 0,
             }
         );
     }
@@ -915,6 +999,7 @@ mod tests {
             TypedExpr::Ident {
                 name: "ZKProof".to_string(),
                 tpe: sfunc,
+                pos: 0,
             }
         );
     }
@@ -928,6 +1013,7 @@ mod tests {
                 items: vec![int_const(1), int_const(2)],
                 elem_type: SType::SInt,
                 tpe: SType::SColl(Box::new(SType::SInt)),
+                pos: 0,
             }
         );
     }
@@ -963,6 +1049,7 @@ mod tests {
                 items: vec![long_const(1), long_const(2)],
                 elem_type: SType::SLong,
                 tpe: SType::SColl(Box::new(SType::SLong)),
+                pos: 0,
             }
         );
     }
@@ -976,6 +1063,7 @@ mod tests {
                 items: vec![],
                 elem_type: SType::NoType,
                 tpe: SType::SColl(Box::new(SType::NoType)),
+                pos: 0,
             }
         );
     }
@@ -991,7 +1079,8 @@ mod tests {
             TypedExpr::Apply {
                 func: Box::new(int_const(5)),
                 args: vec![int_const(1)],
-                tpe: SType::NoType, // callee tpe SInt is neither SFunc nor SColl
+                tpe: SType::NoType, // callee tpe SInt is neither SFunc nor SColl,
+                pos: 0,
             }
         );
     }
@@ -1006,6 +1095,7 @@ mod tests {
                 right: Box::new(int_const(2)),
                 opcode: ARITH_MIN,
                 tpe: SType::SInt,
+                pos: 0,
             }
         );
     }
@@ -1020,6 +1110,7 @@ mod tests {
                 right: Box::new(long_const(2)),
                 opcode: ARITH_MAX,
                 tpe: SType::SLong,
+                pos: 0,
             }
         );
     }
@@ -1035,6 +1126,7 @@ mod tests {
                 func: Box::new(int_const(9)),
                 args: vec![int_const(1), int_const(2), int_const(3)],
                 tpe: SType::NoType,
+                pos: 0,
             }
         );
     }
@@ -1050,6 +1142,7 @@ mod tests {
                 given_res_type,
                 body,
                 tpe,
+                ..
             } => {
                 assert!(tpe_params.is_empty());
                 assert_eq!(args, vec![("x".to_string(), SType::SInt)]);
@@ -1062,10 +1155,15 @@ mod tests {
                         obj: Box::new(TypedExpr::Ident {
                             name: "x".to_string(),
                             tpe: SType::NoType,
+                            pos: 0,
                         }),
                         name: "+".to_string(),
-                        args: vec![TypedExpr::Height { tpe: SType::SInt }],
+                        args: vec![TypedExpr::Height {
+                            tpe: SType::SInt,
+                            pos: 0
+                        }],
                         tpe: SType::NoType,
+                        pos: 0,
                     }
                 );
                 // Lambda.tpe = SFunc([SInt], givenResType ?: body.tpe=NoType).
@@ -1087,7 +1185,10 @@ mod tests {
     fn rule7_empty_block_unwraps_to_result() {
         assert_eq!(
             bind_src("{ HEIGHT }"),
-            TypedExpr::Height { tpe: SType::SInt }
+            TypedExpr::Height {
+                tpe: SType::SInt,
+                pos: 0
+            }
         );
     }
 
@@ -1102,6 +1203,7 @@ mod tests {
                 right: Box::new(int_const(2)),
                 opcode: ARITH_MIN,
                 tpe: SType::SInt,
+                pos: 0,
             }
         );
     }
@@ -1115,14 +1217,20 @@ mod tests {
                 bindings: vec![TypedExpr::ValNode {
                     name: "x".to_string(),
                     given_type: SType::SInt,
-                    body: Box::new(TypedExpr::Height { tpe: SType::SInt }),
+                    body: Box::new(TypedExpr::Height {
+                        tpe: SType::SInt,
+                        pos: 0
+                    }),
                     tpe: SType::SInt,
+                    pos: 0,
                 }],
                 result: Box::new(TypedExpr::Ident {
                     name: "x".to_string(),
                     tpe: SType::NoType,
+                    pos: 0,
                 }),
-                tpe: SType::NoType, // Block.tpe = result.tpe
+                tpe: SType::NoType, // Block.tpe = result.tpe,
+                pos: 0,
             }
         );
     }
@@ -1164,6 +1272,7 @@ mod tests {
             TypedExpr::Constant {
                 value: ConstPayload::ProveDlog(pk),
                 tpe: SType::SSigmaProp,
+                pos: 0,
             }
         );
     }
@@ -1181,8 +1290,10 @@ mod tests {
                 args: vec![TypedExpr::Constant {
                     value: ConstPayload::String("not an address".to_string()),
                     tpe: SType::SString,
+                    pos: 0,
                 }],
                 tpe: SType::NoType,
+                pos: 0,
             }
         );
     }
@@ -1195,6 +1306,7 @@ mod tests {
             TypedExpr::MethodCall {
                 obj: Box::new(TypedExpr::Global {
                     tpe: SType::SGlobal,
+                    pos: 0,
                 }),
                 method: MethodRef {
                     owner: "SigmaDslBuilder".to_string(),
@@ -1203,6 +1315,7 @@ mod tests {
                 args: vec![int_const(1)],
                 type_subst: vec![],
                 tpe: SType::SColl(Box::new(SType::SByte)),
+                pos: 0,
             }
         );
     }
@@ -1217,12 +1330,15 @@ mod tests {
                     obj: Box::new(TypedExpr::Ident {
                         name: "x".to_string(),
                         tpe: SType::NoType,
+                        pos: 0,
                     }),
                     field: "isDefined".to_string(),
                     res_type: None,
-                    tpe: SType::NoType, // NoType receiver → NoType lookup
+                    tpe: SType::NoType, // NoType receiver → NoType lookup,
+                    pos: 0,
                 }),
                 tpe: SType::SBoolean,
+                pos: 0,
             }
         );
     }
@@ -1236,10 +1352,12 @@ mod tests {
                 obj: Box::new(TypedExpr::Ident {
                     name: "x".to_string(),
                     tpe: SType::NoType,
+                    pos: 0,
                 }),
                 field: "isDefined".to_string(),
                 res_type: None,
                 tpe: SType::NoType,
+                pos: 0,
             }
         );
     }
@@ -1254,6 +1372,7 @@ mod tests {
             TypedExpr::Constant {
                 value: ConstPayload::Bool(true),
                 tpe: SType::SBoolean,
+                pos: 0,
             }
         );
         assert_eq!(
@@ -1261,6 +1380,7 @@ mod tests {
             TypedExpr::Constant {
                 value: ConstPayload::String("abc".to_string()),
                 tpe: SType::SString,
+                pos: 0,
             }
         );
         assert_eq!(
@@ -1268,6 +1388,7 @@ mod tests {
             TypedExpr::Constant {
                 value: ConstPayload::Unit,
                 tpe: SType::SUnit,
+                pos: 0,
             }
         );
     }
@@ -1282,6 +1403,7 @@ mod tests {
                 left: Box::new(int_const(1)),
                 right: Box::new(int_const(2)),
                 tpe: SType::SBoolean,
+                pos: 0,
             }
         );
         // ArithOp.tpe = left.tpe (trees.scala:704-707).
@@ -1292,6 +1414,7 @@ mod tests {
                 right: Box::new(int_const(3)),
                 opcode: ARITH_MINUS,
                 tpe: SType::SInt,
+                pos: 0,
             }
         );
         // BitOp.tpe = left.tpe (trees.scala:911-915).
@@ -1302,6 +1425,7 @@ mod tests {
                 right: Box::new(int_const(2)),
                 opcode: BIT_OR,
                 tpe: SType::SInt,
+                pos: 0,
             }
         );
         // `+` is a MethodCallLike in the reference grammar; tpe = NoType.
@@ -1312,6 +1436,7 @@ mod tests {
                 name: "+".to_string(),
                 args: vec![int_const(2)],
                 tpe: SType::NoType,
+                pos: 0,
             }
         );
         // LogicalNot → SBoolean.
@@ -1321,8 +1446,10 @@ mod tests {
                 input: Box::new(TypedExpr::Constant {
                     value: ConstPayload::Bool(true),
                     tpe: SType::SBoolean,
+                    pos: 0,
                 }),
                 tpe: SType::SBoolean,
+                pos: 0,
             }
         );
     }
@@ -1338,9 +1465,11 @@ mod tests {
                     TypedExpr::Constant {
                         value: ConstPayload::Bool(true),
                         tpe: SType::SBoolean,
+                        pos: 0,
                     },
                 ],
                 tpe: SType::STuple(vec![SType::SInt, SType::SBoolean]),
+                pos: 0,
             }
         );
         // If.tpe = trueBranch.tpe (trees.scala:1348-1351).
@@ -1363,6 +1492,7 @@ mod tests {
                     range: Box::new(SType::SByte),
                     tpe_params: vec![],
                 },
+                pos: 0,
             }
         );
     }
@@ -1555,6 +1685,7 @@ mod tests {
             TypedExpr::Constant {
                 value: ConstPayload::ProveDlog(g),
                 tpe: SType::SSigmaProp,
+                pos: 0,
             },
             "ProveDlog payload must be the secp256k1 G-point bytes"
         );
@@ -1571,13 +1702,16 @@ mod tests {
                 obj: Box::new(TypedExpr::Constant {
                     value: ConstPayload::ByteColl(vec![1, 2]),
                     tpe: SType::SColl(Box::new(SType::SByte)),
+                    pos: 0,
                 }),
                 name: "++".to_string(),
                 args: vec![TypedExpr::Constant {
                     value: ConstPayload::ByteColl(vec![3, 4]),
                     tpe: SType::SColl(Box::new(SType::SByte)),
+                    pos: 0,
                 }],
                 tpe: SType::NoType,
+                pos: 0,
             }
         );
     }
