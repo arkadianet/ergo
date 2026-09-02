@@ -592,10 +592,12 @@ impl NodeConfig {
 
         // [api.security] — always required when the API server is enabled,
         // matching Scala `ErgoApp.scala:40-43` `require(apiKeyHash.isDefined,
-        // "API key hash must be set")`. Generate with
-        // `echo -n "<secret>" | b2sum -l 256 | cut -d' ' -f1`. Validated
-        // here so a malformed value exits the node with a clear shell
-        // message rather than silently disabling the gate downstream.
+        // "API key hash must be set")`. Generate a RANDOM secret first
+        // (never a guessable word) and hash it, e.g.:
+        //   secret=$(openssl rand -hex 32)
+        //   printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1
+        // Validated here so a malformed value exits the node with a clear
+        // shell message rather than silently disabling the gate downstream.
         let api_key_hash = if api_bind.is_some() {
             let raw = toml_cfg
                 .api
@@ -605,11 +607,11 @@ impl NodeConfig {
                 .ok_or_else(|| {
                     "[api.security] api_key_hash is required when the API is enabled. \
                      Set it to the lowercase Base16 of Blake2b256(<your-secret>). Generate \
-                     a random secret first — never a guessable word — e.g. \
-                     `openssl rand -hex 32 | tee >(b2sum -l 256 | cut -d' ' -f1)` \
-                     (prints the secret to save and the hash to configure), or without \
-                     openssl: `head -c 32 /dev/urandom | xxd -p -c 256 | tee >(b2sum -l 256 | \
-                     cut -d' ' -f1)`. \
+                     a RANDOM secret first — never a guessable word — save it, then hash \
+                     it, e.g.: `secret=$(openssl rand -hex 32); printf '%s' \"$secret\" | \
+                     b2sum -l 256 | cut -d' ' -f1` (or without openssl: `secret=$(head -c \
+                     32 /dev/urandom | xxd -p -c 256); printf '%s' \"$secret\" | b2sum -l \
+                     256 | cut -d' ' -f1`). \
                      Disable the API server entirely with [api] disabled = true if you \
                      have no operator surface to expose."
                         .to_string()

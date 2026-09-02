@@ -54,9 +54,22 @@ pub(super) fn make_state(db_path: &Path) -> NodeState {
 ///
 /// Production force-disables the mempool for any digest mode (admission
 /// needs UTXO box bytes — see `config::mempool_must_force_disable`), so
-/// this fixture pins `enabled = false` to match the real Mode-5 posture
-/// rather than fabricating an impossible digest-with-live-mempool node.
+/// this pins `enabled = false` to match the real Mode-5 posture rather
+/// than fabricating an impossible digest-with-live-mempool node.
 pub(super) fn make_digest_state(db_path: &Path) -> NodeState {
+    make_digest_state_with_mempool_config(db_path, false)
+}
+
+/// Same digest backend as [`make_digest_state`], parameterized on the
+/// mempool's `enabled` flag. `mempool_enabled = true` is an
+/// impossible-in-production combination (`config::mempool_must_force_disable`
+/// prevents it at boot) — used ONLY to exercise `handle_mempool_tick`'s
+/// post-boot degrade guard: it must log-and-skip rather than panic if
+/// this invariant is ever violated.
+pub(super) fn make_digest_state_with_mempool_config(
+    db_path: &Path,
+    mempool_enabled: bool,
+) -> NodeState {
     let store = ergo_state::DigestStateStore::open(
         db_path,
         ergo_validation::scala_launch(),
@@ -68,34 +81,7 @@ pub(super) fn make_digest_state(db_path: &Path) -> NodeState {
     )
     .unwrap();
     let mempool_cfg = MempoolConfig {
-        enabled: false,
-        ..MempoolConfig::default()
-    };
-    make_state_with_backend(
-        ergo_state::StateBackendKind::Digest(store),
-        crate::config::StateType::Digest,
-        mempool_cfg,
-    )
-}
-
-/// Same digest backend as [`make_digest_state`], but with the mempool
-/// left `enabled = true` — an impossible-in-production combination
-/// (`config::mempool_must_force_disable` prevents it at boot), used ONLY
-/// to exercise `handle_mempool_tick`'s post-boot degrade guard: it must
-/// log-and-skip rather than panic if this invariant is ever violated.
-pub(super) fn make_digest_state_with_mempool_enabled(db_path: &Path) -> NodeState {
-    let store = ergo_state::DigestStateStore::open(
-        db_path,
-        ergo_validation::scala_launch(),
-        ergo_chain_spec::VotingParams {
-            voting_length: 2,
-            ..ergo_chain_spec::VotingParams::mainnet()
-        },
-        [0u8; 33],
-    )
-    .unwrap();
-    let mempool_cfg = MempoolConfig {
-        enabled: true,
+        enabled: mempool_enabled,
         ..MempoolConfig::default()
     };
     make_state_with_backend(
@@ -141,6 +127,7 @@ fn make_state_with_backend(
         },
         mempool,
         mempool_notifier: MempoolNotifier::new(),
+        mempool_gate_broken: false,
         throttle: ThroughputLimiter::with_defaults(),
         last_seen_active_params: ergo_validation::scala_launch(),
         last_seen_validation_settings: ergo_validation::ErgoValidationSettings::empty(),

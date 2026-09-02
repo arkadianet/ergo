@@ -161,11 +161,20 @@ Consequences:
 - **`/metrics` is not authenticated.** Keep it on loopback or behind a
   proxy.
 
-Generate a hash from a secret with, for example:
+Generate a hash from a RANDOM secret (never a guessable word) with, for
+example:
 
 ```bash
-echo -n "<your-secret>" | b2sum -l 256 | cut -d' ' -f1
+secret=$(openssl rand -hex 32)
+printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1
 ```
+
+Save `$secret` somewhere safe — it is the plaintext `api_key` clients send;
+the hash above is what goes in `api_key_hash`. The shipped
+`ergo-node.toml` template ships with `api_key_hash` set to
+`Blake2b256("hello")` — the node's boot-warn fires for this value on
+every boot, loopback bind included, because anything with local shell
+access already has it. Rotate it before relying on the API for anything.
 
 ## `[mempool]`
 

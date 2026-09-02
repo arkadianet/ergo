@@ -104,6 +104,12 @@ pub(crate) struct NodeState {
     /// simply never matches a later reorg's tip.
     pub(super) last_reorg_enrichment: Option<ReorgEnrichment>,
     pub(super) mempool_notifier: MempoolNotifier,
+    /// One-shot latch: set the first (and only) time
+    /// `handle_mempool_tick` observes the digest-mode gating invariant
+    /// ("mempool enabled implies a UTXO-backed store") broken post-boot.
+    /// Once set, every subsequent tick short-circuits immediately instead
+    /// of re-logging at the 250ms tick cadence forever.
+    pub(super) mempool_gate_broken: bool,
     // ---- throughput limiter ----
     // Per-peer sliding-window cap (1000 msg/sec, 2 MB/sec over 10s).
     // Consulted on every inbound frame; over-limit frames drop and

@@ -31,8 +31,12 @@ bind = "127.0.0.1:9099"          # loopback only. To expose on the network add
 # Lowercase Blake2b-256 of your secret api_key. The `api_key` request header
 # is required to reach /wallet/* and /node/shutdown (read routes stay open).
 # The value below is blake2b256("hello") — the same dev key the Scala node
-# documents. It is fine on loopback, but **CHANGE IT before `public_bind`**.
-# Generate your own:  printf 'your-secret' | b2sum -l 256
+# documents. It is a WEAK/DEFAULT key: the node logs a loud boot-warning
+# for it on every start, loopback included, because anything with local
+# shell access already has it — CHANGE IT before relying on the API for
+# anything, not just before `public_bind`.
+# Generate your own from a random secret:
+#   secret=$(openssl rand -hex 32); printf '%s' "$secret" | b2sum -l 256
 api_key_hash = "324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf"
 
 [indexer]

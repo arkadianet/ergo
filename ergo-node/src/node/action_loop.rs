@@ -335,16 +335,22 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
         return;
     }
     // Boot enforces "mempool enabled implies UTXO-mode store" (digest mode
-    // gates the mempool subsystem off entirely), so `as_utxo()` returning
-    // `None` here means that invariant broke somewhere after boot. Log and
-    // skip this tick rather than panicking the single-writer action-loop
-    // task — a wedged mempool subsystem degrades gracefully; a killed
-    // action loop takes the whole node down with it.
+    // gates the mempool subsystem off entirely). `mempool_gate_broken` is a
+    // one-shot latch: the FIRST tick that finds the store not UTXO-backed
+    // logs ERROR once and sets it, and every tick after that short-circuits
+    // right here — silently, cheaply — instead of re-logging at the 250ms
+    // tick cadence forever. Degrading (skip the tick) rather than panicking
+    // keeps the single-writer action-loop task alive.
+    if state.mempool_gate_broken {
+        return;
+    }
     let Some(utxo) = state.store.as_utxo() else {
         tracing::error!(
             "handle_mempool_tick: mempool enabled but store is not UTXO-backed \
-             (digest-mode gating invariant violated post-boot) — skipping this tick"
+             (digest-mode gating invariant violated post-boot) — mempool tick \
+             permanently disabled for the rest of this session"
         );
+        state.mempool_gate_broken = true;
         return;
     };
     // Single poll of committed-state tip identity. `MempoolNotifier`
@@ -449,14 +455,13 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
     let Some(owned) = build_tip_context(state) else {
         return;
     };
-    // Same digest-mode gating invariant as above; re-checked rather than
-    // trusting the earlier guard still holds, since this closes over
-    // `state` freshly at this point in the tick.
+    // The digest-mode gating invariant was already verified once, above, at
+    // the top of this tick — the store's backend kind never changes for the
+    // lifetime of a `NodeState`, so this is guaranteed `Some` here. Kept as
+    // a safe early return, not an `.expect`/panic, purely as defense in
+    // depth; no separate error log (the top-level check already latched
+    // `mempool_gate_broken` and logged if this invariant were ever broken).
     let Some(utxo) = state.store.as_utxo() else {
-        tracing::error!(
-            "handle_mempool_tick: mempool enabled but store is not UTXO-backed \
-             (digest-mode gating invariant violated post-boot) — skipping this tick"
-        );
         return;
     };
     let now = Instant::now();
@@ -631,16 +636,17 @@ mod tests {
 
     /// The digest-mode gating invariant ("mempool enabled implies a
     /// UTXO-backed store") is enforced at boot
-    /// (`config::mempool_must_force_disable`), so `as_utxo()` returning
-    /// `None` inside `handle_mempool_tick` means that invariant broke
-    /// post-boot. Previously this was a `.expect(...)` that killed the
-    /// single-writer action-loop task; it must now log and skip the tick
-    /// instead, leaving the node running.
+    /// (`config::mempool_must_force_disable`): `handle_mempool_tick` must
+    /// never observe a digest-backed store with the mempool enabled. If it
+    /// ever does, it must degrade — log ERROR once and permanently
+    /// short-circuit the tick — rather than panic the single-writer
+    /// action-loop task, and rather than re-logging every 250ms forever.
     #[test]
     fn handle_mempool_tick_digest_backend_with_mempool_enabled_degrades_not_panics() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut state = crate::node::tests::make_digest_state_with_mempool_enabled(
+        let mut state = crate::node::tests::make_digest_state_with_mempool_config(
             &tmp.path().join("digest.redb"),
+            true,
         );
         assert!(
             state.store.as_utxo().is_none(),
@@ -650,8 +656,21 @@ mod tests {
             state.mempool.config().enabled,
             "precondition: mempool is (invariant-violating) enabled"
         );
+        assert!(
+            !state.mempool_gate_broken,
+            "precondition: gate not yet latched"
+        );
 
-        // Must return normally, not panic.
+        // First tick: must return normally (not panic) and latch the gate.
         handle_mempool_tick(&mut state, None);
+        assert!(
+            state.mempool_gate_broken,
+            "first violation latches the one-shot gate"
+        );
+
+        // Second tick: must short-circuit at the top-of-function check
+        // (the latch), not panic, and not re-derive `as_utxo()` at all.
+        handle_mempool_tick(&mut state, None);
+        assert!(state.mempool_gate_broken, "latch stays set");
     }
 }

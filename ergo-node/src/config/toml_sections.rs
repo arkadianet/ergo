@@ -185,8 +185,8 @@ pub(super) struct TomlApi {
 #[serde(default)]
 pub(super) struct TomlApiSecurity {
     /// Lowercase Base16 (hex) of `Blake2b256(api_key_plaintext)`.
-    /// 64 chars. Generate with e.g.
-    /// `echo -n "<your-secret>" | b2sum -l 256 | cut -d' ' -f1`.
+    /// 64 chars. Generate a RANDOM secret first, then hash it, e.g.:
+    /// `secret=$(openssl rand -hex 32); printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1`.
     pub(super) api_key_hash: Option<String>,
 }
 

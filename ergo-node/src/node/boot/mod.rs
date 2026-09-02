@@ -836,6 +836,7 @@ async fn run_inner_with_backend(
         our_handshake,
         mempool,
         mempool_notifier,
+        mempool_gate_broken: false,
         throttle,
         last_seen_active_params: sync.last_seen_active_params,
         last_seen_validation_settings: sync.last_seen_validation_settings,

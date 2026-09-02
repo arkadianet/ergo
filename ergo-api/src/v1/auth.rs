@@ -225,7 +225,9 @@ pub enum InsecurePosture {
     /// (`no_key_configured`, unusable) until a key is set; flagged so the
     /// operator learns why those routes reject rather than discovering it live.
     NoKeyNetworkReachable,
-    /// Network-reachable bind whose api-key hashes a known weak/default secret.
+    /// The api-key hashes a known weak/default secret — reachable by any
+    /// local process regardless of bind, and by the network too if the
+    /// bind is not loopback.
     WeakDefaultKey,
 }
 
@@ -256,7 +258,8 @@ pub fn assess_posture(security: Option<&ApiSecurity>, bind: SocketAddr) -> Optio
 }
 
 /// Boot-warn hook. Logs a loud `WARN` if the v1 T1/T2 surface is
-/// network-reachable under a weak/default api-key (or none).
+/// configured with a weak/default api-key, or is network-reachable with
+/// no key configured at all.
 ///
 /// **Call site:** invoked once at server startup in `crate::server`, right
 /// after `ApiSecurity` is built and the bind `SocketAddr` is known, before
@@ -273,8 +276,10 @@ pub fn warn_startup_posture(security: Option<&ApiSecurity>, bind: SocketAddr) {
         Some(InsecurePosture::WeakDefaultKey) => warn!(
             target: "ergo_api::v1::auth",
             %bind,
-            "INSECURE: the API is network-reachable under a weak/default api_key \
-             (e.g. the shipped \"hello\" template value) — rotate api_key_hash immediately."
+            "INSECURE: the API is configured with a weak/default api_key (e.g. the \
+             shipped \"hello\" template value) — reachable by any local process, \
+             and by the network too if the bind is not loopback. Rotate \
+             api_key_hash immediately."
         ),
         None => {}
     }
