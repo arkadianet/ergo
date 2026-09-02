@@ -162,14 +162,38 @@ impl Fixture {
         }
         // Spread the touched indices across the whole key space so the
         // proof visits independent root-to-leaf paths, as a real block does.
-        let stride = (self.n / (3 * txs).max(1)).max(1) as u64;
+        //
+        // Each transaction claims THREE consecutive stride slots — one
+        // lookup, two removals — so the data-input path and the spent-box
+        // paths never coincide. Sharing a slot would make the lookup free
+        // (the removal already visits that root-to-leaf path) and understate
+        // both the proof size and the prove/verify cost.
+        let stride = (self.n / (3 * txs)).max(1) as u64;
         for i in 0..txs as u64 {
-            lookups.push(key((i * stride) % self.n as u64));
-            to_remove.insert(key(((i * 2 + 1) * stride) % self.n as u64), ());
-            to_remove.insert(key(((i * 2 + 2) * stride) % self.n as u64), ());
+            let base = i * 3;
+            lookups.push(key((base * stride) % self.n as u64));
+            to_remove.insert(key(((base + 1) * stride) % self.n as u64), ());
+            to_remove.insert(key(((base + 2) * stride) % self.n as u64), ());
             to_insert.insert(key(self.n as u64 + i * 2), vec![0xCD; VALUE_LEN]);
             to_insert.insert(key(self.n as u64 + i * 2 + 1), vec![0xCD; VALUE_LEN]);
         }
+        // The workload the table claims to measure is only what it measures
+        // if these three sets are pairwise disjoint.
+        assert_eq!(
+            to_remove.len(),
+            2 * txs,
+            "removal keys must be distinct: {txs} txs produced {} removals",
+            to_remove.len()
+        );
+        assert!(
+            lookups.iter().all(|k| !to_remove.contains_key(k)),
+            "data-input lookups must not reuse a spent-box path"
+        );
+        assert!(
+            lookups.iter().all(|k| !to_insert.contains_key(k))
+                && to_remove.keys().all(|k| !to_insert.contains_key(k)),
+            "created boxes must not collide with looked-up or spent boxes"
+        );
         ChangeSet {
             lookups,
             to_remove,
@@ -286,6 +310,18 @@ fn adproofs_regen_cost_table() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(5);
+    // Validated before any fixture is built: a zero size divides by zero in
+    // `change_set`'s key striding, and zero runs medians an empty vector.
+    // Both are operator typos, so fail with the knob name rather than a panic
+    // twenty minutes into a run.
+    assert!(
+        !sizes.is_empty() && sizes.iter().all(|&n| n > 0),
+        "ERGO_REGEN_BENCH_SIZES must be a non-empty list of positive integers, got {sizes:?}"
+    );
+    assert!(
+        runs > 0,
+        "ERGO_REGEN_BENCH_RUNS must be at least 1, got {runs}"
+    );
     let tx_counts = [0usize, 10, 100, 500];
 
     println!(
