@@ -68,6 +68,7 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
         api_key_hash: Some(
             "324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf".into(),
         ),
+        api_allowed_hosts: Vec::new(),
         mempool_config: MempoolConfig::default(),
         mempool_sort_policy: "cost".into(),
         indexer_config: IndexerConfig::default(),

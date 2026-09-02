@@ -251,6 +251,40 @@ pub fn serve_on_with_mempool_and_wallet_and_security(
     wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
 ) -> JoinHandle<()> {
+    serve_on_with_mempool_and_wallet_and_security_and_hosts(
+        ctx,
+        listener,
+        shutdown_rx,
+        admin,
+        wallet_admin,
+        security,
+        &[],
+    )
+}
+
+/// Variant of [`serve_on_with_mempool_and_wallet_and_security`] that
+/// also takes the operator's `[api] allowed_hosts` list, threaded into
+/// the [`crate::host_guard`] middleware layered around the whole
+/// router (including the 404 fallback) — see that module's docs for
+/// the DNS-rebinding threat model and the loopback-vs-public
+/// enforcement split. `allowed_hosts` empty + a loopback bind still
+/// enforces the built-in defaults (`localhost`, `127.0.0.1`, `::1`,
+/// the literal bind address); empty + a non-loopback bind disables the
+/// guard entirely, matching the module docs.
+///
+/// Production (`ergo-node`) calls this entry point directly with the
+/// resolved `[api] allowed_hosts`; every other `serve_on*` variant
+/// forwards an empty list here.
+#[allow(clippy::too_many_arguments)]
+pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts(
+    ctx: ServerCtx,
+    listener: tokio::net::TcpListener,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    admin: Option<Arc<dyn NodeAdmin>>,
+    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+    allowed_hosts: &[String],
+) -> JoinHandle<()> {
     let bind_addr = listener.local_addr().ok();
     // v1 boot-warn: loudly flag a network-reachable T1/T2 surface under
     // a weak/default (or absent) api_key. Called once here, right after the
@@ -259,6 +293,23 @@ pub fn serve_on_with_mempool_and_wallet_and_security(
         crate::v1::warn_startup_posture(security.as_deref(), addr);
     }
     let app = router_with_mempool_and_wallet_and_security(ctx, admin, wallet_admin, security);
+    // Host-header allowlist: the outermost layer, added after the router
+    // is fully assembled (with its own `TraceLayer` / `spa_security_headers`
+    // layers already attached), so it runs first on every request —
+    // including ones that would otherwise 404 — and before any of that
+    // work. Only wired when the bind address is known; an unresolved
+    // listener address (should not happen for a live TCP listener) skips
+    // the guard rather than panicking at boot.
+    let app = match bind_addr {
+        Some(addr) => {
+            let allowlist = Arc::new(crate::host_guard::HostAllowlist::new(addr, allowed_hosts));
+            app.layer(axum::middleware::from_fn_with_state(
+                allowlist,
+                crate::host_guard::require_allowed_host,
+            ))
+        }
+        None => app,
+    };
     let actual = bind_addr
         .map(|a| a.to_string())
         .unwrap_or_else(|| "<unknown>".to_string());

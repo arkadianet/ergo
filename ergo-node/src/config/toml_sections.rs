@@ -173,6 +173,13 @@ pub(super) struct TomlApi {
     /// `[api.security].api_key_hash`; auth gates `/wallet/*` and
     /// `/node/shutdown`.
     pub(super) public_bind: Option<bool>,
+    /// Extra `Host` header values the DNS-rebinding guard accepts,
+    /// beyond `localhost` / `127.0.0.1` / `::1` / the literal `bind`
+    /// address (always allowed on a loopback bind). Default empty. On
+    /// a non-loopback bind the guard only activates when this list is
+    /// non-empty. Each entry may include a port (`"example.com:9099"`)
+    /// to pin it, or omit one to match any port.
+    pub(super) allowed_hosts: Option<Vec<String>>,
     /// `[api.security]` subsection. Optional in TOML but its
     /// `api_key_hash` field must be present when the API server is
     /// enabled — checked at load.

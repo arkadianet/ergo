@@ -20,6 +20,7 @@ pub mod auth;
 pub mod blockchain;
 pub mod compat;
 pub mod emission;
+pub mod host_guard;
 pub mod mining;
 pub mod script;
 pub mod server;
@@ -37,7 +38,8 @@ pub use compat::{NodeChainQuery, Parameters, ScalaInfo};
 pub use mining::{mining_router, MiningApiError, NodeMining, NoopNodeMining};
 pub use server::{
     bind, realtime_handle, router_with_wallet, serve, serve_on, serve_on_with_mempool,
-    serve_on_with_mempool_and_wallet_and_security, ServerCtx,
+    serve_on_with_mempool_and_wallet_and_security,
+    serve_on_with_mempool_and_wallet_and_security_and_hosts, ServerCtx,
 };
 pub use traits::{
     ChainParamsView, MempoolView, NodeAdmin, NodeReadState, NodeSubmit, NoopMempoolView,

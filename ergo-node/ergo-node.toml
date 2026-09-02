@@ -26,6 +26,9 @@ max_connections = 384
 [api]
 bind = "127.0.0.1:9099"          # loopback only. To expose on the network add
                                  # `public_bind = true` (and read the note below).
+# allowed_hosts = ["my-node.example.com"]  # extra Host headers to accept, guarding
+                                 # against DNS rebinding (default []; loopback binds
+                                 # always accept localhost/127.0.0.1/::1/the bind IP).
 
 [api.security]
 # Lowercase Blake2b-256 of your secret api_key. The `api_key` request header
