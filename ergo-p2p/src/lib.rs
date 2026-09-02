@@ -12,6 +12,8 @@
 //!   length[4 BE i32]` plus optional `checksum[4] || payload`.
 //! * [`connection`] — async TCP `Connection` wrapper that buffers
 //!   reads, drains complete frames, and rejects oversized payloads.
+//!   Its read splits into a header phase and a body phase so a caller
+//!   can budget a frame's declared size before the body is read.
 //! * [`handshake`] — version exchange + features negotiation; the
 //!   gate before a peer is promoted to [`peer::Peer`].
 //! * [`message`] — typed P2P message enum and parser/serializer

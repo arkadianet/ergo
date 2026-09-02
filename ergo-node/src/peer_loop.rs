@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ergo_api::SubmitError;
-use ergo_p2p::connection::Connection;
+use ergo_p2p::connection::{Connection, ConnectionError};
 use ergo_p2p::framing::{wire_len, MessageFrame};
 use ergo_p2p::handshake::{
     deserialize_handshake_with_consumed, serialize_handshake, Handshake, PeerSpec,
@@ -72,10 +72,12 @@ pub enum PeerEvent {
         reply: oneshot::Sender<Result<String, SubmitError>>,
     },
     /// Inbound message from a peer. The payload is byte-budgeted through
-    /// [`EVENT_BYTE_BUDGET`] (audit M-5, issue #243): the permit rides on
-    /// the payload ([`MeteredPayload`]) and is released on drop, so the
-    /// in-flight bytes through this channel can never exceed the budget —
-    /// a reader task blocks on acquisition instead of enqueueing, which
+    /// [`EventByteBudget`] (audit M-5, issues #243 / #280): the permit is
+    /// taken at frame-HEADER time, before the body is allocated or read,
+    /// rides on the payload ([`MeteredPayload`]), and is released on drop.
+    /// So neither the bytes in flight through this channel nor the bytes
+    /// accumulating in per-connection read buffers can exceed the budget —
+    /// a reader task parks on acquisition instead of reading on, which
     /// turns into TCP backpressure against the sender.
     Message {
         peer: SocketAddr,
@@ -114,18 +116,30 @@ pub struct MeteredPayload {
 }
 
 impl MeteredPayload {
-    /// Take a budget permit for `inner.len()` bytes (awaiting while the
-    /// budget is exhausted) and wrap the payload. The permit is owned
-    /// (cloned `Arc` call) so it moves with the payload and releases on
-    /// drop, wherever the event ends up.
-    async fn meter(inner: Vec<u8>, budget: &EventByteBudget) -> Self {
-        let _permit = budget
-            .clone()
-            .acquire_many_owned(inner.len().max(1) as u32)
-            .await
-            .expect("event byte budget semaphore is never closed");
-        Self { inner, _permit }
+    /// Wrap a payload in a permit taken earlier — at frame-header time,
+    /// before the payload existed (issue #280). The permit must cover
+    /// `inner.len()`; [`acquire_budget`] is the only way to take one.
+    fn from_parts(inner: Vec<u8>, permit: tokio::sync::OwnedSemaphorePermit) -> Self {
+        Self {
+            inner,
+            _permit: permit,
+        }
     }
+}
+
+/// Take a budget permit for `len` payload bytes, awaiting while the
+/// budget is exhausted. Empty payloads still cost one permit so that a
+/// flood of empty frames cannot bypass the budget entirely.
+///
+/// The permit is owned (cloned `Arc` call) so it can be taken before the
+/// payload exists — at frame-header time — then moved onto the payload
+/// and released on drop, wherever the event ends up.
+async fn acquire_budget(len: usize, budget: &EventByteBudget) -> tokio::sync::OwnedSemaphorePermit {
+    budget
+        .clone()
+        .acquire_many_owned(len.max(1) as u32)
+        .await
+        .expect("event byte budget semaphore is never closed")
 }
 
 impl std::ops::Deref for MeteredPayload {
@@ -319,6 +333,35 @@ async fn do_handshake(
     .map_err(|_| "handshake deadline exceeded".to_string())?
 }
 
+/// Read one framed message, charging its bytes to the shared budget at
+/// frame-HEADER time (issue #280).
+///
+/// The header phase returns as soon as the 9-byte framing header is
+/// buffered — nothing of the body has been accepted yet. The permit for
+/// the declared length is taken there, so when the budget is exhausted
+/// the reader parks *before* allocating or reading the body: the socket
+/// stops being read, kernel buffers fill, and the TCP window closes on
+/// the sender. This extends the budget from the queue (#279) to the
+/// read-side accumulation the queue budget did not cover.
+///
+/// Abandoning this future (the `select!` branch losing the race) is safe:
+/// the header stays peeked in the connection's read buffer and a dropped
+/// permit returns its bytes to the budget, so the next call re-reads the
+/// same header and re-acquires. A peer that disconnects mid-body drops
+/// the permit the same way.
+async fn read_metered_frame(
+    conn: &mut Connection,
+    budget: &EventByteBudget,
+) -> Result<(u8, MeteredPayload), ConnectionError> {
+    let header = conn.read_frame_header().await?;
+    let permit = acquire_budget(header.payload_len, budget).await;
+    let frame = conn.read_frame_body().await?;
+    Ok((
+        frame.code,
+        MeteredPayload::from_parts(frame.payload, permit),
+    ))
+}
+
 /// Per-peer read/write loop. Owns the Connection.
 /// Reads frames → sends PeerEvent::Message to action loop.
 /// Receives outbound MessageFrame from action loop → writes to peer.
@@ -333,25 +376,17 @@ pub async fn peer_task(
 ) {
     loop {
         tokio::select! {
-            result = conn.read_message() => {
+            result = read_metered_frame(&mut conn, &event_byte_budget) => {
                 match result {
-                    Ok(frame) => {
+                    Ok((code, payload)) => {
                         // Count the exact on-wire frame size on a successful
-                        // read, before `payload` is moved into the event.
-                        // Post-handshake framed bytes only — the handshake
-                        // round-trip preceded this task owning the conn.
-                        bytes_in.fetch_add(wire_len(frame.payload.len()) as u64, Ordering::Relaxed);
-                        // M-5: byte-budget the payload BEFORE enqueueing. When
-                        // the budget is exhausted this awaits — the socket
-                        // stops being read, kernel buffers fill, and the TCP
-                        // window closes on the sender (transport backpressure).
-                        // The permit rides on the payload and is released on
-                        // drop, wherever the event is consumed.
-                        let payload =
-                            MeteredPayload::meter(frame.payload, &event_byte_budget).await;
+                        // read. Post-handshake framed bytes only — the
+                        // handshake round-trip preceded this task owning
+                        // the conn.
+                        bytes_in.fetch_add(wire_len(payload.len()) as u64, Ordering::Relaxed);
                         if event_tx.send(PeerEvent::Message {
                             peer: peer_id,
-                            code: frame.code,
+                            code,
                             payload,
                         }).await.is_err() {
                             return;
@@ -532,6 +567,17 @@ mod tests {
 mod budget_tests {
     use super::*;
 
+    // ----- helpers -----
+
+    /// The production acquisition sequence in one call: take the permit
+    /// for `inner.len()` bytes, then hang the payload off it.
+    async fn meter(inner: Vec<u8>, budget: &EventByteBudget) -> MeteredPayload {
+        let permit = acquire_budget(inner.len(), budget).await;
+        MeteredPayload::from_parts(inner, permit)
+    }
+
+    // ----- happy path -----
+
     /// M-5 accounting: a metered payload takes exactly its byte length out
     /// of the shared budget, and dropping the event releases it — wherever
     /// it is consumed or discarded, with no consumer-side discipline.
@@ -540,7 +586,7 @@ mod budget_tests {
         let budget = new_event_byte_budget();
         let before = budget.available_permits();
 
-        let payload = MeteredPayload::meter(vec![0xAB; 1_000], &budget).await;
+        let payload = meter(vec![0xAB; 1_000], &budget).await;
         assert_eq!(
             budget.available_permits(),
             before - 1_000,
@@ -555,18 +601,89 @@ mod budget_tests {
         );
     }
 
+    /// #280: with the budget exhausted the reader parks at frame-HEADER
+    /// time. The body is not accumulated behind the block — only the
+    /// bounded header-phase overshoot (<= one socket read) is buffered,
+    /// not the megabyte the frame declares — and the socket stops being
+    /// drained, which is the TCP backpressure the budget trades for
+    /// memory. Cancelling the parked read then re-reading resumes on the
+    /// same frame: the header was peeked, not consumed.
+    #[tokio::test]
+    async fn read_metered_frame_exhausted_budget_parks_before_reading_the_body() {
+        use ergo_p2p::connection::READ_BUF_SIZE;
+        use ergo_p2p::framing::{wire_len, MAINNET_MAGIC};
+
+        const PAYLOAD_LEN: usize = 1 << 20; // 1 MiB — 16x the read chunk
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let mut server_conn = Connection::new(server, MAINNET_MAGIC);
+
+        // The write blocks once the socket buffers fill — which is the
+        // point — so it has to run on its own task.
+        let writer = tokio::spawn(async move {
+            let mut client_conn = Connection::new(client, MAINNET_MAGIC);
+            client_conn.send(88, vec![0x7E; PAYLOAD_LEN]).await.unwrap();
+            client_conn
+        });
+
+        // Leave the budget with far less than the frame declares.
+        let budget: EventByteBudget = Arc::new(tokio::sync::Semaphore::new(PAYLOAD_LEN));
+        let hold = budget
+            .clone()
+            .acquire_many_owned((PAYLOAD_LEN - 16) as u32)
+            .await
+            .unwrap();
+
+        let parked = tokio::time::timeout(
+            Duration::from_millis(300),
+            read_metered_frame(&mut server_conn, &budget),
+        )
+        .await;
+        assert!(
+            parked.is_err(),
+            "reader must park on the budget, not deliver the frame"
+        );
+        assert!(
+            server_conn.buffered_bytes() <= READ_BUF_SIZE,
+            "parked reader buffered {} bytes of a {PAYLOAD_LEN}-byte body",
+            server_conn.buffered_bytes()
+        );
+
+        drop(hold);
+        let (code, payload) = read_metered_frame(&mut server_conn, &budget)
+            .await
+            .expect("frame after the budget frees");
+        assert_eq!(code, 88);
+        assert_eq!(payload.len(), PAYLOAD_LEN);
+        assert_eq!(
+            budget.available_permits(),
+            0,
+            "the delivered payload holds its own bytes out of the budget"
+        );
+        drop(payload);
+        assert_eq!(budget.available_permits(), PAYLOAD_LEN);
+
+        let _client = writer.await.unwrap();
+        assert_eq!(wire_len(PAYLOAD_LEN), PAYLOAD_LEN + 13);
+    }
+
+    // ----- error paths -----
+
     /// M-5 backpressure: when the budget is exhausted, a reader's
     /// acquisition blocks (it does not enqueue) until space frees — this
     /// is what turns memory pressure into TCP backpressure.
     #[tokio::test]
     async fn acquisition_blocks_while_budget_exhausted() {
         let budget: EventByteBudget = Arc::new(tokio::sync::Semaphore::new(2));
-        let _hold = MeteredPayload::meter(vec![0u8; 2], &budget).await;
+        let _hold = meter(vec![0u8; 2], &budget).await;
 
         let attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let a2 = attempted.clone();
         let task = tokio::spawn(async move {
-            let p = MeteredPayload::meter(vec![0u8; 1], &budget).await;
+            let p = meter(vec![0u8; 1], &budget).await;
             a2.store(true, Ordering::Relaxed);
             p
         });
