@@ -90,11 +90,20 @@ pub(crate) fn bimap2(
 }
 
 /// `unmap[T](env, op, i)(newNode)(tArg)` (SigmaTyper.scala:616-628).
+///
+/// `pos` is the offset the BINDER assigned to the unary node itself (the
+/// operator's own offset, e.g. `!`/`-`/`~`) — distinct from `i_pos`, the
+/// bound input's offset used for the error-site citations below (unchanged,
+/// per SigmaTyper.scala:621/625). The built node is re-pinned to `pos` so a
+/// successfully-typed unary node carries its own source position rather than
+/// its child's.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn unmap(
     env: &TypeEnv,
     ctx: &TyperCtx,
     op: &str,
     i: TypedExpr,
+    pos: crate::span::Pos,
     mk: impl FnOnce(TypedExpr) -> Result<TypedExpr, BuildError>,
     t_arg: SType,
 ) -> Result<TypedExpr, TyperError> {
@@ -110,7 +119,9 @@ pub(crate) fn unmap(
             format!("Invalid unary op {op}: expected argument type {t_arg:?}, actual: {it:?}"),
         ));
     }
-    mk(i1).map_err(|be| TyperError::invalid_unary(i_pos, format!("operation {op} error: {be:?}")))
+    mk(i1)
+        .map(|node| node.with_pos(pos))
+        .map_err(|be| TyperError::invalid_unary(i_pos, format!("operation {op} error: {be:?}")))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

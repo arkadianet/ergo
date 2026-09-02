@@ -156,6 +156,7 @@ pub(crate) fn assign_select(
     env: &TypeEnv,
     obj: TypedExpr,
     field: String,
+    sel_pos: Pos,
     ctx: &TyperCtx,
 ) -> Result<TypedExpr, TyperError> {
     let new_obj = assign_type(env, obj, ctx)?;
@@ -163,10 +164,11 @@ pub(crate) fn assign_select(
     // newObj.tpe must be SProduct (SigmaTyper.scala:90-91); container_exists is
     // true for every SProduct (incl. the empty SBoolean/SString/SAny/SUnit
     // containers), false for non-product types (SFunc/NoType/STypeVar/...).
-    // Citations: SigmaTyper.scala:121/93 name `sel`/`obj.sourceContext` —
-    // the Select node starts at its receiver, so the typed obj's offset IS
-    // the Select's offset.
-    let sel_pos = node_pos(&new_obj);
+    // Citations: SigmaTyper.scala:121 `sel.sourceContext` for the non-product
+    // error (the bound Select's OWN position — `sel_pos`); SigmaTyper.scala:93
+    // `obj.sourceContext` for MethodNotFound below (the receiver's position).
+    // These are two different citations in the reference, not the same one.
+    let obj_pos = node_pos(&new_obj);
     if !container_exists(&t_obj) {
         return Err(TyperError::typer(
             sel_pos,
@@ -176,7 +178,7 @@ pub(crate) fn assign_select(
     // getMethod(tNewObj, n) — None -> MethodNotFound (incl. empty containers, E4).
     let method = get_method(&t_obj, &field, ctx.tree_version).ok_or_else(|| {
         TyperError::method_not_found(
-            sel_pos,
+            obj_pos,
             format!("Cannot find method '{field}' in the object of Product type {t_obj:?}"),
         )
     })?;
@@ -306,11 +308,13 @@ pub(crate) fn assign_lambda(
 // §1.13 If, §1.14 AND/OR, §1.19 Exponentiate, §1.20 ByIndex
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn assign_if(
     env: &TypeEnv,
     c: TypedExpr,
     t: TypedExpr,
     e: TypedExpr,
+    if_pos: Pos,
     ctx: &TyperCtx,
 ) -> Result<TypedExpr, TyperError> {
     let c1 = assign_type(env, c, ctx)?;
@@ -339,7 +343,6 @@ pub(crate) fn assign_if(
             ),
         ));
     }
-    let if_pos = node_pos(&c1); // the If node starts at its condition
     Ok(TypedExpr::If {
         condition: Box::new(c1),
         true_branch: Box::new(t1),
@@ -387,6 +390,7 @@ pub(crate) fn assign_exponentiate(
     ctx: &TyperCtx,
     left: TypedExpr,
     right: TypedExpr,
+    exp_pos: Pos,
 ) -> Result<TypedExpr, TyperError> {
     let l1 = assign_type(env, left, ctx)?;
     let r1 = assign_type(env, right, ctx)?;
@@ -402,7 +406,6 @@ pub(crate) fn assign_exponentiate(
             ),
         ));
     }
-    let exp_pos = node_pos(&l1); // the op node starts at its left operand
     Ok(TypedExpr::Exponentiate {
         left: Box::new(l1),
         right: Box::new(r1),
@@ -411,12 +414,14 @@ pub(crate) fn assign_exponentiate(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn assign_byindex(
     env: &TypeEnv,
     ctx: &TyperCtx,
     input: TypedExpr,
     index: Box<TypedExpr>,
     default: Option<Box<TypedExpr>>,
+    bi_pos: Pos,
 ) -> Result<TypedExpr, TyperError> {
     let c1 = assign_type(env, input, ctx)?;
     // require isCollectionLike (SigmaTyper.scala:494)
@@ -451,7 +456,6 @@ pub(crate) fn assign_byindex(
             ));
         }
     }
-    let bi_pos = node_pos(&c1); // the ByIndex node starts at its collection
     Ok(TypedExpr::ByIndex {
         input: Box::new(c1),
         index,

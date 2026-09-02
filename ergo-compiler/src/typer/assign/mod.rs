@@ -309,8 +309,9 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
             obj,
             field,
             res_type: None,
+            pos,
             ..
-        } => assign_select(env, *obj, field, ctx),
+        } => assign_select(env, *obj, field, pos, ctx),
 
         // §1.6 Lambda — SigmaTyper.scala:124-135
         Lambda {
@@ -338,8 +339,9 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
             condition,
             true_branch,
             false_branch,
+            pos,
             ..
-        } => assign_if(env, *condition, *true_branch, *false_branch, ctx),
+        } => assign_if(env, *condition, *true_branch, *false_branch, pos, ctx),
 
         // §1.14 AND/OR — SigmaTyper.scala:451-461
         AND { input, pos, .. } => assign_and_or(env, *input, true, pos, ctx),
@@ -409,15 +411,20 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
             ..
         } => assign_bitop(env, ctx, *left, *right, opcode),
 
-        // §1.18 Xor / MultiplyGroup — SigmaTyper.scala:482-483
-        Xor { left, right, .. } => bimap(
+        // §1.18 Xor / MultiplyGroup — SigmaTyper.scala:482-483. The rebuilt
+        // node inherits the offset of the Xor/MultiplyGroup node being
+        // rewritten (bound `pos`, captured by the closure), not its left
+        // child's — `bimap`'s error citation still cites the left operand
+        // separately (SigmaTyper.scala citations, unchanged).
+        Xor {
+            left, right, pos, ..
+        } => bimap(
             env,
             ctx,
             "|",
             *left,
             *right,
-            |l, r| {
-                let pos = node_pos(&l);
+            move |l, r| {
                 Ok(TypedExpr::Xor {
                     left: Box::new(l),
                     right: Box::new(r),
@@ -428,14 +435,15 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
             coll_byte(),
             coll_byte(),
         ),
-        MultiplyGroup { left, right, .. } => bimap(
+        MultiplyGroup {
+            left, right, pos, ..
+        } => bimap(
             env,
             ctx,
             "*",
             *left,
             *right,
-            |l, r| {
-                let pos = node_pos(&l);
+            move |l, r| {
                 Ok(TypedExpr::MultiplyGroup {
                     left: Box::new(l),
                     right: Box::new(r),
@@ -448,21 +456,25 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
         ),
 
         // §1.19 Exponentiate — SigmaTyper.scala:485-490
-        Exponentiate { left, right, .. } => assign_exponentiate(env, ctx, *left, *right),
+        Exponentiate {
+            left, right, pos, ..
+        } => assign_exponentiate(env, ctx, *left, *right, pos),
 
         // §1.20 ByIndex — SigmaTyper.scala:492-500
         ByIndex {
             input,
             index,
             default,
+            pos,
             ..
-        } => assign_byindex(env, ctx, *input, index, default),
+        } => assign_byindex(env, ctx, *input, index, default, pos),
 
         // §1.21 SizeOf — SigmaTyper.scala:502-506
-        SizeOf { input, .. } => {
+        SizeOf { input, pos, .. } => {
             let c1 = assign_type(env, *input, ctx)?;
             if !is_collection_like(node_tpe(&c1)) {
-                // SigmaTyper.scala:505: `col.sourceContext`
+                // SigmaTyper.scala:505: `col.sourceContext` (the bound, pre-typed
+                // input's own offset — unchanged, this is an error-site citation).
                 return Err(TyperError::typer(
                     node_pos(&c1),
                     format!(
@@ -471,16 +483,17 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
                     ),
                 ));
             }
-            let sz_pos = node_pos(&c1);
+            // Rebuilt node inherits the offset of the SizeOf node being
+            // rewritten, not its child's (P5-A convention).
             Ok(SizeOf {
                 input: Box::new(c1),
                 tpe: SType::SInt,
-                pos: sz_pos,
+                pos,
             })
         }
 
         // §1.22 SigmaPropIsProven / SigmaPropBytes — SigmaTyper.scala:508-518
-        SigmaPropIsProven { input, .. } => {
+        SigmaPropIsProven { input, pos, .. } => {
             let p1 = assign_type(env, *input, ctx)?;
             if !matches!(node_tpe(&p1), SType::SSigmaProp) {
                 // SigmaTyper.scala:511: `p.sourceContext`
@@ -492,14 +505,13 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
                     ),
                 ));
             }
-            let sp_pos = node_pos(&p1);
             Ok(SigmaPropIsProven {
                 input: Box::new(p1),
                 tpe: SType::SBoolean,
-                pos: sp_pos,
+                pos,
             })
         }
-        SigmaPropBytes { input, .. } => {
+        SigmaPropBytes { input, pos, .. } => {
             let p1 = assign_type(env, *input, ctx)?;
             if !matches!(node_tpe(&p1), SType::SSigmaProp) {
                 // SigmaTyper.scala:517: `p.sourceContext`
@@ -511,20 +523,22 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
                     ),
                 ));
             }
-            let pb_pos = node_pos(&p1);
             Ok(SigmaPropBytes {
                 input: Box::new(p1),
                 tpe: coll_byte(),
-                pos: pb_pos,
+                pos,
             })
         }
 
-        // §1.23 unary via unmap — SigmaTyper.scala:520-522
-        LogicalNot { input, .. } => unmap(
+        // §1.23 unary via unmap — SigmaTyper.scala:520-522. `pos` is the
+        // operator's own offset assigned by the binder; the built node is
+        // re-pinned to it inside `unmap` rather than inheriting the input's.
+        LogicalNot { input, pos, .. } => unmap(
             env,
             ctx,
             "!",
             *input,
+            pos,
             |i| {
                 Ok(TypedExpr::LogicalNot {
                     input: Box::new(i),
@@ -534,11 +548,12 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
             },
             SType::SBoolean,
         ),
-        Negation { input, .. } => unmap(
+        Negation { input, pos, .. } => unmap(
             env,
             ctx,
             "-",
             *input,
+            pos,
             |i| {
                 let tpe = node_tpe(&i).clone();
                 Ok(TypedExpr::Negation {
@@ -549,11 +564,12 @@ fn dispatch(env: &TypeEnv, e: TypedExpr, ctx: &TyperCtx) -> Result<TypedExpr, Ty
             },
             tt(),
         ),
-        BitInversion { input, .. } => unmap(
+        BitInversion { input, pos, .. } => unmap(
             env,
             ctx,
             "~",
             *input,
+            pos,
             |i| {
                 let tpe = node_tpe(&i).clone();
                 Ok(TypedExpr::BitInversion {
@@ -1903,5 +1919,58 @@ mod tests {
             let typed = type_env_res(src, &TypeEnv::new()).expect("types");
             assert_ne!(node_tpe(&typed), &SType::NoType, "{src}");
         }
+    }
+
+    /// P1 regression: `!x`/`-x`/`~x` (§1.23 unary via `unmap`) and `obj.isEmpty`
+    /// (binder Rule 11's `LogicalNot` desugar) must carry the BINDER-assigned
+    /// source offset on the built node, not the placeholder `pos: 0` the old
+    /// arm literals hardcoded. A leading space in each source shifts the
+    /// binder-assigned offset off the reserved `0` (synthesized-node) value,
+    /// so a regression back to a hardcoded 0 fails visibly instead of
+    /// coincidentally matching a same-column real offset.
+    #[test]
+    fn unary_ops_and_is_empty_carry_binder_assigned_pos() {
+        let env = tenv(&[("x", SType::SBoolean), ("n", SType::SInt)]);
+
+        // `unmap` builds LogicalNot/Negation/BitInversion with `pos = arg.pos()`
+        // (parse/operators.rs mk_unary_op) — the leading space shifts the
+        // argument's offset to 2, off the reserved `0` (synthesized-node)
+        // value, so a regression back to the old hardcoded `pos: 0` literal
+        // fails visibly instead of coincidentally matching a same-column
+        // real offset.
+        let not_typed = type_env_res(" !x", &env).expect("!x types");
+        assert!(matches!(not_typed, TypedExpr::LogicalNot { .. }));
+        assert_eq!(
+            node_pos(&not_typed),
+            2,
+            "LogicalNot must keep the binder's pos"
+        );
+
+        let neg_typed = type_env_res(" -n", &env).expect("-n types");
+        assert!(matches!(neg_typed, TypedExpr::Negation { .. }));
+        assert_eq!(
+            node_pos(&neg_typed),
+            2,
+            "Negation must keep the binder's pos"
+        );
+
+        let binv_typed = type_env_res(" ~n", &env).expect("~n types");
+        assert!(matches!(binv_typed, TypedExpr::BitInversion { .. }));
+        assert_eq!(
+            node_pos(&binv_typed),
+            2,
+            "BitInversion must keep the binder's pos"
+        );
+
+        // Rule 11: `obj.isEmpty` -> `!obj.isDefined` at bind time
+        // (binder.rs, `pos: e.pos()`); the resulting LogicalNot must keep
+        // that bound offset through typing too.
+        let is_empty_typed = type_env_res(" getVar[Int](1).isEmpty", &env).expect("isEmpty types");
+        assert!(matches!(is_empty_typed, TypedExpr::LogicalNot { .. }));
+        assert_eq!(
+            node_pos(&is_empty_typed),
+            1,
+            "isEmpty's desugared LogicalNot must keep the binder's pos"
+        );
     }
 }

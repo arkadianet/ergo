@@ -924,11 +924,11 @@ pub fn node_pos(e: &TypedExpr) -> Pos {
     }
 }
 
-/// Return a copy of `self` with the source offset set to `new_pos`, used
-/// where a node is REBUILT from a differently-positioned source construct
-/// (e.g. the binder substituting an env value for an `Ident` — Scala pins
-/// the substituted node's `currentSrcCtx` to the replaced node's context).
 impl TypedExpr {
+    /// Return a copy of `self` with the source offset set to `new_pos`, used
+    /// where a node is REBUILT from a differently-positioned source construct
+    /// (e.g. the binder substituting an env value for an `Ident` — Scala pins
+    /// the substituted node's `currentSrcCtx` to the replaced node's context).
     pub fn with_pos(mut self, new_pos: Pos) -> TypedExpr {
         match &mut self {
             TypedExpr::Height { pos, .. } => *pos = new_pos,
@@ -1844,8 +1844,18 @@ impl PartialEq for TypedExpr {
                     ..
                 },
             ) => obj == oobj && name == oname && args == oargs && tpe == otpe,
-            // Different variants are never equal.
-            _ => false,
+            // Different variants are never equal. Guard against a future variant
+            // that forgets to add its own match arm above: comparing a value to
+            // itself would then silently fall through here and read as unequal
+            // to itself. debug_assert catches that in debug/test builds.
+            (a, b) => {
+                debug_assert_ne!(
+                    std::mem::discriminant(a),
+                    std::mem::discriminant(b),
+                    "PartialEq arm missing for variant"
+                );
+                false
+            }
         }
     }
 }

@@ -332,9 +332,17 @@ fn seed_reject_records_position_parity() {
         }
         checked += 1;
     }
-    assert!(
-        checked >= 20,
-        "swept only {checked} positioned reject records — seed may have shrunk"
+    let deviation_notes: Vec<String> = POSITION_DEVIATION_SOURCES
+        .iter()
+        .map(|&(s, reason)| format!("{s:?} ({reason})"))
+        .collect();
+    assert_eq!(
+        checked,
+        21,
+        "swept {checked} positioned reject records, expected exactly 21 — \
+         seed may have shrunk/grown, or a POSITION_DEVIATION_SOURCES entry \
+         was added/removed. Currently excluded: [{}]",
+        deviation_notes.join(", ")
     );
     assert!(
         mismatches.is_empty(),
