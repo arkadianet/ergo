@@ -100,6 +100,7 @@ fn make_state_with_backend(
         peer_manager,
         registry: PeerRegistry::new(),
         event_tx,
+        event_byte_budget: crate::peer_loop::new_event_byte_budget(),
         magic: [0u8; 4],
         our_handshake: Handshake {
             time: 0,

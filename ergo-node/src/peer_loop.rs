@@ -45,11 +45,6 @@ pub enum PeerEvent {
         peer_addr: SocketAddr,
         stream: TcpStream,
     },
-    Message {
-        peer: SocketAddr,
-        code: u8,
-        payload: Vec<u8>,
-    },
     Disconnected {
         peer: SocketAddr,
     },
@@ -76,6 +71,69 @@ pub enum PeerEvent {
         ad_proofs_bytes: Option<Vec<u8>>,
         reply: oneshot::Sender<Result<String, SubmitError>>,
     },
+    /// Inbound message from a peer. The payload is byte-budgeted through
+    /// [`EVENT_BYTE_BUDGET`] (audit M-5, issue #243): the permit rides on
+    /// the payload ([`MeteredPayload`]) and is released on drop, so the
+    /// in-flight bytes through this channel can never exceed the budget —
+    /// a reader task blocks on acquisition instead of enqueueing, which
+    /// turns into TCP backpressure against the sender.
+    Message {
+        peer: SocketAddr,
+        code: u8,
+        payload: MeteredPayload,
+    },
+}
+
+/// Byte-budget for message payloads in flight through the event channel.
+///
+/// Audit M-5 (issue #243): the channel is bounded at 4096 EVENTS (sized for
+/// ~200 B headers), but `Message` payloads reach `MAX_PAYLOAD_SIZE` = 8 MB.
+/// Worst case — 256 inbound peers streaming maximal frames into a busy
+/// action loop — was 4096 × 8 MB ≈ 32 GiB of queued payloads on top of
+/// per-connection read buffers. Bounding by BYTES closes the composition:
+/// 256 MiB admits ~32 maximal frames in flight (ample for honest IBD, where
+/// the action loop drains header events in batches), and a reader that
+/// cannot acquire blocks BEFORE enqueueing — the socket stops being read,
+/// kernel buffers fill, and the TCP window closes on the sender. Memory
+/// pressure becomes transport backpressure instead of an OOM vector.
+pub type EventByteBudget = Arc<tokio::sync::Semaphore>;
+
+pub const EVENT_BYTE_BUDGET_MAX: usize = 256 * 1024 * 1024;
+
+pub fn new_event_byte_budget() -> EventByteBudget {
+    Arc::new(tokio::sync::Semaphore::new(EVENT_BYTE_BUDGET_MAX))
+}
+
+/// A message payload holding its byte-budget permit. The permit is
+/// released when the struct is dropped — wherever the event is consumed
+/// or discarded — so the accounting cannot leak, and no consumer-side
+/// release discipline is required.
+pub struct MeteredPayload {
+    inner: Vec<u8>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl MeteredPayload {
+    /// Take a budget permit for `inner.len()` bytes (awaiting while the
+    /// budget is exhausted) and wrap the payload. The permit is owned
+    /// (cloned `Arc` call) so it moves with the payload and releases on
+    /// drop, wherever the event ends up.
+    async fn meter(inner: Vec<u8>, budget: &EventByteBudget) -> Self {
+        let _permit = budget
+            .clone()
+            .acquire_many_owned(inner.len().max(1) as u32)
+            .await
+            .expect("event byte budget semaphore is never closed");
+        Self { inner, _permit }
+    }
+}
+
+impl std::ops::Deref for MeteredPayload {
+    type Target = Vec<u8>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
 }
 
 /// Attempt to connect and handshake with a peer.
@@ -268,6 +326,7 @@ pub async fn peer_task(
     peer_id: SocketAddr,
     mut conn: Connection,
     event_tx: mpsc::Sender<PeerEvent>,
+    event_byte_budget: EventByteBudget,
     mut outbound_rx: mpsc::Receiver<MessageFrame>,
     bytes_in: Arc<AtomicU64>,
     bytes_out: Arc<AtomicU64>,
@@ -282,10 +341,18 @@ pub async fn peer_task(
                         // Post-handshake framed bytes only — the handshake
                         // round-trip preceded this task owning the conn.
                         bytes_in.fetch_add(wire_len(frame.payload.len()) as u64, Ordering::Relaxed);
+                        // M-5: byte-budget the payload BEFORE enqueueing. When
+                        // the budget is exhausted this awaits — the socket
+                        // stops being read, kernel buffers fill, and the TCP
+                        // window closes on the sender (transport backpressure).
+                        // The permit rides on the payload and is released on
+                        // drop, wherever the event is consumed.
+                        let payload =
+                            MeteredPayload::meter(frame.payload, &event_byte_budget).await;
                         if event_tx.send(PeerEvent::Message {
                             peer: peer_id,
                             code: frame.code,
-                            payload: frame.payload,
+                            payload,
                         }).await.is_err() {
                             return;
                         }
@@ -351,6 +418,7 @@ mod tests {
             peer_id,
             server_conn,
             event_tx,
+            new_event_byte_budget(),
             outbound_rx,
             Arc::clone(&bytes_in),
             Arc::clone(&bytes_out),
@@ -457,5 +525,60 @@ mod tests {
             elapsed >= deadline,
             "returned before deadline: {elapsed:?} < {deadline:?}",
         );
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    /// M-5 accounting: a metered payload takes exactly its byte length out
+    /// of the shared budget, and dropping the event releases it — wherever
+    /// it is consumed or discarded, with no consumer-side discipline.
+    #[tokio::test]
+    async fn metered_payload_takes_and_releases_budget() {
+        let budget = new_event_byte_budget();
+        let before = budget.available_permits();
+
+        let payload = MeteredPayload::meter(vec![0xAB; 1_000], &budget).await;
+        assert_eq!(
+            budget.available_permits(),
+            before - 1_000,
+            "acquisition must charge the payload's byte length"
+        );
+
+        drop(payload);
+        assert_eq!(
+            budget.available_permits(),
+            before,
+            "drop must release the charged bytes"
+        );
+    }
+
+    /// M-5 backpressure: when the budget is exhausted, a reader's
+    /// acquisition blocks (it does not enqueue) until space frees — this
+    /// is what turns memory pressure into TCP backpressure.
+    #[tokio::test]
+    async fn acquisition_blocks_while_budget_exhausted() {
+        let budget: EventByteBudget = Arc::new(tokio::sync::Semaphore::new(2));
+        let _hold = MeteredPayload::meter(vec![0u8; 2], &budget).await;
+
+        let attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let a2 = attempted.clone();
+        let task = tokio::spawn(async move {
+            let p = MeteredPayload::meter(vec![0u8; 1], &budget).await;
+            a2.store(true, Ordering::Relaxed);
+            p
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !attempted.load(Ordering::Relaxed),
+            "acquisition must block while the budget is exhausted"
+        );
+
+        drop(_hold);
+        let _p = task.await.unwrap();
+        assert!(attempted.load(Ordering::Relaxed));
     }
 }

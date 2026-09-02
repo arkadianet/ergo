@@ -82,6 +82,10 @@ pub(crate) struct NodeState {
     pub(super) peer_manager: PeerManager,
     pub(super) registry: PeerRegistry,
     pub(super) event_tx: mpsc::Sender<PeerEvent>,
+    /// Byte-budget for message payloads in flight through the event
+    /// channel (audit M-5, issue #243) — shared with every peer read
+    /// task; see `peer_loop::EVENT_BYTE_BUDGET_MAX`.
+    pub(super) event_byte_budget: crate::peer_loop::EventByteBudget,
     pub(super) magic: [u8; 4],
     pub(super) our_handshake: Handshake,
     // ---- mempool ----
