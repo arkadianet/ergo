@@ -51,6 +51,55 @@ fn statically_known(fields: &[crate::config::ExtensionFieldSource]) -> Vec<([u8;
         })
         .collect()
 }
+
+/// Upper bound on bytes read from a `value_file`, in hex-text form. The
+/// decoded value is capped at
+/// [`ergo_validation::block::EXTENSION_FIELD_VALUE_MAX_SIZE`] bytes by rule
+/// 404; hex-encoding doubles that, and a small allowance covers an optional
+/// `0x`/`0X` prefix plus surrounding whitespace/newline. Kept well short of
+/// "reasonable config file" sizes so a large or corrupted file is rejected
+/// from a bounded read rather than loaded in full first.
+const MAX_VALUE_FILE_BYTES: usize = 2 * ergo_validation::block::EXTENSION_FIELD_VALUE_MAX_SIZE + 16;
+
+/// Why a `value_file` read did not produce a value to decode.
+enum ReadValueFileError {
+    /// The file does not exist yet — the steady state before a writer has
+    /// published anything.
+    NotFound,
+    /// More than [`MAX_VALUE_FILE_BYTES`] were read without reaching EOF.
+    TooLarge,
+    /// Any other I/O failure (permissions, not-a-file, …).
+    Io(std::io::Error),
+}
+
+/// Read `path` as UTF-8 text, bounded at [`MAX_VALUE_FILE_BYTES`].
+///
+/// Reads at most `MAX_VALUE_FILE_BYTES + 1` bytes via `Read::take` — an
+/// oversized or corrupted file is rejected from that bounded read, never
+/// loaded in full first (a `File` open + capped read, not
+/// `std::fs::read_to_string`, so a huge `value_file` cannot exhaust node
+/// memory on every candidate build).
+fn read_value_file_bounded(path: &std::path::Path) -> Result<String, ReadValueFileError> {
+    use std::io::Read as _;
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ReadValueFileError::NotFound)
+        }
+        Err(e) => return Err(ReadValueFileError::Io(e)),
+    };
+    let mut buf = Vec::with_capacity(MAX_VALUE_FILE_BYTES.min(4096));
+    file.take(MAX_VALUE_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(ReadValueFileError::Io)?;
+    if buf.len() > MAX_VALUE_FILE_BYTES {
+        return Err(ReadValueFileError::TooLarge);
+    }
+    String::from_utf8(buf).map_err(|e| {
+        ReadValueFileError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    })
+}
+
 use crate::reemission::ReemissionSettings;
 use crate::solution::{verify_solution, SolutionOutcome};
 use crate::work_message::{MinerSolution, WorkMessage};
@@ -617,9 +666,17 @@ impl MiningHandle {
         for field in self.custom_extension_fields.iter() {
             let value = match &field.value {
                 ExtensionValueSource::Static(v) => v.clone(),
-                ExtensionValueSource::File(path) => match std::fs::read_to_string(path) {
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(e) => {
+                ExtensionValueSource::File(path) => match read_value_file_bounded(path) {
+                    Err(ReadValueFileError::NotFound) => continue,
+                    Err(ReadValueFileError::TooLarge) => {
+                        return Err(MiningError::InvalidConfig(format!(
+                            "[mining] extension field {:02x?} value_file {} exceeds the \
+                             {MAX_VALUE_FILE_BYTES}-byte read cap",
+                            field.key,
+                            path.display()
+                        )))
+                    }
+                    Err(ReadValueFileError::Io(e)) => {
                         return Err(MiningError::InvalidConfig(format!(
                             "[mining] extension field {:02x?} value_file {}: {e}",
                             field.key,
@@ -758,6 +815,30 @@ mod tests {
             .resolve_extension_fields()
             .expect_err("must reject");
         assert!(format!("{err:?}").contains("404"), "{err:?}");
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// A file far past the bounded-read cap must be rejected while reading —
+    /// the point of the fix is that `resolve_extension_fields` never
+    /// allocates the whole file first. Distinct from
+    /// `an_oversized_file_value_is_rejected_at_resolve` above, which covers a
+    /// file just over rule 404's decoded-byte cap (well within the bounded
+    /// read) to prove the read-time cap and the rule-404 cap don't collide.
+    #[test]
+    fn a_file_far_over_the_read_cap_fails_at_read_time_not_after_full_load() {
+        let p = tmp("way-too-large");
+        // Several times MAX_VALUE_FILE_BYTES of valid hex text — if this were
+        // loaded in full before any size check, it would still decode (it's
+        // well-formed hex), so only a bounded read catches it here.
+        let huge_hex = "aa".repeat(MAX_VALUE_FILE_BYTES * 4);
+        std::fs::write(&p, &huge_hex).unwrap();
+        let err = handle_with_file(&p)
+            .resolve_extension_fields()
+            .expect_err("must reject before decoding");
+        assert!(
+            format!("{err:?}").contains("read cap"),
+            "expected the bounded-read error, got {err:?}"
+        );
         std::fs::remove_file(&p).ok();
     }
 
