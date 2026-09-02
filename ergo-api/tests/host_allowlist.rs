@@ -93,6 +93,37 @@ fn probe_request(host: Option<&str>) -> Request<Body> {
     builder.body(Body::empty()).unwrap()
 }
 
+/// HTTP/2-style request: host identity lives in the URI's authority
+/// component (`:authority` pseudo-header, which axum/hyper surface via
+/// `Request::uri().authority()`) and there is deliberately no `Host`
+/// header at all — that's exactly the shape hyper's h2 server produces
+/// (P1-1).
+fn probe_request_authority_only(authority: &str) -> Request<Body> {
+    let uri = format!("http://{authority}/__host-guard-probe");
+    Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// A `Host` header carrying a byte sequence that is valid as raw
+/// header-value bytes (`HeaderValue` permits any byte outside
+/// `0x00..=0x08`, `0x0A..=0x1F`, and `0x7F`) but is not valid UTF-8 —
+/// obs-text, `0x80..=0xFF` (P2-1).
+fn probe_request_raw_host_bytes(bytes: &[u8]) -> Request<Body> {
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri("/__host-guard-probe")
+        .body(Body::empty())
+        .unwrap();
+    req.headers_mut().insert(
+        header::HOST,
+        axum::http::HeaderValue::from_bytes(bytes).unwrap(),
+    );
+    req
+}
+
 async fn status_for(app: axum::Router, host: Option<&str>) -> StatusCode {
     app.oneshot(probe_request(host)).await.unwrap().status()
 }
@@ -146,6 +177,17 @@ async fn ipv6_loopback_bind_bracketed_host_passes() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn http2_style_good_authority_no_host_header_passes() {
+    // P1-1: no Host header, but a good :authority — must pass, not be
+    // treated as "missing host identity, allow unconditionally".
+    let resp = app("127.0.0.1:9099", &[])
+        .oneshot(probe_request_authority_only("127.0.0.1"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
 // ----- error paths -----
 
 #[tokio::test]
@@ -197,4 +239,74 @@ async fn allowed_hosts_port_pin_accepts_right_port() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn http2_style_evil_authority_no_host_header_rejected() {
+    // P1-1: an h2c request never carries a `Host` header — before the
+    // fix, the "missing Host" branch let this straight through. It
+    // must now be checked against the same allowlist via `:authority`.
+    let resp = app("127.0.0.1:9099", &[])
+        .oneshot(probe_request_authority_only("evil.example.com"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+}
+
+#[tokio::test]
+async fn non_utf8_host_header_rejected() {
+    // P2-1: obs-text bytes fail `HeaderValue::to_str()`, which used to
+    // map to `None` and fail OPEN (treated as "no Host header" →
+    // allowed). Must now fail closed.
+    let resp = app("127.0.0.1:9099", &[])
+        .oneshot(probe_request_raw_host_bytes(&[0xff, 0xfe, b'x']))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+}
+
+#[tokio::test]
+async fn subdomain_bypass_127_0_0_1_evil_com_rejected() {
+    let status = status_for(app("127.0.0.1:9099", &[]), Some("127.0.0.1.evil.com")).await;
+    assert_eq!(status, StatusCode::MISDIRECTED_REQUEST);
+}
+
+#[tokio::test]
+async fn subdomain_bypass_localhost_evil_com_rejected() {
+    let status = status_for(app("127.0.0.1:9099", &[]), Some("localhost.evil.com")).await;
+    assert_eq!(status, StatusCode::MISDIRECTED_REQUEST);
+}
+
+#[tokio::test]
+async fn trailing_dot_fqdn_passes() {
+    // A trailing dot denotes the DNS root and is stripped before
+    // matching (documented, user-typable) — `localhost.` behaves like
+    // `localhost`.
+    let status = status_for(app("127.0.0.1:9099", &[]), Some("localhost.")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn double_trailing_dot_rejected() {
+    // Only ONE trailing dot is stripped; a second is left dangling.
+    let status = status_for(app("127.0.0.1:9099", &[]), Some("localhost..")).await;
+    assert_eq!(status, StatusCode::MISDIRECTED_REQUEST);
+}
+
+#[tokio::test]
+async fn malformed_bracket_host_rejected() {
+    let resp = app("127.0.0.1:9099", &[])
+        .oneshot(probe_request_raw_host_bytes(b"[::1"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+}
+
+#[tokio::test]
+async fn empty_host_header_rejected() {
+    let resp = app("127.0.0.1:9099", &[])
+        .oneshot(probe_request_raw_host_bytes(b""))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
 }

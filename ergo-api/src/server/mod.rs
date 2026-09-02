@@ -300,20 +300,39 @@ pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts(
     // work. Only wired when the bind address is known; an unresolved
     // listener address (should not happen for a live TCP listener) skips
     // the guard rather than panicking at boot.
-    let app = match bind_addr {
-        Some(addr) => {
-            let allowlist = Arc::new(crate::host_guard::HostAllowlist::new(addr, allowed_hosts));
-            app.layer(axum::middleware::from_fn_with_state(
-                allowlist,
-                crate::host_guard::require_allowed_host,
-            ))
-        }
+    //
+    // Built once here (rather than inside the layer closure) so its
+    // resolved `enforce` flag and allowlist contents can be logged
+    // right next to "api listening" (P1-2) — an operator staring at an
+    // unexpected 421 after a config change (or a reverse-proxy upgrade
+    // that starts forwarding its own hostname) can read the effective
+    // posture straight from the boot log instead of re-deriving it
+    // from `[api] allowed_hosts` by hand.
+    let host_allowlist =
+        bind_addr.map(|addr| Arc::new(crate::host_guard::HostAllowlist::new(addr, allowed_hosts)));
+    let app = match &host_allowlist {
+        Some(allowlist) => app.layer(axum::middleware::from_fn_with_state(
+            allowlist.clone(),
+            crate::host_guard::require_allowed_host,
+        )),
         None => app,
     };
     let actual = bind_addr
         .map(|a| a.to_string())
         .unwrap_or_else(|| "<unknown>".to_string());
-    info!(addr = %actual, "api listening");
+    match &host_allowlist {
+        Some(allowlist) => {
+            info!(
+                addr = %actual,
+                host_guard_enforced = allowlist.is_enforced(),
+                host_guard_allowlist = %allowlist.describe().join(", "),
+                "api listening",
+            );
+        }
+        None => {
+            info!(addr = %actual, "api listening");
+        }
+    }
     tokio::spawn(async move {
         // `into_make_service_with_connect_info` installs `ConnectInfo<SocketAddr>`
         // so the v1 governor / auth tier can read the real peer IP for per-IP
