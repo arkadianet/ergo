@@ -63,6 +63,17 @@ impl ExtendedSecretKey {
         // #1627; the divergence is in CHILD derivation.
         let _ = use_pre_1627;
         // Standard BIP32: HMAC-SHA512 with key "Bitcoin seed".
+        //
+        // Accepted residual: `result` (the raw 64-byte HMAC output) and
+        // the internal `Hmac<Sha512>` state are not wiped after use —
+        // `hmac`/`sha2` don't zeroize their internals, and the derived
+        // `secret`/`chain_code` below are the only long-lived copies.
+        // `chain_code` is zeroized on drop via `ExtendedSecretKey`'s
+        // `#[derive(Zeroize, ZeroizeOnDrop)]`; `secret` is
+        // `#[zeroize(skip)]` on that same derive because it instead
+        // relies on `k256::SecretKey`'s own internal zeroize-on-drop.
+        // Same story in `derive_child` below. Not worth hand-rolling a
+        // zeroizing HMAC for a stack-transient digest buffer.
         let mut mac =
             HmacSha512::new_from_slice(b"Bitcoin seed").expect("HMAC accepts any key length");
         mac.update(seed);
