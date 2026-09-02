@@ -5,9 +5,12 @@
 //! frame encoding/decoding, buffering, and checksum verification.
 
 use std::io;
+use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::framing::{self, FrameError, FrameHeader, MessageFrame, HEADER_LENGTH};
 
@@ -19,11 +22,29 @@ pub const MAX_PAYLOAD_SIZE: usize = 8_194_304;
 /// [`Connection::read_frame_header`].
 pub const READ_BUF_SIZE: usize = 65_536;
 
+/// How long a frame body may make NO progress before the peer is judged
+/// stalled.
+///
+/// This is a no-progress deadline, not a total one: it restarts on every
+/// byte received, so an honest peer trickling an 8 MB block over minutes
+/// stays connected while a peer that declares a body and then goes
+/// silent is dropped. Without it, a declared-but-unsent body would hold
+/// its reader — and whatever budget it has been admitted — until the
+/// 600 s inactivity sweep.
+pub const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// A framed P2P connection over TCP.
 pub struct Connection {
     stream: TcpStream,
     magic: [u8; 4],
     read_buf: Vec<u8>,
+    /// Landing area for one socket read, reused for the life of the
+    /// connection. Owned rather than a local so it is neither zeroed per
+    /// read nor held inside the read future across an await; a cancelled
+    /// read leaves it untouched because nothing is committed to
+    /// `read_buf` until the read returns.
+    scratch: Box<[u8]>,
+    body_idle_timeout: Duration,
 }
 
 /// Failures produced by [`Connection::read_message`] /
@@ -42,27 +63,49 @@ pub enum ConnectionError {
     /// Frame's declared payload length exceeded `MAX_PAYLOAD_SIZE`.
     #[error("payload too large: {0} bytes (max {MAX_PAYLOAD_SIZE})")]
     PayloadTooLarge(usize),
+    /// Peer declared a frame body and then stopped sending: no byte of
+    /// it arrived within [`BODY_IDLE_TIMEOUT`].
+    #[error("frame body stalled: {got} of {want} bytes, no progress for {}s", BODY_IDLE_TIMEOUT.as_secs())]
+    BodyStalled {
+        /// Wire bytes of this frame received so far.
+        got: usize,
+        /// Wire bytes the frame's header declared.
+        want: usize,
+    },
+    /// The read-side byte budget was closed — the node is shutting down.
+    #[error("event byte budget closed")]
+    BudgetClosed,
 }
 
 impl Connection {
     /// Wrap a TcpStream for P2P communication.
     pub fn new(stream: TcpStream, magic: [u8; 4]) -> Self {
-        Self {
-            stream,
-            magic,
-            read_buf: Vec::with_capacity(READ_BUF_SIZE),
-        }
+        Self::with_buf(stream, magic, Vec::with_capacity(READ_BUF_SIZE))
     }
 
     /// Wrap a TcpStream with pre-existing buffered data.
     /// Used after handshake when the initial read may contain both the
     /// handshake response AND subsequent framed messages.
     pub fn new_with_buffer(stream: TcpStream, magic: [u8; 4], initial_data: Vec<u8>) -> Self {
+        Self::with_buf(stream, magic, initial_data)
+    }
+
+    fn with_buf(stream: TcpStream, magic: [u8; 4], read_buf: Vec<u8>) -> Self {
         Self {
             stream,
             magic,
-            read_buf: initial_data,
+            read_buf,
+            scratch: vec![0u8; READ_BUF_SIZE].into_boxed_slice(),
+            body_idle_timeout: BODY_IDLE_TIMEOUT,
         }
+    }
+
+    /// Override the no-progress deadline for frame bodies. Production
+    /// runs the [`BODY_IDLE_TIMEOUT`] default; tests that need to observe
+    /// the deadline firing shorten it.
+    pub fn with_body_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.body_idle_timeout = timeout;
+        self
     }
 
     /// Read one complete message frame from the connection.
@@ -71,9 +114,10 @@ impl Connection {
     /// code and payload. Handles partial reads and buffering internally.
     ///
     /// Equivalent to [`read_frame_header`](Self::read_frame_header)
-    /// followed by [`read_frame_body`](Self::read_frame_body); a caller
-    /// that must act on the declared size *before* the body is accepted
-    /// (byte-budget acquisition, issue #280) calls the two phases itself.
+    /// followed by [`read_frame_body`](Self::read_frame_body). A caller
+    /// that meters read-side bytes (issue #280) uses
+    /// [`read_frame_body_metered`](Self::read_frame_body_metered) for the
+    /// second phase.
     pub async fn read_message(&mut self) -> Result<MessageFrame, ConnectionError> {
         self.read_frame_header().await?;
         self.read_frame_body().await
@@ -83,34 +127,31 @@ impl Connection {
     /// framing header is buffered, then parse and size-check it.
     ///
     /// The header is *peeked*, not consumed: the bytes stay in the read
-    /// buffer for [`read_frame_body`](Self::read_frame_body), and calling
-    /// this again re-parses the same header. That makes the two phases
-    /// safe to abandon between calls (a `select!` branch that loses the
-    /// race, a permit acquisition that is cancelled) without losing
-    /// framing position.
+    /// buffer for the body phase, and calling this again re-parses the
+    /// same header. That makes the two phases safe to abandon between
+    /// calls (a `select!` branch that loses the race, an admission that
+    /// is cancelled) without losing framing position.
     ///
-    /// Returning here is the point at which a caller can admit or refuse
-    /// `payload_len` bytes before the body is allocated and read. A
-    /// socket read that lands in this phase is capped at
-    /// [`READ_BUF_SIZE`], so at most 64 KiB of a frame's body can be
-    /// buffered ahead of that decision — a bounded overshoot that keeps
-    /// small pipelined frames at one syscall each, against the megabytes
-    /// the body phase would otherwise accept unbudgeted.
+    /// Returning here is the point at which a caller learns `payload_len`
+    /// before committing to receive it. A socket read that lands in this
+    /// phase runs only while fewer than [`HEADER_LENGTH`] bytes are
+    /// buffered and is capped at [`READ_BUF_SIZE`], so at most
+    /// `READ_BUF_SIZE + HEADER_LENGTH - 1` bytes can be buffered ahead of
+    /// that point — a bounded overshoot that keeps small pipelined frames
+    /// at one syscall each, against the megabytes the body phase would
+    /// otherwise accept in one go.
     pub async fn read_frame_header(&mut self) -> Result<FrameHeader, ConnectionError> {
         loop {
             match framing::parse_frame_header(&self.magic, &self.read_buf) {
                 Ok(Some(header)) => {
                     // Reject an oversized declaration before the body is
-                    // budgeted, allocated, or read.
+                    // admitted, allocated, or read.
                     if header.payload_len > MAX_PAYLOAD_SIZE {
                         self.read_buf.clear();
                         return Err(ConnectionError::PayloadTooLarge(header.payload_len));
                     }
                     return Ok(header);
                 }
-                // Fewer than 9 bytes buffered: read whatever the socket
-                // has. An unbounded chunk here is fine — the header phase
-                // never reads past what the kernel already holds.
                 Ok(None) => self.fill(READ_BUF_SIZE).await?,
                 Err(e) => {
                     // Protocol error — clear buffer and return error
@@ -121,15 +162,60 @@ impl Connection {
         }
     }
 
-    /// Body phase: read until the frame whose header is already buffered
-    /// is complete, then decode and consume it.
-    ///
-    /// Reads are limited to the bytes this frame still needs and the
-    /// buffer is reserved exactly once for it, so accepting a maximal
-    /// frame costs its own size and no more; the buffer is released back
-    /// to [`READ_BUF_SIZE`] afterwards rather than retaining an 8 MB
-    /// allocation for the life of the connection.
+    /// Body phase with no admission control — the plain read path used by
+    /// `read_message` and by callers that do not meter read-side bytes.
     pub async fn read_frame_body(&mut self) -> Result<MessageFrame, ConnectionError> {
+        let (frame, _) = self.read_body(None).await?;
+        Ok(frame)
+    }
+
+    /// Body phase that charges a shared byte budget for the bytes it
+    /// accepts, returning the frame together with the permits taken
+    /// (issue #280).
+    ///
+    /// Permits for each socket read are acquired BEFORE that read
+    /// happens, so the budget is only ever held by bytes that exist or
+    /// are about to. When it is exhausted the reader parks with the body
+    /// still in the sender's socket: reads stop, kernel buffers fill, and
+    /// the TCP window closes on the sender.
+    ///
+    /// Charging per read rather than for the length the header declared
+    /// is what keeps this safe under attack. A peer that declares 8 MB
+    /// and then goes silent holds ONE read chunk of budget, not 8 MB, so
+    /// 13 wire bytes cannot reserve a thirty-second of the whole node's
+    /// budget; [`BODY_IDLE_TIMEOUT`] then takes even that chunk back.
+    /// Waiting on the budget is backpressure, not peer inactivity, and
+    /// does not count against that deadline.
+    ///
+    /// The returned permit covers the wire bytes read HERE — delivered
+    /// bytes plus at most one outstanding read chunk — which is not the
+    /// payload's length: bytes the header phase had already buffered were
+    /// never charged, and the final chunk is charged in full. A caller
+    /// that needs the permit to match the payload settles the difference
+    /// itself.
+    ///
+    /// The buffer grows the same way the budget is charged: never past
+    /// what the frame needs, and never more than about twice what has
+    /// been admitted, so a bare header cannot make the node reserve 8 MB.
+    /// On completion the buffer is released back to [`READ_BUF_SIZE`]
+    /// instead of keeping a maximal frame's allocation for the life of
+    /// the connection.
+    pub async fn read_frame_body_metered(
+        &mut self,
+        budget: &Arc<Semaphore>,
+    ) -> Result<(MessageFrame, Option<OwnedSemaphorePermit>), ConnectionError> {
+        self.read_body(Some(budget)).await
+    }
+
+    async fn read_body(
+        &mut self,
+        budget: Option<&Arc<Semaphore>>,
+    ) -> Result<(MessageFrame, Option<OwnedSemaphorePermit>), ConnectionError> {
+        let mut held: Option<OwnedSemaphorePermit> = None;
+        // Bytes the header phase had already buffered. They were never
+        // charged (see the overshoot bound on `read_frame_header`), so
+        // they are excluded from what this frame owes.
+        let baseline = self.read_buf.len();
         loop {
             match framing::deserialize_frame(&self.magic, &self.read_buf) {
                 Ok(Some((frame, consumed))) => {
@@ -137,11 +223,11 @@ impl Connection {
                     if self.read_buf.len() <= READ_BUF_SIZE {
                         self.read_buf.shrink_to(READ_BUF_SIZE);
                     }
-                    return Ok(frame);
+                    return Ok((frame, held));
                 }
                 Ok(None) => {
-                    // How much this frame still needs. Before the header
-                    // is buffered we only know we want the header itself.
+                    // Wire bytes this frame needs in total. Before the
+                    // header is buffered we only know we want the header.
                     let want = match framing::parse_frame_header(&self.magic, &self.read_buf) {
                         Ok(Some(header)) => {
                             if header.payload_len > MAX_PAYLOAD_SIZE {
@@ -156,15 +242,52 @@ impl Connection {
                             return Err(ConnectionError::Frame(e));
                         }
                     };
-                    // The frame is known incomplete here, so `want` exceeds
-                    // what is buffered; the clamp only keeps a zero-length
-                    // read — which would read as EOF — out of `fill`.
-                    let missing = want.saturating_sub(self.read_buf.len()).max(1);
-                    // Reserve for this frame once, exactly: the first pass
-                    // sizes the buffer to the whole frame and the rest find
-                    // the capacity already there.
-                    self.read_buf.reserve_exact(missing);
-                    self.fill(missing).await?;
+                    let got = self.read_buf.len();
+                    // The frame is known incomplete here, so `want`
+                    // exceeds what is buffered; the clamp only keeps a
+                    // zero-length read — which reads as EOF — out of
+                    // `fill`.
+                    let chunk = want.saturating_sub(got).clamp(1, READ_BUF_SIZE);
+
+                    // Pay for the bytes before accepting them. What this
+                    // frame owes is everything it has taken in so far
+                    // plus the read about to happen; topping that up —
+                    // rather than charging a fresh chunk per iteration —
+                    // is what keeps a peer dribbling bytes from
+                    // accumulating permits far beyond what it has sent.
+                    // The hold is therefore always "delivered bytes plus
+                    // at most one READ_BUF_SIZE chunk".
+                    if let Some(budget) = budget {
+                        let owed = got - baseline + chunk;
+                        let paid = held.as_ref().map_or(0, |p| p.num_permits());
+                        if owed > paid {
+                            // The shortfall never exceeds one chunk, so
+                            // the cast cannot truncate and the request is
+                            // always small enough to be granted.
+                            let permit = Arc::clone(budget)
+                                .acquire_many_owned((owed - paid) as u32)
+                                .await
+                                .map_err(|_| ConnectionError::BudgetClosed)?;
+                            match &mut held {
+                                Some(existing) => existing.merge(permit),
+                                None => held = Some(permit),
+                            }
+                        }
+                    }
+
+                    // Grow toward the frame, never past it and never more
+                    // than about twice what has been admitted: 13 wire
+                    // bytes must not be able to reserve 8 MB.
+                    let target = want.min(got.saturating_add(chunk).saturating_mul(2));
+                    if target > self.read_buf.capacity() {
+                        self.read_buf.reserve_exact(target - got);
+                    }
+
+                    // Per-read, so the deadline restarts on every byte a
+                    // slow-but-honest peer delivers.
+                    tokio::time::timeout(self.body_idle_timeout, self.fill(chunk))
+                        .await
+                        .map_err(|_| ConnectionError::BodyStalled { got, want })??;
                 }
                 Err(e) => {
                     // Protocol error — clear buffer and return error
@@ -178,13 +301,12 @@ impl Connection {
     /// Append one socket read of at most `limit` bytes to the read
     /// buffer. A read of 0 bytes is a clean peer close.
     async fn fill(&mut self, limit: usize) -> Result<(), ConnectionError> {
-        let mut tmp = [0u8; READ_BUF_SIZE];
-        let cap = limit.min(READ_BUF_SIZE);
-        let n = self.stream.read(&mut tmp[..cap]).await?;
+        let cap = limit.clamp(1, READ_BUF_SIZE);
+        let n = self.stream.read(&mut self.scratch[..cap]).await?;
         if n == 0 {
             return Err(ConnectionError::Closed);
         }
-        self.read_buf.extend_from_slice(&tmp[..n]);
+        self.read_buf.extend_from_slice(&self.scratch[..n]);
         Ok(())
     }
 
@@ -221,6 +343,7 @@ impl Connection {
 mod tests {
     use super::*;
     use crate::framing::{serialize_frame, MAINNET_MAGIC};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::net::TcpListener;
 
     // ----- helpers -----
@@ -236,6 +359,14 @@ mod tests {
             Connection::new(client_stream, MAINNET_MAGIC),
             Connection::new(server_stream, MAINNET_MAGIC),
         )
+    }
+
+    /// Like [`connected_pair`] with `idle` as the server side's body
+    /// no-progress deadline, so a test can watch it fire in milliseconds
+    /// instead of the production 30 s.
+    async fn connected_pair_with_idle(idle: Duration) -> (Connection, Connection) {
+        let (client, server) = connected_pair().await;
+        (client, server.with_body_idle_timeout(idle))
     }
 
     /// The 9-byte framing header a frame with `payload_len` payload bytes
@@ -353,8 +484,11 @@ mod tests {
         let frame = server.read_frame_body().await.unwrap();
         assert_eq!(frame.payload.len(), 1 << 20);
         assert!(frame.payload.iter().all(|b| *b == 0xC3));
+        // The point is that the megabyte was RELEASED, not the exact
+        // figure `shrink_to` lands on: assert a bound that holds however
+        // the allocator honours the request.
         assert!(
-            server.read_buf.capacity() <= READ_BUF_SIZE,
+            server.read_buf.capacity() <= 2 * READ_BUF_SIZE,
             "read buffer kept {} bytes of capacity after a 1 MiB frame",
             server.read_buf.capacity()
         );
@@ -483,5 +617,132 @@ mod tests {
             ),
             "expected ChecksumMismatch, got {result:?}"
         );
+    }
+
+    /// A body that arrives in small pieces over a span far longer than
+    /// the deadline still completes: the deadline measures NO PROGRESS,
+    /// not total time. An 8 MB block from a 100 KB/s peer takes ~80 s and
+    /// must not be mistaken for a stall.
+    #[tokio::test]
+    async fn read_frame_body_slow_trickle_beats_the_idle_deadline() {
+        let (mut client, mut server) = connected_pair_with_idle(Duration::from_millis(150)).await;
+
+        let payload = vec![0x3C; 512];
+        let bytes = serialize_frame(&MAINNET_MAGIC, &MessageFrame { code: 12, payload });
+        let total = bytes.len();
+        let drip = tokio::spawn(async move {
+            // Eight pieces, 60 ms apart: ~480 ms overall, over three
+            // deadlines, but never 150 ms without a byte.
+            for piece in bytes.chunks(total.div_ceil(8)) {
+                client.stream.write_all(piece).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(60)).await;
+            }
+            client
+        });
+
+        let frame = server.read_message().await.expect("trickled frame");
+        assert_eq!(frame.code, 12);
+        assert_eq!(frame.payload, vec![0x3C; 512]);
+        let _client = drip.await.unwrap();
+    }
+
+    /// #280: a peer that declares a body and then goes silent — without
+    /// closing, so no EOF ever arrives — is cut loose by the no-progress
+    /// deadline instead of holding a reader (and its admitted budget)
+    /// until the 600 s inactivity sweep.
+    #[tokio::test]
+    async fn read_frame_body_silent_body_trips_the_idle_deadline() {
+        let (mut client, mut server) = connected_pair_with_idle(Duration::from_millis(150)).await;
+
+        client
+            .stream
+            .write_all(&header_bytes(55, 4_096))
+            .await
+            .unwrap();
+        let header = server.read_frame_header().await.unwrap();
+        assert_eq!(header.payload_len, 4_096);
+
+        let result = server.read_frame_body().await;
+        match result {
+            Err(ConnectionError::BodyStalled { got, want }) => {
+                assert_eq!(got, HEADER_LENGTH);
+                assert_eq!(want, framing::wire_len(4_096));
+            }
+            other => panic!("expected BodyStalled, got {other:?}"),
+        }
+        // The peer never closed — the deadline is what ended this.
+        drop(client);
+    }
+
+    /// #280 P1, at the transport layer: the budget is charged for bytes
+    /// as they are read, so a header declaring a maximal body buys ONE
+    /// read chunk. Without this, 13 wire bytes would reserve 8 MB of a
+    /// shared budget and a handful of peers could park every reader.
+    #[tokio::test]
+    async fn read_frame_body_metered_bare_header_holds_one_chunk() {
+        let (mut client, mut server) = connected_pair_with_idle(Duration::from_secs(30)).await;
+        client
+            .stream
+            .write_all(&header_bytes(55, MAX_PAYLOAD_SIZE as i32))
+            .await
+            .unwrap();
+        server.read_frame_header().await.unwrap();
+
+        let budget = Arc::new(Semaphore::new(MAX_PAYLOAD_SIZE));
+        let observed = Arc::new(AtomicBool::new(false));
+        let (probe_budget, probe_seen) = (budget.clone(), observed.clone());
+        let probe = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            probe_seen.store(true, Ordering::Relaxed);
+            probe_budget.available_permits()
+        });
+
+        // The read cannot finish; run it only until the probe has looked.
+        let _ = tokio::time::timeout(
+            Duration::from_millis(400),
+            server.read_frame_body_metered(&budget),
+        )
+        .await;
+
+        let available = probe.await.unwrap();
+        assert!(observed.load(Ordering::Relaxed));
+        assert_eq!(
+            available,
+            MAX_PAYLOAD_SIZE - READ_BUF_SIZE,
+            "a bare header must hold one read chunk, not its declaration"
+        );
+        // Cancelling the read released it.
+        assert_eq!(budget.available_permits(), MAX_PAYLOAD_SIZE);
+        drop(client);
+    }
+
+    /// The metered path returns the same frames as the plain one, with a
+    /// permit covering what it read.
+    #[tokio::test]
+    async fn read_frame_body_metered_roundtrips_and_charges() {
+        let (mut client, mut server) = connected_pair_with_idle(Duration::from_secs(30)).await;
+        let payload = vec![0x11; 200_000];
+        let writer = tokio::spawn(async move {
+            client.send(9, vec![0x11; 200_000]).await.unwrap();
+            client
+        });
+
+        let budget = Arc::new(Semaphore::new(MAX_PAYLOAD_SIZE));
+        server.read_frame_header().await.unwrap();
+        let (frame, permit) = server.read_frame_body_metered(&budget).await.unwrap();
+        assert_eq!(frame.code, 9);
+        assert_eq!(frame.payload, payload);
+        let permit = permit.expect("a 200 KB body crosses several read chunks");
+        // Everything except the header phase's bounded overshoot was
+        // charged; the caller settles that remainder against the payload.
+        assert!(
+            permit.num_permits() + READ_BUF_SIZE + HEADER_LENGTH >= payload.len(),
+            "permits {} leave more than the header-phase overshoot of {} payload bytes uncharged",
+            permit.num_permits(),
+            payload.len()
+        );
+        drop(permit);
+        assert_eq!(budget.available_permits(), MAX_PAYLOAD_SIZE);
+        let _client = writer.await.unwrap();
     }
 }

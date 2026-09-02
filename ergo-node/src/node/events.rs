@@ -24,7 +24,7 @@ use crate::anchor_map::parse_rest_url;
 use crate::peer_loop::{self, PeerEvent};
 
 use super::{
-    cleanup_disconnected_peer, flush_actions, handle_message, send_to_peer,
+    cleanup_disconnected_peer, flush_actions, handle_message, penalize_peer, send_to_peer,
     try_send_anchor_sync_info, NodeState, PeerRuntime,
 };
 
@@ -497,7 +497,15 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
             flush_actions(state, actions);
         }
 
-        PeerEvent::Disconnected { peer } => {
+        PeerEvent::Disconnected { peer, penalty } => {
+            // Score first when the peer earned it (a frame body it
+            // declared and then withheld). `penalize_peer` is idempotent
+            // with the cleanup below: a ban removes the peer here and the
+            // normal path then finds nothing left to do — the same
+            // sequence a ban from the action loop already produces.
+            if let Some(penalty) = penalty {
+                penalize_peer(state, peer, penalty, now);
+            }
             // The single disconnect record is emitted by
             // `peer_manager.disconnect()` below (state/age/score/caller,
             // at DEBUG) — no separate INFO line here, which would double-log.
