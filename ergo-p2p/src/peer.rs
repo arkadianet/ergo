@@ -256,7 +256,33 @@ pub struct PeerInfo {
     pub state: ConnectionState,
     pub score: PeerScore,
     pub connected_at: Instant,
+    /// Wall-clock of the last *valid frame* of any kind from this peer.
+    /// Reported as `lastMessage` / `lastSeenMessageTime` on the API and
+    /// used for address-book recency ranking — the Scala analogue is
+    /// `PeerInfo.lastStoredActivityTime`, refreshed on every handled
+    /// message (`NetworkController.scala:129-142`). NOT the idle-timeout
+    /// clock; see [`PeerInfo::last_progress`].
     pub last_seen: Instant,
+    /// Wall-clock of the last frame from this peer that carried *protocol
+    /// progress* (see [`PeerInfo::note_progress`]). This — not
+    /// [`PeerInfo::last_seen`] — is the clock [`INACTIVE_TIMEOUT`] runs
+    /// against, so a peer that trickles cheap frames (bare `GetPeers`,
+    /// empty `Peers`, unknown opcodes) cannot hold an inbound slot open
+    /// indefinitely.
+    ///
+    /// [proposed] divergence from Scala, which drops a connection purely
+    /// on `lastStoredActivityTime` age (`NetworkController.scala:307-325`,
+    /// `inactiveConnectionDeadline = 10m` in `application.conf:543`) and
+    /// so refreshes on any handled message. The divergence is safe for
+    /// honest peers because a Scala node sends `SyncInfo` to every
+    /// connected peer at least once a minute: `ErgoSyncTracker`'s
+    /// `outdatedPeers` (`ErgoSyncTracker.scala:144-148`) selects any peer
+    /// we have not synced with for more than `SyncThreshold = 1.minute`
+    /// (`ErgoSyncTracker.scala:21`) and `sendSync` is scheduled every
+    /// `syncInterval = 5s` (`ErgoNodeViewSynchronizer.scala:278-279`,
+    /// `application.conf:546`). `SyncInfo` counts as progress, leaving a
+    /// 10x margin inside the 600s window.
+    pub last_progress: Instant,
     /// Consecutive modifier-delivery timeouts since this peer last delivered
     /// an accepted modifier. Drives download-peer deprioritization once it
     /// reaches [`DELIVERY_DEGRADE_STREAK`]; reset to 0 on any accepted
@@ -288,6 +314,7 @@ impl PeerInfo {
             score: PeerScore::new(now),
             connected_at: now,
             last_seen: now,
+            last_progress: now,
             delivery_failure_streak: 0,
             peer_spec: None,
             sync_version: SyncVersion::V2, // default until handshake
@@ -309,6 +336,7 @@ impl PeerInfo {
             score: PeerScore::new(now),
             connected_at: now,
             last_seen: now,
+            last_progress: now,
             delivery_failure_streak: 0,
             peer_spec: None,
             sync_version: SyncVersion::V2,
@@ -354,7 +382,12 @@ impl PeerInfo {
         self.sync_version = SyncVersion::for_peer(&spec.version);
         self.peer_spec = Some(spec);
         self.state = ConnectionState::Active;
+        // A completed handshake is progress in its own right, and it is
+        // the point at which the peer enters the `INACTIVE_TIMEOUT`
+        // window. Scala likewise stamps `lastStoredActivityTime` on
+        // handshake (`NetworkController.scala:429`).
         self.last_seen = now;
+        self.last_progress = now;
         Ok(())
     }
 
@@ -384,9 +417,25 @@ impl PeerInfo {
         }
     }
 
-    /// Mark peer as seen (received valid message).
+    /// Mark peer as seen: a valid frame of any kind arrived. Refreshes
+    /// [`PeerInfo::last_seen`] only — it does NOT reset the idle-timeout
+    /// clock. Use [`PeerInfo::note_progress`] for frames that carry
+    /// protocol progress.
     pub fn touch(&mut self, now: Instant) {
         self.last_seen = now;
+    }
+
+    /// Mark peer as making protocol progress: a frame arrived that passed
+    /// the per-peer throughput throttle, deserialized, and belongs to a
+    /// useful class (handshake completion, `SyncInfo`, `Inv`,
+    /// `RequestModifier`, `Modifier`, a non-empty `Peers`, or a
+    /// state-sync/NiPoPoW payload). Resets the [`INACTIVE_TIMEOUT`] clock.
+    ///
+    /// Progress implies seen, so this also refreshes
+    /// [`PeerInfo::last_seen`]; callers need not call both.
+    pub fn note_progress(&mut self, now: Instant) {
+        self.last_seen = now;
+        self.last_progress = now;
     }
 
     /// Record the outcome of a requested-modifier delivery. A success resets
@@ -414,8 +463,11 @@ impl PeerInfo {
             ConnectionState::Handshaking => {
                 now.duration_since(self.connected_at) > HANDSHAKE_TIMEOUT
             }
+            // Idle timeout runs against `last_progress`, not `last_seen`:
+            // frames that carry no protocol progress must not hold the
+            // slot open. See [`PeerInfo::last_progress`].
             ConnectionState::Active | ConnectionState::Degraded => {
-                now.duration_since(self.last_seen) > INACTIVE_TIMEOUT
+                now.duration_since(self.last_progress) > INACTIVE_TIMEOUT
             }
             ConnectionState::Disconnected => false,
         }
@@ -732,6 +784,74 @@ mod tests {
         let peer = PeerInfo::new_outbound(test_addr(9030), now);
         assert!(!peer.is_timed_out(now));
         assert!(peer.is_timed_out(now + CONNECT_TIMEOUT + Duration::from_secs(1)));
+    }
+
+    /// A peer that keeps sending frames but never makes progress is
+    /// evicted once `INACTIVE_TIMEOUT` elapses since its last progress —
+    /// `touch` alone must not hold the slot open. This is the whole point
+    /// of splitting `last_progress` off `last_seen`.
+    #[test]
+    fn active_peer_touch_only_times_out_after_inactive_window() {
+        let now = Instant::now();
+        let mut peer = PeerInfo::new_outbound(test_addr(9030), now);
+        peer.mark_tcp_connected();
+        peer.complete_handshake(test_spec(Version::NIPOPOW), now)
+            .unwrap();
+
+        // Trickle non-progress frames for well over the window.
+        let mut t = now;
+        while t < now + INACTIVE_TIMEOUT + Duration::from_secs(60) {
+            t += Duration::from_secs(30);
+            peer.touch(t);
+        }
+
+        assert_eq!(peer.last_seen, t, "last_seen tracks any valid frame");
+        assert_eq!(peer.last_progress, now, "touch must not count as progress");
+        assert!(
+            peer.is_timed_out(t),
+            "keepalive-only peer must not hold its slot past the window",
+        );
+    }
+
+    /// The honest case: a peer that makes progress inside the window is
+    /// kept, and each progress frame restarts the clock.
+    #[test]
+    fn active_peer_progress_inside_window_is_kept() {
+        let now = Instant::now();
+        let mut peer = PeerInfo::new_outbound(test_addr(9030), now);
+        peer.mark_tcp_connected();
+        peer.complete_handshake(test_spec(Version::NIPOPOW), now)
+            .unwrap();
+
+        // A Scala peer sends SyncInfo at least once a minute; sample that
+        // at a much lazier 5-minute cadence and still stay connected.
+        let mut t = now;
+        for _ in 0..10 {
+            t += Duration::from_secs(300);
+            peer.note_progress(t);
+            assert!(!peer.is_timed_out(t), "progress must reset the clock");
+        }
+
+        // Only after the window elapses with no further progress.
+        assert!(!peer.is_timed_out(t + INACTIVE_TIMEOUT));
+        assert!(peer.is_timed_out(t + INACTIVE_TIMEOUT + Duration::from_secs(1)));
+    }
+
+    /// Handshake completion is itself progress: it starts the window, so a
+    /// freshly handshaked peer is never instantly evictable even if the
+    /// TCP connection was established long before.
+    #[test]
+    fn handshake_completion_counts_as_progress() {
+        let now = Instant::now();
+        let mut peer = PeerInfo::new_outbound(test_addr(9030), now);
+        peer.mark_tcp_connected();
+        let handshake_at = now + Duration::from_secs(20);
+        peer.complete_handshake(test_spec(Version::NIPOPOW), handshake_at)
+            .unwrap();
+
+        assert_eq!(peer.last_progress, handshake_at);
+        assert!(!peer.is_timed_out(handshake_at + INACTIVE_TIMEOUT));
+        assert!(peer.is_timed_out(handshake_at + INACTIVE_TIMEOUT + Duration::from_secs(1)));
     }
 
     #[test]

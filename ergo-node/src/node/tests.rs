@@ -518,6 +518,142 @@ fn request_unknown_type_id_returns_no_action() {
     assert!(actions.is_empty(), "expected no actions, got {:?}", actions);
 }
 
+// ----- idle-peer progress gating (#247 item 9) -----
+
+/// Register a handshaked, registry-backed peer so `evict_timed_out` and
+/// `send_to_peer` both see it. The returned receiver must be held for the
+/// duration of the test, otherwise the outbound channel reads as closed.
+#[must_use]
+fn connect_test_peer(
+    state: &mut NodeState,
+    peer: SocketAddr,
+    now: Instant,
+) -> mpsc::Receiver<ergo_p2p::framing::MessageFrame> {
+    state.peer_manager.register_outbound(peer, now).unwrap();
+    state.peer_manager.mark_tcp_connected(&peer);
+    state
+        .peer_manager
+        .complete_handshake(&peer, state.our_handshake.peer_spec.clone(), None, now)
+        .unwrap();
+    let (tx, rx) = mpsc::channel(64);
+    state.registry.peers.insert(
+        peer,
+        PeerRuntime {
+            sync_version: SyncVersion::V2,
+            outbound_tx: tx,
+        },
+    );
+    rx
+}
+
+/// Mirror the `PeerEvent::Message` path in `events.rs`: every valid frame
+/// touches, and `handle_message` decides whether it also counts as
+/// progress.
+fn deliver_frame(state: &mut NodeState, peer: SocketAddr, code: u8, payload: &[u8], now: Instant) {
+    state.peer_manager.touch(&peer, now);
+    let _ = handle_message(state, peer, code, payload, now);
+}
+
+/// A peer that trickles nothing but bare `GetPeers` keeps its `last_seen`
+/// fresh yet makes no progress, so it must lose its slot once the
+/// inactivity window elapses. Pre-fix this peer was immortal.
+#[test]
+fn keepalive_only_peer_is_evicted_after_inactive_window() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let peer = test_peer();
+    let now = Instant::now();
+    let _rx = connect_test_peer(&mut state, peer, now);
+
+    let mut t = now;
+    let deadline = now + ergo_p2p::peer::INACTIVE_TIMEOUT + Duration::from_secs(60);
+    while t < deadline {
+        t += Duration::from_secs(60);
+        deliver_frame(&mut state, peer, message::CODE_GET_PEERS, &[], t);
+    }
+
+    let evicted = state.peer_manager.evict_timed_out(t);
+    assert_eq!(evicted, vec![peer], "keepalive-only peer must be evicted");
+    assert_eq!(state.peer_manager.peer_count(), 0);
+}
+
+/// An empty `Peers` reply is as cheap as a keepalive and must not count,
+/// while a `Peers` reply that actually carries entries does.
+#[test]
+fn empty_peers_reply_is_not_progress_but_populated_one_is() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let peer = test_peer();
+    let now = Instant::now();
+    let _rx = connect_test_peer(&mut state, peer, now);
+
+    let empty = message::serialize_peers(&[]);
+    let mut t = now;
+    let deadline = now + ergo_p2p::peer::INACTIVE_TIMEOUT + Duration::from_secs(60);
+    while t < deadline {
+        t += Duration::from_secs(60);
+        deliver_frame(&mut state, peer, message::CODE_PEERS, &empty, t);
+    }
+    assert_eq!(
+        state.peer_manager.evict_timed_out(t),
+        vec![peer],
+        "empty Peers must not refresh the idle timer",
+    );
+
+    // Same peer, same cadence, but the reply carries an entry.
+    let mut state = make_state(&tmp.path().join("state2.redb"));
+    let _rx = connect_test_peer(&mut state, peer, now);
+    let specs = vec![state.our_handshake.peer_spec.clone()];
+    let populated = message::serialize_peers(&specs);
+    let mut t = now;
+    while t < deadline {
+        t += Duration::from_secs(60);
+        deliver_frame(&mut state, peer, message::CODE_PEERS, &populated, t);
+    }
+    assert!(
+        state.peer_manager.evict_timed_out(t).is_empty(),
+        "a Peers reply carrying entries is progress",
+    );
+}
+
+/// The honest-peer case: a single progress frame inside the window keeps
+/// the peer, and the clock restarts from that frame.
+#[test]
+fn progress_frame_inside_window_keeps_peer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let peer = test_peer();
+    let now = Instant::now();
+    let _rx = connect_test_peer(&mut state, peer, now);
+
+    // A `RequestModifier` for headers we don't have: no actions, but it is
+    // a peer doing protocol work.
+    let payload = req_modifier_payload(ModifierTypeId::Header.as_byte(), &[mid(1)]);
+    let progress_at = now + Duration::from_secs(500);
+    deliver_frame(
+        &mut state,
+        peer,
+        message::CODE_REQUEST_MODIFIER,
+        &payload,
+        progress_at,
+    );
+
+    assert!(
+        state
+            .peer_manager
+            .evict_timed_out(progress_at + ergo_p2p::peer::INACTIVE_TIMEOUT)
+            .is_empty(),
+        "peer must be kept for a full window after its last progress",
+    );
+    assert_eq!(
+        state.peer_manager.evict_timed_out(
+            progress_at + ergo_p2p::peer::INACTIVE_TIMEOUT + Duration::from_secs(1)
+        ),
+        vec![peer],
+        "and evicted once that window elapses with no further progress",
+    );
+}
+
 // ----- mode 2 part 2f-2: inbound SnapshotsInfo + disconnect cleanup -----
 
 fn snapshots_info_payload(manifests: &[(i32, [u8; 32])]) -> Vec<u8> {

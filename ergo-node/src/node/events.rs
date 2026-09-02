@@ -106,10 +106,13 @@ fn process_header_modifier_batch(
     for (peer, mods) in messages {
         // Same admission gates as handle_event Message path:
         // unknown peers get dropped; touching updates last-seen.
+        // These are `Modifier` payloads that already deserialized, so
+        // they are progress and reset the idle-timeout clock — the
+        // batched twin of the `CODE_MODIFIER` arm in `dispatch.rs`.
         if state.peer_manager.get(&peer).is_none() {
             continue;
         }
-        state.peer_manager.touch(&peer, now);
+        state.peer_manager.note_progress(&peer, now);
 
         let type_id = mods.type_id;
         state.sections_received_total += mods.modifiers.len() as u64;
@@ -492,6 +495,10 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
                 cleanup_disconnected_peer(state, &peer);
                 return;
             }
+            // Any valid frame refreshes the reported last-message time;
+            // only frames that carry protocol progress reset the
+            // idle-timeout clock, and `handle_message` decides that (see
+            // its "Progress classification" module notes).
             state.peer_manager.touch(&peer, now);
             let actions = handle_message(state, peer, code, &payload, now);
             flush_actions(state, actions);

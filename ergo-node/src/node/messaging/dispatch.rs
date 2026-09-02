@@ -3,6 +3,21 @@
 //! logic (`CODE_INV`, `CODE_MODIFIER`, `CODE_PEERS`) are factored into
 //! named helpers below, all following the same `&mut NodeState -> Vec<Action>`
 //! convention as `handle_message` itself.
+//!
+//! # Progress classification
+//!
+//! Dispatch is also where a frame is classified as carrying protocol
+//! *progress*, via [`note_progress`]. Progress — not "any valid frame" —
+//! is what resets a peer's `INACTIVE_TIMEOUT` clock
+//! (`ergo_p2p::peer::PeerInfo::last_progress`), so that a peer trickling
+//! cheap frames cannot hold an inbound slot open forever within
+//! `max_inbound`. A frame counts as progress when it passed the throughput
+//! throttle above, deserialized, and belongs to a useful class. The
+//! deny-list is deliberately small — bare requests that carry no payload
+//! and cost the sender nothing (`GetPeers`, `GetSnapshotsInfo`), an empty
+//! `Peers` reply, unknown opcodes, and anything that fails to
+//! deserialize — because the honest-peer cost of a false eviction is much
+//! higher than the cost of a slightly cheaper trickle.
 
 use std::time::Instant;
 
@@ -21,6 +36,14 @@ use super::super::{
     admit_transaction, hedge_request_modifiers, send_to_peer, try_send_anchor_sync_info, NodeState,
 };
 use super::{manifest, popow, utxo_chunk};
+
+/// Record that this frame carried protocol progress, resetting the peer's
+/// idle-timeout clock. See the module-level "Progress classification"
+/// notes for what qualifies; call it only after the frame has cleared the
+/// throttle and deserialized.
+fn note_progress(state: &mut NodeState, peer: &PeerId, now: Instant) {
+    state.peer_manager.note_progress(peer, now);
+}
 
 #[tracing::instrument(
     name = "msg",
@@ -65,6 +88,11 @@ pub(in crate::node) fn handle_message(
                     debug!(peer = %peer, "spammy SyncInfo; dropping");
                     return vec![];
                 }
+                // A `SyncInfo` that clears the per-peer lock time is the
+                // protocol's liveness signal: a Scala peer sends one to
+                // every connected peer at least once a minute
+                // (`ErgoSyncTracker.scala:144-148`, `SyncThreshold`).
+                note_progress(state, &peer, now);
                 let sv = state
                     .registry
                     .peers
@@ -101,7 +129,13 @@ pub(in crate::node) fn handle_message(
             }
         },
         message::CODE_INV => match message::deserialize_inv(payload) {
-            Ok(inv) => handle_inv(state, peer, inv, now),
+            Ok(inv) => {
+                // `deserialize_inv` rejects an empty id list
+                // (`MessageError::EmptyInv`), so a parsed Inv always
+                // advertises something.
+                note_progress(state, &peer, now);
+                handle_inv(state, peer, inv, now)
+            }
             Err(e) => {
                 warn!(peer = %peer, error = %e, "bad Inv");
                 vec![Action::Penalize {
@@ -112,6 +146,7 @@ pub(in crate::node) fn handle_message(
         },
         message::CODE_REQUEST_MODIFIER => match message::deserialize_inv(payload) {
             Ok(inv) => {
+                note_progress(state, &peer, now);
                 let type_id = inv.type_id;
                 let hits: Vec<([u8; 32], Vec<u8>)> = match ModifierTypeId::from_byte(type_id) {
                     Some(ModifierTypeId::Transaction) => inv
@@ -222,7 +257,12 @@ pub(in crate::node) fn handle_message(
             }
         },
         message::CODE_MODIFIER => match message::deserialize_modifiers(payload) {
-            Ok(mods) => handle_modifier_batch(state, peer, mods, now),
+            Ok(mods) => {
+                // `deserialize_modifiers` rejects an empty batch
+                // (`MessageError::EmptyModifiers`).
+                note_progress(state, &peer, now);
+                handle_modifier_batch(state, peer, mods, now)
+            }
             Err(e) => {
                 warn!(peer = %peer, error = %e, "bad Modifier");
                 vec![Action::Penalize {
@@ -232,6 +272,11 @@ pub(in crate::node) fn handle_message(
             }
         },
         message::CODE_GET_PEERS => {
+            // Deliberately NOT progress: a bare `GetPeers` carries no
+            // payload, so it is the cheapest frame a peer can trickle to
+            // hold its slot. Serving it still costs us nothing beyond the
+            // reply, and an honest peer that asks for peers is also
+            // syncing with us.
             // Seed for rotation: wall-clock nanos give a different
             // starting offset on each `Peers` reply so the same prefix
             // of our peer list isn't sent to every requester.
@@ -252,7 +297,14 @@ pub(in crate::node) fn handle_message(
             Vec::new()
         }
         message::CODE_PEERS => match message::deserialize_peers(payload, 100) {
-            Ok(peers) => handle_peers_response(state, peer, peers),
+            Ok(peers) => {
+                // Only a `Peers` reply that actually carries entries is
+                // progress; an empty list is as cheap as a keepalive.
+                if !peers.is_empty() {
+                    note_progress(state, &peer, now);
+                }
+                handle_peers_response(state, peer, peers)
+            }
             Err(e) => {
                 warn!(peer = %peer, error = %e, "bad Peers");
                 Vec::new()
@@ -260,6 +312,7 @@ pub(in crate::node) fn handle_message(
         },
         message::CODE_SNAPSHOTS_INFO => match message::deserialize_snapshots_info(payload) {
             Ok(info) => {
+                note_progress(state, &peer, now);
                 // Feed the discovery reducer. The reducer tracks per-peer
                 // votes and applies the Scala quorum rule. Eligibility
                 // filtering — restricting which peers we *ask* for
@@ -284,6 +337,8 @@ pub(in crate::node) fn handle_message(
         message::CODE_GET_SNAPSHOTS_INFO => {
             match message::deserialize_get_snapshots_info(payload) {
                 Ok(()) => {
+                    // Deliberately NOT progress, for the same reason as
+                    // `GetPeers`: the payload is empty by definition.
                     let info = ergo_p2p::types::SnapshotsInfo {
                         available_manifests: state.snapshot_state.available_manifests(),
                     };
@@ -308,6 +363,9 @@ pub(in crate::node) fn handle_message(
         }
         message::CODE_GET_MANIFEST => match message::deserialize_get_manifest(payload) {
             Ok(manifest_id) => {
+                // A bootstrapping peer pulling our UTXO snapshot is doing
+                // real work, even while it sends us nothing else.
+                note_progress(state, &peer, now);
                 // Lookup is by exact id. Mismatched id is a silent
                 // drop, matching Scala `peer.handlerRef !` no-op when
                 // `SnapshotsDb.get(manifestId)` returns None.
@@ -333,6 +391,7 @@ pub(in crate::node) fn handle_message(
         },
         message::CODE_MANIFEST => match message::deserialize_manifest(payload) {
             Ok(manifest_bytes) => {
+                note_progress(state, &peer, now);
                 manifest::handle_inbound_manifest(state, peer, manifest_bytes);
                 Vec::new()
             }
@@ -346,6 +405,7 @@ pub(in crate::node) fn handle_message(
         },
         message::CODE_UTXO_CHUNK => match message::deserialize_utxo_chunk(payload) {
             Ok(chunk_bytes) => {
+                note_progress(state, &peer, now);
                 utxo_chunk::handle_inbound_utxo_chunk(state, peer, chunk_bytes);
                 Vec::new()
             }
@@ -359,6 +419,7 @@ pub(in crate::node) fn handle_message(
         },
         message::CODE_GET_UTXO_CHUNK => match message::deserialize_get_utxo_chunk(payload) {
             Ok(subtree_id) => {
+                note_progress(state, &peer, now);
                 if let Some(bytes) = state.snapshot_state.chunk_bytes(&subtree_id) {
                     match message::serialize_utxo_chunk(bytes) {
                         Ok(reply) => {
@@ -380,6 +441,11 @@ pub(in crate::node) fn handle_message(
             }
         },
         message::CODE_NIPOPOW_PROOF => {
+            // An empty frame is not a proof; `handle_inbound_popow_proof`
+            // will reject it, so it must not refresh the clock either.
+            if !payload.is_empty() {
+                note_progress(state, &peer, now);
+            }
             popow::handle_inbound_popow_proof(state, peer, payload.to_vec())
         }
         message::CODE_GET_NIPOPOW_PROOF => {
@@ -407,6 +473,7 @@ pub(in crate::node) fn handle_message(
                     }];
                 }
             };
+            note_progress(state, &peer, now);
             if !data.p2p_servable() {
                 warn!(
                     peer = %peer,
@@ -469,7 +536,9 @@ pub(in crate::node) fn handle_message(
             }
         }
         _ => {
-            // Ignore unknown message codes (forward compatibility)
+            // Ignore unknown message codes (forward compatibility).
+            // Deliberately NOT progress: an unknown opcode is free to
+            // generate and tells us nothing about the peer's usefulness.
             Vec::new()
         }
     }
