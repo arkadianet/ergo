@@ -40,6 +40,36 @@ pub struct ApiStatus {
     /// Session-scoped — resets on restart, which `rate()` handles.
     #[serde(default)]
     pub block_apply_errors_total: u64,
+    /// Monotonic count of redb/persist failures surfaced from the state
+    /// store since node start (the `ergo_node_storage_errors_state_total`
+    /// Prometheus counter source, issue #281). Distinct from
+    /// `block_apply_errors_total`: that counts VALIDATION rejections (a
+    /// block this node refuses); this counts the store itself failing to
+    /// persist — invisible to the block-apply counter, and the gap that
+    /// left a poisoned redb handle undetected without shadow validation on
+    /// prod mainnet 2026-07-20. Session-scoped — resets on restart.
+    #[serde(default)]
+    pub storage_errors_state_total: u64,
+    /// Same as `storage_errors_state_total`, scoped to the indexer's own
+    /// redb (the `ergo_node_storage_errors_indexer_total` Prometheus
+    /// counter source). `0` when the indexer is disabled.
+    #[serde(default)]
+    pub storage_errors_indexer_total: u64,
+    /// Same as `storage_errors_state_total`, scoped to the peer address
+    /// book's redb (the `ergo_node_storage_errors_peers_total` Prometheus
+    /// counter source).
+    #[serde(default)]
+    pub storage_errors_peers_total: u64,
+    /// The most recent redb/persist failure across the state, indexer, and
+    /// peer stores, formatted `"<store>: <message>"` — same shape as
+    /// `last_block_apply_error`, this node's other single-string operator
+    /// alarm. `None` when no storage failure has occurred this session. A
+    /// persistent `Some(_)` after an I/O event means the store's redb
+    /// handle is poisoned (`Previous I/O error occurred`) and stays that
+    /// way until the process restarts — see "Storage failure events" in
+    /// `docs/operating.md` for the recovery procedure.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_storage_error: Option<String>,
     /// Terminal deep-fork wedge: the best-header chain forks below the
     /// state backend's rollback window, so this node can never reorg onto
     /// it and will not apply another block. A persistent `Some(_)` is an

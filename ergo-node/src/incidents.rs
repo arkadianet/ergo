@@ -438,4 +438,75 @@ mod tests {
         let after = std::fs::read_dir(dir.path()).unwrap().count();
         assert!(after > before, "snapshot file must be written on ERROR");
     }
+
+    /// Issue #281 ask 3: a poisoned store's storage-failure ERROR event
+    /// (`code = "storage_error:<store>"`, `store`, `error` — threaded onto
+    /// `ergo_state::storage_observability::emit_report`'s existing
+    /// `storage_io_failure` et al. for state/indexer, and emitted directly
+    /// by `PeerManager::record_storage_error` for peers) reaches this
+    /// generic ERROR trigger the same as any other ERROR event, so a
+    /// poisoned store produces an incident snapshot with no
+    /// shadow-validation dependency. The snapshot content proves the
+    /// `store` / `error` fields survive into the forensic file.
+    #[test]
+    fn storage_error_event_triggers_incident_snapshot() {
+        // `set_incident_dir` backs onto a process-wide `OnceLock` (it's a
+        // once-at-boot call in production) — a second call from this test
+        // is a no-op if `error_event_triggers_snapshot_write_via_layer`
+        // (or a prior run of this test in the same process) already won
+        // the race. Read back `incident_dir()` rather than assuming this
+        // test's own tempdir is the active one, so the assertion holds
+        // either way.
+        let dir = tempfile::tempdir().unwrap();
+        set_incident_dir(dir.path().to_path_buf());
+        let active_dir = incident_dir();
+        let subscriber = tracing_subscriber::Registry::default().with(CaptureLayer);
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let before = std::fs::create_dir_all(&active_dir)
+            .ok()
+            .and_then(|_| std::fs::read_dir(&active_dir).ok())
+            .map(|rd| rd.count())
+            .unwrap_or(0);
+        // Real shape production emits (`ergo_state::storage_observability::
+        // emit_report`): the pre-existing `storage_io_failure` /
+        // `storage_health_transition` / `storage_operation_failed` event
+        // names are unchanged (tests elsewhere pin the exact event count
+        // per failure), with `code` + `store` now threaded onto them.
+        let code = format!("storage_error:state-probe-{}", std::process::id());
+        tracing::error!(
+            event = "storage_io_failure",
+            code = %code,
+            store = "state",
+            error = "Previous I/O error occurred. Please close and re-open the database.",
+            "storage operation failed",
+        );
+        let mut snapshot_path = None;
+        for _ in 0..50 {
+            let entries: Vec<_> = std::fs::read_dir(&active_dir).unwrap().collect();
+            if entries.len() > before {
+                snapshot_path = entries
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .find(|p| {
+                        std::fs::read_to_string(p)
+                            .map(|t| t.contains(&code))
+                            .unwrap_or(false)
+                    });
+                if snapshot_path.is_some() {
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let path = snapshot_path.expect("storage_error must trigger an incident snapshot");
+        let text = std::fs::read_to_string(path).unwrap();
+        // Top-level `incident.code` is written directly from the dedupe
+        // key, so it's unescaped JSON; the triggering event itself lives
+        // inside the `events` array as a nested JSON-*string*, so its
+        // fields (`store`, `error`) come back with their quotes escaped.
+        assert!(text.contains(&format!("\"code\":\"{code}\"")));
+        assert!(text.contains(r#"\"store\":\"state\""#));
+        assert!(text.contains("Previous I/O error occurred"));
+    }
 }

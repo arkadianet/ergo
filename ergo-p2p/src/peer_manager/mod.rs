@@ -89,6 +89,15 @@ pub struct PeerManager {
     /// Next scheduled expired-ban sweep. `None` until the first sweep is
     /// due — an empty ban list needs no sweeping.
     next_ban_sweep: Option<Instant>,
+    /// Monotonic count of `peers.redb` write-through failures since node
+    /// start (the `ergo_node_storage_errors_peers_total` Prometheus counter
+    /// source, issue #281). `Cell`, not `AtomicU64`: `PeerManager` is owned
+    /// single-threaded by the action loop, but the `persist_*` write-through
+    /// helpers in `persistence.rs` take `&self`.
+    storage_error_count: std::cell::Cell<u64>,
+    /// `(unix_ms, message)` of the most recent `peers.redb` write-through
+    /// failure, for `ApiStatus.last_storage_error`.
+    last_storage_error: std::cell::RefCell<Option<(u64, String)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +120,8 @@ impl PeerManager {
             limits,
             book: None,
             next_ban_sweep: None,
+            storage_error_count: std::cell::Cell::new(0),
+            last_storage_error: std::cell::RefCell::new(None),
         }
     }
 
@@ -959,5 +970,19 @@ impl PeerManager {
             self.bans.len(),
             self.known_addresses.len(),
         )
+    }
+
+    /// Monotonic `peers.redb` write-through failure count since node start
+    /// (issue #281; the `ergo_node_storage_errors_peers_total` Prometheus
+    /// counter source).
+    pub fn storage_error_count(&self) -> u64 {
+        self.storage_error_count.get()
+    }
+
+    /// `(unix_ms, message)` of the most recent `peers.redb` write-through
+    /// failure, if any — merged with the state/indexer last-error at the
+    /// node layer to pick the freshest for `ApiStatus.last_storage_error`.
+    pub fn last_storage_error(&self) -> Option<(u64, String)> {
+        self.last_storage_error.borrow().clone()
     }
 }

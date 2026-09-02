@@ -297,6 +297,9 @@ Exposed counters (reset to zero on node restart):
 | Metric | Tracks |
 |---|---|
 | `ergo_node_block_apply_errors_total` | Block-apply rejections since node start |
+| `ergo_node_storage_errors_state_total` | Redb/persist failures surfaced from the state store since node start |
+| `ergo_node_storage_errors_indexer_total` | Redb/persist failures surfaced from the indexer store since node start |
+| `ergo_node_storage_errors_peers_total` | Redb/persist failures surfaced from the peer address book since node start |
 | `ergo_node_mempool_tx_requested_total` | Unconfirmed-tx ids requested from peers since node start |
 | `ergo_node_mempool_peer_tx_admitted_total` | Peer-sourced txs admitted to the mempool since node start |
 | `ergo_node_mempool_peer_tx_rejected_total` | Peer-sourced txs rejected by admission since node start |
@@ -373,6 +376,31 @@ least-recently-used entries.
 The regular `node_heartbeat` event includes `storage_health`,
 `storage_io_failures_total`, `storage_previous_io_failures_total`, and
 `storage_errors_suppressed_total`. Healthy heartbeats remain a single line.
+
+**Storage-error counter and restart recovery (issue #281).** Every reported
+storage failure — state store, indexer store, or peer address book — also
+increments one of `ergo_node_storage_errors_state_total` /
+`_indexer_total` / `_peers_total` and updates `last_storage_error` in
+`GET /api/v1/node/status`. The state/indexer events above (`storage_io_failure`
+etc.) carry a `store` field (`state` / `indexer`) and a stable `code` field
+(`storage_error:<store>`) so the incident-snapshot trigger dedupes correctly;
+the peer address book, which does not share this module, logs its own
+`storage_error` ERROR event with `store = "peers"` at the same write-through
+sites. This is the counter `block_apply_errors_total`
+cannot see: that one only fires on VALIDATION rejections, so a persist-layer
+fault — redb returning `Previous I/O error occurred. Please close and
+re-open the database.` after a real disk hiccup — used to leave the node
+frozen with every apply/rejection counter reading zero. **If any
+`ergo_node_storage_errors_*_total` is non-zero after an I/O event
+(disk-full, remount, host I/O error in `dmesg`), restart the node.** A
+graceful stop + start clears redb's poison latch — the corresponding
+handle simply reopens on boot — with no data loss observed; the counter
+itself does not reset on its own and does not decrease, so a steady
+non-zero reading after a restart means the underlying disk/filesystem issue
+is still present, not that the node is still unhealthy. Automatic
+reopen/self-heal of the redb handle without a restart is explicitly out of
+scope — the signal is the point; use it to page or restart, don't wait for
+the node to recover on its own.
 
 ## Dry-running a transaction (the one recommended path)
 
@@ -477,6 +505,7 @@ companion gauge explaining it.
 |---|---|---|
 | Height not moving | `ergo_node_apply_in_progress`, `ergo_node_last_apply_duration_ms`, `ergo_node_last_apply_age_ms` | `apply_in_progress 1` with a growing duration = a big block mid-apply, not a stall. Old `last_apply_age_ms` with `apply_in_progress 0` = genuinely not applying → next row. |
 | Not applying, headers advancing | `ergo_node_sync_gap`, `ergo_node_block_apply_errors_total`, `/api/v1/node/status .last_block_apply_error` | Rising errors on one block = rejection loop (capture the block id + reason). Zero errors + growing gap = download starvation → peers row. |
+| Frozen, all apply/sync counters flat at zero | `ergo_node_storage_errors_state_total` / `_indexer_total` / `_peers_total`, `/api/v1/node/status .last_storage_error` | Non-zero after an I/O event = a poisoned redb handle (persist-layer failure, not a validation rejection — `block_apply_errors_total` cannot see this). Restart the node. |
 | Suspected network isolation | `ergo_node_peer_count`, peer events on `/api/v1/events` | Low/zero peers or churn = connectivity, not consensus. |
 | Chain disagreement suspected | `ergo_node_shadow_diverged`, `ergo_node_shadow_divergence_total`, `_reference_unreachable` | See the Shadow validation triage below — do NOT wipe the data dir first. |
 | Tip frozen forever, headers far ahead | `/api/v1/node/status .sync_wedged` | Deep-fork wedge: below the rollback window only a resync recovers (see Troubleshooting). |

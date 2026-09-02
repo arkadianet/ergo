@@ -1,4 +1,5 @@
 use super::*;
+use crate::address_book::AddressBookError;
 use std::net::Ipv4Addr;
 
 fn addr(a: u8, b: u8, c: u8, d: u8, port: u16) -> SocketAddr {
@@ -1445,4 +1446,32 @@ fn persisted_ban_rows_stay_within_cap_across_reopen() {
         "persisted rows must be evicted alongside in-memory entries, got {}",
         loaded.bans.len()
     );
+}
+
+// ----- storage-error observability (issue #281) -----
+
+/// A simulated `peers.redb` write-through failure (issue #281) increments
+/// `storage_error_count` and records `last_storage_error` in the
+/// `"peers: <message>"` shape the node layer expects when picking the
+/// freshest of the state/indexer/peers last-error candidates.
+#[test]
+fn record_storage_error_increments_counter_and_sets_last_error() {
+    let mgr = PeerManager::new(1);
+    assert_eq!(mgr.storage_error_count(), 0);
+    assert!(mgr.last_storage_error().is_none());
+
+    let addr = addr(10, 0, 0, 1, 9030);
+    let err = AddressBookError::Db("simulated redb write failure".to_string());
+    mgr.record_storage_error("mark_failure", &addr, &err);
+
+    assert_eq!(mgr.storage_error_count(), 1);
+    let (_ts, message) = mgr.last_storage_error().expect("last_storage_error set");
+    assert!(message.starts_with("peers: "));
+    assert!(message.contains("simulated redb write failure"));
+
+    // A second failure keeps incrementing (not deduped at this layer —
+    // the incident-snapshot trigger's own dedupe window is what limits
+    // log volume, not this counter).
+    mgr.record_storage_error("mark_failure", &addr, &err);
+    assert_eq!(mgr.storage_error_count(), 2);
 }

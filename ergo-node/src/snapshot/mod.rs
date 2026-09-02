@@ -218,6 +218,10 @@ impl NodeSnapshot {
                 snapshot_age_ms: 0,
                 last_block_apply_error: None,
                 block_apply_errors_total: 0,
+                storage_errors_state_total: 0,
+                storage_errors_indexer_total: 0,
+                storage_errors_peers_total: 0,
+                last_storage_error: None,
                 sync_wedged: None,
                 shadow: None,
                 mempool_tx_requested_total: 0,
@@ -404,6 +408,18 @@ pub struct SnapshotParts<'a> {
     /// Monotonic block-apply rejection count, for the
     /// `ergo_node_block_apply_errors_total` Prometheus counter.
     pub block_apply_errors_total: u64,
+    /// Monotonic state-store redb/persist failure count, for
+    /// `ApiStatus.storage_errors_state_total` (issue #281).
+    pub storage_errors_state_total: u64,
+    /// Monotonic indexer-store redb/persist failure count, for
+    /// `ApiStatus.storage_errors_indexer_total`.
+    pub storage_errors_indexer_total: u64,
+    /// Monotonic peer-store redb/persist failure count, for
+    /// `ApiStatus.storage_errors_peers_total`.
+    pub storage_errors_peers_total: u64,
+    /// The freshest of the state/indexer/peer-store last-error messages,
+    /// for `ApiStatus.last_storage_error`.
+    pub last_storage_error: Option<String>,
     /// Terminal deep-fork wedge projected to the API DTO (age computed at
     /// publish time from the executor's `Instant`), or `None`. Drives
     /// `ApiStatus.sync_wedged` and the `HealthStatus::Wedged` overlay in

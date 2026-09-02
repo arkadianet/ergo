@@ -1,21 +1,50 @@
 //! Persistence write-through helpers for [`PeerManager`].
 //!
 //! Each helper short-circuits when no book is attached. Errors are
-//! logged and swallowed: in-memory state is the source of truth for
-//! the running session, the book is best-effort restore-on-restart.
+//! logged (ERROR — see [`PeerManager::record_storage_error`], issue #281)
+//! and swallowed: in-memory state is the source of truth for the running
+//! session, the book is best-effort restore-on-restart.
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime};
 
-use tracing::warn;
-
-use crate::address_book::{BanRecord, LastDirection};
+use crate::address_book::{AddressBookError, BanRecord, LastDirection};
 use crate::handshake::PeerSpec;
 use crate::peer::Direction;
 
 use super::{PeerManager, PeerOrigin};
 
 impl PeerManager {
+    /// Record one `peers.redb` write-through failure: bumps
+    /// `storage_error_count`, remembers it for `last_storage_error`, and
+    /// emits the structured `storage_error` ERROR event (issue #281) — a
+    /// stable `code` so the incident-snapshot trigger (#263) dedupes
+    /// repeats within its window instead of writing a fresh snapshot per
+    /// housekeeping tick while the book stays unwritable.
+    pub(super) fn record_storage_error(
+        &self,
+        op: &'static str,
+        addr_or_ip: &dyn std::fmt::Display,
+        e: &AddressBookError,
+    ) {
+        let now_ms = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.storage_error_count
+            .set(self.storage_error_count.get() + 1);
+        *self.last_storage_error.borrow_mut() = Some((now_ms, format!("peers: {e}")));
+        tracing::error!(
+            event = "storage_error",
+            code = "storage_error:peers",
+            store = "peers",
+            op,
+            peer = %addr_or_ip,
+            error = %e,
+            "address_book write failed",
+        );
+    }
+
     pub(super) fn persist_handshake(
         &self,
         addr: SocketAddr,
@@ -38,7 +67,7 @@ impl PeerManager {
             last_dir,
             SystemTime::now(),
         ) {
-            warn!(peer = %addr, op = "upsert_handshaked", error = %e, "address_book write failed");
+            self.record_storage_error("upsert_handshaked", &addr, &e);
         }
     }
 
@@ -47,7 +76,7 @@ impl PeerManager {
             return;
         };
         if let Err(e) = book.touch_seen(addr, SystemTime::now()) {
-            warn!(peer = %addr, op = "touch_seen", error = %e, "address_book write failed");
+            self.record_storage_error("touch_seen", &addr, &e);
         }
     }
 
@@ -56,7 +85,7 @@ impl PeerManager {
             return;
         };
         if let Err(e) = book.mark_failure(addr, SystemTime::now()) {
-            warn!(peer = %addr, op = "mark_failure", error = %e, "address_book write failed");
+            self.record_storage_error("mark_failure", &addr, &e);
         }
     }
 
@@ -65,7 +94,7 @@ impl PeerManager {
             return;
         };
         if let Err(e) = book.mark_success(addr, SystemTime::now()) {
-            warn!(peer = %addr, op = "mark_success", error = %e, "address_book write failed");
+            self.record_storage_error("mark_success", &addr, &e);
         }
     }
 
@@ -74,7 +103,7 @@ impl PeerManager {
             return;
         };
         if let Err(e) = book.add_known(addr, origin) {
-            warn!(peer = %addr, op = "add_known", error = %e, "address_book write failed");
+            self.record_storage_error("add_known", &addr, &e);
         }
     }
 
@@ -86,7 +115,7 @@ impl PeerManager {
             return;
         };
         if let Err(e) = book.unban(ip) {
-            warn!(ip = %ip, op = "unban", error = %e, "address_book write failed");
+            self.record_storage_error("unban", &ip, &e);
         }
     }
 
@@ -102,7 +131,7 @@ impl PeerManager {
             permanent,
         };
         if let Err(e) = book.record_ban(&record) {
-            warn!(ip = %ip, op = "record_ban", error = %e, "address_book write failed");
+            self.record_storage_error("record_ban", &ip, &e);
         }
     }
 }

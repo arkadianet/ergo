@@ -5818,6 +5818,19 @@ components:
           format: int64
           description: Unix-ms of the most recent retained reorg, if any.
           minimum: 0
+        last_storage_error:
+          type:
+          - string
+          - 'null'
+          description: |-
+            The most recent redb/persist failure across the state, indexer, and
+            peer stores, formatted `"<store>: <message>"` — same shape as
+            `last_block_apply_error`, this node's other single-string operator
+            alarm. `None` when no storage failure has occurred this session. A
+            persistent `Some(_)` after an I/O event means the store's redb
+            handle is poisoned (`Previous I/O error occurred`) and stays that
+            way until the process restarts — see "Storage failure events" in
+            `docs/operating.md` for the recovery procedure.
         mempool_peer_tx_admitted_total:
           type: integer
           format: int64
@@ -5895,6 +5908,35 @@ components:
             On-disk size of `state.redb` in bytes, probed per status read.
             `None` when the file is absent (never synced / failed to open).
             The `ergo_state_db_bytes` Prometheus gauge source.
+          minimum: 0
+        storage_errors_indexer_total:
+          type: integer
+          format: int64
+          description: |-
+            Same as `storage_errors_state_total`, scoped to the indexer's own
+            redb (the `ergo_node_storage_errors_indexer_total` Prometheus
+            counter source). `0` when the indexer is disabled.
+          minimum: 0
+        storage_errors_peers_total:
+          type: integer
+          format: int64
+          description: |-
+            Same as `storage_errors_state_total`, scoped to the peer address
+            book's redb (the `ergo_node_storage_errors_peers_total` Prometheus
+            counter source).
+          minimum: 0
+        storage_errors_state_total:
+          type: integer
+          format: int64
+          description: |-
+            Monotonic count of redb/persist failures surfaced from the state
+            store since node start (the `ergo_node_storage_errors_state_total`
+            Prometheus counter source, issue #281). Distinct from
+            `block_apply_errors_total`: that counts VALIDATION rejections (a
+            block this node refuses); this counts the store itself failing to
+            persist — invisible to the block-apply counter, and the gap that
+            left a poisoned redb handle undetected without shadow validation on
+            prod mainnet 2026-07-20. Session-scoped — resets on restart.
           minimum: 0
         sync_state:
           $ref: '#/components/schemas/SyncStateLabel'

@@ -5,8 +5,8 @@ use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
 use ergo_state::storage_observability::{
-    ErrorDiagnostics, StorageErrorClass, StorageFailureContext, StorageFailureReporter,
-    StorageHealth, StorageReport,
+    last_storage_error, report_storage_failure, storage_error_totals, ErrorDiagnostics,
+    StorageErrorClass, StorageFailureContext, StorageFailureReporter, StorageHealth, StorageReport,
 };
 use ergo_state::store::StateError;
 use ergo_state::test_helpers::SharedBuf;
@@ -372,4 +372,50 @@ fn reporter_emits_stable_structured_first_io_and_poison_transition_fields() {
     assert_eq!(summary_fields["last_seen_unix_ms"], 31_000);
     assert_eq!(summary_fields["best_full_block_height"], 1_234);
     assert_eq!(summary_fields["best_header_height"], 1_240);
+}
+
+// ----- ergo_node_storage_errors_total counter (issue #281) -----
+//
+// These exercise the FREE `report_storage_failure` function, which is
+// backed by a single process-global reporter + counters (unlike the rest
+// of this file, which builds its own `StorageFailureReporter` instances
+// for isolation). Assertions use before/after deltas rather than exact
+// values: `cargo test` runs this binary's tests concurrently, and other
+// tests in this same file call `report_storage_failure` too.
+
+#[test]
+fn report_storage_failure_state_subsystem_increments_state_counter() {
+    let (state_before, _indexer_before) = storage_error_totals();
+    report_storage_failure(&context("counter_probe_state"), &io_incident(IO_ERRNO));
+    let (state_after, _indexer_after) = storage_error_totals();
+    assert!(state_after > state_before);
+}
+
+#[test]
+fn report_storage_failure_indexer_subsystem_increments_indexer_counter() {
+    let indexer_context = StorageFailureContext {
+        subsystem: "indexer",
+        component: "indexer_task",
+        database_path: Some(Path::new("/var/lib/ergo/index.redb")),
+        operation: "counter_probe_indexer",
+        best_full_block_height: None,
+        best_header_height: None,
+        attempted_height: None,
+    };
+    let (_state_before, indexer_before) = storage_error_totals();
+    report_storage_failure(&indexer_context, &io_incident(IO_ERRNO));
+    let (_state_after, indexer_after) = storage_error_totals();
+    assert!(indexer_after > indexer_before);
+}
+
+#[test]
+fn report_storage_failure_sets_last_storage_error_with_store_prefix() {
+    let unique = DynamicFailure {
+        height: 987_654,
+        id: "last-storage-error-probe",
+    };
+    report_storage_failure(&context("counter_probe_last_error"), &unique);
+    let (_ts, message) = last_storage_error().expect("last_storage_error populated");
+    assert!(message.starts_with("state: "));
+    assert!(message.contains(&unique.to_string()));
 }

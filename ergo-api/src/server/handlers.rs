@@ -430,6 +430,15 @@ ergo_node_snapshot_age_ms {snap_age}
 # HELP ergo_node_block_apply_errors_total Block-apply rejections since node start.
 # TYPE ergo_node_block_apply_errors_total counter
 ergo_node_block_apply_errors_total {apply_errs}
+# HELP ergo_node_storage_errors_state_total Redb/persist failures surfaced from the state store since node start.
+# TYPE ergo_node_storage_errors_state_total counter
+ergo_node_storage_errors_state_total {storage_errors_state}
+# HELP ergo_node_storage_errors_indexer_total Redb/persist failures surfaced from the indexer store since node start.
+# TYPE ergo_node_storage_errors_indexer_total counter
+ergo_node_storage_errors_indexer_total {storage_errors_indexer}
+# HELP ergo_node_storage_errors_peers_total Redb/persist failures surfaced from the peer address book since node start.
+# TYPE ergo_node_storage_errors_peers_total counter
+ergo_node_storage_errors_peers_total {storage_errors_peers}
 # HELP ergo_node_sync_wedged Terminal deep-fork wedge (1 = resync required).
 # TYPE ergo_node_sync_wedged gauge
 ergo_node_sync_wedged {wedged}
@@ -535,6 +544,9 @@ ergo_disk_total_bytes {disk_total_bytes}
         revalidating = mempool.revalidation_pending,
         snap_age = status.snapshot_age_ms,
         apply_errs = status.block_apply_errors_total,
+        storage_errors_state = status.storage_errors_state_total,
+        storage_errors_indexer = status.storage_errors_indexer_total,
+        storage_errors_peers = status.storage_errors_peers_total,
         wedged = u8::from(status.sync_wedged.is_some()),
         tx_requested = status.mempool_tx_requested_total,
         peer_tx_admitted = status.mempool_peer_tx_admitted_total,

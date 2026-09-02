@@ -35,7 +35,7 @@ use crate::rollback::rollback_one_block;
 use crate::scratch::BlockApplyScratch;
 use crate::store::{IndexerMeta, IndexerStore};
 use crate::HeaderId;
-use ergo_indexer_types::{IndexerHaltReason, IndexerStatus};
+use ergo_indexer_types::{IndexerHaltReason, IndexerQuery, IndexerStatus};
 
 /// Atomic `(height, header_id)` snapshot of the chain's committed tip,
 /// shaped to match `ergo_state::diff::TipPointer` so the production
@@ -364,6 +364,14 @@ impl<C: IndexerChainSource> IndexerTask<C> {
                 IndexerPoll::Halted(e) => {
                     let reason = e.halt_reason();
                     tracing::error!(error = %e, reason = ?reason, "indexer halted in-loop");
+                    if e.is_storage_error() {
+                        crate::handle::report_indexer_storage_failure(
+                            self.handle.store().as_deref().map(IndexerStore::path),
+                            "indexer_task",
+                            Some(self.handle.indexed_height()),
+                            &e,
+                        );
+                    }
                     self.handle.set_status(IndexerStatus::Halted(reason));
                     return;
                 }
