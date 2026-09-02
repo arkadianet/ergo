@@ -792,6 +792,34 @@ mod tests {
         assert_eq!(name_str.len(), 36 + ".json".len());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn init_creates_secret_file_with_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut storage = SecretStorage::open(tmp.path().to_path_buf());
+
+        storage
+            .init(
+                crate::mnemonic::MnemonicStrength::Words24,
+                "test-password",
+                "",
+            )
+            .expect("init must succeed");
+
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(entries.len(), 1);
+        let mode = entries[0].metadata().unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "secret file must be created with 0o600, never a wider default"
+        );
+    }
+
     #[test]
     fn restore_from_known_mnemonic_creates_file() {
         let tmp = tempfile::tempdir().unwrap();

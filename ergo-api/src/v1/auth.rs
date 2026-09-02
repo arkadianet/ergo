@@ -16,11 +16,14 @@
 //! the standard error envelope with `unauthorized` (401), so v1 clients get
 //! uniform errors. Both call the same `verify`.
 //!
-//! **Boot-warn.** [`warn_startup_posture`] logs a loud warning when
-//! T1/T2 routes are network-reachable under a weak/default `api_key_hash` (or
-//! none at all). The server calls it once at startup — see the call-site note
-//! on that function. The underlying decision is the pure, testable
-//! [`assess_posture`].
+//! **Boot-warn.** [`warn_startup_posture`] logs a loud warning once at
+//! startup when `api_key_hash` matches a known weak/default secret
+//! (regardless of bind address — a loopback bind is still reachable by
+//! anything with local shell access, and it's exactly what the shipped
+//! config template ships with), or when T1/T2 routes are network-reachable
+//! with no key configured at all. The server calls it once at startup — see
+//! the call-site note on that function. The underlying decision is the
+//! pure, testable [`assess_posture`].
 //!
 //! Each v1 route group mounts [`require_tier`] at the tier its endpoints
 //! need; a T2 endpoint additionally relies on an operator-side reverse-proxy
@@ -229,22 +232,26 @@ pub enum InsecurePosture {
 /// Pure posture check: given the api-key verifier
 /// and the API bind address, is the T1/T2 surface dangerously exposed?
 ///
-/// A loopback-only bind is never flagged (only the operator can reach it).
-/// A network-reachable bind is flagged when there is no key, or when the key
-/// matches a [`KNOWN_WEAK_KEYS`] default. Separated from logging so it is unit-testable.
+/// A weak/default key is flagged **regardless of bind address**: the shipped
+/// `ergo-node.toml` template binds loopback by default, so gating this check
+/// behind "network-reachable" meant the single most common misconfiguration
+/// (never rotating the template `api_key_hash`) silently never warned —
+/// anything with local shell access (any co-resident process or user) still
+/// has the key. A missing key on a loopback bind is not flagged: T1/T2 fail
+/// closed either way and only the operator can reach loopback, so there is
+/// nothing additional to warn about there.
 pub fn assess_posture(security: Option<&ApiSecurity>, bind: SocketAddr) -> Option<InsecurePosture> {
+    if let Some(sec) = security {
+        if KNOWN_WEAK_KEYS.iter().any(|k| sec.verify(k)) {
+            return Some(InsecurePosture::WeakDefaultKey);
+        }
+    }
     if bind.ip().is_loopback() {
         return None;
     }
     match security {
         None => Some(InsecurePosture::NoKeyNetworkReachable),
-        Some(sec) => {
-            if KNOWN_WEAK_KEYS.iter().any(|k| sec.verify(k)) {
-                Some(InsecurePosture::WeakDefaultKey)
-            } else {
-                None
-            }
-        }
+        Some(_) => None,
     }
 }
 
@@ -480,10 +487,22 @@ mod tests {
     }
 
     #[test]
-    fn posture_loopback_bind_is_never_flagged() {
+    fn posture_loopback_bind_with_no_key_is_not_flagged() {
+        // No key at all on loopback: T1/T2 fail closed either way, and only
+        // the operator can reach loopback — nothing extra to warn about.
         assert_eq!(assess_posture(None, sock(LOCAL)), None);
+    }
+
+    #[test]
+    fn posture_loopback_bind_with_weak_key_is_flagged() {
+        // The shipped ergo-node.toml template binds loopback by default;
+        // gating the weak-key warning behind "network-reachable" meant an
+        // un-rotated template key never warned. Must fire regardless of bind.
         let weak = security_for(b"hello");
-        assert_eq!(assess_posture(Some(&weak), sock(LOCAL)), None);
+        assert_eq!(
+            assess_posture(Some(&weak), sock(LOCAL)),
+            Some(InsecurePosture::WeakDefaultKey)
+        );
     }
 
     #[test]

@@ -604,8 +604,12 @@ impl NodeConfig {
                 .and_then(|s| s.api_key_hash.as_deref())
                 .ok_or_else(|| {
                     "[api.security] api_key_hash is required when the API is enabled. \
-                     Set it to the lowercase Base16 of Blake2b256(<your-secret>), e.g. \
-                     `echo -n \"hello\" | b2sum -l 256 | cut -d' ' -f1`. \
+                     Set it to the lowercase Base16 of Blake2b256(<your-secret>). Generate \
+                     a random secret first — never a guessable word — e.g. \
+                     `openssl rand -hex 32 | tee >(b2sum -l 256 | cut -d' ' -f1)` \
+                     (prints the secret to save and the hash to configure), or without \
+                     openssl: `head -c 32 /dev/urandom | xxd -p -c 256 | tee >(b2sum -l 256 | \
+                     cut -d' ' -f1)`. \
                      Disable the API server entirely with [api] disabled = true if you \
                      have no operator surface to expose."
                         .to_string()

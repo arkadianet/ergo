@@ -78,6 +78,33 @@ pub(super) fn make_digest_state(db_path: &Path) -> NodeState {
     )
 }
 
+/// Same digest backend as [`make_digest_state`], but with the mempool
+/// left `enabled = true` — an impossible-in-production combination
+/// (`config::mempool_must_force_disable` prevents it at boot), used ONLY
+/// to exercise `handle_mempool_tick`'s post-boot degrade guard: it must
+/// log-and-skip rather than panic if this invariant is ever violated.
+pub(super) fn make_digest_state_with_mempool_enabled(db_path: &Path) -> NodeState {
+    let store = ergo_state::DigestStateStore::open(
+        db_path,
+        ergo_validation::scala_launch(),
+        ergo_chain_spec::VotingParams {
+            voting_length: 2,
+            ..ergo_chain_spec::VotingParams::mainnet()
+        },
+        [0u8; 33],
+    )
+    .unwrap();
+    let mempool_cfg = MempoolConfig {
+        enabled: true,
+        ..MempoolConfig::default()
+    };
+    make_state_with_backend(
+        ergo_state::StateBackendKind::Digest(store),
+        crate::config::StateType::Digest,
+        mempool_cfg,
+    )
+}
+
 fn make_state_with_backend(
     backend: ergo_state::StateBackendKind,
     state_type: crate::config::StateType,

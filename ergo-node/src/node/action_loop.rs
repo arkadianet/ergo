@@ -334,16 +334,24 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
     if !state.mempool.config().enabled {
         return;
     }
+    // Boot enforces "mempool enabled implies UTXO-mode store" (digest mode
+    // gates the mempool subsystem off entirely), so `as_utxo()` returning
+    // `None` here means that invariant broke somewhere after boot. Log and
+    // skip this tick rather than panicking the single-writer action-loop
+    // task — a wedged mempool subsystem degrades gracefully; a killed
+    // action loop takes the whole node down with it.
+    let Some(utxo) = state.store.as_utxo() else {
+        tracing::error!(
+            "handle_mempool_tick: mempool enabled but store is not UTXO-backed \
+             (digest-mode gating invariant violated post-boot) — skipping this tick"
+        );
+        return;
+    };
     // Single poll of committed-state tip identity. `MempoolNotifier`
     // returns NoChange when nothing's moved — the normal case
     // between block applications — so this path is cheap on the hot
     // loop.
-    let outcome = state.mempool_notifier.poll(
-        state
-            .store
-            .as_utxo()
-            .expect("utxo-only: mempool subsystem is gated off in digest mode"),
-    );
+    let outcome = state.mempool_notifier.poll(utxo);
     let tip_changed = match outcome {
         PollOutcome::Initialized(_) | PollOutcome::NoChange => false,
         PollOutcome::Emit(state_diff) => {
@@ -441,14 +449,19 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
     let Some(owned) = build_tip_context(state) else {
         return;
     };
+    // Same digest-mode gating invariant as above; re-checked rather than
+    // trusting the earlier guard still holds, since this closes over
+    // `state` freshly at this point in the tick.
+    let Some(utxo) = state.store.as_utxo() else {
+        tracing::error!(
+            "handle_mempool_tick: mempool enabled but store is not UTXO-backed \
+             (digest-mode gating invariant violated post-boot) — skipping this tick"
+        );
+        return;
+    };
     let now = Instant::now();
     let actions = {
-        let tip_ctx = owned.as_mempool_ctx(
-            state
-                .store
-                .as_utxo()
-                .expect("utxo-only: mempool subsystem is gated off in digest mode"),
-        );
+        let tip_ctx = owned.as_mempool_ctx(utxo);
         let mut actions = Vec::new();
         // A or B first (clean the existing pool)...
         if need_recheck {
@@ -614,5 +627,31 @@ mod tests {
             0,
             "active pool emptied — no stale/confirmed tx is served or relayed",
         );
+    }
+
+    /// The digest-mode gating invariant ("mempool enabled implies a
+    /// UTXO-backed store") is enforced at boot
+    /// (`config::mempool_must_force_disable`), so `as_utxo()` returning
+    /// `None` inside `handle_mempool_tick` means that invariant broke
+    /// post-boot. Previously this was a `.expect(...)` that killed the
+    /// single-writer action-loop task; it must now log and skip the tick
+    /// instead, leaving the node running.
+    #[test]
+    fn handle_mempool_tick_digest_backend_with_mempool_enabled_degrades_not_panics() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_digest_state_with_mempool_enabled(
+            &tmp.path().join("digest.redb"),
+        );
+        assert!(
+            state.store.as_utxo().is_none(),
+            "precondition: digest backend has no UTXO view"
+        );
+        assert!(
+            state.mempool.config().enabled,
+            "precondition: mempool is (invariant-violating) enabled"
+        );
+
+        // Must return normally, not panic.
+        handle_mempool_tick(&mut state, None);
     }
 }
