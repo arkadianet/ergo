@@ -229,6 +229,7 @@ pub fn lift(v: &EnvValue) -> Result<TypedExpr, GroupElementError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::typed::node_pos;
     use crate::typed_print::print_typed;
 
     // ----- helpers -----
@@ -258,6 +259,15 @@ mod tests {
                 tpe: SType::SBoolean,
                 pos: 0,
             }
+        );
+        // `TypedExpr` equality intentionally ignores `pos` (positions are
+        // advisory, not part of tree identity) — the `pos: 0` above does NOT
+        // test the position contract, so assert it directly too
+        // (CodeRabbit #env.rs:259).
+        assert_eq!(
+            node_pos(&e),
+            0,
+            "lifted env constants are synthesized (pos 0)"
         );
     }
 

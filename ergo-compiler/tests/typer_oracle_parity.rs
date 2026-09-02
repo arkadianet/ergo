@@ -297,6 +297,13 @@ const POSITION_DEVIATION_SOURCES: &[(&str, &str)] = &[
 #[test]
 fn seed_reject_records_position_parity() {
     let seed = include_str!("../../test-vectors/ergoscript/typer/golden_seed.txt");
+    // `positioned` counts every REJECT record with a real oracle position,
+    // BEFORE the POSITION_DEVIATION_SOURCES filter — the full parity
+    // surface. `checked` counts only the records actually compared for
+    // exact line:col agreement, i.e. `positioned` minus the deviation
+    // entries. Keeping these separate (CodeRabbit #3918554303) avoids
+    // silently folding a documented deviation into the "exact match" count.
+    let mut positioned = 0usize;
     let mut checked = 0usize;
     let mut mismatches: Vec<String> = Vec::new();
     for line in seed.lines() {
@@ -320,6 +327,7 @@ fn seed_reject_records_position_parity() {
         if (oracle_line, oracle_col) == (0, 0) {
             continue; // oracle itself has no SourceContext (route/runtime throws)
         }
+        positioned += 1;
         if POSITION_DEVIATION_SOURCES.iter().any(|&(s, _)| s == src) {
             continue;
         }
@@ -337,11 +345,20 @@ fn seed_reject_records_position_parity() {
         .map(|&(s, reason)| format!("{s:?} ({reason})"))
         .collect();
     assert_eq!(
+        positioned,
+        22,
+        "swept {positioned} positioned reject records (pre-deviation-filter), \
+         expected exactly 22 — seed may have shrunk/grown. Currently excluded \
+         from the exact-match count: [{}]",
+        deviation_notes.join(", ")
+    );
+    assert_eq!(
         checked,
         21,
-        "swept {checked} positioned reject records, expected exactly 21 — \
-         seed may have shrunk/grown, or a POSITION_DEVIATION_SOURCES entry \
-         was added/removed. Currently excluded: [{}]",
+        "checked {checked} positioned reject records for EXACT line:col parity \
+         (positioned minus POSITION_DEVIATION_SOURCES), expected exactly 21 — \
+         a POSITION_DEVIATION_SOURCES entry was added/removed. Currently \
+         excluded: [{}]",
         deviation_notes.join(", ")
     );
     assert!(

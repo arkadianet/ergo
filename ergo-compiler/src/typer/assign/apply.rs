@@ -424,7 +424,12 @@ pub(crate) fn assign_collection_index(
             ),
         ));
     }
-    let idx = upcast_to(typed_index, &SType::SInt).map_err(|be| build_to_typer(be, app_pos))?;
+    // `upcastTo` (syntax.scala:168) is a raw Scala `assert`, not a typer
+    // `error(msg, X.sourceContext)` call — it has no structured Scala
+    // citation. Cite the index (matching the sibling numeric-type-guard
+    // error above), not the whole application: it is the useful, and more
+    // consistent, advisory position (CodeRabbit #3918554294).
+    let idx = upcast_to(typed_index, &SType::SInt).map_err(|be| build_to_typer(be, idx_pos))?;
     Ok(TypedExpr::ByIndex {
         input: Box::new(new_f),
         index: Box::new(idx),
@@ -490,7 +495,12 @@ pub(crate) fn assign_tuple_index(
             ),
         ));
     }
-    let idx = upcast_to(typed_index, &SType::SInt).map_err(|be| build_to_typer(be, app_pos))?;
+    // `upcastTo` (syntax.scala:168) is a raw Scala `assert`, not a typer
+    // `error(msg, X.sourceContext)` call — it has no structured Scala
+    // citation. Cite the index (matching the sibling numeric-type-guard
+    // error above), not the whole application: it is the useful, and more
+    // consistent, advisory position (CodeRabbit #3918554294).
+    let idx = upcast_to(typed_index, &SType::SInt).map_err(|be| build_to_typer(be, idx_pos))?;
     Ok(TypedExpr::ByIndex {
         input: Box::new(new_f),
         index: Box::new(idx),
@@ -654,7 +664,7 @@ pub(crate) fn adapt_sigma_prop_to_boolean(
                         pos,
                     });
                 } else {
-                    out.push(finalize_collection(adapted)?);
+                    out.push(finalize_collection(adapted, pos)?);
                 }
             }
             // (it, SBoolean) where it.tpe == SSigmaProp -> SigmaPropIsProven(it).
@@ -674,11 +684,18 @@ pub(crate) fn adapt_sigma_prop_to_boolean(
 
 /// `assignConcreteCollection(cc, items)` over ALREADY-TYPED items (no re-typing) —
 /// SigmaTyper.scala:545-556.  Computes the element type via msgTypeOf.
-pub(crate) fn finalize_collection(items: Vec<TypedExpr>) -> Result<TypedExpr, TyperError> {
-    // The collection node starts at its first item (Scala cites
-    // `cc.sourceContext`, assignConcreteCollection) — same offset. An empty
-    // collection has no item to cite (0 = unset SourceContext).
-    let cc_pos = items.first().map(node_pos).unwrap_or(0);
+///
+/// `cc_pos` is the ORIGINAL `ConcreteCollection` node's own bound position —
+/// SigmaTyper.scala:549/553/555 all cite `cc.sourceContext`, the collection's
+/// own offset, both for its two error sites and for the rebuilt node
+/// (`builder.currentSrcCtx.withValue(cc.sourceContext) { mkConcreteCollection(...) }`).
+/// The caller passes this through (CodeRabbit #3918554297); it must NOT be
+/// re-derived from the first item, which would lose the `Coll(...)` offset
+/// (e.g. `allOf(Coll(sigmaProp(true)))`).
+pub(crate) fn finalize_collection(
+    items: Vec<TypedExpr>,
+    cc_pos: Pos,
+) -> Result<TypedExpr, TyperError> {
     let mut types: Vec<SType> = Vec::new();
     for it in &items {
         let t = node_tpe(it).clone();

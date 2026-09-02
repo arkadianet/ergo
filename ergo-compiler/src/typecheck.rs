@@ -14,14 +14,15 @@
 //! # Error shape (E9 + E12)
 //!
 //! [`CompileError`] tags the failing phase.  Every USER-facing reject
-//! (`Parse`/`Bind`/`Type`) carries a REAL source offset (`pos()` is meaningful):
-//! `Type` errors cite the node the typer is rejecting — positions ride on
-//! [`TypedExpr`] (typed.rs) and mirror Scala's per-site `sourceContext`
-//! citations. The post-typecheck variants (`Root`/`Emit`/`Write`) still return
-//! `0`: they operate on position-less IR nodes, and the route-level Scala
-//! throws carry no SourceContext (the oracle records `0:0` for them). The
-//! accept/reject verdict and the exception CLASS remain the graded facts (E5
-//! makes reject positions advisory).
+//! (`Parse`/`Bind`/`Type`) carries a REAL, 0-based byte offset (`pos()` is
+//! meaningful): `Type` errors cite the node the typer is rejecting —
+//! positions ride on [`TypedExpr`] (typed.rs) and mirror Scala's per-site
+//! `sourceContext` citations. The post-typecheck variants (`Root`/`Emit`/
+//! `Serializer`/`Write`) still return `0`: they operate on position-less IR
+//! nodes, and the route-level Scala throws carry no SourceContext (the
+//! oracle records `0:0` for them). The accept/reject verdict and the
+//! exception CLASS remain the graded facts (E5 makes reject positions
+//! advisory).
 
 use ergo_ser::address::NetworkPrefix;
 
@@ -100,14 +101,14 @@ pub enum CompileError {
 }
 
 impl CompileError {
-    /// The 1-based source offset of the error.
+    /// The 0-based (zero-based) byte offset of the error into the source.
     ///
     /// `Parse`/`Bind`/`Type` return the real offset of the offending construct
     /// (`Type` cites the node the typer rejected — E12 lifted, see
     /// `typer/assign/mod.rs`). The post-typecheck phases (`Root`/`Emit`/
-    /// `Write`) return `0`: they operate on position-less IR nodes, and the
-    /// route-level Scala throws carry no SourceContext (the oracle records
-    /// `REJECT 0:0 Exception` for them).
+    /// `Serializer`/`Write`) return `0`: they operate on position-less IR
+    /// nodes, and the route-level Scala throws carry no SourceContext (the
+    /// oracle records `REJECT 0:0 Exception` for them).
     pub fn pos(&self) -> Pos {
         match self {
             CompileError::Parse(e) => e.pos(),
