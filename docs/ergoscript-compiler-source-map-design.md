@@ -1,8 +1,9 @@
 # Emit-time source map — design pass (P5 deliverable B)
 
-Status: DESIGN ONLY — deliverable A (positions threaded through the typer) is
-landed; this doc specifies B for a follow-up implementation, co-designed with
-the ergo-forge workbench side.
+Status: IMPLEMENTED (2026-09-03) — see "What B landed" at the end for the one
+place the implementation departs from the sketch below, and why. Deliverable
+A (positions threaded through the typer) landed first; this doc was the spec
+for B, co-designed with the ergo-forge workbench side.
 
 ## What A landed (the substrate B builds on)
 
@@ -186,3 +187,49 @@ hand-computed offsets).
 - Forge-side lift changes: separate repo, needs the contract above frozen
   first (forge pins this repo by git rev — the API must land before their
   lift consumes it).
+
+## What B landed (and where it departs from the sketch)
+
+- `ergo_ser::opcode::{preorder, children, node_opcode}` — the shared walk
+  (§2), landed first exactly as specified. Both sides key off it.
+- `ergo_compiler::compile_with_source_map(env, source, tree_version, network)
+  -> (CompileResult, SourceMap)` — additive; `compile` is untouched and the
+  bytes are identical (pinned by `tests/source_map.rs`).
+- `SourceMap { offset(id), node_count(), tags(), aligns_with(walk) }` — the
+  consumer alignment check (§2) is per-node opcode tags, not just a count.
+
+**Departure: origins are recorded at emit but resolved AFTER the pipeline.**
+The sketch in §1 builds a parallel origin tree alongside emit. That describes
+the tree emit produces — but `tree::graph_build` then runs six rewrite passes
+(cast folds, isProven fusion, constant folding, dead-`val` pruning, lowering,
+CSE) before anything is serialized. An emit-time origin tree would misalign
+with the final tree after the first fold, and the consumer's node-count
+check would reject the map for most real contracts. Threading origins through
+every pass would touch ~5k lines of oracle-graded code for no parity gain.
+
+What is implemented instead (`ergo-compiler/src/source_map.rs`):
+
+1. Emit records, for every typed node it lowers, the serialized bytes of the
+   produced IR subtree with the typed node's `pos`. The one hook is
+   `Scope::emit` — every recursive lowering passes through it, so no
+   call-site churn. After emit, the records are pinned onto the emit-time
+   tree node by node; on the untouched emit output every recorded subtree
+   is literally present, so this is exact.
+2. After `graph_build`, the emit-time tree is aligned top-down against the
+   final pre-segregation root. Same opcode and arity → cite and recurse
+   pairwise, so a fold deep in a subtree uncites only the folded node, never
+   its ancestors. Rewrite shapes with their own rule: a CSE `BlockValue`
+   wrapped around the root (align through the result; hoisted `ValDef` rhs
+   found among emit-time subtrees by bytes); a `ValUse` standing in for a
+   hoisted subtree (cited at that spelling when the rhs bytes match); an
+   emit-time `val` the pipeline inlined (the emit-side `ValUse` is followed to
+   its rhs); two blocks (results align, items pair by binding id); an arity
+   change such as an inserted cast (node uncited, children re-found by
+   bytes).
+3. Anything the alignment cannot place stays uncited — the "synthesized
+   nodes are not citable" rule of §4 holds by construction. Note that a
+   typer-inserted `Upcast` IS cited (at its operand): the typer pins rebuilt
+   nodes at the node being rewritten (A's table), so it carries a position.
+
+Tags are taken from the segregated body (what a consumer parses), offsets
+from the pre-segregation root; the two have identical shape (§2).

@@ -45,6 +45,10 @@ pub(crate) struct Scope {
     /// under `VersionContext.withVersions`). Rides on the scope so every nested
     /// `emit_method_call` sees it; drives the V6-method GraphBuilding gate.
     pub(crate) tree_version: u8,
+    /// P5-B source-map recording: `Some` when the caller asked for a map.
+    /// Every `emit(expr)` then records the produced subtree's bytes with
+    /// `node_pos(expr)` (see `crate::source_map`). `None` costs nothing.
+    pub(crate) origins: Option<crate::source_map::Origins>,
 }
 
 impl Scope {
@@ -54,7 +58,15 @@ impl Scope {
             next_id: 1,
             placeholders: HashMap::new(),
             tree_version,
+            origins: None,
         }
+    }
+
+    /// Like [`Scope::new`] but recording source origins for a [`crate::SourceMap`].
+    pub(crate) fn new_tracking(tree_version: u8) -> Self {
+        let mut s = Scope::new(tree_version);
+        s.origins = Some(crate::source_map::Origins::default());
+        s
     }
 
     /// Emission scope seeded with a contract's named-parameter placeholder env
@@ -68,6 +80,7 @@ impl Scope {
             next_id: 1,
             placeholders,
             tree_version: V6_ERGO_TREE_VERSION,
+            origins: None,
         }
     }
 
