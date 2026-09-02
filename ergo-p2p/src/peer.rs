@@ -266,9 +266,19 @@ pub struct PeerInfo {
     /// Wall-clock of the last frame from this peer that carried *protocol
     /// progress* (see [`PeerInfo::note_progress`]). This — not
     /// [`PeerInfo::last_seen`] — is the clock [`INACTIVE_TIMEOUT`] runs
-    /// against, so a peer that trickles cheap frames (bare `GetPeers`,
-    /// empty `Peers`, unknown opcodes) cannot hold an inbound slot open
-    /// indefinitely.
+    /// against, so a peer that trickles frames doing nothing for us (bare
+    /// `GetPeers`, empty `Peers`, empty `SyncInfo`, requests we serve
+    /// nothing for, unknown opcodes) does not keep its slot on that basis
+    /// alone.
+    ///
+    /// This raises the floor on what a slot-holder must do; it is not a
+    /// DoS control. A deliberate attacker still holds a slot with a
+    /// handful of bytes every nine minutes, because the cheapest
+    /// qualifying frames are by construction indistinguishable from an
+    /// honest idle neighbour's. See the "Progress classification" notes on
+    /// `ergo_node::node::messaging::dispatch` for the residual paths.
+    /// Bounding a determined attacker is the job of `max_inbound` and the
+    /// per-IP / subnet limits.
     ///
     /// [proposed] divergence from Scala, which drops a connection purely
     /// on `lastStoredActivityTime` age (`NetworkController.scala:307-325`,
@@ -426,9 +436,10 @@ impl PeerInfo {
     }
 
     /// Mark peer as making protocol progress: a frame arrived that passed
-    /// the per-peer throughput throttle, deserialized, and belongs to a
-    /// useful class (handshake completion, `SyncInfo`, `Inv`,
-    /// `RequestModifier`, `Modifier`, a non-empty `Peers`, or a
+    /// the per-peer throughput throttle, deserialized, and did something
+    /// for us (handshake completion, a non-empty `SyncInfo`, `Inv`,
+    /// `Modifier`, a `RequestModifier` we served at least one modifier
+    /// for, a `Peers` reply naming a dialable address, or a
     /// state-sync/NiPoPoW payload). Resets the [`INACTIVE_TIMEOUT`] clock.
     ///
     /// Progress implies seen, so this also refreshes

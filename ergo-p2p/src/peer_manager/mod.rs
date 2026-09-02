@@ -809,8 +809,14 @@ impl PeerManager {
 
     // ---- Eviction / cleanup ----
 
-    /// Remove timed-out peers and return their addresses.
-    pub fn evict_timed_out(&mut self, now: Instant) -> Vec<PeerId> {
+    /// Remove timed-out peers and return each address with the state it
+    /// held when evicted.
+    ///
+    /// The state matters to the caller: a `Connecting`/`Handshaking`
+    /// eviction is a failed dial and should feed dial backoff, whereas an
+    /// `Active`/`Degraded` eviction is a handshaked peer that stopped
+    /// making progress — a different fact about a reachable address.
+    pub fn evict_timed_out(&mut self, now: Instant) -> Vec<(PeerId, ConnectionState)> {
         let to_remove: Vec<(PeerId, ConnectionState, u64, u64, u64)> = self
             .peers
             .iter()
@@ -819,9 +825,9 @@ impl PeerManager {
                 (
                     *addr,
                     p.state,
-                    p.connected_at.elapsed().as_secs(),
-                    p.last_seen.elapsed().as_secs(),
-                    p.last_progress.elapsed().as_secs(),
+                    now.saturating_duration_since(p.connected_at).as_secs(),
+                    now.saturating_duration_since(p.last_seen).as_secs(),
+                    now.saturating_duration_since(p.last_progress).as_secs(),
                 )
             })
             .collect();
@@ -856,8 +862,10 @@ impl PeerManager {
             }
             self.peers.remove(addr);
         }
-        let to_remove: Vec<PeerId> = to_remove.into_iter().map(|(a, ..)| a).collect();
         to_remove
+            .into_iter()
+            .map(|(addr, state, ..)| (addr, state))
+            .collect()
     }
 
     // ---- Internal helpers ----

@@ -9,15 +9,30 @@
 //! Dispatch is also where a frame is classified as carrying protocol
 //! *progress*, via [`note_progress`]. Progress — not "any valid frame" —
 //! is what resets a peer's `INACTIVE_TIMEOUT` clock
-//! (`ergo_p2p::peer::PeerInfo::last_progress`), so that a peer trickling
-//! cheap frames cannot hold an inbound slot open forever within
-//! `max_inbound`. A frame counts as progress when it passed the throughput
-//! throttle above, deserialized, and belongs to a useful class. The
-//! deny-list is deliberately small — bare requests that carry no payload
-//! and cost the sender nothing (`GetPeers`, `GetSnapshotsInfo`), an empty
-//! `Peers` reply, unknown opcodes, and anything that fails to
-//! deserialize — because the honest-peer cost of a false eviction is much
-//! higher than the cost of a slightly cheaper trickle.
+//! (`ergo_p2p::peer::PeerInfo::last_progress`). A frame counts as progress
+//! when it passed the throughput throttle above, deserialized, and did
+//! something for us: advertised or delivered modifiers, asked for
+//! modifiers we actually served, carried non-empty chain information, or
+//! gossiped a dialable address.
+//!
+//! **Scope.** This is an operational fix, not a DoS control. It reclaims
+//! slots from peers that are stuck, misconfigured, or too dumb to sync —
+//! the observed failure mode — and it raises the floor on what a
+//! slot-holder must do. It does NOT defeat a deliberate attacker: roughly
+//! 40 bytes every nine minutes still holds a slot, because the cheapest
+//! qualifying frames are indistinguishable from an honest peer's. Known
+//! residual paths, all deliberate:
+//!
+//! - a well-formed one-header `SyncInfo`, which is exactly what an honest
+//!   idle neighbour sends and cannot be excluded without evicting it;
+//! - a `RequestModifier` for a modifier we do have, e.g. a header id the
+//!   attacker replays from our own `Inv`;
+//! - a one-entry `Peers` reply naming any dialable address.
+//!
+//! Bounding a determined attacker is `max_inbound` plus per-IP and subnet
+//! limits' job, not this timer's. The deny-list here is deliberately
+//! small — the honest-peer cost of a false eviction is much higher than
+//! the cost of a slightly cheaper trickle.
 
 use std::time::Instant;
 
@@ -88,11 +103,17 @@ pub(in crate::node) fn handle_message(
                     debug!(peer = %peer, "spammy SyncInfo; dropping");
                     return vec![];
                 }
-                // A `SyncInfo` that clears the per-peer lock time is the
-                // protocol's liveness signal: a Scala peer sends one to
-                // every connected peer at least once a minute
-                // (`ErgoSyncTracker.scala:144-148`, `SyncThreshold`).
-                note_progress(state, &peer, now);
+                // A non-empty `SyncInfo` that clears the per-peer lock
+                // time is the protocol's liveness signal: a Scala peer
+                // sends one to every connected peer at least once a
+                // minute (`ErgoSyncTracker.scala:144-148`,
+                // `SyncThreshold`). An empty one — a legal 4-byte frame —
+                // carries no chain information, so it does not count; a
+                // peer with genuinely nothing to say is also a peer we
+                // have no reason to hold a slot for.
+                if !sync_info.is_empty() {
+                    note_progress(state, &peer, now);
+                }
                 let sv = state
                     .registry
                     .peers
@@ -146,7 +167,6 @@ pub(in crate::node) fn handle_message(
         },
         message::CODE_REQUEST_MODIFIER => match message::deserialize_inv(payload) {
             Ok(inv) => {
-                note_progress(state, &peer, now);
                 let type_id = inv.type_id;
                 let hits: Vec<([u8; 32], Vec<u8>)> = match ModifierTypeId::from_byte(type_id) {
                     Some(ModifierTypeId::Transaction) => inv
@@ -229,8 +249,14 @@ pub(in crate::node) fn handle_message(
                     None => Vec::new(),
                 };
                 if hits.is_empty() {
+                    // Asking costs nothing; being served does. Only a
+                    // request we actually answered counts as progress, so
+                    // a stream of requests for ids we do not hold cannot
+                    // hold the slot. An honest downloader requests what we
+                    // advertised, so its requests hit.
                     Vec::new()
                 } else {
+                    note_progress(state, &peer, now);
                     let data = ModifiersData {
                         type_id,
                         modifiers: hits,
@@ -298,9 +324,12 @@ pub(in crate::node) fn handle_message(
         }
         message::CODE_PEERS => match message::deserialize_peers(payload, 100) {
             Ok(peers) => {
-                // Only a `Peers` reply that actually carries entries is
-                // progress; an empty list is as cheap as a keepalive.
-                if !peers.is_empty() {
+                // Only a `Peers` reply carrying something we could
+                // actually dial is progress. An empty list is as cheap as
+                // a keepalive, and so is a list of specs with no declared
+                // address — `handle_peers_response` cannot add those to
+                // the dial pool either.
+                if peers.iter().any(|p| p.declared_address.is_some()) {
                     note_progress(state, &peer, now);
                 }
                 handle_peers_response(state, peer, peers)
