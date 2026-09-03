@@ -519,7 +519,7 @@ impl StateStore {
             wallet_payload,
         });
         match result {
-            Ok(()) => {
+            Ok(durability) => {
                 // Post-mutation bookkeeping: clear_dirty + arena_commit
                 // are AVL+ tree finalization (potentially the missing
                 // 5-10ms per block that doesn't show in tree/digest/
@@ -529,7 +529,13 @@ impl StateStore {
                 let t_post = std::time::Instant::now();
                 self.height = height;
                 self.tree.clear_dirty();
-                self.tree.arena_commit();
+                // `durability` says whether `persist_apply` committed these
+                // nodes to redb or merely queued them. On the pipeline path
+                // it queued them, and the arena must pin them against
+                // eviction until the worker's commit lands — otherwise a
+                // later cold read falls through to redb and serves
+                // pre-commit bytes for a node this block rewrote.
+                self.tree.arena_commit(durability);
                 self.chain_state.best_full_block_height = height;
                 self.chain_state.best_full_block_id = *header_id;
                 if self.chain_state.best_header_height < height {
@@ -570,6 +576,14 @@ impl StateStore {
                 Ok(())
             }
             Err(e) => {
+                // `rebuild_from_committed` reads the tip out of redb, which
+                // lags any job still in the persist queue. Drain the queue
+                // first so the state it rebuilds from is the real tip and
+                // not a rewind to whatever the worker happened to have
+                // committed. Flush failure is reported in preference to
+                // the apply error: it means the durable tip is unknown,
+                // which is the more serious of the two.
+                self.flush_persist_pipeline()?;
                 self.rebuild_from_committed()?;
                 Err(e)
             }
@@ -578,7 +592,10 @@ impl StateStore {
 
     /// Inner mutation path for apply_block. All fallible operations after the
     /// first tree mutation are here so the caller can catch any error and rebuild.
-    fn apply_mutations(&mut self, mutation: UtxoMutation<'_>) -> Result<(), StateError> {
+    fn apply_mutations(
+        &mut self,
+        mutation: UtxoMutation<'_>,
+    ) -> Result<crate::avl::arena::CommitDurability, StateError> {
         let UtxoMutation {
             height,
             header_id,
@@ -684,6 +701,6 @@ impl StateStore {
             );
         }
 
-        result.map(|_| ())
+        result
     }
 }

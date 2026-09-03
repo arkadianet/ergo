@@ -10,7 +10,7 @@
 
 use ergo_primitives::digest::{ADDigest, Digest32};
 
-use super::arena::{MemoryArena, NodeArena};
+use super::arena::{CommitDurability, MemoryArena, NodeArena};
 use super::changelog::{ChangeLog, NodeChange};
 use super::digest::{
     internal_label, leaf_label, root_digest, NEGATIVE_INFINITY_KEY, POSITIVE_INFINITY_KEY,
@@ -141,6 +141,19 @@ impl AvlTree {
     /// Number of structurally modified (dirty) nodes pending commit.
     pub fn arena_cache_dirty_len(&self) -> usize {
         self.arena.cache_dirty_len()
+    }
+
+    // invariant: label-agnostic — cache-statistics accessor; no consensus path.
+    /// Bytes pinned in the clean cache awaiting their persist job's commit.
+    pub fn arena_cache_unpersisted_bytes(&self) -> usize {
+        self.arena.cache_unpersisted_bytes()
+    }
+
+    // invariant: label-agnostic — arena lifecycle; no consensus path.
+    /// Handle to the arena's durable watermark, handed to the persist
+    /// pipeline so committing jobs release the pins they took.
+    pub fn arena_durable_seq_handle(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicU64>> {
+        self.arena.durable_seq_handle()
     }
 }
 
@@ -370,8 +383,8 @@ impl AvlTree {
     // invariant: label-agnostic — arena lifecycle; does not read labels.
     /// Notify the arena of a successful commit (moves dirty → clean in
     /// CachedDiskArena; no-op for MemoryArena).
-    pub fn arena_commit(&mut self) {
-        self.arena.commit();
+    pub fn arena_commit(&mut self, durability: CommitDurability) {
+        self.arena.commit(durability);
     }
 
     // invariant: label-agnostic — arena lifecycle; does not read labels.

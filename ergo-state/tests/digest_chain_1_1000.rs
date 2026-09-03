@@ -269,3 +269,127 @@ fn rollback_from_1000_to_800_then_reapply() {
     assert_eq!(store.height(), 1000);
     assert_eq!(store.root_digest(), fixtures.expected_digest(1000));
 }
+
+/// The persist pipeline commits to redb *behind* the in-memory tree, so
+/// `arena_commit()` is not the redb write boundary on that path: a node
+/// mutated at height N is moved dirty→clean while its `PersistJob` is
+/// still queued. If the clean cache then evicts it, the next block's walk
+/// cold-reads pre-N bytes and the root digest diverges.
+///
+/// This pins that the two seams cannot overlap, under the most hostile
+/// settings available: a cache budget of a few dozen nodes (so every
+/// block's nodes are evicted almost immediately after `arena_commit`) and
+/// the production queue depth of 64 (so the worker lags as far behind as
+/// backpressure allows). Every height is checked against the captured
+/// Scala state root, so a stale read surfaces as `DigestMismatch` or
+/// `BoxNotFound` rather than as a silently wrong tree.
+#[test]
+fn digest_chain_1_1000_pipelined_under_cache_pressure_matches_oracle() {
+    let dir = tempfile::tempdir().unwrap();
+    // ~28 nodes of headroom: the clean cache cannot hold one block's
+    // structural writes, let alone 64 blocks' worth.
+    let mut store =
+        StateStore::open_with_cache(dir.path().join("state.redb").as_path(), 4096).unwrap();
+    init_genesis(&mut store);
+    // Genesis first: the pipeline worker must not race the genesis write.
+    store.enable_persist_pipeline(64);
+    let fixtures = TestFixtures::load();
+
+    for height in 1u32..=1000 {
+        fixtures.apply_block(&mut store, height);
+    }
+    store.flush_persist_pipeline().unwrap();
+    assert_eq!(store.height(), 1000);
+    assert_eq!(store.root_digest(), fixtures.expected_digest(1000));
+}
+
+#[test]
+fn ctrl_tiny_cache_no_pipeline() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store =
+        StateStore::open_with_cache(dir.path().join("state.redb").as_path(), 4096).unwrap();
+    init_genesis(&mut store);
+    let fixtures = TestFixtures::load();
+    for height in 1u32..=1000 {
+        fixtures.apply_block(&mut store, height);
+    }
+    assert_eq!(store.root_digest(), fixtures.expected_digest(1000));
+}
+
+#[test]
+fn ctrl_default_cache_with_pipeline() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    init_genesis(&mut store);
+    store.enable_persist_pipeline(64);
+    let fixtures = TestFixtures::load();
+    for height in 1u32..=1000 {
+        fixtures.apply_block(&mut store, height);
+    }
+    store.flush_persist_pipeline().unwrap();
+    assert_eq!(store.root_digest(), fixtures.expected_digest(1000));
+}
+
+#[test]
+fn ctrl_tiny_cache_pipeline_depth_1() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store =
+        StateStore::open_with_cache(dir.path().join("state.redb").as_path(), 4096).unwrap();
+    init_genesis(&mut store);
+    store.enable_persist_pipeline(1);
+    let fixtures = TestFixtures::load();
+    for height in 1u32..=1000 {
+        fixtures.apply_block(&mut store, height);
+    }
+    store.flush_persist_pipeline().unwrap();
+    assert_eq!(store.root_digest(), fixtures.expected_digest(1000));
+}
+
+#[test]
+fn ctrl_medium_cache_16mib_with_pipeline() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store =
+        StateStore::open_with_cache(dir.path().join("state.redb").as_path(), 16 * 1024 * 1024)
+            .unwrap();
+    init_genesis(&mut store);
+    store.enable_persist_pipeline(64);
+    let fixtures = TestFixtures::load();
+    for height in 1u32..=1000 {
+        fixtures.apply_block(&mut store, height);
+    }
+    store.flush_persist_pipeline().unwrap();
+    assert_eq!(store.root_digest(), fixtures.expected_digest(1000));
+}
+
+/// Rollback while persist jobs are still queued: `rollback_to` must drain
+/// the pipeline before it rewinds from redb, and the pins taken by the
+/// in-flight jobs must not leave the arena serving a stale tree after
+/// the rewind. Same hostile cache budget as the pin above.
+#[test]
+fn rollback_with_in_flight_persist_jobs_under_cache_pressure_matches_oracle() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store =
+        StateStore::open_with_cache(dir.path().join("state.redb").as_path(), 4096).unwrap();
+    init_genesis(&mut store);
+    store.enable_persist_pipeline(64);
+    let fixtures = TestFixtures::load();
+
+    for height in 1u32..=1000 {
+        fixtures.apply_block(&mut store, height);
+    }
+    // No explicit flush: the queue may hold up to 64 uncommitted jobs.
+    store.rollback_to(900, None, None).unwrap();
+    assert_eq!(store.height(), 900);
+    assert_eq!(store.root_digest(), fixtures.expected_digest(900));
+
+    for height in 901u32..=1000 {
+        fixtures.apply_block(&mut store, height);
+    }
+    store.flush_persist_pipeline().unwrap();
+    assert_eq!(store.root_digest(), fixtures.expected_digest(1000));
+    assert_eq!(
+        store.metrics().arena_unpersisted_pinned_bytes,
+        0,
+        "after a flush every pin has been released"
+    );
+}

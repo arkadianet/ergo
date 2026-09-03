@@ -1,7 +1,7 @@
 //! Tests for the CachedDiskArena: dirty eviction safety, small-cache oracle
 //! parity, abort/rebuild correctness, and label persistence.
 
-use ergo_state::avl::arena::{CachedDiskArena, NodeArena};
+use ergo_state::avl::arena::{CachedDiskArena, CommitDurability, NodeArena};
 use ergo_state::avl::node::AvlNode;
 use ergo_state::store::{node_from_bytes, node_to_bytes};
 use redb::{Database, TableDefinition};
@@ -74,7 +74,7 @@ fn commit_moves_dirty_to_clean_with_eviction() {
     }
     seed_redb(&db, &nodes);
 
-    arena.commit();
+    arena.commit(CommitDurability::Durable);
 
     for i in 1u64..=5 {
         assert!(
@@ -258,4 +258,195 @@ fn small_cache_state_store_opens_and_operates() {
     )
     .unwrap();
     assert_eq!(store.height(), 0);
+}
+
+// ============================================================================
+// Unpersisted pins (persist-pipeline stale-read guard, #314)
+// ============================================================================
+//
+// On the pipeline path `commit` runs BEFORE redb holds the bytes: the
+// persist job is only queued. A clean node evicted in that window would be
+// re-read from redb as its pre-commit bytes (or not at all). These tests
+// drive the arena through that window directly and pin that a node stays
+// readable with its post-commit bytes until the durable watermark reaches
+// its job, and only then becomes evictable.
+
+// ----- helpers -----
+
+fn leaf_value(node: &AvlNode) -> Vec<u8> {
+    match node {
+        AvlNode::Leaf { value, .. } => value.clone(),
+        other => panic!("expected a leaf, got {other:?}"),
+    }
+}
+
+/// Push `n` fresh durable nodes through the arena to create eviction
+/// pressure on everything already in the clean cache.
+fn pressure(arena: &mut CachedDiskArena, db: &Database, first_id: u64, n: u64) {
+    let nodes: Vec<(u64, AvlNode)> = (first_id..first_id + n)
+        .map(|i| (i, make_leaf((i % 250) as u8, &[i as u8; 100])))
+        .collect();
+    for (id, node) in &nodes {
+        arena.put(*id, node.clone());
+    }
+    seed_redb(db, &nodes);
+    arena.commit(CommitDurability::Durable);
+}
+
+// ----- happy path -----
+
+#[test]
+fn pending_job_node_survives_budget_pressure_until_ack() {
+    // Budget fits ~2 nodes of this size, so pressure evicts aggressively.
+    let (db, mut arena, _dir) = make_arena(300);
+
+    // redb holds the PRE-commit bytes for node 1 (what the worker has
+    // not yet overwritten).
+    seed_redb(&db, &[(1, make_leaf(0x01, &[0xA1; 100]))]);
+    assert_eq!(leaf_value(&arena.get(1).unwrap()), vec![0xA1; 100]);
+
+    // Block N rewrites node 1; its bytes travel in persist job 1, which
+    // has not committed.
+    arena.put(1, make_leaf(0x01, &[0xB1; 100]));
+    arena.commit(CommitDurability::PendingJob(1));
+    assert!(
+        arena.cache_unpersisted_bytes() > 0,
+        "a pending-job commit must pin the node"
+    );
+
+    // Heavy pressure: without the pin, node 1 is the LRU victim.
+    pressure(&mut arena, &db, 100, 20);
+    assert_eq!(
+        leaf_value(&arena.get(1).unwrap()),
+        vec![0xB1; 100],
+        "a pinned node must serve its post-commit bytes, never redb's stale copy"
+    );
+    assert!(
+        arena.cache_unpersisted_bytes() > 0,
+        "still pinned: job 1 not acked"
+    );
+
+    // The worker commits job 1: redb now holds the new bytes, and the
+    // watermark reaches the job's sequence.
+    seed_redb(&db, &[(1, make_leaf(0x01, &[0xB1; 100]))]);
+    arena
+        .durable_seq_handle()
+        .expect("disk arena exposes a durable watermark")
+        .store(1, std::sync::atomic::Ordering::Release);
+
+    // Pressure again: the pin is released, node 1 is evictable, and a
+    // cold read comes back from redb with the committed bytes.
+    pressure(&mut arena, &db, 200, 20);
+    assert_eq!(
+        arena.cache_unpersisted_bytes(),
+        0,
+        "acked job releases every pin it held"
+    );
+    assert_eq!(leaf_value(&arena.get(1).unwrap()), vec![0xB1; 100]);
+}
+
+#[test]
+fn pins_hold_the_clean_cache_over_budget_while_jobs_are_in_flight() {
+    let (db, mut arena, _dir) = make_arena(300);
+    // Ten 100-byte nodes in one pending job: far over a 300-byte budget,
+    // and none of them may go.
+    let nodes: Vec<(u64, AvlNode)> = (1u64..=10)
+        .map(|i| (i, make_leaf(i as u8, &[i as u8; 100])))
+        .collect();
+    for (id, node) in &nodes {
+        arena.put(*id, node.clone());
+    }
+    arena.commit(CommitDurability::PendingJob(7));
+
+    assert_eq!(arena.cache_clean_len(), 10, "nothing pinned may be evicted");
+    assert!(arena.cache_unpersisted_bytes() >= 10 * 100);
+    for (id, node) in &nodes {
+        assert_eq!(leaf_value(&arena.get(*id).unwrap()), leaf_value(node));
+    }
+
+    // Ack the job (redb catches up), and the cache shrinks back under
+    // budget on the next enforcement.
+    seed_redb(&db, &nodes);
+    arena
+        .durable_seq_handle()
+        .unwrap()
+        .store(7, std::sync::atomic::Ordering::Release);
+    pressure(&mut arena, &db, 100, 1);
+    assert_eq!(arena.cache_unpersisted_bytes(), 0);
+    assert!(
+        arena.cache_clean_len() < 10,
+        "once unpinned, budget enforcement evicts again"
+    );
+}
+
+#[test]
+fn durable_commit_pins_nothing() {
+    let (db, mut arena, _dir) = make_arena(300);
+    let nodes = vec![(1, make_leaf(1, &[1; 100])), (2, make_leaf(2, &[2; 100]))];
+    for (id, node) in &nodes {
+        arena.put(*id, node.clone());
+    }
+    seed_redb(&db, &nodes);
+    arena.commit(CommitDurability::Durable);
+    assert_eq!(
+        arena.cache_unpersisted_bytes(),
+        0,
+        "the synchronous path never pins: redb already holds the bytes"
+    );
+}
+
+#[test]
+fn pending_job_already_acked_pins_nothing() {
+    let (db, mut arena, _dir) = make_arena(300);
+    arena
+        .durable_seq_handle()
+        .unwrap()
+        .store(5, std::sync::atomic::Ordering::Release);
+    let nodes = vec![(1, make_leaf(1, &[1; 100]))];
+    for (id, node) in &nodes {
+        arena.put(*id, node.clone());
+    }
+    seed_redb(&db, &nodes);
+    arena.commit(CommitDurability::PendingJob(3));
+    assert_eq!(
+        arena.cache_unpersisted_bytes(),
+        0,
+        "job 3 <= watermark 5: durable already"
+    );
+}
+
+#[test]
+fn rewriting_a_pinned_node_moves_its_pin_to_the_newer_job() {
+    let (db, mut arena, _dir) = make_arena(300);
+    arena.put(1, make_leaf(1, &[0xA1; 100]));
+    arena.commit(CommitDurability::PendingJob(1));
+    let pinned_after_first = arena.cache_unpersisted_bytes();
+
+    // Rewritten in the next block: the pin now belongs to job 2, and the
+    // running total counts the node once.
+    arena.put(1, make_leaf(1, &[0xB1; 100]));
+    arena.commit(CommitDurability::PendingJob(2));
+    assert_eq!(arena.cache_unpersisted_bytes(), pinned_after_first);
+
+    // Acking job 1 alone must NOT release it: its bytes are in job 2.
+    seed_redb(&db, &[(1, make_leaf(1, &[0xA1; 100]))]);
+    arena
+        .durable_seq_handle()
+        .unwrap()
+        .store(1, std::sync::atomic::Ordering::Release);
+    pressure(&mut arena, &db, 100, 20);
+    assert_eq!(leaf_value(&arena.get(1).unwrap()), vec![0xB1; 100]);
+    assert!(arena.cache_unpersisted_bytes() > 0);
+}
+
+// ----- error paths -----
+
+#[test]
+fn abort_drops_all_pins() {
+    let (_db, mut arena, _dir) = make_arena(300);
+    arena.put(1, make_leaf(1, &[1; 100]));
+    arena.commit(CommitDurability::PendingJob(1));
+    assert!(arena.cache_unpersisted_bytes() > 0);
+    arena.abort();
+    assert_eq!(arena.cache_unpersisted_bytes(), 0);
 }

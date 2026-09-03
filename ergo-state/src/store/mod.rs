@@ -647,6 +647,11 @@ pub struct StateMetrics {
     /// Structurally modified (dirty) AVL nodes pending commit. Sustained
     /// growth signals a stalled commit pipeline.
     pub arena_cache_dirty_len: usize,
+    /// Clean-cache bytes pinned against eviction because the persist job
+    /// carrying them has not committed. Sustained growth means the persist
+    /// worker is falling behind; the cache runs over its byte budget by
+    /// this much until it catches up.
+    pub arena_unpersisted_pinned_bytes: usize,
     /// Headers buffered in `batch_headers` awaiting persist.
     pub batch_headers_len: usize,
     /// Sum of buffered header bytes in `batch_headers`.
@@ -904,6 +909,11 @@ impl StateStore {
             queue_depth,
             self.voting_settings.voting_length,
             self.blocks_to_keep,
+            // Hand the worker the arena's durable watermark. Without it the
+            // arena could evict a clean node whose bytes are still sitting
+            // in an uncommitted job, and the next cold read would fall
+            // through to redb and serve pre-commit bytes.
+            self.tree.arena_durable_seq_handle(),
         ));
     }
 
@@ -989,6 +999,7 @@ impl StateStore {
             arena_cache_capacity_bytes: self.tree.arena_cache_capacity_bytes(),
             arena_cache_clean_len: self.tree.arena_cache_clean_len(),
             arena_cache_dirty_len: self.tree.arena_cache_dirty_len(),
+            arena_unpersisted_pinned_bytes: self.tree.arena_cache_unpersisted_bytes(),
             batch_headers_len: self.headers.batch_headers_len(),
             batch_headers_bytes: self.headers.batch_headers_bytes(),
             batch_meta_len: self.headers.batch_meta_len(),
@@ -1096,7 +1107,9 @@ impl StateStore {
         }
         write_txn.commit()?;
         self.tree.clear_dirty();
-        self.tree.arena_commit();
+        // Genesis writes synchronously above, so redb already holds these.
+        self.tree
+            .arena_commit(crate::avl::arena::CommitDurability::Durable);
         self.genesis_committed = true;
         Ok(())
     }
@@ -3713,8 +3726,10 @@ impl StateStore {
     /// Internal: persist a block application.
     ///
     /// When the persist pipeline is active, this builds a PersistJob and sends
-    /// it to the background thread (non-blocking unless the queue is full).
-    /// Otherwise falls back to a synchronous write transaction.
+    /// it to the background thread (non-blocking unless the queue is full)
+    /// and returns `CommitDurability::PendingJob(seq)` so the caller pins
+    /// the block's nodes until that job commits. Otherwise it falls back to
+    /// a synchronous write transaction and returns `Durable`.
     fn persist_apply(
         &mut self,
         height: u32,
@@ -3723,7 +3738,7 @@ impl StateStore {
         undo: &UndoEntry,
         voted_params_row: Option<ergo_validation::ActiveProtocolParameters>,
         wallet_payload: Option<&WalletApplyPayload>,
-    ) -> Result<(), StateError> {
+    ) -> Result<crate::avl::arena::CommitDurability, StateError> {
         // Defensive: voted_params_row should be `Some` iff this is an
         // epoch-start block. The caller (block_proc) is the gatekeeper;
         // we double-check here so a misuse fails loud at the storage
@@ -3866,7 +3881,10 @@ impl StateStore {
                 );
             }
 
-            pipeline.send(job)?;
+            // The sequence this job was assigned. The caller passes it to
+            // `arena_commit` so the nodes it carries stay pinned in the
+            // clean cache until the worker acknowledges the commit.
+            let seq = pipeline.send(job)?;
 
             // Update IBD flush counter.
             if self.ibd_mode {
@@ -3877,7 +3895,7 @@ impl StateStore {
                 }
             }
 
-            return Ok(());
+            return Ok(crate::avl::arena::CommitDurability::PendingJob(seq));
         }
 
         // --- Synchronous fallback ---
@@ -4172,7 +4190,9 @@ impl StateStore {
             );
         }
 
-        Ok(())
+        // The write transaction above committed before returning, so redb
+        // already holds every node in this block's dirty set.
+        Ok(crate::avl::arena::CommitDurability::Durable)
     }
 
     /// Derive next_id by scanning the AVL_NODES table for the max key.
