@@ -10,7 +10,7 @@
 
 use ergo_primitives::digest::{ADDigest, Digest32};
 
-use super::arena::{MemoryArena, NodeArena};
+use super::arena::{MemoryArena, NodeArena, ReadSession};
 use super::changelog::{ChangeLog, NodeChange};
 use super::digest::{
     internal_label, leaf_label, root_digest, NEGATIVE_INFINITY_KEY, POSITIVE_INFINITY_KEY,
@@ -141,6 +141,20 @@ impl AvlTree {
     /// Number of structurally modified (dirty) nodes pending commit.
     pub fn arena_cache_dirty_len(&self) -> usize {
         self.arena.cache_dirty_len()
+    }
+
+    // invariant: label-agnostic — storage-session lifecycle; reads only.
+    /// Open a snapshot read session over the arena for a bulk walk.
+    ///
+    /// Every cache miss taken while the returned guard is alive reads
+    /// through one shared redb read transaction and table handle. The
+    /// guard must not outlive the walk it was opened for — see
+    /// [`ReadSession`] for the full invariant.
+    ///
+    /// The guard borrows nothing, so a mutating walk can hold one open
+    /// while it takes `&mut self` on the tree.
+    pub fn begin_read_session(&self) -> ReadSession {
+        self.arena.begin_read_session()
     }
 }
 

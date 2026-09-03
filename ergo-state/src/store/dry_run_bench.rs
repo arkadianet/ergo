@@ -224,11 +224,11 @@ fn measure(fx: &Fixture, cs: &ChangeSet, budget: usize, runs: usize) -> Row {
     // One untimed warm-up so the OS page cache state is the same for
     // every timed run (the arena LRU is still cold per run by construction).
     for run in 0..=runs {
-        // Arena construction is timed separately: `CachedDiskArena::new`
-        // sizes its clean LRU as `byte_budget / 100` entries, so at the
-        // shipped 1 GiB default it allocates a ~10.7M-slot table. That is a
-        // once-per-open cost in production, not a per-block one, and must
-        // not be smeared into the hydration number.
+        // Arena construction is timed separately: it is a once-per-open
+        // cost in production, not a per-block one, and must not be smeared
+        // into the hydration number. Since #289 the clean LRU starts empty
+        // and grows with occupancy, so this column reads ~0 at every
+        // budget; it used to scale with `cache_bytes`.
         let t_arena = Instant::now();
         let tree = fx.cold_tree(budget);
         let arena_setup = t_arena.elapsed();
