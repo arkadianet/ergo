@@ -141,19 +141,25 @@ async fn mode_5_syncs_a_header_from_a_real_peer() {
         .expect("send inv");
 
     // Drain frames until the node requests the advertised header. Other
-    // traffic (SyncInfo, GetPeers, …) is expected and ignored.
-    loop {
-        let frame = timeout(WIRE_TIMEOUT, conn.read_message())
-            .await
-            .expect("node never requested the advertised header")
-            .expect("read frame");
-        if frame.code == CODE_REQUEST_MODIFIER {
-            let req = deserialize_inv(&frame.payload).expect("parse RequestModifier");
-            if req.type_id == ModifierTypeId::Header.as_byte() && req.ids.contains(&header_id) {
-                break;
+    // traffic (SyncInfo, GetPeers, …) is expected and ignored — but each
+    // ignored frame must NOT rearm the wait: a per-read `timeout` resets on
+    // every iteration, so a node that keeps sending other frames without
+    // ever requesting the header would spin here until the outer CI
+    // timeout instead of failing with a clear message. Bound the whole
+    // loop by one absolute deadline instead.
+    timeout(WIRE_TIMEOUT, async {
+        loop {
+            let frame = conn.read_message().await.expect("read frame");
+            if frame.code == CODE_REQUEST_MODIFIER {
+                let req = deserialize_inv(&frame.payload).expect("parse RequestModifier");
+                if req.type_id == ModifierTypeId::Header.as_byte() && req.ids.contains(&header_id) {
+                    break;
+                }
             }
         }
-    }
+    })
+    .await
+    .expect("node never requested the advertised header within the wire timeout");
 
     let modifiers = serialize_modifiers(&ModifiersData {
         type_id: ModifierTypeId::Header.as_byte(),
