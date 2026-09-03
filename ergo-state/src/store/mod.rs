@@ -479,6 +479,8 @@ mod apply;
 pub use apply::compute_minimal_full_block_height;
 mod backfill;
 mod dry_run;
+#[cfg(test)]
+mod dry_run_bench;
 /// Test-only re-export of the canonical proof producer, used by
 /// the digest-mode apply seam's producer/consumer interop test and
 /// the `test-helpers` ADProofs-derivation seam. Production code never
