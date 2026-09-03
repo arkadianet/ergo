@@ -238,8 +238,27 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
             time: _,
             conn,
         } => {
-            // Skip if already connected (late HandshakeComplete from a previous dial)
+            // Skip if this address is already registered — a late
+            // HandshakeComplete from a previous dial, or an inbound
+            // connection from a reused ephemeral port whose predecessor
+            // has not been torn down yet. The connection is dropped, not
+            // swapped in: the registry is keyed by remote address alone,
+            // and so is `PeerEvent::Disconnected`, so a replaced runtime
+            // would be torn down by the *old* connection's teardown
+            // event and leave a live socket with no registry entry.
+            // Scala drops the duplicate for the same reason
+            // (`NetworkController.handleHandshake`'s
+            // `connectionForPeerAddress(peerAddress).exists(_.handlerRef
+            // != peerHandlerRef)` → `CloseConnection`,
+            // NetworkController.scala:417-424). The stale entry clears
+            // itself within the handshake timeout; the drop is logged so
+            // an operator can tell it from a network fault (issue #293).
             if state.registry.peers.contains_key(&addr) {
+                debug!(
+                    peer = %addr,
+                    reason = "address_still_registered",
+                    "dropping duplicate inbound connection",
+                );
                 drop(conn);
                 return;
             }

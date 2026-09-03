@@ -3296,4 +3296,76 @@ fn byte_throttle_over_cap_non_modifier_frame_drops_and_penalizes() {
         )),
         "an over-cap non-delivery frame must still be dropped and penalized: {actions:?}",
     );
+// ----- duplicate inbound drop (issue #293) -----
+
+/// A `HandshakeComplete` for an address the registry already holds — a
+/// late event from a previous dial, or an inbound connection from a
+/// reused ephemeral port — leaves the existing runtime untouched and
+/// drops the new connection. Replacing the runtime is not safe: both the
+/// registry and `PeerEvent::Disconnected` are keyed by remote address
+/// alone, so the old connection's teardown would then evict the peer we
+/// had just swapped in. Scala drops the duplicate for the same reason
+/// (`NetworkController.handleHandshake`, NetworkController.scala:417-424).
+/// The branch now emits a `reason = "address_still_registered"` DEBUG
+/// line so an operator can tell this drop from a network fault.
+#[tokio::test]
+async fn handshake_complete_for_registered_address_keeps_existing_runtime() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("dup.redb"));
+    let peer = test_peer();
+
+    // The incumbent runtime, whose channel must survive the duplicate.
+    let (tx, mut rx) = mpsc::channel::<ergo_p2p::framing::MessageFrame>(4);
+    state.registry.peers.insert(
+        peer,
+        PeerRuntime {
+            sync_version: SyncVersion::V1,
+            outbound_tx: tx,
+        },
+    );
+
+    // A real socket for the duplicate connection: the drop must close it.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen_addr = listener.local_addr().unwrap();
+    let accept = tokio::spawn(async move { listener.accept().await.unwrap().0 });
+    let client = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
+    let server = accept.await.unwrap();
+    let conn = Box::new(ergo_p2p::connection::Connection::new(server, state.magic));
+
+    super::events::handle_event_batch(
+        &mut state,
+        vec![PeerEvent::HandshakeComplete {
+            addr: peer,
+            peer_spec: PeerSpec {
+                agent_name: "dup".into(),
+                version: Version::NIPOPOW,
+                node_name: "dup".into(),
+                declared_address: None,
+                features: Vec::new(),
+            },
+            time: 0,
+            conn,
+        }],
+    );
+
+    assert_eq!(
+        state.registry.peers.len(),
+        1,
+        "the duplicate must not add or replace a registry entry",
+    );
+    assert!(
+        state
+            .registry
+            .try_send(&peer, message::CODE_SYNC_INFO, Vec::new()),
+        "the incumbent runtime's channel must still be usable",
+    );
+    assert_eq!(
+        rx.try_recv().expect("frame reaches the incumbent").code,
+        message::CODE_SYNC_INFO,
+    );
+    assert!(
+        state.peer_manager.get(&peer).is_none(),
+        "the dropped duplicate must not complete a handshake",
+    );
+    drop(client);
 }
