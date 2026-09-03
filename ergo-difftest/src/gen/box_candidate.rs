@@ -14,6 +14,7 @@ use ergo_ser::sigma_type::SigmaType;
 use ergo_ser::sigma_value::{SigmaBoolean, SigmaValue};
 
 use crate::gen::asm;
+use crate::gen::evaluated_value;
 use crate::gen::{Feature, FeatureSet, GenMode, GenOutput};
 use crate::rng::Rng;
 
@@ -88,13 +89,27 @@ fn assemble(
 }
 
 fn gen_adversarial(rng: &mut Rng) -> GenOutput {
-    match rng.below(5) {
+    match rng.below(7) {
         0 => sigmaprop_root_violation(rng),
         1 => tree_version_nonzero(rng),
         2 => register_v6_type(rng),
         3 => zero_amount_token(rng),
-        _ => off_curve_group_element(rng),
+        4 => off_curve_group_element(rng),
+        _ => register_evaluated_values(rng),
     }
+}
+
+/// Box whose register block is drawn from the full `EvaluatedValue` vocabulary.
+///
+/// The register reader is the SECOND position Scala parses with
+/// `ValueSerializer` + an `EvaluatedValue` cast (`ErgoBoxCandidate.serializer`;
+/// `Tuple`'s doc comment at `values.scala:779` names this position explicitly:
+/// *"this superclass is required as Tuple can be in a register"*). Same
+/// vocabulary, same accept rule as the context-extension twin (#301).
+fn register_evaluated_values(rng: &mut Rng) -> GenOutput {
+    let (registers, features, reference_accepts) = evaluated_value::gen_register_block(rng, 4);
+    let bytes = assemble(1_000_000, &asm::TREE_TRUE_PROP, 1, &[], &registers);
+    out(bytes, reference_accepts, FeatureSet::from_iter(features))
 }
 
 fn out(bytes: Vec<u8>, intended_valid: bool, features: FeatureSet) -> GenOutput {

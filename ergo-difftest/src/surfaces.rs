@@ -308,6 +308,30 @@ pub fn registry(only: Option<&str>) -> Vec<Surface> {
                 )
             }),
         },
+        // ----- `ctx_expr`: contextExtension · ergoBoxCandidate frame -----
+        // The wire form behind the `reduce_ctx` oracle surface. Both halves are
+        // self-delimiting, so one reader consumes them in sequence; hermetically
+        // the pair must reach the same read/write fixed point the two codecs
+        // reach individually. A frame whose extension parses but whose box does
+        // not (or vice versa) is a plain Rejected, not a Bug.
+        Surface {
+            name: "ctx_expr",
+            run: Box::new(|b| {
+                rw_check(
+                    b,
+                    |r| {
+                        let ext = ergo_ser::input::read_context_extension(r)?;
+                        let candidate = ergo_ser::ergo_box::read_ergo_box_candidate(r)?;
+                        Ok((ext, candidate))
+                    },
+                    |w, (ext, candidate)| {
+                        ergo_ser::input::write_context_extension(w, ext)?;
+                        ergo_ser::ergo_box::write_ergo_box_candidate(w, candidate)
+                    },
+                    |(_, candidate)| box_candidate_is_unparsed(candidate),
+                )
+            }),
+        },
         // ----- read-only no-panic -----
         // `deserialize_batch_merkle_proof` takes the whole byte slice (and a
         // `WriteError`-typed result), so it can't go through `ro_check`/`rw!`;

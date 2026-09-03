@@ -57,6 +57,11 @@ pub struct Oracle {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    /// Optional request/response transcript (`DIFFTEST_ORACLE_LOG=<path>`).
+    /// A standing guard is only as trustworthy as its pipe: when a campaign
+    /// reports a verdict a manual re-query cannot reproduce, this is the
+    /// evidence that says whether the harness and the oracle were in step.
+    transcript: Option<std::fs::File>,
 }
 
 impl Oracle {
@@ -72,10 +77,15 @@ impl Oracle {
             .spawn()?;
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
+        let transcript = match std::env::var("DIFFTEST_ORACLE_LOG") {
+            Ok(path) if !path.is_empty() => Some(std::fs::File::create(path)?),
+            _ => None,
+        };
         Ok(Oracle {
             child,
             stdin,
             stdout,
+            transcript,
         })
     }
 
@@ -89,7 +99,8 @@ impl Oracle {
     /// answers `SIGMA` / `WRAP` / `THROW <exc>` for the MethodCall typechecker-
     /// registry harness.
     pub fn query_raw(&mut self, surface: &str, bytes: &[u8]) -> io::Result<String> {
-        writeln!(self.stdin, "{surface} {}", to_hex(bytes))?;
+        let request = to_hex(bytes);
+        writeln!(self.stdin, "{surface} {request}")?;
         self.stdin.flush()?;
         let mut line = String::new();
         let n = self.stdout.read_line(&mut line)?;
@@ -99,7 +110,13 @@ impl Oracle {
                 "oracle closed its output",
             ));
         }
-        Ok(line.trim().to_string())
+        let response = line.trim().to_string();
+        if let Some(log) = self.transcript.as_mut() {
+            writeln!(log, ">> {surface} {request}")?;
+            writeln!(log, "<< {response}")?;
+            log.flush()?;
+        }
+        Ok(response)
     }
 }
 
@@ -177,6 +194,16 @@ pub fn oracle_surfaces() -> Vec<SurfaceSpec> {
             // `P:<prop>|<cost>` string (both sides reduce to it).
             name: "reduce",
             rust_verdict: reduce_verdict,
+            compare_canonical: true,
+            soft_fork_header: false,
+        },
+        SurfaceSpec {
+            // eval/cost differential WITH a wire-supplied context extension and
+            // wire-supplied SELF registers — the two positions Scala parses as an
+            // `EvaluatedValue`. Canonical comparison is the reduced
+            // `P:<prop>|<cost>` string, same as `reduce`.
+            name: "reduce_ctx",
+            rust_verdict: reduce_ctx_verdict,
             compare_canonical: true,
             soft_fork_header: false,
         },
@@ -445,6 +472,154 @@ fn reduce_verdict(bytes: &[u8]) -> (Verdict, usize) {
             value_length_opt: None,
         }),
         ergo_tree_version: tree.version,
+        ..ReductionContext::minimal(0, 0)
+    };
+    let limit = match JitCost::from_block_cost(1_000_000) {
+        Ok(l) => l,
+        Err(_) => return (Verdict::Reject("cost-limit".into()), consumed),
+    };
+    let mut cost = CostAccumulator::new(limit);
+    match reduce_expr_with_cost(&tree.body, &ctx, &tree.constants, &mut cost) {
+        Ok(sb) => {
+            let mut w = VlqWriter::new();
+            if let Err(e) = ergo_ser::sigma_value::write_sigma_boolean(&mut w, &sb) {
+                return (Verdict::Reject(format!("serialize: {e:?}")), consumed);
+            }
+            (
+                Verdict::Accept(format!(
+                    "P:{}|{}",
+                    to_hex(&w.result()),
+                    cost.total().value()
+                )),
+                consumed,
+            )
+        }
+        Err(e) => (Verdict::Reject(format!("{e:?}")), consumed),
+    }
+}
+
+/// Copy a parsed register block into the evaluator's lazy register slots
+/// (`registers[0]` is R4). Mirrors `ergo-validation`'s `copy_registers`; kept
+/// local so the harness does not depend on that crate's `test-helpers` feature.
+fn copy_registers(
+    regs: &ergo_ser::register::AdditionalRegisters,
+) -> [Option<ergo_ser::register::RegisterValue>; 6] {
+    let mut out: [Option<ergo_ser::register::RegisterValue>; 6] =
+        [None, None, None, None, None, None];
+    for (i, reg) in regs.registers.iter().take(6).enumerate() {
+        out[i] = Some(reg.clone());
+    }
+    out
+}
+
+/// `reduce_ctx`: the eval/cost differential over a `contextExtension ·
+/// ergoBoxCandidate` frame (see `crate::gen::ctx_expr`).
+///
+/// Where [`reduce_verdict`] pins an EMPTY context extension and a register-less
+/// SELF, this surface takes both from the WIRE and parses them with the real
+/// consensus readers. That is what makes it the differential home for the
+/// `EvaluatedValue` vocabulary: a node whose `ContextExtension` reader admits
+/// only `Constant` REJECTS a frame the reference reduces (reject-valid, #301),
+/// and a node whose `getVar` hands a `Tuple` node back with pair semantics
+/// ACCEPTS a reduction the reference refuses (accept-invalid, the other arm of
+/// the same fix).
+///
+/// Everything else — the dummy pre-header, the cost limit, the activated
+/// version — matches [`reduce_verdict`] field-for-field, so the two surfaces
+/// differ in exactly one variable.
+fn reduce_ctx_verdict(bytes: &[u8]) -> (Verdict, usize) {
+    use ergo_primitives::cost::{CostAccumulator, JitCost};
+    use ergo_primitives::digest::ModifierId;
+    use ergo_ser::ergo_box::{serialize_ergo_box, ErgoBox};
+    use ergo_sigma::evaluator::{reduce_expr_with_cost, EvalBox, ReductionContext};
+
+    let mut r = VlqReader::new(bytes);
+    let extension = match ergo_ser::input::read_context_extension(&mut r) {
+        Ok(e) => e,
+        Err(e) => return (Verdict::Reject(format!("extension: {e:?}")), r.position()),
+    };
+    let candidate = match ergo_ser::ergo_box::read_ergo_box_candidate(&mut r) {
+        Ok(c) => c,
+        Err(e) => return (Verdict::Reject(format!("box: {e:?}")), r.position()),
+    };
+    let consumed = r.position();
+
+    // Full-consensus surface: curve-check every group element the parse saw
+    // (extension values and register values included), matching the JVM's
+    // deserialize-time `GroupElementSerializer` check.
+    if let Err(e) = drain_and_check_group_elements(&mut r) {
+        return (Verdict::Reject(e), consumed);
+    }
+
+    let tree = candidate.ergo_tree().clone();
+    for gate in [
+        ergo_ser::ergo_tree::check_header_size_bit as fn(&_) -> _,
+        ergo_ser::ergo_tree::check_tree_version_supported,
+        ergo_ser::ergo_tree::check_resolvable_methods,
+        ergo_ser::ergo_tree::check_sigma_prop_root,
+    ] {
+        if let Err(e) = gate(&tree) {
+            return (Verdict::Reject(format!("{e:?}")), consumed);
+        }
+    }
+    if matches!(tree.body, ergo_ser::opcode::Expr::Unparsed(_)) {
+        return (Verdict::Reject("UnparsedErgoTree".into()), consumed);
+    }
+
+    // SELF is the parsed box at transaction id 0…0, index 0 — the same identity
+    // `reduce`'s dummy SELF uses, so a script reading SELF.id / SELF.bytes gets a
+    // value derived from the real box bytes on both sides.
+    let boxed = ErgoBox {
+        candidate: candidate.clone(),
+        transaction_id: ModifierId::from_bytes([0u8; 32]),
+        index: 0,
+    };
+    let raw_bytes = match serialize_ergo_box(&boxed) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                Verdict::Reject(format!("SELF serialization: {e:?}")),
+                consumed,
+            )
+        }
+    };
+    let id = match boxed.box_id() {
+        Ok(d) => *d.as_bytes(),
+        Err(e) => return (Verdict::Reject(format!("SELF id: {e:?}")), consumed),
+    };
+    let self_box = EvalBox {
+        value: candidate.value as i64,
+        script_bytes: candidate.ergo_tree_bytes().to_vec(),
+        creation_height: candidate.creation_height,
+        id,
+        transaction_id: [0u8; 32],
+        output_index: 0,
+        registers: copy_registers(&candidate.additional_registers),
+        tokens: candidate
+            .tokens
+            .iter()
+            .map(|t| (*t.token_id.as_bytes(), t.amount))
+            .collect(),
+        raw_bytes,
+        register_bytes: candidate.register_bytes().to_vec(),
+    };
+    let inputs = [self_box];
+    let ctx = ReductionContext {
+        self_box: Some(&inputs[0]),
+        inputs: &inputs,
+        pre_header_version: 4,
+        pre_header_timestamp: 3,
+        miner_pubkey: ergo_sigma::evaluator::SECP256K1_GENERATOR,
+        last_block_utxo_root: Some(ergo_ser::sigma_value::AvlTreeData {
+            digest: vec![0u8; 33],
+            insert_allowed: true,
+            update_allowed: true,
+            remove_allowed: true,
+            key_length: 32,
+            value_length_opt: None,
+        }),
+        ergo_tree_version: tree.version,
+        extension: extension.values,
         ..ReductionContext::minimal(0, 0)
     };
     let limit = match JitCost::from_block_cost(1_000_000) {

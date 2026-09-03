@@ -818,6 +818,8 @@ fn run_oracle_repro_minimize(
 fn structured_oracle_bytes(seed: u64, iter: u64, oracle_surface: &str) -> Vec<u8> {
     let gen_surface = match oracle_surface {
         "reduce" => "sigma_expr",
+        // `reduce_ctx` consumes a `contextExtension · ergoBoxCandidate` frame.
+        "reduce_ctx" => "ctx_expr",
         // `validate` (stateless-tx) parses a transaction first, so it needs
         // transaction-shaped bytes — without this it falls back to `ergo_tree`
         // and both sides reject immediately (no differential signal).

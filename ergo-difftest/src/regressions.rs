@@ -117,15 +117,39 @@ impl Triage {
 // Classification
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Parse surfaces for which the `reduce`-reconciliation rule applies.
-const PARSE_SURFACES: &[&str] = &["ergo_tree", "ergo_box_candidate", "transaction", "header"];
+/// The reduction surface a parse-surface divergence is reconciled against, and
+/// how to turn the parse-surface bytes into an input for it.
+///
+/// Reconciliation is only meaningful when the SAME bytes can be handed to a
+/// surface that actually EVALUATES them:
+///
+/// * `ergo_tree` bytes are a script → `reduce` consumes them directly.
+/// * `ergo_box_candidate` bytes are a box → prefixing an empty context
+///   extension (`0x00`) makes them a `reduce_ctx` frame, which reduces the
+///   box's own script with the box as SELF (registers included).
+///
+/// `transaction` and `header` bytes are NEITHER. Feeding them to `reduce` makes
+/// both sides reject on the first byte, which "agrees" for a reason that has
+/// nothing to do with the finding — so a real transaction-surface divergence
+/// (e.g. a context-extension value the node refuses to parse) would be filed
+/// as benign. Those surfaces therefore have no reconciliation channel and stay
+/// `Pending` for a human.
+fn reduction_channel(surface: &str) -> Option<(&'static str, &'static [u8])> {
+    match surface {
+        "ergo_tree" => Some(("reduce", &[])),
+        "ergo_box_candidate" => Some(("reduce_ctx", &[0x00])),
+        _ => None,
+    }
+}
 
 /// Classify a minimized divergence.
 ///
-/// **Key rule**: for a divergence on a parse surface, run `diff` on the
-/// `reduce` surface for the same bytes.  If `reduce` agrees → `KnownArtifact`.
-/// If `reduce` also diverges → `Pending`.  A divergence that is already on the
-/// `reduce` surface is always `Pending`.
+/// **Key rule**: for a parse-surface divergence with a reduction channel (see
+/// [`reduction_channel`]), re-run `diff` on that channel for the same bytes. If
+/// the reduction **agrees**, the parse-surface divergence is a
+/// [`Triage::KnownArtifact`] — the node retains original wire bytes / defers the
+/// curve-check, so the difference is benign. If the reduction **also diverges**,
+/// or the surface has no reduction channel, the record is [`Triage::Pending`].
 ///
 /// This function never sets a which-side-is-right verdict.
 pub fn classify(
@@ -133,27 +157,23 @@ pub fn classify(
     minimized_input: &[u8],
     oracle: &mut Oracle,
 ) -> io::Result<Triage> {
-    if PARSE_SURFACES.contains(&spec.name) {
-        // Find the reduce spec from the oracle surface list.
-        let reduce_spec = oracle_surfaces()
-            .into_iter()
-            .find(|s| s.name == "reduce")
-            .expect("reduce surface is always present in oracle_surfaces()");
+    let Some((channel, prefix)) = reduction_channel(spec.name) else {
+        return Ok(Triage::Pending);
+    };
+    let channel_spec = oracle_surfaces()
+        .into_iter()
+        .find(|s| s.name == channel)
+        .expect("reduction channel surfaces are always present in oracle_surfaces()");
+    let mut input = Vec::with_capacity(prefix.len() + minimized_input.len());
+    input.extend_from_slice(prefix);
+    input.extend_from_slice(minimized_input);
 
-        return match diff(&reduce_spec, minimized_input, oracle)? {
-            // reduce agrees → known parse-surface artifact.
-            None => Ok(Triage::KnownArtifact(
-                "reconciles on reduce: parse-surface only, node retains original bytes / defers curve-check"
-                    .to_string(),
-            )),
-            // reduce also diverges → genuine candidate.
-            Some(_) => Ok(Triage::Pending),
-        };
+    match diff(&channel_spec, &input, oracle)? {
+        None => Ok(Triage::KnownArtifact(format!(
+            "reconciles on {channel}: parse-surface only, node retains original bytes / defers curve-check"
+        ))),
+        Some(_) => Ok(Triage::Pending),
     }
-
-    // reduce-surface divergences (and anything not in PARSE_SURFACES) are
-    // always Pending.
-    Ok(Triage::Pending)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

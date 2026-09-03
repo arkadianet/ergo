@@ -66,6 +66,7 @@ declare -A BUG_TRIGGER=()
 declare -A BUG_EXPECTED=()
 declare -A BUG_ITERS=()
 declare -A BUG_SURFACE=()
+declare -A BUG_BLOCKED=()
 
 _cur_id=""
 _cur_class=""
@@ -74,6 +75,7 @@ _cur_trigger=""
 _cur_expected=""
 _cur_iters="50000"
 _cur_surface=""
+_cur_blocked=""
 
 flush_bug() {
     if [[ -n "$_cur_id" ]]; then
@@ -84,6 +86,7 @@ flush_bug() {
         BUG_EXPECTED["$_cur_id"]="$_cur_expected"
         BUG_ITERS["$_cur_id"]="$_cur_iters"
         BUG_SURFACE["$_cur_id"]="$_cur_surface"
+        BUG_BLOCKED["$_cur_id"]="$_cur_blocked"
     fi
     _cur_id=""
     _cur_class=""
@@ -92,6 +95,7 @@ flush_bug() {
     _cur_expected=""
     _cur_iters="50000"
     _cur_surface=""
+    _cur_blocked=""
 }
 
 toml_val() {
@@ -131,6 +135,9 @@ while IFS= read -r line; do
             ;;
         surface\ *=*)
             _cur_surface="$(toml_val "$line")"
+            ;;
+        blocked_on\ *=*)
+            _cur_blocked="$(toml_val "$line")"
             ;;
     esac
 done < "$MANIFEST"
@@ -182,6 +189,17 @@ for id in "${BUG_IDS[@]}"; do
     trigger="${BUG_TRIGGER[$id]}"
     patch_file="$PATCHES_DIR/${id}.patch"
     class="${BUG_CLASS[$id]}"
+
+    # An entry whose FIX is not on this branch cannot assert a clean HEAD: the
+    # bug IS the current behaviour, so step 1 would fail by construction. Skip
+    # with the blocker named, so the entry stays armed and self-documenting
+    # until the fix lands.
+    blocked="${BUG_BLOCKED[$id]:-}"
+    if [[ -n "$blocked" ]]; then
+        echo "[SKIP] $id: blocked on $blocked (fix not present on this branch — clean-HEAD assertion cannot hold)"
+        ((SKIP++)) || true
+        continue
+    fi
 
     # SD bugs and WR bugs without trigger_hex cannot be gated here
     if [[ "$wr" != "true" ]]; then

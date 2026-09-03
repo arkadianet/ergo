@@ -72,10 +72,13 @@ object ErgoSerdeOracle {
     votes = Colls.fromArray(Array.fill(3)(0: Byte))
   )
 
-  private def dummyReduceContext(tree: ErgoTree, activatedVersion: Byte): ErgoLikeContext = {
-    val selfBox = new ErgoBox(
-      value = 1000000L, ergoTree = tree,
-      transactionId = bytesToId(Array.fill(32)(0: Byte)), index = 0.toShort, creationHeight = 0)
+  // SELF + the surrounding context. `selfBox` and `extension` are the two knobs
+  // the surfaces differ in: `reduce` pins a register-less box and an EMPTY
+  // extension, `reduce_ctx` takes BOTH from the wire.
+  private def reduceContext(
+      selfBox: ErgoBox,
+      extension: ContextExtension,
+      activatedVersion: Byte): ErgoLikeContext =
     new ErgoLikeContext(
       lastBlockUtxoRoot = AvlTreeData.dummy,
       headers = Colls.emptyColl[Header],
@@ -84,12 +87,18 @@ object ErgoSerdeOracle {
       boxesToSpend = IndexedSeq(selfBox),
       spendingTransaction = ErgoLikeTransaction(IndexedSeq(), IndexedSeq()),
       selfIndex = 0,
-      extension = ContextExtension.empty,
+      extension = extension,
       validationSettings = ValidationRules.currentSettings,
       costLimit = DefaultEvalSettings.scriptCostLimitInEvaluator,
       initCost = 0L,
       activatedScriptVersion = activatedVersion
-    ).withErgoTreeVersion(tree.version)
+    ).withErgoTreeVersion(selfBox.ergoTree.version)
+
+  private def dummyReduceContext(tree: ErgoTree, activatedVersion: Byte): ErgoLikeContext = {
+    val selfBox = new ErgoBox(
+      value = 1000000L, ergoTree = tree,
+      transactionId = bytesToId(Array.fill(32)(0: Byte)), index = 0.toShort, creationHeight = 0)
+    reduceContext(selfBox, ContextExtension.empty, activatedVersion)
   }
 
   // Canonical repr of the reduced root: a SigmaProp → its SigmaBoolean bytes (what
@@ -108,17 +117,38 @@ object ErgoSerdeOracle {
       throw new IllegalArgumentException("reduced root is not SigmaProp/Bool: " + other.getClass.getSimpleName)
   }
 
+  private def evalIn(ctx: ErgoLikeContext, t: ErgoTree): String = {
+    val accu = new CostAccumulator(
+      JitCost.fromBlockCost(0),
+      Some(JitCost.fromBlockCost(Math.toIntExact(ctx.costLimit))))
+    val (v, _blockCost) = CErgoTreeEvaluator.eval(
+      ctx.toSigmaContext(), accu, t.constants,
+      t.toProposition(t.isConstantSegregation && t.hasDeserialize), DefaultEvalSettings)
+    "ACCEPT " + reduceRepr(v) + "|" + accu.totalCost.value
+  }
+
   private def reduce(bytes: Array[Byte]): String = {
     val t = tree.deserializeErgoTree(bytes)
     VersionContext.withVersions(3.toByte, t.version) {
-      val ctx = dummyReduceContext(t, 3.toByte)
-      val accu = new CostAccumulator(
-        JitCost.fromBlockCost(0),
-        Some(JitCost.fromBlockCost(Math.toIntExact(ctx.costLimit))))
-      val (v, _blockCost) = CErgoTreeEvaluator.eval(
-        ctx.toSigmaContext(), accu, t.constants,
-        t.toProposition(t.isConstantSegregation && t.hasDeserialize), DefaultEvalSettings)
-      "ACCEPT " + reduceRepr(v) + "|" + accu.totalCost.value
+      evalIn(dummyReduceContext(t, 3.toByte), t)
+    }
+  }
+
+  // ── reduce_ctx surface: `contextExtension · ergoBoxCandidate` frame ────────
+  // Both halves are self-delimiting, so ONE reader consumes them in sequence.
+  // The frame exists so the two positions Scala parses as an `EvaluatedValue`
+  // — an input's context extension (`ContextExtension.scala:59`) and a box's
+  // registers — come from the WIRE, and the box's ergoTree is the script that
+  // reads them. `reduce` can only ever exercise that vocabulary at parse; this
+  // surface exercises it through evaluation and cost as well.
+  private def reduceCtx(bytes: Array[Byte]): String = {
+    val r = SigmaSerializer.startReader(bytes)
+    val extension = ContextExtension.serializer.parse(r)
+    val candidate = ErgoBoxCandidate.serializer.parse(r)
+    val selfBox = candidate.toBox(bytesToId(Array.fill(32)(0: Byte)), 0.toShort)
+    val t = selfBox.ergoTree
+    VersionContext.withVersions(3.toByte, t.version) {
+      evalIn(reduceContext(selfBox, extension, 3.toByte), t)
     }
   }
 
@@ -162,6 +192,7 @@ object ErgoSerdeOracle {
               val h = HeaderSerializer.parseBytes(bytes)
               acc(hex(HeaderSerializer.toBytes(h)))
             case "reduce" => reduce(bytes)
+            case "reduce_ctx" => reduceCtx(bytes)
             case "mc_root" =>
               // MethodCall-root classifier for the typechecker-registry harness:
               // deserialize (checkType = true, like the box reader) and report
