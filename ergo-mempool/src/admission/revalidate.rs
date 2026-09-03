@@ -157,8 +157,13 @@ pub(crate) fn is_hard_invalid(err: &ValidationErr) -> bool {
 /// data-input box is such a failure.
 ///
 /// A reorg that restores the spent box can make the tx valid again; that is why
-/// `record_failed_tx` routes this class to the re-admittable unresolved-bytes
-/// cache rather than the blacklist, so the tx can simply be re-submitted.
+/// `record_failed_tx` routes this class to the unresolved-bytes cache rather
+/// than the blacklist. Note what that does and does not buy: the cache is a
+/// SUPPRESSION filter, so for `unresolved_cache_ttl_seconds` (60s) a re-submit
+/// of the same bytes is refused as `RecentlyUnresolved`; nothing re-admits the
+/// tx on its own. After that window it is freely re-submittable — unlike a
+/// blacklisted tx, which is refused for `invalidation_ttl_seconds` (4h) and
+/// stops being fetched over Inv.
 pub(crate) fn is_recheck_evictable(err: &ValidationErr) -> bool {
     is_hard_invalid(err) || matches!(err, ValidationErr::UnresolvedDataInput)
 }

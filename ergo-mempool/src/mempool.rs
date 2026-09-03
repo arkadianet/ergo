@@ -70,14 +70,15 @@ pub struct Mempool {
     /// every existing caller and test keeps working unchanged; the node
     /// wires a `Some(_)` after boot once the realtime bus exists.
     observer: Option<Arc<dyn MempoolObserver>>,
-    /// Descendants left pooled when a hard-invalid recheck cascade truncated
+    /// Descendants left pooled when an evicting recheck cascade truncated
     /// at `max_family_depth` (the [`OrderedPool::remove_with_descendants_frontier`]
-    /// frontier). Their hard-invalid ancestor is gone, so they are orphaned and
+    /// frontier). Their evicted ancestor is gone, so they are orphaned and
     /// must be dependency-evicted — but doing the whole family in one op would
     /// reintroduce the O(family) cost the depth cap prevents, so they are
     /// drained under the per-pass budget across successive recheck passes.
-    /// Only ever fed from the hard-invalid arm, so a transient
-    /// unresolved-input (demoted-parent) tx is never enqueued here.
+    /// Only ever fed from the `admission::is_recheck_evictable` arm (a hard
+    /// invalidity, or an unresolved DATA input), so a transient
+    /// unresolved-spend-input (demoted-parent) tx is never enqueued here.
     pending_orphan_eviction: Vec<TxId>,
     /// Brief holding store for orphans (child-before-parent) and held
     /// parents/singles (parent-before-child) that cannot be admitted yet.
@@ -902,7 +903,8 @@ impl Mempool {
     /// Validate a package child against an overlay that includes the held
     /// ancestors' outputs, charging the consumed cost to `CostBudgets` on BOTH
     /// the pass and fail paths (identical metering to normal admission — no
-    /// free oracle).
+    /// free oracle), with the same `DemotedFromBlock` exemption admission
+    /// applies.
     fn validate_package_child<V: Validator>(
         &mut self,
         c_bytes: &[u8],
@@ -927,8 +929,15 @@ impl Mempool {
         };
         let res = validator.validate(c_bytes, &overlay_view, &committed_view, &mut tx_cx);
         // Charge regardless of verdict — the invariant is that no staging
-        // operation runs script validation without charging CostBudgets.
-        self.budgets.charge(source.budget_source(), cost.consumed());
+        // operation runs script validation without charging CostBudgets. The one
+        // exemption mirrors `admission::check_capturing_held`: a demoted tx is
+        // our own re-admission after a rollback, already bounded by
+        // `revalidation_per_tick`, and charging it here would let a multi-tick
+        // drain exhaust the local budget and strand its own tail. Reachable only
+        // with `staging_enabled`.
+        if !matches!(source, TxSource::DemotedFromBlock) {
+            self.budgets.charge(source.budget_source(), cost.consumed());
+        }
         res
     }
 
@@ -1626,7 +1635,7 @@ impl Mempool {
         consumed
     }
 
-    /// Drain queued orphan evictions — descendants a hard-invalid cascade left
+    /// Drain queued orphan evictions — descendants an evicting cascade left
     /// pooled past the `max_family_depth` cap — bounded by the pass's remaining
     /// cost budget. Each is dependency-evicted with its own descendants; a
     /// removal that truncates again re-queues the deeper frontier, so a large

@@ -738,6 +738,36 @@ impl NodeConfig {
         if mempool_config.per_peer_cost_budget == 0 {
             return Err("[mempool] per_peer_cost_budget must be >= 1".into());
         }
+        // Cross-field sanity. Both checks judge only what the operator actually
+        // WROTE: lowering `global_cost_budget` alone must not fail the boot over
+        // a defaulted key nobody typed. A defaulted value that trips one of
+        // these is harmless anyway — an over-large per-peer cap simply never
+        // binds, and the shipped reserve is one `max_tx_cost`.
+        if let Some(per_peer) = tm.per_peer_cost_budget {
+            // A per-peer cap above the pool it draws from can never bind: the
+            // global gate always trips first, so ONE peer could spend the whole
+            // block's budget while the fairness split silently does nothing.
+            if per_peer > mempool_config.global_cost_budget {
+                return Err(format!(
+                    "[mempool] per_peer_cost_budget ({per_peer}) must not exceed \
+                     global_cost_budget ({}) — a larger value never binds, leaving one peer \
+                     able to spend the whole budget",
+                    mempool_config.global_cost_budget
+                ));
+            }
+        }
+        if let Some(reserve) = tm.local_reserved_cost_budget {
+            // The reserve is headroom for local work, not a second mempool.
+            // Bounding it against the shared pool catches a unit slip before it
+            // quietly multiplies the node's per-block validation work.
+            let max_local_reserve = mempool_config.global_cost_budget.saturating_mul(4);
+            if reserve > max_local_reserve {
+                return Err(format!(
+                    "[mempool] local_reserved_cost_budget ({reserve}) must not exceed \
+                     4x global_cost_budget ({max_local_reserve})"
+                ));
+            }
+        }
         if mempool_config.invalidation_cache_size == 0 {
             return Err("[mempool] invalidation_cache_size must be >= 1".into());
         }

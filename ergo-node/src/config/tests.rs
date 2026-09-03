@@ -658,6 +658,89 @@ fn mempool_zero_local_reserve_accepted() {
 }
 
 #[test]
+fn mempool_per_peer_budget_above_global_rejected() {
+    // A per-peer cap larger than the pool it draws from never binds — the
+    // global gate trips first, so the fairness split would be inert.
+    let path = write_toml(
+        "[mempool]\n\
+         global_cost_budget = 1000000\n\
+         per_peer_cost_budget = 2000000\n\
+         \n[peers]\nknown = [\"127.0.0.1:9030\"]\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let err = NodeConfig::load(cli).expect_err("should reject a non-binding per-peer cap");
+    assert!(err.contains("per_peer_cost_budget"), "error: {err}");
+}
+
+#[test]
+fn mempool_per_peer_budget_equal_to_global_accepted() {
+    // Equal is the degenerate-but-meaningful case: one peer may spend the
+    // whole pool, which is a choice, not a typo.
+    let path = write_toml(
+        "[mempool]\n\
+         global_cost_budget = 1000000\n\
+         per_peer_cost_budget = 1000000\n\
+         \n[peers]\nknown = [\"127.0.0.1:9030\"]\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let cfg = NodeConfig::load(cli).expect("load");
+    assert_eq!(cfg.mempool_config.per_peer_cost_budget, 1_000_000);
+}
+
+#[test]
+fn mempool_oversized_local_reserve_rejected() {
+    // More than 4x the shared pool reads as a unit slip, not a policy choice.
+    let path = write_toml(
+        "[mempool]\n\
+         global_cost_budget = 1000000\n\
+         per_peer_cost_budget = 1000000\n\
+         local_reserved_cost_budget = 5000000\n\
+         \n[peers]\nknown = [\"127.0.0.1:9030\"]\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let err = NodeConfig::load(cli).expect_err("should reject an oversized local reserve");
+    assert!(err.contains("local_reserved_cost_budget"), "error: {err}");
+}
+
+#[test]
+fn mempool_local_reserve_at_the_bound_accepted() {
+    let path = write_toml(
+        "[mempool]\n\
+         global_cost_budget = 1000000\n\
+         per_peer_cost_budget = 1000000\n\
+         local_reserved_cost_budget = 4000000\n\
+         \n[peers]\nknown = [\"127.0.0.1:9030\"]\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let cfg = NodeConfig::load(cli).expect("load");
+    assert_eq!(cfg.mempool_config.local_reserved_cost_budget, 4_000_000);
+}
+
+#[test]
+fn mempool_lowering_global_budget_alone_does_not_trip_cross_field_checks() {
+    // The cross-field checks judge only explicitly configured keys: an
+    // operator who lowers global_cost_budget must not be refused a boot over
+    // the DEFAULT per-peer cap or local reserve, which they never typed.
+    let path = write_toml(
+        "[mempool]\n\
+         global_cost_budget = 1000000\n\
+         \n[peers]\nknown = [\"127.0.0.1:9030\"]\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let cfg = NodeConfig::load(cli).expect("load");
+    let def = MempoolConfig::default();
+    assert_eq!(cfg.mempool_config.global_cost_budget, 1_000_000);
+    assert_eq!(
+        cfg.mempool_config.per_peer_cost_budget,
+        def.per_peer_cost_budget
+    );
+    assert_eq!(
+        cfg.mempool_config.local_reserved_cost_budget,
+        def.local_reserved_cost_budget
+    );
+}
+
+#[test]
 fn mempool_zero_cleanup_cost_mult_rejected() {
     // 0 would silently disable the tip-revalidation pass entirely.
     let path =

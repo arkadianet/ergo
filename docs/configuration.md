@@ -208,7 +208,16 @@ box state, i.e. under `state_type = "digest"` or
 The cost budgets below are anti-DoS bounds on how much script-evaluation
 work the node will do per block. They are node-local policy: they never
 affect which blocks the node accepts, and the Scala reference node has no
-equivalent gate on this path at all.
+equivalent gate on this path at all. `global_cost_budget` is a pool shared
+by peers and local submissions; `local_reserved_cost_budget` is an extra
+slice only local submissions can reach, and which they spend first. The
+per-block total is therefore bounded at the sum of the two.
+
+Two cross-field rules are enforced at load, and only against keys you set
+explicitly (lowering `global_cost_budget` alone never fails the boot over a
+defaulted key): `per_peer_cost_budget` must not exceed
+`global_cost_budget`, and `local_reserved_cost_budget` must not exceed four
+times it.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -221,9 +230,9 @@ equivalent gate on this path at all.
 | `max_tx_cost` | u64 | `4900000` | Maximum single-transaction cost (matches the Scala mainnet override). Must be at least 1. |
 | `ibd_gate_block_lag` | u32 | `10` | Block-lag threshold that gates mempool admission while the node is still catching up during initial sync. |
 | `rebroadcast_count` | usize | `3` | Number of surviving unconfirmed transactions re-advertised per tip-change recheck (Scala `MempoolAuditor` `rebroadcastCount`). Re-broadcast rotates oldest-`last_checked_at` first. `0` disables re-broadcast. |
-| `global_cost_budget` | u64 | `12000000` | Per-block validation-cost budget that REMOTE peers contend for, in aggregate. Once spent, every peer is refused until the next block. Must be at least 1. Local submissions are accounted separately and never shrink it. |
-| `per_peer_cost_budget` | u64 | `10000000` | Per-block validation-cost budget a single peer may spend, within `global_cost_budget`. Must be at least 1. |
-| `local_reserved_cost_budget` | u64 | `4900000` (one `max_tx_cost`) | Per-block validation-cost headroom reserved for node-LOCAL submissions (`POST /transactions*`, wallet), **on top of** `global_cost_budget`. Peers cannot reach it, so a peer flooding the node to its global cap cannot starve the operator's own transactions — at least one maximum-cost local transaction is always validated per block. `0` restores a single shared pool, i.e. peer traffic can again block local submissions. |
+| `global_cost_budget` | u64 | `12000000` | The shared per-block validation-cost pool. Peers draw on it, and so does local work once its reserve is gone. Once spent, every peer is refused until the next block. Must be at least 1. |
+| `per_peer_cost_budget` | u64 | `10000000` | Per-block validation-cost budget a single peer may spend, within `global_cost_budget`. Must be at least 1, and not more than `global_cost_budget` when set explicitly (a larger value could never bind). |
+| `local_reserved_cost_budget` | u64 | `4900000` (one `max_tx_cost`) | Extra per-block validation-cost slice for node-LOCAL submissions (`POST /transactions*`, wallet), spent **before** the shared pool and reachable by nothing else. A peer flooding the node cannot starve the operator's own transactions — at least one maximum-cost local transaction is always validated per block. Local work beyond the reserve competes with peers for what is left of `global_cost_budget`, so the per-block total never exceeds the sum of the two. `0` restores a single shared pool, i.e. peer traffic can again block local submissions. When set explicitly it may not exceed four times `global_cost_budget`. |
 | `invalidation_cache_size` | usize | `10000` | Maximum remembered invalidated transaction ids. Matches Scala `invalidModifiersCacheSize`. Must be at least 1. |
 | `invalidation_ttl_seconds` | u64 | `14400` (4 h) | How long an invalidated transaction id is remembered and its re-download suppressed. Matches Scala `invalidModifiersCacheExpiration = 4h`. Must be at least 1. Ergo transaction ids do not cover spending proofs, so a peer can invalidate an id by relaying a proof-corrupted variant of a transaction that has not been seen yet; the honest transaction is then refused for this long. The window is identical in the reference node, so shortening it here is a deliberate divergence — it trades that exposure for more re-validation of genuinely invalid transactions. |
 | `cleanup_cost_mult` | u64 | `6` | Per-pass cost budget for the tip-revalidation (recheck-and-evict) pass, as a multiplier on the live `max_block_cost`. Transactions not reached in a pass are deferred to later blocks, oldest-checked first. Must be at least 1 (`0` would disable the pass). |

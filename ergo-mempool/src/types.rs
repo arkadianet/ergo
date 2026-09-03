@@ -39,9 +39,10 @@ impl TxSource {
 
     /// Which cost-budget pool this source draws on. Everything that is not a
     /// remote peer is LOCAL: `Api` and `Wallet` are the operator's own work,
-    /// and `DemotedFromBlock` is our own rollback drain (budget-exempt before
-    /// it ever reaches [`crate::budget::CostBudgets`], so its mapping here is
-    /// never consulted).
+    /// and `DemotedFromBlock` is our own rollback drain — budget-exempt at
+    /// every site that charges (`admission::check_capturing_held` and
+    /// `Mempool::validate_package_child`), so its mapping here is never
+    /// consulted.
     pub fn budget_source(&self) -> crate::budget::BudgetSource {
         match self {
             TxSource::Peer(p) => crate::budget::BudgetSource::Peer(*p),

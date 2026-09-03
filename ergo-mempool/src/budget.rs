@@ -6,13 +6,19 @@
 //! peer cannot force script evaluation on an exhausted node. All
 //! budgets reset on every `ApplyBlock` event.
 //!
-//! Remote and local traffic draw on SEPARATE pools. Peer-sourced txs
-//! contend for `global_cap` among themselves; node-local submissions
-//! (`TxSource::Api` / `TxSource::Wallet`) may additionally draw on
-//! `local_reserved`, which no peer can ever touch. Without that split a
-//! single flooding peer that spends the whole shared global budget also
-//! blocks the operator's own `POST /transactions` submissions until the
-//! next block. Scala has no cost budget on this path at all: a
+//! There are two pools, not two independent budgets. `global_cap` is a
+//! SHARED pool both peers and local submissions draw on; `local_reserved`
+//! is an extra slice only node-local submissions (`TxSource::Api` /
+//! `TxSource::Wallet`) can reach, and they spend it FIRST. So a single
+//! flooding peer that drains the shared pool still cannot block the
+//! operator's own `POST /transactions` (the reserve is untouched), while
+//! the per-block total stays bounded at `global_cap + local_reserved` —
+//! local traffic that spills past its reserve competes with peers for what
+//! is left of the shared pool, exactly as it did before the reserve
+//! existed. Gating each pool independently would instead grant a full
+//! allowance to each side and inflate the real ceiling.
+//!
+//! Scala has no cost budget on this path at all: a
 //! `LocallyGeneratedTransaction` goes straight to `txModify`
 //! (`ErgoNodeViewHolder.scala:659`), so reserving headroom for local
 //! work moves us TOWARD the reference node, not away from it.
@@ -34,8 +40,8 @@ pub enum BudgetVerdict {
 /// Which pool a transaction's validation cost is charged against.
 ///
 /// `TxSource::DemotedFromBlock` has no variant here: demoted re-admission is
-/// budget-exempt upstream in `admission::check_capturing_held` and never
-/// reaches these counters.
+/// budget-exempt at every charging site (`admission::check_capturing_held`,
+/// `Mempool::validate_package_child`) and never reaches these counters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BudgetSource {
     /// Remote traffic from `peer`. Contends for `global_cap` with every
@@ -79,8 +85,8 @@ impl CostBudgets {
         self.remote_consumed.saturating_add(self.local_consumed)
     }
 
-    /// Cost charged by remote peers this block — the figure the peer-facing
-    /// global gate compares against `global_cap`.
+    /// Cost charged by remote peers this block. Observational — the peer gate
+    /// compares `shared_consumed()` (this plus local overflow) to `global_cap`.
     pub fn remote_consumed(&self) -> u64 {
         self.remote_consumed
     }
@@ -89,10 +95,16 @@ impl CostBudgets {
         self.per_peer_consumed.get(peer).copied().unwrap_or(0)
     }
 
-    /// The ceiling a local submission is gated on: the peer-contended cap
-    /// plus the reserve peers cannot reach.
-    fn local_cap(&self) -> u64 {
-        self.global_cap.saturating_add(self.local_reserved)
+    /// How much of the SHARED pool has been spent: everything peers charged,
+    /// plus whatever local work spilled past its reserve. Locals draw on the
+    /// reserve first, so the first `local_reserved` of local cost is invisible
+    /// here — that is what makes the reserve unreachable by peers. Both gates
+    /// read this one figure, which is what bounds the per-block total at
+    /// `global_cap + local_reserved` rather than letting the two pools grant a
+    /// full allowance each.
+    fn shared_consumed(&self) -> u64 {
+        self.remote_consumed
+            .saturating_add(self.local_consumed.saturating_sub(self.local_reserved))
     }
 
     /// Pre-validation gate. Returns whether a new tx of unknown cost
@@ -130,7 +142,7 @@ impl CostBudgets {
     fn verdict(&self, source: BudgetSource) -> BudgetVerdict {
         match source {
             BudgetSource::Peer(p) => {
-                if self.remote_consumed >= self.global_cap {
+                if self.shared_consumed() >= self.global_cap {
                     return BudgetVerdict::GlobalExhausted;
                 }
                 if self.peer_consumed(&p) >= self.per_peer_cap {
@@ -139,7 +151,12 @@ impl CostBudgets {
                 BudgetVerdict::Ok
             }
             BudgetSource::Local => {
-                if self.global_consumed() >= self.local_cap() {
+                // The reserve, plus however much of the shared pool the peers
+                // have left. Written against `local_consumed` (not the overflow)
+                // so that a local source with its reserve still intact is
+                // admitted even when peers have drained the shared pool.
+                let shared_left = self.global_cap.saturating_sub(self.remote_consumed);
+                if self.local_consumed >= self.local_reserved.saturating_add(shared_left) {
                     return BudgetVerdict::GlobalExhausted;
                 }
                 BudgetVerdict::Ok
@@ -205,17 +222,31 @@ mod tests {
     }
 
     #[test]
-    fn local_charges_leave_the_peer_allowance_intact() {
-        let mut b = budgets();
+    fn local_charges_within_the_reserve_leave_the_peer_pool_untouched() {
+        // Locals spend the reserve FIRST, so reserve-sized local work is
+        // invisible to the shared pool the peers draw on.
+        let mut b = CostBudgets::new(1_000, 1_000, 500);
         b.charge(BudgetSource::Local, 500);
         assert_eq!(b.global_consumed(), 500);
         assert_eq!(b.remote_consumed(), 0, "local work is not peer work");
         assert!(b.per_peer_consumed.is_empty());
+        assert_eq!(b.shared_consumed(), 0, "spent entirely out of the reserve");
+        assert_eq!(b.pre_admission_check(src(1)), BudgetVerdict::Ok);
+    }
+
+    #[test]
+    fn local_spending_past_the_reserve_draws_on_the_shared_pool() {
+        // The reserve is a head start, not a second budget: once it is gone,
+        // local work competes with peers for the shared pool, which is what
+        // bounds the per-block total at global_cap + local_reserved.
+        let mut b = CostBudgets::new(1_000, 1_000, 200);
+        b.charge(BudgetSource::Local, 700);
         assert_eq!(
-            b.pre_admission_check(src(1)),
-            BudgetVerdict::Ok,
-            "peers keep their full global_cap regardless of local traffic"
+            b.shared_consumed(),
+            500,
+            "200 came from the reserve, 500 from the shared pool"
         );
+        assert_eq!(b.pre_admission_check(src(1)), BudgetVerdict::Ok);
     }
 
     #[test]
@@ -294,8 +325,6 @@ mod tests {
         assert_eq!(b.pre_admission_check(src(1)), BudgetVerdict::Ok);
     }
 
-    // ----- local reserve -----
-
     #[test]
     fn flooding_peer_at_full_global_cap_still_leaves_local_headroom() {
         // The red-team scenario: one peer spends the entire peer-contended
@@ -343,16 +372,53 @@ mod tests {
     }
 
     #[test]
-    fn local_spending_never_exhausts_the_peer_budget() {
-        // Local work is charged to its own counter, so even a local burst far
-        // past global_cap leaves peers their full allowance.
+    fn locals_first_then_peers_get_only_the_rest_of_the_shared_pool() {
+        // Reverse order of the flood case: local work runs to exhaustion
+        // FIRST. It may spend reserve + the whole shared pool, and a peer
+        // arriving afterwards must NOT find a fresh global_cap — otherwise the
+        // per-block validation work would be global_cap + reserve + global_cap.
         let mut b = CostBudgets::new(1_000, 1_000, 200);
         b.charge(BudgetSource::Local, 1_200);
         assert_eq!(
             b.pre_admission_check(BudgetSource::Local),
-            BudgetVerdict::GlobalExhausted
+            BudgetVerdict::GlobalExhausted,
+            "locals bounded at reserve + shared pool"
         );
+        assert_eq!(
+            b.shared_consumed(),
+            1_000,
+            "1_200 local = 200 reserve + the whole 1_000 shared pool"
+        );
+        assert_eq!(
+            b.pre_admission_check(src(1)),
+            BudgetVerdict::GlobalExhausted,
+            "the shared pool is gone; a peer does not get a fresh allowance"
+        );
+        assert_eq!(
+            b.global_consumed(),
+            1_200,
+            "total per-block work is capped at global_cap + local_reserved"
+        );
+    }
+
+    #[test]
+    fn partial_local_overflow_leaves_peers_only_the_remainder() {
+        // 500 local against a 200 reserve spends 300 of the 1_000 shared pool;
+        // a peer may then still spend the remaining 700, and no more.
+        let mut b = CostBudgets::new(1_000, 1_000, 200);
+        b.charge(BudgetSource::Local, 500);
         assert_eq!(b.pre_admission_check(src(1)), BudgetVerdict::Ok);
+        b.charge(src(1), 700);
+        assert_eq!(
+            b.pre_admission_check(src(1)),
+            BudgetVerdict::GlobalExhausted,
+            "shared pool exactly spent by 300 local overflow + 700 peer"
+        );
+        assert_eq!(
+            b.global_consumed(),
+            1_200,
+            "never more than global_cap + local_reserved"
+        );
     }
 
     #[test]
