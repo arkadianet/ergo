@@ -80,6 +80,12 @@ pub struct NodeConfig {
     pub data_dir: PathBuf,
     pub known_peers: Vec<SocketAddr>,
     pub peer_limits: ergo_p2p::peer_manager::PeerLimits,
+    /// `[peers] allow_local` — whether local-network addresses may be
+    /// learned by gossip, dialed, and gossiped onward. Default `false`,
+    /// matching Scala `scorex.network.allowLocal`. Configured
+    /// `known_peers` bypass it (they are seed-origin and always
+    /// dialable); this governs only *learned* addresses.
+    pub allow_local: bool,
     /// Address to bind our inbound TCP listener on. `None` → outbound
     /// only (no inbound listener spawned). When present, the node
     /// accepts inbound peers up to `peer_limits.max_inbound()`.

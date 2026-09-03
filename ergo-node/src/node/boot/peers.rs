@@ -19,11 +19,14 @@ use crate::config::NodeConfig;
 pub(super) fn setup(config: &NodeConfig) -> (i64, PeerManager) {
     let session_id: i64 = rand_session_id();
     let mut peer_manager = PeerManager::new_with_limits(session_id, config.peer_limits);
+    // Set before any address is restored, learned, or dialed: it decides
+    // which addresses the routability filter admits.
+    peer_manager.set_allow_local(config.allow_local);
 
     match AddressBook::open(&config.data_dir) {
         Ok(book) => {
             let book = std::sync::Arc::new(book);
-            match book.load_all() {
+            match book.load_all(config.allow_local) {
                 Ok(state) => {
                     let mono_now = std::time::Instant::now();
                     let wall_now = std::time::SystemTime::now();
@@ -71,6 +74,7 @@ pub(super) fn setup(config: &NodeConfig) -> (i64, PeerManager) {
     }
     tracing::info!(
         known_peers = config.known_peers.len(),
+        allow_local = config.allow_local,
         "known peers configured"
     );
     tracing::info!(

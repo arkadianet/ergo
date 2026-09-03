@@ -21,6 +21,12 @@ target_outbound = 96
 max_connections = 384
 # max_inbound defaults to 256 — an independent inbound budget, so a full
 # outbound set never reduces inbound capacity.
+# allow_local defaults to false: addresses on the local network (loopback,
+# RFC1918, link-local, IPv6 unique-local, carrier-grade NAT) are not learned
+# from gossip, dialed, or shared. Set it true for a LAN devnet whose peers
+# must discover each other over private addresses. Addresses listed in
+# `known` above are dialed regardless of this setting.
+# allow_local = false
 # The bundled mainnet seed peers are merged in automatically; add your own here.
 
 [api]

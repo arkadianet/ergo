@@ -8,7 +8,7 @@ use std::time::Instant;
 use ergo_api::SubmitError;
 use ergo_p2p::handshake::PeerFeature;
 use ergo_p2p::message;
-use ergo_p2p::peer::{PeerId, SyncVersion};
+use ergo_p2p::peer::{Direction, PeerId, SyncVersion};
 use ergo_p2p::peer_manager::ConnectError;
 use ergo_p2p::types::ModifierTypeId;
 use ergo_primitives::reader::VlqReader;
@@ -311,6 +311,10 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
             }
 
             state.peer_manager.mark_tcp_connected(&addr);
+            // Read the direction before admission: a rejected handshake
+            // removes the peer entry, and the failure arm below needs to
+            // know whether this connection was ours to begin with.
+            let direction = state.peer_manager.get(&addr).map(|p| p.direction);
             match state
                 .peer_manager
                 .complete_handshake(&addr, peer_spec.clone(), session_id, now)
@@ -380,7 +384,16 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
                         warn!(peer = %addr, error = %e, reason = reason, "handshake not admitted");
                     }
                     state.peer_manager.disconnect(&addr);
-                    state.peer_manager.mark_dial_failed(&addr, now);
+                    // Only a connection we dialed can fail a dial. An
+                    // inbound peer's `addr` is its ephemeral client port,
+                    // which we never chose to dial and must never book
+                    // backoff against (issue #298 review, P1-1).
+                    // `mark_dial_failed` independently ignores addresses
+                    // outside the dial pool; this states the intent at
+                    // the call site rather than relying on that.
+                    if direction != Some(Direction::Inbound) {
+                        state.peer_manager.mark_dial_failed(&addr, now);
+                    }
                     return;
                 }
             }

@@ -114,6 +114,10 @@ impl NodeConfig {
                 .per_subnet_limit
                 .unwrap_or(ergo_p2p::peer_manager::DEFAULT_PER_SUBNET_LIMIT),
         };
+        // Scala's `scorex.network.allowLocal`, default false
+        // (`application.conf:492`). Governs *learned* addresses only —
+        // `known_peers` above are seed-origin and stay dialable either way.
+        let allow_local = toml_cfg.peers.allow_local.unwrap_or(false);
         if peer_limits.max_connections == 0 {
             return Err("[peers] max_connections must be >= 1".into());
         }
@@ -964,6 +968,7 @@ impl NodeConfig {
             data_dir,
             known_peers,
             peer_limits,
+            allow_local,
             bind_addr,
             declared_addr,
             agent_name,

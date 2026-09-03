@@ -39,7 +39,7 @@ fn handshaked_peer_round_trips_through_reopen() {
     }
 
     let book = open(&path);
-    let state = book.load_all().unwrap();
+    let state = book.load_all(false).unwrap();
     assert_eq!(state.peers.len(), 1);
     let p = &state.peers[0];
     assert_eq!(p.addr, addr);
@@ -65,7 +65,7 @@ fn gossip_then_handshake_upgrades_record() {
     }
 
     let book = open(&path);
-    let state = book.load_all().unwrap();
+    let state = book.load_all(false).unwrap();
     assert_eq!(state.peers.len(), 1);
     assert!(state.peers[0].handshaked);
 }
@@ -91,7 +91,7 @@ fn stale_peer_skipped_on_load() {
     }
 
     let book = open(&path);
-    let state = book.load_all().unwrap();
+    let state = book.load_all(false).unwrap();
     assert_eq!(state.peers.len(), 0);
     assert_eq!(state.stale_skipped, 1);
 }
@@ -122,13 +122,13 @@ fn expired_ban_purged_on_load_permanent_survives() {
     }
 
     let book = open(&path);
-    let state = book.load_all().unwrap();
+    let state = book.load_all(false).unwrap();
     assert_eq!(state.bans.len(), 1, "permanent ban must survive expiry");
     assert_eq!(state.bans[0].ip, perm_ip);
     assert_eq!(state.expired_bans_purged, 1);
 
     // Re-load to confirm the purge is durable, not just in-memory.
-    let state2 = book.load_all().unwrap();
+    let state2 = book.load_all(false).unwrap();
     assert_eq!(state2.bans.len(), 1);
     assert_eq!(state2.expired_bans_purged, 0);
 }
@@ -141,13 +141,17 @@ fn failure_then_success_clears_backoff_state() {
     let addr = sock(7, 7, 7, 7, 9030);
     {
         let book = open(&path);
+        // `mark_failure` records against an existing row and never
+        // creates one, so the address enters the book the way production
+        // puts it there: gossip ingest before the first dial.
+        book.add_known(addr, PeerOrigin::Gossip).unwrap();
         book.mark_failure(addr, SystemTime::now()).unwrap();
         book.mark_failure(addr, SystemTime::now()).unwrap();
         book.mark_success(addr, SystemTime::now()).unwrap();
     }
 
     let book = open(&path);
-    let state = book.load_all().unwrap();
+    let state = book.load_all(false).unwrap();
     assert_eq!(state.peers.len(), 1);
     let p = &state.peers[0];
     assert_eq!(p.consecutive_failures, 0);
@@ -173,7 +177,7 @@ fn unban_removes_entry() {
     }
 
     let book = open(&path);
-    let state = book.load_all().unwrap();
+    let state = book.load_all(false).unwrap();
     assert_eq!(state.bans.len(), 0);
 }
 
@@ -187,7 +191,7 @@ fn corruption_renames_and_starts_fresh() {
 
     // Open should succeed by renaming the corrupt file and creating fresh.
     let book = AddressBook::open_at(&path).expect("recover from corruption");
-    let state = book.load_all().unwrap();
+    let state = book.load_all(false).unwrap();
     assert_eq!(state.peers.len(), 0);
     assert_eq!(state.bans.len(), 0);
 
@@ -228,7 +232,7 @@ fn add_known_does_not_overwrite_handshaked_record() {
     }
 
     let book = open(&path);
-    let state = book.load_all().unwrap();
+    let state = book.load_all(false).unwrap();
     assert_eq!(state.peers.len(), 1);
     let p = &state.peers[0];
     assert!(p.handshaked, "handshake bit must survive gossip add_known");
@@ -286,7 +290,7 @@ fn peer_manager_restores_known_peers_and_bans_from_persisted_address_book() {
 
     // --- session 2: reopen, load, hydrate PeerManager ---
     let book = Arc::new(open(&path));
-    let state = book.load_all().expect("load_all");
+    let state = book.load_all(false).expect("load_all");
     assert_eq!(state.peers.len(), 3, "all three peers must survive");
     assert_eq!(state.bans.len(), 1, "the ban must survive");
 
@@ -353,6 +357,8 @@ fn mark_failure_atomic_under_concurrent_calls() {
     let path = dir.path().join("peers.redb");
     let book = Arc::new(open(&path));
     let addr = sock(4, 4, 4, 4, 9030);
+    // The row must exist first: `mark_failure` updates, never creates.
+    book.add_known(addr, PeerOrigin::Gossip).unwrap();
 
     const N_THREADS: u32 = 8;
     const N_PER_THREAD: u32 = 25;
@@ -370,7 +376,7 @@ fn mark_failure_atomic_under_concurrent_calls() {
         h.join().unwrap();
     }
 
-    let state = book.load_all().unwrap();
+    let state = book.load_all(false).unwrap();
     let p = state
         .peers
         .iter()

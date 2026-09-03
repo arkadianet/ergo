@@ -290,7 +290,10 @@ impl AddressBook {
 
     /// Read every row, filtering stale + corrupt; purge expired bans in
     /// the same write txn that returns to the caller.
-    pub fn load_all(&self) -> Result<LoadedState, AddressBookError> {
+    /// `allow_local` is the operator's `[peers] allow_local`; it widens
+    /// the routability rule the sanitisation pass applies, so a LAN
+    /// devnet's persisted peers survive the purge.
+    pub fn load_all(&self, allow_local: bool) -> Result<LoadedState, AddressBookError> {
         let now_wall = SystemTime::now();
         let stale_cutoff = now_wall - Duration::from_secs(STALE_AFTER_DAYS * 24 * 60 * 60);
 
@@ -331,7 +334,7 @@ impl AddressBook {
                         // real candidates by recency (issue #298). Seeds
                         // keep their exemption — an operator may point
                         // `[peers] known` at a loopback address.
-                        if !body.origin.is_seed() && !is_routable_for_p2p(&addr) {
+                        if !body.origin.is_seed() && !is_routable_for_p2p(&addr, allow_local) {
                             nonroutable_keys.push(k.value().to_vec());
                             continue;
                         }
@@ -445,33 +448,25 @@ impl AddressBook {
         })
     }
 
-    /// Increment `consecutive_failures` and stamp `last_failure`. Creates
-    /// a stub (HANDSHAKED clear) if the address is unknown. Atomic via
-    /// `mutate_peer` so concurrent dial-failure hooks no longer lose
-    /// counter increments.
+    /// Increment `consecutive_failures` and stamp `last_failure` on an
+    /// existing record. Atomic via `mutate_peer` so concurrent
+    /// dial-failure hooks no longer lose counter increments.
+    ///
+    /// No-op when the address is absent. It used to create a stub row,
+    /// which made every dial-failure hook a row factory for whatever
+    /// address it was handed — including an inbound peer's observed
+    /// `ip:ephemeral` socket, whose public form is routable enough to
+    /// survive the boot purge and be replayed into the dial pool (issue
+    /// #298 review, P1-1). Backoff is state *about* a row, so it now
+    /// requires one; every address the dial pool holds was written by
+    /// `add_known` or `upsert_handshaked` first.
     pub fn mark_failure(&self, addr: SocketAddr, now: SystemTime) -> Result<(), AddressBookError> {
         self.mutate_peer(addr, |prior| {
-            let record = match prior {
-                Some(mut p) => {
-                    p.last_failure = Some(now);
-                    p.consecutive_failures = p.consecutive_failures.saturating_add(1);
-                    p
-                }
-                None => PersistedPeer {
-                    addr,
-                    last_handshake: None,
-                    last_seen: None,
-                    last_failure: Some(now),
-                    consecutive_failures: 1,
-                    origin: PeerOrigin::Gossip,
-                    handshaked: false,
-                    last_direction: None,
-                    agent_name: String::new(),
-                    agent_version: [0; 3],
-                    node_name: String::new(),
-                },
-            };
-            Some(record)
+            prior.map(|mut p| {
+                p.last_failure = Some(now);
+                p.consecutive_failures = p.consecutive_failures.saturating_add(1);
+                p
+            })
         })?;
         self.maybe_evict()?;
         Ok(())
@@ -661,7 +656,18 @@ impl AddressBook {
 ///
 /// Tier 0: failed gossip-only — ascending `last_failure` (oldest first).
 /// Tier 1: unhandshaked, no failures yet — arbitrary (last_seen=0).
-/// Tier 2: handshaked — ascending `last_seen` (oldest first).
+/// Tier 2: handshaked, but only ever inbound — ascending `last_seen`.
+/// Tier 3: handshaked outbound — ascending `last_seen` (oldest first).
+///
+/// The top tier turns on `last_direction == Outbound`, not on
+/// `handshaked` alone, because those are different claims. An outbound
+/// row is an address we dialed and reached: proven good, and the last
+/// thing we want to lose. A handshaked *inbound* row is booked under an
+/// address the peer merely declared and we have never tried — a peer
+/// rotating its declared address across reconnects mints a fresh
+/// unverified row each time, and while `handshaked` alone decided the
+/// top tier those phantoms outranked every real candidate and could
+/// fill the [`MAX_PEERS`] cap (issue #298 review, P2-2).
 fn evict_priority(p: &PersistedPeer) -> (u8, u64) {
     let last_seen_secs = p
         .last_seen
@@ -677,6 +683,8 @@ fn evict_priority(p: &PersistedPeer) -> (u8, u64) {
         (0, last_failure_secs)
     } else if !p.handshaked {
         (1, last_seen_secs)
+    } else if p.last_direction == Some(LastDirection::Outbound) {
+        (3, last_seen_secs)
     } else {
         (2, last_seen_secs)
     }
@@ -733,7 +741,7 @@ mod tests {
         book.add_known(seeded_loopback, PeerOrigin::Seed).unwrap();
         book.add_known(routable, PeerOrigin::Gossip).unwrap();
 
-        let loaded = book.load_all().unwrap();
+        let loaded = book.load_all(false).unwrap();
         assert_eq!(loaded.nonroutable_purged, 2);
         let addrs: Vec<SocketAddr> = loaded.peers.iter().map(|p| p.addr).collect();
         assert!(!addrs.contains(&observed), "got {addrs:?}");
@@ -742,9 +750,80 @@ mod tests {
         assert!(addrs.contains(&routable), "got {addrs:?}");
 
         // The purge is durable: a second load sees nothing left to drop.
-        let reloaded = book.load_all().unwrap();
+        let reloaded = book.load_all(false).unwrap();
         assert_eq!(reloaded.nonroutable_purged, 0);
         assert_eq!(reloaded.peers.len(), 2);
+    }
+
+    // ----- eviction tiering (issue #298 review, P2-2) -----
+
+    /// An address we actually reached outbound outranks a handshaked row
+    /// booked under an address a peer merely declared while connecting
+    /// *to* us. Without the split, a peer rotating its declared address
+    /// across reconnects mints unverified rows that sit in the same top
+    /// tier as proven-good peers and can fill the `MAX_PEERS` cap.
+    #[test]
+    fn evict_priority_ranks_unverified_inbound_below_reached_outbound() {
+        let now = now_secs();
+        let base = PersistedPeer {
+            addr: v4(1, 1, 1, 1, 9030),
+            last_handshake: Some(now),
+            last_seen: Some(now),
+            last_failure: None,
+            consecutive_failures: 0,
+            origin: PeerOrigin::Gossip,
+            handshaked: true,
+            last_direction: Some(LastDirection::Inbound),
+            agent_name: String::new(),
+            agent_version: [0; 3],
+            node_name: String::new(),
+        };
+        let inbound = base.clone();
+        let outbound = PersistedPeer {
+            last_direction: Some(LastDirection::Outbound),
+            ..base.clone()
+        };
+        // A handshaked row from an older schema with no recorded
+        // direction is unverified too — it cannot claim we reached it.
+        let unknown_direction = PersistedPeer {
+            last_direction: None,
+            ..base.clone()
+        };
+        let unhandshaked = PersistedPeer {
+            handshaked: false,
+            last_handshake: None,
+            last_seen: None,
+            ..base.clone()
+        };
+
+        let (pi, po) = (evict_priority(&inbound), evict_priority(&outbound));
+        assert!(pi < po, "inbound-only < reached-outbound: {pi:?} vs {po:?}");
+        assert_eq!(evict_priority(&unknown_direction).0, pi.0);
+        assert!(
+            evict_priority(&unhandshaked) < pi,
+            "unhandshaked still ranks below any handshaked row",
+        );
+    }
+
+    /// `mark_failure` no longer conjures a row for an address the book
+    /// has never seen — a dial-failure hook must not be a row factory
+    /// for whatever socket it is handed.
+    #[test]
+    fn mark_failure_absent_address_creates_no_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let book = AddressBook::open_at(&dir.path().join("peers.redb")).unwrap();
+
+        book.mark_failure(v4(1, 2, 3, 4, 54321), now_secs())
+            .unwrap();
+        assert!(book.load_all(false).unwrap().peers.is_empty());
+
+        // On a row that exists, it still counts.
+        let known = v4(213, 239, 193, 208, 9030);
+        book.add_known(known, PeerOrigin::Gossip).unwrap();
+        book.mark_failure(known, now_secs()).unwrap();
+        let loaded = book.load_all(false).unwrap();
+        assert_eq!(loaded.peers.len(), 1);
+        assert_eq!(loaded.peers[0].consecutive_failures, 1);
     }
 
     // ---- begin_write_qr helper ----

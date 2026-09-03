@@ -1112,26 +1112,26 @@ fn block_section_capable_peers_falls_back_to_delivery_degraded_archives() {
 #[test]
 fn is_routable_rejects_rfc1918_and_private_categories() {
     // RFC1918 — the exact case from prod logs (10.0.0.8:9030 leak).
-    assert!(!is_routable_for_p2p(&addr(10, 0, 0, 8, 9030)));
-    assert!(!is_routable_for_p2p(&addr(192, 168, 1, 1, 9030)));
-    assert!(!is_routable_for_p2p(&addr(172, 16, 5, 5, 9030)));
+    assert!(!is_routable_for_p2p(&addr(10, 0, 0, 8, 9030), false));
+    assert!(!is_routable_for_p2p(&addr(192, 168, 1, 1, 9030), false));
+    assert!(!is_routable_for_p2p(&addr(172, 16, 5, 5, 9030), false));
     // Loopback / unspecified / multicast.
-    assert!(!is_routable_for_p2p(&addr(127, 0, 0, 1, 9030)));
-    assert!(!is_routable_for_p2p(&addr(0, 0, 0, 0, 9030)));
-    assert!(!is_routable_for_p2p(&addr(224, 0, 0, 1, 9030)));
+    assert!(!is_routable_for_p2p(&addr(127, 0, 0, 1, 9030), false));
+    assert!(!is_routable_for_p2p(&addr(0, 0, 0, 0, 9030), false));
+    assert!(!is_routable_for_p2p(&addr(224, 0, 0, 1, 9030), false));
     // Link-local.
-    assert!(!is_routable_for_p2p(&addr(169, 254, 1, 1, 9030)));
+    assert!(!is_routable_for_p2p(&addr(169, 254, 1, 1, 9030), false));
     // Carrier-grade NAT.
-    assert!(!is_routable_for_p2p(&addr(100, 64, 1, 1, 9030)));
-    assert!(!is_routable_for_p2p(&addr(100, 127, 255, 254, 9030)));
+    assert!(!is_routable_for_p2p(&addr(100, 64, 1, 1, 9030), false));
+    assert!(!is_routable_for_p2p(&addr(100, 127, 255, 254, 9030), false));
     // Port 0 — not dialable.
-    assert!(!is_routable_for_p2p(&addr(213, 239, 193, 208, 0)));
+    assert!(!is_routable_for_p2p(&addr(213, 239, 193, 208, 0), false));
 
     // Real public seed addresses must pass.
-    assert!(is_routable_for_p2p(&addr(213, 239, 193, 208, 9030)));
-    assert!(is_routable_for_p2p(&addr(159, 65, 11, 55, 9030)));
+    assert!(is_routable_for_p2p(&addr(213, 239, 193, 208, 9030), false));
+    assert!(is_routable_for_p2p(&addr(159, 65, 11, 55, 9030), false));
     // 100.x outside the CGNAT band is fine.
-    assert!(is_routable_for_p2p(&addr(100, 200, 1, 1, 9030)));
+    assert!(is_routable_for_p2p(&addr(100, 200, 1, 1, 9030), false));
 }
 
 #[test]
@@ -1141,15 +1141,64 @@ fn is_routable_handles_ipv6_categories() {
         SocketAddr::new(IpAddr::V6(ip.parse::<Ipv6Addr>().unwrap()), port)
     };
     // Public IPv6 (one of our hardcoded seeds).
-    assert!(is_routable_for_p2p(&v6("2001:41d0:700:6662::", 29031)));
+    assert!(is_routable_for_p2p(
+        &v6("2001:41d0:700:6662::", 29031),
+        false
+    ));
     // Loopback / unspecified / link-local / unique-local.
-    assert!(!is_routable_for_p2p(&v6("::1", 9030)));
-    assert!(!is_routable_for_p2p(&v6("::", 9030)));
-    assert!(!is_routable_for_p2p(&v6("fe80::1", 9030)));
-    assert!(!is_routable_for_p2p(&v6("fc00::1", 9030)));
-    assert!(!is_routable_for_p2p(&v6("fd12:3456:789a::1", 9030)));
+    assert!(!is_routable_for_p2p(&v6("::1", 9030), false));
+    assert!(!is_routable_for_p2p(&v6("::", 9030), false));
+    assert!(!is_routable_for_p2p(&v6("fe80::1", 9030), false));
+    assert!(!is_routable_for_p2p(&v6("fc00::1", 9030), false));
+    assert!(!is_routable_for_p2p(&v6("fd12:3456:789a::1", 9030), false));
+    // fec0::/10 deprecated site-local — what Java's
+    // `isSiteLocalAddress` matches for IPv6, so Scala's `isLocal`
+    // rejects it too (NetworkUtils.scala:31-38).
+    assert!(!is_routable_for_p2p(&v6("fec0::1", 9030), false));
+    assert!(!is_routable_for_p2p(&v6("feff:ffff::1", 9030), false));
     // Multicast.
-    assert!(!is_routable_for_p2p(&v6("ff02::1", 9030)));
+    assert!(!is_routable_for_p2p(&v6("ff02::1", 9030), false));
+}
+
+/// `allow_local` re-admits exactly the local-network classes and
+/// nothing else: unspecified, multicast, and port 0 stay rejected
+/// because they are not addresses a peer can listen on.
+#[test]
+fn is_routable_with_allow_local_admits_local_classes_only() {
+    use std::net::Ipv6Addr;
+    let v6 = |ip: &str, port: u16| -> SocketAddr {
+        SocketAddr::new(IpAddr::V6(ip.parse::<Ipv6Addr>().unwrap()), port)
+    };
+    // Local classes, all re-admitted.
+    for a in [
+        addr(127, 0, 0, 1, 9030),
+        addr(10, 0, 0, 8, 9030),
+        addr(192, 168, 1, 1, 9030),
+        addr(169, 254, 1, 1, 9030),
+        addr(100, 64, 1, 1, 9030),
+    ] {
+        assert!(!is_routable_for_p2p(&a, false), "{a} is local");
+        assert!(is_routable_for_p2p(&a, true), "{a} under allow_local");
+    }
+    for a in [
+        v6("::1", 9030),
+        v6("fe80::1", 9030),
+        v6("fc00::1", 9030),
+        v6("fec0::1", 9030),
+    ] {
+        assert!(!is_routable_for_p2p(&a, false), "{a} is local");
+        assert!(is_routable_for_p2p(&a, true), "{a} under allow_local");
+    }
+    // Never-dialable, whatever the setting.
+    for a in [
+        addr(0, 0, 0, 0, 9030),
+        addr(224, 0, 0, 1, 9030),
+        addr(213, 239, 193, 208, 0),
+    ] {
+        assert!(!is_routable_for_p2p(&a, true), "{a} is never dialable");
+    }
+    assert!(!is_routable_for_p2p(&v6("::", 9030), true));
+    assert!(!is_routable_for_p2p(&v6("ff02::1", 9030), true));
 }
 
 #[test]
@@ -1440,7 +1489,7 @@ fn persisted_ban_rows_stay_within_cap_across_reopen() {
     drop(book);
 
     let reopened = AddressBook::open_at(&path).unwrap();
-    let loaded = reopened.load_all().unwrap();
+    let loaded = reopened.load_all(false).unwrap();
     assert!(
         loaded.bans.len() <= 4,
         "persisted rows must be evicted alongside in-memory entries, got {}",
@@ -1595,7 +1644,7 @@ fn inbound_handshake_without_declared_address_writes_no_book_entry() {
         .unwrap();
     mgr.disconnect(&observed);
 
-    let loaded = book.load_all().unwrap();
+    let loaded = book.load_all(false).unwrap();
     assert!(
         loaded.peers.is_empty(),
         "an inbound peer with no declared address must not enter the book, got {:?}",
@@ -1620,7 +1669,7 @@ fn inbound_handshake_persists_declared_address_not_observed_socket() {
         .unwrap();
     mgr.disconnect(&observed);
 
-    let loaded = book.load_all().unwrap();
+    let loaded = book.load_all(false).unwrap();
     let addrs: Vec<SocketAddr> = loaded.peers.iter().map(|p| p.addr).collect();
     assert!(
         addrs.contains(&declared),
@@ -1655,7 +1704,7 @@ fn outbound_handshake_persists_dialed_socket_even_when_loopback() {
         .unwrap();
     mgr.disconnect(&dialed);
 
-    let loaded = book.load_all().unwrap();
+    let loaded = book.load_all(false).unwrap();
     let row = loaded
         .peers
         .iter()
@@ -1683,7 +1732,7 @@ fn inbound_handshake_from_seeded_loopback_touches_the_seed_entry() {
         .unwrap();
     mgr.disconnect(&observed);
 
-    let loaded = book.load_all().unwrap();
+    let loaded = book.load_all(false).unwrap();
     let addrs: Vec<SocketAddr> = loaded.peers.iter().map(|p| p.addr).collect();
     assert!(
         !addrs.contains(&observed),
@@ -1735,5 +1784,167 @@ fn addresses_to_connect_skips_learned_nonroutable_but_keeps_seeds() {
     assert!(
         candidates.contains(&routable),
         "routable gossip stays dialable, got {candidates:?}",
+    );
+}
+
+// ----- dial-failure bookkeeping (issue #298 review, P1-1) -----
+
+/// An inbound peer that fails its handshake leaves no book row. The
+/// failure paths hand `mark_dial_failed` the observed `ip:ephemeral`
+/// socket, which is not in the dial pool — and `mark_failure` no longer
+/// creates a stub for it. A *public* ephemeral socket like
+/// `1.2.3.4:54321` is routable, so a stub would survive the boot purge
+/// and be replayed straight into the dial pool on the next start.
+#[test]
+fn mark_dial_failed_unknown_address_writes_no_book_entry() {
+    let (mut mgr, book, _dir) = mgr_with_book();
+    let now = Instant::now();
+    let observed = addr(1, 2, 3, 4, 54321);
+
+    mgr.register_inbound(observed, now).unwrap();
+    mgr.mark_tcp_connected(&observed);
+    mgr.disconnect(&observed);
+    mgr.mark_dial_failed(&observed, now);
+
+    let loaded = book.load_all(false).unwrap();
+    assert!(
+        loaded.peers.is_empty(),
+        "a failure on an address we never dialed must not mint a row, got {:?}",
+        loaded.peers.iter().map(|p| p.addr).collect::<Vec<_>>(),
+    );
+    assert_eq!(mgr.known_addresses_len(), 0);
+}
+
+/// A dial failure on a genuine dial-pool address still records — both in
+/// memory (so backoff suppresses it) and on disk.
+#[test]
+fn mark_dial_failed_known_address_records_failure() {
+    let (mut mgr, book, _dir) = mgr_with_book();
+    let now = Instant::now();
+    let known = addr(213, 239, 193, 208, 9030);
+
+    mgr.add_known_address(known, PeerOrigin::Gossip);
+    mgr.mark_dial_failed(&known, now);
+    mgr.mark_dial_failed(&known, now);
+
+    assert!(
+        mgr.addresses_to_connect(now, 8).is_empty(),
+        "backoff must suppress a freshly-failed address",
+    );
+    let loaded = book.load_all(false).unwrap();
+    let row = loaded.peers.iter().find(|p| p.addr == known).unwrap();
+    assert_eq!(row.consecutive_failures, 2);
+    assert!(row.last_failure.is_some());
+}
+
+// ----- allow_local (issue #298 review, P1-2) -----
+
+/// With `[peers] allow_local` off — the default, Scala's
+/// `scorex.network.allowLocal = false` — a LAN address learned by
+/// gossip is refused at ingest. With it on, the same address is
+/// accepted, dialable, and shareable, which is what lets a LAN devnet
+/// form by gossip instead of by hand-listing every node.
+#[test]
+fn allow_local_admits_gossiped_lan_addresses_when_enabled() {
+    let lan = addr(192, 168, 1, 5, 9030);
+    let now = Instant::now();
+
+    let mut strict = PeerManager::new(11);
+    assert_eq!(
+        strict.add_known_address(lan, PeerOrigin::Gossip),
+        AddKnownOutcome::FilteredNonRoutable,
+    );
+    assert!(!strict.addresses_to_connect(now, 8).contains(&lan));
+
+    let mut permissive = PeerManager::new(11);
+    permissive.set_allow_local(true);
+    assert!(permissive.allow_local());
+    assert_eq!(
+        permissive.add_known_address(lan, PeerOrigin::Gossip),
+        AddKnownOutcome::Added,
+    );
+    assert!(
+        permissive.addresses_to_connect(now, 8).contains(&lan),
+        "allow_local must make a learned LAN address dialable",
+    );
+}
+
+/// `allow_local` reaches the boot sanitisation too: a LAN devnet's
+/// persisted peers must not be purged out from under it on restart.
+#[test]
+fn allow_local_preserves_lan_rows_through_boot_sanitisation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peers.redb");
+    let book = AddressBook::open_at(&path).unwrap();
+    let lan = addr(192, 168, 1, 5, 9030);
+    book.add_known(lan, PeerOrigin::Gossip).unwrap();
+
+    assert_eq!(
+        book.load_all(true).unwrap().peers.len(),
+        1,
+        "allow_local keeps LAN rows",
+    );
+    assert_eq!(
+        book.load_all(false).unwrap().nonroutable_purged,
+        1,
+        "the default purges them",
+    );
+}
+
+/// `peers_for_sharing` uses the same `allow_local` policy as the dial
+/// side: a LAN declared address is withheld by default and propagated
+/// once the operator opts in.
+#[test]
+fn peers_for_sharing_honours_allow_local() {
+    let now = Instant::now();
+    let lan_declared = addr(192, 168, 1, 5, 9030);
+
+    let share = |allow_local: bool| -> usize {
+        let mut mgr = PeerManager::new(12);
+        mgr.set_allow_local(allow_local);
+        let observed = addr(192, 168, 1, 5, 41000);
+        mgr.register_inbound(observed, now).unwrap();
+        mgr.mark_tcp_connected(&observed);
+        mgr.complete_handshake(&observed, spec_with_declared(Some(lan_declared)), None, now)
+            .unwrap();
+        mgr.peers_for_sharing(8, 0).len()
+    };
+
+    assert_eq!(share(false), 0, "a LAN declared address is not gossiped");
+    assert_eq!(share(true), 1, "allow_local propagates it");
+}
+
+// ----- outbound declared-address parity (issue #298 review, P2-1) -----
+
+/// Scala books a handshake under `peerSpec.address` in **both**
+/// directions (`NetworkController.scala:412`, `PeerDatabase.scala:81`),
+/// so an outbound peer whose declared listening address differs from the
+/// socket we happened to dial is persisted under the declared one.
+#[test]
+fn outbound_handshake_persists_declared_when_it_differs_from_dialed() {
+    let (mut mgr, book, _dir) = mgr_with_book();
+    let now = Instant::now();
+    let dialed = addr(213, 239, 193, 208, 9030);
+    let declared = addr(159, 65, 11, 55, 9020);
+
+    mgr.add_known_address(dialed, PeerOrigin::Gossip);
+    mgr.register_outbound(dialed, now).unwrap();
+    mgr.mark_tcp_connected(&dialed);
+    mgr.complete_handshake(&dialed, spec_with_declared(Some(declared)), None, now)
+        .unwrap();
+
+    let loaded = book.load_all(false).unwrap();
+    let row = loaded
+        .peers
+        .iter()
+        .find(|p| p.addr == declared)
+        .expect("the declared listening address carries the handshake");
+    assert!(row.handshaked);
+    assert!(
+        !loaded
+            .peers
+            .iter()
+            .any(|p| p.addr == dialed && p.handshaked),
+        "the dialed socket keeps its dial-pool row but not the handshake",
     );
 }

@@ -1113,6 +1113,7 @@ fn cfg_with_mode(
         chain_spec: Arc::new(ChainSpec::mainnet()),
         data_dir: std::env::temp_dir().join("ergo-mode-label-cfg"),
         known_peers: vec!["127.0.0.1:1".parse().unwrap()],
+        allow_local: false,
         peer_limits: PeerLimits::default(),
         bind_addr: None,
         declared_addr: None,

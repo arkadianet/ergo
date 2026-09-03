@@ -117,6 +117,12 @@ pub struct PeerManager {
     /// above are NOT throttled — every occurrence still counts and is
     /// remembered; only the log line is rate-limited.
     storage_error_log_state: std::cell::RefCell<HashMap<&'static str, (u64, u64)>>,
+    /// Operator's `[peers] allow_local` (Scala `scorex.network.allowLocal`,
+    /// default `false`). When set, local-network addresses — loopback,
+    /// RFC1918, link-local, unique-local, carrier-grade NAT — are dialable
+    /// and gossipable like any other, which is what a LAN devnet needs to
+    /// form by gossip. See [`is_routable_for_p2p`].
+    allow_local: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -142,7 +148,19 @@ impl PeerManager {
             storage_error_count: std::cell::Cell::new(0),
             last_storage_error: std::cell::RefCell::new(None),
             storage_error_log_state: std::cell::RefCell::new(HashMap::new()),
+            allow_local: false,
         }
+    }
+
+    /// Set the operator's `[peers] allow_local` policy. Called once at
+    /// boot, before any address is learned or dialed.
+    pub fn set_allow_local(&mut self, allow_local: bool) {
+        self.allow_local = allow_local;
+    }
+
+    /// Whether local-network addresses are dialable and gossipable.
+    pub fn allow_local(&self) -> bool {
+        self.allow_local
     }
 
     /// Attach a persistent address book. Subsequent lifecycle hooks
@@ -263,7 +281,7 @@ impl PeerManager {
                 // `known_addresses` (that's how we got here).
                 if direction == Direction::Inbound {
                     if let Some(declared) = declared_socket {
-                        if declared != *addr && is_routable_for_p2p(&declared) {
+                        if declared != *addr && is_routable_for_p2p(&declared, self.allow_local) {
                             self.add_known_address(declared, PeerOrigin::Gossip);
                         }
                     }
@@ -682,7 +700,7 @@ impl PeerManager {
     /// every `GetPeers`) and counting every routable spec as "added"
     /// produces misleading dial-pool diagnostics.
     pub fn add_known_address(&mut self, addr: SocketAddr, origin: PeerOrigin) -> AddKnownOutcome {
-        if !origin.is_seed() && !is_routable_for_p2p(&addr) {
+        if !origin.is_seed() && !is_routable_for_p2p(&addr, self.allow_local) {
             return AddKnownOutcome::FilteredNonRoutable;
         }
         if let Some(existing) = self.known_addresses.iter_mut().find(|k| k.addr == addr) {
@@ -752,16 +770,28 @@ impl PeerManager {
         self.bans.insert(ip, BanEntry { until, count });
     }
 
-    /// Record a dial failure against the known address. Increments the
+    /// Record a dial failure against a known address. Increments the
     /// consecutive-failure counter and stamps `last_failure = now` so
     /// `addresses_to_connect` will skip this address until the backoff
-    /// window elapses (see `DIAL_BACKOFF_SECS`). No-op for addresses
-    /// not already known.
+    /// window elapses (see `DIAL_BACKOFF_SECS`).
+    ///
+    /// Fully a no-op — in memory *and* on disk — for an address the dial
+    /// pool does not hold. Backoff is a fact about an address we chose to
+    /// dial, and only dialable addresses ever enter the pool, so this is
+    /// what keeps an inbound peer's observed `ip:ephemeral` socket out of
+    /// `peers.redb`: the failure paths that fire for inbound peers (a
+    /// pre-handshake eviction in `sync_tick`, a rejected
+    /// `complete_handshake` in the node's handshake arm) hand us the
+    /// observed socket, which is never in the pool. Without the gate the
+    /// write-through created a stub row, and a public `1.2.3.4:54321`
+    /// stub is routable enough to survive the boot purge and be replayed
+    /// into the dial pool (issue #298 review, P1-1).
     pub fn mark_dial_failed(&mut self, addr: &SocketAddr, now: Instant) {
-        if let Some(k) = self.known_addresses.iter_mut().find(|k| k.addr == *addr) {
-            k.last_failure = Some(now);
-            k.consecutive_failures = k.consecutive_failures.saturating_add(1);
-        }
+        let Some(k) = self.known_addresses.iter_mut().find(|k| k.addr == *addr) else {
+            return;
+        };
+        k.last_failure = Some(now);
+        k.consecutive_failures = k.consecutive_failures.saturating_add(1);
         self.persist_failure(*addr);
     }
 
@@ -806,7 +836,7 @@ impl PeerManager {
                 let Some(sock) = declared_to_socket(declared) else {
                     return false;
                 };
-                is_routable_for_p2p(&sock)
+                is_routable_for_p2p(&sock, self.allow_local)
             })
             .collect();
         if eligible.is_empty() {
@@ -856,12 +886,19 @@ impl PeerManager {
                 // address is either an inbound peer's observed socket
                 // (issue #298) or a NATted peer's LAN address; either
                 // way the dial can only fail, and a pool full of them
-                // starves the real candidates. Seed entries keep their
-                // exemption: an operator may legitimately point
-                // `[peers] known` at `127.0.0.1:9020` (a local Scala
-                // node), which is Scala's `allowLocal` escape hatch in
-                // `NetworkUtils.isLocal` (NetworkUtils.scala:31-38).
-                if !k.origin.is_seed() && !is_routable_for_p2p(&k.addr) {
+                // starves the real candidates. Scala applies the same
+                // rule on its dial path — `NetworkController` refuses a
+                // local `remote` with "Prevented attempt to connect to
+                // local peer" (NetworkController.scala:337-338) — and
+                // relaxing it network-wide is `allow_local`, threaded
+                // into the predicate itself.
+                //
+                // Seed entries are exempt on top of that: an operator
+                // naming `127.0.0.1:9020` in `[peers] known` asked for
+                // that address specifically, so it is dialed whatever
+                // `allow_local` says. That exemption is ours, not
+                // Scala's.
+                if !k.origin.is_seed() && !is_routable_for_p2p(&k.addr, self.allow_local) {
                     return false;
                 }
                 if let (Some(last), n) = (k.last_failure, k.consecutive_failures) {
@@ -957,32 +994,46 @@ impl PeerManager {
     /// when the peer has no dialable identity and therefore must not
     /// occupy a row in the address book.
     ///
-    /// Outbound: the socket we dialed is by construction a listening
-    /// address, and it stays dialable even when non-routable — an
-    /// operator's `[peers] known` entry may legitimately be
-    /// `127.0.0.1:9020`, a Scala node on the same host.
+    /// The declared address wins in **both** directions, matching Scala:
+    /// `NetworkController.handleHandshake` keys on
+    /// `peerInfo.peerSpec.address` (`NetworkController.scala:412`) and
+    /// `PeerDatabase.addOrUpdateKnownPeer` stores under it
+    /// (`PeerDatabase.scala:81`), where `address` is `declaredAddress
+    /// orElse localAddressOpt` (ergo-core `PeerSpec.scala:37`) — never
+    /// the observed remote socket. A peer's declared address is its
+    /// listening address; the socket we observe is only incidentally
+    /// the same one, and for an inbound peer it is an ephemeral client
+    /// port that can never be dialed.
     ///
-    /// Inbound: the peer reached us from an ephemeral client port, so
-    /// the observed socket is never dialable. Only the handshake's
-    /// declared address is, and a *learned* declared address must pass
-    /// the same routability filter `peers_for_sharing` applies before
-    /// we propagate it. The exception is an address the operator
-    /// already seeded: a local Scala node dialing us keeps its seeded
-    /// row dialable.
+    /// Two departures, both narrow:
+    ///
+    /// * A *seeded* dialed socket wins over a declared address. An
+    ///   operator pointing `[peers] known` at `127.0.0.1:9020` reaches a
+    ///   Scala node that declares its public address; booking the
+    ///   handshake under the public address would strand the loopback
+    ///   row the operator actually dials.
+    /// * An outbound peer with no usable declared address falls back to
+    ///   the socket we dialed. We reached it, so it is dialable by
+    ///   demonstration — this is Scala's `orElse localAddressOpt` arm in
+    ///   spirit. An *inbound* peer gets no such fallback: its observed
+    ///   socket is an ephemeral port, so with no declared address it has
+    ///   no dialable identity at all and nothing is written.
     fn dialable_address(
         &self,
         direction: Direction,
         observed: SocketAddr,
         declared: Option<SocketAddr>,
     ) -> Option<SocketAddr> {
-        if direction == Direction::Outbound {
+        let dialed_seed = direction == Direction::Outbound && self.is_seed_address(&observed);
+        if dialed_seed {
             return Some(observed);
         }
-        let declared = declared?;
-        if is_routable_for_p2p(&declared) || self.is_seed_address(&declared) {
-            Some(declared)
-        } else {
-            None
+        let usable_declared = declared
+            .filter(|d| is_routable_for_p2p(d, self.allow_local) || self.is_seed_address(d));
+        match (usable_declared, direction) {
+            (Some(declared), _) => Some(declared),
+            (None, Direction::Outbound) => Some(observed),
+            (None, Direction::Inbound) => None,
         }
     }
 

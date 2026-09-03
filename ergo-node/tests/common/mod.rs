@@ -36,6 +36,7 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
         chain_spec: chain_spec.clone(),
         data_dir,
         known_peers: vec![unreachable_peer],
+        allow_local: false,
         peer_limits: PeerLimits::default(),
         bind_addr: None,
         declared_addr: None,
