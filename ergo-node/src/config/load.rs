@@ -602,6 +602,32 @@ impl NodeConfig {
                 .to_string());
         }
 
+        // R6 (local rule, no Scala counterpart — Scala has no header-anchored
+        // snapshot install). A NiPoPoW-bootstrapped node's header chain is
+        // SPARSE: it materialises the proof's prefix and its dense suffix
+        // window, nothing else. A `[chain] checkpoint` below that window is
+        // therefore a height the node will never hold a header for, which
+        // makes the Mode 2 install anchor check refuse permanently — a node
+        // that boots, syncs, and then silently never installs. The dense
+        // window start is `suffix_head_height - (k - 1)` of a proof that has
+        // not been fetched yet, so it is not computable at load time: the only
+        // honest check is to require the anchor be absent when NiPoPoW
+        // bootstrap is on. An operator who wants the anchor should bootstrap
+        // without NiPoPoW (a full header sync materialises every height).
+        if nipopow_bootstrap && header_checkpoint.is_some() {
+            return Err(
+                "[node.nipopow] nipopow_bootstrap = true is incompatible with \
+                 a `[chain] checkpoint`. A NiPoPoW-bootstrapped node's header chain is \
+                 sparse, so a checkpoint height outside the proof's dense suffix window \
+                 can never be observed and the Mode 2 snapshot install would refuse \
+                 forever. Whether a given height falls inside that window is only known \
+                 once a proof arrives, so it cannot be checked here. Either remove \
+                 `[chain] checkpoint` (accepting a PoW-only anchored install) or set \
+                 nipopow_bootstrap = false and let a full header sync pass the anchor."
+                    .to_string(),
+            );
+        }
+
         let api_bind = if toml_cfg.api.disabled.unwrap_or(false) {
             None
         } else {

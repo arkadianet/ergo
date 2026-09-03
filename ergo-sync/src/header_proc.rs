@@ -705,6 +705,30 @@ mod tests {
         assert!(check_header_checkpoint(None, 100, &id(0xbb)).is_ok());
     }
 
+    #[test]
+    fn cumulative_score_uses_shared_decoder() {
+        // Verify that decode_compact_bits from ergo-ser produces correct
+        // BigUint values that convert cleanly to big-endian bytes for storage.
+        let nbits = 0x1a_01_76_5e_u32;
+        let difficulty = decode_compact_bits(nbits);
+        let bytes = difficulty.to_bytes_be();
+        assert!(!bytes.is_empty());
+        // Roundtrip: bytes → BigUint → bytes should be identity
+        let restored = BigUint::from_bytes_be(&bytes);
+        assert_eq!(restored, difficulty);
+    }
+
+    #[test]
+    fn score_accumulation_via_biguint() {
+        let parent_score = BigUint::from(1000u64);
+        let difficulty = BigUint::from(500u64);
+        let result = parent_score + difficulty;
+        assert_eq!(result, BigUint::from(1500u64));
+        // Bytes roundtrip
+        let bytes = result.to_bytes_be();
+        assert_eq!(BigUint::from_bytes_be(&bytes), BigUint::from(1500u64));
+    }
+
     // ----- error paths -----
 
     #[test]
@@ -728,29 +752,5 @@ mod tests {
             }
             other => panic!("expected CheckpointMismatch, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn cumulative_score_uses_shared_decoder() {
-        // Verify that decode_compact_bits from ergo-ser produces correct
-        // BigUint values that convert cleanly to big-endian bytes for storage.
-        let nbits = 0x1a_01_76_5e_u32;
-        let difficulty = decode_compact_bits(nbits);
-        let bytes = difficulty.to_bytes_be();
-        assert!(!bytes.is_empty());
-        // Roundtrip: bytes → BigUint → bytes should be identity
-        let restored = BigUint::from_bytes_be(&bytes);
-        assert_eq!(restored, difficulty);
-    }
-
-    #[test]
-    fn score_accumulation_via_biguint() {
-        let parent_score = BigUint::from(1000u64);
-        let difficulty = BigUint::from(500u64);
-        let result = parent_score + difficulty;
-        assert_eq!(result, BigUint::from(1500u64));
-        // Bytes roundtrip
-        let bytes = result.to_bytes_be();
-        assert_eq!(BigUint::from_bytes_be(&bytes), BigUint::from(1500u64));
     }
 }

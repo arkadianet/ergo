@@ -106,8 +106,9 @@ Notes on the modes that boot today:
   for this combo.
 
 Config consistency is enforced at load time, mirroring four of the Scala
-reference node's five `consistentSettings` rules (R1, R2, R3, R5). The ones
-operators trip most often:
+reference node's five `consistentSettings` rules (R1, R2, R3, R5), plus one
+local rule with no Scala counterpart (R6, below). The ones operators trip
+most often:
 
 - `verify_transactions = false` requires `state_type = "digest"` (R1).
 - `[indexer] enabled = true` is incompatible with `blocks_to_keep >= 0` and
@@ -118,6 +119,9 @@ operators trip most often:
   NiPoPoW-bootstrap (R3).
 - `state_type = "digest"` rejects `[mining] enabled = true` and
   `[indexer] enabled = true`.
+- `[node.nipopow] nipopow_bootstrap = true` is incompatible with a
+  `[chain] checkpoint` (R6, local — see
+  [Mode 2 trust anchor](#mode-2-trust-anchor-chain-checkpoint) below).
 
 ### Mode 2 trust anchor (`[chain] checkpoint`)
 
@@ -165,6 +169,19 @@ checkpoint only (`script_validation_checkpoint_*`) and leaves the header
 anchor to the operator; setting `[chain] checkpoint` to the same pair
 reproduces Scala's mainnet behaviour exactly.
 
+**R6: `[chain] checkpoint` and `nipopow_bootstrap` are mutually exclusive.**
+A NiPoPoW-bootstrapped node's header chain is deliberately sparse — it
+materialises only the proof's prefix and its dense suffix window, nothing
+else. A checkpoint height outside that window is a height this node will
+*never* hold a header for, which makes the anchor check above refuse the
+Mode 2 install forever: the node boots, syncs, and then silently never
+installs. The dense window's start depends on a proof that has not been
+fetched yet at config-load time, so it cannot be checked here — the only
+honest rule is to reject the combination outright. To use both: bootstrap
+without NiPoPoW first (a full header sync materialises every height, so the
+anchor is always observable), or drop the checkpoint and accept a PoW-only
+anchored install.
+
 **Mode-sentinel safety:** UTXO and digest data directories are not
 interconvertible in place. A boot-time check refuses a `state_type` that
 disagrees with the value recorded in an existing data directory before any
@@ -210,6 +227,11 @@ Operator notes:
   bootstrap flag. Start the combined bootstrap from an empty `data_dir`.
 - The Mode 2 trust caveat above still applies: cross-check the installed
   UTXO root before trusting the state.
+- This recipe cannot be combined with a `[chain] checkpoint` (R6, above) —
+  the node rejects that combination at load time. A NiPoPoW-bootstrapped
+  header chain is too sparse to guarantee the anchor height is ever
+  observed, which would otherwise make the Mode 2 install refuse
+  permanently once headers and chunks are already synced.
 
 ## First run vs resume
 

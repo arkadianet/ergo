@@ -467,21 +467,39 @@ fn drive_popow_bootstrap(state: &mut NodeState, now: Instant) {
         // also takes &mut self via the store).
         let proof_opt = popow.best_proof().cloned();
         if let Some(proof) = proof_opt {
-            // Header-level checkpoint (Scala `hdrCheckpoint`). The proof-apply
-            // path writes headers directly, bypassing
-            // `header_proc::finalize_header`, so the anchor is enforced here
-            // instead — otherwise a NiPoPoW bootstrap would be the one way a
-            // header at the checkpoint height enters the store unchecked.
+            // Header-level checkpoint (Scala `hdrCheckpoint`), defence in
+            // depth. Proofs are already checked at ingress
+            // (`messaging::popow`) so a violating proof never reaches the
+            // verifier; this second check covers any future path that latches
+            // a best proof without going through that handler.
+            //
+            // Rejection is NOT terminal: dropping only the latched proof and
+            // returning to `Requesting` keeps the honest quorum count and lets
+            // other providers finish the bootstrap. Marking the reducer
+            // `Applied` here would let one bad proof disable NiPoPoW for the
+            // whole run while reporting a bootstrap that never happened.
             let checkpoint = state.executor.header_checkpoint();
             if let Err(e) =
                 ergo_sync::popow_bootstrap::check_proof_against_checkpoint(&proof, checkpoint)
             {
+                let culprit = state
+                    .popow_bootstrap
+                    .as_mut()
+                    .and_then(|popow| popow.reject_best_proof());
                 warn!(
                     error = %e,
-                    "NiPoPoW: proof violates the configured header checkpoint; bootstrap aborted",
+                    peer = ?culprit,
+                    "NiPoPoW: best proof violates the configured header checkpoint; \
+                     proof dropped, bootstrap continues",
                 );
-                if let Some(popow) = state.popow_bootstrap.as_mut() {
-                    popow.mark_applied();
+                if let Some(peer) = culprit {
+                    flush_actions(
+                        state,
+                        vec![ergo_sync::coordinator::Action::Penalize {
+                            peer,
+                            penalty: ergo_p2p::peer::Penalty::Misbehavior,
+                        }],
+                    );
                 }
                 return;
             }
@@ -1055,11 +1073,26 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
             Some(ckpt),
             observed,
         ) {
-            warn!(
-                error = %e,
-                snapshot_height = snapshot_height_u32,
-                "Mode 2: install refused — snapshot is not anchored by the configured                  header checkpoint; halted",
-            );
+            // Standing condition, re-evaluated every tick: warn once, then
+            // keep it at debug so a refused install is visible without
+            // flooding the log.
+            if state.snapshot_anchor_refusal_warned {
+                tracing::debug!(
+                    error = %e,
+                    snapshot_height = snapshot_height_u32,
+                    "Mode 2: install still refused by the header checkpoint anchor",
+                );
+            } else {
+                state.snapshot_anchor_refusal_warned = true;
+                warn!(
+                    error = %e,
+                    snapshot_height = snapshot_height_u32,
+                    checkpoint_height = ckpt.height,
+                    "Mode 2: install refused — the configured header checkpoint has not \
+                     been passed on this node's header chain; no snapshot will be \
+                     installed until it is (clear [chain] checkpoint to install unanchored)",
+                );
+            }
             return;
         }
     }

@@ -2161,3 +2161,58 @@ fn header_checkpoint_unknown_key_rejected() {
         .expect_err("a typo'd key must not silently leave the node unanchored");
     assert!(err.contains("blockId"), "unexpected error: {err}");
 }
+
+// ----- R6: nipopow_bootstrap × [chain] checkpoint -----
+
+#[test]
+fn nipopow_bootstrap_with_header_checkpoint_rejected_by_r6() {
+    // A NiPoPoW-bootstrapped node's header chain is sparse (proof prefix +
+    // dense suffix window only), so a checkpoint height outside that window
+    // can never be observed by the Mode 2 install anchor check — the node
+    // would boot, sync, and then refuse to install forever. R6 rejects the
+    // combination at load time rather than let an operator discover this at
+    // runtime.
+    let hex_id = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+    let path = write_toml(&format!(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [node.utxo]\nutxo_bootstrap = true\n\
+         [node.nipopow]\nnipopow_bootstrap = true\n\
+         [chain]\ncheckpoint = {{ height = 1231454, block_id = \"{hex_id}\" }}\n",
+    ));
+    let err =
+        NodeConfig::load(minimal_cli(Some(&path))).expect_err("R6 must reject the combination");
+    assert!(err.contains("nipopow_bootstrap"), "error: {err}");
+    assert!(err.contains("checkpoint"), "error: {err}");
+}
+
+#[test]
+fn nipopow_bootstrap_without_header_checkpoint_accepted() {
+    // R6 only fires when both are set; nipopow_bootstrap alone (R5's default
+    // genesis id clears that rule) must still load.
+    let path = write_toml(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [node.utxo]\nutxo_bootstrap = true\n\
+         [node.nipopow]\nnipopow_bootstrap = true\n",
+    );
+    let cfg = NodeConfig::load(minimal_cli(Some(&path)))
+        .expect("nipopow_bootstrap without a checkpoint must not trip R6");
+    assert!(cfg.nipopow_bootstrap);
+    assert!(cfg.header_checkpoint.is_none());
+}
+
+#[test]
+fn header_checkpoint_without_nipopow_bootstrap_accepted() {
+    // R6 only fires when nipopow_bootstrap is on; a full header sync
+    // materialises every height, so the checkpoint alone is fine (this is
+    // exactly `header_checkpoint_valid_table_round_trips` plus the R6 guard
+    // not tripping).
+    let hex_id = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+    let path = write_toml(&format!(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [chain]\ncheckpoint = {{ height = 1231454, block_id = \"{hex_id}\" }}\n",
+    ));
+    let cfg = NodeConfig::load(minimal_cli(Some(&path)))
+        .expect("checkpoint without nipopow_bootstrap must not trip R6");
+    assert!(!cfg.nipopow_bootstrap);
+    assert!(cfg.header_checkpoint.is_some());
+}

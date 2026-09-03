@@ -206,6 +206,7 @@ fn make_state_with_backend(
         bootstrap_started_unix_ms: None,
         bootstrap_was_active_this_session: false,
         installed_snapshot: None,
+        snapshot_anchor_refusal_warned: false,
         wallet_hook: None,
         mining_enabled: false,
         api_publicly_bound: false,
@@ -3408,4 +3409,137 @@ async fn handshake_complete_for_registered_address_keeps_existing_runtime() {
         "the dropped duplicate must not complete a handshake",
     );
     drop(client);
+}
+
+// ----- NiPoPoW proof vs the header checkpoint (ingress) -----
+
+/// Mainnet genesis and height-2 headers, hex, as served on the wire. Same
+/// vectors the `ergo-sync` popow reducer tests use; duplicated here because
+/// this test drives the node's real message dispatch rather than the reducer.
+const POPOW_GENESIS_HEX: &str = "010000000000000000000000000000000000000000000000000000000000000000766ab7a313cd2fb66d135b0be6662aa02dfa8e5b17342c05a04396268df0bfbb93fb06aa44413ff57ac878fda9377207d5db0e78833556b331b4d9727b3153ba18b7a08878f2a7ee4389c5a1cece1e2724abe8b8adc8916240dd1bcac069177303f1f6cee9ba2d0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8060117650100000003be7ad70c74f691345cbedba19f4844e7fc514e1188a7929f5ae261d5bb00bb6602da9385ac99014ddcffe88d2ac5f28ce817cd615f270a0a5eae58acfb9fd9f6a0000000030151dc631b7207d4420062aeb54e82b0cfb160ff6ace90ab7754f942c4c3266b";
+const POPOW_HEIGHT_2_HEX: &str = "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b828b0f6a0e6cb98ed4649c6e4cc00599ae78755324c79a8cec51e94ecca339d7a3a11a92de9c0ba1e95068f39bc1e08afa4ca23dff16de135fac64d0cf7dd1ab6291b70477f591ee8efb8a962d36ddbe3ac57591e39fe45ffb8c51c4939e41980387d9cfe9ba2d6b46bcba6f750f5be67d89679e921b78c277c5546a08cdb0955376fa0ea271e30601176502000000033c46c7fd7085638bf4bc902badb4e5a1942d3251d92d0eddd6fbe5d57e91553703df646d7f6138aede718a2a4f1a76d4125750e8ab496b7a8a25292d07e14cbadb0000000a03d0d0191b06164a2e86a170f0d8ac96cffa2e3312f2f5b0b1c3b1e082b9a0cd";
+
+fn popow_proof_frame() -> Vec<u8> {
+    use ergo_primitives::reader::VlqReader;
+    use ergo_ser::header::read_header;
+    use ergo_ser::popow_header::PoPowHeader;
+    use ergo_ser::popow_proof::NipopowProof;
+
+    let hdr = |hex_str: &str| {
+        let raw = hex::decode(hex_str).unwrap();
+        read_header(&mut VlqReader::new(&raw)).unwrap()
+    };
+    let popow_hdr = |h| PoPowHeader {
+        header: h,
+        interlinks: vec![],
+        interlinks_proof: vec![],
+    };
+    let proof = NipopowProof {
+        m: 6,
+        k: 10,
+        prefix: vec![popow_hdr(hdr(POPOW_GENESIS_HEX))],
+        suffix_head: popow_hdr(hdr(POPOW_HEIGHT_2_HEX)),
+        suffix_tail: vec![],
+        continuous: false,
+    };
+    let body = ergo_ser::popow_proof::serialize_nipopow_proof(&proof).unwrap();
+    message::serialize_nipopow_proof(&body).unwrap()
+}
+
+fn state_with_popow_bootstrap(state: &mut NodeState) {
+    state.popow_bootstrap = Some(ergo_sync::popow_bootstrap::PopowBootstrap::new(
+        2,
+        None,
+        DifficultyParams::mainnet(),
+    ));
+}
+
+#[test]
+fn popow_proof_violating_checkpoint_penalizes_peer_and_never_reaches_verifier() {
+    // A forged proof carrying a different header at the operator's anchor
+    // height must be rejected at INGRESS: penalise the sender, and leave the
+    // reducer untouched so the forgery neither counts toward quorum nor wins
+    // best-proof selection. Marking the bootstrap terminal here would let one
+    // such proof disable NiPoPoW for the whole run.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    state_with_popow_bootstrap(&mut state);
+    state
+        .executor
+        .set_header_checkpoint(Some(ergo_sync::header_proc::HeaderCheckpoint {
+            height: 2,
+            block_id: [0x7fu8; 32],
+        }));
+
+    let peer = test_peer();
+    let actions = handle_message(
+        &mut state,
+        peer,
+        message::CODE_NIPOPOW_PROOF,
+        &popow_proof_frame(),
+        Instant::now(),
+    );
+
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::Penalize {
+                peer: p,
+                penalty: Penalty::Misbehavior,
+            } if *p == peer
+        )),
+        "a proof violating the checkpoint must penalise its sender: {actions:?}"
+    );
+    let popow = state.popow_bootstrap.as_ref().unwrap();
+    assert_eq!(
+        popow.proofs_processed(),
+        0,
+        "the forged proof must never reach the verifier"
+    );
+    assert!(
+        popow.is_active(true),
+        "one forged proof must not disable NiPoPoW bootstrap"
+    );
+    assert!(!popow.quorum_reached());
+}
+
+#[test]
+fn popow_proof_matching_checkpoint_reaches_the_verifier() {
+    // Control for the test above: with the anchor satisfied, the same proof
+    // takes the normal path into the verifier and no penalty is emitted.
+    use ergo_primitives::reader::VlqReader;
+    use ergo_ser::header::{read_header, serialize_header};
+
+    let raw = hex::decode(POPOW_HEIGHT_2_HEX).unwrap();
+    let h2 = read_header(&mut VlqReader::new(&raw)).unwrap();
+    let (_bytes, h2_id) = serialize_header(&h2).unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    state_with_popow_bootstrap(&mut state);
+    state
+        .executor
+        .set_header_checkpoint(Some(ergo_sync::header_proc::HeaderCheckpoint {
+            height: 2,
+            block_id: *h2_id.as_bytes(),
+        }));
+
+    let peer = test_peer();
+    let actions = handle_message(
+        &mut state,
+        peer,
+        message::CODE_NIPOPOW_PROOF,
+        &popow_proof_frame(),
+        Instant::now(),
+    );
+
+    assert!(
+        !actions.iter().any(|a| matches!(a, Action::Penalize { .. })),
+        "a proof consistent with the checkpoint must not be penalised: {actions:?}"
+    );
+    assert_eq!(
+        state.popow_bootstrap.as_ref().unwrap().provider_count(),
+        1,
+        "the proof must have reached the reducer"
+    );
 }
