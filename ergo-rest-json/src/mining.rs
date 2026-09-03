@@ -104,8 +104,16 @@ pub struct AutolykosSolutionJson {
     /// Hex-encoded 8-byte nonce. Required.
     pub n: String,
 
-    /// Distance value. v1-only; v2 defaults to 0 per `dForV2`. Encoded
-    /// as decimal-BigInt string when present.
+    /// Distance value. v1-only; v2 defaults to 0 per `dForV2`.
+    ///
+    /// UNSIGNED: Scala carries `d` as the magnitude that
+    /// `BigIntegers.asUnsignedByteArray` writes to the wire, so a
+    /// `BigUint` is the faithful type — a signed BigInt would admit
+    /// values no Scala node can serialize. On the wire it is a bare
+    /// JSON NUMBER (`ApiCodecs.bigIntEncoder` =
+    /// `JsonNumber.fromDecimalStringUnsafe`), matching the `d` the
+    /// header encoder emits; a decimal string is also accepted inbound,
+    /// as circe's `Decoder[BigInt]` accepts one.
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(serialize_with = "serialize_opt_biguint_decimal")]
@@ -141,27 +149,48 @@ fn deserialize_biguint_decimal<'de, D: Deserializer<'de>>(d: D) -> Result<BigUin
         .map_err(|e| serde::de::Error::custom(format!("biguint parse: {e}")))
 }
 
+/// Autolykos v1 `d`, rendered the way Scala renders it: a bare JSON
+/// number (`AutolykosSolution.jsonEncoder` → `ApiCodecs.bigIntEncoder`
+/// → `JsonNumber.fromDecimalStringUnsafe`). `serde_json`'s
+/// `arbitrary_precision` feature (enabled by this crate) carries the
+/// full ~2^190 magnitude losslessly; a plain `f64` number would not.
 fn serialize_opt_biguint_decimal<S: Serializer>(
     v: &Option<BigUint>,
     s: S,
 ) -> Result<S::Ok, S::Error> {
     match v {
-        Some(b) => s.serialize_str(&b.to_str_radix(10)),
+        Some(b) => b
+            .to_str_radix(10)
+            .parse::<serde_json::Number>()
+            .map_err(|e| serde::ser::Error::custom(format!("biguint as JSON number: {e}")))?
+            .serialize(s),
         None => s.serialize_none(),
     }
 }
 
+/// Inbound `d`, accepting exactly what circe's `Decoder[BigInt]`
+/// accepts: a JSON number (the form Scala's own encoder emits, so a
+/// Scala-shaped v1 solution must not be rejected at the door) or a
+/// decimal string. The value is an unsigned magnitude, so a negative or
+/// fractional number is a malformed solution rather than something to
+/// reinterpret.
 fn deserialize_opt_biguint_decimal<'de, D: Deserializer<'de>>(
     d: D,
 ) -> Result<Option<BigUint>, D::Error> {
-    let opt = Option::<String>::deserialize(d)?;
-    match opt {
-        Some(s) => s
-            .parse::<BigUint>()
-            .map(Some)
-            .map_err(|e| serde::de::Error::custom(format!("biguint parse: {e}"))),
-        None => Ok(None),
-    }
+    let decimal = match Option::<serde_json::Value>::deserialize(d)? {
+        None | Some(serde_json::Value::Null) => return Ok(None),
+        Some(serde_json::Value::Number(n)) => n.to_string(),
+        Some(serde_json::Value::String(s)) => s,
+        Some(other) => {
+            return Err(serde::de::Error::custom(format!(
+                "d must be a JSON number or decimal string, got {other}"
+            )))
+        }
+    };
+    decimal
+        .parse::<BigUint>()
+        .map(Some)
+        .map_err(|e| serde::de::Error::custom(format!("biguint parse: {e}")))
 }
 
 #[cfg(test)]
@@ -219,6 +248,39 @@ mod tests {
         assert!(parsed.d.is_none());
     }
 
+    /// `d` from mainnet header 3
+    /// (`3ff49e2419f779390a9347e8c3ee6391dd3f9e543c12dabcb0f1ebc8168754f4`),
+    /// the first block on the chain whose Autolykos v1 distance has its
+    /// top bit set: 27 magnitude bytes starting `0x9a`.
+    const MAINNET_H3_D: &str = "63676299738664633458272122943823860664316059640250223568297740204";
+
+    #[test]
+    fn autolykos_solution_parses_v1_d_from_json_number() {
+        // Scala's `AutolykosSolution.jsonEncoder` emits `d` as a bare
+        // JSON number, so this is the shape a Scala-compatible v1 miner
+        // POSTs. Rejecting it would close the door on the real wire form.
+        let s = format!(r#"{{"n":"0000000900cb491a","d":{MAINNET_H3_D}}}"#);
+        let parsed: AutolykosSolutionJson = serde_json::from_str(&s).expect("de");
+        let d = parsed.d.expect("d present");
+        assert_eq!(d.to_str_radix(10), MAINNET_H3_D);
+        let magnitude = d.to_bytes_be();
+        assert_eq!(magnitude.len(), 27, "unsigned magnitude is minimal-length");
+        assert!(
+            magnitude[0] >= 0x80,
+            "h=3 exercises the high-bit case: {:#04x}",
+            magnitude[0],
+        );
+    }
+
+    #[test]
+    fn autolykos_solution_parses_v1_d_from_decimal_string() {
+        // circe's `Decoder[BigInt]` also accepts a string, so stay as
+        // permissive inbound as the node we mirror.
+        let s = format!(r#"{{"n":"0000000900cb491a","d":"{MAINNET_H3_D}"}}"#);
+        let parsed: AutolykosSolutionJson = serde_json::from_str(&s).expect("de");
+        assert_eq!(parsed.d.expect("d present").to_str_radix(10), MAINNET_H3_D);
+    }
+
     #[test]
     fn reward_address_response_keys_are_camel_case() {
         let r = RewardAddressResponse {
@@ -238,7 +300,56 @@ mod tests {
         assert!(s.contains("\"rewardPubkey\""), "{s}");
     }
 
+    // ----- round-trips -----
+
+    #[test]
+    fn autolykos_solution_v1_d_roundtrips_as_bare_json_number() {
+        let s = format!(r#"{{"n":"0000000900cb491a","d":{MAINNET_H3_D}}}"#);
+        let parsed: AutolykosSolutionJson = serde_json::from_str(&s).expect("de");
+        let json = serde_json::to_value(&parsed).expect("ser");
+        assert!(
+            json["d"].is_number(),
+            "d must re-emit as a JSON number, not a string: {}",
+            json["d"],
+        );
+        assert_eq!(
+            json["d"].to_string(),
+            MAINNET_H3_D,
+            "arbitrary-precision number must survive the round trip intact",
+        );
+        let reparsed: AutolykosSolutionJson =
+            serde_json::from_value(json).expect("re-emitted form re-parses");
+        assert_eq!(reparsed, parsed);
+    }
+
     // ----- error paths -----
+
+    #[test]
+    fn autolykos_solution_rejects_negative_d() {
+        // `d` is the unsigned magnitude Scala writes with
+        // `BigIntegers.asUnsignedByteArray`; a negative value is not a
+        // solution any node could have produced.
+        let s = r#"{"n":"0000000900cb491a","d":-1}"#;
+        let err = serde_json::from_str::<AutolykosSolutionJson>(s).expect_err("must reject");
+        assert!(err.to_string().contains("biguint parse"), "{err}");
+    }
+
+    #[test]
+    fn autolykos_solution_rejects_fractional_d() {
+        let s = r#"{"n":"0000000900cb491a","d":1.5}"#;
+        let err = serde_json::from_str::<AutolykosSolutionJson>(s).expect_err("must reject");
+        assert!(err.to_string().contains("biguint parse"), "{err}");
+    }
+
+    #[test]
+    fn autolykos_solution_rejects_non_numeric_d() {
+        let s = r#"{"n":"0000000900cb491a","d":true}"#;
+        let err = serde_json::from_str::<AutolykosSolutionJson>(s).expect_err("must reject");
+        assert!(
+            err.to_string().contains("JSON number or decimal string"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn work_message_rejects_invalid_b_string() {

@@ -522,39 +522,37 @@ struct BlockSections {
     extension_bytes: Vec<u8>,
 }
 
-/// Work around a KNOWN, DEFERRED production decode bug so the replay driver can
-/// reconstruct byte-exact header bytes (needed because `from_persisted_parts`
-/// re-hashes them). `ergo-rest-json` decodes the Autolykos v1 pow `d` field as
-/// SIGNED two's-complement, but Scala serializes it UNSIGNED
-/// (`asUnsignedByteArray`, minimal magnitude, never a leading 0x00). So a `d`
-/// that begins with 0x00 (len >= 2) is unambiguously the spurious sign byte the
-/// buggy decode prepended for a magnitude whose top byte is >= 0x80 (mainnet
-/// height 3 is the first such block). We strip it with precise byte-surgery on
-/// the header's trailing `[d_len][d]` fields, leaving every other byte
-/// byte-identical to Scala. The production fix (correcting the decode itself)
-/// remains deferred; this is a replay-only workaround.
-fn correct_v1_pow_d(header_bytes: &[u8]) -> Result<Vec<u8>, String> {
+/// Assert the production decode reconstructed a Scala-faithful Autolykos
+/// v1 `d`: an UNSIGNED, minimal-length magnitude
+/// (`BigIntegers.asUnsignedByteArray`), which never carries a leading
+/// `0x00`. This guarded a decode bug that read `d` as SIGNED
+/// two's-complement and so prepended a sign byte to every high-bit
+/// magnitude (mainnet height 3 is the first such block), producing
+/// header bytes one byte too long and the wrong id. The decode is fixed;
+/// the check stays as a tripwire, because `from_persisted_parts` re-hashes
+/// these bytes and a regression would otherwise surface as an opaque
+/// id mismatch far from its cause.
+fn check_v1_pow_d(header_bytes: &[u8]) -> Result<(), String> {
     let hdr = parse_header(header_bytes)?;
     if let AutolykosSolution::V1 { d, .. } = &hdr.solution {
         if d.len() >= 2 && d[0] == 0x00 {
-            let l = d.len();
-            // tail is the last `l + 1` bytes: [d_len = l][d (l bytes)].
-            let cut = header_bytes.len() - l - 1;
-            let mut fixed = header_bytes[..cut].to_vec();
-            fixed.push((l - 1) as u8);
-            fixed.extend_from_slice(&d[1..]);
-            return Ok(fixed);
+            return Err(format!(
+                "h={}: Autolykos v1 d has a leading 0x00 sign byte ({} bytes) — \
+                 Scala serializes it unsigned and minimal-length",
+                hdr.height,
+                d.len(),
+            ));
         }
     }
-    Ok(header_bytes.to_vec())
+    Ok(())
 }
 
 fn decode_block(block: &ScalaFullBlock) -> Result<BlockSections, String> {
     // The recomputed modifier id is intentionally discarded: the replay driver
     // uses the archival node's authoritative id (see `checked_header_with_oracle_id`).
-    let (raw_header_bytes, _hid_modifier) =
+    let (header_bytes, _hid_modifier) =
         decode_scala_header(&block.header).map_err(|(r, d)| format!("header decode ({r}): {d}"))?;
-    let header_bytes = correct_v1_pow_d(&raw_header_bytes)?;
+    check_v1_pow_d(&header_bytes)?;
 
     let block_transactions_bytes =
         decode_block_transactions_with_mode(&block.block_transactions, DecodeMode::Preserve)
