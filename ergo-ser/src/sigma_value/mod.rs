@@ -324,7 +324,15 @@ pub fn write_value(w: &mut VlqWriter, tpe: &SigmaType, val: &SigmaValue) -> Resu
             write_bigint_value(w, v)?;
         }
         (SigmaType::SGroupElement, SigmaValue::GroupElement(ge)) => {
-            w.put_bytes(ge.as_bytes());
+            // Scala writes the identity as 33 zeroes and every other point
+            // re-encoded from its affine coordinates
+            // (`GroupElementSerializer.scala:20-33`), so a `0x00`-lead
+            // encoding never survives a round-trip with its trailing bytes
+            // intact. The reader already normalizes; this keeps the writer
+            // independently faithful for programmatically built values.
+            w.put_bytes(&ergo_primitives::group_element::canonical_encoding(
+                *ge.as_bytes(),
+            ));
         }
         (SigmaType::SSigmaProp, SigmaValue::SigmaProp(sb)) => {
             write_sigma_boolean(w, sb)?;

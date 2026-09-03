@@ -758,6 +758,91 @@ mod tests {
         }
     }
 
+    /// `GroupElement` register values normalize the way the JVM does, and the
+    /// box id is computed over the normalized bytes.
+    ///
+    /// `GroupElementSerializer.parse` (`GroupElementSerializer.scala:35-42`)
+    /// maps ANY 33-byte encoding whose lead byte is `0x00` to the infinity
+    /// point, whatever the other 32 bytes hold, and `serialize` (`:20-33`)
+    /// writes infinity as 33 zeroes. `ErgoBox.id` is `Blake2b256` of the
+    /// RE-SERIALIZED box (`ErgoBox.scala:87-92`), so `07 00 aa*32` and
+    /// `07 00*33` are one box with one id. Preserving the trailing garbage
+    /// gave such a box a different id than the reference -- a UTXO-set /
+    /// AVL-root divergence on a box the reference accepts. A compressed
+    /// point (`0x02`/`0x03` lead) re-encodes to itself. The same normalization
+    /// applies to the point inside a `ProveDlog` `SigmaProp` constant.
+    ///
+    /// Vector: `test-vectors/scala/canonical_extension_and_group_element.json`.
+    #[test]
+    fn register_group_element_encodings_normalize_to_scala_bytes_and_box_ids() {
+        use ergo_primitives::digest::blake2b256;
+        const PREFIX: &str = "c0843d10010101d17300000001";
+        const SUFFIX: &str = "070707070707070707070707070707070707070707070707070707070707070703";
+        const ZERO33: &str = "000000000000000000000000000000000000000000000000000000000000000000";
+        const GARBAGE: &str = "00aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const GENERATOR: &str =
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        // (label, wire point, Scala re-serialized point, Scala box id)
+        let cases = [
+            (
+                "identity_all_zero",
+                ZERO33,
+                ZERO33,
+                "f97a4bddd81927722ead4b4c83fac917905440d69cd2a997fb64e892013ca7f8",
+            ),
+            (
+                "identity_zero_lead_garbage",
+                GARBAGE,
+                ZERO33,
+                "f97a4bddd81927722ead4b4c83fac917905440d69cd2a997fb64e892013ca7f8",
+            ),
+            (
+                "generator",
+                GENERATOR,
+                GENERATOR,
+                "b13d2f0732d91f7d8a1cf5dd38cfb10d1fa48ac537dbc747f0224331f510457c",
+            ),
+        ];
+        for (label, wire_point, canonical_point, expected_box_id) in cases {
+            // R4 = GroupElement constant (`07` + point).
+            let candidate_hex = format!("{PREFIX}07{wire_point}");
+            let bytes = hex::decode(&candidate_hex).unwrap();
+            let mut r = VlqReader::new(&bytes);
+            let candidate = crate::ergo_box::read_ergo_box_candidate(&mut r)
+                .unwrap_or_else(|e| panic!("{label}: Scala accepts this register, got {e:?}"));
+            assert!(r.is_empty(), "{label}: trailing bytes");
+            let mut w = VlqWriter::new();
+            crate::ergo_box::write_ergo_box_candidate(&mut w, &candidate).unwrap();
+            let canonical_candidate = format!("{PREFIX}07{canonical_point}");
+            assert_eq!(
+                hex::encode(w.result()),
+                canonical_candidate,
+                "{label}: the register must re-serialize as GroupElementSerializer does",
+            );
+            let box_bytes = hex::decode(format!("{canonical_candidate}{SUFFIX}")).unwrap();
+            assert_eq!(
+                hex::encode(blake2b256(&box_bytes).as_bytes()),
+                expected_box_id,
+                "{label}: box id must match the JVM",
+            );
+
+            // The same point inside a ProveDlog SigmaProp constant (`08cd` + point).
+            let dlog_hex = format!("{PREFIX}08cd{wire_point}");
+            let bytes = hex::decode(&dlog_hex).unwrap();
+            let mut r = VlqReader::new(&bytes);
+            let candidate = crate::ergo_box::read_ergo_box_candidate(&mut r).unwrap_or_else(|e| {
+                panic!("{label}: Scala accepts this ProveDlog register, got {e:?}")
+            });
+            let mut w = VlqWriter::new();
+            crate::ergo_box::write_ergo_box_candidate(&mut w, &candidate).unwrap();
+            assert_eq!(
+                hex::encode(w.result()),
+                format!("{PREFIX}08cd{canonical_point}"),
+                "{label}: the ProveDlog point must normalize identically",
+            );
+        }
+    }
+
     /// The decoded values behind the register node forms.
     #[test]
     fn register_evaluated_value_forms_decode_to_scala_values() {

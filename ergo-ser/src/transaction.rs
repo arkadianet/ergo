@@ -703,8 +703,9 @@ mod tests {
     /// Before the fix the Rust reader ran `read_constant` on the extension
     /// entry, so this transaction — and every block containing it — was
     /// REJECTED at parse: a reject-valid stall the node could never advance
-    /// past. The tx id is unaffected either way (the extension is not part of
-    /// `bytes_to_sign`), so it is pinned here as the oracle's value.
+    /// past. The tx id commits to the extension's canonical encoding (it is
+    /// part of `bytes_to_sign`); both node forms are preserved by the
+    /// reference, so the id is the oracle's value over these exact bytes.
     ///
     /// Vector: `test-vectors/scala/context_extension_evaluated_values.json`.
     #[test]
@@ -731,10 +732,10 @@ mod tests {
     }
 
     /// The same shape for the remaining `EvaluatedValue` forms, each with the
-    /// JVM's transaction id and byte-exact re-serialization. `7f`/`80` are the
-    /// canonicalizing pair: the reference re-emits them as `0101`/`0100`, and
-    /// the transaction id is unaffected either way because the extension is
-    /// not part of `bytes_to_sign`.
+    /// JVM's transaction id and byte-exact re-serialization. The extension IS
+    /// part of `bytes_to_sign`, so each id commits to the canonical encoding;
+    /// the canonicalizing pair `7f`/`80` is pinned from the wire side in
+    /// `tx_extension_wire_encodings_canonicalize_to_scala_id_and_bytes`.
     ///
     /// Vector: `test-vectors/scala/evaluated_value_forms.json`.
     #[test]
@@ -787,6 +788,125 @@ mod tests {
             let mut w = VlqWriter::new();
             write_transaction(&mut w, &tx).unwrap();
             assert_eq!(hex::encode(w.result()), expected_hex, "{tx_hex}: bytes");
+        }
+    }
+
+    /// The transaction id commits to the CANONICAL ContextExtension encoding.
+    ///
+    /// Scala's `ErgoLikeTransaction.id` is `Blake2b256(bytesToSign)`, and
+    /// `bytesToSign` (`ErgoLikeTransaction.scala:190-197`) rebuilds every
+    /// input from the PARSED extension (`Input.serializer` ->
+    /// `ProverResult.serializer` -> `ContextExtension.serializer.serialize`),
+    /// never from the wire bytes. `ValueSerializer` routes every `Constant` --
+    /// including the `TrueLeaf`/`FalseLeaf` opcodes `7f`/`80` and a
+    /// non-canonical Boolean payload `0105` -- through `ConstantSerializer`,
+    /// so those wire forms hash as `0101`/`0100`, while the node forms `0x82`
+    /// / `0x83` / `0x85` / `0x86` hash byte-for-byte. Hashing the verbatim
+    /// wire slice gave the `7f`/`80`/`0105` transactions a different id than
+    /// the reference -- a different `transactionsRoot`, a rejected block.
+    ///
+    /// Each case: the same 1-in / 1-out transaction with the input's
+    /// extension carried VERBATIM as `wire`, the reference's
+    /// `ErgoTransactionSerializer.toBytes(parse(wire))`, and its id.
+    ///
+    /// Vector: `test-vectors/scala/canonical_extension_and_group_element.json`.
+    #[test]
+    fn tx_extension_wire_encodings_canonicalize_to_scala_id_and_bytes() {
+        const IN: &str = "01010101010101010101010101010101010101010101010101010101010101010100";
+        const OUT: &str = "000001c0843d10010101d17300000000";
+        // (label, extension wire hex, Scala canonical extension hex, Scala tx id)
+        let cases = [
+            (
+                "true_leaf_opcode",
+                "01017f",
+                "01010101",
+                "0034c8fded6a1dca7bba16e71419da08eaebf8186d346bc20cd9a15b91b5e0b5",
+            ),
+            (
+                "false_leaf_opcode",
+                "010180",
+                "01010100",
+                "1a61e84e647e0940ea93c79f6e3e8b610b2e46cbeac106311d217d0b70a35726",
+            ),
+            (
+                "bool_noncanonical",
+                "01010105",
+                "01010101",
+                "0034c8fded6a1dca7bba16e71419da08eaebf8186d346bc20cd9a15b91b5e0b5",
+            ),
+            (
+                "bool_canonical",
+                "01010101",
+                "01010101",
+                "0034c8fded6a1dca7bba16e71419da08eaebf8186d346bc20cd9a15b91b5e0b5",
+            ),
+            (
+                "bool_false_canonical",
+                "01010100",
+                "01010100",
+                "1a61e84e647e0940ea93c79f6e3e8b610b2e46cbeac106311d217d0b70a35726",
+            ),
+            (
+                "concrete_collection",
+                "0101830204040e0410",
+                "0101830204040e0410",
+                "a48c2a1ef6eebe4b01ec48fdfd318e6b5a2d96f7572cc592a0f156e1408fac05",
+            ),
+            (
+                "bool_collection",
+                "0101850201",
+                "0101850201",
+                "f305a5d9d1874bc6e16992676a5e8cf142bbb1a7171d91072c460005e4fed6c3",
+            ),
+            (
+                "group_generator",
+                "010182",
+                "010182",
+                "6a751a0dc3ce23f9b622c25ba55fc37426712d594cafdb25d17f48139f5edaab",
+            ),
+            (
+                "create_tuple",
+                "0101860204020404",
+                "0101860204020404",
+                "0699dec311aa8a885e6e85649bd17626d386e57b01fba453f445f346f6b13caf",
+            ),
+        ];
+        for (label, wire_ext, canonical_ext, expected_id) in cases {
+            let wire_hex = format!("{IN}{wire_ext}{OUT}");
+            let canonical_hex = format!("{IN}{canonical_ext}{OUT}");
+            let wire = hex::decode(&wire_hex).unwrap();
+            let mut r = VlqReader::new(&wire);
+            let tx = read_transaction(&mut r)
+                .unwrap_or_else(|e| panic!("{label}: Scala accepts {wire_hex}, got {e:?}"));
+            assert!(r.is_empty(), "{label}: leftover bytes");
+
+            assert_eq!(
+                hex::encode(transaction_id(&tx).unwrap().as_bytes()),
+                expected_id,
+                "{label}: tx id must match the JVM (canonical extension in bytes_to_sign)",
+            );
+            assert_eq!(
+                hex::encode(tx.inputs[0].spending_proof.extension_bytes()),
+                canonical_ext,
+                "{label}: the cached extension encoding must be the canonical one",
+            );
+            let mut w = VlqWriter::new();
+            write_transaction(&mut w, &tx).unwrap();
+            assert_eq!(
+                hex::encode(w.result()),
+                canonical_hex,
+                "{label}: re-serialization must equal ErgoTransactionSerializer.toBytes",
+            );
+
+            // The canonical encoding, parsed on its own, is the fixed point.
+            let canonical = hex::decode(&canonical_hex).unwrap();
+            let mut r2 = VlqReader::new(&canonical);
+            let tx2 = read_transaction(&mut r2).unwrap();
+            assert_eq!(
+                bytes_to_sign(&tx).unwrap(),
+                bytes_to_sign(&tx2).unwrap(),
+                "{label}: wire and canonical parses must sign identical bytes",
+            );
         }
     }
 

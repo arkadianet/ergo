@@ -21,6 +21,40 @@ impl GroupElement {
     }
 }
 
+/// The canonical encoding of the group identity: 33 zero bytes.
+///
+/// Scala `GroupElementSerializer` (`GroupElementSerializer.scala:18`,
+/// `:20-33`) writes the infinity point as `Array.fill(33)(0)`.
+pub const IDENTITY_ENCODING: [u8; GROUP_ELEMENT_LENGTH] = [0u8; GROUP_ELEMENT_LENGTH];
+
+/// Normalize a 33-byte SEC1 encoding the way Scala's serializer round-trip
+/// does.
+///
+/// `GroupElementSerializer.parse` (`GroupElementSerializer.scala:35-42`) tests
+/// only the LEAD byte: `if (encoded(0) != 0) decodePoint(encoded) else
+/// CryptoContext.default.infinity`. So EVERY 33-byte sequence starting with
+/// `0x00` decodes to the same identity point, whatever the remaining 32 bytes
+/// hold — and `serialize` then writes that point back as 33 zeroes
+/// (`:21-22`). The reference therefore accepts `07 00 AA..AA` in a register
+/// and re-serializes it as `07 00*33`; since a box id is `blake2b256` of the
+/// re-serialized box bytes, the id is computed over the ZEROED form.
+/// Preserving the original trailing garbage would give such a box a different
+/// id than the reference node computes — a UTXO-set / AVL-root divergence on a
+/// box the reference accepts.
+///
+/// A `0x02` / `0x03` compressed encoding needs no normalization: Scala
+/// re-encodes it from the decoded affine coordinates, which for any point
+/// `decodePoint` accepts reproduces the same 33 bytes. An X coordinate that is
+/// not a valid curve point is rejected outright, by `decodePoint` there and by
+/// the reader's sideband curve check here.
+pub fn canonical_encoding(bytes: [u8; GROUP_ELEMENT_LENGTH]) -> [u8; GROUP_ELEMENT_LENGTH] {
+    if bytes[0] == 0x00 {
+        IDENTITY_ENCODING
+    } else {
+        bytes
+    }
+}
+
 /// Read a 33-byte group element AND record it on the reader's sideband so a
 /// higher (crypto-capable) layer can curve-check it after parsing. Every
 /// deserializer that reads a group element must go through this — that is what
@@ -50,6 +84,12 @@ pub fn read_group_element(
             )));
         }
     }
+    // Normalize exactly as `GroupElementSerializer.parse` does: a `0x00` lead
+    // IS the identity point, whatever follows, and the identity's encoding is
+    // 33 zeroes. Storing the verbatim trailing bytes would leak a non-value
+    // distinction into box ids, `bytes_to_sign`, and script-level equality —
+    // see `canonical_encoding`.
+    let bytes = canonical_encoding(bytes);
     r.record_group_element(bytes);
     Ok(GroupElement::from_bytes(bytes))
 }

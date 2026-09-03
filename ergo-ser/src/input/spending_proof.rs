@@ -1,6 +1,6 @@
 //! [`SpendingProof`] and signed [`Input`]: sigma proof bytes plus the
-//! committed context extension, with verbatim-bytes round-trip guarantees
-//! and the `bytes_to_sign` (zeroed-proof) serialization form.
+//! committed context extension, with the CANONICAL extension encoding cached
+//! for the `bytes_to_sign` (zeroed-proof) serialization form.
 
 use ergo_primitives::digest::Digest32;
 use ergo_primitives::reader::{ReadError, VlqReader};
@@ -13,11 +13,35 @@ use super::context_extension::{read_context_extension, write_context_extension, 
 /// Sigma proof bytes plus the context extension committed to during
 /// signing.
 ///
-/// The verbatim wire bytes of the extension are kept alongside the
-/// parsed [`ContextExtension`] so callers that need byte-exact round-trip
-/// (`bytes_to_sign(tx)` parity, raw mainnet fixture replay) don't have
-/// to re-serialize through the writer — which can canonicalize away
-/// non-canonical-but-accepted forms (e.g. SBoolean wire `0105` vs `0101`).
+/// The CANONICAL wire encoding of the extension is cached alongside the parsed
+/// [`ContextExtension`], so every writer emits it without re-serializing per
+/// call.
+///
+/// Canonical, not verbatim, because that is what the transaction id commits
+/// to. Scala's `ErgoLikeTransaction.id` is `Blake2b256(messageToSign)` and
+/// `bytesToSign` (`ErgoLikeTransaction.scala:190-197`) rebuilds every input
+/// from the PARSED object — `tx.inputs.map(_.inputToSign)` produces
+/// `Input(boxId, ProverResult(Array.empty, extension))`, which
+/// `Input.serializer` -> `ProverResult.serializer.serialize`
+/// (`ProverResult.scala:33-37`) -> `ContextExtension.serializer.serialize`
+/// re-encodes from the parsed `ContextExtension`. The verbatim wire bytes are
+/// never hashed.
+///
+/// That matters because the reference accepts extension encodings it does not
+/// itself emit and canonicalizes them on the way out: the `TrueLeaf` /
+/// `FalseLeaf` opcodes `7f` / `80` and a non-canonical Boolean payload `0105`
+/// all become `0101` / `0100`. Caching the verbatim bytes gave such a
+/// transaction a DIFFERENT id than the reference, hence a different
+/// `transactionsRoot`, hence a rejected block. Verified against the JVM: the
+/// wire extension `01017f` and the canonical `01010101` produce the same
+/// transaction id (`0034c8fd…`) and the same `transactionsRoot`
+/// (`bdb0ebec…`).
+///
+/// The node forms the reference PRESERVES — `0x82`, `0x83`, `0x85`, `0x86` —
+/// round-trip byte-for-byte through [`write_context_extension`], because the
+/// parsed [`ContextExtension`] keeps each node's identity. So for every
+/// canonically-encoded transaction these bytes equal the wire slice they
+/// replace.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpendingProof {
     /// Raw signature / sigma proof bytes.
@@ -65,11 +89,16 @@ impl SpendingProof {
     ///
     /// Caller MUST ensure `extension_bytes` is a valid serialization that
     /// `read_context_extension` would parse back to the same `extension`
-    /// struct. No runtime validation is performed — the trade-off for
-    /// byte-exact roundtrip on Scala-emitted forms that the writer
-    /// might canonicalize away (e.g. SBoolean `0105` vs `0101`). A
-    /// mismatch silently desyncs `bytes_to_sign(tx)` from internal
-    /// inspection. Prefer [`SpendingProof::try_from_raw_parts`] when
+    /// struct. No runtime validation is performed. A mismatch silently
+    /// desyncs `bytes_to_sign(tx)` from internal inspection.
+    ///
+    /// Prefer supplying the CANONICAL encoding: the reference hashes the
+    /// re-serialized extension into the transaction id, so bytes that merely
+    /// re-parse equal — `01017f` versus `01010101` — still yield the wrong id.
+    /// The consensus wire reader ([`read_spending_proof`]) canonicalizes for
+    /// exactly that reason; this constructor exists for callers replaying a
+    /// specific byte sequence (REST `DecodeMode::Preserve`), where the source
+    /// is a Scala node that only ever emits canonical hex. Prefer [`SpendingProof::try_from_raw_parts`] when
     /// the caller cannot guarantee the contract, or
     /// [`SpendingProof::new`] when no external byte fixture exists.
     pub fn from_trusted_raw_parts(
@@ -153,20 +182,24 @@ pub fn write_spending_proof(w: &mut VlqWriter, sp: &SpendingProof) -> Result<(),
     Ok(())
 }
 
-/// Decode the wire form produced by [`write_spending_proof`]. The
-/// extension bytes consumed during parse are captured verbatim so the
-/// resulting [`SpendingProof`] is byte-exact-roundtrip.
+/// Decode the wire form produced by [`write_spending_proof`]. The extension is
+/// cached in its CANONICAL encoding — the form the reference node hashes into
+/// the transaction id — see the [`SpendingProof`] doc comment.
 pub fn read_spending_proof(r: &mut VlqReader) -> Result<SpendingProof, ReadError> {
     let proof_len = r.get_u16()? as usize;
     let proof = r.get_bytes(proof_len)?.to_vec();
-    let ext_start = r.position();
     let extension = read_context_extension(r)?;
-    let ext_end = r.position();
-    let extension_bytes = r.data_slice(ext_start, ext_end).to_vec();
+    // Canonical re-encoding, NOT the verbatim wire slice — the transaction id
+    // hashes what `ContextExtension.serializer.serialize` produces from the
+    // parsed extension, and the reference canonicalizes `7f` / `80` / `0105`
+    // on that path. See the `SpendingProof` doc comment.
+    let mut w = VlqWriter::new();
+    write_context_extension(&mut w, &extension)
+        .map_err(|e| ReadError::InvalidData(format!("extension re-serialize: {e}")))?;
     Ok(SpendingProof {
         proof,
         extension,
-        extension_bytes,
+        extension_bytes: w.result(),
     })
 }
 

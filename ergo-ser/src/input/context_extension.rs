@@ -446,13 +446,16 @@ pub fn read_context_extension(r: &mut VlqReader) -> Result<ContextExtension, Rea
     Ok(ContextExtension { values })
 }
 
-/// Walk verbatim ContextExtension bytes (count byte + concatenated
-/// `key + serialized_constant` entries) and return `(key, value_bytes)`
-/// pairs preserving the original wire encoding of each entry's value.
+/// Walk ContextExtension bytes (count byte + concatenated
+/// `key + serialized_value` entries) and return `(key, value_bytes)` pairs.
 ///
-/// The returned `value_bytes` is the type-prefix + value-data slice, i.e.
-/// what `ValueSerializer.serialize` produced — exactly what the Scala
-/// node hex-encodes per-entry in the JSON `extension` map.
+/// The returned `value_bytes` is the CANONICAL `ValueSerializer.serialize`
+/// encoding of each entry's value — exactly what the Scala node hex-encodes
+/// per-entry in the JSON `extension` map, which it derives from the parsed
+/// `EvaluatedValue` node rather than from the bytes it read. So a wire entry
+/// of `7f` (the `TrueLeaf` opcode) is reported as `0101`, matching the
+/// reference's REST view, while the node forms it preserves (`0x82`, `0x83`,
+/// `0x85`, `0x86`) are reported unchanged.
 pub fn split_context_extension_bytes(
     extension_bytes: &[u8],
 ) -> Result<Vec<(u8, Vec<u8>)>, ReadError> {
@@ -461,10 +464,11 @@ pub fn split_context_extension_bytes(
     let mut entries = Vec::with_capacity(count);
     for _ in 0..count {
         let key = r.get_u8()?;
-        let start = r.position();
-        let _ = read_extension_value(&mut r)?;
-        let end = r.position();
-        entries.push((key, r.data_slice(start, end).to_vec()));
+        let (tpe, val) = read_extension_value(&mut r)?;
+        let mut w = VlqWriter::new();
+        write_extension_value(&mut w, &tpe, &val)
+            .map_err(|e| ReadError::InvalidData(format!("extension value re-serialize: {e}")))?;
+        entries.push((key, w.result()));
     }
     Ok(entries)
 }

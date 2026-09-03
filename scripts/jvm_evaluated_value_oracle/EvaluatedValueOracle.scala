@@ -154,6 +154,28 @@ object EvaluatedValueOracle {
         c.additionalRegisters.get(ErgoBox.R4).map(_.toString).getOrElse("-")
     } catch { case e: Throwable => fail(e) }
 
+  /** Parse a full signed transaction from hex and report the reference's
+    * canonical re-serialization plus its id. `ErgoLikeTransaction.id` is
+    * Blake2b256(bytesToSign), and `bytesToSign` rebuilds every input from the
+    * PARSED `ContextExtension` (ErgoLikeTransaction.scala:190-197 ->
+    * Input.serializer -> ProverResult.serializer -> ContextExtension.serializer
+    * .serialize), so the id commits to the CANONICAL extension encoding, never
+    * to the verbatim wire bytes. */
+  def parseTxHex(h: String): String =
+    try {
+      val tx = ErgoTransactionSerializer.parseBytes(Base16.decode(h).get)
+      "ACCEPT " + hex(ErgoTransactionSerializer.toBytes(tx)) + " id=" + tx.id.toString
+    } catch { case e: Throwable => fail(e) }
+
+  /** A 1-in / 1-out transaction whose sole input carries `extHex` verbatim as
+    * its ContextExtension wire bytes. */
+  def txHexWithRawExtension(extHex: String): String = {
+    val boxId = "01" * 32
+    val out = hex(ErgoBoxCandidate.serializer.toBytes(new ErgoBoxCandidate(1000000L, trueTree, 0)))
+    // inputCount | boxId | proofLen=0 | <extension> | dataInputs=0 | tokens=0 | outputs=1 | out
+    "01" + boxId + "00" + extHex + "00" + "00" + "01" + out
+  }
+
   def main(args: Array[String]): Unit = VersionContext.withVersions(3.toByte, 0.toByte) {
     // ── hand-crafted bytes: the TrueLeaf / FalseLeaf OPCODES (0x7f / 0x80).
     // `ValueSerializer` never WRITES these for a boolean constant (it routes
@@ -306,5 +328,70 @@ object EvaluatedValueOracle {
     out("script_getreg_long_not_isdefined_hex", hex(treeSer.serializeErgoTree(sRegMismatchEmpty)))
     out("reduce_getreg_type_mismatch_present_not_isdefined",
       reduce(sRegMismatchEmpty, ContextExtension.empty, Map(ErgoBox.R4 -> IntConstant(5))))
+
+    // ── transaction id canonicalizes the ContextExtension ────────────────────
+    // Same transaction, three encodings of the same var-1 Boolean `true`:
+    // the TrueLeaf opcode, a non-canonical Boolean payload, and the canonical
+    // constant. All three must yield the SAME id and the SAME canonical bytes.
+    for ((label, extHex) <- Seq(
+           "true_leaf_opcode" -> "01017f",
+           "false_leaf_opcode" -> "010180",
+           "bool_noncanonical" -> "01010105",
+           "bool_canonical" -> "01010101",
+           "bool_false_canonical" -> "01010100",
+           "concrete_collection" -> "0101830204040e0410",
+           "bool_collection" -> "0101850201",
+           "group_generator" -> "010182",
+           "create_tuple" -> "0101860204020404")) {
+      val h = txHexWithRawExtension(extHex)
+      out(s"txid_ext_${label}_input_hex", h)
+      out(s"txid_ext_${label}", parseTxHex(h))
+    }
+
+    // ── GroupElement normalization ───────────────────────────────────────────
+    // GroupElementSerializer.parse (GroupElementSerializer.scala:35-42) maps
+    // ANY 33 bytes whose first byte is 0 to the infinity point; serialize
+    // (:20-33) writes infinity as 33 zeroes and re-encodes every other point
+    // from affine coordinates. So a register `07 00 AA..` is accepted and
+    // re-serialized as `07 00*33`, and the box id is computed over THAT.
+    val geAllZero = "00" * 33
+    val geZeroLeadGarbage = "00" + ("aa" * 32)
+    val geGenerator = hex(GroupElementSerializer.toBytes(CryptoConstants.dlogGroup.generator))
+    for ((label, geHex) <- Seq(
+           "identity_all_zero" -> geAllZero,
+           "identity_zero_lead_garbage" -> geZeroLeadGarbage,
+           "generator" -> geGenerator)) {
+      out(s"reg_ge_${label}_parse",
+        parseBoxCandidateHex("c0843d10010101d17300000001" + "07" + geHex))
+      // The same point inside a ProveDlog SigmaProp constant (`08cd` + point).
+      out(s"reg_sigmaprop_dlog_${label}_parse",
+        parseBoxCandidateHex("c0843d10010101d17300000001" + "08cd" + geHex))
+      out(s"ctxext_ge_${label}_parse", parseCtxExtHex("0101" + "07" + geHex))
+    }
+    // Box ids over the full box for the two infinity encodings.
+    for ((label, geHex) <- Seq(
+           "identity_all_zero" -> geAllZero,
+           "identity_zero_lead_garbage" -> geZeroLeadGarbage,
+           "generator" -> geGenerator)) {
+      val candHex = "c0843d10010101d17300000001" + "07" + geHex
+      out(s"box_ge_${label}_id", try {
+        val c = ErgoBoxCandidate.serializer.parse(SigmaSerializer.startReader(Base16.decode(candHex).get))
+        val b = new ErgoBox(c.value, c.ergoTree, c.additionalTokens, c.additionalRegisters,
+          bytesToId(Array.fill(32)(7: Byte)), 3.toShort, c.creationHeight)
+        "ACCEPT bytes=" + hex(b.bytes) + " id=" + hex(b.id)
+      } catch { case e: Throwable => fail(e) })
+    }
+
+    // ── block-level: transactionsRoot is built over the canonical ids ────────
+    out("transactions_root_true_leaf_vs_canonical", try {
+      import org.ergoplatform.modifiers.history.BlockTransactions
+      val hdrId = bytesToId(Array.fill(32)(9: Byte))
+      val roots = Seq("01017f", "01010101").map { extHex =>
+        val tx = ErgoTransactionSerializer.parseBytes(
+          Base16.decode(txHexWithRawExtension(extHex)).get)
+        hex(BlockTransactions(hdrId, 3.toByte, Seq(tx)).digest)
+      }
+      "roots=" + roots.mkString(",") + (if (roots.distinct.size == 1) " IDENTICAL" else " DIFFERENT")
+    } catch { case e: Throwable => fail(e) })
   }
 }

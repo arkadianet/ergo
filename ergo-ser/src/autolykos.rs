@@ -104,6 +104,7 @@ pub fn read_solution(r: &mut VlqReader, block_version: u8) -> Result<AutolykosSo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ergo_primitives::group_element::canonical_encoding;
 
     // ----- round-trips -----
 
@@ -203,7 +204,14 @@ mod tests {
             proptest::prop_assert_eq!(data.len(), 41);
             let mut r = VlqReader::new(&data);
             let decoded = read_solution(&mut r, 2).unwrap();
-            proptest::prop_assert_eq!(decoded, sol);
+            // A `0x00`-lead point IS the identity and re-encodes as 33 zeroes
+            // (Scala `GroupElementSerializer`), so the fixed point of the
+            // round-trip is the canonical form, not the drawn bytes.
+            let expected = AutolykosSolution::V2 {
+                pk: GroupElement::from_bytes(canonical_encoding(pk_arr)),
+                nonce: nonce_arr,
+            };
+            proptest::prop_assert_eq!(decoded, expected);
         }
 
         /// Round-trip property for AutolykosSolution::V1 with valid
@@ -233,7 +241,16 @@ mod tests {
             let data = writer.result();
             let mut reader = VlqReader::new(&data);
             let decoded = read_solution(&mut reader, 1).unwrap();
-            proptest::prop_assert_eq!(decoded, sol);
+            let expected = AutolykosSolution::V1 {
+                pk: GroupElement::from_bytes(canonical_encoding(pk_arr)),
+                w: GroupElement::from_bytes(canonical_encoding(w_arr)),
+                nonce: nonce_arr,
+                d: match &sol {
+                    AutolykosSolution::V1 { d, .. } => d.clone(),
+                    AutolykosSolution::V2 { .. } => unreachable!(),
+                },
+            };
+            proptest::prop_assert_eq!(decoded, expected);
         }
     }
 }

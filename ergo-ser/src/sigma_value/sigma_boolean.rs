@@ -1,7 +1,7 @@
 //! [`SigmaBoolean`] tree wire codec (Scala `SigmaBooleanSerializer` tag
 //! layout) and the shared `MaxTreeDepth` bound on its recursion.
 
-use ergo_primitives::group_element::read_group_element;
+use ergo_primitives::group_element::{canonical_encoding, read_group_element};
 use ergo_primitives::reader::{ReadError, VlqReader};
 use ergo_primitives::writer::VlqWriter;
 
@@ -39,14 +39,14 @@ pub fn write_sigma_boolean(w: &mut VlqWriter, sb: &SigmaBoolean) -> Result<(), W
         SigmaBoolean::TrivialProp(true) => w.put_u8(TRIVIAL_PROP_TRUE),
         SigmaBoolean::ProveDlog(ge) => {
             w.put_u8(PROVE_DLOG);
-            w.put_bytes(ge.as_bytes());
+            w.put_bytes(&canonical_encoding(*ge.as_bytes()));
         }
         SigmaBoolean::ProveDHTuple { g, h, u, v } => {
             w.put_u8(PROVE_DHTUPLE);
-            w.put_bytes(g.as_bytes());
-            w.put_bytes(h.as_bytes());
-            w.put_bytes(u.as_bytes());
-            w.put_bytes(v.as_bytes());
+            w.put_bytes(&canonical_encoding(*g.as_bytes()));
+            w.put_bytes(&canonical_encoding(*h.as_bytes()));
+            w.put_bytes(&canonical_encoding(*u.as_bytes()));
+            w.put_bytes(&canonical_encoding(*v.as_bytes()));
         }
         SigmaBoolean::Cand(children) => {
             check_children_len(children.len(), "Cand")?;
