@@ -20,6 +20,20 @@ Required before testnet startup unlocks (the `validate_supported` gate in
 - `state_digest_height_1.json` — AVL state root at height 1, for the embedded
   digest round-trip test
 
+Committed JSON-shape oracles (small, verbatim captures — the on-wire JSON
+*type* of each field is the thing under test, so these must never be
+re-serialized or reformatted):
+
+- `headers_json/scala_headers_442325_442334.json` — 10 consecutive v4 header
+  bodies, `GET /blocks/{id}/header`
+- `mining_json/scala_candidate_522032.json` — one `GET /mining/candidate`
+  response (h=522032, 6.0.3, captured 2026-09-03). Pins that Scala emits the
+  mining target `b` as a **bare JSON number**, not a string:
+  `WorkMessage` carries `b: BigInt` and `ApiCodecs.bigIntEncoder` is
+  `JsonNumber.fromDecimalStringUnsafe`. The value is ~2^222, past f64's
+  exact-integer range, so reading it needs arbitrary precision. Backs
+  `mining::tests::work_message_*_scala_candidate_*` in `ergo-rest-json`.
+
 Bulk range extractions (`headers_*_NNNNNN*.json` etc.) are gitignored and
 regenerable from a running Scala testnet node.
 

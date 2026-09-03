@@ -414,8 +414,10 @@ mod tests {
     #[test]
     fn work_message_to_json_matches_legacy_wire_shape() {
         // Pin the external-miner wire contract after the typed-WorkMessage
-        // move: msg/pk hex, `b` as a decimal BigInt string, `h` present, and
-        // `proof` omitted when None. Lithos/Rigel/ErgoStratum depend on this.
+        // move: msg/pk hex, `b` as a bare JSON number (Scala's
+        // `ApiCodecs.bigIntEncoder`, pinned against a live 6.0.3 candidate in
+        // `ergo-rest-json::mining`), `h` present, and `proof` omitted when
+        // None. Lithos/Rigel/ErgoStratum depend on this.
         // The pool-versioning extension (template_seq / clean_jobs) is purely
         // additive — the Scala-parity fields below must be byte-identical to
         // the pre-extension shape, which this asserts key-by-key.
@@ -427,7 +429,8 @@ mod tests {
         };
         let v = serde_json::to_value(work_message_to_json(w, 42, true)).unwrap();
         assert_eq!(v["msg"], serde_json::Value::String("ab".repeat(32)));
-        assert_eq!(v["b"], serde_json::Value::String("123456789".into()));
+        assert!(v["b"].is_number(), "b must be a bare number: {}", v["b"]);
+        assert_eq!(v["b"].to_string(), "123456789");
         assert_eq!(v["h"], serde_json::Value::Number(1_786_188.into()));
         assert_eq!(v["pk"].as_str().unwrap(), hex::encode([0x02u8; 33]));
         assert!(v.get("proof").is_none(), "proof omitted when None");
