@@ -66,7 +66,7 @@ pub fn revalidate_pooled<V: Validator>(
 /// mean for relay"). The two paths agree on caching, with ONE deliberate
 /// asymmetry on the separate EVICTION decision: a `ValidationErr::Other(_)` is
 /// blacklisted here (so admission stops re-fetching a rejected new tx) but is
-/// NOT a recheck eviction trigger (`is_hard_invalid` excludes it), so an
+/// NOT a recheck eviction trigger (`is_recheck_evictable` excludes it), so an
 /// already-pooled tx hitting an internal/contract `Other(_)` is kept rather than
 /// dropped + blacklisted.
 ///
@@ -81,8 +81,10 @@ pub fn revalidate_pooled<V: Validator>(
 ///   catch-all `Other`) → the invalidation cache, keyed by the canonical
 ///   `tx_id`, so the Inv path stops re-fetching these bytes
 ///   (`Mempool::is_invalidated`). Mirrors Scala `OrderedTxPool.invalidate`.
-///   NB: this set is NOT identical to `is_hard_invalid` — it additionally
-///   includes `Other`, which admission blacklists but recheck does not evict on.
+///   NB: this set is NOT identical to `is_recheck_evictable` — it additionally
+///   includes `Other` (which admission blacklists but recheck does not evict
+///   on), and excludes `UnresolvedDataInput` (which recheck evicts on but keeps
+///   re-admittable rather than blacklisting).
 pub(crate) fn record_failed_tx(
     invalidated: &mut InvalidationCache,
     unresolved: &mut crate::unresolved::UnresolvedCache,
@@ -108,10 +110,11 @@ pub(crate) fn record_failed_tx(
 /// failures (`UnresolvedInput`/`UnresolvedDataInput`), parse-class failures
 /// (`Deserialize`/`NonCanonical`), AND the validator's catch-all `Other(_)`.
 ///
-/// The proactive recheck (`Mempool::recheck_and_evict`) evicts a pooled tx ONLY
-/// when this returns true. The excluded classes are NOT proof the tx is invalid
-/// at the new tip:
-/// * A non-resolution failure can be a transient reorg-dependency (a demoted
+/// The proactive recheck (`Mempool::recheck_and_evict`) evicts on this set plus
+/// `UnresolvedDataInput` — see [`is_recheck_evictable`], which is the predicate
+/// that pass actually asks. The classes excluded from BOTH are not proof the tx
+/// is invalid at the new tip:
+/// * An unresolved SPEND input can be a transient reorg-dependency (a demoted
 ///   parent pending re-admission) — dropping such a tx to the unresolved-bytes
 ///   cache (a suppression filter, not a re-admit queue) would lose a valid tx —
 ///   or it is a confirmed double-spend already evicted by `on_tip_change`'s
@@ -135,4 +138,27 @@ pub(crate) fn is_hard_invalid(err: &ValidationErr) -> bool {
             | ValidationErr::MonetaryFailed
             | ValidationErr::CostExceeded
     )
+}
+
+/// Should the proactive recheck EVICT a pooled tx that failed with `err`?
+///
+/// [`is_hard_invalid`] plus one case it deliberately excludes:
+/// `UnresolvedDataInput`. Data inputs resolve against the COMMITTED view only
+/// (`revalidate_pooled` passes `CommittedOnly`, never the pool overlay), so
+/// unlike a regular `UnresolvedInput` — which can be a demoted parent still
+/// waiting in the revalidation queue — an unresolved DATA input means the box
+/// is simply not in the UTXO set at this tip. Nothing in the pool can ever
+/// supply it, and `on_tip_change`'s input-conflict cascade does not cover it
+/// (that indexes spend inputs, not data inputs), so without this the tx sits in
+/// the pool until it is squeezed out by weight — for a low-weight tx, forever.
+/// Scala evicts it: `CleanupWorker.validatePool` eliminates EVERY tx whose
+/// re-validation fails (`CleanupWorker.scala:94-97` →
+/// `EliminateTransactions` → `ErgoMemPool.invalidate`), and a missing
+/// data-input box is such a failure.
+///
+/// A reorg that restores the spent box can make the tx valid again; that is why
+/// `record_failed_tx` routes this class to the re-admittable unresolved-bytes
+/// cache rather than the blacklist, so the tx can simply be re-submitted.
+pub(crate) fn is_recheck_evictable(err: &ValidationErr) -> bool {
+    is_hard_invalid(err) || matches!(err, ValidationErr::UnresolvedDataInput)
 }

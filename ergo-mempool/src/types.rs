@@ -36,6 +36,20 @@ impl TxSource {
             _ => None,
         }
     }
+
+    /// Which cost-budget pool this source draws on. Everything that is not a
+    /// remote peer is LOCAL: `Api` and `Wallet` are the operator's own work,
+    /// and `DemotedFromBlock` is our own rollback drain (budget-exempt before
+    /// it ever reaches [`crate::budget::CostBudgets`], so its mapping here is
+    /// never consulted).
+    pub fn budget_source(&self) -> crate::budget::BudgetSource {
+        match self {
+            TxSource::Peer(p) => crate::budget::BudgetSource::Peer(*p),
+            TxSource::Api | TxSource::Wallet | TxSource::DemotedFromBlock => {
+                crate::budget::BudgetSource::Local
+            }
+        }
+    }
 }
 
 /// Actions emitted by mempool entry points. The node event loop consumes
@@ -256,8 +270,19 @@ pub struct MempoolConfig {
     /// uses random selection; the rotation is functionally equivalent for
     /// load-spreading and is deterministic/testable). 0 disables re-broadcast.
     pub rebroadcast_count: usize,
+    /// Per-block validation-cost budget REMOTE peers contend for, in aggregate.
+    /// Local submissions are accounted separately and never shrink it.
     pub global_cost_budget: u64,
+    /// Per-block validation-cost budget a single peer may spend.
     pub per_peer_cost_budget: u64,
+    /// Per-block validation-cost headroom reserved for NODE-LOCAL submissions
+    /// (`TxSource::Api` / `TxSource::Wallet`), on top of `global_cost_budget`.
+    /// Peers cannot reach it, so a peer flooding the node to its global cap
+    /// cannot also starve the operator's own `POST /transactions`. `0` restores
+    /// the single shared pool (peer traffic can then block local submissions).
+    /// The default is one `max_tx_cost`, i.e. at least one maximum-cost local
+    /// transaction always gets validated per block.
+    pub local_reserved_cost_budget: u64,
     pub unresolved_cache_size: usize,
     pub unresolved_cache_ttl_seconds: u64,
 
@@ -302,6 +327,9 @@ impl Default for MempoolConfig {
             min_relay_fee_nano_erg: 1_000_000,
             max_tx_size_bytes: 98_304,
             max_tx_cost: 4_900_000, // mainnet.conf overrides application.conf default of 1_000_000
+            // Scala parity: `application.conf` `invalidModifiersCacheSize = 10000`
+            // and `invalidModifiersCacheExpiration = 4h` (the mempool section,
+            // lines 147/150), the sizing of `OrderedTxPool.invalidatedTxIds`.
             invalidation_cache_size: 10_000,
             invalidation_ttl_seconds: 14_400,
             ibd_gate_block_lag: 10,
@@ -315,6 +343,7 @@ impl Default for MempoolConfig {
             rebroadcast_count: 3, // Scala application.conf default
             global_cost_budget: 12_000_000,
             per_peer_cost_budget: 10_000_000,
+            local_reserved_cost_budget: 4_900_000, // one max_tx_cost
             unresolved_cache_size: 4_096,
             unresolved_cache_ttl_seconds: 60,
             // Staging pool — human-confirmed bounds. OPT-IN: the orphan/held

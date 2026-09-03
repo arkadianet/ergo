@@ -43,7 +43,7 @@ pub use mock::{MockPlan, MockStructure, MockValidator};
 pub(crate) use outcome::HeldCandidate;
 pub use outcome::{AdmissionOutcome, CheckOutcome, RejectReason};
 pub use revalidate::revalidate_pooled;
-pub(crate) use revalidate::{is_hard_invalid, record_failed_tx};
+pub(crate) use revalidate::{is_recheck_evictable, record_failed_tx};
 
 use outcome::{classify, ReplacementDecision};
 
@@ -155,14 +155,17 @@ pub(crate) fn check_capturing_held<V: Validator>(
     // Demoted txs (our OWN, re-admitted after a rollback / epoch-demote) bypass
     // the anti-DoS cost budget just as they bypass the IBD gate below: they are
     // not adversarial traffic, and the drain is already bounded by
-    // `revalidation_per_tick`. For `DemotedFromBlock`, `peer` is `None`, so only
-    // the GLOBAL cap ever applied — disabling that gate (and its charge) is what
+    // `revalidation_per_tick`. `DemotedFromBlock` is a LOCAL budget source, so
+    // only the local gate ever applied — disabling it (and its charge) is what
     // keeps a multi-tick drain from tripping `GlobalExhausted` and stranding the
     // popped-but-not-re-admitted tail (those entries are already off the queue,
     // so a budget reject would silently lose a valid tx). Scoped to demoted
-    // only: `Wallet` (also peer-less) stays gated — it's new local work a
+    // only: `Wallet` (also local) stays gated — it's new local work a
     // rejection simply bounces back to the caller, not an irreversible drain.
     let budget_exempt = matches!(source, TxSource::DemotedFromBlock);
+    // Peer traffic contends for the shared remote budget; `Api`/`Wallet` draw
+    // on the local reserve instead, so a peer flood cannot starve them.
+    let budget_source = source.budget_source();
 
     // ── Step 0 — IBD gate (skipped for demoted revalidation) ─────────
     // Demoted txs are re-entering from our own rollback path; we are
@@ -183,7 +186,7 @@ pub(crate) fn check_capturing_held<V: Validator>(
 
     // ── Step 1 — Pre-validation budget gate (skipped for demoted) ────
     if !budget_exempt {
-        match cx.budgets.pre_admission_check(peer) {
+        match cx.budgets.pre_admission_check(budget_source) {
             BudgetVerdict::Ok => {}
             BudgetVerdict::PeerExhausted => {
                 return (
@@ -341,7 +344,7 @@ pub(crate) fn check_capturing_held<V: Validator>(
             // Charge whatever cost the validator consumed (skipped for demoted
             // re-admission — see `budget_exempt`).
             if !budget_exempt {
-                cx.budgets.charge(peer, cost.consumed());
+                cx.budgets.charge(budget_source, cost.consumed());
             }
 
             // Classify the error for routing + peer penalty.
@@ -434,7 +437,7 @@ pub(crate) fn check_capturing_held<V: Validator>(
         } else {
             // Losing the double-spend still charges cost (skipped for demoted).
             if !budget_exempt {
-                cx.budgets.charge(peer, validated.consumed_cost);
+                cx.budgets.charge(budget_source, validated.consumed_cost);
             }
             actions.push(MempoolAction::Observe {
                 event: ObservedEvent::DroppedDoubleSpendLoser {
@@ -457,7 +460,7 @@ pub(crate) fn check_capturing_held<V: Validator>(
 
     // ── Step 14 — Charge cost, check capacity plan.
     if !budget_exempt {
-        cx.budgets.charge(peer, validated.consumed_cost);
+        cx.budgets.charge(budget_source, validated.consumed_cost);
     }
 
     // Capacity plan: check whether the new tx can fit after replacements.
