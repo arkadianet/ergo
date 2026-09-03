@@ -203,10 +203,11 @@ pub(super) struct TomlApiSecurity {
 /// Set `disabled = true` to skip tx relay entirely (e.g. archival or sync-test runs).
 ///
 /// Only operator-facing knobs are exposed here. Internal tuning parameters
-/// (CPFP depths, budget caps, invalidation TTLs, revalidation rates) are
-/// intentionally not surfaced — they are rarely changed and an incorrect
-/// value could degrade performance without a clear error. Use source-level
-/// defaults for those.
+/// (CPFP family depths/ops/time — Scala-pinned, since changing them changes
+/// pool ordering and eviction cascades; revalidation rates; notifier cadence;
+/// unresolved-cache sizing; the staging capacity caps) are intentionally not
+/// surfaced — they are rarely changed and an incorrect value could degrade
+/// performance without a clear error. Use source-level defaults for those.
 ///
 /// `#[serde(deny_unknown_fields)]` makes typos (e.g. `enabled = false`
 /// instead of `disabled = true`) an explicit parse error rather than a
@@ -223,6 +224,26 @@ pub(super) struct TomlMempool {
     pub(super) max_tx_size_bytes: Option<usize>,
     pub(super) max_tx_cost: Option<u64>,
     pub(super) ibd_gate_block_lag: Option<u32>,
+    /// Per-block validation-cost budget that REMOTE peers contend for, in
+    /// aggregate. Anti-DoS only — it bounds script-evaluation work per block
+    /// and never affects which blocks the node accepts.
+    pub(super) global_cost_budget: Option<u64>,
+    /// Per-block validation-cost budget a SINGLE peer may spend.
+    pub(super) per_peer_cost_budget: Option<u64>,
+    /// Per-block validation-cost headroom reserved for node-LOCAL submissions
+    /// (`/transactions`, wallet), on top of `global_cost_budget`. Peers cannot
+    /// reach it, so a peer flooding the node to its global cap cannot starve
+    /// the operator's own transactions. `0` restores one shared pool.
+    pub(super) local_reserved_cost_budget: Option<u64>,
+    /// Max entries in the invalidated-tx cache (Scala
+    /// `invalidModifiersCacheSize`).
+    pub(super) invalidation_cache_size: Option<usize>,
+    /// How long an invalidated tx id is remembered, in seconds (Scala
+    /// `invalidModifiersCacheExpiration`, 4h).
+    pub(super) invalidation_ttl_seconds: Option<u64>,
+    /// Per-pass cost budget for the tip-revalidation (recheck-and-evict) pass,
+    /// as a multiplier on the live `max_block_cost`.
+    pub(super) cleanup_cost_mult: Option<u64>,
     /// Count of surviving unconfirmed txs to re-advertise on each tip-change
     /// recheck (Scala `MempoolAuditor` `rebroadcastCount`, default 3). 0
     /// disables re-broadcast.

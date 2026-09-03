@@ -16,6 +16,38 @@ infrastructure.
 
 ## [Unreleased]
 
+### Added
+
+- **`[mempool]` cost budgets are TOML-tunable.** `global_cost_budget`,
+  `per_peer_cost_budget`, `local_reserved_cost_budget`,
+  `invalidation_cache_size`, `invalidation_ttl_seconds` and
+  `cleanup_cost_mult` are now operator knobs, validated at load (each must be
+  at least 1; the local reserve may be 0). Every default equals the constant it
+  replaced, so an unchanged config behaves exactly as before. The CPFP family
+  bounds, revalidation rates, notifier cadence, unresolved-cache sizing and the
+  staging capacity caps stay internal — the family bounds mirror Scala
+  `OrderedTxPool` and changing them would change pool ordering and eviction
+  cascades.
+
+### Fixed
+
+- **A flooding peer can no longer starve the operator's own transactions.**
+  Remote and local submissions now draw on separate per-block validation-cost
+  pools: peers contend for `global_cost_budget`, while `TxSource::Api` /
+  `TxSource::Wallet` additionally get `local_reserved_cost_budget` (default one
+  `max_tx_cost`), which no peer can reach. Previously a single peer that spent
+  the shared global budget also blocked `POST /transactions` until the next
+  block. Scala gates locally-generated transactions not at all — they go
+  straight to `txModify` — so this moves toward the reference node.
+- **Transactions whose data inputs were spent are evicted on tip change.** A
+  data input resolves against the committed view alone, so no pooled
+  transaction can supply it and the input-conflict cascade (which indexes spend
+  inputs) never covered it; such a transaction used to sit in the pool until
+  squeezed out by weight. The proactive recheck now evicts it, matching Scala
+  `CleanupWorker`, and keeps it re-admittable (unresolved-bytes cache, not the
+  blacklist) in case a reorg restores the box. An unresolved regular spend
+  input is still kept — it can be a demoted parent awaiting re-admission.
+
 ## [0.6.0] - 2026-09-03
 
 The consensus-parity and hardening release. Two live mainnet accept-invalid

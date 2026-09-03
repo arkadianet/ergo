@@ -676,19 +676,30 @@ impl NodeConfig {
             max_tx_size_bytes: tm.max_tx_size_bytes.unwrap_or(def.max_tx_size_bytes),
             max_tx_cost: tm.max_tx_cost.unwrap_or(def.max_tx_cost),
             ibd_gate_block_lag: tm.ibd_gate_block_lag.unwrap_or(def.ibd_gate_block_lag),
-            // Internal tuning — not operator-configurable via TOML/CLI.
-            invalidation_cache_size: def.invalidation_cache_size,
-            invalidation_ttl_seconds: def.invalidation_ttl_seconds,
+            invalidation_cache_size: tm
+                .invalidation_cache_size
+                .unwrap_or(def.invalidation_cache_size),
+            invalidation_ttl_seconds: tm
+                .invalidation_ttl_seconds
+                .unwrap_or(def.invalidation_ttl_seconds),
+            mempool_cleanup_cost_mult: tm
+                .cleanup_cost_mult
+                .unwrap_or(def.mempool_cleanup_cost_mult),
+            rebroadcast_count: tm.rebroadcast_count.unwrap_or(def.rebroadcast_count),
+            global_cost_budget: tm.global_cost_budget.unwrap_or(def.global_cost_budget),
+            per_peer_cost_budget: tm.per_peer_cost_budget.unwrap_or(def.per_peer_cost_budget),
+            local_reserved_cost_budget: tm
+                .local_reserved_cost_budget
+                .unwrap_or(def.local_reserved_cost_budget),
+            // Internal tuning — not operator-configurable via TOML/CLI. The
+            // family bounds mirror Scala `OrderedTxPool` and changing them
+            // changes pool ordering and eviction cascades, so they stay pinned.
             notifier_poll_ms: def.notifier_poll_ms,
             revalidation_per_tick: def.revalidation_per_tick,
             revalidation_max_depth: def.revalidation_max_depth,
             max_family_depth: def.max_family_depth,
             max_family_ops: def.max_family_ops,
             max_family_update_ms: def.max_family_update_ms,
-            mempool_cleanup_cost_mult: def.mempool_cleanup_cost_mult,
-            rebroadcast_count: tm.rebroadcast_count.unwrap_or(def.rebroadcast_count),
-            global_cost_budget: def.global_cost_budget,
-            per_peer_cost_budget: def.per_peer_cost_budget,
             unresolved_cache_size: def.unresolved_cache_size,
             unresolved_cache_ttl_seconds: def.unresolved_cache_ttl_seconds,
             // Staging pool (package admission). The master switch is an
@@ -717,6 +728,26 @@ impl NodeConfig {
         }
         if mempool_config.max_tx_cost == 0 {
             return Err("[mempool] max_tx_cost must be >= 1".into());
+        }
+        // Anti-DoS budgets. A zero cap would reject every transaction from the
+        // gated source for the whole block, so both must be positive; the
+        // local reserve may be 0 (one shared pool, the pre-reserve behaviour).
+        if mempool_config.global_cost_budget == 0 {
+            return Err("[mempool] global_cost_budget must be >= 1".into());
+        }
+        if mempool_config.per_peer_cost_budget == 0 {
+            return Err("[mempool] per_peer_cost_budget must be >= 1".into());
+        }
+        if mempool_config.invalidation_cache_size == 0 {
+            return Err("[mempool] invalidation_cache_size must be >= 1".into());
+        }
+        if mempool_config.invalidation_ttl_seconds == 0 {
+            return Err("[mempool] invalidation_ttl_seconds must be >= 1".into());
+        }
+        // 0 would disable the tip-revalidation pass entirely (per-pass budget
+        // = 0 × max_block_cost), silently reverting the CleanupWorker parity.
+        if mempool_config.mempool_cleanup_cost_mult == 0 {
+            return Err("[mempool] cleanup_cost_mult must be >= 1".into());
         }
 
         // [indexer] — opt-in extra-index parity. Defaults disabled.

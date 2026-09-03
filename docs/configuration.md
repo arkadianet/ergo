@@ -195,12 +195,20 @@ access already has it. Rotate it before relying on the API for anything.
 ## `[mempool]`
 
 Only operator-facing knobs are exposed. Internal tuning parameters
-(CPFP family limits, cost budgets, invalidation and revalidation rates,
-notifier cadence, unresolved-cache sizing) are deliberately not
-configurable; supplying one of those keys is a parse error because this
-section rejects unknown keys. The mempool is force-disabled — regardless
-of `disabled` — whenever the node has no UTXO box state, i.e. under
-`state_type = "digest"` or `verify_transactions = false`.
+(CPFP family limits, revalidation rates, notifier cadence,
+unresolved-cache sizing, the staging capacity/fairness caps) are
+deliberately not configurable; supplying one of those keys is a parse
+error because this section rejects unknown keys. The CPFP family bounds in
+particular stay pinned because they mirror Scala `OrderedTxPool` and
+changing them changes pool ordering and eviction cascades. The mempool is
+force-disabled — regardless of `disabled` — whenever the node has no UTXO
+box state, i.e. under `state_type = "digest"` or
+`verify_transactions = false`.
+
+The cost budgets below are anti-DoS bounds on how much script-evaluation
+work the node will do per block. They are node-local policy: they never
+affect which blocks the node accepts, and the Scala reference node has no
+equivalent gate on this path at all.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -213,6 +221,12 @@ of `disabled` — whenever the node has no UTXO box state, i.e. under
 | `max_tx_cost` | u64 | `4900000` | Maximum single-transaction cost (matches the Scala mainnet override). Must be at least 1. |
 | `ibd_gate_block_lag` | u32 | `10` | Block-lag threshold that gates mempool admission while the node is still catching up during initial sync. |
 | `rebroadcast_count` | usize | `3` | Number of surviving unconfirmed transactions re-advertised per tip-change recheck (Scala `MempoolAuditor` `rebroadcastCount`). Re-broadcast rotates oldest-`last_checked_at` first. `0` disables re-broadcast. |
+| `global_cost_budget` | u64 | `12000000` | Per-block validation-cost budget that REMOTE peers contend for, in aggregate. Once spent, every peer is refused until the next block. Must be at least 1. Local submissions are accounted separately and never shrink it. |
+| `per_peer_cost_budget` | u64 | `10000000` | Per-block validation-cost budget a single peer may spend, within `global_cost_budget`. Must be at least 1. |
+| `local_reserved_cost_budget` | u64 | `4900000` (one `max_tx_cost`) | Per-block validation-cost headroom reserved for node-LOCAL submissions (`POST /transactions*`, wallet), **on top of** `global_cost_budget`. Peers cannot reach it, so a peer flooding the node to its global cap cannot starve the operator's own transactions — at least one maximum-cost local transaction is always validated per block. `0` restores a single shared pool, i.e. peer traffic can again block local submissions. |
+| `invalidation_cache_size` | usize | `10000` | Maximum remembered invalidated transaction ids. Matches Scala `invalidModifiersCacheSize`. Must be at least 1. |
+| `invalidation_ttl_seconds` | u64 | `14400` (4 h) | How long an invalidated transaction id is remembered and its re-download suppressed. Matches Scala `invalidModifiersCacheExpiration = 4h`. Must be at least 1. Ergo transaction ids do not cover spending proofs, so a peer can invalidate an id by relaying a proof-corrupted variant of a transaction that has not been seen yet; the honest transaction is then refused for this long. The window is identical in the reference node, so shortening it here is a deliberate divergence — it trades that exposure for more re-validation of genuinely invalid transactions. |
+| `cleanup_cost_mult` | u64 | `6` | Per-pass cost budget for the tip-revalidation (recheck-and-evict) pass, as a multiplier on the live `max_block_cost`. Transactions not reached in a pass are deferred to later blocks, oldest-checked first. Must be at least 1 (`0` would disable the pass). |
 | `staging_enabled` | bool | `false` | Master switch for the staging pool: orphan/held-parent staging, package admission, and package RBF. Off by default; when off, admission behaves exactly as it did before staging existed. The staging capacity/fairness caps are internal tuning and not configurable. |
 
 ## `[indexer]`

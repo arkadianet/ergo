@@ -570,6 +570,119 @@ fn rebroadcast_count_defaults_to_scala_value() {
 }
 
 #[test]
+fn mempool_cost_budget_knobs_from_toml() {
+    let path = write_toml(
+        "[mempool]\n\
+         global_cost_budget = 20000000\n\
+         per_peer_cost_budget = 5000000\n\
+         local_reserved_cost_budget = 7000000\n\
+         invalidation_cache_size = 42\n\
+         invalidation_ttl_seconds = 900\n\
+         cleanup_cost_mult = 9\n\
+         \n[peers]\nknown = [\"127.0.0.1:9030\"]\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let cfg = NodeConfig::load(cli).expect("load");
+    assert_eq!(cfg.mempool_config.global_cost_budget, 20_000_000);
+    assert_eq!(cfg.mempool_config.per_peer_cost_budget, 5_000_000);
+    assert_eq!(cfg.mempool_config.local_reserved_cost_budget, 7_000_000);
+    assert_eq!(cfg.mempool_config.invalidation_cache_size, 42);
+    assert_eq!(cfg.mempool_config.invalidation_ttl_seconds, 900);
+    assert_eq!(cfg.mempool_config.mempool_cleanup_cost_mult, 9);
+}
+
+#[test]
+fn mempool_cost_budgets_default_to_source_values() {
+    // Omitting every new key must leave behaviour bit-identical to the
+    // pre-config constants.
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
+    let cfg = NodeConfig::load(cli).expect("load");
+    let def = MempoolConfig::default();
+    assert_eq!(
+        cfg.mempool_config.global_cost_budget,
+        def.global_cost_budget
+    );
+    assert_eq!(
+        cfg.mempool_config.per_peer_cost_budget,
+        def.per_peer_cost_budget
+    );
+    assert_eq!(
+        cfg.mempool_config.local_reserved_cost_budget,
+        def.local_reserved_cost_budget
+    );
+    assert_eq!(
+        cfg.mempool_config.mempool_cleanup_cost_mult,
+        def.mempool_cleanup_cost_mult
+    );
+}
+
+#[test]
+fn mempool_invalidation_defaults_match_scala() {
+    // Scala application.conf: invalidModifiersCacheSize = 10000,
+    // invalidModifiersCacheExpiration = 4h (lines 147/150).
+    let def = MempoolConfig::default();
+    assert_eq!(def.invalidation_cache_size, 10_000);
+    assert_eq!(def.invalidation_ttl_seconds, 4 * 60 * 60);
+}
+
+#[test]
+fn mempool_zero_global_cost_budget_rejected() {
+    // A zero cap would reject every peer transaction for the whole block.
+    let path =
+        write_toml("[mempool]\nglobal_cost_budget = 0\n\n[peers]\nknown = [\"127.0.0.1:9030\"]\n");
+    let cli = minimal_cli(Some(&path));
+    let err = NodeConfig::load(cli).expect_err("should reject zero global budget");
+    assert!(err.contains("global_cost_budget"), "error: {err}");
+}
+
+#[test]
+fn mempool_zero_per_peer_cost_budget_rejected() {
+    let path = write_toml(
+        "[mempool]\nper_peer_cost_budget = 0\n\n[peers]\nknown = [\"127.0.0.1:9030\"]\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let err = NodeConfig::load(cli).expect_err("should reject zero per-peer budget");
+    assert!(err.contains("per_peer_cost_budget"), "error: {err}");
+}
+
+#[test]
+fn mempool_zero_local_reserve_accepted() {
+    // 0 is a legitimate value: it restores the single shared pool.
+    let path = write_toml(
+        "[mempool]\nlocal_reserved_cost_budget = 0\n\n[peers]\nknown = [\"127.0.0.1:9030\"]\n",
+    );
+    let cli = minimal_cli(Some(&path));
+    let cfg = NodeConfig::load(cli).expect("load");
+    assert_eq!(cfg.mempool_config.local_reserved_cost_budget, 0);
+}
+
+#[test]
+fn mempool_zero_cleanup_cost_mult_rejected() {
+    // 0 would silently disable the tip-revalidation pass entirely.
+    let path =
+        write_toml("[mempool]\ncleanup_cost_mult = 0\n\n[peers]\nknown = [\"127.0.0.1:9030\"]\n");
+    let cli = minimal_cli(Some(&path));
+    let err = NodeConfig::load(cli).expect_err("should reject zero cleanup multiplier");
+    assert!(err.contains("cleanup_cost_mult"), "error: {err}");
+}
+
+#[test]
+fn mempool_zero_invalidation_knobs_rejected() {
+    for (key, val) in [
+        ("invalidation_cache_size", "0"),
+        ("invalidation_ttl_seconds", "0"),
+    ] {
+        let path = write_toml(&format!(
+            "[mempool]\n{key} = {val}\n\n[peers]\nknown = [\"127.0.0.1:9030\"]\n"
+        ));
+        let cli = minimal_cli(Some(&path));
+        let err = NodeConfig::load(cli).expect_err("should reject zero");
+        assert!(err.contains(key), "error: {err}");
+    }
+}
+
+#[test]
 fn mempool_unknown_field_rejected() {
     // `enabled = false` is a common typo for `disabled = true`.
     // deny_unknown_fields must surface this as a parse error, not
