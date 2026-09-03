@@ -58,7 +58,7 @@ pub use self::handle::RunHandle;
 pub(super) use self::identity::mode_label_for;
 pub(in crate::node) use self::messaging::handle_message;
 pub(in crate::node) use self::peer_actions::{
-    cleanup_disconnected_peer, flush_actions, send_to_peer,
+    cleanup_disconnected_peer, flush_actions, penalize_peer, send_to_peer,
 };
 pub(crate) use self::shadow_watch::ShadowConfig;
 pub(in crate::node) use self::state::{NodeState, PeerRuntime};

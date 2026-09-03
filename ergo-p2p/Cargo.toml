@@ -12,7 +12,7 @@ ergo-primitives = { workspace = true }
 ergo-ser        = { workspace = true }
 redb            = { workspace = true, features = ["logging"] }
 thiserror       = { workspace = true }
-tokio           = { workspace = true, features = ["net", "io-util", "time", "macros", "rt-multi-thread"] }
+tokio           = { workspace = true, features = ["net", "io-util", "sync", "time", "macros", "rt-multi-thread"] }
 tracing         = { workspace = true }
 
 [features]

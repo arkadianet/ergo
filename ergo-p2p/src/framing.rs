@@ -41,6 +41,19 @@ pub enum FrameError {
     UnknownCode(u8),
 }
 
+/// The framing header of one message: what the first
+/// [`HEADER_LENGTH`] bytes declare, before any payload byte has been
+/// received. Parsed by [`parse_frame_header`] so a reader can size (and
+/// budget) the body it is about to accept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameHeader {
+    /// Message code identifying the payload type.
+    pub code: u8,
+    /// Payload length the frame declares. Not yet trusted to be
+    /// available — only that it is non-negative.
+    pub payload_len: usize,
+}
+
 /// A parsed message frame (code + payload bytes).
 #[derive(Debug, Clone)]
 pub struct MessageFrame {
@@ -57,7 +70,7 @@ pub struct MessageFrame {
 /// the same constants and pinned to it by `wire_len_matches_serialize_frame`
 /// so the two cannot drift. Used for per-peer byte accounting at the
 /// transport boundary (post-handshake framed-message bytes).
-pub fn wire_len(payload_len: usize) -> usize {
+pub const fn wire_len(payload_len: usize) -> usize {
     if payload_len > 0 {
         HEADER_LENGTH + CHECKSUM_LENGTH + payload_len
     } else {
@@ -88,21 +101,20 @@ pub fn serialize_frame(magic: &[u8; 4], frame: &MessageFrame) -> Vec<u8> {
     buf
 }
 
-/// Attempt to deserialize one message frame from a byte buffer.
+/// Parse just the framing header from the head of `data`.
 ///
-/// Returns `Ok(Some((frame, consumed)))` on success, where `consumed` is
-/// the number of bytes used from the buffer.
-/// Returns `Ok(None)` if the buffer doesn't contain a complete frame yet.
-/// Returns `Err` for protocol violations (wrong magic, bad checksum, etc.).
-pub fn deserialize_frame(
-    magic: &[u8; 4],
-    data: &[u8],
-) -> Result<Option<(MessageFrame, usize)>, FrameError> {
+/// Returns `Ok(None)` while fewer than [`HEADER_LENGTH`] bytes are
+/// buffered. The header is *peeked*, never consumed, so a caller may
+/// call this repeatedly on the same buffer.
+///
+/// Validation order is the same as [`deserialize_frame`]'s — negative
+/// length first, then magic — so splitting a read into a header phase
+/// and a body phase reports the identical error for identical bytes.
+pub fn parse_frame_header(magic: &[u8; 4], data: &[u8]) -> Result<Option<FrameHeader>, FrameError> {
     if data.len() < HEADER_LENGTH {
         return Ok(None); // incomplete
     }
 
-    // Parse header
     let mut got_magic = [0u8; 4];
     got_magic.copy_from_slice(&data[..4]);
     let code = data[4];
@@ -121,7 +133,27 @@ pub fn deserialize_frame(
         });
     }
 
-    if length == 0 {
+    Ok(Some(FrameHeader {
+        code,
+        payload_len: length as usize,
+    }))
+}
+
+/// Attempt to deserialize one message frame from a byte buffer.
+///
+/// Returns `Ok(Some((frame, consumed)))` on success, where `consumed` is
+/// the number of bytes used from the buffer.
+/// Returns `Ok(None)` if the buffer doesn't contain a complete frame yet.
+/// Returns `Err` for protocol violations (wrong magic, bad checksum, etc.).
+pub fn deserialize_frame(
+    magic: &[u8; 4],
+    data: &[u8],
+) -> Result<Option<(MessageFrame, usize)>, FrameError> {
+    let Some(FrameHeader { code, payload_len }) = parse_frame_header(magic, data)? else {
+        return Ok(None); // incomplete
+    };
+
+    if payload_len == 0 {
         // Empty payload — frame is just the 9-byte header.
         return Ok(Some((
             MessageFrame {
@@ -133,13 +165,13 @@ pub fn deserialize_frame(
     }
 
     // Non-empty payload: need header + checksum + payload
-    let total_needed = HEADER_LENGTH + CHECKSUM_LENGTH + length as usize;
+    let total_needed = wire_len(payload_len);
     if data.len() < total_needed {
         return Ok(None); // incomplete
     }
 
     let checksum = &data[9..13];
-    let payload = &data[13..13 + length as usize];
+    let payload = &data[13..13 + payload_len];
 
     // Verify checksum
     let hash = blake2b256(payload);
