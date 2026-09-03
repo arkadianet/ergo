@@ -11,6 +11,7 @@
 //! oracle in `ergo-node/src/api_bridge.rs`.
 
 use indexmap::IndexMap;
+use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -71,16 +72,53 @@ pub struct ScalaHeader {
     pub parent_id: String,
 }
 
-/// Autolykos solution DTO. `d` is `JsonValue` because Scala emits an
-/// integer literal for v2 (always 0) and a decimal-string for v1
-/// BigInts; keeping the field flexible matches both without
-/// splitting the type.
+/// Autolykos solution DTO. `d` is `JsonValue` rather than a concrete
+/// integer type because it is a Scala `BigInt` reaching ~2^190 for v1
+/// (0 for v2), and because the wire admits two spellings: Scala emits a
+/// bare JSON NUMBER (`ApiCodecs.bigIntEncoder` =
+/// `JsonNumber.fromDecimalStringUnsafe`), while circe's
+/// `Decoder[BigInt]` — and so this crate — also tolerates a decimal
+/// string inbound. Read it with [`unsigned_bigint_from_json`] rather
+/// than matching the value inline; that is the one place both spellings
+/// are handled.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScalaPowSolutions {
     pub pk: String,
     pub w: String,
     pub n: String,
     pub d: JsonValue,
+}
+
+/// Read an unsigned Scala `BigInt` field out of JSON, accepting exactly
+/// what circe's `Decoder[BigInt]` accepts: a bare JSON number — the form
+/// Scala's own encoders emit, so a Scala-shaped payload must never be
+/// rejected at the door — or a decimal string, which keeps any client
+/// still sending the older string form working.
+///
+/// Shared by the two such fields on the REST surface: the mining target
+/// `b` (`WorkMessage`) and the Autolykos v1 PoW distance `d`
+/// (`AutolykosSolution`). Both are UNSIGNED magnitudes on the wire — `d`
+/// is what `BigIntegers.asUnsignedByteArray` writes, with no sign byte —
+/// so a negative or fractional value is malformed input rather than
+/// something to reinterpret.
+///
+/// The number arm is exact only because this crate enables serde_json's
+/// `arbitrary_precision`: these values run past f64's exact-integer
+/// range, and a lossy parse would silently corrupt a header id.
+///
+/// `field` names the JSON path in the error, e.g. `"powSolutions.d"`.
+pub(crate) fn unsigned_bigint_from_json(field: &str, value: &JsonValue) -> Result<BigUint, String> {
+    let decimal = match value {
+        JsonValue::Number(n) => n.to_string(),
+        JsonValue::String(s) => s.clone(),
+        other => {
+            return Err(format!(
+                "{field} must be a JSON number or decimal string, got {other}"
+            ))
+        }
+    };
+    BigUint::parse_bytes(decimal.as_bytes(), 10)
+        .ok_or_else(|| format!("{field} {decimal:?} is not a valid unsigned decimal"))
 }
 
 /// `BlockTransactions.jsonEncoder` shape:

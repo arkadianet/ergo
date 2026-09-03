@@ -113,7 +113,9 @@ pub(super) fn encode_pow_solutions(
             // negative (live repro: h=28662 served d = -652…), and the
             // string form diverged from Scala's number. Requires
             // serde_json `arbitrary_precision` (enabled via
-            // ergo-rest-json) — v1 d values are ~2^190.
+            // ergo-rest-json) — v1 d values are ~2^190. Held here by
+            // `tests::encode_pow_solutions_v1_d_matches_scala_served_number`,
+            // against verbatim mainnet h=3 JSON.
             {
                 let dec = num_bigint::BigUint::from_bytes_be(d).to_string();
                 let n: serde_json::Number = dec

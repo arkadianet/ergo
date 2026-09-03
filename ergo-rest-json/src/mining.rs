@@ -35,6 +35,8 @@
 use num_bigint::BigUint;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::types::unsigned_bigint_from_json;
+
 /// JSON payload returned by `GET /mining/candidate` and
 /// `POST /mining/candidateWithTxs`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -49,9 +51,10 @@ pub struct WorkMessageJson {
     ///
     /// A bare JSON NUMBER on the wire, as Scala emits it — `WorkMessage`
     /// carries `b: BigInt` and `ApiCodecs.bigIntEncoder` renders a
-    /// `JsonNumber`, verified against a live 6.0.3 testnet node (see
-    /// `mining_candidate_scala_oracle.rs`). A decimal string is also
-    /// accepted inbound, as circe's `Decoder[BigInt]` accepts one.
+    /// `JsonNumber`, verified against a live 6.0.3 testnet node by
+    /// `tests::work_message_scala_candidate_b_is_a_bare_json_number`. A
+    /// decimal string is also accepted inbound, as circe's
+    /// `Decoder[BigInt]` accepts one.
     #[serde(serialize_with = "serialize_biguint_decimal")]
     #[serde(deserialize_with = "deserialize_biguint_decimal")]
     pub b: BigUint,
@@ -160,29 +163,6 @@ fn biguint_as_json_number(v: &BigUint) -> Result<serde_json::Number, String> {
         .map_err(|e| format!("biguint as JSON number: {e}"))
 }
 
-/// Read an unsigned magnitude from what circe's `Decoder[BigInt]`
-/// accepts: a JSON number (the form Scala's own encoder emits) or a
-/// decimal string. Both `b` and `d` are unsigned magnitudes, so a
-/// negative or fractional value is malformed rather than something to
-/// reinterpret.
-fn biguint_from_json_value<E: serde::de::Error>(
-    field: &str,
-    value: serde_json::Value,
-) -> Result<BigUint, E> {
-    let decimal = match value {
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => s,
-        other => {
-            return Err(E::custom(format!(
-                "{field} must be a JSON number or decimal string, got {other}"
-            )))
-        }
-    };
-    decimal
-        .parse::<BigUint>()
-        .map_err(|e| E::custom(format!("biguint parse: {e}")))
-}
-
 fn serialize_biguint_decimal<S: Serializer>(v: &BigUint, s: S) -> Result<S::Ok, S::Error> {
     biguint_as_json_number(v)
         .map_err(serde::ser::Error::custom)?
@@ -190,7 +170,8 @@ fn serialize_biguint_decimal<S: Serializer>(v: &BigUint, s: S) -> Result<S::Ok, 
 }
 
 fn deserialize_biguint_decimal<'de, D: Deserializer<'de>>(d: D) -> Result<BigUint, D::Error> {
-    biguint_from_json_value("b", serde_json::Value::deserialize(d)?)
+    unsigned_bigint_from_json("b", &serde_json::Value::deserialize(d)?)
+        .map_err(serde::de::Error::custom)
 }
 
 /// Autolykos v1 `d`, rendered the way Scala renders it — a bare JSON
@@ -213,7 +194,9 @@ fn deserialize_opt_biguint_decimal<'de, D: Deserializer<'de>>(
 ) -> Result<Option<BigUint>, D::Error> {
     match Option::<serde_json::Value>::deserialize(d)? {
         None | Some(serde_json::Value::Null) => Ok(None),
-        Some(value) => biguint_from_json_value("d", value).map(Some),
+        Some(value) => unsigned_bigint_from_json("d", &value)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
     }
 }
 
@@ -363,14 +346,20 @@ mod tests {
         // solution any node could have produced.
         let s = r#"{"n":"0000000900cb491a","d":-1}"#;
         let err = serde_json::from_str::<AutolykosSolutionJson>(s).expect_err("must reject");
-        assert!(err.to_string().contains("biguint parse"), "{err}");
+        assert!(
+            err.to_string().contains("not a valid unsigned decimal"),
+            "{err}"
+        );
     }
 
     #[test]
     fn autolykos_solution_rejects_fractional_d() {
         let s = r#"{"n":"0000000900cb491a","d":1.5}"#;
         let err = serde_json::from_str::<AutolykosSolutionJson>(s).expect_err("must reject");
-        assert!(err.to_string().contains("biguint parse"), "{err}");
+        assert!(
+            err.to_string().contains("not a valid unsigned decimal"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -388,7 +377,10 @@ mod tests {
         let bad = r#"{"msg":"aa","b":"not_a_number","pk":"02ff"}"#;
         let err =
             serde_json::from_str::<WorkMessageJson>(bad).expect_err("must reject non-numeric b");
-        assert!(err.to_string().contains("biguint parse"), "{err}");
+        assert!(
+            err.to_string().contains("not a valid unsigned decimal"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -433,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn work_message_roundtrips_scala_candidate_byte_exactly() {
+    fn work_message_reemits_scala_candidate_fields_with_identical_json_types() {
         let raw = candidate_oracle_raw();
         let parsed: WorkMessageJson = serde_json::from_str(&raw).expect("real candidate parses");
         let served: serde_json::Value = serde_json::from_str(&raw).expect("fixture parses");

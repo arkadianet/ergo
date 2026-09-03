@@ -30,7 +30,7 @@ use std::net::TcpStream;
 
 use ergo_primitives::digest::ModifierId;
 use ergo_primitives::reader::VlqReader;
-use ergo_rest_json::types::ScalaFullBlock;
+use ergo_rest_json::types::{ScalaFullBlock, ScalaHeader};
 use ergo_rest_json::{
     decode_block_transactions_with_mode, decode_extension, decode_scala_header, DecodeMode,
 };
@@ -304,107 +304,15 @@ fn fetch_header_id_at(node: &str, h: u32) -> Result<String, String> {
 /// `GET /blocks/{id}` → `ScalaFullBlock`.
 fn fetch_full_block(node: &str, id: &str) -> Result<ScalaFullBlock, String> {
     let body = http_get(node, &format!("/blocks/{id}"))?;
-    // The Scala node serves the `powSolutions.d` field as a bare big integer
-    // for v1 headers (Autolykos v1). Without serde_json's `arbitrary_precision`
-    // feature, large integers lose precision when parsed as f64. Pre-process
-    // the raw JSON to quote unquoted numeric `d` values so they survive
-    // round-trip as exact decimal strings — exactly the representation
-    // `decode_scala_header` expects.
-    let body = quote_pow_d_field(&body);
+    // Parsed VERBATIM. `powSolutions.d` arrives as a bare big integer for v1
+    // headers and reaches ~2^190, so an f64 parse would lose it — but this
+    // crate depends on `ergo-rest-json`, which turns on serde_json's
+    // `arbitrary_precision`, and Cargo unifies features across the graph. The
+    // `Number` therefore carries the exact digits, and `decode_scala_header`
+    // reads that arm directly. Rewriting the body to quote `d` (as this used
+    // to) would mean the driver only ever exercised the string arm, leaving
+    // the real Scala shape untested across every replayed block.
     serde_json::from_str(&body).map_err(|e| format!("blocks/{id} parse: {e}: body={body:.200}"))
-}
-
-/// Quote unquoted numeric `d` fields in `powSolutions` JSON.
-///
-/// The Scala node emits `"d" : <integer>` (note: space before `:`) for
-/// v1 (Autolykos v1) headers. Rust's `decode_scala_header` expects the
-/// value to be a decimal string. Without serde_json's `arbitrary_precision`
-/// feature, very large integers lose precision when parsed as f64.
-///
-/// This function scans the raw JSON body and for every `"d"` key followed
-/// by `:` and an unquoted number, wraps the number in double-quotes so
-/// serde_json preserves the full decimal representation.
-fn quote_pow_d_field(json: &str) -> String {
-    let key = b"\"d\"";
-    let bytes = json.as_bytes();
-    let mut out = String::with_capacity(json.len() + 4);
-    let mut pos = 0;
-
-    while pos + key.len() <= bytes.len() {
-        if &bytes[pos..pos + key.len()] != key {
-            // JSON keys are ASCII, so we can safely push one byte at a time.
-            out.push(char::from(bytes[pos]));
-            pos += 1;
-            continue;
-        }
-
-        // Found `"d"` — look ahead for optional whitespace then `:`
-        let key_end = pos + key.len();
-        let mut scan = key_end;
-        while scan < bytes.len() && bytes[scan] == b' ' {
-            scan += 1;
-        }
-        if scan >= bytes.len() || bytes[scan] != b':' {
-            // Not a key:value pattern — emit as-is and continue
-            out.push('"');
-            out.push('d');
-            out.push('"');
-            pos = key_end;
-            continue;
-        }
-        let colon_pos = scan;
-        scan = colon_pos + 1; // past ':'
-
-        // Skip whitespace after the colon
-        while scan < bytes.len() && bytes[scan] == b' ' {
-            scan += 1;
-        }
-
-        if scan >= bytes.len() || bytes[scan] == b'"' {
-            // Already a quoted string — copy the key+colon verbatim
-            out.push_str(&json[pos..scan]);
-            pos = scan;
-            continue;
-        }
-
-        // It looks like an unquoted value. Check if it's a number.
-        let num_start = scan;
-        if bytes[scan] == b'-' {
-            scan += 1;
-        }
-        let digits_start = scan;
-        while scan < bytes.len() && bytes[scan].is_ascii_digit() {
-            scan += 1;
-        }
-        // Handle optional decimal/exponent part (unlikely for `d` but robust)
-        if scan < bytes.len() && matches!(bytes[scan], b'.' | b'e' | b'E') {
-            while scan < bytes.len()
-                && matches!(bytes[scan], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
-            {
-                scan += 1;
-            }
-        }
-
-        if scan > digits_start {
-            // Emit `"d" : "<number>"` (preserving original whitespace around `:`)
-            out.push_str(&json[pos..num_start]); // includes `"d"`, whitespace, colon, whitespace
-            out.push('"');
-            out.push_str(&json[num_start..scan]);
-            out.push('"');
-            pos = scan;
-        } else {
-            // Not a number after all — emit key and move on
-            out.push_str(&json[pos..colon_pos + 1]);
-            pos = colon_pos + 1;
-        }
-    }
-
-    // Flush any remaining bytes
-    if pos < bytes.len() {
-        out.push_str(&json[pos..]);
-    }
-
-    out
 }
 
 // ── genesis box parsing ──────────────────────────────────────────────────────
@@ -522,17 +430,35 @@ struct BlockSections {
     extension_bytes: Vec<u8>,
 }
 
-/// Assert the production decode reconstructed a Scala-faithful Autolykos
-/// v1 `d`: an UNSIGNED, minimal-length magnitude
-/// (`BigIntegers.asUnsignedByteArray`), which never carries a leading
-/// `0x00`. This guarded a decode bug that read `d` as SIGNED
-/// two's-complement and so prepended a sign byte to every high-bit
-/// magnitude (mainnet height 3 is the first such block), producing
-/// header bytes one byte too long and the wrong id. The decode is fixed;
-/// the check stays as a tripwire, because `from_persisted_parts` re-hashes
-/// these bytes and a regression would otherwise surface as an opaque
-/// id mismatch far from its cause.
-fn check_v1_pow_d(header_bytes: &[u8]) -> Result<(), String> {
+/// Assert the v1 PoW distance survives the JSON→bytes bridge the way Scala
+/// wrote it, on both sides of the decode:
+///
+/// - INBOUND, `powSolutions.d` is a bare JSON number. That is what circe
+///   emits (`ApiCodecs.bigIntEncoder`), and asserting it here is what keeps
+///   the driver honest: it proves every replayed v1 block exercises
+///   `decode_scala_header`'s `Value::Number` arm rather than the lenient
+///   string arm.
+/// - OUTBOUND, the decoded magnitude carries no leading `0x00`.
+///   `BigIntegers.asUnsignedByteArray` is unsigned and minimal-length, so a
+///   leading zero could only be ours. This guarded a decode that read `d` as
+///   signed two's-complement and so prepended a sign byte to every high-bit
+///   magnitude (mainnet height 3 is the first such block), producing header
+///   bytes one byte too long and the wrong id.
+///
+/// The decode is fixed; the checks stay as tripwires, because
+/// `from_persisted_parts` re-hashes these bytes and a regression would
+/// otherwise surface as an opaque id mismatch far from its cause.
+fn check_v1_pow_d(header: &ScalaHeader, header_bytes: &[u8]) -> Result<(), String> {
+    if header.version != 1 {
+        return Ok(());
+    }
+    if !header.pow_solutions.d.is_number() {
+        return Err(format!(
+            "h={}: powSolutions.d arrived as {} — the Scala node serves a bare \
+             JSON number, so the number decode path is going untested",
+            header.height, header.pow_solutions.d,
+        ));
+    }
     let hdr = parse_header(header_bytes)?;
     if let AutolykosSolution::V1 { d, .. } = &hdr.solution {
         if d.len() >= 2 && d[0] == 0x00 {
@@ -552,7 +478,7 @@ fn decode_block(block: &ScalaFullBlock) -> Result<BlockSections, String> {
     // uses the archival node's authoritative id (see `checked_header_with_oracle_id`).
     let (header_bytes, _hid_modifier) =
         decode_scala_header(&block.header).map_err(|(r, d)| format!("header decode ({r}): {d}"))?;
-    check_v1_pow_d(&header_bytes)?;
+    check_v1_pow_d(&block.header, &header_bytes)?;
 
     let block_transactions_bytes =
         decode_block_transactions_with_mode(&block.block_transactions, DecodeMode::Preserve)
