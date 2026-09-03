@@ -474,7 +474,7 @@ proptest::proptest! {
         // node arena (otherwise subsequent `label_of` calls keep
         // recomputing and the corruption write competes with stale
         // queue state).
-        tree.arena_commit();
+        tree.arena_commit(ergo_state::avl::arena::CommitDurability::Durable);
 
         // Baseline equality. Per-operation oracle tests in this same
         // file prove this for every other test; pin it here too.
@@ -497,12 +497,12 @@ proptest::proptest! {
         // had to compute the label from children, so the cached
         // value needs to land before we corrupt.
         let pre = tree.label_of_for_test(id);
-        tree.arena_commit();
+        tree.arena_commit(ergo_state::avl::arena::CommitDurability::Durable);
 
         // Corrupt one byte of its arena-stored label, then flush
         // the corruption from the label queue to the node arena.
         tree.corrupt_arena_label_byte_for_test(id, byte_idx, mask);
-        tree.arena_commit();
+        tree.arena_commit(ergo_state::avl::arena::CommitDurability::Durable);
 
         // Oracle must still match the pre-corruption baseline (it
         // walks the subtree from structure, ignoring cached
@@ -565,7 +565,7 @@ proptest::proptest! {
         // Flush queued label updates from the build phase so the
         // baseline `forced_full_recompute_digest()` reads from a
         // settled arena. (Same reason as Proptest A.)
-        tree.arena_commit();
+        tree.arena_commit(ergo_state::avl::arena::CommitDurability::Durable);
 
         let baseline_root_digest = tree.root_digest();
         let baseline_oracle = tree.forced_full_recompute_digest();

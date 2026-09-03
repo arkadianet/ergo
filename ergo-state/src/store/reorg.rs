@@ -266,7 +266,11 @@ impl StateStore {
                     return Err(e);
                 }
                 self.tree.clear_dirty();
-                self.tree.arena_commit();
+                // `persist_rollback` committed its own write transaction,
+                // and the pipeline was flushed at the top of `rollback_to`,
+                // so redb holds these nodes already.
+                self.tree
+                    .arena_commit(crate::avl::arena::CommitDurability::Durable);
                 // Voted params: refresh in-memory cache from the now-consistent
                 // table. delete_above ran inside persist_rollback's txn. Cache
                 // refresh failure is non-fatal here — the rollback itself

@@ -60,6 +60,13 @@ use crate::store::{
 struct CommitWatch {
     state: Mutex<CommitState>,
     cond: Condvar,
+    /// Mirror of `committed_count` that the AVL arena can read without
+    /// taking a lock. The arena pins clean nodes to the sequence number
+    /// of the job carrying their bytes and releases the pin once this
+    /// reaches it, so publishing it is what makes those nodes evictable
+    /// again. `None` when no arena is attached (tests constructing a
+    /// bare pipeline).
+    durable_seq: Option<Arc<AtomicU64>>,
 }
 
 #[derive(Default)]
@@ -77,10 +84,11 @@ struct CommitState {
 }
 
 impl CommitWatch {
-    fn new() -> Arc<Self> {
+    fn new(durable_seq: Option<Arc<AtomicU64>>) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(CommitState::default()),
             cond: Condvar::new(),
+            durable_seq,
         })
     }
 
@@ -99,6 +107,14 @@ impl CommitWatch {
     fn record_committed_jobs(&self, n: u64) {
         let mut s = self.take_lock();
         s.committed_count = s.committed_count.saturating_add(n);
+        // Publish under the same lock that advances the count, so the
+        // watermark can never run ahead of a commit that has been
+        // recorded. Release ordering pairs with the arena's acquire load:
+        // a reader that sees this value also sees the redb commit that
+        // produced it.
+        if let Some(seq) = &self.durable_seq {
+            seq.store(s.committed_count, Ordering::Release);
+        }
         self.cond.notify_all();
     }
 
@@ -480,10 +496,11 @@ impl PersistPipeline {
         queue_depth: usize,
         voting_length: u32,
         blocks_to_keep: i32,
+        durable_seq: Option<Arc<AtomicU64>>,
     ) -> Self {
         let (tx, rx) = bounded::<PersistJob>(queue_depth);
         let (result_tx, result_rx) = bounded::<PersistResult>(queue_depth + 1);
-        let commit_watch = CommitWatch::new();
+        let commit_watch = CommitWatch::new(durable_seq);
         let worker_watch = Arc::clone(&commit_watch);
 
         let handle = thread::Builder::new()
@@ -525,14 +542,19 @@ impl PersistPipeline {
     /// `flush_to_count` then surfaces the bumped count via the
     /// commit_watch's terminal-error path rather than waiting
     /// forever on an unreachable target.
-    pub(crate) fn send(&self, job: PersistJob) -> Result<(), StateError> {
-        self.sent_count.fetch_add(1, Ordering::AcqRel);
+    pub(crate) fn send(&self, job: PersistJob) -> Result<u64, StateError> {
+        // The sequence this job is assigned: jobs commit in FIFO order and
+        // `committed_count` counts them, so "job `seq` is durable" is
+        // exactly `committed_count >= seq`. The caller hands it to
+        // `NodeArena::commit` so the arena can pin this job's nodes.
+        let seq = self.sent_count.fetch_add(1, Ordering::AcqRel) + 1;
         let tx = self.tx.as_ref().ok_or(StateError::InvalidPrecondition {
             what: "persist pipeline already shut down",
         })?;
         tx.send(job).map_err(|_| StateError::InternalInvariant {
             what: "persist worker thread died (channel closed)",
-        })
+        })?;
+        Ok(seq)
     }
 
     /// Drain any completed results without blocking.
@@ -1304,7 +1326,7 @@ mod tests {
         // voting_length is a safe default — the gate only fires on jobs
         // that carry `voted_params_row = Some(_)`, which the unit tests
         // here don't synthesize.
-        let p = PersistPipeline::new(db, path, queue_depth, 1024, -1);
+        let p = PersistPipeline::new(db, path, queue_depth, 1024, -1, None);
         (dir, p)
     }
 
@@ -1471,7 +1493,7 @@ mod tests {
         let dispatch = tracing::Dispatch::new(subscriber);
         let (job_tx, job_rx) = bounded(4);
         let (result_tx, result_rx) = bounded(4);
-        let watch = CommitWatch::new();
+        let watch = CommitWatch::new(None);
         let worker_db = Arc::clone(&db);
         let worker_path = path.clone();
         let worker = std::thread::spawn(move || {
@@ -1596,7 +1618,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("persist.redb");
         let db = Arc::new(Database::create(&path).unwrap());
-        let p = PersistPipeline::new(Arc::clone(&db), path.clone(), 4, 1024, -1);
+        let p = PersistPipeline::new(Arc::clone(&db), path.clone(), 4, 1024, -1, None);
 
         let tracked_tree = vec![0x00, 0x08, 0xCDu8, 0x02, 0xAA, 0xBB];
         let box_id = [0xA1u8; 32];
@@ -1656,7 +1678,7 @@ mod tests {
         // flush_persist_pipeline would lie to rollback_to and let the
         // database mutate against a stale durable tip. The Err for
         // close-without-commit is the contract this test pins.
-        let watch = CommitWatch::new();
+        let watch = CommitWatch::new(None);
         let watch_signal = Arc::clone(&watch);
         let waiter = thread::spawn(move || watch.wait_for(5));
         // Tiny sleep to let the waiter park on the condvar.
@@ -1686,7 +1708,7 @@ mod tests {
         // then branch B sends 3 jobs (the producer would queue these
         // after a rollback). The watch tracks counts, so the new target
         // is 8 — branch A's 5 do NOT satisfy a target of 8.
-        let watch = CommitWatch::new();
+        let watch = CommitWatch::new(None);
         watch.record_committed_jobs(5); // branch A
         let watch_clone = Arc::clone(&watch);
         let waiter = thread::spawn(move || watch_clone.wait_for(8));
@@ -1749,7 +1771,7 @@ mod tests {
         // because callers (`flush_persist_pipeline` → `wait_for`) sit
         // on the rollback/reorg path and turning a poison into a panic
         // there is strictly worse than continuing with the prior state.
-        let watch = CommitWatch::new();
+        let watch = CommitWatch::new(None);
         let w = Arc::clone(&watch);
         let _ = std::thread::spawn(move || {
             let _g = w.state.lock().expect("not poisoned yet");
@@ -1776,7 +1798,7 @@ mod tests {
 
     #[test]
     fn poisoned_mutex_record_error_surfaces_via_wait_for() {
-        let watch = CommitWatch::new();
+        let watch = CommitWatch::new(None);
         let w = Arc::clone(&watch);
         let _ = std::thread::spawn(move || {
             let _g = w.state.lock().expect("not poisoned yet");
