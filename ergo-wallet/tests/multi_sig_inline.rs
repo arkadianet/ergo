@@ -2339,3 +2339,108 @@ fn dapp_and_with_combined_registry() {
         .expect("verify must not error");
     assert!(ok, "dApp AND proof must verify");
 }
+
+// ----- distributed signing: two parties, no shared secrets -----
+
+/// The standard Ergo multi-party flow (Scala `ProverUtils`), end to end
+/// with two provers that never see each other's secrets:
+/// 1. each signer generates commitments for their own leaf;
+/// 2. the first signer proves with their own commitment plus the other
+///    signer's public commitment (`prove_sigma_partial`) — the other
+///    signer's leaf is real but unsigned, so this proof does not verify;
+/// 3. the first signer's real proof and the non-signer's simulated proof
+///    are extracted with `bag_for_multisig`;
+/// 4. the second signer proves with that bag plus their own commitment;
+///    the result verifies.
+fn two_party_flow(
+    tree: &SigmaBoolean,
+    images: [&SigmaBoolean; 3],
+    secrets: [k256::Scalar; 2],
+    pks: [[u8; 33]; 2],
+) {
+    use ergo_wallet::proving::external::ProverExternalSecret;
+    use ergo_wallet::proving::secrets::SecretRegistry;
+    use ergo_wallet::proving::sigma::{prove_sigma, prove_sigma_partial};
+    let [alice, bob, carol] = images;
+    let reg = |pk: [u8; 33], s: k256::Scalar| {
+        SecretRegistry::empty()
+            .merge_external_secrets(&[ProverExternalSecret::Dlog {
+                pk,
+                scalar: s.into(),
+            }])
+            .unwrap()
+    };
+    let reg_a = reg(pks[0], secrets[0]);
+    let reg_b = reg(pks[1], secrets[1]);
+    let message = b"two parties, no shared secret";
+
+    // 1. commitments
+    let bag_a =
+        generate_commitments_for(tree, std::slice::from_ref(alice), &mut OsRngBackend).unwrap();
+    let bag_b =
+        generate_commitments_for(tree, std::slice::from_ref(bob), &mut OsRngBackend).unwrap();
+    let public = |bag: &HintsBag| HintsBag {
+        hints: bag
+            .hints
+            .iter()
+            .filter(|h| matches!(h, Hint::RealCommitment(_)))
+            .cloned()
+            .collect(),
+    };
+
+    // 2. alice's partial proof
+    let mut hints_a = bag_a.clone();
+    hints_a.extend(public(&bag_b));
+    let (partial, _) =
+        prove_sigma_partial(tree, &reg_a, message, &hints_a, &mut OsRngBackend).unwrap();
+    assert!(
+        !ergo_sigma::verify::verify_sigma_proof(tree, &partial, message).unwrap_or(false),
+        "a partial proof must not verify"
+    );
+
+    // 3. extract
+    let extracted = bag_for_multisig(
+        tree,
+        &partial,
+        std::slice::from_ref(alice),
+        std::slice::from_ref(carol),
+    )
+    .unwrap();
+    assert!(extracted
+        .hints
+        .iter()
+        .any(|h| matches!(h, Hint::RealSecretProof(p) if &p.image == alice)));
+
+    // 4. bob completes
+    let mut hints_b = extracted;
+    hints_b.extend(bag_b);
+    let (full, _) = prove_sigma(tree, &reg_b, message, &hints_b, &mut OsRngBackend).unwrap();
+    assert!(ergo_sigma::verify::verify_sigma_proof(tree, &full, message).unwrap());
+}
+
+fn party(seed: u64) -> (k256::Scalar, [u8; 33], SigmaBoolean) {
+    let s = k256::Scalar::from(seed);
+    let pk = compressed_pk(k256::ProjectivePoint::GENERATOR * s);
+    (s, pk, SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk)))
+}
+
+#[test]
+fn two_of_three_threshold_signed_by_two_parties_without_sharing_secrets() {
+    let (sa, pka, a) = party(7);
+    let (sb, pkb, b) = party(11);
+    let (_, _, c) = party(13);
+    let tree = SigmaBoolean::Cthreshold {
+        k: 2,
+        children: vec![a.clone(), b.clone(), c.clone()],
+    };
+    two_party_flow(&tree, [&a, &b, &c], [sa, sb], [pka, pkb]);
+}
+
+#[test]
+fn two_of_two_and_signed_by_two_parties_without_sharing_secrets() {
+    let (sa, pka, a) = party(17);
+    let (sb, pkb, b) = party(19);
+    let (_, _, c) = party(23); // not in the tree; nothing to simulate
+    let tree = SigmaBoolean::Cand(vec![a.clone(), b.clone()]);
+    two_party_flow(&tree, [&a, &b, &c], [sa, sb], [pka, pkb]);
+}
