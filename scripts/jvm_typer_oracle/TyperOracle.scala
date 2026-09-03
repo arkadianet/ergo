@@ -21,6 +21,14 @@
 //                 method visibility, not the header)
 //   cce <hex>     compile with the DEMO env (same free vars as tce)
 //   ccs <hex>     compile with the SigmaTyperTest env (same free vars as tcs)
+//   ct  <hex>     contract template: reply `OK <ContractTemplate.serializer hex>`
+//   ap  <hex> <version> <argshex>
+//                 apply a contract template: compile `<hex>` as a template, then
+//                 `ContractTemplate.applyTemplate(Some(version), values)` where
+//                 `<argshex>` is Base16 of `name=Type:literal,name=Type:literal`
+//                 (Types: Int, Long, Boolean, Short, Byte). Reply
+//                 `OK <ErgoTreeSerializer bytes hex>` — the byte-exact target for
+//                 the Rust twin's `ContractTemplate::apply`.
 //
 // ── batch mode (from worktree root) ────────────────────────────────────────────
 //   python3 scripts/jvm_typer_oracle/gen_inputs.py | \
@@ -342,6 +350,54 @@ object TyperOracle {
         }
     }
 
+  // ----- template application driver for `ap` -----
+  //
+  // Mirrors sdk.ContractTemplate.applyTemplate (ContractTemplate.scala:147-181):
+  // constants[i] = provided value (type-checked against constTypes(i)) or the
+  // declared default; header = setConstantSegregation(headerWithVersion(version));
+  // body = the template's expressionTree with its ConstantPlaceholders.
+  private def applyVerb(hexStr: String, versionStr: String, argsHex: String): String =
+    (Base16.decode(hexStr), Base16.decode(argsHex)) match {
+      case (scala.util.Success(bytes), scala.util.Success(argBytes)) =>
+        val source = new String(bytes, java.nio.charset.StandardCharsets.UTF_8)
+        val argText = new String(argBytes, java.nio.charset.StandardCharsets.UTF_8).trim
+        try
+          VersionContext.withVersions(V, V) {
+            val ct = templateCompiler.compile(source)
+            val values: Map[String, Constant[SType]] =
+              if (argText.isEmpty) Map.empty
+              else argText.split(",").map { kv =>
+                val Array(name, tv) = kv.split("=", 2)
+                val Array(tpe, lit) = tv.split(":", 2)
+                val c: Constant[SType] = tpe match {
+                  case "Int"     => IntConstant(lit.toInt).asInstanceOf[Constant[SType]]
+                  case "Long"    => LongConstant(lit.toLong).asInstanceOf[Constant[SType]]
+                  case "Boolean" => BooleanConstant(lit.toBoolean).asInstanceOf[Constant[SType]]
+                  case "Short"   => ShortConstant(lit.toShort).asInstanceOf[Constant[SType]]
+                  case "Byte"    => ByteConstant(lit.toByte).asInstanceOf[Constant[SType]]
+                  case other     => throw new IllegalArgumentException("unsupported ap type " + other)
+                }
+                name -> c
+              }.toMap
+            val tree = ct.applyTemplate(Some(versionStr.toByte), values)
+            val out = ErgoTreeSerializer.DefaultSerializer.serializeErgoTree(tree)
+            "OK " + out.map("%02x".format(_)).mkString
+          }
+        catch {
+          // getMessage is null for a message-less IllegalArgumentException; the
+          // reject reply must still be produced, or the NPE escapes the catch
+          // and kills the session before the remaining vectors are answered.
+          case e: IllegalArgumentException =>
+            val msg = Option(e.getMessage).getOrElse("").replace(' ', '_')
+            "REJECT 0:0 " + e.getClass.getSimpleName + " " + msg
+          case e: CompilerException =>
+            val pos = e.source match { case Some(sc) => loc(sc); case None => "0:0" }
+            "REJECT " + pos + " " + e.getClass.getSimpleName
+          case e: Throwable => "REJECT 0:0 " + e.getClass.getSimpleName
+        }
+      case _ => "ERR not-hex"
+    }
+
   def main(args: Array[String]): Unit = {
     var line = StdIn.readLine()
     while (line != null) {
@@ -355,6 +411,11 @@ object TyperOracle {
           case Array("cce", hex) => compileVerb(demoEnv, hex)
           case Array("ccs", hex) => compileVerb(sigmaTyperEnv, hex)
           case Array("ct",  hex) => contractVerb(hex)
+          case Array("ap",  rest) => rest.split("\\s+", 3) match {
+            case Array(hex, ver, argsHex) => applyVerb(hex, ver, argsHex)
+            case Array(hex, ver)          => applyVerb(hex, ver, "")
+            case _                        => "ERR bad-ap-line"
+          }
           case _                 => "ERR bad-line"
         }
         println(out)
