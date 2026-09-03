@@ -1540,3 +1540,200 @@ fn record_storage_error_throttles_log_line_but_not_counter() {
     }
     assert_eq!(mgr.storage_error_count(), 8);
 }
+
+// ----- dial-book routability (issue #298) -----
+
+/// Build a `PeerSpec` with an optional IPv4 declared address.
+fn spec_with_declared(declared: Option<SocketAddr>) -> PeerSpec {
+    use crate::handshake::DeclaredAddress;
+    PeerSpec {
+        agent_name: "remote".into(),
+        version: crate::handshake::Version::NIPOPOW,
+        node_name: "r".into(),
+        declared_address: declared.map(|d| match d.ip() {
+            IpAddr::V4(v4) => DeclaredAddress {
+                addr: v4.octets().to_vec(),
+                port: d.port() as u32,
+            },
+            IpAddr::V6(v6) => DeclaredAddress {
+                addr: v6.octets().to_vec(),
+                port: d.port() as u32,
+            },
+        }),
+        features: Vec::new(),
+    }
+}
+
+/// A `PeerManager` with a fresh on-disk book, plus the tempdir that must
+/// outlive it.
+fn mgr_with_book() -> (PeerManager, std::sync::Arc<AddressBook>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let book = std::sync::Arc::new(AddressBook::open_at(&dir.path().join("peers.redb")).unwrap());
+    let mut mgr = PeerManager::new(7);
+    mgr.set_address_book(book.clone());
+    (mgr, book, dir)
+}
+
+/// An inbound peer that declares no address has no dialable identity, so
+/// its handshake and its later disconnect must leave the book untouched.
+/// Before the fix, `persist_handshake` upserted the observed
+/// `ip:ephemeral` socket and `persist_touch` kept refreshing it, so every
+/// inbound session seeded one undialable most-recently-seen row (issue
+/// #298: 909 loopback rows and a starved dial cycle after restart).
+/// Scala writes nothing for such a peer — `addOrUpdateKnownPeer` iterates
+/// `peerSpec.address` (`declaredAddress orElse localAddressOpt`), which
+/// is empty here (PeerDatabase.scala:79-87, PeerSpec.scala:37).
+#[test]
+fn inbound_handshake_without_declared_address_writes_no_book_entry() {
+    let (mut mgr, book, _dir) = mgr_with_book();
+    let now = Instant::now();
+    let observed = addr(213, 239, 193, 208, 52331);
+
+    mgr.register_inbound(observed, now).unwrap();
+    mgr.mark_tcp_connected(&observed);
+    mgr.complete_handshake(&observed, spec_with_declared(None), None, now)
+        .unwrap();
+    mgr.disconnect(&observed);
+
+    let loaded = book.load_all().unwrap();
+    assert!(
+        loaded.peers.is_empty(),
+        "an inbound peer with no declared address must not enter the book, got {:?}",
+        loaded.peers.iter().map(|p| p.addr).collect::<Vec<_>>(),
+    );
+}
+
+/// An inbound peer that declares a routable listening address is
+/// persisted under that address, never under the ephemeral socket we
+/// observed — the declared address is the only one a later dial cycle
+/// can use.
+#[test]
+fn inbound_handshake_persists_declared_address_not_observed_socket() {
+    let (mut mgr, book, _dir) = mgr_with_book();
+    let now = Instant::now();
+    let observed = addr(213, 239, 193, 208, 52331);
+    let declared = addr(213, 239, 193, 208, 9030);
+
+    mgr.register_inbound(observed, now).unwrap();
+    mgr.mark_tcp_connected(&observed);
+    mgr.complete_handshake(&observed, spec_with_declared(Some(declared)), None, now)
+        .unwrap();
+    mgr.disconnect(&observed);
+
+    let loaded = book.load_all().unwrap();
+    let addrs: Vec<SocketAddr> = loaded.peers.iter().map(|p| p.addr).collect();
+    assert!(
+        addrs.contains(&declared),
+        "declared listening address must be persisted, got {addrs:?}",
+    );
+    assert!(
+        !addrs.contains(&observed),
+        "observed ephemeral socket must never be persisted, got {addrs:?}",
+    );
+    let row = loaded.peers.iter().find(|p| p.addr == declared).unwrap();
+    assert!(row.handshaked, "the declared row carries the handshake");
+    assert!(
+        row.last_seen.is_some(),
+        "disconnect refreshes last_seen on the declared row",
+    );
+}
+
+/// An outbound peer keeps being persisted under the socket we dialed —
+/// that address is by construction a listening address, and it stays
+/// dialable even when it is loopback (an operator's `[peers] known`
+/// pointing at a Scala node on the same host).
+#[test]
+fn outbound_handshake_persists_dialed_socket_even_when_loopback() {
+    let (mut mgr, book, _dir) = mgr_with_book();
+    let now = Instant::now();
+    let dialed = addr(127, 0, 0, 1, 9020);
+
+    mgr.add_known_address(dialed, PeerOrigin::Seed);
+    mgr.register_outbound(dialed, now).unwrap();
+    mgr.mark_tcp_connected(&dialed);
+    mgr.complete_handshake(&dialed, spec_with_declared(Some(dialed)), None, now)
+        .unwrap();
+    mgr.disconnect(&dialed);
+
+    let loaded = book.load_all().unwrap();
+    let row = loaded
+        .peers
+        .iter()
+        .find(|p| p.addr == dialed)
+        .expect("configured loopback seed must survive as a book row");
+    assert!(row.handshaked);
+    assert_eq!(row.origin, PeerOrigin::Seed);
+}
+
+/// A loopback address the operator seeded stays dialable when that peer
+/// connects to *us*: the declared address matches an existing seed row,
+/// so the routability filter is bypassed and the seed's `last_seen` is
+/// refreshed. Only learned addresses are filtered.
+#[test]
+fn inbound_handshake_from_seeded_loopback_touches_the_seed_entry() {
+    let (mut mgr, book, _dir) = mgr_with_book();
+    let now = Instant::now();
+    let seeded = addr(127, 0, 0, 1, 9020);
+    let observed = addr(127, 0, 0, 1, 41337);
+
+    mgr.add_known_address(seeded, PeerOrigin::Seed);
+    mgr.register_inbound(observed, now).unwrap();
+    mgr.mark_tcp_connected(&observed);
+    mgr.complete_handshake(&observed, spec_with_declared(Some(seeded)), None, now)
+        .unwrap();
+    mgr.disconnect(&observed);
+
+    let loaded = book.load_all().unwrap();
+    let addrs: Vec<SocketAddr> = loaded.peers.iter().map(|p| p.addr).collect();
+    assert!(
+        !addrs.contains(&observed),
+        "the ephemeral socket is still never persisted, got {addrs:?}",
+    );
+    let row = loaded.peers.iter().find(|p| p.addr == seeded).unwrap();
+    assert_eq!(row.origin, PeerOrigin::Seed);
+    assert!(
+        row.handshaked && row.last_seen.is_some(),
+        "a seeded loopback peer dialing us keeps its dialable row current",
+    );
+}
+
+/// `addresses_to_connect` applies the same routability predicate as
+/// `peers_for_sharing`: a learned loopback / RFC1918 entry is never
+/// offered as a dial candidate, while a seeded loopback entry still is.
+#[test]
+fn addresses_to_connect_skips_learned_nonroutable_but_keeps_seeds() {
+    let mut mgr = PeerManager::new(9);
+    let now = Instant::now();
+    let learned_loopback = addr(127, 1, 0, 1, 42947);
+    let learned_private = addr(10, 0, 0, 8, 9030);
+    let seeded_loopback = addr(127, 0, 0, 1, 9020);
+    let routable = addr(213, 239, 193, 208, 9030);
+
+    // `add_known_address` already filters gossip; restore bypasses it the
+    // way a boot-time replay of an older book would.
+    for a in [learned_loopback, learned_private] {
+        mgr.restore_known_peer(KnownPeer {
+            addr: a,
+            last_seen: Some(now),
+            origin: PeerOrigin::Gossip,
+            last_failure: None,
+            consecutive_failures: 0,
+        });
+    }
+    mgr.add_known_address(seeded_loopback, PeerOrigin::Seed);
+    mgr.add_known_address(routable, PeerOrigin::Gossip);
+
+    let candidates = mgr.addresses_to_connect(now, 16);
+    assert!(
+        !candidates.contains(&learned_loopback) && !candidates.contains(&learned_private),
+        "learned non-routable addresses must not be dialed, got {candidates:?}",
+    );
+    assert!(
+        candidates.contains(&seeded_loopback),
+        "an operator-configured loopback seed stays dialable, got {candidates:?}",
+    );
+    assert!(
+        candidates.contains(&routable),
+        "routable gossip stays dialable, got {candidates:?}",
+    );
+}

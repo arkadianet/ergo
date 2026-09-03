@@ -120,7 +120,7 @@ use codec::{
     encode_ban, encode_ip_key, encode_persisted_peer,
 };
 
-use crate::peer_manager::PeerOrigin;
+use crate::peer_manager::{is_routable_for_p2p, PeerOrigin};
 
 // ---- Public types ----
 
@@ -164,6 +164,14 @@ pub struct LoadedState {
     pub stale_skipped: usize,
     pub corrupt_skipped: usize,
     pub expired_bans_purged: usize,
+    /// Rows dropped from disk because the address is not dialable —
+    /// learned (non-seed) entries on loopback / unspecified / RFC1918 /
+    /// link-local / multicast addresses, or port 0. Older nodes
+    /// persisted inbound peers under their observed `ip:ephemeral`
+    /// socket (issue #298); purging them here lets an existing node
+    /// self-heal on the next boot instead of needing `peers.redb`
+    /// moved aside by hand.
+    pub nonroutable_purged: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -291,6 +299,7 @@ impl AddressBook {
         // Peers — read-only iteration, decode + filter. A fresh DB has
         // no PEERS table yet (redb doesn't auto-create on read); treat
         // that as an empty result, not an error.
+        let mut nonroutable_keys: Vec<Vec<u8>> = Vec::new();
         {
             let read_txn = self.db.begin_read()?;
             match read_txn.open_table(PEERS) {
@@ -317,12 +326,33 @@ impl AddressBook {
                                 continue;
                             }
                         }
+                        // Sanitise the persisted book: a learned entry we
+                        // would never dial is dead weight that outranks
+                        // real candidates by recency (issue #298). Seeds
+                        // keep their exemption — an operator may point
+                        // `[peers] known` at a loopback address.
+                        if !body.origin.is_seed() && !is_routable_for_p2p(&addr) {
+                            nonroutable_keys.push(k.value().to_vec());
+                            continue;
+                        }
                         state.peers.push(body);
                     }
                 }
                 Err(redb::TableError::TableDoesNotExist(_)) => {}
                 Err(e) => return Err(e.into()),
             }
+        }
+
+        if !nonroutable_keys.is_empty() {
+            let write_txn = begin_write_qr(&self.db)?;
+            {
+                let mut table = write_txn.open_table(PEERS)?;
+                for k in &nonroutable_keys {
+                    table.remove(k.as_slice())?;
+                }
+            }
+            write_txn.commit()?;
+            state.nonroutable_purged = nonroutable_keys.len();
         }
 
         // Bans — collect active, separately collect keys to purge. Same
@@ -678,6 +708,43 @@ mod tests {
             .unwrap()
             .as_secs();
         UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    // ----- boot sanitisation (issue #298) -----
+
+    /// A book written by an older node holds inbound peers under their
+    /// observed `ip:ephemeral` socket. `load_all` must drop those rows
+    /// from disk so the node self-heals on the next boot instead of
+    /// needing `peers.redb` moved aside — while keeping routable rows and
+    /// operator-seeded loopback rows, which stay legitimately dialable.
+    #[test]
+    fn load_all_purges_learned_nonroutable_rows_and_keeps_seeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("peers.redb");
+        let book = AddressBook::open_at(&path).unwrap();
+
+        let observed = v4(127, 1, 0, 1, 42947);
+        let private = v4(10, 0, 0, 8, 9030);
+        let seeded_loopback = v4(127, 0, 0, 1, 9020);
+        let routable = v4(213, 239, 193, 208, 9030);
+
+        book.add_known(observed, PeerOrigin::Gossip).unwrap();
+        book.add_known(private, PeerOrigin::Gossip).unwrap();
+        book.add_known(seeded_loopback, PeerOrigin::Seed).unwrap();
+        book.add_known(routable, PeerOrigin::Gossip).unwrap();
+
+        let loaded = book.load_all().unwrap();
+        assert_eq!(loaded.nonroutable_purged, 2);
+        let addrs: Vec<SocketAddr> = loaded.peers.iter().map(|p| p.addr).collect();
+        assert!(!addrs.contains(&observed), "got {addrs:?}");
+        assert!(!addrs.contains(&private), "got {addrs:?}");
+        assert!(addrs.contains(&seeded_loopback), "got {addrs:?}");
+        assert!(addrs.contains(&routable), "got {addrs:?}");
+
+        // The purge is durable: a second load sees nothing left to drop.
+        let reloaded = book.load_all().unwrap();
+        assert_eq!(reloaded.nonroutable_purged, 0);
+        assert_eq!(reloaded.peers.len(), 2);
     }
 
     // ---- begin_write_qr helper ----

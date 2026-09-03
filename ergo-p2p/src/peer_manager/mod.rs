@@ -236,7 +236,24 @@ impl PeerManager {
                         );
                     }
                 }
-                self.persist_handshake(*addr, &spec_for_book, direction);
+                // Persist under the address we would dial to reach this
+                // peer again, never the observed socket. An inbound peer
+                // reaches us from an ephemeral client port, so the
+                // observed socket is undialable; without this the book
+                // accumulates one `ip:ephemeral` row per inbound session
+                // and the dial cycle starves on them after a restart
+                // (issue #298). Scala keys its peer database on
+                // `peerSpec.address` (`declaredAddress orElse
+                // localAddressOpt`) and writes nothing at all when that
+                // is empty — `PeerDatabase.addOrUpdateKnownPeer`
+                // (PeerDatabase.scala:79-87), `PeerSpec.address`
+                // (ergo-core PeerSpec.scala:37), reached from
+                // `NetworkController.handleHandshake`'s
+                // `peerInfo.peerSpec.address.getOrElse(remoteAddress)`
+                // (NetworkController.scala:412, 430).
+                if let Some(dial_addr) = self.dialable_address(direction, *addr, declared_socket) {
+                    self.persist_handshake(dial_addr, &spec_for_book, direction);
+                }
                 // Inbound peers reach us from an ephemeral client port
                 // (`addr`); their listening port lives in the declared
                 // address. Record the declared socket in
@@ -285,9 +302,31 @@ impl PeerManager {
                 "peer removed",
             );
         }
+        // Refresh `last_seen` on the address we would dial to reach this
+        // peer again — for an inbound peer that is its declared listening
+        // address, not the ephemeral client port we observed. `touch_seen`
+        // is a no-op on an address the book does not hold, so this never
+        // creates a row; the point is that it must not refresh an
+        // undialable one into the most-recently-seen position either
+        // (issue #298).
+        let dial_addr = if was_handshaked {
+            self.peers
+                .get(addr)
+                .map(|p| {
+                    let declared = p
+                        .peer_spec
+                        .as_ref()
+                        .and_then(|s| s.declared_address.as_ref())
+                        .and_then(declared_to_socket);
+                    (p.direction, declared)
+                })
+                .and_then(|(direction, declared)| self.dialable_address(direction, *addr, declared))
+        } else {
+            None
+        };
         self.peers.remove(addr);
-        if was_handshaked {
-            self.persist_touch(*addr);
+        if let Some(dial_addr) = dial_addr {
+            self.persist_touch(dial_addr);
         }
     }
 
@@ -812,6 +851,19 @@ impl PeerManager {
         self.known_addresses
             .iter()
             .filter(|k| {
+                // Never dial an address we would refuse to gossip. A
+                // learned entry on a loopback / RFC1918 / link-local
+                // address is either an inbound peer's observed socket
+                // (issue #298) or a NATted peer's LAN address; either
+                // way the dial can only fail, and a pool full of them
+                // starves the real candidates. Seed entries keep their
+                // exemption: an operator may legitimately point
+                // `[peers] known` at `127.0.0.1:9020` (a local Scala
+                // node), which is Scala's `allowLocal` escape hatch in
+                // `NetworkUtils.isLocal` (NetworkUtils.scala:31-38).
+                if !k.origin.is_seed() && !is_routable_for_p2p(&k.addr) {
+                    return false;
+                }
                 if let (Some(last), n) = (k.last_failure, k.consecutive_failures) {
                     if n > 0 && now.duration_since(last) < backoff_for(n) {
                         return false;
@@ -900,6 +952,48 @@ impl PeerManager {
     }
 
     // ---- Internal helpers ----
+
+    /// The address we would dial to reach this peer again, or `None`
+    /// when the peer has no dialable identity and therefore must not
+    /// occupy a row in the address book.
+    ///
+    /// Outbound: the socket we dialed is by construction a listening
+    /// address, and it stays dialable even when non-routable — an
+    /// operator's `[peers] known` entry may legitimately be
+    /// `127.0.0.1:9020`, a Scala node on the same host.
+    ///
+    /// Inbound: the peer reached us from an ephemeral client port, so
+    /// the observed socket is never dialable. Only the handshake's
+    /// declared address is, and a *learned* declared address must pass
+    /// the same routability filter `peers_for_sharing` applies before
+    /// we propagate it. The exception is an address the operator
+    /// already seeded: a local Scala node dialing us keeps its seeded
+    /// row dialable.
+    fn dialable_address(
+        &self,
+        direction: Direction,
+        observed: SocketAddr,
+        declared: Option<SocketAddr>,
+    ) -> Option<SocketAddr> {
+        if direction == Direction::Outbound {
+            return Some(observed);
+        }
+        let declared = declared?;
+        if is_routable_for_p2p(&declared) || self.is_seed_address(&declared) {
+            Some(declared)
+        } else {
+            None
+        }
+    }
+
+    /// Whether the dial pool already holds this address as an
+    /// operator-supplied seed. Seeds are exempt from the routability
+    /// filter on both the dial and the persistence side.
+    fn is_seed_address(&self, addr: &SocketAddr) -> bool {
+        self.known_addresses
+            .iter()
+            .any(|k| k.addr == *addr && k.origin.is_seed())
+    }
 
     fn check_can_connect(&self, addr: PeerId, now: Instant) -> Result<(), ConnectError> {
         // Banned

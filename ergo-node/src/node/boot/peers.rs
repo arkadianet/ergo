@@ -50,6 +50,7 @@ pub(super) fn setup(config: &NodeConfig) -> (i64, PeerManager) {
                         bans = state.bans.len(),
                         stale_skipped = state.stale_skipped,
                         corrupt_skipped = state.corrupt_skipped,
+                        nonroutable_purged = state.nonroutable_purged,
                         expired_bans_purged = state.expired_bans_purged,
                         "address_book restored",
                     );
