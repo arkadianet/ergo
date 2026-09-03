@@ -419,24 +419,77 @@ mod tests {
         assert!(ring.last().unwrap().contains("\"level\":\"INFO\""));
     }
 
-    #[test]
-    fn error_event_triggers_snapshot_write_via_layer() {
-        let dir = tempfile::tempdir().unwrap();
-        set_incident_dir(dir.path().to_path_buf());
-        let subscriber = tracing_subscriber::Registry::default().with(CaptureLayer);
-        let _guard = tracing::subscriber::set_default(subscriber);
-        let before = std::fs::read_dir(dir.path()).unwrap().count();
-        tracing::error!(code = "test-snapshot", "injected storage failure");
-        // Synchronous enough: writer thread may lag a moment.
+    /// The incident directory these tests share, for the life of the
+    /// test binary.
+    ///
+    /// `INCIDENT_DIR` is a `OnceLock` — a once-at-boot call in
+    /// production — so exactly ONE directory is ever active per binary.
+    /// Backing it with a per-test `TempDir` raced twice over: which test
+    /// won the lock, and whether that winner's `TempDir` had already
+    /// dropped (deleting the directory) while another test was still
+    /// polling it, which surfaced as a `NotFound` panic in whichever
+    /// test lost. One directory that outlives every test removes both
+    /// races; tests tell their snapshots apart by `code`, not by
+    /// directory.
+    static SHARED_INCIDENT_DIR: LazyLock<tempfile::TempDir> =
+        LazyLock::new(|| tempfile::tempdir().expect("incident test dir"));
+
+    /// Install the shared directory (a no-op after the first caller) and
+    /// return whichever directory is actually active.
+    fn shared_incident_dir() -> PathBuf {
+        set_incident_dir(SHARED_INCIDENT_DIR.path().to_path_buf());
+        incident_dir()
+    }
+
+    /// The marker that identifies the snapshot TRIGGERED BY `code`.
+    ///
+    /// Every snapshot embeds the process-global event ring, so one test's
+    /// file also contains other tests' event text — a bare substring
+    /// search finds the wrong file. Only the triggering snapshot carries
+    /// the code unescaped at top level: ring entries are nested JSON
+    /// strings, so their quotes come back escaped.
+    fn snapshot_marker(code: &str) -> String {
+        format!("\"code\":\"{code}\"")
+    }
+
+    /// Wait for the snapshot triggered by `code` to land in `dir`.
+    fn await_snapshot(dir: &std::path::Path, code: &str) -> Option<PathBuf> {
+        let marker = snapshot_marker(code);
         for _ in 0..50 {
-            let count = std::fs::read_dir(dir.path()).unwrap().count();
-            if count > before {
-                break;
+            let found = std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path())
+                .find(|path| {
+                    std::fs::read_to_string(path)
+                        .map(|text| text.contains(&marker))
+                        .unwrap_or(false)
+                });
+            if found.is_some() {
+                return found;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        let after = std::fs::read_dir(dir.path()).unwrap().count();
-        assert!(after > before, "snapshot file must be written on ERROR");
+        None
+    }
+
+    #[test]
+    fn error_event_triggers_snapshot_write_via_layer() {
+        // The directory is shared with every other incident test (see
+        // `SHARED_INCIDENT_DIR`), so identify THIS test's snapshot by its
+        // own code rather than by a bare file count — a count can be
+        // satisfied by a concurrent test's snapshot.
+        let active_dir = shared_incident_dir();
+        let code = format!("test-snapshot-{}", std::process::id());
+        let subscriber = tracing_subscriber::Registry::default().with(CaptureLayer);
+        let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::error!(code = %code, "injected storage failure");
+        // Synchronous enough: writer thread may lag a moment.
+        assert!(
+            await_snapshot(&active_dir, &code).is_some(),
+            "snapshot file must be written on ERROR"
+        );
     }
 
     /// Issue #281 ask 3: a poisoned store's storage-failure ERROR event
@@ -450,23 +503,12 @@ mod tests {
     /// `store` / `error` fields survive into the forensic file.
     #[test]
     fn storage_error_event_triggers_incident_snapshot() {
-        // `set_incident_dir` backs onto a process-wide `OnceLock` (it's a
-        // once-at-boot call in production) — a second call from this test
-        // is a no-op if `error_event_triggers_snapshot_write_via_layer`
-        // (or a prior run of this test in the same process) already won
-        // the race. Read back `incident_dir()` rather than assuming this
-        // test's own tempdir is the active one, so the assertion holds
-        // either way.
-        let dir = tempfile::tempdir().unwrap();
-        set_incident_dir(dir.path().to_path_buf());
-        let active_dir = incident_dir();
+        // Shared with the other incident tests, and outliving all of
+        // them — see `SHARED_INCIDENT_DIR`. This test already identifies
+        // its own snapshot by `code`, so sharing costs it nothing.
+        let active_dir = shared_incident_dir();
         let subscriber = tracing_subscriber::Registry::default().with(CaptureLayer);
         let _guard = tracing::subscriber::set_default(subscriber);
-        let before = std::fs::create_dir_all(&active_dir)
-            .ok()
-            .and_then(|_| std::fs::read_dir(&active_dir).ok())
-            .map(|rd| rd.count())
-            .unwrap_or(0);
         // Real shape production emits (`ergo_state::storage_observability::
         // emit_report`): the pre-existing `storage_io_failure` /
         // `storage_health_transition` / `storage_operation_failed` event
@@ -480,26 +522,8 @@ mod tests {
             error = "Previous I/O error occurred. Please close and re-open the database.",
             "storage operation failed",
         );
-        let mut snapshot_path = None;
-        for _ in 0..50 {
-            let entries: Vec<_> = std::fs::read_dir(&active_dir).unwrap().collect();
-            if entries.len() > before {
-                snapshot_path = entries
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.path())
-                    .find(|p| {
-                        std::fs::read_to_string(p)
-                            .map(|t| t.contains(&code))
-                            .unwrap_or(false)
-                    });
-                if snapshot_path.is_some() {
-                    break;
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        let path = snapshot_path.expect("storage_error must trigger an incident snapshot");
+        let path = await_snapshot(&active_dir, &code)
+            .expect("storage_error must trigger an incident snapshot");
         let text = std::fs::read_to_string(path).unwrap();
         // Top-level `incident.code` is written directly from the dedupe
         // key, so it's unescaped JSON; the triggering event itself lives
