@@ -757,6 +757,72 @@ fn drive_chunk_download(state: &mut NodeState, now: Instant) {
     }
 }
 
+/// Resolution of the canonical header id at a snapshot anchor
+/// height, for the Mode 2 / Mode 4 install re-fetch and the
+/// manifest-verification trust check.
+///
+/// The arms are NOT interchangeable, and in particular a
+/// [`ergo_state::chain::HeightLookup::SparseGap`] splits into two
+/// operationally opposite outcomes on a NiPoPoW-bootstrapped store:
+///
+/// * `Defer` — the anchor is inside the proof's dense range
+///   `[dense_from_height, best_header_height]` but the index row has
+///   not landed yet. Retry; the row materializes on its own.
+/// * `UnreachableGap` — the anchor is BELOW `dense_from_height`, in
+///   the proof's sparse prefix. Bounded forward catch-up starts at
+///   `best_header_height + 1` and `rewrite_best_chain_into_index`
+///   stops its backward walk at the first height whose row already
+///   matches, so nothing ever back-fills `HEADER_CHAIN_INDEX` below
+///   `dense_from_height`. Treating this as `Defer` retries forever
+///   while logging "catchup pending", so the bootstrap silently
+///   never completes. It is a terminal, operator-actionable state:
+///   the discovered snapshot epoch predates the NiPoPoW proof this
+///   node bootstrapped from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InstallAnchor {
+    /// `HEADER_CHAIN_INDEX[height]` is populated — install may run.
+    Ready([u8; 32]),
+    /// Index row absent but reachable: retry on the next tick.
+    Defer,
+    /// Index row absent and unreachable — the anchor sits in the
+    /// NiPoPoW sparse prefix, which forward catch-up never fills.
+    UnreachableGap { dense_from_height: u32 },
+    /// The anchor is above `best_header_height`. Header sync cannot
+    /// reach it from here; the operator must intervene.
+    AboveTip,
+}
+
+/// Classify the snapshot anchor height against the store's
+/// sparse-aware height lookup. Split out of
+/// [`install_reconstructed_snapshot`] so the composed Mode 4
+/// handoff — a `SparseGap` deferral resolving to `Dense` once
+/// bounded forward catch-up indexes the height, versus the
+/// permanently-unreachable sparse-prefix anchor — is directly
+/// testable without standing up a full `NodeState`.
+pub(crate) fn resolve_install_anchor(
+    store: &ergo_state::store::StateStore,
+    snapshot_height: u32,
+) -> Result<InstallAnchor, ergo_state::store::StateError> {
+    use ergo_state::chain::{HeaderAvailability, HeightLookup};
+    Ok(match store.lookup_header_at_height(snapshot_height)? {
+        HeightLookup::Dense(id) => InstallAnchor::Ready(id),
+        HeightLookup::SparseGap => {
+            match store.chain_state().header_availability {
+                HeaderAvailability::PoPowSparse {
+                    dense_from_height, ..
+                } if snapshot_height < dense_from_height => {
+                    InstallAnchor::UnreachableGap { dense_from_height }
+                }
+                // Dense-mode gaps and in-dense-range gaps are the
+                // corruption / not-yet-indexed shapes the store
+                // already logs; retrying is the safe response.
+                _ => InstallAnchor::Defer,
+            }
+        }
+        HeightLookup::AboveTip => InstallAnchor::AboveTip,
+    })
+}
+
 /// Mode 2 consume-side: install the reconstructed UTXO snapshot
 /// into the running `StateStore`. Final step of bootstrap.
 ///
@@ -806,28 +872,33 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
     // Re-fetch the canonical header at snapshot_height. A reorg
     // since the earlier trust check would flip this; the install
     // would then refuse on root mismatch and the operator restarts.
-    //
-    // In PoPowSparse mode (NiPoPoW-bootstrapped node), `SparseGap`
-    // at `snapshot_height` means bounded forward catchup hasn't
-    // populated the row yet — defer the install until the next tick.
-    // `AboveTip` and `Err` are still halt conditions (operator must
-    // intervene).
-    use ergo_state::chain::HeightLookup;
-    let header_id = match state
-        .store
-        .as_utxo()
-        .expect("utxo-only: Mode 2 snapshot install is gated off in digest mode")
-        .lookup_header_at_height(snapshot_height as u32)
-    {
-        Ok(HeightLookup::Dense(id)) => id,
-        Ok(HeightLookup::SparseGap) => {
+    let header_id = match resolve_install_anchor(
+        state
+            .store
+            .as_utxo()
+            .expect("utxo-only: Mode 2 snapshot install is gated off in digest mode"),
+        snapshot_height as u32,
+    ) {
+        Ok(InstallAnchor::Ready(id)) => id,
+        Ok(InstallAnchor::Defer) => {
             tracing::debug!(
                 height = snapshot_height,
                 "Mode 2: install — SparseGap at snapshot height; deferring (catchup pending)",
             );
             return;
         }
-        Ok(HeightLookup::AboveTip) => {
+        Ok(InstallAnchor::UnreachableGap { dense_from_height }) => {
+            warn!(
+                height = snapshot_height,
+                dense_from_height,
+                "Mode 4: install — snapshot anchor is below the NiPoPoW proof's \
+                 dense_from_height, so forward catchup can never index it; halted. \
+                 The discovered snapshot epoch predates the proof this node \
+                 bootstrapped from — restart with a fresh data_dir.",
+            );
+            return;
+        }
+        Ok(InstallAnchor::AboveTip) => {
             warn!(
                 height = snapshot_height,
                 "Mode 2: install — snapshot height above best_header_height; halted",
@@ -1105,4 +1176,135 @@ fn maybe_emit_gauges(state: &mut NodeState, now: Instant) {
         orphan_headers,
         "subsystem gauges"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_install_anchor, InstallAnchor};
+    use ergo_state::store::StateStore;
+    use ergo_state::test_helpers::nipopow_proof_dense_from_2;
+
+    // ----- helpers -----
+
+    /// Open a store and commit the k=4 NiPoPoW fixture proof, which
+    /// leaves the chain in `PoPowSparse { dense_from_height = 2 }`
+    /// over heights 1..=8: height 1 is the sparse prefix (headers
+    /// present in `HEADERS_BY_HEIGHT` but NOT in
+    /// `HEADER_CHAIN_INDEX`), heights 2..=8 are the dense suffix.
+    /// This is exactly the shape a Mode 4 node has between the
+    /// NiPoPoW apply and bounded forward catch-up.
+    fn popow_sparse_store(dir: &tempfile::TempDir) -> StateStore {
+        let mut store = StateStore::open(&dir.path().join("state.redb")).expect("open store");
+        store.initialize_genesis(&[]).expect("init genesis");
+        store
+            .apply_popow_proof(&nipopow_proof_dense_from_2())
+            .expect("apply popow proof");
+        store
+    }
+
+    /// Sparse-prefix height for the fixture above (`< dense_from_height`).
+    const SPARSE_PREFIX_HEIGHT: u32 = 1;
+    /// Dense-suffix tip height for the fixture above.
+    const DENSE_TIP_HEIGHT: u32 = 8;
+    /// `dense_from_height` the fixture proof commits.
+    const PROOF_DENSE_FROM_HEIGHT: u32 = 2;
+
+    // ----- happy path -----
+
+    #[test]
+    fn resolve_install_anchor_dense_suffix_height_is_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = popow_sparse_store(&dir);
+        let expected = store
+            .get_header_id_at_height(DENSE_TIP_HEIGHT)
+            .unwrap()
+            .expect("popow indexes the dense suffix");
+        assert_eq!(
+            resolve_install_anchor(&store, DENSE_TIP_HEIGHT).unwrap(),
+            InstallAnchor::Ready(expected),
+        );
+    }
+
+    #[test]
+    fn resolve_install_anchor_deferred_gap_resolves_to_ready_after_catchup() {
+        // The deferred branch must actually RESOLVE: once bounded
+        // forward catch-up writes the `HEADER_CHAIN_INDEX` row for the
+        // anchor height, the very next call returns `Ready` with the
+        // canonical id. Without this the Mode 4 install would defer
+        // forever and the node would never leave bootstrap.
+        //
+        // Driven at a DENSE-range height whose index row is missing —
+        // the shape a mid-flight index write leaves — because the
+        // sparse-prefix gap is terminal by construction (see the
+        // `unreachable` test below).
+        let dir = tempfile::tempdir().unwrap();
+        let store = popow_sparse_store(&dir);
+        let canonical_id = store
+            .get_header_id_at_height(DENSE_TIP_HEIGHT)
+            .unwrap()
+            .expect("popow indexes the dense suffix");
+        store
+            .test_remove_header_chain_index_row(DENSE_TIP_HEIGHT)
+            .unwrap();
+        assert_eq!(
+            resolve_install_anchor(&store, DENSE_TIP_HEIGHT).unwrap(),
+            InstallAnchor::Defer,
+            "a gap INSIDE the dense range is reachable — retry, do not halt",
+        );
+
+        store
+            .test_force_put_header_chain_index(DENSE_TIP_HEIGHT, &canonical_id)
+            .unwrap();
+        assert_eq!(
+            resolve_install_anchor(&store, DENSE_TIP_HEIGHT).unwrap(),
+            InstallAnchor::Ready(canonical_id),
+            "a deferred gap must become Ready once catch-up indexes the height",
+        );
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn resolve_install_anchor_sparse_prefix_height_is_unreachable_not_deferred() {
+        // Composed Mode 4 bug guard. A snapshot anchor below the
+        // proof's `dense_from_height` was previously classified as
+        // `SparseGap` → "defer, catchup pending". But bounded forward
+        // catch-up starts at `best_header_height + 1`, and
+        // `rewrite_best_chain_into_index` stops its backward walk at
+        // the first height whose index row already matches — so
+        // nothing ever writes `HEADER_CHAIN_INDEX` below
+        // `dense_from_height`. Deferring there is an infinite loop
+        // that reports itself as healthy. It must be terminal.
+        let dir = tempfile::tempdir().unwrap();
+        let store = popow_sparse_store(&dir);
+        assert_eq!(
+            store.get_header_id_at_height(SPARSE_PREFIX_HEIGHT).unwrap(),
+            None,
+            "precondition: sparse prefix height is not in HEADER_CHAIN_INDEX",
+        );
+        assert!(
+            !store
+                .header_ids_at_height_all(SPARSE_PREFIX_HEIGHT)
+                .unwrap()
+                .is_empty(),
+            "precondition: the header itself IS persisted — the gap is the INDEX",
+        );
+        assert_eq!(
+            resolve_install_anchor(&store, SPARSE_PREFIX_HEIGHT).unwrap(),
+            InstallAnchor::UnreachableGap {
+                dense_from_height: PROOF_DENSE_FROM_HEIGHT,
+            },
+        );
+    }
+
+    #[test]
+    fn resolve_install_anchor_above_header_tip_halts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = popow_sparse_store(&dir);
+        assert_eq!(
+            resolve_install_anchor(&store, DENSE_TIP_HEIGHT + 1).unwrap(),
+            InstallAnchor::AboveTip,
+            "an anchor past the validated header tip is a halt, never a deferral",
+        );
+    }
 }

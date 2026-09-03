@@ -403,4 +403,104 @@ pub mod test_helpers {
             continuous: true,
         }
     }
+
+    use crate::avl::snapshot_codec::{
+        reconstruct_tree, ReconstructedTree, SnapshotServer, MAINNET_MANIFEST_DEPTH,
+    };
+    use crate::avl::tree::AvlTree;
+    use crate::chain::HeaderMeta;
+    use ergo_primitives::digest::Digest32;
+    use std::collections::HashMap;
+
+    /// Build a small populated AVL+ tree, round-trip it through the
+    /// public snapshot codec (`SnapshotServer::build` →
+    /// `reconstruct_tree`), and return the
+    /// `(ReconstructedTree, expected_state_root)` pair that
+    /// [`StateStore::install_snapshot_state`] consumes.
+    ///
+    /// This is the REAL install fixture — the same manifest/chunk
+    /// round-trip a Mode 2 peer download produces, not a fabricated
+    /// tree — so a caller can drive a genuine snapshot install into a
+    /// store. `snapshot_height` is stamped into the manifest the
+    /// server builds; `install_snapshot_state` takes the anchor height
+    /// separately, so the two must agree for the fixture to mirror
+    /// production.
+    ///
+    /// `expected_state_root` is the 33-byte `ADDigest` form of the
+    /// reconstructed root (32-byte label ++ 1-byte tree height), which
+    /// is what a real header at the snapshot height carries in
+    /// `header.state_root`. Callers that want the install to be
+    /// refused pass a different root.
+    pub fn reconstructed_snapshot_fixture(
+        n_leaves: u8,
+        snapshot_height: u32,
+    ) -> (ReconstructedTree, ADDigest) {
+        let mut tree = AvlTree::new();
+        for i in 0..n_leaves {
+            let key = [i.wrapping_add(0x10); 32];
+            let value = vec![i, i.wrapping_add(0x20), i.wrapping_add(0x40)];
+            tree.insert(key, value);
+        }
+        let server = SnapshotServer::build(&tree, snapshot_height, MAINNET_MANIFEST_DEPTH)
+            .expect("snapshot server build");
+        let chunks_map: HashMap<Digest32, Vec<u8>> = server.chunks.iter().cloned().collect();
+        let reconstructed =
+            reconstruct_tree(&server.manifest_bytes, &chunks_map).expect("reconstruct tree");
+        let mut root_bytes = [0u8; 33];
+        root_bytes[..32].copy_from_slice(reconstructed.root_label.as_bytes());
+        root_bytes[32] = reconstructed.tree_height;
+        (reconstructed, ADDigest::from_bytes(root_bytes))
+    }
+
+    /// Seed a DENSE best-header chain of the first `count` mainnet
+    /// headers (1..=`count`, `count <= 8`) into `store` through the
+    /// production `store_validated_header` writer, so `HEADERS`,
+    /// `HEADER_META`, `HEADER_CHAIN_INDEX`, `HEADERS_BY_HEIGHT` and
+    /// `SECTION_HEIGHT_INDEX` all land the way header validation would
+    /// have written them.
+    ///
+    /// Returns `(height, header_id)` for every seeded header in
+    /// ascending height order. The tip becomes `best_header_*`, so a
+    /// subsequent [`StateStore::install_snapshot_state`] at any seeded
+    /// height satisfies both the `snapshot_height <= best_header_height`
+    /// precondition and the `HEADERS_BY_HEIGHT` anchor cross-check
+    /// WITHOUT a NiPoPoW proof — the Mode 2 / Mode 4 "UTXO bootstrap on
+    /// a Dense store" shape.
+    ///
+    /// `cumulative_score` is a synthetic strictly-increasing
+    /// big-endian value: these tests assert on index/sentinel shape,
+    /// not on difficulty arithmetic.
+    pub fn seed_dense_mainnet_headers(
+        store: &mut StateStore,
+        count: usize,
+    ) -> Result<Vec<(u32, [u8; 32])>, StateError> {
+        assert!(
+            count >= 1 && count <= MAINNET_HEADERS_1_TO_8.len(),
+            "seed_dense_mainnet_headers: count must be 1..={}",
+            MAINNET_HEADERS_1_TO_8.len(),
+        );
+        let mut seeded = Vec::with_capacity(count);
+        for hex_str in MAINNET_HEADERS_1_TO_8.iter().take(count) {
+            let header = header_from_hex(hex_str);
+            let (bytes, id) =
+                ergo_ser::header::serialize_header(&header).expect("serialize mainnet header");
+            let header_id = *id.as_bytes();
+            let score = (header.height as u64).to_be_bytes().to_vec();
+            let meta = HeaderMeta {
+                parent_id: *header.parent_id.as_bytes(),
+                height: header.height,
+                cumulative_score: score.clone(),
+                pow_validity: 1,
+                timestamp: header.timestamp,
+            };
+            store.store_validated_header(
+                &header_id,
+                &bytes,
+                &meta,
+                Some((header.height, score)),
+            )?;
+            seeded.push((header.height, header_id));
+        }
+        Ok(seeded)
+    }
 }

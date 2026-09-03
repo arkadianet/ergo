@@ -44,15 +44,15 @@ pub(super) fn handle_inbound_manifest(
     // bounded forward catchup yet" → silent drop (the voter is
     // still valid; re-poll on the next tick). Distinguishing the
     // two requires the 3-arm `HeightLookup`.
-    use ergo_state::chain::HeightLookup;
-    let header_id = match state
-        .store
-        .as_utxo()
-        .expect("utxo-only: Mode 2 snapshot-bootstrap manifest verify is gated off in digest mode")
-        .lookup_header_at_height(height as u32)
-    {
-        Ok(HeightLookup::Dense(id)) => id,
-        Ok(HeightLookup::SparseGap) => {
+    use crate::node::sync_tick::{resolve_install_anchor, InstallAnchor};
+    let header_id = match resolve_install_anchor(
+        state.store.as_utxo().expect(
+            "utxo-only: Mode 2 snapshot-bootstrap manifest verify is gated off in digest mode",
+        ),
+        height as u32,
+    ) {
+        Ok(InstallAnchor::Ready(id)) => id,
+        Ok(InstallAnchor::Defer) => {
             // Catchup hasn't filled the snapshot-height row yet.
             // Per-tick re-poll until the row materializes; do NOT
             // evict — the voter is consistent with the chain, we're
@@ -64,7 +64,27 @@ pub(super) fn handle_inbound_manifest(
             );
             return;
         }
-        Ok(HeightLookup::AboveTip) => {
+        Ok(InstallAnchor::UnreachableGap { dense_from_height }) => {
+            // The advertised snapshot sits in the NiPoPoW sparse
+            // prefix. Forward catch-up never indexes below
+            // `dense_from_height`, so re-polling this voter would
+            // spin forever — we can NEVER verify this manifest
+            // against a canonical state_root. Evict and recompute
+            // selection so a voter advertising a reachable epoch
+            // can win instead.
+            warn!(
+                peer = %peer,
+                height = height,
+                dense_from_height,
+                "snapshot height is below the NiPoPoW proof's dense_from_height and can \
+                 never be indexed; evicting manifest voter",
+            );
+            state
+                .snapshot_bootstrap
+                .reject_manifest_and_evict_voter(peer);
+            return;
+        }
+        Ok(InstallAnchor::AboveTip) => {
             // Snapshot height exceeds best_header_height — same as
             // Dense's `None` for an above-tip height; the voter has
             // advertised a height we don't have any canonical claim

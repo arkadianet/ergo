@@ -79,6 +79,23 @@ impl StateStore {
         Ok(())
     }
 
+    /// Delete a single HEADER_CHAIN_INDEX row, leaving `HEADERS` /
+    /// `HEADER_META` intact. Synthesizes the "header persisted but
+    /// best-chain index row absent" shape that
+    /// `lookup_header_at_height` maps to `HeightLookup::SparseGap`,
+    /// so a caller's gap-classification logic can be driven at a
+    /// chosen height without fabricating a whole chain state.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn test_remove_header_chain_index_row(&self, height: u32) -> Result<(), StateError> {
+        let write_txn = crate::begin_write_qr(&self.db)?;
+        {
+            let mut idx_table = write_txn.open_table(HEADER_CHAIN_INDEX)?;
+            idx_table.remove(height as u64)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
     /// Insert a single `CHAIN_INDEX` (applied chain) entry. Companion to
     /// `test_force_put_header_chain_index`, used by tests that need to
     /// pin a divergence between the applied chain and the best-header
