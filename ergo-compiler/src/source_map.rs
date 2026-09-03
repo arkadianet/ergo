@@ -56,6 +56,11 @@ pub(crate) struct Origins {
 
 impl Origins {
     pub(crate) fn record(&mut self, produced: &Expr, pos: Pos) {
+        // `0` is P5-A's "unset" (Scala's `Nullable.None`, printed `0:0`):
+        // synthesized receivers and env constants carry it. Not a citation.
+        if pos == 0 {
+            return;
+        }
         if let Some(bytes) = subtree_bytes(produced) {
             self.entries.push((bytes, pos));
         }
@@ -116,6 +121,9 @@ struct EmitTree<'a> {
     children: Vec<Vec<usize>>,
     /// Subtree bytes → emit ids in preorder, for re-finding moved subtrees.
     by_bytes: HashMap<Vec<u8>, VecDeque<usize>>,
+    /// Emit ids already paired with a final node (structurally or by
+    /// bytes). A recovery by bytes must never hand out one of these again.
+    consumed: Vec<bool>,
 }
 
 impl<'a> EmitTree<'a> {
@@ -156,17 +164,31 @@ impl<'a> EmitTree<'a> {
         }
         let mut id = 0;
         fill(root, &mut id, &mut children);
+        let consumed = vec![false; nodes.len()];
         EmitTree {
             nodes,
             pos,
             children,
             by_bytes,
+            consumed,
         }
+    }
+
+    /// Mark an emit node as paired with a final node.
+    fn consume(&mut self, id: usize) {
+        self.consumed[id] = true;
     }
 
     /// Take the next unconsumed emit node with exactly these subtree bytes.
     fn find(&mut self, bytes: &[u8]) -> Option<usize> {
-        self.by_bytes.get_mut(bytes).and_then(|q| q.pop_front())
+        let q = self.by_bytes.get_mut(bytes)?;
+        while let Some(id) = q.pop_front() {
+            if !self.consumed[id] {
+                self.consumed[id] = true;
+                return Some(id);
+            }
+        }
+        None
     }
 }
 
@@ -227,8 +249,10 @@ pub(crate) fn resolve(emit_root: &Expr, root: &Expr, body: &Expr, origins: &Orig
         |e: &Expr| matches!(e, Expr::Op(n) if matches!(n.payload, Payload::BlockValue { .. }));
 
     let mut offsets = BTreeMap::new();
-    let mut work: Vec<(usize, usize)> = vec![(0, 0)]; // (emit id, final id)
-    while let Some((ei, fi)) = work.pop() {
+    // FIFO: pairs are processed in preorder, so a left sibling claims its
+    // emit node before a right sibling's byte recovery could take it.
+    let mut work: VecDeque<(usize, usize)> = VecDeque::from([(0, 0)]); // (emit id, final id)
+    while let Some((ei, fi)) = work.pop_front() {
         let (e, f) = (emit.nodes[ei], final_nodes[fi]);
         // A `val` the pipeline inlined: the emit side reads it through a
         // ValUse where the final tree has the rhs itself. Align the rhs.
@@ -236,7 +260,7 @@ pub(crate) fn resolve(emit_root: &Expr, root: &Expr, body: &Expr, origins: &Orig
             if let Payload::ValUse { id } = &n.payload {
                 if !matches!(f, Expr::Op(m) if matches!(m.payload, Payload::ValUse { .. })) {
                     if let Some(&rhs) = emit_valdef_rhs.get(id) {
-                        work.push((rhs, fi));
+                        work.push_back((rhs, fi));
                     }
                     continue;
                 }
@@ -247,20 +271,21 @@ pub(crate) fn resolve(emit_root: &Expr, root: &Expr, body: &Expr, origins: &Orig
         if is_block(e) && is_block(f) {
             let ek = emit.children[ei].clone();
             let fk = &final_children[fi];
-            work.push((ek[ek.len() - 1], fk[fk.len() - 1]));
+            emit.consume(ei);
+            work.push_back((ek[ek.len() - 1], fk[fk.len() - 1]));
             for &fitem in &fk[..fk.len() - 1] {
                 let fid = valdef_id(final_nodes[fitem]);
                 if let Some(&eitem) = ek[..ek.len() - 1]
                     .iter()
                     .find(|&&ei2| valdef_id(emit.nodes[ei2]) == fid)
                 {
-                    work.push((eitem, fitem));
+                    work.push_back((eitem, fitem));
                 } else if let Some(src) = final_children[fitem]
                     .first()
                     .and_then(|&r| subtree_bytes(final_nodes[r]))
                     .and_then(|b| emit.find(&b))
                 {
-                    work.push((src, final_children[fitem][0]));
+                    work.push_back((src, final_children[fitem][0]));
                 }
             }
             continue;
@@ -268,8 +293,9 @@ pub(crate) fn resolve(emit_root: &Expr, root: &Expr, body: &Expr, origins: &Orig
         // An emit-time block the pipeline dissolved (every `val` inlined or
         // pruned): look through it to the result.
         if is_block(e) && !is_block(f) {
-            let ek = &emit.children[ei];
-            work.push((ek[ek.len() - 1], fi));
+            let last = *emit.children[ei].last().expect("a block has a result");
+            emit.consume(ei);
+            work.push_back((last, fi));
             continue;
         }
         match f {
@@ -280,6 +306,7 @@ pub(crate) fn resolve(emit_root: &Expr, root: &Expr, body: &Expr, origins: &Orig
                         .get(id)
                         .map(|b| Some(b) == subtree_bytes(e).as_ref());
                     if same == Some(true) {
+                        emit.consume(ei);
                         if let Some(p) = emit.pos[ei] {
                             offsets.insert(fi as u64, p);
                         }
@@ -293,12 +320,12 @@ pub(crate) fn resolve(emit_root: &Expr, root: &Expr, body: &Expr, origins: &Orig
             {
                 let kids = &final_children[fi];
                 let (items, result) = kids.split_at(kids.len() - 1);
-                work.push((ei, result[0]));
+                work.push_back((ei, result[0]));
                 for &item in items {
                     if let Expr::Op(v) = final_nodes[item] {
                         if let Payload::ValDef { rhs, .. } = &v.payload {
                             if let Some(src) = subtree_bytes(rhs).and_then(|b| emit.find(&b)) {
-                                work.push((src, final_children[item][0]));
+                                work.push_back((src, final_children[item][0]));
                             }
                         }
                     }
@@ -308,24 +335,27 @@ pub(crate) fn resolve(emit_root: &Expr, root: &Expr, body: &Expr, origins: &Orig
             _ => {}
         }
         if shape(e) == shape(f) {
+            emit.consume(ei);
             if let Some(p) = emit.pos[ei] {
                 offsets.insert(fi as u64, p);
             }
             for (&ec, &fc) in emit.children[ei].iter().zip(&final_children[fi]) {
-                work.push((ec, fc));
+                work.push_back((ec, fc));
             }
         } else if emit.children[ei].len() == final_children[fi].len() {
             // Rewritten in place (lowering): the node is uncited, its
             // children are very likely untouched.
+            emit.consume(ei);
             for (&ec, &fc) in emit.children[ei].iter().zip(&final_children[fi]) {
-                work.push((ec, fc));
+                work.push_back((ec, fc));
             }
         } else {
-            // Arity changed (an inserted cast, a collapsed node): re-find
-            // each final child among the emit-time subtrees by bytes.
+            // Arity changed (an inserted cast, a collapsed node): the emit
+            // node is NOT consumed — it may be one of the children re-found
+            // by bytes below (an inserted cast wraps the very node we hold).
             for &fc in &final_children[fi] {
                 if let Some(src) = subtree_bytes(final_nodes[fc]).and_then(|b| emit.find(&b)) {
-                    work.push((src, fc));
+                    work.push_back((src, fc));
                 }
             }
         }
@@ -404,6 +434,30 @@ mod tests {
     }
 
     // ----- error paths -----
+
+    #[test]
+    fn resolve_byte_recovery_skips_an_already_aligned_duplicate() {
+        // emit: GT(Height@10, Height@30) → final: GT(Height, Upcast(Height)).
+        // The left Height aligns structurally; the right one is recovered by
+        // bytes and must get the SECOND spelling, not the first again.
+        let upcast = Expr::Op(IrNode {
+            opcode: 0x7E,
+            payload: Payload::NumericCast {
+                input: Box::new(height()),
+                tpe: SigmaType::SLong,
+            },
+        });
+        let emit_root = gt(height(), height());
+        let final_root = gt(height(), upcast);
+        let mut o = Origins::default();
+        o.record(&height(), 10);
+        o.record(&height(), 30);
+        o.record(&emit_root, 4);
+        let map = resolve(&emit_root, &final_root, &final_root, &o);
+        assert_eq!(map.offset(1), Some(10));
+        assert_eq!(map.offset(2), None); // the cast itself
+        assert_eq!(map.offset(3), Some(30));
+    }
 
     #[test]
     fn resolve_arity_change_recovers_children_by_bytes() {

@@ -131,3 +131,43 @@ fn source_map_does_not_change_the_compiled_bytes() {
     let (mapped, _) = compile(src);
     assert_eq!(plain.tree_bytes, mapped.tree_bytes);
 }
+
+// ----- review regressions (PR #292) -----
+
+#[test]
+fn source_map_duplicate_leaves_are_not_reused_across_an_arity_change() {
+    // Two `HEIGHT`s at different offsets; the second sits under a
+    // typer-inserted Upcast (mixed width), so it takes the byte-recovery
+    // path. It must get ITS offset, not the first HEIGHT's.
+    let src = "sigmaProp(HEIGHT > 1 && HEIGHT > 2L)";
+    let (out, map) = compile(src);
+    let heights: Vec<u64> = preorder(&out.ergo_tree.body)
+        .filter(|(_, e)| node_opcode(e) == 0xA3)
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(heights.len(), 2, "both HEIGHTs survive");
+    let first = at(src, "HEIGHT > 1");
+    let second = at(src, "HEIGHT > 2L");
+    assert_eq!(map.offset(heights[0]), Some(first));
+    assert_eq!(map.offset(heights[1]), Some(second));
+}
+
+#[test]
+fn source_map_leaves_a_synthetic_receiver_uncited() {
+    // Bare `groupGenerator` lowers to a property call whose `Global`
+    // receiver the emitter synthesizes (pos 0 = unset, P5-A's convention):
+    // the receiver must not be cited at offset 0.
+    let src = "sigmaProp(groupGenerator == groupGenerator)";
+    let (out, map) = compile(src);
+    let globals: Vec<u64> = preorder(&out.ergo_tree.body)
+        .filter(|(_, e)| node_opcode(e) == 0xDD) // Global
+        .map(|(id, _)| id)
+        .collect();
+    assert!(
+        !globals.is_empty(),
+        "expected a synthesized Global receiver"
+    );
+    for g in globals {
+        assert_eq!(map.offset(g), None);
+    }
+}

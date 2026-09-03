@@ -1,6 +1,6 @@
 # Emit-time source map — design pass (P5 deliverable B)
 
-Status: IMPLEMENTED (2026-09-03) — see "What B landed" at the end for the one
+Status: IMPLEMENTED (PR #292) — see "What B landed" at the end for the one
 place the implementation departs from the sketch below, and why. Deliverable
 A (positions threaded through the typer) landed first; this doc was the spec
 for B, co-designed with the ergo-forge workbench side.

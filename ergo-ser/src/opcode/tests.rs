@@ -1763,14 +1763,57 @@ fn preorder_assigns_dfs_ids_in_payload_field_order() {
 
 #[test]
 fn preorder_visits_block_items_before_the_result_and_counts_every_node() {
-    // { val v1 = HEIGHT; sigmaProp(v1 > 100) }
-    let bytes = hex_bytes("d1d801d601a391720104640000");
-    let mut r = VlqReader::new(&bytes);
-    let root = match parse_expr(&mut r, 0, 0) {
-        Ok(e) => e,
-        Err(_) => return, // shape sanity only: a different encoding is fine
-    };
-    let ids: Vec<u64> = super::preorder(&root).map(|(id, _)| id).collect();
-    let n = ids.len() as u64;
-    assert_eq!(ids, (0..n).collect::<Vec<_>>());
+    // { val v1 = HEIGHT; sigmaProp(v1 > 100) }, built directly so the shape
+    // is exactly what the assertion describes.
+    let height = Expr::Op(IrNode {
+        opcode: 0xA3,
+        payload: Payload::Zero,
+    });
+    let val_def = Expr::Op(IrNode {
+        opcode: 0xD6,
+        payload: Payload::ValDef {
+            id: 1,
+            tpe: None,
+            rhs: Box::new(height),
+        },
+    });
+    let gt = Expr::Op(IrNode {
+        opcode: 0x91,
+        payload: Payload::Two(
+            Box::new(Expr::Op(IrNode {
+                opcode: 0x72,
+                payload: Payload::ValUse { id: 1 },
+            })),
+            Box::new(Expr::Const {
+                tpe: SigmaType::SInt,
+                val: SigmaValue::Int(100),
+            }),
+        ),
+    });
+    let root = Expr::Op(IrNode {
+        opcode: 0xD1,
+        payload: Payload::One(Box::new(Expr::Op(IrNode {
+            opcode: 0xD8,
+            payload: Payload::BlockValue {
+                items: vec![val_def],
+                result: Box::new(gt),
+            },
+        }))),
+    });
+    let walk: Vec<(u64, u8)> = super::preorder(&root)
+        .map(|(id, e)| (id, super::node_opcode(e)))
+        .collect();
+    // Items (ValDef, then its rhs) come BEFORE the result subtree.
+    assert_eq!(
+        walk,
+        vec![
+            (0, 0xD1),
+            (1, 0xD8),
+            (2, 0xD6),
+            (3, 0xA3),
+            (4, 0x91),
+            (5, 0x72),
+            (6, 0x00),
+        ]
+    );
 }
