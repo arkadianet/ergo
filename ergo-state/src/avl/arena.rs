@@ -355,15 +355,17 @@ impl CachedDiskArena {
     /// `byte_budget`: max bytes for the clean LRU cache (dirty map is unbounded
     /// but small — bounded by per-block mutation count).
     pub fn new(db: Arc<Database>, byte_budget: usize) -> Self {
-        // LruCache needs a NonZeroUsize item cap. We derive it from the byte
-        // budget (min node ~100 bytes) and enforce the actual byte budget
-        // ourselves via clean_bytes tracking.
-        let item_cap = (byte_budget / 100).max(1024);
-        let cap = std::num::NonZeroUsize::new(item_cap).unwrap();
         Self {
             dirty: RefCell::new(HashMap::new()),
             removed: RefCell::new(HashSet::new()),
-            clean_cache: RefCell::new(LruCache::new(cap)),
+            // The byte budget is the only bound on the clean cache:
+            // `enforce_budget` evicts by LRU until `clean_bytes <=
+            // byte_budget`, so an item cap would be a second, redundant
+            // one. `unbounded` starts from an empty table that grows
+            // geometrically with occupancy instead of pre-allocating a
+            // slot per ~100 budgeted bytes — a 1 GiB budget used to
+            // reserve ~10.7M slots up front and fault them in cold.
+            clean_cache: RefCell::new(LruCache::unbounded()),
             db,
             session: SessionSlot::default(),
             byte_budget,
@@ -762,6 +764,46 @@ mod tests {
         assert!(arena.session_is_open());
         arena.abort();
         assert!(!arena.session_is_open());
+    }
+
+    // ----- clean-cache sizing -----
+
+    /// The byte budget is the only bound: with no item cap in play, a
+    /// budget sized for three leaves holds exactly three however many
+    /// nodes are read through it.
+    #[test]
+    fn clean_cache_evicts_on_byte_budget_not_item_count() {
+        let nodes: Vec<(NodeId, u8)> = (1..=10u64).map(|id| (id, id as u8)).collect();
+        let (_dir, db) = fixture(&nodes);
+        let three_leaves = 3 * node_byte_size(&leaf(1));
+
+        let arena = CachedDiskArena::new(db, three_leaves);
+        assert_eq!(
+            arena.cache_clean_len(),
+            0,
+            "a freshly built cache holds nothing"
+        );
+        for (id, _) in &nodes {
+            arena.get(*id).expect("cold read");
+        }
+
+        assert_eq!(arena.cache_clean_len(), 3);
+        assert!(arena.cache_clean_bytes() <= three_leaves);
+    }
+
+    #[test]
+    fn clean_cache_occupancy_grows_only_with_reads() {
+        let nodes: Vec<(NodeId, u8)> = (1..=10u64).map(|id| (id, id as u8)).collect();
+        let (_dir, db) = fixture(&nodes);
+
+        // A budget far larger than the working set: occupancy must track
+        // what was read, not what was budgeted.
+        let arena = CachedDiskArena::new(db, 1 << 30);
+        assert_eq!(arena.cache_clean_len(), 0);
+        for (n, (id, _)) in nodes.iter().enumerate() {
+            arena.get(*id).expect("cold read");
+            assert_eq!(arena.cache_clean_len(), n + 1);
+        }
     }
 
     /// The reason `commit`/`abort` close the session: an open session pins
