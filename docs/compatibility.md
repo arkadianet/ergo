@@ -141,11 +141,13 @@ Be aware of these before depending on the node.
 - **Mode 4 (pruned + UTXO bootstrap)** — builds on Mode 3 (landed) plus
   the Mode 2 snapshot bootstrap; not yet wired.
 - **Mode 5 (digest verifier)** — the storage schema, atomic-commit layer,
-  and AD-proof apply seam exist; the node boots and survives the
-  handshake, sync-info, and API seams. Full sync stalls at the UTXO-typed
-  executor header pipeline (the AD-proof transaction-validation path is
-  pending); external ADProof-corpus parity and reorg-abort hardening also
-  remain open.
+  and AD-proof apply seam exist; the node boots, survives the handshake,
+  sync-info, and API seams, and syncs headers from live peers (the
+  executor's header pipeline is backend-agnostic, so a digest store
+  validates and persists headers exactly as a UTXO store does).
+  AD-proof block replay is oracle-pinned only against the mainnet window
+  in `test-vectors/mode5/`; broader corpus parity (further mainnet
+  windows, testnet, negatives) and the reorg-abort re-anchor remain open.
 - **Mode 2 trust anchor** — the installed UTXO root verification is
   provisional pending a Scala-oracle vector. Operators using Mode 2 should
   cross-check the bootstrapped UTXO root against a known-good reference

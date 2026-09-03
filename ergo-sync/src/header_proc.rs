@@ -17,7 +17,7 @@ use ergo_primitives::reader::VlqReader;
 use ergo_ser::difficulty::decode_compact_bits;
 use ergo_ser::header::read_header;
 use ergo_state::chain::HeaderMeta;
-use ergo_state::store::StateStore;
+use ergo_state::{ChainStateRead, HeaderSectionStore};
 use ergo_validation::header::{CheckedHeader, HeaderValidationError};
 use num_bigint::BigUint;
 use thiserror::Error;
@@ -184,8 +184,8 @@ pub fn pre_validate_header(header_bytes: &[u8]) -> Result<PreValidatedHeader, He
 /// Phase 2 of header processing: chain linkage + difficulty + persist.
 /// Sequential, requires DB access. Caller provides the raw header bytes
 /// (not cloned into PreValidatedHeader to avoid duplicate allocations).
-pub fn finalize_header(
-    store: &mut StateStore,
+pub fn finalize_header<S: HeaderSectionStore + ChainStateRead + ?Sized>(
+    store: &mut S,
     pre: PreValidatedHeader,
     header_bytes: &[u8],
     config: &DifficultyParams,
@@ -212,8 +212,8 @@ pub fn finalize_header(
 }
 
 /// Process a header using mainnet chain config. Convenience wrapper.
-pub fn process_header(
-    store: &mut StateStore,
+pub fn process_header<S: HeaderSectionStore + ChainStateRead + ?Sized>(
+    store: &mut S,
     header_bytes: &[u8],
 ) -> Result<ProcessedHeader, HeaderProcessError> {
     process_header_cfg(store, header_bytes, &DifficultyParams::mainnet())
@@ -225,8 +225,8 @@ pub fn process_header(
 /// Thin wrapper over the two-phase primitives. The shadow-duplicate
 /// preflight that used to live here (get_header / is_invalid / genesis
 /// branch) is now handled by `finalize_header` — single code path.
-pub fn process_header_cfg(
-    store: &mut StateStore,
+pub fn process_header_cfg<S: HeaderSectionStore + ChainStateRead + ?Sized>(
+    store: &mut S,
     header_bytes: &[u8],
     config: &DifficultyParams,
 ) -> Result<ProcessedHeader, HeaderProcessError> {
@@ -238,8 +238,8 @@ pub fn process_header_cfg(
 ///
 /// Consumes a [`PowCheckedHeader`] — PoW was already verified in phase 1
 /// (or upfront in `process_header_cfg`) and is not re-run here.
-fn process_header_inner(
-    store: &mut StateStore,
+fn process_header_inner<S: HeaderSectionStore + ChainStateRead + ?Sized>(
+    store: &mut S,
     pow_checked: ergo_validation::header::PowCheckedHeader,
     header_bytes: &[u8],
     config: &DifficultyParams,
@@ -378,7 +378,7 @@ fn process_header_inner(
     let score_bytes = cumulative_score.to_bytes_be();
 
     // 9. Check if this is the new best header (heaviest chain by cumulative score).
-    let current_best_score = BigUint::from_bytes_be(&store.chain_state().best_header_score);
+    let current_best_score = BigUint::from_bytes_be(&store.chain_state_meta().best_header_score);
     let is_new_best = cumulative_score > current_best_score;
 
     // 10. Persist header + meta + optional best-header in one redb transaction.
@@ -422,8 +422,8 @@ fn process_header_inner(
 /// - PoW valid
 ///
 /// No parent header lookup, no timestamp check against parent.
-fn process_genesis_header(
-    store: &mut StateStore,
+fn process_genesis_header<S: HeaderSectionStore + ?Sized>(
+    store: &mut S,
     header: ergo_ser::header::Header,
     header_id: [u8; 32],
     header_bytes: &[u8],
@@ -502,8 +502,8 @@ fn process_genesis_header(
 
 /// Walk backwards from a known header to find the header ID at `target_height`.
 /// Returns the header_id without loading/parsing the header bytes.
-pub fn find_header_id_at_height(
-    store: &StateStore,
+pub fn find_header_id_at_height<S: HeaderSectionStore + ?Sized>(
+    store: &S,
     start_id: &[u8; 32],
     start_height: u32,
     target_height: u32,
@@ -530,8 +530,8 @@ pub fn find_header_id_at_height(
 
 /// Walk backwards from a known header to find the header at `target_height`.
 /// Uses header_meta parent_id chain to navigate.
-pub fn find_header_at_height(
-    store: &StateStore,
+pub fn find_header_at_height<S: HeaderSectionStore + ?Sized>(
+    store: &S,
     start_id: &[u8; 32],
     start_height: u32,
     target_height: u32,

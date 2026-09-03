@@ -39,7 +39,7 @@ What ships today, against the Scala reference node's mode taxonomy:
 | Mode 2 — UTXO snapshot bootstrap (consume + serve) | yes | yes |
 | Mode 3 — Pruned (suffix window) | yes | yes (functional; end-to-end activation-parity tests are the remaining `done` gate) |
 | Mode 4 — Pruned + UTXO bootstrap | yes | partial (Mode 2 + Mode 3 pieces compose; composed-lifecycle plumbing open) |
-| Mode 5 — Digest verifier (AD-proof tx validation) | yes | yes (boots end-to-end; external ADProof-corpus parity + reorg-abort hardening remain) |
+| Mode 5 — Digest verifier (AD-proof tx validation) | yes | yes (boots and syncs headers from peers; external ADProof-corpus parity beyond the pinned mainnet window and reorg-abort re-anchor remain) |
 | Mode 6 — Headers-only | yes | yes |
 | NiPoPoW bootstrap (consume + serve) | yes | yes |
 | Extra-index (`/blockchain/*`) | yes | yes (requires Mode 1) |

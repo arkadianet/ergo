@@ -146,6 +146,11 @@ async fn mode_5_survives_a_sync_tick() {
     // Scope: this is a no-panic robustness guard for the digest backend. It does
     // NOT assert Mode 5 is consensus- or Scala-parity-complete — only that the
     // action loop must never abort on a UTXO-only assumption.
+    //
+    // A peerless node never delivers a modifier, so this test alone cannot
+    // reach the header pipeline. Its sibling
+    // `mode5_header_sync_e2e::mode_5_syncs_a_header_from_a_real_peer` drives a
+    // real P2P peer that hands the node a header and asserts the tip advances.
     let mut cfg = common::make_test_config(std::env::temp_dir().join("ergo-mode5-sync-tick"));
     cfg.state_type = ergo_node::config::StateType::Digest;
     // Digest backend has no box store, so the loader/runtime disable the mempool.
