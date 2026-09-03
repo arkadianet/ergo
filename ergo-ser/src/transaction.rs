@@ -730,6 +730,66 @@ mod tests {
         assert_eq!(hex::encode(w.result()), TX_HEX);
     }
 
+    /// The same shape for the remaining `EvaluatedValue` forms, each with the
+    /// JVM's transaction id and byte-exact re-serialization. `7f`/`80` are the
+    /// canonicalizing pair: the reference re-emits them as `0101`/`0100`, and
+    /// the transaction id is unaffected either way because the extension is
+    /// not part of `bytes_to_sign`.
+    ///
+    /// Vector: `test-vectors/scala/evaluated_value_forms.json`.
+    #[test]
+    fn tx_with_every_evaluated_value_extension_form_matches_scala() {
+        // (tx hex, Scala re-serialized tx hex, Scala tx id)
+        let cases = [
+            // GroupGenerator (0x82)
+            (
+                "01010101010101010101010101010101010101010101010101010101010101010100010182000001c0843d10010101d17300000000",
+                "01010101010101010101010101010101010101010101010101010101010101010100010182000001c0843d10010101d17300000000",
+                "6a751a0dc3ce23f9b622c25ba55fc37426712d594cafdb25d17f48139f5edaab",
+            ),
+            // ConcreteCollectionBooleanConstant (0x85)
+            (
+                "010101010101010101010101010101010101010101010101010101010101010101000101850201000001c0843d10010101d17300000000",
+                "010101010101010101010101010101010101010101010101010101010101010101000101850201000001c0843d10010101d17300000000",
+                "f305a5d9d1874bc6e16992676a5e8cf142bbb1a7171d91072c460005e4fed6c3",
+            ),
+            // ConcreteCollection (0x83)
+            (
+                "010101010101010101010101010101010101010101010101010101010101010101000101830204040e0410000001c0843d10010101d17300000000",
+                "010101010101010101010101010101010101010101010101010101010101010101000101830204040e0410000001c0843d10010101d17300000000",
+                "a48c2a1ef6eebe4b01ec48fdfd318e6b5a2d96f7572cc592a0f156e1408fac05",
+            ),
+            // TrueLeaf constant form (`0101`) -- the canonical target
+            (
+                "0101010101010101010101010101010101010101010101010101010101010101010001010101000001c0843d10010101d17300000000",
+                "0101010101010101010101010101010101010101010101010101010101010101010001010101000001c0843d10010101d17300000000",
+                "0034c8fded6a1dca7bba16e71419da08eaebf8186d346bc20cd9a15b91b5e0b5",
+            ),
+            // FalseLeaf constant form (`0100`)
+            (
+                "0101010101010101010101010101010101010101010101010101010101010101010001010100000001c0843d10010101d17300000000",
+                "0101010101010101010101010101010101010101010101010101010101010101010001010100000001c0843d10010101d17300000000",
+                "1a61e84e647e0940ea93c79f6e3e8b610b2e46cbeac106311d217d0b70a35726",
+            ),
+        ];
+
+        for (tx_hex, expected_hex, expected_id) in cases {
+            let tx_bytes = hex::decode(tx_hex).unwrap();
+            let mut r = VlqReader::new(&tx_bytes);
+            let tx = read_transaction(&mut r)
+                .unwrap_or_else(|e| panic!("Scala accepts {tx_hex}, got {e:?}"));
+            assert!(r.is_empty(), "{tx_hex}: leftover bytes");
+            assert_eq!(
+                hex::encode(transaction_id(&tx).unwrap().as_bytes()),
+                expected_id,
+                "{tx_hex}: tx id",
+            );
+            let mut w = VlqWriter::new();
+            write_transaction(&mut w, &tx).unwrap();
+            assert_eq!(hex::encode(w.result()), expected_hex, "{tx_hex}: bytes");
+        }
+    }
+
     /// Parse a real mainnet transaction from raw wire bytes, compute tx_id
     /// and box_id for each output, and compare against explorer-known values.
     /// This tests the EXACT code path used during block sync:

@@ -109,6 +109,12 @@ fn sigma_value_json(v: &SigmaValue) -> Value {
         SigmaValue::BigInt(n) => Value::String(n.to_string()),
         SigmaValue::Str(s) => Value::String(s.clone()),
         SigmaValue::GroupElement(ge) => Value::String(hex::encode(ge.as_bytes())),
+        // The `GroupGenerator` node (0x82) stored as a register / context-var
+        // value. Its value IS the generator point, so it renders exactly like
+        // a group-element constant of that point (Scala's `GroupGenerator.value`).
+        SigmaValue::GroupGenerator => {
+            Value::String(hex::encode(ergo_ser::sigma_value::SECP256K1_GENERATOR))
+        }
         SigmaValue::SigmaProp(sb) => sigma_boolean_json(sb),
         SigmaValue::AvlTree(t) => avl_tree_json(t),
         SigmaValue::OpaqueBoxBytes(bytes) => Value::String(hex::encode(bytes)),
@@ -132,6 +138,12 @@ fn sigma_value_json(v: &SigmaValue) -> Value {
             None => Value::Null,
         },
         SigmaValue::Tuple(items) => Value::Array(items.iter().map(sigma_value_json).collect()),
+        // A `ConcreteCollection` node (0x83 / packed 0x85) renders as the
+        // collection it evaluates to — the node form is a wire detail, not a
+        // value difference.
+        SigmaValue::ConcreteCollection { items, .. } => {
+            Value::Array(items.iter().map(sigma_value_json).collect())
+        }
     }
 }
 

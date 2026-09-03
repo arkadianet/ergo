@@ -13,7 +13,8 @@
   "source": {
     "sigma_state": "6.0.2",
     "ergo_core": "6.0.2",
-    "activated_script_version": 3
+    "activated_script_version": 3,
+    "generator": "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala"
   },
   "values": {
     "tuple_node_0x86": {

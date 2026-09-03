@@ -68,10 +68,34 @@ pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, Re
         let amount = r.get_u64()?;
         tokens.push(Token { token_id, amount });
     }
-    let reg_start = r.position();
     let additional_registers = read_registers(r)?;
-    let reg_end = r.position();
-    let register_bytes = r.data_slice(reg_start, reg_end).to_vec();
+    // Register block = the CANONICAL re-serialization of the parsed registers,
+    // never the verbatim wire slice.
+    //
+    // `write_ergo_box_candidate` emits these bytes, and a box id is
+    // `blake2b256` of the box bytes, so this block is what the id commits to.
+    // Scala derives `ErgoBox.bytes` the same way — from the parsed
+    // `ErgoBoxCandidate`, through `ValueSerializer.serialize` on each stored
+    // `EvaluatedValue` node — which CANONICALIZES the register encodings the
+    // reference accepts but does not itself emit. Verified against the JVM: a
+    // register whose wire bytes are `7f` (the `TrueLeaf` opcode, reachable via
+    // `CaseObjectSerialization`), `80` (`FalseLeaf`) or `0105` (a Boolean
+    // constant with a non-`0x01` payload) all re-serialize as `0101` / `0100`,
+    // and the box id is computed over THAT. Keeping the verbatim slice would
+    // give such a box a different id than the reference node — a silent
+    // state-root divergence on a box the reference accepts.
+    //
+    // The node FORMS the reference does preserve — `Constant`, `CreateTuple`
+    // (`0x86`), `ConcreteCollection` (`0x83` / packed `0x85`) and
+    // `GroupGenerator` (`0x82`) — round-trip byte-for-byte through
+    // `write_registers`, because the parsed `RegisterValue` keeps each node's
+    // identity. So for every canonically-encoded box (i.e. every box any
+    // wallet or the reference node itself produces) these bytes are identical
+    // to the wire slice they replace.
+    let mut rw = VlqWriter::new();
+    crate::register::write_registers(&mut rw, &additional_registers)
+        .map_err(|e| ReadError::InvalidData(format!("register re-serialize: {e}")))?;
+    let register_bytes = rw.result();
 
     Ok(ErgoBoxCandidate {
         value,

@@ -1,0 +1,233 @@
+{
+  "_comment": [
+    "Ground truth from the Scala reference stack (sigma-state 6.0.2 + ergo-core 6.0.2).",
+    "Pins EVERY EvaluatedValue form the reference accepts as a stored value in a box",
+    "register and in a ContextExtension entry, on both the serde and the reduce surfaces.",
+    "",
+    "`EvaluatedValue` is a SEALED trait (sigma/ast/values.scala:310) with four subclasses:",
+    "Constant (:331), EvaluatedCollection/ConcreteCollection (:589), GroupGenerator (:709)",
+    "and Tuple (:779). Both ContextExtension.serializer.parse (ContextExtension.scala:59)",
+    "and ErgoBoxCandidate.serializer (ErgoBoxCandidate.scala:231) read entries with",
+    "r.getValue().asInstanceOf[EvaluatedValue[_ <: SType]] -- the full ValueSerializer --",
+    "and rule 1019 CheckV6Type (ValidationRules.scala:186-192) matches on exactly those",
+    "four cases with the message 'V6 type used in register or context var extension'.",
+    "",
+    "Note the two directions of byte handling. 0x82 / 0x83 / 0x85 / 0x86 are PRESERVED:",
+    "the reference keeps the parsed node and re-emits the same form. 0x7f (TrueLeaf) and",
+    "0x80 (FalseLeaf) are CANONICALIZED: ValueSerializer.deserialize accepts the bare",
+    "opcode via CaseObjectSerialization (ValueSerializer.scala:79-80) but serialize routes",
+    "the ConstantNode[SBoolean] (values.scala:742, :753) back through ConstantSerializer,",
+    "so they come out as 0101 / 0100. A non-canonical Boolean payload (0105) canonicalizes",
+    "the same way. A box id is blake2b256 of the STRUCTURALLY re-serialized box bytes, so",
+    "an implementation must reproduce both directions or it computes a different id than",
+    "the reference for a box the reference accepts."
+  ],
+  "source": {
+    "sigma_state": "6.0.2",
+    "ergo_core": "6.0.2",
+    "activated_script_version": 3,
+    "generator": "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala"
+  },
+  "box_prefix": {
+    "_comment": "ErgoBoxCandidate: 1000000 nanoERG, script sigmaProp(true), height 0, no tokens, one register. Append the register hex to get the full candidate.",
+    "candidate_prefix_hex": "c0843d10010101d17300000001",
+    "box_suffix_hex": "070707070707070707070707070707070707070707070707070707070707070703",
+    "box_suffix_comment": "transactionId 0x07..07 (32 bytes) + output index 3; box id = blake2b256(candidate_bytes || suffix)"
+  },
+  "forms": [
+    {
+      "name": "group_generator",
+      "node": "GroupGenerator (0x82)",
+      "value_hex": "82",
+      "scala_reserialized_value_hex": "82",
+      "ctxext_hex": "010182",
+      "ctxext_parse": "ACCEPT",
+      "ctxext_reserialized_hex": "010182",
+      "register_hex": "82",
+      "register_reserialized_hex": "82",
+      "box_id": "05b02f98770d6178bb39f4ceecaa78bbcaacf2c8b8752f9d0d13b418604305a8",
+      "tx_hex": "01010101010101010101010101010101010101010101010101010101010101010100010182000001c0843d10010101d17300000000",
+      "tx_reserialized_hex": "01010101010101010101010101010101010101010101010101010101010101010100010182000001c0843d10010101d17300000000",
+      "tx_id": "6a751a0dc3ce23f9b622c25ba55fc37426712d594cafdb25d17f48139f5edaab"
+    },
+    {
+      "name": "concrete_collection",
+      "node": "ConcreteCollection (0x83), Coll[Int](7, 8)",
+      "value_hex": "830204040e0410",
+      "scala_reserialized_value_hex": "830204040e0410",
+      "ctxext_hex": "0101830204040e0410",
+      "ctxext_parse": "ACCEPT",
+      "ctxext_reserialized_hex": "0101830204040e0410",
+      "register_hex": "830204040e0410",
+      "register_reserialized_hex": "830204040e0410",
+      "box_id": "6d346c1bbf6e1a4b004e560cb6a30a2fe7e7d9e4579f416c4d13c8f4dc3ec495",
+      "tx_hex": "010101010101010101010101010101010101010101010101010101010101010101000101830204040e0410000001c0843d10010101d17300000000",
+      "tx_reserialized_hex": "010101010101010101010101010101010101010101010101010101010101010101000101830204040e0410000001c0843d10010101d17300000000",
+      "tx_id": "a48c2a1ef6eebe4b01ec48fdfd318e6b5a2d96f7572cc592a0f156e1408fac05"
+    },
+    {
+      "name": "bool_collection",
+      "node": "ConcreteCollectionBooleanConstant (0x85), Coll[Boolean](true, false)",
+      "_comment": "values.scala:845 -- ConcreteCollection.apply routes an all-boolean-constant collection to this node unconditionally, so 0x85 is the only wire form such a node takes.",
+      "value_hex": "850201",
+      "scala_reserialized_value_hex": "850201",
+      "ctxext_hex": "0101850201",
+      "ctxext_parse": "ACCEPT",
+      "ctxext_reserialized_hex": "0101850201",
+      "register_hex": "850201",
+      "register_reserialized_hex": "850201",
+      "box_id": "37213bebf038b01db735fad8acea2a0f52b9115723509fd482bed7d2ac5297b2",
+      "tx_hex": "010101010101010101010101010101010101010101010101010101010101010101000101850201000001c0843d10010101d17300000000",
+      "tx_reserialized_hex": "010101010101010101010101010101010101010101010101010101010101010101000101850201000001c0843d10010101d17300000000",
+      "tx_id": "f305a5d9d1874bc6e16992676a5e8cf142bbb1a7171d91072c460005e4fed6c3"
+    },
+    {
+      "name": "true_leaf_opcode",
+      "node": "TrueLeaf (0x7f) -- accepted on input, CANONICALIZED on output",
+      "value_hex": "7f",
+      "scala_reserialized_value_hex": "0101",
+      "ctxext_hex": "01017f",
+      "ctxext_parse": "ACCEPT",
+      "ctxext_reserialized_hex": "01010101",
+      "register_hex": "7f",
+      "register_reserialized_hex": "0101",
+      "box_id": "2c62fee9cba04f4dda73909663097d395eb9a7d6e3eb56d7791720be148cdd40",
+      "box_id_comment": "computed over the CANONICAL 0101 register form, not over the 7f wire byte"
+    },
+    {
+      "name": "false_leaf_opcode",
+      "node": "FalseLeaf (0x80) -- accepted on input, CANONICALIZED on output",
+      "value_hex": "80",
+      "scala_reserialized_value_hex": "0100",
+      "ctxext_hex": "010180",
+      "ctxext_parse": "ACCEPT",
+      "ctxext_reserialized_hex": "01010100",
+      "register_hex": "80",
+      "register_reserialized_hex": "0100",
+      "box_id": "26e30bfb4f9b978596322e53b23e89807878751ddf9308359b2504fefc92f74d"
+    },
+    {
+      "name": "bool_constant_noncanonical",
+      "node": "Constant[SBoolean] with a non-0x01 payload (0105) -- CANONICALIZED",
+      "value_hex": "0105",
+      "scala_reserialized_value_hex": "0101",
+      "ctxext_hex": "01010105",
+      "ctxext_parse": "ACCEPT",
+      "ctxext_reserialized_hex": "01010101",
+      "register_hex": "0105",
+      "register_reserialized_hex": "0101"
+    },
+    {
+      "name": "bool_constant_true",
+      "node": "Constant[SBoolean] true (0101) -- the canonical target form",
+      "value_hex": "0101",
+      "scala_reserialized_value_hex": "0101",
+      "ctxext_hex": "01010101",
+      "ctxext_parse": "ACCEPT",
+      "ctxext_reserialized_hex": "01010101",
+      "register_hex": "0101",
+      "register_reserialized_hex": "0101",
+      "box_id": "2c62fee9cba04f4dda73909663097d395eb9a7d6e3eb56d7791720be148cdd40",
+      "tx_hex": "0101010101010101010101010101010101010101010101010101010101010101010001010101000001c0843d10010101d17300000000",
+      "tx_id": "0034c8fded6a1dca7bba16e71419da08eaebf8186d346bc20cd9a15b91b5e0b5"
+    },
+    {
+      "name": "bool_constant_false",
+      "node": "Constant[SBoolean] false (0100)",
+      "value_hex": "0100",
+      "scala_reserialized_value_hex": "0100",
+      "ctxext_hex": "01010100",
+      "ctxext_reserialized_hex": "01010100",
+      "tx_hex": "0101010101010101010101010101010101010101010101010101010101010101010001010100000001c0843d10010101d17300000000",
+      "tx_id": "1a61e84e647e0940ea93c79f6e3e8b610b2e46cbeac106311d217d0b70a35726"
+    },
+    {
+      "name": "group_element_constant_control",
+      "node": "Constant[SGroupElement] holding the generator -- the value-equivalent control for GroupGenerator",
+      "value_hex": "070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "scala_reserialized_value_hex": "070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "register_hex": "070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "box_id": "b13d2f0732d91f7d8a1cf5dd38cfb10d1fa48ac537dbc747f0224331f510457c"
+    }
+  ],
+  "not_an_evaluated_value": {
+    "_comment": "Height is a NotReadyValue, so the asInstanceOf checkcast throws. Pins the boundary: the permissive reader must not become 'accept any expression'.",
+    "value_hex": "a3",
+    "ctxext_hex": "0101a3",
+    "ctxext_parse": "REJECT",
+    "scala_exception": "ClassCastException",
+    "scala_message": "class sigma.ast.Height$ cannot be cast to class sigma.ast.EvaluatedValue"
+  },
+  "context_extension_key_domain": {
+    "_comment": [
+      "sigma-state 6.0.2 has NO `k < 0` guard in ContextExtension.serializer.parse (that",
+      "check exists only in later revisions), so a key byte with the high bit set parses",
+      "and lands as a negative Scala Byte. The rejection happens at context build:",
+      "ErgoLikeContext.toSigmaContext sizes the var array from keys.max."
+    ],
+    "hex": "01800405",
+    "scala_parse": "ACCEPT",
+    "scala_parsed_keys": [-128],
+    "scala_reserialized_hex": "01800405",
+    "reduce_with_sigmaprop_true_script": "REJECT",
+    "scala_exception": "NegativeArraySizeException",
+    "scala_message": "-127"
+  },
+  "reduce": {
+    "_comment": "CErgoTreeEvaluator.eval against the dummy ErgoLikeContext (activated version 3, SELF = the tree at 1000000 nanoERG as the sole input). P:d3 = TrivialProp(true), P:d2 = TrivialProp(false).",
+    "group_generator_extension_equals_generator": {
+      "script": "sigmaProp(getVar[GroupElement](1).get == groupGenerator)",
+      "tree_hex": "1000d193e4e3010782",
+      "extension_hex": "010182",
+      "verdict": "ACCEPT", "prop_hex": "d3", "jit_cost": 222
+    },
+    "group_generator_extension_is_defined": {
+      "script": "sigmaProp(getVar[GroupElement](1).isDefined)",
+      "tree_hex": "1000d1e6e30107",
+      "extension_hex": "010182",
+      "verdict": "ACCEPT", "prop_hex": "d3", "jit_cost": 35
+    },
+    "group_generator_register_equals_generator": {
+      "script": "sigmaProp(SELF.R4[GroupElement].get == groupGenerator)",
+      "tree_hex": "1000d193e4c6a7040782",
+      "register_block_hex": "0182",
+      "verdict": "ACCEPT", "prop_hex": "d3", "jit_cost": 272
+    },
+    "group_element_constant_register_control": {
+      "_comment": "Same script, R4 = Constant[SGroupElement](generator). Identical verdict AND cost -- node and constant are value-equivalent; only the bytes differ.",
+      "tree_hex": "1000d193e4c6a7040782",
+      "register_block_hex": "01070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "verdict": "ACCEPT", "prop_hex": "d3", "jit_cost": 272
+    },
+    "true_leaf_extension_get": {
+      "script": "sigmaProp(getVar[Boolean](1).get)",
+      "tree_hex": "1000d1e4e30101",
+      "extension_hex": "01017f",
+      "verdict": "ACCEPT", "prop_hex": "d3", "jit_cost": 40
+    },
+    "false_leaf_extension_get": {
+      "script": "sigmaProp(getVar[Boolean](1).get)",
+      "tree_hex": "1000d1e4e30101",
+      "extension_hex": "010180",
+      "verdict": "ACCEPT", "prop_hex": "d2", "jit_cost": 40
+    },
+    "true_leaf_register_get": {
+      "script": "sigmaProp(SELF.R4[Boolean].get)",
+      "tree_hex": "1000d1e4c6a70401",
+      "register_block_hex": "017f",
+      "verdict": "ACCEPT", "prop_hex": "d3", "jit_cost": 90
+    },
+    "bool_collection_extension_by_index": {
+      "script": "sigmaProp(getVar[Coll[Boolean]](1).get(0))",
+      "tree_hex": "10010400d1b2e4e3010d730000",
+      "extension_hex": "0101850201",
+      "verdict": "ACCEPT", "prop_hex": "d3", "jit_cost": 71
+    },
+    "bool_collection_register_by_index": {
+      "script": "sigmaProp(SELF.R4[Coll[Boolean]].get(0))",
+      "tree_hex": "10010400d1b2e4c6a7040d730000",
+      "register_block_hex": "01850201",
+      "verdict": "ACCEPT", "prop_hex": "d3", "jit_cost": 121
+    }
+  }
+}

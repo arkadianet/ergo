@@ -2981,14 +2981,22 @@ fn context_getvar_inline_works_methodcall_form_unsupported() {
         Value::Opt(Some(Box::new(Value::Int(123)))),
         "inline GetVar must read the present var",
     );
-    // Absent var id, and present-but-wrong-type both yield None.
+    // An ABSENT var id yields None...
     assert_eq!(
         run_eval_ctx(&inline(99, SigmaType::SInt), &ctx),
         Value::Opt(None)
     );
-    assert_eq!(
-        run_eval_ctx(&inline(7, SigmaType::SLong), &ctx),
-        Value::Opt(None)
+    // ...but a PRESENT var of the wrong type is an error, not None. Scala's
+    // `CContext.getVar` (`sigmastate/eval/CContext.scala:60-74`) throws
+    // `InvalidType("Cannot getVar[Long](7): invalid type of value ...")` in
+    // that case; returning None here would satisfy scripts the reference
+    // node rejects.
+    assert!(
+        matches!(
+            run_eval_ctx_err(&inline(7, SigmaType::SLong), &ctx),
+            EvalError::TypeError { .. }
+        ),
+        "a present context var of the wrong type must fail, not read as None",
     );
 
     // The (101, 11) getVar MethodCall form is unsupported: it must REJECT
@@ -11897,10 +11905,17 @@ fn serialize_put_cost_box_with_expr_tuple_register() {
     // R4 = (Byte, Byte) as CreateTuple(0x86) EXPRESSION:
     // 1(opcode) + 1(count) + 2 * [type_enc(SByte)=1 + data=1] = 6.
     use ergo_ser::register::{AdditionalRegisters, RegisterValue};
+    use ergo_ser::sigma_value::CollValue;
+    // The CreateTuple NODE form is `(STuple, SigmaValue::Coll)` — Scala's
+    // `Tuple.value` is a `Coll`. A `SigmaValue::Tuple` under the same type is
+    // a tuple CONSTANT and encodes as a constant instead.
     let regs = AdditionalRegisters {
         registers: vec![RegisterValue {
             tpe: SigmaType::STuple(vec![SigmaType::SByte, SigmaType::SByte]),
-            value: SigmaValue::Tuple(vec![SigmaValue::Byte(102), SigmaValue::Byte(99)]),
+            value: SigmaValue::Coll(CollValue::Values(vec![
+                SigmaValue::Byte(102),
+                SigmaValue::Byte(99),
+            ])),
         }],
     };
     let b = build_box(
@@ -11941,12 +11956,18 @@ fn serialize_put_cost_box_with_nested_expr_tuple_register() {
     // 1(opcode)+1(count) + 2 * inner; inner putValue = 1(opcode)+1(count) +
     // 2*[type_enc(SByte)=1 + data=1] = 6. So register cost = 2 + 2*6 = 14.
     use ergo_ser::register::{AdditionalRegisters, RegisterValue};
+    use ergo_ser::sigma_value::CollValue;
     let inner_t = SigmaType::STuple(vec![SigmaType::SByte, SigmaType::SByte]);
-    let inner_v = || SigmaValue::Tuple(vec![SigmaValue::Byte(1), SigmaValue::Byte(2)]);
+    let inner_v = || {
+        SigmaValue::Coll(CollValue::Values(vec![
+            SigmaValue::Byte(1),
+            SigmaValue::Byte(2),
+        ]))
+    };
     let regs = AdditionalRegisters {
         registers: vec![RegisterValue {
             tpe: SigmaType::STuple(vec![inner_t.clone(), inner_t]),
-            value: SigmaValue::Tuple(vec![inner_v(), inner_v()]),
+            value: SigmaValue::Coll(CollValue::Values(vec![inner_v(), inner_v()])),
         }],
     };
     let b = build_box(
@@ -12732,10 +12753,15 @@ fn bytes_with_no_ref_for_register_block(register_bytes: Vec<u8>) -> Vec<u8> {
 
 /// A tuple-typed register encoded as a Constant (DataSerializer form) must
 /// round-trip through bytesWithoutRef byte-for-byte — NOT collapse into a
-/// `CreateTuple` (0x86) expression. The parsed `RegisterValue` alone is
-/// ambiguous (a Constant tuple and a CreateTuple expr both parse to
-/// `(STuple, Tuple)`); only the verbatim wire bytes carry the provenance. This
-/// is the divergence that stalled mainnet block 1808895.
+/// `CreateTuple` (0x86) expression. This is the divergence that stalled
+/// mainnet block 1808895.
+///
+/// The parsed `RegisterValue` now carries the provenance itself: a tuple
+/// Constant is `(STuple, SigmaValue::Tuple)` and a `CreateTuple` node is
+/// `(STuple, SigmaValue::Coll)` — Scala's `Tuple.value` really is a `Coll`
+/// (`sigma/ast/values.scala:786-791`). So the structural writer reproduces
+/// either form faithfully, and the verbatim bytes are a belt-and-braces
+/// second copy rather than the only source of truth.
 #[test]
 fn extract_bytes_with_no_ref_preserves_constant_tuple_register() {
     let tpe = SigmaType::STuple(vec![SigmaType::SLong, SigmaType::SLong]);
@@ -12750,9 +12776,10 @@ fn extract_bytes_with_no_ref_preserves_constant_tuple_register() {
         entry[0]
     );
 
-    // The same value through the structural register writer goes out as a
-    // CreateTuple (0x86) — the buggy encoding. bytesWithoutRef must NOT produce
-    // this; it must reproduce the Constant `entry` verbatim.
+    // The same value through the structural register writer must ALSO stay a
+    // Constant — it used to be rewritten as a `CreateTuple` (0x86), which gave
+    // a box carrying this shape (block 836113, tx[18].R9 on mainnet) the wrong
+    // id and the containing transaction the wrong id on the JSON submit path.
     let structural = {
         let mut w = ergo_primitives::writer::VlqWriter::new();
         ergo_ser::register::write_registers(
@@ -12765,8 +12792,8 @@ fn extract_bytes_with_no_ref_preserves_constant_tuple_register() {
         w.result()
     };
     assert_eq!(
-        structural[1], 0x86,
-        "structural writer emits CreateTuple for tuple registers (the bug)"
+        structural[1], entry[0],
+        "structural writer must keep a tuple Constant as a Constant"
     );
 
     let mut register_bytes = vec![0x01u8];
