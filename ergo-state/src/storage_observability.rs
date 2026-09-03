@@ -3,11 +3,85 @@ use std::error::Error;
 use std::hash::Hash;
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_SUMMARY_INTERVAL: Duration = Duration::from_secs(300);
 const DEFAULT_FAILURE_CAPACITY: usize = 128;
+
+// ----- ergo_node_storage_errors_total (issue #281) -----
+//
+// Process-global, deliberately separate from `StorageFailureReporter`'s
+// per-instance state above: `report_storage_failure` is the ONLY caller
+// (the free function backed by `global_reporter()`), so tests that build
+// their own `StorageFailureReporter` for dedupe-window assertions never
+// touch these counters. Two buckets today because every existing caller
+// of this module targets either the chain-state store (`subsystem` one
+// of "sync" / "mining" / "node" / "state") or the indexer store
+// (`subsystem = "indexer"`); the peer store (ergo-p2p) does not depend
+// on ergo-state and keeps its own counter (`PeerManager::storage_error_count`),
+// aggregated at the node layer alongside these two.
+static STATE_STORAGE_ERRORS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static INDEXER_STORAGE_ERRORS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static LAST_STORAGE_ERROR: Mutex<Option<(u64, String)>> = Mutex::new(None);
+
+/// Bucket a caller's `subsystem` into the coarse `store` label surfaced on
+/// `ergo_node_storage_errors_*_total` and the `storage_error` event. Every
+/// current chain-state caller uses one of "sync" / "mining" / "node" /
+/// "state"; `"indexer"` is the one non-state bucket this module sees.
+fn store_label(subsystem: &str) -> &'static str {
+    if subsystem == "indexer" {
+        "indexer"
+    } else {
+        "state"
+    }
+}
+
+/// Monotonic `(state, indexer)` storage-error totals since process start —
+/// the `ergo_node_storage_errors_state_total` / `_indexer_total` Prometheus
+/// counter sources.
+pub fn storage_error_totals() -> (u64, u64) {
+    (
+        STATE_STORAGE_ERRORS_TOTAL.load(Ordering::Relaxed),
+        INDEXER_STORAGE_ERRORS_TOTAL.load(Ordering::Relaxed),
+    )
+}
+
+/// The most recent `(unix_ms, "<store>: <message>")` storage failure this
+/// module observed, if any. Compared against the peer store's own
+/// last-error timestamp at the node layer to pick the freshest for
+/// `ApiStatus.last_storage_error`.
+pub fn last_storage_error() -> Option<(u64, String)> {
+    LAST_STORAGE_ERROR
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone()
+}
+
+/// Record one storage-error occurrence for the counter + last-error status
+/// field (issue #281). Counts every occurrence, including `Suppressed`
+/// ones, so the total stays honest independent of `emit_report`'s dedupe
+/// throttle. Deliberately does NOT log — `emit_report` already logs
+/// `First`/`Summary` reports (`storage_io_failure` /
+/// `storage_health_transition` / `storage_operation_failed` /
+/// `storage_error_summary`), which callers, including tests pinning exact
+/// event counts, expect to remain the ONLY ERROR/WARN line per reported
+/// failure. `store` and a stable `code` are threaded onto those same
+/// events (see `emit_report`) rather than emitted as a second event here.
+fn note_storage_error(context: &StorageFailureContext<'_>, error: &(dyn Error + 'static)) {
+    let store = store_label(context.subsystem);
+    match store {
+        "indexer" => INDEXER_STORAGE_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed),
+        _ => STATE_STORAGE_ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed),
+    };
+    let now_ms = unix_ms(SystemTime::now());
+    let message = format!("{store}: {error}");
+    let mut slot = LAST_STORAGE_ERROR
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    *slot = Some((now_ms, message));
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StorageErrorClass {
@@ -486,8 +560,17 @@ fn emit_report(context: &StorageFailureContext<'_>, report: &StorageReport) {
                         StorageErrorClass::PreviousIo => StorageHealth::Poisoned,
                         StorageErrorClass::Other => StorageHealth::Degraded,
                     });
+            let store = store_label(context.subsystem);
             tracing::error!(
                 event,
+                // `code` is the incident-snapshot dedupe key (issue #281,
+                // #263's `CaptureLayer`): stable per store, so this ERROR
+                // triggers exactly one snapshot per dedupe window instead
+                // of one per distinct `error` message (which embeds raw
+                // OS-error text that can vary between otherwise-identical
+                // failures).
+                code = %format!("storage_error:{store}"),
+                store,
                 subsystem = context.subsystem,
                 component = context.component,
                 database_path = %context.database_path.map(Path::display).map(|path| path.to_string()).unwrap_or_default(),
@@ -520,6 +603,7 @@ fn emit_report(context: &StorageFailureContext<'_>, report: &StorageReport) {
         StorageReport::Summary(summary) => {
             tracing::warn!(
                 event = "storage_error_summary",
+                store = store_label(&summary.subsystem),
                 subsystem = summary.subsystem,
                 component = summary.component,
                 database_path = summary.database_path.as_deref().unwrap_or_default(),
@@ -560,7 +644,9 @@ pub fn report_storage_failure(
     context: &StorageFailureContext<'_>,
     error: &(dyn Error + 'static),
 ) -> StorageReport {
-    global_reporter().report(context, error)
+    let report = global_reporter().report(context, error);
+    note_storage_error(context, error);
+    report
 }
 
 pub fn storage_health_snapshot() -> StorageHealthSnapshot {

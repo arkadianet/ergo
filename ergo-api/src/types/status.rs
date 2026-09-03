@@ -40,6 +40,56 @@ pub struct ApiStatus {
     /// Session-scoped — resets on restart, which `rate()` handles.
     #[serde(default)]
     pub block_apply_errors_total: u64,
+    /// Monotonic count of redb/persist failures surfaced from the state
+    /// store since node start (the `ergo_node_storage_errors_state_total`
+    /// Prometheus counter source, issue #281). Distinct from
+    /// `block_apply_errors_total`: that counts VALIDATION rejections (a
+    /// block this node refuses); this counts the store itself failing to
+    /// persist — invisible to the block-apply counter, and the gap that
+    /// left a poisoned redb handle undetected without shadow validation on
+    /// prod mainnet 2026-07-20. Session-scoped — resets on restart.
+    ///
+    /// LIVE, not snapshot-sourced: `ergo-node`'s `api_bridge::status()`
+    /// reads this straight from `ergo_state::storage_observability`'s
+    /// process-global atomics on every call — exactly like the
+    /// starvation-free telemetry fields (issue #266). This is required,
+    /// not cosmetic: the failure mode this field exists to catch (a
+    /// poisoned redb handle) is also the one most likely to wedge the
+    /// action loop, which is what publishes snapshots. A snapshot-sourced
+    /// counter would freeze at its pre-wedge value forever, in exactly the
+    /// scenario an operator most needs it to keep moving.
+    #[serde(default)]
+    pub storage_errors_state_total: u64,
+    /// Same as `storage_errors_state_total`, scoped to the indexer's own
+    /// redb (the `ergo_node_storage_errors_indexer_total` Prometheus
+    /// counter source). `0` when the indexer is disabled. Also LIVE-read,
+    /// same as `storage_errors_state_total` — see that field's doc.
+    #[serde(default)]
+    pub storage_errors_indexer_total: u64,
+    /// Same as `storage_errors_state_total`, scoped to the peer address
+    /// book's redb (the `ergo_node_storage_errors_peers_total` Prometheus
+    /// counter source). Unlike the state/indexer counters above, this one
+    /// IS snapshot-sourced (published at most once per action-loop tick):
+    /// `ergo-p2p`'s `PeerManager` keeps its own counter on plain
+    /// `Cell`/`RefCell` fields (not `Sync`) because it is owned
+    /// single-threaded by the action loop, so it cannot be read from the
+    /// API task the way the state/indexer atomics can. In the wedge
+    /// scenario this field exists for, a peer-store failure would still
+    /// lag until the loop unwedges (or the last snapshot already had it).
+    #[serde(default)]
+    pub storage_errors_peers_total: u64,
+    /// The most recent redb/persist failure across the state, indexer, and
+    /// peer stores, formatted `"<store>: <message>"` — same shape as
+    /// `last_block_apply_error`, this node's other single-string operator
+    /// alarm. `None` when no storage failure has occurred this session. A
+    /// persistent `Some(_)` after an I/O event means the store's redb
+    /// handle is poisoned (`Previous I/O error occurred`) and stays that
+    /// way until the process restarts — see "Storage failure events" in
+    /// `docs/operating.md` for the recovery procedure. Live for state/
+    /// indexer failures, snapshot-sourced for peers — see
+    /// `storage_errors_state_total` / `storage_errors_peers_total`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_storage_error: Option<String>,
     /// Terminal deep-fork wedge: the best-header chain forks below the
     /// state backend's rollback window, so this node can never reorg onto
     /// it and will not apply another block. A persistent `Some(_)` is an

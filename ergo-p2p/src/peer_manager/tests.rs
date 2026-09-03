@@ -1,4 +1,5 @@
 use super::*;
+use crate::address_book::AddressBookError;
 use std::net::Ipv4Addr;
 
 fn addr(a: u8, b: u8, c: u8, d: u8, port: u16) -> SocketAddr {
@@ -1445,4 +1446,97 @@ fn persisted_ban_rows_stay_within_cap_across_reopen() {
         "persisted rows must be evicted alongside in-memory entries, got {}",
         loaded.bans.len()
     );
+}
+
+// ----- storage-error observability (issue #281) -----
+
+/// A simulated `peers.redb` write-through failure (issue #281) increments
+/// `storage_error_count` and records `last_storage_error` in the
+/// `"peers: <message>"` shape the node layer expects when picking the
+/// freshest of the state/indexer/peers last-error candidates.
+#[test]
+fn record_storage_error_increments_counter_and_sets_last_error() {
+    let mgr = PeerManager::new(1);
+    assert_eq!(mgr.storage_error_count(), 0);
+    assert!(mgr.last_storage_error().is_none());
+
+    let addr = addr(10, 0, 0, 1, 9030);
+    let err = AddressBookError::Db("simulated redb write failure".to_string());
+    mgr.record_storage_error("mark_failure", &addr, &err);
+
+    assert_eq!(mgr.storage_error_count(), 1);
+    let (_ts, message) = mgr.last_storage_error().expect("last_storage_error set");
+    assert!(message.starts_with("peers: "));
+    assert!(message.contains("simulated redb write failure"));
+
+    // A second failure keeps incrementing the counter — only the log
+    // LINE is throttled (see the next test), never the counter or
+    // `last_storage_error`, which must track every real occurrence.
+    mgr.record_storage_error("mark_failure", &addr, &err);
+    assert_eq!(mgr.storage_error_count(), 2);
+}
+
+/// Issue #281 review fix P2-1: an unthrottled ERROR-per-write-through
+/// would flood the log (and amplify the very I/O fault causing it) for a
+/// poisoned/full `peers.redb`, since every housekeeping tick keeps
+/// retrying the same write. The log line is throttled to at most once
+/// per `STORAGE_ERROR_LOG_INTERVAL_MS` per operation; the counter is not.
+#[test]
+fn record_storage_error_throttles_log_line_but_not_counter() {
+    let mgr = PeerManager::new(1);
+    let addr = addr(10, 0, 0, 2, 9030);
+    let err = AddressBookError::Db("simulated redb write failure".to_string());
+
+    // First occurrence for this op: due immediately (no prior emit).
+    mgr.record_storage_error("touch_seen", &addr, &err);
+    {
+        let state = mgr.storage_error_log_state.borrow();
+        let (last_emit, suppressed) = state["touch_seen"];
+        assert!(last_emit > 0, "first occurrence must emit immediately");
+        assert_eq!(suppressed, 0);
+    }
+
+    // Repeated occurrences within the interval: counter advances, but
+    // the log throttle records them as suppressed instead of re-emitting.
+    for _ in 0..5 {
+        mgr.record_storage_error("touch_seen", &addr, &err);
+    }
+    assert_eq!(mgr.storage_error_count(), 6);
+    {
+        let state = mgr.storage_error_log_state.borrow();
+        let (last_emit, suppressed) = state["touch_seen"];
+        assert_eq!(
+            suppressed, 5,
+            "5 repeats within the window must be suppressed"
+        );
+        assert!(last_emit > 0);
+    }
+
+    // A DIFFERENT op has its own independent throttle bucket.
+    mgr.record_storage_error("mark_failure", &addr, &err);
+    {
+        let state = mgr.storage_error_log_state.borrow();
+        let (_, suppressed) = state["mark_failure"];
+        assert_eq!(
+            suppressed, 0,
+            "a distinct op must not inherit another op's throttle"
+        );
+    }
+    assert_eq!(mgr.storage_error_count(), 7);
+
+    // Simulate the interval elapsing: backdate `touch_seen`'s last-emit
+    // past the threshold, then confirm the next failure is due again and
+    // resets the suppressed counter.
+    {
+        let mut state = mgr.storage_error_log_state.borrow_mut();
+        let entry = state.get_mut("touch_seen").unwrap();
+        entry.0 = entry.0.saturating_sub(STORAGE_ERROR_LOG_INTERVAL_MS);
+    }
+    mgr.record_storage_error("touch_seen", &addr, &err);
+    {
+        let state = mgr.storage_error_log_state.borrow();
+        let (_, suppressed) = state["touch_seen"];
+        assert_eq!(suppressed, 0, "an emission resets the suppressed count");
+    }
+    assert_eq!(mgr.storage_error_count(), 8);
 }

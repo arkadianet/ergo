@@ -11,6 +11,31 @@ use ergo_indexer_types::{
     IndexerQuery, IndexerReadError, IndexerStatus, Page, SortDir, StorageRentEligibleDto,
 };
 
+/// Feed a genuine redb persist failure into the shared storage-error
+/// observability module (issue #281) — `ergo_node_storage_errors_indexer_total`
+/// plus `last_storage_error` and the `storage_error` ERROR event. Callers
+/// are expected to gate on `IndexerError::is_storage_error` first; this
+/// helper only formats the context, it does not classify.
+pub(crate) fn report_indexer_storage_failure(
+    database_path: Option<&Path>,
+    operation: &'static str,
+    attempted_height: Option<u64>,
+    error: &IndexerError,
+) {
+    ergo_state::storage_observability::report_storage_failure(
+        &ergo_state::storage_observability::StorageFailureContext {
+            subsystem: "indexer",
+            component: "indexer_store",
+            database_path,
+            operation,
+            best_full_block_height: None,
+            best_header_height: None,
+            attempted_height: attempted_height.and_then(|h| u32::try_from(h).ok()),
+        },
+        error,
+    );
+}
+
 /// Public read-side handle wired into `ergo-api`. Holds the in-memory
 /// `IndexerStatus` (never persisted), the cached `indexed_height`
 /// mirror so `/blockchain/indexedHeight` answers without a redb read
@@ -70,6 +95,14 @@ impl IndexerHandle {
                             reason = ?e.halt_reason(),
                             "indexer halted: read_meta failed on boot",
                         );
+                        if e.is_storage_error() {
+                            report_indexer_storage_failure(
+                                Some(&path),
+                                "indexer_read_meta",
+                                None,
+                                &e,
+                            );
+                        }
                         return Some(Self::halted(e.halt_reason()));
                     }
                 };
@@ -88,6 +121,9 @@ impl IndexerHandle {
                     reason = ?e.halt_reason(),
                     "indexer halted: store open failed",
                 );
+                if e.is_storage_error() {
+                    report_indexer_storage_failure(Some(&path), "indexer_store_open", None, &e);
+                }
                 Some(Self::halted(e.halt_reason()))
             }
         }

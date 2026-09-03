@@ -383,4 +383,64 @@ impl IndexerError {
             | Self::UndoEntryMalformed { .. } => IndexerHaltReason::DbCorruption,
         }
     }
+
+    /// `true` for a genuine redb persist failure (open/table/storage/commit
+    /// error) OR a filesystem I/O failure preparing the indexer DB
+    /// directory (`FsIo` — `create_dir_all`/`remove_file`/similar) — the
+    /// scope `ergo_node_storage_errors_total` covers (issue #281).
+    /// Deliberately narrower than [`halt_reason`]'s `DbCorruption` bucket:
+    /// that bucket also covers logical/consistency faults (row decode
+    /// mismatches, missing boxes, segment topology errors) that are not
+    /// "a redb/persist error was surfaced" in the operator sense —
+    /// counting those too would make the storage-errors counter fire on
+    /// bugs that have nothing to do with the underlying disk/database.
+    pub fn is_storage_error(&self) -> bool {
+        matches!(self, Self::Db(_) | Self::DbCommit(_) | Self::FsIo { .. })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ----- happy path -----
+
+    #[test]
+    fn is_storage_error_true_for_db_db_commit_and_fs_io_variants() {
+        let db = IndexerError::Db(Box::new(redb::Error::TableDoesNotExist(
+            "INDEXED_BOX".to_string(),
+        )));
+        assert!(db.is_storage_error());
+
+        let commit = IndexerError::DbCommit(Box::new(redb::CommitError::Storage(
+            redb::StorageError::Corrupted("simulated commit failure".to_string()),
+        )));
+        assert!(commit.is_storage_error());
+
+        // FsIo (create_dir_all/remove_file prepping the DB directory) is
+        // a genuine disk failure too, even though it fires before the
+        // indexer-DB layer is in scope (review fix P2-2).
+        let fs_io = IndexerError::FsIo {
+            context: "create_dir_all",
+            source: std::io::Error::other("simulated disk failure"),
+        };
+        assert!(fs_io.is_storage_error());
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn is_storage_error_false_for_logical_consistency_variants() {
+        // SectionMissing / HeightMismatch etc. all halt as DbCorruption
+        // too (see `halt_reason`), but they are NOT "a redb/persist error
+        // was surfaced" — they're the indexer catching an internal
+        // consistency fault, not the disk/database failing.
+        assert!(!IndexerError::SectionMissing(100).is_storage_error());
+        assert!(!IndexerError::HeightMismatch {
+            expected: 10,
+            got: 11
+        }
+        .is_storage_error());
+        assert!(!IndexerError::SchemaCorruption.is_storage_error());
+    }
 }

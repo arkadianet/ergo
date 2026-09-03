@@ -455,6 +455,25 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
         }
     };
 
+    // Storage-error observability (issue #281): the state + indexer
+    // buckets are process-global counters maintained by
+    // `ergo_state::storage_observability` (every `report_storage_failure`
+    // call across sync/mining/boot/indexer feeds them); the peer store
+    // keeps its own counter on `PeerManager` since ergo-p2p does not
+    // depend on ergo-state. `last_storage_error` picks whichever of the
+    // two sources is freshest by its recorded unix-ms timestamp.
+    let (storage_errors_state_total, storage_errors_indexer_total) =
+        ergo_state::storage_observability::storage_error_totals();
+    let storage_errors_peers_total = state.peer_manager.storage_error_count();
+    let last_storage_error = [
+        ergo_state::storage_observability::last_storage_error(),
+        state.peer_manager.last_storage_error(),
+    ]
+    .into_iter()
+    .flatten()
+    .max_by_key(|(ts, _)| *ts)
+    .map(|(_, message)| message);
+
     let parts = SnapshotParts {
         now_unix_ms,
         snapshot_built_at: now,
@@ -551,6 +570,10 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
             .collect(),
         last_block_apply_error,
         block_apply_errors_total,
+        storage_errors_state_total,
+        storage_errors_indexer_total,
+        storage_errors_peers_total,
+        last_storage_error,
         sync_wedged,
         shadow,
         mempool_tx_requested_total: state.mempool_tx_requested_total,

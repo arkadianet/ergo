@@ -56,7 +56,6 @@ pub enum OpenOutcome {
 #[derive(Clone)]
 pub struct IndexerStore {
     db: Arc<Database>,
-    #[allow(dead_code)] // read by future debug/log helpers
     path: PathBuf,
     /// Undo-retention window (max serviceable rollback depth). Defaults to
     /// [`ROLLBACK_WINDOW`] at `open`; node boot overrides it with the SAME
@@ -92,6 +91,13 @@ pub(crate) struct TestRawRows<'a> {
 }
 
 impl IndexerStore {
+    /// On-disk path of the indexer redb file. Used for storage-error
+    /// observability (issue #281) so a halt's diagnostics carry the same
+    /// `database_path` shape as the state store's.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// Open the indexer DB at `path`, applying the wipe/resume
     /// table:
     ///
