@@ -137,7 +137,8 @@ ergo-crypto, ergo-validation, ergo-state, ergo-mempool
   devnet chains, exactly as Scala's `offlineGeneration` does
   (`ErgoApp.scala:212-216`), and never waives the height half. Requiring `header == full` instead would let
   anything that runs the header chain ahead of the bodies halt honest block
-  production permanently. There is no `offline_generation` bypass (`config.rs`,
+  production permanently. `offline_generation` bypasses only the fresh-application
+  trigger; the nearly-synced height condition still applies everywhere (`config.rs`,
   `engine.rs::should_publish`, `handle.rs::cached_work_if_synced`).
 - **Single committed view per build.** Every consensus-bearing read flows
   through `CandidateStateView`; the off-loop engine sources all reads from one

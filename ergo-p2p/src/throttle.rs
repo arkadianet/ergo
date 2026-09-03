@@ -9,7 +9,9 @@
 //! guards against tiny-frame floods and must sit ABOVE the burst
 //! rates a healthy Scala peer produces.
 //!
-//! Neither cap may be allowed to drop a *solicited* delivery. Dropping a
+//! The byte cap must not be allowed to drop a *solicited* delivery (the
+//! message cap stays fully active; only `LimiterVerdict::ByteRateExceeded`
+//! is waived for admitted frames). Dropping a
 //! `Modifier` frame carrying a body we requested is self-harm: our own
 //! delivery checker then times the request out and charges the honest holder a
 //! `NonDelivery` penalty plus a body-delivery-streak failure, ejecting the very
