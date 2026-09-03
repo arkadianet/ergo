@@ -143,7 +143,10 @@ object PruneFormulaOracle {
   private def parseInputs(json: String): Seq[Vector] = {
     val convergentSection = section(json, "convergent_vectors")
     val divergentSection  = section(json, "divergent_vectors")
-    val all = entries(convergentSection) ++ entries(divergentSection)
+    // Flip-time activation rows (Gate 1 task 3.1). Optional so the
+    // harness still runs against a pre-schema-3 fixture.
+    val flipSection       = optSection(json, "flip_vectors").getOrElse("")
+    val all = entries(convergentSection) ++ entries(divergentSection) ++ entries(flipSection)
     all.map { obj =>
       val id   = strField(obj, "id")
       val inp  = subObject(obj, "inputs")
@@ -168,6 +171,16 @@ object PruneFormulaOracle {
     val openIdx = json.indexOf('[', keyIdx)
     val closeIdx = matchingBracket(json, openIdx, '[', ']')
     json.substring(openIdx + 1, closeIdx)
+  }
+
+  private def optSection(json: String, name: String): Option[String] = {
+    val key = "\"" + name + "\""
+    val keyIdx = json.indexOf(key)
+    if (keyIdx < 0) return None
+    val openIdx = json.indexOf('[', keyIdx)
+    if (openIdx < 0) return None
+    val closeIdx = matchingBracket(json, openIdx, '[', ']')
+    Some(json.substring(openIdx + 1, closeIdx))
   }
 
   private def entries(arr: String): Seq[String] = {
