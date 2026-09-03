@@ -270,7 +270,30 @@ impl PeerManager {
                 // `peerInfo.peerSpec.address.getOrElse(remoteAddress)`
                 // (NetworkController.scala:412, 430).
                 if let Some(dial_addr) = self.dialable_address(direction, *addr, declared_socket) {
-                    self.persist_handshake(dial_addr, &spec_for_book, direction);
+                    // `dial_addr` is the *observed* socket only when we
+                    // actually connected to it — either an outbound dial
+                    // with no usable declared address (the `orElse
+                    // localAddressOpt` fallback) or a seeded outbound
+                    // dial. Whenever it differs from `addr` we are
+                    // persisting under a *declared* address instead: one
+                    // the peer merely claims to listen on and we have
+                    // never dialed ourselves. Stamping that row
+                    // `LastDirection::Outbound` would hand it the same
+                    // "reached outbound" eviction tier as a proven-good
+                    // peer purely because this session happened to be
+                    // outbound — a peer rotating its declared address
+                    // across reconnects could mint an unbounded stream of
+                    // top-tier rows and evict real dial candidates from
+                    // `peers.redb` (CodeRabbit #299 round 2). Book it
+                    // under the unverified (inbound-tier) provenance
+                    // instead; only a directly-reached address earns
+                    // `Outbound`.
+                    let persist_direction = if dial_addr == *addr {
+                        direction
+                    } else {
+                        Direction::Inbound
+                    };
+                    self.persist_handshake(dial_addr, &spec_for_book, persist_direction);
                 }
                 // Inbound peers reach us from an ephemeral client port
                 // (`addr`); their listening port lives in the declared

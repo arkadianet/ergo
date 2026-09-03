@@ -52,9 +52,29 @@ use std::net::{IpAddr, SocketAddr};
 /// so `allow_local` re-admits them along with everything else and a
 /// LAN operator loses nothing by the extra strictness.
 pub fn is_routable_for_p2p(addr: &SocketAddr, allow_local: bool) -> bool {
-    let ip = addr.ip();
+    // Fold an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) down to its
+    // IPv4 form before classifying it. `is_local_address`'s IPv6 arm
+    // only recognises fe80::/10, fc00::/7 and fec0::/10 — an address
+    // like `::ffff:10.0.0.8` matches none of those (its top segment is
+    // `0`), so without this it sailed past the RFC1918 check that
+    // `10.0.0.8` itself would fail, reaching the dial pool and
+    // `Peers`-message egress despite being the same private host
+    // (CodeRabbit #299 round 2, SSRF-class). `to_canonical` performs
+    // exactly this fold via `Ipv6Addr::to_ipv4_mapped()` and otherwise
+    // returns the address unchanged.
+    let ip = addr.ip().to_canonical();
     if ip.is_unspecified() || ip.is_multicast() || addr.port() == 0 {
         return false;
+    }
+    // 255.255.255.255 is never a listening address either — it is the
+    // limited-broadcast destination. Gossip that hands it out via a
+    // `Peers` response would otherwise sail past every other check and
+    // sit in the dial pool and `peers.redb` forever (CodeRabbit #299
+    // round 2, DoS).
+    if let IpAddr::V4(v4) = ip {
+        if v4.is_broadcast() {
+            return false;
+        }
     }
     !is_local_address(&ip) || allow_local
 }

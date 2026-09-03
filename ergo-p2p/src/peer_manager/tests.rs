@@ -1132,6 +1132,42 @@ fn is_routable_rejects_rfc1918_and_private_categories() {
     assert!(is_routable_for_p2p(&addr(159, 65, 11, 55, 9030), false));
     // 100.x outside the CGNAT band is fine.
     assert!(is_routable_for_p2p(&addr(100, 200, 1, 1, 9030), false));
+
+    // IPv4 broadcast — never a listening address, whatever `allow_local`
+    // says (CodeRabbit #299 round 2: a `Peers` response can hand out
+    // 255.255.255.255, which must not enter the dial pool).
+    assert!(!is_routable_for_p2p(
+        &SocketAddr::new(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255)), 9030),
+        false
+    ));
+    assert!(!is_routable_for_p2p(
+        &SocketAddr::new(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255)), 9030),
+        true
+    ));
+}
+
+/// `::ffff:a.b.c.d` (IPv4-mapped IPv6) must classify exactly like the
+/// IPv4 address it embeds — before the fix, `is_local_address`'s IPv6
+/// arm only matched fe80::/10, fc00::/7 and fec0::/10, none of which an
+/// IPv4-mapped address's top segment (always `0`) can hit, so
+/// `::ffff:10.0.0.8` sailed past the RFC1918 rejection `10.0.0.8` itself
+/// gets (CodeRabbit #299 round 2, SSRF-class).
+#[test]
+fn is_routable_rejects_ipv4_mapped_local_addresses() {
+    let mapped = |a, b, c, d| -> SocketAddr {
+        SocketAddr::new(IpAddr::V6(Ipv4Addr::new(a, b, c, d).to_ipv6_mapped()), 9030)
+    };
+
+    assert!(!is_routable_for_p2p(&mapped(127, 0, 0, 1), false));
+    assert!(!is_routable_for_p2p(&mapped(10, 0, 0, 1), false));
+    assert!(!is_routable_for_p2p(&mapped(192, 168, 1, 1), false));
+
+    // The same host is admitted once `allow_local` is set — matching
+    // the plain-IPv4 form's behaviour exactly.
+    assert!(is_routable_for_p2p(&mapped(10, 0, 0, 1), true));
+
+    // A public IPv4-mapped address still passes.
+    assert!(is_routable_for_p2p(&mapped(213, 239, 193, 208), false));
 }
 
 #[test]
@@ -1947,4 +1983,79 @@ fn outbound_handshake_persists_declared_when_it_differs_from_dialed() {
             .any(|p| p.addr == dialed && p.handshaked),
         "the dialed socket keeps its dial-pool row but not the handshake",
     );
+}
+
+/// An outbound peer's declared address that differs from the socket we
+/// actually dialed must NOT be booked with `LastDirection::Outbound` —
+/// we never dialed it ourselves, only the peer's own claim says it
+/// listens there. Before the fix, `persist_handshake` always used the
+/// live session's direction regardless of which address it was writing,
+/// so this row got the same tier-3 "reached outbound" eviction priority
+/// as a genuinely-dialed peer (CodeRabbit #299 round 2, DoS: a peer that
+/// rotates its declared address across reconnects can mint an unbounded
+/// stream of unverified top-tier rows and evict real dial candidates
+/// from `peers.redb`).
+#[test]
+fn outbound_handshake_declared_mismatch_does_not_earn_outbound_provenance() {
+    use crate::address_book::LastDirection;
+
+    let (mut mgr, book, _dir) = mgr_with_book();
+    let now = Instant::now();
+    let dialed = addr(213, 239, 193, 208, 9030);
+    let declared = addr(159, 65, 11, 55, 9020);
+
+    mgr.add_known_address(dialed, PeerOrigin::Gossip);
+    mgr.register_outbound(dialed, now).unwrap();
+    mgr.mark_tcp_connected(&dialed);
+    mgr.complete_handshake(&dialed, spec_with_declared(Some(declared)), None, now)
+        .unwrap();
+
+    let loaded = book.load_all(false).unwrap();
+    let row = loaded
+        .peers
+        .iter()
+        .find(|p| p.addr == declared)
+        .expect("the declared listening address carries the handshake");
+    assert_ne!(
+        row.last_direction,
+        Some(LastDirection::Outbound),
+        "an unreached declared address must not claim outbound provenance",
+    );
+}
+
+/// A peer that rotates its declared address across repeated outbound
+/// reconnects must not mint a stream of `Outbound`-tier rows — each
+/// rotation books a *different* address, none of which we ever dialed
+/// directly, so none may claim the reached-outbound eviction tier that
+/// would let it displace real dial candidates.
+#[test]
+fn outbound_handshake_rotated_declared_addresses_never_earn_outbound_provenance() {
+    use crate::address_book::LastDirection;
+
+    let (mut mgr, book, _dir) = mgr_with_book();
+    let now = Instant::now();
+    let dialed = addr(213, 239, 193, 208, 9030);
+
+    mgr.add_known_address(dialed, PeerOrigin::Gossip);
+
+    for i in 0..5u8 {
+        let declared = addr(159, 65, 11, i, 9020);
+        mgr.register_outbound(dialed, now).unwrap();
+        mgr.mark_tcp_connected(&dialed);
+        mgr.complete_handshake(&dialed, spec_with_declared(Some(declared)), None, now)
+            .unwrap();
+        mgr.disconnect(&dialed);
+
+        let loaded = book.load_all(false).unwrap();
+        let row = loaded
+            .peers
+            .iter()
+            .find(|p| p.addr == declared)
+            .expect("each rotated declared address is persisted");
+        assert_ne!(
+            row.last_direction,
+            Some(LastDirection::Outbound),
+            "rotation {i}: an unreached declared address must not earn outbound provenance",
+        );
+    }
 }

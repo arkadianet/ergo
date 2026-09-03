@@ -323,20 +323,23 @@ impl AddressBook {
                                 continue;
                             }
                         };
+                        // Sanitise the persisted book: a learned entry we
+                        // would never dial is dead weight that outranks
+                        // real candidates by recency (issue #298). Seeds
+                        // keep their exemption — an operator may point
+                        // `[peers] known` at a loopback address. This runs
+                        // BEFORE the stale check: a stale non-routable row
+                        // must still be queued for purge, not skipped over
+                        // and left to rot on disk across restarts.
+                        if !body.origin.is_seed() && !is_routable_for_p2p(&addr, allow_local) {
+                            nonroutable_keys.push(k.value().to_vec());
+                            continue;
+                        }
                         if let Some(seen) = body.last_seen {
                             if seen < stale_cutoff {
                                 state.stale_skipped += 1;
                                 continue;
                             }
-                        }
-                        // Sanitise the persisted book: a learned entry we
-                        // would never dial is dead weight that outranks
-                        // real candidates by recency (issue #298). Seeds
-                        // keep their exemption — an operator may point
-                        // `[peers] known` at a loopback address.
-                        if !body.origin.is_seed() && !is_routable_for_p2p(&addr, allow_local) {
-                            nonroutable_keys.push(k.value().to_vec());
-                            continue;
                         }
                         state.peers.push(body);
                     }
@@ -753,6 +756,59 @@ mod tests {
         let reloaded = book.load_all(false).unwrap();
         assert_eq!(reloaded.nonroutable_purged, 0);
         assert_eq!(reloaded.peers.len(), 2);
+    }
+
+    /// A learned non-routable row whose `last_seen` also predates the
+    /// stale cutoff must still be purged. Before this fix the stale
+    /// branch's `continue` ran first and exited the loop iteration
+    /// before the routability check ever queued the key, so the row
+    /// survived every boot indefinitely instead of self-healing.
+    #[test]
+    fn load_all_purges_stale_nonroutable_row_not_just_fresh_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("peers.redb");
+        let book = AddressBook::open_at(&path).unwrap();
+
+        let private = v4(10, 0, 0, 8, 9030);
+        let long_ago = UNIX_EPOCH + Duration::from_secs(1);
+
+        let stale_row = PersistedPeer {
+            addr: private,
+            last_handshake: None,
+            last_seen: Some(long_ago),
+            last_failure: None,
+            consecutive_failures: 0,
+            origin: PeerOrigin::Gossip,
+            handshaked: false,
+            last_direction: None,
+            agent_name: String::new(),
+            agent_version: [0; 3],
+            node_name: String::new(),
+        };
+
+        {
+            let write_txn = begin_write_qr(&book.db).unwrap();
+            {
+                let mut table = write_txn.open_table(PEERS).unwrap();
+                let key = encode_addr_key(private);
+                let val = encode_persisted_peer(&stale_row);
+                table.insert(key.as_slice(), val.as_slice()).unwrap();
+            }
+            write_txn.commit().unwrap();
+        }
+
+        let loaded = book.load_all(false).unwrap();
+        assert_eq!(
+            loaded.nonroutable_purged, 1,
+            "stale non-routable row must be purged, not silently skipped"
+        );
+        assert_eq!(loaded.stale_skipped, 0);
+        assert!(loaded.peers.is_empty());
+
+        // The purge is durable — the row is gone from disk, not just
+        // filtered out of this load's result.
+        let reloaded = book.load_all(false).unwrap();
+        assert_eq!(reloaded.nonroutable_purged, 0);
     }
 
     // ----- eviction tiering (issue #298 review, P2-2) -----
