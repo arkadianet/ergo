@@ -139,8 +139,9 @@ jobs:
     # Coverage-guided libFuzzer fuzzing — requires nightly (SanitizerCoverage +
     # ASan are unstable -Z features; see D1 in interface-contracts.md §6). This
     # is the deeper, non-gating complement to the stable structured campaign: it
-    # reaches inputs bounded fuzzing misses. A bounded smoke per surface keeps the
-    # nightly runtime sane; crash artifacts are uploaded for triage.
+    # reaches inputs bounded fuzzing misses. A bounded run per surface keeps the
+    # nightly runtime sane; crash artifacts and the grown corpus are uploaded
+    # for triage / re-seeding.
     strategy:
       fail-fast: false
       matrix:
@@ -160,18 +161,30 @@ jobs:
           key: cargo-fuzz-${{ matrix.target }}
           workspaces: ergo-difftest/fuzz
 
+      # Cache the installed cargo-fuzz binary itself (not just its build deps)
+      # across nightly runs — it changes rarely.
+      - name: cache cargo-fuzz binary
+        id: cargo-fuzz-bin-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-fuzz
+          key: cargo-fuzz-bin-${{ runner.os }}-v0.13
+
       - name: install cargo-fuzz
+        if: steps.cargo-fuzz-bin-cache.outputs.cache-hit != 'true'
         run: cargo install cargo-fuzz --locked
 
-      # Bounded smoke: build (ASan) + a short coverage-guided run seeded from the
-      # committed corpus/<surface>. -error_exitcode=1 makes a real crash fail the
-      # job (actionable red); the type-depth guard artifact is already filtered
-      # out of the Bug class (SER-003) so it will not spuriously fail this.
-      - name: fuzz ${{ matrix.target }} (bounded smoke)
+      # Bounded run: build (ASan) + a coverage-guided run seeded from the
+      # committed corpus/<surface>, capped at 10 minutes wall-clock per target
+      # (fail-fast: false means one target's crash doesn't stop the others).
+      # -error_exitcode=1 makes a real crash fail the job (actionable red);
+      # the type-depth guard artifact is already filtered out of the Bug class
+      # (SER-003) so it will not spuriously fail this.
+      - name: fuzz ${{ matrix.target }} (bounded run, 10 min)
         working-directory: ergo-difftest
         run: |
           cargo +nightly fuzz run "${{ matrix.target }}" -- \
-            -max_total_time=180 -error_exitcode=1
+            -max_total_time=600 -error_exitcode=1
 
       - name: upload crash artifacts
         if: failure()
@@ -179,4 +192,15 @@ jobs:
         with:
           name: fuzz-crash-${{ matrix.target }}
           path: ergo-difftest/fuzz/artifacts/
+          if-no-files-found: ignore
+
+      # Always upload the (possibly grown) corpus, win or lose, so an operator
+      # can review new coverage-adding inputs and fold curated ones back into
+      # the committed corpus/<surface>/ by hand.
+      - name: upload grown corpus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-${{ matrix.target }}
+          path: ergo-difftest/fuzz/corpus/${{ matrix.target }}/
           if-no-files-found: ignore
