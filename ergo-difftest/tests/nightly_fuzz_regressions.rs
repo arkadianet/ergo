@@ -59,14 +59,19 @@ fn corpus_mutation_structure_changed_sample_accepted() {
 }
 
 #[test]
-fn ergo_box_candidate_size_zero_unparsed_not_bug() {
-    // cargo-fuzz ergo_box_candidate: size-0 Unparsed + non-canonical height
-    // → Bug #19 reshape on re-decode. Consensus writers still emit verbatim;
-    // harness classifies as WriteRejected.
+fn ergo_box_candidate_size_zero_unparsed_rejects() {
+    // cargo-fuzz ergo_box_candidate: size-0 Unparsed + non-canonical height.
+    // The script body carries a ZERO type byte, which the reference raises as
+    // `InvalidTypePrefix` — a `SerializerException` `deserializeErgoTree` does
+    // NOT catch, so the box is REJECTED, never soft-fork-wrapped. Was pinned as
+    // WriteRejected (a Bug #19 reshape) while the zero prefix was a soft error
+    // that funneled into the body-error wrap; the reference verdict is a reject.
+    //
+    // JVM oracle: `ergo_box_candidate 00eb00e4da…e4e4` -> REJECT InvalidTypePrefix
     assert_outcome(
         "ergo_box_candidate",
         "00eb00e4da0000001a0000000000000000001a000000000000001ae4e4",
-        Outcome::WriteRejected,
+        Outcome::Rejected,
     );
 }
 
@@ -81,10 +86,14 @@ fn ergo_box_candidate_declared_size_one_reshape_not_bug() {
 }
 
 #[test]
-fn transaction_size_zero_unparsed_not_bug() {
+fn transaction_size_zero_unparsed_rejects() {
+    // Same zero-type-prefix shape as `ergo_box_candidate_size_zero_unparsed_rejects`,
+    // reached through an output candidate's script.
+    //
+    // JVM oracle: `transaction 01b69575e11c…00000a` -> REJECT InvalidTypePrefix
     assert_outcome(
         "transaction",
         "01b69575e11c0200feffffff5976ee0d6245a1168396b2e2a4f384691f275d501c000000000280b48128cb00f30000000008040900000000000000169900b5be00000a",
-        Outcome::WriteRejected,
+        Outcome::Rejected,
     );
 }

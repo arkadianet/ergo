@@ -42,6 +42,21 @@ pub fn decode_type(r: &mut VlqReader, byte: u8) -> Result<SigmaType, ReadError> 
 fn decode_type_at_depth(r: &mut VlqReader, byte: u8, depth: usize) -> Result<SigmaType, ReadError> {
     let next = depth + 1;
     match byte {
+        // Scala `TypeSerializer.deserialize` guards `if (c <= 0) throw new
+        // InvalidTypePrefix(...)` on EVERY type byte it reads (`getUByte`, so
+        // `c <= 0` is exactly `c == 0`). `InvalidTypePrefix` extends
+        // `SerializerException`, NOT `ValidationException`, so
+        // `deserializeErgoTree`'s catch does not cover it: a size-delimited tree
+        // whose body carries a zero type byte is REJECTED outright, never wrapped
+        // as `UnparsedErgoTree`. Returning a soft `InvalidData` here funneled it
+        // into the generic body-error wrap and accepted a tree the reference
+        // rejects (cargo-fuzz #305). Every OTHER unknown type code is a rule-1016
+        // `ValidationException` in the reference and stays soft (`InvalidData`)
+        // below, so a size-delimited tree still wraps for those.
+        0 => Err(ReadError::HardReject(
+            "type prefix 0 is not a valid type code (Scala InvalidTypePrefix)".to_string(),
+        )),
+
         // Primitive embeddable types (1..=11), version-gated exactly like Scala's
         // `getEmbeddableType` (embeddableV5 = codes 1..=8 pre-v3; embeddableV6 adds
         // SUnsignedBigInt = code 9 at v3+).
@@ -491,16 +506,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn error_code_zero() {
-        let data = [0x00];
-        let mut r = VlqReader::new(&data);
-        let err = read_type(&mut r).unwrap_err();
-        assert!(
-            matches!(err, ReadError::InvalidData(_)),
-            "expected InvalidData for code 0, got: {err:?}"
-        );
-    }
+    // NB: type code 0 is covered by `read_type_prefix_zero_hard_rejects` in the
+    // oracle-parity section — it is a HARD reject, not a soft `InvalidData`.
 
     #[test]
     fn read_type_above_max_depth_returns_error_not_stack_overflow() {
@@ -529,5 +536,43 @@ mod tests {
             }
             other => panic!("expected depth error, got: {other:?}"),
         }
+    }
+
+    // ----- oracle parity -----
+
+    /// Type prefix `0` is Scala's `InvalidTypePrefix` — a `SerializerException`,
+    /// NOT a `ValidationException` — so `deserializeErgoTree`'s catch does not
+    /// cover it and a size-delimited tree carrying one is REJECTED, never
+    /// wrapped as `UnparsedErgoTree`. Oracle (`ErgoSerdeOracle.scala`,
+    /// sigma-state 6.0.2, surface `ergo_tree`):
+    ///
+    /// ```text
+    /// ergo_tree 080100   -> REJECT InvalidTypePrefix
+    /// ergo_tree 08016b   -> ACCEPT 08016b
+    /// ```
+    ///
+    /// `08016b` is the discriminator twin: an unknown but NON-zero type code is
+    /// rule-1016 `ValidationException` territory, which the reference DOES
+    /// catch and wrap — so it must stay a soft [`ReadError::InvalidData`].
+    #[test]
+    fn read_type_prefix_zero_hard_rejects() {
+        let mut r = VlqReader::new(&[0x00]);
+        let err = read_type(&mut r).expect_err("type prefix 0 must reject");
+        assert!(
+            matches!(&err, ReadError::HardReject(m) if m.contains("type prefix 0")),
+            "type prefix 0 must be a HardReject so it escapes the size-delimited \
+             soft-fork wrap (Scala InvalidTypePrefix), got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn read_type_unknown_nonzero_code_stays_soft() {
+        let mut r = VlqReader::new(&[0x6b]);
+        let err = read_type(&mut r).expect_err("type code 0x6b must reject");
+        assert!(
+            matches!(&err, ReadError::InvalidData(m) if m.contains("unknown type code")),
+            "an unknown non-zero type code is a wrappable ValidationException in \
+             the reference, so it must stay soft, got: {err:?}"
+        );
     }
 }

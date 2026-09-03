@@ -1782,3 +1782,70 @@ mod santa_wire_v6 {
         assert_eq!(w.result(), bytes, "round-trip must be identity");
     }
 }
+
+// ----- oracle parity: cargo-fuzz #305 size-delimited over-accept -----
+
+/// A cargo-fuzz reproducer whose size-delimited tree body failed with an error
+/// the reference raises as a `SerializerException` — which
+/// `ErgoTreeSerializer.deserializeErgoTree` does NOT catch, so the reference
+/// rejects the whole tree instead of wrapping it as `UnparsedErgoTree`. It was
+/// ACCEPTED here because a zero type byte produced a soft error that funneled
+/// into the generic body-error wrap, and it surfaced as a fixed-point invariant
+/// violation in `ergo-difftest` (the wrap region is not self-contained: the body
+/// parse read PAST the declared size, then the wrap rewound to it).
+///
+/// JVM oracle (`scripts/jvm_serde_oracle/ErgoSerdeOracle.scala`,
+/// sigma-state 6.0.2 / ergo-core 6.0.2):
+///
+/// ```text
+/// ergo_box_candidate 01eb00e4da...  -> REJECT InvalidTypePrefix     (#305)
+/// ergo_tree          080100         -> REJECT InvalidTypePrefix
+/// ergo_tree          08016b         -> ACCEPT 08016b   (soft-wrap twin)
+/// ```
+mod fuzz_size_delimited_hard_reject {
+    use super::*;
+
+    /// #305: a box candidate whose v3 size-delimited script declares size 0 and
+    /// whose body carries a zero type byte — the reference's `InvalidTypePrefix`,
+    /// which escapes the wrap.
+    #[test]
+    fn box_candidate_with_zero_type_prefix_script_rejects() {
+        let bytes = hex::decode(
+            "01eb00e4da000103060108015e000000000000000000000000000000020000000affffffff00001a00e4e4",
+        )
+        .unwrap();
+        let mut r = VlqReader::new(&bytes);
+        assert!(
+            crate::ergo_box::read_ergo_box_candidate(&mut r).is_err(),
+            "a box candidate whose size-delimited script body carries a zero type byte must \
+             be REJECTED (JVM: REJECT InvalidTypePrefix)"
+        );
+    }
+
+    #[test]
+    fn size_delimited_zero_type_prefix_body_rejects() {
+        let bytes = hex::decode("080100").unwrap();
+        let mut r = VlqReader::new(&bytes);
+        assert!(
+            read_ergo_tree(&mut r).is_err(),
+            "JVM: REJECT InvalidTypePrefix — a zero type byte is a SerializerException, \
+             never an UnparsedErgoTree wrap"
+        );
+    }
+
+    /// Discriminator: an unknown but NON-zero type code IS a rule-1016
+    /// `ValidationException`, which the reference catches and wraps. This must
+    /// keep being accepted, or the fix above would have over-corrected into a
+    /// reject-valid.
+    #[test]
+    fn size_delimited_unknown_type_code_still_wraps() {
+        let bytes = hex::decode("08016b").unwrap();
+        let mut r = VlqReader::new(&bytes);
+        let tree = read_ergo_tree(&mut r)
+            .expect("JVM: ACCEPT 08016b — an unknown non-zero type code soft-forks");
+        assert!(matches!(tree.body, crate::opcode::Expr::Unparsed(_)));
+        let mut w = ergo_primitives::writer::VlqWriter::new();
+        crate::ergo_tree::write_ergo_tree(&mut w, &tree).expect("re-serialize");
+        assert_eq!(w.result(), bytes, "JVM canonical bytes are 08016b");
+    }
+}

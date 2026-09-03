@@ -560,3 +560,30 @@ budget_iters   = 2000
 trigger_hex    = "00d196850306"
 expected_canonical = ""
 note = "ORACLE: difftest --oracle --repro 00d196850306 --surface reduce. rust Accept P:d2|50 vs jvm Accept P:d2|65 → Canonical/cost divergence."
+
+# 32. sigma-type-prefix-zero-soft  [cargo-fuzz #305]
+# ---------------------------------------------------------------------------
+# Scala `TypeSerializer.deserialize` throws `InvalidTypePrefix` on a zero type
+# byte. That is a `SerializerException`, NOT a `ValidationException`, so
+# `ErgoTreeSerializer.deserializeErgoTree` does NOT catch it: a size-delimited
+# tree whose body carries a zero type byte is REJECTED, never wrapped as
+# `UnparsedErgoTree`. Emitting a soft `InvalidData` funneled it into the generic
+# body-error wrap, accepting a tree every JVM node refuses (accept-invalid), and
+# surfaced in cargo-fuzz as a box-candidate fixed-point violation: the wrapped
+# region is only the declared size, but the body parse read PAST it, so the
+# re-serialized bytes re-parse into a different structure.
+#
+# CLEAN HEAD:   ergo_tree 080100 → Rust REJECT, JVM REJECT InvalidTypePrefix → AGREE
+# PATCHED HEAD: ergo_tree 080100 → Rust ACCEPT (UnparsedErgoTree), JVM REJECT → DIVERGE
+[[bug]]
+id             = "sigma-type-prefix-zero-soft"
+surface        = "ergo_tree"
+class          = "accept-reject"
+wire_reachable = true
+fix_file       = "ergo-ser/src/sigma_type/read.rs"
+reinject       = "In decode_type_at_depth, delete the `0 => Err(ReadError::HardReject(...))` arm so a zero type byte falls through to the generic soft `unknown type code` InvalidData. Patch: known_bugs/patches/sigma-type-prefix-zero-soft.patch"
+budget_iters   = 50000
+trigger_hex    = "080100"
+# 08 = v0 header with the size bit; 01 = declared size 1; 00 = zero type byte
+expected_canonical = ""
+note = "ORACLE: difftest --oracle --repro 080100 --surface ergo_tree. Discriminator twin 08016b (unknown NON-zero type code) is a rule-1016 ValidationException the JVM DOES wrap → ACCEPT 08016b on both heads."
