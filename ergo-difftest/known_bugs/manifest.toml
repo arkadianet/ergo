@@ -587,3 +587,35 @@ trigger_hex    = "080100"
 # 08 = v0 header with the size bit; 01 = declared size 1; 00 = zero type byte
 expected_canonical = ""
 note = "ORACLE: difftest --oracle --repro 080100 --surface ergo_tree. Discriminator twin 08016b (unknown NON-zero type code) is a rule-1016 ValidationException the JVM DOES wrap → ACCEPT 08016b on both heads."
+
+# ---------------------------------------------------------------------------
+# 29. inline-sheader-constant-soft-wrap  [cargo-fuzz #304]
+# ---------------------------------------------------------------------------
+# Scala's `DataSerializer` matches `SHeader` only under
+# `isV3OrLaterErgoTreeVersion`; a pre-v3 header value falls through to
+# `CoreDataSerializer` and throws a `SerializerException`, which escapes
+# `deserializeErgoTree`'s catch. The SEGREGATED-constant path already
+# hard-rejected (SANTA wire/v6 `Box.softfork_header_constant_reject`), but the
+# INLINE body-constant path returned a soft `InvalidData`, so a size-delimited
+# pre-v3 tree wrapped instead of rejecting. cargo-fuzz found it through an
+# `SBox` constant whose nested script is such a tree: the header value parse ran
+# past the declared size, the wrap rewound to it, and the emitted bytes no
+# longer re-decoded.
+#
+# CLEAN HEAD:   constant <trigger> → Rust REJECT, JVM REJECT SerializerException → AGREE
+# PATCHED HEAD: constant <trigger> → Rust ACCEPT, JVM REJECT → DIVERGE
+[[bug]]
+id             = "inline-sheader-constant-soft-wrap"
+surface        = "ergo_tree"
+class          = "accept-reject"
+wire_reachable = true
+fix_file       = "ergo-ser/src/opcode/parse.rs"
+reinject       = "In parse_expr's inline-constant arm, change the `_tree_version < 3 && val.contains_header()` guard back from ReadError::HardReject to ReadError::InvalidData. Patch: known_bugs/patches/inline-sheader-constant-soft-wrap.patch"
+budget_iters   = 50000
+trigger_hex    = "6868686868680000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000686868686868686868680000000000000000000000686868686868686868682600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000686868686868686868686868686868686868686868686868686868f2686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686800e5ec94ec7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f8d"
+# The nested script of the cargo-fuzz `constant` crasher, lifted to the
+# `ergo_tree` oracle surface (the harness has no `constant` oracle surface):
+# header 0x68 = v0 with the size bit, declared size 0x68, body = an inline
+# SHeader constant (type byte 0x68).
+expected_canonical = ""
+note = "ORACLE: difftest --oracle --repro <trigger_hex> --surface ergo_tree. Reached by cargo-fuzz through the `constant` target as an SBox constant wrapping this tree (prefix 6301)."

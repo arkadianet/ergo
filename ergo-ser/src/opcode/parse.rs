@@ -60,8 +60,17 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
         // (incl. nested) in a pre-v3 (version < 3) tree is rejected by the
         // reference at parse time — but an empty Coll[Header] (no header
         // materialized) is accepted. Match that value-based behavior.
+        //
+        // HARD reject: the reference's pre-v3 SHeader arm falls through to
+        // `CoreDataSerializer` and throws a `SerializerException`, which
+        // `deserializeErgoTree` does NOT catch — so it escapes the
+        // size-delimited soft-fork wrap and rejects the whole tree. This is the
+        // same verdict the SEGREGATED-constant path already applies
+        // (`ergo_tree::read::parse_body`); emitting a soft `InvalidData` here
+        // funneled an INLINE pre-v3 header constant into the generic body-error
+        // wrap and accepted a tree the reference rejects (cargo-fuzz #304).
         if _tree_version < 3 && val.contains_header() {
-            return Err(ReadError::InvalidData(format!(
+            return Err(ReadError::HardReject(format!(
                 "SHeader value requires ErgoTree version >= 3 (got {_tree_version})"
             )));
         }
@@ -602,5 +611,80 @@ mod tests {
         let mut r = VlqReader::new(INLINE_SOME_INT);
         let err = parse_expr(&mut r, 0, 0).expect_err("headerless Option must reject");
         assert!(matches!(&err, ReadError::InvalidData(m) if m.contains("SOption")));
+    }
+
+    // ----- oracle parity -----
+
+    /// An INLINE pre-v3 `SHeader` constant must be a [`ReadError::HardReject`],
+    /// not a soft `InvalidData`. The reference's `DataSerializer` matches
+    /// `SHeader` only when `isV3OrLaterErgoTreeVersion`; otherwise it falls
+    /// through to `CoreDataSerializer` and throws a `SerializerException`, which
+    /// `deserializeErgoTree` does NOT catch — so the whole tree is rejected
+    /// rather than wrapped as `UnparsedErgoTree`. A soft error here was swallowed
+    /// by the size-delimited body-error wrap (cargo-fuzz #304). The SEGREGATED
+    /// constant path already hard-rejects (`ergo_tree::read::parse_body`, blessed
+    /// by SANTA wire/v6 `Box.softfork_header_constant_reject`); the two paths
+    /// must agree.
+    ///
+    /// `SOption` is the discriminator: its pre-v3 rejection comes from
+    /// `CheckSerializableTypeCode`, a `ValidationException` the reference DOES
+    /// wrap, so it stays soft — see `inline_option_constant_rejected_in_pre_v3_tree_body`.
+    #[test]
+    fn inline_header_constant_pre_v3_hard_rejects() {
+        // `68` = SHeader type code; the value bytes never need to be well formed
+        // — an empty header payload already fails, and either way the version
+        // gate is what must classify the error as hard.
+        let mut header_const = vec![0x68u8];
+        header_const.extend_from_slice(
+            &crate::header::serialize_header_without_pow(&min_header()).unwrap(),
+        );
+        header_const.extend_from_slice(&[0x02; 33]); // Autolykos v2 pk
+        header_const.extend_from_slice(&[0x00; 8]); // nonce
+        for version in 0u8..3 {
+            let mut r = VlqReader::new(&header_const);
+            let err = parse_expr(&mut r, 0, version).expect_err("pre-v3 inline Header must reject");
+            assert!(
+                matches!(&err, ReadError::HardReject(m) if m.contains("SHeader")),
+                "version {version}: a pre-v3 inline Header constant must HARD reject so it \
+                 escapes the size-delimited soft-fork wrap, got: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_header_constant_v3_parses() {
+        let mut header_const = vec![0x68u8];
+        header_const.extend_from_slice(
+            &crate::header::serialize_header_without_pow(&min_header()).unwrap(),
+        );
+        header_const.extend_from_slice(&[0x02; 33]);
+        header_const.extend_from_slice(&[0x00; 8]);
+        let mut r = VlqReader::new(&header_const);
+        let expr = parse_expr(&mut r, 0, 3).expect("v3 inline Header must parse");
+        match expr {
+            Expr::Const { val, .. } => assert!(val.contains_header()),
+            other => panic!("expected Const, got {other:?}"),
+        }
+    }
+
+    fn min_header() -> crate::header::Header {
+        use ergo_primitives::digest::{ADDigest, Digest32, ModifierId};
+        crate::header::Header {
+            version: 2,
+            parent_id: ModifierId::from_bytes([0; 32]),
+            ad_proofs_root: Digest32::from_bytes([0; 32]),
+            transactions_root: Digest32::from_bytes([0; 32]),
+            state_root: ADDigest::from_bytes([0; 33]),
+            timestamp: 0,
+            extension_root: Digest32::from_bytes([0; 32]),
+            n_bits: 0x1a01_7660,
+            height: 1,
+            votes: [0; 3],
+            unparsed_bytes: vec![],
+            solution: crate::autolykos::AutolykosSolution::V2 {
+                pk: ergo_primitives::group_element::GroupElement::from_bytes([0x02; 33]),
+                nonce: [0; 8],
+            },
+        }
     }
 }

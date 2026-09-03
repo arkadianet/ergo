@@ -1,0 +1,11 @@
+--- a/ergo-ser/src/opcode/parse.rs
++++ b/ergo-ser/src/opcode/parse.rs
+@@ -70,7 +70,7 @@
+         // funneled an INLINE pre-v3 header constant into the generic body-error
+         // wrap and accepted a tree the reference rejects (cargo-fuzz #304).
+         if _tree_version < 3 && val.contains_header() {
+-            return Err(ReadError::HardReject(format!(
++            return Err(ReadError::InvalidData(format!(
+                 "SHeader value requires ErgoTree version >= 3 (got {_tree_version})"
+             )));
+         }

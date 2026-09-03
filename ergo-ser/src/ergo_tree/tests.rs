@@ -1783,14 +1783,14 @@ mod santa_wire_v6 {
     }
 }
 
-// ----- oracle parity: cargo-fuzz #305 size-delimited over-accept -----
+// ----- oracle parity: cargo-fuzz #304 / #305 size-delimited over-accepts -----
 
-/// A cargo-fuzz reproducer whose size-delimited tree body failed with an error
-/// the reference raises as a `SerializerException` — which
+/// Two cargo-fuzz reproducers whose size-delimited tree body failed with an
+/// error the reference raises as a `SerializerException` — which
 /// `ErgoTreeSerializer.deserializeErgoTree` does NOT catch, so the reference
-/// rejects the whole tree instead of wrapping it as `UnparsedErgoTree`. It was
-/// ACCEPTED here because a zero type byte produced a soft error that funneled
-/// into the generic body-error wrap, and it surfaced as a fixed-point invariant
+/// rejects the whole tree instead of wrapping it as `UnparsedErgoTree`. Both
+/// were ACCEPTED here because the error was soft and funneled into the generic
+/// body-error wrap, and both surfaced as a fixed-point / re-decode invariant
 /// violation in `ergo-difftest` (the wrap region is not self-contained: the body
 /// parse read PAST the declared size, then the wrap rewound to it).
 ///
@@ -1798,12 +1798,31 @@ mod santa_wire_v6 {
 /// sigma-state 6.0.2 / ergo-core 6.0.2):
 ///
 /// ```text
+/// constant           63016868...8d  -> REJECT SerializerException   (#304)
 /// ergo_box_candidate 01eb00e4da...  -> REJECT InvalidTypePrefix     (#305)
 /// ergo_tree          080100         -> REJECT InvalidTypePrefix
 /// ergo_tree          08016b         -> ACCEPT 08016b   (soft-wrap twin)
 /// ```
 mod fuzz_size_delimited_hard_reject {
     use super::*;
+
+    /// #304: an `SBox` constant whose nested v0 size-delimited script body is an
+    /// INLINE `SHeader` constant. Pre-v3 `SHeader` data is a reference
+    /// `SerializerException`, so the box script — and with it the constant — is
+    /// rejected, not soft-forked.
+    #[test]
+    fn sbox_constant_with_pre_v3_inline_header_script_rejects() {
+        let bytes = hex::decode(
+            "63016868686868680000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000686868686868686868680000000000000000000000686868686868686868682600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000686868686868686868686868686868686868686868686868686868f2686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686800e5ec94ec7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f8d",
+        )
+        .unwrap();
+        let mut r = VlqReader::new(&bytes);
+        assert!(
+            crate::sigma_value::read_constant(&mut r).is_err(),
+            "an SBox constant whose nested pre-v3 size-delimited script carries an inline \
+             SHeader constant must be REJECTED (JVM: REJECT SerializerException)"
+        );
+    }
 
     /// #305: a box candidate whose v3 size-delimited script declares size 0 and
     /// whose body carries a zero type byte — the reference's `InvalidTypePrefix`,
