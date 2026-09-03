@@ -336,13 +336,28 @@ object ErgoSerdeOracle {
         }
     }
 
+  // Fault injection for the guard's own failure-path test. When
+  // DIFFTEST_ORACLE_DIE_AFTER=<n> is set, the oracle answers n queries and then
+  // exits, closing the pipe mid-campaign. This is how
+  // `scripts/difftest-guard.sh` proves it FAILS on a dead oracle instead of
+  // reporting a green run that checked almost nothing. Unset (the normal case)
+  // it is inert.
+  private val dieAfter: Option[Int] =
+    sys.env.get("DIFFTEST_ORACLE_DIE_AFTER").flatMap(v => scala.util.Try(v.toInt).toOption)
+
   def main(args: Array[String]): Unit = {
+    var answered = 0
     var line = StdIn.readLine()
     while (line != null) {
       val t = line.trim
       if (t.nonEmpty) {
         val parts = t.split("\\s+", 2)
         println(if (parts.length == 2) handle(parts(0), parts(1)) else "ERR bad-line")
+        answered += 1
+        if (dieAfter.exists(answered >= _)) {
+          Console.err.println(s"DIFFTEST_ORACLE_DIE_AFTER: exiting after $answered queries")
+          System.exit(0)
+        }
       }
       line = StdIn.readLine()
     }

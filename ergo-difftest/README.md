@@ -106,10 +106,43 @@ scripts/difftest-guard.sh --surfaces "reduce_ctx transaction"
 
 It runs the structure-aware generators against the live oracle on `reduce`,
 `reduce_ctx`, `transaction`, `ergo_box_candidate` and `validate`, minimizes and
-classifies every unique divergence, prints a per-surface table, and **exits
-non-zero on any `PENDING` record**. `KnownArtifact` records are reported and
-ignored. Records land under `ergo-difftest/regressions/` (gitignored);
-`QUEUE.md` lists only the pending ones.
+classifies every unique divergence, and prints a per-surface table. Records land
+under `ergo-difftest/regressions/` (gitignored); `QUEUE.md` lists the pending
+ones.
+
+| exit | meaning |
+|---|---|
+| 0 | every planned check ran; no unbaselined pending divergence |
+| 1 | an **unbaselined** pending divergence — a candidate for human triage |
+| 2 | usage / environment error (no `scala-cli`, no binary, malformed baseline) |
+| 3 | **harness error** — the oracle died, or a surface checked fewer inputs than it planned |
+
+Exit 3 exists because the failure mode that matters most is a guard that passes
+having checked almost nothing. Three independent assertions guard against it: the
+campaign's own exit code (`difftest` returns 3 on a spawn or pipe failure, never
+folding one into a clean summary), an `oracle: HARNESS ERROR:` marker grep over
+the log, and a `checks == iters` count per surface. To see it work, set
+`DIFFTEST_ORACLE_DIE_AFTER=<n>` — a fault-injection knob in the oracle script that
+answers `n` queries and exits.
+
+### The accepted baseline
+
+A guard that is red on day one teaches nobody anything: a new finding is
+indistinguishable from the ones already known, and the red becomes wallpaper.
+`known_bugs/baseline.toml` lists the divergences that are present on `main`
+right now, each keyed by its content-addressed record identity
+(`<surface>/sha256(input_hex)[..16]`, the same key `auto_file` writes to) and
+each carrying a **required** `ref` matching `(PR|issue) #<number>`. An entry
+without a tracking reference is refused — that is a muted divergence, not an
+accepted one.
+
+The guard fails only on pendings that are *not* listed; baselined ones print in
+their own table, and a baseline entry the run did not reproduce is called out
+too (either the fix landed and the entry should be deleted, or coverage was
+lost). When a referenced fix merges, delete the entry: the guard going red on
+the next run is the signal that the fix did not close the class.
+
+`KnownArtifact` records are reported and never fail the run.
 
 ### The `EvaluatedValue` vocabulary (`src/gen/evaluated_value.rs`)
 
@@ -172,18 +205,34 @@ original wire bytes / defers the curve check). If it persists, or the surface ha
 no channel, the record is `PENDING` and a human decides. The harness never sets a
 which-side-is-right verdict.
 
+### Known coverage gap — `CONTEXT.headers`
+
+Both reduce surfaces run with an **empty** last-headers window: the node side
+leaves `ReductionContext::last_headers` empty and the JVM side passes
+`headers = Colls.emptyColl[Header]`. A script reading `CONTEXT.headers` sees a
+zero-length collection on both sides and agrees trivially, so the window-size
+divergence family (#238: 10 headers in Rust vs 9 in Scala) **cannot** surface
+here. Closing it needs a header window on both sides — a fixed agreed set of
+serialized headers, or a third `ctx_expr` frame field carrying them on the wire.
+That is an oracle-contract change, deliberately not folded into the guard; the
+replay driver reaches the class in the meantime.
+
 ### Debugging the pipe
 
 `DIFFTEST_ORACLE_LOG=<path>` writes the full request/response transcript. A
 standing guard is only as trustworthy as its pipe: when a campaign reports a
 verdict a manual re-query cannot reproduce, this is the evidence that says
-whether the harness and the oracle were in step.
+whether the harness and the oracle were in step. The log is opened in APPEND
+mode with a per-process header, and `difftest-guard.sh` gives each surface its
+own `<path>.<surface>` file, so one surface's oracle cannot overwrite another's
+evidence.
 
 ### CI
 
 The nightly `consensus-guard` job in `.github/workflows/fuzz.yml` runs the same
-set, uploads `regressions/` plus the oracle transcript as an artifact, and fails
-on any `PENDING`. It is `workflow_dispatch`-only rather than scheduled, because
+set, uploads `regressions/` plus the per-surface oracle transcripts as an artifact,
+fails on any unbaselined `PENDING`, and fails louder (exit 3) if the run did not
+check what it planned to. It is `workflow_dispatch`-only rather than scheduled, because
 `ergo-core 6.0.2` is not on Maven Central: a cold GitHub-hosted runner has to
 clone the Scala node and `sbt avldb/publishLocal ergoWallet/publishLocal
 ergoCore/publishLocal`, which does not fit the ~20 min budget. The job caches

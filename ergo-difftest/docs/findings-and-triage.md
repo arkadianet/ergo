@@ -175,3 +175,17 @@ so a systematic under-charge is a fork risk at the boundary.
 node defers the curve check to tx validation; on `reduce_ctx` both sides reject,
 so the reduction channel agrees. This is the documented #4 artifact, and it is
 the control that shows the classifier is not simply marking everything pending.
+
+All five are recorded in `known_bugs/baseline.toml` with their tracking
+references (A → PR #301, B → issue #312, C → issue #311), so the guard is green
+on `main` today and goes red the moment a *new* class appears. Delete a baseline
+entry when its fix merges — the guard going red on the next run is the signal
+that the fix did not close the class.
+
+**Known coverage gap: `CONTEXT.headers` (the #238 family) is not exercised.**
+Both reduce surfaces run with an empty last-headers window on both sides
+(`ReductionContext::last_headers` empty; `headers = Colls.emptyColl[Header]` in
+`ErgoSerdeOracle.scala`), so a script reading `CONTEXT.headers` agrees trivially
+and the 10-vs-9 window-size divergence cannot surface. Closing it needs a header
+window on both sides — an oracle-contract change, tracked as a TODO on
+`reduce_verdict` in `src/oracle.rs`.

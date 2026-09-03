@@ -67,6 +67,7 @@ declare -A BUG_EXPECTED=()
 declare -A BUG_ITERS=()
 declare -A BUG_SURFACE=()
 declare -A BUG_BLOCKED=()
+declare -A BUG_BLOCKED_UNTIL=()
 
 _cur_id=""
 _cur_class=""
@@ -76,6 +77,7 @@ _cur_expected=""
 _cur_iters="50000"
 _cur_surface=""
 _cur_blocked=""
+_cur_blocked_until=""
 
 flush_bug() {
     if [[ -n "$_cur_id" ]]; then
@@ -87,6 +89,7 @@ flush_bug() {
         BUG_ITERS["$_cur_id"]="$_cur_iters"
         BUG_SURFACE["$_cur_id"]="$_cur_surface"
         BUG_BLOCKED["$_cur_id"]="$_cur_blocked"
+        BUG_BLOCKED_UNTIL["$_cur_id"]="$_cur_blocked_until"
     fi
     _cur_id=""
     _cur_class=""
@@ -96,6 +99,7 @@ flush_bug() {
     _cur_iters="50000"
     _cur_surface=""
     _cur_blocked=""
+    _cur_blocked_until=""
 }
 
 toml_val() {
@@ -108,8 +112,23 @@ toml_val() {
     echo "$val"
 }
 
+# Strip a trailing TOML comment WITHOUT cutting a '#' that lives inside a quoted
+# value. `blocked_on = "PR #301"` is exactly that case, and a naive `${line%%#*}`
+# silently truncated it to `PR ` — a validation rule that reads its own input
+# wrong is worse than no rule.
+strip_comment() {
+    local line="$1" out="" in_quote=0 i ch
+    for (( i = 0; i < ${#line}; i++ )); do
+        ch="${line:i:1}"
+        [[ "$ch" == '"' ]] && in_quote=$(( 1 - in_quote ))
+        [[ "$ch" == "#" && $in_quote -eq 0 ]] && break
+        out+="$ch"
+    done
+    printf '%s' "$out"
+}
+
 while IFS= read -r line; do
-    line="${line%%#*}"     # strip trailing comments
+    line="$(strip_comment "$line")"
     line="${line%"${line##*[! ]}"}"  # rtrim
     case "$line" in
         "[[bug]]")
@@ -138,6 +157,9 @@ while IFS= read -r line; do
             ;;
         blocked_on\ *=*)
             _cur_blocked="$(toml_val "$line")"
+            ;;
+        blocked_until\ *=*)
+            _cur_blocked_until="$(toml_val "$line")"
             ;;
     esac
 done < "$MANIFEST"
@@ -195,8 +217,27 @@ for id in "${BUG_IDS[@]}"; do
     # with the blocker named, so the entry stays armed and self-documenting
     # until the fix lands.
     blocked="${BUG_BLOCKED[$id]:-}"
+    blocked_until="${BUG_BLOCKED_UNTIL[$id]:-}"
     if [[ -n "$blocked" ]]; then
-        echo "[SKIP] $id: blocked on $blocked (fix not present on this branch — clean-HEAD assertion cannot hold)"
+        # A blocker must name a tracking PR/issue and carry an expiry. Without
+        # both, "blocked" is indistinguishable from "quietly disabled forever".
+        if ! [[ "$blocked" =~ ^(PR|issue)\ \#[0-9]+ ]]; then
+            echo "  [FAIL] $id: blocked_on '$blocked' must start with 'PR #<n>' or 'issue #<n>'"
+            ((FAIL++)) || true
+            continue
+        fi
+        if ! [[ "$blocked_until" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            echo "  [FAIL] $id: blocked_on requires blocked_until = \"YYYY-MM-DD\" (got '${blocked_until}')"
+            ((FAIL++)) || true
+            continue
+        fi
+        if [[ "$(date -u +%Y-%m-%d)" > "$blocked_until" ]]; then
+            echo "  [FAIL] $id: blocked_until $blocked_until has passed — re-check $blocked and either"
+            echo "         drop blocked_on (the fix landed: add the patch and gate it) or extend the date deliberately."
+            ((FAIL++)) || true
+            continue
+        fi
+        echo "[SKIP] $id: blocked on $blocked until $blocked_until (fix not present on this branch — clean-HEAD assertion cannot hold)"
         ((SKIP++)) || true
         continue
     fi

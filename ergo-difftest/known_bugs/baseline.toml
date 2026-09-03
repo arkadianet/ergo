@@ -1,0 +1,67 @@
+# Accepted baseline for the standing consensus guard (scripts/difftest-guard.sh).
+#
+# A guard that is red on day one teaches nobody anything: a NEW finding is
+# indistinguishable from the ones already known, and the red becomes wallpaper.
+# Every entry here is a divergence that IS present on `main` right now, has been
+# triaged by a human, and has a tracking issue or PR. The guard fails only on a
+# PENDING record whose key is NOT listed here; baselined pendings are printed in
+# their own table so they stay visible without being fatal.
+#
+# `key` is the record's content-addressed identity, exactly as
+# `ergo-difftest/src/regressions.rs::auto_file` computes it:
+#
+#     key = "<surface>/" + sha256(record.input_hex)[..16]
+#
+# which is also the path the record lands at:
+# `<regressions_dir>/<surface>/<sha256hex[..16]>.json`.
+#
+# RULES
+#  * `ref` is REQUIRED and must match `(PR|issue) #<number>`. An entry without a
+#    tracking reference is not a baseline, it is a divergence somebody muted.
+#  * When the referenced fix merges, DELETE the entry. The guard going red on
+#    the next run is the signal that the fix did not actually close the class.
+#  * Never add an entry to make a run green. Add it because a human read the
+#    minimized record, understood the divergence, and filed it.
+
+# ---------------------------------------------------------------------------
+# PR #301 — a non-Constant EvaluatedValue in an input's context extension.
+# The node's `read_context_extension` reads a Constant only, so it rejects a
+# transaction the reference mines: a reject-valid stall. One class, three
+# surfaces (the same minimized transaction reaches `transaction` and `validate`;
+# `reduce_ctx` carries the frame form).
+#
+# NOTE: all three triggers are `0x85`, the BOOL-PACKED ConcreteCollection. #301's
+# deserializer split admits `0x83` and `0x86` by name; `0x85` is the same
+# `EvaluatedValue`. If the fix lands without it, these entries stay red — which
+# is the correct outcome, not a reason to re-baseline them.
+# ---------------------------------------------------------------------------
+[[baseline]]
+key  = "transaction/f5ae47e008aaa2a6"
+ref  = "PR #301"
+note = "ctx-extension 0x85 in a 1-in/1-out tx: rust Reject(unknown type code: 0x85) vs jvm ACCEPT byte-exact."
+
+[[baseline]]
+key  = "validate/f5ae47e008aaa2a6"
+ref  = "PR #301"
+note = "Same transaction as above reaching statelessValidity: the reject happens at parse, before any structural rule."
+
+[[baseline]]
+key  = "reduce_ctx/9dcf5061b61a535c"
+ref  = "PR #301"
+note = "contextExtension·ergoBoxCandidate frame carrying 0x85 and 0x83 extension values: rust Reject(extension: ...) vs jvm ACCEPT P:d3|5."
+
+# ---------------------------------------------------------------------------
+# Issue #312 — the register twin of #301, NOT covered by that PR.
+# ---------------------------------------------------------------------------
+[[baseline]]
+key  = "ergo_box_candidate/ef25eeb513cc52ed"
+ref  = "issue #312"
+note = "GroupGenerator (0x82) in R4/R6: rust Reject(unsupported expression opcode 0x82 in register value) vs jvm ACCEPT byte-exact. Persists on the reduce_ctx reduction channel."
+
+# ---------------------------------------------------------------------------
+# Issue #311 — JIT cost divergence, same proposition on both sides.
+# ---------------------------------------------------------------------------
+[[baseline]]
+key  = "reduce/eae7d58bd90f6ba5"
+ref  = "issue #311"
+note = "sigmaProp(AND(Coll[Boolean](true,true,false))) in the 0x85 packed form: both reduce to FalseProp, node cost 50 vs reference cost 65."

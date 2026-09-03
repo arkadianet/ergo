@@ -299,16 +299,22 @@ jobs:
       - name: cargo build (release)
         run: cargo build --release -p ergo-difftest
 
-      # The guard itself. Exits non-zero on any PENDING divergence — a
-      # reduce-native finding, or a parse-surface finding that PERSISTS on its
-      # reduction channel. KnownArtifact records are reported and ignored.
+      # The guard itself. Exit 1 = an UNBASELINED pending divergence (a new
+      # candidate); exit 3 = the run did not check what it planned to (dead
+      # oracle / short campaign), which is louder than a finding, not quieter.
+      # Divergences already tracked in known_bugs/baseline.toml are printed in
+      # their own table and do not fail the job.
+      #
+      # Inputs reach the shell through `env:`, never interpolated into `run:` —
+      # `${{ }}` in a run body is textual substitution, so a crafted input value
+      # would execute as script. The guard validates them as integers too.
       - name: consensus guard
         env:
           DIFFTEST_ORACLE_LOG: ${{ runner.temp }}/oracle-transcript.log
+          GUARD_SEED: ${{ inputs.guard_seed || '991' }}
+          GUARD_ITERS: ${{ inputs.guard_iters || '2000' }}
         run: |
-          scripts/difftest-guard.sh \
-            --seed "${{ inputs.guard_seed || '991' }}" \
-            --iters "${{ inputs.guard_iters || '2000' }}"
+          scripts/difftest-guard.sh --seed "$GUARD_SEED" --iters "$GUARD_ITERS"
 
       # Always upload: on a pass this is the empty-queue evidence, on a failure
       # it is the minimized, classified record set plus the oracle transcript
@@ -320,5 +326,5 @@ jobs:
           name: consensus-guard-regressions
           path: |
             ergo-difftest/regressions/
-            ${{ runner.temp }}/oracle-transcript.log
+            ${{ runner.temp }}/oracle-transcript.log.*
           if-no-files-found: ignore

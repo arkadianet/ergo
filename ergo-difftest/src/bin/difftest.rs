@@ -15,6 +15,20 @@ use std::process::ExitCode;
 
 use ergo_difftest::{from_hex, run_campaign, run_input, Outcome};
 
+/// Exit code for a HARNESS/ORACLE failure, distinct from both "clean" (0) and
+/// "divergences found" (1) so a caller can tell "nothing was wrong" from
+/// "nothing was checked". Usage errors keep code 2.
+const EXIT_HARNESS_ERROR_CODE: u8 = 3;
+
+/// [`EXIT_HARNESS_ERROR_CODE`] as an [`ExitCode`] (`ExitCode::from` is not const).
+fn exit_harness_error() -> ExitCode {
+    ExitCode::from(EXIT_HARNESS_ERROR_CODE)
+}
+
+/// Marker every oracle-pipe failure is printed with, so a wrapper script can
+/// grep a log for it even when it only has the log (not the exit code).
+const ORACLE_ERROR_MARKER: &str = "oracle: HARNESS ERROR:";
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut seed: u64 = 1;
@@ -530,8 +544,8 @@ fn run_oracle(
     let mut oracle = match Oracle::spawn(&script) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("oracle: spawn failed: {e}\n(is scala-cli on PATH?)");
-            return ExitCode::FAILURE;
+            eprintln!("{ORACLE_ERROR_MARKER} spawn failed: {e}\n(is scala-cli on PATH?)");
+            return exit_harness_error();
         }
     };
 
@@ -546,6 +560,7 @@ fn run_oracle(
         std::collections::HashMap::new();
     let mut total = 0u64;
     let mut checked = 0u64;
+    let mut harness_error = false;
     'outer: for iter in 0..iters {
         // Non-structured: one shared input diffed across every surface.
         // Structured: per-surface targeted bytes (generated inside the loop).
@@ -570,7 +585,12 @@ fn run_oracle(
                         .or_insert((1, d));
                 }
                 Err(e) => {
-                    eprintln!("oracle: pipe error after {checked} checks: {e}");
+                    // A dead pipe is a HARNESS failure, not a clean campaign.
+                    // Reporting it and then falling through to the normal
+                    // summary would let an oracle that died at check 3 of 2000
+                    // exit 0 — a green guard that checked almost nothing.
+                    eprintln!("{ORACLE_ERROR_MARKER} pipe error after {checked} checks: {e}");
+                    harness_error = true;
                     break 'outer;
                 }
             }
@@ -589,7 +609,17 @@ fn run_oracle(
         "oracle: checks={checked} surfaces={} unique_classes={unique} total_divergences={total}",
         surfaces.len(),
     );
+    if harness_error {
+        println!(
+            "{ORACLE_ERROR_MARKER} campaign aborted after {checked}/{} planned checks — \
+             the verdicts below cover only what was actually checked",
+            iters * surfaces.len() as u64,
+        );
+    }
     if classes.is_empty() {
+        if harness_error {
+            return exit_harness_error();
+        }
         println!("node and JVM reference agree on all checked inputs");
         return ExitCode::SUCCESS;
     }
@@ -603,21 +633,36 @@ fn run_oracle(
     }
 
     // ── Minimize + classify + file ──────────────────────────────────────────
-    if do_minimize {
-        minimize_and_file_campaign(
+    if do_minimize
+        && !minimize_and_file_campaign(
             &sorted,
             &surfaces,
             &mut oracle,
             regressions_dir,
             seed,
             "oracle-mutation",
-        );
+        )
+    {
+        // A pipe death during minimize/classify means records were NOT filed,
+        // so the pending count downstream is an undercount. Fail as a harness
+        // error rather than let a partial record set read as the whole truth.
+        harness_error = true;
     }
 
-    ExitCode::FAILURE
+    if harness_error {
+        exit_harness_error()
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 /// Minimize every unique divergence from a campaign, classify it, and file it.
+///
+/// Returns `false` when the ORACLE PIPE failed part-way — a minimize or
+/// classify step that could not reach the JVM leaves the record set
+/// incomplete, which the caller must surface as a harness error rather than as
+/// a smaller-than-real finding count. A minimizer that merely cannot shrink an
+/// input (a local, non-pipe failure) is not a harness error.
 fn minimize_and_file_campaign(
     sorted: &[(u64, ergo_difftest::oracle::Divergence)],
     surfaces: &[ergo_difftest::oracle::SurfaceSpec],
@@ -625,7 +670,7 @@ fn minimize_and_file_campaign(
     regressions_dir: &std::path::Path,
     campaign_seed: u64,
     provenance: &str,
-) {
+) -> bool {
     use ergo_difftest::minimize::minimize_divergence;
     use ergo_difftest::regressions::{classify_and_file, SeedInfo};
     use ergo_difftest::{from_hex, to_hex};
@@ -633,6 +678,7 @@ fn minimize_and_file_campaign(
     let mut minimized_count = 0u64;
     let mut pending_count = 0u64;
     let mut artifact_count = 0u64;
+    let mut pipe_ok = true;
 
     for (_, div) in sorted {
         // Find the matching SurfaceSpec for this divergence's surface.
@@ -654,7 +700,18 @@ fn minimize_and_file_campaign(
         let (min_bytes, min_div) = match minimize_divergence(&orig_bytes, spec, oracle) {
             Ok(pair) => pair,
             Err(e) => {
-                eprintln!(" FAILED: {e}");
+                let msg = e.to_string();
+                // `minimize_divergence` surfaces both local shrink failures and
+                // io errors from the pipe through one Err channel; only the
+                // latter invalidates the record set.
+                if e.kind() == std::io::ErrorKind::UnexpectedEof
+                    || e.kind() == std::io::ErrorKind::BrokenPipe
+                {
+                    eprintln!("{ORACLE_ERROR_MARKER} minimize pipe failure: {msg}");
+                    pipe_ok = false;
+                } else {
+                    eprintln!(" FAILED: {msg}");
+                }
                 continue;
             }
         };
@@ -684,7 +741,11 @@ fn minimize_and_file_campaign(
                 }
             }
             Err(e) => {
-                eprintln!("  classify/file error for {}: {e}", div.surface);
+                eprintln!(
+                    "{ORACLE_ERROR_MARKER} classify/file error for {}: {e}",
+                    div.surface
+                );
+                pipe_ok = false;
             }
         }
     }
@@ -695,6 +756,7 @@ fn minimize_and_file_campaign(
         sorted.iter().map(|(c, _)| c).sum::<u64>(),
         sorted.len(),
     );
+    pipe_ok
 }
 
 /// Replay a SINGLE input against the JVM oracle (the `--oracle --repro` path), so
@@ -711,8 +773,8 @@ fn run_oracle_repro(bytes: &[u8], script: Option<String>, only: Option<&str>) ->
     let mut oracle = match Oracle::spawn(&script) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("oracle: spawn failed: {e}\n(is scala-cli on PATH?)");
-            return ExitCode::FAILURE;
+            eprintln!("{ORACLE_ERROR_MARKER} spawn failed: {e}\n(is scala-cli on PATH?)");
+            return exit_harness_error();
         }
     };
 
@@ -732,8 +794,11 @@ fn run_oracle_repro(bytes: &[u8], script: Option<String>, only: Option<&str>) ->
                 );
             }
             Err(e) => {
-                eprintln!("oracle: pipe error on surface {}: {e}", spec.name);
-                return ExitCode::FAILURE;
+                eprintln!(
+                    "{ORACLE_ERROR_MARKER} pipe error on surface {}: {e}",
+                    spec.name
+                );
+                return exit_harness_error();
             }
         }
     }
@@ -765,8 +830,8 @@ fn run_oracle_repro_minimize(
     let mut oracle = match Oracle::spawn(&script) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("oracle: spawn failed: {e}\n(is scala-cli on PATH?)");
-            return ExitCode::FAILURE;
+            eprintln!("{ORACLE_ERROR_MARKER} spawn failed: {e}\n(is scala-cli on PATH?)");
+            return exit_harness_error();
         }
     };
 
@@ -944,6 +1009,14 @@ fn print_help() {
          \x20                  divergence; with --repro: minimize+file that one input\n\
          \x20                  (--repro --minimize requires --surface)\n\
          \x20 --regressions-dir D  where to file records (default: ergo-difftest/regressions)\n\
-         \x20 --selftest       verify the harness's own bug-detection has teeth\n"
+         \x20 --selftest       verify the harness's own bug-detection has teeth\n\
+         \n\
+         EXIT CODES:\n\
+         \x20 0  clean — every check ran and node and reference agreed\n\
+         \x20 1  divergences found (or a hermetic invariant violation)\n\
+         \x20 2  usage error\n\
+         \x20 3  harness/oracle error — the oracle could not be spawned, or the\n\
+         \x20    pipe died mid-campaign, so the run checked LESS than it planned.\n\
+         \x20    Never read a 3 as a clean run.\n"
     );
 }

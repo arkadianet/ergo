@@ -77,10 +77,28 @@ impl Oracle {
             .spawn()?;
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
-        let transcript = match std::env::var("DIFFTEST_ORACLE_LOG") {
-            Ok(path) if !path.is_empty() => Some(std::fs::File::create(path)?),
+        // APPEND, never truncate: a guard run spawns one oracle process per
+        // surface, and several of them may share a single log path. Truncating
+        // on spawn would leave the artifact holding only the last surface's
+        // transcript — exactly the evidence a post-mortem needs least. The
+        // header line delimits the processes.
+        let mut transcript = match std::env::var("DIFFTEST_ORACLE_LOG") {
+            Ok(path) if !path.is_empty() => Some(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)?,
+            ),
             _ => None,
         };
+        if let Some(log) = transcript.as_mut() {
+            writeln!(
+                log,
+                "== oracle begin: script={script} pid={} ==",
+                child.id()
+            )?;
+            log.flush()?;
+        }
         Ok(Oracle {
             child,
             stdin,
@@ -361,6 +379,19 @@ fn deserialize_box_script(
     (Ok(tree), consumed)
 }
 
+/// **Coverage gap — `CONTEXT.headers` (the #238 class) is NOT exercised.** Both
+/// reduce surfaces run with an EMPTY last-headers window: the node side leaves
+/// `ReductionContext::last_headers` empty and the JVM side passes
+/// `headers = Colls.emptyColl[Header]` (`ErgoSerdeOracle.scala`
+/// `reduceContext`). A script reading `CONTEXT.headers` therefore sees a
+/// zero-length collection on both sides and agrees trivially, so the window-size
+/// divergence family (10 headers in Rust vs 9 in Scala) cannot surface here.
+/// Closing it needs a header window on BOTH sides — either a fixed
+/// oracle-and-node-agreed set of 10 serialized headers, or a third frame field
+/// carrying them on the wire the way `ctx_expr` carries the extension. That is an
+/// oracle-contract change, deliberately not folded into the guard PR; the
+/// replay driver reaches the class in the meantime.
+///
 /// `reduce`: the EVAL/COST differential. Deserialize the tree (full box-script
 /// gates, via [`deserialize_box_script`]) and reduce its root to the on-chain
 /// sigma proposition + raw JIT cost, against the same minimal "dummy" context the
