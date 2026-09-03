@@ -55,6 +55,9 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
         sync_interval_stable: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL_STABLE,
         cache_bytes: None,
         script_validation_checkpoint: chain_spec.bootstrap.checkpoint,
+        // No header-level anchor in tests: Scala's default is
+        // `checkpoint = null` and there is no network default.
+        header_checkpoint: None,
         genesis_id: chain_spec.genesis.header_id,
         api_bind: Some("127.0.0.1:0".parse().unwrap()),
         // Scala-parity Blake2b256("hello") test oracle. The integration

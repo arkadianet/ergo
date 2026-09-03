@@ -1143,6 +1143,7 @@ fn cfg_with_mode(
         sync_interval_stable: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL_STABLE,
         cache_bytes: None,
         script_validation_checkpoint: None,
+        header_checkpoint: None,
         genesis_id: None,
         api_bind: None,
         api_key_hash: None,

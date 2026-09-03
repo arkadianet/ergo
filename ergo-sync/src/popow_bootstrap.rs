@@ -218,6 +218,49 @@ impl PopowBootstrap {
     }
 }
 
+/// Enforce the header-level checkpoint on every header carried by a NiPoPoW
+/// proof, BEFORE `StateStore::apply_popow_proof` writes them.
+///
+/// The proof-apply path writes headers straight into `HEADERS` /
+/// `HEADER_META` / `HEADER_CHAIN_INDEX` without going through
+/// [`crate::header_proc::finalize_header`], so it would otherwise be the one
+/// way a header at the checkpoint height enters the store unchecked. Scala
+/// has no equivalent gap here (its NiPoPoW bootstrap is not a header-writing
+/// shortcut past `HeadersProcessor`), so this is the Rust-side placement of
+/// the same `hdrCheckpoint` rule.
+///
+/// Only the header at exactly `checkpoint.height` is constrained; a proof
+/// whose sparse prefix skips that height passes this check (it neither
+/// confirms nor contradicts the anchor — the snapshot-install anchor check
+/// in [`crate::snapshot_bootstrap::manifest`] is what refuses to *trust*
+/// state above an unconfirmed anchor).
+pub fn check_proof_against_checkpoint(
+    proof: &NipopowProof,
+    checkpoint: Option<crate::header_proc::HeaderCheckpoint>,
+) -> Result<(), crate::header_proc::HeaderProcessError> {
+    let Some(ckpt) = checkpoint else {
+        return Ok(());
+    };
+    let headers = proof
+        .prefix
+        .iter()
+        .map(|p| &p.header)
+        .chain(std::iter::once(&proof.suffix_head.header))
+        .chain(proof.suffix_tail.iter());
+    for header in headers {
+        if header.height != ckpt.height {
+            continue;
+        }
+        let (_bytes, id) = ergo_ser::header::serialize_header(header).map_err(|e| {
+            crate::header_proc::HeaderProcessError::Deserialize(format!(
+                "popow proof header at checkpoint height: {e:?}"
+            ))
+        })?;
+        ckpt.check(header.height, id.as_bytes())?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,5 +428,78 @@ mod tests {
             )
         ));
         assert!(b.quorum_reached(), "second distinct peer reaches quorum");
+    }
+
+    // ----- header checkpoint on the proof-apply shortcut -----
+
+    fn header_id_of(h: &Header) -> [u8; 32] {
+        let (_bytes, id) = ergo_ser::header::serialize_header(h).unwrap();
+        *id.as_bytes()
+    }
+
+    #[test]
+    fn proof_checkpoint_absent_accepts_proof() {
+        assert!(check_proof_against_checkpoint(&valid_proof(), None).is_ok());
+    }
+
+    #[test]
+    fn proof_checkpoint_matching_id_accepts_proof() {
+        let proof = valid_proof();
+        let ckpt = crate::header_proc::HeaderCheckpoint {
+            height: 2,
+            block_id: header_id_of(&proof.suffix_head.header),
+        };
+        assert!(check_proof_against_checkpoint(&proof, Some(ckpt)).is_ok());
+    }
+
+    #[test]
+    fn proof_checkpoint_height_absent_from_proof_accepts_proof() {
+        // A sparse prefix that skips the checkpoint height neither confirms
+        // nor contradicts the anchor; refusing to *trust* state above an
+        // unconfirmed anchor is the snapshot-install check's job.
+        let proof = valid_proof();
+        let ckpt = crate::header_proc::HeaderCheckpoint {
+            height: 500_000,
+            block_id: [0x7f; 32],
+        };
+        assert!(check_proof_against_checkpoint(&proof, Some(ckpt)).is_ok());
+    }
+
+    #[test]
+    fn proof_checkpoint_wrong_id_at_checkpoint_height_rejects_proof() {
+        let proof = valid_proof();
+        let ckpt = crate::header_proc::HeaderCheckpoint {
+            height: 2,
+            block_id: [0x7f; 32],
+        };
+        let err = check_proof_against_checkpoint(&proof, Some(ckpt))
+            .expect_err("proof header at the checkpoint height with a wrong id must be refused");
+        assert!(
+            matches!(
+                err,
+                crate::header_proc::HeaderProcessError::CheckpointMismatch { height: 2, .. }
+            ),
+            "expected CheckpointMismatch at height 2, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn proof_checkpoint_checks_prefix_headers_too() {
+        // The anchor must cover the sparse prefix, not just the suffix:
+        // genesis sits in `prefix` at height 1.
+        let proof = valid_proof();
+        let ckpt = crate::header_proc::HeaderCheckpoint {
+            height: 1,
+            block_id: [0x7f; 32],
+        };
+        let err = check_proof_against_checkpoint(&proof, Some(ckpt))
+            .expect_err("prefix header at the checkpoint height must be checked");
+        assert!(
+            matches!(
+                err,
+                crate::header_proc::HeaderProcessError::CheckpointMismatch { height: 1, .. }
+            ),
+            "expected CheckpointMismatch at height 1, got {err:?}"
+        );
     }
 }

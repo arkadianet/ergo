@@ -467,6 +467,24 @@ fn drive_popow_bootstrap(state: &mut NodeState, now: Instant) {
         // also takes &mut self via the store).
         let proof_opt = popow.best_proof().cloned();
         if let Some(proof) = proof_opt {
+            // Header-level checkpoint (Scala `hdrCheckpoint`). The proof-apply
+            // path writes headers directly, bypassing
+            // `header_proc::finalize_header`, so the anchor is enforced here
+            // instead — otherwise a NiPoPoW bootstrap would be the one way a
+            // header at the checkpoint height enters the store unchecked.
+            let checkpoint = state.executor.header_checkpoint();
+            if let Err(e) =
+                ergo_sync::popow_bootstrap::check_proof_against_checkpoint(&proof, checkpoint)
+            {
+                warn!(
+                    error = %e,
+                    "NiPoPoW: proof violates the configured header checkpoint; bootstrap aborted",
+                );
+                if let Some(popow) = state.popow_bootstrap.as_mut() {
+                    popow.mark_applied();
+                }
+                return;
+            }
             match state
                 .store
                 .as_utxo_mut()
@@ -1008,6 +1026,44 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
     };
 
     let snapshot_height_u32 = snapshot_height as u32;
+
+    // Header-checkpoint anchor (Scala `ergo.node.checkpoint`). A Mode 2
+    // install adopts state the node never computed; the manifest is bound to
+    // the header chain's `state_root`, and the header chain in turn is bound
+    // to the operator's anchor. Refuse to install state at or above an anchor
+    // this node has not actually passed. See the trust argument in
+    // `ergo_sync::snapshot_bootstrap::manifest`.
+    if let Some(ckpt) = state.executor.header_checkpoint() {
+        let observed = match state
+            .store
+            .as_utxo()
+            .expect("utxo-only: Mode 2 snapshot install is gated off in digest mode")
+            .lookup_header_at_height(ckpt.height)
+        {
+            Ok(HeightLookup::Dense(id)) => Some(id),
+            Ok(HeightLookup::SparseGap) | Ok(HeightLookup::AboveTip) => None,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Mode 2: install — checkpoint-height chain lookup failed; halted",
+                );
+                return;
+            }
+        };
+        if let Err(e) = ergo_sync::snapshot_bootstrap::snapshot_install_anchor_check(
+            snapshot_height_u32,
+            Some(ckpt),
+            observed,
+        ) {
+            warn!(
+                error = %e,
+                snapshot_height = snapshot_height_u32,
+                "Mode 2: install refused — snapshot is not anchored by the configured                  header checkpoint; halted",
+            );
+            return;
+        }
+    }
+
     match state
         .store
         .as_utxo_mut()

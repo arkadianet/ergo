@@ -49,10 +49,89 @@ pub enum HeaderProcessError {
         hex::encode(parent_id)
     )]
     EpochContextIncomplete { height: u32, parent_id: [u8; 32] },
+    /// The header sits at exactly the configured header-level checkpoint
+    /// height but carries a different id than the operator pinned. Scala
+    /// `HeadersProcessor.checkpointCondition`
+    /// (`HeadersProcessor.scala:437-443`), surfaced through the `hdrCheckpoint`
+    /// validation rule at `HeadersProcessor.scala:428`. The sender is
+    /// penalised exactly like any other invalid header — this node is on a
+    /// different chain than the peer at the one height the operator declared
+    /// authoritative.
+    #[error(
+        "checkpoint mismatch at height {height}: expected {}, got {}",
+        hex::encode(expected),
+        hex::encode(got)
+    )]
+    CheckpointMismatch {
+        height: u32,
+        expected: [u8; 32],
+        got: [u8; 32],
+    },
     #[error("validation failed: {0}")]
     Validation(#[from] HeaderValidationError),
     #[error("storage error: {0}")]
     Storage(#[from] ergo_state::store::StateError),
+}
+
+/// Operator-supplied header-level trust anchor: "the block at `height`
+/// MUST be `block_id`".
+///
+/// Scala parity: `ergo.node.checkpoint` (`application.conf:113-125`,
+/// default `null`) enforced in HEADER validation by
+/// `HeadersProcessor.checkpointCondition`
+/// (`HeadersProcessor.scala:437-443`), wired in as the `hdrCheckpoint` rule
+/// of `validateChildBlockHeader` (`HeadersProcessor.scala:428`). Only the
+/// header at *exactly* `height` is constrained: headers below it are
+/// validated normally and are NOT skipped or trusted (Scala's
+/// `checkpointCondition` returns `true` for every other height), and headers
+/// above it inherit the anchor transitively through the parent chain.
+/// `validateGenesisBlockHeader` (`HeadersProcessor.scala:402-417`) carries no
+/// `hdrCheckpoint` rule, so genesis is likewise unconstrained here.
+///
+/// DISTINCT FROM the script-validation checkpoint
+/// (`[chain] script_validation_checkpoint_height` / `_block_id`, consumed by
+/// `BlockValidationContext::script_validation_checkpoint`): that one governs
+/// whether per-input ErgoScript evaluation is SKIPPED below a height during
+/// full-block validation. This one adds no skipping whatsoever — it only
+/// binds one header id, on the header chain, before any full block exists.
+/// Scala happens to read both from the same HOCON key; this node keeps them
+/// as two settings because the script checkpoint carries per-network
+/// defaults while the header anchor is deliberately operator-supplied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeaderCheckpoint {
+    /// Height at which `block_id` is asserted. Always `> 0` as loaded from
+    /// config; height 0 has no header.
+    pub height: u32,
+    /// The header id the operator pins at `height`.
+    pub block_id: [u8; 32],
+}
+
+impl HeaderCheckpoint {
+    /// Scala `checkpointCondition`: pass unless the header is at exactly the
+    /// checkpoint height with a different id.
+    pub fn check(&self, height: u32, header_id: &[u8; 32]) -> Result<(), HeaderProcessError> {
+        if height == self.height && header_id != &self.block_id {
+            return Err(HeaderProcessError::CheckpointMismatch {
+                height,
+                expected: self.block_id,
+                got: *header_id,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// [`HeaderCheckpoint::check`] lifted over `Option` — no checkpoint
+/// configured accepts every header, matching Scala's `getOrElse(true)`.
+pub fn check_header_checkpoint(
+    checkpoint: Option<HeaderCheckpoint>,
+    height: u32,
+    header_id: &[u8; 32],
+) -> Result<(), HeaderProcessError> {
+    match checkpoint {
+        Some(c) => c.check(height, header_id),
+        None => Ok(()),
+    }
 }
 
 /// Result of successfully processing a header.
@@ -184,11 +263,15 @@ pub fn pre_validate_header(header_bytes: &[u8]) -> Result<PreValidatedHeader, He
 /// Phase 2 of header processing: chain linkage + difficulty + persist.
 /// Sequential, requires DB access. Caller provides the raw header bytes
 /// (not cloned into PreValidatedHeader to avoid duplicate allocations).
+///
+/// `checkpoint` is the operator-supplied header-level trust anchor
+/// ([`HeaderCheckpoint`]); `None` disables it (Scala's default).
 pub fn finalize_header<S: HeaderSectionStore + ChainStateRead + ?Sized>(
     store: &mut S,
     pre: PreValidatedHeader,
     header_bytes: &[u8],
     config: &DifficultyParams,
+    checkpoint: Option<HeaderCheckpoint>,
 ) -> Result<ProcessedHeader, HeaderProcessError> {
     let header_id = *pre.pow_checked.header_id();
     // Already known?
@@ -206,6 +289,14 @@ pub fn finalize_header<S: HeaderSectionStore + ChainStateRead + ?Sized>(
         return process_genesis_header(store, header, header_id, header_bytes, config);
     }
 
+    // Header-level checkpoint (Scala `hdrCheckpoint`,
+    // `HeadersProcessor.scala:428` + `:437-443`). Placed after the genesis
+    // branch because Scala's `validateGenesisBlockHeader` carries no
+    // `hdrCheckpoint` rule. A mismatch is an INVALID header: the caller's
+    // catch-all error arm reports it and penalises the sending peer exactly
+    // as it does for a bad PoW or a broken difficulty.
+    check_header_checkpoint(checkpoint, pre.height, &header_id)?;
+
     // Chain linkage + difficulty (needs parent from store). Consumes the
     // PoW proof to skip re-verification.
     process_header_inner(store, pre.pow_checked, header_bytes, config)
@@ -216,7 +307,7 @@ pub fn process_header<S: HeaderSectionStore + ChainStateRead + ?Sized>(
     store: &mut S,
     header_bytes: &[u8],
 ) -> Result<ProcessedHeader, HeaderProcessError> {
-    process_header_cfg(store, header_bytes, &DifficultyParams::mainnet())
+    process_header_cfg(store, header_bytes, &DifficultyParams::mainnet(), None)
 }
 
 /// Process a raw header with network-specific chain configuration.
@@ -229,9 +320,10 @@ pub fn process_header_cfg<S: HeaderSectionStore + ChainStateRead + ?Sized>(
     store: &mut S,
     header_bytes: &[u8],
     config: &DifficultyParams,
+    checkpoint: Option<HeaderCheckpoint>,
 ) -> Result<ProcessedHeader, HeaderProcessError> {
     let pre = pre_validate_header(header_bytes)?;
-    finalize_header(store, pre, header_bytes, config)
+    finalize_header(store, pre, header_bytes, config, checkpoint)
 }
 
 /// Chain linkage + difficulty + persist. Shared by process_header_cfg and finalize_header.
@@ -569,6 +661,74 @@ pub fn find_header_at_height<S: HeaderSectionStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- helpers -----
+
+    fn id(byte: u8) -> [u8; 32] {
+        [byte; 32]
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn checkpoint_matching_id_at_checkpoint_height_accepts() {
+        let ckpt = HeaderCheckpoint {
+            height: 100,
+            block_id: id(0xaa),
+        };
+        assert!(ckpt.check(100, &id(0xaa)).is_ok());
+    }
+
+    #[test]
+    fn checkpoint_header_below_checkpoint_height_unaffected() {
+        // Scala `checkpointCondition` returns true for every height that is
+        // not the checkpoint height — the checkpoint neither rejects NOR
+        // trusts anything below it.
+        let ckpt = HeaderCheckpoint {
+            height: 100,
+            block_id: id(0xaa),
+        };
+        assert!(ckpt.check(99, &id(0xbb)).is_ok());
+    }
+
+    #[test]
+    fn checkpoint_header_above_checkpoint_height_unaffected() {
+        let ckpt = HeaderCheckpoint {
+            height: 100,
+            block_id: id(0xaa),
+        };
+        assert!(ckpt.check(101, &id(0xbb)).is_ok());
+    }
+
+    #[test]
+    fn checkpoint_absent_accepts_every_header() {
+        assert!(check_header_checkpoint(None, 100, &id(0xbb)).is_ok());
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn checkpoint_mismatching_id_at_checkpoint_height_errors() {
+        let ckpt = HeaderCheckpoint {
+            height: 100,
+            block_id: id(0xaa),
+        };
+        let err = ckpt
+            .check(100, &id(0xbb))
+            .expect_err("wrong id at the checkpoint height must be rejected");
+        match err {
+            HeaderProcessError::CheckpointMismatch {
+                height,
+                expected,
+                got,
+            } => {
+                assert_eq!(height, 100);
+                assert_eq!(expected, id(0xaa));
+                assert_eq!(got, id(0xbb));
+            }
+            other => panic!("expected CheckpointMismatch, got {other:?}"),
+        }
+    }
 
     #[test]
     fn cumulative_score_uses_shared_decoder() {

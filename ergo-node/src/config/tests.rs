@@ -2083,3 +2083,81 @@ fn peers_allow_local_defaults_off_and_parses_when_set() {
         "an explicit allow_local = true must reach NodeConfig",
     );
 }
+
+// ----- [chain] checkpoint (header-level, Scala ergo.node.checkpoint) -----
+
+#[test]
+fn header_checkpoint_absent_is_none() {
+    // Scala's default is `checkpoint = null` (application.conf:125): an
+    // anchored node is always an explicit operator decision, so there is no
+    // network default to fall back to.
+    let path = write_toml("[peers]\nknown = [\"127.0.0.1:9030\"]\n");
+    let cfg = NodeConfig::load(minimal_cli(Some(&path))).expect("absent checkpoint loads");
+    assert!(cfg.header_checkpoint.is_none());
+    // The script-validation checkpoint is a DIFFERENT setting and keeps its
+    // network default.
+    assert!(cfg.script_validation_checkpoint.is_some());
+}
+
+#[test]
+fn header_checkpoint_valid_table_round_trips() {
+    let hex_id = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+    let mut expected = [0u8; 32];
+    for (i, slot) in expected.iter_mut().enumerate() {
+        *slot = (i + 1) as u8;
+    }
+    let path = write_toml(&format!(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [chain]\ncheckpoint = {{ height = 1231454, block_id = \"{hex_id}\" }}\n",
+    ));
+    let cfg = NodeConfig::load(minimal_cli(Some(&path))).expect("valid checkpoint loads");
+    let ckpt = cfg.header_checkpoint.expect("checkpoint must be set");
+    assert_eq!(ckpt.height, 1_231_454);
+    assert_eq!(ckpt.block_id, expected);
+}
+
+#[test]
+fn header_checkpoint_zero_height_rejected() {
+    let hex_id = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+    let path = write_toml(&format!(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [chain]\ncheckpoint = {{ height = 0, block_id = \"{hex_id}\" }}\n",
+    ));
+    let err = NodeConfig::load(minimal_cli(Some(&path)))
+        .expect_err("height 0 has no header and must be refused");
+    assert!(err.contains("height"), "unexpected error: {err}");
+}
+
+#[test]
+fn header_checkpoint_short_block_id_rejected() {
+    let path = write_toml(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [chain]\ncheckpoint = { height = 100, block_id = \"0a0b0c\" }\n",
+    );
+    let err = NodeConfig::load(minimal_cli(Some(&path)))
+        .expect_err("a block_id that is not 32 bytes must be refused");
+    assert!(err.contains("32 bytes"), "unexpected error: {err}");
+}
+
+#[test]
+fn header_checkpoint_non_hex_block_id_rejected() {
+    let path = write_toml(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [chain]\ncheckpoint = { height = 100, block_id = \"zzzz\" }\n",
+    );
+    let err =
+        NodeConfig::load(minimal_cli(Some(&path))).expect_err("a non-hex block_id must be refused");
+    assert!(err.contains("hex decode"), "unexpected error: {err}");
+}
+
+#[test]
+fn header_checkpoint_unknown_key_rejected() {
+    let hex_id = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+    let path = write_toml(&format!(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [chain]\ncheckpoint = {{ height = 100, blockId = \"{hex_id}\" }}\n",
+    ));
+    let err = NodeConfig::load(minimal_cli(Some(&path)))
+        .expect_err("a typo'd key must not silently leave the node unanchored");
+    assert!(err.contains("blockId"), "unexpected error: {err}");
+}

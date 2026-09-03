@@ -534,6 +534,36 @@ impl NodeConfig {
             None => default_cp,
         };
 
+        // Header-level checkpoint (`[chain] checkpoint`), Scala
+        // `ergo.node.checkpoint` as enforced by
+        // `HeadersProcessor.checkpointCondition`. No network default and no
+        // CLI override: an anchored node is an explicit operator decision,
+        // matching Scala's `checkpoint = null` in `application.conf:125`.
+        let header_checkpoint = match &toml_cfg.chain.checkpoint {
+            None => None,
+            Some(c) => {
+                if c.height == 0 {
+                    return Err("[chain] checkpoint.height must be > 0 (height 0 has no \
+                         header); omit the whole `checkpoint` table to disable the anchor"
+                        .into());
+                }
+                let bytes = hex::decode(c.block_id.trim_start_matches("0x"))
+                    .map_err(|e| format!("[chain] checkpoint.block_id hex decode: {e}"))?;
+                if bytes.len() != 32 {
+                    return Err(format!(
+                        "[chain] checkpoint.block_id must be 32 bytes (got {})",
+                        bytes.len(),
+                    ));
+                }
+                let mut block_id = [0u8; 32];
+                block_id.copy_from_slice(&bytes);
+                Some(ergo_sync::header_proc::HeaderCheckpoint {
+                    height: c.height,
+                    block_id,
+                })
+            }
+        };
+
         // Genesis-id resolution for NiPoPoW R5. TOML
         // override > network default. An explicit empty string in
         // TOML (`genesis_id = ""`) disables the check entirely —
@@ -1047,6 +1077,7 @@ impl NodeConfig {
             sync_interval_stable,
             cache_bytes,
             script_validation_checkpoint,
+            header_checkpoint,
             genesis_id,
             api_bind,
             api_key_hash,

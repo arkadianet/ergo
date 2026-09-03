@@ -152,6 +152,15 @@ pub struct NodeConfig {
     /// `Some((h, id))` → skip below `h`, assert observed header_id at `h`
     /// matches `id` (mismatch = hard error).
     pub script_validation_checkpoint: Option<(u32, [u8; 32])>,
+    /// Header-level checkpoint (Scala `ergo.node.checkpoint`, enforced by
+    /// `HeadersProcessor.checkpointCondition`): the header at exactly
+    /// `height` MUST have id `block_id` or the header is invalid and its
+    /// sender is penalised. `None` (the default, matching Scala's
+    /// `checkpoint = null`) disables the anchor. It skips no validation —
+    /// headers below the height are processed exactly as without it.
+    /// Sourced from `[chain] checkpoint`; there is deliberately no network
+    /// default, so an anchored node is always an operator decision.
+    pub header_checkpoint: Option<ergo_sync::header_proc::HeaderCheckpoint>,
     /// Genesis header id (32 bytes) used for NiPoPoW R5 enforcement.
     /// `Some(id)` → verifier rejects proofs whose first header id
     /// does not match. `None` → open verification (development only).

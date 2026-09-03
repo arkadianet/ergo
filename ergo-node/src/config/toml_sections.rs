@@ -272,6 +272,25 @@ pub(super) struct TomlChain {
     /// string to disable genesis-id checking entirely — accepted
     /// **only** in development; production runs MUST keep the default.
     pub(super) genesis_id: Option<String>,
+    /// Header-level checkpoint (Scala `ergo.node.checkpoint`): the header at
+    /// exactly `height` MUST have id `block_id`, enforced during HEADER
+    /// validation. Absent by default, matching Scala's `checkpoint = null`.
+    /// Deliberately NOT the same setting as
+    /// `script_validation_checkpoint_*` above — that one governs skipping
+    /// ErgoScript evaluation during full-block validation.
+    pub(super) checkpoint: Option<TomlHeaderCheckpoint>,
+}
+
+/// `[chain] checkpoint = { height = N, block_id = "hex" }`.
+/// `deny_unknown_fields` so a typo'd key surfaces as a parse error instead
+/// of silently leaving the node unanchored.
+#[derive(serde::Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub(super) struct TomlHeaderCheckpoint {
+    /// Height whose header id is pinned. Must be > 0.
+    pub(super) height: u32,
+    /// Hex-encoded header id (32 bytes) expected at `height`.
+    pub(super) block_id: String,
 }
 
 #[derive(serde::Deserialize, Default, Debug)]

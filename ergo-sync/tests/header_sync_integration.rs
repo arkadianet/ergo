@@ -297,6 +297,183 @@ fn process_header_chain_2_through_5() {
 }
 
 #[test]
+fn finalize_header_at_checkpoint_height_with_matching_id_accepted() {
+    // Scala `hdrCheckpoint` (`HeadersProcessor.scala:428`): the checkpoint
+    // constrains the header at exactly its height and nothing else. With the
+    // real header id pinned, header 2 processes normally.
+    use ergo_sync::header_proc::{finalize_header, pre_validate_header, HeaderCheckpoint};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    init_genesis(&mut store);
+    let headers = load_headers();
+    seed_header_1(&mut store, &headers);
+
+    let h2_bytes = get_header_bytes(&headers, 2);
+    let h2_id = get_header_id(&headers, 2);
+    let ckpt = HeaderCheckpoint {
+        height: 2,
+        block_id: h2_id,
+    };
+
+    let pre = pre_validate_header(&h2_bytes).unwrap();
+    let processed = finalize_header(
+        &mut store,
+        pre,
+        &h2_bytes,
+        &ergo_crypto::difficulty::DifficultyParams::mainnet(),
+        Some(ckpt),
+    )
+    .expect("header matching the checkpoint must be accepted");
+    assert_eq!(processed.header_id, h2_id);
+    assert_eq!(store.chain_state().best_header_height, 2);
+}
+
+#[test]
+fn finalize_header_at_checkpoint_height_with_wrong_id_rejected() {
+    // The real header 2 against a checkpoint pinning a DIFFERENT id at
+    // height 2: this node is not on the operator's chain at the one height
+    // they declared authoritative, so the header is invalid. The executor's
+    // catch-all error arm penalises the sending peer exactly as for a bad
+    // PoW (see `header_checkpoint_mismatch_penalizes_peer` in
+    // `ergo-sync/src/executor/tests.rs`).
+    use ergo_sync::header_proc::{finalize_header, pre_validate_header, HeaderCheckpoint};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    init_genesis(&mut store);
+    let headers = load_headers();
+    seed_header_1(&mut store, &headers);
+
+    let h2_bytes = get_header_bytes(&headers, 2);
+    let h2_id = get_header_id(&headers, 2);
+    let ckpt = HeaderCheckpoint {
+        height: 2,
+        block_id: [0x7fu8; 32],
+    };
+
+    let pre = pre_validate_header(&h2_bytes).unwrap();
+    let err = finalize_header(
+        &mut store,
+        pre,
+        &h2_bytes,
+        &ergo_crypto::difficulty::DifficultyParams::mainnet(),
+        Some(ckpt),
+    )
+    .expect_err("header at the checkpoint height with a different id must be rejected");
+    match err {
+        HeaderProcessError::CheckpointMismatch {
+            height,
+            expected,
+            got,
+        } => {
+            assert_eq!(height, 2);
+            assert_eq!(expected, [0x7fu8; 32]);
+            assert_eq!(got, h2_id);
+        }
+        other => panic!("expected CheckpointMismatch, got {other:?}"),
+    }
+    // Rejected before persistence: the header must not have been stored.
+    assert!(store.get_header(&h2_id).unwrap().is_none());
+    assert_eq!(store.chain_state().best_header_height, 1);
+}
+
+#[test]
+fn finalize_header_below_checkpoint_height_unaffected() {
+    // Scala does NOT skip validation below the checkpoint height and does not
+    // constrain those headers either: headers 2-5 process identically with a
+    // checkpoint pinned far above them (height 1000, arbitrary id).
+    use ergo_sync::header_proc::{finalize_header, pre_validate_header, HeaderCheckpoint};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    init_genesis(&mut store);
+    let headers = load_headers();
+    seed_header_1(&mut store, &headers);
+
+    let ckpt = HeaderCheckpoint {
+        height: 1000,
+        block_id: [0x7fu8; 32],
+    };
+    for height in 2..=5 {
+        let h_bytes = get_header_bytes(&headers, height);
+        let pre = pre_validate_header(&h_bytes).unwrap();
+        let processed = finalize_header(
+            &mut store,
+            pre,
+            &h_bytes,
+            &ergo_crypto::difficulty::DifficultyParams::mainnet(),
+            Some(ckpt),
+        )
+        .unwrap_or_else(|e| panic!("height {height} must be unaffected by the checkpoint: {e}"));
+        assert_eq!(processed.height, height);
+    }
+    assert_eq!(store.chain_state().best_header_height, 5);
+}
+
+#[test]
+fn header_checkpoint_mismatch_penalizes_sending_peer() {
+    // Scala treats `hdrCheckpoint` like any other header rule: the modifier
+    // is InvalidModifier and the sender is penalised. Drive the real
+    // executor path (`Action::ValidateHeader`) so the penalty, not just the
+    // error, is pinned.
+    use ergo_p2p::peer::Penalty;
+    use ergo_sync::coordinator::{Action, SyncCoordinator};
+    use ergo_sync::executor::SyncExecutor;
+    use ergo_sync::header_proc::HeaderCheckpoint;
+    use ergo_validation::context::ProtocolParams;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::time::Instant;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    init_genesis(&mut store);
+    let headers = load_headers();
+    seed_header_1(&mut store, &headers);
+    let mut store = ergo_state::StateBackendKind::Utxo(store);
+
+    let mut coordinator = SyncCoordinator::new(1);
+    coordinator.sync_state_mut().set_headers_chain_synced();
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        ergo_crypto::difficulty::DifficultyParams::mainnet(),
+    );
+    executor.set_header_checkpoint(Some(HeaderCheckpoint {
+        height: 2,
+        block_id: [0x7fu8; 32],
+    }));
+
+    let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9030);
+    let h2_bytes = get_header_bytes(&headers, 2);
+    let h2_id = get_header_id(&headers, 2);
+    let actions = executor.execute_all(
+        vec![Action::ValidateHeader {
+            peer,
+            header_bytes: h2_bytes,
+        }],
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::Penalize {
+                peer: p,
+                penalty: Penalty::Misbehavior,
+            } if *p == peer
+        )),
+        "checkpoint mismatch must penalise the sending peer: {actions:?}"
+    );
+    assert!(
+        store.get_header(&h2_id).unwrap().is_none(),
+        "a header rejected by the checkpoint must not be persisted"
+    );
+}
+
+#[test]
 fn process_header_rejects_height_mismatch() {
     // Process header 2 but with a parent whose metadata claims height 5
     // instead of 1. Header 2 (height=2) should fail: expected 6, got 2.
