@@ -163,8 +163,11 @@ pub(super) fn get_var_from_input(
     };
     match ext.get(&var_id) {
         Some((ext_tpe, ext_val)) if *ext_tpe == tpe => {
-            let val =
-                crate::evaluator::helpers::sigma_to_value_versioned(ext_tpe, ext_val, cx.ctx)?;
+            // Same lowering as `0xE3 GetVar` — including the `Tuple`-node
+            // (0x86) provenance case, which Scala hands back as a `Coll`.
+            let val = crate::evaluator::opcodes::box_context::extension_var_value(
+                ext_tpe, ext_val, cx.ctx,
+            )?;
             Ok(Value::Opt(Some(Box::new(val))))
         }
         _ => Ok(Value::Opt(None)),

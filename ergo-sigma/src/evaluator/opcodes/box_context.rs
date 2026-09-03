@@ -13,7 +13,7 @@ use ergo_primitives::cost::CostAccumulator;
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::opcode::{parse_expr, write_expr, Expr, IrNode, Payload};
 use ergo_ser::sigma_type::SigmaType;
-use ergo_ser::sigma_value::SigmaValue;
+use ergo_ser::sigma_value::{CollValue, SigmaValue};
 
 use super::super::cost::add_cost;
 use super::super::eval_ctx::EvalCtx;
@@ -475,9 +475,54 @@ pub(in crate::evaluator) fn eval_get_var(
             if ext_tpe != tpe {
                 return Ok(Value::Opt(None));
             }
-            let val = sigma_to_value_versioned(ext_tpe, ext_val, ctx)?;
+            let val = extension_var_value(ext_tpe, ext_val, ctx)?;
             Ok(Value::Opt(Some(Box::new(val))))
         }
         None => Ok(Value::Opt(None)),
+    }
+}
+
+/// Lower a ContextExtension entry to the runtime value Scala's `getVar`
+/// hands back. Shared by `0xE3 GetVar` and the v6
+/// `SContext.getVarFromInput` MethodCall — both read the same
+/// `EvaluatedValue` node through the same `toSigmaContext` var map
+/// (`ErgoLikeContext.scala:158-160`: `k -> toAnyValue(v.value)(stypeToRType(v.tpe))`).
+///
+/// The one case that is not a plain conversion is a `Tuple` node
+/// (`0x86 CreateTuple`) entry. Scala stores the NODE, and
+/// `Tuple.value = Colls.fromArray(items.map(_.value))` is a `Coll`, not a
+/// `Tuple2` (`sigma/ast/values.scala:786-791`), while the type it is filed
+/// under is `STuple`. `getVar` compares only the RType derived from that
+/// type, so the lookup SUCCEEDS and returns the `Coll`; the mismatch surfaces
+/// at the first consumer that type-checks against `STuple` —
+/// `Value.checkType` → `InterpreterException("Invalid type returned by
+/// evaluator")` (`values.scala:232-255`, `SType.isValueOfType` requires a
+/// `Tuple2` for a pair type, `SType.scala:200-202`). So `isDefined` on such a
+/// var succeeds and `._1` fails.
+///
+/// `read_extension_value` records that provenance as the
+/// `(STuple, SigmaValue::Coll)` pair, and we lower it to a
+/// `Value::CollGeneric` — deliberately NOT a `Value::Tuple` — so
+/// `SelectField` (0x8C) rejects it exactly where Scala's `verifyInput`
+/// fails. A tuple `Constant` entry keeps `SigmaValue::Tuple` and its real
+/// `Tuple2` semantics. This mirrors the box-register twin above
+/// (`tuple_node_coll_value` + `register_is_tuple_node`).
+pub(in crate::evaluator) fn extension_var_value(
+    ext_tpe: &SigmaType,
+    ext_val: &SigmaValue,
+    ctx: &ReductionContext<'_>,
+) -> Result<Value, EvalError> {
+    match (ext_tpe, ext_val) {
+        (SigmaType::STuple(types), SigmaValue::Coll(CollValue::Values(vals)))
+            if types.len() == vals.len() =>
+        {
+            let items = types
+                .iter()
+                .zip(vals.iter())
+                .map(|(t, v)| sigma_to_value_versioned(t, v, ctx))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::CollGeneric(items, Box::new(SigmaType::SAny)))
+        }
+        _ => sigma_to_value_versioned(ext_tpe, ext_val, ctx),
     }
 }

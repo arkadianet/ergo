@@ -694,6 +694,42 @@ mod tests {
 
     // ----- oracle parity -----
 
+    /// Scala oracle vector: a 1-in / 1-out transaction whose input's
+    /// ContextExtension carries a `Tuple` node (`0x86`) at var 1 and a
+    /// `ConcreteCollection` (`0x83`) at var 2. `ErgoTransactionSerializer`
+    /// (sigma-state 6.0.2 / ergo-core 6.0.2) ACCEPTs it and re-serializes it
+    /// byte-for-byte, and mines it into a block.
+    ///
+    /// Before the fix the Rust reader ran `read_constant` on the extension
+    /// entry, so this transaction — and every block containing it — was
+    /// REJECTED at parse: a reject-valid stall the node could never advance
+    /// past. The tx id is unaffected either way (the extension is not part of
+    /// `bytes_to_sign`), so it is pinned here as the oracle's value.
+    ///
+    /// Vector: `test-vectors/scala/context_extension_evaluated_values.json`.
+    #[test]
+    fn tx_with_non_constant_context_extension_values_round_trips_and_matches_scala_id() {
+        const TX_HEX: &str = "01010101010101010101010101010101010101010101010101010101010101010100020186020402040402830204040e0410000001c0843d10010101d17300000000";
+        let tx_bytes = hex::decode(TX_HEX).unwrap();
+
+        let mut r = VlqReader::new(&tx_bytes);
+        let tx = read_transaction(&mut r).expect("Scala accepts this transaction");
+        assert!(r.is_empty(), "leftover bytes: {}", r.remaining());
+
+        assert_eq!(
+            hex::encode(transaction_id(&tx).unwrap().as_bytes()),
+            "c04018851690968c719bf02977dea716850ac92acf2b15e90152109dd39864cb",
+            "tx id must match the Scala oracle",
+        );
+
+        // Byte-exact re-serialization: `read_spending_proof` captures the
+        // verbatim extension bytes and `write_spending_proof` emits them, so
+        // both non-constant node forms survive unchanged.
+        let mut w = VlqWriter::new();
+        write_transaction(&mut w, &tx).unwrap();
+        assert_eq!(hex::encode(w.result()), TX_HEX);
+    }
+
     /// Parse a real mainnet transaction from raw wire bytes, compute tx_id
     /// and box_id for each output, and compare against explorer-known values.
     /// This tests the EXACT code path used during block sync:

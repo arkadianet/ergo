@@ -1,0 +1,87 @@
+{
+  "_comment": [
+    "Ground truth from the Scala reference stack (sigma-state 6.0.2 + ergo-core 6.0.2,",
+    "the versions mainnet runs). Pins what ContextExtension.serializer.parse accepts as an",
+    "entry value: r.getValue().asInstanceOf[EvaluatedValue[_ <: SType]] -- the FULL",
+    "ValueSerializer, admitting every subclass of the sealed EvaluatedValue trait",
+    "(Constant, ConcreteCollection, GroupGenerator, Tuple), not only Constant.",
+    "Also pins the runtime shape a Tuple-node context var takes: Tuple.value is a Coll,",
+    "so a tuple-typed consumer fails with InterpreterException while isDefined succeeds.",
+    "Generated with scripts/jvm_serde_oracle-style scala-cli harness; verdicts and costs",
+    "are the JVM's, never a Rust self-oracle."
+  ],
+  "source": {
+    "sigma_state": "6.0.2",
+    "ergo_core": "6.0.2",
+    "activated_script_version": 3
+  },
+  "values": {
+    "tuple_node_0x86": {
+      "_comment": "Tuple(IntConstant(1), IntConstant(2)) via ValueSerializer.serialize",
+      "hex": "860204020404"
+    },
+    "concrete_collection_0x83": {
+      "_comment": "ConcreteCollection(IntConstant(7), IntConstant(8) : SInt)",
+      "hex": "830204040e0410"
+    },
+    "height_node_0xa3": {
+      "_comment": "Height -- a NotReadyValue, NOT an EvaluatedValue",
+      "hex": "a3"
+    }
+  },
+  "context_extension": {
+    "_comment": "count=2, var 1 = Tuple node, var 2 = ConcreteCollection",
+    "hex": "020186020402040402830204040e0410",
+    "scala_parse": "ACCEPT",
+    "scala_reserialized_hex": "020186020402040402830204040e0410"
+  },
+  "context_extension_non_evaluated_value": {
+    "_comment": "count=1, var 1 = Height (0xa3)",
+    "hex": "0101a3",
+    "scala_parse": "REJECT",
+    "scala_exception": "ClassCastException",
+    "scala_message": "class sigma.ast.Height$ cannot be cast to class sigma.ast.EvaluatedValue"
+  },
+  "transaction": {
+    "_comment": "ErgoTransactionSerializer round-trip of a 1-in/1-out tx whose input extension carries both non-constant values",
+    "hex": "01010101010101010101010101010101010101010101010101010101010101010100020186020402040402830204040e0410000001c0843d10010101d17300000000",
+    "scala_parse": "ACCEPT",
+    "scala_reserialized_hex": "01010101010101010101010101010101010101010101010101010101010101010100020186020402040402830204040e0410000001c0843d10010101d17300000000",
+    "scala_tx_id": "c04018851690968c719bf02977dea716850ac92acf2b15e90152109dd39864cb"
+  },
+  "reduce": {
+    "_comment": [
+      "CErgoTreeEvaluator.eval against a dummy ErgoLikeContext (activated version 3,",
+      "self box = the tree at 1000000 nanoERG, sole input, no outputs/data inputs)",
+      "whose extension is the context_extension above. P:d3 = TrivialProp(true)."
+    ],
+    "true_leaf_never_reads_the_vars": {
+      "script": "sigmaProp(true)",
+      "tree_hex": "10010101d17300",
+      "verdict": "ACCEPT",
+      "prop_hex": "d3",
+      "jit_cost": 16
+    },
+    "tuple_var_is_defined": {
+      "script": "sigmaProp(getVar[(Int, Int)](1).isDefined)",
+      "tree_hex": "1000d1e6e30158",
+      "verdict": "ACCEPT",
+      "prop_hex": "d3",
+      "jit_cost": 35
+    },
+    "tuple_var_select_field": {
+      "script": "sigmaProp(getVar[(Int, Int)](1).get._1 == 1)",
+      "tree_hex": "10010402d1938ce4e30158017300",
+      "verdict": "REJECT",
+      "scala_exception": "InterpreterException",
+      "scala_message": "Invalid type returned by evaluator: expression: OptionGet(GetVar(1,Option[(SInt$,SInt$)])) expected type: (SInt$,SInt$) resulting value: Coll(1,2)"
+    },
+    "collection_var_by_index": {
+      "script": "sigmaProp(getVar[Coll[Int]](2).get(0) == 7)",
+      "tree_hex": "10020400040ed193b2e4e302107300007301",
+      "verdict": "ACCEPT",
+      "prop_hex": "d3",
+      "jit_cost": 75
+    }
+  }
+}

@@ -8,8 +8,9 @@ use ergo_primitives::reader::{ReadError, VlqReader};
 use ergo_primitives::writer::VlqWriter;
 
 use crate::error::WriteError;
+use crate::opcode::{parse_expr, write_expr, Expr, IrNode, Payload};
 use crate::sigma_type::SigmaType;
-use crate::sigma_value::{read_constant, write_constant, SigmaValue};
+use crate::sigma_value::{read_constant, write_constant, CollValue, SigmaValue};
 
 /// Context variables supplied to script evaluation alongside an input.
 ///
@@ -86,7 +87,7 @@ pub fn write_context_extension(
         // byte.
         for (&key, (tpe, val)) in &ext.values {
             w.put_u8(key);
-            write_constant(w, tpe, val)?;
+            write_extension_value(w, tpe, val)?;
         }
     } else {
         // HAMT order is a pure function of the keyset — independent
@@ -97,7 +98,7 @@ pub fn write_context_extension(
         entries.sort_by_key(|(k, _)| crate::scala_hamt::hamt_sort_key_for_byte_key(*k));
         for (key, (tpe, val)) in entries {
             w.put_u8(key);
-            write_constant(w, tpe, val)?;
+            write_extension_value(w, tpe, val)?;
         }
     }
     Ok(())
@@ -140,6 +141,177 @@ fn read_extension_count(r: &mut VlqReader) -> Result<usize, ReadError> {
     Ok(raw as usize)
 }
 
+/// Read one ContextExtension entry value — any `EvaluatedValue` encoding the
+/// Scala reference accepts, not just a `Constant`.
+///
+/// # Consensus parity (sigma-state 6.0.2)
+///
+/// `ContextExtension.serializer.parse`
+/// (`sigma/interpreter/ContextExtension.scala:59`) reads each entry with
+/// `r.getValue().asInstanceOf[EvaluatedValue[_ <: SType]]` — `getValue` is
+/// `ValueSerializer.deserialize` (`sigma/serialization/SigmaByteReader.scala:46`),
+/// the FULL expression deserializer, and the cast admits every subclass of the
+/// sealed `EvaluatedValue` trait (`sigma/ast/values.scala:310`):
+/// `Constant` (:331), `EvaluatedCollection`/`ConcreteCollection` (:589),
+/// `GroupGenerator` (:709) and `Tuple` (:779). `CheckV6Type`
+/// (`ValidationRules.scala:186-192`) confirms this by matching on exactly those
+/// four cases, with the message "V6 type used in register or context var
+/// extension".
+///
+/// Rust historically read the entry with `read_constant`, i.e. a plain
+/// type-code + data `Constant`. A transaction whose extension carried a
+/// `Tuple` node (`0x86 CreateTuple`) or a `ConcreteCollection` (`0x83`) —
+/// even one no script ever reads — was therefore mined by the Scala node and
+/// REJECTED at parse by every Rust node: a reject-valid stall, the class that
+/// wedges the node at a block height it can never advance past.
+///
+/// A node that is not an `EvaluatedValue` (e.g. `Height`, `0xA3`) is still
+/// rejected here — Scala's `asInstanceOf` is a real runtime checkcast on the
+/// erased `EvaluatedValue` class and throws `ClassCastException`, which the
+/// node surfaces as a parse failure.
+///
+/// # Tuple-node provenance
+///
+/// Scala keeps the parsed NODE, so a `Tuple` node and a `Constant` of the same
+/// `STuple` type are NOT interchangeable at evaluation:
+/// `Tuple.value = Colls.fromArray(items.map(_.value))` — a `Coll`
+/// (`values.scala:786-791`) — whereas `CoreDataSerializer.deserialize`'s
+/// `STuple` arm returns `Evaluation.toDslTuple(...)`, a real `Tuple2`
+/// (`CoreDataSerializer.scala:134-138`). We record that distinction in the
+/// parsed pair itself: a `Tuple` node decodes to
+/// `(SigmaType::STuple(..), SigmaValue::Coll(CollValue::Values(..)))` — the
+/// same "tuple type, collection payload" mismatch Scala carries — while a
+/// tuple `Constant` keeps `SigmaValue::Tuple`. `write_extension_value` maps the
+/// pair back to `0x86`, and `eval_get_var` lowers it to a `Value::CollGeneric`
+/// so a tuple-typed consumer fails exactly where Scala's
+/// `Value.checkType` does.
+fn read_extension_value(r: &mut VlqReader) -> Result<(SigmaType, SigmaValue), ReadError> {
+    // Constant type codes are <= 0x70; anything above is an expression opcode
+    // (`ValueSerializer.deserialize` makes the same split). Same discrimination
+    // the register reader uses — see `crate::register::read_register_value`.
+    if r.peek_u8()? <= 0x70 {
+        return read_constant(r);
+    }
+    // Extension bytes carry no tree header, so parse at `tree_version = 0`
+    // (as the register reader does — the version does not affect the wire
+    // shape of the evaluated forms below).
+    let expr = parse_expr(r, 0, 0)?;
+    evaluated_expr_to_extension_value(&expr)
+}
+
+/// Lower a parsed expression to the `(type, value)` pair a ContextExtension
+/// entry holds, accepting exactly Scala's `EvaluatedValue` node set.
+fn evaluated_expr_to_extension_value(expr: &Expr) -> Result<(SigmaType, SigmaValue), ReadError> {
+    match expr {
+        Expr::Const { tpe, val } => Ok((tpe.clone(), val.clone())),
+        // `Tuple` (0x86 CreateTuple). Type = STuple of the item types
+        // (`Tuple.tpe`, values.scala:783); value = the items' values as a
+        // `Coll` (`Tuple.value`, values.scala:786-791) — deliberately NOT
+        // `SigmaValue::Tuple`, see `read_extension_value`.
+        Expr::Op(IrNode {
+            opcode: 0x86,
+            payload: Payload::Tuple { items },
+        }) => {
+            let mut types = Vec::with_capacity(items.len());
+            let mut values = Vec::with_capacity(items.len());
+            for item in items {
+                let (t, v) = evaluated_expr_to_extension_value(item)?;
+                types.push(t);
+                values.push(v);
+            }
+            Ok((
+                SigmaType::STuple(types),
+                SigmaValue::Coll(CollValue::Values(values)),
+            ))
+        }
+        // `ConcreteCollection` (0x83) — an `EvaluatedCollection`, whose
+        // `value` is the plain collection of item values.
+        Expr::Op(IrNode {
+            opcode: 0x83,
+            payload: Payload::ConcreteCollection { elem_type, items },
+        }) => {
+            let mut values = Vec::with_capacity(items.len());
+            for item in items {
+                let (_, v) = evaluated_expr_to_extension_value(item)?;
+                values.push(v);
+            }
+            Ok((
+                SigmaType::SColl(Box::new(elem_type.clone())),
+                SigmaValue::Coll(CollValue::Values(values)),
+            ))
+        }
+        // Scala's `asInstanceOf[EvaluatedValue[_]]` throws
+        // `ClassCastException` for every other node.
+        Expr::Op(node) => Err(ReadError::InvalidData(format!(
+            "context-extension value node 0x{:02X} is not an EvaluatedValue \
+             (Scala ContextExtension.parse casts to EvaluatedValue and throws)",
+            node.opcode
+        ))),
+        Expr::Unparsed(_) => Err(ReadError::InvalidData(
+            "unexpected unparsed-tree body as a context-extension value".into(),
+        )),
+    }
+}
+
+/// Serialize one ContextExtension entry value in the form Scala's
+/// `w.putValue(v)` (`ContextExtension.scala:49` → `ValueSerializer.serialize`)
+/// emits for the node that parsed it.
+///
+/// The `(STuple, Coll)` pair is the `Tuple`-node provenance marker set by
+/// [`read_extension_value`]; it goes back out as `0x86 CreateTuple`, so a
+/// parsed extension re-serializes byte-for-byte. Every other pair is a
+/// `Constant`.
+fn write_extension_value(
+    w: &mut VlqWriter,
+    tpe: &SigmaType,
+    val: &SigmaValue,
+) -> Result<(), WriteError> {
+    match (tpe, val) {
+        (SigmaType::STuple(types), SigmaValue::Coll(CollValue::Values(values)))
+            if types.len() == values.len() =>
+        {
+            let items = types
+                .iter()
+                .zip(values.iter())
+                .map(|(t, v)| extension_value_to_expr(t, v))
+                .collect::<Result<Vec<_>, _>>()?;
+            write_expr(
+                w,
+                &Expr::Op(IrNode {
+                    opcode: 0x86,
+                    payload: Payload::Tuple { items },
+                }),
+                false,
+            )
+        }
+        _ => write_constant(w, tpe, val),
+    }
+}
+
+/// Convert one entry value (or a `Tuple`-node item) back to the expression
+/// `ValueSerializer` would have written.
+fn extension_value_to_expr(tpe: &SigmaType, val: &SigmaValue) -> Result<Expr, WriteError> {
+    match (tpe, val) {
+        (SigmaType::STuple(types), SigmaValue::Coll(CollValue::Values(values)))
+            if types.len() == values.len() =>
+        {
+            let items = types
+                .iter()
+                .zip(values.iter())
+                .map(|(t, v)| extension_value_to_expr(t, v))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Expr::Op(IrNode {
+                opcode: 0x86,
+                payload: Payload::Tuple { items },
+            }))
+        }
+        _ => Ok(Expr::Const {
+            tpe: tpe.clone(),
+            val: val.clone(),
+        }),
+    }
+}
+
 /// Decode the wire form produced by [`write_context_extension`].
 /// Insertion order = wire order: IndexMap preserves the order keys
 /// arrived on the wire so a subsequent re-serialize (for ≤ 4 entries)
@@ -178,7 +350,7 @@ pub fn read_context_extension(r: &mut VlqReader) -> Result<ContextExtension, Rea
     let mut values = IndexMap::with_capacity(count);
     for _ in 0..count {
         let key = r.get_u8()?;
-        let (tpe, val) = read_constant(r)?;
+        let (tpe, val) = read_extension_value(r)?;
         // Rule 1019 CheckV6Type: reject at parse, matching Scala's
         // per-entry `CheckV6Type(v)`. Version-independent, fires whether
         // or not the var is later referenced by `getVar`. Identical
@@ -210,7 +382,7 @@ pub fn split_context_extension_bytes(
     for _ in 0..count {
         let key = r.get_u8()?;
         let start = r.position();
-        let _ = read_constant(&mut r)?;
+        let _ = read_extension_value(&mut r)?;
         let end = r.position();
         entries.push((key, r.data_slice(start, end).to_vec()));
     }
@@ -838,5 +1010,116 @@ mod tests {
             }
             other => panic!("expected InvalidData reject, got {other:?}"),
         }
+    }
+
+    // ----- oracle parity: non-Constant EvaluatedValue entry values -----
+    //
+    // Vectors and verdicts from the Scala reference (sigma-state 6.0.2 +
+    // ergo-core 6.0.2), pinned in
+    // `test-vectors/scala/context_extension_evaluated_values.json`. Scala
+    // `ContextExtension.serializer.parse` reads each entry with
+    // `r.getValue().asInstanceOf[EvaluatedValue[_ <: SType]]` — the full
+    // `ValueSerializer` — so a `Tuple` (0x86) or `ConcreteCollection` (0x83)
+    // node is accepted and a non-`EvaluatedValue` node is not.
+
+    fn from_hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    fn to_hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    /// Scala ACCEPTs this extension (var 1 = `Tuple(1, 2)` as `0x86`,
+    /// var 2 = `ConcreteCollection(7, 8 : Int)` as `0x83`) and re-serializes
+    /// it byte-for-byte. Rust used to REJECT it at parse (`read_constant` on
+    /// a `0x86` type code) — a reject-valid stall on any block carrying such
+    /// a transaction.
+    #[test]
+    fn context_extension_evaluated_value_nodes_round_trip_byte_exact() {
+        const ORACLE_HEX: &str = "020186020402040402830204040e0410";
+        let bytes = from_hex(ORACLE_HEX);
+        let mut r = VlqReader::new(&bytes);
+        let ext = read_context_extension(&mut r).expect("Scala accepts this extension");
+        assert!(r.is_empty(), "all oracle bytes must be consumed");
+        assert_eq!(ext.values.len(), 2);
+
+        // The `Tuple` node's provenance marker: STuple type, Coll payload —
+        // the same mismatch Scala carries (`Tuple.tpe` vs `Tuple.value`).
+        assert_eq!(
+            ext.values.get(&1),
+            Some(&(
+                SigmaType::STuple(vec![SigmaType::SInt, SigmaType::SInt]),
+                SigmaValue::Coll(CollValue::Values(vec![
+                    SigmaValue::Int(1),
+                    SigmaValue::Int(2)
+                ])),
+            ))
+        );
+        assert_eq!(
+            ext.values.get(&2),
+            Some(&(
+                SigmaType::SColl(Box::new(SigmaType::SInt)),
+                SigmaValue::Coll(CollValue::Values(vec![
+                    SigmaValue::Int(7),
+                    SigmaValue::Int(8)
+                ])),
+            ))
+        );
+
+        // The `Tuple` node goes back out as `0x86 CreateTuple`, byte-identical
+        // to what Scala's `ValueSerializer` wrote.
+        let entries = split_context_extension_bytes(&serialize_ext(&ext)).unwrap();
+        assert_eq!(to_hex(&entries[0].1), "860204020404");
+
+        // Re-serialization is semantically lossless: it parses back equal.
+        //
+        // It is not byte-identical for the `ConcreteCollection` entry. Scala
+        // keeps the parsed NODE and re-emits `0x83`, whereas a
+        // `ConcreteCollection` and a `Coll` `Constant` of the same items are
+        // indistinguishable once parsed — both are
+        // `(SColl(elem), Coll(Values))`, because Scala's
+        // `EvaluatedCollection.value` is a plain `Coll` just like a
+        // constant's. We therefore re-emit the `Constant` form. This is inert
+        // on the consensus path: `read_spending_proof` captures the verbatim
+        // extension bytes and `write_spending_proof` emits those, so a
+        // transaction parsed from the wire re-serializes byte-for-byte
+        // regardless. Only an extension rebuilt structurally in memory (the
+        // wallet's construct-and-sign path, which never produces `0x83`)
+        // reaches this encoder.
+        let reencoded = serialize_ext(&ext);
+        let mut rr = VlqReader::new(&reencoded);
+        assert_eq!(read_context_extension(&mut rr).unwrap(), ext);
+    }
+
+    /// A node that is not an `EvaluatedValue` — `Height` (`0xa3`) — must be
+    /// rejected: Scala's `asInstanceOf[EvaluatedValue[_]]` is a real runtime
+    /// checkcast and throws `ClassCastException`. This pins the boundary so
+    /// the permissive read above does not become "accept any expression".
+    #[test]
+    fn context_extension_non_evaluated_value_node_rejects() {
+        let bytes = from_hex("0101a3");
+        let mut r = VlqReader::new(&bytes);
+        let res = read_context_extension(&mut r);
+        assert!(
+            res.is_err(),
+            "Height (0xa3) is not an EvaluatedValue; Scala throws ClassCastException, got {res:?}"
+        );
+    }
+
+    /// `split_context_extension_bytes` must walk the same node set, so the
+    /// REST `extension` map hex stays byte-exact for a tuple-node entry.
+    #[test]
+    fn split_context_extension_bytes_preserves_evaluated_value_nodes() {
+        let entries = split_context_extension_bytes(&from_hex("020186020402040402830204040e0410"))
+            .expect("split must accept the same nodes the reader accepts");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, 1);
+        assert_eq!(to_hex(&entries[0].1), "860204020404");
+        assert_eq!(entries[1].0, 2);
+        assert_eq!(to_hex(&entries[1].1), "830204040e0410");
     }
 }

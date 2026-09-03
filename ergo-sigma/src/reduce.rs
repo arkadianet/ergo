@@ -751,3 +751,111 @@ mod pre_reduction_check_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod context_extension_evaluated_value_tests {
+    //! Oracle parity for ContextExtension entries encoded as non-`Constant`
+    //! `EvaluatedValue` nodes. Every expectation below is a verdict/cost the
+    //! Scala reference stack (sigma-state 6.0.2 + ergo-core 6.0.2) produced;
+    //! the vectors are pinned in
+    //! `test-vectors/scala/context_extension_evaluated_values.json`.
+
+    use ergo_primitives::cost::{CostAccumulator, JitCost};
+    use ergo_primitives::reader::VlqReader;
+    use ergo_ser::input::read_context_extension;
+
+    use crate::evaluator::{reduce_expr_with_cost, ReductionContext};
+
+    // ----- helpers -----
+
+    /// The Scala-emitted ContextExtension block from the oracle vector:
+    /// var 1 = `Tuple(IntConstant(1), IntConstant(2))` (`0x86`),
+    /// var 2 = `ConcreteCollection(7, 8 : Int)` (`0x83`).
+    const ORACLE_EXTENSION_HEX: &str = "020186020402040402830204040e0410";
+
+    fn from_hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    /// Reduce `tree_hex` under the oracle's dummy context with the oracle's
+    /// extension bound, returning `(sigma-boolean hex, jit cost)`.
+    fn reduce_with_oracle_extension(tree_hex: &str) -> Result<(String, u64), String> {
+        let tree_bytes = from_hex(tree_hex);
+        let mut r = VlqReader::new(&tree_bytes);
+        let tree = ergo_ser::ergo_tree::read_ergo_tree(&mut r).map_err(|e| format!("{e:?}"))?;
+
+        let ext_bytes = from_hex(ORACLE_EXTENSION_HEX);
+        let mut er = VlqReader::new(&ext_bytes);
+        let ext = read_context_extension(&mut er).map_err(|e| format!("{e:?}"))?;
+
+        let ctx = ReductionContext {
+            extension: ext.values,
+            ergo_tree_version: tree.version,
+            ..ReductionContext::minimal_v6(0, 0)
+        };
+        let mut cost = CostAccumulator::new(JitCost::from_block_cost(1_000_000).expect("limit"));
+        let sb = reduce_expr_with_cost(&tree.body, &ctx, &tree.constants, &mut cost)
+            .map_err(|e| format!("{e:?}"))?;
+        let mut w = ergo_primitives::writer::VlqWriter::new();
+        ergo_ser::sigma_value::write_sigma_boolean(&mut w, &sb).map_err(|e| format!("{e:?}"))?;
+        Ok((
+            w.result().iter().map(|b| format!("{b:02x}")).collect(),
+            cost.total().value(),
+        ))
+    }
+
+    // ----- oracle parity -----
+
+    /// The whole point of the fix: a transaction whose input extension carries
+    /// a `Tuple` node is mined by the Scala node, and a script that never
+    /// reads the var still reduces to `TrivialProp(true)` at cost 16. Before
+    /// the fix the extension failed to PARSE, so the Rust node rejected a
+    /// block the reference accepts — a reject-valid stall.
+    #[test]
+    fn true_leaf_with_tuple_node_extension_reduces_to_scala_verdict() {
+        assert_eq!(
+            reduce_with_oracle_extension("10010101d17300"),
+            Ok(("d3".to_string(), 16)),
+        );
+    }
+
+    /// `getVar[(Int, Int)](1).isDefined` — Scala's `getVar` matches on the
+    /// declared `STuple` type and hands back `Tuple.value`, so the option is
+    /// `Some` and `isDefined` is true. Cost 35.
+    #[test]
+    fn tuple_node_var_is_defined_matches_scala() {
+        assert_eq!(
+            reduce_with_oracle_extension("1000d1e6e30158"),
+            Ok(("d3".to_string(), 35)),
+        );
+    }
+
+    /// `getVar[(Int, Int)](1).get._1 == 1` — Scala REJECTS: `Tuple.value` is a
+    /// `Coll`, not a `Tuple2`, so `Value.checkType` at `OptionGet` throws
+    /// `InterpreterException("Invalid type returned by evaluator ... resulting
+    /// value: Coll(1,2)")`. We must reject too: a tuple-node context var is
+    /// unusable as a tuple, and accepting it would be an accept-invalid fork.
+    #[test]
+    fn tuple_node_var_select_field_rejects_like_scala() {
+        let res = reduce_with_oracle_extension("10010402d1938ce4e30158017300");
+        assert!(
+            res.is_err(),
+            "a Tuple-node context var must not satisfy a tuple-typed consumer \
+             (Scala throws InterpreterException), got {res:?}"
+        );
+    }
+
+    /// `getVar[Coll[Int]](2).get(0) == 7` — a `ConcreteCollection` (0x83)
+    /// context var IS usable: `EvaluatedCollection.value` is a real `Coll`.
+    /// Scala ACCEPTs at cost 75.
+    #[test]
+    fn concrete_collection_var_by_index_matches_scala() {
+        assert_eq!(
+            reduce_with_oracle_extension("10020400040ed193b2e4e302107300007301"),
+            Ok(("d3".to_string(), 75)),
+        );
+    }
+}
