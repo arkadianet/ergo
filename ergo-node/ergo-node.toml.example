@@ -105,6 +105,10 @@ download_window = 384
 bind = "127.0.0.1:9099"
 disabled = false
 public_bind = false
+# allowed_hosts = ["my-node.example.com"]  # extra `Host` header values the
+# DNS-rebinding guard accepts (default []). Loopback binds always accept
+# localhost/127.0.0.1/::1/the literal bind IP regardless of this list; a
+# non-loopback bind only enforces the guard when this list is non-empty.
 
 [mempool]
 # disabled = false           # set true to skip tx relay (e.g. archival or sync-test runs)

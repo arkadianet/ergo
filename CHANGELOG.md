@@ -35,6 +35,21 @@ infrastructure.
   literals**: both gain required `gauges` / `sync_gauges` fields —
   pre-1.0 policy applies (breaking changes between minors); populate
   `ApiSyncGauges::default()` when hand-assembling.
+- **`[api] allowed_hosts` — Host-header allowlist / DNS-rebinding guard
+  (#247 item 4).** The operator API now rejects requests whose `Host`
+  header (or, for HTTP/2, `:authority`) doesn't match `localhost` /
+  `127.0.0.1` / `::1` / the literal bind address / an `allowed_hosts`
+  entry, with `421 Misdirected Request`. Enforced by default on the
+  loopback bind (`127.0.0.1:9099`); a non-loopback bind only enforces
+  when `allowed_hosts` is non-empty. **Operator action required if you
+  front the API with a reverse proxy on a loopback bind that forwards
+  its own public hostname** (e.g. nginx `proxy_set_header Host
+  $host`) — add that hostname to `[api] allowed_hosts`, or the proxied
+  requests now get `421` instead of reaching the API. The resolved
+  allowlist and enforcement flag are logged at `INFO` next to the "api
+  listening" boot line so a `421` is diagnosable without guessing. See
+  `docs/configuration.md#api` for the full key reference and security
+  note.
 
 ### Changed
 

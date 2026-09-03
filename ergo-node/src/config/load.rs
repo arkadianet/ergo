@@ -638,6 +638,14 @@ impl NodeConfig {
             None
         };
 
+        // [api] allowed_hosts — extra `Host` header values the DNS-
+        // rebinding guard accepts; see `ResolvedConfig::api_allowed_hosts`
+        // and `ergo_api::host_guard`. Empty by default. No validation
+        // beyond parsing as a TOML string list: unlike `bind`, entries
+        // are compared as opaque strings, not `SocketAddr`s, so a typo
+        // just never matches rather than failing to parse.
+        let api_allowed_hosts = toml_cfg.api.allowed_hosts.clone().unwrap_or_default();
+
         // [mempool] — TOML overrides defaults; CLI flags override TOML.
         let def = MempoolConfig::default();
         let tm = &toml_cfg.mempool;
@@ -976,6 +984,7 @@ impl NodeConfig {
             genesis_id,
             api_bind,
             api_key_hash,
+            api_allowed_hosts,
             mempool_config,
             mempool_sort_policy,
             indexer_config,

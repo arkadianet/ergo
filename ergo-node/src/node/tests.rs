@@ -1134,6 +1134,7 @@ fn cfg_with_mode(
         genesis_id: None,
         api_bind: None,
         api_key_hash: None,
+        api_allowed_hosts: Vec::new(),
         mempool_config,
         mempool_sort_policy: "cost".into(),
         indexer_config: IndexerConfig::default(),

@@ -126,6 +126,7 @@ beyond loopback.
 | `bind` | string (socket addr) | `"127.0.0.1:9099"` | HTTP API bind address. Parsed at load; a malformed value is rejected. A non-loopback bind is rejected unless `public_bind = true`. |
 | `disabled` | bool | `false` | When `true`, the API server is not started and no `api_key_hash` is required. |
 | `public_bind` | bool | `false` | Permits binding a non-loopback address. A non-loopback `bind` without `public_bind = true` is rejected at load. See the security note below. |
+| `allowed_hosts` | array of string | `[]` | Extra `Host` header values the DNS-rebinding guard accepts, beyond `localhost` / `127.0.0.1` / `::1` / the literal `bind` address (always accepted on a loopback bind). An entry may include a port (`"example.com:9099"`) to pin it, or omit one to match any port. On a non-loopback bind, the guard only activates when this list is non-empty — see the security note below. |
 
 ### `[api.security]`
 
@@ -160,6 +161,21 @@ Consequences:
   node with an authenticated reverse proxy.
 - **`/metrics` is not authenticated.** Keep it on loopback or behind a
   proxy.
+- **The `Host` header is checked to close the DNS-rebinding read path.**
+  A loopback bind (the default) rejects any request whose `Host` header
+  isn't `localhost`, `127.0.0.1`, `[::1]`, the literal `bind` address, or
+  an `allowed_hosts` entry, with `421 Misdirected Request` — this stops
+  attacker-controlled JavaScript on a rebound domain from reading the
+  unauthenticated surface (`/info`, `/blocks/*`, `/peers/*`, …) via a
+  victim's browser hitting `127.0.0.1:9099`. Key-gated routes were never
+  at risk (the `api_key` header can't be forged cross-origin), so this
+  is a hardening measure for the public routes, not a fix for a gap in
+  the api-key gate. A request with no `Host` header at all is allowed
+  (HTTP/1.0 tooling). On a non-loopback bind the guard only activates
+  when `allowed_hosts` is non-empty — most public deployments front the
+  API with a reverse proxy that already validates `Host`/SNI, and
+  enforcing here by default would risk breaking that setup for no
+  defensive gain.
 
 Generate a hash from a RANDOM secret (never a guessable word) with, for
 example:
