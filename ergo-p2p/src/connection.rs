@@ -1179,17 +1179,95 @@ mod tests {
     const LARGE_PART_ONE: usize = 2 << 20;
     const SMALL_FRAME: usize = 32 * 1024;
 
-    /// Drive `LARGE_READERS` readers whose senders pause mid-frame plus
-    /// `SMALL_READERS` single-chunk readers against `budget`, and return
-    /// how many finished within `watchdog` — `None` if they did not all
-    /// finish, which for this workload means they deadlocked.
-    async fn run_mixed_readers(budget: &ReadBudget, watchdog: Duration) -> Option<usize> {
-        // The senders' pause must actually exhaust the budget, or the
-        // deadlock this pins cannot form.
+    /// What a [`run_mixed_readers`] run observed.
+    struct MixedRun {
+        /// Readers that finished inside the watchdog, or `None` if they
+        /// did not all finish — which for this workload means deadlock.
+        finished: Option<usize>,
+        /// Budget still free at the moment the readers settled.
+        free_at_quiescence: usize,
+        /// LARGE readers that had completed by that moment. Small ones
+        /// are the contending gossip traffic and are expected to come and
+        /// go throughout; it is a large reader finishing early that would
+        /// mean the budget was never contended.
+        large_completed_at_quiescence: usize,
+    }
+
+    /// Wait until the readers have SETTLED: no reader can make further
+    /// progress without more bytes on the wire.
+    ///
+    /// Returns the budget still free at that point.
+    ///
+    /// This replaces a fixed sleep, and the difference is the whole point
+    /// of this harness. A wall-clock pause makes the deadlock an
+    /// environment race: if the readers have not drained the first part
+    /// of their frames before the senders resume, the rest arrives while
+    /// the budget is still free, readers complete one at a time — each
+    /// completion releasing its permits — and the workload drains
+    /// sequentially with no deadlock at all. That is exactly how this
+    /// passed on Windows and failed nowhere else. Gating on the readers'
+    /// own settling instead makes the state deterministic on any target.
+    ///
+    /// Settled is read from the shared budget: once every reader is
+    /// parked — on the budget, or on a socket that has nothing more to
+    /// give — the free permit count stops moving.
+    async fn wait_until_readers_settle(budget: &ReadBudget) -> usize {
+        const POLL: Duration = Duration::from_millis(25);
+        /// 300 ms of no movement. Generous on purpose: settling early
+        /// only releases the senders sooner, and the callers assert the
+        /// state they actually require.
+        const STABLE_POLLS: usize = 12;
+        const GIVE_UP_AFTER: Duration = Duration::from_secs(20);
+
+        let started = tokio::time::Instant::now();
+        let mut last = usize::MAX;
+        let mut stable = 0;
+        loop {
+            let free = budget.bytes().available_permits();
+            // Require some progress too, so "nothing has started yet"
+            // cannot be mistaken for "everything has stopped".
+            if free == last && free < budget.capacity() {
+                stable += 1;
+                if stable >= STABLE_POLLS {
+                    return free;
+                }
+            } else {
+                stable = 0;
+                last = free;
+            }
+            assert!(
+                started.elapsed() < GIVE_UP_AFTER,
+                "readers never settled: {free} of {} B free after {:?}. \
+                 The workload never reached the state under test.",
+                budget.capacity(),
+                started.elapsed(),
+            );
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    /// Drive `LARGE_READERS` readers whose senders hold back the tail of
+    /// each frame, plus `SMALL_READERS` single-chunk readers, against
+    /// `budget`.
+    ///
+    /// The senders release their tail only once the readers have settled,
+    /// so every large reader is provably mid-frame — holding permits and
+    /// wanting more — before any of them can finish. No reader can
+    /// complete before that point, because the bytes to complete with
+    /// have not been sent.
+    async fn run_mixed_readers(budget: &ReadBudget, watchdog: Duration) -> MixedRun {
+        // With the tail withheld, the readers cannot absorb more than the
+        // budget, so it is driven to exhaustion and every reader is left
+        // wanting — the hold-and-wait state, reached by construction
+        // rather than by timing.
         assert!(
             LARGE_READERS * LARGE_PART_ONE > budget.capacity(),
-            "the paused senders must over-subscribe the budget"
+            "the withheld tails must over-subscribe the budget"
         );
+
+        // Large readers only: see `large_completed_at_quiescence`.
+        let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (release_tx, release_rx) = tokio::sync::watch::channel(false);
 
         let mut tasks = Vec::with_capacity(LARGE_READERS + SMALL_READERS);
         for i in 0..LARGE_READERS {
@@ -1201,17 +1279,27 @@ mod tests {
                     payload: vec![i as u8; LARGE_FRAME],
                 },
             );
+            let mut release = release_rx.clone();
             let writer = tokio::spawn(async move {
                 client.write_all(&bytes[..LARGE_PART_ONE]).await.unwrap();
-                tokio::time::sleep(Duration::from_millis(400)).await;
+                // Hold the tail until the readers have settled. A sender
+                // whose own write is still blocked simply arrives here
+                // later; the readers it is feeding are parked either way.
+                while !*release.borrow_and_update() {
+                    if release.changed().await.is_err() {
+                        break;
+                    }
+                }
                 client.write_all(&bytes[LARGE_PART_ONE..]).await.unwrap();
                 client
             });
             let budget = budget.clone();
+            let completed = completed.clone();
             tasks.push(tokio::spawn(async move {
                 server.read_frame_header().await.unwrap();
                 let (frame, permit) = server.read_frame_body_metered(&budget).await.unwrap();
                 assert_eq!(frame.payload.len(), LARGE_FRAME);
+                completed.fetch_add(1, Ordering::Relaxed);
                 // Drain, as the action loop does.
                 drop(permit);
                 let _client = writer.await.unwrap();
@@ -1240,15 +1328,25 @@ mod tests {
             }));
         }
 
+        let free_at_quiescence = wait_until_readers_settle(budget).await;
+        let large_completed_at_quiescence = completed.load(Ordering::Relaxed);
+        let _ = release_tx.send(true);
+
         let total = tasks.len();
-        tokio::time::timeout(watchdog, async {
+        let finished = tokio::time::timeout(watchdog, async {
             for task in tasks {
                 task.await.unwrap();
             }
             total
         })
         .await
-        .ok()
+        .ok();
+
+        MixedRun {
+            finished,
+            free_at_quiescence,
+            large_completed_at_quiescence,
+        }
     }
 
     // ----- admission control -----
@@ -1261,18 +1359,19 @@ mod tests {
     /// dropped and no permit ever comes back. All P2P reading stops,
     /// permanently.
     ///
-    /// Forty large readers whose senders pause mid-frame put every one of
-    /// them in that state at the same moment (40 x 2 MiB of demand
-    /// against an 8-slot budget of 66 MB), and forty single-chunk readers
-    /// contend alongside them. Every reader must finish.
+    /// Forty large readers, held mid-frame until every one of them is
+    /// parked, put the budget in exactly that state (40 x 2 MiB of demand
+    /// against an 8-slot budget of 66 MB), with forty single-chunk
+    /// readers contending alongside them. Every reader must finish.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_readers_over_budget_all_complete() {
         // Per-address cap off: every loopback reader shares one address,
         // and this test is about the SLOT pool. The cap has its own test.
         let budget = ReadBudget::for_slot_contention_test(8 * PER_READER_MAX, Some(8));
         assert_eq!(budget.slots_available(), 8);
-        let done = run_mixed_readers(&budget, Duration::from_secs(60)).await;
-        assert_eq!(done, Some(LARGE_READERS + SMALL_READERS));
+
+        let run = run_mixed_readers(&budget, Duration::from_secs(60)).await;
+        assert_eq!(run.finished, Some(LARGE_READERS + SMALL_READERS));
         assert_eq!(
             budget.bytes().available_permits(),
             budget.capacity(),
@@ -1281,16 +1380,42 @@ mod tests {
         assert_eq!(budget.slots_available(), 8, "every slot is returned");
     }
 
-    /// The negative control for the test above: the SAME workload with
-    /// the slot pool removed must deadlock. Without this, that test only
-    /// proves the workload runs — not that the pool is what carries it.
-    /// Bounded by a watchdog so a failure is a timeout, not a hung suite.
+    /// The negative control for the test above: the SAME workload on the
+    /// SAME harness, with only the slot pool removed, must deadlock.
+    /// Without this, that test only proves the workload runs — not that
+    /// the pool is what carries it. Bounded by a watchdog so a failure is
+    /// a timeout, not a hung suite.
+    ///
+    /// The preconditions are asserted rather than assumed. This test
+    /// passed on Windows once already, because the workload there never
+    /// reached the state under test and finished perfectly happily; a run
+    /// that does not establish the deadlock now fails loudly instead of
+    /// reporting a green result it did not earn.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_readers_over_budget_deadlock_without_slot_pool() {
         let budget = ReadBudget::for_slot_contention_test(8 * PER_READER_MAX, None);
-        let done = run_mixed_readers(&budget, Duration::from_secs(10)).await;
+        let run = run_mixed_readers(&budget, Duration::from_secs(10)).await;
+
+        // Preconditions: by the time the senders were released, the
+        // readers had eaten the budget and not one of them had finished.
+        assert!(
+            run.free_at_quiescence < PER_READER_MAX,
+            "precondition not met: {} B still free of {} B when the readers \
+             settled, so they were never in hold-and-wait and this run \
+             proves nothing about the slot pool",
+            run.free_at_quiescence,
+            budget.capacity(),
+        );
         assert_eq!(
-            done, None,
+            run.large_completed_at_quiescence, 0,
+            "precondition not met: {} large readers had already finished \
+             before the tails were released, so the budget was never \
+             contended",
+            run.large_completed_at_quiescence,
+        );
+
+        assert_eq!(
+            run.finished, None,
             "without the slot pool these readers must deadlock — if this \
              passes, the pool is no longer what makes the workload finish"
         );
