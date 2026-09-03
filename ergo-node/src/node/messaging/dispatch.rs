@@ -80,6 +80,37 @@ pub(in crate::node) fn handle_message(
     let frame_bytes = payload.len().saturating_add(9) as u32;
     match state.throttle.check_and_record(peer, now, frame_bytes) {
         LimiterVerdict::Ok => {}
+        // A `Modifier` frame is a delivery of something WE requested, and the
+        // byte axis must never drop one. If it did, our own delivery checker
+        // would time the request out and charge the holder a `NonDelivery`
+        // penalty plus a body-delivery-streak failure
+        // (`ergo-sync/src/coordinator/events.rs` `check_timeouts`) — ejecting
+        // the honest peer that was actually serving us, for a drop we caused.
+        // That is the same class of self-inflicted starvation PR #160 fixed on
+        // the message axis, and it bites hardest exactly when it hurts most:
+        // catching up bodies from a single holder is the traffic pattern that
+        // saturates a 2 MB/s cap.
+        //
+        // The frame is still charged to the window, so the peer's next
+        // non-exempt frame is judged against its true rate; the message cap
+        // (checked first) still applies; and a peer cannot mint free bandwidth
+        // by lying, because a modifier we did not request — or bytes that do
+        // not re-hash to the id claimed — is penalized downstream in
+        // `handle_modifiers` / `coordinator::on_modifier_received`. Read-side
+        // memory is bounded by the shared byte budget with TCP backpressure
+        // (#279/#283), which parks the reader instead of discarding data. The
+        // Scala reference node applies no inbound rate limit at all.
+        LimiterVerdict::ByteRateExceeded if code == message::CODE_MODIFIER => {
+            state
+                .throttle
+                .record_admitted_over_cap(peer, now, frame_bytes);
+            debug!(
+                peer = %peer,
+                bytes = frame_bytes,
+                "byte throttle exceeded by a modifier delivery; admitting rather than \
+                 penalizing the holder for a drop we would have caused",
+            );
+        }
         LimiterVerdict::MessageRateExceeded | LimiterVerdict::ByteRateExceeded => {
             warn!(peer = %peer, code = code, "throttle exceeded; dropping frame");
             return vec![Action::Penalize {

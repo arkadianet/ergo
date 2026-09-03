@@ -26,7 +26,7 @@
 - `src/address_book/mod.rs` — `AddressBook`: `peers.redb` persistence of peer rows + per-IP bans, load-time staleness/expiry pruning, `MAX_PEERS` eviction, quick-repair open.
 - `src/address_book/codec.rs` — key/value byte encoders/decoders for the persisted peer / ban / IP-key records.
 - `src/partition.rs` — pure `distribute` of pending modifier IDs across peers into per-(peer,type) `Bucket`s; deterministic, rotation-cursored, deliberate Scala divergences documented.
-- `src/throttle.rs` — `ThroughputLimiter`: per-peer sliding-window (100 msg/s, 2 MB/s) rate limiter; pure state, `now`-parameterized.
+- `src/throttle.rs` — `ThroughputLimiter`: per-peer sliding-window (1000 msg/s, 2 MB/s) rate limiter; pure state, `now`-parameterized. The byte axis never drops a *solicited* delivery — `ergo-node`'s dispatch admits over-cap `Modifier` frames and charges them via `record_admitted_over_cap`, because dropping one makes our own delivery checker penalize the honest holder.
 - `src/assembly.rs` — `AssemblyTracker`: per-header section-arrival aggregator (transactions/extension/AD-proofs) with reverse modifier-id index; section-id recipe itself lives in `ergo_ser::modifier_id`.
 - `src/delivery.rs` — `DeliveryTracker`: request ownership, per-peer in-flight caps, timeout/retry/reassignment, duplicate + unsolicited-modifier policy, late-delivery acceptance.
 - `src/sync.rs` — per-peer `SyncState` download-window tracker + `compare_sync_info`/`PeerChainStatus` height-based preliminary classifier (full fork choice lives in `ergo-sync`).
@@ -48,7 +48,7 @@
 - `is_routable_for_p2p` (fn) / `declared_to_socket` (fn) — dial/gossip routability gate; safe IPv4/IPv6 declared-address parse — `src/peer_manager/routability.rs:26` / `:78`
 - `AddressBook` (struct) — redb peer/ban persistence; `open`/`load_all`/`upsert_handshaked`/`record_ban`/… — `src/address_book/mod.rs:200`
 - `distribute` (fn) / `Bucket` (type) / `BucketConfig` (struct) — pure per-round modifier-ID partitioner across sorted peers — `src/partition.rs:91` / `:41` / `:59`
-- `ThroughputLimiter` (struct) / `LimiterVerdict` (enum) — per-peer rate limiter; `check_and_record` only records on `Ok` — `src/throttle.rs:89` / `:39`
+- `ThroughputLimiter` (struct) / `LimiterVerdict` (enum) — per-peer rate limiter; `check_and_record` only records on `Ok`, `record_admitted_over_cap` charges a frame the caller admitted anyway — `src/throttle.rs` / `:39`
 - `AssemblyTracker` (struct) — section-arrival aggregator; `section_received` signals completion exactly once (incomplete→complete transition) — `src/assembly.rs:28`
 - `DeliveryTracker` (struct) / `DeliveryAction` (enum) / `ModifierStatus` (enum) — in-flight request bookkeeping; `on_received` → Accept/Ignore/RejectSpam — `src/delivery.rs:121` / `:76` / `:63`
 - `SyncState` (struct) / `compare_sync_info` (fn) / `PeerChainStatus` (enum) — download-window + per-peer SyncInfo cadence; height-based status classifier — `src/sync.rs:63` / `:338` / `:21`
