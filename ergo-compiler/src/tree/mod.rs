@@ -23,6 +23,8 @@
 use ergo_primitives::writer::VlqWriter;
 use ergo_ser::address::{encode_p2s, encode_p2sh, NetworkPrefix};
 use ergo_ser::ergo_tree::write_ergo_tree;
+
+use crate::source_map::SourceMap;
 use ergo_ser::opcode::{write_expr, Expr, IrNode, Payload};
 use ergo_ser::sigma_type::SigmaType;
 use ergo_ser::sigma_value::CollValue;
@@ -319,17 +321,47 @@ pub fn compile(
     tree_version: u8,
     network: NetworkPrefix,
 ) -> Result<CompileResult, CompileError> {
+    compile_inner(env, source, tree_version, network, false).map(|(r, _)| r)
+}
+
+/// [`compile`] plus a P5-B [`SourceMap`] over the compiled tree body
+/// (`docs/ergoscript-compiler-source-map-design.md`). Bytes and addresses are
+/// identical to [`compile`]'s: the map is side data, recorded at emit and
+/// resolved against the final tree.
+pub fn compile_with_source_map(
+    env: &ScriptEnv,
+    source: &str,
+    tree_version: u8,
+    network: NetworkPrefix,
+) -> Result<(CompileResult, SourceMap), CompileError> {
+    compile_inner(env, source, tree_version, network, true)
+        .map(|(r, m)| (r, m.expect("tracking requested")))
+}
+
+fn compile_inner(
+    env: &ScriptEnv,
+    source: &str,
+    tree_version: u8,
+    network: NetworkPrefix,
+    track_origins: bool,
+) -> Result<(CompileResult, Option<SourceMap>), CompileError> {
     let typed = typecheck_with_network(env, source, tree_version, network)?;
 
     // Root dispatch — ScriptApiRoute.scala:60-65. Emit under the requested
     // `tree_version` so the GraphBuilding-parity gates reject V6-only constructs
     // (e.g. the bare `fromBigEndianBytes` predef) under a v5 target.
+    let (emitted, origins) = if track_origins {
+        let (e, o) = crate::emit::emit_with_version_tracked(&typed, tree_version)?;
+        (e, Some(o))
+    } else {
+        (emit_with_version(&typed, tree_version)?, None)
+    };
     let root = match node_tpe(&typed) {
-        SType::SSigmaProp => emit_with_version(&typed, tree_version)?,
+        SType::SSigmaProp => emitted,
         SType::SBoolean => Expr::Op(IrNode {
             // BoolToSigmaProp — Scala `script.toSigmaProp` (values.scala:58).
             opcode: 0xD1,
-            payload: Payload::One(Box::new(emit_with_version(&typed, tree_version)?)),
+            payload: Payload::One(Box::new(emitted)),
         }),
         other => {
             return Err(CompileError::Root {
@@ -338,7 +370,11 @@ pub fn compile(
         }
     };
 
+    // The emit-time tree, kept for the source map's alignment against the
+    // final tree (see `crate::source_map`).
+    let emit_root = origins.as_ref().map(|_| root.clone());
     let root = graph_build(root)?;
+    let pre_segregation_root = origins.as_ref().map(|_| root.clone());
 
     // P2SH proposition bytes — Scala's `Pay2SHAddress.apply(script: ErgoTree)`
     // hashes `toProposition(replaceConstants = isConstantSegregation)`
@@ -353,6 +389,12 @@ pub fn compile(
     let proposition_bytes = pw.result();
 
     let ergo_tree = build_tree(root)?;
+    let source_map = match (&origins, &emit_root, &pre_segregation_root) {
+        (Some(o), Some(emitted), Some(pre)) => {
+            Some(crate::source_map::resolve(emitted, pre, &ergo_tree.body, o))
+        }
+        _ => None,
+    };
 
     let mut w = VlqWriter::new();
     write_ergo_tree(&mut w, &ergo_tree)?;
@@ -397,12 +439,15 @@ pub fn compile(
     let p2s_address = encode_p2s(network, &tree_bytes);
     let p2sh_address = encode_p2sh(network, &proposition_bytes);
 
-    Ok(CompileResult {
-        tree_bytes,
-        ergo_tree,
-        p2s_address,
-        p2sh_address,
-    })
+    Ok((
+        CompileResult {
+            tree_bytes,
+            ergo_tree,
+            p2s_address,
+            p2sh_address,
+        },
+        source_map,
+    ))
 }
 
 #[cfg(test)]

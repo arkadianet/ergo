@@ -1738,3 +1738,82 @@ fn segregate_extracts_constants_in_first_write_order_no_dedup() {
     assert_eq!(ph(a), Some(0), "first constant → ConstPlaceholder(0)");
     assert_eq!(ph(b), Some(1), "second constant → ConstPlaceholder(1)");
 }
+
+// ----- preorder walk (the shared node-identity contract, source-map design §2) -----
+
+fn hex_bytes(h: &str) -> Vec<u8> {
+    (0..h.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+#[test]
+fn preorder_assigns_dfs_ids_in_payload_field_order() {
+    // sigmaProp(HEIGHT > 100): BoolToSigmaProp(GT(Height, Const 100))
+    let bytes = hex_bytes("d191a30464");
+    let mut r = VlqReader::new(&bytes);
+    let root = parse_expr(&mut r, 0, 0).unwrap();
+    let walk: Vec<(u64, u8)> = super::preorder(&root)
+        .map(|(id, e)| (id, super::node_opcode(e)))
+        .collect();
+    // ids 0..n in DFS order; opcode tag per node (0x00 for an inline constant).
+    assert_eq!(walk, vec![(0, 0xD1), (1, 0x91), (2, 0xA3), (3, 0x00)]);
+}
+
+#[test]
+fn preorder_visits_block_items_before_the_result_and_counts_every_node() {
+    // { val v1 = HEIGHT; sigmaProp(v1 > 100) }, built directly so the shape
+    // is exactly what the assertion describes.
+    let height = Expr::Op(IrNode {
+        opcode: 0xA3,
+        payload: Payload::Zero,
+    });
+    let val_def = Expr::Op(IrNode {
+        opcode: 0xD6,
+        payload: Payload::ValDef {
+            id: 1,
+            tpe: None,
+            rhs: Box::new(height),
+        },
+    });
+    let gt = Expr::Op(IrNode {
+        opcode: 0x91,
+        payload: Payload::Two(
+            Box::new(Expr::Op(IrNode {
+                opcode: 0x72,
+                payload: Payload::ValUse { id: 1 },
+            })),
+            Box::new(Expr::Const {
+                tpe: SigmaType::SInt,
+                val: SigmaValue::Int(100),
+            }),
+        ),
+    });
+    let root = Expr::Op(IrNode {
+        opcode: 0xD1,
+        payload: Payload::One(Box::new(Expr::Op(IrNode {
+            opcode: 0xD8,
+            payload: Payload::BlockValue {
+                items: vec![val_def],
+                result: Box::new(gt),
+            },
+        }))),
+    });
+    let walk: Vec<(u64, u8)> = super::preorder(&root)
+        .map(|(id, e)| (id, super::node_opcode(e)))
+        .collect();
+    // Items (ValDef, then its rhs) come BEFORE the result subtree.
+    assert_eq!(
+        walk,
+        vec![
+            (0, 0xD1),
+            (1, 0xD8),
+            (2, 0xD6),
+            (3, 0xA3),
+            (4, 0x91),
+            (5, 0x72),
+            (6, 0x00),
+        ]
+    );
+}

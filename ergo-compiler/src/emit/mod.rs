@@ -152,6 +152,19 @@ pub fn emit_with_version(expr: &TypedExpr, tree_version: u8) -> Result<Expr, Emi
     Scope::new(tree_version).emit(expr)
 }
 
+/// [`emit_with_version`] that also returns the recorded source origins for
+/// a P5-B [`crate::SourceMap`] (resolved by the compile route after the
+/// rewrite passes).
+pub(crate) fn emit_with_version_tracked(
+    expr: &TypedExpr,
+    tree_version: u8,
+) -> Result<(Expr, crate::source_map::Origins), EmitError> {
+    let mut scope = Scope::new_tracking(tree_version);
+    let out = scope.emit(expr)?;
+    let origins = scope.origins.take().unwrap_or_default();
+    Ok((out, origins))
+}
+
 /// Emit a typed contract body, resolving each named parameter to its
 /// `ConstantPlaceholder(index)` node (M7). `placeholders` maps a param name to
 /// its constant-table index (declaration order for ≤4 params). Any body

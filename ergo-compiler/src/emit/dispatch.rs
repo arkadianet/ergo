@@ -8,7 +8,19 @@ use crate::typed::{node_tpe, MethodRef, TypedExpr};
 use super::*;
 
 impl Scope {
+    /// Lower one typed node. Every recursive lowering goes through here, so
+    /// this is the one place the P5-B source map hooks in: when origins are
+    /// being recorded, the subtree just produced is filed under the typed
+    /// node's source position (`crate::source_map`).
     pub(crate) fn emit(&mut self, expr: &TypedExpr) -> Result<Expr, EmitError> {
+        let out = self.emit_inner(expr)?;
+        if let Some(origins) = self.origins.as_mut() {
+            origins.record(&out, crate::typed::node_pos(expr));
+        }
+        Ok(out)
+    }
+
+    fn emit_inner(&mut self, expr: &TypedExpr) -> Result<Expr, EmitError> {
         use TypedExpr as T;
 
         match expr {
