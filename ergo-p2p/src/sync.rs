@@ -290,13 +290,35 @@ impl SyncState {
     }
 
     /// Get blocks that should be downloaded next (within the download window).
+    ///
+    /// The window is anchored at `max(best_full_block_height,
+    /// prune_sentinel - 1)`, and blocks below the sentinel are dropped
+    /// outright. On a from-scratch Mode 3 node the sentinel is the
+    /// floor: `best_full_block_height` is still `0` (no block has been
+    /// applied yet) while the headers-synced flip has seeded the
+    /// sentinel far up the chain, so an anchor of `0` would cap the
+    /// window at `[0, download_window]` — a range containing none of
+    /// the pending blocks recovery seeds at/above the sentinel — and
+    /// every tick would emit an empty request batch. Same split-brain
+    /// class as the Mode 2 post-install `set_best_full_block` fix in
+    /// `ergo-node/src/node/sync_tick.rs`.
+    ///
+    /// Scala has no such cached anchor: `nextModifiersToDownload`
+    /// starts its walk at `minimalFullBlockHeight` whenever
+    /// `bestFullBlockOpt` is `None`
+    /// (`ToDownloadProcessor.scala:99-102`), which is exactly the
+    /// sentinel floor reproduced here.
+    ///
+    /// Inert for archive / Mode 6 / any pre-eviction store, where
+    /// `prune_sentinel` is `0`.
     pub fn blocks_to_download(&self) -> Vec<&PendingBlock> {
-        let limit = self
+        let anchor = self
             .best_full_block_height
-            .saturating_add(self.download_window as u32);
+            .max(self.prune_sentinel.saturating_sub(1));
+        let limit = anchor.saturating_add(self.download_window as u32);
         self.pending_blocks
             .iter()
-            .filter(|b| b.height <= limit)
+            .filter(|b| b.height >= self.prune_sentinel && b.height <= limit)
             .collect()
     }
 
@@ -660,6 +682,93 @@ mod tests {
             state.add_pending_block(i, mk_id(i as u8));
         }
         assert_eq!(state.blocks_to_download().len(), 1);
+    }
+
+    #[test]
+    fn blocks_to_download_prune_sentinel_is_the_window_floor_on_a_fresh_node() {
+        // Mode 3 from-scratch: the headers-synced flip seeded the
+        // sentinel at 969 (Scala oracle vector
+        // `flip_h1200_keep232_mainnet`) while no block has been applied,
+        // so `best_full_block_height` is still 0. Anchoring the window
+        // at 0 would cap it at [0, 384] and return NOTHING — a stalled
+        // pipeline that re-emits an empty request batch every tick.
+        let mut state = SyncState::new(0);
+        state.set_prune_sentinel(969);
+        for h in 969..=1200 {
+            state.add_pending_block(h, mk_id32(h));
+        }
+        let to_download = state.blocks_to_download();
+        assert_eq!(
+            to_download.len(),
+            232,
+            "every pending block from the sentinel to the header tip is              inside the window once the sentinel is the floor",
+        );
+        assert_eq!(to_download.first().map(|b| b.height), Some(969));
+        assert_eq!(to_download.last().map(|b| b.height), Some(1200));
+    }
+
+    #[test]
+    fn blocks_to_download_prune_sentinel_excludes_sub_sentinel_blocks() {
+        // Scala's `nextModifiersToDownload` starts its walk AT
+        // `minimalFullBlockHeight` when no full block has been applied
+        // (ToDownloadProcessor.scala:99-102); it never enumerates below
+        // it. Blocks under the sentinel would be evicted on apply and
+        // the serve side refuses them anyway, so they must not consume
+        // window slots either.
+        let mut state = SyncState::new(0);
+        state.set_prune_sentinel(969);
+        for h in 1..=1200 {
+            state.add_pending_block(h, mk_id32(h));
+        }
+        let to_download = state.blocks_to_download();
+        assert!(
+            to_download.iter().all(|b| b.height >= 969),
+            "no sub-sentinel block may be scheduled for download",
+        );
+        assert_eq!(to_download.first().map(|b| b.height), Some(969));
+    }
+
+    #[test]
+    fn blocks_to_download_prune_sentinel_still_honors_the_window_cap() {
+        // The sentinel moves the window's anchor; it does not widen it.
+        let mut state = SyncState::new_with_window(0, 50);
+        state.set_prune_sentinel(1000);
+        for h in 1000..=1200 {
+            state.add_pending_block(h, mk_id32(h));
+        }
+        let to_download = state.blocks_to_download();
+        assert_eq!(to_download.len(), 50);
+        assert_eq!(to_download.last().map(|b| b.height), Some(1049));
+    }
+
+    #[test]
+    fn blocks_to_download_archive_sentinel_zero_is_inert() {
+        // Archive / Mode 6 / any pre-eviction store leaves the mirror at
+        // 0, where `saturating_sub(1)` keeps the anchor at
+        // `best_full_block_height` and the lower filter admits every
+        // height. Regression guard: the Mode 3 floor must not perturb
+        // the archive hot path.
+        let mut state = SyncState::new(100);
+        assert_eq!(state.prune_sentinel(), 0);
+        for h in 101..=150 {
+            state.add_pending_block(h, mk_id32(h));
+        }
+        assert_eq!(state.blocks_to_download().len(), 50);
+    }
+
+    #[test]
+    fn blocks_to_download_applied_tip_wins_over_a_lower_sentinel() {
+        // Steady state on a long-running pruned node: the applied tip is
+        // far above the sentinel, so the anchor must stay at the tip.
+        // `max` — not "sentinel always wins" — is what makes that true.
+        let mut state = SyncState::new(5000);
+        state.set_prune_sentinel(4096);
+        for h in 5001..=5100 {
+            state.add_pending_block(h, mk_id32(h));
+        }
+        let to_download = state.blocks_to_download();
+        assert_eq!(to_download.len(), 100);
+        assert_eq!(to_download.last().map(|b| b.height), Some(5100));
     }
 
     #[test]

@@ -145,6 +145,21 @@ pub(super) fn handle_sync_tick(state: &mut NodeState) {
         info!("headers chain synced — caught up to peers (level-triggered fallback)");
     }
 
+    // 2.6 Mode 3 activation parity — seed the prune sentinel at the
+    // headers-synced flip. Scala does this inside
+    // `ToDownloadProcessor.toDownload` on the header that flips the
+    // latch (`ToDownloadProcessor.scala:110-118`); our latch has two
+    // flip points (the `on_header` freshness edge and the
+    // caught-up-to-peers fallback just above), so the seed is
+    // level-triggered here and one-shot inside the helper. Archive /
+    // Mode 6 / any store that already holds full blocks return before
+    // touching redb.
+    super::prune_activation::seed_prune_sentinel_at_flip(
+        &mut state.store,
+        &mut state.coordinator,
+        state.identity_inputs.blocks_to_keep,
+    );
+
     // 3. Try to apply the next sequential block if sections are available.
     if state.coordinator.sync_state().headers_chain_synced() {
         // Startup recovery bailed with "headers not near tip" when

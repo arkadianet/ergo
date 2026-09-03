@@ -91,6 +91,54 @@ pub fn compute_minimal_full_block_height(
     }
 }
 
+/// Scala-parity seed for the Mode 3 prune sentinel at the
+/// **headers-synced flip**, mirroring
+/// `ToDownloadProcessor.toDownload` (`ToDownloadProcessor.scala:110-118`),
+/// which calls `FullBlockPruningProcessor.updateBestFullBlock(header)`
+/// on the first header that flips `isHeadersChainSynced`. Scala's
+/// `nextModifiersToDownload` then starts full-block download at
+/// `minimalFullBlockHeight` for a node with no full blocks yet
+/// (`ToDownloadProcessor.scala:99-102`), so on a fresh pruned node the
+/// sentinel — not genesis — is the download floor.
+///
+/// Returns `Some(new_min)` when the flip must seed the sentinel, and
+/// `None` when it must leave it alone. `None` covers, in order:
+/// - `blocks_to_keep < 0` (archive) and `== 0` (canonical Mode 6) —
+///   neither prunes, so neither seeds.
+/// - `best_full_block_height > 0` — the store already holds full
+///   blocks; the forward-apply eviction seam owns the sentinel from
+///   there and seeding would jump it past applied history.
+/// - `sentinel_row.is_some()` — a sentinel already exists. This is the
+///   one-shot latch: `install_snapshot_state` / `apply_popow_proof`
+///   materialize the row, so a Mode 4 store is never re-seeded, and a
+///   flip observed twice (boot then tick) cannot advance it twice.
+/// - the computed value is still `1` (GenesisHeight) — nothing to
+///   record; the absent row already reads as `1`.
+///
+/// `current_min` is fixed at `1` because the row is known absent on
+/// the only branch that computes, matching Scala's
+/// `readMinimalFullBlockHeight()` default of `GenesisHeight`.
+pub fn activation_minimal_full_block_height(
+    sentinel_row: Option<u32>,
+    best_header_height: u32,
+    best_full_block_height: u32,
+    blocks_to_keep: i32,
+    voting_length: u32,
+) -> Option<u32> {
+    if blocks_to_keep <= 0 {
+        return None;
+    }
+    if best_full_block_height > 0 {
+        return None;
+    }
+    if sentinel_row.is_some() {
+        return None;
+    }
+    let new_min =
+        compute_minimal_full_block_height(1, best_header_height, blocks_to_keep, voting_length);
+    (new_min > 1).then_some(new_min)
+}
+
 impl StateStore {
     /// Apply validated transactions to the UTXO state.
     ///

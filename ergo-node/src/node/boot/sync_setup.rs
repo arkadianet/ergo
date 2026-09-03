@@ -404,6 +404,21 @@ pub(super) fn setup(
         );
     }
 
+    // Mode 3 activation parity — boot-path arm of the headers-synced
+    // flip. `recover_coordinator` above flips the latch itself when the
+    // best header's timestamp is fresh (`executor/startup.rs` →
+    // `SyncState::check_headers_synced`), so a pruned node that boots
+    // with an already-synced header chain and no full blocks reaches
+    // its first tick needing the sentinel already seeded — the
+    // coordinator's request-side gate and download window both read it.
+    // No-op for archive / Mode 6 / a store that already holds full
+    // blocks or a sentinel; see `node::prune_activation`.
+    crate::node::prune_activation::seed_prune_sentinel_at_flip(
+        store,
+        &mut coordinator,
+        config.blocks_to_keep,
+    );
+
     // Committed chain-state snapshot. Nothing mutates committed state
     // between here and `NodeState` construction, so one owned snapshot
     // feeds the handshake `nipopow` feature, the heartbeat baselines, and
