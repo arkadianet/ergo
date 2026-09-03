@@ -327,7 +327,7 @@ impl SyncExecutor {
             match store.get_header_meta(&cs.best_header_id) {
                 Ok(Some(meta)) => coordinator
                     .sync_state_mut()
-                    .check_headers_synced(meta.timestamp),
+                    .check_headers_synced(meta.timestamp, meta.height),
                 Ok(None) => {}
                 Err(e) => super::report_sync_storage_failure(
                     store,

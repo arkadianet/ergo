@@ -24,6 +24,26 @@
 //! [`ergo_state::store::activation_minimal_full_block_height`], pinned
 //! against the Scala oracle by
 //! `ergo-state/tests/prune_activation_scala_oracle.rs`.
+//!
+//! **Seed height.** Scala seeds from the *flipping* header's own
+//! height, inside `toDownload` at the moment it flips
+//! (`ToDownloadProcessor.scala:110-112`). This module's `on_header`
+//! observation point can run one or more headers after that edge —
+//! `SyncState::check_headers_synced` flips the latch synchronously as
+//! part of validating a specific header, but this helper is invoked
+//! from the next `sync_tick`, and further headers may validate in
+//! between. `SyncState::flip_seed_height` closes that gap: the
+//! freshness edge records the flipping header's own height there, and
+//! this module prefers it over the live `best_header_height` when
+//! present. The two other observation points don't need it — boot's
+//! `sync_setup` calls this immediately after `recover_coordinator`
+//! detects the flip in the same synchronous step, and the
+//! caught-up-to-peers fallback has no single flipping header to begin
+//! with (its own current-tip height already **is** the value to seed
+//! from). Net effect either way is benign even uncorrected: a
+//! higher-than-Scala seed still leaves the retained suffix at least
+//! `blocks_to_keep` deep relative to the (also higher) tip it was
+//! computed against — it only ever seeds equal to or later than Scala.
 
 use ergo_state::store::activation_minimal_full_block_height;
 use ergo_state::ChainStateRead;
@@ -74,9 +94,24 @@ pub(super) fn seed_prune_sentinel_at_flip(
             return None;
         }
     };
+    // Seed from the height Scala actually flips on
+    // (`ToDownloadProcessor.scala:110-112`) when we captured it: the
+    // `on_header` freshness edge (`SyncState::check_headers_synced`)
+    // records the flipping header's own height, but this helper may
+    // observe the flip on a LATER tick than the one that flipped it —
+    // any headers validated in between would otherwise inflate the
+    // seed height above what Scala wrote. Falls back to the live
+    // `best_header_height` when the flip has no single flipping header
+    // (the caught-up-to-peers fallback) or when this is the boot-path
+    // observation immediately following the flip it just detected,
+    // where the two are identical anyway.
+    let seed_height = coordinator
+        .sync_state()
+        .flip_seed_height()
+        .unwrap_or(meta.best_header_height);
     let seeded = activation_minimal_full_block_height(
         sentinel_row,
-        meta.best_header_height,
+        seed_height,
         meta.best_full_block_height,
         blocks_to_keep,
         voting_length,
@@ -93,6 +128,7 @@ pub(super) fn seed_prune_sentinel_at_flip(
     coordinator.sync_state_mut().set_prune_sentinel(seeded);
     info!(
         sentinel = seeded,
+        seed_height,
         best_header_height = meta.best_header_height,
         blocks_to_keep,
         voting_length,
