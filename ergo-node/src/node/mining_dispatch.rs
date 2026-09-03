@@ -1,7 +1,36 @@
 //! Mining bridge dispatch: drives one `MiningRequest` (GetCandidate or
-//! SubmitSolution) through the action-loop's owned state. Gated by the
-//! "applied tip == best-header tip" invariant so we never mine on a
-//! sibling fork the network is about to reorg off.
+//! SubmitSolution) through the action-loop's owned state.
+//!
+//! # The mining gate (Scala parity)
+//!
+//! Candidates are built **on the applied full-block tip**, gated by a one-way
+//! *mining-started latch* — not by an instantaneous "headers == bodies" test.
+//! This mirrors the reference node exactly:
+//!
+//! - `ErgoMiner.isBlockchainNearlySynced`
+//!   (`ergo-scala/.../mining/ErgoMiner.scala:119-121`) is
+//!   `headersHeight < fullBlockHeight + 6`, checked once on the way from
+//!   `starting` to `started` (`ErgoMiner.scala:128-155`); entering `started`
+//!   unsubscribes from `FullBlockApplied` and the condition is never re-tested.
+//! - `CandidateGenerator.createCandidate` takes its parent from
+//!   `history.bestFullBlockOpt` (`CandidateGenerator.scala:530`) — the applied
+//!   tip. The header tip plays no part.
+//! - The only per-candidate freshness condition is
+//!   `CandidateGenerator.generateCandidate`'s `chainSynced`
+//!   (`CandidateGenerator.scala:415-416`):
+//!   `h.bestFullBlockOpt.id == stateContext.lastHeaderOpt.id`, i.e. the UTXO
+//!   state has finished applying the best full block. Our equivalent is the
+//!   engine's commit-visibility check (`ergo_mining::engine::build_and_publish`),
+//!   which waits for the committed snapshot to reflect the intent's parent.
+//!
+//! Requiring `best_header == best_full` instead would amplify liveness capture:
+//! any party (or hiccup) that pushes headers ahead of bodies silently halts our
+//! block production, and once honest production stops it never restarts. Scala
+//! keeps producing on its applied tip and its blocks compete. Every input the
+//! candidate reads — `last_applied_chain_window_10`, the parent header, the AVL
+//! root — is sourced from the APPLIED chain (`CHAIN_INDEX` walked back from
+//! `best_full_block_height`, `ergo-state/src/store/mod.rs`), so a leading header
+//! tip cannot make a candidate script-divergent.
 //!
 //! On `SubmitSolution`, walks the same persistence + header pipeline
 //! peer-received blocks go through (BT/Extension/ADProofs persist →
@@ -11,7 +40,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ergo_mining::engine::{BestTip, BuildIntent, BuildReason};
+use ergo_mining::engine::{BestTip, BuildIntent, BuildReason, MINING_SYNC_TOLERANCE};
 use ergo_mining::handle::MiningHandle;
 use ergo_state::wallet::RewardKeyResolution;
 use ergo_state::ChainStateRead;
@@ -61,36 +90,50 @@ pub(super) struct MiningProducerState {
     pub(super) last_mempool_signal: Option<Instant>,
 }
 
+/// The two tuning windows [`decide_mining_signal`] throttles with: how often a
+/// synced-but-uncovered node retries the recovery build, and the same-parent
+/// mempool-refresh debounce (`[mining].block_candidate_generation_interval_ms`).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct MiningSignalIntervals {
+    pub(super) recovery: Duration,
+    pub(super) refresh_debounce: Duration,
+}
+
 /// What the action-loop producer should signal this iteration, given the
 /// current observations. Pure decision (no I/O) so the tip/recovery/refresh
 /// precedence is unit-testable. `None` = signal nothing this iteration.
+///
+/// `mining_started` is the loop's latched gate (see [`mining_started_latch`]);
+/// it is passed in rather than recomputed from `tip_now` because the latch is
+/// one-way — a header run-ahead after the node started mining must not silence
+/// the recovery/refresh signals.
 pub(super) fn decide_mining_signal(
     prev: &MiningProducerState,
     tip_now: MiningTipSnapshot,
+    mining_started: bool,
     has_cached_candidate: bool,
     revision_now: u64,
     now: Instant,
-    recovery_interval: Duration,
-    refresh_debounce: Duration,
+    intervals: MiningSignalIntervals,
 ) -> Option<BuildReason> {
     // 1. Tip moved (full OR header-only) → always re-signal; preempts the rest.
     if tip_now != prev.last_tip {
         return Some(BuildReason::Tip);
     }
-    // 2. Synced but nothing served yet (wallet just-ready / post-race) →
+    // 2. Started but nothing served yet (wallet just-ready / post-race) →
     //    throttled recovery retry.
-    if tip_now.synced()
+    if mining_started
         && !has_cached_candidate
         && prev
             .last_recovery
-            .is_none_or(|t| now.duration_since(t) >= recovery_interval)
+            .is_none_or(|t| now.duration_since(t) >= intervals.recovery)
     {
         return Some(BuildReason::WalletReady);
     }
-    // 3. Same synced tip, mempool advanced, debounce elapsed → same-parent refresh.
-    if tip_now.synced()
+    // 3. Same tip, mempool advanced, debounce elapsed → same-parent refresh.
+    if mining_started
         && revision_now != prev.last_revision
-        && mempool_refresh_due(prev.last_mempool_signal, now, refresh_debounce)
+        && mempool_refresh_due(prev.last_mempool_signal, now, intervals.refresh_debounce)
     {
         return Some(BuildReason::MempoolRefresh);
     }
@@ -121,13 +164,17 @@ impl MiningTipSnapshot {
         }
     }
 
-    /// The full live mining-gate predicate (identical to the serve-time gate
-    /// and `CommittedSnapshot::synced`): a full block exists and the header
-    /// tip equals it. Never true at the zeroed genesis state.
-    pub(super) fn synced(&self) -> bool {
-        self.best_header_height == self.best_full_height
-            && self.best_full_height > 0
-            && self.best_header_id == self.best_full_id
+    /// Scala's `ErgoMiner.isBlockchainNearlySynced`
+    /// (`ErgoMiner.scala:119-121`): a full block exists and the header chain
+    /// leads the applied chain by fewer than [`MINING_SYNC_TOLERANCE`] blocks.
+    /// Never true at the zeroed genesis state.
+    ///
+    /// This is the *start* condition only. Once the loop has latched it into
+    /// [`BestTip::synced`] the latch never re-closes, so a later header
+    /// run-ahead cannot stop block production — see the module docs.
+    pub(super) fn nearly_synced(&self) -> bool {
+        self.best_full_height > 0
+            && self.best_header_height < self.best_full_height + MINING_SYNC_TOLERANCE
     }
 
     /// The current best-full tip id (the candidate's parent).
@@ -137,8 +184,7 @@ impl MiningTipSnapshot {
 
     /// Test-only constructor: the fields are module-private, so unit tests for
     /// [`decide_mining_signal`] build snapshots through this rather than
-    /// standing up a full `NodeState`. A synced snapshot needs full==header
-    /// (same id + height) with height > 0.
+    /// standing up a full `NodeState`.
     #[cfg(test)]
     pub(super) fn for_test(
         best_full_id: [u8; 32],
@@ -153,6 +199,18 @@ impl MiningTipSnapshot {
             best_header_height,
         }
     }
+}
+
+/// The mining-started latch, as a pure function so the one-way property is
+/// unit-testable: once set it can never clear.
+///
+/// Scala's `ErgoMiner` checks `isBlockchainNearlySynced` only while in the
+/// `starting` state; entering `started` unsubscribes from `FullBlockApplied`
+/// (`ErgoMiner.scala:128-155`) so the condition is never re-evaluated. That
+/// one-wayness is the liveness property: a party that pushes the header chain
+/// ahead of the bodies cannot switch honest block production back off.
+pub(super) fn mining_started_latch(already_started: bool, tip: MiningTipSnapshot) -> bool {
+    already_started || tip.nearly_synced()
 }
 
 /// Update the mining engine's authoritative tip and, when synced, publish a
@@ -170,6 +228,10 @@ impl MiningTipSnapshot {
 /// `chain_seq` bumps on every best-full **id** change (including equal-height
 /// reorgs); a header-only advance keeps the same seq. Returns the captured tip
 /// so the caller can track it for change detection.
+///
+/// This is the sole writer of the mining-started latch (`BestTip::synced`):
+/// it sets the bit the first time the node is nearly synced and never clears
+/// it thereafter, matching Scala's one-way `starting → started` transition.
 pub(super) fn signal_mining_engine(
     state: &NodeState,
     wiring: &MiningWiring,
@@ -183,14 +245,14 @@ pub(super) fn signal_mining_engine(
     if &now.best_full_id != prev_best_full_id {
         *chain_seq += 1;
     }
-    let synced = now.synced();
+    let synced = mining_started_latch(handle.best_tip().synced, now);
     handle.set_best_tip(BestTip {
         parent_id: now.best_full_id,
         chain_seq: *chain_seq,
         synced,
     });
-    // Never build while unsynced; the tip is still published so the serve path
-    // refuses correctly (header-only advance stops serving immediately).
+    // Never build before the latch closes (IBD); the tip is still published so
+    // the serve path refuses correctly.
     if !synced {
         return now;
     }
@@ -256,7 +318,7 @@ pub(super) fn handle_mining_request(
     };
 
     // Reward-key resolution is independent of sync state — answer it before
-    // the synced-tip gate. The candidate path freezes the reward key; this
+    // the mining-started gate. The candidate path freezes the reward key; this
     // read does not generate a candidate.
     if let crate::mining_bridge::MiningRequest::GetRewardKey { reply } = req {
         use ergo_state::wallet::RewardKeyResolution;
@@ -288,42 +350,21 @@ pub(super) fn handle_mining_request(
         return;
     }
 
-    // Synced-tip gate. ergo-mining's design forbids mining at an
-    // unsynced tip: the candidate's script-visible context
-    // (last_applied_chain_window_10, last_block_utxo_root) would
-    // diverge from the canonical chain the rest of the network is
-    // building on, producing script-divergent candidates per
-    // `ergo-mining/src/config.rs:17`.
-    //
-    // Two-part check, both required:
-    //
-    //   a) Heights match: best_header_height == best_full_block_height.
-    //      Closes the obvious "header is ahead of body" gap.
-    //
-    //   b) Ids match: best_header_id == best_full_block_id. Closes
-    //      the equal-height-different-id case where best-header is
-    //      on a sibling fork at the same height we've applied — the
-    //      chain may be about to reorg onto the heavier tip and
-    //      mining on the applied (about-to-be-orphaned) tip would
-    //      burn the solution. State permits this divergence after
-    //      header processing flips the best-header pointer without
-    //      applying the new block; full-block apply only realigns
-    //      when it strictly increases the height (see
-    //      `ergo-state/src/store/mod.rs` chain-state writes).
-    //
-    // Both `(a) && (b)` give the "applied tip == best-header tip"
-    // invariant `last_applied_chain_window_10` relies on.
-    let cs = state.store.chain_state_meta();
-    let synced = cs.best_header_height == cs.best_full_block_height
-        && cs.best_full_block_height > 0
-        && cs.best_header_id == cs.best_full_block_id;
-    if !synced {
+    // Mining-started gate — the SAME latch the producer maintains, read from
+    // the shared `BestTip` rather than recomputed here, so the serve path and
+    // the build path can never disagree. See the module docs for why this is a
+    // one-way latch on "nearly synced" and not a live `headers == bodies`
+    // test.
+    if !handle.best_tip().synced {
+        let cs = state.store.chain_state_meta();
         let msg = format!(
-            "node not synced to tip (best_header={}@{} best_full={}@{}); refusing to mine",
+            "node still catching up (best_header={}@{} best_full={}@{}); \
+             mining starts once the header chain is within {} blocks of the applied chain",
             hex::encode(cs.best_header_id),
             cs.best_header_height,
             hex::encode(cs.best_full_block_id),
             cs.best_full_block_height,
+            MINING_SYNC_TOLERANCE,
         );
         match req {
             crate::mining_bridge::MiningRequest::GetCandidate { reply } => {
@@ -332,9 +373,9 @@ pub(super) fn handle_mining_request(
             crate::mining_bridge::MiningRequest::SubmitSolution { reply, .. } => {
                 let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(msg)));
             }
-            // GetRewardKey is answered before this synced-tip gate (above).
+            // GetRewardKey is answered before this mining-started gate (above).
             crate::mining_bridge::MiningRequest::GetRewardKey { .. } => {
-                unreachable!("GetRewardKey is handled before the synced-tip gate")
+                unreachable!("GetRewardKey is handled before the mining-started gate")
             }
         }
         return;
@@ -348,8 +389,8 @@ pub(super) fn handle_mining_request(
             // re-checks the synced bit and the candidate's parent under the
             // cache lock, so it returns `None` (→ 503) when the engine has not
             // yet published for the current tip — the miner re-polls and the
-            // engine publishes within a tick of the tip change. The synced-tip
-            // gate above already rejected the unsynced case.
+            // engine publishes within a tick of the tip change. The
+            // mining-started gate above already rejected the IBD case.
             let payload =
                 match handle.cached_template_if_synced() {
                     Some((work, identity)) => Ok(crate::mining_bridge::work_message_to_json(
@@ -543,9 +584,9 @@ pub(super) fn handle_mining_request(
                 )));
             }
         }
-        // GetRewardKey is answered before the synced-tip gate (above).
+        // GetRewardKey is answered before the mining-started gate (above).
         crate::mining_bridge::MiningRequest::GetRewardKey { .. } => {
-            unreachable!("GetRewardKey is handled before the synced-tip gate")
+            unreachable!("GetRewardKey is handled before the mining-started gate")
         }
     }
 }
@@ -587,14 +628,96 @@ mod tests {
         assert!(mempool_refresh_due(Some(base), now, debounce));
     }
 
+    // ----- mining_started_latch (one-way) -----
+
+    #[test]
+    fn mining_started_latch_opens_once_nearly_synced() {
+        assert!(mining_started_latch(false, synced_tip(1, 100)));
+    }
+
+    #[test]
+    fn mining_started_latch_stays_closed_during_ibd() {
+        assert!(!mining_started_latch(
+            false,
+            header_ahead_tip(1, 100, 5_000)
+        ));
+    }
+
+    #[test]
+    fn mining_started_latch_never_recloses_on_header_run_ahead() {
+        // The whole point of the fix: an adversary (or a network hiccup) that
+        // drives the header chain far ahead of the applied chain must not be
+        // able to switch our block production back off.
+        assert!(mining_started_latch(true, header_ahead_tip(1, 100, 5_000)));
+    }
+
+    #[test]
+    fn mining_started_latch_never_recloses_on_a_rolled_back_tip() {
+        assert!(mining_started_latch(true, MiningTipSnapshot::default()));
+    }
+
     // ----- decide_mining_signal -----
 
     const RECOVERY: Duration = Duration::from_secs(1);
     const DEBOUNCE: Duration = Duration::from_millis(1000);
+    const INTERVALS: MiningSignalIntervals = MiningSignalIntervals {
+        recovery: RECOVERY,
+        refresh_debounce: DEBOUNCE,
+    };
 
-    /// A synced snapshot at the given height: full == header (same id + height).
+    /// A caught-up snapshot at the given height: full == header (same id + height).
     fn synced_tip(id_byte: u8, height: u32) -> MiningTipSnapshot {
         MiningTipSnapshot::for_test([id_byte; 32], height, [id_byte; 32], height)
+    }
+
+    /// A snapshot whose header chain leads the applied chain by `lead` blocks.
+    fn header_ahead_tip(id_byte: u8, full_height: u32, lead: u32) -> MiningTipSnapshot {
+        MiningTipSnapshot::for_test(
+            [id_byte; 32],
+            full_height,
+            [id_byte ^ 0xff; 32],
+            full_height + lead,
+        )
+    }
+
+    // ----- nearly_synced (Scala isBlockchainNearlySynced parity) -----
+
+    #[test]
+    fn nearly_synced_header_equal_to_full_is_true() {
+        assert!(synced_tip(1, 100).nearly_synced());
+    }
+
+    #[test]
+    fn nearly_synced_header_five_ahead_is_true() {
+        // Scala: headersHeight < fullBlockHeight + 6 → 105 < 106 holds.
+        assert!(header_ahead_tip(1, 100, 5).nearly_synced());
+    }
+
+    #[test]
+    fn nearly_synced_header_six_ahead_is_false() {
+        // 106 < 106 is false — the IBD boundary, matching ErgoMiner.scala:119-121.
+        assert!(!header_ahead_tip(1, 100, 6).nearly_synced());
+    }
+
+    #[test]
+    fn nearly_synced_deep_ibd_is_false() {
+        assert!(!header_ahead_tip(1, 100, 900_000).nearly_synced());
+    }
+
+    #[test]
+    fn nearly_synced_at_zero_height_is_false() {
+        // Zeroed genesis state: no full block applied yet.
+        assert!(!MiningTipSnapshot::default().nearly_synced());
+    }
+
+    #[test]
+    fn nearly_synced_equal_height_sibling_header_is_true() {
+        // best-header on a same-height sibling of the applied tip. Scala builds
+        // on `bestFullBlockOpt` regardless (CandidateGenerator.scala:530); every
+        // input we read comes from the applied chain, so this is not a reason to
+        // stop producing.
+        let tip = MiningTipSnapshot::for_test([1; 32], 100, [2; 32], 100);
+        assert!(tip.nearly_synced());
     }
 
     #[test]
@@ -609,8 +732,8 @@ mod tests {
         };
         let tip_now = synced_tip(2, 11);
         let got = decide_mining_signal(
-            &prev, tip_now, /* has_cached */ true, /* revision_now */ 9, now, RECOVERY,
-            DEBOUNCE,
+            &prev, tip_now, /* mining_started */ true, /* has_cached */ true,
+            /* revision_now */ 9, now, INTERVALS,
         );
         assert_eq!(got, Some(BuildReason::Tip));
     }
@@ -628,11 +751,11 @@ mod tests {
         let got = decide_mining_signal(
             &prev,
             tip,
+            /* mining_started */ true,
             /* has_cached */ false,
             5,
             base + RECOVERY, // interval elapsed
-            RECOVERY,
-            DEBOUNCE,
+            INTERVALS,
         );
         assert_eq!(got, Some(BuildReason::WalletReady));
     }
@@ -650,11 +773,11 @@ mod tests {
         let got = decide_mining_signal(
             &prev,
             tip,
+            /* mining_started */ true,
             /* has_cached */ false,
             5,
             base + Duration::from_millis(999), // one tick short of the interval
-            RECOVERY,
-            DEBOUNCE,
+            INTERVALS,
         );
         assert_eq!(got, None);
     }
@@ -672,11 +795,11 @@ mod tests {
         let got = decide_mining_signal(
             &prev,
             tip,
+            /* mining_started */ true,
             /* has_cached */ true,            // covered → recovery branch skipped
             6,               // revision advanced
             base + DEBOUNCE, // debounce elapsed
-            RECOVERY,
-            DEBOUNCE,
+            INTERVALS,
         );
         assert_eq!(got, Some(BuildReason::MempoolRefresh));
     }
@@ -694,11 +817,11 @@ mod tests {
         let got = decide_mining_signal(
             &prev,
             tip,
+            /* mining_started */ true,
             /* has_cached */ true,
             6,                                 // revision advanced
             base + Duration::from_millis(999), // within the debounce window
-            RECOVERY,
-            DEBOUNCE,
+            INTERVALS,
         );
         assert_eq!(got, None);
     }
@@ -716,37 +839,85 @@ mod tests {
         let got = decide_mining_signal(
             &prev,
             tip,
+            /* mining_started */ true,
             /* has_cached */ true,
             5,               // revision unchanged
             base + DEBOUNCE, // debounce elapsed, but nothing to refresh
-            RECOVERY,
-            DEBOUNCE,
+            INTERVALS,
         );
         assert_eq!(got, None);
     }
 
     #[test]
-    fn decide_unsynced_no_tip_change_returns_none() {
-        // Header ahead of full (unsynced) and the tip didn't change: neither
-        // recovery nor refresh fires while unsynced.
+    fn decide_not_started_no_tip_change_returns_none() {
+        // Still doing IBD and the tip didn't change: neither recovery nor
+        // refresh fires before the mining-started latch closes.
         let base = Instant::now();
-        let unsynced = MiningTipSnapshot::for_test([1; 32], 9, [2; 32], 10);
+        let ibd = header_ahead_tip(1, 9, 5_000);
         let prev = MiningProducerState {
-            last_tip: unsynced,
+            last_tip: ibd,
             last_revision: 5,
             last_recovery: None,
             last_mempool_signal: None,
         };
         let got = decide_mining_signal(
             &prev,
-            unsynced,
-            /* has_cached */ false, // would trigger recovery if synced
-            6,     // revision advanced — would trigger refresh if synced
+            ibd,
+            /* mining_started */ false,
+            /* has_cached */ false, // would trigger recovery if started
+            6,     // revision advanced — would trigger refresh if started
             base + DEBOUNCE,
-            RECOVERY,
-            DEBOUNCE,
+            INTERVALS,
         );
         assert_eq!(got, None);
+    }
+
+    #[test]
+    fn decide_header_ahead_of_full_still_refreshes_once_started() {
+        // The liveness property: headers racing ahead of bodies after the node
+        // started mining must NOT silence the same-parent refresh. Under the old
+        // `headers == full` gate this returned None and production halted.
+        let base = Instant::now();
+        let tip = header_ahead_tip(1, 100, 40);
+        let prev = MiningProducerState {
+            last_tip: tip,
+            last_revision: 5,
+            last_recovery: Some(base),
+            last_mempool_signal: Some(base),
+        };
+        let got = decide_mining_signal(
+            &prev,
+            tip,
+            /* mining_started */ true, // latched earlier, never re-closed
+            /* has_cached */ true,
+            6,
+            base + DEBOUNCE,
+            INTERVALS,
+        );
+        assert_eq!(got, Some(BuildReason::MempoolRefresh));
+    }
+
+    #[test]
+    fn decide_applied_tip_advance_under_header_lead_returns_tip() {
+        // Bodies catching up one block while the header chain stays ahead is a
+        // tip change: the candidate must be rebuilt on the new applied parent.
+        let base = Instant::now();
+        let prev = MiningProducerState {
+            last_tip: header_ahead_tip(1, 100, 40),
+            last_revision: 5,
+            last_recovery: Some(base),
+            last_mempool_signal: Some(base),
+        };
+        let got = decide_mining_signal(
+            &prev,
+            header_ahead_tip(2, 101, 39),
+            /* mining_started */ true,
+            /* has_cached */ true,
+            5,
+            base,
+            INTERVALS,
+        );
+        assert_eq!(got, Some(BuildReason::Tip));
     }
 
     #[test]
@@ -764,11 +935,11 @@ mod tests {
         let got = decide_mining_signal(
             &prev,
             tip,
+            /* mining_started */ true,
             /* has_cached */ false,
             6,
             base + DEBOUNCE, // both RECOVERY and DEBOUNCE elapsed (equal here)
-            RECOVERY,
-            DEBOUNCE,
+            INTERVALS,
         );
         assert_eq!(got, Some(BuildReason::WalletReady));
     }

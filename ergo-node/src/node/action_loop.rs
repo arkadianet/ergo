@@ -23,7 +23,7 @@ use super::events::handle_event_batch;
 use super::memory_sampler::sample_memory;
 use super::mining_dispatch::{
     decide_mining_signal, handle_mining_request, signal_mining_engine, MiningProducerState,
-    MiningTipSnapshot, MiningWiring,
+    MiningSignalIntervals, MiningTipSnapshot, MiningWiring,
 };
 use super::peer_actions::{connect_to_address, flush_actions, try_dial_peers};
 use super::sync_tick::handle_sync_tick;
@@ -86,8 +86,8 @@ pub(super) async fn action_loop(
 
     // --- Off-loop mining engine producer state ---
     // After every state-mutating select arm we recompute the tip; on a tip
-    // change we re-signal the engine (`Tip`), and while synced-but-uncovered we
-    // retry (`WalletReady`). On an unchanged synced tip whose mempool advanced,
+    // change we re-signal the engine (`Tip`), and while started-but-uncovered we
+    // retry (`WalletReady`). On an unchanged tip whose mempool advanced,
     // a debounced `MempoolRefresh` re-signals with the same parent and a fresh
     // pool snapshot. The tip starts at the zeroed sentinel so the startup prime
     // below always fires.
@@ -112,9 +112,9 @@ pub(super) async fn action_loop(
     // Set by the votes-changed arm; consumed in the post-arm mining block to
     // force a same-tip rebuild this iteration (so a vote change applies now).
     let mut mining_votes_dirty = false;
-    // Startup priming: publish the initial BestTip + (if already synced) the
-    // first BuildIntent, so an idle already-synced node serves a candidate
-    // without waiting for an unrelated state change.
+    // Startup priming: publish the initial BestTip + (if the node is already
+    // nearly synced) the first BuildIntent, so an idle caught-up node serves a
+    // candidate without waiting for an unrelated state change.
     if let Some(wiring) = mining.as_ref() {
         let prev = mining_last_tip.best_full_id();
         mining_last_tip = signal_mining_engine(
@@ -254,11 +254,14 @@ pub(super) async fn action_loop(
             let decided = decide_mining_signal(
                 &producer,
                 tip_now,
+                wiring.handle.best_tip().synced,
                 has_cached,
                 revision_now,
                 now,
-                MINING_RECOVERY_RETRY,
-                wiring.refresh_debounce,
+                MiningSignalIntervals {
+                    recovery: MINING_RECOVERY_RETRY,
+                    refresh_debounce: wiring.refresh_debounce,
+                },
             );
             let signal = decided.or(mining_votes_dirty.then_some(BuildReason::VotesChanged));
             mining_votes_dirty = false;

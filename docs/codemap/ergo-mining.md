@@ -122,10 +122,17 @@ ergo-crypto, ergo-validation, ergo-state, ergo-mempool
   storage-rent self-claim — `src/storage_rent_claim.rs:90,264`
 
 ## Invariants & contracts
-- **Synced-tip gate.** Candidates are only built and served while `synced(tip)`
-  (a committed full block exists and the header tip equals it). There is no
-  `offline_generation` bypass — mining at an unsynced tip produces
-  script-divergent candidates and is forbidden (`config.rs`,
+- **Applied-tip gate (Scala `CandidateGenerator` parity).** The candidate's
+  parent is always the APPLIED full-block tip
+  (`CandidateGenerator.scala:530` — `history.bestFullBlockOpt`), and every
+  consensus input is read from the applied chain. Building/serving is gated on
+  `BestTip::synced`, a **one-way mining-started latch**: the action loop sets it
+  the first time the header chain is within `MINING_SYNC_TOLERANCE` (6) blocks
+  of the applied chain — Scala's `ErgoMiner.isBlockchainNearlySynced`,
+  `ErgoMiner.scala:119-121` — and never clears it, mirroring Scala's
+  `starting → started` transition. Requiring `header == full` instead would let
+  anything that runs the header chain ahead of the bodies halt honest block
+  production permanently. There is no `offline_generation` bypass (`config.rs`,
   `engine.rs::should_publish`, `handle.rs::cached_work_if_synced`).
 - **Single committed view per build.** Every consensus-bearing read flows
   through `CandidateStateView`; the off-loop engine sources all reads from one

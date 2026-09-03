@@ -36,11 +36,10 @@ pub struct ExtensionFieldSource {
 /// (`--mining-enabled`, `--mining-public-key`) override the parsed
 /// TOML at startup.
 ///
-/// `offline_generation` is not present in v1 — the bypass would
-/// allow mining against an unsynced tip, which can publish candidates
-/// whose script context (`CONTEXT.headers`, `LastBlockUtxoRootHash`)
-/// diverges from the chain mainnet validators see. Mining is
-/// unconditionally gated on `synced(tip)`.
+/// `offline_generation` is not present in v1 — Scala's flag (`ErgoApp.scala:212`)
+/// bypasses the miner's start-up sync check entirely, which on a public network
+/// means mining a chain nobody else has. Mining here is unconditionally gated on
+/// the nearly-synced start latch (`ergo_mining::engine::MINING_SYNC_TOLERANCE`).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct MiningConfig {
     /// `false` (default): mining subsystem is disabled and `/mining/*`

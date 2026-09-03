@@ -8,7 +8,8 @@
 //! authoritative [`BestTip`] on the [`MiningHandle`]. The engine task then
 //! calls [`build_and_publish`] off the loop: it opens ONE committed redb
 //! snapshot, waits for that snapshot to reflect the intent's expected
-//! parent (commit visibility), gates on `synced(tip)`, materializes
+//! parent (commit visibility), gates on the mining-started latch
+//! ([`BestTip::synced`]), materializes
 //! storage-rent-eligible boxes against that snapshot via the injected
 //! `resolve_rent` closure (the eligible-id list itself comes from the
 //! indexer's eventually-consistent extra-index), runs the unchanged
@@ -50,13 +51,26 @@ pub enum BuildReason {
     VotesChanged,
 }
 
+/// How far the header tip may lead the applied full-block tip while mining
+/// still starts. Scala's `ErgoMiner.isBlockchainNearlySynced`
+/// (`ergo-scala/src/main/scala/org/ergoplatform/mining/ErgoMiner.scala:119-121`)
+/// is `headersHeight < fullBlockHeight + 6`: a node whose bodies trail the
+/// header chain by a handful of blocks is "nearly synced" and mines, while a
+/// node still doing IBD (headers thousands ahead) does not.
+pub const MINING_SYNC_TOLERANCE: u32 = 6;
+
 /// The authoritative current tip, maintained by the action loop on the
 /// [`MiningHandle`]. The engine CAS-checks against it at publish; serving
 /// gates on `synced`.
 ///
-/// `synced` is the full live mining-gate predicate (a committed full block
-/// exists and the header tip equals it), computed by the loop on every
-/// best-header / best-full transition.
+/// `synced` is the **mining-started latch**, not an instantaneous
+/// "headers == bodies" test. The loop sets it once the node is nearly synced
+/// (`headers_height < full_height + `[`MINING_SYNC_TOLERANCE`]) and then never
+/// clears it, mirroring Scala's one-way `ErgoMiner.starting → started`
+/// transition (`ErgoMiner.scala:128-155`, which unsubscribes from
+/// `FullBlockApplied` on entry to `started` and never re-checks). The parent
+/// stays the applied full-block tip throughout, so a header chain racing ahead
+/// of bodies slows candidate *content*, never candidate *production*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct BestTip {
     pub parent_id: [u8; 32],
@@ -65,7 +79,7 @@ pub struct BestTip {
 }
 
 impl BestTip {
-    /// Pre-genesis / not-yet-synced default: zeroed parent, not synced, so
+    /// Pre-genesis / not-yet-latched default: zeroed parent, not synced, so
     /// serving refuses until the loop publishes a real synced tip.
     pub fn unsynced() -> Self {
         Self {
@@ -157,8 +171,9 @@ pub enum BuildOutcome {
     /// current tip is (or will be) queued; the driver drops this one instead of
     /// spinning. (Spec §6 step 3: "ahead of / forked from ⇒ drop this intent".)
     IntentSuperseded,
-    /// The committed view is not `synced(tip)` (header tip leads full tip).
-    /// No candidate is built or served while unsynced.
+    /// The mining-started latch ([`BestTip::synced`]) is not set — the node
+    /// is still doing IBD (or has no full block yet). No candidate is built
+    /// or served until the loop latches it.
     NotSynced,
     /// The candidate orchestrator returned `None` (its own in-generation
     /// parent guard caught a flip). Retry on the next intent.
@@ -260,9 +275,14 @@ pub fn build_and_publish(
         return Ok(BuildOutcome::IntentSuperseded);
     }
 
-    // Synced gate (full live predicate), evaluated within this committed
-    // view: never build while the header tip leads the full tip.
-    if !snapshot.synced() {
+    // Mining-started gate. The authority is the loop's one-way latch on the
+    // handle (see [`BestTip`]) — Scala's `ErgoMiner.starting → started`. The
+    // per-candidate freshness condition Scala applies instead
+    // (`CandidateGenerator.generateCandidate`'s `chainSynced`:
+    // `h.bestFullBlockOpt.id == stateContext.lastHeaderOpt.id`, i.e. state has
+    // applied the best full block) is the commit-visibility check above; a
+    // header tip that leads the applied tip is NOT a reason to stop.
+    if !handle.best_tip().synced {
         return Ok(BuildOutcome::NotSynced);
     }
 
