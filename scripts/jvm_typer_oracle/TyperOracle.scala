@@ -384,7 +384,12 @@ object TyperOracle {
             "OK " + out.map("%02x".format(_)).mkString
           }
         catch {
-          case e: IllegalArgumentException => "REJECT 0:0 " + e.getClass.getSimpleName + " " + e.getMessage.replace(' ', '_')
+          // getMessage is null for a message-less IllegalArgumentException; the
+          // reject reply must still be produced, or the NPE escapes the catch
+          // and kills the session before the remaining vectors are answered.
+          case e: IllegalArgumentException =>
+            val msg = Option(e.getMessage).getOrElse("").replace(' ', '_')
+            "REJECT 0:0 " + e.getClass.getSimpleName + " " + msg
           case e: CompilerException =>
             val pos = e.source match { case Some(sc) => loc(sc); case None => "0:0" }
             "REJECT " + pos + " " + e.getClass.getSimpleName

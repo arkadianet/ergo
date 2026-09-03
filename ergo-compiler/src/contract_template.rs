@@ -114,8 +114,18 @@ pub enum ApplyError {
     /// A value was supplied for a name that is not a template parameter.
     /// Scala silently ignores extras; refusing them is stricter, never
     /// looser, and catches the misspelling a caller would otherwise miss.
+    /// Raised only once every constant slot resolved, so it never masks a
+    /// rejection Scala would also have made.
     #[error("`{name}` is not a parameter of this template")]
     UnknownParameter { name: String },
+    /// The supplied `(SigmaType, SigmaValue)` pair is internally inconsistent —
+    /// the value variant is not the one the type names (e.g. `SInt` with
+    /// `SigmaValue::Long`). Scala's `Constant[SType]` pairs type and value by
+    /// construction, so this state is unrepresentable there; the Rust tuple can
+    /// express it, and the tree it would produce does not represent the declared
+    /// type. Refused here rather than at serialization time.
+    #[error("value supplied for parameter `{name}` is not a {tpe:?}")]
+    InconsistentValue { name: String, tpe: Box<SigmaType> },
 }
 
 /// Compile an ErgoScript contract-template source into a [`ContractTemplate`].
@@ -289,6 +299,11 @@ impl ContractTemplate {
     /// header is `setConstantSegregation(headerWithVersion(version))`, so
     /// `has_size` follows Scala's rule of the size bit for version > 0.
     ///
+    /// Each supplied `(SigmaType, SigmaValue)` must be self-consistent — the
+    /// value variant is the one the type names — which Scala gets for free from
+    /// `Constant[SType]`; an inconsistent pair is an
+    /// [`ApplyError::InconsistentValue`], not a tree.
+    ///
     /// Byte parity is graded by `tests/contract_template_parity.rs` against
     /// the JVM oracle's `ap` verb (`test-vectors/ergoscript/contract/apply_seed.json`).
     pub fn apply(
@@ -296,12 +311,6 @@ impl ContractTemplate {
         tree_version: u8,
         values: &BTreeMap<String, (SigmaType, SigmaValue)>,
     ) -> Result<ErgoTree, ApplyError> {
-        for name in values.keys() {
-            if !self.parameters.iter().any(|p| &p.name == name) {
-                return Err(ApplyError::UnknownParameter { name: name.clone() });
-            }
-        }
-
         let mut constants: Vec<(SigmaType, SigmaValue)> =
             Vec::with_capacity(self.const_types.len());
         for (i, tpe) in self.const_types.iter().enumerate() {
@@ -317,6 +326,18 @@ impl ContractTemplate {
                             name: param.map(|p| p.name.clone()).unwrap_or_default(),
                             expected: Box::new(tpe.clone()),
                             got: Box::new(got.clone()),
+                        });
+                    }
+                    // `(tpe, value)` is a plain tuple here, so the value variant
+                    // can disagree with the type it is paired with. `write_value`
+                    // is the authority on which pairs are representable — ask it,
+                    // rather than duplicating its match arms. Trial-serializing a
+                    // single constant is cheap and cannot drift from the writer.
+                    let mut probe = VlqWriter::new();
+                    if write_value(&mut probe, tpe, v).is_err() {
+                        return Err(ApplyError::InconsistentValue {
+                            name: param.map(|p| p.name.clone()).unwrap_or_default(),
+                            tpe: Box::new(tpe.clone()),
                         });
                     }
                     v.clone()
@@ -338,6 +359,19 @@ impl ContractTemplate {
                 },
             };
             constants.push((tpe.clone(), value));
+        }
+
+        // Unknown names are refused only AFTER every slot resolved. Scala's
+        // applyTemplate ignores extras, so this rejection has no counterpart in
+        // the oracle; running it last keeps the deviation strictly additive —
+        // wherever Scala rejects, we reject for the SAME reason and in the same
+        // slot order, and the extra strictness only bites on inputs Scala would
+        // have accepted. (Checking it first reported an unknown name for a
+        // template that was in fact missing a required parameter.)
+        for name in values.keys() {
+            if !self.parameters.iter().any(|p| &p.name == name) {
+                return Err(ApplyError::UnknownParameter { name: name.clone() });
+            }
         }
 
         Ok(ErgoTree {
@@ -428,7 +462,33 @@ mod tests {
         compile_contract(src, 3, NetworkPrefix::Testnet).expect("contract compiles")
     }
 
+    /// One `Int` parameter, no default — the smallest template that exercises
+    /// every `apply` rejection.
+    fn one_int_param_template() -> ContractTemplate {
+        cc("/* */\n@contract def c(threshold: Int) = sigmaProp(HEIGHT > threshold)")
+    }
+
+    fn values(
+        pairs: &[(&str, SigmaType, SigmaValue)],
+    ) -> BTreeMap<String, (SigmaType, SigmaValue)> {
+        pairs
+            .iter()
+            .map(|(n, t, v)| (n.to_string(), (t.clone(), v.clone())))
+            .collect()
+    }
+
     // ----- happy path -----
+
+    #[test]
+    fn apply_sets_size_bit_for_version_above_zero() {
+        let ct = one_int_param_template();
+        let vals = values(&[("threshold", SigmaType::SInt, SigmaValue::Int(7))]);
+        let v0 = ct.apply(0, &vals).expect("v0 applies");
+        assert!(!v0.has_size, "ErgoTree v0 carries no size bit");
+        let v1 = ct.apply(1, &vals).expect("v1 applies");
+        assert!(v1.has_size, "ErgoTree v1+ always carries the size bit");
+        assert!(v1.constant_segregation, "applyTemplate always segregates");
+    }
 
     #[test]
     fn assembles_name_description_and_declaration_order_parameters() {
@@ -518,5 +578,53 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ContractError::DuplicateParamName { name } if name == "a"));
+    }
+
+    #[test]
+    fn apply_missing_required_parameter_rejects() {
+        let err = one_int_param_template()
+            .apply(0, &BTreeMap::new())
+            .unwrap_err();
+        assert!(matches!(err, ApplyError::MissingParameter { name } if name == "threshold"));
+    }
+
+    #[test]
+    fn apply_declared_type_mismatch_rejects() {
+        let err = one_int_param_template()
+            .apply(
+                0,
+                &values(&[("threshold", SigmaType::SLong, SigmaValue::Long(7))]),
+            )
+            .unwrap_err();
+        assert!(matches!(err, ApplyError::TypeMismatch { name, .. } if name == "threshold"));
+    }
+
+    #[test]
+    fn apply_unknown_parameter_name_rejects() {
+        // Deliberate deviation: Scala's applyTemplate ignores extras.
+        let err = one_int_param_template()
+            .apply(
+                0,
+                &values(&[
+                    ("threshold", SigmaType::SInt, SigmaValue::Int(7)),
+                    ("nosuch", SigmaType::SInt, SigmaValue::Int(1)),
+                ]),
+            )
+            .unwrap_err();
+        assert!(matches!(err, ApplyError::UnknownParameter { name } if name == "nosuch"));
+    }
+
+    #[test]
+    fn apply_type_value_pair_disagreeing_rejects() {
+        // The declared type matches constTypes[0], but the paired value is a
+        // Long — a pair Scala's Constant[SType] cannot express. The tree must
+        // not be built from it.
+        let err = one_int_param_template()
+            .apply(
+                0,
+                &values(&[("threshold", SigmaType::SInt, SigmaValue::Long(7))]),
+            )
+            .unwrap_err();
+        assert!(matches!(err, ApplyError::InconsistentValue { name, .. } if name == "threshold"));
     }
 }

@@ -2,6 +2,9 @@
   "_captured": "2026-09-03",
   "_format": "verb ap; oracle reply verbatim. 'OK <hex>' = ErgoTreeSerializer.DefaultSerializer.serializeErgoTree(ContractTemplate.applyTemplate(Some(tree_version), values)) as Base16; 'REJECT 0:0 IllegalArgumentException <message>' for a failed require.",
   "_source": "TyperOracle.scala ap verb, scala-cli sigma-state 6.0.2 (Scala 2.12.21, JVM 17), ORACLE_TREE_VERSION=3, ORACLE_NETWORK=testnet. Sources are the contract_seed.json vectors named by `vector`; `args` is name=Type:literal,... (empty = defaults only).",
+  "_note": "Top-level `tree_version` is ORACLE_TREE_VERSION — the version the oracle COMPILED each template under (`templateCompiler.compile`), which the Rust side must pass to `compile_contract`. The per-vector `tree_version` is a different thing: the `ap` verb's version argument, i.e. the ErgoTree version `applyTemplate` stamps into the produced tree.",
+  "tree_version": 3,
+  "network": "testnet",
   "vectors": [
     {
       "name": "no_params_v0",
