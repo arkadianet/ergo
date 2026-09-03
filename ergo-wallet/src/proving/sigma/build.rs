@@ -117,6 +117,18 @@ pub(super) fn build_tree(
                     z_bytes,
                     commit_bytes,
                 }
+            } else if let Some(r_pt) = find_real_commitment_schnorr(prop, &position, hints) {
+                // Another party committed to this leaf and will sign it
+                // later (distributed signing, first round). It is REAL —
+                // its commitment enters the Fiat-Shamir hash and it takes
+                // the propagated challenge — but nobody here can respond:
+                // the response is left zero. Such a proof does not verify;
+                // `prove_sigma_partial` returns it for `bag_for_multisig`.
+                LeafState::SuppliedProof {
+                    supplied_challenge: None,
+                    z_bytes: [0u8; 32],
+                    commit_bytes: r_pt.to_vec(),
+                }
             } else {
                 let ch = rng.sample_challenge();
                 let z = rng.sample_scalar();
@@ -207,6 +219,17 @@ pub(super) fn build_tree(
                     supplied_challenge: Some(ssp.challenge),
                     z_bytes,
                     commit_bytes,
+                }
+            } else if let Some((a, b)) = find_real_commitment_dht(prop, &position, hints) {
+                // Another party's commitment: real, unsigned (see the
+                // Schnorr arm above).
+                let mut cb = Vec::with_capacity(66);
+                cb.extend_from_slice(&a);
+                cb.extend_from_slice(&b);
+                LeafState::SuppliedProof {
+                    supplied_challenge: None,
+                    z_bytes: [0u8; 32],
+                    commit_bytes: cb,
                 }
             } else {
                 let ch = rng.sample_challenge();
@@ -394,6 +417,24 @@ pub(super) fn build_tree(
                 let child_pos = position.child(i as u32);
                 if is_truly_real[i] {
                     built.push(build_tree(child_prop, secrets, hints, child_pos, rng)?);
+                } else if subtree_sim_coverage(child_prop, hints, &child_pos)
+                    == SimHintCoverage::All
+                    && subtree_hint_reconstructable(child_prop)
+                {
+                    // Distributed signing: another party already simulated
+                    // this child (its Sim* hints cover it). Reuse its
+                    // challenge and bytes, so the Fiat-Shamir hash — and
+                    // hence every other party's challenge — is the one they
+                    // signed against.
+                    let sub =
+                        build_simulated_or_sibling_from_hints(child_prop, hints, &child_pos, rng)?;
+                    let ch = super::finalize::get_sim_challenge(&sub).ok_or_else(|| {
+                        WalletError::MissingSecret(
+                            "simulated threshold child from hints has no challenge".into(),
+                        )
+                    })?;
+                    sim_challenges.push((i, ch));
+                    built.push(sub);
                 } else {
                     // Pre-sample the threshold-level simulated challenge.
                     let ch = rng.sample_challenge();
@@ -435,6 +476,12 @@ pub(super) fn can_prove(
                         h,
                         crate::proving::hints::Hint::RealSecretProof(rsp)
                             if &rsp.image == prop && &rsp.position == current_position
+                    ) || matches!(
+                        h,
+                        // Another party committed to it and will sign it:
+                        // real for the purpose of choosing branches.
+                        crate::proving::hints::Hint::RealCommitment(rc)
+                            if &rc.image == prop && &rc.position == current_position
                     )
                 })
         }
@@ -457,6 +504,10 @@ pub(super) fn can_prove(
                         h_hint,
                         crate::proving::hints::Hint::RealSecretProof(rsp)
                             if &rsp.image == prop && &rsp.position == current_position
+                    ) || matches!(
+                        h_hint,
+                        crate::proving::hints::Hint::RealCommitment(rc)
+                            if &rc.image == prop && &rc.position == current_position
                     )
                 })
         }

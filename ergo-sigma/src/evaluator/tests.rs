@@ -4402,6 +4402,30 @@ fn opcode_atleast_no_trivial_stays_threshold() {
     }
 }
 
+/// `CONTEXT.headers.size` — pins the regression: `eval_size_of` had no
+/// `CollHeader` arm, so a script reading the header count raised a type
+/// error where Scala answers the number of headers (10 on mainnet).
+#[test]
+fn opcode_size_of_context_headers() {
+    let headers = vec![test_eval_header_v2(), test_eval_header_v2()];
+    let b = make_test_box();
+    let mut ctx = ctx_with_self_box(&b);
+    ctx.last_headers = &headers;
+    let context_expr = op(0xFE, Payload::Zero);
+    let coll = op(
+        0xDB,
+        Payload::MethodCall {
+            type_id: 101,
+            method_id: 2,
+            obj: Box::new(context_expr),
+            args: vec![],
+            type_args: vec![],
+        },
+    );
+    let expr = op(0xB1, Payload::One(Box::new(coll)));
+    assert_eq!(run_eval_ctx(&expr, &ctx), Value::Int(2));
+}
+
 // SContext.headers (type_id=101, method_id=2) via PropertyCall
 #[test]
 fn opcode_context_headers() {

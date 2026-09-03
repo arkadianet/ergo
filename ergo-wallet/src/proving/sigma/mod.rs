@@ -71,6 +71,35 @@ pub fn prove_sigma(
     hints: &HintsBag,
     rng: &mut dyn ProvingRng,
 ) -> Result<(Vec<u8>, JitCost), WalletError> {
+    prove_sigma_inner(proposition, secrets, message, hints, rng, true)
+}
+
+/// First round of distributed signing: like [`prove_sigma`], but the
+/// result is NOT self-verified, because leaves that other parties
+/// committed to (`RealCommitment` hints for keys this registry lacks)
+/// are left unsigned. Feed the result to
+/// [`crate::proving::extract::bag_for_multisig`] with this prover's keys
+/// as `real_secrets` and the non-signers' keys as `simulated_secrets`;
+/// the next signer proves with that bag plus their own commitments.
+/// Mirrors Scala `ErgoProvingInterpreter.sign` with hints.
+pub fn prove_sigma_partial(
+    proposition: &SigmaBoolean,
+    secrets: &SecretRegistry,
+    message: &[u8],
+    hints: &HintsBag,
+    rng: &mut dyn ProvingRng,
+) -> Result<(Vec<u8>, JitCost), WalletError> {
+    prove_sigma_inner(proposition, secrets, message, hints, rng, false)
+}
+
+fn prove_sigma_inner(
+    proposition: &SigmaBoolean,
+    secrets: &SecretRegistry,
+    message: &[u8],
+    hints: &HintsBag,
+    rng: &mut dyn ProvingRng,
+    self_verify: bool,
+) -> Result<(Vec<u8>, JitCost), WalletError> {
     match proposition {
         SigmaBoolean::TrivialProp(true) => return Ok((Vec::new(), JitCost::ZERO)),
         SigmaBoolean::TrivialProp(false) => {
@@ -104,6 +133,9 @@ pub fn prove_sigma(
     proof.extend_from_slice(&root_ch);
     serialize_tree(&completed, &mut proof);
 
+    if !self_verify {
+        return Ok((proof, cost));
+    }
     match ergo_sigma::verify::verify_sigma_proof(proposition, &proof, message) {
         Ok(true) => Ok((proof, cost)),
         _ => Err(WalletError::SelfVerifyFailed),

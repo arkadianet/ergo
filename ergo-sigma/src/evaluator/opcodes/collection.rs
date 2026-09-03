@@ -50,6 +50,10 @@ pub(in crate::evaluator) fn eval_size_of(
         Value::CollLong(v) => Ok(Value::Int(v.len() as i32)),
         Value::CollSigmaProp(v) => Ok(Value::Int(v.len() as i32)),
         Value::CollBox(v) => Ok(Value::Int(v.len() as i32)),
+        // `CONTEXT.headers.size` — Scala answers 10 on mainnet; without
+        // this arm the Rust node raised a type error (consensus divergence
+        // for any script that reads it).
+        Value::CollHeader(v) => Ok(Value::Int(v.len() as i32)),
         Value::Tokens(v) => Ok(Value::Int(v.len() as i32)),
         // Boxed-element coll carrier (Coll[Tuple], Coll[Header]
         // fallback, etc.). A real `Value::Tuple` is not a collection
