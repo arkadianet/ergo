@@ -79,9 +79,11 @@ fn header_id(bytes: &[u8]) -> [u8; 32] {
 }
 
 /// Open a genesis-seeded digest store and stamp `SEED_HEIGHT` in as the
-/// committed tip: header bytes + meta + height index + chain state. Fork
-/// choice is exercised for real by the fed headers, so the seeded
-/// cumulative score is the score every subsequent header builds on.
+/// committed tip: header bytes + meta + height index + chain state. The
+/// fixture is a linear extension only — no competing branch — so the
+/// seeded score just has to be the one subsequent headers accumulate on;
+/// it is well below real mainnet cumulative difficulty and does not
+/// stand in for a fork-choice fixture.
 fn seeded_digest_backend(
     dir: &std::path::Path,
     headers: &BTreeMap<u32, Vec<u8>>,
@@ -97,8 +99,8 @@ fn seeded_digest_backend(
     let seed_bytes = &headers[&SEED_HEIGHT];
     let seed_header = parse_header(seed_bytes);
     let seed_id = header_id(seed_bytes);
-    // Any monotonic score works for fork choice — each fed header adds its
-    // own decoded difficulty on top, so `is_new_best` must hold all the way.
+    // Linear extension: each fed header adds its own decoded difficulty on
+    // top of this, so `is_new_best` holds all the way down the range.
     let seed_score = (SEED_HEIGHT as u64).to_be_bytes().to_vec();
     let meta = HeaderMeta {
         parent_id: *seed_header.parent_id.as_bytes(),
@@ -113,19 +115,24 @@ fn seeded_digest_backend(
     store
         .seed_header_chain_index_for_test(SEED_HEIGHT, &seed_id)
         .expect("seed chain index");
+    // Header-first IBD shape: headers are validated and persisted while the
+    // full-block tip is still 0 and the root is still the genesis digest.
+    // That is what a live Mode 5 node looks like during header sync, and it
+    // keeps the fixture honest about what these tests exercise (the header
+    // pipeline, not the ADProof apply seam).
     store.seed_tip_for_test(
-        *seed_header.state_root.as_bytes(),
+        ergo_chain_spec::GenesisParams::mainnet().state_digest,
         ChainStateMeta {
             best_header_id: seed_id,
             best_header_height: SEED_HEIGHT,
             best_header_score: seed_score,
-            best_full_block_id: seed_id,
-            best_full_block_height: SEED_HEIGHT,
+            best_full_block_id: [0u8; 32],
+            best_full_block_height: 0,
             header_availability: HeaderAvailability::Dense,
         },
     );
 
-    assert_eq!(ChainStateRead::height(&store), SEED_HEIGHT);
+    assert_eq!(store.chain_state_meta().best_header_height, SEED_HEIGHT);
     StateBackendKind::Digest(store)
 }
 
@@ -147,7 +154,7 @@ fn mode5_inbound_header_advances_the_digest_header_tip() {
     let headers = prior_headers();
     let mut store = seeded_digest_backend(tmp.path(), &headers);
 
-    let mut coordinator = SyncCoordinator::new(SEED_HEIGHT);
+    let mut coordinator = SyncCoordinator::new(0);
     coordinator.sync_state_mut().set_headers_chain_synced();
     let mut executor = SyncExecutor::new(
         ProtocolParams::mainnet_default(),
@@ -208,7 +215,7 @@ fn mode5_unlinked_header_is_buffered_not_fatal() {
     let headers = prior_headers();
     let mut store = seeded_digest_backend(tmp.path(), &headers);
 
-    let mut coordinator = SyncCoordinator::new(SEED_HEIGHT);
+    let mut coordinator = SyncCoordinator::new(0);
     coordinator.sync_state_mut().set_headers_chain_synced();
     let mut executor = SyncExecutor::new(
         ProtocolParams::mainnet_default(),
@@ -236,5 +243,103 @@ fn mode5_unlinked_header_is_buffered_not_fatal() {
         store.chain_state_meta().best_header_height,
         SEED_HEIGHT,
         "an unlinked header must not advance the digest header tip"
+    );
+}
+
+#[test]
+fn mode5_validation_verdict_durably_invalidates_the_branch() {
+    // Mode 5 must persist a definitive consensus verdict, not just
+    // session-mark it. A session-only mark would leave `best_header` parked
+    // on the dead branch above `best_full` and let a peer re-feed that branch
+    // header-by-header after every restart — the node would never converge.
+    //
+    // The verdict classes the executor routes to `invalidate_validation_branch`
+    // (`Validation`, `HeaderMeta`, `EpochExtension`, `AdProofsHashMismatch`)
+    // are mode-independent, so this path IS reachable in Mode 5; only the
+    // stale-root-ambiguous digest apply failure takes the session-mark path.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let headers = prior_headers();
+    let mut store = seeded_digest_backend(tmp.path(), &headers);
+
+    let mut coordinator = SyncCoordinator::new(0);
+    coordinator.sync_state_mut().set_headers_chain_synced();
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    let peer: PeerId = "127.0.0.1:9030".parse().expect("peer addr");
+
+    // Sync two headers so FEED_LO + 1 is the tip and FEED_LO + 2 is unseen.
+    for h in FEED_LO..=FEED_LO + 1 {
+        executor.execute(
+            Action::ValidateHeader {
+                peer,
+                header_bytes: headers[&h].clone(),
+            },
+            &mut store,
+            &mut coordinator,
+            Instant::now(),
+            None,
+        );
+    }
+    let rejected = header_id(&headers[&(FEED_LO + 1)]);
+    assert_eq!(store.chain_state_meta().best_header_height, FEED_LO + 1);
+
+    // The block at the tip fails full-block validation on a consensus rule.
+    let invalidated = store
+        .invalidate_validation_branch(rejected)
+        .expect("digest backend must persist a validation verdict");
+    assert_eq!(invalidated, vec![rejected]);
+    assert!(
+        store
+            .is_durably_invalid(&rejected)
+            .expect("durable invalidity"),
+        "a consensus verdict must be durable in Mode 5, not session-scoped",
+    );
+    assert_eq!(
+        store.chain_state_meta().best_header_height,
+        FEED_LO,
+        "best_header must re-anchor below the invalidated branch",
+    );
+
+    // A NEVER-SEEN child of the invalidated header carries no flag of its own;
+    // only the hereditary parent guard can refuse it. Without a durable parent
+    // verdict this is what re-grows the dead branch.
+    let child_bytes = headers[&(FEED_LO + 2)].clone();
+    let err = ergo_sync::header_proc::process_header_cfg(
+        &mut store,
+        &child_bytes,
+        &DifficultyParams::mainnet(),
+    )
+    .expect_err("child of a durably-invalid parent must be refused");
+    assert!(
+        matches!(
+            err,
+            ergo_sync::header_proc::HeaderProcessError::Invalid { .. }
+        ),
+        "expected the hereditary parent-invalid refusal, got {err:?}",
+    );
+
+    // The verdict is durable: reopen the store and it still refuses.
+    drop(store);
+    let reopened = DigestStateStore::open(
+        &tmp.path().join("digest_state.redb"),
+        ergo_validation::scala_launch(),
+        ergo_chain_spec::VotingParams::mainnet(),
+        ergo_chain_spec::GenesisParams::mainnet().state_digest,
+    )
+    .expect("reopen digest store");
+    assert!(
+        HeaderSectionStore::is_durably_invalid(&reopened, &rejected).expect("durable after reopen"),
+        "the persisted verdict must survive a restart",
+    );
+    assert!(
+        HeaderSectionStore::is_invalid(&reopened, &rejected).expect("is_invalid after reopen"),
+        "a durable verdict must also read as invalid after the session set is gone",
+    );
+    assert_eq!(
+        ChainStateRead::chain_state_meta(&reopened).best_header_height,
+        FEED_LO,
+        "the re-anchored best_header must survive a restart",
     );
 }

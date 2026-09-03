@@ -186,4 +186,28 @@ async fn mode_5_syncs_a_header_from_a_real_peer() {
         .shutdown()
         .await
         .expect("Mode-5 action loop must survive an inbound header");
+
+    // Restart on the same data dir. Header validation persists `chain_state`
+    // while the full-block tip is still 0, so a node that has only synced
+    // headers must still reopen — the digest store's open-time consistency
+    // check has to read that shape as header-first IBD, not a torn write.
+    let mut restart_cfg = common::make_test_config(data_dir.path().to_path_buf());
+    restart_cfg.state_type = ergo_node::config::StateType::Digest;
+    restart_cfg.mempool_config.enabled = false;
+    let restarted = run_inner(restart_cfg)
+        .await
+        .expect("Mode 5 must reboot after syncing headers but applying no block");
+    // The read snapshot is published by the sync tick, so poll rather than
+    // reading it the instant boot returns.
+    let deadline = std::time::Instant::now() + WIRE_TIMEOUT;
+    let mut restarted_tip = restarted.read.tip();
+    while restarted_tip.best_header.height < 1 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        restarted_tip = restarted.read.tip();
+    }
+    assert_eq!(
+        restarted_tip.best_header.height, 1,
+        "the synced header tip must survive the restart",
+    );
+    restarted.shutdown().await.expect("clean restart shutdown");
 }

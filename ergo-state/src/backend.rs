@@ -89,9 +89,14 @@ pub trait HeaderSectionStore {
     /// Durably invalidate a full-block-validation-rejected header and all its
     /// stored descendants, re-anchoring best_header to the surviving tip.
     /// Returns the invalidated ids (inclusive). Scala
-    /// `ErgoHistory.reportModifierIsInvalid`. Only the UTXO backend persists;
-    /// the digest backend is session-scoped (its apply failures are
-    /// stale-root-ambiguous by contract).
+    /// `ErgoHistory.reportModifierIsInvalid`.
+    ///
+    /// BOTH backends persist. The substrate is the header tables, which every
+    /// backend keeps, and the verdict classes the executor routes here
+    /// (`Validation`, `HeaderMeta`, `EpochExtension`, `AdProofsHashMismatch`)
+    /// are mode-independent consensus rejections. The stale-root-ambiguous
+    /// digest apply failure is not one of them — it takes
+    /// [`Self::mark_session_invalid`].
     fn invalidate_validation_branch(
         &mut self,
         header_id: [u8; 32],

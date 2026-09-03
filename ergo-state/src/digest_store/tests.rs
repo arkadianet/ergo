@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::backend::{ChainStateRead, HeaderSectionStore};
-use crate::chain::HeaderAvailability;
+use crate::chain::{HeaderAvailability, HeaderMeta};
 use ergo_validation::scala_launch;
 use redb::ReadableTable;
 use std::path::Path;
@@ -906,6 +906,48 @@ fn divergent_header_and_full_block_pointers_round_trip() {
     );
 }
 
+#[test]
+fn reopen_after_header_only_sync_boots_at_the_genesis_digest() {
+    // Header validation persists `chain_state` (the `best_header_*` pointers)
+    // as soon as the first header lands, long before any block applies. A
+    // Mode 5 node in header-first IBD therefore has `chain_state` present at
+    // `best_full_block_height == 0` with no `root_digest` — the whole of IBD
+    // looks like this, so reopening it must boot at the network genesis
+    // digest, not reject the dir as a torn write.
+    let tmp = tempdir().expect("tempdir");
+    let db_path = tmp.path().join("digest_state.redb");
+    let header_tip = [0x5A; 32];
+    {
+        let mut store =
+            DigestStateStore::open(&db_path, scala_launch(), test_voting(), TEST_GENESIS_DIGEST)
+                .expect("fresh open");
+        let meta = HeaderMeta {
+            parent_id: [0u8; 32],
+            height: 1,
+            cumulative_score: vec![0x07],
+            pow_validity: 1,
+            timestamp: 1_700_000_000,
+        };
+        HeaderSectionStore::store_validated_header(
+            &mut store,
+            &header_tip,
+            &[0u8; 8],
+            &meta,
+            Some((1, vec![0x07])),
+        )
+        .expect("persist a validated header");
+    }
+
+    let reopened =
+        DigestStateStore::open(&db_path, scala_launch(), test_voting(), TEST_GENESIS_DIGEST)
+            .expect("a header-only dir must reopen");
+    assert_eq!(reopened.root_digest(), TEST_GENESIS_DIGEST);
+    let cs = reopened.chain_state();
+    assert_eq!(cs.best_header_height, 1, "the header tip must survive");
+    assert_eq!(cs.best_header_id, header_tip);
+    assert_eq!(cs.best_full_block_height, 0, "no block applied");
+}
+
 // ----- oracle parity (state-type stamp shared with StateStore) -----
 
 #[test]
@@ -1404,16 +1446,17 @@ fn open_rejects_off_boundary_voted_params_row() {
 
 #[test]
 fn failed_misopen_does_not_poison_state_type_sentinel() {
-    // A sentinel-less dir carrying a StateStore-shaped
-    // chain_state (no root_digest, no digest history) opened as
-    // Mode 5 must fail at shape validation WITHOUT writing the
+    // A sentinel-less dir in a torn shape — a genesis chain_state with no
+    // root_digest but an applied-height CHAIN_INDEX row — opened as Mode 5
+    // must fail at shape validation WITHOUT writing the
     // `data_dir_state_type` sentinel — otherwise the mis-open
     // would re-classify the dir as digest-verifier on disk.
     let tmp = tempdir().expect("tempdir");
     let db_path = tmp.path().join("digest_state.redb");
     {
-        // Write only a genesis chain_state row — no sentinel, no
-        // root_digest, no history ledgers (a torn / foreign shape).
+        // chain_state at height 0 with no root_digest is the legal
+        // headers-only shape on its own; the CHAIN_INDEX row is what makes
+        // this dir torn (an applied height with no digest behind it).
         let db = crate::redb_util::open_with_repair_logging(&db_path, "seed").expect("open");
         let txn = crate::begin_write_qr(&db).expect("begin_write");
         {
@@ -1425,6 +1468,11 @@ fn failed_misopen_does_not_poison_state_type_sentinel() {
                 genesis_chain_state().serialize().as_slice(),
             )
             .expect("write chain_state");
+            let mut idx = txn
+                .open_table(crate::store::CHAIN_INDEX)
+                .expect("open chain_index");
+            idx.insert(1u64, [0x11u8; 32].as_slice())
+                .expect("write orphan chain_index tip");
         }
         txn.commit().expect("commit");
     }
@@ -1432,7 +1480,7 @@ fn failed_misopen_does_not_poison_state_type_sentinel() {
         .expect_err("shape-invalid dir must reject");
     // It fails on shape validation, not state-type mismatch.
     let msg = format!("{err}");
-    assert!(msg.contains("root_digest absent"), "msg={msg}");
+    assert!(msg.contains("chain_index_tip=true"), "msg={msg}");
     // Critical: the sentinel must NOT have been written by the
     // failed open.
     let db = crate::redb_util::open_with_repair_logging(&db_path, "verify").expect("reopen");

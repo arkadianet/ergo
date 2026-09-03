@@ -3,7 +3,7 @@
 //! Implements the spec's atomicity invariant: undo_log + AVL mutations +
 //! chain_index + state_meta all in one redb write transaction.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -2369,13 +2369,7 @@ impl StateStore {
     /// current best chain). Order beyond slot 0 is insertion-order
     /// of the orphan arrivals.
     pub fn header_ids_at_height_all(&self, height: u32) -> Result<Vec<[u8; 32]>, StateError> {
-        let read_txn = self.db.begin_read()?;
-        let table = match read_txn.open_table(HEADERS_BY_HEIGHT) {
-            Ok(t) => t,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
-            Err(e) => return Err(e.into()),
-        };
-        read_height_index_ids(&table, height)
+        self.headers.header_ids_at_height_all(height)
     }
 
     /// Look up the header_id on the best-header chain at a given height.
@@ -2610,14 +2604,12 @@ impl StateStore {
     /// invalidated ids (inclusive of `header_id`) so the caller can evict them
     /// from any in-flight download queue.
     ///
-    /// Scala parity: `ErgoHistory.reportModifierIsInvalid`
-    /// (ErgoHistory.scala:122). Scala computes
-    /// `continuationHeaderChains(invalidatedHeader, _ => true).flatten.distinct`
-    /// — the invalidated header plus every header reachable forward from it —
-    /// writes `validityKey(id) -> 0` for each (durable), and re-points
-    /// `BestHeaderKey` via `loopHeightDown(headersHeight, !invalidatedIds.contains)`.
-    /// A single rejection on live testnet invalidated ~3,100 descendant
-    /// headers ("Going to invalidate <id> and Array(...)").
+    /// The walk, the durable `pow_validity = 3` writes, and the best-header
+    /// re-anchor all live in the shared header tables
+    /// ([`crate::header_store::HeaderSectionTables::invalidate_validation_branch`]),
+    /// which the digest backend drives with the same semantics. This wrapper
+    /// supplies the committed chain-state snapshot and mirrors the re-anchored
+    /// best-header back onto the in-memory `ChainState`.
     ///
     /// This is the reject-valid-liveness half only: it does NOT roll UTXO
     /// state back, because on this failure path committed state already sits
@@ -2632,124 +2624,13 @@ impl StateStore {
         &mut self,
         header_id: [u8; 32],
     ) -> Result<Vec<[u8; 32]>, StateError> {
-        let start_meta = self.get_header_meta(&header_id)?.ok_or(
-            // Same precondition as mark_pow_invalid: the header meta must
-            // exist before we can flag it. A missing row is caller misuse,
-            // not corruption.
-            StateError::InvalidPrecondition {
-                what: "invalidate_validation_branch: caller must store header_meta first",
-            },
-        )?;
-
-        // Phase 1: collect the invalidated set = start header + every stored
-        // descendant, walking height by height and following parent links.
-        // `header_ids_at_height_all` returns canonical + orphan ids at each
-        // height, so fork descendants are captured too (Scala's
-        // continuationHeaderChains explores all forward branches).
-        let mut invalid_set: HashSet<[u8; 32]> = HashSet::new();
-        invalid_set.insert(header_id);
-        let mut invalidated: Vec<[u8; 32]> = vec![header_id];
-        let top = self.chain_state.best_header_height;
-        let mut h = start_meta.height + 1;
-        // Walk until a height yields no further descendants — NOT bounded by
-        // `best_header_height`. A stored competing branch can extend above the
-        // current best tip (more blocks, less work), and every stored
-        // descendant of the failing header must be flagged or it could re-grow
-        // best_header on restart. The `added_any` gap check is the terminator;
-        // `header_ids_at_height_all` returns empty once heights run out, so the
-        // loop always ends. `top` is retained only for `loop_best_header_down`.
-        loop {
-            let mut added_any = false;
-            for id in self.header_ids_at_height_all(h)? {
-                if invalid_set.contains(&id) {
-                    continue;
-                }
-                if let Some(meta) = self.get_header_meta(&id)? {
-                    if invalid_set.contains(&meta.parent_id) {
-                        invalid_set.insert(id);
-                        invalidated.push(id);
-                        added_any = true;
-                    }
-                }
-            }
-            if !added_any {
-                break;
-            }
-            h += 1;
-        }
-
-        // Phase 2: durably flag every invalidated header (pow_validity = 3),
-        // then re-anchor best_header — both in one write transaction so a
-        // crash mid-invalidation cannot leave a re-anchored pointer above a
-        // header that was never flagged (which would re-wedge on restart).
-        let new_best = self.loop_best_header_down(&invalid_set, top)?;
-        let write_txn = crate::begin_write_qr(&self.db)?;
-        {
-            let mut meta_table = write_txn.open_table(HEADER_META)?;
-            for id in &invalidated {
-                // Read the row from the already-open write-txn table rather
-                // than `get_header_meta` (which opens a fresh read txn per id —
-                // an N+1 pattern while this write txn is live). Only
-                // pow_validity changes; the rest of the row is immutable once
-                // stored. Copy the value out and drop the borrow before insert.
-                let existing = match meta_table.get(id.as_slice())? {
-                    Some(guard) => Some(HeaderMeta::deserialize(guard.value()).map_err(|e| {
-                        StateError::DbCorruption {
-                            table: "header_meta",
-                            key: hex::encode(id),
-                            reason: e.to_string(),
-                        }
-                    })?),
-                    None => None,
-                };
-                if let Some(mut meta) = existing {
-                    meta.pow_validity = 3;
-                    meta_table.insert(id.as_slice(), meta.serialize().as_slice())?;
-                }
-            }
-            let mut cs_table = write_txn.open_table(CHAIN_STATE_META)?;
-            let mut cs = self.chain_state.to_persisted();
-            cs.best_header_id = new_best.0;
-            cs.best_header_height = new_best.1;
-            cs.best_header_score = new_best.2.clone();
-            cs_table.insert("chain_state", cs.serialize().as_slice())?;
-        }
-        write_txn.commit()?;
-
-        // Mirror the re-anchored best-header onto in-memory chain_state.
-        self.chain_state.best_header_id = new_best.0;
-        self.chain_state.best_header_height = new_best.1;
-        self.chain_state.best_header_score = new_best.2;
-
+        let (invalidated, cs_after) = self
+            .headers
+            .invalidate_validation_branch(header_id, &self.chain_state.to_persisted())?;
+        self.chain_state.best_header_id = cs_after.best_header_id;
+        self.chain_state.best_header_height = cs_after.best_header_height;
+        self.chain_state.best_header_score = cs_after.best_header_score;
         Ok(invalidated)
-    }
-
-    /// Walk the canonical best-header index down from `top`, returning the
-    /// `(id, height, cumulative_score)` of the highest height whose canonical
-    /// header id is NOT in `invalid_set`. Scala `loopHeightDown`. Falls back
-    /// to the zeroed pre-genesis anchor if every height is invalidated.
-    fn loop_best_header_down(
-        &self,
-        invalid_set: &HashSet<[u8; 32]>,
-        top: u32,
-    ) -> Result<([u8; 32], u32, Vec<u8>), StateError> {
-        let mut h = top;
-        loop {
-            if let Some(id) = self.get_header_id_at_height(h)? {
-                if !invalid_set.contains(&id) {
-                    let score = self
-                        .get_header_meta(&id)?
-                        .map(|m| m.cumulative_score)
-                        .unwrap_or_else(|| vec![0]);
-                    return Ok((id, h, score));
-                }
-            }
-            if h == 0 {
-                // Entire chain invalidated — pre-genesis anchor.
-                return Ok(([0u8; 32], 0, vec![0]));
-            }
-            h -= 1;
-        }
     }
 
     /// Begin buffering header writes. Subsequent store_validated_header calls
@@ -4388,6 +4269,83 @@ mod tests {
             }
             other => panic!("expected DbCorruption, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn is_durably_invalid_session_mark_is_not_durable() {
+        // A session mark is a transient/IO verdict: `is_invalid` must see it
+        // (so the current tick stops re-applying) while `is_durably_invalid`
+        // must not (so the hereditary parent guard does not permanently block
+        // the whole descendant subtree for one transient failure).
+        let (mut store, _dir) = fresh_store();
+        let id = [0x77; 32];
+        let meta = HeaderMeta {
+            parent_id: [0u8; 32],
+            height: 1,
+            cumulative_score: vec![0x01],
+            pow_validity: 1,
+            timestamp: 1_700_000_000,
+        };
+        store
+            .store_validated_header(&id, &[0u8; 8], &meta, Some((1, vec![0x01])))
+            .expect("store header");
+
+        store.mark_session_invalid(id);
+
+        assert!(store.is_invalid(&id).expect("is_invalid"));
+        assert!(
+            !store.is_durably_invalid(&id).expect("is_durably_invalid"),
+            "a session mark must never present as a durable verdict",
+        );
+    }
+
+    #[test]
+    fn is_durably_invalid_reports_persisted_validation_verdict() {
+        // `invalidate_validation_branch` writes pow_validity = 3, the durable
+        // `validityKey -> 0` equivalent Scala's parent check reads. That is
+        // what the hereditary guard in header processing must observe — for
+        // the header itself and for every flagged descendant.
+        let (mut store, _dir) = fresh_store();
+        let parent = [0xB1; 32];
+        let child = [0xB2; 32];
+        let p_meta = HeaderMeta {
+            parent_id: [0u8; 32],
+            height: 1,
+            cumulative_score: vec![0x01],
+            pow_validity: 1,
+            timestamp: 1_700_000_000,
+        };
+        let c_meta = HeaderMeta {
+            parent_id: parent,
+            height: 2,
+            cumulative_score: vec![0x02],
+            pow_validity: 1,
+            timestamp: 1_700_000_001,
+        };
+        store
+            .store_validated_header(&parent, &[0u8; 8], &p_meta, Some((1, vec![0x01])))
+            .expect("store parent");
+        store
+            .store_validated_header(&child, &[0u8; 8], &c_meta, Some((2, vec![0x02])))
+            .expect("store child");
+        assert!(!store.is_durably_invalid(&parent).expect("pre-check"));
+
+        store
+            .invalidate_validation_branch(parent)
+            .expect("invalidate");
+
+        assert!(store.is_durably_invalid(&parent).expect("parent durable"));
+        assert!(store.is_durably_invalid(&child).expect("child durable"));
+    }
+
+    #[test]
+    fn is_durably_invalid_unknown_header_is_false() {
+        // No stored meta means no verdict — the guard must not treat an
+        // unknown ancestor as invalid.
+        let (store, _dir) = fresh_store();
+        assert!(!store
+            .is_durably_invalid(&[0x99; 32])
+            .expect("is_durably_invalid"));
     }
 
     // ----- advance_minimal_full_block_height_in_txn -----

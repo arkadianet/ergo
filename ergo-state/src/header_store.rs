@@ -15,14 +15,14 @@
 //! best-header pointers; this component only persists the rows and the
 //! derived indexes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use redb::{Database, ReadableTable};
 
 use crate::chain::{ChainStateMeta, HeaderMeta};
 use crate::store::{
-    append_orphan_to_height_index, rewrite_best_chain_into_index,
+    append_orphan_to_height_index, read_height_index_ids, rewrite_best_chain_into_index,
     rewrite_height_index_for_new_best, StateError, BLOCK_SECTIONS, CHAIN_STATE_META, HEADERS,
     HEADERS_BY_HEIGHT, HEADER_CHAIN_INDEX, HEADER_META, MINIMAL_FULL_BLOCK_HEIGHT_KEY,
     MODIFIER_TYPE_INDEX, SECTION_HEIGHT_INDEX, STATE_META,
@@ -342,6 +342,161 @@ impl HeaderSectionTables {
             },
             Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
             Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Every header id known at `height`, canonical plus fork orphans
+    /// (`HEADERS_BY_HEIGHT`). Scala `headerIdsAtHeight`.
+    pub(crate) fn header_ids_at_height_all(
+        &self,
+        height: u32,
+    ) -> Result<Vec<[u8; 32]>, StateError> {
+        let read_txn = self.db.begin_read()?;
+        let table = match read_txn.open_table(HEADERS_BY_HEIGHT) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        read_height_index_ids(&table, height)
+    }
+
+    /// Durably invalidate `header_id` and every stored descendant, then
+    /// re-anchor the best header onto the highest surviving height. Returns
+    /// the invalidated ids (inclusive) and the updated chain state, which the
+    /// caller mirrors onto its own in-memory copy.
+    ///
+    /// Scala parity: `ErgoHistory.reportModifierIsInvalid`
+    /// (ErgoHistory.scala:122). Scala computes
+    /// `continuationHeaderChains(invalidatedHeader, _ => true).flatten.distinct`
+    /// — the invalidated header plus every header reachable forward from it —
+    /// writes `validityKey(id) -> 0` for each (durable), and re-points
+    /// `BestHeaderKey` via `loopHeightDown(headersHeight, !invalidatedIds.contains)`.
+    /// A single rejection on live testnet invalidated ~3,100 descendant
+    /// headers ("Going to invalidate <id> and Array(...)").
+    ///
+    /// Header tables are the whole substrate here — no box arena, no digest
+    /// ledger — so both backends share this body. Only `best_header_*` moves;
+    /// committed state already sits at the failing block's parent on this
+    /// path, so `best_full_*` is left untouched.
+    ///
+    /// Reserved for definitive validation verdicts. Callers must NOT route
+    /// transient/IO failures here.
+    pub(crate) fn invalidate_validation_branch(
+        &self,
+        header_id: [u8; 32],
+        cs_before: &ChainStateMeta,
+    ) -> Result<(Vec<[u8; 32]>, ChainStateMeta), StateError> {
+        let start_meta = self.get_header_meta(&header_id)?.ok_or(
+            // The header meta must exist before we can flag it. A missing row
+            // is caller misuse, not corruption.
+            StateError::InvalidPrecondition {
+                what: "invalidate_validation_branch: caller must store header_meta first",
+            },
+        )?;
+
+        // Phase 1: collect the invalidated set = start header + every stored
+        // descendant, walking height by height and following parent links.
+        // `header_ids_at_height_all` returns canonical + orphan ids at each
+        // height, so fork descendants are captured too (Scala's
+        // continuationHeaderChains explores all forward branches).
+        let mut invalid_set: HashSet<[u8; 32]> = HashSet::new();
+        invalid_set.insert(header_id);
+        let mut invalidated: Vec<[u8; 32]> = vec![header_id];
+        let top = cs_before.best_header_height;
+        let mut h = start_meta.height + 1;
+        // Walk until a height yields no further descendants — NOT bounded by
+        // `best_header_height`. A stored competing branch can extend above the
+        // current best tip (more blocks, less work), and every stored
+        // descendant of the failing header must be flagged or it could re-grow
+        // best_header on restart. The `added_any` gap check is the terminator;
+        // `header_ids_at_height_all` returns empty once heights run out, so the
+        // loop always ends. `top` is retained only for `loop_best_header_down`.
+        loop {
+            let mut added_any = false;
+            for id in self.header_ids_at_height_all(h)? {
+                if invalid_set.contains(&id) {
+                    continue;
+                }
+                if let Some(meta) = self.get_header_meta(&id)? {
+                    if invalid_set.contains(&meta.parent_id) {
+                        invalid_set.insert(id);
+                        invalidated.push(id);
+                        added_any = true;
+                    }
+                }
+            }
+            if !added_any {
+                break;
+            }
+            h += 1;
+        }
+
+        // Phase 2: durably flag every invalidated header (pow_validity = 3),
+        // then re-anchor best_header — both in one write transaction so a
+        // crash mid-invalidation cannot leave a re-anchored pointer above a
+        // header that was never flagged (which would re-wedge on restart).
+        let new_best = self.loop_best_header_down(&invalid_set, top)?;
+        let mut cs_after = cs_before.clone();
+        cs_after.best_header_id = new_best.0;
+        cs_after.best_header_height = new_best.1;
+        cs_after.best_header_score = new_best.2;
+        let write_txn = crate::begin_write_qr(&self.db)?;
+        {
+            let mut meta_table = write_txn.open_table(HEADER_META)?;
+            for id in &invalidated {
+                // Read the row from the already-open write-txn table rather
+                // than `get_header_meta` (which opens a fresh read txn per id —
+                // an N+1 pattern while this write txn is live). Only
+                // pow_validity changes; the rest of the row is immutable once
+                // stored. Copy the value out and drop the borrow before insert.
+                let existing = match meta_table.get(id.as_slice())? {
+                    Some(guard) => Some(HeaderMeta::deserialize(guard.value()).map_err(|e| {
+                        StateError::DbCorruption {
+                            table: "header_meta",
+                            key: hex::encode(id),
+                            reason: e.to_string(),
+                        }
+                    })?),
+                    None => None,
+                };
+                if let Some(mut meta) = existing {
+                    meta.pow_validity = 3;
+                    meta_table.insert(id.as_slice(), meta.serialize().as_slice())?;
+                }
+            }
+            let mut cs_table = write_txn.open_table(CHAIN_STATE_META)?;
+            cs_table.insert("chain_state", cs_after.serialize().as_slice())?;
+        }
+        write_txn.commit()?;
+
+        Ok((invalidated, cs_after))
+    }
+
+    /// Walk the canonical best-header index down from `top`, returning the
+    /// `(id, height, cumulative_score)` of the highest height whose canonical
+    /// header id is NOT in `invalid_set`. Scala `loopHeightDown`. Falls back
+    /// to the zeroed pre-genesis anchor if every height is invalidated.
+    fn loop_best_header_down(
+        &self,
+        invalid_set: &HashSet<[u8; 32]>,
+        top: u32,
+    ) -> Result<([u8; 32], u32, Vec<u8>), StateError> {
+        let mut h = top;
+        loop {
+            if let Some(id) = self.get_header_id_at_height(h)? {
+                if !invalid_set.contains(&id) {
+                    let score = self
+                        .get_header_meta(&id)?
+                        .map(|m| m.cumulative_score)
+                        .unwrap_or_else(|| vec![0]);
+                    return Ok((id, h, score));
+                }
+            }
+            if h == 0 {
+                // Entire chain invalidated — pre-genesis anchor.
+                return Ok(([0u8; 32], 0, vec![0]));
+            }
+            h -= 1;
         }
     }
 
