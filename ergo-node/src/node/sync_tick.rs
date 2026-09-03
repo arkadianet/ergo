@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use ergo_p2p::handshake::PeerFeature;
 use ergo_p2p::message;
-use ergo_p2p::peer::{PeerId, SyncVersion};
+use ergo_p2p::peer::{ConnectionState, PeerId, SyncVersion};
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::header::read_header;
 use ergo_state::{ChainStateRead, HeaderSectionStore};
@@ -93,7 +93,7 @@ pub(super) fn handle_sync_tick(state: &mut NodeState) {
     if !evicted.is_empty() {
         info!(count = evicted.len(), "evicted stale peers");
     }
-    for addr in evicted {
+    for (addr, was_state) in evicted {
         let actions = state.executor.on_peer_disconnected(
             &addr,
             &mut state.coordinator,
@@ -101,10 +101,22 @@ pub(super) fn handle_sync_tick(state: &mut NodeState) {
             now,
         );
         cleanup_disconnected_peer(state, &addr);
-        // Timeout eviction is a dial failure for known addresses too
-        // (peer never completed handshake) — apply backoff so the dial
-        // cycle stops re-trying the same dead address every tick.
-        state.peer_manager.mark_dial_failed(&addr, now);
+        // A pre-handshake timeout is a dial failure for known addresses
+        // too (the peer never got as far as a handshake) — apply backoff
+        // so the dial cycle stops re-trying the same dead address every
+        // tick.
+        //
+        // A handshaked peer evicted for making no progress is NOT a dial
+        // failure: the address answered, handshaked, and stayed reachable.
+        // Counting it would bump `consecutive_failures` and push a
+        // perfectly dialable address down the ranking, which is exactly
+        // backwards — we want to be free to try it again later.
+        if !matches!(
+            was_state,
+            ConnectionState::Active | ConnectionState::Degraded
+        ) {
+            state.peer_manager.mark_dial_failed(&addr, now);
+        }
         flush_actions(state, actions);
     }
 

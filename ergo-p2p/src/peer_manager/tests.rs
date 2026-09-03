@@ -276,7 +276,7 @@ fn evict_timed_out() {
     // Still in Connecting state — times out after 5s
     let evicted =
         mgr.evict_timed_out(now + crate::peer::CONNECT_TIMEOUT + std::time::Duration::from_secs(1));
-    assert_eq!(evicted, vec![a]);
+    assert_eq!(evicted, vec![(a, crate::peer::ConnectionState::Connecting)]);
     assert_eq!(mgr.peer_count(), 0);
 }
 

@@ -284,10 +284,21 @@ impl PeerManager {
         outcome
     }
 
-    /// Mark a peer as active (received valid message).
+    /// Mark a peer as seen (a valid frame of any kind arrived). Refreshes
+    /// the reported last-message time only; see [`PeerInfo::touch`].
     pub fn touch(&mut self, addr: &PeerId, now: Instant) {
         if let Some(peer) = self.peers.get_mut(addr) {
             peer.touch(now);
+        }
+    }
+
+    /// Mark a peer as making protocol progress, resetting its idle-timeout
+    /// clock. Called by the message dispatcher once a frame has passed the
+    /// throttle, deserialized, and been classified as useful; see
+    /// [`PeerInfo::note_progress`]. No-op for an unknown peer.
+    pub fn note_progress(&mut self, addr: &PeerId, now: Instant) {
+        if let Some(peer) = self.peers.get_mut(addr) {
+            peer.note_progress(now);
         }
     }
 
@@ -798,9 +809,15 @@ impl PeerManager {
 
     // ---- Eviction / cleanup ----
 
-    /// Remove timed-out peers and return their addresses.
-    pub fn evict_timed_out(&mut self, now: Instant) -> Vec<PeerId> {
-        let to_remove: Vec<(PeerId, ConnectionState, u64, u64)> = self
+    /// Remove timed-out peers and return each address with the state it
+    /// held when evicted.
+    ///
+    /// The state matters to the caller: a `Connecting`/`Handshaking`
+    /// eviction is a failed dial and should feed dial backoff, whereas an
+    /// `Active`/`Degraded` eviction is a handshaked peer that stopped
+    /// making progress — a different fact about a reachable address.
+    pub fn evict_timed_out(&mut self, now: Instant) -> Vec<(PeerId, ConnectionState)> {
+        let to_remove: Vec<(PeerId, ConnectionState, u64, u64, u64)> = self
             .peers
             .iter()
             .filter(|(_, p)| p.is_timed_out(now))
@@ -808,26 +825,47 @@ impl PeerManager {
                 (
                     *addr,
                     p.state,
-                    p.connected_at.elapsed().as_secs(),
-                    p.last_seen.elapsed().as_secs(),
+                    now.saturating_duration_since(p.connected_at).as_secs(),
+                    now.saturating_duration_since(p.last_seen).as_secs(),
+                    now.saturating_duration_since(p.last_progress).as_secs(),
                 )
             })
             .collect();
-        for (addr, state, age, last_seen) in &to_remove {
-            // Per-peer detail at DEBUG; the caller logs a single INFO
-            // `evicted stale peers` count summary for the batch.
-            debug!(
-                peer = %addr,
-                state = ?state,
-                age_s = age,
-                last_seen_s = last_seen,
-                reason = "TimeoutEvict",
-                "peer removed: idle timeout",
-            );
+        for (addr, state, age, last_seen, last_progress) in &to_remove {
+            // A handshaked peer evicted here failed to make PROGRESS
+            // inside `INACTIVE_TIMEOUT`, which is not the same as having
+            // gone silent: `last_seen_s` well below `last_progress_s`
+            // means it was trickling frames that carry no progress to hold
+            // the slot. That case is logged at INFO — there is no metrics
+            // registry for disconnect reasons in this node — while the
+            // connect/handshake timeouts keep the DEBUG level they had;
+            // the caller logs a single INFO count summary for the batch.
+            if matches!(state, ConnectionState::Active | ConnectionState::Degraded) {
+                info!(
+                    peer = %addr,
+                    state = ?state,
+                    age_s = age,
+                    last_seen_s = last_seen,
+                    last_progress_s = last_progress,
+                    reason = "no_progress",
+                    "peer removed: no protocol progress within the inactivity window",
+                );
+            } else {
+                debug!(
+                    peer = %addr,
+                    state = ?state,
+                    age_s = age,
+                    last_seen_s = last_seen,
+                    reason = "TimeoutEvict",
+                    "peer removed: idle timeout",
+                );
+            }
             self.peers.remove(addr);
         }
-        let to_remove: Vec<PeerId> = to_remove.into_iter().map(|(a, _, _, _)| a).collect();
         to_remove
+            .into_iter()
+            .map(|(addr, state, ..)| (addr, state))
+            .collect()
     }
 
     // ---- Internal helpers ----

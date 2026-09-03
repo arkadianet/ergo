@@ -291,6 +291,23 @@ pub fn serialize_sync_info(info: &SyncInfo) -> Result<Vec<u8>, MessageError> {
     Ok(w.result())
 }
 
+impl SyncInfo {
+    /// Whether this sync message carries no chain information at all.
+    ///
+    /// Both wire shapes have a legal zero-length encoding: an empty V1 id
+    /// list (a 4-byte frame) and a V2 body with `count = 0`. Scala's
+    /// `sendSyncToPeer` guards `if (sync.nonEmpty)`
+    /// (`ErgoNodeViewSynchronizer.scala:367-372`), but the scheduled
+    /// `sendSync` broadcast does not, so a peer with no headers yet can
+    /// legitimately emit one. It tells us nothing either way.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            SyncInfo::V1 { header_ids } => header_ids.is_empty(),
+            SyncInfo::V2 { headers } => headers.is_empty(),
+        }
+    }
+}
+
 pub fn deserialize_sync_info(payload: &[u8]) -> Result<SyncInfo, MessageError> {
     let mut r = VlqReader::new(payload);
     let length = r.get_u16()? as usize;
