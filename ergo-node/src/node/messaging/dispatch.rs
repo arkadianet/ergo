@@ -80,10 +80,10 @@ pub(in crate::node) fn handle_message(
     let frame_bytes = payload.len().saturating_add(9) as u32;
     match state.throttle.check_and_record(peer, now, frame_bytes) {
         LimiterVerdict::Ok => {}
-        // A `Modifier` frame is a delivery of something WE requested, and the
-        // byte axis must never drop one. If it did, our own delivery checker
-        // would time the request out and charge the holder a `NonDelivery`
-        // penalty plus a body-delivery-streak failure
+        // A `Modifier` frame that is answering a request WE sent must not be
+        // dropped by the byte axis. If it were, our own delivery checker would
+        // time the request out and charge the holder a `NonDelivery` penalty
+        // plus a body-delivery-streak failure
         // (`ergo-sync/src/coordinator/events.rs` `check_timeouts`) — ejecting
         // the honest peer that was actually serving us, for a drop we caused.
         // That is the same class of self-inflicted starvation PR #160 fixed on
@@ -91,24 +91,32 @@ pub(in crate::node) fn handle_message(
         // catching up bodies from a single holder is the traffic pattern that
         // saturates a 2 MB/s cap.
         //
-        // The frame is still charged to the window, so the peer's next
-        // non-exempt frame is judged against its true rate; the message cap
-        // (checked first) still applies; and a peer cannot mint free bandwidth
-        // by lying, because a modifier we did not request — or bytes that do
-        // not re-hash to the id claimed — is penalized downstream in
-        // `handle_modifiers` / `coordinator::on_modifier_received`. Read-side
-        // memory is bounded by the shared byte budget with TCP backpressure
-        // (#279/#283), which parks the reader instead of discarding data. The
-        // Scala reference node applies no inbound rate limit at all.
-        LimiterVerdict::ByteRateExceeded if code == message::CODE_MODIFIER => {
+        // The exemption is decided on the DELIVERY TRACKER, not on the opcode:
+        // only a frame carrying at least one id this peer owes us — in flight,
+        // or covered by a late-delivery allowance — is admitted. A replay of an
+        // id we already have resolves to `Ignore` and stays on the drop path,
+        // so the byte cap keeps its teeth against a peer re-sending a
+        // legitimately delivered 8 MB section at the message rate.
+        //
+        // An admitted frame is still charged to the window, so the peer's next
+        // frame is judged against its true rate; the message cap (checked
+        // first) still applies; and bytes that do not re-hash to the id claimed
+        // are penalized downstream in `handle_modifiers`. Read-side memory is
+        // bounded by the shared byte budget with TCP backpressure (#279/#283),
+        // which parks the reader instead of discarding data. The Scala
+        // reference node applies no inbound rate limit at all.
+        LimiterVerdict::ByteRateExceeded
+            if code == message::CODE_MODIFIER
+                && frame_answers_our_request(state, &peer, payload) =>
+        {
             state
                 .throttle
                 .record_admitted_over_cap(peer, now, frame_bytes);
             debug!(
                 peer = %peer,
                 bytes = frame_bytes,
-                "byte throttle exceeded by a modifier delivery; admitting rather than \
-                 penalizing the holder for a drop we would have caused",
+                "byte throttle exceeded by a solicited modifier delivery; admitting rather \
+                 than penalizing the holder for a drop we would have caused",
             );
         }
         LimiterVerdict::MessageRateExceeded | LimiterVerdict::ByteRateExceeded => {
@@ -981,6 +989,29 @@ fn handle_peers_response(state: &mut NodeState, peer: PeerId, peers: Vec<PeerSpe
         );
     }
     Vec::new()
+}
+
+/// Whether this `Modifier` frame carries at least one modifier the peer still
+/// owes us — the precondition for exempting it from the byte cap.
+///
+/// Resolves the real delivery decision (`DeliveryTracker::on_received`, a `&self`
+/// query) rather than trusting the opcode, so only ids that would be `Accept`ed
+/// qualify: in flight from this peer, or covered by a late-delivery allowance.
+/// `Ignore` (a replay of something already received) and `RejectSpam` (never
+/// requested, or the wrong peer answering) both fail the test and leave the
+/// frame on the drop-and-penalize path.
+///
+/// An unparseable payload is not solicited — it cannot be answering anything —
+/// so it is dropped, which is also what the dispatch arm would have done with it.
+fn frame_answers_our_request(state: &NodeState, peer: &PeerId, payload: &[u8]) -> bool {
+    use ergo_p2p::delivery::DeliveryAction;
+    let Ok(mods) = message::deserialize_modifiers(payload) else {
+        return false;
+    };
+    let delivery = state.coordinator.delivery();
+    mods.modifiers
+        .iter()
+        .any(|(id, _)| delivery.on_received(id, peer) == DeliveryAction::Accept)
 }
 
 /// Does `bytes` actually parse to a `Transaction` whose canonical

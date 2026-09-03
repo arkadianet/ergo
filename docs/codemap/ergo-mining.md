@@ -126,11 +126,16 @@ ergo-crypto, ergo-validation, ergo-state, ergo-mempool
   parent is always the APPLIED full-block tip
   (`CandidateGenerator.scala:530` — `history.bestFullBlockOpt`), and every
   consensus input is read from the applied chain. Building/serving is gated on
-  `BestTip::synced`, a **one-way mining-started latch**: the action loop sets it
-  the first time the header chain is within `MINING_SYNC_TOLERANCE` (6) blocks
-  of the applied chain — Scala's `ErgoMiner.isBlockchainNearlySynced`,
-  `ErgoMiner.scala:119-121` — and never clears it, mirroring Scala's
-  `starting → started` transition. Requiring `header == full` instead would let
+  `BestTip::synced`, a **one-way mining-started latch**. The action loop opens it
+  when a *freshly applied* block (Scala's `FullBlockApplied` +
+  `shouldStartMine = isNew(blockInterval * 2)`, `ErgoMiner.scala:116-117,172-174`)
+  leaves the header chain within `MINING_SYNC_TOLERANCE` (6) blocks of the
+  applied chain (`isBlockchainNearlySynced`, `ErgoMiner.scala:119-121`), and
+  never clears it — mirroring Scala's `starting → started` transition. The
+  freshness half is what stops a node restarted after hours offline from mining
+  its stale persisted tip; `[mining].offline_generation` waives it for peerless
+  devnet chains, exactly as Scala's `offlineGeneration` does
+  (`ErgoApp.scala:212-216`), and never waives the height half. Requiring `header == full` instead would let
   anything that runs the header chain ahead of the bodies halt honest block
   production permanently. There is no `offline_generation` bypass (`config.rs`,
   `engine.rs::should_publish`, `handle.rs::cached_work_if_synced`).

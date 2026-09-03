@@ -7,6 +7,14 @@
 //! *mining-started latch* — not by an instantaneous "headers == bodies" test.
 //! This mirrors the reference node exactly:
 //!
+//! - The latch can only be reached from a freshly applied block:
+//!   `case FullBlockApplied(header) if shouldStartMine(header)`
+//!   (`ErgoMiner.scala:172-174`), where
+//!   `shouldStartMine = b.isNew(blockInterval * 2)` (`ErgoMiner.scala:116-117`)
+//!   requires the applied block's own timestamp to be recent. Outside
+//!   `offlineGeneration` (`ErgoApp.scala:212-216`) that is the ONLY sender of
+//!   `StartMining`, so a node that boots on a stale persisted tip does not mine
+//!   until the network gives it a fresh block.
 //! - `ErgoMiner.isBlockchainNearlySynced`
 //!   (`ergo-scala/.../mining/ErgoMiner.scala:119-121`) is
 //!   `headersHeight < fullBlockHeight + 6`, checked once on the way from
@@ -38,12 +46,12 @@
 //! new tip matches the submitted header before replying `Ok`.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ergo_mining::engine::{BestTip, BuildIntent, BuildReason, MINING_SYNC_TOLERANCE};
 use ergo_mining::handle::MiningHandle;
 use ergo_state::wallet::RewardKeyResolution;
-use ergo_state::ChainStateRead;
+use ergo_state::{ChainStateRead, HeaderSectionStore};
 use ergo_sync::coordinator::Action;
 use tokio::sync::watch;
 use tracing::{info, warn};
@@ -65,6 +73,14 @@ pub(super) struct MiningWiring {
     /// mutations between tip changes collapses into at most one rebuild per
     /// window; see [`mempool_refresh_due`].
     pub(super) refresh_debounce: Duration,
+    /// The network's target block interval
+    /// (`chain_spec.difficulty.desired_interval_ms` — mainnet 120_000, testnet
+    /// 45_000). Twice this is the freshness window the mining-started latch
+    /// requires of the applied tip; see [`mining_started_latch`].
+    pub(super) block_interval_ms: u64,
+    /// `[mining].offline_generation` — start mining without waiting for a
+    /// freshly applied block (Scala `ErgoApp.scala:212-216`). Default `false`.
+    pub(super) offline_generation: bool,
 }
 
 /// True if a mempool-refresh signal is due: never fired before, or the
@@ -201,16 +217,103 @@ impl MiningTipSnapshot {
     }
 }
 
-/// The mining-started latch, as a pure function so the one-way property is
-/// unit-testable: once set it can never clear.
+/// Wall-clock milliseconds since the Unix epoch, for the latch's tip-freshness
+/// comparison. A clock before the epoch yields 0, which makes every tip look
+/// fresh — the same direction Scala's `System.currentTimeMillis` would fail in,
+/// and harmless because the latch still requires a block to have been applied
+/// while we were running.
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// How many block intervals old the applied tip may be and still let the latch
+/// open. Scala `ErgoMiner.shouldStartMine` is
+/// `b.isNew(ergoSettings.chainSettings.blockInterval * 2)`
+/// (`ErgoMiner.scala:116-117`).
+const TIP_FRESHNESS_INTERVALS: u64 = 2;
+
+/// The mining-started latch, as a pure function so both its preconditions and
+/// its one-wayness are unit-testable. Once set it can never clear.
 ///
-/// Scala's `ErgoMiner` checks `isBlockchainNearlySynced` only while in the
-/// `starting` state; entering `started` unsubscribes from `FullBlockApplied`
-/// (`ErgoMiner.scala:128-155`) so the condition is never re-evaluated. That
-/// one-wayness is the liveness property: a party that pushes the header chain
+/// Three conditions, all required to OPEN it — the same three Scala applies:
+///
+/// 1. `full_block_applied` — Scala only ever reaches the sync check through
+///    `case FullBlockApplied(header) if shouldStartMine(header)`
+///    (`ErgoMiner.scala:172-174`), i.e. a block was just applied. It is never
+///    evaluated against whatever state happened to be on disk at start-up.
+/// 2. `tip.nearly_synced()` — `isBlockchainNearlySynced`
+///    (`ErgoMiner.scala:119-121`).
+/// 3. `tip_is_fresh` — `shouldStartMine`'s `isNew(blockInterval * 2)`
+///    (`ErgoMiner.scala:116-117`): the applied block's own timestamp must be
+///    recent in wall-clock terms.
+///
+/// (1) and (3) are what stop a node that has been offline for hours from
+/// latching on its stale persisted tip the moment it boots — at that point
+/// `best_header` and `best_full` are equal (nothing has been received yet) so
+/// the height condition alone is trivially satisfied, and the node would mine
+/// a dead parent for the whole catch-up with no way to re-close the latch.
+///
+/// `offline_generation` waives (1) and (3) only — the height condition (2) is
+/// never waived, matching Scala, whose `offlineGeneration` path still routes
+/// `StartMining` through `isBlockchainNearlySynced`. It exists for peerless
+/// devnet chains, where no block will ever arrive to trigger the start.
+///
+/// Once open it stays open: Scala's `started` state unsubscribes from
+/// `FullBlockApplied` (`ErgoMiner.scala:128-155`) and never re-checks. That
+/// one-wayness is the liveness property — a party that pushes the header chain
 /// ahead of the bodies cannot switch honest block production back off.
-pub(super) fn mining_started_latch(already_started: bool, tip: MiningTipSnapshot) -> bool {
-    already_started || tip.nearly_synced()
+pub(super) fn mining_started_latch(
+    already_started: bool,
+    tip: MiningTipSnapshot,
+    full_block_applied: bool,
+    tip_is_fresh: bool,
+    offline_generation: bool,
+) -> bool {
+    let start_trigger = offline_generation || (full_block_applied && tip_is_fresh);
+    already_started || (start_trigger && tip.nearly_synced())
+}
+
+/// Whether the applied tip's own block timestamp is recent enough for the
+/// latch — Scala `Header.isNew(blockInterval * 2)`. `None` (the tip's
+/// `HEADER_META` row could not be read) is never fresh: refusing to start
+/// mining is the safe direction, and the next applied block retries.
+pub(super) fn tip_is_fresh(
+    best_full_timestamp_ms: Option<u64>,
+    now_ms: u64,
+    block_interval_ms: u64,
+) -> bool {
+    let Some(ts) = best_full_timestamp_ms else {
+        return false;
+    };
+    // Scala's `isNew` is a lower bound only — a header from the future is
+    // still "new" there, and the block validator is what rejects excessive
+    // drift, so we deliberately do not add an upper bound here.
+    ts >= now_ms.saturating_sub(block_interval_ms.saturating_mul(TIP_FRESHNESS_INTERVALS))
+}
+
+/// Read the applied tip's block timestamp from its `HEADER_META` row.
+///
+/// Deliberately NOT a field on [`MiningTipSnapshot`]: `capture` runs on every
+/// action-loop wake purely for tip-change detection, and this is a redb read
+/// txn plus a row decode. Only the latch needs the value, and only while the
+/// latch is still closed, so `signal_mining_engine` resolves it there and stops
+/// paying for it the moment mining starts.
+fn best_full_timestamp_ms(state: &NodeState, tip: &MiningTipSnapshot) -> Option<u64> {
+    match state.store.get_header_meta(&tip.best_full_id) {
+        Ok(Some(meta)) => Some(meta.timestamp),
+        Ok(None) => None,
+        Err(e) => {
+            warn!(
+                error = ?e,
+                tip = %hex::encode(tip.best_full_id),
+                "mining: could not read applied-tip timestamp; treating the tip as stale",
+            );
+            None
+        }
+    }
 }
 
 /// Update the mining engine's authoritative tip and, when synced, publish a
@@ -229,9 +332,11 @@ pub(super) fn mining_started_latch(already_started: bool, tip: MiningTipSnapshot
 /// reorgs); a header-only advance keeps the same seq. Returns the captured tip
 /// so the caller can track it for change detection.
 ///
-/// This is the sole writer of the mining-started latch (`BestTip::synced`):
-/// it sets the bit the first time the node is nearly synced and never clears
-/// it thereafter, matching Scala's one-way `starting → started` transition.
+/// This is the sole writer of the mining-started latch (`BestTip::synced`).
+/// It sets the bit the first time a freshly applied block leaves the node
+/// nearly synced, and never clears it thereafter — Scala's one-way
+/// `starting → started` transition. See [`mining_started_latch`] for why the
+/// start-up prime deliberately cannot open it.
 pub(super) fn signal_mining_engine(
     state: &NodeState,
     wiring: &MiningWiring,
@@ -242,10 +347,34 @@ pub(super) fn signal_mining_engine(
     let handle = &wiring.handle;
     let intent_tx = &wiring.intent_tx;
     let now = MiningTipSnapshot::capture(state);
-    if &now.best_full_id != prev_best_full_id {
+    let best_full_advanced = &now.best_full_id != prev_best_full_id;
+    if best_full_advanced {
         *chain_seq += 1;
     }
-    let synced = mining_started_latch(handle.best_tip().synced, now);
+    let already_started = handle.best_tip().synced;
+    // Scala's `FullBlockApplied` precondition. At the start-up prime
+    // `prev_best_full_id` is the zero sentinel, so a bare id-difference test
+    // would read the PERSISTED tip as a fresh application — exactly the case
+    // that must not latch. Excluding `Startup` makes the precondition mean
+    // "a block was applied while we were running", as it does in Scala.
+    let full_block_applied = best_full_advanced && reason != BuildReason::Startup;
+    // Only resolve the tip timestamp while the latch is still closed and a
+    // block actually landed — see `best_full_timestamp_ms` for why this read is
+    // kept off the hot path.
+    let fresh = full_block_applied
+        && !already_started
+        && tip_is_fresh(
+            best_full_timestamp_ms(state, &now),
+            now_unix_ms(),
+            wiring.block_interval_ms,
+        );
+    let synced = mining_started_latch(
+        already_started,
+        now,
+        full_block_applied,
+        fresh,
+        wiring.offline_generation,
+    );
     handle.set_best_tip(BestTip {
         parent_id: now.best_full_id,
         chain_seq: *chain_seq,
@@ -628,18 +757,143 @@ mod tests {
         assert!(mempool_refresh_due(Some(base), now, debounce));
     }
 
-    // ----- mining_started_latch (one-way) -----
+    // ----- tip_is_fresh (Scala shouldStartMine / isNew parity) -----
+
+    /// Mainnet target block interval.
+    const INTERVAL_MS: u64 = 120_000;
+    /// An arbitrary "now" well clear of the epoch so subtraction is meaningful.
+    const NOW_MS: u64 = 1_800_000_000_000;
 
     #[test]
-    fn mining_started_latch_opens_once_nearly_synced() {
-        assert!(mining_started_latch(false, synced_tip(1, 100)));
+    fn tip_is_fresh_tip_at_the_two_interval_boundary_is_fresh() {
+        // Scala `isNew(d)` is `timestamp >= now - d`; the boundary is inclusive.
+        assert!(tip_is_fresh(
+            Some(NOW_MS - 2 * INTERVAL_MS),
+            NOW_MS,
+            INTERVAL_MS
+        ));
+    }
+
+    #[test]
+    fn tip_is_fresh_tip_one_ms_past_the_boundary_is_stale() {
+        assert!(!tip_is_fresh(
+            Some(NOW_MS - 2 * INTERVAL_MS - 1),
+            NOW_MS,
+            INTERVAL_MS
+        ));
+    }
+
+    #[test]
+    fn tip_is_fresh_tip_hours_old_is_stale() {
+        assert!(!tip_is_fresh(
+            Some(NOW_MS - 6 * 60 * 60 * 1000),
+            NOW_MS,
+            INTERVAL_MS
+        ));
+    }
+
+    #[test]
+    fn tip_is_fresh_unreadable_timestamp_is_stale() {
+        assert!(!tip_is_fresh(None, NOW_MS, INTERVAL_MS));
+    }
+
+    #[test]
+    fn tip_is_fresh_future_tip_is_fresh() {
+        // `isNew` is a lower bound only; drift is the block validator's job.
+        assert!(tip_is_fresh(
+            Some(NOW_MS + INTERVAL_MS),
+            NOW_MS,
+            INTERVAL_MS
+        ));
+    }
+
+    // ----- mining_started_latch (one-way, with Scala's preconditions) -----
+
+    #[test]
+    fn mining_started_latch_opens_on_a_fresh_applied_block_when_nearly_synced() {
+        assert!(mining_started_latch(
+            false,
+            synced_tip(1, 100),
+            true,
+            true,
+            /* offline_generation */ false,
+        ));
     }
 
     #[test]
     fn mining_started_latch_stays_closed_during_ibd() {
+        // Bodies are being applied and they are fresh, but the header chain is
+        // still thousands ahead: this is IBD, and Scala does not mine.
         assert!(!mining_started_latch(
             false,
-            header_ahead_tip(1, 100, 5_000)
+            header_ahead_tip(1, 100, 5_000),
+            true,
+            true,
+            /* offline_generation */ false,
+        ));
+    }
+
+    #[test]
+    fn mining_started_latch_stale_persisted_tip_does_not_start() {
+        // The restart case. A node that was fully synced hours ago boots with
+        // best_header == best_full on a stale tip, so the height condition is
+        // trivially satisfied and nothing has been received yet. Neither the
+        // start-up prime (no block applied while running) nor the stale
+        // timestamp may open the latch — otherwise the node serves candidates
+        // on a dead parent for the whole catch-up, with no way to re-close it.
+        let persisted = synced_tip(1, 100);
+        assert!(
+            !mining_started_latch(
+                false, persisted, /* full_block_applied */ false,
+                /* tip_is_fresh */ false, /* offline_generation */ false,
+            ),
+            "a stale persisted tip must not start mining at boot",
+        );
+        // Even once catch-up starts applying blocks, a tip still hours behind
+        // wall clock keeps the latch closed.
+        assert!(
+            !mining_started_latch(
+                false, persisted, /* full_block_applied */ true,
+                /* tip_is_fresh */ false, /* offline_generation */ false,
+            ),
+            "applying historical blocks during catch-up must not start mining",
+        );
+        // Caught up: a freshly applied block at a nearly-synced tip starts it.
+        assert!(
+            mining_started_latch(
+                false,
+                synced_tip(2, 4_000),
+                /* full_block_applied */ true,
+                /* tip_is_fresh */ true,
+                /* offline_generation */ false,
+            ),
+            "a fresh applied block at a caught-up tip must start mining",
+        );
+    }
+
+    #[test]
+    fn mining_started_latch_startup_prime_alone_never_starts() {
+        // Belt and braces: even a genuinely fresh persisted tip does not latch
+        // at the prime, because Scala only ever latches from FullBlockApplied.
+        assert!(!mining_started_latch(
+            false,
+            synced_tip(1, 100),
+            /* full_block_applied */ false,
+            /* tip_is_fresh */ true,
+            /* offline_generation */ false,
+        ));
+    }
+
+    #[test]
+    fn mining_started_latch_genesis_from_scratch_stays_closed() {
+        // best_full == 0: nothing applied, so `nearly_synced` is false however
+        // the other two preconditions land.
+        assert!(!mining_started_latch(
+            false,
+            MiningTipSnapshot::default(),
+            true,
+            true,
+            /* offline_generation */ false,
         ));
     }
 
@@ -647,13 +901,52 @@ mod tests {
     fn mining_started_latch_never_recloses_on_header_run_ahead() {
         // The whole point of the fix: an adversary (or a network hiccup) that
         // drives the header chain far ahead of the applied chain must not be
-        // able to switch our block production back off.
-        assert!(mining_started_latch(true, header_ahead_tip(1, 100, 5_000)));
+        // able to switch our block production back off. None of the three
+        // opening preconditions is consulted once the latch is set.
+        assert!(mining_started_latch(
+            true,
+            header_ahead_tip(1, 100, 5_000),
+            /* full_block_applied */ false,
+            /* tip_is_fresh */ false,
+            /* offline_generation */ false,
+        ));
     }
 
     #[test]
     fn mining_started_latch_never_recloses_on_a_rolled_back_tip() {
-        assert!(mining_started_latch(true, MiningTipSnapshot::default()));
+        assert!(mining_started_latch(
+            true,
+            MiningTipSnapshot::default(),
+            false,
+            false,
+            /* offline_generation */ false,
+        ));
+    }
+
+    #[test]
+    fn mining_started_latch_offline_generation_waives_the_block_trigger() {
+        // Devnet / peerless: no block will ever arrive to trigger the start, so
+        // the operator opts out of the freshness precondition.
+        assert!(mining_started_latch(
+            false,
+            synced_tip(1, 100),
+            /* full_block_applied */ false,
+            /* tip_is_fresh */ false,
+            /* offline_generation */ true,
+        ));
+    }
+
+    #[test]
+    fn mining_started_latch_offline_generation_still_requires_nearly_synced() {
+        // Scala's offlineGeneration path still routes StartMining through
+        // `isBlockchainNearlySynced`, so the height condition is never waived.
+        assert!(!mining_started_latch(
+            false,
+            header_ahead_tip(1, 100, 5_000),
+            /* full_block_applied */ false,
+            /* tip_is_fresh */ false,
+            /* offline_generation */ true,
+        ));
     }
 
     // ----- decide_mining_signal -----

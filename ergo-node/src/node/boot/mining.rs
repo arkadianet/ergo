@@ -210,6 +210,8 @@ pub(super) fn spawn_engine(
             refresh_debounce: Duration::from_millis(
                 config.mining_config.block_candidate_generation_interval_ms,
             ),
+            block_interval_ms: config.chain_spec.difficulty.desired_interval_ms,
+            offline_generation: config.mining_config.offline_generation,
         }),
         engine_handle: Some(task),
         worker_handle: Some(worker),

@@ -3182,6 +3182,55 @@ fn byte_throttle_over_cap_modifier_frame_admitted_without_penalty() {
     );
 }
 
+/// The exemption is decided on the delivery tracker, not the opcode. A peer
+/// re-sending a section we already received resolves to `DeliveryAction::Ignore`,
+/// so it stays on the drop-and-penalize path — otherwise the byte cap would be
+/// inoperative for `CODE_MODIFIER` and a peer could replay a legitimately
+/// delivered 8 MB section at the message rate for free.
+#[test]
+fn byte_throttle_over_cap_replayed_modifier_frame_drops_and_penalizes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let peer = test_peer();
+    let now = Instant::now();
+    let (section_id, section_bytes) = canonical_ad_proofs_section(4096);
+
+    // Request it, then deliver it once under the cap so it lands in the
+    // tracker's received set.
+    let inv = message::serialize_inv(&InvData {
+        type_id: ModifierTypeId::ADProofs.as_byte(),
+        ids: vec![section_id],
+    })
+    .expect("serialize inv");
+    let _ = handle_message(&mut state, peer, message::CODE_INV, &inv, now);
+    let payload = message::serialize_modifiers(&ergo_p2p::types::ModifiersData {
+        type_id: ModifierTypeId::ADProofs.as_byte(),
+        modifiers: vec![(section_id, section_bytes)],
+    })
+    .expect("serialize modifiers");
+    let _ = handle_message(&mut state, peer, message::CODE_MODIFIER, &payload, now);
+    assert_eq!(
+        state.coordinator.delivery().status(&section_id),
+        ergo_p2p::delivery::ModifierStatus::Received,
+        "the first delivery must have been accepted for the replay to be a replay",
+    );
+
+    saturate_byte_window(&mut state, peer, now);
+    let actions = handle_message(&mut state, peer, message::CODE_MODIFIER, &payload, now);
+
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::Penalize {
+                penalty: Penalty::Misbehavior,
+                ..
+            }
+        )),
+        "an over-cap replay of an already-received section must be dropped and penalized: \
+         {actions:?}",
+    );
+}
+
 /// The byte axis still charges the exempted frame, so a peer cannot mint free
 /// bandwidth by sending only `Modifier` frames — its next non-exempt frame is
 /// judged against the true window.
@@ -3192,9 +3241,17 @@ fn byte_throttle_over_cap_modifier_frame_still_charged_to_the_window() {
     let peer = test_peer();
     let now = Instant::now();
     let budget = state.throttle.limits().max_bytes_per_window;
+    let (section_id, section_bytes) = canonical_ad_proofs_section(4096);
+
+    let inv = message::serialize_inv(&InvData {
+        type_id: ModifierTypeId::ADProofs.as_byte(),
+        ids: vec![section_id],
+    })
+    .expect("serialize inv");
+    let _ = handle_message(&mut state, peer, message::CODE_INV, &inv, now);
+
     saturate_byte_window(&mut state, peer, now);
 
-    let (section_id, section_bytes) = canonical_ad_proofs_section(4096);
     let payload = message::serialize_modifiers(&ergo_p2p::types::ModifiersData {
         type_id: ModifierTypeId::ADProofs.as_byte(),
         modifiers: vec![(section_id, section_bytes)],

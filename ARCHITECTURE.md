@@ -142,9 +142,10 @@ candidate against the committed UTXO tip (coinbase + emission/reemission,
 greedy mempool selection, optional zero-fee storage-rent self-claim, AVL
 dry-run), and CAS-publishes it iff the live tip still matches. `GET
 /mining/candidate` serves the published cache only, gated on the one-way
-mining-started latch (Scala `ErgoMiner.isBlockchainNearlySynced`: the header
-chain within 6 blocks of the applied chain, checked once at start-up and never
-re-closed). The candidate's parent is always the applied full-block tip, so a
+mining-started latch (Scala `ErgoMiner`: a freshly applied block that leaves the
+header chain within 6 blocks of the applied chain, checked once and never
+re-closed; `[mining].offline_generation` waives the freshness half for peerless
+devnet chains). The candidate's parent is always the applied full-block tip, so a
 header chain racing ahead of the bodies cannot halt block production.
 Submitted solutions are PoW-prechecked off the loop, then re-checked for the
 authoritative parent under the loop lock before the block is applied.
