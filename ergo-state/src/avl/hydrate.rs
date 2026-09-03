@@ -40,6 +40,11 @@ const UTXO_KEY_LENGTH: usize = 32;
 /// = true`) so the caller can extract the AD-proof bytes after running
 /// a batch.
 pub fn hydrate_batch_avl_prover(tree: &AvlTree) -> Result<BatchAVLProver, StateError> {
+    // The walk touches every node in the tree, so nearly all of it is cold
+    // reads. One session amortizes the redb read transaction and table
+    // handle over the whole walk instead of opening a pair per node. The
+    // walk is read-only, so its snapshot cannot go stale under it.
+    let _session = tree.begin_read_session();
     hydrate_batch_avl_prover_from_fetch(tree.root_id(), tree.tree_height(), &|id| {
         tree.get_node(id).ok_or(StateError::InternalInvariant {
             what: "hydrate: node id missing from arena",

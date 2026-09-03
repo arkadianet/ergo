@@ -595,6 +595,13 @@ impl StateStore {
         let mut box_removed = Vec::with_capacity(to_remove.len());
         let mut box_created = Vec::with_capacity(to_insert.len());
 
+        // One snapshot read session for the whole mutation walk: every
+        // root-to-leaf path the removes and inserts touch is a cold arena
+        // read on a freshly opened store. The guard is dropped before the
+        // block's write transaction is built, so its snapshot cannot go
+        // stale under the reads it serves.
+        let session = self.tree.begin_read_session();
+
         let t0 = std::time::Instant::now();
         for box_id in to_remove.keys() {
             let old_bytes = self.tree.remove(box_id).ok_or_else(|| {
@@ -618,6 +625,7 @@ impl StateStore {
         let t0 = std::time::Instant::now();
         let new_digest = self.tree.root_digest();
         let t_digest = t0.elapsed();
+        drop(session);
 
         if &new_digest != expected_state_root {
             tracing::warn!(
