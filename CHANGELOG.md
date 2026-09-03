@@ -16,101 +16,201 @@ infrastructure.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-03
+
+The consensus-parity and hardening release. Two live mainnet accept-invalid
+divergences were root-caused from captured incident vectors and fixed — the
+`CONTEXT.headers` window that let this node apply 15 blocks the reference node
+rejected, and the `adProofsRoot` binding that was never checked in UTXO mode —
+alongside a SANTA conformance sweep that closes the remaining wire/v6, AVL, and
+NiPoPoW coals. An external audit pass landed across the P2P read path (a byte
+budget charged as frames are read, an admission-slot pool, first-body and
+per-progress deadlines) and the wallet/API surfaces (no recovery phrase via
+argv, an `api_key` gate on `/mining/*`, a failed-attempt budget on wallet
+unlock). Observability was rebuilt in four phases — a written logging grammar,
+pipeline spans, `/metrics` subsystem gauges, automatic incident snapshots — plus
+starvation-free telemetry that stays truthful while a long apply owns the action
+loop, and storage-error counters so a poisoned database is no longer invisible.
+New surface: package-aware mempool admission (**default off**), `GET
+/api/v1/prices`, file-backed mining extension fields, and compiler source
+positions with an emit-time source map. **Operators fronting a loopback-bound
+API with a reverse proxy must set `[api] allowed_hosts` before upgrading** — see
+Security below. The consensus fixes change verdicts; re-verify this node's
+verdicts against the Scala reference before relying on it for funds.
+
 ### Added
 
-- **First-class logging, phase 1** (design: `dev-docs/logging-overhaul-DESIGN.md`).
-  `[logging.modules]` — per-module level overrides validated at load
-  (e.g. `"ergo_sync::executor" = "debug"`); `RUST_LOG` still wins when set.
-  `docs/logging.md` — the written contract: canonical fields, level table,
-  jq forensics recipes, chatter ledger.
-- **`/metrics` subsystem-gauge series (logging overhaul phase 3).** The
-  Prometheus endpoint now exports the #257 attribution gauges —
-  delivery-tracker depths (`ergo_dl_*`, including the M-7 leak
-  indicator), orphan-buffer sizes, ban/address-book counts, mining
-  solution verdict counters, and resident set size (`ergo_rss_kb`) —
-  alongside the existing chain/mempool series. Values are read from the
-  latest published snapshot and refresh when the snapshot publisher
-  publishes a new one. **Breaking for external
-  builders of `ergo_node::snapshot::{NodeSnapshot, SnapshotParts}` struct
-  literals**: both gain required `gauges` / `sync_gauges` fields —
-  pre-1.0 policy applies (breaking changes between minors); populate
-  `ApiSyncGauges::default()` when hand-assembling.
-- **`[api] allowed_hosts` — Host-header allowlist / DNS-rebinding guard
-  (#247 item 4).** The operator API now rejects requests whose `Host`
-  header (or, for HTTP/2, `:authority`) doesn't match `localhost` /
-  `127.0.0.1` / `::1` / the literal bind address / an `allowed_hosts`
-  entry, with `421 Misdirected Request`. Enforced by default on the
-  loopback bind (`127.0.0.1:9099`); a non-loopback bind only enforces
-  when `allowed_hosts` is non-empty. **Operator action required if you
-  front the API with a reverse proxy on a loopback bind that forwards
-  its own public hostname** (e.g. nginx `proxy_set_header Host
-  $host`) — add that hostname to `[api] allowed_hosts`, or the proxied
-  requests now get `421` instead of reaching the API. The resolved
-  allowlist and enforcement flag are logged at `INFO` next to the "api
-  listening" boot line so a `421` is diagnosable without guessing. See
-  `docs/configuration.md#api` for the full key reference and security
-  note.
+- **Package-aware mempool admission — the staging pool (#228). Default off.**
+  A bounded staging tier in front of `OrderedPool` lets the mempool reason about
+  transaction *families*: a child arriving before its parent is held instead of
+  dropped and admitted the moment the parent lands, and a low-fee parent that
+  lost its own admission gate is held until a high-fee child lets the **package**
+  clear on aggregate feerate. Package RBF replaces a conflicting incumbent and
+  its descendant closure only when the package wins on **both** aggregate feerate
+  and absolute fee (anti-pinning). Opt in with `[mempool] staging_enabled = true`
+  plus the `staging_*` bounds; the disabled path is a verified no-op and
+  single-tx admission is byte-identical to 0.5.3. Nothing new goes on the wire —
+  only fully-resolved, individually-valid transactions are ever inserted or
+  advertised, so a node in a Scala-majority network gossips exactly as before.
+- **`GET /api/v1/prices` — reference spot prices (#234).**
+  `?token_id=…&quote=ERG` returns a deterministic Spectrum N2T v1 reference
+  price (exact tree identity, GCD-reduced rational plus a truncated display
+  value) with the `indexed_height` it was read at. Unknown mint-box R6 decimals
+  answer `200` with `priced: false` / `decimals_unknown`; no pool answers
+  `no_liquidity`; an overflowing or unstable index answers `503
+  pricing_unavailable`.
+- **File-backed mining extension fields (#231).** A `[mining]
+  extension_fields` entry now takes `value_file` instead of `value`, re-read on
+  **every candidate build** — so a merge-mining commitment that tracks a moving
+  auxiliary tip no longer needs a node restart. Deliberate failure modes: a
+  missing or blank file commits nothing for that field (the steady state before
+  the writer starts, which must not stall block production), malformed content
+  fails the build, and an oversized value is rejected at resolve so a file cannot
+  smuggle a value past rule 404's cap. Pre-existing `{ key, value }` entries
+  deserialize and resolve unchanged.
+- **First-class logging, phase 1 (#260)** (design:
+  `dev-docs/logging-overhaul-DESIGN.md`). `[logging.modules]` — per-module level
+  overrides validated at load (e.g. `"ergo_sync::executor" = "debug"`), honored
+  by both the console and file layers; `RUST_LOG` still wins when set.
+  `docs/logging.md` is the written contract: canonical fields, the level table,
+  jq forensics recipes, and a chatter ledger recording triage decisions.
+- **Pipeline spans and coverage fills, phase 2 (#261).** `pre_validate_header`,
+  `process_block_utxo`, `handle_assemble_block`, and `SyncCoordinator::on_sync_info`
+  open spans carrying `block` / `height` / `peer`, and the JSON file layer embeds
+  span context — so `jq 'select(.fields.block == "7c7587…")'` yields one block's
+  full story. Mining gains a per-solution verdict line
+  (`accepted | invalid_pow | stale_parent`), wallet lifecycle gains unlock/lock
+  INFO and wrong-password WARN (never secret material), and p2p logs handshake
+  completion at DEBUG.
+- **`/metrics` subsystem-gauge series, phase 3 (#259, #262).** The Prometheus
+  endpoint now exports the #257 attribution family — delivery-tracker depths
+  (`ergo_dl_*`, including the late-allowance leak indicator), orphan-buffer sizes
+  (`ergo_orphan_*`), `ergo_bans` / `ergo_known_addrs`, mining solution verdict
+  counters (`ergo_solutions_*_total`), and resident set size (`ergo_rss_kb`) —
+  alongside the existing chain/mempool series, computed live at snapshot publish
+  time. A minute-cadence `node_gauges` log line carries the same values for
+  operators without a scrape. **Breaking for external builders of
+  `ergo_node::snapshot::{NodeSnapshot, SnapshotParts}` struct literals**: both
+  gain required `gauges` / `sync_gauges` fields — pre-1.0 policy applies
+  (breaking changes between minors); populate `ApiSyncGauges::default()` when
+  hand-assembling.
+- **Automatic incident snapshots, phase 4 (#263).** The first ERROR per stable
+  code within a 5-minute dedupe window writes one self-contained
+  `data/incidents/incident-<ts>.json` — the incident code and node version, the
+  last gauge sample, and the last ~500 structured events — instead of leaving
+  evidence scattered across rotated logs. Dedupe is decided on the emitting
+  thread and the file is written from a detached writer thread, so the action
+  loop never blocks on disk; the newest 10 snapshots are retained.
+- **Starvation-free telemetry and a wall-clock wedge alarm (#267).** A plain
+  `std::thread` sampler nothing on the runtime can starve reads
+  `/proc/self/statm`, the wall clock, and the running apply's age every 5 s.
+  `/info` and `/metrics` now overlay live `rss_kb_live` / `uptime_seconds_live`
+  over the snapshot's stale values, and two new series —
+  `ergo_node_apply_age_ms` (−1 when idle) and `ergo_node_apply_wedged` — expose a
+  single apply exceeding 600 s, which also raises one ERROR per episode with smaps
+  attribution guidance. Previously, during the failure shape #264 reported,
+  `ergo_rss_kb` reported ~165 MB against 5.35 GB actual and `uptime_seconds` froze
+  at 2 on an hour-plus process.
+- **Storage-error counters and diagnostics (#232, #290).** `ergo_node_storage_errors_state_total`,
+  `_indexer_total`, and `_peers_total` on `/metrics`, plus
+  `last_storage_error` on `GET /api/v1/node/status`, alongside structured
+  storage-failure events that carry a stable `code` / `store` and preserve the
+  initiating redb errno, source chain, database, operation, and chain height.
+  The state and indexer counters are read **live** from process-global atomics on
+  every request rather than from the published snapshot — a poisoned redb handle
+  is the failure most likely to wedge the loop that publishes it, so a
+  snapshot-sourced counter would freeze precisely when it matters. The peers
+  counter stays snapshot-fed (its `PeerManager` is action-loop-owned and not
+  `Sync`), which is documented in the field docs and `docs/operating.md`. The
+  stable `code` also makes a poisoned store produce exactly one incident snapshot
+  (#263) per incident. On prod mainnet (2026-07-20) a redb `Previous I/O error`
+  latch froze the node at one height for hours while
+  `ergo_node_block_apply_errors_total` stayed 0; a non-zero storage counter after
+  an I/O event means graceful stop + start, which clears the latch.
+- **Storage and disk gauges (#273).** `ergo_state_db_bytes`,
+  `ergo_index_db_bytes`, `ergo_disk_free_bytes`, and `ergo_disk_total_bytes`,
+  overlaid live per request the same way `rss_kb_live` is — so data-dir growth
+  per height is measurable rather than argued about (a testnet soak flagged ~43 GB
+  over ~434k blocks with no budget to judge it against).
+- **Compiler: source positions through the typed layer (#287).** Every
+  `TypedExpr` node carries a byte offset, and `TyperError` cites the node the
+  error is about, so typer rejections no longer all report `pos() == 0`.
+  Positions are excluded from `TypedExpr` equality and `typed_print`, so byte
+  parity and tree identity are unchanged. Of the seed's 22 positioned reject
+  records, 21 match Scala's line:col exactly; the single deviation is allowlisted
+  with its reason.
+- **Compiler: emit-time source map (#292).** `compile_with_source_map` returns a
+  `SourceMap` mapping each compiled node to its source offset, keyed by the
+  shared preorder walk now exported as `ergo_ser::opcode::{preorder, children,
+  node_opcode}`. Origins are pinned on the untouched emit-time tree and aligned
+  top-down against the final tree, so the six post-emit rewrite passes (folds,
+  fusion, pruning, lowering, CSE) uncite only the nodes they rewrite rather than
+  their ancestors. `compile` is untouched and its bytes are identical, pinned by
+  test.
+- **Compiler: `ContractTemplate::apply` (#291).** Instantiates a template into an
+  `ErgoTree` — the Rust twin of `sdk.ContractTemplate.applyTemplate`, rebuilding
+  constants slot by slot from supplied values or declared defaults with
+  `ApplyError` per Scala `require`. Byte-exact against a new JVM oracle verb over
+  16 vectors (13 accepting, both rejects agreeing). One deliberate deviation:
+  unknown parameter names are refused where Scala ignores extras.
+- **ADProofs regeneration micro-benchmark (#286).** An `#[ignore]`d
+  crate-internal benchmark over a real `CachedDiskArena` and redb table, plus its
+  measured baseline in `docs/perf/adproofs-regen-bench-2026-09-02.md`. Measured
+  conclusion: regeneration is **flat in block size and linear in tree size**
+  (~3.03 s for a 500-tx block vs 3.04 s for an empty one at a 1M-box tree; ~11x
+  per 10x boxes), ~83% hydration / ~17% proving, so no block-size tuning helps —
+  and #265's `verify_shipped_ad_proofs` is ~90x cheaper (33.8 ms vs 3034.8 ms)
+  and O(block) with no resident tree. Issue #257's cached-pristine-base idea is
+  therefore right for mining and wrong for validation, and is not being built.
+- **Adversarial P2P peer harness (#294).** `ergo-node/examples/p2p_adversary.rs`
+  handshakes with a live node and drives eight misbehaving-peer scenarios
+  (header stall, body stall, trickle, concurrent 8 MB frames, same-IP admission,
+  idle slot, SyncInfo cadence, keepalive-only), printing PASS/FAIL with measured
+  timings. It produced the evidence behind #283 and #285. A test tool only —
+  point it at nodes you operate.
 
 ### Changed
 
-- **Logging file sink defaults to JSON.** The on-disk archive is the
-  machine-queryable primary (jq / Loki / Splunk); console stays text by
-  default. Set `[logging.file] format = "text"` to restore the old shape.
-  File sink now also honors `RUST_LOG`/module overrides instead of a
-  hardcoded `info`.
-- **Heartbeat flood tamed.** During active sync the operator heartbeat
-  respects a 5 s minimum spacing between progress lines (idle nodes keep
-  the once-per-minute pulse) — previously ~1 line/second during IBD.
-- **New minute-cadence `node_gauges` log line**: delivery-tracker depths,
-  orphan-buffer size, peer/ban/address-book counts, mempool depth — the
-  memory-attribution telemetry for issue #257.
-- **`peer REST url rejected` warns once per (peer, URL)**; repeats demote
-  to debug.
-
-- **Hygiene: `/utils/seed` entropy now drawn from `OsRng`** (policy
-  consistency with every other security-relevant RNG site), **batch-Merkle
-  proof count arithmetic is overflow-checked** (portability hardening on the
-  wire decoder), **wallet secret files are created atomically with mode
-  0600** on Unix (closing the write-then-chmod TOCTOU window; Windows keeps
-  plain writes), and **the decrypted BIP39 seed no longer leaves an
-  unzeroized stack copy** in `unlock()`.
-
-- **Security: wallet `unlock` and `check` now enforce a failed-attempt budget.**
-  Five failed attempts within 60 s lock the operation for 300 s, returning the
-  previously-defined-but-unwired `RateLimited` error as HTTP 429. Previously
-  password/phrase guessing against `/wallet/unlock`, `/api/v1/wallet/unlock`,
-  and `/api/v1/wallet/check` was unlimited (each guess still costing a PBKDF2
-  run). Enforcement lives in the wallet writer task, so every surface shares
-  one budget per operation; successful operations reset it. Pinned by unit
-  tests on the limiter policy.
-
-- **Security: the Scala-compat `/mining/*` routes are now api_key-gated.**
-  `GET /mining/candidate` (including its longpoll hold), `POST /mining/solution`,
-  `GET /mining/rewardAddress`, and `GET /mining/rewardPublicKey` previously
-  mounted with no authentication — a drift the v1 API design doc flagged for
-  closure. Solution submission drives the block pipeline, the longpoll holds
-  an API task, and the reward routes expose the miner payout identity, so all
-  four now sit behind the same `api_key` gate as `/node/shutdown`. This is a
-  deliberate hardening over the Scala reference node (which leaves
-  `/mining/*` open): external miner integrations must now send the `api_key`
-  header they already need for any other operator route. Pinned by
-  `ergo-api/tests/mining_auth_gate.rs`.
+- **Two first-class API families (#233).** Router ownership is split into a
+  Scala-compatible facade (125 operations) and the unified RUST API (179
+  operations), each serving a complete canonical OpenAPI document from a
+  production-linked, bidirectionally tested route inventory. Paths, methods,
+  middleware, auth, responses, and public exports are preserved: `/swagger`
+  remains the Scala documentation, `/swagger/native` and `/swagger/v1` both serve
+  the RUST documentation without redirects, and legacy OpenAPI URLs still work.
+  `docs/api` and the Scala-compat WebUI banner were realigned with the real route
+  gaps (#229).
+- **Logging file sink defaults to JSON.** The on-disk archive is now the
+  machine-queryable primary (jq / Loki / Splunk); console stays text by default.
+  Set `[logging.file] format = "text"` to restore the old shape. The file sink
+  also honors `RUST_LOG` and module overrides instead of a hardcoded `info`.
+- **Heartbeat flood tamed.** During active sync the operator heartbeat respects a
+  5 s minimum spacing between progress lines (idle nodes keep the once-per-minute
+  pulse) — previously ~1 line/second, ~3,600 near-duplicate lines/hour during IBD.
+- **`peer REST url rejected` warns once per (peer, URL)**; repeats demote to
+  debug, so one misconfigured peer re-announcing a bad URL no longer floods the
+  log every gossip cycle.
+- **`lru` upgraded 0.16.4 → 0.18.2 (#240, #252).** RUSTSEC-2026-0253 (a
+  non-panic-safe `LruCache::pop`) was first carried as a justified `deny.toml`
+  ignore — the only consumer is the AVL clean-node read cache, whose keys and
+  values have no `Drop` impls, so the use-after-free was unreachable — and then
+  cleared outright by taking the patched release. Both mirrored ignore lists are
+  back to bincode-only.
+- **Faster CI (#235, #258).** The push trigger now names `main` rather than a
+  nonexistent `master`, so merges to the default branch are verified at all
+  (#232 and #233 had each landed with a red Windows job). The pipeline drops the
+  duplicate `cargo check` pass (clippy is a superset), builds with
+  `line-tables-only` debuginfo and no incremental compilation, and runs
+  `cargo nextest` with doctests moved to an explicit ubuntu-only step.
+- **Mempool duplicate-id invariant pinned across family-weight rekeys (#272)** —
+  a regression test for the bug class fixed upstream in ergo#2439 (v6.0.4), which
+  `OrderedPool` is structurally immune to but had no end-to-end coverage for.
+  Three further v6.0.4 fixes were audited and found already covered.
 
 ### Fixed
-- **Consensus: header solution `pk` was never curve-checked (v2+ headers) —
-  accept-invalid chain-split vector.** Scala rejects a header whose Autolykos
-  solution `pk` is an off-curve point or an invalid SEC1 prefix at deserialize
-  time (`GroupElementSerializer.parse`); the v2+ PoW hit never touches `pk`
-  bytes (`powHit` depends only on `(msg, nonce, height)`), so this node parsed
-  such a header cleanly and accepted it on PoW strength alone. Header ingestion
-  (`pre_validate_header`) now drains the parse-time group-element sideband and
-  runs the JVM-matching accept rule *before* PoW, giving a poisoned pk its own
-  specific rejection verdict. The transaction path already enforced the same
-  rule; v1 solutions were independently covered by their EC decode. Pinned by
-  unit tests plus ingestion tests covering off-curve/bad-prefix rejection,
-  check ordering against PoW, and curated mainnet v2 headers still passing.
+
 - **Consensus: `CONTEXT.headers` exposed 10 headers during block validation; Scala
-  exposes 9.** Scala's `ErgoStateContext` splits its stored window
+  exposes 9 (#238).** Scala's `ErgoStateContext` splits its stored window
   (`sigmaPreHeader = lastHeaders.head`, `sigmaLastHeaders = lastHeaders.drop(1)`),
   so scripts validating block `H` see only `[H-1 … H-9]` and `CONTEXT.headers(9)`
   throws — while this node fed all 10 (`[H-1 … H-10]`) into script eval. Because
@@ -126,8 +226,144 @@ infrastructure.
   (`test-vectors/mainnet/context_headers_1853478/`): the poison transaction
   verifies under the legacy 10-entry window and is rejected under the
   Scala-parity 9-entry window.
-
-- **Nightly fuzz round-trip classification (Bug #19).** Non-self-delimiting
+- **Consensus: group elements were not curve-checked on the header and NiPoPoW
+  paths (#239, #278) — accept-invalid chain-split vector.** Scala rejects a
+  header whose Autolykos solution `pk` is an off-curve point or an invalid SEC1
+  prefix at deserialize time (`GroupElementSerializer.parse`); the v2+ PoW hit
+  never touches `pk` bytes (`powHit` depends only on `(msg, nonce, height)`), so
+  this node parsed such a header cleanly and accepted it on PoW strength alone,
+  while every JVM node rejected it — and any miner can mint such headers at will.
+  Header ingestion (`pre_validate_header`) now drains the parse-time
+  group-element sideband and runs the JVM-matching accept rule *before* PoW,
+  giving a poisoned pk its own specific rejection verdict. NiPoPoW bootstrap
+  headers bypass that gate entirely — `apply_popow_proof` writes them straight
+  into the header store — so `NipopowVerifier::process` now runs the same check
+  on every embedded header's solution points (`pk`, plus `w` on v1 solutions) and
+  classifies a proof carrying an off-curve point as a `ValidationError`, which
+  the messaging layer already penalizes. The transaction path already enforced
+  the rule; v1 solutions were independently covered by their EC decode.
+- **Consensus: `adProofsRoot` was never bound in UTXO mode; ADProofs are now
+  verified at O(block) during apply (#254, #256, #265).** The UTXO-mode block
+  path validated `transactions_root`, `extension_root`, and section linkage but
+  never touched `header.ad_proofs_root` — no requirement that the section exists,
+  no decode, no hash binding. Live mainnet proof: block `437601cd…` at
+  h1,853,301, rejected by Scala as *"Regenerated proofHash is not equal to the
+  declared one"*, was accepted and applied here for 697 s before a
+  cumulative-work reorg. #254 bound the declared root to the stored section;
+  #256 went further and regenerated proofs through the canonical prover path, so
+  a forged self-consistent `(root, proofs)` pair no longer validates. That
+  regeneration then proved unaffordable at archival scale — it is O(tree size)
+  per block where Scala's permanently-resident `persistentProver` makes the same
+  semantics cheap — and wedged post-restore catch-up with anonymous RSS climbing
+  114 MB → 8.5 GB (issue #264, reproduced under ptrace on a cloned 74 GB state:
+  100 blocks in 69 min). #265 replaces it with `verify_shipped_ad_proofs`: the
+  shipped section is bound to the header's section id, its inner payload hashed
+  against `adProofsRoot`, and the block's net box changes replayed through it
+  from the parent root to `stateRoot` — O(block size), same rejection power, no
+  resident tree. A missing section is `AdProofsUnavailable` (retryable data
+  availability), never a regeneration. The sync coordinator now requests ADProofs
+  sections in UTXO mode (Scala `stateType.requireProofs`) and gates assembly
+  completion on them. Measured after: the same clone closed a ~660-block gap in
+  2 minutes with RSS settled at ~3.4 GB.
+- **Consensus: AVL verifier operation bounds were never enforced (#274).** Scala's
+  `ADProofs.verify` passes `maxNumOperations = Some(changes.operations.size)`, but
+  every `AvlVerifier` call site here hardcoded `None`, so the underlying crate's
+  scrypto node-count cap never fired — and the SANTA `adverse-malicious-extra-nodes`
+  vector (blessed `proof_accepted = false`) was accepted, with the lookup returning
+  attacker-chosen bytes. Block-level ADProofs verification, digest apply, and the
+  mining candidate self-check now pass the netted operation count; script-level AVL
+  ops keep `None`, matching sigma's `CAvlTreeVerifier`, with the evidence pinned in
+  a comment.
+- **Consensus: SANTA wire/v6 SHeader rejects and NiPoPoW `log2` parity (#275).**
+  Two accept-invalid coals: `read_group_element` now enforces the SEC1 lead byte
+  (`0x00` identity, `0x02`/`0x03` compressed) at parse, since JVM
+  `GroupElementSerializer.parse` can decode nothing else, and SHeader-constant
+  decode failures are now **hard rejects** that escape the soft-fork
+  `UnparsedErgoTree` wrap — Scala's SHeader `DataSerializer` arm raises a
+  `SerializerException`, which `deserializeErgoTree`'s catch does not cover
+  (the distinction is by exception type, not phase; rule-1012-class
+  `ValidationException`s still wrap). Separately, Scala's
+  `log2 = math.log(x)/math.log(2)` carries a 1-ULP error at exact powers of two
+  (ln(2^251)/ln(2) = 251.00000000000003) where Rust's `f64::log2` returns exactly
+  251, rewriting every interlinks vector after height 22 of the synthetic chain;
+  `max_level_of` now uses the ln/ln form. Real PoW hits are hash outputs and
+  cannot be exact powers of two, so this could never fire on a live chain — but
+  JVM parity is the contract. All 14 wire/v6 entries and a new 32-height JVM
+  NiPoPoW corpus now match their blessings byte-for-byte.
+- **Consensus surface: `AvlVerifier` reports old values and the remaining scrypto
+  operations (#276).** `update` / `insert` / `insert_or_update` return the old
+  value they replaced instead of `()`, and `RemoveIfExists`, `UpdateLongBy`, and
+  `UnknownModification` gained methods they never had — completing the seven
+  previously not-implemented SANTA authds entries. Pure API completeness with zero
+  consensus impact (no ErgoTree surface exists for the new operations, and existing
+  consumers use `.is_ok()`), verified by grading the entire 37-entry
+  `AvlVerify.ergots_corpus` — all 37 match their scrypto 3.0.0 blessing, including
+  the four adverse rejects.
+- **Consensus-adjacent: shared-peer count clamped below Scala's 64-parse limit
+  (#269).** `peers_for_sharing` was called with limit 100, but the reference node
+  parses inbound `Peers` with `require(length <= 64)` and escalates any parse
+  failure to a permanent penalty with a ~10-year blacklist — so a well-behaved
+  Rust node could get itself permanently banned by the network it was helping.
+  `MAX_SHARED_PEER_SPECS = 48` is now enforced inside `peers_for_sharing`
+  regardless of caller limit (the reference client itself sends 8). `PeerSpec`
+  encoders also bound their one-byte length prefixes for `agent_name`,
+  `node_name`, and the RestApiUrl feature body, which previously wrapped and
+  desynced the receiving parser above 255 bytes.
+- **Sync scheduling and non-delivery parity, tier 1 (#237, #251).** The misread
+  100 ms send cadence is replaced by Scala's proactive `ErgoSyncTracker` model —
+  `MinSyncInterval` 20 s, `SyncThreshold` 1 min, `ClearThreshold` 3 min, with
+  configurable `[sync] sync_interval_secs` / `sync_interval_stable_secs`
+  defaulting to 5 s while older peers are present and 15 s once stable — and
+  `peers_to_sync_with` mirrors `peersToSyncWith`. Delivery hard timeouts now
+  apply `NonDelivery` only when the request was issued at or after the peer's
+  last `Got`; soft timeouts re-request without a penalty. `SyncInfo` comparison
+  follows Scala's height/ID-based `compare`/`compareV2` (unparseable V2 tips are
+  `Unknown`, equal cumulative score at differing heights is `Fork`), inbound
+  `SyncInfo` is rate-limited at the 100 ms `PerPeerSyncLockTime`, transaction
+  deliveries now advance `last_modifier_got_time` (they previously routed around
+  it and could trip the NonDelivery gate while actively delivering), a
+  well-formed empty `SyncInfoV2` classifies `Younger` rather than `Unknown`, and
+  the sync-sent stamp is written only on a successful send so a serialization
+  failure no longer starves that peer of chain updates.
+- **Late-delivery allowances leaked for the node's lifetime (#268).**
+  `DeliveryTracker::late_acceptable` entries — granted on timeout, HOL reassign,
+  or hedge registration so a peer's late-but-valid answer is not spam-penalized —
+  were removed only on receipt or peer cancel, so an id that timed out and was
+  then abandoned kept its allowance forever. Measured on mainnet tip:
+  `dl_late_acceptable` grew 395 → 1,149 in ~5 hours with nothing unusual
+  happening. Entries now carry a first-seen instant and are swept at a 60 s TTL in
+  the same pass as the sibling `recently_released` shadow, after which a delivery
+  from the previously-allowed peer is correctly `RejectSpam`. Watch
+  `dl_late_acceptable` after upgrading: it should plateau near the steady-state
+  in-flight count instead of ratcheting.
+- **Dead testnet seeds caused a `peers = 0` livelock (#273).** All three bundled
+  seeds in `BootstrapParams::testnet()` refuse TCP (verified live 2026-08 against
+  a synced Scala 6.0.3 node), and the failure mode is a discovery dead end: dead
+  seeds are never evicted, they back off to a 2 h cap, `getpeers_fanout` returns 0
+  at `connected == 0` so `GetPeers` has nobody to ask, and every dial trace is
+  debug-only — the operator sees `peer_manager_count 3 → 0` and then silence.
+  Three verified-live seeds replace them (pinned by a chain-spec test), and the
+  dial cycle now WARNs in the dead-end state (positive deficit, every known
+  address backoff-skipped, zero connected peers) at a 5-minute interval with
+  `deficit` and `known_addresses` attached.
+- **`/info` ignored the configured `node_name` (#273).** Scala's `/info` `name` is
+  the configured `nodeName`; this node synthesized `ergo-rust-{network}-{version}`
+  regardless — the only one of three surfaces (handshake `PeerSpec`, native
+  `/api/v1/info`, Scala-compat `/info`) that did, so a configured name could not
+  survive an upgrade. Now wired to `config.node_name`, with unset configs keeping
+  the established `ergo-rust-node` default.
+- **The inactivity timer is refreshed by progress, not by any frame (#285).**
+  `INACTIVE_TIMEOUT` (600 s) ran against `PeerInfo::last_seen`, which every valid
+  frame refreshed — so a peer trickling a bare `GetPeers` once a minute, an empty
+  `Peers` reply, or an unknown opcode held its inbound slot forever. Eviction now
+  keys on whether a peer is *useful*. Read this as an **operational fix, not a DoS
+  control**: it reclaims slots from peers that are stuck, misconfigured, or too
+  dumb to sync, but roughly 40 bytes every nine minutes still holds a slot,
+  because the cheapest qualifying frames (a one-header `SyncInfo`, a
+  `RequestModifier` for something we have, a one-entry `Peers`) are by
+  construction indistinguishable from an honest idle neighbour's. Bounding a
+  determined attacker remains `max_inbound` plus the per-IP and subnet limits' job.
+- **Nightly fuzz round-trip classification, Bug #19 (#236).** Non-self-delimiting
   `UnparsedErgoTree` propositionBytes (empty / mid-VLQ truncations) refuse
   `write_ergo_tree` (`WriteError` → difftest `WriteRejected`). Soft-fork-opaque
   box/tx re-decode failures after canonical VLQ rewrite are classified as
@@ -135,6 +371,140 @@ infrastructure.
   and consensus box writers still emit preserved tree bytes for id-parity.
   `IrNode` `PartialEq` treats `0x83` boolean-constant `ConcreteCollection` as
   equal to packed `0x85` `BoolCollection` after Scala-style compaction.
+- **Test determinism (#297).** The slot-pool deadlock negative control now
+  gates the senders on the readers settling instead of a fixed sleep (it
+  passed vacuously on Windows), and the two incident-snapshot tests no longer
+  race on a process-global incident directory (#296).
+
+### Security
+
+- **P2P read path: the event byte budget is now charged as frames are read, with
+  an admission-slot pool and progress deadlines (#279, #283).** The shared
+  `PeerEvent` channel is bounded at 4096 events but `Message` payloads reach the
+  8 MB `MAX_PAYLOAD_SIZE`, so the composition — every component individually
+  bounded — was worth ~32 GiB of queued payloads at 256 inbound peers streaming
+  maximal frames. #279 added a shared 256 MiB `Semaphore` budget acquired before
+  enqueueing, with the permit riding on the payload and released on drop, turning
+  memory pressure into TCP backpressure rather than drops. #283 closed the
+  residual: the permit was taken *after* the whole frame was already buffered, so
+  ~384 connections × 8 MB of transient read buffers were never seen by any budget
+  (and a grown buffer kept its capacity for the connection's life). `read_message`
+  now splits into a header phase (the 9-byte framing header is peeked, not
+  consumed, so an abandoned read cannot lose framing position) and a body phase
+  that acquires budget for **each socket read before it happens**, topping the
+  hold up to delivered-bytes-plus-one-chunk — so a peer that declares 8 MB and
+  sends nothing holds 64 KiB, not 8 MB, and the buffer is released back to
+  `READ_BUF_SIZE` on completion. Because charging per read means holding permits
+  while waiting for more, an **admission-slot pool** orders the waits: a frame too
+  large to finish in one read takes one of 32 slots (and, before that, a
+  per-address claim) *while holding nothing*, then waits for bytes; single-read
+  frames take no slot, so header and transaction gossip never queues behind block
+  bodies. The invariant, stated once: a reader never awaits the byte budget while
+  holding byte permits unless it holds an admission slot, and the three waits run
+  strictly address claim → slot → bytes. Two deadlines bound *how long* rather
+  than how much: **5 s to the first body byte** (header-stalling is the cheapest
+  attack on the slot pool) and **30 s per read of progress** thereafter, both held
+  as absolute instants on the connection so an outbound message cancelling the
+  read cannot re-arm them, with time spent waiting on our own admission control
+  credited back so backpressure is never blamed on the peer. A tripped deadline
+  disconnects and scores `Penalty::NonDelivery` (2), not `Misbehavior` — a NAT
+  reset mid-frame is indistinguishable from deliberate withholding, and repetition
+  still bans. **Residual, deliberate:** an attacker who can muster 32 distinct
+  addresses across at least 11 /16s (the per-subnet connection limit is 3) can
+  still occupy every slot and delay large-frame ingest in ≤5 s bursts; small-frame
+  gossip is untouched throughout. Making `NonDelivery` stack within `SAFE_INTERVAL`
+  (audit L-1, open) and weighting slot admission by delivery history would shrink
+  it further and are deliberately not in this release. Deadlock freedom is pinned
+  by an in-tree negative control that asserts the same workload deadlocks with the
+  slot pool removed.
+- **`[api] allowed_hosts` — Host-header allowlist / DNS-rebinding guard (#284).**
+  The operator API now rejects requests whose `Host` header (or, for HTTP/2, the
+  `:authority` pseudo-header) doesn't match `localhost` / `127.0.0.1` / `::1` /
+  the literal bind address / an `allowed_hosts` entry, with `421 Misdirected
+  Request` in the usual JSON error envelope. The guard wraps the whole assembled
+  router including the 404 fallback, so a rebound request never learns the route
+  table shape. Without it, attacker JavaScript on a rebound domain could
+  same-origin `fetch()` this node's public-by-design routes (`/info`, `/blocks/*`,
+  `/peers/*`, `/emission/*`, `/metrics`) out of a victim's browser; key-gated
+  routes were never at risk, since the `api_key` header cannot be forged
+  cross-origin. Enforced by default on the loopback bind (`127.0.0.1:9099`), the
+  exact rebinding target; a non-loopback bind only enforces when `allowed_hosts`
+  is non-empty, since operators exposing the API publicly usually front it with a
+  proxy that already validates `Host`/SNI. A request with no `Host` and no
+  `:authority` passes through, matching what the Scala reference tolerates for
+  HTTP/1.0 clients. **Breaking — operator action required if you front the API
+  with a reverse proxy on a loopback bind that forwards its own public hostname**
+  (e.g. nginx `proxy_set_header Host $host`): add that hostname to
+  `[api] allowed_hosts`, or the proxied requests get `421` instead of reaching the
+  API. The resolved allowlist and enforcement flag are logged at `INFO` next to
+  the "api listening" boot line so a `421` is diagnosable without guessing. See
+  `docs/configuration.md#api` for the key reference and security note.
+- **The wallet CLI no longer takes the recovery phrase via argv by default
+  (#277).** `import`, `derive`, and `pubkey` took `--mnemonic <String>` — argv is
+  world-readable through `/proc/<pid>/cmdline` for the process lifetime, persists
+  in shell history, and is routinely captured by CI logs and crash reporters, for
+  the highest-value secret in the system. The default is now an interactive
+  no-echo prompt; `--mnemonic-file <path>` (`-` = stdin) is the scripted path; and
+  `--mnemonic` is accepted only behind an explicit
+  `--dangerously-pass-mnemonic-via-argv` gate, with a refusal message naming the
+  safe alternatives. The phrase and derived seed are wrapped in `Zeroizing`. All
+  sources yield byte-identical pubkeys, pinned by test. `--passphrase` remains an
+  argv flag by deliberate choice — it is not spend-capable without the phrase —
+  with its residual exposure now noted in the help text.
+- **Wallet `unlock` and `check` enforce a failed-attempt budget (#242).**
+  `WalletAdminError::RateLimited` had existed all along, mapped to HTTP 429 in
+  three places, but was never constructed — so password guessing against
+  `/wallet/unlock`, `/api/v1/wallet/unlock`, and `/api/v1/wallet/check` was
+  unlimited and parallelizable across connections. Five failures within 60 s now
+  lock the operation for 300 s. Enforcement lives in the wallet writer task, the
+  single choke point every surface funnels through, so all surfaces share one
+  budget per operation; a success resets it, unrelated errors don't count as guess
+  feedback, and each operation has its own budget so a lockout on `check` cannot
+  deny an `unlock`. Budgets are per-process and unpersisted, matching the threat
+  model (online guessing; offline attacks against the encrypted wallet file are
+  inherent to the Scala-compatible at-rest format).
+- **The Scala-compat `/mining/*` routes are api_key-gated (#241, #253).**
+  `GET /mining/candidate` (including its longpoll hold), `POST /mining/solution`,
+  `GET /mining/rewardAddress`, and `GET /mining/rewardPublicKey` previously
+  mounted with no authentication — solution submission drives the block pipeline,
+  the longpoll holds an API task, and the reward routes expose the miner payout
+  identity. All four now sit behind the same `api_key` gate as `/node/shutdown`,
+  matching the already-gated native `/api/v1/mining/*`. This is a **deliberate
+  hardening over the Scala reference node**, which leaves `/mining/*` open:
+  external miner integrations must now send the `api_key` header they already
+  need for any other operator route. SECURITY.md's gate table names all three
+  route families.
+- **Audit hygiene bundle (#250, #282).** `/utils/seed` entropy is drawn from
+  `OsRng` (policy consistency with every other security-relevant RNG site);
+  batch-Merkle proof count arithmetic is overflow-checked with a typed decoder
+  error (a 32-bit-target wrapping landmine); wallet secret files are created
+  atomically with mode `0600` on Unix via `create_new(true).mode(0o600)`, closing
+  the write-then-chmod window where ciphertext, salt, and IV were briefly readable
+  under a permissive umask (Windows keeps plain writes, with restricted ACLs a
+  documented skip), pinned by a mode assertion test; and the decrypted BIP39 seed
+  stays inside the zeroize discipline instead of being copied to a plain stack
+  array in `unlock()`, with the accepted residual (the raw HMAC-SHA512 output,
+  which `hmac`/`sha2` do not wipe) documented at the derivation site. The
+  `api_key_hash` setup hints across `config/load.rs`, `toml_sections.rs`,
+  `docs/configuration.md`, and the shipped `ergo-node.toml` no longer suggest
+  hashing the literal `"hello"` — they generate a random secret — and the weak-key
+  boot warning now fires on loopback binds too, so the single most common
+  misconfiguration (never rotating the template key on the shipped loopback
+  default) finally warns. The digest-mode mempool invariant in `handle_mempool_tick`
+  degrades with a once-latched ERROR instead of panicking the single-writer action
+  loop.
+- **The ban list is bounded (#249).** Every handshake-reject recorded a one-year
+  ban keyed by IP, written through to the persistent redb `BANS` table, with
+  neither representation bounded and expired rows purged only at load — so an
+  adversary holding an IPv6 /64 could mint unlimited source addresses for a
+  slow-burn memory and disk exhaustion that survived restarts, plus permanent
+  pollution of `/peers/blacklisted`. `MAX_BANS = 10_000` now caps the in-memory
+  map, evicting soonest-expiring first (which naturally deprioritizes permanent
+  bans) and deleting the evicted IP's persisted row in the same flow, and an
+  hourly `sweep_expired_bans` removes expired entries from memory and redb
+  together. Expired bans were already unenforced; this is hygiene against
+  unbounded residency. IPv6 /64-prefix scoping remains out of scope (#244).
+
 ## [0.5.3] - 2026-07-19
 
 The refactor-and-harden release: a workspace-wide split of oversized source
