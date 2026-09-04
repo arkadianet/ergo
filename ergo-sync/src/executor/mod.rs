@@ -19,7 +19,6 @@ use crate::coordinator::{Action, SyncCoordinator};
 use ergo_crypto::difficulty::DifficultyParams;
 use ergo_p2p::peer::PeerId;
 
-use ergo_state::store::StateStore;
 use ergo_state::ChainStateRead;
 use ergo_validation::context::ProtocolParams;
 use ergo_validation::header::CheckedHeader;
@@ -68,20 +67,6 @@ fn report_sync_storage_failure(
         },
         error,
     );
-}
-
-/// The header-validation pipeline (`header_proc::finalize_header` and
-/// friends) is still typed against the concrete UTXO `StateStore`: it
-/// performs no box-arena work, but threading the backend enum through
-/// the whole header pipeline (and its `ergo-mining` / test callers) is a
-/// separate slice. Until then, the executor reaches the UTXO header
-/// tables here. The Mode 5 boot gate is REJECT, so a digest backend
-/// never reaches this seam — the `expect` documents that invariant
-/// rather than silently degrading.
-fn utxo_header_store_mut(store: &mut ergo_state::StateBackendKind) -> &mut StateStore {
-    store
-        .as_utxo_mut()
-        .expect("header pipeline is UTXO-typed; Mode 5 digest header sync is gated off")
 }
 
 /// Classify a full-block apply failure as a definitive VALIDATION verdict —

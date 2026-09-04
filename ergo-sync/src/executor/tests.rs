@@ -6,6 +6,7 @@ use ergo_primitives::group_element::{GroupElement, GROUP_ELEMENT_LENGTH};
 use ergo_primitives::writer::VlqWriter;
 use ergo_ser::autolykos::AutolykosSolution;
 use ergo_ser::header::{write_header, Header};
+use ergo_state::store::StateStore;
 use ergo_state::test_helpers::SharedBuf;
 use ergo_state::ChainStateRead;
 use std::io;

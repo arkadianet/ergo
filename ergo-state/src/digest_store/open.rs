@@ -174,18 +174,25 @@ struct LoadedState {
 /// authoritative anchor and cross-checking the other two rows
 /// against it.
 ///
-/// Three on-disk shapes are valid; everything else is corruption:
+/// Four on-disk shapes are valid; everything else is corruption:
 ///
 /// 1. **Fresh** — `chain_state` absent. No apply ever committed, so
 ///    `root_digest` and `CHAIN_INDEX` must also be empty. Boots at
 ///    the network's genesis state (`genesis_state_digest`).
-/// 2. **Genesis-after-rollback** — `chain_state` present with
+/// 2. **Headers-only** — `chain_state` present at
+///    `best_full_block_height == 0` with `root_digest` ABSENT. Header
+///    validation persists `chain_state` (the `best_header_*` pointers)
+///    long before the first block applies, so this is the normal shape
+///    of a node in header-first IBD, not a torn write. Every
+///    applied-state row must still be empty; boots at the genesis
+///    state like shape 1.
+/// 3. **Genesis-after-rollback** — `chain_state` present with
 ///    `best_full_block_height == 0` (the store applied blocks then
 ///    rolled back to 0). `root_digest` is present and must equal
 ///    `genesis_state_digest`, and `CHAIN_INDEX` carries no
 ///    applied-height rows (`apply` only writes rows at height >= 1,
 ///    and rollback truncated them).
-/// 3. **Applied** — `chain_state` present with height `h >= 1`.
+/// 4. **Applied** — `chain_state` present with height `h >= 1`.
 ///    `root_digest` present; `CHAIN_INDEX` tip height equals `h`
 ///    AND the id stored at that tip equals `best_full_block_id`
 ///    (apply writes them together; a divergence is a split-brain).
@@ -269,10 +276,6 @@ fn read_consistent_state(
             })
         }
         Some(cs) => {
-            // chain_state is authoritative — root_digest must accompany it.
-            let root = root.ok_or_else(|| {
-                corruption("chain_state present but root_digest absent — torn write".into())
-            })?;
             // Internal fork-choice invariants on the persisted chain
             // state (header tip leads/equals full-block tip; score
             // non-empty). A violation is on-disk corruption.
@@ -280,8 +283,39 @@ fn read_consistent_state(
                 return Err(corruption(reason.into()));
             }
             let h = cs.best_full_block_height;
+
+            // Shape 2: headers-only. Header validation persists
+            // `chain_state` (the `best_header_*` pointers) long before any
+            // block applies, so `chain_state` present is NOT by itself
+            // evidence that an apply committed — a node that has synced
+            // headers and applied nothing has exactly this shape, and it is
+            // what every Mode 5 node looks like for the whole of header-first
+            // IBD. Boot it at the network genesis digest, as the fresh shape
+            // does, after confirming every applied-state row really is absent.
+            if h == 0 && root.is_none() {
+                let has_history = history_ledger_nonempty(&read)?;
+                if chain_index_tip.is_some() || has_history {
+                    return Err(corruption(format!(
+                        "chain_state at height 0 with no root_digest but \
+                         chain_index_tip={} / history_rows={} present — torn write",
+                        chain_index_tip.is_some(),
+                        has_history,
+                    )));
+                }
+                return Ok(LoadedState {
+                    root_digest: *genesis_state_digest,
+                    chain_state: cs,
+                    fresh: true,
+                });
+            }
+
+            // Past this point an apply (or a rollback from one) committed, so
+            // the root must accompany the chain state.
+            let root = root.ok_or_else(|| {
+                corruption("chain_state present but root_digest absent — torn write".into())
+            })?;
             if h == 0 {
-                // Shape 2: genesis-after-rollback. CHAIN_INDEX carries
+                // Shape 3: genesis-after-rollback. CHAIN_INDEX carries
                 // no applied-height rows; the root is the empty digest;
                 // and rollback-to-0 leaves the genesis history rows
                 // (key 0) it read to restore. A `chain_state` at
@@ -314,7 +348,7 @@ fn read_consistent_state(
                     fresh: false,
                 })
             } else {
-                // Shape 3: applied. Tip height AND id must match, and
+                // Shape 4: applied. Tip height AND id must match, and
                 // the rollback substrate (history dense over [0, h-1])
                 // must exist — otherwise the store boots "healthy" but
                 // cannot reorg, surfacing the defect at a fork instead

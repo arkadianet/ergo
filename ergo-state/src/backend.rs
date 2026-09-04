@@ -89,14 +89,33 @@ pub trait HeaderSectionStore {
     /// Durably invalidate a full-block-validation-rejected header and all its
     /// stored descendants, re-anchoring best_header to the surviving tip.
     /// Returns the invalidated ids (inclusive). Scala
-    /// `ErgoHistory.reportModifierIsInvalid`. Only the UTXO backend persists;
-    /// the digest backend is session-scoped (its apply failures are
-    /// stale-root-ambiguous by contract).
+    /// `ErgoHistory.reportModifierIsInvalid`.
+    ///
+    /// BOTH backends persist. The substrate is the header tables, which every
+    /// backend keeps, and the verdict classes the executor routes here
+    /// (`Validation`, `HeaderMeta`, `EpochExtension`, `AdProofsHashMismatch`)
+    /// are mode-independent consensus rejections. The stale-root-ambiguous
+    /// digest apply failure is not one of them — it takes
+    /// [`Self::mark_session_invalid`].
     fn invalidate_validation_branch(
         &mut self,
         header_id: [u8; 32],
     ) -> Result<Vec<[u8; 32]>, StateError>;
     fn is_invalid(&self, header_id: &[u8; 32]) -> Result<bool, StateError>;
+    /// Durable-only invalidity: the persisted PoW (`pow_validity == 2`) or
+    /// full-block-validation (`== 3`) flag, EXCLUDING the session-scoped set.
+    /// The hereditary parent-invalid guard in header processing tests this,
+    /// not [`Self::is_invalid`] — a session mark is a transient verdict and
+    /// must not permanently block a descendant subtree. Scala's parent check
+    /// reads the durable `isSemanticallyValid == Invalid` row.
+    ///
+    /// The default body derives it from the stored header meta, which is
+    /// correct for any backend that persists validity in `HeaderMeta`.
+    fn is_durably_invalid(&self, header_id: &[u8; 32]) -> Result<bool, StateError> {
+        Ok(self
+            .get_header_meta(header_id)?
+            .is_some_and(|meta| meta.pow_validity == 2 || meta.pow_validity == 3))
+    }
     fn reader_handle(&self) -> crate::reader::ChainStoreReader;
     fn shutdown_cleanly(&mut self) -> Result<(), StateError>;
 }
@@ -221,6 +240,9 @@ impl HeaderSectionStore for StateStore {
     }
     fn is_invalid(&self, header_id: &[u8; 32]) -> Result<bool, StateError> {
         StateStore::is_invalid(self, header_id)
+    }
+    fn is_durably_invalid(&self, header_id: &[u8; 32]) -> Result<bool, StateError> {
+        StateStore::is_durably_invalid(self, header_id)
     }
     fn reader_handle(&self) -> crate::reader::ChainStoreReader {
         StateStore::reader_handle(self)
@@ -480,6 +502,12 @@ impl HeaderSectionStore for StateBackendKind {
         match self {
             StateBackendKind::Utxo(s) => s.is_invalid(header_id),
             StateBackendKind::Digest(d) => d.is_invalid(header_id),
+        }
+    }
+    fn is_durably_invalid(&self, header_id: &[u8; 32]) -> Result<bool, StateError> {
+        match self {
+            StateBackendKind::Utxo(s) => s.is_durably_invalid(header_id),
+            StateBackendKind::Digest(d) => d.is_durably_invalid(header_id),
         }
     }
     fn reader_handle(&self) -> crate::reader::ChainStoreReader {

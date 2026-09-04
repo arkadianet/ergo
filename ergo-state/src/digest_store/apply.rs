@@ -230,18 +230,29 @@ impl crate::backend::HeaderSectionStore for DigestStateStore {
         &mut self,
         header_id: [u8; 32],
     ) -> Result<Vec<[u8; 32]>, StateError> {
-        // Digest-mode invalidity is session-scoped by contract (a stale local
-        // parent root and a definitively bad block are observationally
-        // identical here — see `BlockProcessError::DigestApply`), so there is
-        // no durable branch flag to persist. The executor's validation-verdict
-        // classifier does not route digest apply failures here; this satisfies
-        // the shared trait for the non-incident path. Delegate the insert to
-        // `mark_session_invalid` so it stays the single source of truth.
-        self.mark_session_invalid(header_id);
-        Ok(vec![header_id])
+        // Reached only for definitive consensus verdicts — `Validation`,
+        // `HeaderMeta`, `EpochExtension`, `AdProofsHashMismatch` — which the
+        // executor's classifier admits in every mode. The stale-root-ambiguous
+        // `DigestApply` failure is NOT one of them; it takes the session-mark
+        // path instead. A verdict must therefore be durable here exactly as it
+        // is on the UTXO backend: a session-only mark would let a peer re-feed
+        // the dead branch header-by-header after every restart while
+        // `best_header` stayed parked above `best_full` on it.
+        //
+        // The whole substrate is the shared header tables, so the walk, the
+        // `pow_validity = 3` writes and the best-header re-anchor are the same
+        // code the UTXO backend runs; only the chain-state mirroring differs.
+        let (invalidated, cs_after) = self
+            .headers
+            .invalidate_validation_branch(header_id, &self.chain_state)?;
+        self.chain_state = cs_after;
+        Ok(invalidated)
     }
     fn is_invalid(&self, header_id: &[u8; 32]) -> Result<bool, StateError> {
-        Ok(self.session_invalids.contains(header_id))
+        if self.session_invalids.contains(header_id) {
+            return Ok(true);
+        }
+        crate::backend::HeaderSectionStore::is_durably_invalid(self, header_id)
     }
     fn reader_handle(&self) -> crate::reader::ChainStoreReader {
         crate::reader::ChainStoreReader::new(self.db.clone())

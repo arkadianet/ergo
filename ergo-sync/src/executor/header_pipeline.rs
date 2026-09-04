@@ -17,7 +17,7 @@ use tracing::{info, warn};
 use crate::coordinator::{Action, SyncCoordinator};
 use crate::header_proc::{self, HeaderProcessError, ProcessedHeader};
 
-use super::{utxo_header_store_mut, SyncExecutor, LAST_HEADERS_WINDOW};
+use super::{SyncExecutor, LAST_HEADERS_WINDOW};
 
 /// Cap on total buffered orphan headers. Sized for Step D's
 /// anchor-spacing scheduler: with `ANCHOR_SPACING = 4_000` and
@@ -132,12 +132,8 @@ impl SyncExecutor {
         let pre = pre_result?;
 
         let t_fin = Instant::now();
-        let finalize_result = header_proc::finalize_header(
-            utxo_header_store_mut(store),
-            pre,
-            header_bytes,
-            &self.chain_config,
-        );
+        let finalize_result =
+            header_proc::finalize_header(store, pre, header_bytes, &self.chain_config);
         self.header_perf
             .add_finalize(t_fin.elapsed().as_nanos() as u64);
         let processed = finalize_result?;
@@ -187,12 +183,8 @@ impl SyncExecutor {
         let pre_for_buffer = pre.clone();
 
         let t_fin = Instant::now();
-        let finalize_result = header_proc::finalize_header(
-            utxo_header_store_mut(store),
-            pre,
-            header_bytes,
-            &self.chain_config,
-        );
+        let finalize_result =
+            header_proc::finalize_header(store, pre, header_bytes, &self.chain_config);
         self.header_perf
             .add_finalize(t_fin.elapsed().as_nanos() as u64);
         match finalize_result {
@@ -346,12 +338,7 @@ impl SyncExecutor {
                     let header_id = *pre.header_id();
                     let header_height = pre.height;
                     let pre_for_buffer = pre.clone();
-                    match header_proc::finalize_header(
-                        utxo_header_store_mut(store),
-                        pre,
-                        &bytes,
-                        &config,
-                    ) {
+                    match header_proc::finalize_header(store, pre, &bytes, &config) {
                         Ok(processed) => {
                             let expected = ExpectedSections::from_header(
                                 &processed.header_id,
@@ -518,7 +505,7 @@ impl SyncExecutor {
             let header_id = *pre.header_id();
             let header_height = pre.height;
             let pre_for_buffer = pre.clone();
-            match header_proc::finalize_header(utxo_header_store_mut(store), pre, &bytes, &config) {
+            match header_proc::finalize_header(store, pre, &bytes, &config) {
                 Ok(processed) => {
                     // Children waiting on THIS header are now eligible
                     // — pull them out of the buffer and onto the queue.
