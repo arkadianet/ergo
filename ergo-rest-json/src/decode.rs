@@ -717,39 +717,20 @@ fn decode_scala_pow_solution(
         w_arr.copy_from_slice(&w_bytes);
         let w = GroupElement::from_bytes(w_arr);
 
-        // `d` for v1 is a Scala `BigInt`, JSON-encoded by circe as a
-        // bare JSON NUMBER (not a string) — the UNSIGNED magnitude of
-        // the PoW distance. The wire bytes are Scala's
+        // `d` for v1 is a Scala `BigInt` — the UNSIGNED magnitude of the
+        // PoW distance. The wire bytes are Scala's
         // `BigIntegers.asUnsignedByteArray`, so the production encoder
         // (`ergo-node::api_bridge::compat::encode_pow_solutions`)
-        // round-trips via `BigUint::from_bytes_be(d)` and emits the
-        // decimal as a number. Mirror that here: accept a number (the
-        // real Scala form) or, leniently, a decimal string, parse as an
-        // UNSIGNED magnitude, and re-emit via `to_bytes_be()`. A
-        // high-bit value therefore stays positive — a signed
-        // two's-complement decode would flip it negative (live repro
-        // h=28662: Scala serves d = +5624…573; the old signed path
-        // served -652…) and would invent a spurious `0x00` sign
-        // disambiguator that real Scala data never carries.
-        let d_dec = match &pow.d {
-            serde_json::Value::Number(n) => n.to_string(),
-            serde_json::Value::String(s) => s.clone(),
-            other => {
-                return Err((
-                    DESERIALIZE,
-                    format!(
-                        "powSolutions.d must be a number or decimal string for v1 header, got {other:?}"
-                    ),
-                ));
-            }
-        };
-        let d_big = num_bigint::BigUint::parse_bytes(d_dec.as_bytes(), 10).ok_or_else(|| {
-            (
-                DESERIALIZE,
-                format!("powSolutions.d {d_dec:?} is not a valid unsigned decimal"),
-            )
-        })?;
-        let d = d_big.to_bytes_be();
+        // round-trips via `BigUint::from_bytes_be(d)`. Reading it
+        // unsigned and re-emitting via `to_bytes_be()` keeps a high-bit
+        // value positive: a signed two's-complement decode would flip it
+        // negative (live repro h=28662: Scala serves d = +5624…573; the
+        // old signed path served -652…) and would prepend a spurious
+        // `0x00` sign disambiguator that real Scala data never carries,
+        // lengthening the header and changing its id.
+        let d = crate::types::unsigned_bigint_from_json("powSolutions.d", &pow.d)
+            .map_err(|e| (DESERIALIZE, e))?
+            .to_bytes_be();
 
         Ok(ergo_ser::autolykos::AutolykosSolution::V1 { pk, w, nonce, d })
     } else {

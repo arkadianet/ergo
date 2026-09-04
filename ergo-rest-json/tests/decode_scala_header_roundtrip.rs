@@ -1,20 +1,28 @@
-//! Round-trip oracle for `decode_scala_header`.
+//! Bytes → JSON → bytes CONSISTENCY round-trip for `decode_scala_header`.
 //!
-//! Loads real mainnet header bytes from `headers_1_10.json`,
-//! parses to internal `Header`, builds a `ScalaHeader` JSON DTO
-//! from the parsed fields (replicating Scala's `Header.jsonEncoder`
-//! shape), then decodes via `decode_scala_header` and asserts the
-//! result is byte-identical to the input.
+//! Loads real mainnet header bytes from `headers_1_10.json`, parses to
+//! an internal `Header`, builds a `ScalaHeader` JSON DTO from the
+//! parsed fields, then decodes via `decode_scala_header` and asserts
+//! the result is byte-identical to the input.
 //!
-//! Coverage: v1 headers (Autolykos v1 PoW solution with `w` + `d`)
-//! from heights 1..=5; v2 headers (Autolykos v2, `w`/`d` ignored)
-//! from `headers_700000_700010.json` or similar.
+//! This is NOT an oracle for the JSON shape, and must not be read as
+//! one: the DTO is built by `header_to_scala` below, a replica of the
+//! production encoder, so a decoder and an encoder that are wrong in
+//! matching ways round-trip perfectly. That is exactly how a signed
+//! read of the Autolykos v1 `d` survived here — the replica re-encoded
+//! the spurious sign byte the decoder had invented, and the bytes
+//! matched.
 //!
-//! v1 headers are the harder case — `d` is a BigInt that Scala
-//! emits as a decimal-stringified JSON value. Our decoder reads
-//! the string and reconstructs the big-endian length-prefixed
-//! byte representation; this test pins that the round-trip is
-//! lossless across the BigInt boundary.
+//! What pins the JSON shape itself is `headers_json_scala_oracle.rs`,
+//! which decodes header bodies captured VERBATIM from live Scala nodes
+//! (mainnet v1 and testnet v4) and checks the re-serialized id against
+//! the node's own. `json_header_v1_reencoded_d_matches_served_decimal`
+//! there pins `d`'s encode direction against the decimal Scala served,
+//! which is what keeps the replica below honest.
+//!
+//! What this file still adds is breadth over the wire bytes: heights
+//! and header shapes (EIP-37 curated v2+ headers, `unparsedBytes`) that
+//! the captured-JSON fixtures do not cover.
 
 use ergo_primitives::reader::VlqReader;
 use ergo_rest_json::decode_scala_header;
@@ -43,10 +51,12 @@ fn load_headers(filename: &str) -> Vec<HeaderVec> {
 }
 
 /// Build a `ScalaHeader` JSON DTO from a parsed internal `Header`,
-/// replicating Scala's `Header.jsonEncoder` shape exactly. This is
-/// the read-side encoder logic the production bridge uses, replayed
-/// here so the test is self-contained (the production encoder is
-/// `pub(super)` in `ergo-node::api_bridge::compat`).
+/// replicating Scala's `Header.jsonEncoder` shape. This is the
+/// read-side encoder logic the production bridge uses, replayed here
+/// because that encoder is `pub(super)` in
+/// `ergo-node::api_bridge::compat` — which is why the round-trips below
+/// prove consistency, not correctness. The `d` arm is held to the real
+/// Scala rendering by `headers_json_scala_oracle.rs`.
 fn header_to_scala(h: &ergo_ser::header::Header, id: &str) -> ScalaHeader {
     let pow_solutions = match &h.solution {
         ergo_ser::autolykos::AutolykosSolution::V1 { pk, w, nonce, d } => ScalaPowSolutions {

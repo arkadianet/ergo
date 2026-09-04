@@ -1739,3 +1739,70 @@ fn normalize_header_sizes(ours: &mut serde_json::Value, scala: &mut serde_json::
         );
     }
 }
+
+// ----- oracle parity: Autolykos v1 pow `d` on the read side -----
+
+/// The production encoder `compat::encode_pow_solutions` serves `d` on
+/// `/blocks/{id}`, `/blocks/{id}/header` and the nipopow routes. Nothing
+/// held it to Scala's rendering before: the shape was only cross-checked
+/// against a replica of itself in the `ergo-rest-json` round-trip suite.
+///
+/// Oracle: `test-vectors/mainnet/headers_json/scala_headers_v1_mainnet.json`
+/// is verbatim Scala mainnet JSON. Decode the h=3 body — the first block
+/// on the chain whose Autolykos v1 distance has its top bit set, i.e. the
+/// case a signed encoder gets wrong — hand the resulting solution to the
+/// production encoder, and require the emitted value to be a JSON NUMBER
+/// carrying the exact decimal the node itself served
+/// (`ApiCodecs.bigIntEncoder` = `JsonNumber.fromDecimalStringUnsafe`).
+#[test]
+fn encode_pow_solutions_v1_d_matches_scala_served_number() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("test-vectors/mainnet/headers_json/scala_headers_v1_mainnet.json");
+    let raw =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let served: Vec<serde_json::Value> = serde_json::from_str(&raw).expect("fixture parses");
+    let h3 = served
+        .iter()
+        .find(|h| h["height"] == 3)
+        .expect("fixture carries mainnet height 3");
+
+    let dto: ergo_rest_json::types::ScalaHeader =
+        serde_json::from_value(h3.clone()).expect("DTO parses");
+    let header = ergo_rest_json::decode_scala_header_struct(&dto).expect("real node JSON decodes");
+
+    let (pk, w, n, d) = encode_pow_solutions(&header.solution);
+    assert_eq!(pk, h3["powSolutions"]["pk"].as_str().unwrap());
+    assert_eq!(w, h3["powSolutions"]["w"].as_str().unwrap());
+    assert_eq!(n, h3["powSolutions"]["n"].as_str().unwrap());
+
+    assert!(
+        d.is_number(),
+        "Scala renders d as a bare JSON number, not a string: {d}",
+    );
+    assert_eq!(
+        d, h3["powSolutions"]["d"],
+        "encoded d differs from the decimal the Scala node served",
+    );
+
+    // Serializing must not round the magnitude through f64: the digits
+    // that survive to the wire are the ones a client re-derives the
+    // header id from.
+    let on_wire = serde_json::to_string(&d).expect("d serializes");
+    assert_eq!(on_wire, h3["powSolutions"]["d"].to_string());
+    assert_eq!(on_wire.len(), 65, "unexpected magnitude width: {on_wire}");
+
+    // And the magnitude really is the high-bit case this guards.
+    match &header.solution {
+        ergo_ser::autolykos::AutolykosSolution::V1 { d, .. } => {
+            assert_eq!(d.len(), 27, "minimal-length unsigned magnitude");
+            assert!(
+                d[0] >= 0x80,
+                "h=3 must exercise the high bit: {:#04x}",
+                d[0]
+            );
+        }
+        other => panic!("h=3 must decode to a v1 solution, got {other:?}"),
+    }
+}
