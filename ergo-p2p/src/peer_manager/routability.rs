@@ -3,7 +3,10 @@
 //! [`is_routable_for_p2p`] is the gate for "should I dial this address
 //! and should I propagate it to other peers via the Peers message?",
 //! parameterised by the operator's `[peers] allow_local` (Scala's
-//! `scorex.network.allowLocal`).
+//! `scorex.network.allowLocal`). It also rejects, unconditionally, the
+//! IANA special-purpose IPv4/IPv6 ranges (documentation, benchmarking,
+//! reserved) that Scala's `NetworkUtils.isLocal` doesn't classify at
+//! all but that are never legitimately dialable peers either.
 //! [`declared_to_socket`] parses a wire-format declared address (4
 //! bytes IPv4 or 16 bytes IPv6) into a [`SocketAddr`] without the
 //! IPv4-vs-IPv6 length-coercion bug a previous `try_from(...).unwrap_or([0;4])`
@@ -23,7 +26,9 @@ use std::net::{IpAddr, SocketAddr};
 /// Two classes of rejection:
 ///
 /// * **Never dialable, whatever the setting** — unspecified, multicast,
-///   and port 0. These are not addresses a peer can listen on.
+///   port 0, and the IANA special-purpose ranges (documentation,
+///   benchmarking, reserved, and similar — see [`is_never_dialable`]).
+///   These are not addresses a peer can listen on.
 /// * **Local-network addresses** — loopback, RFC1918 / site-local,
 ///   link-local, IPv6 unique-local, and carrier-grade NAT. Rejected
 ///   unless `allow_local` is set.
@@ -63,20 +68,66 @@ pub fn is_routable_for_p2p(addr: &SocketAddr, allow_local: bool) -> bool {
     // exactly this fold via `Ipv6Addr::to_ipv4_mapped()` and otherwise
     // returns the address unchanged.
     let ip = addr.ip().to_canonical();
-    if ip.is_unspecified() || ip.is_multicast() || addr.port() == 0 {
+    if addr.port() == 0 || is_never_dialable(&ip) {
         return false;
     }
-    // 255.255.255.255 is never a listening address either — it is the
-    // limited-broadcast destination. Gossip that hands it out via a
-    // `Peers` response would otherwise sail past every other check and
-    // sit in the dial pool and `peers.redb` forever (CodeRabbit #299
-    // round 2, DoS).
-    if let IpAddr::V4(v4) = ip {
-        if v4.is_broadcast() {
-            return false;
+    !is_local_address(&ip) || allow_local
+}
+
+/// Whether an IP can never be a real, dialable peer address, whatever
+/// `allow_local` says — unspecified, multicast, IPv4 limited-broadcast,
+/// and the IANA special-purpose registry ranges that are never
+/// legitimately advertised by a real peer: RFC 5737 documentation
+/// (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`), RFC 2544
+/// benchmarking (`198.18.0.0/15`), RFC 1122 "this network"
+/// (`0.0.0.0/8`), RFC 6890 reserved-for-future-use (`240.0.0.0/4`,
+/// which subsumes the broadcast address already handled below), RFC
+/// 6890 IETF protocol assignments (`192.0.0.0/24`), and the deprecated
+/// 6to4 relay anycast (`192.88.99.0/24`) — with IPv6 equivalents RFC
+/// 3849 documentation (`2001:db8::/32`) and RFC 5180 benchmarking
+/// (`2001:2::/48`).
+///
+/// Unlike the private/loopback/link-local classes [`is_local_address`]
+/// covers, these are not addresses that become reachable under any real
+/// network topology — a LAN operator's `[peers] allow_local` gains
+/// nothing by re-admitting them, and a peer that gossips one is either
+/// misconfigured or filling the address book with junk. Rejected
+/// unconditionally, the same as unspecified/multicast/port-0
+/// (CodeRabbit #299 round 3).
+fn is_never_dialable(ip: &IpAddr) -> bool {
+    if ip.is_unspecified() || ip.is_multicast() {
+        return true;
+    }
+    match ip {
+        IpAddr::V4(v4) => {
+            let oct = v4.octets();
+            v4.is_broadcast()
+                // 0.0.0.0/8 — "this network" (0.0.0.0 itself is already
+                // caught by is_unspecified above).
+                || oct[0] == 0
+                // 192.0.0.0/24 — IETF protocol assignments.
+                || (oct[0] == 192 && oct[1] == 0 && oct[2] == 0)
+                // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 —
+                // TEST-NET-1/2/3 documentation ranges.
+                || (oct[0] == 192 && oct[1] == 0 && oct[2] == 2)
+                || (oct[0] == 198 && oct[1] == 51 && oct[2] == 100)
+                || (oct[0] == 203 && oct[1] == 0 && oct[2] == 113)
+                // 198.18.0.0/15 — benchmarking.
+                || (oct[0] == 198 && (18..=19).contains(&oct[1]))
+                // 192.88.99.0/24 — deprecated 6to4 relay anycast.
+                || (oct[0] == 192 && oct[1] == 88 && oct[2] == 99)
+                // 240.0.0.0/4 — reserved for future use. Covers
+                // 255.255.255.255 too, already caught by is_broadcast.
+                || oct[0] >= 240
+        }
+        IpAddr::V6(v6) => {
+            let segs = v6.segments();
+            // 2001:db8::/32 — documentation.
+            (segs[0] == 0x2001 && segs[1] == 0x0db8)
+                // 2001:2::/48 — benchmarking.
+                || (segs[0] == 0x2001 && segs[1] == 0x0002 && segs[2] == 0)
         }
     }
-    !is_local_address(&ip) || allow_local
 }
 
 /// Whether an IP belongs to a local-network class — the set

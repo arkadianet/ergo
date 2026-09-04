@@ -312,9 +312,9 @@ fn addresses_to_connect_skips_per_ip_collisions() {
     // off — burning the per-cycle dial budget on guaranteed-failures.
     let mut mgr = PeerManager::new(1);
     let now = Instant::now();
-    let primary = addr(203, 0, 113, 1, 9030);
-    let alt_port = addr(203, 0, 113, 1, 9020); // same IP, different port
-    let other = addr(203, 0, 113, 2, 9030);
+    let primary = addr(100, 200, 1, 1, 9030);
+    let alt_port = addr(100, 200, 1, 1, 9020); // same IP, different port
+    let other = addr(100, 200, 1, 2, 9030);
 
     mgr.add_known_address(primary, PeerOrigin::Seed);
     mgr.add_known_address(alt_port, PeerOrigin::Seed);
@@ -336,17 +336,17 @@ fn addresses_to_connect_skips_per_ip_collisions() {
 #[test]
 fn addresses_to_connect_skips_per_subnet_saturation() {
     // The /16 subnet limit (default 3) is also enforced upfront so
-    // dial-budget isn't wasted. With three peers in 203.0.113.0/16,
+    // dial-budget isn't wasted. With three peers in 100.200.0.0/16,
     // a fourth gossiped candidate from the same /16 must be filtered
     // before `register_outbound` sees it.
     let mut mgr = PeerManager::new(1);
     let now = Instant::now();
     for i in 1..=3u8 {
-        let a = addr(203, 0, 113, i, 9030);
+        let a = addr(100, 200, 1, i, 9030);
         mgr.add_known_address(a, PeerOrigin::Seed);
         mgr.register_outbound(a, now).unwrap();
     }
-    let fourth = addr(203, 0, 113, 4, 9030);
+    let fourth = addr(100, 200, 1, 4, 9030);
     mgr.add_known_address(fourth, PeerOrigin::Seed);
 
     // Subnet is full — the fourth candidate is filtered out, even
@@ -358,11 +358,16 @@ fn addresses_to_connect_skips_per_subnet_saturation() {
 fn known_addresses_for_discovery() {
     let mut mgr = PeerManager::new(1);
     let now = Instant::now();
-    // Use TEST-NET-3 (203.0.113/24) — reserved-for-documentation
-    // routable IPs that pass the routability filter without being
-    // real public hosts. Pre-routability-filter the test used 10/8.
-    let a1 = addr(203, 0, 113, 1, 9030);
-    let a2 = addr(203, 0, 113, 2, 9030);
+    // 100.200.1/24 sits outside every special-purpose range (it's
+    // outside the 100.64.0.0/10 CGNAT band and none of the IANA
+    // documentation/benchmarking/reserved ranges `is_never_dialable`
+    // rejects), so it passes the routability filter without being a
+    // real public host. Pre-routability-filter the test used 10/8;
+    // the TEST-NET ranges (192.0.2/24, 198.51.100/24, 203.0.113/24)
+    // used after that are themselves now rejected (CodeRabbit #299
+    // round 3), so this picks a plain, non-special block instead.
+    let a1 = addr(100, 200, 1, 1, 9030);
+    let a2 = addr(100, 200, 1, 2, 9030);
 
     mgr.add_known_address(a1, PeerOrigin::Seed);
     mgr.add_known_address(a2, PeerOrigin::Gossip);
@@ -385,25 +390,26 @@ fn add_known_address_caps_dial_pool_under_gossip_flood() {
     // protects seeds first, then by `(last_seen, -failures)`.
     let mut mgr = PeerManager::new(1);
 
-    // Fill exactly to cap with synthetic gossip entries (RFC5737
-    // TEST-NET-1 198.51.100/24 is documentation-routable; pad with
-    // TEST-NET-3 203.0.113/24 for the second 256-entry block).
-    // Use port to disambiguate within a /24 since
-    // `add_known_address` keys on full SocketAddr.
+    // Fill exactly to cap with synthetic gossip entries. 100.201.1/24
+    // and 100.200.1/24 sit outside every special-purpose range (see
+    // the comment on `known_addresses_for_discovery`), so both pass
+    // the routability filter without being real public hosts. Use
+    // port to disambiguate within a /24 since `add_known_address`
+    // keys on full SocketAddr.
     let mut count = 0usize;
     'outer: for octet in 1..=255u8 {
         for port in 9030u16..=u16::MAX {
             if count >= MAX_KNOWN_ADDRESSES {
                 break 'outer;
             }
-            mgr.add_known_address(addr(198, 51, 100, octet, port), PeerOrigin::Gossip);
+            mgr.add_known_address(addr(100, 201, 1, octet, port), PeerOrigin::Gossip);
             count += 1;
         }
     }
     assert_eq!(mgr.known_addresses_len(), MAX_KNOWN_ADDRESSES);
 
     // Pushing another gossip entry must NOT grow the pool.
-    let extra_gossip = addr(203, 0, 113, 1, 9030);
+    let extra_gossip = addr(100, 200, 1, 1, 9030);
     mgr.add_known_address(extra_gossip, PeerOrigin::Gossip);
     assert_eq!(
         mgr.known_addresses_len(),
@@ -420,7 +426,7 @@ fn add_known_address_caps_dial_pool_under_gossip_flood() {
 
     // A seed claim, however, must displace the lowest-priority
     // gossip entry to make room.
-    let seed_addr = addr(203, 0, 113, 99, 9030);
+    let seed_addr = addr(100, 200, 1, 99, 9030);
     mgr.add_known_address(seed_addr, PeerOrigin::Seed);
     assert_eq!(
         mgr.known_addresses_len(),
@@ -445,7 +451,7 @@ fn add_known_address_upgrades_gossip_learned_to_seed_on_duplicate() {
     // on the same shape (`address_book.rs:395-407`); this fixes
     // the in-memory mirror to match.
     let mut mgr = PeerManager::new(1);
-    let a = addr(203, 0, 113, 1, 9030);
+    let a = addr(100, 200, 1, 1, 9030);
 
     // First learned via gossip (origin=Gossip).
     mgr.add_known_address(a, PeerOrigin::Gossip);
@@ -498,7 +504,7 @@ fn add_known_address_upgrades_gossip_learned_to_seed_on_duplicate() {
 #[test]
 fn add_known_address_outcome_taxonomy_is_complete() {
     let mut mgr = PeerManager::new(1);
-    let routable = addr(203, 0, 113, 1, 9030);
+    let routable = addr(100, 200, 1, 1, 9030);
 
     assert_eq!(
         mgr.add_known_address(routable, PeerOrigin::Gossip),
@@ -547,8 +553,8 @@ fn dial_failure_backoff_skips_recently_failed_until_window_elapses() {
     // them in the list never got a chance.
     let mut mgr = PeerManager::new(1);
     let now = Instant::now();
-    let dead = addr(203, 0, 113, 1, 9030);
-    let live = addr(203, 0, 113, 2, 9030);
+    let dead = addr(100, 200, 1, 1, 9030);
+    let live = addr(100, 200, 1, 2, 9030);
 
     mgr.add_known_address(dead, PeerOrigin::Seed);
     mgr.add_known_address(live, PeerOrigin::Gossip);
@@ -594,7 +600,7 @@ fn dial_failure_backoff_skips_recently_failed_until_window_elapses() {
 fn dial_success_resets_backoff_state() {
     let mut mgr = PeerManager::new(1);
     let now = Instant::now();
-    let a = addr(203, 0, 113, 1, 9030);
+    let a = addr(100, 200, 1, 1, 9030);
     mgr.add_known_address(a, PeerOrigin::Seed);
 
     // Two failures escalate to a 2min backoff.
@@ -1235,6 +1241,129 @@ fn is_routable_with_allow_local_admits_local_classes_only() {
     }
     assert!(!is_routable_for_p2p(&v6("::", 9030), true));
     assert!(!is_routable_for_p2p(&v6("ff02::1", 9030), true));
+}
+
+/// Every IANA IPv4 special-purpose range `is_never_dialable` rejects,
+/// under both `allow_local` settings — these are not local-network
+/// addresses `allow_local` is meant to re-admit, they're addresses no
+/// real peer ever listens on (CodeRabbit #299 round 3).
+#[test]
+fn is_routable_rejects_ipv4_special_purpose_ranges() {
+    let cases: &[(&str, SocketAddr)] = &[
+        ("0.0.0.0/8 \"this network\"", addr(0, 5, 6, 7, 9030)),
+        (
+            "192.0.0.0/24 IETF protocol assignments",
+            addr(192, 0, 0, 8, 9030),
+        ),
+        (
+            "192.0.2.0/24 TEST-NET-1 documentation",
+            addr(192, 0, 2, 1, 9030),
+        ),
+        (
+            "198.51.100.0/24 TEST-NET-2 documentation",
+            addr(198, 51, 100, 1, 9030),
+        ),
+        (
+            "203.0.113.0/24 TEST-NET-3 documentation",
+            addr(203, 0, 113, 1, 9030),
+        ),
+        (
+            "198.18.0.0/15 benchmarking (low half)",
+            addr(198, 18, 0, 1, 9030),
+        ),
+        (
+            "198.18.0.0/15 benchmarking (high half)",
+            addr(198, 19, 255, 254, 9030),
+        ),
+        (
+            "192.88.99.0/24 6to4 relay anycast",
+            addr(192, 88, 99, 1, 9030),
+        ),
+        ("240.0.0.0/4 reserved (low end)", addr(240, 0, 0, 1, 9030)),
+        ("240.0.0.0/4 reserved (high end)", addr(255, 0, 0, 1, 9030)),
+    ];
+    for (label, a) in cases {
+        assert!(
+            !is_routable_for_p2p(a, false),
+            "{label} ({a}) must be rejected with allow_local=false"
+        );
+        assert!(
+            !is_routable_for_p2p(a, true),
+            "{label} ({a}) must stay rejected with allow_local=true — \
+             allow_local re-admits local-network classes only"
+        );
+    }
+}
+
+/// IPv6 equivalents of the special-purpose ranges above, under both
+/// `allow_local` settings.
+#[test]
+fn is_routable_rejects_ipv6_special_purpose_ranges() {
+    use std::net::Ipv6Addr;
+    let v6 = |ip: &str, port: u16| -> SocketAddr {
+        SocketAddr::new(IpAddr::V6(ip.parse::<Ipv6Addr>().unwrap()), port)
+    };
+    let cases: &[(&str, SocketAddr)] = &[
+        ("2001:db8::/32 documentation", v6("2001:db8::1", 9030)),
+        (
+            "2001:db8::/32 documentation (high end)",
+            v6("2001:db8:ffff:ffff:ffff:ffff:ffff:ffff", 9030),
+        ),
+        ("2001:2::/48 benchmarking", v6("2001:2::1", 9030)),
+    ];
+    for (label, a) in cases {
+        assert!(
+            !is_routable_for_p2p(a, false),
+            "{label} ({a}) must be rejected with allow_local=false"
+        );
+        assert!(
+            !is_routable_for_p2p(a, true),
+            "{label} ({a}) must stay rejected with allow_local=true"
+        );
+    }
+    // 2001:2:1::1 is outside the /48 (segs[2] != 0) and must pass —
+    // guards against an over-wide mask.
+    assert!(is_routable_for_p2p(&v6("2001:2:1::1", 9030), false));
+}
+
+/// The gossip ingest path (`add_known_address` with `origin=Gossip`,
+/// the same call `Peers`-message handling drives) must not create a
+/// row for a special-purpose address — it has to be rejected before
+/// ever reaching `known_addresses`, not merely excluded from dial
+/// selection downstream.
+#[test]
+fn add_known_address_drops_special_purpose_gossip_without_creating_rows() {
+    let mut mgr = PeerManager::new(1);
+    let before = mgr.known_addresses_len();
+
+    let gossiped = [
+        addr(192, 0, 2, 1, 9030),    // TEST-NET-1 documentation
+        addr(198, 51, 100, 1, 9030), // TEST-NET-2 documentation
+        addr(203, 0, 113, 1, 9030),  // TEST-NET-3 documentation
+        addr(198, 18, 0, 1, 9030),   // benchmarking
+        addr(192, 88, 99, 1, 9030),  // 6to4 relay anycast
+        addr(240, 0, 0, 1, 9030),    // reserved
+    ];
+    for a in gossiped {
+        let outcome = mgr.add_known_address(a, PeerOrigin::Gossip);
+        assert_eq!(
+            outcome,
+            AddKnownOutcome::FilteredNonRoutable,
+            "{a} must be filtered, not admitted as a known address"
+        );
+    }
+
+    assert_eq!(
+        mgr.known_addresses_len(),
+        before,
+        "special-purpose gossip must not create rows in the dial book"
+    );
+    for a in gossiped {
+        assert!(
+            !mgr.known_addresses.iter().any(|k| k.addr == a),
+            "{a} must not appear in known_addresses"
+        );
+    }
 }
 
 #[test]
