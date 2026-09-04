@@ -510,6 +510,93 @@ fn reject_with_remaining_quorum_falls_back_to_selected() {
     assert_ne!(next.0, peer(1), "evicted peer must not be re-chosen");
 }
 
+// ----- Mode 4 install-phase self-heal (P2-1) -----
+
+#[test]
+fn reject_manifest_and_evict_voter_drops_a_latched_verified_manifest() {
+    // Reproduces the Mode 4 install-phase race: a manifest fully
+    // verifies (ManifestVerified), then something outside this
+    // module discovers it can never actually be installed (the
+    // NiPoPoW proof's dense_from_height landed above the anchor
+    // after verification). `install_reconstructed_snapshot` must be
+    // able to reuse the SAME eviction call the manifest-phase arms
+    // use, and it must actually un-latch `verified` rather than
+    // leaving `state()` stuck reporting ManifestVerified forever.
+    let mut bs = reach_selected(3);
+    bs.mark_manifest_requested(peer(1), 52_224, mid(0xAA), Instant::now());
+    bs.accept_verified_manifest(vec![1, 2, 3]);
+    assert_eq!(
+        bs.state(),
+        BootstrapState::ManifestVerified {
+            height: 52_224,
+            manifest_id: mid(0xAA),
+        },
+        "precondition: manifest is latched verified",
+    );
+
+    let voter = bs
+        .voter_for_selected_manifest()
+        .expect("selected manifest still has a voter");
+    bs.reject_manifest_and_evict_voter(voter);
+
+    assert!(
+        !matches!(bs.state(), BootstrapState::ManifestVerified { .. }),
+        "eviction after verification must drop the verified latch, not leave \
+         the state machine reporting an unusable manifest as still-verified \
+         forever: {:?}",
+        bs.state(),
+    );
+}
+
+#[test]
+fn drop_verified_manifest_unlatches_without_an_evictable_voter() {
+    // The fallback path when the peer that served the manifest is no
+    // longer tracked (e.g. disconnected between verification and
+    // install, already removed from `votes` by `on_peer_disconnect`).
+    // There is nothing left to evict, but `verified` must still be
+    // cleared so discovery can reopen.
+    let mut bs = reach_selected(3);
+    bs.mark_manifest_requested(peer(1), 52_224, mid(0xAA), Instant::now());
+    bs.accept_verified_manifest(vec![1, 2, 3]);
+
+    // Simulate every voter for this manifest having disconnected.
+    for p in 1..=3u16 {
+        bs.on_peer_disconnect(&peer(p));
+    }
+
+    bs.drop_verified_manifest();
+    assert!(
+        !matches!(bs.state(), BootstrapState::ManifestVerified { .. }),
+        "drop_verified_manifest must unlatch verified even with no voter to \
+         evict: {:?}",
+        bs.state(),
+    );
+}
+
+#[test]
+fn reject_manifest_and_evict_voter_at_manifest_phase_is_unaffected_by_verified_clear() {
+    // Non-regression: the ordinary manifest-phase eviction (verified
+    // is still None, a request is pending) must behave exactly as
+    // before — clearing `verified` there is a no-op, not a new
+    // side effect that changes which state the machine lands in.
+    let mut bs = SnapshotBootstrap::with_quorum(3);
+    for p in 1..=4u16 {
+        bs.on_snapshots_info(peer(p), &[(52_224, mid(0xAA))]);
+    }
+    bs.mark_manifest_requested(peer(1), 52_224, mid(0xAA), Instant::now());
+
+    bs.reject_manifest_and_evict_voter(peer(1));
+    assert_eq!(
+        bs.state(),
+        BootstrapState::Selected {
+            height: 52_224,
+            manifest_id: mid(0xAA),
+        },
+        "manifest-phase eviction behavior must be unchanged: still 3 voters \
+         for A → reselects the same manifest",
+    );
+}
+
 #[test]
 fn check_request_timeout_evicts_silent_voter() {
     let mut bs = SnapshotBootstrap::with_quorum(3);

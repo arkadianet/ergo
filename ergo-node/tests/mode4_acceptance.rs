@@ -28,12 +28,23 @@
 //!   where `apply_popow_proof` is refused on an installed store
 //!   and the store stays coherently `Dense`. The deferred
 //!   `HeightLookup::SparseGap` install branch and its resolution to
-//!   `Dense` via bounded forward catch-up are covered by the
-//!   `resolve_install_anchor` unit tests in
-//!   `ergo-node/src/node/sync_tick.rs`, which also pin the
+//!   `Dense` are covered by the `resolve_install_anchor` unit tests
+//!   in `ergo-node/src/node/sync_tick.rs`, which also pin the
 //!   composition bug this row found: an anchor BELOW the proof's
 //!   `dense_from_height` used to defer forever (forward catch-up
-//!   never back-fills the sparse prefix), and is now terminal.
+//!   never back-fills the sparse prefix), and is now terminal
+//!   (self-healing back to manifest discovery, not a permanent
+//!   halt). **Those unit tests pin the deferred→`Ready` handoff
+//!   only at the classifier** — they synthesize the "row indexed"
+//!   transition directly with `test_force_put_header_chain_index`
+//!   rather than running header sync's real bounded forward
+//!   catch-up (`rewrite_best_chain_into_index`,
+//!   `ergo-state/src/store/height_index.rs:204`) end-to-end through
+//!   a running node. Driving that handoff through the ACTUAL
+//!   catch-up mechanism inside `run_inner` remains open — it is the
+//!   second half of Gate 2 task 4.3 in
+//!   `dev-docs/plans/2026-09-03-mode-gates-plan.md`, not closed by
+//!   this PR.
 //! - **Scala pin (archive + utxo_bootstrap)** — an archive-configured
 //!   node with `utxo_bootstrap = true` keeps a CONSTANT prune
 //!   sentinel across boot, matching

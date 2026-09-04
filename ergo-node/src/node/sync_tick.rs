@@ -771,13 +771,22 @@ fn drive_chunk_download(state: &mut NodeState, now: Instant) {
 /// * `UnreachableGap` — the anchor is BELOW `dense_from_height`, in
 ///   the proof's sparse prefix. Bounded forward catch-up starts at
 ///   `best_header_height + 1` and `rewrite_best_chain_into_index`
-///   stops its backward walk at the first height whose row already
-///   matches, so nothing ever back-fills `HEADER_CHAIN_INDEX` below
-///   `dense_from_height`. Treating this as `Defer` retries forever
-///   while logging "catchup pending", so the bootstrap silently
-///   never completes. It is a terminal, operator-actionable state:
-///   the discovered snapshot epoch predates the NiPoPoW proof this
-///   node bootstrapped from.
+///   (`ergo-state/src/store/height_index.rs:204`) stops its backward
+///   walk at the first height whose row already matches, so nothing
+///   ever back-fills `HEADER_CHAIN_INDEX` below `dense_from_height`.
+///   Treating this as `Defer` retries forever while logging "catchup
+///   pending", so the bootstrap silently never completes. It is
+///   terminal for THIS manifest/anchor: the discovered snapshot
+///   epoch predates the NiPoPoW proof this node bootstrapped from,
+///   and that specific (height, manifest_id) pair can never be
+///   installed. Both call sites self-heal rather than halt the
+///   node — `messaging/manifest.rs` evicts the voter and lets
+///   discovery reselect; `install_reconstructed_snapshot` additionally
+///   drops the already-verified manifest and any in-flight chunk
+///   assembly for it before falling back to discovery, since the
+///   race that produces `UnreachableGap` at install time (the proof
+///   landing after this manifest already verified) means the bytes
+///   in hand are for a manifest that can never be installed either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InstallAnchor {
     /// `HEADER_CHAIN_INDEX[height]` is populated — install may run.
@@ -888,14 +897,35 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
             return;
         }
         Ok(InstallAnchor::UnreachableGap { dense_from_height }) => {
+            // Reaching this arm at install time (rather than at
+            // manifest-verify time in `messaging/manifest.rs`) means
+            // the NiPoPoW proof landed AFTER this manifest already
+            // verified against the canonical header — a narrow
+            // tick-ordering race; Scala has no install-time check
+            // here at all. The manifest itself is not dishonest, it
+            // is just unreachable now: forward catchup can never
+            // index below `dense_from_height`. Self-heal exactly like
+            // the manifest-phase arm — drop the now-unreachable
+            // manifest and any in-flight chunk-assembly state for it,
+            // evict its voter, and fall back to discovery so a voter
+            // advertising a reachable epoch can be selected instead,
+            // rather than halting the node permanently.
             warn!(
                 height = snapshot_height,
                 dense_from_height,
                 "Mode 4: install — snapshot anchor is below the NiPoPoW proof's \
-                 dense_from_height, so forward catchup can never index it; halted. \
-                 The discovered snapshot epoch predates the proof this node \
-                 bootstrapped from — restart with a fresh data_dir.",
+                 dense_from_height, so forward catchup can never index it. The \
+                 verified manifest is unreachable from this proof; dropping it \
+                 and returning to manifest discovery for a reachable epoch.",
             );
+            state.chunk_assembly = None;
+            state.pending_manifest_bytes = None;
+            match state.snapshot_bootstrap.voter_for_selected_manifest() {
+                Some(peer) => state
+                    .snapshot_bootstrap
+                    .reject_manifest_and_evict_voter(peer),
+                None => state.snapshot_bootstrap.drop_verified_manifest(),
+            }
             return;
         }
         Ok(InstallAnchor::AboveTip) => {
