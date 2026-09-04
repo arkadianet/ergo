@@ -1783,8 +1783,10 @@ mod santa_wire_v6 {
     }
 }
 
-// ----- oracle parity: cargo-fuzz #304 / #305 size-delimited over-accepts -----
+// ----- oracle parity -----
 
+// cargo-fuzz #304 / #305 size-delimited over-accepts.
+//
 /// Two cargo-fuzz reproducers whose size-delimited tree body failed with an
 /// error the reference raises as a `SerializerException` — which
 /// `ErgoTreeSerializer.deserializeErgoTree` does NOT catch, so the reference
@@ -1866,5 +1868,88 @@ mod fuzz_size_delimited_hard_reject {
         let mut w = ergo_primitives::writer::VlqWriter::new();
         crate::ergo_tree::write_ergo_tree(&mut w, &tree).expect("re-serialize");
         assert_eq!(w.result(), bytes, "JVM canonical bytes are 08016b");
+    }
+
+    /// #305 follow-up (accept-invalid): a size-delimited script whose body is
+    /// a general-tuple type (`0x60`) declaring `count=1` with a zero item
+    /// type byte. Before the item-read-order fix in
+    /// `ergo-ser/src/sigma_type/read.rs`, the tuple arm rejected `count < 2`
+    /// with a soft `InvalidData` BEFORE reading any item, so the zero byte
+    /// was never reached — the soft error funneled into the generic
+    /// size-delimited wrap and the tree/box/transaction was accepted. Scala
+    /// reads the item unconditionally and its own `c <= 0` check on that item
+    /// throws `InvalidTypePrefix` (a `SerializerException`, uncaught by
+    /// `deserializeErgoTree`).
+    ///
+    /// Oracle (`ErgoSerdeOracle.scala`, sigma-state 6.0.2):
+    ///
+    /// ```text
+    /// ergo_tree          0803600100         -> REJECT InvalidTypePrefix
+    /// ergo_box_candidate 010803600100000000 -> REJECT InvalidTypePrefix
+    /// ```
+    #[test]
+    fn size_delimited_zero_type_prefix_inside_general_tuple_rejects() {
+        let bytes = hex::decode("0803600100").unwrap();
+        let mut r = VlqReader::new(&bytes);
+        assert!(
+            read_ergo_tree(&mut r).is_err(),
+            "JVM: REJECT InvalidTypePrefix — a zero item type inside a \
+             size-delimited general-tuple type must hard-reject, not \
+             soft-fork wrap"
+        );
+    }
+
+    #[test]
+    fn box_candidate_with_zero_type_prefix_inside_general_tuple_rejects() {
+        let bytes = hex::decode("010803600100000000").unwrap();
+        let mut r = VlqReader::new(&bytes);
+        assert!(
+            crate::ergo_box::read_ergo_box_candidate(&mut r).is_err(),
+            "JVM: REJECT InvalidTypePrefix — same zero-item-inside-tuple \
+             shape, reached through a box candidate's script"
+        );
+    }
+
+    /// #305 follow-up (reject-valid): Scala's `TypeSerializer.deserialize`
+    /// has NO arity floor on a general-tuple `count` — a 1-element `STuple`
+    /// is a normal accept (`sigmaProp((0,) == (0,))` below). An earlier
+    /// version of the tuple-type reader rejected `count < 2` outright, so
+    /// this tree — and any real one shaped like it — was wrongly refused: a
+    /// chain-stall class bug (a block containing it would be rejected here
+    /// but accepted by the network).
+    ///
+    /// Oracle (`ErgoSerdeOracle.scala`, sigma-state 6.0.2, surface
+    /// `ergo_tree`), both the sizeless and size-delimited encodings of the
+    /// identical body:
+    ///
+    /// ```text
+    /// ergo_tree 00d1936001040060010400         -> ACCEPT 00d1936001040060010400
+    /// ergo_tree 080ad1936001040060010400       -> ACCEPT 080ad1936001040060010400
+    /// ```
+    #[test]
+    fn general_tuple_one_element_type_accepts_sizeless_and_sized() {
+        // NB: this only asserts PARSE success, matching the JVM `ACCEPT`
+        // verdict — it deliberately does NOT round-trip through
+        // `write_ergo_tree`. `write_tuple` (`sigma_type/write.rs`) keeps a
+        // `count >= 2` floor on write, matching Scala's own
+        // `TypeSerializer.serialize`, which ALSO throws re-emitting a
+        // 1-element `STuple` type in isolation (oracle, `sigma_type`
+        // surface: `600104` parses, but re-serializing it throws). The
+        // reference's `ergo_tree` surface still reports identical canonical
+        // bytes for the WHOLE tree because `ErgoTree.bytes` echoes the
+        // original wire bytes rather than re-deriving them from the parsed
+        // AST — the same reason this crate's consensus read path
+        // (`read_ergo_box_candidate`) keeps the ORIGINAL byte slice
+        // (`ergo_tree_bytes = r.data_slice(tree_start, tree_end)`) instead of
+        // calling `write_ergo_tree` on the parsed tree. `write_ergo_tree` is
+        // only used to construct a NEW tree from scratch
+        // (`ErgoBoxCandidate::new`), a path no compiler emits a degenerate
+        // tuple type into.
+        for hex_bytes in ["00d1936001040060010400", "080ad1936001040060010400"] {
+            let bytes = hex::decode(hex_bytes).unwrap();
+            let mut r = VlqReader::new(&bytes);
+            read_ergo_tree(&mut r)
+                .unwrap_or_else(|e| panic!("JVM: ACCEPT {hex_bytes} — got error {e:?}"));
+        }
     }
 }

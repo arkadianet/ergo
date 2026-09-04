@@ -663,6 +663,84 @@ mod tests {
             compact.len(),
         );
     }
+
+    // ----- oracle parity -----
+
+    /// A general-`STuple` type of arity != 2 now deserializes (the
+    /// `count < 2` reject was dropped from `ergo-ser/src/sigma_type/read.rs`
+    /// to match Scala's read-side parity), which makes EQ over such a value
+    /// reachable at reduce time for the first time. Scala's
+    /// `DataValueComparer.equalDataValues` (sigma-state 6.0.2,
+    /// `data/.../DataValueComparer.scala:331`) dispatches its tuple case with
+    /// `case tup1: Tuple2[_,_] =>` — it matches ONLY arity 2; any other
+    /// tuple arity falls through every case and hits the comparator's final
+    /// default, which throws a bare `RuntimeException`.
+    ///
+    /// Oracle (`ErgoSerdeOracle.scala`, sigma-state 6.0.2, surface `reduce`):
+    ///
+    /// ```text
+    /// reduce 00d1936001040060010400             -> REJECT RuntimeException   (sigmaProp((0,) == (0,)), 1-tuple)
+    /// reduce 00d1934804040402040648040404020406 -> REJECT RuntimeException   (sigmaProp((1,2,3) == (1,2,3)), 3-tuple)
+    /// ```
+    ///
+    /// Both trees themselves parse fine (`ergo_tree` surface: ACCEPT) — the
+    /// reject is at evaluation, not deserialization.
+    #[test]
+    fn reduce_tuple_eq_arity_other_than_two_rejects_runtimeexception() {
+        for hex_bytes in [
+            "00d1936001040060010400",
+            "00d1934804040402040648040404020406",
+        ] {
+            let bytes = hex::decode(hex_bytes).unwrap();
+            let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
+            let tree = ergo_ser::ergo_tree::read_ergo_tree(&mut r)
+                .unwrap_or_else(|e| panic!("tree {hex_bytes} must parse (JVM: ACCEPT): {e:?}"));
+            let ctx = crate::evaluator::ReductionContext::minimal(0, 0);
+            let mut cost = CostAccumulator::recording_only();
+            let err = crate::evaluator::reduce_expr_with_cost(
+                &tree.body,
+                &ctx,
+                &tree.constants,
+                &mut cost,
+            )
+            .expect_err(
+                "EQ over a non-2-arity tuple must reject, matching Scala's \
+                 DataValueComparer RuntimeException",
+            );
+            assert!(
+                matches!(err, crate::evaluator::EvalError::RuntimeException(_)),
+                "expected RuntimeException, got {err:?}"
+            );
+        }
+    }
+
+    /// Discriminator: arity 2 is the one shape Scala's `DataValueComparer`
+    /// DOES support, so it must keep reducing (not be swept into the arity
+    /// gate above).
+    #[test]
+    fn reduce_tuple_eq_arity_two_still_reduces() {
+        let left = Box::new(Expr::Const {
+            tpe: SigmaType::STuple(vec![SigmaType::SInt, SigmaType::SInt]),
+            val: SigmaValue::Tuple(vec![SigmaValue::Int(1), SigmaValue::Int(2)]),
+        });
+        let right = Box::new(Expr::Const {
+            tpe: SigmaType::STuple(vec![SigmaType::SInt, SigmaType::SInt]),
+            val: SigmaValue::Tuple(vec![SigmaValue::Int(1), SigmaValue::Int(2)]),
+        });
+        let eq = Box::new(Expr::Op(IrNode {
+            opcode: 0x93, // EQ
+            payload: Payload::Two(left, right),
+        }));
+        let expr = Expr::Op(IrNode {
+            opcode: 0xD1, // BoolToSigmaProp
+            payload: Payload::One(eq),
+        });
+        let ctx = crate::evaluator::ReductionContext::minimal(0, 0);
+        let mut cost = CostAccumulator::recording_only();
+        let sb = crate::evaluator::reduce_expr_with_cost(&expr, &ctx, &[], &mut cost)
+            .expect("a 2-tuple EQ is the one arity Scala's comparator supports");
+        assert!(matches!(sb, SigmaBoolean::TrivialProp(true)));
+    }
 }
 
 #[cfg(test)]

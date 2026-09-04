@@ -180,9 +180,14 @@ fn write_option(w: &mut VlqWriter, elem: &SigmaType) -> Result<(), WriteError> {
 fn write_tuple(w: &mut VlqWriter, elems: &[SigmaType]) -> Result<(), WriteError> {
     match elems.len() {
         0 | 1 => {
-            // STuple is read back as 2+ elements (the TUPLE_CODE reader rejects
-            // count < 2); refuse to emit a degenerate tuple that would not
-            // round-trip.
+            // Deliberate read/write asymmetry, matching Scala exactly: the
+            // TUPLE_CODE reader accepts a 0- or 1-element STuple (Scala
+            // `TypeSerializer.deserialize` has no arity floor on read — see
+            // `read.rs`'s TUPLE_CODE arm), but `TypeSerializer.serialize`
+            // itself throws re-emitting one (oracle, `sigma_type` surface:
+            // `600104` -> ACCEPT on read, write throws). A degenerate tuple
+            // can arrive by reading an existing tree; refuse to ORIGINATE
+            // one here, matching the reference's own write-side refusal.
             return Err(WriteError::InvalidData(format!(
                 "STuple must have at least 2 elements, got {}",
                 elems.len()

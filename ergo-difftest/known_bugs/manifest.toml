@@ -619,3 +619,82 @@ trigger_hex    = "68686868686800000000000000000000000000000000000000000000000000
 # SHeader constant (type byte 0x68).
 expected_canonical = ""
 note = "ORACLE: difftest --oracle --repro <trigger_hex> --surface ergo_tree. Reached by cargo-fuzz through the `constant` target as an SBox constant wrapping this tree (prefix 6301)."
+
+# ---------------------------------------------------------------------------
+# 30. general-tuple-count-floor-soft  [#305 follow-up, accept-invalid direction]
+# ---------------------------------------------------------------------------
+# The general-tuple type reader (TUPLE_CODE=0x60) rejected `count < 2` with a
+# soft InvalidData BEFORE reading any item type. Scala's TypeSerializer.deserialize
+# has no such floor and reads every item unconditionally; its own `c <= 0` check on
+# an item throws InvalidTypePrefix (a SerializerException, uncaught by
+# deserializeErgoTree). Because the arity check fired first, a zero item byte
+# inside a 0- or 1-count tuple never reached the read that would have hard-rejected
+# it, so it fell through to the generic body-error wrap instead — an accept-invalid
+# twin of #305 reachable through the SAME opcode family but a different arity.
+#
+# CLEAN HEAD:   ergo_tree 0803600100 → Rust REJECT, JVM REJECT InvalidTypePrefix → AGREE
+# PATCHED HEAD: ergo_tree 0803600100 → Rust ACCEPT (UnparsedErgoTree), JVM REJECT → DIVERGE
+[[bug]]
+id             = "general-tuple-count-floor-soft"
+surface        = "ergo_tree"
+class          = "accept-reject"
+wire_reachable = true
+fix_file       = "ergo-ser/src/sigma_type/read.rs"
+reinject       = "In decode_type_at_depth's TUPLE_CODE arm, reintroduce the `if count < 2 { return Err(ReadError::InvalidData(...)) }` check BEFORE the item-read loop. Patch: known_bugs/patches/general-tuple-count-floor-soft.patch"
+budget_iters   = 50000
+trigger_hex    = "0803600100"
+# 08 = v0 header with the size bit; 03 = declared size 3; 60 01 00 = general
+# tuple type, count=1, item type byte 0.
+expected_canonical = ""
+note = "ORACLE: difftest --oracle --repro 0803600100 --surface ergo_tree. Twin box-candidate reproducer: ergo_box_candidate 010803600100000000 -> REJECT InvalidTypePrefix."
+
+# ---------------------------------------------------------------------------
+# 31. general-tuple-arity-one-reject-valid  [#305 follow-up, reject-valid direction]
+# ---------------------------------------------------------------------------
+# Same `count < 2` floor as #30, opposite direction: Scala accepts a 0- or
+# 1-element STuple type on read (TypeSerializer.deserialize has no arity check),
+# e.g. the type embedded in `sigmaProp((0,) == (0,))`. The pre-fix Rust reader
+# refused any tuple type with fewer than 2 elements outright — a chain-stall
+# class bug: a block containing a tree shaped like this would be REJECTED here
+# and ACCEPTED by the rest of the network.
+#
+# CLEAN HEAD:   ergo_tree 00d1936001040060010400 → Rust ACCEPT, JVM ACCEPT → AGREE
+# PATCHED HEAD: ergo_tree 00d1936001040060010400 → Rust REJECT, JVM ACCEPT → DIVERGE
+[[bug]]
+id             = "general-tuple-arity-one-reject-valid"
+surface        = "ergo_tree"
+class          = "accept-reject"
+wire_reachable = true
+fix_file       = "ergo-ser/src/sigma_type/read.rs"
+reinject       = "Same patch as general-tuple-count-floor-soft (the `count < 2` floor rejects both directions at once). Patch: known_bugs/patches/general-tuple-count-floor-soft.patch"
+budget_iters   = 50000
+trigger_hex    = "00d1936001040060010400"
+# Sizeless v0 tree: BoolToSigmaProp(EQ(Const(STuple[SInt], (0,)), Const(STuple[SInt], (0,))))
+expected_canonical = "00d1936001040060010400"
+note = "ORACLE: reject-valid class. difftest --oracle --repro 00d1936001040060010400 --surface ergo_tree: clean AGREE (both ACCEPT, byte-exact), patched Rust REJECT / JVM ACCEPT. Sized twin 080ad1936001040060010400 also ACCEPTs on both heads."
+
+# ---------------------------------------------------------------------------
+# 32. eq-tuple-arity-not-two-accepts  [#305 follow-up, evaluator surface]
+# ---------------------------------------------------------------------------
+# Consequence of #31: once a non-2-arity STuple deserializes, EQ over such a
+# value became reachable at reduce time. Scala's DataValueComparer.equalDataValues
+# dispatches its tuple case with `case tup1: Tuple2[_,_] =>` — it matches ONLY
+# arity 2; any other tuple arity falls through every case to the comparator's
+# final default, which throws a bare RuntimeException. The pre-fix Rust
+# `eq_with_cost_inner` Tuple arm had no arity gate and happily compared two
+# equal-length non-2 tuples element-wise, accepting a script the reference
+# rejects at evaluation.
+#
+# CLEAN HEAD:   reduce 00d1936001040060010400 → Rust REJECT, JVM REJECT RuntimeException → AGREE
+# PATCHED HEAD: reduce 00d1936001040060010400 → Rust ACCEPT P:<TrivialProp(true)>, JVM REJECT → DIVERGE
+[[bug]]
+id             = "eq-tuple-arity-not-two-accepts"
+surface        = "reduce"
+class          = "reduce"
+wire_reachable = true
+fix_file       = "ergo-sigma/src/evaluator/cost.rs"
+reinject       = "In eq_with_cost_inner, merge the two `Value::Tuple` arms back into a single `Value::Tuple(a) => { ... match right { Value::Tuple(b) if a.len() == b.len() => ... , _ => Ok(false) } }` arm (drop the `a.len() == 2` / `b.len() == 2` guards and the trailing `Value::Tuple(_) => Err(...)` arm). Patch: known_bugs/patches/eq-tuple-arity-not-two-accepts.patch"
+budget_iters   = 50000
+trigger_hex    = "00d1936001040060010400"
+expected_canonical = ""
+note = "ORACLE: difftest --oracle --repro 00d1936001040060010400 --surface reduce: clean AGREE (both REJECT RuntimeException), patched AcceptReject (rust Accept P:TrivialProp(true) vs jvm Reject RuntimeException). 3-element twin: 00d1934804040402040648040404020406."

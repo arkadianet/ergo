@@ -88,15 +88,41 @@ fn decode_type_at_depth(r: &mut VlqReader, byte: u8, depth: usize) -> Result<Sig
         // ConstrId-based ranges (12..=95)
         b @ 12..=95 => decode_constructor_at_depth(r, b, depth),
 
-        // General tuple (5+ elements). Scala TypeSerializer.scala:189
-        // reads count as a single unsigned byte (max 255).
+        // General tuple. Scala TypeSerializer.scala:189-192 reads count as a
+        // single unsigned byte (max 255) and then reads exactly that many
+        // item types — with NO arity check on the way in. Two bugs traced to
+        // the same missing-item-read-order root cause here (cargo-fuzz #305
+        // follow-up):
+        //
+        //   - reject-valid: an earlier version of this arm rejected
+        //     `count < 2` with a soft `InvalidData` BEFORE reading any item
+        //     type. Scala's reader has no such floor — a size-1 (or size-0)
+        //     `STuple` type is a normal accept (e.g. `sigmaProp((0,) == (0,))`
+        //     embeds `STuple[SInt]`, count=1). Rejecting it diverged from a
+        //     tree the reference accepts (a chain-stall class of bug: a block
+        //     containing such a tree would be wrongly rejected).
+        //   - accept-invalid: because that same check fired before the item
+        //     loop ran, a zero type-prefix inside a 1-element (or 0-element)
+        //     tuple never reached the per-item `read_type_at_depth` call that
+        //     hard-rejects byte 0 (see the `0 =>` arm above), so it fell
+        //     through as a soft `InvalidData` — accepted-and-wrapped on a
+        //     size-delimited tree the reference hard-rejects
+        //     (`InvalidTypePrefix`, a `SerializerException` outside
+        //     `deserializeErgoTree`'s catch).
+        //
+        // Reading every item unconditionally, with no arity floor, fixes
+        // both at once: `count` in 0..=255 is always accepted structurally,
+        // and a zero prefix at ANY item position (including the only item of
+        // a 1-tuple) hits the hard reject via the recursive call before this
+        // arm ever returns `Ok`.
+        //
+        // The writer (`write_tuple`) keeps its own `count >= 2` floor — Scala
+        // is asymmetric here: `TypeSerializer.serialize` itself throws
+        // writing back a 0- or 1-element `STuple`, so parity requires the
+        // node to accept such a type on READ (it can appear inside an
+        // existing tree) while still refusing to ORIGINATE one on WRITE.
         TUPLE_CODE => {
             let count = r.get_u8()? as usize;
-            if count < 2 {
-                return Err(ReadError::InvalidData(format!(
-                    "tuple must have at least 2 elements, got {count}"
-                )));
-            }
             let mut elems = Vec::with_capacity(count);
             for _ in 0..count {
                 elems.push(read_type_at_depth(r, next)?);
@@ -573,6 +599,64 @@ mod tests {
             matches!(&err, ReadError::InvalidData(m) if m.contains("unknown type code")),
             "an unknown non-zero type code is a wrappable ValidationException in \
              the reference, so it must stay soft, got: {err:?}"
+        );
+    }
+
+    /// General-tuple (`TUPLE_CODE` = 0x60) read parity, cargo-fuzz #305
+    /// follow-up. Scala `TypeSerializer.deserialize` (TypeSerializer.scala:
+    /// 188-192) reads `count` item types with NO arity floor — a 0- or
+    /// 1-element `STuple` is a normal accept — and every item read hits the
+    /// same `c <= 0` hard reject as any other type-byte position, wherever it
+    /// falls in the tuple.
+    ///
+    /// Oracle (`ErgoSerdeOracle.scala`, sigma-state 6.0.2, surface
+    /// `sigma_type`):
+    ///
+    /// ```text
+    /// sigma_type 6000     -> ACCEPT      (0-element tuple)
+    /// sigma_type 600104   -> ACCEPT      (1-element tuple: STuple[SInt])
+    /// sigma_type 600100   -> REJECT InvalidTypePrefix  (1-element, item byte 0)
+    /// sigma_type 60020004 -> REJECT InvalidTypePrefix  (2-element, first item byte 0)
+    /// ```
+    ///
+    /// (`ACCEPT` here has no canonical-bytes suffix: Scala's own
+    /// `TypeSerializer.serialize` throws re-emitting a 0- or 1-element
+    /// `STuple` — `write_tuple` keeps its `count >= 2` floor for exactly
+    /// that reason, an intentional read/write asymmetry, see its doc.)
+    #[test]
+    fn read_type_general_tuple_arity_zero_and_one_accept() {
+        for (bytes, want) in [
+            (&[0x60u8, 0x00][..], SigmaType::STuple(vec![])),
+            (
+                &[0x60u8, 0x01, 0x04][..],
+                SigmaType::STuple(vec![SigmaType::SInt]),
+            ),
+        ] {
+            let mut r = VlqReader::new(bytes);
+            let got = read_type(&mut r)
+                .unwrap_or_else(|e| panic!("tuple bytes {bytes:02x?} must accept: {e:?}"));
+            assert_eq!(got, want, "bytes {bytes:02x?}");
+        }
+    }
+
+    #[test]
+    fn read_type_general_tuple_zero_item_hard_rejects_at_any_position() {
+        // count=1, sole item byte 0.
+        let mut r = VlqReader::new(&[0x60, 0x01, 0x00]);
+        let err = read_type(&mut r).expect_err("zero item type in a 1-tuple must hard-reject");
+        assert!(
+            matches!(&err, ReadError::HardReject(_)),
+            "expected HardReject (Scala InvalidTypePrefix), got: {err:?}"
+        );
+
+        // count=2, FIRST item byte 0 (the second item, 0x04 = SInt, is never
+        // reached — matches Scala reading item types left to right and
+        // throwing on the first zero byte it hits).
+        let mut r = VlqReader::new(&[0x60, 0x02, 0x00, 0x04]);
+        let err = read_type(&mut r).expect_err("zero item type in a 2-tuple must hard-reject");
+        assert!(
+            matches!(&err, ReadError::HardReject(_)),
+            "expected HardReject (Scala InvalidTypePrefix), got: {err:?}"
         );
     }
 }
