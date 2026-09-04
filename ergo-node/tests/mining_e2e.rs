@@ -405,6 +405,13 @@ async fn boot_synced_mining_node_with_cache(
     config.mining_config.enabled = true;
     config.mining_config.miner_public_key_hex = Some(hex::encode(MINER_PK));
     config.mining_config.candidate_base_cache = candidate_base_cache;
+    // This node has no peers, so no block will ever arrive to trigger the
+    // mining-started latch's `FullBlockApplied` precondition (Scala
+    // `ErgoMiner.scala:172-174`) — and the seeded chain's timestamps are far in
+    // the past anyway. That is exactly what Scala's `offlineGeneration`
+    // (`ErgoApp.scala:212-216`) is for: a local chain that must produce the next
+    // block itself. The height half of the gate still applies.
+    config.mining_config.offline_generation = true;
     let handle = spawn_node(config).await;
     (dir, handle, parent_tip)
 }

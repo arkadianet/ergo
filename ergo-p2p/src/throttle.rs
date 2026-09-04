@@ -7,7 +7,17 @@
 //!
 //! The byte cap is the real resource bound; the message cap only
 //! guards against tiny-frame floods and must sit ABOVE the burst
-//! rates a healthy Scala peer produces. Scala's delivery checker
+//! rates a healthy Scala peer produces.
+//!
+//! The byte cap must not be allowed to drop a *solicited* delivery (the
+//! message cap stays fully active; only `LimiterVerdict::ByteRateExceeded`
+//! is waived for admitted frames). Dropping a
+//! `Modifier` frame carrying a body we requested is self-harm: our own
+//! delivery checker then times the request out and charges the honest holder a
+//! `NonDelivery` penalty plus a body-delivery-streak failure, ejecting the very
+//! peer that was serving us. The caller admits those frames over the byte cap
+//! and records them via [`ThroughputLimiter::record_admitted_over_cap`]; see
+//! `ergo-node`'s `messaging::dispatch::handle_message`. Scala's delivery checker
 //! re-requests every non-delivered modifier as a single-id
 //! `RequestModifier`, rescheduled in synchronized bursts (hundreds
 //! of frames inside one second), on top of 1/s SyncInfo and Inv
@@ -142,6 +152,25 @@ impl ThroughputLimiter {
 
         state.record(now, bytes);
         LimiterVerdict::Ok
+    }
+
+    /// Record a frame the caller admitted **despite** a
+    /// [`LimiterVerdict::ByteRateExceeded`] verdict, so the sliding window
+    /// still reflects its cost.
+    ///
+    /// The byte cap bounds resource use, but a frame delivering a modifier we
+    /// asked for cannot be dropped without hurting ourselves: the delivery
+    /// checker never sees the delivery, times out, and charges the honest
+    /// holder a `NonDelivery` penalty plus a body-delivery-streak failure for a
+    /// drop we caused. Callers that admit such a frame must call this so the
+    /// window does not under-count and the peer's next non-exempt frame is
+    /// judged against its true rate.
+    ///
+    /// The message cap is unaffected — it is checked first and still rejects.
+    pub fn record_admitted_over_cap(&mut self, peer: SocketAddr, now: Instant, bytes: u32) {
+        let state = self.peers.entry(peer).or_default();
+        state.prune(now, self.limits.window);
+        state.record(now, bytes);
     }
 
     /// Drop per-peer state on disconnect. Frees the per-peer
@@ -362,5 +391,61 @@ mod tests {
         // 1,000-msg cap several times over — encoding that a future
         // re-lowering of the default reintroduces the stall.
         assert!(admitted > 1_000, "storm no longer exercises the old cap");
+    }
+
+    #[test]
+    fn record_admitted_over_cap_charges_the_window() {
+        // An exempted frame must still cost the peer its bytes, or the byte
+        // axis silently under-counts a peer that only ever sends deliveries.
+        let mut l = ThroughputLimiter::new(tight_limits());
+        let now = Instant::now();
+        let p = peer(1);
+        // tight_limits: 300 bytes per window, so a second 200-byte frame is
+        // over the cap.
+        assert_eq!(l.check_and_record(p, now, 200), LimiterVerdict::Ok);
+        assert_eq!(
+            l.check_and_record(p, now, 200),
+            LimiterVerdict::ByteRateExceeded
+        );
+        l.record_admitted_over_cap(p, now, 200);
+        assert_eq!(l.bytes_in_window(&p), 400, "over-cap bytes are charged");
+        assert_eq!(l.msgs_in_window(&p), 2, "over-cap frames count as messages");
+    }
+
+    #[test]
+    fn record_admitted_over_cap_bytes_expire_with_the_window() {
+        // Exempted bytes are ordinary window events, not a permanent debt.
+        let mut l = ThroughputLimiter::new(tight_limits());
+        let t0 = Instant::now();
+        let p = peer(1);
+        l.record_admitted_over_cap(p, t0, 10_000);
+        assert_eq!(l.bytes_in_window(&p), 10_000);
+        let later = t0 + Duration::from_secs(11);
+        assert_eq!(l.check_and_record(p, later, 50), LimiterVerdict::Ok);
+        assert_eq!(l.bytes_in_window(&p), 50);
+    }
+
+    #[test]
+    fn body_catchup_burst_exceeds_the_default_byte_cap() {
+        // Why the exemption exists: catching bodies up from ONE holder is the
+        // ordinary traffic pattern that saturates 2 MB/s. Twenty 1.5 MB blocks
+        // inside the 10 s window is well past the 20 MB budget, so without the
+        // exemption the tail of this burst is dropped — and our own delivery
+        // checker charges the holder NonDelivery for it.
+        let mut l = ThroughputLimiter::with_defaults();
+        let p = peer(1);
+        let start = Instant::now();
+        let mut dropped = 0u32;
+        for i in 0..20u64 {
+            let now = start + Duration::from_millis(i * 100);
+            if l.check_and_record(p, now, 1_500_000) == LimiterVerdict::ByteRateExceeded {
+                dropped += 1;
+            }
+        }
+        assert!(
+            dropped > 0,
+            "a single-holder body catch-up must be able to hit the byte cap, \
+             otherwise this regression pin proves nothing"
+        );
     }
 }

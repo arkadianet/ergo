@@ -1096,6 +1096,38 @@ fn build_and_publish_drops_when_live_tip_moved_off_built_parent() {
 }
 
 #[test]
+fn build_and_publish_gate_follows_the_handle_latch_not_the_snapshot() {
+    // The engine's mining gate is the action loop's one-way "mining started"
+    // latch (`BestTip::synced`), NOT a header-vs-full comparison read off the
+    // committed snapshot. A fully caught-up store with the latch still closed
+    // (the node is booting / doing IBD) must build nothing.
+    let regime = Regime::pre_eip27();
+    let (_dir, store, tip) = synced_store(&regime);
+
+    let handle = handle(&regime);
+    handle.set_best_tip(BestTip {
+        parent_id: tip,
+        chain_seq: 1,
+        synced: false,
+    });
+
+    let intent = build_intent(tip, regime.parent_height);
+    let outcome = build_and_publish(
+        &store.reader_handle(),
+        &handle,
+        &intent,
+        BuildMode::Full,
+        None,
+        || BUILT_AT_MS,
+        |_, _| unreachable!("rent resolver must not run when the build is gated off"),
+        &mut None,
+    )
+    .expect("build_and_publish ok");
+    assert_eq!(outcome, BuildOutcome::NotSynced);
+    assert_eq!(handle.cached_work_if_synced(), None);
+}
+
+#[test]
 fn generate_candidate_non_genesis_parent_without_interlinks_errors_without_panicking() {
     // Seed a synced store whose non-genesis parent extension is canonical but
     // carries NO interlinks fields (a single non-`0x01`-prefixed system field).

@@ -160,16 +160,6 @@ impl CommittedSnapshot {
         self.chain_state.best_header_height
     }
 
-    /// The full live mining-gate synced predicate: a committed full block
-    /// exists and the header tip equals the full tip. Mirrors the on-loop
-    /// gate exactly (height > 0 guard included), so it is never true at
-    /// the zeroed genesis state where both ids are `[0; 32]` at height 0.
-    pub fn synced(&self) -> bool {
-        self.chain_state.best_full_block_height > 0
-            && self.chain_state.best_header_height == self.chain_state.best_full_block_height
-            && self.chain_state.best_header_id == self.chain_state.best_full_block_id
-    }
-
     /// Committed AVL+ state root — the candidate's parent state root.
     pub fn state_root(&self) -> ADDigest {
         ADDigest::from_bytes(self.state_meta.root_digest)

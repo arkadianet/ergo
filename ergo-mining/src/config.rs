@@ -36,11 +36,9 @@ pub struct ExtensionFieldSource {
 /// (`--mining-enabled`, `--mining-public-key`) override the parsed
 /// TOML at startup.
 ///
-/// `offline_generation` is not present in v1 — the bypass would
-/// allow mining against an unsynced tip, which can publish candidates
-/// whose script context (`CONTEXT.headers`, `LastBlockUtxoRootHash`)
-/// diverges from the chain mainnet validators see. Mining is
-/// unconditionally gated on `synced(tip)`.
+/// Mining start-up is gated on the nearly-synced latch
+/// (`ergo_mining::engine::MINING_SYNC_TOLERANCE`) plus a freshly applied block;
+/// `offline_generation` relaxes the second half for peerless / devnet nodes.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct MiningConfig {
     /// `false` (default): mining subsystem is disabled and `/mining/*`
@@ -105,6 +103,27 @@ pub struct MiningConfig {
     /// it is opt-in for mining nodes with RAM headroom.
     #[serde(default)]
     pub candidate_base_cache: bool,
+
+    /// `true`: start mining as soon as the chain heights are nearly synced,
+    /// without waiting for a freshly applied block. Scala
+    /// `nodeSettings.offlineGeneration` (`ErgoApp.scala:212-216`), which sends
+    /// `StartMining` at boot instead of waiting for a
+    /// `FullBlockApplied(header) if shouldStartMine(header)` trigger
+    /// (`ErgoMiner.scala:172-174`).
+    ///
+    /// Default `false`, and it should stay false on any node connected to a
+    /// public network: the block-freshness precondition it removes is what
+    /// stops a node that has been offline for hours from mining on its stale
+    /// persisted tip for the whole catch-up. It exists for local/devnet chains
+    /// with no peers, where no block will ever arrive to trigger the start and
+    /// the node must produce the next one itself.
+    ///
+    /// Note this relaxes only the freshness half. The height condition
+    /// (`headers within MINING_SYNC_TOLERANCE of bodies`) still applies, exactly
+    /// as it does on Scala's `offlineGeneration` path — which routes through
+    /// `isBlockchainNearlySynced` just like every other start.
+    #[serde(default)]
+    pub offline_generation: bool,
 
     /// Operator-configured custom extension fields, injected into every block
     /// candidate's Extension section (the general merge-mining / commitment
@@ -177,6 +196,7 @@ impl Default for MiningConfig {
             claim_storage_rent: false,
             max_storage_rent_claims: default_max_storage_rent_claims(),
             candidate_base_cache: false,
+            offline_generation: false,
             extension_fields: Vec::new(),
         }
     }

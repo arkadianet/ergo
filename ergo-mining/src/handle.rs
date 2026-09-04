@@ -372,13 +372,14 @@ impl MiningHandle {
     /// lock so publish/serve always see a consistent (tip, cache) pair.
     ///
     /// Bumps the serve-state notify ONLY when the tip actually changes (parent
-    /// or synced bit), waking longpoll waiters: a header-only advance that flips
-    /// synced→false, or a reorg that changes the parent, both change what
-    /// `cached_*_if_synced` serves with no publish, so a waiter must not sleep
-    /// the full bound on now-stale work. A re-set of the same tip (e.g. the
-    /// producer re-signalling on a mempool refresh) changes nothing here and
-    /// does not wake — that path's own publish bumps the notify. The watch send
-    /// happens outside the cache lock.
+    /// or synced bit), waking longpoll waiters: a reorg that changes the parent,
+    /// or the one-time `false → true` flip of the mining-started latch, both
+    /// change what `cached_*_if_synced` serves with no publish, so a waiter must
+    /// not sleep the full bound on now-stale work. (`synced` is a one-way latch
+    /// — see [`BestTip`] — so it never flips back to `false`.) A re-set of the
+    /// same tip (e.g. the producer re-signalling on a mempool refresh) changes
+    /// nothing here and does not wake — that path's own publish bumps the
+    /// notify. The watch send happens outside the cache lock.
     pub fn set_best_tip(&self, tip: BestTip) {
         let changed = {
             let mut cache = self.cache.write().expect("cache poisoned");
@@ -1352,10 +1353,12 @@ mod tests {
 
     #[test]
     fn set_best_tip_to_a_new_tip_bumps_serve_notify() {
-        // A tip transition with NO publish (e.g. header-only advance flipping
-        // synced→false, or a reorg changing the parent) changes what serving
-        // would return, so a longpoll waiter must wake. Both kinds of change
-        // bump the notify.
+        // A tip transition with NO publish (a reorg changing the parent, or the
+        // synced bit changing) changes what serving would return, so a longpoll
+        // waiter must wake. Both kinds of change bump the notify. The `true →
+        // false` direction asserted below cannot arise from the production
+        // latch, which is one-way; it is exercised here because `set_best_tip`
+        // is a plain setter and must notify on any change of the pair.
         let h = MiningHandle::mainnet([0x02u8; 33]);
         let mut rx = h.subscribe_serve_changes();
         rx.borrow_and_update();

@@ -13,7 +13,7 @@
 //!
 //! Also covers: the single-transaction inputs (tip, header, last-10
 //! window, params, settings, root) all come from one frozen MVCC view,
-//! the `synced()` predicate matches the live mining gate, and the view is
+//! the exposed tip fields agree with the live store, and the view is
 //! immune to commits that land after it opened.
 
 use ergo_primitives::digest::{ADDigest, Digest32, ModifierId};
@@ -97,13 +97,6 @@ fn apply_n_blocks_with_timestamp_base(store: &mut StateStore, n: u32, ts_base: u
     tip
 }
 
-fn synced_predicate(store: &StateStore) -> bool {
-    let cs = store.chain_state();
-    cs.best_full_block_height > 0
-        && cs.best_header_height == cs.best_full_block_height
-        && cs.best_header_id == cs.best_full_block_id
-}
-
 // ----- happy path -----
 
 #[test]
@@ -131,11 +124,12 @@ fn snapshot_tip_and_root_match_store_at_genesis() {
     assert_eq!(snap.best_full_block_id(), cs.best_full_block_id);
     assert_eq!(snap.best_full_block_height(), cs.best_full_block_height);
     assert_eq!(snap.best_full_block_height(), 0, "genesis is height 0");
-    assert_eq!(snap.state_root(), store.root_digest());
-    assert!(
-        !snap.synced(),
-        "genesis (height 0) must not satisfy the synced predicate"
+    assert_eq!(
+        snap.best_header_id(),
+        cs.best_header_id,
+        "the snapshot's header tip must agree with the store's"
     );
+    assert_eq!(snap.state_root(), store.root_digest());
 }
 
 // ----- oracle parity -----
@@ -172,8 +166,6 @@ fn dry_run_matches_store_oracle_at_height_15() {
     assert_eq!(snap.best_full_block_height(), 15);
     assert_eq!(snap.best_header_id(), cs.best_header_id);
     assert_eq!(snap.best_header_height(), cs.best_header_height);
-    assert_eq!(snap.synced(), synced_predicate(&store));
-    assert!(snap.synced(), "15 applied blocks, header==full => synced");
     assert_eq!(snap.state_root(), store.root_digest());
 
     let got = snap.candidate_dry_run(&[]).expect("off-loop dry-run");

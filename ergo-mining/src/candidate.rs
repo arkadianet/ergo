@@ -142,9 +142,12 @@ pub struct Candidate {
 /// has not reached a state from which mining is possible (tip below
 /// height 10, or a tip-flip caught by the post-dry-run guard).
 ///
-/// **Synced-tip contract:** the caller is expected to
-/// have gated on `synced(tip)` already. Mining at an unsynced tip
-/// produces script-divergent candidates and is forbidden.
+/// **Applied-tip contract:** the caller is expected to have gated on the
+/// mining-started latch (`BestTip::synced`) already, and every consensus input
+/// here is read from the APPLIED chain (`best_full_block_*`, `CHAIN_INDEX`) —
+/// never from the header tip. A header chain that leads the applied tip is
+/// therefore not a correctness problem for the candidate; mining before the
+/// node has caught up at all (IBD) is, and that is what the latch gates.
 ///
 /// `mempool` supplies the priority-ordered snapshot from which user
 /// transactions are selected (placed after the coinbase tx, before the
