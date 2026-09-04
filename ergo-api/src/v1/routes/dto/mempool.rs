@@ -22,9 +22,10 @@ pub struct V1MempoolTx {
     pub size_bytes: u32,
     pub validation_cost_units: u64,
     pub priority_weight: String,
-    /// Where the tx entered our pool: `peer | api | wallet | demoted_from_block`
-    /// (the real [`ApiTxSource`] taxonomy, not a `propagated|local|reemission|
-    /// rebroadcast` classification, which does not match the implemented enum).
+    /// Where the tx entered our pool: `peer | api | public_api | wallet |
+    /// demoted_from_block` (the real [`ApiTxSource`] taxonomy, not a
+    /// `propagated|local|reemission|rebroadcast` classification, which
+    /// does not match the implemented enum).
     pub source: String,
     pub input_count: u32,
     pub output_count: u32,
@@ -40,6 +41,7 @@ pub(crate) fn mempool_source_str(source: &ApiTxSource) -> &'static str {
     match source {
         ApiTxSource::Peer { .. } => "peer",
         ApiTxSource::Api => "api",
+        ApiTxSource::PublicApi => "public_api",
         ApiTxSource::Wallet => "wallet",
         ApiTxSource::DemotedFromBlock => "demoted_from_block",
     }

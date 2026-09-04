@@ -31,6 +31,19 @@ infrastructure.
 
 ### Fixed
 
+- **An unauthenticated caller on a publicly-bound API can no longer drain
+  the local cost reserve.** `POST /transactions*` /
+  `/api/v1/mempool/{submit,check}` are unauthenticated by design (the
+  `api_key` gate never covers submission routes), so once an operator sets
+  `[api] public_bind = true` on a non-loopback bind, any internet caller
+  could reach the same `TxSource::Api` classification the operator's own
+  loopback tooling used, and flood `local_reserved_cost_budget` — the
+  reserve that budget exists to protect the operator's own wallet
+  submissions from peer floods. Such submissions are now classified
+  `TxSource::PublicApi`, which is charged against the shared
+  `global_cost_budget` exactly like peer traffic and can never reach the
+  reserve. A loopback-bound API (the default) is unaffected: submissions
+  there still classify as trusted `TxSource::Api` and keep the reserve.
 - **A flooding peer can no longer starve the operator's own transactions.**
   `global_cost_budget` is now a shared pool, with `local_reserved_cost_budget`
   (default one `max_tx_cost`) an extra slice only `TxSource::Api` /

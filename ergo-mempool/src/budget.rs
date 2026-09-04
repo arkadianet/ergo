@@ -18,6 +18,18 @@
 //! existed. Gating each pool independently would instead grant a full
 //! allowance to each side and inflate the real ceiling.
 //!
+//! `local_reserved` is reachable ONLY by traffic the node can actually
+//! trust to be operator-initiated. `TxSource::Api` is that trusted case:
+//! the `[api]` listener is bound loopback (the default), so only local
+//! processes can reach it. Once the operator opts into `[api] public_bind
+//! = true` — exposing the (unauthenticated-by-design) submission routes
+//! to the network — a submission arriving on that bind is indistinguishable
+//! from arbitrary internet traffic, so it is classified `TxSource::
+//! PublicApi` / `BudgetSource::PublicApi` instead: it contends for
+//! `global_cap` exactly like `Peer` traffic and can never touch the
+//! reserve. See `ergo-node/src/node/admission.rs` for where that
+//! classification is made.
+//!
 //! Scala has no cost budget on this path at all: a
 //! `LocallyGeneratedTransaction` goes straight to `txModify`
 //! (`ErgoNodeViewHolder.scala:659`), so reserving headroom for local
@@ -50,6 +62,15 @@ pub enum BudgetSource {
     /// Node-local submission (`TxSource::Api` / `TxSource::Wallet`), which
     /// may spend into `local_reserved` after `global_cap` is gone.
     Local,
+    /// Unauthenticated API submission received while `[api] bind` is
+    /// non-loopback (`TxSource::PublicApi`). No trustworthy per-caller
+    /// identity exists for this path — the `api_key` gate never covers
+    /// submission routes, so the HTTP layer carries no key, and the
+    /// client IP is not (yet) plumbed through — so, unlike `Peer`, this
+    /// bucket is unkeyed: every such submission contends for `global_cap`
+    /// through the one shared `remote_consumed` counter, with no separate
+    /// per-source cap. It NEVER reaches `local_reserved`.
+    PublicApi,
 }
 
 pub struct CostBudgets {
@@ -127,6 +148,9 @@ impl CostBudgets {
             BudgetSource::Local => {
                 self.local_consumed = self.local_consumed.saturating_add(cost);
             }
+            BudgetSource::PublicApi => {
+                self.remote_consumed = self.remote_consumed.saturating_add(cost);
+            }
         }
     }
 
@@ -157,6 +181,15 @@ impl CostBudgets {
                 // admitted even when peers have drained the shared pool.
                 let shared_left = self.global_cap.saturating_sub(self.remote_consumed);
                 if self.local_consumed >= self.local_reserved.saturating_add(shared_left) {
+                    return BudgetVerdict::GlobalExhausted;
+                }
+                BudgetVerdict::Ok
+            }
+            BudgetSource::PublicApi => {
+                // Same gate as `Peer`, minus the per-source cap: there is
+                // no identity to key it on, so the only protection is the
+                // shared ceiling every remote source contends for.
+                if self.shared_consumed() >= self.global_cap {
                     return BudgetVerdict::GlobalExhausted;
                 }
                 BudgetVerdict::Ok
@@ -323,6 +356,62 @@ mod tests {
         b.charge(src(1), 500);
         b.reset();
         assert_eq!(b.pre_admission_check(src(1)), BudgetVerdict::Ok);
+    }
+
+    #[test]
+    fn public_api_charge_never_touches_the_reserve() {
+        // The core security property: a `PublicApi` flood contends for the
+        // shared pool exactly like a peer would, and cannot dip into
+        // `local_reserved` the way `BudgetSource::Local` can.
+        let mut b = CostBudgets::new(1_000, 1_000, 300);
+        b.charge(BudgetSource::PublicApi, 1_000);
+        assert_eq!(
+            b.remote_consumed(),
+            1_000,
+            "public-api cost lands in the same bucket as peer cost"
+        );
+        assert_eq!(
+            b.local_consumed, 0,
+            "public-api never charges local_consumed"
+        );
+        assert_eq!(
+            b.pre_admission_check(BudgetSource::Local),
+            BudgetVerdict::Ok,
+            "the untouched reserve still admits a genuinely-local submission"
+        );
+    }
+
+    #[test]
+    fn public_api_flood_exhausts_only_the_shared_pool() {
+        let mut b = CostBudgets::new(1_000, 1_000, 0);
+        b.charge(BudgetSource::PublicApi, 1_000);
+        assert_eq!(
+            b.pre_admission_check(BudgetSource::PublicApi),
+            BudgetVerdict::GlobalExhausted
+        );
+        assert_eq!(
+            b.pre_admission_check(src(1)),
+            BudgetVerdict::GlobalExhausted,
+            "a public-api flood exhausts the same shared cap peers contend for"
+        );
+    }
+
+    #[test]
+    fn public_api_and_peer_contend_for_the_same_shared_cap() {
+        let mut b = CostBudgets::new(1_000, 1_000, 0);
+        b.charge(src(1), 600);
+        b.charge(BudgetSource::PublicApi, 300);
+        assert_eq!(b.shared_consumed(), 900);
+        assert_eq!(
+            b.pre_admission_check(BudgetSource::PublicApi),
+            BudgetVerdict::Ok
+        );
+        b.charge(BudgetSource::PublicApi, 100);
+        assert_eq!(
+            b.pre_admission_check(src(2)),
+            BudgetVerdict::GlobalExhausted,
+            "public-api spend counts toward the cap a peer is gated on"
+        );
     }
 
     #[test]

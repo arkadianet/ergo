@@ -7188,9 +7188,10 @@ components:
               source:
                 type: string
                 description: |-
-                  Where the tx entered our pool: `peer | api | wallet | demoted_from_block`
-                  (the real [`ApiTxSource`] taxonomy, not a `propagated|local|reemission|
-                  rebroadcast` classification, which does not match the implemented enum).
+                  Where the tx entered our pool: `peer | api | public_api | wallet |
+                  demoted_from_block` (the real [`ApiTxSource`] taxonomy, not a
+                  `propagated|local|reemission|rebroadcast` classification, which
+                  does not match the implemented enum).
               tx_id:
                 type: string
               validation_cost_units:
@@ -10140,9 +10141,10 @@ components:
         source:
           type: string
           description: |-
-            Where the tx entered our pool: `peer | api | wallet | demoted_from_block`
-            (the real [`ApiTxSource`] taxonomy, not a `propagated|local|reemission|
-            rebroadcast` classification, which does not match the implemented enum).
+            Where the tx entered our pool: `peer | api | public_api | wallet |
+            demoted_from_block` (the real [`ApiTxSource`] taxonomy, not a
+            `propagated|local|reemission|rebroadcast` classification, which
+            does not match the implemented enum).
         tx_id:
           type: string
         validation_cost_units:

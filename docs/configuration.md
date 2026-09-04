@@ -158,7 +158,12 @@ Consequences:
   network.** Binding `0.0.0.0` with `public_bind = true` makes
   transaction submission, block submission, and `/metrics` world-callable.
   For remote operator access, prefer binding loopback and fronting the
-  node with an authenticated reverse proxy.
+  node with an authenticated reverse proxy. On a public bind, transaction
+  submissions are automatically charged against the shared
+  `global_cost_budget` (not `local_reserved_cost_budget`) so an
+  unauthenticated flood on this surface cannot exhaust the reserve the
+  operator's own loopback tooling relies on — see `[mempool]`'s
+  `local_reserved_cost_budget` below.
 - **`/metrics` is not authenticated.** Keep it on loopback or behind a
   proxy.
 - **The `Host` header is checked to close the DNS-rebinding read path.**
@@ -210,8 +215,23 @@ work the node will do per block. They are node-local policy: they never
 affect which blocks the node accepts, and the Scala reference node has no
 equivalent gate on this path at all. `global_cost_budget` is a pool shared
 by peers and local submissions; `local_reserved_cost_budget` is an extra
-slice only local submissions can reach, and which they spend first. The
-per-block total is therefore bounded at the sum of the two.
+slice only TRUSTED local submissions can reach, and which they spend first.
+The per-block total is therefore bounded at the sum of the two.
+
+"Trusted local" here means `TxSource::Wallet` and, for the API path,
+`TxSource::Api` — a `POST /transactions*` / `/api/v1/mempool/{submit,check}`
+request that arrived while `[api] bind` is loopback. That last qualifier
+matters: the `api_key` gate never covers submission routes (see the `[api]`
+security note above — they are unauthenticated by design), so the only
+signal the node has for "is this really the operator's own tooling" is
+whether the listener is reachable from outside the machine at all. Once an
+operator sets `[api] public_bind = true` with a non-loopback `bind`, a
+submission on that listener is indistinguishable from arbitrary internet
+traffic and is classified `TxSource::PublicApi` instead — it contends for
+`global_cost_budget` exactly like peer traffic and can never reach
+`local_reserved_cost_budget`. Without this distinction, exposing the API
+publicly would let any unauthenticated caller flood the reserve the
+operator's own wallet submissions depend on.
 
 Two cross-field rules are enforced at load, and only against keys you set
 explicitly (lowering `global_cost_budget` alone never fails the boot over a
@@ -232,7 +252,7 @@ times it.
 | `rebroadcast_count` | usize | `3` | Number of surviving unconfirmed transactions re-advertised per tip-change recheck (Scala `MempoolAuditor` `rebroadcastCount`). Re-broadcast rotates oldest-`last_checked_at` first. `0` disables re-broadcast. |
 | `global_cost_budget` | u64 | `12000000` | The shared per-block validation-cost pool. Peers draw on it, and so does local work once its reserve is gone. Once spent, every peer is refused until the next block. Must be at least 1. |
 | `per_peer_cost_budget` | u64 | `10000000` | Per-block validation-cost budget a single peer may spend, within `global_cost_budget`. Must be at least 1, and not more than `global_cost_budget` when set explicitly (a larger value could never bind). |
-| `local_reserved_cost_budget` | u64 | `4900000` (one `max_tx_cost`) | Extra per-block validation-cost slice for node-LOCAL submissions (`POST /transactions*`, wallet), spent **before** the shared pool and reachable by nothing else. A peer flooding the node cannot starve the operator's own transactions — at least one maximum-cost local transaction is always validated per block. Local work beyond the reserve competes with peers for what is left of `global_cost_budget`, so the per-block total never exceeds the sum of the two. `0` restores a single shared pool, i.e. peer traffic can again block local submissions. When set explicitly it may not exceed four times `global_cost_budget`. |
+| `local_reserved_cost_budget` | u64 | `4900000` (one `max_tx_cost`) | Extra per-block validation-cost slice for TRUSTED node-local submissions (wallet, and API submissions on a loopback `[api] bind`), spent **before** the shared pool and reachable by nothing else. A peer flooding the node cannot starve the operator's own transactions — at least one maximum-cost local transaction is always validated per block. Local work beyond the reserve competes with peers for what is left of `global_cost_budget`, so the per-block total never exceeds the sum of the two. `0` restores a single shared pool, i.e. peer traffic can again block local submissions. When set explicitly it may not exceed four times `global_cost_budget`. **Not reachable by API submissions on a `public_bind = true` (non-loopback) bind** — those are unauthenticated by design and are charged against `global_cost_budget` instead, alongside peer traffic. |
 | `invalidation_cache_size` | usize | `10000` | Maximum remembered invalidated transaction ids. Matches Scala `invalidModifiersCacheSize`. Must be at least 1. |
 | `invalidation_ttl_seconds` | u64 | `14400` (4 h) | How long an invalidated transaction id is remembered and its re-download suppressed. Matches Scala `invalidModifiersCacheExpiration = 4h`. Must be at least 1. Ergo transaction ids do not cover spending proofs, so a peer can invalidate an id by relaying a proof-corrupted variant of a transaction that has not been seen yet; the honest transaction is then refused for this long. The window is identical in the reference node, so shortening it here is a deliberate divergence — it trades that exposure for more re-validation of genuinely invalid transactions. |
 | `cleanup_cost_mult` | u64 | `6` | Per-pass cost budget for the tip-revalidation (recheck-and-evict) pass, as a multiplier on the live `max_block_cost`. Transactions not reached in a pass are deferred to later blocks, oldest-checked first. Must be at least 1 (`0` would disable the pass). |

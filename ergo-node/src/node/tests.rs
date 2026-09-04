@@ -198,6 +198,7 @@ fn make_state_with_backend(
         installed_snapshot: None,
         wallet_hook: None,
         mining_enabled: false,
+        api_publicly_bound: false,
         api_weight_function: ergo_api::types::ApiWeightFunction::Cost,
         recent_blocks_cache: None,
         network: ergo_ser::address::NetworkPrefix::Mainnet,
