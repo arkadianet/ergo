@@ -34,7 +34,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::oracle::{
-    diff, oracle_surfaces, Divergence, DivergenceKind, Oracle, SurfaceSpec, Verdict,
+    oracle_surfaces, query_verdicts, reconcile, Divergence, DivergenceKind, Oracle, Reconciliation,
+    SurfaceSpec, Verdict,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -145,11 +146,17 @@ fn reduction_channel(surface: &str) -> Option<(&'static str, &'static [u8])> {
 /// Classify a minimized divergence.
 ///
 /// **Key rule**: for a parse-surface divergence with a reduction channel (see
-/// [`reduction_channel`]), re-run `diff` on that channel for the same bytes. If
-/// the reduction **agrees**, the parse-surface divergence is a
-/// [`Triage::KnownArtifact`] — the node retains original wire bytes / defers the
-/// curve-check, so the difference is benign. If the reduction **also diverges**,
-/// or the surface has no reduction channel, the record is [`Triage::Pending`].
+/// [`reduction_channel`]), re-run the reconciliation on that channel for the
+/// same bytes via [`crate::oracle::reconcile`]. If the reduction **explicitly
+/// agrees** (`Reconciliation::Agree`), the parse-surface divergence is a
+/// [`Triage::KnownArtifact`] — the node retains original wire bytes / defers
+/// the curve-check, so the difference is benign. If the reduction **also
+/// diverges**, the surface has no reduction channel, or the reduction channel
+/// itself **could not be evaluated** (`Reconciliation::Indeterminate` — e.g.
+/// `reduce`/`reduce_ctx` errored rather than agreeing), the record is
+/// [`Triage::Pending`]: an oracle that couldn't decide proves nothing about
+/// whether the original divergence is benign, so it must not be read as
+/// "reconciles."
 ///
 /// This function never sets a which-side-is-right verdict.
 pub fn classify(
@@ -168,11 +175,13 @@ pub fn classify(
     input.extend_from_slice(prefix);
     input.extend_from_slice(minimized_input);
 
-    match diff(&channel_spec, &input, oracle)? {
-        None => Ok(Triage::KnownArtifact(format!(
+    let (rust, jvm, jvm_input) = query_verdicts(&channel_spec, &input, oracle)?;
+    match reconcile(&channel_spec, rust, jvm, &jvm_input) {
+        Reconciliation::Agree => Ok(Triage::KnownArtifact(format!(
             "reconciles on {channel}: parse-surface only, node retains original bytes / defers curve-check"
         ))),
-        Some(_) => Ok(Triage::Pending),
+        Reconciliation::Diverges(_) => Ok(Triage::Pending),
+        Reconciliation::Indeterminate => Ok(Triage::Pending),
     }
 }
 

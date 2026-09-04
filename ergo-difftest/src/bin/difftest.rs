@@ -29,6 +29,13 @@ fn exit_harness_error() -> ExitCode {
 /// grep a log for it even when it only has the log (not the exit code).
 const ORACLE_ERROR_MARKER: &str = "oracle: HARNESS ERROR:";
 
+/// Upper bound on `--iters`. `iters` is user-controlled up to `u64::MAX`, and
+/// `run_oracle`'s planned-check-count report multiplies it by the surface
+/// count; this bound (plus computing that product in `u128`, belt-and-
+/// suspenders) keeps the multiplication overflow-free and rejects a typo'd
+/// extra zero rather than starting a campaign that would run for millennia.
+const MAX_ITERS: u64 = 1_000_000_000_000;
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut seed: u64 = 1;
@@ -139,6 +146,18 @@ fn main() -> ExitCode {
             );
             return ExitCode::from(2);
         }
+    }
+
+    // Reject an absurd --iters before it reaches the planned-check-count math
+    // (`iters * surfaces.len()` in `run_oracle`): `iters` is user-controlled up
+    // to u64::MAX, and a naive u64 multiply there would panic in debug and
+    // silently wrap in release. MAX_ITERS keeps that product comfortably inside
+    // u128 (belt-and-suspenders alongside the u128 cast in `run_oracle`) and
+    // rejects a typo'd extra zero rather than starting a campaign that would
+    // run for millennia.
+    if iters > MAX_ITERS {
+        eprintln!("--iters: {iters} exceeds the maximum of {MAX_ITERS}");
+        return ExitCode::from(2);
     }
 
     // `--check-canonical` only takes effect inside the `--repro` path below;
@@ -613,7 +632,7 @@ fn run_oracle(
         println!(
             "{ORACLE_ERROR_MARKER} campaign aborted after {checked}/{} planned checks — \
              the verdicts below cover only what was actually checked",
-            iters * surfaces.len() as u64,
+            planned_checks(iters, surfaces.len()),
         );
     }
     if classes.is_empty() {
@@ -913,6 +932,14 @@ fn divergence_signature(d: &ergo_difftest::oracle::Divergence) -> String {
     )
 }
 
+/// `iters * surfaces` for the "planned checks" report. Computed in `u128` so
+/// that even a near-`u64::MAX` `iters` (the `MAX_ITERS` gate in `main` is
+/// belt-and-suspenders, not the thing this relies on) can never overflow the
+/// multiply — a plain `u64` product panics in debug and wraps in release.
+fn planned_checks(iters: u64, surfaces: usize) -> u128 {
+    u128::from(iters) * surfaces as u128
+}
+
 fn parse_next(args: &[String], i: &mut usize, flag: &str) -> u64 {
     let v = take_next(args, i, flag);
     v.parse().unwrap_or_else(|_| {
@@ -1019,4 +1046,39 @@ fn print_help() {
          \x20    pipe died mid-campaign, so the run checked LESS than it planned.\n\
          \x20    Never read a 3 as a clean run.\n"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ----- happy path -----
+
+    #[test]
+    fn planned_checks_typical_iters_matches_product() {
+        assert_eq!(planned_checks(100_000, 12), 1_200_000u128);
+    }
+
+    // ----- round-trips -----
+
+    #[test]
+    fn planned_checks_max_iters_bound_does_not_overflow() {
+        // MAX_ITERS is the CLI-level gate; confirm the report math it protects
+        // stays correct (not just non-panicking) at that boundary.
+        let expected = u128::from(MAX_ITERS) * 64u128;
+        assert_eq!(planned_checks(MAX_ITERS, 64), expected);
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn planned_checks_u64_max_iters_does_not_overflow() {
+        // A plain `u64` product of u64::MAX * surfaces panics in debug builds
+        // (the bug this guards against) and silently wraps in release. The
+        // u128 computation must neither panic nor wrap for any u64 `iters`,
+        // independent of the MAX_ITERS CLI gate.
+        let surfaces = 37usize;
+        let expected = u128::from(u64::MAX) * surfaces as u128;
+        assert_eq!(planned_checks(u64::MAX, surfaces), expected);
+    }
 }

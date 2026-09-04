@@ -35,7 +35,7 @@ pub enum Verdict {
 }
 
 /// A divergence between the node and the JVM reference for one input.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Divergence {
     pub surface: &'static str,
     pub kind: DivergenceKind,
@@ -764,6 +764,84 @@ fn verify_avl_verdict(bytes: &[u8]) -> (Verdict, usize) {
     }
 }
 
+/// Compute the node's verdict for `bytes` and query the JVM for the same
+/// (possibly truncated) input, returning both plus the exact bytes fed to the
+/// JVM. Shared by [`diff`] and [`crate::regressions::classify`] so both agree
+/// on what "the same input" means for a given [`SurfaceSpec`].
+pub fn query_verdicts(
+    spec: &SurfaceSpec,
+    bytes: &[u8],
+    oracle: &mut Oracle,
+) -> io::Result<(Verdict, Verdict, Vec<u8>)> {
+    let (rust, consumed) = (spec.rust_verdict)(bytes);
+    // Feed the JVM exactly the bytes the node treated as this object — trailing
+    // bytes a sizeless parse ignores would be an unfair diff.
+    let jvm_input: Vec<u8> = match &rust {
+        Verdict::Accept(_) => bytes[..consumed].to_vec(),
+        _ => bytes.to_vec(),
+    };
+    let jvm = oracle.query(spec.name, &jvm_input)?;
+    Ok((rust, jvm, jvm_input))
+}
+
+/// Outcome of reconciling the node's and the JVM's verdicts on the same input.
+///
+/// Distinguishes an **explicit** agreement (both sides parsed/rejected the
+/// input the same consensus-relevant way) from an **indeterminate** one (the
+/// oracle could not evaluate at least one side, `Verdict::Err`) — a caller
+/// that needs to know "did they actually agree" (e.g.
+/// [`crate::regressions::classify`], reconciling a parse-surface divergence
+/// against a `reduce`/`reduce_ctx` channel) must not fold `Indeterminate` into
+/// `Agree`: an oracle that couldn't evaluate the reduction channel proves
+/// nothing about whether the original divergence is benign.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Reconciliation {
+    /// Both sides reached the same consensus-relevant outcome.
+    Agree,
+    /// A genuine divergence.
+    Diverges(Divergence),
+    /// At least one side's verdict was `Verdict::Err` — the oracle pipeline
+    /// itself could not decide, so nothing was actually reconciled.
+    Indeterminate,
+}
+
+/// Pure decision: given `spec` and both sides' already-computed verdicts (see
+/// [`query_verdicts`]), classify the outcome. No I/O.
+pub fn reconcile(
+    spec: &SurfaceSpec,
+    rust: Verdict,
+    jvm: Verdict,
+    jvm_input: &[u8],
+) -> Reconciliation {
+    if matches!(rust, Verdict::Err(_)) || matches!(jvm, Verdict::Err(_)) {
+        return Reconciliation::Indeterminate;
+    }
+    let kind = match (&rust, &jvm) {
+        (Verdict::Accept(_), Verdict::Reject(_)) | (Verdict::Reject(_), Verdict::Accept(_)) => {
+            DivergenceKind::AcceptReject
+        }
+        (Verdict::Accept(a), Verdict::Accept(b)) => {
+            if !spec.compare_canonical || a.is_empty() || b.is_empty() || a == b {
+                return Reconciliation::Agree;
+            }
+            if spec.soft_fork_header && jvm_input.first().map(|h| h & 0x07).unwrap_or(0) > 3 {
+                return Reconciliation::Agree;
+            }
+            DivergenceKind::Canonical
+        }
+        (Verdict::Reject(_), Verdict::Reject(_)) => return Reconciliation::Agree,
+        (Verdict::Err(_), _) | (_, Verdict::Err(_)) => unreachable!("Err handled above"),
+    };
+
+    Reconciliation::Diverges(Divergence {
+        surface: spec.name,
+        kind,
+        input_hex: to_hex(jvm_input),
+        rust,
+        jvm,
+    })
+}
+
 /// Compare the node and the JVM on one input for `spec`. `None` when they agree
 /// (or the oracle erred), `Some(Divergence)` otherwise.
 pub fn diff(
@@ -771,39 +849,11 @@ pub fn diff(
     bytes: &[u8],
     oracle: &mut Oracle,
 ) -> io::Result<Option<Divergence>> {
-    let (rust, consumed) = (spec.rust_verdict)(bytes);
-    // Feed the JVM exactly the bytes the node treated as this object — trailing
-    // bytes a sizeless parse ignores would be an unfair diff.
-    let jvm_input: &[u8] = match &rust {
-        Verdict::Accept(_) => &bytes[..consumed],
-        _ => bytes,
-    };
-    let jvm = oracle.query(spec.name, jvm_input)?;
-
-    let kind = match (&rust, &jvm) {
-        (_, Verdict::Err(_)) | (Verdict::Err(_), _) => return Ok(None),
-        (Verdict::Accept(_), Verdict::Reject(_)) | (Verdict::Reject(_), Verdict::Accept(_)) => {
-            DivergenceKind::AcceptReject
-        }
-        (Verdict::Accept(a), Verdict::Accept(b)) => {
-            if !spec.compare_canonical || a.is_empty() || b.is_empty() || a == b {
-                return Ok(None);
-            }
-            if spec.soft_fork_header && jvm_input.first().map(|h| h & 0x07).unwrap_or(0) > 3 {
-                return Ok(None);
-            }
-            DivergenceKind::Canonical
-        }
-        (Verdict::Reject(_), Verdict::Reject(_)) => return Ok(None),
-    };
-
-    Ok(Some(Divergence {
-        surface: spec.name,
-        kind,
-        input_hex: to_hex(jvm_input),
-        rust,
-        jvm,
-    }))
+    let (rust, jvm, jvm_input) = query_verdicts(spec, bytes, oracle)?;
+    Ok(match reconcile(spec, rust, jvm, &jvm_input) {
+        Reconciliation::Diverges(d) => Some(d),
+        Reconciliation::Agree | Reconciliation::Indeterminate => None,
+    })
 }
 
 #[cfg(test)]
@@ -1258,5 +1308,134 @@ mod tests {
             );
             assert_eq!(node, jvm, "[{name}] node vs JVM reduce divergence");
         }
+    }
+
+    // ----- reconcile: agree vs diverges vs indeterminate -----
+    //
+    // Pure-logic tests for `reconcile` — no oracle process needed, since the
+    // decision only looks at two already-computed `Verdict`s. This is the
+    // regression coverage for classify()'s "None means indeterminate, not
+    // agreement" bug: `reconcile` (used by both `diff` and
+    // `crate::regressions::classify`) must keep `Indeterminate` (a
+    // `Verdict::Err` on either side) distinct from `Agree` (an explicit
+    // Reject/Reject or matching Accept/Accept).
+
+    // ----- helpers -----
+
+    fn dummy_rust_verdict(_bytes: &[u8]) -> (Verdict, usize) {
+        unreachable!("reconcile takes pre-computed verdicts; this fn pointer is never invoked")
+    }
+
+    fn spec(compare_canonical: bool, soft_fork_header: bool) -> SurfaceSpec {
+        SurfaceSpec {
+            name: "test_surface",
+            rust_verdict: dummy_rust_verdict,
+            compare_canonical,
+            soft_fork_header,
+        }
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn reconcile_both_reject_agrees() {
+        let s = spec(true, false);
+        let out = reconcile(
+            &s,
+            Verdict::Reject("bad".into()),
+            Verdict::Reject("bad".into()),
+            b"\x00",
+        );
+        assert_eq!(out, Reconciliation::Agree);
+    }
+
+    #[test]
+    fn reconcile_both_accept_same_canonical_agrees() {
+        let s = spec(true, false);
+        let out = reconcile(
+            &s,
+            Verdict::Accept("ab".into()),
+            Verdict::Accept("ab".into()),
+            b"\x00",
+        );
+        assert_eq!(out, Reconciliation::Agree);
+    }
+
+    #[test]
+    fn reconcile_accept_vs_reject_diverges() {
+        let s = spec(true, false);
+        let out = reconcile(
+            &s,
+            Verdict::Accept("ab".into()),
+            Verdict::Reject("nope".into()),
+            b"\x00",
+        );
+        assert!(matches!(
+            out,
+            Reconciliation::Diverges(Divergence {
+                kind: DivergenceKind::AcceptReject,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn reconcile_both_accept_different_canonical_diverges() {
+        let s = spec(true, false);
+        let out = reconcile(
+            &s,
+            Verdict::Accept("ab".into()),
+            Verdict::Accept("cd".into()),
+            b"\x00",
+        );
+        assert!(matches!(
+            out,
+            Reconciliation::Diverges(Divergence {
+                kind: DivergenceKind::Canonical,
+                ..
+            })
+        ));
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn reconcile_rust_err_is_indeterminate_not_agree() {
+        // The bug this guards: a reduce/reduce_ctx pipeline error on the node
+        // side used to fold into `diff`'s `None`, which `classify` read as
+        // "reconciles" (KnownArtifact) — silently suppressing a real
+        // divergence the oracle simply couldn't evaluate.
+        let s = spec(true, false);
+        let out = reconcile(
+            &s,
+            Verdict::Err("eval blew up".into()),
+            Verdict::Accept("ab".into()),
+            b"\x00",
+        );
+        assert_eq!(out, Reconciliation::Indeterminate);
+    }
+
+    #[test]
+    fn reconcile_jvm_err_is_indeterminate_not_agree() {
+        let s = spec(true, false);
+        let out = reconcile(
+            &s,
+            Verdict::Accept("ab".into()),
+            Verdict::Err("oracle pipe hiccup".into()),
+            b"\x00",
+        );
+        assert_eq!(out, Reconciliation::Indeterminate);
+    }
+
+    #[test]
+    fn reconcile_both_err_is_indeterminate() {
+        let s = spec(true, false);
+        let out = reconcile(
+            &s,
+            Verdict::Err("a".into()),
+            Verdict::Err("b".into()),
+            b"\x00",
+        );
+        assert_eq!(out, Reconciliation::Indeterminate);
     }
 }

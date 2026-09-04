@@ -199,9 +199,19 @@ for surface in $SURFACES; do
     tail -n 40 "$log"
     echo
 
+    # `read` returns 1 at EOF — under `set -e` (re-enabled just above) a log
+    # missing the `oracle: checks=...` summary line (e.g. the binary crashed
+    # before printing it) would abort the script right here with a bare
+    # status 1, instead of falling through to the liveness checks below that
+    # classify a missing summary as the HARNESS error (exit 3) it is. `|| true`
+    # lets a failed/empty read through; `checks`/`divergences`/`classes` then
+    # stay unset and the `${var:-0}` defaults below make CHECKS[$surface]
+    # read as "0 checks ran", which the loop's liveness assertion (3) below
+    # already turns into `harness_failed=1`.
+    checks= divergences= classes=
     read -r checks divergences classes < <(
         sed -n 's/^oracle: checks=\([0-9]*\) surfaces=[0-9]* unique_classes=\([0-9]*\) total_divergences=\([0-9]*\)$/\1 \3 \2/p' "$log" | tail -n 1
-    )
+    ) || true
     CHECKS[$surface]="${checks:-0}"
     DIVERGENCES[$surface]="${divergences:-0}"
     CLASSES[$surface]="${classes:-0}"

@@ -231,6 +231,19 @@ for id in "${BUG_IDS[@]}"; do
             ((FAIL++)) || true
             continue
         fi
+        # The regex above only checks digit SHAPE — "9999-99-99" matches it and
+        # then, as a string, compares greater than any real date forever, so a
+        # calendar-impossible blocked_until would never expire. Round-trip it
+        # through `date` (GNU date normalizes to `+%F`; an impossible date like
+        # month 99 or Feb 30 either fails to parse or normalizes to a DIFFERENT
+        # date) and require the output match verbatim before trusting the
+        # string comparison below.
+        normalized_blocked_until="$(date -u -d "$blocked_until" +%F 2>/dev/null)" || normalized_blocked_until=""
+        if [[ "$normalized_blocked_until" != "$blocked_until" ]]; then
+            echo "  [FAIL] $id: blocked_until '$blocked_until' is not a real calendar date"
+            ((FAIL++)) || true
+            continue
+        fi
         if [[ "$(date -u +%Y-%m-%d)" > "$blocked_until" ]]; then
             echo "  [FAIL] $id: blocked_until $blocked_until has passed — re-check $blocked and either"
             echo "         drop blocked_on (the fix landed: add the patch and gate it) or extend the date deliberately."
