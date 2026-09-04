@@ -651,6 +651,32 @@ mod tests {
         }
     }
 
+    /// A TRUNCATED/malformed inline `SHeader` constant (no payload at all)
+    /// must also be a [`ReadError::HardReject`] — and, unlike the version-gate
+    /// check above, this holds at EVERY tree version, v3 included: `SHeader`
+    /// decode failures are mapped to `HardReject` unconditionally inside
+    /// `read_value_at_depth` itself (`sigma_value/mod.rs`'s `SHeader` arm),
+    /// independent of the separate `_tree_version < 3 && val.contains_header()`
+    /// check that only fires once a value has successfully materialized.
+    /// Confirms a malformed pre-v3 payload can't slip past the version gate by
+    /// erroring inside the value read before that check ever runs: it already
+    /// hard-rejects one step earlier, on the SAME path a well-formed pre-v3
+    /// header uses. Oracle (`ErgoSerdeOracle.scala`, sigma-state 6.0.2):
+    /// `constant 68 -> REJECT SerializerException`.
+    #[test]
+    fn inline_header_constant_truncated_hard_rejects_at_every_version() {
+        for version in 0u8..=3 {
+            let mut r = VlqReader::new(&[0x68u8]);
+            let err = parse_expr(&mut r, 0, version)
+                .expect_err("a truncated inline Header constant must reject");
+            assert!(
+                matches!(&err, ReadError::HardReject(m) if m.contains("SHeader")),
+                "version {version}: a truncated inline Header constant must HARD \
+                 reject regardless of tree version, got: {err:?}"
+            );
+        }
+    }
+
     #[test]
     fn inline_header_constant_v3_parses() {
         let mut header_const = vec![0x68u8];
