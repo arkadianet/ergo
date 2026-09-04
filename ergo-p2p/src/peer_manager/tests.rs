@@ -1310,6 +1310,11 @@ fn is_routable_rejects_ipv6_special_purpose_ranges() {
             v6("2001:db8:ffff:ffff:ffff:ffff:ffff:ffff", 9030),
         ),
         ("2001:2::/48 benchmarking", v6("2001:2::1", 9030)),
+        ("100::/64 discard-only", v6("100::1", 9030)),
+        (
+            "100::/64 discard-only (high end)",
+            v6("100::ffff:ffff:ffff:ffff", 9030),
+        ),
     ];
     for (label, a) in cases {
         assert!(

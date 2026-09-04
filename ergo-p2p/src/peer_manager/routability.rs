@@ -126,6 +126,9 @@ fn is_never_dialable(ip: &IpAddr) -> bool {
             (segs[0] == 0x2001 && segs[1] == 0x0db8)
                 // 2001:2::/48 — benchmarking.
                 || (segs[0] == 0x2001 && segs[1] == 0x0002 && segs[2] == 0)
+                // 100::/64 — discard-only (RFC 6666): traffic is black-holed,
+                // so a peer advertising it can only burn dial capacity.
+                || (segs[0] == 0x0100 && segs[1] == 0 && segs[2] == 0 && segs[3] == 0)
         }
     }
 }
