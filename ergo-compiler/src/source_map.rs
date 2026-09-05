@@ -361,14 +361,77 @@ pub(crate) fn resolve(emit_root: &Expr, root: &Expr, body: &Expr, origins: &Orig
         }
     }
 
-    let tags: Vec<u8> = preorder(body).map(|(_, e)| node_opcode(e)).collect();
-    debug_assert_eq!(tags.len(), final_nodes.len());
+    // Segregation may collapse a subtree of the pre-segregation tree into
+    // one placeholder (a collection or tuple of constants becomes a single
+    // constant), so `body` can have fewer nodes than `root`. Re-key the
+    // offsets onto `body`'s ids by walking both in lockstep: where `body`
+    // has a leaf and `root` a subtree, the whole subtree maps to that leaf.
+    let body_nodes: Vec<&Expr> = preorder(body).map(|(_, e)| e).collect();
+    let offsets = if body_nodes.len() == final_nodes.len() {
+        offsets
+    } else {
+        let sizes = subtree_sizes(root);
+        let mut to_body: BTreeMap<u64, u64> = BTreeMap::new();
+        let (mut ri, mut bi) = (0usize, 0usize);
+        while ri < final_nodes.len() && bi < body_nodes.len() {
+            to_body.insert(ri as u64, bi as u64);
+            let root_is_subtree = !ergo_ser::opcode::children(final_nodes[ri]).is_empty();
+            let body_is_leaf = ergo_ser::opcode::children(body_nodes[bi]).is_empty();
+            if root_is_subtree && body_is_leaf {
+                ri += sizes[ri];
+            } else {
+                ri += 1;
+            }
+            bi += 1;
+        }
+        offsets
+            .into_iter()
+            .filter_map(|(id, p)| to_body.get(&id).map(|nid| (*nid, p)))
+            .collect()
+    };
+    let tags: Vec<u8> = body_nodes.iter().map(|e| node_opcode(e)).collect();
     SourceMap { offsets, tags }
+}
+
+/// Size of every subtree, indexed by preorder id.
+fn subtree_sizes(root: &Expr) -> Vec<usize> {
+    fn go(e: &Expr, out: &mut Vec<usize>) -> usize {
+        let me = out.len();
+        out.push(0);
+        let mut n = 1;
+        for c in ergo_ser::opcode::children(e) {
+            n += go(c, out);
+        }
+        out[me] = n;
+        n
+    }
+    let mut out = Vec::new();
+    go(root, &mut out);
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A collection of constants is one constant after segregation, so the
+    /// segregated body has fewer nodes than the pre-segregation tree. The
+    /// map must be keyed by the body's ids (the tree a consumer walks) and
+    /// not assert the two are the same shape.
+    #[test]
+    fn collapsed_constant_collections_do_not_break_the_map() {
+        let src = "sigmaProp(xorOf(Coll(true, false)) && allOf(Coll(true, true)) && anyOf(Coll(false, true)))";
+        let (result, map) = crate::compile_with_source_map(
+            &crate::env::ScriptEnv::new(),
+            src,
+            0,
+            ergo_ser::address::NetworkPrefix::Mainnet,
+        )
+        .expect("compiles");
+        let body_len = preorder(&result.ergo_tree.body).count();
+        assert_eq!(map.tags.len(), body_len);
+        assert!(map.offsets.keys().all(|&id| (id as usize) < body_len));
+    }
     use ergo_ser::opcode::IrNode;
     use ergo_ser::sigma_type::SigmaType;
     use ergo_ser::sigma_value::SigmaValue;
