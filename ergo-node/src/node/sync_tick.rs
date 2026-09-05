@@ -1058,8 +1058,9 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
             .expect("utxo-only: Mode 2 snapshot install is gated off in digest mode")
             .lookup_header_at_height(ckpt.height)
         {
-            Ok(HeightLookup::Dense(id)) => Some(id),
-            Ok(HeightLookup::SparseGap) | Ok(HeightLookup::AboveTip) => None,
+            Ok(ergo_state::chain::HeightLookup::Dense(id)) => Some(id),
+            Ok(ergo_state::chain::HeightLookup::SparseGap)
+            | Ok(ergo_state::chain::HeightLookup::AboveTip) => None,
             Err(e) => {
                 warn!(
                     error = %e,
