@@ -18,6 +18,7 @@ use ergo_ser::sigma_value::{SigmaBoolean, SigmaValue};
 use ergo_ser::transaction::{write_transaction, Transaction};
 
 use crate::gen::asm;
+use crate::gen::evaluated_value;
 use crate::gen::{Feature, FeatureSet, GenMode, GenOutput};
 use crate::rng::Rng;
 
@@ -82,12 +83,18 @@ pub fn gen_valid(rng: &mut Rng) -> GenOutput {
 
 /// One signed input: 32-byte box id, empty proof (`u16` 0), empty extension.
 fn valid_input_bytes(rng: &mut Rng) -> Vec<u8> {
-    let mut b = Vec::with_capacity(34);
+    input_bytes_with_extension(rng, &[0x00])
+}
+
+/// One signed input carrying `extension` verbatim as its context-extension
+/// block: 32-byte box id, empty proof (`u16` 0), then the block.
+fn input_bytes_with_extension(rng: &mut Rng, extension: &[u8]) -> Vec<u8> {
+    let mut b = Vec::with_capacity(34 + extension.len());
     for _ in 0..32 {
         b.push(rng.byte());
     }
     asm::put_vlq(&mut b, 0); // proof length u16 = 0
-    b.push(0x00); // context-extension count = 0
+    b.extend_from_slice(extension);
     b
 }
 
@@ -131,10 +138,40 @@ fn assemble_tx(inputs: &[Vec<u8>], token_ids: &[[u8; 32]], outputs: &[Vec<u8>]) 
 }
 
 fn gen_adversarial(rng: &mut Rng) -> GenOutput {
-    if rng.coin() {
-        empty_outputs(rng)
-    } else {
-        zero_amount_token(rng)
+    // Weighted toward the context-extension vocabulary: it is the position
+    // where the reject-valid class of #301 lives, and the tx-shape knobs
+    // (#23) are already saturated within a few hundred iterations.
+    match rng.below(4) {
+        0 => empty_outputs(rng),
+        1 => zero_amount_token(rng),
+        _ => context_extension_values(rng),
+    }
+}
+
+/// A 1-in / 1-out transaction whose input carries a context extension drawn from
+/// the full `EvaluatedValue` vocabulary (`Constant` incl. nested shapes, `Tuple`
+/// 0x86, `ConcreteCollection` 0x83, `GroupGenerator` 0x82, and non-evaluated
+/// nodes the reference must reject).
+///
+/// Scala parses this position with `r.getValue().asInstanceOf[EvaluatedValue[_]]`
+/// (`ContextExtension.scala:59`), so the first four classes ACCEPT and everything
+/// else raises `ClassCastException`. `intended_valid` follows that rule, which is
+/// what makes a Rust reject of an accepted form a reject-valid stall (#301) and a
+/// Rust accept of a rejected form an accept-invalid fork.
+fn context_extension_values(rng: &mut Rng) -> GenOutput {
+    let (extension, features, reference_accepts) = evaluated_value::gen_context_extension(rng, 4);
+    let output = indexed_output_bytes(1_000_000, &asm::TREE_TRUE_PROP, 1, &[]);
+    let bytes = assemble_tx(
+        &[input_bytes_with_extension(rng, &extension)],
+        &[],
+        &[output],
+    );
+    GenOutput {
+        surface: SURFACE,
+        bytes,
+        intended_valid: reference_accepts,
+        mode: GenMode::Adversarial,
+        features: FeatureSet::from_iter(features),
     }
 }
 

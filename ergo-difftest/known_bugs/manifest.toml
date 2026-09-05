@@ -468,3 +468,95 @@ reinject       = "Remove register-bytes provenance preservation in bytesWithNoRe
 budget_iters   = 0
 trigger_hex    = ""
 note = "SD: only triggered on the specific mainnet block h1808895 with its exact box register layout."
+
+# ---------------------------------------------------------------------------
+# 28. ctx-extension-evaluated-values  [ARMED — fix lands with PR #301]
+# ---------------------------------------------------------------------------
+# Scala parses a ContextExtension value with the full `ValueSerializer` and casts
+# to `EvaluatedValue` (ContextExtension.scala:59), which admits FOUR node kinds:
+# Constant, ConcreteCollection (0x83, or 0x85 bool-packed), Tuple (0x86) and
+# GroupGenerator (0x82). The node's `read_context_extension` reads a CONSTANT
+# only, so it rejects a transaction Scala mines — a reject-valid stall.
+#
+# `blocked_on` because the fix is NOT on this branch: main IS the bugged state,
+# so the gate's clean-HEAD assertion cannot hold yet. Once #301 merges, drop
+# `blocked_on`, add `known_bugs/patches/ctx-extension-evaluated-values.patch`
+# reverting the deserializer half, and the gate proves the guard catches the
+# reversal.
+[[bug]]
+id             = "ctx-extension-evaluated-values"
+surface        = "transaction"
+class          = "accept-reject"
+wire_reachable = true
+blocked_on     = "PR #301 — fix not merged; this branch is at origin/main before it"
+blocked_until  = "2026-12-01"
+fix_file       = "ergo-ser/src/input/context_extension.rs;ergo-sigma/src/evaluator/opcodes/context.rs"
+reinject       = "In read_context_extension, decode entry values with read_constant only (drop the evaluated-value node split), reverting the #301 deserializer half."
+budget_iters   = 2000
+# 1-in / 1-out tx whose input carries context var 1 = ConcreteCollectionBooleanConstants
+# (0x85) — minimized by the guard from a structured campaign at seed 991.
+trigger_hex    = "017dfed1a6e90e37d04605f89917df1a8e2644e425f4bcd4c98973a86052eb2b5c0001018503010000013d0008d3010000"
+expected_canonical = ""
+note = "ORACLE: difftest --oracle --repro <trigger_hex> --surface transaction. On origin/main: rust Reject(unknown type code: 0x85) vs jvm ACCEPT (byte-exact round-trip). NOTE FOR #301 REVIEW: the trigger is 0x85, the BOOL-PACKED ConcreteCollection. #301's split admits 0x83 and 0x86 by name; 0x85 is the same `EvaluatedValue` (ConcreteCollectionBooleanConstants) and must be admitted too, or this exact vector stays a reject-valid after the fix."
+
+# ---------------------------------------------------------------------------
+# 29. ctx-extension-evaluated-values-reduce  [ARMED — fix lands with PR #301]
+# ---------------------------------------------------------------------------
+[[bug]]
+id             = "ctx-extension-evaluated-values-reduce"
+surface        = "reduce_ctx"
+class          = "reduce"
+wire_reachable = true
+blocked_on     = "PR #301 — fix not merged; this branch is at origin/main before it"
+blocked_until  = "2026-12-01"
+fix_file       = "ergo-ser/src/input/context_extension.rs;ergo-sigma/src/evaluator/opcodes/context.rs"
+reinject       = "Same as #28; the reduce_ctx surface additionally covers the EVALUATOR half (getVar over a Tuple node must not gain pair semantics)."
+budget_iters   = 2000
+# `contextExtension · ergoBoxCandidate` frame: 4 extension vars incl. 0x85 and
+# 0x83 nodes, box script = sigmaProp(true).
+trigger_hex    = "04010305028503010303020002843d0008d301000205050500"
+expected_canonical = ""
+note = "ORACLE: difftest --oracle --repro <trigger_hex> --surface reduce_ctx. On origin/main: rust Reject(extension: unknown type code: 0x85) vs jvm ACCEPT P:d3|5."
+
+# ---------------------------------------------------------------------------
+# 30. register-group-generator-node  [OPEN FINDING — no fix on any branch]
+# ---------------------------------------------------------------------------
+# The register twin of #28, found by the standing guard on origin/main. The
+# node's register reader admits `Tuple` (0x86) and `ConcreteCollection` (0x83)
+# but NOT `GroupGenerator` (0x82) — which is an `EvaluatedValue` and which the
+# reference accepts in a register. Reject-valid, same class, different position.
+# Not fixed here: this PR changes no consensus code.
+[[bug]]
+id             = "register-group-generator-node"
+surface        = "ergo_box_candidate"
+class          = "accept-reject"
+wire_reachable = true
+blocked_on     = "issue #312 — open finding, no fix exists yet (the guard PR changes no consensus code)"
+blocked_until  = "2026-12-01"
+fix_file       = "ergo-ser/src/register.rs"
+reinject       = "n/a until a fix exists; the fix would admit opcode 0x82 (GroupGenerator) alongside 0x83/0x86 in the register value reader."
+budget_iters   = 2000
+trigger_hex    = "3d0008d301000382044182"
+expected_canonical = ""
+note = "ORACLE: difftest --oracle --repro 3d0008d301000382044182 --surface ergo_box_candidate. rust Reject(\"unsupported expression opcode 0x82 in register value\") vs jvm ACCEPT (byte-exact). Classified PENDING because it persists on the reduce_ctx reduction channel."
+
+# ---------------------------------------------------------------------------
+# 31. bool-collection-and-cost  [OPEN FINDING — no fix on any branch]
+# ---------------------------------------------------------------------------
+# `sigmaProp(AND(Coll[Boolean](true,true,false)))` written in the bool-packed
+# 0x85 form reduces to the same proposition on both sides at DIFFERENT JIT cost
+# (node 50, reference 65). Cost is consensus-relevant (block cost limit), so a
+# systematic under-charge is a fork risk at the limit.
+[[bug]]
+id             = "bool-collection-and-cost"
+surface        = "reduce"
+class          = "cost"
+wire_reachable = true
+blocked_on     = "issue #311 — open finding, no fix exists yet (the guard PR changes no consensus code)"
+blocked_until  = "2026-12-01"
+fix_file       = "ergo-sigma/src/evaluator/cost.rs"
+reinject       = "n/a until a fix exists."
+budget_iters   = 2000
+trigger_hex    = "00d196850306"
+expected_canonical = ""
+note = "ORACLE: difftest --oracle --repro 00d196850306 --surface reduce. rust Accept P:d2|50 vs jvm Accept P:d2|65 → Canonical/cost divergence."

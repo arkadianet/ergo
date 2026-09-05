@@ -25,7 +25,22 @@ on:
     # 02:00 UTC every night (off-peak for cache efficiency)
     - cron: '0 2 * * *'
   workflow_dispatch:
-    # Allow manual trigger for an on-demand long campaign.
+    # Allow manual trigger for an on-demand long campaign, and for the
+    # JVM-oracle `consensus-guard` job (which only runs on this event — see
+    # the job's own comment for why it is not on the nightly schedule).
+    inputs:
+      runner:
+        description: 'Runner label for consensus-guard (self-hosted recommended)'
+        required: false
+        default: 'ubuntu-latest'
+      guard_seed:
+        description: 'consensus-guard PRNG seed'
+        required: false
+        default: '991'
+      guard_iters:
+        description: 'consensus-guard iterations per surface'
+        required: false
+        default: '2000'
 
 # Least privilege: fuzz jobs read the repo + upload artifacts; no write to contents.
 permissions:
@@ -203,4 +218,113 @@ jobs:
         with:
           name: fuzz-corpus-${{ matrix.target }}
           path: ergo-difftest/fuzz/corpus/${{ matrix.target }}/
+          if-no-files-found: ignore
+
+  consensus-guard:
+    name: consensus guard (JVM oracle differential — reduce / reduce_ctx / tx / box / validate)
+    # `workflow_dispatch` ONLY, deliberately — not on the nightly schedule.
+    #
+    # Why: the oracle runs the REAL reference jars, and `ergo-core 6.0.2` is not
+    # published to Maven Central. Standing it up on a cold GitHub-hosted runner
+    # means cloning the Scala node and running
+    # `sbt avldb/publishLocal ergoWallet/publishLocal ergoCore/publishLocal`,
+    # which alone exceeds the ~20 min this job is budgeted for (an sbt cold start
+    # plus three subproject publishes; the coursier + sigma-state fetch is on top).
+    # The `~/.ivy2/local` cache below removes that cost on a WARM runner, so the
+    # honest wiring is: green-path = a self-hosted runner (or a hosted runner
+    # whose ivy cache is already populated), triggered on demand or by an
+    # operator cron; the bootstrap step is here so a cold run still works, just
+    # slowly. Point `runner` at a self-hosted label to take the fast path.
+    #
+    # The hermetic PR-time `difftest` job in ci.yml is unchanged and needs none
+    # of this.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: consensus-guard
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - uses: VirtusLab/scala-cli-setup@v1
+
+      # The oracle's dependency closure: sigma-state 6.0.2 from Maven (coursier)
+      # and ergo-core 6.0.2 from a local publish (ivy). Keyed on the oracle
+      # script itself plus the pinned reference tag, so an oracle change or a
+      # version bump invalidates the cache instead of silently reusing stale jars.
+      - name: cache JVM oracle dependencies
+        id: oracle-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.ivy2/local
+            ~/.cache/coursier
+          key: jvm-oracle-${{ hashFiles('scripts/jvm_serde_oracle/ErgoSerdeOracle.scala') }}-ergo-core-6.0.2
+
+      # Cold path only: publish ergo-core 6.0.2 locally. `avldb` pulls
+      # leveldbjni-all from the GitLab repo the .scala `using repository`
+      # directive already declares, so no extra resolver config is needed here.
+      - name: bootstrap ergo-core 6.0.2 (publishLocal)
+        if: steps.oracle-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v6.0.2 https://github.com/ergoplatform/ergo.git "$RUNNER_TEMP/ergo-reference"
+          cd "$RUNNER_TEMP/ergo-reference"
+          sbt "avldb/publishLocal" "ergoWallet/publishLocal" "ergoCore/publishLocal"
+
+      # Warm the oracle before timing anything: the first query compiles the
+      # script and resolves dependencies, and a failure here is an ENVIRONMENT
+      # failure, not a consensus finding — surface it as its own red step.
+      - name: warm the JVM oracle
+        run: |
+          set -euo pipefail
+          echo "ergo_tree 0008d3" \
+            | scala-cli run scripts/jvm_serde_oracle/ErgoSerdeOracle.scala \
+            | tee /tmp/oracle-warm.txt
+          grep -q '^ACCEPT 0008d3$' /tmp/oracle-warm.txt
+
+      - name: cargo build (release)
+        run: cargo build --release -p ergo-difftest
+
+      # The guard itself. Exit 1 = an UNBASELINED pending divergence (a new
+      # candidate); exit 3 = the run did not check what it planned to (dead
+      # oracle / short campaign), which is louder than a finding, not quieter.
+      # Divergences already tracked in known_bugs/baseline.toml are printed in
+      # their own table and do not fail the job.
+      #
+      # Inputs reach the shell through `env:`, never interpolated into `run:` —
+      # `${{ }}` in a run body is textual substitution, so a crafted input value
+      # would execute as script. The guard validates them as integers too.
+      - name: consensus guard
+        env:
+          DIFFTEST_ORACLE_LOG: ${{ runner.temp }}/oracle-transcript.log
+          GUARD_SEED: ${{ inputs.guard_seed || '991' }}
+          GUARD_ITERS: ${{ inputs.guard_iters || '2000' }}
+        run: |
+          scripts/difftest-guard.sh --seed "$GUARD_SEED" --iters "$GUARD_ITERS"
+
+      # Always upload: on a pass this is the empty-queue evidence, on a failure
+      # it is the minimized, classified record set plus the oracle transcript
+      # that proves the harness and the oracle stayed in step.
+      - name: upload regressions + oracle transcript
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: consensus-guard-regressions
+          path: |
+            ergo-difftest/regressions/
+            ${{ runner.temp }}/oracle-transcript.log.*
           if-no-files-found: ignore

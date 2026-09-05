@@ -731,6 +731,167 @@ fn reg_tuple_option(rng: &mut Rng) -> (Vec<u8>, Feature) {
 }
 
 // ---------------------------------------------------------------------------
+// Context-variable / register READ vocabulary (the `ctx_expr` surface).
+//
+// These bodies are the consumers of the `EvaluatedValue` vocabulary the
+// transaction / box generators place on the wire: without a reader, an
+// evaluated-value entry is only ever exercised at PARSE. Each variant is paired
+// with a value block built by `super::ctx_expr`, so the read is type-matched and
+// the tree reduces to a concrete `P:<prop>|<cost>` instead of a lockstep
+// type-mismatch reject.
+//
+// The four `getVar` forms mirror the JVM oracle table pinned in PR #301:
+//   sigmaProp(true)                              -> ACCEPT (never reads a var)
+//   getVar[(Int,Int)](1).isDefined               -> ACCEPT
+//   getVar[(Int,Int)](1).get._1 == 1             -> REJECT on the reference
+//                                                   (`Tuple` node's value is a
+//                                                   Coll, not a Tuple2)
+//   getVar[Coll[Int]](2).get(0) == 7             -> ACCEPT
+// ---------------------------------------------------------------------------
+
+/// Which context/register read a `ctx_expr` tree performs. The paired value
+/// block lives in `super::ctx_expr::value_blocks_for`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CtxRead {
+    /// `sigmaProp(true)` — the control: the vars are present but never read, so
+    /// only the PARSE of the extension can make the two sides disagree.
+    NeverReads,
+    /// `getVar[(Int,Int)](1).isDefined`
+    TupleVarIsDefined,
+    /// `getVar[(Int,Int)](1).get._1 == 1`
+    TupleVarFieldEq,
+    /// `getVar[Coll[Int]](2).get(0) == 7`
+    CollVarIndexEq,
+    /// `getVar[Int](3).get == 42`
+    IntVarEq,
+    /// `getVar[GroupElement](4).isDefined`
+    GroupElementVarIsDefined,
+    /// `SELF.R4[(Int,Int)].get._1 == 1`
+    TupleRegisterFieldEq,
+    /// `SELF.R5[Coll[Int]].get(0) == 7`
+    CollRegisterIndexEq,
+    /// `SELF.R6[Coll[Byte]].isDefined`
+    ByteCollRegisterIsDefined,
+}
+
+impl CtxRead {
+    /// Every variant, in declaration order (the generator draws uniformly).
+    pub(crate) const ALL: [CtxRead; 9] = [
+        CtxRead::NeverReads,
+        CtxRead::TupleVarIsDefined,
+        CtxRead::TupleVarFieldEq,
+        CtxRead::CollVarIndexEq,
+        CtxRead::IntVarEq,
+        CtxRead::GroupElementVarIsDefined,
+        CtxRead::TupleRegisterFieldEq,
+        CtxRead::CollRegisterIndexEq,
+        CtxRead::ByteCollRegisterIsDefined,
+    ];
+}
+
+/// `getVar[tpe](var_id)` → `SOption[tpe]`.
+fn get_var(var_id: u8, tpe: SigmaType) -> Expr {
+    Expr::Op(IrNode {
+        opcode: 0xE3,
+        payload: Payload::GetVar { var_id, tpe },
+    })
+}
+
+/// `SELF.R<4+idx>[tpe]` → `SOption[tpe]`.
+fn self_register(reg_id: u8, tpe: SigmaType) -> Expr {
+    Expr::Op(IrNode {
+        opcode: 0xC6,
+        payload: Payload::ExtractRegisterAs {
+            input: Box::new(zero_op(0xA7)),
+            reg_id,
+            tpe,
+        },
+    })
+}
+
+/// `opt.get` (OptionGet 0xE4).
+fn option_get(opt: Expr) -> Expr {
+    op1(0xE4, opt)
+}
+
+/// `opt.isDefined` (OptionIsDefined 0xE6).
+fn option_is_defined(opt: Expr) -> Expr {
+    op1(0xE6, opt)
+}
+
+/// `tuple._<field_idx>` (SelectField 0x8C; `field_idx` is 1-based).
+fn select_field(input: Expr, field_idx: u8) -> Expr {
+    Expr::Op(IrNode {
+        opcode: 0x8C,
+        payload: Payload::SelectField {
+            input: Box::new(input),
+            field_idx,
+        },
+    })
+}
+
+/// `coll(index)` with no default (ByIndex 0xB2).
+fn by_index(input: Expr, index: Expr) -> Expr {
+    Expr::Op(IrNode {
+        opcode: 0xB2,
+        payload: Payload::ByIndex {
+            input: Box::new(input),
+            index: Box::new(index),
+            default: None,
+        },
+    })
+}
+
+fn int_pair_type() -> SigmaType {
+    SigmaType::STuple(vec![SigmaType::SInt, SigmaType::SInt])
+}
+
+fn int_coll_type() -> SigmaType {
+    SigmaType::SColl(Box::new(SigmaType::SInt))
+}
+
+/// Serialize the ErgoTree that performs `read`.
+pub(crate) fn ctx_read_tree_bytes(read: CtxRead) -> Vec<u8> {
+    let body = match read {
+        CtxRead::NeverReads => sigma_prop_const(true),
+        CtxRead::TupleVarIsDefined => bool_to_sigma(option_is_defined(get_var(1, int_pair_type()))),
+        CtxRead::TupleVarFieldEq => bool_to_sigma(op2(
+            0x93,
+            select_field(option_get(get_var(1, int_pair_type())), 1),
+            c_int(1),
+        )),
+        CtxRead::CollVarIndexEq => bool_to_sigma(op2(
+            0x93,
+            by_index(option_get(get_var(2, int_coll_type())), c_int(0)),
+            c_int(7),
+        )),
+        CtxRead::IntVarEq => bool_to_sigma(op2(
+            0x93,
+            option_get(get_var(3, SigmaType::SInt)),
+            c_int(42),
+        )),
+        CtxRead::GroupElementVarIsDefined => {
+            bool_to_sigma(option_is_defined(get_var(4, SigmaType::SGroupElement)))
+        }
+        CtxRead::TupleRegisterFieldEq => bool_to_sigma(op2(
+            0x93,
+            select_field(option_get(self_register(4, int_pair_type())), 1),
+            c_int(1),
+        )),
+        CtxRead::CollRegisterIndexEq => bool_to_sigma(op2(
+            0x93,
+            by_index(option_get(self_register(5, int_coll_type())), c_int(0)),
+            c_int(7),
+        )),
+        CtxRead::ByteCollRegisterIsDefined => bool_to_sigma(option_is_defined(self_register(
+            6,
+            SigmaType::SColl(Box::new(SigmaType::SByte)),
+        ))),
+    };
+    tree_bytes(body)
+}
+
+// ---------------------------------------------------------------------------
 // Deterministic minimal triggers for the re-injection gate.
 //
 // These are STABLE, RNG-free representatives the `known_bugs/manifest.toml`

@@ -131,3 +131,61 @@ lead-engineer oracle-contract change (deferred), or the replay driver.
 4. **Slice 3 (minimize + auto-file)** remains useful for real candidates, but is
    **no longer justified as a phantom-divergence filter** — there are no phantoms.
    Its job is minimize + classify-known-artifact + queue-genuine-candidate.
+
+## Standing-guard findings (2026-09, origin/main @ f08b17c5)
+
+`scripts/difftest-guard.sh --seed 991 --iters 600`, five surfaces, live JVM
+oracle (sigma-state 6.0.2 + ergo-core 6.0.2). Every record below is minimized
+and filed; none is fixed here (the guard PR changes no consensus code).
+
+| surface | checks | divergences | classes | pending | artifacts |
+|---|---|---|---|---|---|
+| `reduce` | 600 | 10 | 1 | 1 | 0 |
+| `reduce_ctx` | 600 | 137 | 1 | 1 | 0 |
+| `transaction` | 600 | 101 | 1 | 1 | 0 |
+| `ergo_box_candidate` | 600 | 79 | 2 | 1 | 1 |
+| `validate` | 600 | 101 | 1 | 1 | 0 |
+
+**A. context-extension `EvaluatedValue` (PR #301's class) — rediscovered.**
+`transaction`, `validate` and `reduce_ctx` all reject a value the reference
+accepts. Minimized transaction:
+`017dfed1…5c0001018503010000013d0008d3010000` — rust
+`Reject(unknown type code: 0x85)`, jvm `ACCEPT` with a byte-exact round-trip.
+Note the trigger is `0x85`, the **bool-packed** `ConcreteCollection`: #301's
+deserializer split admits `0x83` and `0x86` by name, and `0x85` is the same
+`EvaluatedValue`. Worth confirming on that PR that this exact vector stops being
+a reject-valid after the fix.
+
+**B. `GroupGenerator` (`0x82`) in a box register — the register twin, NOT covered
+by #301.** Minimized: `3d0008d301000382044182` — rust
+`Reject("unsupported expression opcode 0x82 in register value")`, jvm `ACCEPT`
+byte-exact. The register reader admits `Tuple` (`0x86`) and `ConcreteCollection`
+(`0x83`) but not `GroupGenerator`, which is equally an `EvaluatedValue`.
+Classified `PENDING` because the divergence persists on the `reduce_ctx`
+reduction channel (the box's own script is reduced with the box as SELF).
+
+**C. bool-packed `AND(Coll[Boolean])` JIT-cost divergence.** `00d196850306` =
+`sigmaProp(AND(Coll[Boolean](true,true,false)))` in the `0x85` form: both sides
+reduce to `FalseProp`, node at cost **50**, reference at cost **65**. Same
+proposition, different cost. Cost is consensus-relevant (the block cost limit),
+so a systematic under-charge is a fork risk at the boundary.
+
+**D. off-curve `GroupElement` in a box script — reconciles, benign.** The one
+`KnownArtifact`: the box surface accepts what the reference rejects because the
+node defers the curve check to tx validation; on `reduce_ctx` both sides reject,
+so the reduction channel agrees. This is the documented #4 artifact, and it is
+the control that shows the classifier is not simply marking everything pending.
+
+All five are recorded in `known_bugs/baseline.toml` with their tracking
+references (A → PR #301, B → issue #312, C → issue #311), so the guard is green
+on `main` today and goes red the moment a *new* class appears. Delete a baseline
+entry when its fix merges — the guard going red on the next run is the signal
+that the fix did not close the class.
+
+**Known coverage gap: `CONTEXT.headers` (the #238 family) is not exercised.**
+Both reduce surfaces run with an empty last-headers window on both sides
+(`ReductionContext::last_headers` empty; `headers = Colls.emptyColl[Header]` in
+`ErgoSerdeOracle.scala`), so a script reading `CONTEXT.headers` agrees trivially
+and the 10-vs-9 window-size divergence cannot surface. Closing it needs a header
+window on both sides — an oracle-contract change, tracked as a TODO on
+`reduce_verdict` in `src/oracle.rs`.

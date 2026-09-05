@@ -24,7 +24,9 @@ use crate::rng::Rng;
 pub(crate) mod asm;
 mod box_candidate;
 mod constant;
+mod ctx_expr;
 mod ergo_tree;
+pub(crate) mod evaluated_value;
 mod header;
 mod sigma_expr;
 mod transaction;
@@ -32,12 +34,18 @@ mod transaction;
 /// The SER surfaces a structured generator targets. Names match the hermetic
 /// surface registry ([`crate::surfaces::registry`]) so a [`GenOutput`] can be
 /// fed straight through [`crate::run_one`].
-pub const SURFACES: [&str; 6] = [
+pub const SURFACES: [&str; 7] = [
     "ergo_tree",
     "constant",
     "ergo_box_candidate",
     "transaction",
     "header",
+    // `contextExtension · ergoBoxCandidate` frames for the consensus-complete
+    // `reduce_ctx` oracle surface: both the context-extension values and the
+    // SELF registers come from the WIRE, so the evaluated-value vocabulary is
+    // exercised through parse AND evaluation (getVar / SELF.Rn) rather than
+    // parse alone.
+    "ctx_expr",
     // Eval-rich ErgoTree bodies for the consensus-complete `reduce` oracle
     // surface. Hermetically these are still ErgoTree bytes (a "sigma_expr"
     // registry entry runs the ergo_tree read/write fixed-point invariant on
@@ -118,11 +126,34 @@ pub enum Feature {
     EvalDeserializeNode,
     /// Registers / tuples / options materialized and projected in the body.
     EvalRegTupleOption,
+    /// A script that READS a context var / register: `getVar[T](i)`,
+    /// `SELF.R4[T]`, `.get`, `.isDefined`, `._1`, `(i)` indexing.
+    EvalCtxVarRead,
+
+    // ----- EvaluatedValue vocabulary (registers + context extension) -----
+    // See `super::evaluated_value`: Scala parses both positions with the full
+    // `ValueSerializer` and casts to `EvaluatedValue`, which admits FOUR node
+    // kinds, not just `Constant`.
+    /// A register value that is a `Constant` — including the nested
+    /// `Coll[Coll[Byte]]` / tuple shapes.
+    RegisterConstantVocabulary,
+    /// A register value that is a non-`Constant` `EvaluatedValue` node
+    /// (`Tuple` 0x86 / `ConcreteCollection` 0x83 / `GroupGenerator` 0x82).
+    RegisterEvaluatedNode,
+    /// A register value that is NOT an `EvaluatedValue` (`Height`, `Inputs`, …)
+    /// — the reference rejects with `ClassCastException`.
+    RegisterNonEvaluatedNode,
+    /// A context-extension value that is a `Constant`, full vocabulary.
+    CtxExtConstantVocabulary,
+    /// A context-extension value that is a non-`Constant` `EvaluatedValue` node.
+    CtxExtEvaluatedNode,
+    /// A context-extension value that is NOT an `EvaluatedValue`.
+    CtxExtNonEvaluatedNode,
 }
 
 impl Feature {
     /// Every feature, in declaration order.
-    pub const ALL: [Feature; 28] = [
+    pub const ALL: [Feature; 35] = [
         Feature::OnManifoldValid,
         Feature::HeaderVersionHighBit,
         Feature::TreeVersionNonZero,
@@ -151,6 +182,13 @@ impl Feature {
         Feature::EvalContext,
         Feature::EvalDeserializeNode,
         Feature::EvalRegTupleOption,
+        Feature::EvalCtxVarRead,
+        Feature::RegisterConstantVocabulary,
+        Feature::RegisterEvaluatedNode,
+        Feature::RegisterNonEvaluatedNode,
+        Feature::CtxExtConstantVocabulary,
+        Feature::CtxExtEvaluatedNode,
+        Feature::CtxExtNonEvaluatedNode,
     ];
 
     /// Stable identifier for reports.
@@ -184,6 +222,13 @@ impl Feature {
             Feature::EvalContext => "eval_context",
             Feature::EvalDeserializeNode => "eval_deserialize_node",
             Feature::EvalRegTupleOption => "eval_reg_tuple_option",
+            Feature::EvalCtxVarRead => "eval_ctx_var_read",
+            Feature::RegisterConstantVocabulary => "register_constant_vocabulary",
+            Feature::RegisterEvaluatedNode => "register_evaluated_node",
+            Feature::RegisterNonEvaluatedNode => "register_non_evaluated_node",
+            Feature::CtxExtConstantVocabulary => "ctx_ext_constant_vocabulary",
+            Feature::CtxExtEvaluatedNode => "ctx_ext_evaluated_node",
+            Feature::CtxExtNonEvaluatedNode => "ctx_ext_non_evaluated_node",
         }
     }
 
@@ -210,6 +255,11 @@ impl Feature {
             Feature::EvalCollEqEarly => Some("#15"),
             Feature::EvalTokenEq => Some("#16"),
             Feature::EvalDeserializeNode => Some("#3"),
+            // #301: a non-`Constant` `EvaluatedValue` in an input's context
+            // extension is a reject-valid stall on every pre-fix node. The
+            // register twin is the same wire class at the other position.
+            Feature::CtxExtEvaluatedNode | Feature::CtxExtNonEvaluatedNode => Some("#301"),
+            Feature::RegisterEvaluatedNode | Feature::RegisterNonEvaluatedNode => Some("#301"),
             // Eval vocabulary with no single mapped catalog bug (calibration /
             // reduce-path coverage). These MUST reduce identically on both sides.
             Feature::EvalSigmaProps
@@ -219,19 +269,22 @@ impl Feature {
             | Feature::EvalComparison
             | Feature::EvalCollOps
             | Feature::EvalContext
-            | Feature::EvalRegTupleOption => None,
+            | Feature::EvalRegTupleOption
+            | Feature::EvalCtxVarRead
+            | Feature::RegisterConstantVocabulary
+            | Feature::CtxExtConstantVocabulary => None,
         }
     }
 
     #[inline]
-    fn bit(self) -> u32 {
-        1u32 << (self as u8)
+    fn bit(self) -> u64 {
+        1u64 << (self as u8)
     }
 }
 
-/// A compact set of [`Feature`]s (bitset over the 16 features).
+/// A compact set of [`Feature`]s (a bitset; one bit per [`Feature::ALL`] entry).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct FeatureSet(u32);
+pub struct FeatureSet(u64);
 
 impl FeatureSet {
     /// The empty set.
@@ -330,6 +383,7 @@ pub fn gen_structured(rng: &mut Rng, surface: &str) -> GenOutput {
         "transaction" => transaction::gen(rng),
         "header" => header::gen(rng),
         "sigma_expr" => sigma_expr::gen(rng),
+        "ctx_expr" => ctx_expr::gen(rng),
         other => {
             debug_assert!(false, "gen_structured: unknown surface {other:?}");
             // Fall back to the crown-jewel surface rather than panic in a
@@ -349,6 +403,7 @@ pub fn gen_on_manifold(rng: &mut Rng, surface: &str) -> GenOutput {
         "transaction" => transaction::gen_valid(rng),
         "header" => header::gen_valid(rng),
         "sigma_expr" => sigma_expr::gen_valid(rng),
+        "ctx_expr" => ctx_expr::gen_valid(rng),
         other => {
             debug_assert!(false, "gen_on_manifold: unknown surface {other:?}");
             ergo_tree::gen_valid(rng)
@@ -413,8 +468,18 @@ pub fn declared_vocabulary(surface: &str) -> FeatureSet {
             RegisterV6Type,
             TxZeroAmountToken,
             OffCurveGroupElement,
+            RegisterConstantVocabulary,
+            RegisterEvaluatedNode,
+            RegisterNonEvaluatedNode,
         ],
-        "transaction" => &[OnManifoldValid, TxEmptyOutputs, TxZeroAmountToken],
+        "transaction" => &[
+            OnManifoldValid,
+            TxEmptyOutputs,
+            TxZeroAmountToken,
+            CtxExtConstantVocabulary,
+            CtxExtEvaluatedNode,
+            CtxExtNonEvaluatedNode,
+        ],
         "header" => &[OnManifoldValid, HeaderVersionHighBit],
         "sigma_expr" => &[
             OnManifoldValid,
@@ -430,6 +495,16 @@ pub fn declared_vocabulary(surface: &str) -> FeatureSet {
             EvalContext,
             EvalDeserializeNode,
             EvalRegTupleOption,
+        ],
+        "ctx_expr" => &[
+            OnManifoldValid,
+            EvalCtxVarRead,
+            CtxExtConstantVocabulary,
+            CtxExtEvaluatedNode,
+            CtxExtNonEvaluatedNode,
+            RegisterConstantVocabulary,
+            RegisterEvaluatedNode,
+            RegisterNonEvaluatedNode,
         ],
         _ => &[],
     };

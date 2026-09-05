@@ -35,7 +35,7 @@ pub enum Verdict {
 }
 
 /// A divergence between the node and the JVM reference for one input.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Divergence {
     pub surface: &'static str,
     pub kind: DivergenceKind,
@@ -57,12 +57,34 @@ pub struct Oracle {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    /// Optional request/response transcript (`DIFFTEST_ORACLE_LOG=<path>`).
+    /// A standing guard is only as trustworthy as its pipe: when a campaign
+    /// reports a verdict a manual re-query cannot reproduce, this is the
+    /// evidence that says whether the harness and the oracle were in step.
+    transcript: Option<std::fs::File>,
 }
 
 impl Oracle {
     /// Spawn `scala-cli run <script>`. The first query blocks through the
     /// oracle's compile/dependency-resolution; subsequent queries are fast.
     pub fn spawn(script: &str) -> io::Result<Oracle> {
+        // Open the transcript BEFORE spawning: a bad log path must fail the
+        // spawn without ever starting a JVM that nobody would reap.
+        //
+        // APPEND, never truncate: a guard run spawns one oracle process per
+        // surface, and several of them may share a single log path. Truncating
+        // on spawn would leave the artifact holding only the last surface's
+        // transcript — exactly the evidence a post-mortem needs least. The
+        // header line delimits the processes.
+        let mut transcript = match std::env::var("DIFFTEST_ORACLE_LOG") {
+            Ok(path) if !path.is_empty() => Some(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)?,
+            ),
+            _ => None,
+        };
         let mut child = Command::new("scala-cli")
             .arg("run")
             .arg(script)
@@ -70,12 +92,29 @@ impl Oracle {
             .stdout(Stdio::piped())
             .stderr(Stdio::null()) // compile/resolve noise goes to stderr
             .spawn()?;
+        if let Some(log) = transcript.as_mut() {
+            let header = writeln!(
+                log,
+                "== oracle begin: script={script} pid={} ==",
+                child.id()
+            )
+            .and_then(|()| log.flush());
+            if let Err(e) = header {
+                // The child is already running; do not leave an orphaned JVM
+                // behind a failed spawn. Best effort: the write error is the
+                // one worth reporting.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
+        }
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
         Ok(Oracle {
             child,
             stdin,
             stdout,
+            transcript,
         })
     }
 
@@ -89,7 +128,8 @@ impl Oracle {
     /// answers `SIGMA` / `WRAP` / `THROW <exc>` for the MethodCall typechecker-
     /// registry harness.
     pub fn query_raw(&mut self, surface: &str, bytes: &[u8]) -> io::Result<String> {
-        writeln!(self.stdin, "{surface} {}", to_hex(bytes))?;
+        let request = to_hex(bytes);
+        writeln!(self.stdin, "{surface} {request}")?;
         self.stdin.flush()?;
         let mut line = String::new();
         let n = self.stdout.read_line(&mut line)?;
@@ -99,7 +139,13 @@ impl Oracle {
                 "oracle closed its output",
             ));
         }
-        Ok(line.trim().to_string())
+        let response = line.trim().to_string();
+        if let Some(log) = self.transcript.as_mut() {
+            writeln!(log, ">> {surface} {request}")?;
+            writeln!(log, "<< {response}")?;
+            log.flush()?;
+        }
+        Ok(response)
     }
 }
 
@@ -177,6 +223,16 @@ pub fn oracle_surfaces() -> Vec<SurfaceSpec> {
             // `P:<prop>|<cost>` string (both sides reduce to it).
             name: "reduce",
             rust_verdict: reduce_verdict,
+            compare_canonical: true,
+            soft_fork_header: false,
+        },
+        SurfaceSpec {
+            // eval/cost differential WITH a wire-supplied context extension and
+            // wire-supplied SELF registers — the two positions Scala parses as an
+            // `EvaluatedValue`. Canonical comparison is the reduced
+            // `P:<prop>|<cost>` string, same as `reduce`.
+            name: "reduce_ctx",
+            rust_verdict: reduce_ctx_verdict,
             compare_canonical: true,
             soft_fork_header: false,
         },
@@ -334,6 +390,19 @@ fn deserialize_box_script(
     (Ok(tree), consumed)
 }
 
+/// **Coverage gap — `CONTEXT.headers` (the #238 class) is NOT exercised.** Both
+/// reduce surfaces run with an EMPTY last-headers window: the node side leaves
+/// `ReductionContext::last_headers` empty and the JVM side passes
+/// `headers = Colls.emptyColl[Header]` (`ErgoSerdeOracle.scala`
+/// `reduceContext`). A script reading `CONTEXT.headers` therefore sees a
+/// zero-length collection on both sides and agrees trivially, so the window-size
+/// divergence family (10 headers in Rust vs 9 in Scala) cannot surface here.
+/// Closing it needs a header window on BOTH sides — either a fixed
+/// oracle-and-node-agreed set of 10 serialized headers, or a third frame field
+/// carrying them on the wire the way `ctx_expr` carries the extension. That is an
+/// oracle-contract change, deliberately not folded into the guard PR; the
+/// replay driver reaches the class in the meantime.
+///
 /// `reduce`: the EVAL/COST differential. Deserialize the tree (full box-script
 /// gates, via [`deserialize_box_script`]) and reduce its root to the on-chain
 /// sigma proposition + raw JIT cost, against the same minimal "dummy" context the
@@ -471,6 +540,154 @@ fn reduce_verdict(bytes: &[u8]) -> (Verdict, usize) {
     }
 }
 
+/// Copy a parsed register block into the evaluator's lazy register slots
+/// (`registers[0]` is R4). Mirrors `ergo-validation`'s `copy_registers`; kept
+/// local so the harness does not depend on that crate's `test-helpers` feature.
+fn copy_registers(
+    regs: &ergo_ser::register::AdditionalRegisters,
+) -> [Option<ergo_ser::register::RegisterValue>; 6] {
+    let mut out: [Option<ergo_ser::register::RegisterValue>; 6] =
+        [None, None, None, None, None, None];
+    for (i, reg) in regs.registers.iter().take(6).enumerate() {
+        out[i] = Some(reg.clone());
+    }
+    out
+}
+
+/// `reduce_ctx`: the eval/cost differential over a `contextExtension ·
+/// ergoBoxCandidate` frame (see `crate::gen::ctx_expr`).
+///
+/// Where [`reduce_verdict`] pins an EMPTY context extension and a register-less
+/// SELF, this surface takes both from the WIRE and parses them with the real
+/// consensus readers. That is what makes it the differential home for the
+/// `EvaluatedValue` vocabulary: a node whose `ContextExtension` reader admits
+/// only `Constant` REJECTS a frame the reference reduces (reject-valid, #301),
+/// and a node whose `getVar` hands a `Tuple` node back with pair semantics
+/// ACCEPTS a reduction the reference refuses (accept-invalid, the other arm of
+/// the same fix).
+///
+/// Everything else — the dummy pre-header, the cost limit, the activated
+/// version — matches [`reduce_verdict`] field-for-field, so the two surfaces
+/// differ in exactly one variable.
+fn reduce_ctx_verdict(bytes: &[u8]) -> (Verdict, usize) {
+    use ergo_primitives::cost::{CostAccumulator, JitCost};
+    use ergo_primitives::digest::ModifierId;
+    use ergo_ser::ergo_box::{serialize_ergo_box, ErgoBox};
+    use ergo_sigma::evaluator::{reduce_expr_with_cost, EvalBox, ReductionContext};
+
+    let mut r = VlqReader::new(bytes);
+    let extension = match ergo_ser::input::read_context_extension(&mut r) {
+        Ok(e) => e,
+        Err(e) => return (Verdict::Reject(format!("extension: {e:?}")), r.position()),
+    };
+    let candidate = match ergo_ser::ergo_box::read_ergo_box_candidate(&mut r) {
+        Ok(c) => c,
+        Err(e) => return (Verdict::Reject(format!("box: {e:?}")), r.position()),
+    };
+    let consumed = r.position();
+
+    // Full-consensus surface: curve-check every group element the parse saw
+    // (extension values and register values included), matching the JVM's
+    // deserialize-time `GroupElementSerializer` check.
+    if let Err(e) = drain_and_check_group_elements(&mut r) {
+        return (Verdict::Reject(e), consumed);
+    }
+
+    let tree = candidate.ergo_tree().clone();
+    for gate in [
+        ergo_ser::ergo_tree::check_header_size_bit as fn(&_) -> _,
+        ergo_ser::ergo_tree::check_tree_version_supported,
+        ergo_ser::ergo_tree::check_resolvable_methods,
+        ergo_ser::ergo_tree::check_sigma_prop_root,
+    ] {
+        if let Err(e) = gate(&tree) {
+            return (Verdict::Reject(format!("{e:?}")), consumed);
+        }
+    }
+    if matches!(tree.body, ergo_ser::opcode::Expr::Unparsed(_)) {
+        return (Verdict::Reject("UnparsedErgoTree".into()), consumed);
+    }
+
+    // SELF is the parsed box at transaction id 0…0, index 0 — the same identity
+    // `reduce`'s dummy SELF uses, so a script reading SELF.id / SELF.bytes gets a
+    // value derived from the real box bytes on both sides.
+    let boxed = ErgoBox {
+        candidate: candidate.clone(),
+        transaction_id: ModifierId::from_bytes([0u8; 32]),
+        index: 0,
+    };
+    let raw_bytes = match serialize_ergo_box(&boxed) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                Verdict::Reject(format!("SELF serialization: {e:?}")),
+                consumed,
+            )
+        }
+    };
+    let id = match boxed.box_id() {
+        Ok(d) => *d.as_bytes(),
+        Err(e) => return (Verdict::Reject(format!("SELF id: {e:?}")), consumed),
+    };
+    let self_box = EvalBox {
+        value: candidate.value as i64,
+        script_bytes: candidate.ergo_tree_bytes().to_vec(),
+        creation_height: candidate.creation_height,
+        id,
+        transaction_id: [0u8; 32],
+        output_index: 0,
+        registers: copy_registers(&candidate.additional_registers),
+        tokens: candidate
+            .tokens
+            .iter()
+            .map(|t| (*t.token_id.as_bytes(), t.amount))
+            .collect(),
+        raw_bytes,
+        register_bytes: candidate.register_bytes().to_vec(),
+    };
+    let inputs = [self_box];
+    let ctx = ReductionContext {
+        self_box: Some(&inputs[0]),
+        inputs: &inputs,
+        pre_header_version: 4,
+        pre_header_timestamp: 3,
+        miner_pubkey: ergo_sigma::evaluator::SECP256K1_GENERATOR,
+        last_block_utxo_root: Some(ergo_ser::sigma_value::AvlTreeData {
+            digest: vec![0u8; 33],
+            insert_allowed: true,
+            update_allowed: true,
+            remove_allowed: true,
+            key_length: 32,
+            value_length_opt: None,
+        }),
+        ergo_tree_version: tree.version,
+        extension: extension.values,
+        ..ReductionContext::minimal(0, 0)
+    };
+    let limit = match JitCost::from_block_cost(1_000_000) {
+        Ok(l) => l,
+        Err(_) => return (Verdict::Reject("cost-limit".into()), consumed),
+    };
+    let mut cost = CostAccumulator::new(limit);
+    match reduce_expr_with_cost(&tree.body, &ctx, &tree.constants, &mut cost) {
+        Ok(sb) => {
+            let mut w = VlqWriter::new();
+            if let Err(e) = ergo_ser::sigma_value::write_sigma_boolean(&mut w, &sb) {
+                return (Verdict::Reject(format!("serialize: {e:?}")), consumed);
+            }
+            (
+                Verdict::Accept(format!(
+                    "P:{}|{}",
+                    to_hex(&w.result()),
+                    cost.total().value()
+                )),
+                consumed,
+            )
+        }
+        Err(e) => (Verdict::Reject(format!("{e:?}")), consumed),
+    }
+}
+
 /// `validate`: stateless structural transaction validity.
 ///
 /// Mirrors Scala `ErgoTransaction.statelessValidity()`: the context-free checks
@@ -558,46 +775,124 @@ fn verify_avl_verdict(bytes: &[u8]) -> (Verdict, usize) {
     }
 }
 
-/// Compare the node and the JVM on one input for `spec`. `None` when they agree
-/// (or the oracle erred), `Some(Divergence)` otherwise.
-pub fn diff(
+/// Compute the node's verdict for `bytes` and query the JVM for the same
+/// (possibly truncated) input, returning both plus the exact bytes fed to the
+/// JVM. Shared by [`diff`] and [`crate::regressions::classify`] so both agree
+/// on what "the same input" means for a given [`SurfaceSpec`].
+pub fn query_verdicts(
     spec: &SurfaceSpec,
     bytes: &[u8],
     oracle: &mut Oracle,
-) -> io::Result<Option<Divergence>> {
+) -> io::Result<(Verdict, Verdict, Vec<u8>)> {
     let (rust, consumed) = (spec.rust_verdict)(bytes);
     // Feed the JVM exactly the bytes the node treated as this object — trailing
     // bytes a sizeless parse ignores would be an unfair diff.
-    let jvm_input: &[u8] = match &rust {
-        Verdict::Accept(_) => &bytes[..consumed],
-        _ => bytes,
+    let jvm_input: Vec<u8> = match &rust {
+        Verdict::Accept(_) => bytes[..consumed].to_vec(),
+        _ => bytes.to_vec(),
     };
-    let jvm = oracle.query(spec.name, jvm_input)?;
+    let jvm = oracle.query(spec.name, &jvm_input)?;
+    Ok((rust, jvm, jvm_input))
+}
 
+/// Outcome of reconciling the node's and the JVM's verdicts on the same input.
+///
+/// Distinguishes an **explicit** agreement (both sides parsed/rejected the
+/// input the same consensus-relevant way) from an **indeterminate** one (the
+/// oracle could not evaluate at least one side, `Verdict::Err`) — a caller
+/// that needs to know "did they actually agree" (e.g.
+/// [`crate::regressions::classify`], reconciling a parse-surface divergence
+/// against a `reduce`/`reduce_ctx` channel) must not fold `Indeterminate` into
+/// `Agree`: an oracle that couldn't evaluate the reduction channel proves
+/// nothing about whether the original divergence is benign.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Reconciliation {
+    /// Both sides reached the same consensus-relevant outcome.
+    Agree,
+    /// A genuine divergence.
+    Diverges(Divergence),
+    /// At least one side's verdict was `Verdict::Err` — the oracle pipeline
+    /// itself could not decide, so nothing was actually reconciled.
+    Indeterminate,
+}
+
+/// Pure decision: given `spec` and both sides' already-computed verdicts (see
+/// [`query_verdicts`]), classify the outcome. No I/O.
+pub fn reconcile(
+    spec: &SurfaceSpec,
+    rust: Verdict,
+    jvm: Verdict,
+    jvm_input: &[u8],
+) -> Reconciliation {
+    if matches!(rust, Verdict::Err(_)) || matches!(jvm, Verdict::Err(_)) {
+        return Reconciliation::Indeterminate;
+    }
     let kind = match (&rust, &jvm) {
-        (_, Verdict::Err(_)) | (Verdict::Err(_), _) => return Ok(None),
         (Verdict::Accept(_), Verdict::Reject(_)) | (Verdict::Reject(_), Verdict::Accept(_)) => {
             DivergenceKind::AcceptReject
         }
         (Verdict::Accept(a), Verdict::Accept(b)) => {
             if !spec.compare_canonical || a.is_empty() || b.is_empty() || a == b {
-                return Ok(None);
+                return Reconciliation::Agree;
             }
             if spec.soft_fork_header && jvm_input.first().map(|h| h & 0x07).unwrap_or(0) > 3 {
-                return Ok(None);
+                return Reconciliation::Agree;
             }
             DivergenceKind::Canonical
         }
-        (Verdict::Reject(_), Verdict::Reject(_)) => return Ok(None),
+        (Verdict::Reject(_), Verdict::Reject(_)) => return Reconciliation::Agree,
+        (Verdict::Err(_), _) | (_, Verdict::Err(_)) => unreachable!("Err handled above"),
     };
 
-    Ok(Some(Divergence {
+    Reconciliation::Diverges(Divergence {
         surface: spec.name,
         kind,
         input_hex: to_hex(jvm_input),
         rust,
         jvm,
-    }))
+    })
+}
+
+/// Compare the node and the JVM on one input for `spec`. `Ok(None)` when they
+/// explicitly agree, `Ok(Some(Divergence))` on a genuine divergence.
+///
+/// An oracle `Verdict::Err` on EITHER side (a `reduce`/`reduce_ctx` pipeline
+/// error, a malformed reply, ...) is surfaced as `Err` here, NOT folded into
+/// `Ok(None)`. `Ok(None)` must mean "checked and agreed" — an oracle that
+/// could not evaluate the input proved nothing, and every caller (the
+/// `run_oracle`/`run_oracle_repro` campaigns, `minimize_divergence`) already
+/// treats an `Err` from this function as a harness failure (exit 3), which is
+/// exactly the "this check did not actually happen" signal an indeterminate
+/// verdict needs. Before this, an `ERR ...` oracle reply reconciled as `None`
+/// and was counted as a clean, passed check.
+pub fn diff(
+    spec: &SurfaceSpec,
+    bytes: &[u8],
+    oracle: &mut Oracle,
+) -> io::Result<Option<Divergence>> {
+    let (rust, jvm, jvm_input) = query_verdicts(spec, bytes, oracle)?;
+    if let Verdict::Err(detail) = &rust {
+        return Err(indeterminate_error(spec, "rust", detail));
+    }
+    if let Verdict::Err(detail) = &jvm {
+        return Err(indeterminate_error(spec, "jvm", detail));
+    }
+    Ok(match reconcile(spec, rust, jvm, &jvm_input) {
+        Reconciliation::Diverges(d) => Some(d),
+        Reconciliation::Agree => None,
+        Reconciliation::Indeterminate => {
+            unreachable!("both sides' Verdict::Err already handled above")
+        }
+    })
+}
+
+/// Build the [`io::Error`] `diff` returns for an indeterminate oracle outcome
+/// (see `diff`'s doc comment for why this must not become `Ok(None)`).
+fn indeterminate_error(spec: &SurfaceSpec, side: &str, detail: &str) -> io::Error {
+    io::Error::other(format!(
+        "oracle could not evaluate surface {}: {side} verdict was Err({detail})",
+        spec.name
+    ))
 }
 
 #[cfg(test)]
@@ -1052,5 +1347,218 @@ mod tests {
             );
             assert_eq!(node, jvm, "[{name}] node vs JVM reduce divergence");
         }
+    }
+
+    // ----- reconcile: agree vs diverges vs indeterminate -----
+    //
+    // Pure-logic tests for `reconcile` — no oracle process needed, since the
+    // decision only looks at two already-computed `Verdict`s. This is the
+    // regression coverage for classify()'s "None means indeterminate, not
+    // agreement" bug: `reconcile` (used by both `diff` and
+    // `crate::regressions::classify`) must keep `Indeterminate` (a
+    // `Verdict::Err` on either side) distinct from `Agree` (an explicit
+    // Reject/Reject or matching Accept/Accept).
+
+    // ----- helpers -----
+
+    fn dummy_rust_verdict(_bytes: &[u8]) -> (Verdict, usize) {
+        unreachable!("reconcile takes pre-computed verdicts; this fn pointer is never invoked")
+    }
+
+    fn spec(compare_canonical: bool, soft_fork_header: bool) -> SurfaceSpec {
+        SurfaceSpec {
+            name: "test_surface",
+            rust_verdict: dummy_rust_verdict,
+            compare_canonical,
+            soft_fork_header,
+        }
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn reconcile_both_reject_agrees() {
+        let s = spec(true, false);
+        let out = reconcile(
+            &s,
+            Verdict::Reject("bad".into()),
+            Verdict::Reject("bad".into()),
+            b"\x00",
+        );
+        assert_eq!(out, Reconciliation::Agree);
+    }
+
+    #[test]
+    fn reconcile_both_accept_same_canonical_agrees() {
+        let s = spec(true, false);
+        let out = reconcile(
+            &s,
+            Verdict::Accept("ab".into()),
+            Verdict::Accept("ab".into()),
+            b"\x00",
+        );
+        assert_eq!(out, Reconciliation::Agree);
+    }
+
+    #[test]
+    fn reconcile_accept_vs_reject_diverges() {
+        let s = spec(true, false);
+        let out = reconcile(
+            &s,
+            Verdict::Accept("ab".into()),
+            Verdict::Reject("nope".into()),
+            b"\x00",
+        );
+        assert!(matches!(
+            out,
+            Reconciliation::Diverges(Divergence {
+                kind: DivergenceKind::AcceptReject,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn reconcile_both_accept_different_canonical_diverges() {
+        let s = spec(true, false);
+        let out = reconcile(
+            &s,
+            Verdict::Accept("ab".into()),
+            Verdict::Accept("cd".into()),
+            b"\x00",
+        );
+        assert!(matches!(
+            out,
+            Reconciliation::Diverges(Divergence {
+                kind: DivergenceKind::Canonical,
+                ..
+            })
+        ));
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn reconcile_rust_err_is_indeterminate_not_agree() {
+        // The bug this guards: a reduce/reduce_ctx pipeline error on the node
+        // side used to fold into `diff`'s `None`, which `classify` read as
+        // "reconciles" (KnownArtifact) — silently suppressing a real
+        // divergence the oracle simply couldn't evaluate.
+        let s = spec(true, false);
+        let out = reconcile(
+            &s,
+            Verdict::Err("eval blew up".into()),
+            Verdict::Accept("ab".into()),
+            b"\x00",
+        );
+        assert_eq!(out, Reconciliation::Indeterminate);
+    }
+
+    #[test]
+    fn reconcile_jvm_err_is_indeterminate_not_agree() {
+        let s = spec(true, false);
+        let out = reconcile(
+            &s,
+            Verdict::Accept("ab".into()),
+            Verdict::Err("oracle pipe hiccup".into()),
+            b"\x00",
+        );
+        assert_eq!(out, Reconciliation::Indeterminate);
+    }
+
+    #[test]
+    fn reconcile_both_err_is_indeterminate() {
+        let s = spec(true, false);
+        let out = reconcile(
+            &s,
+            Verdict::Err("a".into()),
+            Verdict::Err("b".into()),
+            b"\x00",
+        );
+        assert_eq!(out, Reconciliation::Indeterminate);
+    }
+
+    // ----- diff: an oracle ERR reply must be Err, never a passed check -----
+    //
+    // Regression for the incremental CodeRabbit finding on PR #309: `diff`
+    // used to fold a `Verdict::Err` on either side into `Ok(None)` — an ERR
+    // oracle reply then looked identical to "checked and agreed", so
+    // `run_oracle` counted it as a clean check and a campaign could exit 0
+    // having verified nothing on that input. `diff` must surface it as `Err`
+    // so every caller's existing "Err = harness failure" handling fires.
+
+    /// Spawn a trivial stub "oracle" (no scala-cli, no JVM) that replies
+    /// `ERR <detail>` to every request, wired into an `Oracle` the same way
+    /// `Oracle::spawn` would — this only needs `Oracle`'s private fields to be
+    /// reachable from `oracle::tests`, not a real JVM.
+    fn stub_err_oracle(detail: &str) -> Oracle {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "while IFS= read -r _line; do echo 'ERR {detail}'; done"
+            ))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn stub ERR oracle");
+        let stdin = child.stdin.take().expect("piped stdin");
+        let stdout = io::BufReader::new(child.stdout.take().expect("piped stdout"));
+        Oracle {
+            child,
+            stdin,
+            stdout,
+            transcript: None,
+        }
+    }
+
+    #[test]
+    fn diff_jvm_err_reply_is_err_not_ok_none() {
+        let mut oracle = stub_err_oracle("synthetic-jvm-failure");
+        let spec = oracle_surfaces()
+            .into_iter()
+            .find(|s| s.name == "ergo_tree")
+            .expect("ergo_tree is a known oracle surface");
+        // A tree the node itself ACCEPTs (see reduce_verdict_known_trees_match_jvm_oracle),
+        // so the ERR comes from the stub JVM side, not the node's own parse.
+        let bytes = from_hex("0008d3").expect("valid test hex");
+
+        let result = diff(&spec, &bytes, &mut oracle);
+        assert!(
+            result.is_err(),
+            "an oracle ERR reply must be Err, never Ok(None) — Ok(None) reads as              a passed, agreeing check"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("jvm verdict was Err") && msg.contains("synthetic-jvm-failure"),
+            "error should name which side erred and carry the detail: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn diff_rust_err_reply_is_err_not_ok_none() {
+        // Force the NODE side to Err. `query_verdicts` still queries the
+        // (stubbed) JVM regardless of the node's verdict — `diff` checks the
+        // node's `rust` verdict first, so this exercises that branch even
+        // though both sides technically error here.
+        let spec = SurfaceSpec {
+            name: "test_surface",
+            rust_verdict: |_bytes: &[u8]| (Verdict::Err("synthetic-node-failure".into()), 0),
+            compare_canonical: true,
+            soft_fork_header: false,
+        };
+        let mut oracle = stub_err_oracle("synthetic-jvm-failure-not-reached-by-assertion");
+
+        let result = diff(&spec, b"\x00", &mut oracle);
+        assert!(
+            result.is_err(),
+            "a node-side Err verdict must be Err, never Ok(None)"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("rust verdict was Err") && msg.contains("synthetic-node-failure"),
+            "error should name which side erred and carry the detail: {msg:?}"
+        );
     }
 }
