@@ -12991,3 +12991,22 @@ fn sbox_accessor_method_form_costs() {
         "creationInfo body = ExtractCreationInfo(16)"
     );
 }
+
+/// `value-trace`: every evaluated node's value, keyed by its preorder id
+/// in the armed root — `SizeOf(Coll(10,20,30))` records the collection
+/// (id 1) and the size (id 0), in evaluation order.
+#[cfg(feature = "value-trace")]
+#[test]
+fn value_trace_records_every_evaluated_node_by_preorder_id() {
+    let coll = const_bytes(vec![10, 20, 30]);
+    let expr = op(0xB1, Payload::One(Box::new(coll)));
+    crate::value_trace::enable(&expr);
+    assert_eq!(run_eval(&expr), Value::Int(3));
+    let entries = crate::value_trace::take().expect("armed");
+    let ids: Vec<u64> = entries.iter().map(|e| e.id).collect();
+    assert_eq!(ids, vec![1, 0], "{entries:?}");
+    assert!(entries[1].value.contains("Int(3)"), "{entries:?}");
+    // Nothing is recorded once taken.
+    assert_eq!(run_eval(&expr), Value::Int(3));
+    assert!(crate::value_trace::take().is_none());
+}
