@@ -3232,6 +3232,29 @@ fn byte_throttle_over_cap_replayed_modifier_frame_drops_and_penalizes() {
     );
 }
 
+/// Charge `peer`'s byte window up to `headroom` bytes short of the cap, so the
+/// next frame larger than `headroom` is over-cap while a 1-byte probe still
+/// fits. Lets a test tell "the exempt frame was charged" apart from "the
+/// window was already full".
+fn fill_byte_window_leaving(state: &mut NodeState, peer: SocketAddr, now: Instant, headroom: u64) {
+    use ergo_p2p::throttle::LimiterVerdict;
+    let mut remaining = state.throttle.limits().max_bytes_per_window - headroom;
+    while remaining > 0 {
+        let chunk = remaining.min(u32::MAX as u64) as u32;
+        assert_eq!(
+            state.throttle.check_and_record(peer, now, chunk),
+            LimiterVerdict::Ok,
+            "pre-fill must stay under the cap"
+        );
+        remaining -= chunk as u64;
+    }
+    assert_eq!(
+        state.throttle.check_and_record(peer, now, 1),
+        LimiterVerdict::Ok,
+        "a 1-byte probe must still fit inside the headroom",
+    );
+}
+
 /// The byte axis still charges the exempted frame, so a peer cannot mint free
 /// bandwidth by sending only `Modifier` frames — its next non-exempt frame is
 /// judged against the true window.
@@ -3251,7 +3274,11 @@ fn byte_throttle_over_cap_modifier_frame_still_charged_to_the_window() {
     .expect("serialize inv");
     let _ = handle_message(&mut state, peer, message::CODE_INV, &inv, now);
 
-    saturate_byte_window(&mut state, peer, now);
+    // Leave a sliver of headroom: the 4 KiB delivery below is over-cap (and so
+    // takes the exempt path), but a 1-byte probe fits UNLESS that delivery was
+    // charged. Fully saturating the window here would make the final
+    // assertion pass even if the exempt frame were never recorded.
+    fill_byte_window_leaving(&mut state, peer, now, 64);
 
     let payload = message::serialize_modifiers(&ergo_p2p::types::ModifiersData {
         type_id: ModifierTypeId::ADProofs.as_byte(),
@@ -3260,8 +3287,6 @@ fn byte_throttle_over_cap_modifier_frame_still_charged_to_the_window() {
     .expect("serialize modifiers");
     let _ = handle_message(&mut state, peer, message::CODE_MODIFIER, &payload, now);
 
-    // Draining the window by exactly the pre-fill budget must NOT restore
-    // capacity: the exempted frame's bytes are still in flight.
     assert_eq!(
         state.throttle.check_and_record(peer, now, 1),
         ergo_p2p::throttle::LimiterVerdict::ByteRateExceeded,
