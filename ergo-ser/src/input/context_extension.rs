@@ -344,7 +344,26 @@ fn extension_value_to_expr(tpe: &SigmaType, val: &SigmaValue) -> Result<Expr, Wr
         })),
         // `ConcreteCollection` node: packed `0x85` for Boolean elements (the
         // only shape Scala emits for those), `0x83` otherwise.
+        //
+        // The declared entry type must actually be `SColl` of the node's own
+        // `elem_type` before we trust `elem_type` for encoding. The wire
+        // reader can never produce a mismatched pair (`tpe` is always
+        // derived from the same node in `evaluated_expr_to_extension_value`),
+        // but an in-process constructor (wallet / REST) can hand us any
+        // `(SigmaType, SigmaValue)` pairing. Without this check we'd encode
+        // by `elem_type` and silently ignore the declared `tpe` — e.g. a
+        // caller-declared `SColl(SInt)` carrying a `ConcreteCollection` whose
+        // `elem_type` is `SBoolean` would serialize as a Boolean collection,
+        // hashing bytes that don't represent the declared value into the
+        // signed extension.
         (_, SigmaValue::ConcreteCollection { elem_type, items }) => {
+            if !matches!(tpe, SigmaType::SColl(declared_elem) if declared_elem.as_ref() == elem_type.as_ref())
+            {
+                return Err(WriteError::InvalidData(format!(
+                    "ConcreteCollection element type {elem_type:?} does not match \
+                     declared context-extension type {tpe:?}"
+                )));
+            }
             if matches!(elem_type.as_ref(), SigmaType::SBoolean) {
                 let bits = items
                     .iter()
@@ -494,6 +513,32 @@ mod tests {
     }
 
     // ----- round-trips -----
+
+    #[test]
+    fn write_context_extension_concrete_collection_matching_type_round_trips() {
+        // Sanity: a correctly-paired `SColl(SInt)` / `ConcreteCollection {
+        // elem_type: SInt, .. }` still writes and reads back fine — the
+        // guard rejects only a genuine mismatch.
+        let mut values = indexmap::IndexMap::new();
+        values.insert(
+            0u8,
+            (
+                SigmaType::SColl(Box::new(SigmaType::SInt)),
+                SigmaValue::ConcreteCollection {
+                    elem_type: Box::new(SigmaType::SInt),
+                    items: vec![SigmaValue::Int(1), SigmaValue::Int(2)],
+                },
+            ),
+        );
+        let ext = ContextExtension { values };
+        let mut w = VlqWriter::new();
+        write_context_extension(&mut w, &ext).unwrap();
+        let data = w.result();
+        let mut r = VlqReader::new(&data);
+        let decoded = read_context_extension(&mut r).unwrap();
+        assert!(r.is_empty(), "leftover bytes after roundtrip");
+        assert_eq!(decoded, ext);
+    }
 
     #[test]
     fn context_extension_empty_roundtrip() {
@@ -714,6 +759,59 @@ mod tests {
         assert!(
             msg.contains("255"),
             "message should name the cap, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn write_context_extension_concrete_collection_elem_type_mismatch_errors() {
+        // Declared entry type says `SColl(SInt)`, but the
+        // `ConcreteCollection` node's own `elem_type` is `SBoolean`. Prior to
+        // the fix, `extension_value_to_expr` ignored the declared type and
+        // encoded (and signed) this as a Boolean collection — the extension
+        // bytes a wallet signs no longer represent the declared value.
+        let mut values = indexmap::IndexMap::new();
+        values.insert(
+            0u8,
+            (
+                SigmaType::SColl(Box::new(SigmaType::SInt)),
+                SigmaValue::ConcreteCollection {
+                    elem_type: Box::new(SigmaType::SBoolean),
+                    items: vec![SigmaValue::Boolean(true)],
+                },
+            ),
+        );
+        let ext = ContextExtension { values };
+        let mut w = VlqWriter::new();
+        let err = write_context_extension(&mut w, &ext).unwrap_err();
+        let WriteError::InvalidData(msg) = &err;
+        assert!(
+            msg.contains("element type") && msg.contains("declared"),
+            "message should describe the mismatch, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn write_context_extension_concrete_collection_non_coll_outer_type_errors() {
+        // Declared entry type isn't even an `SColl` — a non-collection type
+        // paired with a `ConcreteCollection` value must also be rejected.
+        let mut values = indexmap::IndexMap::new();
+        values.insert(
+            0u8,
+            (
+                SigmaType::SInt,
+                SigmaValue::ConcreteCollection {
+                    elem_type: Box::new(SigmaType::SInt),
+                    items: vec![SigmaValue::Int(1)],
+                },
+            ),
+        );
+        let ext = ContextExtension { values };
+        let mut w = VlqWriter::new();
+        let err = write_context_extension(&mut w, &ext).unwrap_err();
+        let WriteError::InvalidData(msg) = &err;
+        assert!(
+            msg.contains("element type") && msg.contains("declared"),
+            "message should describe the mismatch, got: {msg}"
         );
     }
 

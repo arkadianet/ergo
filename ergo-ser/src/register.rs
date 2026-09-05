@@ -334,7 +334,25 @@ fn register_value_to_expr(tpe: &SigmaType, val: &SigmaValue) -> Result<Expr, Wri
         // A `ConcreteCollection` node goes back out in node form: the packed
         // `0x85` shape when the element type is Boolean (Scala's only encoding
         // for that case), otherwise `0x83` with each item as an expression.
+        //
+        // The declared register type must actually be `SColl` of the node's
+        // own `elem_type` before we trust that `elem_type` for encoding.
+        // Nothing on the wire-read path can produce a mismatched pair (the
+        // reader always derives `tpe` from the same node), but an in-process
+        // constructor (wallet / REST) can hand us any `RegisterValue { tpe,
+        // value }` pairing. Without this check we'd silently encode by
+        // `elem_type` and ignore `tpe`, so e.g. a caller-declared
+        // `SColl(SInt)` carrying a `ConcreteCollection` whose `elem_type` is
+        // `SBoolean` would serialize (and hash) as a Boolean collection —
+        // register bytes that don't represent the declared value.
         (_, SigmaValue::ConcreteCollection { elem_type, items }) => {
+            if !matches!(tpe, SigmaType::SColl(declared_elem) if declared_elem.as_ref() == elem_type.as_ref())
+            {
+                return Err(WriteError::InvalidData(format!(
+                    "ConcreteCollection element type {elem_type:?} does not match \
+                     declared register type {tpe:?}"
+                )));
+            }
             if matches!(elem_type.as_ref(), SigmaType::SBoolean) {
                 let bits = items
                     .iter()
@@ -430,6 +448,24 @@ mod tests {
     }
 
     // ----- round-trips -----
+
+    #[test]
+    fn write_register_value_concrete_collection_matching_type_round_trips() {
+        // Sanity: a correctly-paired `SColl(SInt)` / `ConcreteCollection {
+        // elem_type: SInt, .. }` still writes and round-trips fine — the
+        // guard rejects only a genuine mismatch.
+        let regs = AdditionalRegisters {
+            registers: vec![RegisterValue {
+                tpe: SigmaType::SColl(Box::new(SigmaType::SInt)),
+                value: SigmaValue::ConcreteCollection {
+                    elem_type: Box::new(SigmaType::SInt),
+                    items: vec![SigmaValue::Int(1), SigmaValue::Int(2)],
+                },
+            }],
+        };
+        let decoded = roundtrip(&regs);
+        assert_eq!(decoded, regs);
+    }
 
     #[test]
     fn empty_registers_roundtrip() {
@@ -613,6 +649,54 @@ mod tests {
         assert!(
             msg.contains("max"),
             "message should name the cap, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn write_register_value_concrete_collection_elem_type_mismatch_errors() {
+        // Declared register type says `SColl(SInt)`, but the
+        // `ConcreteCollection` node's own `elem_type` is `SBoolean`. Prior to
+        // the fix, `register_value_to_expr` ignored the declared `tpe` and
+        // encoded (and hashed) this as a Boolean collection — a register
+        // whose serialized bytes silently disagreed with its declared type.
+        let regs = AdditionalRegisters {
+            registers: vec![RegisterValue {
+                tpe: SigmaType::SColl(Box::new(SigmaType::SInt)),
+                value: SigmaValue::ConcreteCollection {
+                    elem_type: Box::new(SigmaType::SBoolean),
+                    items: vec![SigmaValue::Boolean(true)],
+                },
+            }],
+        };
+        let mut w = VlqWriter::new();
+        let err = write_registers(&mut w, &regs).unwrap_err();
+        let WriteError::InvalidData(msg) = &err;
+        assert!(
+            msg.contains("element type") && msg.contains("declared"),
+            "message should describe the mismatch, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn write_register_value_concrete_collection_non_coll_outer_type_errors() {
+        // Declared register type isn't even an `SColl` — a non-collection
+        // type paired with a `ConcreteCollection` value must also be
+        // rejected, not silently encoded by the node's own `elem_type`.
+        let regs = AdditionalRegisters {
+            registers: vec![RegisterValue {
+                tpe: SigmaType::SInt,
+                value: SigmaValue::ConcreteCollection {
+                    elem_type: Box::new(SigmaType::SInt),
+                    items: vec![SigmaValue::Int(1)],
+                },
+            }],
+        };
+        let mut w = VlqWriter::new();
+        let err = write_registers(&mut w, &regs).unwrap_err();
+        let WriteError::InvalidData(msg) = &err;
+        assert!(
+            msg.contains("element type") && msg.contains("declared"),
+            "message should describe the mismatch, got: {msg}"
         );
     }
 
