@@ -85,8 +85,61 @@ fn tx_to_input(tx: &ScalaTransaction) -> ScalaTransactionInput {
 
 // ─── Helper-level mode-divergence tests ──────────────────────────────
 
+/// Submit mode must reproduce every non-`Constant` `EvaluatedValue` form a
+/// wallet can put in a `spendingProof.extension`, byte-for-byte.
+///
+/// `decode_input_with_mode(Submit)` rebuilds the extension bytes from the
+/// PARSED struct (via `SpendingProof::new` -> `write_context_extension`), so a
+/// parse that discarded node provenance re-emitted `830204040e0410` as a plain
+/// `Coll` constant. The submitted transaction's extension bytes then differed
+/// from what the wallet signed and from what Scala would emit — breaking
+/// `bytes_to_sign` on the very inputs the extension protects.
+///
+/// `7f` / `80` are the deliberate exceptions: the reference canonicalizes the
+/// bare `TrueLeaf` / `FalseLeaf` opcodes to `0101` / `0100` on
+/// re-serialization, and so do we (verified against the JVM).
 #[test]
-fn decode_registers_with_mode_diverges_on_constant_stuple() {
+fn decode_context_extension_submit_preserves_evaluated_value_node_forms() {
+    // (submitted hex, bytes Submit mode must emit)
+    let cases = [
+        ("830204040e0410", "830204040e0410"), // ConcreteCollection
+        ("850201", "850201"),                 // packed bool ConcreteCollection
+        ("82", "82"),                         // GroupGenerator
+        ("860204020404", "860204020404"),     // CreateTuple
+        ("0101", "0101"),                     // Boolean constant
+        ("7f", "0101"),                       // TrueLeaf opcode -> canonical
+        ("80", "0100"),                       // FalseLeaf opcode -> canonical
+    ];
+    for (input, expected) in cases {
+        let mut ext = indexmap::IndexMap::new();
+        ext.insert("1".to_string(), input.to_string());
+        let (_, submit) = decode_context_extension_with_mode(&ext, DecodeMode::Submit)
+            .unwrap_or_else(|e| panic!("Submit decode of {input}: {e:?}"));
+        assert_eq!(
+            hex::encode(&submit),
+            format!("0101{expected}"),
+            "Submit mode must emit the reference's bytes for {input}",
+        );
+        let (_, preserve) = decode_context_extension_with_mode(&ext, DecodeMode::Preserve)
+            .unwrap_or_else(|e| panic!("Preserve decode of {input}: {e:?}"));
+        assert_eq!(
+            hex::encode(&preserve),
+            format!("0101{input}"),
+            "Preserve mode must keep the wire bytes for {input}",
+        );
+    }
+}
+
+#[test]
+fn decode_registers_with_mode_preserves_constant_stuple_in_both_modes() {
+    // Submit mode used to rewrite a `Constant[STuple]` register into the
+    // `CreateTuple` (0x86) expression form. Scala does NOT: `ValueSerializer`
+    // routes a `Constant` through `ConstantSerializer` and re-emits
+    // `3c 0e 0e ...`, keeping the 0x86 form only for a register that actually
+    // parsed as a `CreateTuple` node. Canonicalizing here changed the register
+    // bytes of a submitted transaction, hence its id — a live divergence on
+    // the shape block 836113 tx[18].R9 carries on mainnet. Both modes must now
+    // reproduce the wire bytes exactly.
     let mut regs = BTreeMap::new();
     regs.insert("R4".to_string(), CONSTANT_TUPLE_HEX.to_string());
 
@@ -95,31 +148,38 @@ fn decode_registers_with_mode_diverges_on_constant_stuple() {
     let (_, preserve) =
         decode_registers_with_mode(&regs, DecodeMode::Preserve).expect("Preserve register decode");
 
-    assert_ne!(
-        submit, preserve,
-        "decode_registers_with_mode: Submit and Preserve MUST produce \
-         different bytes for Constant[STuple] payloads — otherwise the \
-         routing-drift tests below would be vacuous"
-    );
-
     // Wire shape: count(u8=1) || register-bytes
-    let mut expected_preserve = vec![0x01u8];
-    expected_preserve.extend(hex::decode(CONSTANT_TUPLE_HEX).unwrap());
+    let mut expected = vec![0x01u8];
+    expected.extend(hex::decode(CONSTANT_TUPLE_HEX).unwrap());
     assert_eq!(
-        preserve, expected_preserve,
-        "Preserve mode lost byte-fidelity for Constant[STuple] — \
-         decode_registers_with_mode is canonicalizing instead of \
-         passing the original wire through"
+        preserve, expected,
+        "Preserve mode lost byte-fidelity for Constant[STuple]"
     );
+    assert_eq!(
+        submit, expected,
+        "Submit mode must NOT rewrite a Constant[STuple] register into the \
+         CreateTuple form — Scala keeps the constant, so rewriting it changes \
+         the submitted transaction's id"
+    );
+}
 
-    let mut expected_submit = vec![0x01u8];
-    expected_submit.extend(hex::decode(SUBMIT_CANONICAL_TUPLE_HEX).unwrap());
-    assert_eq!(
-        submit, expected_submit,
-        "Submit mode no longer canonicalizes Constant[STuple] to \
-         CreateTuple — if this changed intentionally, update the \
-         fixture; if not, write_register_value drifted"
-    );
+/// The CreateTuple (0x86) NODE form is the one that must survive as 0x86 —
+/// the counterpart to the test above. Together they pin that register node
+/// provenance is preserved in both directions rather than collapsed.
+#[test]
+fn decode_registers_with_mode_preserves_create_tuple_node_form() {
+    let mut regs = BTreeMap::new();
+    regs.insert("R4".to_string(), SUBMIT_CANONICAL_TUPLE_HEX.to_string());
+
+    let (_, submit) =
+        decode_registers_with_mode(&regs, DecodeMode::Submit).expect("Submit register decode");
+    let (_, preserve) =
+        decode_registers_with_mode(&regs, DecodeMode::Preserve).expect("Preserve register decode");
+
+    let mut expected = vec![0x01u8];
+    expected.extend(hex::decode(SUBMIT_CANONICAL_TUPLE_HEX).unwrap());
+    assert_eq!(preserve, expected);
+    assert_eq!(submit, expected);
 }
 
 #[test]
@@ -225,11 +285,17 @@ fn decode_block_transactions_with_mode_preserve_preserves_block_836113_tx18_id()
 }
 
 #[test]
-fn decode_block_transactions_with_mode_submit_does_canonicalize_tx18() {
-    // Sanity: prove the routing-drift test above isn't vacuous.
-    // If Submit and Preserve both produced Scala's tx_id, the
-    // canonicalization would be silently disabled and the test
-    // above could pass even on a buggy implementation.
+fn decode_block_transactions_with_mode_submit_matches_scala_tx18_id() {
+    // Submit mode used to rewrite tx[18].R9 (a `Constant[STuple]`) into the
+    // `CreateTuple` form, producing a transaction id that DIFFERED from
+    // Scala's — a live wrong-id bug on the JSON submit path, previously pinned
+    // here as if it were the intended behaviour. Now that register node
+    // provenance is preserved, Submit and Preserve agree with the reference.
+    //
+    // The routing-drift coverage this used to provide is carried by the
+    // non-canonical-SBoolean lever above (`0105` -> `0101`), which is a
+    // canonicalization Scala itself performs, and by
+    // `decode_context_extension_with_mode_diverges_on_noncanonical_sbool`.
     let block = load_block_836113();
     let scala_id_hex = block.block_transactions.transactions[18].id.to_lowercase();
 
@@ -243,13 +309,11 @@ fn decode_block_transactions_with_mode_submit_does_canonicalize_tx18() {
             .as_bytes(),
     );
 
-    assert_ne!(
+    assert_eq!(
         computed_hex, scala_id_hex,
-        "Submit mode must canonicalize tx[18] R9 (Constant[STuple] → \
-         CreateTuple) and produce a tx_id that DIFFERS from Scala's. \
-         If equal, the canonicalization is silently disabled and the \
-         Preserve-preservation test above is vacuous — fix the \
-         fixture or the writer before relying on routing-drift coverage."
+        "Submit mode must reproduce Scala's tx id for block 836113 tx[18] — \
+         a submitted transaction whose id differs from the reference's is \
+         rejected by the network"
     );
 }
 

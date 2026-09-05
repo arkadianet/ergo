@@ -10,8 +10,7 @@
 //! - 0xE3 GetVar              — context-extension Option lookup with exact-type match
 
 use ergo_primitives::cost::CostAccumulator;
-use ergo_primitives::reader::VlqReader;
-use ergo_ser::opcode::{parse_expr, write_expr, Expr, IrNode, Payload};
+use ergo_ser::opcode::Expr;
 use ergo_ser::sigma_type::SigmaType;
 use ergo_ser::sigma_value::SigmaValue;
 
@@ -169,82 +168,24 @@ pub(in crate::evaluator) fn read_register_option(
             match &b.registers[reg_idx] {
                 Some(rv) => {
                     check_requested_type(requested, &rv.tpe, reg_id)?;
-                    // Scala `CBox.regs` (CBox.scala:85) stores each register as
-                    // its `EvaluatedValue` node's `.value`. A register encoded as
-                    // a `Tuple` node (0x86 `CreateTuple`) has `Tuple.value =
-                    // Colls.fromArray(items)` — a `Coll`, NOT a `Tuple2`
-                    // (values.scala:789-793). Reading it at its `STuple` type then
-                    // yields a Coll masquerading behind a pair type, which fails
-                    // `Value.checkType` / `SelectField` downstream exactly as
-                    // Scala's InterpreterException "Invalid type returned by
-                    // evaluator" fails `verifyInput`. A `Constant[STuple]`
-                    // register (any type code, incl. the generic 0x60 tuple code)
-                    // keeps its `Tuple2` value and is unaffected — only the 0x86
-                    // node form diverges. See the mainnet-1808895 / testnet-431366
-                    // 0x86-register incidents.
-                    let val = if matches!(rv.tpe, SigmaType::STuple(_))
-                        && register_is_tuple_node(b, reg_idx)
-                    {
-                        tuple_node_coll_value(&rv.tpe, &rv.value, ctx)?
-                    } else {
-                        sigma_to_value_versioned(&rv.tpe, &rv.value, ctx)?
-                    };
+                    // Scala `CBox.regs` (`CBox.scala:85`) stores each
+                    // register as its `EvaluatedValue` node's `.value`. The
+                    // node identity is preserved by the parsed
+                    // `RegisterValue` itself — a `CreateTuple` (0x86)
+                    // register decodes to `(STuple, SigmaValue::Coll)` and a
+                    // tuple `Constant` to `(STuple, SigmaValue::Tuple)` — so
+                    // `sigma_to_value` lowers each to the shape Scala
+                    // produces (a `Coll` masquerading behind a pair type for
+                    // the node form, a real tuple for the constant). See the
+                    // mainnet-1808895 / testnet-431366 0x86-register
+                    // incidents.
+                    let val = sigma_to_value_versioned(&rv.tpe, &rv.value, ctx)?;
                     Ok(Value::Opt(Some(Box::new(val))))
                 }
                 None => Ok(Value::Opt(None)),
             }
         }
         _ => Err(EvalError::UnsupportedOpcode(unsupported_opcode)),
-    }
-}
-
-/// True when additional register `reg_idx` (0 = R4 .. 5 = R9) is encoded on the
-/// wire as a `Tuple` node — a `CreateTuple` expression, opcode `0x86` — rather
-/// than a plain `Constant`. This is the provenance Scala preserves by keeping
-/// the register's `EvaluatedValue` node (Constant vs Tuple); the parsed
-/// `RegisterValue` discards it, so we recover it from the verbatim
-/// `register_bytes` (the first byte of the entry: opcodes are `> 0x70`, a
-/// Constant's type code is `<= 0x70`, and `0x86` is unambiguously `CreateTuple`).
-/// Empty `register_bytes` (test-only structural boxes) or a short/unparsable
-/// block yield `false` — the pre-fix lowering. Real consensus boxes always
-/// carry `register_bytes` (populated from the wire at construction).
-fn register_is_tuple_node(b: &EvalBox, reg_idx: usize) -> bool {
-    if b.register_bytes.is_empty() {
-        return false;
-    }
-    match ergo_ser::register::split_register_bytes(&b.register_bytes) {
-        Ok(entries) => entries
-            .get(reg_idx)
-            .and_then(|e| e.first())
-            .is_some_and(|&first| first == 0x86),
-        Err(_) => false,
-    }
-}
-
-/// Materialize a register whose top-level node is a `Tuple` (0x86 `CreateTuple`)
-/// as a `Coll`, mirroring Scala's `Tuple.value = Colls.fromArray(items)`
-/// (`Coll[Any]`). Each item is lowered through the normal versioned converter.
-/// The resulting `Value::CollGeneric` is deliberately NOT a `Value::Tuple`, so a
-/// tuple-typed consumer (`SelectField`, or the `BlockValue`/`ValDef`
-/// `checkType`) rejects it — the bug-for-bug parity with Scala's `verifyInput`
-/// failure on such a register. Falls back to the normal lowering for any value
-/// that is not actually a tuple (defensive; `register_is_tuple_node` already
-/// gates this to `STuple` registers).
-fn tuple_node_coll_value(
-    tpe: &SigmaType,
-    val: &SigmaValue,
-    ctx: &ReductionContext<'_>,
-) -> Result<Value, EvalError> {
-    match (tpe, val) {
-        (SigmaType::STuple(types), SigmaValue::Tuple(vals)) if types.len() == vals.len() => {
-            let items = types
-                .iter()
-                .zip(vals.iter())
-                .map(|(t, v)| sigma_to_value_versioned(t, v, ctx))
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(Value::CollGeneric(items, Box::new(SigmaType::SAny)))
-        }
-        _ => sigma_to_value_versioned(tpe, val, ctx),
     }
 }
 
@@ -291,28 +232,26 @@ pub(in crate::evaluator) fn eval_extract_bytes_with_no_ref(
 }
 
 /// Canonical candidate serialization (`bytesWithNoRef`): value, script, height,
-/// tokens, then the register block re-emitted with every `GroupElement`
-/// canonicalized (identity garbage normalized; non-identity points
-/// curve-validated). Mirrors `write_ergo_box_candidate` exactly except the
-/// register block is re-serialized through GE normalization rather than copied
-/// verbatim — which is what normalizes the encoding. For a canonically-encoded
-/// box this reproduces `raw_bytes` minus the 32-byte txId + VLQ index suffix
-/// byte-for-byte.
+/// tokens, then the register block. Mirrors Scala
+/// `ErgoBoxCandidate.serializer.serialize`, which re-serializes each register's
+/// parsed `EvaluatedValue` node — so it must preserve the node forms the
+/// reference preserves (`Constant`, `CreateTuple` 0x86, `ConcreteCollection`
+/// 0x83 / packed 0x85, `GroupGenerator` 0x82) and canonicalize the ones it
+/// canonicalizes (`TrueLeaf` 0x7f / `FalseLeaf` 0x80 / a non-canonical Boolean
+/// payload -> `0101` / `0100`; a `0x00`-lead `GroupElement` -> 33 zeroes).
 ///
-/// The register block is re-emitted from the verbatim wire bytes
-/// (`EvalBox.register_bytes`), NOT from the parsed `registers` field, so each
-/// register's node provenance is preserved: a Constant-encoded tuple stays a
-/// Constant, a `CreateTuple` (0x86) register stays 0x86, a `ConcreteCollection`
-/// (0x83) register stays 0x83. This matches Scala `ErgoBoxCandidate.serializer`,
-/// which re-serializes each register's parsed AST node as-is. Re-encoding from
-/// the parsed `RegisterValue` instead would force every tuple-typed register
-/// into `CreateTuple` form (`register::write_register_value`), producing a wrong
-/// `bytesWithNoRef` preimage for a Constant-encoded tuple register — the
-/// divergence that stalled mainnet block 1808895.
+/// `EvalBox.register_bytes` already holds exactly that encoding:
+/// `read_ergo_box_candidate` stores the canonical re-serialization of the
+/// parsed registers rather than the wire slice, and the parsed `RegisterValue`
+/// keeps each node's identity (a tuple `Constant` is `SigmaValue::Tuple`, a
+/// `CreateTuple` node is `SigmaValue::Coll`), while `read_group_element`
+/// normalizes identity encodings at parse. So this simply emits those bytes.
+/// Getting it wrong is the divergence class that stalled mainnet block
+/// 1808895.
 ///
-/// Test-only boxes carry no wire `register_bytes`; they fall back to a
-/// structural re-encode from the parsed registers (behavior-preserving for the
-/// boxes that path serves, none of which carry a Constant-encoded tuple).
+/// Test-only boxes carry no `register_bytes`; they fall back to a structural
+/// re-encode from the parsed registers, which produces the same bytes for the
+/// same reason.
 pub(in crate::evaluator) fn box_candidate_bytes_canonical(
     b: &EvalBox,
 ) -> Result<Vec<u8>, EvalError> {
@@ -328,136 +267,24 @@ pub(in crate::evaluator) fn box_candidate_bytes_canonical(
     if b.register_bytes.is_empty() {
         write_registers_structural(&mut w, b)?;
     } else {
-        write_registers_canonical(&mut w, &b.register_bytes)?;
+        w.put_bytes(&b.register_bytes);
     }
     Ok(w.result())
 }
 
-/// Re-emit the register block from its verbatim wire bytes, normalizing only
-/// `GroupElement` encodings while preserving each register's node shape. See
-/// [`box_candidate_bytes_canonical`] for why provenance must be preserved.
-fn write_registers_canonical(
-    w: &mut ergo_primitives::writer::VlqWriter,
-    register_bytes: &[u8],
-) -> Result<(), EvalError> {
-    let entries = ergo_ser::register::split_register_bytes(register_bytes).map_err(|e| {
-        EvalError::TypeError {
-            expected: "splittable register block",
-            got: format!("register block split failed: {e}"),
-        }
-    })?;
-    w.put_u8(entries.len() as u8);
-    for entry in &entries {
-        let mut r = VlqReader::new(entry);
-        let expr = parse_expr(&mut r, 0, 0).map_err(|e| EvalError::TypeError {
-            expected: "parseable register expression",
-            got: format!("register expr parse failed: {e}"),
-        })?;
-        let canon = canonicalize_register_expr(&expr)?;
-        write_expr(w, &canon, false).map_err(|e| EvalError::TypeError {
-            expected: "serializable register expression",
-            got: format!("register expr re-serialization failed: {e}"),
-        })?;
-    }
-    Ok(())
-}
-
-/// Return a copy of register expression `e` with every `GroupElement`
-/// canonicalized, preserving the node's form: a `Const` re-canonicalizes its
-/// inline value; a `CreateTuple` (0x86) / `ConcreteCollection` (0x83) recurses
-/// into its items; any other form (e.g. `Coll[Boolean]` bit-packed) carries no
-/// `GroupElement` and is returned unchanged.
-fn canonicalize_register_expr(e: &Expr) -> Result<Expr, EvalError> {
-    Ok(match e {
-        Expr::Const { tpe, val } => Expr::Const {
-            tpe: tpe.clone(),
-            val: canonicalize_group_elements(val)?,
-        },
-        Expr::Op(IrNode {
-            opcode: opcode @ 0x86,
-            payload: Payload::Tuple { items },
-        }) => Expr::Op(IrNode {
-            opcode: *opcode,
-            payload: Payload::Tuple {
-                items: items
-                    .iter()
-                    .map(canonicalize_register_expr)
-                    .collect::<Result<_, _>>()?,
-            },
-        }),
-        Expr::Op(IrNode {
-            opcode: opcode @ 0x83,
-            payload: Payload::ConcreteCollection { elem_type, items },
-        }) => Expr::Op(IrNode {
-            opcode: *opcode,
-            payload: Payload::ConcreteCollection {
-                elem_type: elem_type.clone(),
-                items: items
-                    .iter()
-                    .map(canonicalize_register_expr)
-                    .collect::<Result<_, _>>()?,
-            },
-        }),
-        other => other.clone(),
-    })
-}
-
-/// Structural register re-encode for test-only boxes that carry no wire
-/// `register_bytes`. Tuple-typed registers go out in `CreateTuple` form (see
-/// `register::write_register_value`); this is acceptable only because the boxes
-/// reaching this path never carry a Constant-encoded tuple register.
+/// Structural register re-encode for test-only boxes that carry no
+/// `register_bytes`. Identical output to the cached block for any box built
+/// from wire bytes — `write_registers` is the same encoder that produced them.
 fn write_registers_structural(
     w: &mut ergo_primitives::writer::VlqWriter,
     b: &EvalBox,
 ) -> Result<(), EvalError> {
-    use ergo_ser::register::{write_registers, AdditionalRegisters, RegisterValue};
+    use ergo_ser::register::{write_registers, AdditionalRegisters};
 
-    let registers: Vec<RegisterValue> = b
-        .registers
-        .iter()
-        .flatten()
-        .map(|r| {
-            Ok(RegisterValue {
-                tpe: r.tpe.clone(),
-                value: canonicalize_group_elements(&r.value)?,
-            })
-        })
-        .collect::<Result<_, EvalError>>()?;
+    let registers = b.registers.iter().flatten().cloned().collect();
     write_registers(w, &AdditionalRegisters { registers }).map_err(|e| EvalError::TypeError {
         expected: "serializable box registers",
         got: format!("register re-serialization failed: {e}"),
-    })
-}
-
-/// Return a copy of `v` with every `GroupElement` canonicalized (recursing
-/// through `Coll`/`Tuple`/`Option`). A lead-0x00 identity encoding normalizes to
-/// 33 zero bytes; a non-identity point is curve-validated (and propagates an
-/// error if off-curve, matching Scala's parse-time reject).
-fn canonicalize_group_elements(
-    v: &ergo_ser::sigma_value::SigmaValue,
-) -> Result<ergo_ser::sigma_value::SigmaValue, EvalError> {
-    use ergo_ser::sigma_value::{CollValue, SigmaValue};
-    Ok(match v {
-        SigmaValue::GroupElement(ge) => {
-            let canon = super::sigma::canonicalize_group_element(*ge.as_bytes())?;
-            SigmaValue::GroupElement(ergo_primitives::group_element::GroupElement::from_bytes(
-                canon,
-            ))
-        }
-        SigmaValue::Coll(CollValue::Values(vs)) => SigmaValue::Coll(CollValue::Values(
-            vs.iter()
-                .map(canonicalize_group_elements)
-                .collect::<Result<_, _>>()?,
-        )),
-        SigmaValue::Tuple(vs) => SigmaValue::Tuple(
-            vs.iter()
-                .map(canonicalize_group_elements)
-                .collect::<Result<_, _>>()?,
-        ),
-        SigmaValue::Opt(Some(inner)) => {
-            SigmaValue::Opt(Some(Box::new(canonicalize_group_elements(inner)?)))
-        }
-        other => other.clone(),
     })
 }
 
@@ -472,12 +299,68 @@ pub(in crate::evaluator) fn eval_get_var(
     add_cost(cost, 0xE3)?;
     match ctx.extension.get(&var_id) {
         Some((ext_tpe, ext_val)) => {
+            // Scala `CContext.getVar` (`sigmastate/eval/CContext.scala:60-74`)
+            // distinguishes ABSENT from PRESENT-BUT-WRONG-TYPE. An absent slot
+            // returns `None`; a present slot whose stored RType does not match
+            // the requested one falls to the `case _` arm and THROWS
+            // `InvalidType("Cannot getVar[T](id): invalid type of value ...")`.
+            // Returning `None` here instead would ACCEPT an input the
+            // reference node rejects — e.g. extension `{1 -> Int(5)}` with
+            // `sigmaProp(getVar[Long](1).isDefined == false)`, which the JVM
+            // fails and Rust used to satisfy. Oracle: `REJECT InvalidType:
+            // Cannot getVar[Long](1): invalid type of value TestValue(5) at
+            // id=1`, versus `ACCEPT` for the absent slot.
+            //
+            // The box-register twin behaves the same way and is already
+            // enforced by `check_requested_type` above (Scala:
+            // `Cannot getReg[Long](4)`). The v6
+            // `SContext.getVarFromInput` does NOT: its Scala implementation
+            // (`CContext.scala:76-82`) pattern-matches on the RType and falls
+            // through to `case _ => None`, so that path keeps returning
+            // `Opt(None)` on a mismatch.
             if ext_tpe != tpe {
-                return Ok(Value::Opt(None));
+                return Err(EvalError::TypeError {
+                    expected:
+                        "context variable of the requested type (Scala CContext.getVar InvalidType)",
+                    got: format!("var {var_id}: stored {ext_tpe:?}, requested {tpe:?}"),
+                });
             }
-            let val = sigma_to_value_versioned(ext_tpe, ext_val, ctx)?;
+            let val = extension_var_value(ext_tpe, ext_val, ctx)?;
             Ok(Value::Opt(Some(Box::new(val))))
         }
         None => Ok(Value::Opt(None)),
     }
+}
+
+/// Lower a ContextExtension entry to the runtime value Scala's `getVar`
+/// hands back. Shared by `0xE3 GetVar` and the v6
+/// `SContext.getVarFromInput` MethodCall — both read the same
+/// `EvaluatedValue` node through the same `toSigmaContext` var map
+/// (`ErgoLikeContext.scala:158-160`: `k -> toAnyValue(v.value)(stypeToRType(v.tpe))`).
+///
+/// The one case that is not a plain conversion is a `Tuple` node
+/// (`0x86 CreateTuple`) entry. Scala stores the NODE, and
+/// `Tuple.value = Colls.fromArray(items.map(_.value))` is a `Coll`, not a
+/// `Tuple2` (`sigma/ast/values.scala:786-791`), while the type it is filed
+/// under is `STuple`. `getVar` compares only the RType derived from that
+/// type, so the lookup SUCCEEDS and returns the `Coll`; the mismatch surfaces
+/// at the first consumer that type-checks against `STuple` —
+/// `Value.checkType` → `InterpreterException("Invalid type returned by
+/// evaluator")` (`values.scala:232-255`, `SType.isValueOfType` requires a
+/// `Tuple2` for a pair type, `SType.scala:200-202`). So `isDefined` on such a
+/// var succeeds and `._1` fails.
+///
+/// `read_extension_value` records that provenance as the
+/// `(STuple, SigmaValue::Coll)` pair, and we lower it to a
+/// `Value::CollGeneric` — deliberately NOT a `Value::Tuple` — so
+/// `SelectField` (0x8C) rejects it exactly where Scala's `verifyInput`
+/// fails. A tuple `Constant` entry keeps `SigmaValue::Tuple` and its real
+/// `Tuple2` semantics. This mirrors the box-register twin above
+/// (`tuple_node_coll_value` + `register_is_tuple_node`).
+pub(in crate::evaluator) fn extension_var_value(
+    ext_tpe: &SigmaType,
+    ext_val: &SigmaValue,
+    ctx: &ReductionContext<'_>,
+) -> Result<Value, EvalError> {
+    sigma_to_value_versioned(ext_tpe, ext_val, ctx)
 }

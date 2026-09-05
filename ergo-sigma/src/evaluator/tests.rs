@@ -2981,14 +2981,22 @@ fn context_getvar_inline_works_methodcall_form_unsupported() {
         Value::Opt(Some(Box::new(Value::Int(123)))),
         "inline GetVar must read the present var",
     );
-    // Absent var id, and present-but-wrong-type both yield None.
+    // An ABSENT var id yields None...
     assert_eq!(
         run_eval_ctx(&inline(99, SigmaType::SInt), &ctx),
         Value::Opt(None)
     );
-    assert_eq!(
-        run_eval_ctx(&inline(7, SigmaType::SLong), &ctx),
-        Value::Opt(None)
+    // ...but a PRESENT var of the wrong type is an error, not None. Scala's
+    // `CContext.getVar` (`sigmastate/eval/CContext.scala:60-74`) throws
+    // `InvalidType("Cannot getVar[Long](7): invalid type of value ...")` in
+    // that case; returning None here would satisfy scripts the reference
+    // node rejects.
+    assert!(
+        matches!(
+            run_eval_ctx_err(&inline(7, SigmaType::SLong), &ctx),
+            EvalError::TypeError { .. }
+        ),
+        "a present context var of the wrong type must fail, not read as None",
     );
 
     // The (101, 11) getVar MethodCall form is unsupported: it must REJECT
@@ -11921,10 +11929,17 @@ fn serialize_put_cost_box_with_expr_tuple_register() {
     // R4 = (Byte, Byte) as CreateTuple(0x86) EXPRESSION:
     // 1(opcode) + 1(count) + 2 * [type_enc(SByte)=1 + data=1] = 6.
     use ergo_ser::register::{AdditionalRegisters, RegisterValue};
+    use ergo_ser::sigma_value::CollValue;
+    // The CreateTuple NODE form is `(STuple, SigmaValue::Coll)` — Scala's
+    // `Tuple.value` is a `Coll`. A `SigmaValue::Tuple` under the same type is
+    // a tuple CONSTANT and encodes as a constant instead.
     let regs = AdditionalRegisters {
         registers: vec![RegisterValue {
             tpe: SigmaType::STuple(vec![SigmaType::SByte, SigmaType::SByte]),
-            value: SigmaValue::Tuple(vec![SigmaValue::Byte(102), SigmaValue::Byte(99)]),
+            value: SigmaValue::Coll(CollValue::Values(vec![
+                SigmaValue::Byte(102),
+                SigmaValue::Byte(99),
+            ])),
         }],
     };
     let b = build_box(
@@ -11965,12 +11980,18 @@ fn serialize_put_cost_box_with_nested_expr_tuple_register() {
     // 1(opcode)+1(count) + 2 * inner; inner putValue = 1(opcode)+1(count) +
     // 2*[type_enc(SByte)=1 + data=1] = 6. So register cost = 2 + 2*6 = 14.
     use ergo_ser::register::{AdditionalRegisters, RegisterValue};
+    use ergo_ser::sigma_value::CollValue;
     let inner_t = SigmaType::STuple(vec![SigmaType::SByte, SigmaType::SByte]);
-    let inner_v = || SigmaValue::Tuple(vec![SigmaValue::Byte(1), SigmaValue::Byte(2)]);
+    let inner_v = || {
+        SigmaValue::Coll(CollValue::Values(vec![
+            SigmaValue::Byte(1),
+            SigmaValue::Byte(2),
+        ]))
+    };
     let regs = AdditionalRegisters {
         registers: vec![RegisterValue {
             tpe: SigmaType::STuple(vec![inner_t.clone(), inner_t]),
-            value: SigmaValue::Tuple(vec![inner_v(), inner_v()]),
+            value: SigmaValue::Coll(CollValue::Values(vec![inner_v(), inner_v()])),
         }],
     };
     let b = build_box(
@@ -12645,50 +12666,57 @@ fn tuple_item_nested_pair_ok() {
 
 // ---- Cluster: ExtractBytesWithNoRef canonicalizes register GE garbage ----
 
-/// A box carrying a non-canonical *identity* GroupElement register (lead 0x00
-/// with trailing garbage) must surface `bytesWithoutRef` (0xC4) CANONICALLY:
-/// Scala re-serializes the candidate from its parsed structure, where the
-/// identity point re-emits as 33 zero bytes (the trailing garbage is dropped at
-/// parse). `.bytes`/`.id` stay garbage-retained; only `bytesWithoutRef`
-/// normalizes. Build a self-consistent box whose raw_bytes carry the garbage.
+/// A box received on the wire with an identity `GroupElement` register whose
+/// trailing 32 bytes are garbage (`00 aa*32`) must surface `bytesWithoutRef`
+/// (0xC4) CANONICALLY: Scala `GroupElementSerializer.parse` maps any
+/// `0x00`-lead encoding to the identity point and re-serializes it as 33
+/// zeroes, and the box id is computed over the re-serialized bytes. The
+/// normalization happens at parse (`read_group_element`), so the parsed
+/// candidate's cached register block is already canonical and the evaluator
+/// simply emits it. Goes through the production reader rather than a
+/// hand-built `EvalBox`, because that is where the contract now lives.
 #[test]
 fn extract_bytes_with_no_ref_canonicalizes_register_ge() {
+    use ergo_ser::ergo_box::{read_ergo_box_candidate, write_ergo_box, ErgoBox};
     let ge_garbage = {
         let mut g = [0xaau8; 33];
-        g[0] = 0x00; // identity lead: bytes 1..32 are discarded at parse
+        g[0] = 0x00; // identity lead: trailing bytes discarded at parse
         g
     };
-    // raw_bytes = canonical-prefix ++ garbage register ++ txId(32) ++ index VLQ(0)
-    let mut raw = Vec::new();
-    raw.extend_from_slice(&[0xE8, 0x07]); // value 1000 (VLQ u64)
-    raw.extend_from_slice(&[0x10, 0x00]); // script_bytes (opaque here)
-    raw.push(0x00); // creation height 0
-    raw.push(0x00); // token count 0
-    raw.push(0x01); // register count 1
-    raw.push(0x07); // R4 type = SGroupElement
-    raw.extend_from_slice(&ge_garbage); // R4 value, garbage-retained
-    raw.extend_from_slice(&[0x11; 32]); // transaction id
-    raw.push(0x00); // output index VLQ(0)
-
-    // register_bytes = the verbatim register block (count byte + R4 entry),
-    // garbage retained — the canonical re-serializer parses + normalizes this.
-    let mut register_bytes = vec![0x01u8, 0x07u8]; // count 1, R4 type SGroupElement
-    register_bytes.extend_from_slice(&ge_garbage);
-
+    // Candidate: value 1000000, `sigmaProp(true)`, height 0, no tokens, R4 = GE
+    // (the JVM oracle's box shape, `canonical_extension_and_group_element.json`).
+    let mut wire = hex::decode("c0843d10010101d1730000000107").unwrap();
+    wire.extend_from_slice(&ge_garbage);
+    let mut r = ergo_primitives::reader::VlqReader::new(&wire);
+    let candidate = read_ergo_box_candidate(&mut r).expect("Scala accepts a 0x00-lead point");
+    assert!(r.is_empty());
+    assert!(
+        !candidate.register_bytes().contains(&0xAA),
+        "the reader must normalize the identity garbage at parse"
+    );
+    let ergo_box = ErgoBox {
+        candidate,
+        transaction_id: ergo_primitives::digest::ModifierId::from_bytes([0x11; 32]),
+        index: 0,
+    };
+    let raw_bytes = {
+        let mut w = ergo_primitives::writer::VlqWriter::new();
+        write_ergo_box(&mut w, &ergo_box).unwrap();
+        w.result()
+    };
     let b = EvalBox {
         creation_height: 0,
-        script_bytes: vec![0x10, 0x00],
-        value: 1000,
-        id: [0u8; 32],
+        script_bytes: ergo_box.candidate.ergo_tree_bytes().to_vec(),
+        value: ergo_box.candidate.value as i64,
+        id: *ergo_box.box_id().unwrap().as_bytes(),
         transaction_id: [0x11; 32],
         output_index: 0,
         registers: [
-            Some(ergo_ser::register::RegisterValue {
-                tpe: SigmaType::SGroupElement,
-                value: SigmaValue::GroupElement(
-                    ergo_primitives::group_element::GroupElement::from_bytes(ge_garbage),
-                ),
-            }),
+            ergo_box
+                .candidate
+                .additional_registers
+                .get(ergo_ser::register::RegisterId::R4)
+                .cloned(),
             None,
             None,
             None,
@@ -12696,8 +12724,8 @@ fn extract_bytes_with_no_ref_canonicalizes_register_ge() {
             None,
         ],
         tokens: Vec::new(),
-        raw_bytes: raw,
-        register_bytes,
+        raw_bytes,
+        register_bytes: ergo_box.candidate.register_bytes().to_vec(),
     };
     let ctx = ctx_with_self_box(&b);
     let expr = op(0xC4, Payload::One(Box::new(op(0xA7, Payload::Zero))));
@@ -12705,13 +12733,10 @@ fn extract_bytes_with_no_ref_canonicalizes_register_ge() {
         Value::CollBytes(v) => v,
         other => panic!("expected CollBytes, got {other:?}"),
     };
-    // The garbage 0xAA bytes must be gone (canonical re-serialization).
     assert!(
         !out.contains(&0xAA),
-        "bytesWithoutRef must normalize the identity-GE garbage, got {out:?}"
+        "bytesWithoutRef must carry the canonical identity GE, got {out:?}"
     );
-    // The tail is the R4 register: type 0x07 then the canonical identity GE
-    // (33 zero bytes). No txId/index follows (bytesWithoutRef excludes the ref).
     let mut expected_tail = vec![0x07u8];
     expected_tail.extend_from_slice(&[0x00; 33]);
     assert_eq!(
@@ -12756,10 +12781,15 @@ fn bytes_with_no_ref_for_register_block(register_bytes: Vec<u8>) -> Vec<u8> {
 
 /// A tuple-typed register encoded as a Constant (DataSerializer form) must
 /// round-trip through bytesWithoutRef byte-for-byte — NOT collapse into a
-/// `CreateTuple` (0x86) expression. The parsed `RegisterValue` alone is
-/// ambiguous (a Constant tuple and a CreateTuple expr both parse to
-/// `(STuple, Tuple)`); only the verbatim wire bytes carry the provenance. This
-/// is the divergence that stalled mainnet block 1808895.
+/// `CreateTuple` (0x86) expression. This is the divergence that stalled
+/// mainnet block 1808895.
+///
+/// The parsed `RegisterValue` now carries the provenance itself: a tuple
+/// Constant is `(STuple, SigmaValue::Tuple)` and a `CreateTuple` node is
+/// `(STuple, SigmaValue::Coll)` — Scala's `Tuple.value` really is a `Coll`
+/// (`sigma/ast/values.scala:786-791`). So the structural writer reproduces
+/// either form faithfully, and the verbatim bytes are a belt-and-braces
+/// second copy rather than the only source of truth.
 #[test]
 fn extract_bytes_with_no_ref_preserves_constant_tuple_register() {
     let tpe = SigmaType::STuple(vec![SigmaType::SLong, SigmaType::SLong]);
@@ -12774,9 +12804,10 @@ fn extract_bytes_with_no_ref_preserves_constant_tuple_register() {
         entry[0]
     );
 
-    // The same value through the structural register writer goes out as a
-    // CreateTuple (0x86) — the buggy encoding. bytesWithoutRef must NOT produce
-    // this; it must reproduce the Constant `entry` verbatim.
+    // The same value through the structural register writer must ALSO stay a
+    // Constant — it used to be rewritten as a `CreateTuple` (0x86), which gave
+    // a box carrying this shape (block 836113, tx[18].R9 on mainnet) the wrong
+    // id and the containing transaction the wrong id on the JSON submit path.
     let structural = {
         let mut w = ergo_primitives::writer::VlqWriter::new();
         ergo_ser::register::write_registers(
@@ -12789,8 +12820,8 @@ fn extract_bytes_with_no_ref_preserves_constant_tuple_register() {
         w.result()
     };
     assert_eq!(
-        structural[1], 0x86,
-        "structural writer emits CreateTuple for tuple registers (the bug)"
+        structural[1], entry[0],
+        "structural writer must keep a tuple Constant as a Constant"
     );
 
     let mut register_bytes = vec![0x01u8];
@@ -12840,39 +12871,52 @@ fn extract_bytes_with_no_ref_preserves_create_tuple_register() {
 }
 
 /// The exact mainnet-1808895 box shape: a register that is a Constant of a
-/// tuple type CONTAINING a GroupElement. The GE must be canonicalized (identity
-/// garbage -> 33 zeros) WHILE the register stays Constant form — the two
-/// behaviors the fix has to satisfy at once.
+/// tuple type CONTAINING a GroupElement, received on the wire with identity
+/// garbage inside the tuple. The GE must be canonicalized (garbage -> 33
+/// zeros) WHILE the register stays Constant form -- both hold because
+/// `read_group_element` normalizes at parse and the parsed `RegisterValue`
+/// keeps the Constant provenance. The garbage wire form is fabricated from
+/// the canonical encoding by overwriting the 33-zero identity run, since the
+/// writer no longer emits non-canonical points.
 #[test]
 fn extract_bytes_with_no_ref_normalizes_ge_inside_constant_tuple_register() {
-    let ge_garbage = {
-        let mut g = [0xaau8; 33];
-        g[0] = 0x00; // identity lead: trailing bytes discarded at parse
-        g
-    };
+    use ergo_ser::ergo_box::read_ergo_box_candidate;
     let tpe = SigmaType::STuple(vec![SigmaType::SGroupElement, SigmaType::SLong]);
     let val = SigmaValue::Tuple(vec![
         SigmaValue::GroupElement(ergo_primitives::group_element::GroupElement::from_bytes(
-            ge_garbage,
+            [0u8; 33],
         )),
         SigmaValue::Long(7),
     ]);
-    let entry = expr_wire_bytes(&Expr::Const { tpe, val });
-    assert!(entry[0] <= 0x70, "fixture must be Constant-encoded");
-    assert!(entry.contains(&0xAA), "fixture must carry GE garbage");
-
-    let mut register_bytes = vec![0x01u8];
-    register_bytes.extend_from_slice(&entry);
-    let out = bytes_with_no_ref_for_register_block(register_bytes);
-
-    let tail = &out[out.len() - entry.len()..];
+    let canonical_entry = expr_wire_bytes(&Expr::Const { tpe, val });
     assert!(
-        !tail.contains(&0xAA),
-        "GE garbage inside the tuple register must be normalized"
+        canonical_entry[0] <= 0x70,
+        "fixture must be Constant-encoded"
+    );
+    let zero_run = canonical_entry
+        .windows(33)
+        .position(|w| w.iter().all(|b| *b == 0))
+        .expect("canonical entry carries the 33-zero identity point");
+    let mut wire_entry = canonical_entry.clone();
+    wire_entry[zero_run + 1..zero_run + 33].fill(0xAA); // `00 aa*32`
+    assert!(wire_entry.contains(&0xAA), "fixture must carry GE garbage");
+
+    // Candidate: value 1000000, `sigmaProp(true)`, height 0, no tokens, one register.
+    let mut wire = hex::decode("c0843d10010101d17300000001").unwrap();
+    wire.extend_from_slice(&wire_entry);
+    let mut r = ergo_primitives::reader::VlqReader::new(&wire);
+    let candidate = read_ergo_box_candidate(&mut r).expect("Scala accepts the garbage point");
+    assert!(r.is_empty());
+
+    let out = bytes_with_no_ref_for_register_block(candidate.register_bytes().to_vec());
+    assert!(
+        !out.contains(&0xAA),
+        "identity garbage inside the tuple must be normalized, got {out:?}"
     );
     assert_eq!(
-        tail[0], entry[0],
-        "register must stay Constant form (same tuple type code, not 0x86)"
+        &out[out.len() - canonical_entry.len()..],
+        canonical_entry.as_slice(),
+        "register must stay Constant form with the canonical identity GE"
     );
 }
 

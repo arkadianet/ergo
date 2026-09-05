@@ -382,6 +382,61 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
         }
         (SigmaType::SBoolean, SigmaValue::Boolean(b)) => Ok(Value::Bool(*b)),
         (SigmaType::SSigmaProp, SigmaValue::SigmaProp(sb)) => Ok(Value::SigmaProp(sb.clone())),
+        // The `GroupGenerator` node (0x82) stored in a register or a context
+        // extension. Scala's `GroupGenerator.value` is
+        // `SigmaDsl.GroupElement(CryptoConstants.dlogGroup.generator)`
+        // (`sigma/ast/values.scala:715`) — the same point a group-element
+        // constant of the generator holds, and the JVM reduces the two
+        // identically (oracle: `SELF.R4[GroupElement].get == groupGenerator`
+        // costs 272 either way). The variants differ only in wire form.
+        // A `ConcreteCollection` node (0x83, or packed 0x85) lowers exactly like
+        // the collection it evaluates to: Scala's `EvaluatedCollection.value`
+        // is an ordinary `Coll` of the item values. The node form is a wire
+        // detail preserved for re-serialization, not a value difference.
+        (SigmaType::SColl(inner), SigmaValue::ConcreteCollection { items, .. }) => {
+            let coll = if matches!(inner.as_ref(), SigmaType::SBoolean) {
+                CollValue::BoolBits(
+                    items
+                        .iter()
+                        .map(|v| match v {
+                            SigmaValue::Boolean(b) => Ok(*b),
+                            other => Err(EvalError::TypeError {
+                                expected: "Boolean item in a Boolean ConcreteCollection node",
+                                got: format!("{other:?}"),
+                            }),
+                        })
+                        .collect::<Result<Vec<bool>, _>>()?,
+                )
+            } else {
+                CollValue::Values(items.clone())
+            };
+            sigma_to_value(tpe, &SigmaValue::Coll(coll))
+        }
+        // A `Tuple` node (0x86) filed under its `STuple` type. Scala's
+        // `Tuple.value = Colls.fromArray(items.map(_.value))` is a `Coll`, not
+        // a `Tuple2` (`sigma/ast/values.scala:786-791`), so the runtime value
+        // is a collection wearing a tuple type — the state Scala carries, and
+        // the reason a tuple-typed consumer of such a value throws
+        // `Value.checkType`'s `InterpreterException`. `Value::CollGeneric` is
+        // deliberately NOT `Value::Tuple` so `SelectField` (0x8C) rejects it
+        // exactly where the JVM does. A tuple `Constant` keeps
+        // `SigmaValue::Tuple` and its real pair semantics, and never reaches
+        // this arm.
+        (SigmaType::STuple(types), SigmaValue::Coll(CollValue::Values(vals)))
+            if types.len() == vals.len() =>
+        {
+            let items = types
+                .iter()
+                .zip(vals.iter())
+                .map(|(t, v)| sigma_to_value(t, v))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::CollGeneric(items, Box::new(SigmaType::SAny)))
+        }
+        (SigmaType::SGroupElement, SigmaValue::GroupGenerator) => Ok(Value::GroupElement(
+            crate::evaluator::opcodes::sigma::canonicalize_group_element(
+                ergo_ser::sigma_value::SECP256K1_GENERATOR,
+            )?,
+        )),
         (SigmaType::SGroupElement, SigmaValue::GroupElement(ge)) => {
             // Scala validates + canonicalizes a GroupElement when it is
             // deserialized (GroupElementSerializer.parse): 0x00-lead encodings

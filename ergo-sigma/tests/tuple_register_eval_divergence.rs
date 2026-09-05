@@ -46,7 +46,7 @@ use ergo_primitives::reader::VlqReader;
 use ergo_ser::opcode::{Expr, IrNode, Payload};
 use ergo_ser::register::{read_registers, RegisterId};
 use ergo_ser::sigma_type::SigmaType;
-use ergo_ser::sigma_value::{SigmaBoolean, SigmaValue};
+use ergo_ser::sigma_value::{CollValue, SigmaBoolean, SigmaValue};
 use ergo_sigma::evaluator::{reduce_expr_with_cost, EvalBox, ReductionContext};
 
 // ----- helpers -----
@@ -84,14 +84,19 @@ fn self_box_with_r4(entry: &[u8]) -> EvalBox {
     let block = register_block(entry);
     let regs = read_registers(&mut VlqReader::new(&block)).expect("register block parses");
     let r4 = regs.get(RegisterId::R4).expect("R4 present").clone();
-    // Sanity: both encodings parse to the identical logical value.
+    // Sanity: both encodings parse at the same pair TYPE, and each keeps its
+    // node identity in the value shape — a `CreateTuple` node decodes to
+    // Scala's `Tuple.value` (a `Coll`), a tuple `Constant` to a real tuple.
     assert_eq!(
         r4.tpe,
         SigmaType::STuple(vec![SigmaType::SInt, SigmaType::SInt])
     );
-    assert_eq!(
-        r4.value,
-        SigmaValue::Tuple(vec![SigmaValue::Int(432358), SigmaValue::Int(42)])
+    let items = vec![SigmaValue::Int(432358), SigmaValue::Int(42)];
+    assert!(
+        r4.value == SigmaValue::Tuple(items.clone())
+            || r4.value == SigmaValue::Coll(CollValue::Values(items)),
+        "unexpected R4 value shape: {:?}",
+        r4.value
     );
     let mut b = EvalBox::simple(431_358, vec![0x00]);
     b.registers[0] = Some(r4);
@@ -314,13 +319,32 @@ fn pair_constant_register_select_field_accepts() {
 }
 
 /// The two encodings are byte-distinct at their leading provenance byte
-/// (`0x86` CreateTuple vs `0x58` Constant) but decode to the identical logical
-/// register value — the whole point of the divergence.
+/// (`0x86` CreateTuple vs `0x58` Constant), carry the same pair TYPE and the
+/// same item data — and the parsed register keeps them apart, which is what
+/// makes both the evaluation divergence above and byte-exact re-serialization
+/// expressible. `Tuple.value` is a `Coll` in Scala
+/// (`sigma/ast/values.scala:786-791`); a tuple `Constant`'s value is a real
+/// pair (`CoreDataSerializer.scala:134-138`, `Evaluation.toDslTuple`).
 #[test]
-fn both_encodings_decode_to_same_pair_value() {
+fn the_two_encodings_decode_to_distinct_but_equivalent_register_values() {
     assert_eq!(R8_TUPLE_NODE_ENTRY[0], 0x86, "tuple-node provenance byte");
     assert_eq!(PAIR_CONSTANT_ENTRY[0], 0x58, "constant provenance byte");
     let a = read_registers(&mut VlqReader::new(&register_block(R8_TUPLE_NODE_ENTRY))).unwrap();
     let b = read_registers(&mut VlqReader::new(&register_block(PAIR_CONSTANT_ENTRY))).unwrap();
-    assert_eq!(a.get(RegisterId::R4), b.get(RegisterId::R4));
+    let (ra, rb) = (
+        a.get(RegisterId::R4).unwrap(),
+        b.get(RegisterId::R4).unwrap(),
+    );
+    assert_eq!(ra.tpe, rb.tpe, "same declared pair type");
+    let items = vec![SigmaValue::Int(432358), SigmaValue::Int(42)];
+    assert_eq!(ra.value, SigmaValue::Coll(CollValue::Values(items.clone())));
+    assert_eq!(rb.value, SigmaValue::Tuple(items));
+
+    // ...and each re-serializes back into its own wire form, so a box carrying
+    // either shape keeps the id the reference node computes for it.
+    for (regs, entry) in [(&a, R8_TUPLE_NODE_ENTRY), (&b, PAIR_CONSTANT_ENTRY)] {
+        let mut w = ergo_primitives::writer::VlqWriter::new();
+        ergo_ser::register::write_registers(&mut w, regs).unwrap();
+        assert_eq!(w.result(), register_block(entry));
+    }
 }

@@ -94,10 +94,17 @@ fn write_register_value(
     tpe: &SigmaType,
     val: &SigmaValue,
 ) -> Result<(), WriteError> {
-    if let (SigmaType::STuple(_), SigmaValue::Tuple(_)) = (tpe, val) {
-        // Tuples are serialized as CreateTuple expressions in the register
-        // encoding used by the Scala node's ValueSerializer. Each element
-        // is itself a serialized expression (typically a Const).
+    if matches!(
+        (tpe, val),
+        (SigmaType::STuple(_), SigmaValue::Coll(CollValue::Values(_)))
+            | (SigmaType::SGroupElement, SigmaValue::GroupGenerator)
+            | (_, SigmaValue::ConcreteCollection { .. })
+    ) {
+        // Node-form register values: `ValueSerializer` writes a tuple as a
+        // `CreateTuple` expression (each element itself a serialized
+        // expression, typically a Const) and `GroupGenerator` as its bare
+        // opcode. Both must round-trip in that form — the box id is a hash
+        // of these bytes.
         let expr = register_value_to_expr(tpe, val)?;
         write_expr(w, &expr, false)
     } else {
@@ -212,11 +219,22 @@ pub fn split_register_bytes(register_bytes: &[u8]) -> Result<Vec<Vec<u8>>, ReadE
 fn expr_to_register_value(expr: &Expr) -> Result<(SigmaType, SigmaValue), ReadError> {
     match expr {
         Expr::Const { tpe, val } => Ok((tpe.clone(), val.clone())),
+        // `Tuple` (0x86 CreateTuple). Type = STuple of the item types
+        // (`Tuple.tpe`, `sigma/ast/values.scala:783`); value = the items'
+        // values as a `Coll` (`Tuple.value`, `:786-791`) — deliberately NOT
+        // `SigmaValue::Tuple`, which is reserved for a tuple CONSTANT.
+        //
+        // The distinction is load-bearing twice over. On the wire, Scala keeps
+        // the parsed node, so a `Constant[STuple]` register re-serializes as a
+        // constant (`3c 0e 0e ...`) and a `CreateTuple` register as `86 ...`;
+        // collapsing them would give a live mainnet box (block 836113,
+        // tx[18].R9) the wrong id. At evaluation, `Tuple.value` really is a
+        // `Coll`, so a tuple-typed consumer of the node form throws
+        // `Value.checkType` — see `sigma_to_value`'s `(STuple, Coll)` arm.
         Expr::Op(IrNode {
             opcode: 0x86,
             payload: Payload::Tuple { items },
         }) => {
-            // CreateTuple: extract type and value from each element
             let mut types = Vec::with_capacity(items.len());
             let mut values = Vec::with_capacity(items.len());
             for item in items {
@@ -224,13 +242,19 @@ fn expr_to_register_value(expr: &Expr) -> Result<(SigmaType, SigmaValue), ReadEr
                 types.push(t);
                 values.push(v);
             }
-            Ok((SigmaType::STuple(types), SigmaValue::Tuple(values)))
+            Ok((
+                SigmaType::STuple(types),
+                SigmaValue::Coll(CollValue::Values(values)),
+            ))
         }
         Expr::Op(IrNode {
             opcode: 0x83,
             payload: Payload::ConcreteCollection { elem_type, items },
         }) => {
-            // ConcreteCollection: extract value from each element
+            // ConcreteCollection: an EvaluatedCollection whose value is the
+            // collection of item values. Kept as the NODE (not a plain
+            // `SigmaValue::Coll`) so the `0x83` wire form re-serializes
+            // unchanged — the box id hashes these bytes.
             let mut values = Vec::with_capacity(items.len());
             for item in items {
                 let (_, v) = expr_to_register_value(item)?;
@@ -238,9 +262,54 @@ fn expr_to_register_value(expr: &Expr) -> Result<(SigmaType, SigmaValue), ReadEr
             }
             Ok((
                 SigmaType::SColl(Box::new(elem_type.clone())),
-                SigmaValue::Coll(CollValue::Values(values)),
+                SigmaValue::ConcreteCollection {
+                    elem_type: Box::new(elem_type.clone()),
+                    items: values,
+                },
             ))
         }
+        // Packed all-boolean ConcreteCollection (`0x85`). Scala's
+        // `ConcreteCollection.apply` routes a collection of boolean constants
+        // to `ConcreteCollectionBooleanConstant` unconditionally
+        // (`sigma/ast/values.scala:845`), so this is the only wire form such a
+        // node ever takes.
+        Expr::Op(IrNode {
+            opcode: 0x85,
+            payload: Payload::BoolCollection { bits },
+        }) => Ok((
+            SigmaType::SColl(Box::new(SigmaType::SBoolean)),
+            SigmaValue::ConcreteCollection {
+                elem_type: Box::new(SigmaType::SBoolean),
+                items: bits.iter().map(|b| SigmaValue::Boolean(*b)).collect(),
+            },
+        )),
+        // `TrueLeaf` / `FalseLeaf` (`0x7F` / `0x80`). Both are
+        // `ConstantNode[SBoolean]` (`values.scala:742`, `:753`) registered
+        // with `CaseObjectSerialization`, so `ValueSerializer.deserialize`
+        // accepts the bare opcode while `serialize` routes them back through
+        // `ConstantSerializer` and emits the canonical `0101` / `0100`
+        // constant form. We canonicalize identically — verified against the
+        // JVM, which re-serializes a `7f`-encoded register as `0101`.
+        Expr::Op(IrNode {
+            opcode: 0x7F,
+            payload: Payload::Zero,
+        }) => Ok((SigmaType::SBoolean, SigmaValue::Boolean(true))),
+        Expr::Op(IrNode {
+            opcode: 0x80,
+            payload: Payload::Zero,
+        }) => Ok((SigmaType::SBoolean, SigmaValue::Boolean(false))),
+        // `GroupGenerator` (0x82) — a `case object` extending
+        // `EvaluatedValue[SGroupElement.type]` (`sigma/ast/values.scala:709`),
+        // so `ErgoBoxCandidate.serializer`'s `r.getValue()` accepts it and
+        // stores the node. Kept as `SigmaValue::GroupGenerator` rather than a
+        // group-element constant so the one-byte wire form survives
+        // re-serialization — the box id is `blake2b256` of the structurally
+        // re-encoded box bytes, so collapsing it to the 34-byte constant form
+        // would compute a different id for a box Scala accepts.
+        Expr::Op(IrNode {
+            opcode: 0x82,
+            payload: Payload::Zero,
+        }) => Ok((SigmaType::SGroupElement, SigmaValue::GroupGenerator)),
         Expr::Op(node) => Err(ReadError::InvalidData(format!(
             "unsupported expression opcode 0x{:02X} in register value",
             node.opcode
@@ -256,7 +325,62 @@ fn expr_to_register_value(expr: &Expr) -> Result<(SigmaType, SigmaValue), ReadEr
 /// Convert a typed register value back to an expression for serialization.
 fn register_value_to_expr(tpe: &SigmaType, val: &SigmaValue) -> Result<Expr, WriteError> {
     match (tpe, val) {
-        (SigmaType::STuple(types), SigmaValue::Tuple(values)) => {
+        // `GroupGenerator` goes back out as its bare opcode, never as a
+        // group-element constant — see `expr_to_register_value`.
+        (SigmaType::SGroupElement, SigmaValue::GroupGenerator) => Ok(Expr::Op(IrNode {
+            opcode: 0x82,
+            payload: Payload::Zero,
+        })),
+        // A `ConcreteCollection` node goes back out in node form: the packed
+        // `0x85` shape when the element type is Boolean (Scala's only encoding
+        // for that case), otherwise `0x83` with each item as an expression.
+        //
+        // The declared register type must actually be `SColl` of the node's
+        // own `elem_type` before we trust that `elem_type` for encoding.
+        // Nothing on the wire-read path can produce a mismatched pair (the
+        // reader always derives `tpe` from the same node), but an in-process
+        // constructor (wallet / REST) can hand us any `RegisterValue { tpe,
+        // value }` pairing. Without this check we'd silently encode by
+        // `elem_type` and ignore `tpe`, so e.g. a caller-declared
+        // `SColl(SInt)` carrying a `ConcreteCollection` whose `elem_type` is
+        // `SBoolean` would serialize (and hash) as a Boolean collection —
+        // register bytes that don't represent the declared value.
+        (_, SigmaValue::ConcreteCollection { elem_type, items }) => {
+            if !matches!(tpe, SigmaType::SColl(declared_elem) if declared_elem.as_ref() == elem_type.as_ref())
+            {
+                return Err(WriteError::InvalidData(format!(
+                    "ConcreteCollection element type {elem_type:?} does not match \
+                     declared register type {tpe:?}"
+                )));
+            }
+            if matches!(elem_type.as_ref(), SigmaType::SBoolean) {
+                let bits = items
+                    .iter()
+                    .map(|v| match v {
+                        SigmaValue::Boolean(b) => Ok(*b),
+                        other => Err(WriteError::InvalidData(format!(
+                            "non-Boolean item {other:?} in a Boolean ConcreteCollection node"
+                        ))),
+                    })
+                    .collect::<Result<Vec<bool>, _>>()?;
+                return Ok(Expr::Op(IrNode {
+                    opcode: 0x85,
+                    payload: Payload::BoolCollection { bits },
+                }));
+            }
+            let elems: Vec<Expr> = items
+                .iter()
+                .map(|v| register_value_to_expr(elem_type, v))
+                .collect::<Result<_, _>>()?;
+            Ok(Expr::Op(IrNode {
+                opcode: 0x83,
+                payload: Payload::ConcreteCollection {
+                    elem_type: elem_type.as_ref().clone(),
+                    items: elems,
+                },
+            }))
+        }
+        (SigmaType::STuple(types), SigmaValue::Coll(CollValue::Values(values))) => {
             if types.len() != values.len() {
                 return Err(WriteError::InvalidData(
                     "tuple type/value length mismatch".into(),
@@ -324,6 +448,24 @@ mod tests {
     }
 
     // ----- round-trips -----
+
+    #[test]
+    fn write_register_value_concrete_collection_matching_type_round_trips() {
+        // Sanity: a correctly-paired `SColl(SInt)` / `ConcreteCollection {
+        // elem_type: SInt, .. }` still writes and round-trips fine — the
+        // guard rejects only a genuine mismatch.
+        let regs = AdditionalRegisters {
+            registers: vec![RegisterValue {
+                tpe: SigmaType::SColl(Box::new(SigmaType::SInt)),
+                value: SigmaValue::ConcreteCollection {
+                    elem_type: Box::new(SigmaType::SInt),
+                    items: vec![SigmaValue::Int(1), SigmaValue::Int(2)],
+                },
+            }],
+        };
+        let decoded = roundtrip(&regs);
+        assert_eq!(decoded, regs);
+    }
 
     #[test]
     fn empty_registers_roundtrip() {
@@ -510,6 +652,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn write_register_value_concrete_collection_elem_type_mismatch_errors() {
+        // Declared register type says `SColl(SInt)`, but the
+        // `ConcreteCollection` node's own `elem_type` is `SBoolean`. Prior to
+        // the fix, `register_value_to_expr` ignored the declared `tpe` and
+        // encoded (and hashed) this as a Boolean collection — a register
+        // whose serialized bytes silently disagreed with its declared type.
+        let regs = AdditionalRegisters {
+            registers: vec![RegisterValue {
+                tpe: SigmaType::SColl(Box::new(SigmaType::SInt)),
+                value: SigmaValue::ConcreteCollection {
+                    elem_type: Box::new(SigmaType::SBoolean),
+                    items: vec![SigmaValue::Boolean(true)],
+                },
+            }],
+        };
+        let mut w = VlqWriter::new();
+        let err = write_registers(&mut w, &regs).unwrap_err();
+        let WriteError::InvalidData(msg) = &err;
+        assert!(
+            msg.contains("element type") && msg.contains("declared"),
+            "message should describe the mismatch, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn write_register_value_concrete_collection_non_coll_outer_type_errors() {
+        // Declared register type isn't even an `SColl` — a non-collection
+        // type paired with a `ConcreteCollection` value must also be
+        // rejected, not silently encoded by the node's own `elem_type`.
+        let regs = AdditionalRegisters {
+            registers: vec![RegisterValue {
+                tpe: SigmaType::SInt,
+                value: SigmaValue::ConcreteCollection {
+                    elem_type: Box::new(SigmaType::SInt),
+                    items: vec![SigmaValue::Int(1)],
+                },
+            }],
+        };
+        let mut w = VlqWriter::new();
+        let err = write_registers(&mut w, &regs).unwrap_err();
+        let WriteError::InvalidData(msg) = &err;
+        assert!(
+            msg.contains("element type") && msg.contains("declared"),
+            "message should describe the mismatch, got: {msg}"
+        );
+    }
+
     // ----- rule 1019 CheckV6Type on register types -----
 
     #[test]
@@ -571,6 +761,206 @@ mod tests {
 
     // ----- oracle parity -----
 
+    /// Every `EvaluatedValue` form Scala accepts as a box-register value, with
+    /// the JVM's canonical re-serialization and the resulting box id.
+    ///
+    /// A box id is `blake2b256` of the STRUCTURALLY re-serialized box bytes,
+    /// so an encoder that canonicalizes a node into its `Constant` form
+    /// computes a different id than the reference for a box the reference
+    /// accepts — a silent state-root divergence. `0x82` / `0x83` / `0x85` are
+    /// therefore preserved; `0x7f` / `0x80` are canonicalized to `0101` /
+    /// `0100` because the JVM itself does that (`ValueSerializer.serialize`
+    /// routes `TrueLeaf`/`FalseLeaf` through `ConstantSerializer`).
+    ///
+    /// Vector: `test-vectors/scala/evaluated_value_forms.json`.
+    #[test]
+    fn register_evaluated_value_forms_match_scala_bytes_and_box_ids() {
+        use ergo_primitives::digest::blake2b256;
+
+        // Box: 1000000 nanoERG, script sigmaProp(true), height 0, one register.
+        const PREFIX: &str = "c0843d10010101d17300000001";
+        // ...as output index 3 of transaction 0x0707..07.
+        const SUFFIX: &str = "070707070707070707070707070707070707070707070707070707070707070703";
+
+        // (register bytes in, Scala's re-serialized register bytes, Scala box id)
+        let cases = [
+            (
+                "82",
+                "82",
+                "05b02f98770d6178bb39f4ceecaa78bbcaacf2c8b8752f9d0d13b418604305a8",
+            ),
+            (
+                "850201",
+                "850201",
+                "37213bebf038b01db735fad8acea2a0f52b9115723509fd482bed7d2ac5297b2",
+            ),
+            (
+                "830204040e0410",
+                "830204040e0410",
+                "6d346c1bbf6e1a4b004e560cb6a30a2fe7e7d9e4579f416c4d13c8f4dc3ec495",
+            ),
+            (
+                "7f",
+                "0101",
+                "2c62fee9cba04f4dda73909663097d395eb9a7d6e3eb56d7791720be148cdd40",
+            ),
+            (
+                "80",
+                "0100",
+                "26e30bfb4f9b978596322e53b23e89807878751ddf9308359b2504fefc92f74d",
+            ),
+            // CreateTuple (0x86) — preserved; the mainnet-855650 vector below
+            // pins the same form against a real on-chain register.
+            ("860204020404", "860204020404", ""),
+        ];
+
+        for (input, expected_reg, expected_box_id) in cases {
+            let candidate_hex = format!("{PREFIX}{input}");
+            let bytes = hex::decode(&candidate_hex).unwrap();
+            let mut r = VlqReader::new(&bytes);
+            let candidate = crate::ergo_box::read_ergo_box_candidate(&mut r)
+                .unwrap_or_else(|e| panic!("Scala accepts register {input}, got {e:?}"));
+            assert!(r.is_empty(), "{input}: trailing bytes");
+
+            let mut w = VlqWriter::new();
+            crate::ergo_box::write_ergo_box_candidate(&mut w, &candidate).unwrap();
+            assert_eq!(
+                hex::encode(w.result()),
+                format!("{PREFIX}{expected_reg}"),
+                "{input} must re-serialize as the JVM does",
+            );
+
+            if expected_box_id.is_empty() {
+                continue;
+            }
+            let box_bytes = hex::decode(format!("{PREFIX}{expected_reg}{SUFFIX}")).unwrap();
+            assert_eq!(
+                hex::encode(blake2b256(&box_bytes).as_bytes()),
+                expected_box_id,
+                "{input}: box id must match the JVM",
+            );
+        }
+    }
+
+    /// `GroupElement` register values normalize the way the JVM does, and the
+    /// box id is computed over the normalized bytes.
+    ///
+    /// `GroupElementSerializer.parse` (`GroupElementSerializer.scala:35-42`)
+    /// maps ANY 33-byte encoding whose lead byte is `0x00` to the infinity
+    /// point, whatever the other 32 bytes hold, and `serialize` (`:20-33`)
+    /// writes infinity as 33 zeroes. `ErgoBox.id` is `Blake2b256` of the
+    /// RE-SERIALIZED box (`ErgoBox.scala:87-92`), so `07 00 aa*32` and
+    /// `07 00*33` are one box with one id. Preserving the trailing garbage
+    /// gave such a box a different id than the reference -- a UTXO-set /
+    /// AVL-root divergence on a box the reference accepts. A compressed
+    /// point (`0x02`/`0x03` lead) re-encodes to itself. The same normalization
+    /// applies to the point inside a `ProveDlog` `SigmaProp` constant.
+    ///
+    /// Vector: `test-vectors/scala/canonical_extension_and_group_element.json`.
+    #[test]
+    fn register_group_element_encodings_normalize_to_scala_bytes_and_box_ids() {
+        use ergo_primitives::digest::blake2b256;
+        const PREFIX: &str = "c0843d10010101d17300000001";
+        const SUFFIX: &str = "070707070707070707070707070707070707070707070707070707070707070703";
+        const ZERO33: &str = "000000000000000000000000000000000000000000000000000000000000000000";
+        const GARBAGE: &str = "00aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const GENERATOR: &str =
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        // (label, wire point, Scala re-serialized point, Scala box id)
+        let cases = [
+            (
+                "identity_all_zero",
+                ZERO33,
+                ZERO33,
+                "f97a4bddd81927722ead4b4c83fac917905440d69cd2a997fb64e892013ca7f8",
+            ),
+            (
+                "identity_zero_lead_garbage",
+                GARBAGE,
+                ZERO33,
+                "f97a4bddd81927722ead4b4c83fac917905440d69cd2a997fb64e892013ca7f8",
+            ),
+            (
+                "generator",
+                GENERATOR,
+                GENERATOR,
+                "b13d2f0732d91f7d8a1cf5dd38cfb10d1fa48ac537dbc747f0224331f510457c",
+            ),
+        ];
+        for (label, wire_point, canonical_point, expected_box_id) in cases {
+            // R4 = GroupElement constant (`07` + point).
+            let candidate_hex = format!("{PREFIX}07{wire_point}");
+            let bytes = hex::decode(&candidate_hex).unwrap();
+            let mut r = VlqReader::new(&bytes);
+            let candidate = crate::ergo_box::read_ergo_box_candidate(&mut r)
+                .unwrap_or_else(|e| panic!("{label}: Scala accepts this register, got {e:?}"));
+            assert!(r.is_empty(), "{label}: trailing bytes");
+            let mut w = VlqWriter::new();
+            crate::ergo_box::write_ergo_box_candidate(&mut w, &candidate).unwrap();
+            let canonical_candidate = format!("{PREFIX}07{canonical_point}");
+            assert_eq!(
+                hex::encode(w.result()),
+                canonical_candidate,
+                "{label}: the register must re-serialize as GroupElementSerializer does",
+            );
+            let box_bytes = hex::decode(format!("{canonical_candidate}{SUFFIX}")).unwrap();
+            assert_eq!(
+                hex::encode(blake2b256(&box_bytes).as_bytes()),
+                expected_box_id,
+                "{label}: box id must match the JVM",
+            );
+
+            // The same point inside a ProveDlog SigmaProp constant (`08cd` + point).
+            let dlog_hex = format!("{PREFIX}08cd{wire_point}");
+            let bytes = hex::decode(&dlog_hex).unwrap();
+            let mut r = VlqReader::new(&bytes);
+            let candidate = crate::ergo_box::read_ergo_box_candidate(&mut r).unwrap_or_else(|e| {
+                panic!("{label}: Scala accepts this ProveDlog register, got {e:?}")
+            });
+            let mut w = VlqWriter::new();
+            crate::ergo_box::write_ergo_box_candidate(&mut w, &candidate).unwrap();
+            assert_eq!(
+                hex::encode(w.result()),
+                format!("{PREFIX}08cd{canonical_point}"),
+                "{label}: the ProveDlog point must normalize identically",
+            );
+        }
+    }
+
+    /// The decoded values behind the register node forms.
+    #[test]
+    fn register_evaluated_value_forms_decode_to_scala_values() {
+        let decode = |reg_hex: &str| {
+            let bytes = hex::decode(format!("01{reg_hex}")).unwrap();
+            let mut r = VlqReader::new(&bytes);
+            read_registers(&mut r).unwrap().registers[0].clone()
+        };
+        assert_eq!(
+            decode("82"),
+            RegisterValue {
+                tpe: SigmaType::SGroupElement,
+                value: SigmaValue::GroupGenerator,
+            }
+        );
+        assert_eq!(
+            decode("850201"),
+            RegisterValue {
+                tpe: SigmaType::SColl(Box::new(SigmaType::SBoolean)),
+                value: SigmaValue::ConcreteCollection {
+                    elem_type: Box::new(SigmaType::SBoolean),
+                    items: vec![SigmaValue::Boolean(true), SigmaValue::Boolean(false)],
+                },
+            }
+        );
+        assert_eq!(
+            decode("7f"),
+            RegisterValue {
+                tpe: SigmaType::SBoolean,
+                value: SigmaValue::Boolean(true),
+            }
+        );
+    }
+
     #[test]
     fn tuple_register_from_block_855650() {
         // R8 from block 855650, TX b5fd96c9..., output 0.
@@ -594,9 +984,44 @@ mod tests {
             reg.tpe,
             SigmaType::STuple(vec![SigmaType::SByte, SigmaType::SByte])
         );
+        // A `CreateTuple` NODE decodes to Scala's `Tuple.value` -- a `Coll` of
+        // the item values, not a `Tuple2` -- which is what distinguishes it
+        // from a tuple `Constant` on the wire and at evaluation.
         assert_eq!(
             reg.value,
-            SigmaValue::Tuple(vec![SigmaValue::Byte(102), SigmaValue::Byte(99)])
+            SigmaValue::Coll(CollValue::Values(vec![
+                SigmaValue::Byte(102),
+                SigmaValue::Byte(99)
+            ]))
+        );
+        // ...and it re-serializes as `0x86`, byte-for-byte.
+        let mut w = VlqWriter::new();
+        write_registers(&mut w, &decoded).unwrap();
+        assert_eq!(w.result(), raw.to_vec());
+    }
+
+    /// The counterpart: a tuple CONSTANT register (Scala
+    /// `Constant[STuple]`, wire form `3c 0e 0e ...`) decodes to a real
+    /// `SigmaValue::Tuple` and re-serializes as a constant -- NOT as
+    /// `CreateTuple`. Block 836113 tx[18].R9 carries this shape on mainnet,
+    /// and its box id / transaction id commit to the constant bytes.
+    #[test]
+    fn constant_tuple_register_round_trips_as_a_constant() {
+        let raw = hex::decode("013c0e0e0000").unwrap();
+        let mut r = VlqReader::new(&raw);
+        let decoded = read_registers(&mut r).unwrap();
+        assert!(r.is_empty(), "leftover bytes");
+        assert!(
+            matches!(decoded.registers[0].value, SigmaValue::Tuple(_)),
+            "a Constant[STuple] must NOT decode to the CreateTuple node shape, got {:?}",
+            decoded.registers[0].value
+        );
+        let mut w = VlqWriter::new();
+        write_registers(&mut w, &decoded).unwrap();
+        assert_eq!(
+            hex::encode(w.result()),
+            "013c0e0e0000",
+            "a tuple Constant must re-serialize as a Constant"
         );
     }
 }

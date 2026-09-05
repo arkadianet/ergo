@@ -126,6 +126,50 @@ pub enum SigmaValue {
     BigInt(num_bigint::BigInt),
     /// secp256k1 group element (SEC1-compressed 33 bytes).
     GroupElement(GroupElement),
+    /// The `GroupGenerator` NODE (`0x82`) appearing as a stored evaluated
+    /// value in a box register or a ContextExtension entry.
+    ///
+    /// Scala's `GroupGenerator` is a `case object` extending
+    /// `EvaluatedValue[SGroupElement.type]` (`sigma/ast/values.scala:709-712`),
+    /// so `ValueSerializer` writes it as its bare one-byte opcode and both
+    /// `ErgoBoxCandidate.serializer` and `ContextExtension.serializer` store
+    /// the node itself. Its `value` is
+    /// `SigmaDsl.GroupElement(CryptoConstants.dlogGroup.generator)` — exactly
+    /// the same point a `Constant[SGroupElement]` of the generator holds, and
+    /// the JVM reduces the two identically (oracle: both cost 272 for
+    /// `SELF.R4[GroupElement].get == groupGenerator`).
+    ///
+    /// It is a distinct variant only because the WIRE forms differ — one byte
+    /// (`82`) versus thirty-four (`07` + the compressed point) — and a box id
+    /// is `blake2b256` of the structurally re-serialized box bytes. Collapsing
+    /// the node into [`SigmaValue::GroupElement`] would re-emit the constant
+    /// form and compute a different box id for a box the Scala node accepts.
+    GroupGenerator,
+    /// A `ConcreteCollection` NODE (`0x83`, or `0x85` for the packed
+    /// all-boolean form) stored as an evaluated value in a box register or a
+    /// ContextExtension entry.
+    ///
+    /// `ConcreteCollection` is an `EvaluatedCollection`
+    /// (`sigma/ast/values.scala:589`, itself an `EvaluatedValue`), so
+    /// `ValueSerializer` writes the node and both the box-candidate and the
+    /// ContextExtension parsers store it. Its `value` is an ordinary
+    /// collection of the item values — semantically identical to a
+    /// `Constant[SCollection]` of the same items — but the WIRE forms differ
+    /// (`83`/`85` + items versus a type code + packed data), and a box id is
+    /// `blake2b256` of the structurally re-serialized box bytes. Kept as its
+    /// own variant so the node form survives re-serialization instead of being
+    /// canonicalized into [`SigmaValue::Coll`], which would compute a
+    /// different box id (and a different `bytes_to_sign`) for a transaction
+    /// the Scala node accepts.
+    ///
+    /// `elem_type` is the node's `elementType`; `items` are the item values in
+    /// wire order.
+    ConcreteCollection {
+        /// Declared element type of the collection node.
+        elem_type: Box<crate::sigma_type::SigmaType>,
+        /// Item values, in wire order.
+        items: Vec<SigmaValue>,
+    },
     /// Sigma-protocol proposition.
     SigmaProp(SigmaBoolean),
     /// AVL+ tree handle.
@@ -198,6 +242,17 @@ pub enum CollValue {
     Values(Vec<SigmaValue>),
 }
 
+/// secp256k1 generator point in SEC1-compressed form — the value Scala's
+/// `GroupGenerator` node carries
+/// (`SigmaDsl.GroupElement(CryptoConstants.dlogGroup.generator)`,
+/// `sigma/ast/values.scala:715`). Materialized whenever a
+/// [`SigmaValue::GroupGenerator`] is read as a group element.
+pub const SECP256K1_GENERATOR: [u8; 33] = [
+    0x02, 0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB, 0xAC, 0x55, 0xA0, 0x62, 0x95, 0xCE, 0x87, 0x0B,
+    0x07, 0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28, 0xD9, 0x59, 0xF2, 0x81, 0x5B, 0x16, 0xF8, 0x17,
+    0x98,
+];
+
 // -- Constant (type + value) serialization --
 
 /// Write a Constant: type descriptor followed by value data.
@@ -269,7 +324,15 @@ pub fn write_value(w: &mut VlqWriter, tpe: &SigmaType, val: &SigmaValue) -> Resu
             write_bigint_value(w, v)?;
         }
         (SigmaType::SGroupElement, SigmaValue::GroupElement(ge)) => {
-            w.put_bytes(ge.as_bytes());
+            // Scala writes the identity as 33 zeroes and every other point
+            // re-encoded from its affine coordinates
+            // (`GroupElementSerializer.scala:20-33`), so a `0x00`-lead
+            // encoding never survives a round-trip with its trailing bytes
+            // intact. The reader already normalizes; this keeps the writer
+            // independently faithful for programmatically built values.
+            w.put_bytes(&ergo_primitives::group_element::canonical_encoding(
+                *ge.as_bytes(),
+            ));
         }
         (SigmaType::SSigmaProp, SigmaValue::SigmaProp(sb)) => {
             write_sigma_boolean(w, sb)?;

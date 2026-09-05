@@ -751,3 +751,361 @@ mod pre_reduction_check_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod context_extension_evaluated_value_tests {
+    //! Oracle parity for ContextExtension entries encoded as non-`Constant`
+    //! `EvaluatedValue` nodes. Every expectation below is a verdict/cost the
+    //! Scala reference stack (sigma-state 6.0.2 + ergo-core 6.0.2) produced;
+    //! the vectors are pinned in
+    //! `test-vectors/scala/context_extension_evaluated_values.json`.
+
+    use ergo_primitives::cost::{CostAccumulator, JitCost};
+    use ergo_primitives::reader::VlqReader;
+    use ergo_ser::input::read_context_extension;
+
+    use crate::evaluator::{reduce_expr_with_cost, ReductionContext};
+
+    // ----- helpers -----
+
+    /// The Scala-emitted ContextExtension block from the oracle vector:
+    /// var 1 = `Tuple(IntConstant(1), IntConstant(2))` (`0x86`),
+    /// var 2 = `ConcreteCollection(7, 8 : Int)` (`0x83`).
+    const ORACLE_EXTENSION_HEX: &str = "020186020402040402830204040e0410";
+
+    fn from_hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    /// Reduce `tree_hex` under the oracle's dummy context with the oracle's
+    /// extension bound, returning `(sigma-boolean hex, jit cost)`.
+    fn reduce_with_oracle_extension(tree_hex: &str) -> Result<(String, u64), String> {
+        let tree_bytes = from_hex(tree_hex);
+        let mut r = VlqReader::new(&tree_bytes);
+        let tree = ergo_ser::ergo_tree::read_ergo_tree(&mut r).map_err(|e| format!("{e:?}"))?;
+
+        let ext_bytes = from_hex(ORACLE_EXTENSION_HEX);
+        let mut er = VlqReader::new(&ext_bytes);
+        let ext = read_context_extension(&mut er).map_err(|e| format!("{e:?}"))?;
+
+        let ctx = ReductionContext {
+            extension: ext.values,
+            ergo_tree_version: tree.version,
+            ..ReductionContext::minimal_v6(0, 0)
+        };
+        let mut cost = CostAccumulator::new(JitCost::from_block_cost(1_000_000).expect("limit"));
+        let sb = reduce_expr_with_cost(&tree.body, &ctx, &tree.constants, &mut cost)
+            .map_err(|e| format!("{e:?}"))?;
+        let mut w = ergo_primitives::writer::VlqWriter::new();
+        ergo_ser::sigma_value::write_sigma_boolean(&mut w, &sb).map_err(|e| format!("{e:?}"))?;
+        Ok((
+            w.result().iter().map(|b| format!("{b:02x}")).collect(),
+            cost.total().value(),
+        ))
+    }
+
+    // ----- oracle parity -----
+
+    /// The whole point of the fix: a transaction whose input extension carries
+    /// a `Tuple` node is mined by the Scala node, and a script that never
+    /// reads the var still reduces to `TrivialProp(true)` at cost 16. Before
+    /// the fix the extension failed to PARSE, so the Rust node rejected a
+    /// block the reference accepts — a reject-valid stall.
+    #[test]
+    fn true_leaf_with_tuple_node_extension_reduces_to_scala_verdict() {
+        assert_eq!(
+            reduce_with_oracle_extension("10010101d17300"),
+            Ok(("d3".to_string(), 16)),
+        );
+    }
+
+    /// `getVar[(Int, Int)](1).isDefined` — Scala's `getVar` matches on the
+    /// declared `STuple` type and hands back `Tuple.value`, so the option is
+    /// `Some` and `isDefined` is true. Cost 35.
+    #[test]
+    fn tuple_node_var_is_defined_matches_scala() {
+        assert_eq!(
+            reduce_with_oracle_extension("1000d1e6e30158"),
+            Ok(("d3".to_string(), 35)),
+        );
+    }
+
+    /// `getVar[(Int, Int)](1).get._1 == 1` — Scala REJECTS: `Tuple.value` is a
+    /// `Coll`, not a `Tuple2`, so `Value.checkType` at `OptionGet` throws
+    /// `InterpreterException("Invalid type returned by evaluator ... resulting
+    /// value: Coll(1,2)")`. We must reject too: a tuple-node context var is
+    /// unusable as a tuple, and accepting it would be an accept-invalid fork.
+    #[test]
+    fn tuple_node_var_select_field_rejects_like_scala() {
+        let res = reduce_with_oracle_extension("10010402d1938ce4e30158017300");
+        assert!(
+            res.is_err(),
+            "a Tuple-node context var must not satisfy a tuple-typed consumer \
+             (Scala throws InterpreterException), got {res:?}"
+        );
+    }
+
+    /// `getVar[Coll[Int]](2).get(0) == 7` — a `ConcreteCollection` (0x83)
+    /// context var IS usable: `EvaluatedCollection.value` is a real `Coll`.
+    /// Scala ACCEPTs at cost 75.
+    #[test]
+    fn concrete_collection_var_by_index_matches_scala() {
+        assert_eq!(
+            reduce_with_oracle_extension("10020400040ed193b2e4e302107300007301"),
+            Ok(("d3".to_string(), 75)),
+        );
+    }
+}
+
+#[cfg(test)]
+mod evaluated_value_reduce_parity_tests {
+    //! Reduce-surface parity for the remaining `EvaluatedValue` forms and for
+    //! `getVar` / `getReg` type-mismatch semantics. Every verdict and JIT cost
+    //! is the JVM's, produced by
+    //! `scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala` and
+    //! pinned in `test-vectors/scala/evaluated_value_forms.json` /
+    //! `test-vectors/scala/get_var_type_mismatch.json`.
+
+    use ergo_primitives::cost::{CostAccumulator, JitCost};
+    use ergo_primitives::reader::VlqReader;
+    use ergo_ser::input::read_context_extension;
+    use ergo_ser::register::read_registers;
+    use ergo_ser::sigma_type::SigmaType;
+    use ergo_ser::sigma_value::SigmaValue;
+
+    use crate::evaluator::{reduce_expr_with_cost, EvalBox, ReductionContext};
+
+    // ----- helpers -----
+
+    fn from_hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    /// Reduce `tree_hex` with `ext_hex` bound as the SELF input's extension and
+    /// `reg_hex` (a full register block, count byte first) as SELF's registers.
+    fn reduce(tree_hex: &str, ext_hex: &str, reg_hex: &str) -> Result<(String, u64), String> {
+        let tree_bytes = from_hex(tree_hex);
+        let mut r = VlqReader::new(&tree_bytes);
+        let tree = ergo_ser::ergo_tree::read_ergo_tree(&mut r).map_err(|e| format!("{e:?}"))?;
+
+        let ext_bytes = from_hex(ext_hex);
+        let mut er = VlqReader::new(&ext_bytes);
+        let ext = read_context_extension(&mut er).map_err(|e| format!("{e:?}"))?;
+
+        let reg_bytes = from_hex(reg_hex);
+        let mut rr = VlqReader::new(&reg_bytes);
+        let regs = read_registers(&mut rr).map_err(|e| format!("{e:?}"))?;
+        let mut self_box = EvalBox::simple(0, tree_bytes.clone());
+        for (i, rv) in regs.registers.iter().enumerate() {
+            self_box.registers[i] = Some(rv.clone());
+        }
+        self_box.register_bytes = reg_bytes;
+        let inputs = [self_box];
+
+        let ctx = ReductionContext {
+            self_box: Some(&inputs[0]),
+            inputs: &inputs,
+            extension: ext.values,
+            ergo_tree_version: tree.version,
+            ..ReductionContext::minimal_v6(0, 0)
+        };
+        let mut cost = CostAccumulator::new(JitCost::from_block_cost(1_000_000).expect("limit"));
+        let sb = reduce_expr_with_cost(&tree.body, &ctx, &tree.constants, &mut cost)
+            .map_err(|e| format!("{e:?}"))?;
+        let mut w = ergo_primitives::writer::VlqWriter::new();
+        ergo_ser::sigma_value::write_sigma_boolean(&mut w, &sb).map_err(|e| format!("{e:?}"))?;
+        Ok((
+            w.result().iter().map(|b| format!("{b:02x}")).collect(),
+            cost.total().value(),
+        ))
+    }
+
+    const NO_REGS: &str = "00";
+    const NO_EXT: &str = "00";
+
+    // ----- oracle parity: GroupGenerator (0x82) -----
+
+    /// `sigmaProp(getVar[GroupElement](1).get == groupGenerator)` over an
+    /// extension whose var 1 is the `GroupGenerator` NODE. Scala's
+    /// `GroupGenerator.value` is `CryptoConstants.dlogGroup.generator`, so the
+    /// comparison holds. ACCEPT, cost 222.
+    #[test]
+    fn group_generator_extension_var_equals_generator_matches_scala() {
+        assert_eq!(
+            reduce("1000d193e4e3010782", "010182", NO_REGS),
+            Ok(("d3".to_string(), 222)),
+        );
+    }
+
+    /// `sigmaProp(getVar[GroupElement](1).isDefined)`. ACCEPT, cost 35.
+    #[test]
+    fn group_generator_extension_var_is_defined_matches_scala() {
+        assert_eq!(
+            reduce("1000d1e6e30107", "010182", NO_REGS),
+            Ok(("d3".to_string(), 35)),
+        );
+    }
+
+    /// `sigmaProp(SELF.R4[GroupElement].get == groupGenerator)` over an R4
+    /// holding the node. ACCEPT, cost 272 — identical to the group-element
+    /// CONSTANT control below, which is the point: the node and the constant
+    /// are value-equivalent and differ only in wire form.
+    #[test]
+    fn group_generator_register_equals_generator_matches_scala() {
+        assert_eq!(
+            reduce("1000d193e4c6a7040782", NO_EXT, "0182"),
+            Ok(("d3".to_string(), 272)),
+        );
+    }
+
+    #[test]
+    fn group_element_constant_register_equals_generator_matches_scala_control() {
+        assert_eq!(
+            reduce(
+                "1000d193e4c6a7040782",
+                NO_EXT,
+                "01070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            ),
+            Ok(("d3".to_string(), 272)),
+        );
+    }
+
+    // ----- oracle parity: TrueLeaf / FalseLeaf (0x7f / 0x80) -----
+
+    /// `sigmaProp(getVar[Boolean](1).get)` over a `TrueLeaf`-encoded var.
+    /// ACCEPT `d3` (true), cost 40; the `FalseLeaf` twin gives `d2` (false)
+    /// at the same cost.
+    #[test]
+    fn true_leaf_extension_var_reduces_to_scala_verdict() {
+        assert_eq!(
+            reduce("1000d1e4e30101", "01017f", NO_REGS),
+            Ok(("d3".to_string(), 40)),
+        );
+    }
+
+    #[test]
+    fn false_leaf_extension_var_reduces_to_scala_verdict() {
+        assert_eq!(
+            reduce("1000d1e4e30101", "010180", NO_REGS),
+            Ok(("d2".to_string(), 40)),
+        );
+    }
+
+    /// `sigmaProp(SELF.R4[Boolean].get)` over a `7f`-encoded R4. ACCEPT, 90.
+    #[test]
+    fn true_leaf_register_reduces_to_scala_verdict() {
+        assert_eq!(
+            reduce("1000d1e4c6a70401", NO_EXT, "017f"),
+            Ok(("d3".to_string(), 90)),
+        );
+    }
+
+    // ----- oracle parity: ConcreteCollectionBooleanConstant (0x85) -----
+
+    /// `sigmaProp(getVar[Coll[Boolean]](1).get(0))` over a packed `0x85`
+    /// boolean collection `(true, false)`. ACCEPT, cost 71.
+    #[test]
+    fn bool_collection_extension_var_by_index_matches_scala() {
+        assert_eq!(
+            reduce("10010400d1b2e4e3010d730000", "0101850201", NO_REGS),
+            Ok(("d3".to_string(), 71)),
+        );
+    }
+
+    /// `sigmaProp(SELF.R4[Coll[Boolean]].get(0))`. ACCEPT, cost 121.
+    #[test]
+    fn bool_collection_register_by_index_matches_scala() {
+        assert_eq!(
+            reduce("10010400d1b2e4c6a7040d730000", NO_EXT, "01850201"),
+            Ok(("d3".to_string(), 121)),
+        );
+    }
+
+    // ----- oracle parity: getVar / getReg type-mismatch semantics -----
+
+    /// THE fork vector. Extension var 1 holds an `Int`; the script asks for a
+    /// `Long`. Scala's `CContext.getVar` throws
+    /// `InvalidType("Cannot getVar[Long](1): invalid type of value
+    /// TestValue(5) at id=1")` for a PRESENT var of the wrong type — it does
+    /// NOT return `None`. Rust used to return `Opt(None)`, so
+    /// `sigmaProp(getVar[Long](1).isDefined)` reduced to `false` and
+    /// `... == false` scripts SUCCEEDED against an input the reference node
+    /// rejects: accept-invalid.
+    #[test]
+    fn get_var_type_mismatch_on_present_var_rejects_like_scala() {
+        let res = reduce("1000d1e6e30105", "01010404", NO_REGS);
+        assert!(
+            res.is_err(),
+            "a present context var of the wrong type must fail the spend \
+             (Scala throws InvalidType), got {res:?}"
+        );
+        // ...and the negated form, which is the one an attacker would use to
+        // turn the silent `None` into a satisfied script.
+        let negated = reduce("1000d1efe6e30105", "01010404", NO_REGS);
+        assert!(negated.is_err(), "got {negated:?}");
+    }
+
+    /// The other half of the same rule: an ABSENT slot is `None`, not an
+    /// error. `sigmaProp(getVar[Long](1).isDefined)` over an empty extension
+    /// reduces to `d2` (false) at cost 35, and its negation to `d3` at 50.
+    #[test]
+    fn get_var_absent_slot_returns_none_like_scala() {
+        assert_eq!(
+            reduce("1000d1e6e30105", NO_EXT, NO_REGS),
+            Ok(("d2".to_string(), 35)),
+        );
+        assert_eq!(
+            reduce("1000d1efe6e30105", NO_EXT, NO_REGS),
+            Ok(("d3".to_string(), 50)),
+        );
+    }
+
+    /// Control: a matching type still resolves. `getVar[Int](1)` over the same
+    /// `Int` var — ACCEPT `d3`, cost 35.
+    #[test]
+    fn get_var_matching_type_still_resolves() {
+        assert_eq!(
+            reduce("1000d1e6e30104", "01010404", NO_REGS),
+            Ok(("d3".to_string(), 35)),
+        );
+    }
+
+    /// The register analogue behaves the same way and was already correct:
+    /// `SELF.R4[Long].isDefined` over an `Int` R4 throws
+    /// `InvalidType("Cannot getReg[Long](4)")`, while an absent R4 is `None`
+    /// (`d2`, cost 85).
+    #[test]
+    fn get_reg_type_mismatch_on_present_register_rejects_like_scala() {
+        let res = reduce("1000d1e6c6a70405", NO_EXT, "010404");
+        assert!(res.is_err(), "got {res:?}");
+        assert_eq!(
+            reduce("1000d1e6c6a70405", NO_EXT, NO_REGS),
+            Ok(("d2".to_string(), 85)),
+        );
+    }
+
+    // ----- helpers: decoded-value sanity -----
+
+    /// The `0x82` node decodes to the generator-valued group element the
+    /// evaluator materializes, not to an opaque marker.
+    #[test]
+    fn group_generator_value_is_the_secp256k1_generator() {
+        let bytes = from_hex("010182");
+        let mut r = VlqReader::new(&bytes);
+        let ext = read_context_extension(&mut r).unwrap();
+        assert_eq!(
+            ext.values[&1],
+            (SigmaType::SGroupElement, SigmaValue::GroupGenerator)
+        );
+        assert_eq!(
+            ergo_ser::sigma_value::SECP256K1_GENERATOR,
+            crate::evaluator::SECP256K1_GENERATOR
+        );
+    }
+}

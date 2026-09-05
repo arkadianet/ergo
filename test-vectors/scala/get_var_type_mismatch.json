@@ -1,0 +1,96 @@
+{
+  "_comment": [
+    "Ground truth from the Scala reference stack (sigma-state 6.0.2 + ergo-core 6.0.2)",
+    "for getVar / getReg type-mismatch semantics -- an accept-invalid fork vector.",
+    "",
+    "CContext.getVar (sigmastate/eval/CContext.scala:60-74), reached from GetVar.eval",
+    "(sigma/ast/transformers.scala:579-583), distinguishes ABSENT from",
+    "PRESENT-BUT-WRONG-TYPE. An absent slot returns None. A present slot whose stored",
+    "RType does not match the requested one falls to the `case _` arm and THROWS",
+    "InvalidType -- it does NOT return None. An implementation that returns None for a",
+    "present-but-mistyped var SATISFIES scripts the reference node fails, e.g.",
+    "sigmaProp(getVar[Long](1).isDefined == false) over an extension binding var 1 to an Int.",
+    "",
+    "The box-register analogue behaves identically (Cannot getReg[Long](4)).",
+    "The v6 SContext.getVarFromInput does NOT: its implementation",
+    "(CContext.scala:76-82) pattern-matches the RType and falls through to",
+    "`case _ => None`, so a mismatch there is None, not a throw."
+  ],
+  "source": {
+    "sigma_state": "6.0.2",
+    "ergo_core": "6.0.2",
+    "activated_script_version": 3,
+    "generator": "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala"
+  },
+  "context_extension": {
+    "_comment": "count=1, var 1 = Constant[SInt](2)",
+    "hex": "01010404"
+  },
+  "cases": [
+    {
+      "name": "get_var_type_mismatch_present",
+      "script": "sigmaProp(getVar[Long](1).isDefined)",
+      "tree_hex": "1000d1e6e30105",
+      "extension_hex": "01010404",
+      "verdict": "REJECT",
+      "scala_exception": "InvalidType",
+      "scala_message": "Cannot getVar[Long](1): invalid type of value TestValue(5) at id=1"
+    },
+    {
+      "name": "get_var_type_mismatch_present_negated",
+      "_comment": "The form an attacker would use: the silent None would make this SUCCEED.",
+      "script": "sigmaProp(!getVar[Long](1).isDefined)",
+      "tree_hex": "1000d1efe6e30105",
+      "extension_hex": "01010404",
+      "verdict": "REJECT",
+      "scala_exception": "InvalidType",
+      "scala_message": "Cannot getVar[Long](1): invalid type of value TestValue(5) at id=1"
+    },
+    {
+      "name": "get_var_absent_slot",
+      "script": "sigmaProp(getVar[Long](1).isDefined)",
+      "tree_hex": "1000d1e6e30105",
+      "extension_hex": "00",
+      "verdict": "ACCEPT", "prop_hex": "d2", "jit_cost": 35
+    },
+    {
+      "name": "get_var_absent_slot_negated",
+      "script": "sigmaProp(!getVar[Long](1).isDefined)",
+      "tree_hex": "1000d1efe6e30105",
+      "extension_hex": "00",
+      "verdict": "ACCEPT", "prop_hex": "d3", "jit_cost": 50
+    },
+    {
+      "name": "get_var_type_match_control",
+      "script": "sigmaProp(getVar[Int](1).isDefined)",
+      "tree_hex": "1000d1e6e30104",
+      "extension_hex": "01010404",
+      "verdict": "ACCEPT", "prop_hex": "d3", "jit_cost": 35
+    },
+    {
+      "name": "get_reg_type_mismatch_present",
+      "script": "sigmaProp(SELF.R4[Long].isDefined)",
+      "tree_hex": "1000d1e6c6a70405",
+      "register_block_hex": "010404",
+      "verdict": "REJECT",
+      "scala_exception": "InvalidType",
+      "scala_message": "Cannot getReg[Long](4): invalid type of value TestValue(5) at id=4"
+    },
+    {
+      "name": "get_reg_type_mismatch_present_negated",
+      "script": "sigmaProp(!SELF.R4[Long].isDefined)",
+      "tree_hex": "1000d1efe6c6a70405",
+      "register_block_hex": "010404",
+      "verdict": "REJECT",
+      "scala_exception": "InvalidType",
+      "scala_message": "Cannot getReg[Long](4): invalid type of value TestValue(5) at id=4"
+    },
+    {
+      "name": "get_reg_absent_slot",
+      "script": "sigmaProp(SELF.R4[Long].isDefined)",
+      "tree_hex": "1000d1e6c6a70405",
+      "register_block_hex": "00",
+      "verdict": "ACCEPT", "prop_hex": "d2", "jit_cost": 85
+    }
+  ]
+}

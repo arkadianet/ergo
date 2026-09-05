@@ -1,0 +1,89 @@
+{
+  "_comment": [
+    "Ground truth from the Scala reference stack (sigma-state 6.0.2 + ergo-core 6.0.2).",
+    "Pins the fourth EvaluatedValue subclass -- GroupGenerator, sigma/ast/values.scala:709 --",
+    "appearing as a stored VALUE in a box register and in a ContextExtension entry.",
+    "ValueSerializer writes it as its bare one-byte opcode 0x82, not as the 34-byte",
+    "SGroupElement Constant form, and a box id is blake2b256 of the box bytes, so the",
+    "one-byte form is consensus-committed. Its value is CryptoConstants.dlogGroup.generator,",
+    "and the JVM reduces it identically to a group-element constant of that point."
+  ],
+  "source": {
+    "sigma_state": "6.0.2",
+    "ergo_core": "6.0.2",
+    "activated_script_version": 3,
+    "generator": "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala"
+  },
+  "values": {
+    "group_generator_node_0x82": {
+      "_comment": "ValueSerializer.serialize(GroupGenerator)",
+      "hex": "82"
+    },
+    "group_element_constant_control": {
+      "_comment": "ValueSerializer.serialize(GroupElementConstant(GroupGenerator.value)) -- same point, 34 bytes",
+      "hex": "070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+    },
+    "generator_encoded": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+  },
+  "box_candidate": {
+    "_comment": "ErgoBoxCandidate: 1000000 nanoERG, script sigmaProp(true), height 0, R4 = GroupGenerator",
+    "hex": "c0843d10010101d1730000000182",
+    "scala_parse": "ACCEPT",
+    "scala_reserialized_hex": "c0843d10010101d1730000000182"
+  },
+  "ergo_box": {
+    "_comment": "The same candidate as output index 3 of transaction 0x07..07; id = blake2b256(box bytes)",
+    "bytes_hex": "c0843d10010101d1730000000182070707070707070707070707070707070707070707070707070707070707070703",
+    "scala_box_id": "05b02f98770d6178bb39f4ceecaa78bbcaacf2c8b8752f9d0d13b418604305a8"
+  },
+  "context_extension": {
+    "_comment": "count=1, var 1 = GroupGenerator",
+    "hex": "010182",
+    "scala_parse": "ACCEPT",
+    "scala_reserialized_hex": "010182"
+  },
+  "transaction": {
+    "_comment": "1-in/1-out tx whose input extension binds var 1 to the GroupGenerator node",
+    "hex": "01010101010101010101010101010101010101010101010101010101010101010100010182000001c0843d10010101d17300000000",
+    "scala_parse": "ACCEPT",
+    "scala_reserialized_hex": "01010101010101010101010101010101010101010101010101010101010101010100010182000001c0843d10010101d17300000000",
+    "scala_tx_id": "6a751a0dc3ce23f9b622c25ba55fc37426712d594cafdb25d17f48139f5edaab"
+  },
+  "reduce": {
+    "_comment": [
+      "CErgoTreeEvaluator.eval against the dummy ErgoLikeContext (activated version 3,",
+      "self box = the tree at 1000000 nanoERG, sole input). P:d3 = TrivialProp(true)."
+    ],
+    "extension_var_equals_generator": {
+      "script": "sigmaProp(getVar[GroupElement](1).get == groupGenerator)",
+      "tree_hex": "1000d193e4e3010782",
+      "extension_hex": "010182",
+      "verdict": "ACCEPT",
+      "prop_hex": "d3",
+      "jit_cost": 222
+    },
+    "extension_var_is_defined": {
+      "script": "sigmaProp(getVar[GroupElement](1).isDefined)",
+      "tree_hex": "1000d1e6e30107",
+      "extension_hex": "010182",
+      "verdict": "ACCEPT",
+      "prop_hex": "d3",
+      "jit_cost": 35
+    },
+    "register_equals_generator": {
+      "script": "sigmaProp(SELF.R4[GroupElement].get == groupGenerator)",
+      "tree_hex": "1000d193e4c6a7040782",
+      "self_r4": "GroupGenerator node (0x82)",
+      "verdict": "ACCEPT",
+      "prop_hex": "d3",
+      "jit_cost": 272
+    },
+    "register_equals_generator_constant_control": {
+      "_comment": "Same script, R4 = GroupElementConstant(generator). Identical verdict AND cost -- the node and the constant are value-equivalent; only the bytes differ.",
+      "self_r4": "070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "verdict": "ACCEPT",
+      "prop_hex": "d3",
+      "jit_cost": 272
+    }
+  }
+}

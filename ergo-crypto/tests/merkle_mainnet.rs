@@ -249,3 +249,36 @@ fn extension_root_blocks_844665_844680() {
     }
     eprintln!("{} EIP-37 blocks extension root verified", blocks.len());
 }
+
+/// The block-level `transactionsRoot` is built over the CANONICAL transaction
+/// ids, so a transaction whose input extension arrives on the wire as the
+/// `TrueLeaf` opcode (`01017f`) contributes the same leaf as the one carrying
+/// the canonical constant (`01010101`): Scala's `ErgoLikeTransaction.id`
+/// hashes `bytesToSign`, which re-serializes the parsed extension. The oracle
+/// (`scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala`,
+/// `BlockTransactions(hdr, version 3, Seq(tx)).digest`) reports one root for
+/// both encodings; the witness leaf is the same on both sides (no proofs).
+///
+/// Vector: `test-vectors/scala/canonical_extension_and_group_element.json`.
+#[test]
+fn transactions_root_over_wire_true_leaf_extension_matches_canonical_scala_root() {
+    use ergo_ser::transaction::transaction_id;
+    const IN: &str = "01010101010101010101010101010101010101010101010101010101010101010100";
+    const OUT: &str = "000001c0843d10010101d17300000000";
+    const EXPECTED_ROOT: &str = "bdb0ebec0e29bdabb8187b34fc57c29051a39d3f6cb3b6014e5c98157d25b3fe";
+
+    for ext in ["01017f", "01010101"] {
+        let tx_bytes = hex::decode(format!("{IN}{ext}{OUT}")).unwrap();
+        let mut reader = VlqReader::new(&tx_bytes);
+        let tx = read_transaction(&mut reader).unwrap();
+        let tx_id = transaction_id(&tx).unwrap();
+        let witness = witness_id(&tx_bytes);
+        // Block version 3: tx-id leaves followed by witness-id leaves.
+        let leaves: Vec<&[u8]> = vec![tx_id.as_bytes(), witness.as_slice()];
+        assert_eq!(
+            hex::encode(merkle_tree_root(&leaves)),
+            EXPECTED_ROOT,
+            "extension wire form {ext}: transactionsRoot must match the JVM",
+        );
+    }
+}
