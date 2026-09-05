@@ -118,20 +118,29 @@ pub fn decode_input(si: &ScalaInput) -> Result<Input, DecodeError> {
 
 /// Mode-aware variant of [`decode_input`].
 ///
-/// **`DecodeMode::Submit`** (wallet → node): the input's
-/// `spendingProof.extension` is parsed and re-serialized via
-/// [`SpendingProof::new`], canonicalizing non-canonical encodings
-/// the wallet may have submitted (mirrors register canonicalization
-/// — see `b4_q5_extension_canonicalization*` in
-/// `ergo-node/src/api_bridge.rs`).
+/// Both modes canonicalize `spendingProof.extension`: unlike registers,
+/// context-extension entries carry no genuine Scala-side node-form
+/// ambiguity, and the reference's own `tx_id` always commits to the
+/// CANONICAL re-serialization (`ContextExtension.serializer.serialize`
+/// inside `ErgoLikeTransaction.bytesToSign`) regardless of the wire form it
+/// read — see the `SpendingProof` doc comment in `ergo-ser`. So there is no
+/// mode-specific "preserve the caller's bytes" path here: doing so for
+/// `DecodeMode::Preserve` would have hashed non-canonical-but-re-parseable
+/// bytes (`01017f`) into a tx id that DIFFERS from the reference's
+/// (`01010101`) for the same logical extension, on the unverified
+/// assumption that every caller only ever supplies Scala-emitted canonical
+/// hex.
 ///
-/// **`DecodeMode::Preserve`**:
-/// the input's `extension_bytes` are preserved verbatim from the
-/// JSON hex via [`SpendingProof::from_trusted_raw_parts`]. Scala has
-/// already validated these bytes on chain; the consensus-bearing
-/// `tx_id = blake2b256(bytes_to_sign)` requires byte-identical
-/// re-emission. Closes the same `ConstantSerializer`-vs-AST-form
-/// drift class that the register-side fix addresses.
+/// **`DecodeMode::Submit`** (wallet → node): parsed and re-serialized via
+/// [`SpendingProof::new`] (mirrors register canonicalization — see
+/// `b4_q5_extension_canonicalization*` in `ergo-node/src/api_bridge.rs`).
+///
+/// **`DecodeMode::Preserve`**: parsed and re-serialized via
+/// [`SpendingProof::try_from_raw_parts`], which validates the parse and
+/// canonicalizes the stored bytes rather than trusting the caller's wire
+/// form — closing the same `ConstantSerializer`-vs-AST-form drift class the
+/// register-side fix addresses, without the byte-fidelity assumption the
+/// unchecked `from_trusted_raw_parts` would require.
 pub fn decode_input_with_mode(si: &ScalaInput, mode: DecodeMode) -> Result<Input, DecodeError> {
     let box_id = decode_digest32(&si.box_id, "boxId")?;
     let proof = hex::decode(&si.spending_proof.proof_bytes)
@@ -141,7 +150,14 @@ pub fn decode_input_with_mode(si: &ScalaInput, mode: DecodeMode) -> Result<Input
             .map_err(|(r, d)| (r, format!("spendingProof.{d}")))?;
     let spending_proof = match mode {
         DecodeMode::Preserve => {
-            SpendingProof::from_trusted_raw_parts(proof, extension, raw_extension_bytes)
+            SpendingProof::try_from_raw_parts(proof, extension, raw_extension_bytes).map_err(
+                |e| {
+                    (
+                        DESERIALIZE,
+                        format!("spendingProof.extension canonicalize: {e}"),
+                    )
+                },
+            )?
         }
         DecodeMode::Submit => SpendingProof::new(proof, extension)
             .map_err(|e| (DESERIALIZE, format!("spendingProof build: {e}")))?,
@@ -241,10 +257,15 @@ pub fn decode_context_extension(
 ///
 /// **`DecodeMode::Preserve`**: the returned `Vec<u8>` is the input
 /// hex concatenated verbatim (`count(u8) || repeated (key(u8),
-/// value_bytes)`). Used by [`decode_input_with_mode`] +
-/// [`SpendingProof::from_trusted_raw_parts`] so `bytes_to_sign(tx)` matches
-/// Scala's wire form byte-for-byte. Same architectural class as the
-/// register raw-passthrough fix at [`decode_registers_with_mode`].
+/// value_bytes)`) — the raw material [`decode_input_with_mode`] parses.
+/// Unlike the register raw-passthrough at [`decode_registers_with_mode`],
+/// these verbatim bytes are NOT what ends up hashed: `decode_input_with_mode`
+/// feeds them through [`SpendingProof::try_from_raw_parts`], which
+/// re-canonicalizes before storing, because (unlike registers) the
+/// reference's own `tx_id` always commits to the canonical
+/// re-serialization of the extension regardless of the wire form it read.
+/// Returned here verbatim only so callers inspecting raw wire bytes
+/// directly (tests, diagnostics) see exactly what was submitted.
 pub fn decode_context_extension_with_mode(
     map: &indexmap::IndexMap<String, String>,
     mode: DecodeMode,

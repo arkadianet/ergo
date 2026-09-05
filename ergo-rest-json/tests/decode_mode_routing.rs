@@ -38,7 +38,7 @@ use ergo_primitives::reader::VlqReader;
 use ergo_rest_json::{
     decode_block_transactions_with_mode, decode_context_extension_with_mode,
     decode_registers_with_mode, decode_scala_transaction_with_mode, DecodeMode, ScalaFullBlock,
-    ScalaOutputInput, ScalaTransaction, ScalaTransactionInput,
+    ScalaInput, ScalaOutputInput, ScalaSpendingProof, ScalaTransaction, ScalaTransactionInput,
 };
 use ergo_ser::block_transactions::read_block_transactions;
 use ergo_ser::transaction::{read_transaction, transaction_id};
@@ -314,6 +314,70 @@ fn decode_block_transactions_with_mode_submit_matches_scala_tx18_id() {
         "Submit mode must reproduce Scala's tx id for block 836113 tx[18] — \
          a submitted transaction whose id differs from the reference's is \
          rejected by the network"
+    );
+}
+
+/// REST `DecodeMode::Preserve`, end to end: a caller-supplied non-canonical
+/// `spendingProof.extension` entry (`"1": "7f"`, the bare `TrueLeaf` opcode)
+/// must still decode to the CANONICAL tx id, not the id a byte-verbatim
+/// hash of `7f` would produce. This is the P2 gap `SpendingProof::from_raw_parts`
+/// closed: the earlier "Preserve keeps caller bytes verbatim" behavior
+/// documented an unverified assumption ("Scala only emits canonical hex")
+/// that a REST caller is not bound by.
+///
+/// Oracle: `test-vectors/scala/canonical_extension_and_group_element.json`,
+/// case `true_leaf_opcode` — `extension_wire_hex: "01017f"` canonicalizes to
+/// `extension_canonical_hex: "01010101"`, both yielding tx id
+/// `0034c8fd…`. The expected id below is copied from that oracle file, not
+/// computed by the code under test.
+#[test]
+fn decode_scala_transaction_with_mode_preserve_canonicalizes_true_leaf_extension_to_jvm_oracle_id()
+{
+    const ORACLE_TX_WIRE_HEX: &str = "0101010101010101010101010101010101010101010101010101010101010101010001017f000001c0843d10010101d17300000000";
+    const ORACLE_ID: &str = "0034c8fded6a1dca7bba16e71419da08eaebf8186d346bc20cd9a15b91b5e0b5";
+
+    // Pull a real, already-canonical ergoTree/output pair out of the oracle
+    // tx wire itself, so the test only varies the extension under scrutiny.
+    let wire = hex::decode(ORACLE_TX_WIRE_HEX).unwrap();
+    let mut r = VlqReader::new(&wire);
+    let oracle_tx = read_transaction(&mut r).expect("oracle tx wire must parse");
+    assert!(r.is_empty());
+    let out = &oracle_tx.output_candidates[0];
+
+    let mut extension = indexmap::IndexMap::new();
+    extension.insert("1".to_string(), "7f".to_string()); // non-canonical: bare TrueLeaf opcode
+
+    let input = ScalaTransactionInput {
+        inputs: vec![ScalaInput {
+            box_id: hex::encode([0x01u8; 32]),
+            spending_proof: ScalaSpendingProof {
+                proof_bytes: String::new(),
+                extension,
+            },
+        }],
+        data_inputs: vec![],
+        outputs: vec![ScalaOutputInput {
+            value: out.value,
+            ergo_tree: hex::encode(out.ergo_tree_bytes()),
+            assets: vec![],
+            creation_height: out.creation_height,
+            additional_registers: BTreeMap::new(),
+        }],
+    };
+
+    let bytes = decode_scala_transaction_with_mode(&input, DecodeMode::Preserve)
+        .expect("Preserve decode of a non-canonical-but-parseable extension must succeed");
+    let mut r2 = VlqReader::new(&bytes);
+    let decoded_tx = read_transaction(&mut r2).expect("re-parse decoded tx wire");
+    assert!(r2.is_empty());
+    let computed_id = hex::encode(transaction_id(&decoded_tx).expect("tx_id").as_bytes());
+
+    assert_eq!(
+        computed_id, ORACLE_ID,
+        "DecodeMode::Preserve must canonicalize spendingProof.extension \
+         before it reaches the tx id — a REST caller feeding non-canonical \
+         hex (01017f) must not produce a different id than the reference's \
+         canonical form (01010101)",
     );
 }
 

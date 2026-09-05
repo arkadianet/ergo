@@ -80,27 +80,27 @@ impl SpendingProof {
         })
     }
 
-    /// Build a SpendingProof from a parsed [`ContextExtension`] and the
-    /// **verbatim** wire bytes the parser saw. Use this when reconstructing
-    /// from external data (REST JSON, captured fixtures) where the original
-    /// byte form must be preserved for `bytes_to_sign(tx)` parity.
+    /// Build a SpendingProof from a parsed [`ContextExtension`] and its
+    /// wire bytes, trusting the caller that `extension_bytes` is both a
+    /// valid serialization of `extension` AND already in CANONICAL form
+    /// (byte-identical to what [`write_context_extension`] would produce).
+    /// No runtime validation is performed.
     ///
     /// # Safety contract
     ///
-    /// Caller MUST ensure `extension_bytes` is a valid serialization that
-    /// `read_context_extension` would parse back to the same `extension`
-    /// struct. No runtime validation is performed. A mismatch silently
-    /// desyncs `bytes_to_sign(tx)` from internal inspection.
-    ///
-    /// Prefer supplying the CANONICAL encoding: the reference hashes the
-    /// re-serialized extension into the transaction id, so bytes that merely
-    /// re-parse equal — `01017f` versus `01010101` — still yield the wrong id.
-    /// The consensus wire reader ([`read_spending_proof`]) canonicalizes for
-    /// exactly that reason; this constructor exists for callers replaying a
-    /// specific byte sequence (REST `DecodeMode::Preserve`), where the source
-    /// is a Scala node that only ever emits canonical hex. Prefer [`SpendingProof::try_from_raw_parts`] when
-    /// the caller cannot guarantee the contract, or
-    /// [`SpendingProof::new`] when no external byte fixture exists.
+    /// A caller that violates either half of the contract — bytes that
+    /// don't parse back to `extension`, or bytes that parse but aren't
+    /// canonical (`01017f` instead of `01010101`) — silently desyncs
+    /// `bytes_to_sign(tx)` from the id the reference node would compute,
+    /// because `ContextExtension.serializer.serialize` (`ProverResult.scala`
+    /// via `ErgoLikeTransaction.bytesToSign`) always re-emits the CANONICAL
+    /// form; see the [`SpendingProof`] doc comment. Reserve this for
+    /// internal callers that produce `extension_bytes` from a source already
+    /// proven canonical (e.g. `write_context_extension` output, or bytes
+    /// read straight off a validated mainnet block). For any externally
+    /// supplied bytes (REST JSON, wallet-submitted hex, captured fixtures
+    /// whose provenance isn't re-checked) use [`SpendingProof::try_from_raw_parts`],
+    /// which parses and canonicalizes instead of trusting the caller.
     pub fn from_trusted_raw_parts(
         proof: Vec<u8>,
         extension: ContextExtension,
@@ -113,20 +113,32 @@ impl SpendingProof {
         }
     }
 
-    /// Validating counterpart to [`SpendingProof::from_trusted_raw_parts`].
+    /// Canonicalizing counterpart to [`SpendingProof::from_trusted_raw_parts`].
     ///
-    /// Re-parses `extension_bytes` and checks the result equals the
-    /// supplied `extension`. Returns `WriteError::InvalidData` on
-    /// re-parse failure, trailing bytes, or parsed-mismatch. On
-    /// success the proof carries the supplied bytes verbatim, so
-    /// non-canonical Scala-emitted extension forms (SBoolean `0105`
-    /// vs `0101`) are preserved for `bytes_to_sign(tx)` parity.
+    /// Re-parses `extension_bytes`, checks the result equals the supplied
+    /// `extension` (`WriteError::InvalidData` on re-parse failure, trailing
+    /// bytes, or parsed-mismatch), and then — unlike the earlier "preserve
+    /// the caller's bytes" behavior — re-serializes the PARSED value via
+    /// [`write_context_extension`] and stores THAT as `extension_bytes`.
     ///
-    /// Cost: one re-parse per call. Use on construction paths where
-    /// the caller cannot prove the invariant by construction; prefer
-    /// the unchecked [`SpendingProof::from_trusted_raw_parts`] in
-    /// hot paths where bytes/parsed are produced atomically by the
-    /// same reader (e.g. inside `read_spending_proof`).
+    /// This is not optional hardening: the reference hashes the
+    /// re-serialized extension into the transaction id (see the
+    /// [`SpendingProof`] doc comment), so a caller-supplied non-canonical
+    /// but re-parseable encoding — `01017f` (bare `TrueLeaf` opcode) versus
+    /// its canonical form `01010101` — must never reach `extension_bytes`
+    /// verbatim, or `bytes_to_sign(tx)` (and hence `transaction_id`) would
+    /// diverge from what Scala computes for the same logical extension.
+    /// Verified against the JVM oracle: both forms canonicalize to id
+    /// `0034c8fd…` (`test-vectors/scala/canonical_extension_and_group_element.json`).
+    ///
+    /// Use this on every construction path fed by external bytes — REST
+    /// `DecodeMode::Preserve` decoding, captured fixtures, anything not
+    /// produced atomically by [`read_spending_proof`] itself. Unlike
+    /// registers (`AdditionalRegisters`), context-extension entries carry no
+    /// genuine Scala-side node-form ambiguity that re-serialization could
+    /// lose — `write_context_extension` round-trips every node form
+    /// (`0x82`/`0x83`/`0x85`/`0x86`) byte-for-byte — so canonicalizing here
+    /// costs nothing beyond one re-parse per call.
     pub fn try_from_raw_parts(
         proof: Vec<u8>,
         extension: ContextExtension,
@@ -145,10 +157,12 @@ impl SpendingProof {
                 "extension_bytes parse to a different ContextExtension than the supplied parsed value".into(),
             ));
         }
+        let mut w = VlqWriter::new();
+        write_context_extension(&mut w, &extension)?;
         Ok(Self {
             proof,
             extension,
-            extension_bytes,
+            extension_bytes: w.result(),
         })
     }
 
@@ -448,6 +462,46 @@ mod tests {
         assert!(
             msg.contains("trailing"),
             "msg should mention trailing, got: {msg}"
+        );
+    }
+
+    // ----- oracle-parity -----
+
+    /// `try_from_raw_parts` must CANONICALIZE, not merely accept, a
+    /// caller-supplied non-canonical-but-re-parseable extension encoding —
+    /// the P2 gap this constructor closes: a REST `DecodeMode::Preserve`
+    /// caller could otherwise feed non-canonical hex straight into
+    /// `extension_bytes`, hashing bytes the reference node never hashes
+    /// into a transaction id.
+    ///
+    /// Wire `01017f` (bare `TrueLeaf` opcode for key 1) parses to the same
+    /// `ContextExtension` as canonical `01010101`, but the reference's
+    /// `ContextExtension.serializer.serialize` re-emits only the latter —
+    /// verified against the JVM oracle
+    /// (`test-vectors/scala/canonical_extension_and_group_element.json`,
+    /// case `true_leaf_opcode`: `extension_wire_hex: "01017f"` canonicalizes
+    /// to `extension_canonical_hex: "01010101"`, transaction id
+    /// `0034c8fd…`). Expected bytes below are copied from that oracle file,
+    /// not computed by the function under test.
+    #[test]
+    fn from_raw_parts_canonicalizes_true_leaf_opcode_to_jvm_oracle_bytes() {
+        let noncanonical_wire = [0x01u8, 0x01, 0x7f]; // count=1, key=1, value=TrueLeaf opcode
+        let mut r = VlqReader::new(&noncanonical_wire);
+        let parsed = read_context_extension(&mut r).expect("01017f must parse (bare TrueLeaf)");
+        assert!(r.is_empty());
+
+        let sp = SpendingProof::try_from_raw_parts(vec![], parsed, noncanonical_wire.to_vec())
+            .expect("non-canonical-but-reparseable extension_bytes must be accepted");
+
+        // JVM oracle: extension_canonical_hex for the true_leaf_opcode case.
+        const JVM_CANONICAL_EXTENSION_HEX: &str = "01010101";
+        assert_eq!(
+            hex::encode(sp.extension_bytes()),
+            JVM_CANONICAL_EXTENSION_HEX,
+            "try_from_raw_parts must store the CANONICAL re-serialization, \
+             not the caller-supplied verbatim bytes — feeding 01017f through \
+             REST DecodeMode::Preserve must still hash the same bytes the \
+             reference node hashes into the transaction id",
         );
     }
 }
