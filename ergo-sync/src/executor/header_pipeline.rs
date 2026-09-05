@@ -132,8 +132,13 @@ impl SyncExecutor {
         let pre = pre_result?;
 
         let t_fin = Instant::now();
-        let finalize_result =
-            header_proc::finalize_header(store, pre, header_bytes, &self.chain_config, self.header_checkpoint);
+        let finalize_result = header_proc::finalize_header(
+            store,
+            pre,
+            header_bytes,
+            &self.chain_config,
+            self.header_checkpoint,
+        );
         self.header_perf
             .add_finalize(t_fin.elapsed().as_nanos() as u64);
         let processed = finalize_result?;
@@ -183,8 +188,13 @@ impl SyncExecutor {
         let pre_for_buffer = pre.clone();
 
         let t_fin = Instant::now();
-        let finalize_result =
-            header_proc::finalize_header(store, pre, header_bytes, &self.chain_config, self.header_checkpoint);
+        let finalize_result = header_proc::finalize_header(
+            store,
+            pre,
+            header_bytes,
+            &self.chain_config,
+            self.header_checkpoint,
+        );
         self.header_perf
             .add_finalize(t_fin.elapsed().as_nanos() as u64);
         match finalize_result {
