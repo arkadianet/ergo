@@ -154,6 +154,14 @@ pub(super) fn handle_sync_tick(state: &mut NodeState) {
     // level-triggered here and one-shot inside the helper. Archive /
     // Mode 6 / any store that already holds full blocks return before
     // touching redb.
+    //
+    // ORDER MATTERS: this must stay ahead of the `recover_coordinator`
+    // call in step 3. Recovery anchors its walk at
+    // `max(best_full_block_height, prune_sentinel - 1)` — the same floor
+    // `blocks_to_download` uses — so seeding first is what lets the
+    // single walk register a range the download side will actually
+    // request. Boot has the reverse order and repairs it explicitly; see
+    // `prune_activation::seed_prune_sentinel_and_rebuild_pending`.
     super::prune_activation::seed_prune_sentinel_at_flip(
         &mut state.store,
         &mut state.coordinator,

@@ -48,7 +48,54 @@
 use ergo_state::store::activation_minimal_full_block_height;
 use ergo_state::ChainStateRead;
 use ergo_sync::coordinator::SyncCoordinator;
+use ergo_sync::executor::{HydrationError, SyncExecutor};
 use tracing::{info, warn};
+
+/// Boot-path arm: seed the sentinel at the flip, then rebuild the
+/// coordinator's pending range against it.
+///
+/// Boot runs `recover_coordinator` *before* this seeding step (it is
+/// what flips the headers-synced latch in the first place), so on a
+/// from-scratch Mode 3 node that walk anchors at
+/// `best_full_block_height = 0` and registers the bottom of the chain —
+/// a range `SyncState::blocks_to_download` then discards wholesale,
+/// because the seed that lands a moment later puts the sentinel far
+/// above it. Recovery has already latched `recovery_done`, so no later
+/// tick repeats the walk, and the seed helper is one-shot, so nothing
+/// repopulates the queue either: section requests stop and full-block
+/// sync stalls before it starts.
+///
+/// Re-running recovery after a fresh seed closes that window. The
+/// second walk sees the sentinel in `SyncState` and anchors on the same
+/// floor the download window uses. `reset_recovery_done` is safe here
+/// because `recover_coordinator` is idempotent — `add_pending_block`
+/// and `register_header` both de-duplicate by header id.
+///
+/// The periodic tick needs none of this: it seeds *before* its recovery
+/// call, so the single walk already sees the sentinel.
+///
+/// Returns the seeded sentinel, or `None` when the flip must not move
+/// it (every no-op condition of [`seed_prune_sentinel_at_flip`]).
+pub(super) fn seed_prune_sentinel_and_rebuild_pending(
+    store: &mut ergo_state::StateBackendKind,
+    executor: &mut SyncExecutor,
+    coordinator: &mut SyncCoordinator,
+    blocks_to_keep: i32,
+) -> Result<Option<u32>, HydrationError> {
+    let Some(sentinel) = seed_prune_sentinel_at_flip(store, coordinator, blocks_to_keep) else {
+        return Ok(None);
+    };
+    executor.reset_recovery_done();
+    let recovered = executor.recover_coordinator(store, coordinator)?;
+    info!(
+        sentinel,
+        recovered,
+        pending = coordinator.sync_state().pending_blocks_len(),
+        "Mode 3: pending download range rebuilt above the freshly seeded \
+         prune sentinel",
+    );
+    Ok(Some(sentinel))
+}
 
 /// Seed the prune sentinel if the headers-synced flip has happened on a
 /// pruned store that holds no full blocks yet. Persists the value and
@@ -137,4 +184,217 @@ pub(super) fn seed_prune_sentinel_at_flip(
          FullBlockPruningProcessor.updateBestFullBlock parity)",
     );
     Some(seeded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ergo_crypto::difficulty::DifficultyParams;
+    use ergo_primitives::digest::{ADDigest, Digest32, ModifierId};
+    use ergo_primitives::group_element::GroupElement;
+    use ergo_ser::autolykos::AutolykosSolution;
+    use ergo_ser::header::{serialize_header, Header};
+    use ergo_state::chain::HeaderMeta;
+    use ergo_state::store::StateStore;
+    use ergo_sync::executor::SyncExecutor;
+    use ergo_validation::context::ProtocolParams;
+
+    // ----- helpers -----
+
+    /// Header-chain tip the fixture seeds.
+    const HEADER_TIP: u32 = 1200;
+    /// Smallest legal pruned window (`keep_versions 200 + SAFETY_MARGIN 50`).
+    const BLOCKS_TO_KEEP: i32 = 250;
+    /// Scala `updateBestFullBlock` output for `(current_min = 1,
+    /// header_height = 1200, blocksToKeep = 250, votingLength = 1024)` —
+    /// oracle vector `flip_h1200_keep250_mainnet`. `1200 - 250 + 1 = 951`.
+    const EXPECTED_SENTINEL: u32 = 951;
+    /// Deliberately smaller than `HEADER_TIP - EXPECTED_SENTINEL` would
+    /// need to reach the sentinel from height 0: with this window a walk
+    /// anchored at `best_full_block_height = 0` stops at 384, far below
+    /// the sentinel, which is exactly the stall under test.
+    const DOWNLOAD_WINDOW: usize = 384;
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock is after the epoch")
+            .as_millis() as u64
+    }
+
+    fn synth_header(height: u32, parent: [u8; 32], timestamp_ms: u64) -> Header {
+        let root = |seed: u8| {
+            let mut b = [0u8; 32];
+            b[..4].copy_from_slice(&height.to_be_bytes());
+            b[4] = seed;
+            b
+        };
+        Header {
+            version: 2,
+            parent_id: ModifierId::from_bytes(parent),
+            ad_proofs_root: Digest32::from_bytes(root(0xAD)),
+            state_root: ADDigest::from_bytes([0u8; 33]),
+            transactions_root: Digest32::from_bytes(root(0x77)),
+            timestamp: timestamp_ms,
+            n_bits: 0x1d00ffff,
+            height,
+            extension_root: Digest32::from_bytes(root(0xEE)),
+            votes: [0u8; 3],
+            unparsed_bytes: vec![],
+            solution: AutolykosSolution::V2 {
+                pk: GroupElement::from_bytes([0x02; 33]),
+                nonce: [0xAA; 8],
+            },
+        }
+    }
+
+    /// A genesis-initialized store carrying a linear synthetic header
+    /// chain `1..=HEADER_TIP` whose tip timestamp is `now` — the state a
+    /// from-scratch pruned node reaches at the headers-synced flip: every
+    /// header validated, no full block applied, no sentinel row.
+    ///
+    /// The fresh tip timestamp is what makes `recover_coordinator` flip
+    /// the latch with no peers connected (`check_headers_synced` is a pure
+    /// function of the best header's timestamp).
+    fn seeded_store() -> (ergo_state::StateBackendKind, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = StateStore::open(&dir.path().join("state.redb")).expect("open store");
+        store.initialize_genesis(&[]).expect("init genesis");
+        let base = now_ms() - u64::from(HEADER_TIP) * 120_000;
+        let mut parent = store.chain_state_meta().best_header_id;
+        for height in 1..=HEADER_TIP {
+            let ts = base + u64::from(height) * 120_000;
+            let header = synth_header(height, parent, ts);
+            let (bytes, id) = serialize_header(&header).expect("serialize header");
+            let id = *id.as_bytes();
+            let meta = HeaderMeta {
+                parent_id: parent,
+                height,
+                cumulative_score: u64::from(height).to_be_bytes().to_vec(),
+                pow_validity: 1,
+                timestamp: ts,
+            };
+            store
+                .store_validated_header(
+                    &id,
+                    &bytes,
+                    &meta,
+                    Some((height, meta.cumulative_score.clone())),
+                )
+                .unwrap_or_else(|e| panic!("store header h={height}: {e:?}"));
+            parent = id;
+        }
+        let cs = store.chain_state_meta();
+        assert_eq!(cs.best_header_height, HEADER_TIP, "fixture header tip");
+        assert_eq!(cs.best_full_block_height, 0, "fixture applies no blocks");
+        (ergo_state::StateBackendKind::Utxo(store), dir)
+    }
+
+    /// Replay the boot sequence up to (but not including) the activation
+    /// seed: hydrate, build the header index, recover the coordinator.
+    fn boot_up_to_the_seed(
+        store: &mut ergo_state::StateBackendKind,
+    ) -> (SyncExecutor, SyncCoordinator) {
+        let mut executor = SyncExecutor::new(
+            ProtocolParams::mainnet_default(),
+            DifficultyParams::mainnet(),
+        );
+        let mut coordinator = SyncCoordinator::new_with_window(0, DOWNLOAD_WINDOW);
+        coordinator.set_requires_proofs(true);
+        executor.hydrate_from_store(store).expect("hydrate");
+        executor
+            .hydrate_block_context(store)
+            .expect("hydrate block context");
+        executor.load_header_index(store).expect("header index");
+        executor
+            .recover_coordinator(store, &mut coordinator)
+            .expect("boot recovery");
+        assert!(
+            coordinator.sync_state().headers_chain_synced(),
+            "fixture premise: the fresh tip must flip the headers-synced latch",
+        );
+        assert!(
+            executor.recovery_done(),
+            "fixture premise: boot recovery latches recovery_done before the seed",
+        );
+        (executor, coordinator)
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn boot_seed_above_the_recovered_window_rebuilds_the_pending_range() {
+        // Boot order is recover-then-seed, so the walk anchors at
+        // `best_full_block_height = 0` and registers 1..=384 while the
+        // seed lands at 951. `blocks_to_download` drops every entry below
+        // the sentinel, `recovery_done` is already latched, and the seed
+        // helper is one-shot — nothing would ever repopulate the queue.
+        let (mut store, _dir) = seeded_store();
+        let (mut executor, mut coordinator) = boot_up_to_the_seed(&mut store);
+
+        let seeded = seed_prune_sentinel_and_rebuild_pending(
+            &mut store,
+            &mut executor,
+            &mut coordinator,
+            BLOCKS_TO_KEEP,
+        )
+        .expect("rebuild must not fail on an intact header chain");
+        assert_eq!(seeded, Some(EXPECTED_SENTINEL), "Scala-parity seed value");
+
+        let queued = coordinator.sync_state().blocks_to_download();
+        assert!(
+            !queued.is_empty(),
+            "an empty download queue is the stall: no section request goes \
+             out, so best_full_block_height never leaves 0",
+        );
+        assert_eq!(
+            queued.first().map(|b| b.height),
+            Some(EXPECTED_SENTINEL),
+            "the rebuilt range must start at the sentinel — the first \
+             block a pruned node is allowed to hold",
+        );
+        assert_eq!(
+            queued.last().map(|b| b.height),
+            Some(HEADER_TIP),
+            "and run to the header tip, which is inside the window from \
+             the sentinel floor",
+        );
+    }
+
+    #[test]
+    fn boot_seed_refused_for_an_archive_node_leaves_the_pending_range_intact() {
+        // Same fixture with `blocks_to_keep = -1`. The seed is refused, so
+        // the helper must not disturb the range boot recovery already
+        // built: an archive node downloads from genesis onward.
+        let (mut store, _dir) = seeded_store();
+        let (mut executor, mut coordinator) = boot_up_to_the_seed(&mut store);
+        let before: Vec<u32> = coordinator
+            .sync_state()
+            .blocks_to_download()
+            .iter()
+            .map(|b| b.height)
+            .collect();
+        assert_eq!(
+            before.first().copied(),
+            Some(1),
+            "archive premise: boot recovery seeds from genesis onward",
+        );
+
+        let seeded = seed_prune_sentinel_and_rebuild_pending(
+            &mut store,
+            &mut executor,
+            &mut coordinator,
+            -1,
+        )
+        .expect("archive rebuild is a no-op, not a failure");
+        assert_eq!(seeded, None, "an archive node must never arm the sentinel");
+
+        let after: Vec<u32> = coordinator
+            .sync_state()
+            .blocks_to_download()
+            .iter()
+            .map(|b| b.height)
+            .collect();
+        assert_eq!(after, before, "archive download range must be untouched");
+    }
 }

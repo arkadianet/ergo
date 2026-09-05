@@ -86,6 +86,17 @@ infrastructure.
   Without it, every pending block sat above the stale window and each
   tick emitted an empty request batch. Same split-brain class as the
   Mode 2 post-install `set_best_full_block` fix.
+- **Mode 3 (pruned): the pending download range is rebuilt after a
+  boot-time sentinel activation.** Boot recovers the coordinator's
+  pending blocks *before* it seeds the sentinel, so a from-scratch
+  pruned node walked the window above `best_full_block_height = 0` and
+  then seeded the sentinel far above that range — which the download
+  window filters away wholesale. With recovery already latched done and
+  the seed helper one-shot, nothing repopulated the queue and section
+  requests stopped before the first one went out. Recovery now anchors
+  its walk on the same floor the download window uses
+  (`max(best_full_block_height, prune_sentinel - 1)`), and boot re-runs
+  it whenever the activation seed fires.
 - Corrected the documented Mode 3 rollback-window floor in
   `docs/compatibility.md` (`keep_versions + SAFETY_MARGIN` = 250 at the
   defaults, not 232).

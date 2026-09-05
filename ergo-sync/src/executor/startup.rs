@@ -304,7 +304,9 @@ impl SyncExecutor {
     ///
     /// After restart, the coordinator is fresh. This rebuilds its knowledge
     /// of headers that were validated but not yet block-applied by walking
-    /// from best_full_block+1 to best_header through the stored header chain.
+    /// the stored header chain from one past the download-window floor
+    /// (`max(best_full_block_height, prune_sentinel - 1)`, the same anchor
+    /// `SyncState::blocks_to_download` uses) up to best_header.
     ///
     /// Only recovers if headers are near tip (headers_chain_synced will be
     /// detected). During initial header sync, recovery is skipped — headers
@@ -366,13 +368,33 @@ impl SyncExecutor {
             return Ok(0);
         }
 
-        // Only recover blocks within the download window.
-        let recovery_limit = cs
+        // Only recover blocks within the download window, anchored on the
+        // same floor `SyncState::blocks_to_download` uses:
+        // `max(best_full_block_height, prune_sentinel - 1)`.
+        //
+        // A freshly activated Mode 3 node holds no full blocks
+        // (`best_full_block_height == 0`) while the headers-synced flip
+        // has already seeded the sentinel far up the chain. The download
+        // side drops every pending entry below the sentinel, so a walk
+        // anchored at `best_full_block_height` would register exactly the
+        // range the download window then filters away — section requests
+        // stop going out and full-block sync stalls. Anchoring both on the
+        // same floor keeps the recovered range inside the window that will
+        // actually be requested (Scala `nextModifiersToDownload` starts at
+        // `minimalFullBlockHeight` when `bestFullBlockOpt` is `None`,
+        // `ToDownloadProcessor.scala:99-102`).
+        //
+        // Inert for archive / Mode 6 / any pre-eviction store, where
+        // `prune_sentinel` is `0` and the floor stays
+        // `best_full_block_height`.
+        let walk_floor = cs
             .best_full_block_height
-            .saturating_add(coordinator.sync_state().download_window() as u32);
+            .max(coordinator.sync_state().prune_sentinel().saturating_sub(1));
+        let recovery_limit =
+            walk_floor.saturating_add(coordinator.sync_state().download_window() as u32);
         let effective_header_height = cs.best_header_height.min(recovery_limit);
 
-        if effective_header_height <= cs.best_full_block_height {
+        if effective_header_height <= walk_floor {
             // Nothing to re-seed: every header within the window is already
             // block-applied. Latch recovery_done (as the walk-completed path
             // at the end does) so sync_tick's `headers_chain_synced &&
@@ -399,7 +421,7 @@ impl SyncExecutor {
             }
         };
 
-        // Walk backwards from the start header to best_full_block+1, collecting
+        // Walk backwards from the start header to `walk_floor + 1`, collecting
         // entries that need block application. Previously this was on the
         // coordinator behind a closure callback; moved here so ergo-p2p
         // stays free of a ergo-state dependency.
@@ -410,11 +432,11 @@ impl SyncExecutor {
         // `header_id` from bytes (catching DB-key vs body drift), parses
         // with EOF enforcement (catching trailing-bytes corruption), and
         // verifies meta consistency (height, parent_id, timestamp). The
-        // legitimate stop is `meta.height <= best_full_block_height` — a
-        // height check, not an absent-row check.
+        // legitimate stop is `meta.height <= walk_floor` — a height check,
+        // not an absent-row check.
         let mut headers_to_register = Vec::new();
         let mut current_id = start_id;
-        for _ in 0..(effective_header_height - cs.best_full_block_height) {
+        for _ in 0..(effective_header_height - walk_floor) {
             let meta = store.get_header_meta(&current_id)?.ok_or_else(|| {
                 HydrationError::MissingPersistedRow {
                     phase: "recover_coordinator",
@@ -422,7 +444,7 @@ impl SyncExecutor {
                     id: hex::encode(current_id),
                 }
             })?;
-            if meta.height <= cs.best_full_block_height {
+            if meta.height <= walk_floor {
                 break;
             }
             let header_bytes = store.get_header(&current_id)?.ok_or_else(|| {

@@ -1033,6 +1033,110 @@ fn recover_coordinator_leaves_done_unset_during_bootstrap() {
     );
 }
 
+#[test]
+fn recover_coordinator_anchors_the_walk_on_the_prune_sentinel_floor() {
+    // Mode 3 tick order: the activation seed lands in `SyncState` before
+    // recovery runs. A walk anchored at `best_full_block_height` (0 on a
+    // node that has applied nothing) would register the bottom of the
+    // chain — a range `blocks_to_download` discards wholesale, because it
+    // anchors at `max(best_full_block_height, prune_sentinel - 1)` and
+    // drops everything below the sentinel. Recovery must use the same
+    // floor, or no section request ever goes out.
+    use ergo_ser::header::serialize_header;
+    use ergo_state::chain::HeaderMeta;
+
+    const TIP: u32 = 40;
+    const SENTINEL: u32 = 25;
+    const WINDOW: usize = 10;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+    store.initialize_genesis(&[]).unwrap();
+    // Linear chain 1..=TIP with a fresh tip timestamp, so the walk has
+    // real parent links to follow and the headers-synced latch is
+    // legitimately open. No full blocks — the state under test.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let base = now_ms - u64::from(TIP) * 120_000;
+    let mut parent = store.chain_state_meta().best_header_id;
+    for height in 1..=TIP {
+        let ts = base + u64::from(height) * 120_000;
+        // Height-derived roots keep each height's section ids distinct.
+        let root = |seed: u8| {
+            let mut b = [0u8; 32];
+            b[..4].copy_from_slice(&height.to_be_bytes());
+            b[4] = seed;
+            Digest32::from_bytes(b)
+        };
+        let header = Header {
+            version: 2,
+            parent_id: ModifierId::from_bytes(parent),
+            ad_proofs_root: root(0xAD),
+            transactions_root: root(0x77),
+            state_root: ADDigest::from_bytes([0u8; 33]),
+            timestamp: ts,
+            extension_root: root(0xEE),
+            n_bits: 0x1d00ffff,
+            height,
+            votes: [0, 0, 0],
+            unparsed_bytes: Vec::new(),
+            solution: AutolykosSolution::V2 {
+                pk: GroupElement::from_bytes([0x02; GROUP_ELEMENT_LENGTH]),
+                nonce: [0xAA; 8],
+            },
+        };
+        let (bytes, hid) = serialize_header(&header).unwrap();
+        let hid = *hid.as_bytes();
+        let meta = HeaderMeta {
+            parent_id: parent,
+            height,
+            cumulative_score: u64::from(height).to_be_bytes().to_vec(),
+            pow_validity: 1,
+            timestamp: ts,
+        };
+        store
+            .store_validated_header(
+                &hid,
+                &bytes,
+                &meta,
+                Some((height, meta.cumulative_score.clone())),
+            )
+            .unwrap();
+        parent = hid;
+    }
+    let store = ergo_state::StateBackendKind::Utxo(store);
+
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    executor.load_header_index(&store).unwrap();
+    let mut coordinator = SyncCoordinator::new_with_window(0, WINDOW);
+    coordinator.sync_state_mut().set_prune_sentinel(SENTINEL);
+
+    let recovered = executor
+        .recover_coordinator(&store, &mut coordinator)
+        .unwrap();
+    assert_eq!(
+        recovered, WINDOW,
+        "the walk must fill one download window above the sentinel floor",
+    );
+    let queued: Vec<u32> = coordinator
+        .sync_state()
+        .blocks_to_download()
+        .iter()
+        .map(|b| b.height)
+        .collect();
+    assert_eq!(
+        queued,
+        (SENTINEL..SENTINEL + WINDOW as u32).collect::<Vec<_>>(),
+        "recovered range must be exactly the window the download side \
+         will request; an empty vec here is the Mode 3 sync stall",
+    );
+}
+
 // ----- branch-invalidation classifier -----
 //
 // `is_validation_verdict` gates the durable branch-invalidation path

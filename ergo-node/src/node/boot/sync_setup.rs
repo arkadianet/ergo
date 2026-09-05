@@ -413,11 +413,21 @@ pub(super) fn setup(
     // coordinator's request-side gate and download window both read it.
     // No-op for archive / Mode 6 / a store that already holds full
     // blocks or a sentinel; see `node::prune_activation`.
-    crate::node::prune_activation::seed_prune_sentinel_at_flip(
+    //
+    // On a fresh seed the recovery above is stale by construction — it
+    // walked from `best_full_block_height = 0`, below the sentinel this
+    // call just wrote — so the helper re-runs it against the new floor.
+    // Without that, `blocks_to_download` filters every recovered entry
+    // away and the node never requests a section.
+    if let Err(e) = crate::node::prune_activation::seed_prune_sentinel_and_rebuild_pending(
         store,
+        &mut executor,
         &mut coordinator,
         config.blocks_to_keep,
-    );
+    ) {
+        report_sync_boot_failure(store, "recover_coordinator", &e);
+        return Err(Box::new(e));
+    }
 
     // Committed chain-state snapshot. Nothing mutates committed state
     // between here and `NodeState` construction, so one owned snapshot
