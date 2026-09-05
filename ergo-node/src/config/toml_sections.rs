@@ -388,6 +388,15 @@ pub(super) struct TomlPeers {
     /// declared address (we are not gossipped as reachable). Mirrors
     /// Scala `scorex.network.declaredAddress`.
     pub(super) declared_addr: Option<String>,
+    /// Allow local-network addresses (loopback, RFC1918 / site-local,
+    /// link-local, IPv6 unique-local, carrier-grade NAT) to be learned
+    /// by gossip, dialed, and shared with peers. Default `false`.
+    /// Mirrors Scala `scorex.network.allowLocal` (`application.conf:492`,
+    /// `NetworkUtils.isLocal`). Turn it on for a LAN devnet; leaving it
+    /// off is what keeps a NATted peer's `10.0.0.8:9030` out of every
+    /// other node's dial pool. Operator-configured `[peers] known`
+    /// entries are dialable regardless of this setting.
+    pub(super) allow_local: Option<bool>,
 }
 
 /// `[sync]` TOML section: tunables for the download pipeline.

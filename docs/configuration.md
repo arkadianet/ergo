@@ -92,6 +92,7 @@ the fast clean-database boot path.
 | `per_subnet_limit` | usize | `3` | Maximum connections per /16 subnet. Must be at least 1. |
 | `bind_addr` | string | none | Inbound TCP listen address. Absent or empty string = outbound-only (no inbound listener). Parsed as a socket address at load; a malformed value is rejected. |
 | `declared_addr` | string | none | Address advertised in the handshake and peer gossip so others can dial this node. Independent of `bind_addr` (a NAT'd host binds privately and declares its public address). Absent or empty = the handshake omits it. |
+| `allow_local` | bool | `false` | Allow local-network addresses — loopback, RFC1918 / site-local, link-local, IPv6 unique-local, and carrier-grade NAT — to be learned from gossip, dialed, shared with peers, and kept in `peers.redb`. Off by default so a NAT'd peer advertising e.g. `10.0.0.8:9030` does not enter every other node's dial pool. Turn it on for a LAN devnet, where peers must find each other by gossip over private addresses. Mirrors Scala `scorex.network.allowLocal`. Entries in `known` are unaffected: an operator-configured address is always dialable, including `127.0.0.1:9020`. |
 
 ## `[sync]`
 

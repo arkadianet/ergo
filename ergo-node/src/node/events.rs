@@ -8,7 +8,7 @@ use std::time::Instant;
 use ergo_api::SubmitError;
 use ergo_p2p::handshake::PeerFeature;
 use ergo_p2p::message;
-use ergo_p2p::peer::{PeerId, SyncVersion};
+use ergo_p2p::peer::{Direction, PeerId, SyncVersion};
 use ergo_p2p::peer_manager::ConnectError;
 use ergo_p2p::types::ModifierTypeId;
 use ergo_primitives::reader::VlqReader;
@@ -238,8 +238,27 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
             time: _,
             conn,
         } => {
-            // Skip if already connected (late HandshakeComplete from a previous dial)
+            // Skip if this address is already registered — a late
+            // HandshakeComplete from a previous dial, or an inbound
+            // connection from a reused ephemeral port whose predecessor
+            // has not been torn down yet. The connection is dropped, not
+            // swapped in: the registry is keyed by remote address alone,
+            // and so is `PeerEvent::Disconnected`, so a replaced runtime
+            // would be torn down by the *old* connection's teardown
+            // event and leave a live socket with no registry entry.
+            // Scala drops the duplicate for the same reason
+            // (`NetworkController.handleHandshake`'s
+            // `connectionForPeerAddress(peerAddress).exists(_.handlerRef
+            // != peerHandlerRef)` → `CloseConnection`,
+            // NetworkController.scala:417-424). The stale entry clears
+            // itself within the handshake timeout; the drop is logged so
+            // an operator can tell it from a network fault (issue #293).
             if state.registry.peers.contains_key(&addr) {
+                debug!(
+                    peer = %addr,
+                    reason = "address_still_registered",
+                    "dropping duplicate inbound connection",
+                );
                 drop(conn);
                 return;
             }
@@ -292,6 +311,10 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
             }
 
             state.peer_manager.mark_tcp_connected(&addr);
+            // Read the direction before admission: a rejected handshake
+            // removes the peer entry, and the failure arm below needs to
+            // know whether this connection was ours to begin with.
+            let direction = state.peer_manager.get(&addr).map(|p| p.direction);
             match state
                 .peer_manager
                 .complete_handshake(&addr, peer_spec.clone(), session_id, now)
@@ -361,7 +384,16 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
                         warn!(peer = %addr, error = %e, reason = reason, "handshake not admitted");
                     }
                     state.peer_manager.disconnect(&addr);
-                    state.peer_manager.mark_dial_failed(&addr, now);
+                    // Only a connection we dialed can fail a dial. An
+                    // inbound peer's `addr` is its ephemeral client port,
+                    // which we never chose to dial and must never book
+                    // backoff against (issue #298 review, P1-1).
+                    // `mark_dial_failed` independently ignores addresses
+                    // outside the dial pool; this states the intent at
+                    // the call site rather than relying on that.
+                    if direction != Some(Direction::Inbound) {
+                        state.peer_manager.mark_dial_failed(&addr, now);
+                    }
                     return;
                 }
             }

@@ -2063,3 +2063,23 @@ fn shadow_disabled_skips_validation() {
     let cfg = NodeConfig::load(cli).expect("dormant section loads");
     assert!(!cfg.shadow_config.enabled);
 }
+
+/// `[peers] allow_local` defaults to `false`, matching Scala's
+/// `scorex.network.allowLocal` (`application.conf:492`), and reaches
+/// `NodeConfig` when the operator sets it.
+#[test]
+fn peers_allow_local_defaults_off_and_parses_when_set() {
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
+    assert!(
+        !NodeConfig::load(cli).expect("load").allow_local,
+        "allow_local must default to false",
+    );
+
+    let toml = write_toml("[peers]\nknown = [\"127.0.0.1:9030\"]\nallow_local = true\n");
+    let cli = minimal_cli(Some(&toml));
+    assert!(
+        NodeConfig::load(cli).expect("load").allow_local,
+        "an explicit allow_local = true must reach NodeConfig",
+    );
+}

@@ -1124,6 +1124,7 @@ fn cfg_with_mode(
         chain_spec: Arc::new(ChainSpec::mainnet()),
         data_dir: std::env::temp_dir().join("ergo-mode-label-cfg"),
         known_peers: vec!["127.0.0.1:1".parse().unwrap()],
+        allow_local: false,
         peer_limits: PeerLimits::default(),
         bind_addr: None,
         declared_addr: None,
@@ -3242,6 +3243,29 @@ fn byte_throttle_over_cap_replayed_modifier_frame_drops_and_penalizes() {
     );
 }
 
+/// Charge `peer`'s byte window up to `headroom` bytes short of the cap, so the
+/// next frame larger than `headroom` is over-cap while a 1-byte probe still
+/// fits. Lets a test tell "the exempt frame was charged" apart from "the
+/// window was already full".
+fn fill_byte_window_leaving(state: &mut NodeState, peer: SocketAddr, now: Instant, headroom: u64) {
+    use ergo_p2p::throttle::LimiterVerdict;
+    let mut remaining = state.throttle.limits().max_bytes_per_window - headroom;
+    while remaining > 0 {
+        let chunk = remaining.min(u32::MAX as u64) as u32;
+        assert_eq!(
+            state.throttle.check_and_record(peer, now, chunk),
+            LimiterVerdict::Ok,
+            "pre-fill must stay under the cap"
+        );
+        remaining -= chunk as u64;
+    }
+    assert_eq!(
+        state.throttle.check_and_record(peer, now, 1),
+        LimiterVerdict::Ok,
+        "a 1-byte probe must still fit inside the headroom",
+    );
+}
+
 /// The byte axis still charges the exempted frame, so a peer cannot mint free
 /// bandwidth by sending only `Modifier` frames — its next non-exempt frame is
 /// judged against the true window.
@@ -3261,7 +3285,11 @@ fn byte_throttle_over_cap_modifier_frame_still_charged_to_the_window() {
     .expect("serialize inv");
     let _ = handle_message(&mut state, peer, message::CODE_INV, &inv, now);
 
-    saturate_byte_window(&mut state, peer, now);
+    // Leave a sliver of headroom: the 4 KiB delivery below is over-cap (and so
+    // takes the exempt path), but a 1-byte probe fits UNLESS that delivery was
+    // charged. Fully saturating the window here would make the final
+    // assertion pass even if the exempt frame were never recorded.
+    fill_byte_window_leaving(&mut state, peer, now, 64);
 
     let payload = message::serialize_modifiers(&ergo_p2p::types::ModifiersData {
         type_id: ModifierTypeId::ADProofs.as_byte(),
@@ -3270,8 +3298,6 @@ fn byte_throttle_over_cap_modifier_frame_still_charged_to_the_window() {
     .expect("serialize modifiers");
     let _ = handle_message(&mut state, peer, message::CODE_MODIFIER, &payload, now);
 
-    // Draining the window by exactly the pre-fill budget must NOT restore
-    // capacity: the exempted frame's bytes are still in flight.
     assert_eq!(
         state.throttle.check_and_record(peer, now, 1),
         ergo_p2p::throttle::LimiterVerdict::ByteRateExceeded,
@@ -3307,4 +3333,78 @@ fn byte_throttle_over_cap_non_modifier_frame_drops_and_penalizes() {
         )),
         "an over-cap non-delivery frame must still be dropped and penalized: {actions:?}",
     );
+}
+
+// ----- duplicate inbound drop (issue #293) -----
+
+/// A `HandshakeComplete` for an address the registry already holds — a
+/// late event from a previous dial, or an inbound connection from a
+/// reused ephemeral port — leaves the existing runtime untouched and
+/// drops the new connection. Replacing the runtime is not safe: both the
+/// registry and `PeerEvent::Disconnected` are keyed by remote address
+/// alone, so the old connection's teardown would then evict the peer we
+/// had just swapped in. Scala drops the duplicate for the same reason
+/// (`NetworkController.handleHandshake`, NetworkController.scala:417-424).
+/// The branch now emits a `reason = "address_still_registered"` DEBUG
+/// line so an operator can tell this drop from a network fault.
+#[tokio::test]
+async fn handshake_complete_for_registered_address_keeps_existing_runtime() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("dup.redb"));
+    let peer = test_peer();
+
+    // The incumbent runtime, whose channel must survive the duplicate.
+    let (tx, mut rx) = mpsc::channel::<ergo_p2p::framing::MessageFrame>(4);
+    state.registry.peers.insert(
+        peer,
+        PeerRuntime {
+            sync_version: SyncVersion::V1,
+            outbound_tx: tx,
+        },
+    );
+
+    // A real socket for the duplicate connection: the drop must close it.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen_addr = listener.local_addr().unwrap();
+    let accept = tokio::spawn(async move { listener.accept().await.unwrap().0 });
+    let client = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
+    let server = accept.await.unwrap();
+    let conn = Box::new(ergo_p2p::connection::Connection::new(server, state.magic));
+
+    super::events::handle_event_batch(
+        &mut state,
+        vec![PeerEvent::HandshakeComplete {
+            addr: peer,
+            peer_spec: PeerSpec {
+                agent_name: "dup".into(),
+                version: Version::NIPOPOW,
+                node_name: "dup".into(),
+                declared_address: None,
+                features: Vec::new(),
+            },
+            time: 0,
+            conn,
+        }],
+    );
+
+    assert_eq!(
+        state.registry.peers.len(),
+        1,
+        "the duplicate must not add or replace a registry entry",
+    );
+    assert!(
+        state
+            .registry
+            .try_send(&peer, message::CODE_SYNC_INFO, Vec::new()),
+        "the incumbent runtime's channel must still be usable",
+    );
+    assert_eq!(
+        rx.try_recv().expect("frame reaches the incumbent").code,
+        message::CODE_SYNC_INFO,
+    );
+    assert!(
+        state.peer_manager.get(&peer).is_none(),
+        "the dropped duplicate must not complete a handshake",
+    );
+    drop(client);
 }
