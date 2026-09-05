@@ -1,0 +1,44 @@
+--- a/ergo-sigma/src/evaluator/cost.rs
++++ b/ergo-sigma/src/evaluator/cost.rs
+@@ -309,32 +309,17 @@
+     match left {
+         // Tuple: EQ_Tuple, then pairwise `&&` short-circuit (Scala case 3).
+-        //
+-        // `DataValueComparer.equalDataValues` (sigma-state 6.0.2,
+-        // `data/.../DataValueComparer.scala:331`) dispatches this case with
+-        // `case tup1: Tuple2[_,_] =>` — it matches ONLY a genuine Scala
+-        // `Tuple2`. A general `STuple` value of any OTHER arity (1, 3, 4, …
+-        // — reachable now that the type reader accepts a non-2 `STuple`
+-        // count, see `ergo-ser/src/sigma_type/read.rs`) never matches this
+-        // arm, falls through every remaining case, and hits the comparator's
+-        // final default, which throws a bare `RuntimeException` — BEFORE any
+-        // cost is charged (the `addFixedCost(EQ_Tuple)` wrapper is inside the
+-        // matched arm's body, not the dispatch). Oracle
+-        // (`ErgoSerdeOracle.scala`, `reduce`): a 1-element and a 3-element
+-        // tuple EQ both come back `REJECT RuntimeException`; only arity 2
+-        // reduces. Charging `EQ_TUPLE` cost then falling through to a
+-        // length-matched-but-not-2 comparison (or accepting a length
+-        // mismatch as `false`, as an earlier version of this arm did) both
+-        // diverge from that reject — the former under-rejects, the latter
+-        // wrongly accepts non-2-arity tuple equality as a value comparison
+-        // Scala never performs.
+-        Value::Tuple(a) if a.len() == 2 => {
++        Value::Tuple(a) => {
+             cost.add(JitCost::from_jit(cost_table::EQ_TUPLE))?;
+             match right {
+-                Value::Tuple(b) if b.len() == 2 => {
++                Value::Tuple(b) if a.len() == b.len() => {
+                     for (ai, bi) in a.iter().zip(b.iter()) {
+                         if !eq_with_cost_inner(ai, bi, ctx, cost)? {
+                             return Ok(false);
+                         }
+                     }
+                     Ok(true)
+                 }
+                 _ => Ok(false),
+             }
+         }
+-        Value::Tuple(_) => Err(EvalError::RuntimeException(
+-            "EQ on a tuple value with arity other than 2 is not supported (Scala \
+-             DataValueComparer.equalDataValues matches only Tuple2)",
+-        )),

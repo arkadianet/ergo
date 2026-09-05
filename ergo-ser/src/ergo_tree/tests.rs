@@ -1782,3 +1782,174 @@ mod santa_wire_v6 {
         assert_eq!(w.result(), bytes, "round-trip must be identity");
     }
 }
+
+// ----- oracle parity -----
+
+// cargo-fuzz #304 / #305 size-delimited over-accepts.
+//
+/// Two cargo-fuzz reproducers whose size-delimited tree body failed with an
+/// error the reference raises as a `SerializerException` — which
+/// `ErgoTreeSerializer.deserializeErgoTree` does NOT catch, so the reference
+/// rejects the whole tree instead of wrapping it as `UnparsedErgoTree`. Both
+/// were ACCEPTED here because the error was soft and funneled into the generic
+/// body-error wrap, and both surfaced as a fixed-point / re-decode invariant
+/// violation in `ergo-difftest` (the wrap region is not self-contained: the body
+/// parse read PAST the declared size, then the wrap rewound to it).
+///
+/// JVM oracle (`scripts/jvm_serde_oracle/ErgoSerdeOracle.scala`,
+/// sigma-state 6.0.2 / ergo-core 6.0.2):
+///
+/// ```text
+/// constant           63016868...8d  -> REJECT SerializerException   (#304)
+/// ergo_box_candidate 01eb00e4da...  -> REJECT InvalidTypePrefix     (#305)
+/// ergo_tree          080100         -> REJECT InvalidTypePrefix
+/// ergo_tree          08016b         -> ACCEPT 08016b   (soft-wrap twin)
+/// ```
+mod fuzz_size_delimited_hard_reject {
+    use super::*;
+
+    /// #304: an `SBox` constant whose nested v0 size-delimited script body is an
+    /// INLINE `SHeader` constant. Pre-v3 `SHeader` data is a reference
+    /// `SerializerException`, so the box script — and with it the constant — is
+    /// rejected, not soft-forked.
+    #[test]
+    fn sbox_constant_with_pre_v3_inline_header_script_rejects() {
+        let bytes = hex::decode(
+            "63016868686868680000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000686868686868686868680000000000000000000000686868686868686868682600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000686868686868686868686868686868686868686868686868686868f2686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686868686800e5ec94ec7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f8d",
+        )
+        .unwrap();
+        let mut r = VlqReader::new(&bytes);
+        assert!(
+            crate::sigma_value::read_constant(&mut r).is_err(),
+            "an SBox constant whose nested pre-v3 size-delimited script carries an inline \
+             SHeader constant must be REJECTED (JVM: REJECT SerializerException)"
+        );
+    }
+
+    /// #305: a box candidate whose v3 size-delimited script declares size 0 and
+    /// whose body carries a zero type byte — the reference's `InvalidTypePrefix`,
+    /// which escapes the wrap.
+    #[test]
+    fn box_candidate_with_zero_type_prefix_script_rejects() {
+        let bytes = hex::decode(
+            "01eb00e4da000103060108015e000000000000000000000000000000020000000affffffff00001a00e4e4",
+        )
+        .unwrap();
+        let mut r = VlqReader::new(&bytes);
+        assert!(
+            crate::ergo_box::read_ergo_box_candidate(&mut r).is_err(),
+            "a box candidate whose size-delimited script body carries a zero type byte must \
+             be REJECTED (JVM: REJECT InvalidTypePrefix)"
+        );
+    }
+
+    #[test]
+    fn size_delimited_zero_type_prefix_body_rejects() {
+        let bytes = hex::decode("080100").unwrap();
+        let mut r = VlqReader::new(&bytes);
+        assert!(
+            read_ergo_tree(&mut r).is_err(),
+            "JVM: REJECT InvalidTypePrefix — a zero type byte is a SerializerException, \
+             never an UnparsedErgoTree wrap"
+        );
+    }
+
+    /// Discriminator: an unknown but NON-zero type code IS a rule-1016
+    /// `ValidationException`, which the reference catches and wraps. This must
+    /// keep being accepted, or the fix above would have over-corrected into a
+    /// reject-valid.
+    #[test]
+    fn size_delimited_unknown_type_code_still_wraps() {
+        let bytes = hex::decode("08016b").unwrap();
+        let mut r = VlqReader::new(&bytes);
+        let tree = read_ergo_tree(&mut r)
+            .expect("JVM: ACCEPT 08016b — an unknown non-zero type code soft-forks");
+        assert!(matches!(tree.body, crate::opcode::Expr::Unparsed(_)));
+        let mut w = ergo_primitives::writer::VlqWriter::new();
+        crate::ergo_tree::write_ergo_tree(&mut w, &tree).expect("re-serialize");
+        assert_eq!(w.result(), bytes, "JVM canonical bytes are 08016b");
+    }
+
+    /// #305 follow-up (accept-invalid): a size-delimited script whose body is
+    /// a general-tuple type (`0x60`) declaring `count=1` with a zero item
+    /// type byte. Before the item-read-order fix in
+    /// `ergo-ser/src/sigma_type/read.rs`, the tuple arm rejected `count < 2`
+    /// with a soft `InvalidData` BEFORE reading any item, so the zero byte
+    /// was never reached — the soft error funneled into the generic
+    /// size-delimited wrap and the tree/box/transaction was accepted. Scala
+    /// reads the item unconditionally and its own `c <= 0` check on that item
+    /// throws `InvalidTypePrefix` (a `SerializerException`, uncaught by
+    /// `deserializeErgoTree`).
+    ///
+    /// Oracle (`ErgoSerdeOracle.scala`, sigma-state 6.0.2):
+    ///
+    /// ```text
+    /// ergo_tree          0803600100         -> REJECT InvalidTypePrefix
+    /// ergo_box_candidate 010803600100000000 -> REJECT InvalidTypePrefix
+    /// ```
+    #[test]
+    fn size_delimited_zero_type_prefix_inside_general_tuple_rejects() {
+        let bytes = hex::decode("0803600100").unwrap();
+        let mut r = VlqReader::new(&bytes);
+        assert!(
+            read_ergo_tree(&mut r).is_err(),
+            "JVM: REJECT InvalidTypePrefix — a zero item type inside a \
+             size-delimited general-tuple type must hard-reject, not \
+             soft-fork wrap"
+        );
+    }
+
+    #[test]
+    fn box_candidate_with_zero_type_prefix_inside_general_tuple_rejects() {
+        let bytes = hex::decode("010803600100000000").unwrap();
+        let mut r = VlqReader::new(&bytes);
+        assert!(
+            crate::ergo_box::read_ergo_box_candidate(&mut r).is_err(),
+            "JVM: REJECT InvalidTypePrefix — same zero-item-inside-tuple \
+             shape, reached through a box candidate's script"
+        );
+    }
+
+    /// #305 follow-up (reject-valid): Scala's `TypeSerializer.deserialize`
+    /// has NO arity floor on a general-tuple `count` — a 1-element `STuple`
+    /// is a normal accept (`sigmaProp((0,) == (0,))` below). An earlier
+    /// version of the tuple-type reader rejected `count < 2` outright, so
+    /// this tree — and any real one shaped like it — was wrongly refused: a
+    /// chain-stall class bug (a block containing it would be rejected here
+    /// but accepted by the network).
+    ///
+    /// Oracle (`ErgoSerdeOracle.scala`, sigma-state 6.0.2, surface
+    /// `ergo_tree`), both the sizeless and size-delimited encodings of the
+    /// identical body:
+    ///
+    /// ```text
+    /// ergo_tree 00d1936001040060010400         -> ACCEPT 00d1936001040060010400
+    /// ergo_tree 080ad1936001040060010400       -> ACCEPT 080ad1936001040060010400
+    /// ```
+    #[test]
+    fn general_tuple_one_element_type_accepts_sizeless_and_sized() {
+        // NB: this only asserts PARSE success, matching the JVM `ACCEPT`
+        // verdict — it deliberately does NOT round-trip through
+        // `write_ergo_tree`. `write_tuple` (`sigma_type/write.rs`) keeps a
+        // `count >= 2` floor on write, matching Scala's own
+        // `TypeSerializer.serialize`, which ALSO throws re-emitting a
+        // 1-element `STuple` type in isolation (oracle, `sigma_type`
+        // surface: `600104` parses, but re-serializing it throws). The
+        // reference's `ergo_tree` surface still reports identical canonical
+        // bytes for the WHOLE tree because `ErgoTree.bytes` echoes the
+        // original wire bytes rather than re-deriving them from the parsed
+        // AST — the same reason this crate's consensus read path
+        // (`read_ergo_box_candidate`) keeps the ORIGINAL byte slice
+        // (`ergo_tree_bytes = r.data_slice(tree_start, tree_end)`) instead of
+        // calling `write_ergo_tree` on the parsed tree. `write_ergo_tree` is
+        // only used to construct a NEW tree from scratch
+        // (`ErgoBoxCandidate::new`), a path no compiler emits a degenerate
+        // tuple type into.
+        for hex_bytes in ["00d1936001040060010400", "080ad1936001040060010400"] {
+            let bytes = hex::decode(hex_bytes).unwrap();
+            let mut r = VlqReader::new(&bytes);
+            read_ergo_tree(&mut r)
+                .unwrap_or_else(|e| panic!("JVM: ACCEPT {hex_bytes} — got error {e:?}"));
+        }
+    }
+}

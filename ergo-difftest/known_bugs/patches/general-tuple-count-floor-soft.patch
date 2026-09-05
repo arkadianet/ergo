@@ -1,0 +1,13 @@
+--- a/ergo-ser/src/sigma_type/read.rs
++++ b/ergo-ser/src/sigma_type/read.rs
+@@ -100,6 +100,10 @@
+         TUPLE_CODE => {
+             let count = r.get_u8()? as usize;
++            if count < 2 {
++                return Err(ReadError::InvalidData(format!(
++                    "tuple must have at least 2 elements, got {count}"
++                )));
++            }
+             let mut elems = Vec::with_capacity(count);
+             for _ in 0..count {
+                 elems.push(read_type_at_depth(r, next)?);
