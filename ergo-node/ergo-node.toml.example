@@ -121,6 +121,31 @@ public_bind = false
 # ibd_gate_block_lag = 10   # auto-pause mempool when > N blocks behind tip
 # rebroadcast_count = 3      # surviving unconfirmed txs re-advertised per tip-change recheck (Scala MempoolAuditor rebroadcastCount); 0 disables
 
+# Anti-DoS validation-cost budgets, per block. Node-local policy only —
+# they bound how much script evaluation the node will do, and never affect
+# which blocks it accepts. global_cost_budget is a SHARED pool; local
+# submissions (POST /transactions*, wallet) first spend
+# local_reserved_cost_budget, which peers cannot touch, so a flooding peer
+# cannot starve your own transactions. Local work past the reserve competes
+# for the shared pool, so the per-block total stays at global + reserve.
+# Set the reserve to 0 for one shared pool (the pre-0.6 behaviour).
+# When set explicitly, per_peer must be <= global and the reserve <= 4x global.
+# global_cost_budget = 12000000        # the shared pool, per block
+# per_peer_cost_budget = 10000000      # a single peer's share of it
+# local_reserved_cost_budget = 4900000 # local-only slice; = one max_tx_cost
+
+# Invalidated-tx memory. Matches Scala invalidModifiersCacheSize /
+# invalidModifiersCacheExpiration = 4h. NB Ergo tx ids do not cover
+# spending proofs, so a relayed proof-corrupted variant can blacklist an
+# id for this long; the reference node has the same window.
+# invalidation_cache_size = 10000
+# invalidation_ttl_seconds = 14400
+
+# Per-pass budget for the tip-revalidation (recheck-and-evict) pass, as a
+# multiplier on the live max_block_cost. Txs not reached in a pass are
+# deferred to later blocks, oldest-checked first. Must be >= 1.
+# cleanup_cost_mult = 6
+
 [api]
 # Submission routes (POST /api/v1/mempool/{submit,check},
 # POST /transactions[/bytes][/check[Bytes]], POST /blocks) are always

@@ -133,8 +133,15 @@ impl TryFrom<&str> for ApiWeightFunction {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ApiTxSource {
-    Peer { addr: String },
+    Peer {
+        addr: String,
+    },
     Api,
+    /// Same wire path as `Api`, received while `[api] bind` was
+    /// non-loopback — see `ergo_mempool::types::TxSource::PublicApi`.
+    /// Charged against the shared global cost budget, never the local
+    /// reserve.
+    PublicApi,
     Wallet,
     DemotedFromBlock,
 }

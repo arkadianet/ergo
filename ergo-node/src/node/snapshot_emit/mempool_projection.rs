@@ -29,6 +29,7 @@ pub(super) fn project_mempool_transactions(
                     addr: peer.to_string(),
                 },
                 TxSource::Api => ApiTxSource::Api,
+                TxSource::PublicApi => ApiTxSource::PublicApi,
                 TxSource::Wallet => ApiTxSource::Wallet,
                 TxSource::DemotedFromBlock => ApiTxSource::DemotedFromBlock,
             };

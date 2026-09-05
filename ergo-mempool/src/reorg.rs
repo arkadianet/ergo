@@ -323,7 +323,7 @@ mod tests {
     #[test]
     fn apply_removes_confirmed_pool_tx() {
         let mut pool = OrderedPool::with_capacity(4);
-        let mut b = CostBudgets::new(1_000_000, 100_000);
+        let mut b = CostBudgets::new(1_000_000, 100_000, 0);
         let mut rq = RevalidationQueue::new(100);
         seed_entry(&mut pool, 1, 0x10, 0x11, 100, vec![]);
         let cfg = MempoolConfig::default();
@@ -365,7 +365,7 @@ mod tests {
         // Pool tx spends input X; block tx (not in pool) also spends X.
         // The pool tx must be evicted.
         let mut pool = OrderedPool::with_capacity(4);
-        let mut b = CostBudgets::new(1_000_000, 100_000);
+        let mut b = CostBudgets::new(1_000_000, 100_000, 0);
         let mut rq = RevalidationQueue::new(100);
         seed_entry(&mut pool, 7, 0xAA, 0xBB, 100, vec![]);
         let cfg = MempoolConfig::default();
@@ -391,7 +391,7 @@ mod tests {
         // STAYS — its spent-output-of-parent input is now committed
         // UTXO (conceptually).
         let mut pool = OrderedPool::with_capacity(4);
-        let mut b = CostBudgets::new(1_000_000, 100_000);
+        let mut b = CostBudgets::new(1_000_000, 100_000, 0);
         let mut rq = RevalidationQueue::new(100);
         seed_entry(&mut pool, 1, 0x10, 0x11, 100, vec![]);
         seed_entry(&mut pool, 2, 0x11, 0x22, 200, vec![d(1)]);
@@ -414,7 +414,7 @@ mod tests {
         // parent edge; it must NOT reset C to its base weight (which would
         // wrongly discard GC's contribution — the pre-fix behavior).
         let mut pool = OrderedPool::with_capacity(8);
-        let mut b = CostBudgets::new(1_000_000, 100_000);
+        let mut b = CostBudgets::new(1_000_000, 100_000, 0);
         let mut rq = RevalidationQueue::new(100);
         // Seed the post-boost state directly. 777/333 are deliberately not the
         // ByCost recompute of these entries' fee/cost, so a reset-to-base
@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn demoted_txs_enqueue() {
         let mut pool = OrderedPool::with_capacity(4);
-        let mut b = CostBudgets::new(1_000_000, 100_000);
+        let mut b = CostBudgets::new(1_000_000, 100_000, 0);
         let mut rq = RevalidationQueue::new(100);
         let cfg = MempoolConfig::default();
         let diff = mk_diff(
@@ -464,9 +464,9 @@ mod tests {
     #[test]
     fn budgets_reset_on_tip_change() {
         let mut pool = OrderedPool::with_capacity(4);
-        let mut b = CostBudgets::new(1_000_000, 100_000);
+        let mut b = CostBudgets::new(1_000_000, 100_000, 0);
         let mut rq = RevalidationQueue::new(100);
-        b.charge(None, 500_000);
+        b.charge(crate::budget::BudgetSource::Local, 500_000);
         assert_eq!(b.global_consumed(), 500_000);
         let cfg = MempoolConfig::default();
         let diff = mk_diff(tip_100(), vec![], vec![]);
@@ -477,7 +477,7 @@ mod tests {
     #[test]
     fn revalidation_drain_resubmits_with_demoted_source() {
         let mut pool = OrderedPool::with_capacity(4);
-        let mut b = CostBudgets::new(1_000_000, 100_000);
+        let mut b = CostBudgets::new(1_000_000, 100_000, 0);
         let mut inv = InvalidationCache::new(32, Duration::from_secs(60), Duration::from_secs(1));
         let mut unr = UnresolvedCache::new(32, Duration::from_secs(60));
         let mut rq = RevalidationQueue::new(100);
@@ -530,7 +530,7 @@ mod tests {
     #[test]
     fn empty_queue_fast_path_returns_empty_actions() {
         let mut pool = OrderedPool::with_capacity(4);
-        let mut b = CostBudgets::new(1_000_000, 100_000);
+        let mut b = CostBudgets::new(1_000_000, 100_000, 0);
         let mut inv = InvalidationCache::new(32, Duration::from_secs(60), Duration::from_secs(1));
         let mut unr = UnresolvedCache::new(32, Duration::from_secs(60));
         let mut rq = RevalidationQueue::new(100);
@@ -555,7 +555,7 @@ mod tests {
     #[test]
     fn drain_respects_per_tick_cap() {
         let mut pool = OrderedPool::with_capacity(100);
-        let mut b = CostBudgets::new(10_000_000, 10_000_000);
+        let mut b = CostBudgets::new(10_000_000, 10_000_000, 0);
         let mut inv = InvalidationCache::new(32, Duration::from_secs(60), Duration::from_secs(1));
         let mut unr = UnresolvedCache::new(32, Duration::from_secs(60));
         let mut rq = RevalidationQueue::new(100);
@@ -616,8 +616,8 @@ mod tests {
         // stranded — demoted re-admission is budget-exempt.
         let mut pool = OrderedPool::with_capacity(4);
         let global_cap = 1_000_000;
-        let mut b = CostBudgets::new(global_cap, global_cap);
-        b.charge(None, global_cap); // exhaust the global budget BEFORE the drain
+        let mut b = CostBudgets::new(global_cap, global_cap, 0);
+        b.charge(crate::budget::BudgetSource::Local, global_cap); // exhaust the budget BEFORE the drain
         assert_eq!(b.global_consumed(), global_cap);
         let mut inv = InvalidationCache::new(32, Duration::from_secs(60), Duration::from_secs(1));
         let mut unr = UnresolvedCache::new(32, Duration::from_secs(60));
@@ -679,7 +679,7 @@ mod tests {
         // between-block peer traffic), all demoted txs re-admit — none stranded.
         let mut pool = OrderedPool::with_capacity(16);
         let global_cap = 1_000_000;
-        let mut b = CostBudgets::new(global_cap, global_cap);
+        let mut b = CostBudgets::new(global_cap, global_cap, 0);
         let mut inv = InvalidationCache::new(64, Duration::from_secs(60), Duration::from_secs(1));
         let mut unr = UnresolvedCache::new(64, Duration::from_secs(60));
         let mut rq = RevalidationQueue::new(100);
@@ -720,7 +720,7 @@ mod tests {
 
         let mut ticks = 0;
         while !rq.is_empty() {
-            b.charge(None, global_cap); // keep the global budget exhausted
+            b.charge(crate::budget::BudgetSource::Local, global_cap); // keep the budget exhausted
             {
                 let mut cx = AdmissionCtx {
                     tip_ctx: &tip,
@@ -748,7 +748,7 @@ mod tests {
         // Simulate "we're behind tip" — normal admission would drop.
         // Demoted revalidation must still succeed.
         let mut pool = OrderedPool::with_capacity(4);
-        let mut b = CostBudgets::new(1_000_000, 100_000);
+        let mut b = CostBudgets::new(1_000_000, 100_000, 0);
         let mut inv = InvalidationCache::new(32, Duration::from_secs(60), Duration::from_secs(1));
         let mut unr = UnresolvedCache::new(32, Duration::from_secs(60));
         let mut rq = RevalidationQueue::new(100);
@@ -812,7 +812,7 @@ mod tests {
         // Pool tx spends two inputs, both appear in applied_spent_inputs.
         // It should be evicted once, not twice.
         let mut pool = OrderedPool::with_capacity(4);
-        let mut b = CostBudgets::new(1_000_000, 100_000);
+        let mut b = CostBudgets::new(1_000_000, 100_000, 0);
         let mut rq = RevalidationQueue::new(100);
         let bytes: Arc<[u8]> = Arc::from(vec![1u8; 20].into_boxed_slice());
         let entry = Entry::new(
@@ -849,7 +849,7 @@ mod tests {
         // in the old chain). The pool never had B; A is re-enqueued
         // and on next tick_revalidation re-admitted.
         let mut pool = OrderedPool::with_capacity(4);
-        let mut b = CostBudgets::new(10_000_000, 10_000_000);
+        let mut b = CostBudgets::new(10_000_000, 10_000_000, 0);
         let mut inv = InvalidationCache::new(32, Duration::from_secs(60), Duration::from_secs(1));
         let mut unr = UnresolvedCache::new(32, Duration::from_secs(60));
         let mut rq = RevalidationQueue::new(100);
@@ -901,7 +901,7 @@ mod tests {
     #[test]
     fn invalid_demoted_tx_dropped_without_pool_change() {
         let mut pool = OrderedPool::with_capacity(4);
-        let mut b = CostBudgets::new(1_000_000, 100_000);
+        let mut b = CostBudgets::new(1_000_000, 100_000, 0);
         let mut inv = InvalidationCache::new(32, Duration::from_secs(60), Duration::from_secs(1));
         let mut unr = UnresolvedCache::new(32, Duration::from_secs(60));
         let mut rq = RevalidationQueue::new(100);

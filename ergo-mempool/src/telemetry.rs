@@ -20,6 +20,7 @@ use crate::{AdmissionOutcome, CheckOutcome, MempoolObserver};
 fn source_tag(source: &TxSource) -> &'static str {
     match source {
         TxSource::Api => "api",
+        TxSource::PublicApi => "public_api",
         TxSource::Peer(_) => "peer",
         TxSource::Wallet => "local",
         TxSource::DemotedFromBlock => "revalidation",
@@ -166,9 +167,11 @@ pub(crate) fn emit_tracing_for_admission(
     tip: Option<TipPointer>,
 ) {
     let src = source_tag(source);
-    // User-initiated sources (`Api`, `Wallet`) log at `info!`;
-    // per-peer churn (`Peer`, `DemotedFromBlock`) drops to `debug!`
-    // to keep the default operator stream readable on busy networks.
+    // Trusted, operator-initiated sources (`Api`, `Wallet`) log at
+    // `info!`; per-peer/public churn (`Peer`, `PublicApi`,
+    // `DemotedFromBlock`) drops to `debug!` to keep the default operator
+    // stream readable on busy networks — `PublicApi` is unauthenticated
+    // traffic from a public bind and gets no more log weight than a peer.
     let is_api = matches!(source, TxSource::Api | TxSource::Wallet);
 
     match outcome {
@@ -256,9 +259,11 @@ pub(crate) fn emit_tracing_for_check(
     pool_bytes: usize,
 ) {
     let src = source_tag(source);
-    // User-initiated sources (`Api`, `Wallet`) log at `info!`;
-    // per-peer churn (`Peer`, `DemotedFromBlock`) drops to `debug!`
-    // to keep the default operator stream readable on busy networks.
+    // Trusted, operator-initiated sources (`Api`, `Wallet`) log at
+    // `info!`; per-peer/public churn (`Peer`, `PublicApi`,
+    // `DemotedFromBlock`) drops to `debug!` to keep the default operator
+    // stream readable on busy networks — `PublicApi` is unauthenticated
+    // traffic from a public bind and gets no more log weight than a peer.
     let is_api = matches!(source, TxSource::Api | TxSource::Wallet);
 
     match outcome {

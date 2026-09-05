@@ -48,7 +48,7 @@ pub use admission::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use admission::{MockPlan, MockStructure, MockValidator};
-pub use budget::{BudgetVerdict, CostBudgets};
+pub use budget::{BudgetSource, BudgetVerdict, CostBudgets};
 pub use invalidation::{InvalidationCache, InvalidationReason, LookupResult};
 pub use mempool::Mempool;
 pub use overlay::{CommittedOnly, PoolUtxoOverlay};

@@ -932,6 +932,10 @@ async fn run_inner_with_backend(
         // authoritative gate — it matches the expression that determined whether
         // to enter the `if config.mining_config.enabled` arm.
         mining_enabled: mining_subsystem.handle.is_some(),
+        // Non-loopback `[api] bind` — only reachable with `public_bind =
+        // true` set (enforced at config load). See `NodeState::
+        // api_publicly_bound` for why this steers API-tx budget routing.
+        api_publicly_bound: config.api_bind.is_some_and(|addr| !addr.ip().is_loopback()),
         api_weight_function,
         recent_blocks_cache: None,
         network: config.chain_spec.network_params.address_prefix,

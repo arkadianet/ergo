@@ -16,6 +16,55 @@ infrastructure.
 
 ## [Unreleased]
 
+### Added
+
+- **`[mempool]` cost budgets are TOML-tunable.** `global_cost_budget`,
+  `per_peer_cost_budget`, `local_reserved_cost_budget`,
+  `invalidation_cache_size`, `invalidation_ttl_seconds` and
+  `cleanup_cost_mult` are now operator knobs, validated at load (each must be
+  at least 1; the local reserve may be 0). Every default equals the constant it
+  replaced, so an unchanged config behaves exactly as before. The CPFP family
+  bounds, revalidation rates, notifier cadence, unresolved-cache sizing and the
+  staging capacity caps stay internal — the family bounds mirror Scala
+  `OrderedTxPool` and changing them would change pool ordering and eviction
+  cascades.
+
+### Fixed
+
+- **An unauthenticated caller on a publicly-bound API can no longer drain
+  the local cost reserve.** `POST /transactions*` /
+  `/api/v1/mempool/{submit,check}` are unauthenticated by design (the
+  `api_key` gate never covers submission routes), so once an operator sets
+  `[api] public_bind = true` on a non-loopback bind, any internet caller
+  could reach the same `TxSource::Api` classification the operator's own
+  loopback tooling used, and flood `local_reserved_cost_budget` — the
+  reserve that budget exists to protect the operator's own wallet
+  submissions from peer floods. Such submissions are now classified
+  `TxSource::PublicApi`, which is charged against the shared
+  `global_cost_budget` exactly like peer traffic and can never reach the
+  reserve. A loopback-bound API (the default) is unaffected: submissions
+  there still classify as trusted `TxSource::Api` and keep the reserve.
+- **A flooding peer can no longer starve the operator's own transactions.**
+  `global_cost_budget` is now a shared pool, with `local_reserved_cost_budget`
+  (default one `max_tx_cost`) an extra slice only `TxSource::Api` /
+  `TxSource::Wallet` can reach, and which they spend first. Previously a single
+  peer that spent the shared global budget also blocked `POST /transactions`
+  until the next block. Local work that spills past its reserve still competes
+  with peers for the shared pool, so the per-block validation total stays
+  bounded at `global_cost_budget + local_reserved_cost_budget`. Scala gates
+  locally-generated transactions not at all — they go straight to `txModify` —
+  so this moves toward the reference node.
+- **Transactions whose data inputs were spent are evicted on tip change.** A
+  data input resolves against the committed view alone, so no pooled
+  transaction can supply it and the input-conflict cascade (which indexes spend
+  inputs) never covered it; such a transaction used to sit in the pool until
+  squeezed out by weight. The proactive recheck now evicts it, matching Scala
+  `CleanupWorker`. It goes to the unresolved-bytes cache rather than the
+  blacklist, so if a reorg restores the box it can be re-submitted once the
+  `unresolved_cache_ttl_seconds` suppression window (60s) has passed — nothing
+  re-admits it automatically. An unresolved regular spend input is still kept
+  in the pool: it can be a demoted parent awaiting re-admission.
+
 ## [0.6.0] - 2026-09-03
 
 The consensus-parity and hardening release. Two live mainnet accept-invalid

@@ -2789,6 +2789,19 @@ components:
             enum:
             - api
       - type: object
+        description: |-
+          Same wire path as `Api`, received while `[api] bind` was
+          non-loopback — see `ergo_mempool::types::TxSource::PublicApi`.
+          Charged against the shared global cost budget, never the local
+          reserve.
+        required:
+        - kind
+        properties:
+          kind:
+            type: string
+            enum:
+            - public_api
+      - type: object
         required:
         - kind
         properties:

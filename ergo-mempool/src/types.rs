@@ -21,6 +21,19 @@ pub type PeerId = SocketAddr;
 pub enum TxSource {
     Peer(PeerId),
     Api,
+    /// Same wire paths as `Api` (`POST /transactions*`,
+    /// `/api/v1/mempool/{submit,check}`) but received while the `[api]`
+    /// listener is bound non-loopback. The `api_key` gate never covers
+    /// submission routes (they are unauthenticated by design — see
+    /// `docs/configuration.md`), so on a public bind ANY caller on the
+    /// network can reach this path indistinguishably from the operator's
+    /// own tooling. Maps to `BudgetSource::PublicApi` instead of
+    /// `BudgetSource::Local`, so this traffic contends for the shared
+    /// global pool exactly like `Peer` traffic and can never touch
+    /// `local_reserved` — closing the flood-the-reserve hole a bare
+    /// `Api` classification would otherwise leave open once an operator
+    /// opts into `public_bind = true`.
+    PublicApi,
     Wallet,
     DemotedFromBlock,
 }
@@ -34,6 +47,24 @@ impl TxSource {
         match self {
             TxSource::Peer(p) => Some(*p),
             _ => None,
+        }
+    }
+
+    /// Which cost-budget pool this source draws on. `Api` and `Wallet` are
+    /// the operator's own trusted work and draw on the LOCAL reserve;
+    /// `DemotedFromBlock` is our own rollback drain — budget-exempt at
+    /// every site that charges (`admission::check_capturing_held` and
+    /// `Mempool::validate_package_child`), so its mapping here is never
+    /// consulted. `PublicApi` is untrusted (indistinguishable from
+    /// arbitrary internet traffic once `public_bind = true`) and maps to
+    /// the shared pool exactly like `Peer`, never the reserve.
+    pub fn budget_source(&self) -> crate::budget::BudgetSource {
+        match self {
+            TxSource::Peer(p) => crate::budget::BudgetSource::Peer(*p),
+            TxSource::PublicApi => crate::budget::BudgetSource::PublicApi,
+            TxSource::Api | TxSource::Wallet | TxSource::DemotedFromBlock => {
+                crate::budget::BudgetSource::Local
+            }
         }
     }
 }
@@ -256,8 +287,25 @@ pub struct MempoolConfig {
     /// uses random selection; the rotation is functionally equivalent for
     /// load-spreading and is deterministic/testable). 0 disables re-broadcast.
     pub rebroadcast_count: usize,
+    /// Per-block validation-cost budget shared by remote traffic and local
+    /// work beyond `local_reserved_cost_budget`. Local work consumes its
+    /// reserve first; overflow consumes this shared budget and reduces the
+    /// capacity available to remote traffic.
     pub global_cost_budget: u64,
+    /// Per-block validation-cost budget a single peer may spend.
     pub per_peer_cost_budget: u64,
+    /// Per-block validation-cost headroom reserved for NODE-LOCAL submissions
+    /// (`TxSource::Api` / `TxSource::Wallet`), on top of `global_cost_budget`.
+    /// Peers cannot reach it, so a peer flooding the node to its global cap
+    /// cannot also starve the operator's own `POST /transactions`. `0` restores
+    /// the single shared pool (peer traffic can then block local submissions).
+    /// The default is one `max_tx_cost`, i.e. at least one maximum-cost local
+    /// transaction always gets validated per block. `TxSource::PublicApi`
+    /// (an unauthenticated submission on a non-loopback `[api] bind` — see
+    /// `ergo-node/src/node/admission.rs::api_tx_source`) is NOT node-local
+    /// for this purpose: it never draws on this reserve, only on
+    /// `global_cost_budget` alongside peer traffic.
+    pub local_reserved_cost_budget: u64,
     pub unresolved_cache_size: usize,
     pub unresolved_cache_ttl_seconds: u64,
 
@@ -302,6 +350,9 @@ impl Default for MempoolConfig {
             min_relay_fee_nano_erg: 1_000_000,
             max_tx_size_bytes: 98_304,
             max_tx_cost: 4_900_000, // mainnet.conf overrides application.conf default of 1_000_000
+            // Scala parity: `application.conf` `invalidModifiersCacheSize = 10000`
+            // and `invalidModifiersCacheExpiration = 4h` (the mempool section,
+            // lines 147/150), the sizing of `OrderedTxPool.invalidatedTxIds`.
             invalidation_cache_size: 10_000,
             invalidation_ttl_seconds: 14_400,
             ibd_gate_block_lag: 10,
@@ -315,6 +366,7 @@ impl Default for MempoolConfig {
             rebroadcast_count: 3, // Scala application.conf default
             global_cost_budget: 12_000_000,
             per_peer_cost_budget: 10_000_000,
+            local_reserved_cost_budget: 4_900_000, // one max_tx_cost
             unresolved_cache_size: 4_096,
             unresolved_cache_ttl_seconds: 60,
             // Staging pool — human-confirmed bounds. OPT-IN: the orphan/held
@@ -347,5 +399,60 @@ impl MempoolConfig {
             max_bytes_per_peer: self.staging_max_bytes_per_peer,
             max_waiters_per_input: self.staging_max_waiters_per_input,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::budget::BudgetSource;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    // ----- helpers -----
+
+    fn peer_addr() -> PeerId {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9030)
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn budget_source_trusted_sources_map_to_local() {
+        for source in [TxSource::Api, TxSource::Wallet, TxSource::DemotedFromBlock] {
+            assert_eq!(
+                source.budget_source(),
+                BudgetSource::Local,
+                "{source:?} must draw on the local reserve",
+            );
+        }
+    }
+
+    #[test]
+    fn budget_source_public_api_maps_to_public_api_bucket() {
+        // The security-critical mapping: an unauthenticated public-bind
+        // submission must NOT be classified as `Local` — that would let it
+        // exhaust `local_reserved_cost_budget` and starve the operator's
+        // own wallet submissions.
+        assert_eq!(TxSource::PublicApi.budget_source(), BudgetSource::PublicApi);
+        assert_ne!(TxSource::PublicApi.budget_source(), BudgetSource::Local);
+    }
+
+    #[test]
+    fn budget_source_peer_maps_to_its_own_peer_bucket() {
+        assert_eq!(
+            TxSource::Peer(peer_addr()).budget_source(),
+            BudgetSource::Peer(peer_addr())
+        );
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn public_api_is_not_reported_as_a_peer() {
+        // `is_peer`/`peer()` gate P2P-only bookkeeping (penalty routing);
+        // `PublicApi` has no socket-level peer identity to penalize.
+        let source = TxSource::PublicApi;
+        assert!(!source.is_peer());
+        assert_eq!(source.peer(), None);
     }
 }

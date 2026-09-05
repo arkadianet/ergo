@@ -1017,6 +1017,78 @@ fn recheck_unresolved_input_left_in_pool_not_evicted() {
 }
 
 #[test]
+fn recheck_unresolved_data_input_evicts_tx() {
+    // A DATA input resolves against the COMMITTED view only (revalidate_pooled
+    // passes CommittedOnly), so no pooled tx can ever supply it and
+    // on_tip_change's cascade — which indexes SPEND inputs — never evicts on
+    // it. Left in the pool such a tx leaks until it is squeezed out by weight,
+    // i.e. never for a low-weight tx. Scala eliminates it: CleanupWorker
+    // eliminates every tx whose re-validation fails
+    // (CleanupWorker.scala:94-97 -> EliminateTransactions).
+    let mut mp = mempool_with(MempoolConfig::default());
+    seed(&mut mp, 1, 0x10, 0x11, 100, vec![]);
+    let base = Instant::now();
+    set_checked(&mut mp, 1, base);
+    let utxo = FakeUtxo::empty();
+    let tip = TestTip::new();
+    let v = AlwaysErr {
+        err: ValidationErr::UnresolvedDataInput,
+    };
+
+    let now = base + Duration::from_secs(10);
+    let actions = mp.recheck_and_evict(now, &tip.view(&utxo), &v);
+
+    assert!(
+        !mp.contains(&d(1)),
+        "a tx whose data input is gone must be evicted, not leaked"
+    );
+    assert_eq!(evicted_ids(&actions), vec![d(1)]);
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, MempoolAction::RevokeBroadcast { .. })),
+        "the evicted tx must stop being advertised"
+    );
+    assert!(
+        !mp.is_invalidated(&d(1)),
+        "a reorg could restore the data-input box, so the tx stays \
+         re-admittable rather than blacklisted"
+    );
+    mp.pool().check_invariants();
+}
+
+#[test]
+fn recheck_unresolved_data_input_evicts_dependent_descendants() {
+    // The data-input eviction goes through the same cascading removal as a
+    // hard invalidity: a child spending the evicted tx's output can no longer
+    // be mined, so it goes too (dependency eviction — never blacklisted).
+    let mut mp = mempool_with(MempoolConfig::default());
+    seed(&mut mp, 1, 0x10, 0x11, 100, vec![]); // parent, output 0x11
+    seed(&mut mp, 2, 0x11, 0x12, 50, vec![d(1)]); // child spends it
+    let base = Instant::now();
+    set_checked(&mut mp, 1, base);
+    set_checked(&mut mp, 2, base + Duration::from_secs(1)); // parent visited first
+
+    let utxo = FakeUtxo::empty();
+    let tip = TestTip::new();
+    let v = AlwaysErr {
+        err: ValidationErr::UnresolvedDataInput,
+    };
+
+    let actions = mp.recheck_and_evict(base + Duration::from_secs(10), &tip.view(&utxo), &v);
+
+    assert!(!mp.contains(&d(1)), "parent evicted");
+    assert!(!mp.contains(&d(2)), "orphaned child evicted with it");
+    let evicted = evicted_ids(&actions);
+    assert!(evicted.contains(&d(1)) && evicted.contains(&d(2)));
+    assert!(
+        !mp.is_invalidated(&d(2)),
+        "cascade descendants are dependency-evicted, never cached"
+    );
+    mp.pool().check_invariants();
+}
+
+#[test]
 fn recheck_other_failure_left_in_pool_not_evicted() {
     // ValidationErr::Other(_) is the validator's catch-all for INTERNAL /
     // contract failures (resolved-inputs mismatch, internal-invariant

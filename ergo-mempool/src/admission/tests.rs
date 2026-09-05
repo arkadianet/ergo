@@ -1,5 +1,5 @@
 use super::*;
-use crate::budget::CostBudgets;
+use crate::budget::{BudgetSource, CostBudgets};
 use crate::invalidation::{InvalidationCache, InvalidationReason};
 use crate::types::TipPointer;
 use crate::unresolved::UnresolvedCache;
@@ -85,7 +85,7 @@ fn default_config() -> MempoolConfig {
 fn fresh() -> (OrderedPool, CostBudgets, InvalidationCache, UnresolvedCache) {
     (
         OrderedPool::with_capacity(32),
-        CostBudgets::new(1_000_000, 100_000),
+        CostBudgets::new(1_000_000, 100_000, 0),
         InvalidationCache::new(32, Duration::from_secs(60), Duration::from_secs(1)),
         UnresolvedCache::new(32, Duration::from_secs(60)),
     )
@@ -175,7 +175,7 @@ fn pre_admission_budget_exhausted_short_circuits() {
     let utxo = EmptyUtxo;
     let c = ctx();
     let (mut pool, mut b, mut inv, mut unr) = fresh();
-    b.charge(Some(peer()), 200_000); // blow the peer budget
+    b.charge(BudgetSource::Peer(peer()), 200_000); // blow the peer budget
     let cfg = default_config();
     let w = ByCost;
     let v = MockValidator::new(); // never called
@@ -212,7 +212,7 @@ fn demoted_source_exempt_from_global_budget_gate() {
     let utxo = EmptyUtxo;
     let c = ctx();
     let (mut pool, mut b, mut inv, mut unr) = fresh();
-    b.charge(None, 1_000_000_000_000); // exhaust the global budget
+    b.charge(BudgetSource::Local, 1_000_000_000_000); // exhaust the local budget
     let before = b.global_consumed();
     let cfg = default_config();
     let w = ByCost;
@@ -255,7 +255,7 @@ fn wallet_source_still_gated_by_global_budget() {
     let utxo = EmptyUtxo;
     let c = ctx();
     let (mut pool, mut b, mut inv, mut unr) = fresh();
-    b.charge(None, 1_000_000_000_000); // exhaust the global budget
+    b.charge(BudgetSource::Local, 1_000_000_000_000); // exhaust the local budget
     let cfg = default_config();
     let w = ByCost;
     let v = validator_accepting(b"bytes", id(1), 5_000_000); // never reached
@@ -1461,10 +1461,14 @@ fn global_budget_exhausted_blocks_new_peers() {
     let utxo = EmptyUtxo;
     let c = ctx();
     let (mut pool, _, mut inv, mut unr) = fresh();
-    let mut b = CostBudgets::new(10_000, 100_000); // tight global cap
+    let mut b = CostBudgets::new(10_000, 100_000, 0); // tight global cap
     let cfg = default_config();
-    // Pre-fill global budget so any peer is blocked.
-    b.charge(None, 10_000);
+    // Pre-fill the peer-contended global budget from ANOTHER peer, so this
+    // peer is blocked by the global cap rather than by its own per-peer cap.
+    b.charge(
+        BudgetSource::Peer(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9001)),
+        10_000,
+    );
     let w = ByCost;
     let v = MockValidator::new();
     let tip = c.view(&utxo);
@@ -1663,13 +1667,75 @@ fn admit_child_credits_in_pool_parent_weight_via_process() {
 }
 
 #[test]
+fn flooding_peer_at_full_global_budget_does_not_block_api_submission() {
+    // The red-team scenario (war-games PLAN 5): one peer spends the ENTIRE
+    // peer-contended global budget for the block. Every peer is then shut out
+    // until the next block — but the operator's own `POST /transactions` must
+    // still land, because local submissions draw on `local_reserved_cost_budget`
+    // instead. Scala reserves nothing here because it gates nothing here: a
+    // LocallyGeneratedTransaction goes straight to txModify
+    // (ErgoNodeViewHolder.scala:659).
+    let utxo = EmptyUtxo;
+    let c = ctx();
+    let (mut pool, _, mut inv, mut unr) = fresh();
+    // global cap 10_000, per-peer cap 10_000 (so the flood trips the GLOBAL
+    // gate, not the per-peer one), 10_000 reserved for local work.
+    let mut b = CostBudgets::new(10_000, 10_000, 10_000);
+    b.charge(BudgetSource::Peer(peer()), 10_000);
+    let cfg = default_config();
+    let w = ByCost;
+    let v = validator_accepting(b"bytes", id(1), 5_000_000);
+    let tip = c.view(&utxo);
+    let mut cx = AdmissionCtx {
+        tip_ctx: &tip,
+        config: &cfg,
+        pool: &mut pool,
+        budgets: &mut b,
+        invalidated: &mut inv,
+        unresolved: &mut unr,
+        weight_fn: &w,
+    };
+
+    // The flooding peer itself, and any other peer, are now blocked.
+    let (flooder, _) = process(
+        b"bytes",
+        TxSource::Peer(peer()),
+        Instant::now(),
+        &mut cx,
+        &v,
+    );
+    assert!(matches!(
+        flooder,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::GlobalBudgetExhausted
+        }
+    ));
+    let other = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9001);
+    let (other_peer, _) = process(b"bytes", TxSource::Peer(other), Instant::now(), &mut cx, &v);
+    assert!(matches!(
+        other_peer,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::GlobalBudgetExhausted
+        }
+    ));
+
+    // The operator's own submission still gets in.
+    let (api, _) = process(b"bytes", TxSource::Api, Instant::now(), &mut cx, &v);
+    assert!(
+        matches!(api, AdmissionOutcome::Admitted { .. }),
+        "a peer flood must not starve local submissions: {api:?}"
+    );
+    assert_eq!(pool.len(), 1);
+}
+
+#[test]
 fn api_source_bypasses_per_peer_budget() {
     let utxo = EmptyUtxo;
     let c = ctx();
     let (mut pool, mut b, mut inv, mut unr) = fresh();
     let cfg = default_config();
     // Fill a random peer's budget; Api source must still admit.
-    b.charge(Some(peer()), 200_000);
+    b.charge(BudgetSource::Peer(peer()), 200_000);
     let w = ByCost;
     let v = validator_accepting(b"bytes", id(1), 5_000_000);
     let tip = c.view(&utxo);

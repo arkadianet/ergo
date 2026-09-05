@@ -70,14 +70,15 @@ pub struct Mempool {
     /// every existing caller and test keeps working unchanged; the node
     /// wires a `Some(_)` after boot once the realtime bus exists.
     observer: Option<Arc<dyn MempoolObserver>>,
-    /// Descendants left pooled when a hard-invalid recheck cascade truncated
+    /// Descendants left pooled when an evicting recheck cascade truncated
     /// at `max_family_depth` (the [`OrderedPool::remove_with_descendants_frontier`]
-    /// frontier). Their hard-invalid ancestor is gone, so they are orphaned and
+    /// frontier). Their evicted ancestor is gone, so they are orphaned and
     /// must be dependency-evicted — but doing the whole family in one op would
     /// reintroduce the O(family) cost the depth cap prevents, so they are
     /// drained under the per-pass budget across successive recheck passes.
-    /// Only ever fed from the hard-invalid arm, so a transient
-    /// unresolved-input (demoted-parent) tx is never enqueued here.
+    /// Only ever fed from the `admission::is_recheck_evictable` arm (a hard
+    /// invalidity, or an unresolved DATA input), so a transient
+    /// unresolved-spend-input (demoted-parent) tx is never enqueued here.
     pending_orphan_eviction: Vec<TxId>,
     /// Brief holding store for orphans (child-before-parent) and held
     /// parents/singles (parent-before-child) that cannot be admitted yet.
@@ -88,7 +89,11 @@ pub struct Mempool {
 
 impl Mempool {
     pub fn new(config: MempoolConfig, weight_fn: Box<dyn WeightFunction>) -> Self {
-        let budgets = CostBudgets::new(config.global_cost_budget, config.per_peer_cost_budget);
+        let budgets = CostBudgets::new(
+            config.global_cost_budget,
+            config.per_peer_cost_budget,
+            config.local_reserved_cost_budget,
+        );
         let invalidation = InvalidationCache::new(
             config.invalidation_cache_size,
             std::time::Duration::from_secs(config.invalidation_ttl_seconds),
@@ -898,7 +903,8 @@ impl Mempool {
     /// Validate a package child against an overlay that includes the held
     /// ancestors' outputs, charging the consumed cost to `CostBudgets` on BOTH
     /// the pass and fail paths (identical metering to normal admission — no
-    /// free oracle).
+    /// free oracle), with the same `DemotedFromBlock` exemption admission
+    /// applies.
     fn validate_package_child<V: Validator>(
         &mut self,
         c_bytes: &[u8],
@@ -923,8 +929,15 @@ impl Mempool {
         };
         let res = validator.validate(c_bytes, &overlay_view, &committed_view, &mut tx_cx);
         // Charge regardless of verdict — the invariant is that no staging
-        // operation runs script validation without charging CostBudgets.
-        self.budgets.charge(source.peer(), cost.consumed());
+        // operation runs script validation without charging CostBudgets. The one
+        // exemption mirrors `admission::check_capturing_held`: a demoted tx is
+        // our own re-admission after a rollback, already bounded by
+        // `revalidation_per_tick`, and charging it here would let a multi-tick
+        // drain exhaust the local budget and strand its own tail. Reachable only
+        // with `staging_enabled`.
+        if !matches!(source, TxSource::DemotedFromBlock) {
+            self.budgets.charge(source.budget_source(), cost.consumed());
+        }
         res
     }
 
@@ -1331,19 +1344,23 @@ impl Mempool {
     /// (tie-break `tx_id`), so the tail is covered within a bounded number of
     /// passes and cannot starve.
     ///
-    /// Eviction policy: a tx is evicted ONLY when it is PROVABLY invalid at the
-    /// new tip — a hard consensus failure (script/monetary/structural/cost),
-    /// per `admission::is_hard_invalid`. A non-resolution failure
-    /// (`UnresolvedInput`/`UnresolvedDataInput`), a parse-class failure, or the
-    /// validator's catch-all `Other(_)` (an internal/contract error — resolved-
-    /// inputs mismatch / internal-invariant violation — not a consensus verdict)
-    /// does NOT evict: an unresolved input can be a transient reorg-dependency (a
-    /// demoted parent pending re-admission via the revalidation-queue drain), a
-    /// genuine confirmed double-spend is already evicted by
+    /// Eviction policy: a tx is evicted when it is PROVABLY invalid at the new
+    /// tip — a hard consensus failure (script/monetary/structural/cost) — or its
+    /// DATA inputs no longer resolve, per `admission::is_recheck_evictable`. A
+    /// regular `UnresolvedInput`, a parse-class failure, or the validator's
+    /// catch-all `Other(_)` (an internal/contract error — resolved-inputs
+    /// mismatch / internal-invariant violation — not a consensus verdict) does
+    /// NOT evict: an unresolved spend input can be a transient reorg-dependency
+    /// (a demoted parent pending re-admission via the revalidation-queue drain),
+    /// a genuine confirmed double-spend is already evicted by
     /// `on_tip_change`'s input-conflict cascade, and an `Other(_)` is not safe
     /// proof to drop an already-accepted tx — so such txs are left in place
     /// (rotation clock advanced) rather than dropped to the unresolved-bytes
-    /// cache (a suppression filter, not a re-admit queue). Eviction goes through
+    /// cache (a suppression filter, not a re-admit queue). A DATA input is
+    /// different in kind: it resolves against the committed view alone, so no
+    /// pooled tx can ever supply it and `on_tip_change` (which indexes spend
+    /// inputs) never evicts on it — leaving it pooled leaks it, which is why
+    /// Scala's `CleanupWorker` eliminates it. Eviction goes through
     /// the family-weight debiting wrapper and routes the FAILED ROOT
     /// id through the shared `admission::record_failed_tx` classifier (here
     /// always the blacklist arm, since only hard-invalid failures reach it), so
@@ -1354,7 +1371,7 @@ impl Mempool {
     /// frontier, which is queued in `pending_orphan_eviction` and swept by
     /// [`Self::drain_orphan_evictions`] under this pass's cost budget, carrying
     /// the deeper frontier forward until the whole invalid subtree is gone. Only
-    /// hard-invalid cascades feed that queue, so a transient `UnresolvedInput`
+    /// evicting cascades feed that queue, so a transient `UnresolvedInput`
     /// (demoted-parent) tx is never swept.
     ///
     /// `now` is injected and stamps all per-tx bookkeeping (the rotation clock),
@@ -1527,21 +1544,23 @@ impl Mempool {
     /// * `Ok` (still valid) → keep; refresh only the rotation clock
     ///   (`touch_rechecked`) — deliberately NOT cost/weight, since re-pricing on
     ///   a validity check would desync `Entry.cost` from the `ByCost` weight key.
-    /// * `Err` that is NOT `is_hard_invalid` (non-resolution / parse-class /
-    ///   validator catch-all `Other(_)`) → keep, only advancing the rotation
-    ///   clock. Such a failure is not proof of invalidity: an unresolved input
-    ///   can be a transient reorg-dependency, dropping it to the unresolved-bytes
-    ///   cache (a suppression filter, not a re-admit queue) would lose a valid
-    ///   tx; a confirmed double-spend is already evicted by `on_tip_change`'s
-    ///   input-conflict cascade; an `Other(_)` is an internal/contract error,
-    ///   not a consensus verdict.
-    /// * hard-invalid `Err` (script/monetary/structural/cost) → evict it + its
+    /// * `Err` that is NOT `is_recheck_evictable` (unresolved SPEND input /
+    ///   parse-class / validator catch-all `Other(_)`) → keep, only advancing the
+    ///   rotation clock. Such a failure is not proof of invalidity: an unresolved
+    ///   spend input can be a transient reorg-dependency, dropping it to the
+    ///   unresolved-bytes cache (a suppression filter, not a re-admit queue)
+    ///   would lose a valid tx; a confirmed double-spend is already evicted by
+    ///   `on_tip_change`'s input-conflict cascade; an `Other(_)` is an
+    ///   internal/contract error, not a consensus verdict.
+    /// * evictable `Err` (script/monetary/structural/cost, or an unresolved
+    ///   DATA input — see `is_recheck_evictable`) → evict it + its
     ///   now-orphaned descendants (debiting the surviving ancestor's family
     ///   weight), prune the pass
     ///   overlay so a later tx can't resolve a gone output, and route ONLY the
-    ///   failed root through the shared `record_failed_tx` classifier (here
-    ///   always the blacklist arm). Cascade descendants are dependency-evicted,
-    ///   never cached.
+    ///   failed root through the shared `record_failed_tx` classifier (the
+    ///   blacklist arm for a hard invalidity; the re-admittable unresolved-bytes
+    ///   cache for an unresolved data input, which a reorg could make valid
+    ///   again). Cascade descendants are dependency-evicted, never cached.
     ///
     /// `pool_outputs` is the once-per-pass overlay map, pruned in place on
     /// eviction. Removed tx ids are appended to `removed_for_actions`; ids that
@@ -1581,7 +1600,7 @@ impl Mempool {
                 // inputs all resolve, which a non-resolution failure violates.
                 passed_ids.push(id);
             }
-            Err(ref err) if !admission::is_hard_invalid(err) => {
+            Err(ref err) if !admission::is_recheck_evictable(err) => {
                 self.pool.touch_rechecked(&id, now);
             }
             Err(err) => {
@@ -1616,7 +1635,7 @@ impl Mempool {
         consumed
     }
 
-    /// Drain queued orphan evictions — descendants a hard-invalid cascade left
+    /// Drain queued orphan evictions — descendants an evicting cascade left
     /// pooled past the `max_family_depth` cap — bounded by the pass's remaining
     /// cost budget. Each is dependency-evicted with its own descendants; a
     /// removal that truncates again re-queues the deeper frontier, so a large

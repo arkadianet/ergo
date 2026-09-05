@@ -156,6 +156,28 @@ pub(super) fn admit_transaction(
     route_mempool_actions(state, actions)
 }
 
+/// Classify an incoming `POST /transactions*` / `/api/v1/mempool/*`
+/// submission as trusted-local or public-untrusted.
+///
+/// The `api_key` gate never covers submission routes (unauthenticated by
+/// design — see `docs/configuration.md`'s API security notes), so the
+/// only trust signal this node has is bind scope: on the default loopback
+/// `[api] bind`, only local processes can reach this handler at all, so
+/// `TxSource::Api` (local reserve) is correct. Once the operator opts
+/// into `[api] public_bind = true` with a non-loopback bind, this path is
+/// reachable by arbitrary internet callers indistinguishable from the
+/// operator's own tooling — classify as `TxSource::PublicApi` so it
+/// contends for the shared global budget like peer traffic and can never
+/// exhaust `local_reserved` (the reserve the operator's own wallet
+/// submissions depend on staying available).
+fn api_tx_source(state: &NodeState) -> TxSource {
+    if state.api_publicly_bound {
+        TxSource::PublicApi
+    } else {
+        TxSource::Api
+    }
+}
+
 /// Drive an API submission through the same admission pipeline peers
 /// use. `Broadcast` mode runs `Mempool::process` (steps 0–14 then
 /// commit then Inv); `CheckOnly` runs `Mempool::check` (steps 0–14,
@@ -186,6 +208,7 @@ pub(super) fn admit_api_transaction(
     let (tx_id, actions) =
         match mode {
             SubmitMode::Broadcast => {
+                let source = api_tx_source(state);
                 let (outcome, actions) =
                     {
                         let tip_ctx =
@@ -194,7 +217,7 @@ pub(super) fn admit_api_transaction(
                             ));
                         state
                             .mempool
-                            .process(bytes, TxSource::Api, now, &tip_ctx, &ErgoValidator)
+                            .process(bytes, source, now, &tip_ctx, &ErgoValidator)
                     };
                 let tx_id = match outcome {
                     AdmissionOutcome::Admitted { tx_id, .. } => Ok(hex::encode(tx_id.as_bytes())),
@@ -203,6 +226,7 @@ pub(super) fn admit_api_transaction(
                 (tx_id, actions)
             }
             SubmitMode::CheckOnly => {
+                let source = api_tx_source(state);
                 let (outcome, actions) =
                     {
                         let tip_ctx =
@@ -211,7 +235,7 @@ pub(super) fn admit_api_transaction(
                             ));
                         state
                             .mempool
-                            .check(bytes, TxSource::Api, now, &tip_ctx, &ErgoValidator)
+                            .check(bytes, source, now, &tip_ctx, &ErgoValidator)
                     };
                 let tx_id = match outcome {
                     CheckOutcome::WouldAdmit { validated, .. } => {
@@ -312,5 +336,61 @@ pub(super) fn reject_to_submit_error(reason: RejectReason) -> SubmitError {
     SubmitError {
         reason: reason_str.to_string(),
         detail,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::node::tests::make_state;
+
+    // ----- happy path -----
+
+    /// Default fixture state mirrors the default `[api] bind` (loopback):
+    /// the operator's own tooling is the only thing that can reach the API
+    /// submit path, so it keeps drawing on the trusted local reserve.
+    #[test]
+    fn api_tx_source_loopback_bind_classifies_local() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = make_state(&tmp.path().join("utxo.redb"));
+        assert!(
+            !state.api_publicly_bound,
+            "fixture precondition: loopback by default"
+        );
+        assert!(matches!(api_tx_source(&state), TxSource::Api));
+    }
+
+    /// Once the operator opts into a non-loopback `[api] bind`
+    /// (`public_bind = true`), an unauthenticated caller is
+    /// indistinguishable from the operator's own tooling — the fix under
+    /// test routes that traffic away from the local reserve.
+    #[test]
+    fn api_tx_source_public_bind_classifies_public_api() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = make_state(&tmp.path().join("utxo.redb"));
+        state.api_publicly_bound = true;
+        assert!(matches!(api_tx_source(&state), TxSource::PublicApi));
+    }
+
+    // ----- oracle parity -----
+
+    /// The classification feeds straight into `TxSource::budget_source()`
+    /// (ergo-mempool's own concern, pinned there too) — cross-checked here
+    /// so a future refactor of either side can't silently reintroduce the
+    /// reserve-exhaustion hole this fix closes.
+    #[test]
+    fn public_api_classification_never_maps_to_the_local_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = make_state(&tmp.path().join("utxo.redb"));
+        state.api_publicly_bound = true;
+        let source = api_tx_source(&state);
+        assert_eq!(
+            source.budget_source(),
+            ergo_mempool::budget::BudgetSource::PublicApi
+        );
+        assert_ne!(
+            source.budget_source(),
+            ergo_mempool::budget::BudgetSource::Local
+        );
     }
 }
