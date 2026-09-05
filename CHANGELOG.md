@@ -41,7 +41,14 @@ infrastructure.
   pre-existing `script_validation_checkpoint_*`, whose semantics are unchanged.
   The anchor is also enforced on the two paths that write headers without
   going through the header pipeline: locally mined headers and the headers
-  carried by a NiPoPoW proof.
+  carried by a NiPoPoW proof. **Incompatible with `[node.nipopow]
+  nipopow_bootstrap = true`:** a NiPoPoW-bootstrapped node's header chain is
+  sparse, so a checkpoint below the proof's dense suffix window would never
+  be observed and the Mode 2 install anchor check would refuse forever.
+  Configuring both together fails configuration loading at startup (rule R6)
+  rather than booting into a silently-stuck node — set `nipopow_bootstrap =
+  false` (full header sync materialises every height) or drop `[chain]
+  checkpoint` before upgrading a node that runs both today.
 - **Mode 2 snapshot installs are checkpoint-anchored.** A UTXO snapshot at or
   above a configured checkpoint height is refused unless this node's own
   header chain materialises that height with the pinned id — i.e. unless the

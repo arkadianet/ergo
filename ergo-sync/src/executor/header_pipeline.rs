@@ -572,6 +572,23 @@ impl SyncExecutor {
                         coordinator,
                     );
                 }
+                Err(e @ HeaderProcessError::CheckpointMismatch { .. }) => {
+                    // A checkpoint mismatch is peer misbehavior, not a
+                    // transient gap — same as the single-header and
+                    // batch paths' generic error arm (both fall through
+                    // to a `Penalize` on any non-buffered error). Must be
+                    // handled explicitly here because the orphan-drain
+                    // catch-all below silently drops without penalizing:
+                    // an orphan that gets re-finalized on drain and fails
+                    // the configured checkpoint would otherwise escape
+                    // penalty even though the identical header on the
+                    // normal (non-orphan) path is penalized.
+                    report_header_failure(store, peer, "finalize_header_orphan_drain", &e);
+                    all_actions.push(Action::Penalize {
+                        peer,
+                        penalty: Penalty::Misbehavior,
+                    });
+                }
                 Err(HeaderProcessError::AlreadyKnown { .. }) => {}
                 Err(_) => {} // drop invalid
             }

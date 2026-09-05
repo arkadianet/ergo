@@ -1093,6 +1093,12 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
                      installed until it is (clear [chain] checkpoint to install unanchored)",
                 );
             }
+            // Not a halt: the anchor may still become observed (bounded
+            // catchup filling in the header chain). Put the reconstructed
+            // tree back so the next tick's `take()` finds it again — the
+            // tree can't be rebuilt otherwise, since `pending_manifest_bytes`
+            // is already consumed by this point.
+            state.reconstructed_tree = Some(reconstructed);
             return;
         }
     }

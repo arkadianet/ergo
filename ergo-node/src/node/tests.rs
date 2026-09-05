@@ -1023,6 +1023,207 @@ fn peer_disconnect_drops_snapshot_bootstrap_vote() {
     );
 }
 
+// ----- mode 2 part 2i: install retry across a deferred checkpoint anchor -----
+
+/// Round-trip an empty `AvlTree` through the manifest codec to get a real
+/// (non-fabricated) `ReconstructedTree` — same shape `drive_chunk_download`
+/// hands `install_reconstructed_snapshot`, just without the network/chunk
+/// machinery.
+fn empty_reconstructed_tree() -> ergo_state::avl::snapshot_codec::ReconstructedTree {
+    use ergo_state::avl::snapshot_codec::{
+        reconstruct_tree, serialize_manifest, MAINNET_MANIFEST_DEPTH,
+    };
+    use ergo_state::avl::tree::AvlTree;
+    let tree = AvlTree::new();
+    let manifest_bytes = serialize_manifest(&tree, MAINNET_MANIFEST_DEPTH).unwrap();
+    reconstruct_tree(&manifest_bytes, &std::collections::HashMap::new()).unwrap()
+}
+
+/// A minimal synthetic header at `height` carrying `state_root`. Not
+/// PoW-valid or otherwise consensus-checked — `install_reconstructed_snapshot`
+/// only reads `(height, state_root)` off the persisted bytes via
+/// `ergo_ser::header::read_header`, it never re-validates them.
+fn synthetic_header_with_state_root(
+    height: u32,
+    state_root: ergo_primitives::digest::ADDigest,
+) -> ([u8; 32], Vec<u8>) {
+    use ergo_primitives::digest::{blake2b256, Digest32, ModifierId};
+    use ergo_primitives::group_element::{GroupElement, GROUP_ELEMENT_LENGTH};
+    use ergo_primitives::writer::VlqWriter;
+    use ergo_ser::autolykos::AutolykosSolution;
+    use ergo_ser::header::{write_header, Header};
+
+    let header = Header {
+        version: 2,
+        parent_id: ModifierId::from_bytes([0u8; 32]),
+        ad_proofs_root: Digest32::ZERO,
+        transactions_root: Digest32::ZERO,
+        state_root,
+        timestamp: 1_700_000_000 + height as u64,
+        extension_root: Digest32::ZERO,
+        n_bits: 0,
+        height,
+        votes: [0, 0, 0],
+        unparsed_bytes: Vec::new(),
+        solution: AutolykosSolution::V2 {
+            pk: GroupElement::from_bytes([0u8; GROUP_ELEMENT_LENGTH]),
+            nonce: [0u8; 8],
+        },
+    };
+    let mut w = VlqWriter::new();
+    write_header(&mut w, &header).expect("synthetic header fits wire bounds");
+    let bytes = w.result();
+    let id = *blake2b256(&bytes).as_bytes();
+    (id, bytes)
+}
+
+/// CodeRabbit #313 (MAJOR, `sync_tick.rs:946`): `install_reconstructed_snapshot`
+/// calls `state.reconstructed_tree.take()` up front. The anchor-not-observed
+/// early return (checkpoint height not yet materialized on this node's
+/// header chain — a `SparseGap`/store-corruption-shaped read from
+/// `lookup_header_at_height`, same as a genuine PoPowSparse gap) dropped the
+/// taken tree without putting it back, so a SECOND tick would silently
+/// no-op forever: `state.reconstructed_tree` is `None` and can never be
+/// rebuilt (`pending_manifest_bytes` was already consumed). Bootstrap would
+/// be permanently stuck even after the anchor became observable. Fixed by
+/// restoring `state.reconstructed_tree` before returning on that path (and
+/// the `SparseGap`-defer path just above it).
+#[test]
+fn install_reconstructed_snapshot_retries_after_deferred_checkpoint_anchor_appears() {
+    use ergo_state::chain::HeaderMeta;
+    use ergo_sync::header_proc::HeaderCheckpoint;
+    use ergo_sync::snapshot_bootstrap::BootstrapState;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+
+    let snapshot_height: u32 = 5;
+    let checkpoint_height: u32 = 3;
+    let checkpoint_block_id = [0xEEu8; 32];
+
+    // An (empty-tree) reconstructed snapshot, its root embedded as a real
+    // header's `state_root` so the install-time trust re-check passes.
+    let reconstructed = empty_reconstructed_tree();
+    let manifest_id = *reconstructed.root_label.as_bytes();
+    let mut root_digest = [0u8; 33];
+    root_digest[..32].copy_from_slice(&manifest_id);
+    root_digest[32] = reconstructed.tree_height;
+    let state_root = ergo_primitives::digest::ADDigest::from_bytes(root_digest);
+
+    let (h5_id, h5_bytes) = synthetic_header_with_state_root(snapshot_height, state_root);
+
+    {
+        let store = state.store.as_utxo_mut().unwrap();
+        store.store_header(&h5_id, &h5_bytes).unwrap();
+        store
+            .store_header_meta(
+                &h5_id,
+                &HeaderMeta {
+                    parent_id: [0u8; 32],
+                    height: snapshot_height,
+                    cumulative_score: vec![5],
+                    pow_validity: 1,
+                    timestamp: 1_700_000_005,
+                },
+            )
+            .unwrap();
+        store
+            .test_force_set_best_header_unsafe(h5_id, snapshot_height, vec![5])
+            .unwrap();
+        store
+            .test_force_put_header_chain_index(snapshot_height, &h5_id)
+            .unwrap();
+        store
+            .test_force_put_headers_by_height(snapshot_height, &h5_id)
+            .unwrap();
+        // Deliberately leave `checkpoint_height` unindexed: the operator's
+        // anchor has not been observed on this node's header chain yet.
+    }
+
+    state.executor.set_header_checkpoint(Some(HeaderCheckpoint {
+        height: checkpoint_height,
+        block_id: checkpoint_block_id,
+    }));
+
+    // Drive the snapshot_bootstrap reducer to `ManifestVerified` — the gate
+    // `install_reconstructed_snapshot` checks — without the real quorum/
+    // chunk-download machinery, which is irrelevant to this regression.
+    for p in 1..=3u16 {
+        state
+            .snapshot_bootstrap
+            .on_snapshots_info(synthetic_peer(p), &[(snapshot_height as i32, manifest_id)]);
+    }
+    assert!(matches!(
+        state.snapshot_bootstrap.state(),
+        BootstrapState::Selected { .. }
+    ));
+    state.snapshot_bootstrap.mark_manifest_requested(
+        synthetic_peer(1),
+        snapshot_height as i32,
+        manifest_id,
+        Instant::now(),
+    );
+    state
+        .snapshot_bootstrap
+        .accept_verified_manifest(Vec::new());
+    assert!(matches!(
+        state.snapshot_bootstrap.state(),
+        BootstrapState::ManifestVerified { .. }
+    ));
+
+    state.reconstructed_tree = Some(reconstructed);
+
+    // Tick 1: anchor not yet observed — install must defer, not drop the
+    // reconstructed tree.
+    handle_sync_tick(&mut state);
+    assert!(
+        state.reconstructed_tree.is_some(),
+        "a deferred (not-yet-observed) checkpoint anchor must NOT drop the \
+         reconstructed tree — the install must be retryable next tick",
+    );
+    assert_eq!(
+        state
+            .store
+            .as_utxo()
+            .unwrap()
+            .chain_state()
+            .best_full_block_height,
+        0,
+        "install must not have proceeded while the anchor is unobserved",
+    );
+
+    // The anchor becomes observed: the operator's pinned id materializes at
+    // the checkpoint height on this node's header chain.
+    state
+        .store
+        .as_utxo()
+        .unwrap()
+        .test_force_put_header_chain_index(checkpoint_height, &checkpoint_block_id)
+        .unwrap();
+
+    // Tick 2: anchor now observed and matches — install must succeed using
+    // the SAME reconstructed tree kept from tick 1.
+    handle_sync_tick(&mut state);
+    assert!(
+        state.reconstructed_tree.is_none(),
+        "a successful install must consume the reconstructed tree",
+    );
+    assert_eq!(
+        state.installed_snapshot,
+        Some((snapshot_height, manifest_id)),
+        "install must complete once the anchor is observed",
+    );
+    assert_eq!(
+        state
+            .store
+            .as_utxo()
+            .unwrap()
+            .chain_state()
+            .best_full_block_height,
+        snapshot_height,
+    );
+}
+
 // ----- span emission -----
 
 #[test]

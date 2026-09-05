@@ -473,6 +473,115 @@ fn header_checkpoint_mismatch_penalizes_sending_peer() {
     );
 }
 
+/// CodeRabbit #313 (MINOR, `header_pipeline.rs:531`): an orphan that gets
+/// re-finalized on `drain_orphans` and fails the configured checkpoint hit
+/// the generic `Err(_) => {} // drop invalid` arm and was dropped WITHOUT
+/// penalizing the sending peer — unlike the identical header on the normal
+/// (`handle_validate_header`) or batch path, both of which fall through to
+/// a `Penalize`. Reproduce via the real orphan-buffer + drain path: header 3
+/// arrives before its parent (header 2) and buffers; header 2 then arrives
+/// and installs, triggering `drain_orphans` to re-finalize the buffered
+/// header 3 against a checkpoint pinned (wrong id) at height 3.
+#[test]
+fn orphan_drain_checkpoint_mismatch_penalizes_sending_peer() {
+    use ergo_p2p::peer::Penalty;
+    use ergo_sync::coordinator::{Action, SyncCoordinator};
+    use ergo_sync::executor::SyncExecutor;
+    use ergo_sync::header_proc::HeaderCheckpoint;
+    use ergo_validation::context::ProtocolParams;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::time::Instant;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    init_genesis(&mut store);
+    let headers = load_headers();
+    seed_header_1(&mut store, &headers);
+    let mut store = ergo_state::StateBackendKind::Utxo(store);
+
+    let mut coordinator = SyncCoordinator::new(1);
+    coordinator.sync_state_mut().set_headers_chain_synced();
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        ergo_crypto::difficulty::DifficultyParams::mainnet(),
+    );
+
+    let orphan_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 9030);
+    let installer_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)), 9030);
+    let h2_bytes = get_header_bytes(&headers, 2);
+    let h3_bytes = get_header_bytes(&headers, 3);
+    let h3_id = get_header_id(&headers, 3);
+
+    // Header 3 arrives first, no checkpoint configured yet: its parent
+    // (header 2) isn't installed, so it buffers as an orphan keyed by
+    // header 2's id (`finalize_header` checks the checkpoint BEFORE chain
+    // linkage, so a header that fails the checkpoint can never reach the
+    // orphan buffer in the first place — the mismatch has to appear
+    // between buffering and drain, e.g. the checkpoint is set/changed
+    // while the header sits in the buffer).
+    let orphan_actions = executor.execute_all(
+        vec![Action::ValidateHeader {
+            peer: orphan_peer,
+            header_bytes: h3_bytes,
+        }],
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+    assert!(
+        !orphan_actions.iter().any(|a| matches!(
+            a,
+            Action::Penalize { peer: p, .. } if *p == orphan_peer
+        )),
+        "buffering an orphan must not itself penalize the peer: {orphan_actions:?}"
+    );
+    assert!(
+        store.get_header(&h3_id).unwrap().is_none(),
+        "orphan header 3 must not be persisted before its parent arrives"
+    );
+
+    // Now the checkpoint is set, pinned at height 3 with the WRONG id.
+    // Header 2 arrives and installs (not at the checkpoint height), which
+    // triggers `drain_orphans` to re-finalize the buffered header 3 — and
+    // header 3 fails the checkpoint at height 3.
+    executor.set_header_checkpoint(Some(HeaderCheckpoint {
+        height: 3,
+        block_id: [0x7fu8; 32],
+    }));
+    let drain_actions = executor.execute_all(
+        vec![Action::ValidateHeader {
+            peer: installer_peer,
+            header_bytes: h2_bytes,
+        }],
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+
+    assert!(
+        drain_actions.iter().any(|a| matches!(
+            a,
+            Action::Penalize {
+                peer: p,
+                penalty: Penalty::Misbehavior,
+            } if *p == orphan_peer
+        )),
+        "a checkpoint-invalid header hit on orphan drain must penalize the \
+         peer that originally sent it, same as the non-orphan path: {drain_actions:?}"
+    );
+    assert!(
+        store.get_header(&h3_id).unwrap().is_none(),
+        "a header rejected by the checkpoint on drain must not be persisted"
+    );
+    assert_eq!(
+        store.chain_state_meta().best_header_height,
+        2,
+        "the checkpoint-invalid orphan must not advance best_header past header 2"
+    );
+}
+
 #[test]
 fn process_header_rejects_height_mismatch() {
     // Process header 2 but with a parent whose metadata claims height 5
