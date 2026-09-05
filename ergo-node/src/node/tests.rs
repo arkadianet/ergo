@@ -41,6 +41,16 @@ fn mid(n: u8) -> [u8; 32] {
 
 pub(super) fn make_state(db_path: &Path) -> NodeState {
     let store = StateStore::open(db_path).unwrap();
+    make_state_with_store(store)
+}
+
+/// Same as [`make_state`], but takes an already-configured `StateStore`
+/// (e.g. one with genesis + a NiPoPoW proof already applied) rather than
+/// opening a fresh one. Lets `sync_tick`'s own test module reuse its
+/// `popow_sparse_store` fixture to drive a real `NodeState` through Mode 4
+/// install-phase scenarios (`resolve_install_anchor` gaps) without
+/// duplicating the whole `NodeState` construction.
+pub(super) fn make_state_with_store(store: StateStore) -> NodeState {
     make_state_with_backend(
         ergo_state::StateBackendKind::Utxo(store),
         crate::config::StateType::Utxo,

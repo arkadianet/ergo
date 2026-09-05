@@ -530,6 +530,46 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
     // Fail-loud on sentinel read errors: masking them with
     // `unwrap_or(1)` would skip the activation gate in the exact
     // corrupt-DB case the gate is meant to catch.
+    //
+    // `config.blocks_to_keep` override pin (Scala
+    // `FullBlockPruningProcessor.scala:49-55`,
+    // `updateBestFullBlock`'s `blocksToKeep < 0` arm):
+    //
+    //   if (nodeConfig.blocksToKeep < 0) {
+    //     if (nodeConfig.utxoSettings.utxoBootstrap) {
+    //       readMinimalFullBlockHeight()   // constant: keep the
+    //                                      // installed snapshot's floor
+    //     } else {
+    //       GenesisHeight                  // reset to 1: no
+    //                                      // pruning, no bootstrap
+    //     }
+    //   } else { ... }
+    //
+    // Both arms of that `if` are re-derivations of "never advance
+    // past the archive floor" for a fresh session — Scala only
+    // reaches this branch from `updateBestFullBlock`, called on
+    // every full-block apply, so it re-asserts the constant (or
+    // the genesis reset) on each one. Rust does not re-derive
+    // anything at boot: `read_minimal_full_block_height` here is a
+    // plain read of the persisted `STATE_META` sentinel, and
+    // `compute_minimal_full_block_height` (`ergo-state/src/store/apply.rs:59-61`)
+    // is the single writer for the `blocks_to_keep < 0` case,
+    // returning `current_min` unchanged for BOTH the
+    // utxo_bootstrap and archive-only shapes. That is equivalent
+    // to Scala's two arms because they only diverge when
+    // `current_min` is not already `GenesisHeight` (1) — i.e. a
+    // node that ran Mode 2/4 bootstrap (sentinel > 1 from
+    // `install_snapshot_state` / `apply_popow_proof`) and was then
+    // reconfigured to plain archive (`utxo_bootstrap = false`,
+    // `blocks_to_keep = -1`) with no fresh full-block apply since.
+    // `archive_with_utxo_bootstrap_keeps_constant_sentinel_across_boot`
+    // in `ergo-node/tests/mode4_acceptance.rs` pins the
+    // `utxo_bootstrap = true` arm end-to-end through `run_inner`;
+    // the reconfigured-to-plain-archive shape is the advisory
+    // warning below, not a silent GenesisHeight reset — Rust never
+    // writes the sentinel at boot, so it does not need to choose
+    // between the two Scala arms, it just carries forward whatever
+    // the last writer committed.
     let boot_sentinel = store.read_minimal_full_block_height().map_err(|e| {
         Box::new(std::io::Error::other(format!(
             "boot: cannot read minimal_full_block_height (state corruption blocks \

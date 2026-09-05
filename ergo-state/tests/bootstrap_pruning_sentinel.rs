@@ -30,18 +30,14 @@
 //! composition tests run BOTH writers in either order and verify
 //! the max-style sentinel + atomicity contracts.
 
-use std::collections::HashMap;
 use std::path::Path;
 
-use ergo_primitives::digest::{ADDigest, Digest32, ModifierId};
+use ergo_primitives::digest::{ADDigest, ModifierId};
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::header::{read_header, Header};
 use ergo_ser::popow_header::PoPowHeader;
 use ergo_ser::popow_proof::NipopowProof;
-use ergo_state::avl::snapshot_codec::{
-    reconstruct_tree, ReconstructedTree, SnapshotServer, MAINNET_MANIFEST_DEPTH,
-};
-use ergo_state::avl::tree::AvlTree;
+use ergo_state::avl::snapshot_codec::ReconstructedTree;
 use ergo_state::chain::HeaderAvailability;
 use ergo_state::store::StateStore;
 use tempfile::TempDir;
@@ -229,21 +225,13 @@ fn strict_standalone_writer_still_rejects_backward() {
 /// public snapshot codec, and return a (reconstructed_tree,
 /// expected_state_root) pair that satisfies
 /// `install_snapshot_state`'s defense-in-depth root check.
+///
+/// Delegates to the exported `test-helpers` builder so this file and
+/// the cross-crate Mode 4 acceptance tests in `ergo-node` drive the
+/// SAME fixture — a divergence between them would let one suite pass
+/// against a shape the other never sees.
 fn build_reconstructed_tree(n_leaves: u8) -> (ReconstructedTree, ADDigest) {
-    let mut tree = AvlTree::new();
-    for i in 0..n_leaves {
-        let key = [i.wrapping_add(0x10); 32];
-        let value = vec![i, i.wrapping_add(0x20), i.wrapping_add(0x40)];
-        tree.insert(key, value);
-    }
-    let server = SnapshotServer::build(&tree, 100, MAINNET_MANIFEST_DEPTH).unwrap();
-    let chunks_map: HashMap<Digest32, Vec<u8>> = server.chunks.iter().cloned().collect();
-    let reconstructed = reconstruct_tree(&server.manifest_bytes, &chunks_map).unwrap();
-    // ADDigest = 32-byte root label + 1-byte tree height suffix.
-    let mut root_bytes = [0u8; 33];
-    root_bytes[..32].copy_from_slice(reconstructed.root_label.as_bytes());
-    root_bytes[32] = reconstructed.tree_height;
-    (reconstructed, ADDigest::from_bytes(root_bytes))
+    ergo_state::test_helpers::reconstructed_snapshot_fixture(n_leaves, 100)
 }
 
 #[test]

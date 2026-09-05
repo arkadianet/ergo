@@ -422,14 +422,44 @@ impl SnapshotBootstrap {
     }
 
     /// Caller's trust check failed OR the manifest reply was
-    /// missing — the chosen voter is dishonest about that height.
-    /// Evicts their vote, recomputes selection, clears the pending
-    /// request. State transitions back to `Selected` (different
-    /// voter, same or new manifest) / `Querying` / `Idle` depending
-    /// on what the remaining quorum supports.
+    /// missing OR a manifest that verified fine against the
+    /// canonical header turned out to be unreachable later (Mode 4
+    /// install found the anchor sits in a NiPoPoW proof's sparse
+    /// prefix, which forward catch-up never indexes) — the chosen
+    /// voter is dishonest about that height, or simply cannot serve
+    /// an epoch this node's header history can ever reach. Evicts
+    /// their vote, drops any latched `verified` manifest, recomputes
+    /// selection, clears the pending request. State transitions back
+    /// to `Selected` (different voter, same or new manifest) /
+    /// `Querying` / `Idle` depending on what the remaining quorum
+    /// supports.
+    ///
+    /// Clearing `verified` is a no-op at every manifest-phase call
+    /// site (verification hasn't happened yet there — `pending_request`
+    /// is still set, `verified` is still `None`). It is exactly what
+    /// lets the Mode 4 install-phase `UnreachableGap` arm in
+    /// `ergo-node`'s `install_reconstructed_snapshot` reuse this same
+    /// recovery path instead of halting bootstrap permanently: without
+    /// un-latching `verified`, `state()` would keep reporting
+    /// `ManifestVerified` forever and discovery could never select a
+    /// different, reachable epoch.
     pub fn reject_manifest_and_evict_voter(&mut self, peer: PeerId) {
         self.pending_request = None;
+        self.verified = None;
         self.votes.remove(&peer);
+        self.recompute_selection();
+    }
+
+    /// Drop a latched `verified` manifest without evicting any vote —
+    /// the install-phase counterpart to
+    /// [`Self::reject_manifest_and_evict_voter`] for the case where no
+    /// live voter remains to evict (e.g. the peer that served the
+    /// manifest disconnected between verification and install, and
+    /// `on_peer_disconnect` already removed their vote). Recomputes
+    /// selection so discovery can pick a new target from whatever
+    /// votes remain.
+    pub fn drop_verified_manifest(&mut self) {
+        self.verified = None;
         self.recompute_selection();
     }
 

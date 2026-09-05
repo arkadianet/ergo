@@ -38,7 +38,7 @@ What ships today, against the Scala reference node's mode taxonomy:
 | Mode 1 — Full archive | yes | yes |
 | Mode 2 — UTXO snapshot bootstrap (consume + serve) | yes | yes |
 | Mode 3 — Pruned (suffix window) | yes | yes (functional; end-to-end activation-parity tests are the remaining `done` gate) |
-| Mode 4 — Pruned + UTXO bootstrap | yes | partial (Mode 2 + Mode 3 pieces compose; composed-lifecycle plumbing open) |
+| Mode 4 — Pruned + UTXO bootstrap | yes | yes for the composed lifecycle: a real UTXO-snapshot install and a NiPoPoW proof compose max-style on the prune sentinel and reboot cleanly (tested both orders, `ergo-node/tests/mode4_acceptance.rs`). Live multi-peer soak still outstanding |
 | Mode 5 — Digest verifier (AD-proof tx validation) | yes | yes (boots and syncs headers from peers; external ADProof-corpus parity beyond the pinned mainnet window and reorg-abort re-anchor remain) |
 | Mode 6 — Headers-only | yes | yes |
 | NiPoPoW bootstrap (consume + serve) | yes | yes |
