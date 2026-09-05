@@ -842,18 +842,46 @@ pub fn reconcile(
     })
 }
 
-/// Compare the node and the JVM on one input for `spec`. `None` when they agree
-/// (or the oracle erred), `Some(Divergence)` otherwise.
+/// Compare the node and the JVM on one input for `spec`. `Ok(None)` when they
+/// explicitly agree, `Ok(Some(Divergence))` on a genuine divergence.
+///
+/// An oracle `Verdict::Err` on EITHER side (a `reduce`/`reduce_ctx` pipeline
+/// error, a malformed reply, ...) is surfaced as `Err` here, NOT folded into
+/// `Ok(None)`. `Ok(None)` must mean "checked and agreed" — an oracle that
+/// could not evaluate the input proved nothing, and every caller (the
+/// `run_oracle`/`run_oracle_repro` campaigns, `minimize_divergence`) already
+/// treats an `Err` from this function as a harness failure (exit 3), which is
+/// exactly the "this check did not actually happen" signal an indeterminate
+/// verdict needs. Before this, an `ERR ...` oracle reply reconciled as `None`
+/// and was counted as a clean, passed check.
 pub fn diff(
     spec: &SurfaceSpec,
     bytes: &[u8],
     oracle: &mut Oracle,
 ) -> io::Result<Option<Divergence>> {
     let (rust, jvm, jvm_input) = query_verdicts(spec, bytes, oracle)?;
+    if let Verdict::Err(detail) = &rust {
+        return Err(indeterminate_error(spec, "rust", detail));
+    }
+    if let Verdict::Err(detail) = &jvm {
+        return Err(indeterminate_error(spec, "jvm", detail));
+    }
     Ok(match reconcile(spec, rust, jvm, &jvm_input) {
         Reconciliation::Diverges(d) => Some(d),
-        Reconciliation::Agree | Reconciliation::Indeterminate => None,
+        Reconciliation::Agree => None,
+        Reconciliation::Indeterminate => {
+            unreachable!("both sides' Verdict::Err already handled above")
+        }
     })
+}
+
+/// Build the [`io::Error`] `diff` returns for an indeterminate oracle outcome
+/// (see `diff`'s doc comment for why this must not become `Ok(None)`).
+fn indeterminate_error(spec: &SurfaceSpec, side: &str, detail: &str) -> io::Error {
+    io::Error::other(format!(
+        "oracle could not evaluate surface {}: {side} verdict was Err({detail})",
+        spec.name
+    ))
 }
 
 #[cfg(test)]
@@ -1437,5 +1465,89 @@ mod tests {
             b"\x00",
         );
         assert_eq!(out, Reconciliation::Indeterminate);
+    }
+
+    // ----- diff: an oracle ERR reply must be Err, never a passed check -----
+    //
+    // Regression for the incremental CodeRabbit finding on PR #309: `diff`
+    // used to fold a `Verdict::Err` on either side into `Ok(None)` — an ERR
+    // oracle reply then looked identical to "checked and agreed", so
+    // `run_oracle` counted it as a clean check and a campaign could exit 0
+    // having verified nothing on that input. `diff` must surface it as `Err`
+    // so every caller's existing "Err = harness failure" handling fires.
+
+    /// Spawn a trivial stub "oracle" (no scala-cli, no JVM) that replies
+    /// `ERR <detail>` to every request, wired into an `Oracle` the same way
+    /// `Oracle::spawn` would — this only needs `Oracle`'s private fields to be
+    /// reachable from `oracle::tests`, not a real JVM.
+    fn stub_err_oracle(detail: &str) -> Oracle {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "while IFS= read -r _line; do echo 'ERR {detail}'; done"
+            ))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn stub ERR oracle");
+        let stdin = child.stdin.take().expect("piped stdin");
+        let stdout = io::BufReader::new(child.stdout.take().expect("piped stdout"));
+        Oracle {
+            child,
+            stdin,
+            stdout,
+            transcript: None,
+        }
+    }
+
+    #[test]
+    fn diff_jvm_err_reply_is_err_not_ok_none() {
+        let mut oracle = stub_err_oracle("synthetic-jvm-failure");
+        let spec = oracle_surfaces()
+            .into_iter()
+            .find(|s| s.name == "ergo_tree")
+            .expect("ergo_tree is a known oracle surface");
+        // A tree the node itself ACCEPTs (see reduce_verdict_known_trees_match_jvm_oracle),
+        // so the ERR comes from the stub JVM side, not the node's own parse.
+        let bytes = from_hex("0008d3").expect("valid test hex");
+
+        let result = diff(&spec, &bytes, &mut oracle);
+        assert!(
+            result.is_err(),
+            "an oracle ERR reply must be Err, never Ok(None) — Ok(None) reads as              a passed, agreeing check"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("jvm verdict was Err") && msg.contains("synthetic-jvm-failure"),
+            "error should name which side erred and carry the detail: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn diff_rust_err_reply_is_err_not_ok_none() {
+        // Force the NODE side to Err. `query_verdicts` still queries the
+        // (stubbed) JVM regardless of the node's verdict — `diff` checks the
+        // node's `rust` verdict first, so this exercises that branch even
+        // though both sides technically error here.
+        let spec = SurfaceSpec {
+            name: "test_surface",
+            rust_verdict: |_bytes: &[u8]| (Verdict::Err("synthetic-node-failure".into()), 0),
+            compare_canonical: true,
+            soft_fork_header: false,
+        };
+        let mut oracle = stub_err_oracle("synthetic-jvm-failure-not-reached-by-assertion");
+
+        let result = diff(&spec, b"\x00", &mut oracle);
+        assert!(
+            result.is_err(),
+            "a node-side Err verdict must be Err, never Ok(None)"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("rust verdict was Err") && msg.contains("synthetic-node-failure"),
+            "error should name which side erred and carry the detail: {msg:?}"
+        );
     }
 }

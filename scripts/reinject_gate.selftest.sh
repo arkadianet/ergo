@@ -11,9 +11,10 @@
 #
 # This test builds a throwaway git repo shaped like the real one (just enough
 # of `ergo-difftest/known_bugs/` for the manifest parser) with two `[[bug]]`
-# entries — one `blocked_until = "9999-99-99"`, one `blocked_until =
-# "2026-12-01"` (a real, not-yet-passed date) — and runs the real
-# `reinject_gate.sh` with `--only` against each, asserting:
+# entries — one `blocked_until = "9999-99-99"`, one `blocked_until` set to a
+# real date generated at test time (`date -u -d '+400 days' +%F`, so this
+# fixture never itself goes stale) — and runs the real `reinject_gate.sh`
+# with `--only` against each, asserting:
 #   * the impossible date is REJECTED ("not a real calendar date"), not
 #     silently accepted as "blocked forever";
 #   * the valid future date is accepted and the entry is SKIPPED (not FAILed)
@@ -38,7 +39,13 @@ fail() {
 mkdir -p "$WORK/ergo-difftest/known_bugs/patches"
 git -C "$WORK" init -q
 
-cat >"$WORK/ergo-difftest/known_bugs/manifest.toml" <<'EOF'
+# A fixed literal future date goes stale the day it arrives — generate one
+# relative to "now" so this test keeps passing indefinitely. +400 days is
+# comfortably past any plausible `blocked_until` window used elsewhere in the
+# repo, so it never collides with a real entry's expiry during this run.
+FUTURE_DATE="$(date -u -d '+400 days' +%F)"
+
+cat >"$WORK/ergo-difftest/known_bugs/manifest.toml" <<EOF
 [[bug]]
 id = "impossible_date"
 class = "WR"
@@ -53,7 +60,7 @@ class = "WR"
 wire_reachable = "true"
 trigger_hex = ""
 blocked_on = "PR #2"
-blocked_until = "2026-12-01"
+blocked_until = "$FUTURE_DATE"
 EOF
 
 gate_rc=0
@@ -78,6 +85,6 @@ run_gate valid_future_date
 out2="$WORK/out.valid_future_date"
 [[ $gate_rc -eq 0 ]] || fail "valid_future_date: expected exit 0 (a valid not-yet-passed blocked_until is a clean SKIP), got $gate_rc"
 grep -q "not a real calendar date" "$out2" && fail "valid_future_date: a real calendar date must not be rejected"
-grep -q "SKIP.*valid_future_date: blocked on PR #2 until 2026-12-01" "$out2" || fail "valid_future_date: expected the ordinary still-blocked SKIP line"
+grep -q "SKIP.*valid_future_date: blocked on PR #2 until $FUTURE_DATE" "$out2" || fail "valid_future_date: expected the ordinary still-blocked SKIP line"
 
 echo "PASS: blocked_until is calendar-validated — impossible dates are rejected, real future dates still SKIP as blocked"
