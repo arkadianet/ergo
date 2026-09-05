@@ -28,6 +28,10 @@ bytes             = { workspace = true }
 # useful for diagnosing cost-divergence bugs against the Scala oracle. No
 # runtime overhead when the feature is off.
 cost-trace = []
+# `value_trace` module: every evaluated node's value keyed by preorder id,
+# for source-level inspection in tooling. Debug-only; never in a consensus
+# build.
+value-trace = []
 
 [dev-dependencies]
 hex        = { workspace = true }

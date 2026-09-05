@@ -60,6 +60,8 @@ pub mod dht;
 pub mod evaluator;
 pub mod reduce;
 pub mod schnorr;
+#[cfg(feature = "value-trace")]
+pub mod value_trace;
 pub mod verify;
 
 /// Fiat-Shamir challenge size: 192 bits = 24 bytes.

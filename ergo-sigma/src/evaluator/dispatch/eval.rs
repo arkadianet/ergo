@@ -79,6 +79,10 @@ pub(in crate::evaluator) fn eval_expr(
         Expr::Unparsed(_) => Err(EvalError::UnparsedErgoTree),
     };
     *depth -= 1;
+    #[cfg(feature = "value-trace")]
+    if let Ok(v) = &result {
+        crate::value_trace::record(expr, v);
+    }
     result
 }
 

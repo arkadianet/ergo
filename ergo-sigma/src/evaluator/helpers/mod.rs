@@ -5,7 +5,7 @@
 
 mod coll;
 mod equality;
-mod serialize;
+pub(crate) mod serialize;
 mod subst_constants;
 mod type_infer;
 
