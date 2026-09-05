@@ -3,6 +3,36 @@
 //! selection, manifest request/timeout ownership, and trust
 //! verification against the header chain's `state_root`. See the
 //! parent module doc for the full protocol context.
+//!
+//! # Trust argument for a Mode 2 install
+//!
+//! Installing a UTXO snapshot means adopting, wholesale, a state the node
+//! never computed. What makes that safe is a chain of two links:
+//!
+//! 1. **Manifest => header.** [`verify_manifest_against_state_root`] binds
+//!    the manifest to `header.state_root` at `snapshot_height`, so the
+//!    installed tree is the one the chain committed to at that height.
+//! 2. **Header => operator anchor.** The header chain itself is only
+//!    PoW-validated. PoW is a cost, not an identity: a sufficiently funded
+//!    peer set can present a heavier-looking-enough header chain to a node
+//!    that has never seen the real one. Scala closes this with the
+//!    operator-supplied `ergo.node.checkpoint` — and closes it *in header
+//!    validation* (`HeadersProcessor.checkpointCondition`,
+//!    `HeadersProcessor.scala:437-443`), which is the only layer that fires
+//!    on a Mode 2 bootstrap: no full block below `snapshot_height` is ever
+//!    applied, so a full-block-level checkpoint never runs at all.
+//!
+//! [`snapshot_install_anchor_check`] is link 2 for the install decision: when
+//! a checkpoint is configured and the snapshot sits AT OR ABOVE it, the node
+//! refuses to install unless its own header chain materialises the checkpoint
+//! height with the pinned id — i.e. unless the anchor was actually *passed*
+//! and verified on the way up. A snapshot strictly below the checkpoint
+//! height is not covered by the anchor and installs unconditionally; the
+//! anchor still fires later, on the headers that reach it.
+//!
+//! A missing row (a NiPoPoW-sparse header chain that skips the checkpoint
+//! height) is a refusal, not a pass: an anchor that was never observed proves
+//! nothing about the chain that produced the manifest.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -52,13 +82,14 @@ pub enum ManifestVerifyError {
 /// codec's manifest_id (which is the root label by construction —
 /// see `SnapshotServer::build` in `ergo-state`).
 ///
-/// **Oracle gap — provisional:** the prefix-32 rule is the only
-/// interpretation consistent with our own serve-side construction;
-/// it has not yet been pinned against a Scala-produced manifest +
-/// header pair. Consume-side trust verification stays PROVISIONAL
-/// until a Scala mainnet snapshot's `manifest_id` and the matching
-/// header `state_root` at the same height are captured and the byte
-/// relationship is confirmed.
+/// **Oracle-pinned:** the prefix-32 rule is confirmed against a
+/// Scala-produced manifest + header pair
+/// (`test-vectors/testnet/utxo_snapshot_manifest_522239.json`, captured
+/// from a Scala 6.0.3 testnet node with
+/// `scripts/capture-utxo-manifest.sh`): the advertised `manifestId` is
+/// byte-for-byte the first 32 bytes of the header `stateRoot` at the
+/// same height. `manifest_prefix32_rule_matches_scala_manifest` in this
+/// module's oracle-parity section pins it.
 pub fn verify_manifest_against_state_root(
     manifest_id: &[u8; 32],
     state_root: &ADDigest,
@@ -73,6 +104,80 @@ pub fn verify_manifest_against_state_root(
             expected_manifest_id: *manifest_id,
             actual_state_root_prefix: actual,
         })
+    }
+}
+
+/// Why a Mode 2 install was refused by the header-checkpoint anchor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotAnchorError {
+    /// The node's own header chain has no header at the checkpoint height,
+    /// so the anchor was never observed. Happens on a NiPoPoW-sparse header
+    /// chain whose prefix skips that height, or when the header chain has
+    /// not reached it yet.
+    AnchorNotObserved { checkpoint_height: u32 },
+    /// The node's header chain HAS a header at the checkpoint height and it
+    /// is not the pinned one. The chain the manifest came from is not the
+    /// operator's chain; nothing on it may be installed.
+    AnchorMismatch {
+        checkpoint_height: u32,
+        expected: [u8; 32],
+        got: [u8; 32],
+    },
+}
+
+impl std::fmt::Display for SnapshotAnchorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SnapshotAnchorError::AnchorNotObserved { checkpoint_height } => write!(
+                f,
+                "header checkpoint at height {checkpoint_height} was never observed on this \
+                 node's header chain"
+            ),
+            SnapshotAnchorError::AnchorMismatch {
+                checkpoint_height,
+                expected,
+                got,
+            } => write!(
+                f,
+                "header checkpoint mismatch at height {checkpoint_height}: expected {}, got {}",
+                hex::encode(expected),
+                hex::encode(got)
+            ),
+        }
+    }
+}
+
+/// Decide whether a UTXO snapshot at `snapshot_height` may be installed given
+/// the operator's header-level checkpoint. See the module doc's trust
+/// argument.
+///
+/// `header_at_checkpoint` is the id the node's own best-header chain holds at
+/// `checkpoint.height`, or `None` when that height is not materialised
+/// (sparse gap, or above the header tip). Pure so the decision is testable
+/// without a store; the caller does the chain lookup.
+pub fn snapshot_install_anchor_check(
+    snapshot_height: u32,
+    checkpoint: Option<crate::header_proc::HeaderCheckpoint>,
+    header_at_checkpoint: Option<[u8; 32]>,
+) -> Result<(), SnapshotAnchorError> {
+    let Some(ckpt) = checkpoint else {
+        return Ok(());
+    };
+    if snapshot_height < ckpt.height {
+        // Below the anchor: the anchor makes no claim about this state, and
+        // it is still enforced on the headers that reach it later.
+        return Ok(());
+    }
+    match header_at_checkpoint {
+        None => Err(SnapshotAnchorError::AnchorNotObserved {
+            checkpoint_height: ckpt.height,
+        }),
+        Some(id) if id == ckpt.block_id => Ok(()),
+        Some(id) => Err(SnapshotAnchorError::AnchorMismatch {
+            checkpoint_height: ckpt.height,
+            expected: ckpt.block_id,
+            got: id,
+        }),
     }
 }
 

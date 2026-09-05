@@ -229,6 +229,21 @@ pub(super) fn setup(
     } else {
         info!("script-validation checkpoint: disabled (full validation)");
     }
+    // Header-level checkpoint (Scala `hdrCheckpoint`). Independent of the
+    // script-validation checkpoint above: it skips nothing, it only binds one
+    // header id on the header chain — which is what makes it usable as the
+    // trust anchor for a Mode 2 snapshot install (no full block below the
+    // snapshot height is ever applied, so a full-block-level checkpoint can
+    // never fire on that path).
+    executor.set_header_checkpoint(config.header_checkpoint);
+    match config.header_checkpoint {
+        Some(c) => info!(
+            height = c.height,
+            block_id = %hex::encode(c.block_id),
+            "header checkpoint: header at this height must match block_id",
+        ),
+        None => info!("header checkpoint: disabled (no [chain] checkpoint configured)"),
+    }
     let reemission_rules = super::build_reemission_rules(&config.chain_spec);
     match &reemission_rules {
         Some(r) => info!(

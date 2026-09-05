@@ -132,8 +132,13 @@ impl SyncExecutor {
         let pre = pre_result?;
 
         let t_fin = Instant::now();
-        let finalize_result =
-            header_proc::finalize_header(store, pre, header_bytes, &self.chain_config);
+        let finalize_result = header_proc::finalize_header(
+            store,
+            pre,
+            header_bytes,
+            &self.chain_config,
+            self.header_checkpoint,
+        );
         self.header_perf
             .add_finalize(t_fin.elapsed().as_nanos() as u64);
         let processed = finalize_result?;
@@ -183,8 +188,13 @@ impl SyncExecutor {
         let pre_for_buffer = pre.clone();
 
         let t_fin = Instant::now();
-        let finalize_result =
-            header_proc::finalize_header(store, pre, header_bytes, &self.chain_config);
+        let finalize_result = header_proc::finalize_header(
+            store,
+            pre,
+            header_bytes,
+            &self.chain_config,
+            self.header_checkpoint,
+        );
         self.header_perf
             .add_finalize(t_fin.elapsed().as_nanos() as u64);
         match finalize_result {
@@ -286,6 +296,7 @@ impl SyncExecutor {
 
         // Phase 1: parallel pre-validation (parse + PoW)
         let config = self.chain_config.clone();
+        let checkpoint = self.header_checkpoint;
         let batch_len = headers.len() as u64;
         // Per-header CPU time accumulator. Captured by reference inside the
         // rayon closure so each worker thread can fetch_add its own work
@@ -338,7 +349,7 @@ impl SyncExecutor {
                     let header_id = *pre.header_id();
                     let header_height = pre.height;
                     let pre_for_buffer = pre.clone();
-                    match header_proc::finalize_header(store, pre, &bytes, &config) {
+                    match header_proc::finalize_header(store, pre, &bytes, &config, checkpoint) {
                         Ok(processed) => {
                             let expected = ExpectedSections::from_header(
                                 &processed.header_id,
@@ -500,12 +511,13 @@ impl SyncExecutor {
         store.begin_header_batch();
         let mut newly_installed_local = newly_installed;
         let config = self.chain_config.clone();
+        let checkpoint = self.header_checkpoint;
         let t_fin = Instant::now();
         while let Some((peer, pre, bytes)) = work_queue.pop() {
             let header_id = *pre.header_id();
             let header_height = pre.height;
             let pre_for_buffer = pre.clone();
-            match header_proc::finalize_header(store, pre, &bytes, &config) {
+            match header_proc::finalize_header(store, pre, &bytes, &config, checkpoint) {
                 Ok(processed) => {
                     // Children waiting on THIS header are now eligible
                     // — pull them out of the buffer and onto the queue.
@@ -569,6 +581,23 @@ impl SyncExecutor {
                         store,
                         coordinator,
                     );
+                }
+                Err(e @ HeaderProcessError::CheckpointMismatch { .. }) => {
+                    // A checkpoint mismatch is peer misbehavior, not a
+                    // transient gap — same as the single-header and
+                    // batch paths' generic error arm (both fall through
+                    // to a `Penalize` on any non-buffered error). Must be
+                    // handled explicitly here because the orphan-drain
+                    // catch-all below silently drops without penalizing:
+                    // an orphan that gets re-finalized on drain and fails
+                    // the configured checkpoint would otherwise escape
+                    // penalty even though the identical header on the
+                    // normal (non-orphan) path is penalized.
+                    report_header_failure(store, peer, "finalize_header_orphan_drain", &e);
+                    all_actions.push(Action::Penalize {
+                        peer,
+                        penalty: Penalty::Misbehavior,
+                    });
                 }
                 Err(HeaderProcessError::AlreadyKnown { .. }) => {}
                 Err(_) => {} // drop invalid

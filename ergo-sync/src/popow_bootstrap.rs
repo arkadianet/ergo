@@ -66,6 +66,11 @@ pub struct PopowBootstrap {
     /// more than one proof toward quorum (Scala parity). Also backs the
     /// dashboard `provider_count` observability surface.
     seen_providers: BTreeSet<PeerId>,
+    /// Peer whose proof is currently latched as the verifier's best. Set
+    /// whenever a proof replaces the best one (`BetterChain`) and cleared by
+    /// [`Self::reject_best_proof`], so a proof rejected AFTER selection can
+    /// still be attributed to the provider that supplied it.
+    best_proof_peer: Option<PeerId>,
     started_at: Option<Instant>,
 }
 
@@ -90,6 +95,7 @@ impl PopowBootstrap {
             verifier: NipopowVerifier::new(genesis_id_opt, chain_config),
             requested_peers: BTreeSet::new(),
             seen_providers: BTreeSet::new(),
+            best_proof_peer: None,
             started_at: None,
         }
     }
@@ -165,6 +171,9 @@ impl PopowBootstrap {
             return None;
         }
         let result = self.verifier.process(proof);
+        if matches!(result, NipopowVerificationResult::BetterChain { .. }) {
+            self.best_proof_peer = Some(peer);
+        }
         if matches!(
             result,
             NipopowVerificationResult::BetterChain { .. }
@@ -197,6 +206,30 @@ impl PopowBootstrap {
         self.verifier.best_proof()
     }
 
+    /// Reject the latched best proof and return the peer that supplied it
+    /// (for penalty), leaving the bootstrap RUNNING.
+    ///
+    /// Used when a proof passes NiPoPoW verification but is unacceptable for
+    /// another reason — today, a header at the configured checkpoint height
+    /// with the wrong id. The reducer must not go terminal here: marking it
+    /// `Applied` when nothing was applied would let a single forged proof
+    /// that won best-proof selection disable NiPoPoW bootstrap for the whole
+    /// run. Instead:
+    ///
+    /// * `verifier.reset()` drops only the best proof. `proofs_processed`
+    ///   survives (Scala `NipopowVerifier.reset` clears `bestProofOpt` only),
+    ///   so honest proofs already counted toward quorum are NOT discarded and
+    ///   the next valid proof re-selects immediately.
+    /// * State returns to `Requesting`, so other providers still get asked
+    ///   and their proofs still land.
+    /// * The offending provider stays in `seen_providers`, so it cannot
+    ///   re-supply a proof for this bootstrap.
+    pub fn reject_best_proof(&mut self) -> Option<PeerId> {
+        self.verifier.reset();
+        self.state = PopowBootstrapState::Requesting;
+        self.best_proof_peer.take()
+    }
+
     /// Mark the apply path as complete. After this call,
     /// [`Self::state`] returns `Applied` and
     /// [`Self::is_active`] returns `false`.
@@ -218,6 +251,56 @@ impl PopowBootstrap {
     }
 }
 
+/// Enforce the header-level checkpoint on every header carried by a NiPoPoW
+/// proof, BEFORE `StateStore::apply_popow_proof` writes them.
+///
+/// The proof-apply path writes headers straight into `HEADERS` /
+/// `HEADER_META` / `HEADER_CHAIN_INDEX` without going through
+/// [`crate::header_proc::finalize_header`], so it would otherwise be the one
+/// way a header at the checkpoint height enters the store unchecked.
+///
+/// DELIBERATE, STRICTER DIVERGENCE FROM SCALA. Scala has the same shortcut and
+/// does not close it: `PopowProcessor.applyPopowProof` (~`:143-147`) calls
+/// `process(h, nipopowMode = true)` per header directly, bypassing
+/// `ErgoHistory.append` → `applicableTry` / `validate`, so `hdrCheckpoint`
+/// never runs on nipopow-applied headers there either. Enforcing it here only
+/// ever REJECTS chains Scala would have accepted at this seam, and only when
+/// the operator has pinned an anchor the proof contradicts — it can never make
+/// this node accept something Scala rejects, so consensus compatibility is
+/// unaffected.
+///
+/// Only the header at exactly `checkpoint.height` is constrained; a proof
+/// whose sparse prefix skips that height passes this check (it neither
+/// confirms nor contradicts the anchor — the snapshot-install anchor check
+/// in [`crate::snapshot_bootstrap::manifest`] is what refuses to *trust*
+/// state above an unconfirmed anchor).
+pub fn check_proof_against_checkpoint(
+    proof: &NipopowProof,
+    checkpoint: Option<crate::header_proc::HeaderCheckpoint>,
+) -> Result<(), crate::header_proc::HeaderProcessError> {
+    let Some(ckpt) = checkpoint else {
+        return Ok(());
+    };
+    let headers = proof
+        .prefix
+        .iter()
+        .map(|p| &p.header)
+        .chain(std::iter::once(&proof.suffix_head.header))
+        .chain(proof.suffix_tail.iter());
+    for header in headers {
+        if header.height != ckpt.height {
+            continue;
+        }
+        let (_bytes, id) = ergo_ser::header::serialize_header(header).map_err(|e| {
+            crate::header_proc::HeaderProcessError::Deserialize(format!(
+                "popow proof header at checkpoint height: {e:?}"
+            ))
+        })?;
+        ckpt.check(header.height, id.as_bytes())?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +317,11 @@ mod tests {
         let raw = hex::decode(s).unwrap();
         let mut r = VlqReader::new(&raw);
         read_header(&mut r).unwrap()
+    }
+
+    fn header_id_of(h: &Header) -> [u8; 32] {
+        let (_bytes, id) = ergo_ser::header::serialize_header(h).unwrap();
+        *id.as_bytes()
     }
 
     fn popow_hdr(h: Header) -> PoPowHeader {
@@ -331,6 +419,79 @@ mod tests {
         assert_eq!(b.pending_request_peers(&[peer(1)]), vec![peer(1)]);
     }
 
+    #[test]
+    fn proof_checkpoint_absent_accepts_proof() {
+        assert!(check_proof_against_checkpoint(&valid_proof(), None).is_ok());
+    }
+
+    #[test]
+    fn proof_checkpoint_matching_id_accepts_proof() {
+        let proof = valid_proof();
+        let ckpt = crate::header_proc::HeaderCheckpoint {
+            height: 2,
+            block_id: header_id_of(&proof.suffix_head.header),
+        };
+        assert!(check_proof_against_checkpoint(&proof, Some(ckpt)).is_ok());
+    }
+
+    #[test]
+    fn proof_checkpoint_height_absent_from_proof_accepts_proof() {
+        // A sparse prefix that skips the checkpoint height neither confirms
+        // nor contradicts the anchor; refusing to *trust* state above an
+        // unconfirmed anchor is the snapshot-install check's job.
+        let proof = valid_proof();
+        let ckpt = crate::header_proc::HeaderCheckpoint {
+            height: 500_000,
+            block_id: [0x7f; 32],
+        };
+        assert!(check_proof_against_checkpoint(&proof, Some(ckpt)).is_ok());
+    }
+
+    // A proof that wins best-proof selection but is later found unacceptable
+    // (wrong header at the checkpoint height) must NOT make the reducer
+    // terminal: that would let one forged proof disable NiPoPoW for the
+    // whole run while reporting a bootstrap that never happened. These two
+    // tests are the happy-path illustration that rejection is recoverable;
+    // the adversarial angle (rejected peer can't just try again) lives in
+    // error paths below.
+    #[test]
+    fn reject_best_proof_returns_provider_and_keeps_bootstrap_running() {
+        let mut b = fresh_bootstrap(1);
+        b.mark_requested(peer(1), Instant::now());
+        let _ = b.on_proof_received(peer(1), valid_proof());
+        assert!(b.quorum_reached());
+
+        let culprit = b.reject_best_proof();
+
+        assert_eq!(culprit, Some(peer(1)), "the provider must be attributable");
+        assert_eq!(b.state(), PopowBootstrapState::Requesting);
+        assert!(b.is_active(true), "the bootstrap must still be active");
+        assert!(b.best_proof().is_none(), "the bad proof must be dropped");
+        assert_eq!(
+            b.proofs_processed(),
+            1,
+            "honest proofs already counted toward quorum survive (Scala \
+             NipopowVerifier.reset clears only bestProofOpt)",
+        );
+    }
+
+    #[test]
+    fn honest_proof_after_rejection_completes_bootstrap() {
+        let mut b = fresh_bootstrap(1);
+        b.mark_requested(peer(1), Instant::now());
+        let _ = b.on_proof_received(peer(1), valid_proof());
+        let _ = b.reject_best_proof();
+
+        b.mark_requested(peer(2), Instant::now());
+        let r = b.on_proof_received(peer(2), valid_proof());
+        assert!(
+            matches!(r, Some(NipopowVerificationResult::BetterChain { .. })),
+            "a fresh provider's proof re-selects after a rejection: {r:?}",
+        );
+        assert!(b.quorum_reached(), "bootstrap must still be able to finish");
+        assert!(b.best_proof().is_some());
+    }
+
     // ----- error paths -----
 
     /// Scala parity (ErgoNodeViewSynchronizer.scala:1066 + PopowProcessor
@@ -385,5 +546,57 @@ mod tests {
             )
         ));
         assert!(b.quorum_reached(), "second distinct peer reaches quorum");
+    }
+
+    #[test]
+    fn rejected_provider_cannot_resupply_a_proof() {
+        // The offending peer stays in `seen_providers`, so it gets exactly
+        // one shot at this bootstrap.
+        let mut b = fresh_bootstrap(1);
+        b.mark_requested(peer(1), Instant::now());
+        let _ = b.on_proof_received(peer(1), valid_proof());
+        let _ = b.reject_best_proof();
+        assert!(
+            b.on_proof_received(peer(1), valid_proof()).is_none(),
+            "a rejected provider must not get a second proof counted",
+        );
+    }
+
+    #[test]
+    fn proof_checkpoint_wrong_id_at_checkpoint_height_rejects_proof() {
+        let proof = valid_proof();
+        let ckpt = crate::header_proc::HeaderCheckpoint {
+            height: 2,
+            block_id: [0x7f; 32],
+        };
+        let err = check_proof_against_checkpoint(&proof, Some(ckpt))
+            .expect_err("proof header at the checkpoint height with a wrong id must be refused");
+        assert!(
+            matches!(
+                err,
+                crate::header_proc::HeaderProcessError::CheckpointMismatch { height: 2, .. }
+            ),
+            "expected CheckpointMismatch at height 2, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn proof_checkpoint_checks_prefix_headers_too() {
+        // The anchor must cover the sparse prefix, not just the suffix:
+        // genesis sits in `prefix` at height 1.
+        let proof = valid_proof();
+        let ckpt = crate::header_proc::HeaderCheckpoint {
+            height: 1,
+            block_id: [0x7f; 32],
+        };
+        let err = check_proof_against_checkpoint(&proof, Some(ckpt))
+            .expect_err("prefix header at the checkpoint height must be checked");
+        assert!(
+            matches!(
+                err,
+                crate::header_proc::HeaderProcessError::CheckpointMismatch { height: 1, .. }
+            ),
+            "expected CheckpointMismatch at height 1, got {err:?}"
+        );
     }
 }

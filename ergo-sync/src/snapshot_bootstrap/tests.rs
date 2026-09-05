@@ -995,3 +995,111 @@ fn progress_counters_reflect_received_state() {
     ca.on_chunk_received(peer(1), cid(0x01), vec![0xAA]);
     assert_eq!(ca.received_count(), 1);
 }
+
+// ----- 2.3 header-checkpoint anchor for the install decision -----
+
+fn ckpt(height: u32, byte: u8) -> crate::header_proc::HeaderCheckpoint {
+    crate::header_proc::HeaderCheckpoint {
+        height,
+        block_id: mid(byte),
+    }
+}
+
+#[test]
+fn anchor_check_without_checkpoint_installs() {
+    assert!(snapshot_install_anchor_check(1_800_000, None, None).is_ok());
+}
+
+#[test]
+fn anchor_check_snapshot_below_checkpoint_installs() {
+    // The anchor makes no claim about state below its height, and it still
+    // fires later on the headers that reach it.
+    assert!(snapshot_install_anchor_check(999, Some(ckpt(1_000, 0xaa)), None).is_ok());
+}
+
+#[test]
+fn anchor_check_snapshot_above_passed_checkpoint_installs() {
+    assert!(
+        snapshot_install_anchor_check(1_800_000, Some(ckpt(1_000, 0xaa)), Some(mid(0xaa))).is_ok()
+    );
+}
+
+#[test]
+fn anchor_check_snapshot_at_checkpoint_height_installs_when_id_matches() {
+    // Boundary: snapshot_height == checkpoint.height is "at or above".
+    assert!(snapshot_install_anchor_check(1_000, Some(ckpt(1_000, 0xaa)), Some(mid(0xaa))).is_ok());
+}
+
+#[test]
+fn anchor_check_snapshot_above_unobserved_checkpoint_refuses() {
+    // Sparse (NiPoPoW) header chain that never materialised the checkpoint
+    // height: the anchor was not passed, so nothing above it is trusted.
+    let err = snapshot_install_anchor_check(1_800_000, Some(ckpt(1_000, 0xaa)), None)
+        .expect_err("an unobserved anchor must refuse the install");
+    assert_eq!(
+        err,
+        SnapshotAnchorError::AnchorNotObserved {
+            checkpoint_height: 1_000
+        }
+    );
+}
+
+#[test]
+fn anchor_check_snapshot_above_mismatching_checkpoint_refuses() {
+    let err = snapshot_install_anchor_check(1_800_000, Some(ckpt(1_000, 0xaa)), Some(mid(0x99)))
+        .expect_err("a mismatching anchor must refuse the install");
+    assert_eq!(
+        err,
+        SnapshotAnchorError::AnchorMismatch {
+            checkpoint_height: 1_000,
+            expected: mid(0xaa),
+            got: mid(0x99),
+        }
+    );
+}
+
+// ----- oracle parity -----
+
+/// Scala-produced snapshot manifest vs the header `state_root` at the same
+/// height — the capture that retires the "provisional" note on
+/// [`verify_manifest_against_state_root`].
+///
+/// Fixture captured 2026-09-05 from a Scala 6.0.3 testnet node with
+/// `scripts/capture-utxo-manifest.sh http://127.0.0.1:9062 522239` against a
+/// Scala testnet node running `ergo.node.utxo.storingUtxoSnapshots > 0`
+/// (its `/utxo/getSnapshotsInfo` advertised exactly that height).
+#[test]
+fn manifest_prefix32_rule_matches_scala_manifest() {
+    #[derive(serde::Deserialize)]
+    struct ManifestFixture {
+        /// Snapshot height the Scala node advertised in
+        /// `/utxo/getSnapshotsInfo`.
+        height: u32,
+        /// `manifestId` from `/utxo/getSnapshotsInfo`, hex (32 bytes).
+        manifest_id: String,
+        /// `stateRoot` of the header at `height`, hex (33 bytes).
+        state_root: String,
+    }
+
+    let path = "../test-vectors/testnet/utxo_snapshot_manifest_522239.json";
+    let raw = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("capture the fixture first ({path}): {e}"));
+    let fixture: ManifestFixture = serde_json::from_str(&raw).unwrap();
+
+    let manifest_id: [u8; 32] = hex::decode(&fixture.manifest_id)
+        .expect("manifest_id hex")
+        .try_into()
+        .expect("manifest_id must be 32 bytes");
+    let state_root_bytes: [u8; 33] = hex::decode(&fixture.state_root)
+        .expect("state_root hex")
+        .try_into()
+        .expect("state_root must be 33 bytes");
+    let state_root = ADDigest::from_bytes(state_root_bytes);
+
+    assert_eq!(
+        fixture.height, 522_239,
+        "fixture height must match its name"
+    );
+    verify_manifest_against_state_root(&manifest_id, &state_root)
+        .expect("Scala manifest_id must equal state_root[..32] at the snapshot height");
+}

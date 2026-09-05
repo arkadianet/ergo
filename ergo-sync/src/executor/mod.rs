@@ -189,6 +189,11 @@ pub struct SyncExecutor {
     /// [`BlockValidationContext::script_validation_checkpoint`] for the
     /// safety contract.
     script_validation_checkpoint: Option<(u32, [u8; 32])>,
+    /// Operator-supplied header-level trust anchor, plumbed into every
+    /// `header_proc::finalize_header` call the pipeline makes. Distinct from
+    /// `script_validation_checkpoint` above: this one binds one header id on
+    /// the header chain (Scala `hdrCheckpoint`) and skips nothing.
+    header_checkpoint: Option<header_proc::HeaderCheckpoint>,
     /// EIP-27 re-emission rule inputs for this node's network, plumbed
     /// through to `validate_full_block_parallel` via `process_block` so
     /// every block transaction is checked against the re-emission burning
@@ -247,6 +252,7 @@ impl SyncExecutor {
             header_index: BTreeMap::new(),
             recovery_done: false,
             script_validation_checkpoint: None,
+            header_checkpoint: None,
             reemission: None,
             header_perf: HeaderPerfCounters::default(),
             block_perf: BlockPerfCounters::default(),
@@ -269,6 +275,22 @@ impl SyncExecutor {
     /// exactly `height` is asserted against `block_id` (mismatch is fatal).
     pub fn set_script_validation_checkpoint(&mut self, ckpt: Option<(u32, [u8; 32])>) {
         self.script_validation_checkpoint = ckpt;
+    }
+
+    /// Set the header-level checkpoint (Scala `ergo.node.checkpoint` enforced
+    /// in `HeadersProcessor`). A header at exactly `height` whose id differs
+    /// from `block_id` is rejected as invalid and its sender penalised;
+    /// headers at every other height are unaffected.
+    pub fn set_header_checkpoint(&mut self, ckpt: Option<header_proc::HeaderCheckpoint>) {
+        self.header_checkpoint = ckpt;
+    }
+
+    /// The header-level checkpoint installed at boot, if any. Read by the
+    /// bootstrap paths that write headers into the store WITHOUT going
+    /// through `finalize_header` (NiPoPoW proof apply, Mode 2 snapshot
+    /// install) so they can enforce the same anchor.
+    pub fn header_checkpoint(&self) -> Option<header_proc::HeaderCheckpoint> {
+        self.header_checkpoint
     }
 
     /// Set the EIP-27 re-emission rule inputs. `Some` enables the

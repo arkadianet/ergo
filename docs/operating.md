@@ -99,14 +99,16 @@ Notes on the modes that boot today:
   is safe. **Trust caveat:** snapshot trust verification against the
   header's state root is provisional pending a Scala-oracle vector — before
   treating the bootstrapped UTXO state as authoritative, cross-check the
-  installed root against a known-good reference manifest.
+  installed root against a known-good reference manifest. Set a
+  `[chain] checkpoint` (below) to anchor the install.
 - **Mode 6** never requests block sections, force-disables the mempool, and
   does not run the wallet apply hook. `blocks_to_keep` must be exactly `0`
   for this combo.
 
 Config consistency is enforced at load time, mirroring four of the Scala
-reference node's five `consistentSettings` rules (R1, R2, R3, R5). The ones
-operators trip most often:
+reference node's five `consistentSettings` rules (R1, R2, R3, R5), plus one
+local rule with no Scala counterpart (R6, below). The ones operators trip
+most often:
 
 - `verify_transactions = false` requires `state_type = "digest"` (R1).
 - `[indexer] enabled = true` is incompatible with `blocks_to_keep >= 0` and
@@ -117,6 +119,68 @@ operators trip most often:
   NiPoPoW-bootstrap (R3).
 - `state_type = "digest"` rejects `[mining] enabled = true` and
   `[indexer] enabled = true`.
+- `[node.nipopow] nipopow_bootstrap = true` is incompatible with a
+  `[chain] checkpoint` (R6, local — see
+  [Mode 2 trust anchor](#mode-2-trust-anchor-chain-checkpoint) below).
+
+### Mode 2 trust anchor (`[chain] checkpoint`)
+
+A Mode 2 install adopts, wholesale, a UTXO state this node never computed.
+Two links make that safe:
+
+1. **Manifest to header.** The manifest id is checked against
+   `header.state_root` at the snapshot height, so the installed tree is the
+   one the chain committed to at that height.
+2. **Header to operator anchor.** The header chain itself is only
+   PoW-validated, and PoW is a cost, not an identity. Scala closes this with
+   the operator-supplied `ergo.node.checkpoint`, enforced *in header
+   validation* — which is the only layer that fires on a Mode 2 bootstrap,
+   because no full block below the snapshot height is ever applied, so a
+   full-block-level checkpoint never runs at all.
+
+This node implements link 2 as `[chain] checkpoint = { height, block_id }`.
+With it set:
+
+- A header at exactly `height` whose id is not `block_id` is invalid and its
+  sender is penalised — on the normal header pipeline, on locally mined
+  headers, and on the headers carried by a NiPoPoW proof (which are written
+  without going through the normal pipeline).
+- A UTXO snapshot at or above `height` is **refused** unless this node's own
+  header chain materialises that height with the pinned id — i.e. unless the
+  anchor was actually passed on the way up. A missing row (a NiPoPoW-sparse
+  header chain that skips the checkpoint height) is a refusal, not a pass: an
+  anchor never observed proves nothing about the chain that produced the
+  manifest. Pick a checkpoint height the proof will carry, or clear the
+  checkpoint if you accept an unanchored install.
+- A snapshot strictly below `height` installs unconditionally; the anchor is
+  still enforced later, on the headers that reach it.
+
+**No mainnet or testnet value is suggested here, on purpose.** The anchor is
+worth exactly as much as the trust you place in where the pair came from; a
+value shipped in this repository would only re-anchor you to this repository.
+Take the `(height, block_id)` from a source you trust — your own
+long-running node, an explorer you audit, an operator you know — and pin it
+yourself. Absent by default, matching Scala's `checkpoint = null`.
+
+Note the divergence from Scala's shipped `mainnet.conf`, which sets
+`ergo.node.checkpoint` to a baked-in pair and therefore enforces the header
+checkpoint by default. This node keeps that baked-in pair as the *script*
+checkpoint only (`script_validation_checkpoint_*`) and leaves the header
+anchor to the operator; setting `[chain] checkpoint` to the same pair
+reproduces Scala's mainnet behaviour exactly.
+
+**R6: `[chain] checkpoint` and `nipopow_bootstrap` are mutually exclusive.**
+A NiPoPoW-bootstrapped node's header chain is deliberately sparse — it
+materialises only the proof's prefix and its dense suffix window, nothing
+else. A checkpoint height outside that window is a height this node will
+*never* hold a header for, which makes the anchor check above refuse the
+Mode 2 install forever: the node boots, syncs, and then silently never
+installs. The dense window's start depends on a proof that has not been
+fetched yet at config-load time, so it cannot be checked here — the only
+honest rule is to reject the combination outright. To use both: bootstrap
+without NiPoPoW first (a full header sync materialises every height, so the
+anchor is always observable), or drop the checkpoint and accept a PoW-only
+anchored install.
 
 **Mode-sentinel safety:** UTXO and digest data directories are not
 interconvertible in place. A boot-time check refuses a `state_type` that
@@ -163,6 +227,11 @@ Operator notes:
   bootstrap flag. Start the combined bootstrap from an empty `data_dir`.
 - The Mode 2 trust caveat above still applies: cross-check the installed
   UTXO root before trusting the state.
+- This recipe cannot be combined with a `[chain] checkpoint` (R6, above) —
+  the node rejects that combination at load time. A NiPoPoW-bootstrapped
+  header chain is too sparse to guarantee the anchor height is ever
+  observed, which would otherwise make the Mode 2 install refuse
+  permanently once headers and chunks are already synced.
 
 ## First run vs resume
 

@@ -467,6 +467,42 @@ fn drive_popow_bootstrap(state: &mut NodeState, now: Instant) {
         // also takes &mut self via the store).
         let proof_opt = popow.best_proof().cloned();
         if let Some(proof) = proof_opt {
+            // Header-level checkpoint (Scala `hdrCheckpoint`), defence in
+            // depth. Proofs are already checked at ingress
+            // (`messaging::popow`) so a violating proof never reaches the
+            // verifier; this second check covers any future path that latches
+            // a best proof without going through that handler.
+            //
+            // Rejection is NOT terminal: dropping only the latched proof and
+            // returning to `Requesting` keeps the honest quorum count and lets
+            // other providers finish the bootstrap. Marking the reducer
+            // `Applied` here would let one bad proof disable NiPoPoW for the
+            // whole run while reporting a bootstrap that never happened.
+            let checkpoint = state.executor.header_checkpoint();
+            if let Err(e) =
+                ergo_sync::popow_bootstrap::check_proof_against_checkpoint(&proof, checkpoint)
+            {
+                let culprit = state
+                    .popow_bootstrap
+                    .as_mut()
+                    .and_then(|popow| popow.reject_best_proof());
+                warn!(
+                    error = %e,
+                    peer = ?culprit,
+                    "NiPoPoW: best proof violates the configured header checkpoint; \
+                     proof dropped, bootstrap continues",
+                );
+                if let Some(peer) = culprit {
+                    flush_actions(
+                        state,
+                        vec![ergo_sync::coordinator::Action::Penalize {
+                            peer,
+                            penalty: ergo_p2p::peer::Penalty::Misbehavior,
+                        }],
+                    );
+                }
+                return;
+            }
             match state
                 .store
                 .as_utxo_mut()
@@ -1008,6 +1044,66 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
     };
 
     let snapshot_height_u32 = snapshot_height as u32;
+
+    // Header-checkpoint anchor (Scala `ergo.node.checkpoint`). A Mode 2
+    // install adopts state the node never computed; the manifest is bound to
+    // the header chain's `state_root`, and the header chain in turn is bound
+    // to the operator's anchor. Refuse to install state at or above an anchor
+    // this node has not actually passed. See the trust argument in
+    // `ergo_sync::snapshot_bootstrap::manifest`.
+    if let Some(ckpt) = state.executor.header_checkpoint() {
+        let observed = match state
+            .store
+            .as_utxo()
+            .expect("utxo-only: Mode 2 snapshot install is gated off in digest mode")
+            .lookup_header_at_height(ckpt.height)
+        {
+            Ok(ergo_state::chain::HeightLookup::Dense(id)) => Some(id),
+            Ok(ergo_state::chain::HeightLookup::SparseGap)
+            | Ok(ergo_state::chain::HeightLookup::AboveTip) => None,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Mode 2: install — checkpoint-height chain lookup failed; \
+                     deferring (retried next tick)",
+                );
+                return defer_reconstructed_tree(state, reconstructed);
+            }
+        };
+        if let Err(e) = ergo_sync::snapshot_bootstrap::snapshot_install_anchor_check(
+            snapshot_height_u32,
+            Some(ckpt),
+            observed,
+        ) {
+            // Standing condition, re-evaluated every tick: warn once, then
+            // keep it at debug so a refused install is visible without
+            // flooding the log.
+            if state.snapshot_anchor_refusal_warned {
+                tracing::debug!(
+                    error = %e,
+                    snapshot_height = snapshot_height_u32,
+                    "Mode 2: install still refused by the header checkpoint anchor",
+                );
+            } else {
+                state.snapshot_anchor_refusal_warned = true;
+                warn!(
+                    error = %e,
+                    snapshot_height = snapshot_height_u32,
+                    checkpoint_height = ckpt.height,
+                    "Mode 2: install refused — the configured header checkpoint has not \
+                     been passed on this node's header chain; no snapshot will be \
+                     installed until it is (clear [chain] checkpoint to install unanchored)",
+                );
+            }
+            // Not a halt: the anchor may still become observed (bounded
+            // catchup filling in the header chain). Put the reconstructed
+            // tree back so the next tick's `take()` finds it again — the
+            // tree can't be rebuilt otherwise, since `pending_manifest_bytes`
+            // is already consumed by this point.
+            return defer_reconstructed_tree(state, reconstructed);
+        }
+    }
+
     match state
         .store
         .as_utxo_mut()

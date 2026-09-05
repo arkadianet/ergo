@@ -534,6 +534,45 @@ impl NodeConfig {
             None => default_cp,
         };
 
+        // Header-level checkpoint (`[chain] checkpoint`), Scala
+        // `ergo.node.checkpoint` as enforced by
+        // `HeadersProcessor.checkpointCondition`. No network default and no
+        // CLI override: an anchored node is an explicit operator decision,
+        // matching Scala's `checkpoint = null` in `application.conf:125`.
+        let header_checkpoint = match &toml_cfg.chain.checkpoint {
+            None => None,
+            Some(c) => {
+                // Height 0 has no header, and height 1 (genesis) takes its
+                // own validation path that never consults the checkpoint —
+                // Scala's `validateGenesisBlockHeader` carries no
+                // `hdrCheckpoint` rule either — so a genesis anchor would be
+                // silently unenforced. Refuse both rather than accept a
+                // checkpoint that cannot fire.
+                if c.height < 2 {
+                    return Err(format!(
+                        "[chain] checkpoint.height must be >= 2 (got {}): height 0 has \
+                         no header and genesis (height 1) is never checked against the \
+                         anchor; omit the whole `checkpoint` table to disable it",
+                        c.height
+                    ));
+                }
+                let bytes = hex::decode(c.block_id.trim_start_matches("0x"))
+                    .map_err(|e| format!("[chain] checkpoint.block_id hex decode: {e}"))?;
+                if bytes.len() != 32 {
+                    return Err(format!(
+                        "[chain] checkpoint.block_id must be 32 bytes (got {})",
+                        bytes.len(),
+                    ));
+                }
+                let mut block_id = [0u8; 32];
+                block_id.copy_from_slice(&bytes);
+                Some(ergo_sync::header_proc::HeaderCheckpoint {
+                    height: c.height,
+                    block_id,
+                })
+            }
+        };
+
         // Genesis-id resolution for NiPoPoW R5. TOML
         // override > network default. An explicit empty string in
         // TOML (`genesis_id = ""`) disables the check entirely —
@@ -570,6 +609,32 @@ impl NodeConfig {
                  ErgoSettingsReader.consistentSettings:195-196). \
                  Remove the genesis_id override or leave it at the network default."
                 .to_string());
+        }
+
+        // R6 (local rule, no Scala counterpart — Scala has no header-anchored
+        // snapshot install). A NiPoPoW-bootstrapped node's header chain is
+        // SPARSE: it materialises the proof's prefix and its dense suffix
+        // window, nothing else. A `[chain] checkpoint` below that window is
+        // therefore a height the node will never hold a header for, which
+        // makes the Mode 2 install anchor check refuse permanently — a node
+        // that boots, syncs, and then silently never installs. The dense
+        // window start is `suffix_head_height - (k - 1)` of a proof that has
+        // not been fetched yet, so it is not computable at load time: the only
+        // honest check is to require the anchor be absent when NiPoPoW
+        // bootstrap is on. An operator who wants the anchor should bootstrap
+        // without NiPoPoW (a full header sync materialises every height).
+        if nipopow_bootstrap && header_checkpoint.is_some() {
+            return Err(
+                "[node.nipopow] nipopow_bootstrap = true is incompatible with \
+                 a `[chain] checkpoint`. A NiPoPoW-bootstrapped node's header chain is \
+                 sparse, so a checkpoint height outside the proof's dense suffix window \
+                 can never be observed and the Mode 2 snapshot install would refuse \
+                 forever. Whether a given height falls inside that window is only known \
+                 once a proof arrives, so it cannot be checked here. Either remove \
+                 `[chain] checkpoint` (accepting a PoW-only anchored install) or set \
+                 nipopow_bootstrap = false and let a full header sync pass the anchor."
+                    .to_string(),
+            );
         }
 
         let api_bind = if toml_cfg.api.disabled.unwrap_or(false) {
@@ -1047,6 +1112,7 @@ impl NodeConfig {
             sync_interval_stable,
             cache_bytes,
             script_validation_checkpoint,
+            header_checkpoint,
             genesis_id,
             api_bind,
             api_key_hash,
