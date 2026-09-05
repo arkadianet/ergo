@@ -628,11 +628,16 @@ impl StateStore {
                 // lags any job still in the persist queue. Drain the queue
                 // first so the state it rebuilds from is the real tip and
                 // not a rewind to whatever the worker happened to have
-                // committed. Flush failure is reported in preference to
-                // the apply error: it means the durable tip is unknown,
-                // which is the more serious of the two.
-                self.flush_persist_pipeline()?;
+                // committed. The rebuild runs even when the flush fails:
+                // the in-memory tree was already mutated by
+                // `apply_mutations`, and skipping it would let a retry
+                // start from uncommitted AVL state. Flush failure is then
+                // reported in preference to the apply error: it means the
+                // durable tip is unknown, which is the more serious of the
+                // two; a rebuild failure outranks both.
+                let flushed = self.flush_persist_pipeline();
                 self.rebuild_from_committed()?;
+                flushed?;
                 Err(e)
             }
         }

@@ -71,8 +71,12 @@ use tracing::{info, warn};
 /// because `recover_coordinator` is idempotent — `add_pending_block`
 /// and `register_header` both de-duplicate by header id.
 ///
-/// The periodic tick needs none of this: it seeds *before* its recovery
-/// call, so the single walk already sees the sentinel.
+/// The periodic tick uses the same path: it seeds before its own
+/// recovery call, so on the normal flip the single walk already sees
+/// the sentinel and the rebuild here is what its step 3 would have done
+/// anyway. The rebuild matters on the tick when a *retried* seed lands —
+/// an earlier observation whose sentinel write failed has already
+/// latched `recovery_done` over a range below the future sentinel.
 ///
 /// Returns the seeded sentinel, or `None` when the flip must not move
 /// it (every no-op condition of [`seed_prune_sentinel_at_flip`]).

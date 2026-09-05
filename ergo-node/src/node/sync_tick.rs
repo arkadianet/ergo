@@ -155,18 +155,22 @@ pub(super) fn handle_sync_tick(state: &mut NodeState) {
     // Mode 6 / any store that already holds full blocks return before
     // touching redb.
     //
-    // ORDER MATTERS: this must stay ahead of the `recover_coordinator`
-    // call in step 3. Recovery anchors its walk at
-    // `max(best_full_block_height, prune_sentinel - 1)` — the same floor
-    // `blocks_to_download` uses — so seeding first is what lets the
-    // single walk register a range the download side will actually
-    // request. Boot has the reverse order and repairs it explicitly; see
-    // `prune_activation::seed_prune_sentinel_and_rebuild_pending`.
-    super::prune_activation::seed_prune_sentinel_at_flip(
+    // A fresh seed also rebuilds the coordinator's pending range: if an
+    // earlier flip observation latched `recovery_done` while the seed
+    // write failed (retried here), the queue holds heights below the
+    // sentinel that `blocks_to_download` will never emit. Re-running the
+    // walk above the seeded floor is what unsticks it. On a tick where
+    // the seed is a no-op nothing changes and step 3 below owns recovery.
+    // Mid-loop corruption is unrecoverable (the same persisted row will
+    // fail validation downstream too), so panic with the affected id
+    // rather than busy-looping silently.
+    super::prune_activation::seed_prune_sentinel_and_rebuild_pending(
         &mut state.store,
+        &mut state.executor,
         &mut state.coordinator,
         state.identity_inputs.blocks_to_keep,
-    );
+    )
+    .expect("recover_coordinator: persistent header table integrity failure");
 
     // 3. Try to apply the next sequential block if sections are available.
     if state.coordinator.sync_state().headers_chain_synced() {
