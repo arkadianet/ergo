@@ -65,6 +65,42 @@ infrastructure.
   re-admits it automatically. An unresolved regular spend input is still kept
   in the pool: it can be a demoted parent awaiting re-admission.
 
+- **Mode 3 (pruned): the prune sentinel is now seeded at the
+  headers-synced flip**, matching Scala's
+  `ToDownloadProcessor.toDownload` →
+  `FullBlockPruningProcessor.updateBestFullBlock`. Previously the
+  sentinel only advanced inside a full-block apply, so a from-scratch
+  pruned node performed a full genesis-onward initial block download and
+  only began evicting afterwards — burning the bandwidth and disk a
+  pruned node is configured to avoid. It now fixes
+  `minimalFullBlockHeight` when the header chain is declared synced and
+  starts block-section download there. The seed is one-shot (no full
+  block applied, no sentinel recorded), so restarts, UTXO-snapshot
+  bootstrap, and NiPoPoW bootstrap are unaffected, and archive /
+  headers-only nodes never arm it.
+- **Mode 3 (pruned): the download window no longer collapses to
+  `[0, download_window]` on a from-scratch pruned node.** The pending
+  block window is now anchored at `max(best_full_block_height,
+  prune_sentinel - 1)` and excludes sub-sentinel heights, mirroring
+  Scala's `nextModifiersToDownload` walk from `minimalFullBlockHeight`.
+  Without it, every pending block sat above the stale window and each
+  tick emitted an empty request batch. Same split-brain class as the
+  Mode 2 post-install `set_best_full_block` fix.
+- **Mode 3 (pruned): the pending download range is rebuilt after a
+  boot-time sentinel activation.** Boot recovers the coordinator's
+  pending blocks *before* it seeds the sentinel, so a from-scratch
+  pruned node walked the window above `best_full_block_height = 0` and
+  then seeded the sentinel far above that range — which the download
+  window filters away wholesale. With recovery already latched done and
+  the seed helper one-shot, nothing repopulated the queue and section
+  requests stopped before the first one went out. Recovery now anchors
+  its walk on the same floor the download window uses
+  (`max(best_full_block_height, prune_sentinel - 1)`), and boot re-runs
+  it whenever the activation seed fires.
+- Corrected the documented Mode 3 rollback-window floor in
+  `docs/compatibility.md` (`keep_versions + SAFETY_MARGIN` = 250 at the
+  defaults, not 232).
+
 ## [0.6.0] - 2026-09-03
 
 The consensus-parity and hardening release. Two live mainnet accept-invalid

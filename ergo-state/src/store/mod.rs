@@ -476,7 +476,7 @@ pub(crate) fn verify_or_init_state_type_inner(
 }
 
 mod apply;
-pub use apply::compute_minimal_full_block_height;
+pub use apply::{activation_minimal_full_block_height, compute_minimal_full_block_height};
 mod backfill;
 mod dry_run;
 #[cfg(test)]

@@ -130,14 +130,37 @@ Be aware of these before depending on the node.
 
 ### Partial (landed but incomplete)
 
-- **Mode 3 (pruned / suffix window)** — schema, handshake, and
-  `block_sections` eviction have landed; a standard pruned config boots.
-  A normal Mode 3 (`state_type = utxo`, `verify = true`, `blocks_to_keep`
-  at or above the rollback-window floor of 232) loads and runs. Only
-  configurations that would undermine reorg safety are rejected at startup:
-  sub-floor suffix windows (`blocks_to_keep` below 232), `blocks_to_keep <
-  -1`, and `blocks_to_keep = 0` outside the canonical headers-only Mode 6
-  combo.
+- **Mode 3 (pruned / suffix window)** — schema, handshake,
+  `block_sections` eviction, and activation at the headers-synced flip
+  have landed; a standard pruned config boots. A normal Mode 3
+  (`state_type = utxo`, `verify = true`, `blocks_to_keep` at or above the
+  rollback-window floor of `keep_versions + SAFETY_MARGIN`, i.e. 250 at
+  the defaults) loads and runs. Only configurations that would undermine
+  reorg safety are rejected at startup: sub-floor suffix windows,
+  `blocks_to_keep < -1`, and `blocks_to_keep = 0` outside the canonical
+  headers-only Mode 6 combo.
+
+  **Activation (when pruning starts).** A pruned node fixes its prune
+  low-water mark — `minimalFullBlockHeight`, the first height it will
+  download and retain full blocks from — the moment it decides the
+  header chain is synced, not on its first block apply. This matches
+  Scala: `ToDownloadProcessor.toDownload` calls
+  `FullBlockPruningProcessor.updateBestFullBlock(header)` on the header
+  that flips `isHeadersChainSynced`, and from then on
+  `nextModifiersToDownload` starts its walk at that height for a node
+  with no full blocks yet. The value is
+  `max(1, header_height - blocks_to_keep + 1)`, snapped down to the
+  start of the containing voting epoch when it exceeds `votingLength`,
+  so a retained window never begins mid-epoch. Practically, a
+  from-scratch pruned node does **not** replay the chain from genesis
+  and prune afterwards — it starts downloading block sections at the
+  sentinel. The seed is one-shot: it fires only while no full block has
+  been applied and no sentinel has been recorded, so a restart resumes
+  with the same value, a UTXO-snapshot or NiPoPoW bootstrap keeps the
+  sentinel that bootstrap wrote, and the sentinel never moves backward.
+  Archive (`blocks_to_keep = -1`) and headers-only Mode 6
+  (`blocks_to_keep = 0`) never seed one. Rollbacks whose replay window
+  would reach below the sentinel are refused rather than half-applied.
 - **Mode 4 (pruned + UTXO bootstrap)** — builds on Mode 3 (landed) plus
   the Mode 2 snapshot bootstrap; not yet wired.
 - **Mode 5 (digest verifier)** — the storage schema, atomic-commit layer,
