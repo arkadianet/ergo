@@ -1098,8 +1098,7 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
             // tree back so the next tick's `take()` finds it again — the
             // tree can't be rebuilt otherwise, since `pending_manifest_bytes`
             // is already consumed by this point.
-            state.reconstructed_tree = Some(reconstructed);
-            return;
+            return defer_reconstructed_tree(state, reconstructed);
         }
     }
 
