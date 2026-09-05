@@ -470,10 +470,14 @@ pub enum DecodeMode {
     /// Wallet/operator submission. Reject soft-fork versions and
     /// canonicalize incoming wire bytes.
     Submit,
-    /// Preserve incoming wire bytes verbatim and accept soft-fork
-    /// ergoTree versions. Used for data already accepted on chain
-    /// (historical-block diagnostics, byte-fidelity oracles) where
+    /// Preserve incoming wire bytes verbatim where the wire form is part
+    /// of the identity (ergoTree bytes, register node forms) and accept
+    /// soft-fork ergoTree versions. Used for data already accepted on
+    /// chain (historical-block diagnostics, byte-fidelity oracles) where
     /// re-canonicalization would corrupt content-addressed identifiers.
+    /// Spending-proof extensions are the exception and are always
+    /// canonicalized: the reference's own tx id commits to the canonical
+    /// re-serialization regardless of the wire form it read.
     Preserve,
 }
 

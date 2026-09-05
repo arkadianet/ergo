@@ -335,6 +335,9 @@ fn decode_scala_transaction_with_mode_preserve_canonicalizes_true_leaf_extension
 {
     const ORACLE_TX_WIRE_HEX: &str = "0101010101010101010101010101010101010101010101010101010101010101010001017f000001c0843d10010101d17300000000";
     const ORACLE_ID: &str = "0034c8fded6a1dca7bba16e71419da08eaebf8186d346bc20cd9a15b91b5e0b5";
+    // Same wire with the extension in the form the reference commits to:
+    // `01017f` (bare TrueLeaf opcode) -> `01010101` (SBoolean `true`).
+    const CANONICAL_TX_WIRE_HEX: &str = "0101010101010101010101010101010101010101010101010101010101010101010001010101000001c0843d10010101d17300000000";
 
     // Pull a real, already-canonical ergoTree/output pair out of the oracle
     // tx wire itself, so the test only varies the extension under scrutiny.
@@ -367,6 +370,14 @@ fn decode_scala_transaction_with_mode_preserve_canonicalizes_true_leaf_extension
 
     let bytes = decode_scala_transaction_with_mode(&input, DecodeMode::Preserve)
         .expect("Preserve decode of a non-canonical-but-parseable extension must succeed");
+    // Check the emitted wire itself: `read_transaction` below canonicalizes
+    // the extension while parsing, so the id assertion alone would pass
+    // even if Preserve still emitted the verbatim `01017f` bytes.
+    assert_eq!(
+        hex::encode(&bytes),
+        CANONICAL_TX_WIRE_HEX,
+        "Preserve must emit the canonical extension bytes, not the caller's verbatim hex",
+    );
     let mut r2 = VlqReader::new(&bytes);
     let decoded_tx = read_transaction(&mut r2).expect("re-parse decoded tx wire");
     assert!(r2.is_empty());

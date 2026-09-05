@@ -166,10 +166,12 @@ impl SpendingProof {
         })
     }
 
-    /// Verbatim wire bytes of the context extension (count byte +
-    /// concatenated entries). Preserved across parse so callers needing
-    /// byte-exact roundtrip — including parity encoders — don't have to
-    /// re-serialize.
+    /// Cached **canonical** serialization of the context extension (count
+    /// byte + concatenated entries) — the form the reference commits to in
+    /// `bytesToSign`, not necessarily the bytes that were parsed. A
+    /// non-canonical wire form (e.g. a bare `TrueLeaf` opcode) is
+    /// re-serialized on construction, so id computation and parity
+    /// encoders can use this without re-serializing.
     pub fn extension_bytes(&self) -> &[u8] {
         &self.extension_bytes
     }
