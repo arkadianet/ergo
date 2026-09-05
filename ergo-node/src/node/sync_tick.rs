@@ -832,6 +832,22 @@ pub(crate) fn resolve_install_anchor(
     })
 }
 
+/// Put a taken-but-not-yet-installed `reconstructed_tree` back so
+/// the next `sync_tick` can retry the install. Centralizes the
+/// restore so `install_reconstructed_snapshot`'s early returns
+/// (and PR #313's checkpoint-anchor early return in the same
+/// function) converge on one call site instead of each
+/// reimplementing `state.reconstructed_tree = Some(reconstructed)`.
+/// Deliberately NOT used by the `InstallAnchor::UnreachableGap`
+/// arm, which abandons this manifest/epoch rather than deferring
+/// a retry of it.
+fn defer_reconstructed_tree(
+    state: &mut NodeState,
+    reconstructed: ergo_state::avl::snapshot_codec::ReconstructedTree,
+) {
+    state.reconstructed_tree = Some(reconstructed);
+}
+
 /// Mode 2 consume-side: install the reconstructed UTXO snapshot
 /// into the running `StateStore`. Final step of bootstrap.
 ///
@@ -840,13 +856,29 @@ pub(crate) fn resolve_install_anchor(
 /// the reconstructed tree's root still matches. This catches
 /// reorgs that may have flipped the canonical header at the
 /// snapshot height between 2g's trust check and now. On
-/// mismatch, the reconstructed tree is discarded — operator
-/// restarts with a fresh data_dir.
+/// mismatch, the mismatch is permanent (a code bug, not a
+/// transient condition) — the tree is put back so the function
+/// stays retry-safe, but the same check will keep failing every
+/// tick and the operator restarts with a fresh data_dir.
 ///
 /// On success, sets `best_full_block_height = snapshot_height`
 /// and `best_full_block_id = header_id`, atomically with the
 /// AVL_NODES bulk-write and STATE_META update. The normal block-
 /// sync path then takes over from `snapshot_height + 1`.
+///
+/// Every early return below that has not moved `reconstructed`
+/// into [`defer_reconstructed_tree`] (or handed it to
+/// `install_snapshot_state` at the bottom) MUST route through
+/// that helper first. Reconstruction is one-shot: the step-3
+/// trigger above requires both `chunk_assembly` completion and
+/// `pending_manifest_bytes`, and this function's `take()` already
+/// consumed both (`take_chunks()` + `.take()`) by the time any of
+/// these arms run. Drop the tree here without restoring it and no
+/// later tick can ever rebuild it — bootstrap silently stalls
+/// forever with a verified manifest it can never install. The one
+/// deliberate exception is `InstallAnchor::UnreachableGap`: that
+/// arm is abandoning this manifest/epoch on purpose, not deferring
+/// a retry of the same one, so the stale tree must NOT come back.
 fn install_reconstructed_snapshot(state: &mut NodeState) {
     let Some(reconstructed) = state.reconstructed_tree.take() else {
         return;
@@ -863,7 +895,7 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
                 state = ?other,
                 "Mode 2: install called without ManifestVerified — bootstrap halted",
             );
-            return;
+            return defer_reconstructed_tree(state, reconstructed);
         }
     };
 
@@ -875,7 +907,7 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
             manifest_id = %hex::encode(manifest_id),
             "Mode 2: reconstructed root mismatches manifest_id (code bug); halted",
         );
-        return;
+        return defer_reconstructed_tree(state, reconstructed);
     }
 
     // Re-fetch the canonical header at snapshot_height. A reorg
@@ -894,7 +926,7 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
                 height = snapshot_height,
                 "Mode 2: install — SparseGap at snapshot height; deferring (catchup pending)",
             );
-            return;
+            return defer_reconstructed_tree(state, reconstructed);
         }
         Ok(InstallAnchor::UnreachableGap { dense_from_height }) => {
             // Reaching this arm at install time (rather than at
@@ -920,7 +952,24 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
             );
             state.chunk_assembly = None;
             state.pending_manifest_bytes = None;
-            match state.snapshot_bootstrap.voter_for_selected_manifest() {
+            // Evict a voter for the manifest we are ACTUALLY committed
+            // to (verified > pending > selected, via
+            // `voters_for_selected_manifest`'s latched target) — not
+            // `voter_for_selected_manifest`'s live `selected` tally.
+            // `selected` is recomputed on every incoming vote even
+            // while a manifest sits `verified` (`recompute_selection`
+            // does not consult the latch), so a later quorum for a
+            // *different* manifest B can silently repoint `selected`
+            // at B while `state()` still reports A as verified. Using
+            // the live tally here would evict a B voter and clear A's
+            // latch — leaving unreachable A retryable and damaging B's
+            // still-good quorum. The latched voter list always names A.
+            match state
+                .snapshot_bootstrap
+                .voters_for_selected_manifest()
+                .into_iter()
+                .next()
+            {
                 Some(peer) => state
                     .snapshot_bootstrap
                     .reject_manifest_and_evict_voter(peer),
@@ -933,11 +982,11 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
                 height = snapshot_height,
                 "Mode 2: install — snapshot height above best_header_height; halted",
             );
-            return;
+            return defer_reconstructed_tree(state, reconstructed);
         }
         Err(e) => {
             warn!(error = %e, "Mode 2: install — chain index lookup failed; halted");
-            return;
+            return defer_reconstructed_tree(state, reconstructed);
         }
     };
     let header_bytes = match state.store.get_header(&header_id) {
@@ -947,14 +996,14 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
                 header_id = %hex::encode(header_id),
                 "Mode 2: install — header bytes missing; halted",
             );
-            return;
+            return defer_reconstructed_tree(state, reconstructed);
         }
     };
     let header = match read_header(&mut VlqReader::new(&header_bytes)) {
         Ok(h) => h,
         Err(e) => {
             warn!(error = %e, "Mode 2: install — header parse failed; halted");
-            return;
+            return defer_reconstructed_tree(state, reconstructed);
         }
     };
 
@@ -1210,9 +1259,10 @@ fn maybe_emit_gauges(state: &mut NodeState, now: Instant) {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_install_anchor, InstallAnchor};
+    use super::{install_reconstructed_snapshot, resolve_install_anchor, InstallAnchor};
     use ergo_state::store::StateStore;
     use ergo_state::test_helpers::nipopow_proof_dense_from_2;
+    use ergo_sync::snapshot_bootstrap::BootstrapState;
 
     // ----- helpers -----
 
@@ -1335,6 +1385,166 @@ mod tests {
             resolve_install_anchor(&store, DENSE_TIP_HEIGHT + 1).unwrap(),
             InstallAnchor::AboveTip,
             "an anchor past the validated header tip is a halt, never a deferral",
+        );
+    }
+
+    // ----- reconstructed-tree retry (#319 review) -----
+
+    fn synthetic_voter(port: u16) -> std::net::SocketAddr {
+        std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+            port,
+        )
+    }
+
+    /// Drive a fresh `SnapshotBootstrap` to `ManifestVerified` for
+    /// `(height, manifest_id)`, voted in by three synthetic peers
+    /// starting at `first_port`. Mirrors the real handshake: quorum
+    /// vote → `Selected` → `mark_manifest_requested` → trust check
+    /// passes → `accept_verified_manifest`.
+    fn verified_bootstrap(
+        height: i32,
+        manifest_id: [u8; 32],
+        first_port: u16,
+    ) -> ergo_sync::snapshot_bootstrap::SnapshotBootstrap {
+        let mut boot = ergo_sync::snapshot_bootstrap::SnapshotBootstrap::new();
+        for p in first_port..first_port + 3 {
+            boot.on_snapshots_info(synthetic_voter(p), &[(height, manifest_id)]);
+        }
+        let (peer, h, mid) = boot
+            .should_request_manifest()
+            .expect("3 matching votes must clear quorum and select a voter");
+        boot.mark_manifest_requested(peer, h, mid, std::time::Instant::now());
+        boot.accept_verified_manifest(Vec::new());
+        boot
+    }
+
+    #[test]
+    fn install_reconstructed_snapshot_deferred_gap_restores_tree_for_retry() {
+        // CodeRabbit #319 (PRRT_kwDOSmAf_c6feH2w): `reconstructed_tree.take()`
+        // runs unconditionally at the top of `install_reconstructed_snapshot`.
+        // Reconstruction is one-shot — `take_chunks()` and
+        // `pending_manifest_bytes.take()` are already consumed by the time
+        // this function runs — so an `InstallAnchor::Defer` early return that
+        // does not put the tree back leaves `reconstructed_tree` `None`
+        // forever: bootstrap can vote, verify, and reconstruct once, then
+        // stall silently on every later tick.
+        let dir = tempfile::tempdir().unwrap();
+        let store = popow_sparse_store(&dir);
+        let canonical_id = store
+            .get_header_id_at_height(DENSE_TIP_HEIGHT)
+            .unwrap()
+            .expect("popow indexes the dense suffix");
+        // Remove the dense-suffix index row so the anchor height resolves
+        // to `Defer` rather than `Ready` (mirrors a mid-flight catchup gap).
+        store
+            .test_remove_header_chain_index_row(DENSE_TIP_HEIGHT)
+            .unwrap();
+
+        let manifest_id = [0xABu8; 32];
+        let mut state = crate::node::tests::make_state_with_store(store);
+        state.snapshot_bootstrap = verified_bootstrap(DENSE_TIP_HEIGHT as i32, manifest_id, 1);
+        state.reconstructed_tree = Some(ergo_state::avl::snapshot_codec::ReconstructedTree {
+            nodes: Vec::new(),
+            root_label: ergo_primitives::digest::Digest32::from_bytes(manifest_id),
+            tree_height: 0,
+        });
+
+        install_reconstructed_snapshot(&mut state);
+
+        assert!(
+            state.reconstructed_tree.is_some(),
+            "a Defer early return must restore reconstructed_tree so the next \
+             tick can retry the install — dropping it here stalls bootstrap \
+             forever, since reconstruction cannot re-run",
+        );
+        assert_eq!(
+            state.snapshot_bootstrap.state(),
+            BootstrapState::ManifestVerified {
+                height: DENSE_TIP_HEIGHT as i32,
+                manifest_id,
+            },
+            "Defer must not disturb the verified manifest — only retry the install",
+        );
+
+        // And the retry actually resolves: once the index row is written
+        // (bounded forward catch-up completing), install succeeds on the
+        // very next tick and consumes the restored tree.
+        state
+            .store
+            .as_utxo()
+            .unwrap()
+            .test_force_put_header_chain_index(DENSE_TIP_HEIGHT, &canonical_id)
+            .unwrap();
+
+        install_reconstructed_snapshot(&mut state);
+        assert!(
+            state.reconstructed_tree.is_none(),
+            "install must consume the restored tree once the gap resolves",
+        );
+    }
+
+    #[test]
+    fn install_reconstructed_snapshot_unreachable_gap_evicts_latched_voter_not_selected() {
+        // CodeRabbit #319 (PRRT_kwDOSmAf_c6feH2x): the `UnreachableGap`
+        // recovery arm used `voter_for_selected_manifest()`, which reads the
+        // live `selected` tally. `selected` is recomputed on every vote
+        // regardless of whether a manifest is already `verified` — so once
+        // manifest A verifies and a later quorum selects a higher-height
+        // manifest B, `selected` silently flips to B while `state()` still
+        // reports A. Evicting "the selected manifest's voter" then evicts a
+        // B voter and clears A's latch, leaving A retryable and damaging B's
+        // still-good quorum. The fix targets `voters_for_selected_manifest()`
+        // (verified > pending > selected), which stays pinned to A.
+        let dir = tempfile::tempdir().unwrap();
+        let store = popow_sparse_store(&dir);
+
+        let manifest_a = [0xAAu8; 32];
+        let manifest_b = [0xBBu8; 32];
+        let mut state = crate::node::tests::make_state_with_store(store);
+
+        // A verifies first, at the sparse-prefix height (unreachable once a
+        // NiPoPoW proof lands — this is exactly the install-time race).
+        state.snapshot_bootstrap = verified_bootstrap(SPARSE_PREFIX_HEIGHT as i32, manifest_a, 1);
+        assert_eq!(
+            state.snapshot_bootstrap.state(),
+            BootstrapState::ManifestVerified {
+                height: SPARSE_PREFIX_HEIGHT as i32,
+                manifest_id: manifest_a,
+            },
+        );
+
+        // A fresh quorum now lands for B at a higher, reachable height.
+        // `selected` flips to B; `verified` still latches A.
+        for p in 10u16..13 {
+            state
+                .snapshot_bootstrap
+                .on_snapshots_info(synthetic_voter(p), &[(DENSE_TIP_HEIGHT as i32, manifest_b)]);
+        }
+
+        state.reconstructed_tree = Some(ergo_state::avl::snapshot_codec::ReconstructedTree {
+            nodes: Vec::new(),
+            root_label: ergo_primitives::digest::Digest32::from_bytes(manifest_a),
+            tree_height: 0,
+        });
+
+        install_reconstructed_snapshot(&mut state);
+
+        assert_eq!(
+            state.snapshot_bootstrap.state(),
+            BootstrapState::Selected {
+                height: DENSE_TIP_HEIGHT as i32,
+                manifest_id: manifest_b,
+            },
+            "recovering from A's UnreachableGap must evict an A voter and drop \
+             A's latch, leaving B's untouched 3-vote quorum selected — the \
+             buggy `voter_for_selected_manifest()` path evicted a B voter \
+             instead, which would drop B below quorum here",
+        );
+        assert!(
+            state.reconstructed_tree.is_none(),
+            "UnreachableGap abandons this manifest/epoch on purpose — the \
+             stale tree for A must not come back",
         );
     }
 }
