@@ -82,17 +82,14 @@ pub enum ManifestVerifyError {
 /// codec's manifest_id (which is the root label by construction —
 /// see `SnapshotServer::build` in `ergo-state`).
 ///
-/// **Oracle gap — provisional:** the prefix-32 rule is the only
-/// interpretation consistent with our own serve-side construction;
-/// it has not yet been pinned against a Scala-produced manifest +
-/// header pair. Consume-side trust verification stays PROVISIONAL
-/// until a Scala mainnet snapshot's `manifest_id` and the matching
-/// header `state_root` at the same height are captured and the byte
-/// relationship is confirmed. The capture is scaffolded: run
-/// `scripts/capture-utxo-manifest.sh <node-url> <height>` against a Scala
-/// node configured with `ergo.node.utxo.storingUtxoSnapshots > 0`, then
-/// un-ignore `manifest_prefix32_rule_matches_scala_manifest` in this
-/// module's oracle-parity section.
+/// **Oracle-pinned:** the prefix-32 rule is confirmed against a
+/// Scala-produced manifest + header pair
+/// (`test-vectors/testnet/utxo_snapshot_manifest_522239.json`, captured
+/// from a Scala 6.0.3 testnet node with
+/// `scripts/capture-utxo-manifest.sh`): the advertised `manifestId` is
+/// byte-for-byte the first 32 bytes of the header `stateRoot` at the
+/// same height. `manifest_prefix32_rule_matches_scala_manifest` in this
+/// module's oracle-parity section pins it.
 pub fn verify_manifest_against_state_root(
     manifest_id: &[u8; 32],
     state_root: &ADDigest,

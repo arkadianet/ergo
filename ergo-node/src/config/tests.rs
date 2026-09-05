@@ -2129,6 +2129,21 @@ fn header_checkpoint_zero_height_rejected() {
 }
 
 #[test]
+fn header_checkpoint_genesis_height_rejected() {
+    // Genesis takes its own validation path that never consults the
+    // checkpoint (Scala's validateGenesisBlockHeader has no hdrCheckpoint
+    // rule either), so an anchor at height 1 could never fire.
+    let hex_id = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+    let path = write_toml(&format!(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [chain]\ncheckpoint = {{ height = 1, block_id = \"{hex_id}\" }}\n",
+    ));
+    let err = NodeConfig::load(minimal_cli(Some(&path)))
+        .expect_err("a genesis checkpoint is never enforced and must be refused");
+    assert!(err.contains(">= 2"), "unexpected error: {err}");
+}
+
+#[test]
 fn header_checkpoint_short_block_id_rejected() {
     let path = write_toml(
         "[peers]\nknown = [\"127.0.0.1:9030\"]\n\

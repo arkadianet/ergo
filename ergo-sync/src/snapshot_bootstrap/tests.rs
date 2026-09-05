@@ -1064,14 +1064,11 @@ fn anchor_check_snapshot_above_mismatching_checkpoint_refuses() {
 /// height — the capture that retires the "provisional" note on
 /// [`verify_manifest_against_state_root`].
 ///
-/// `#[ignore]`d until the fixture exists. Capture it with
-/// `scripts/capture-utxo-manifest.sh http://127.0.0.1:9062 522229` against a
+/// Fixture captured 2026-09-05 from a Scala 6.0.3 testnet node with
+/// `scripts/capture-utxo-manifest.sh http://127.0.0.1:9062 522239` against a
 /// Scala testnet node running `ergo.node.utxo.storingUtxoSnapshots > 0`
-/// (testnet `makeSnapshotEvery` puts the next snapshot at height 522229),
-/// then run:
-/// `cargo test -p ergo-sync manifest_prefix32_rule_matches_scala_manifest -- --ignored`
+/// (its `/utxo/getSnapshotsInfo` advertised exactly that height).
 #[test]
-#[ignore = "fixture test-vectors/testnet/utxo_snapshot_manifest_522229.json not captured yet (Gate 4 task 2.2)"]
 fn manifest_prefix32_rule_matches_scala_manifest() {
     #[derive(serde::Deserialize)]
     struct ManifestFixture {
@@ -1084,7 +1081,7 @@ fn manifest_prefix32_rule_matches_scala_manifest() {
         state_root: String,
     }
 
-    let path = "../test-vectors/testnet/utxo_snapshot_manifest_522229.json";
+    let path = "../test-vectors/testnet/utxo_snapshot_manifest_522239.json";
     let raw = std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("capture the fixture first ({path}): {e}"));
     let fixture: ManifestFixture = serde_json::from_str(&raw).unwrap();
@@ -1100,7 +1097,7 @@ fn manifest_prefix32_rule_matches_scala_manifest() {
     let state_root = ADDigest::from_bytes(state_root_bytes);
 
     assert_eq!(
-        fixture.height, 522_229,
+        fixture.height, 522_239,
         "fixture height must match its name"
     );
     verify_manifest_against_state_root(&manifest_id, &state_root)

@@ -542,10 +542,19 @@ impl NodeConfig {
         let header_checkpoint = match &toml_cfg.chain.checkpoint {
             None => None,
             Some(c) => {
-                if c.height == 0 {
-                    return Err("[chain] checkpoint.height must be > 0 (height 0 has no \
-                         header); omit the whole `checkpoint` table to disable the anchor"
-                        .into());
+                // Height 0 has no header, and height 1 (genesis) takes its
+                // own validation path that never consults the checkpoint —
+                // Scala's `validateGenesisBlockHeader` carries no
+                // `hdrCheckpoint` rule either — so a genesis anchor would be
+                // silently unenforced. Refuse both rather than accept a
+                // checkpoint that cannot fire.
+                if c.height < 2 {
+                    return Err(format!(
+                        "[chain] checkpoint.height must be >= 2 (got {}): height 0 has \
+                         no header and genesis (height 1) is never checked against the \
+                         anchor; omit the whole `checkpoint` table to disable it",
+                        c.height
+                    ));
                 }
                 let bytes = hex::decode(c.block_id.trim_start_matches("0x"))
                     .map_err(|e| format!("[chain] checkpoint.block_id hex decode: {e}"))?;

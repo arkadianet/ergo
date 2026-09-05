@@ -59,9 +59,10 @@ infrastructure.
   argument.
 - `scripts/capture-utxo-manifest.sh` captures a Scala node's snapshot manifest
   plus the header `state_root` at the same height, as the oracle vector for
-  the (still provisional) `manifest_id == state_root[..32]` consume-side trust
-  rule. The parity test `manifest_prefix32_rule_matches_scala_manifest` is in
-  place and `#[ignore]`d until the fixture is captured.
+  the `manifest_id == state_root[..32]` consume-side trust rule. The fixture
+  `test-vectors/testnet/utxo_snapshot_manifest_522239.json` (Scala 6.0.3
+  testnet) is captured and `manifest_prefix32_rule_matches_scala_manifest`
+  pins the rule against it.
 
 ### Fixed
 

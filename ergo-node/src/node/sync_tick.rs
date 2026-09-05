@@ -1064,9 +1064,10 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
             Err(e) => {
                 warn!(
                     error = %e,
-                    "Mode 2: install — checkpoint-height chain lookup failed; halted",
+                    "Mode 2: install — checkpoint-height chain lookup failed; \
+                     deferring (retried next tick)",
                 );
-                return;
+                return defer_reconstructed_tree(state, reconstructed);
             }
         };
         if let Err(e) = ergo_sync::snapshot_bootstrap::snapshot_install_anchor_check(
