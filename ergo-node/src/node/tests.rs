@@ -3297,6 +3297,8 @@ fn byte_throttle_over_cap_non_modifier_frame_drops_and_penalizes() {
         )),
         "an over-cap non-delivery frame must still be dropped and penalized: {actions:?}",
     );
+}
+
 // ----- duplicate inbound drop (issue #293) -----
 
 /// A `HandshakeComplete` for an address the registry already holds — a
