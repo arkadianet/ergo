@@ -68,15 +68,9 @@ impl Oracle {
     /// Spawn `scala-cli run <script>`. The first query blocks through the
     /// oracle's compile/dependency-resolution; subsequent queries are fast.
     pub fn spawn(script: &str) -> io::Result<Oracle> {
-        let mut child = Command::new("scala-cli")
-            .arg("run")
-            .arg(script)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null()) // compile/resolve noise goes to stderr
-            .spawn()?;
-        let stdin = child.stdin.take().expect("piped stdin");
-        let stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
+        // Open the transcript BEFORE spawning: a bad log path must fail the
+        // spawn without ever starting a JVM that nobody would reap.
+        //
         // APPEND, never truncate: a guard run spawns one oracle process per
         // surface, and several of them may share a single log path. Truncating
         // on spawn would leave the artifact holding only the last surface's
@@ -91,14 +85,31 @@ impl Oracle {
             ),
             _ => None,
         };
+        let mut child = Command::new("scala-cli")
+            .arg("run")
+            .arg(script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()) // compile/resolve noise goes to stderr
+            .spawn()?;
         if let Some(log) = transcript.as_mut() {
-            writeln!(
+            let header = writeln!(
                 log,
                 "== oracle begin: script={script} pid={} ==",
                 child.id()
-            )?;
-            log.flush()?;
+            )
+            .and_then(|()| log.flush());
+            if let Err(e) = header {
+                // The child is already running; do not leave an orphaned JVM
+                // behind a failed spawn. Best effort: the write error is the
+                // one worth reporting.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
         }
+        let stdin = child.stdin.take().expect("piped stdin");
+        let stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
         Ok(Oracle {
             child,
             stdin,
