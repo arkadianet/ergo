@@ -287,8 +287,10 @@ pub struct MempoolConfig {
     /// uses random selection; the rotation is functionally equivalent for
     /// load-spreading and is deterministic/testable). 0 disables re-broadcast.
     pub rebroadcast_count: usize,
-    /// Per-block validation-cost budget REMOTE peers contend for, in aggregate.
-    /// Local submissions are accounted separately and never shrink it.
+    /// Per-block validation-cost budget shared by remote traffic and local
+    /// work beyond `local_reserved_cost_budget`. Local work consumes its
+    /// reserve first; overflow consumes this shared budget and reduces the
+    /// capacity available to remote traffic.
     pub global_cost_budget: u64,
     /// Per-block validation-cost budget a single peer may spend.
     pub per_peer_cost_budget: u64,
