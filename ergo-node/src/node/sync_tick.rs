@@ -40,6 +40,26 @@ use super::snapshot_emit::publish_snapshot;
 use super::sync_helpers::try_send_anchor_sync_info;
 use super::{cleanup_disconnected_peer, flush_actions, send_to_peer, NodeState};
 
+/// Coordinator recovery walks the persisted header table. An integrity
+/// failure there — a row that no longer validates, or chain state pointing
+/// at a missing row — is permanent: the same row fails downstream too, and
+/// busy-looping would only hide the affected id, so it panics. A plain
+/// store error (redb I/O, lock, transaction) is not: the walk is idempotent
+/// and `recovery_done` stays unset, so the next tick simply retries.
+fn handle_recovery_error(e: ergo_sync::executor::HydrationError) {
+    use ergo_sync::executor::HydrationError;
+    match e {
+        HydrationError::Store(err) => warn!(
+            error = %err,
+            "recover_coordinator: store error; pending-range recovery retried next tick",
+        ),
+        fatal @ (HydrationError::HeaderIntegrity { .. }
+        | HydrationError::MissingPersistedRow { .. }) => {
+            panic!("recover_coordinator: persistent header table integrity failure: {fatal}")
+        }
+    }
+}
+
 /// Cadence for the subsystem-gauge line (audit #257): one structured
 /// snapshot per minute gives RSS/leak attribution without flooding.
 const GAUGE_INTERVAL: Duration = Duration::from_secs(60);
@@ -161,16 +181,14 @@ pub(super) fn handle_sync_tick(state: &mut NodeState) {
     // sentinel that `blocks_to_download` will never emit. Re-running the
     // walk above the seeded floor is what unsticks it. On a tick where
     // the seed is a no-op nothing changes and step 3 below owns recovery.
-    // Mid-loop corruption is unrecoverable (the same persisted row will
-    // fail validation downstream too), so panic with the affected id
-    // rather than busy-looping silently.
-    super::prune_activation::seed_prune_sentinel_and_rebuild_pending(
+    if let Err(e) = super::prune_activation::seed_prune_sentinel_and_rebuild_pending(
         &mut state.store,
         &mut state.executor,
         &mut state.coordinator,
         state.identity_inputs.blocks_to_keep,
-    )
-    .expect("recover_coordinator: persistent header table integrity failure");
+    ) {
+        handle_recovery_error(e);
+    }
 
     // 3. Try to apply the next sequential block if sections are available.
     if state.coordinator.sync_state().headers_chain_synced() {
@@ -182,18 +200,18 @@ pub(super) fn handle_sync_tick(state: &mut NodeState) {
         // requests only go out for tip-adjacent blocks and best_full_block
         // never advances through the gap.
         if !state.executor.recovery_done() {
-            // Mid-loop corruption is unrecoverable: the same persisted row
-            // will fail validation downstream too. Panic so the operator
-            // sees the affected id rather than busy-looping silently.
-            let recovered = state
+            match state
                 .executor
                 .recover_coordinator(&state.store, &mut state.coordinator)
-                .expect("recover_coordinator: persistent header table integrity failure");
-            if recovered > 0 {
-                info!(
-                    recovered,
-                    "recovered pending blocks after headers caught up"
-                );
+            {
+                Ok(recovered) if recovered > 0 => {
+                    info!(
+                        recovered,
+                        "recovered pending blocks after headers caught up"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => handle_recovery_error(e),
             }
         }
 
