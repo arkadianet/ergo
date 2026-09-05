@@ -655,6 +655,11 @@ pub(super) fn handle_mining_request(
             //    testnet's difficulty schedule, not mainnet's. The
             //    convenience wrapper `process_header` hardcodes
             //    `DifficultyParams::mainnet()` and would misvalidate testnet.
+            //
+            //    The header-level checkpoint travels with it: Scala runs
+            //    `hdrCheckpoint` in `HeadersProcessor` regardless of where the
+            //    header came from, so a locally mined header that lands on the
+            //    checkpoint height with the wrong id is refused here too.
             if let Err(e) = ergo_sync::header_proc::process_header_cfg(
                 state
                     .store
@@ -662,6 +667,7 @@ pub(super) fn handle_mining_request(
                     .expect("utxo-only: mined-header processing is gated off in digest mode"),
                 &header_bytes,
                 handle.chain_config(),
+                state.executor.header_checkpoint(),
             ) {
                 warn!(error = %e, "mining: header proc failed");
                 let _ = reply.send(Err(ergo_api::MiningApiError::Internal(format!(

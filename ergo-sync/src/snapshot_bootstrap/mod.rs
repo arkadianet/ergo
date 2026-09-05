@@ -36,8 +36,9 @@ mod manifest;
 
 pub use chunks::{ChunkAssembly, ChunkReceiveOutcome, CHUNK_REQUEST_TIMEOUT, MAX_INFLIGHT_CHUNKS};
 pub use manifest::{
-    verify_manifest_against_state_root, BootstrapState, ManifestVerifyError, SnapshotBootstrap,
-    MANIFEST_REQUEST_TIMEOUT, MIN_MANIFEST_VOTES,
+    snapshot_install_anchor_check, verify_manifest_against_state_root, BootstrapState,
+    ManifestVerifyError, SnapshotAnchorError, SnapshotBootstrap, MANIFEST_REQUEST_TIMEOUT,
+    MIN_MANIFEST_VOTES,
 };
 
 #[cfg(test)]

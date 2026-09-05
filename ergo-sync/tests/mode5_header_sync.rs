@@ -310,6 +310,7 @@ fn mode5_validation_verdict_durably_invalidates_the_branch() {
         &mut store,
         &child_bytes,
         &DifficultyParams::mainnet(),
+        None,
     )
     .expect_err("child of a durably-invalid parent must be refused");
     assert!(

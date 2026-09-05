@@ -955,6 +955,7 @@ async fn run_inner_with_backend(
         bootstrap_started_unix_ms: None,
         bootstrap_was_active_this_session: false,
         installed_snapshot: None,
+        snapshot_anchor_refusal_warned: false,
         // The headers-only-digest (Mode 6) and digest-verifier (Mode 5)
         // backends have no UTXO-state apply events to feed the wallet,
         // so leave the hook empty to match the `NodeState.wallet_hook`

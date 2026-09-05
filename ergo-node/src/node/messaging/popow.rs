@@ -55,6 +55,25 @@ pub(super) fn handle_inbound_popow_proof(
         }
     };
 
+    // Step 2b: header-level checkpoint (Scala `hdrCheckpoint`) at INGRESS.
+    // The proof-apply path writes proof headers straight into the store,
+    // bypassing `header_proc::finalize_header`, so a proof carrying a
+    // different header at the operator's anchor height must never reach the
+    // verifier: counting it toward quorum or letting it win best-proof
+    // selection would let one forged proof interfere with an honest
+    // bootstrap. Rejecting here keeps the reducer running and untouched, and
+    // penalises the sender like any other invalid header.
+    if let Err(e) = ergo_sync::popow_bootstrap::check_proof_against_checkpoint(
+        &proof,
+        state.executor.header_checkpoint(),
+    ) {
+        warn!(peer = %peer, error = %e, "NiPoPoW: proof violates the configured header checkpoint");
+        return vec![Action::Penalize {
+            peer,
+            penalty: Penalty::Misbehavior,
+        }];
+    }
+
     // Step 3: hand to reducer + verifier.
     let result = match state.popow_bootstrap.as_mut() {
         Some(popow) => match popow.on_proof_received(peer, proof) {

@@ -9,8 +9,8 @@
 #![cfg(any(test, feature = "test-helpers"))]
 
 use super::{
-    StateError, StateStore, CHAIN_INDEX, CHAIN_STATE_META, HEADERS, HEADER_CHAIN_INDEX,
-    HEADER_META, STATE_META,
+    StateError, StateStore, CHAIN_INDEX, CHAIN_STATE_META, HEADERS, HEADERS_BY_HEIGHT,
+    HEADER_CHAIN_INDEX, HEADER_META, STATE_META,
 };
 
 impl StateStore {
@@ -91,6 +91,29 @@ impl StateStore {
         {
             let mut idx_table = write_txn.open_table(HEADER_CHAIN_INDEX)?;
             idx_table.remove(height as u64)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Insert a single `HEADERS_BY_HEIGHT` slot-0 entry for tests that
+    /// pre-seed a single header at a height without going through
+    /// `store_validated_header`'s full parent-chain walk-back (which
+    /// requires `HEADER_META` for every ancestor down to height 1).
+    /// Companion to `test_force_put_header_chain_index` — install-path
+    /// tests need both tables populated independently since
+    /// `install_snapshot_state`'s cross-check reads `HEADERS_BY_HEIGHT`
+    /// while `lookup_header_at_height` reads `HEADER_CHAIN_INDEX`.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn test_force_put_headers_by_height(
+        &self,
+        height: u32,
+        header_id: &[u8; 32],
+    ) -> Result<(), StateError> {
+        let write_txn = crate::begin_write_qr(&self.db)?;
+        {
+            let mut idx_table = write_txn.open_table(HEADERS_BY_HEIGHT)?;
+            idx_table.insert(height as u64, header_id.as_slice())?;
         }
         write_txn.commit()?;
         Ok(())

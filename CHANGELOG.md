@@ -29,6 +29,41 @@ infrastructure.
   `OrderedTxPool` and changing them would change pool ordering and eviction
   cascades.
 
+- **Header-level checkpoint (`[chain] checkpoint`, Scala `ergo.node.checkpoint`
+  parity).** The header at exactly `checkpoint.height` must carry
+  `checkpoint.block_id`, enforced during HEADER validation
+  (`header_proc::finalize_header`), matching Scala's `hdrCheckpoint` rule
+  (`HeadersProcessor.scala:428` / `checkpointCondition` at `:437-443`). A
+  mismatching header is invalid and its sender is penalised like any other
+  invalid header; headers at every other height are unaffected — the anchor
+  skips no validation. Absent by default (Scala `checkpoint = null`), with no
+  network default: an anchored node is an operator decision. Distinct from the
+  pre-existing `script_validation_checkpoint_*`, whose semantics are unchanged.
+  The anchor is also enforced on the two paths that write headers without
+  going through the header pipeline: locally mined headers and the headers
+  carried by a NiPoPoW proof. **Incompatible with `[node.nipopow]
+  nipopow_bootstrap = true`:** a NiPoPoW-bootstrapped node's header chain is
+  sparse, so a checkpoint below the proof's dense suffix window would never
+  be observed and the Mode 2 install anchor check would refuse forever.
+  Configuring both together fails configuration loading at startup (rule R6)
+  rather than booting into a silently-stuck node — set `nipopow_bootstrap =
+  false` (full header sync materialises every height) or drop `[chain]
+  checkpoint` before upgrading a node that runs both today.
+- **Mode 2 snapshot installs are checkpoint-anchored.** A UTXO snapshot at or
+  above a configured checkpoint height is refused unless this node's own
+  header chain materialises that height with the pinned id — i.e. unless the
+  anchor was passed and verified on the way up. Previously the only checkpoint
+  in this node lived in full-block validation, which never fires on a Mode 2
+  bootstrap (no full block below the snapshot height is ever applied), leaving
+  the install anchored to PoW alone. See `docs/operating.md` for the trust
+  argument.
+- `scripts/capture-utxo-manifest.sh` captures a Scala node's snapshot manifest
+  plus the header `state_root` at the same height, as the oracle vector for
+  the `manifest_id == state_root[..32]` consume-side trust rule. The fixture
+  `test-vectors/testnet/utxo_snapshot_manifest_522239.json` (Scala 6.0.3
+  testnet) is captured and `manifest_prefix32_rule_matches_scala_manifest`
+  pins the rule against it.
+
 ### Fixed
 
 - **An unauthenticated caller on a publicly-bound API can no longer drain

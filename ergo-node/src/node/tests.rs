@@ -206,6 +206,7 @@ fn make_state_with_backend(
         bootstrap_started_unix_ms: None,
         bootstrap_was_active_this_session: false,
         installed_snapshot: None,
+        snapshot_anchor_refusal_warned: false,
         wallet_hook: None,
         mining_enabled: false,
         api_publicly_bound: false,
@@ -1022,6 +1023,207 @@ fn peer_disconnect_drops_snapshot_bootstrap_vote() {
     );
 }
 
+// ----- mode 2 part 2i: install retry across a deferred checkpoint anchor -----
+
+/// Round-trip an empty `AvlTree` through the manifest codec to get a real
+/// (non-fabricated) `ReconstructedTree` — same shape `drive_chunk_download`
+/// hands `install_reconstructed_snapshot`, just without the network/chunk
+/// machinery.
+fn empty_reconstructed_tree() -> ergo_state::avl::snapshot_codec::ReconstructedTree {
+    use ergo_state::avl::snapshot_codec::{
+        reconstruct_tree, serialize_manifest, MAINNET_MANIFEST_DEPTH,
+    };
+    use ergo_state::avl::tree::AvlTree;
+    let tree = AvlTree::new();
+    let manifest_bytes = serialize_manifest(&tree, MAINNET_MANIFEST_DEPTH).unwrap();
+    reconstruct_tree(&manifest_bytes, &std::collections::HashMap::new()).unwrap()
+}
+
+/// A minimal synthetic header at `height` carrying `state_root`. Not
+/// PoW-valid or otherwise consensus-checked — `install_reconstructed_snapshot`
+/// only reads `(height, state_root)` off the persisted bytes via
+/// `ergo_ser::header::read_header`, it never re-validates them.
+fn synthetic_header_with_state_root(
+    height: u32,
+    state_root: ergo_primitives::digest::ADDigest,
+) -> ([u8; 32], Vec<u8>) {
+    use ergo_primitives::digest::{blake2b256, Digest32, ModifierId};
+    use ergo_primitives::group_element::{GroupElement, GROUP_ELEMENT_LENGTH};
+    use ergo_primitives::writer::VlqWriter;
+    use ergo_ser::autolykos::AutolykosSolution;
+    use ergo_ser::header::{write_header, Header};
+
+    let header = Header {
+        version: 2,
+        parent_id: ModifierId::from_bytes([0u8; 32]),
+        ad_proofs_root: Digest32::ZERO,
+        transactions_root: Digest32::ZERO,
+        state_root,
+        timestamp: 1_700_000_000 + height as u64,
+        extension_root: Digest32::ZERO,
+        n_bits: 0,
+        height,
+        votes: [0, 0, 0],
+        unparsed_bytes: Vec::new(),
+        solution: AutolykosSolution::V2 {
+            pk: GroupElement::from_bytes([0u8; GROUP_ELEMENT_LENGTH]),
+            nonce: [0u8; 8],
+        },
+    };
+    let mut w = VlqWriter::new();
+    write_header(&mut w, &header).expect("synthetic header fits wire bounds");
+    let bytes = w.result();
+    let id = *blake2b256(&bytes).as_bytes();
+    (id, bytes)
+}
+
+/// CodeRabbit #313 (MAJOR, `sync_tick.rs:946`): `install_reconstructed_snapshot`
+/// calls `state.reconstructed_tree.take()` up front. The anchor-not-observed
+/// early return (checkpoint height not yet materialized on this node's
+/// header chain — a `SparseGap`/store-corruption-shaped read from
+/// `lookup_header_at_height`, same as a genuine PoPowSparse gap) dropped the
+/// taken tree without putting it back, so a SECOND tick would silently
+/// no-op forever: `state.reconstructed_tree` is `None` and can never be
+/// rebuilt (`pending_manifest_bytes` was already consumed). Bootstrap would
+/// be permanently stuck even after the anchor became observable. Fixed by
+/// restoring `state.reconstructed_tree` before returning on that path (and
+/// the `SparseGap`-defer path just above it).
+#[test]
+fn install_reconstructed_snapshot_retries_after_deferred_checkpoint_anchor_appears() {
+    use ergo_state::chain::HeaderMeta;
+    use ergo_sync::header_proc::HeaderCheckpoint;
+    use ergo_sync::snapshot_bootstrap::BootstrapState;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+
+    let snapshot_height: u32 = 5;
+    let checkpoint_height: u32 = 3;
+    let checkpoint_block_id = [0xEEu8; 32];
+
+    // An (empty-tree) reconstructed snapshot, its root embedded as a real
+    // header's `state_root` so the install-time trust re-check passes.
+    let reconstructed = empty_reconstructed_tree();
+    let manifest_id = *reconstructed.root_label.as_bytes();
+    let mut root_digest = [0u8; 33];
+    root_digest[..32].copy_from_slice(&manifest_id);
+    root_digest[32] = reconstructed.tree_height;
+    let state_root = ergo_primitives::digest::ADDigest::from_bytes(root_digest);
+
+    let (h5_id, h5_bytes) = synthetic_header_with_state_root(snapshot_height, state_root);
+
+    {
+        let store = state.store.as_utxo_mut().unwrap();
+        store.store_header(&h5_id, &h5_bytes).unwrap();
+        store
+            .store_header_meta(
+                &h5_id,
+                &HeaderMeta {
+                    parent_id: [0u8; 32],
+                    height: snapshot_height,
+                    cumulative_score: vec![5],
+                    pow_validity: 1,
+                    timestamp: 1_700_000_005,
+                },
+            )
+            .unwrap();
+        store
+            .test_force_set_best_header_unsafe(h5_id, snapshot_height, vec![5])
+            .unwrap();
+        store
+            .test_force_put_header_chain_index(snapshot_height, &h5_id)
+            .unwrap();
+        store
+            .test_force_put_headers_by_height(snapshot_height, &h5_id)
+            .unwrap();
+        // Deliberately leave `checkpoint_height` unindexed: the operator's
+        // anchor has not been observed on this node's header chain yet.
+    }
+
+    state.executor.set_header_checkpoint(Some(HeaderCheckpoint {
+        height: checkpoint_height,
+        block_id: checkpoint_block_id,
+    }));
+
+    // Drive the snapshot_bootstrap reducer to `ManifestVerified` — the gate
+    // `install_reconstructed_snapshot` checks — without the real quorum/
+    // chunk-download machinery, which is irrelevant to this regression.
+    for p in 1..=3u16 {
+        state
+            .snapshot_bootstrap
+            .on_snapshots_info(synthetic_peer(p), &[(snapshot_height as i32, manifest_id)]);
+    }
+    assert!(matches!(
+        state.snapshot_bootstrap.state(),
+        BootstrapState::Selected { .. }
+    ));
+    state.snapshot_bootstrap.mark_manifest_requested(
+        synthetic_peer(1),
+        snapshot_height as i32,
+        manifest_id,
+        Instant::now(),
+    );
+    state
+        .snapshot_bootstrap
+        .accept_verified_manifest(Vec::new());
+    assert!(matches!(
+        state.snapshot_bootstrap.state(),
+        BootstrapState::ManifestVerified { .. }
+    ));
+
+    state.reconstructed_tree = Some(reconstructed);
+
+    // Tick 1: anchor not yet observed — install must defer, not drop the
+    // reconstructed tree.
+    handle_sync_tick(&mut state);
+    assert!(
+        state.reconstructed_tree.is_some(),
+        "a deferred (not-yet-observed) checkpoint anchor must NOT drop the \
+         reconstructed tree — the install must be retryable next tick",
+    );
+    assert_eq!(
+        state
+            .store
+            .as_utxo()
+            .unwrap()
+            .chain_state()
+            .best_full_block_height,
+        0,
+        "install must not have proceeded while the anchor is unobserved",
+    );
+
+    // The anchor becomes observed: the operator's pinned id materializes at
+    // the checkpoint height on this node's header chain.
+    state
+        .store
+        .as_utxo()
+        .unwrap()
+        .test_force_put_header_chain_index(checkpoint_height, &checkpoint_block_id)
+        .unwrap();
+
+    // Tick 2: anchor now observed and matches — install must succeed using
+    // the SAME reconstructed tree kept from tick 1.
+    handle_sync_tick(&mut state);
+    assert!(
+        state.reconstructed_tree.is_none(),
+        "a successful install must consume the reconstructed tree",
+    );
+    assert_eq!(
+        state.installed_snapshot,
+        Some((snapshot_height, manifest_id)),
+        "install must complete once the anchor is observed",
+    );
+    assert_eq!(
+        state
+            .store
+            .as_utxo()
+            .unwrap()
+            .chain_state()
+            .best_full_block_height,
+        snapshot_height,
+    );
+}
+
 // ----- span emission -----
 
 #[test]
@@ -1143,6 +1345,7 @@ fn cfg_with_mode(
         sync_interval_stable: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL_STABLE,
         cache_bytes: None,
         script_validation_checkpoint: None,
+        header_checkpoint: None,
         genesis_id: None,
         api_bind: None,
         api_key_hash: None,
@@ -3407,4 +3610,137 @@ async fn handshake_complete_for_registered_address_keeps_existing_runtime() {
         "the dropped duplicate must not complete a handshake",
     );
     drop(client);
+}
+
+// ----- NiPoPoW proof vs the header checkpoint (ingress) -----
+
+/// Mainnet genesis and height-2 headers, hex, as served on the wire. Same
+/// vectors the `ergo-sync` popow reducer tests use; duplicated here because
+/// this test drives the node's real message dispatch rather than the reducer.
+const POPOW_GENESIS_HEX: &str = "010000000000000000000000000000000000000000000000000000000000000000766ab7a313cd2fb66d135b0be6662aa02dfa8e5b17342c05a04396268df0bfbb93fb06aa44413ff57ac878fda9377207d5db0e78833556b331b4d9727b3153ba18b7a08878f2a7ee4389c5a1cece1e2724abe8b8adc8916240dd1bcac069177303f1f6cee9ba2d0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8060117650100000003be7ad70c74f691345cbedba19f4844e7fc514e1188a7929f5ae261d5bb00bb6602da9385ac99014ddcffe88d2ac5f28ce817cd615f270a0a5eae58acfb9fd9f6a0000000030151dc631b7207d4420062aeb54e82b0cfb160ff6ace90ab7754f942c4c3266b";
+const POPOW_HEIGHT_2_HEX: &str = "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b828b0f6a0e6cb98ed4649c6e4cc00599ae78755324c79a8cec51e94ecca339d7a3a11a92de9c0ba1e95068f39bc1e08afa4ca23dff16de135fac64d0cf7dd1ab6291b70477f591ee8efb8a962d36ddbe3ac57591e39fe45ffb8c51c4939e41980387d9cfe9ba2d6b46bcba6f750f5be67d89679e921b78c277c5546a08cdb0955376fa0ea271e30601176502000000033c46c7fd7085638bf4bc902badb4e5a1942d3251d92d0eddd6fbe5d57e91553703df646d7f6138aede718a2a4f1a76d4125750e8ab496b7a8a25292d07e14cbadb0000000a03d0d0191b06164a2e86a170f0d8ac96cffa2e3312f2f5b0b1c3b1e082b9a0cd";
+
+fn popow_proof_frame() -> Vec<u8> {
+    use ergo_primitives::reader::VlqReader;
+    use ergo_ser::header::read_header;
+    use ergo_ser::popow_header::PoPowHeader;
+    use ergo_ser::popow_proof::NipopowProof;
+
+    let hdr = |hex_str: &str| {
+        let raw = hex::decode(hex_str).unwrap();
+        read_header(&mut VlqReader::new(&raw)).unwrap()
+    };
+    let popow_hdr = |h| PoPowHeader {
+        header: h,
+        interlinks: vec![],
+        interlinks_proof: vec![],
+    };
+    let proof = NipopowProof {
+        m: 6,
+        k: 10,
+        prefix: vec![popow_hdr(hdr(POPOW_GENESIS_HEX))],
+        suffix_head: popow_hdr(hdr(POPOW_HEIGHT_2_HEX)),
+        suffix_tail: vec![],
+        continuous: false,
+    };
+    let body = ergo_ser::popow_proof::serialize_nipopow_proof(&proof).unwrap();
+    message::serialize_nipopow_proof(&body).unwrap()
+}
+
+fn state_with_popow_bootstrap(state: &mut NodeState) {
+    state.popow_bootstrap = Some(ergo_sync::popow_bootstrap::PopowBootstrap::new(
+        2,
+        None,
+        DifficultyParams::mainnet(),
+    ));
+}
+
+#[test]
+fn popow_proof_violating_checkpoint_penalizes_peer_and_never_reaches_verifier() {
+    // A forged proof carrying a different header at the operator's anchor
+    // height must be rejected at INGRESS: penalise the sender, and leave the
+    // reducer untouched so the forgery neither counts toward quorum nor wins
+    // best-proof selection. Marking the bootstrap terminal here would let one
+    // such proof disable NiPoPoW for the whole run.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    state_with_popow_bootstrap(&mut state);
+    state
+        .executor
+        .set_header_checkpoint(Some(ergo_sync::header_proc::HeaderCheckpoint {
+            height: 2,
+            block_id: [0x7fu8; 32],
+        }));
+
+    let peer = test_peer();
+    let actions = handle_message(
+        &mut state,
+        peer,
+        message::CODE_NIPOPOW_PROOF,
+        &popow_proof_frame(),
+        Instant::now(),
+    );
+
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::Penalize {
+                peer: p,
+                penalty: Penalty::Misbehavior,
+            } if *p == peer
+        )),
+        "a proof violating the checkpoint must penalise its sender: {actions:?}"
+    );
+    let popow = state.popow_bootstrap.as_ref().unwrap();
+    assert_eq!(
+        popow.proofs_processed(),
+        0,
+        "the forged proof must never reach the verifier"
+    );
+    assert!(
+        popow.is_active(true),
+        "one forged proof must not disable NiPoPoW bootstrap"
+    );
+    assert!(!popow.quorum_reached());
+}
+
+#[test]
+fn popow_proof_matching_checkpoint_reaches_the_verifier() {
+    // Control for the test above: with the anchor satisfied, the same proof
+    // takes the normal path into the verifier and no penalty is emitted.
+    use ergo_primitives::reader::VlqReader;
+    use ergo_ser::header::{read_header, serialize_header};
+
+    let raw = hex::decode(POPOW_HEIGHT_2_HEX).unwrap();
+    let h2 = read_header(&mut VlqReader::new(&raw)).unwrap();
+    let (_bytes, h2_id) = serialize_header(&h2).unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    state_with_popow_bootstrap(&mut state);
+    state
+        .executor
+        .set_header_checkpoint(Some(ergo_sync::header_proc::HeaderCheckpoint {
+            height: 2,
+            block_id: *h2_id.as_bytes(),
+        }));
+
+    let peer = test_peer();
+    let actions = handle_message(
+        &mut state,
+        peer,
+        message::CODE_NIPOPOW_PROOF,
+        &popow_proof_frame(),
+        Instant::now(),
+    );
+
+    assert!(
+        !actions.iter().any(|a| matches!(a, Action::Penalize { .. })),
+        "a proof consistent with the checkpoint must not be penalised: {actions:?}"
+    );
+    assert_eq!(
+        state.popow_bootstrap.as_ref().unwrap().provider_count(),
+        1,
+        "the proof must have reached the reducer"
+    );
 }

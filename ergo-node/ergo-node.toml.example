@@ -100,6 +100,20 @@ download_window = 384
 # script_validation_checkpoint_height = 1231454
 # script_validation_checkpoint_block_id = "ca5aa96a2d560f49cd5652eae4b9e16bbf410ee32365313dc16544ee5fda1e6d"
 
+# Header-level trust anchor (Scala `ergo.node.checkpoint`): the header at
+# exactly `height` MUST have id `block_id`, or it is rejected as invalid and
+# the sending peer is penalised. It skips nothing — headers at every other
+# height are validated exactly as without it. This is NOT the
+# script_validation_checkpoint above.
+#
+# Absent by default, like Scala's `checkpoint = null`. No mainnet/testnet
+# values are suggested here on purpose: the anchor is only worth anything if
+# the operator obtained the (height, block_id) pair from a source THEY trust
+# (their own long-running node, a block explorer they audit, a peer operator
+# they know) rather than from this file. Required for a Mode 2 UTXO snapshot
+# install to be anchored — see docs/operating.md.
+# checkpoint = { height = 0, block_id = "" }
+
 [api]
 # Operator API is loopback-only by default.
 bind = "127.0.0.1:9099"

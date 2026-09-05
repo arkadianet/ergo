@@ -339,6 +339,12 @@ pub(crate) struct NodeState {
     /// advancing value as a fixed installation fact. `None` until the
     /// first successful install this process lifetime.
     pub(super) installed_snapshot: Option<(u32, [u8; 32])>,
+    /// Latch for the Mode 2 "install refused by the header checkpoint anchor"
+    /// warning. The install path is re-driven every tick, and the refusal is
+    /// usually a standing condition (the anchor height is not on this node's
+    /// header chain), so the warning is emitted once per session and demoted
+    /// to `debug` afterwards rather than filling the log every tick.
+    pub(super) snapshot_anchor_refusal_warned: bool,
     /// Production wallet apply hook. `Some` when the node runs with the
     /// REST API enabled (which implies wallet subsystem boot). Called
     /// from `sync_tick` after each block apply to keep wallet tables
