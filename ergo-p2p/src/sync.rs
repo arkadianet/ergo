@@ -159,6 +159,20 @@ pub struct SyncState {
     /// on apply). Updated by the boot/sync integration after store
     /// apply / open.
     prune_sentinel: u32,
+    /// Height of the header whose freshness edge flipped
+    /// `headers_chain_synced` inside [`Self::check_headers_synced`].
+    /// `None` until that edge fires; never set by the
+    /// [`SyncCoordinator::try_mark_caught_up_to_peers`] fallback path
+    /// (that flip has no single "flipping header" — the caller reads
+    /// the live current best-header height instead, which already
+    /// equals the tip at flip time there). Exists solely so the Mode 3
+    /// activation seed (`ergo_state::store::activation_minimal_full_block_height`)
+    /// can seed from the height Scala actually flips on
+    /// (`ToDownloadProcessor.scala:110-112`) rather than a later tick's
+    /// possibly-advanced `best_header_height`, when one or more
+    /// additional headers validate between the edge and the next
+    /// activation-seed observation point.
+    flip_seed_height: Option<u32>,
 }
 
 /// A block whose header we have but haven't yet downloaded/applied.
@@ -218,6 +232,7 @@ impl SyncState {
             download_window: download_window.clamp(1, MAX_DOWNLOAD_WINDOW_CLAMP),
             header_freshness_threshold_ms,
             prune_sentinel: 0,
+            flip_seed_height: None,
         }
     }
 
@@ -290,13 +305,35 @@ impl SyncState {
     }
 
     /// Get blocks that should be downloaded next (within the download window).
+    ///
+    /// The window is anchored at `max(best_full_block_height,
+    /// prune_sentinel - 1)`, and blocks below the sentinel are dropped
+    /// outright. On a from-scratch Mode 3 node the sentinel is the
+    /// floor: `best_full_block_height` is still `0` (no block has been
+    /// applied yet) while the headers-synced flip has seeded the
+    /// sentinel far up the chain, so an anchor of `0` would cap the
+    /// window at `[0, download_window]` — a range containing none of
+    /// the pending blocks recovery seeds at/above the sentinel — and
+    /// every tick would emit an empty request batch. Same split-brain
+    /// class as the Mode 2 post-install `set_best_full_block` fix in
+    /// `ergo-node/src/node/sync_tick.rs`.
+    ///
+    /// Scala has no such cached anchor: `nextModifiersToDownload`
+    /// starts its walk at `minimalFullBlockHeight` whenever
+    /// `bestFullBlockOpt` is `None`
+    /// (`ToDownloadProcessor.scala:99-102`), which is exactly the
+    /// sentinel floor reproduced here.
+    ///
+    /// Inert for archive / Mode 6 / any pre-eviction store, where
+    /// `prune_sentinel` is `0`.
     pub fn blocks_to_download(&self) -> Vec<&PendingBlock> {
-        let limit = self
+        let anchor = self
             .best_full_block_height
-            .saturating_add(self.download_window as u32);
+            .max(self.prune_sentinel.saturating_sub(1));
+        let limit = anchor.saturating_add(self.download_window as u32);
         self.pending_blocks
             .iter()
-            .filter(|b| b.height <= limit)
+            .filter(|b| b.height >= self.prune_sentinel && b.height <= limit)
             .collect()
     }
 
@@ -384,7 +421,15 @@ impl SyncState {
     /// headerChainDiff)`. Once synced, stays synced (one-way latch).
     /// Uses the per-network threshold stored on the
     /// [`SyncState`] at construction time.
-    pub fn check_headers_synced(&mut self, header_timestamp_ms: u64) {
+    ///
+    /// `height` is the flipping header's own height — recorded in
+    /// [`Self::flip_seed_height`] on the edge that actually flips the
+    /// latch, so a Mode 3 activation seed observed later (a following
+    /// tick, not this same call) can seed from the height Scala flipped
+    /// on rather than a possibly-advanced current tip. Ignored (and not
+    /// recorded) once already synced — the one-way latch already fired,
+    /// so there is no new edge here.
+    pub fn check_headers_synced(&mut self, header_timestamp_ms: u64, height: u32) {
         if self.headers_chain_synced {
             return;
         }
@@ -394,12 +439,23 @@ impl SyncState {
             .as_millis() as u64;
         if now_ms.saturating_sub(header_timestamp_ms) < self.header_freshness_threshold_ms {
             self.headers_chain_synced = true;
+            self.flip_seed_height = Some(height);
             info!("headers chain synced — starting block downloads");
         }
     }
 
     pub fn headers_chain_synced(&self) -> bool {
         self.headers_chain_synced
+    }
+
+    /// Height of the header that flipped `headers_chain_synced` via the
+    /// [`Self::check_headers_synced`] freshness edge, if that is how the
+    /// latch flipped. `None` when the latch hasn't flipped yet, or when
+    /// it flipped via the caught-up-to-peers fallback
+    /// (`SyncCoordinator::try_mark_caught_up_to_peers`), which has no
+    /// single flipping header.
+    pub fn flip_seed_height(&self) -> Option<u32> {
+        self.flip_seed_height
     }
 
     /// Flip the one-way headers-chain-synced latch from the
@@ -660,6 +716,146 @@ mod tests {
             state.add_pending_block(i, mk_id(i as u8));
         }
         assert_eq!(state.blocks_to_download().len(), 1);
+    }
+
+    #[test]
+    fn blocks_to_download_prune_sentinel_is_the_window_floor_on_a_fresh_node() {
+        // Mode 3 from-scratch: the headers-synced flip seeded the
+        // sentinel at 969 (Scala oracle vector
+        // `flip_h1200_keep232_mainnet`) while no block has been applied,
+        // so `best_full_block_height` is still 0. Anchoring the window
+        // at 0 would cap it at [0, 384] and return NOTHING — a stalled
+        // pipeline that re-emits an empty request batch every tick.
+        let mut state = SyncState::new(0);
+        state.set_prune_sentinel(969);
+        for h in 969..=1200 {
+            state.add_pending_block(h, mk_id32(h));
+        }
+        let to_download = state.blocks_to_download();
+        assert_eq!(
+            to_download.len(),
+            232,
+            "every pending block from the sentinel to the header tip is              inside the window once the sentinel is the floor",
+        );
+        assert_eq!(to_download.first().map(|b| b.height), Some(969));
+        assert_eq!(to_download.last().map(|b| b.height), Some(1200));
+    }
+
+    #[test]
+    fn blocks_to_download_prune_sentinel_excludes_sub_sentinel_blocks() {
+        // Scala's `nextModifiersToDownload` starts its walk AT
+        // `minimalFullBlockHeight` when no full block has been applied
+        // (ToDownloadProcessor.scala:99-102); it never enumerates below
+        // it. Blocks under the sentinel would be evicted on apply and
+        // the serve side refuses them anyway, so they must not consume
+        // window slots either.
+        let mut state = SyncState::new(0);
+        state.set_prune_sentinel(969);
+        for h in 1..=1200 {
+            state.add_pending_block(h, mk_id32(h));
+        }
+        let to_download = state.blocks_to_download();
+        assert!(
+            to_download.iter().all(|b| b.height >= 969),
+            "no sub-sentinel block may be scheduled for download",
+        );
+        assert_eq!(to_download.first().map(|b| b.height), Some(969));
+    }
+
+    #[test]
+    fn blocks_to_download_prune_sentinel_still_honors_the_window_cap() {
+        // The sentinel moves the window's anchor; it does not widen it.
+        let mut state = SyncState::new_with_window(0, 50);
+        state.set_prune_sentinel(1000);
+        for h in 1000..=1200 {
+            state.add_pending_block(h, mk_id32(h));
+        }
+        let to_download = state.blocks_to_download();
+        assert_eq!(to_download.len(), 50);
+        assert_eq!(to_download.last().map(|b| b.height), Some(1049));
+    }
+
+    #[test]
+    fn blocks_to_download_archive_sentinel_zero_is_inert() {
+        // Archive / Mode 6 / any pre-eviction store leaves the mirror at
+        // 0, where `saturating_sub(1)` keeps the anchor at
+        // `best_full_block_height` and the lower filter admits every
+        // height. Regression guard: the Mode 3 floor must not perturb
+        // the archive hot path.
+        let mut state = SyncState::new(100);
+        assert_eq!(state.prune_sentinel(), 0);
+        for h in 101..=150 {
+            state.add_pending_block(h, mk_id32(h));
+        }
+        assert_eq!(state.blocks_to_download().len(), 50);
+    }
+
+    #[test]
+    fn blocks_to_download_applied_tip_wins_over_a_lower_sentinel() {
+        // Steady state on a long-running pruned node: the applied tip is
+        // far above the sentinel, so the anchor must stay at the tip.
+        // `max` — not "sentinel always wins" — is what makes that true.
+        let mut state = SyncState::new(5000);
+        state.set_prune_sentinel(4096);
+        for h in 5001..=5100 {
+            state.add_pending_block(h, mk_id32(h));
+        }
+        let to_download = state.blocks_to_download();
+        assert_eq!(to_download.len(), 100);
+        assert_eq!(to_download.last().map(|b| b.height), Some(5100));
+    }
+
+    #[test]
+    fn check_headers_synced_records_the_flipping_headers_own_height() {
+        // The Mode 3 activation seed must be able to recover the exact
+        // height Scala flips on (`ToDownloadProcessor.scala:110-112`),
+        // not whatever `best_header_height` happens to read on a later
+        // observation. `check_headers_synced` is the freshness-edge
+        // flip path, so the height it's called with IS that header.
+        let mut state = SyncState::new(0);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        assert_eq!(state.flip_seed_height(), None);
+        state.check_headers_synced(now_ms, 951);
+        assert!(state.headers_chain_synced());
+        assert_eq!(state.flip_seed_height(), Some(951));
+    }
+
+    #[test]
+    fn check_headers_synced_ignores_height_on_a_stale_header() {
+        // No flip -> no recorded height. A stale (non-fresh) header must
+        // not arm the seed for a flip that hasn't happened yet.
+        let mut state = SyncState::new(0);
+        state.check_headers_synced(0, 951);
+        assert!(!state.headers_chain_synced());
+        assert_eq!(state.flip_seed_height(), None);
+    }
+
+    #[test]
+    fn check_headers_synced_is_a_one_shot_latch_on_the_recorded_height() {
+        // Once flipped, a later fresh header must not move the recorded
+        // flip height -- Scala's latch is one-way and so is the seed.
+        let mut state = SyncState::new(0);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        state.check_headers_synced(now_ms, 951);
+        state.check_headers_synced(now_ms, 9999);
+        assert_eq!(state.flip_seed_height(), Some(951));
+    }
+
+    #[test]
+    fn mark_headers_chain_synced_does_not_set_a_flip_seed_height() {
+        // The caught-up-to-peers fallback has no single flipping header;
+        // the activation seed must fall back to the live
+        // best_header_height for this path, so this must stay None.
+        let mut state = SyncState::new(0);
+        state.mark_headers_chain_synced();
+        assert!(state.headers_chain_synced());
+        assert_eq!(state.flip_seed_height(), None);
     }
 
     #[test]

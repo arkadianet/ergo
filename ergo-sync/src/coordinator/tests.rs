@@ -1294,7 +1294,7 @@ fn setup_pending_blocks_for_request_tests() -> (
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
-    coord.sync_state_mut().check_headers_synced(recent_ts);
+    coord.sync_state_mut().check_headers_synced(recent_ts, 100);
 
     let exp1 = ExpectedSections::from_header(&mk(1), &mk(10), &mk(11), &mk(12));
     let tx1 = exp1.transactions_id;
@@ -1527,7 +1527,7 @@ fn setup_n_pending_blocks_with_window(n: u32, window: usize) -> (SyncCoordinator
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
-    coord.sync_state_mut().check_headers_synced(recent_ts);
+    coord.sync_state_mut().check_headers_synced(recent_ts, 100);
     for i in 0..n {
         let height = 101 + i;
         let header_id = mk32(1 + i);
@@ -1560,7 +1560,7 @@ fn setup_pending_with_mode(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
-    coord.sync_state_mut().check_headers_synced(recent_ts);
+    coord.sync_state_mut().check_headers_synced(recent_ts, 100);
     for i in 0..n {
         let height = 101 + i;
         let header_id = mk32(1 + i);
