@@ -32,11 +32,18 @@ mutating walk can hold one open; and the session caches the opened
 lookup and nothing else. Two call sites take one: the hydration walk
 (`hydrate_batch_avl_prover`, read-only, covers every dry-run and mining
 caller) and one block's pre-persist mutation walk in `apply_mutations`.
-A session pins the redb snapshot it opened on, so it must never span a
-change to the committed bytes; `NodeArena::commit` / `abort` close any
-session still open, which bounds even a guard leaked by a panicking walk
-to the block it was opened in. `read_session_pins_the_snapshot_it_opened_on`
-pins the reason that backstop exists rather than leaving it as a comment.
+A session pins the redb snapshot it opened on. On the persist-pipeline
+path that snapshot can lag the database: `NodeArena::commit` there only
+queues a job, and the worker commits it later (#314/#316). Two rules keep
+a lagging snapshot harmless — while a session is open the arena releases
+no pin for a job above the watermark it observed at open (so a node whose
+durable copy postdates the snapshot stays in cache and is never read from
+disk through it), and a session miss is retried on a fresh transaction
+(so the session is a fast path for hits, never the authority on absence).
+`open_read_session_holds_pins_of_jobs_acked_during_the_session` and
+`read_session_miss_falls_back_to_a_fresh_snapshot` pin both rules;
+`NodeArena::commit` / `abort` still close any guard a panicking walk
+leaked, bounding it to the block it was opened in.
 
 **#289 — let the clean cache grow into its byte budget.**
 `CachedDiskArena::new` derived an LRU item cap of `byte_budget / 100`, so
