@@ -698,3 +698,51 @@ budget_iters   = 50000
 trigger_hex    = "00d1936001040060010400"
 expected_canonical = ""
 note = "ORACLE: difftest --oracle --repro 00d1936001040060010400 --surface reduce: clean AGREE (both REJECT RuntimeException), patched AcceptReject (rust Accept P:TrivialProp(true) vs jvm Reject RuntimeException). 3-element twin: 00d1934804040402040648040404020406."
+
+# ---------------------------------------------------------------------------
+# 33. bool-collection-packed-item-cost  [issue #311, PATCH VERIFIED on `reduce`]
+# ---------------------------------------------------------------------------
+# The packed ConcreteCollectionBooleanConstant (0x85) is a WIRE optimisation
+# only: Scala's ConcreteCollectionBooleanConstantSerializer.parse rebuilds a
+# plain ConcreteCollection of BooleanConstant items, so ConcreteCollection.eval
+# charges Fixed(20) once and then Constant.eval Fixed(5) for EVERY item
+# (20 + 5·n). The pre-fix Rust arm charged the flat 20 and skipped the items.
+#
+# CLEAN HEAD:   reduce 00d196850306 → Rust P:d2|65, JVM P:d2|65 → AGREE
+# PATCHED HEAD: reduce 00d196850306 → Rust P:d2|50, JVM P:d2|65 → Canonical (cost)
+[[bug]]
+id             = "bool-collection-packed-item-cost"
+surface        = "reduce"
+class          = "cost"
+wire_reachable = true
+fix_file       = "ergo-sigma/src/evaluator/opcodes/constants.rs"
+reinject       = "In eval_bool_collection, delete the per-item `add_cost(cost, 0x7F / 0x80)` loop so only the flat 0x85 Fixed(20) is charged. Patch: known_bugs/patches/bool-collection-packed-item-cost.patch"
+budget_iters   = 50000
+# 00 = v0 header; d1 = BoolToSigmaProp; 96 = AND; 85 = packed bool coll; 03 = 3 items; 06 = bits 0b110 (false,true,true)
+trigger_hex    = "00d196850306"
+expected_canonical = ""
+note = "ORACLE reduce cost. difftest --oracle --repro 00d196850306 --surface reduce: clean AGREE (P:d2|65==65), patched Canonical (rust P:d2|50 vs jvm P:d2|65). Siblings: OR 00d197850306 (60), XorOf 00d1ff850306 (75)."
+
+# ---------------------------------------------------------------------------
+# 34. and-or-short-circuit-cost  [issue #311 sibling, PATCH VERIFIED on `reduce`]
+# ---------------------------------------------------------------------------
+# Scala AND.eval / OR.eval (trees.scala:270-283 / 199-212) hand addSeqCost the
+# number of items the short-circuiting loop VISITED (prefix through the first
+# false / true), not the collection length. Pre-fix Rust charged the full
+# length; the two agree until the visited prefix and the full length land in
+# different chunks (chunkSize 32 for AND, 64 for OR).
+#
+# CLEAN HEAD:   reduce 00d1968521feffffff01 → Rust P:d2|215, JVM P:d2|215 → AGREE
+# PATCHED HEAD: reduce 00d1968521feffffff01 → Rust P:d2|220, JVM P:d2|215 → Canonical (cost)
+[[bug]]
+id             = "and-or-short-circuit-cost"
+surface        = "reduce"
+class          = "cost"
+wire_reachable = true
+fix_file       = "ergo-sigma/src/evaluator/opcodes/boolean.rs"
+reinject       = "In eval_and_collection / eval_or_collection, charge add_cost_per_item over items.len() instead of the visited prefix. Patch: known_bugs/patches/and-or-short-circuit-cost.patch"
+budget_iters   = 50000
+# 00 d1 96 85 21 = AND over 33 packed booleans; bits fe ff ff ff 01 = first false, rest true
+trigger_hex    = "00d1968521feffffff01"
+expected_canonical = ""
+note = "ORACLE reduce cost. difftest --oracle --repro 00d1968521feffffff01 --surface reduce: clean AGREE (P:d2|215==215), patched Canonical (rust P:d2|220 vs jvm P:d2|215). OR twin: 00d1978541010000000000000000 (65 items, first true)."

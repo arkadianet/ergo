@@ -66,6 +66,23 @@ infrastructure.
 
 ### Fixed
 
+- **JIT cost parity for `AND`/`OR`/`XorOf` over boolean-collection literals.**
+  The packed `ConcreteCollectionBooleanConstant` (0x85) form is a wire
+  optimisation only: the reference deserializes it into a plain
+  `ConcreteCollection` of `BooleanConstant` items, so evaluation charges the
+  collection's `Fixed(20)` plus `Constant` `Fixed(5)` per item, exactly like
+  the unpacked 0x83 form. The node charged the flat 20 and skipped the items,
+  under-costing every `allOf`/`anyOf`/`xorOf` over a literal boolean
+  collection by 5 per element (`sigmaProp(AND(Coll(false, true, true)))`:
+  node 50 vs reference 65). `AND`/`OR` also charged their per-item cost over
+  the full collection length where the reference charges only the prefix its
+  short-circuiting loop visited; that diverged once the prefix and the length
+  fell in different 32-/64-item chunks. A cost divergence is consensus: a
+  script whose cost sits between the two values is accepted by one
+  implementation and rejected by the other at the block cost limit. Every
+  form is pinned to the live JVM oracle (sigmastate 6.0.2) and the known-bug
+  catalog re-arms the differential guard on both. (#311)
+
 - **A peer can no longer steer the anchor-map builder into GET-ing an
   internal host (SSRF).** `http_get` now resolves the advertised REST host
   first and connects only to an address that passes the dial book's

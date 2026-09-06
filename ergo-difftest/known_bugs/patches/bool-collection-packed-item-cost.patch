@@ -1,0 +1,28 @@
+diff --git b/ergo-sigma/src/evaluator/opcodes/constants.rs a/ergo-sigma/src/evaluator/opcodes/constants.rs
+index 644444ab..d998bafe 100644
+--- b/ergo-sigma/src/evaluator/opcodes/constants.rs
++++ a/ergo-sigma/src/evaluator/opcodes/constants.rs
+@@ -105,23 +105,10 @@ pub(in crate::evaluator) fn eval_context(cost: &mut CostAccumulator) -> Result<V
+ // 0x85 BoolCollection — packed-bits literal vector. The parser pre-decodes
+ // the packed bits into `Payload::BoolCollection`, so the arm wires the
+ // Vec<bool> to Value::CollBool.
+-//
+-// Cost: the packed form is a WIRE optimisation only. Scala's
+-// `ConcreteCollectionBooleanConstantSerializer.parse` rebuilds a plain
+-// `ConcreteCollection(items = BooleanConstant.fromBoolean(bit), SBoolean)`
+-// (ConcreteCollectionBooleanConstantSerializer.scala:35-48), so evaluation
+-// goes through `ConcreteCollection.eval` (values.scala:858-869): the
+-// collection's Fixed(20) once, then `evalTo` on EVERY item, each of which is
+-// `Constant.eval` at Fixed(5) (values.scala:351-354, 380). Total 20 + 5·n —
+-// identical to the unpacked 0x83 form with n TrueLeaf/FalseLeaf children.
+-// Charging the flat 20 alone under-costs by 5·n (issue #311).
+ pub(in crate::evaluator) fn eval_bool_collection(
+     bits: &[bool],
+     cost: &mut CostAccumulator,
+ ) -> Result<Value, EvalError> {
+     add_cost(cost, 0x85)?;
+-    for &bit in bits {
+-        add_cost(cost, if bit { 0x7F } else { 0x80 })?;
+-    }
+     Ok(Value::CollBool(bits.to_vec()))
+ }

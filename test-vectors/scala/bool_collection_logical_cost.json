@@ -1,0 +1,53 @@
+{
+  "_comment": [
+    "Ground truth from the live JVM oracle (sigmastate-interpreter 6.0.2,",
+    "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala via",
+    "`difftest --oracle --repro <tree_hex> --surface reduce`) for JIT cost of",
+    "AND / OR / XorOf over boolean-collection literals -- issue #311.",
+    "",
+    "Derivation (sigmastate 6.0.x source):",
+    " * ConcreteCollectionBooleanConstantSerializer.parse (data/shared/src/main/",
+    "   scala/sigma/serialization/ConcreteCollectionBooleanConstantSerializer.scala:35-48)",
+    "   rebuilds the packed 0x85 form as ConcreteCollection(BooleanConstant.fromBoolean(bit)...),",
+    "   so the packed form is a wire optimisation only.",
+    " * ConcreteCollection.eval (sigma/ast/values.scala:858-869) charges",
+    "   ConcreteCollection.costKind = Fixed(20) (values.scala:907) once, then evalTo",
+    "   on every item; each item is Constant.eval (values.scala:351-354) at",
+    "   Constant.costKind = Fixed(5) (values.scala:380). Collection cost = 20 + 5*n.",
+    " * AND.eval (sigma/ast/trees.scala:270-283): PerItemCost(10, 5, 32) over the",
+    "   number of items its `while (i < len && res)` loop visited (prefix through",
+    "   the first false), not the collection length.",
+    " * OR.eval (trees.scala:199-212): PerItemCost(5, 5, 64) over the prefix",
+    "   through the first true.",
+    " * XorOf.eval (trees.scala:239-245): PerItemCost(20, 5, 32) over the full length.",
+    " * PerItemCost.cost (sigma/ast/CostKind.scala:26-32): base + perChunk *",
+    "   ((n - 1) / chunkSize + 1) -- one chunk at n = 0.",
+    " * BoolToSigmaProp = Fixed(15); a Coll[Boolean] Constant (type 0x0d) is one",
+    "   Constant node = Fixed(5) with no per-item charge.",
+    "",
+    "Each vector is a v0 ErgoTree (header 0x00) reduced with an empty context",
+    "extension and no registers; `expected` is the oracle's verbatim",
+    "`ACCEPT P:<sigma_hex>|<jit_cost>` line. `rust_before_fix` is recorded for",
+    "the record only and is NOT an oracle."
+  ],
+  "source": {
+    "sigma_state": "6.0.2",
+    "oracle": "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala",
+    "surface": "reduce"
+  },
+  "vectors": [
+    { "id": "and_packed_ftt",            "script": "sigmaProp(AND(Coll[Boolean](false,true,true))) packed 0x85",           "tree_hex": "00d196850306",                 "expected": "ACCEPT P:d2|65",  "rust_before_fix": 50 },
+    { "id": "or_packed_ftt",             "script": "sigmaProp(OR(Coll[Boolean](false,true,true))) packed 0x85",            "tree_hex": "00d197850306",                 "expected": "ACCEPT P:d3|60",  "rust_before_fix": 45 },
+    { "id": "xorof_packed_ftt",          "script": "sigmaProp(XorOf(Coll[Boolean](false,true,true))) packed 0x85",         "tree_hex": "00d1ff850306",                 "expected": "ACCEPT P:d2|75",  "rust_before_fix": 60 },
+    { "id": "and_unpacked_fft",          "script": "sigmaProp(AND(ConcreteCollection 0x83 [FalseLeaf,FalseLeaf,TrueLeaf]))", "tree_hex": "00d19683030180807f",         "expected": "ACCEPT P:d2|65",  "rust_before_fix": 65 },
+    { "id": "and_coll_boolean_constant", "script": "sigmaProp(AND(Coll[Boolean] Constant type 0x0d (false,true,true)))",   "tree_hex": "00d1960d0306",                 "expected": "ACCEPT P:d2|35",  "rust_before_fix": 35 },
+    { "id": "and_packed_empty",          "script": "sigmaProp(AND(Coll[Boolean]())) packed 0x85, 0 items",                 "tree_hex": "00d1968500",                   "expected": "ACCEPT P:d3|50",  "rust_before_fix": 50 },
+    { "id": "and_packed_33_first_false", "script": "AND over 33 packed items, first false (1 visited -> 1 chunk)",        "tree_hex": "00d1968521feffffff01",         "expected": "ACCEPT P:d2|215", "rust_before_fix": 55 },
+    { "id": "and_packed_33_all_true",    "script": "AND over 33 packed items, all true (33 visited -> 2 chunks)",         "tree_hex": "00d1968521ffffffff01",         "expected": "ACCEPT P:d3|220", "rust_before_fix": 55 },
+    { "id": "and_packed_32_first_false", "script": "AND over 32 packed items, first false (below chunk boundary)",        "tree_hex": "00d1968520feffffff",           "expected": "ACCEPT P:d2|210", "rust_before_fix": 50 },
+    { "id": "or_packed_65_first_true",   "script": "OR over 65 packed items, first true (1 visited -> 1 chunk)",          "tree_hex": "00d1978541010000000000000000", "expected": "ACCEPT P:d3|370", "rust_before_fix": null },
+    { "id": "or_packed_65_all_false",    "script": "OR over 65 packed items, all false (65 visited -> 2 chunks)",         "tree_hex": "00d1978541000000000000000000", "expected": "ACCEPT P:d2|375", "rust_before_fix": null },
+    { "id": "or_packed_64_first_true",   "script": "OR over 64 packed items, first true (below chunk boundary)",          "tree_hex": "00d19785400100000000000000",   "expected": "ACCEPT P:d3|365", "rust_before_fix": null },
+    { "id": "xorof_packed_33",           "script": "XorOf over 33 packed items (no short-circuit, 2 chunks)",             "tree_hex": "00d1ff8521feffffff01",         "expected": "ACCEPT P:d2|230", "rust_before_fix": 65 }
+  ]
+}

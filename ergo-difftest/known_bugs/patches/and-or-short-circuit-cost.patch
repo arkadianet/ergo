@@ -1,0 +1,66 @@
+diff --git b/ergo-sigma/src/evaluator/opcodes/boolean.rs a/ergo-sigma/src/evaluator/opcodes/boolean.rs
+index 4383d4ca..7ceeed0d 100644
+--- b/ergo-sigma/src/evaluator/opcodes/boolean.rs
++++ a/ergo-sigma/src/evaluator/opcodes/boolean.rs
+@@ -136,27 +136,13 @@ pub(in crate::evaluator) fn eval_and_collection(
+     cx: &mut EvalCtx<'_>,
+ ) -> Result<Value, EvalError> {
+     let val = cx.eval_expr(inner)?;
++    add_cost_per_item(cx.cost, 0x96, collection_len(&val, cx.ctx) as u32)?;
+     match val {
+-        Value::CollBool(items) => {
+-            // Scala `AND.eval` (trees.scala:270-283) hands `addSeqCost` the
+-            // number of items its `while (i < len && res)` loop actually
+-            // visited — the prefix up to and including the first `false`,
+-            // not the collection length. Past a 32-item chunk boundary the
+-            // two differ, and cost is consensus.
+-            let visited = items
+-                .iter()
+-                .position(|b| !*b)
+-                .map_or(items.len(), |i| i + 1);
+-            add_cost_per_item(cx.cost, 0x96, visited as u32)?;
+-            Ok(Value::Bool(items.iter().all(|b| *b)))
+-        }
+-        _ => {
+-            add_cost_per_item(cx.cost, 0x96, collection_len(&val, cx.ctx) as u32)?;
+-            Err(EvalError::TypeError {
+-                expected: "Coll[Boolean]",
+-                got: format!("{val:?}"),
+-            })
+-        }
++        Value::CollBool(items) => Ok(Value::Bool(items.iter().all(|b| *b))),
++        _ => Err(EvalError::TypeError {
++            expected: "Coll[Boolean]",
++            got: format!("{val:?}"),
++        }),
+     }
+ }
+ 
+@@ -166,21 +152,12 @@ pub(in crate::evaluator) fn eval_or_collection(
+     cx: &mut EvalCtx<'_>,
+ ) -> Result<Value, EvalError> {
+     let val = cx.eval_expr(inner)?;
++    add_cost_per_item(cx.cost, 0x97, collection_len(&val, cx.ctx) as u32)?;
+     match val {
+-        Value::CollBool(items) => {
+-            // Scala `OR.eval` (trees.scala:199-212): `while (i < len && !res)`
+-            // — items visited up to and including the first `true`. Chunk
+-            // size is 64, so the divergence surfaces at 65+ items.
+-            let visited = items.iter().position(|b| *b).map_or(items.len(), |i| i + 1);
+-            add_cost_per_item(cx.cost, 0x97, visited as u32)?;
+-            Ok(Value::Bool(items.iter().any(|b| *b)))
+-        }
+-        _ => {
+-            add_cost_per_item(cx.cost, 0x97, collection_len(&val, cx.ctx) as u32)?;
+-            Err(EvalError::TypeError {
+-                expected: "Coll[Boolean] for OR",
+-                got: format!("{val:?}"),
+-            })
+-        }
++        Value::CollBool(items) => Ok(Value::Bool(items.iter().any(|b| *b))),
++        _ => Err(EvalError::TypeError {
++            expected: "Coll[Boolean] for OR",
++            got: format!("{val:?}"),
++        }),
+     }
+ }

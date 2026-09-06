@@ -1105,6 +1105,153 @@ mod evaluated_value_reduce_parity_tests {
         );
     }
 
+    // ----- oracle parity: AND / OR / XorOf over boolean-collection literals (#311) -----
+    //
+    // Every cost below is the live JVM oracle's (sigmastate 6.0.2,
+    // `scripts/jvm_serde_oracle`, `difftest --oracle --surface reduce`),
+    // pinned in `test-vectors/scala/bool_collection_logical_cost.json`.
+    //
+    // Derivation: the packed 0x85 form deserializes on the JVM into a plain
+    // `ConcreteCollection` of `BooleanConstant` items
+    // (ConcreteCollectionBooleanConstantSerializer.scala:35-48), so
+    // `ConcreteCollection.eval` (values.scala:858-869) charges Fixed(20) once
+    // plus `Constant.eval` Fixed(5) per item (values.scala:351, 380).
+    // `AND`/`OR` (trees.scala:270-283 / 199-212) hand `addSeqCost` the number
+    // of items their short-circuiting loop VISITED; `XorOf` (trees.scala:239-
+    // 245) charges the full length.
+
+    /// THE #311 vector: `sigmaProp(AND(Coll[Boolean](false, true, true)))`,
+    /// packed. 15 (BoolToSigmaProp) + 20 + 3·5 (coll) + 10 + 5 (AND, 1 item
+    /// visited) = 65. Pre-fix Rust: 50.
+    #[test]
+    fn and_over_packed_bool_collection_matches_scala_cost() {
+        assert_eq!(
+            reduce("00d196850306", NO_EXT, NO_REGS),
+            Ok(("d2".to_string(), 65)),
+        );
+    }
+
+    /// `sigmaProp(OR(Coll[Boolean](false, true, true)))`, packed.
+    /// 15 + 35 + (5 + 5) = 60. Pre-fix Rust: 45.
+    #[test]
+    fn or_over_packed_bool_collection_matches_scala_cost() {
+        assert_eq!(
+            reduce("00d197850306", NO_EXT, NO_REGS),
+            Ok(("d3".to_string(), 60)),
+        );
+    }
+
+    /// `sigmaProp(XorOf(Coll[Boolean](false, true, true)))`, packed.
+    /// 15 + 35 + (20 + 5) = 75. Pre-fix Rust: 60.
+    #[test]
+    fn xor_of_over_packed_bool_collection_matches_scala_cost() {
+        assert_eq!(
+            reduce("00d1ff850306", NO_EXT, NO_REGS),
+            Ok(("d2".to_string(), 75)),
+        );
+    }
+
+    /// Control: the UNPACKED 0x83 form `AND(Coll(false, false, true))` with
+    /// explicit FalseLeaf/FalseLeaf/TrueLeaf children costs the same 65 —
+    /// the packed form must not be cheaper than what it abbreviates.
+    #[test]
+    fn and_over_unpacked_bool_collection_matches_scala_cost() {
+        assert_eq!(
+            reduce("00d19683030180807f", NO_EXT, NO_REGS),
+            Ok(("d2".to_string(), 65)),
+        );
+    }
+
+    /// Control: a `Coll[Boolean]` CONSTANT (type code 0x0d) is one Constant
+    /// node — Fixed(5), no per-item charge. 15 + 5 + 15 = 35.
+    #[test]
+    fn and_over_coll_boolean_constant_matches_scala_cost() {
+        assert_eq!(
+            reduce("00d1960d0306", NO_EXT, NO_REGS),
+            Ok(("d2".to_string(), 35)),
+        );
+    }
+
+    /// Empty packed collection: `AND(Coll[Boolean]())` is `true`; the
+    /// PerItemCost formula still charges one chunk at n = 0. 15 + 20 + 15 = 50.
+    #[test]
+    fn and_over_empty_packed_bool_collection_matches_scala_cost() {
+        assert_eq!(
+            reduce("00d1968500", NO_EXT, NO_REGS),
+            Ok(("d3".to_string(), 50)),
+        );
+    }
+
+    /// Short-circuit cost across the 32-item AND chunk boundary. 33 packed
+    /// items, first `false`: Scala visits 1 item → 1 chunk. 15 + (20 + 165)
+    /// + (10 + 5) = 215. Charging the full 33 (2 chunks) gives 220.
+    #[test]
+    fn and_33_items_first_false_charges_visited_prefix_like_scala() {
+        assert_eq!(
+            reduce("00d1968521feffffff01", NO_EXT, NO_REGS),
+            Ok(("d2".to_string(), 215)),
+        );
+    }
+
+    /// Same 33 items, all `true`: no short-circuit, 2 chunks. 15 + 185 +
+    /// (10 + 10) = 220.
+    #[test]
+    fn and_33_items_all_true_charges_two_chunks_like_scala() {
+        assert_eq!(
+            reduce("00d1968521ffffffff01", NO_EXT, NO_REGS),
+            Ok(("d3".to_string(), 220)),
+        );
+    }
+
+    /// 32 items, first `false`: below the boundary the visited prefix and
+    /// the full length both round to 1 chunk. 15 + (20 + 160) + 15 = 210.
+    #[test]
+    fn and_32_items_first_false_matches_scala_cost() {
+        assert_eq!(
+            reduce("00d1968520feffffff", NO_EXT, NO_REGS),
+            Ok(("d2".to_string(), 210)),
+        );
+    }
+
+    /// OR's chunk is 64. 65 packed items, first `true`: Scala visits 1 →
+    /// 15 + (20 + 325) + (5 + 5) = 370. Full-length charging gives 375.
+    #[test]
+    fn or_65_items_first_true_charges_visited_prefix_like_scala() {
+        assert_eq!(
+            reduce("00d1978541010000000000000000", NO_EXT, NO_REGS),
+            Ok(("d3".to_string(), 370)),
+        );
+    }
+
+    /// 65 items, all `false`: no short-circuit, 2 chunks. 15 + 345 + (5 +
+    /// 10) = 375.
+    #[test]
+    fn or_65_items_all_false_charges_two_chunks_like_scala() {
+        assert_eq!(
+            reduce("00d1978541000000000000000000", NO_EXT, NO_REGS),
+            Ok(("d2".to_string(), 375)),
+        );
+    }
+
+    /// 64 items, first `true`: below the boundary. 15 + (20 + 320) + 10 = 365.
+    #[test]
+    fn or_64_items_first_true_matches_scala_cost() {
+        assert_eq!(
+            reduce("00d19785400100000000000000", NO_EXT, NO_REGS),
+            Ok(("d3".to_string(), 365)),
+        );
+    }
+
+    /// XorOf never short-circuits: 33 items → 2 chunks. 15 + 185 + (20 +
+    /// 10) = 230.
+    #[test]
+    fn xor_of_33_items_charges_full_length_like_scala() {
+        assert_eq!(
+            reduce("00d1ff8521feffffff01", NO_EXT, NO_REGS),
+            Ok(("d2".to_string(), 230)),
+        );
+    }
+
     // ----- oracle parity: getVar / getReg type-mismatch semantics -----
 
     /// THE fork vector. Extension var 1 holds an `Int`; the script asks for a
