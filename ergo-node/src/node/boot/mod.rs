@@ -1000,8 +1000,9 @@ async fn run_inner_with_backend(
         let map = state.anchor_map.clone();
         let urls = state.rest_peer_urls.clone();
         let tip_cursor = state.anchor_tip_cursor.clone();
+        let allow_local = config.allow_local;
         tokio::spawn(async move {
-            run_anchor_map_builder(map, urls, tip_cursor, anchor_cancel_rx).await;
+            run_anchor_map_builder(map, urls, tip_cursor, anchor_cancel_rx, allow_local).await;
         })
     };
 

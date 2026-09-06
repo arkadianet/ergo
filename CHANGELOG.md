@@ -66,6 +66,14 @@ infrastructure.
 
 ### Fixed
 
+- **A peer can no longer steer the anchor-map builder into GET-ing an
+  internal host (SSRF).** `http_get` now resolves the advertised REST host
+  first and connects only to an address that passes the dial book's
+  routability predicate — loopback, RFC 1918, link-local, CGNAT,
+  multicast and unspecified destinations are refused unless
+  `[peers] allow_local` re-admits the local classes, and the never-dialable
+  special-purpose ranges are refused regardless.
+
 - **An unauthenticated caller on a publicly-bound API can no longer drain
   the local cost reserve.** `POST /transactions*` /
   `/api/v1/mempool/{submit,check}` are unauthenticated by design (the

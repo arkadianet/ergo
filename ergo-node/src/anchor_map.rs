@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use ergo_p2p::peer_manager::is_routable_for_p2p;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{watch, RwLock};
@@ -336,11 +337,49 @@ pub fn parse_rest_url(url: &str) -> Result<ParsedUrl, String> {
     Ok(ParsedUrl { host, port, path })
 }
 
+/// Resolve `host:port` and return the first address a peer is allowed to
+/// steer us to. Rejects loopback / private / link-local / CGNAT /
+/// multicast / unspecified destinations unless `allow_local` (the
+/// `[peers] allow_local` LAN-devnet switch) re-admits the local classes;
+/// the never-dialable special-purpose ranges stay rejected regardless.
+/// Resolution happens here, not in `connect`, so the check cannot be
+/// bypassed by a name that resolves to a private address.
+async fn resolve_routable(
+    host: &str,
+    port: u16,
+    allow_local: bool,
+) -> Result<std::net::SocketAddr, String> {
+    let addrs = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| format!("resolve {host}:{port}: {e}"))?;
+    let mut seen = 0usize;
+    for addr in addrs {
+        seen += 1;
+        if is_routable_for_p2p(&addr, allow_local) {
+            return Ok(addr);
+        }
+    }
+    Err(format!(
+        "{host}:{port} resolves to no routable address ({seen} candidate(s); \
+         loopback/private/link-local/CGNAT/multicast/unspecified are refused \
+         unless [peers] allow_local is set)"
+    ))
+}
+
 /// One-shot HTTP/1.1 GET. Returns the response body bytes on 200.
 /// Strict input parsing + bounded reads to prevent malicious peer
 /// REST endpoints from DoS'ing the builder.
-pub async fn http_get(url: &str) -> Result<Vec<u8>, String> {
+///
+/// `allow_local` mirrors `[peers] allow_local`: the advertised host is
+/// resolved first and every resulting address is classified with the
+/// same predicate the dial book uses ([`is_routable_for_p2p`]), so a
+/// peer cannot steer this node into GET-ing loopback, RFC 1918,
+/// link-local, CGNAT, multicast or unspecified destinations (SSRF).
+/// Only a validated `SocketAddr` is connected to — never the raw host —
+/// so a DNS name that resolves to a private address is refused too.
+pub async fn http_get(url: &str, allow_local: bool) -> Result<Vec<u8>, String> {
     let parsed = parse_rest_url(url)?;
+    let target = resolve_routable(&parsed.host, parsed.port, allow_local).await?;
 
     let req = format!(
         "GET {} HTTP/1.1\r\nHost: {}:{}\r\nUser-Agent: ergo-rust/{}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
@@ -350,9 +389,9 @@ pub async fn http_get(url: &str) -> Result<Vec<u8>, String> {
         env!("CARGO_PKG_VERSION"),
     );
 
-    let mut stream = TcpStream::connect((parsed.host.as_str(), parsed.port))
+    let mut stream = TcpStream::connect(target)
         .await
-        .map_err(|e| format!("connect: {e}"))?;
+        .map_err(|e| format!("connect {target}: {e}"))?;
     stream
         .write_all(req.as_bytes())
         .await
@@ -411,9 +450,13 @@ pub async fn http_get(url: &str) -> Result<Vec<u8>, String> {
 /// Query a peer's REST endpoint for the header IDs at `height`.
 /// `Ok(Some(id))` on success; `Ok(None)` if the response was empty;
 /// `Err` on transport/parse failure.
-pub async fn query_blocks_at(rest_url: &str, height: u32) -> Result<Option<[u8; 32]>, String> {
+pub async fn query_blocks_at(
+    rest_url: &str,
+    height: u32,
+    allow_local: bool,
+) -> Result<Option<[u8; 32]>, String> {
     let url = format!("{}/blocks/at/{}", rest_url.trim_end_matches('/'), height);
-    let body = timeout(REST_QUERY_TIMEOUT, http_get(&url))
+    let body = timeout(REST_QUERY_TIMEOUT, http_get(&url, allow_local))
         .await
         .map_err(|_| format!("timeout after {REST_QUERY_TIMEOUT:?}"))?
         .map_err(|e| format!("{url}: {e}"))?;
@@ -467,6 +510,7 @@ pub async fn run_anchor_map_builder(
     rest_peers: Arc<std::sync::RwLock<RestPeers>>,
     tip_cursor: Arc<AtomicU32>,
     mut cancel_rx: watch::Receiver<bool>,
+    allow_local: bool,
 ) {
     /// Production step matching Scala `MaxInvObjects = 400` so each
     /// anchor's `continuationIdsV1` response covers exactly one full
@@ -611,7 +655,7 @@ pub async fn run_anchor_map_builder(
                         Err(_) => return,
                     };
                     map.note_query_attempt().await;
-                    match query_blocks_at(&url, h).await {
+                    match query_blocks_at(&url, h, allow_local).await {
                         Ok(Some(id)) => {
                             map.note_query_success().await;
                             map.record(&url, h, id).await;
@@ -829,5 +873,73 @@ mod tests {
     fn parse_rest_url_accepts_no_path_defaults_to_root() {
         let p = parse_rest_url("http://example.com").unwrap();
         assert_eq!(p.path, "/");
+    }
+
+    // ----- happy path -----
+
+    #[tokio::test]
+    async fn http_get_reaches_loopback_server_with_allow_local() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            let body = b"[\"aa\"]";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            sock.write_all(body).await.unwrap();
+        });
+        let body = http_get(
+            &format!("http://127.0.0.1:{}/blocks/at/1", addr.port()),
+            true,
+        )
+        .await
+        .expect("allow_local must re-admit loopback");
+        assert_eq!(body, b"[\"aa\"]");
+    }
+
+    // ----- error paths -----
+
+    #[tokio::test]
+    async fn http_get_refuses_loopback_host_unless_allow_local() {
+        // IP literals resolve without DNS, so the refusal is immediate and
+        // no connection is attempted.
+        let err = http_get("http://127.0.0.1:9053/blocks/at/1", false)
+            .await
+            .expect_err("loopback must be refused");
+        assert!(
+            err.contains("no routable address"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_get_refuses_private_and_cgnat_hosts() {
+        for host in [
+            "10.0.0.1",
+            "192.168.1.1",
+            "172.16.0.1",
+            "100.64.0.1",
+            "169.254.1.1",
+        ] {
+            let err = http_get(&format!("http://{host}:80/x"), false)
+                .await
+                .expect_err("private host must be refused");
+            assert!(err.contains("no routable address"), "{host}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn http_get_refuses_never_dialable_hosts_even_with_allow_local() {
+        for host in ["0.0.0.0", "224.0.0.1", "192.0.2.1"] {
+            let err = http_get(&format!("http://{host}:80/x"), true)
+                .await
+                .expect_err("never-dialable host must be refused");
+            assert!(err.contains("no routable address"), "{host}: {err}");
+        }
     }
 }
