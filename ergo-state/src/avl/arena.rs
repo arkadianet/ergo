@@ -8,11 +8,11 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use ergo_primitives::digest::Digest32;
 use lru::LruCache;
-use redb::{Database, ReadableTable};
+use redb::{Database, ReadOnlyTable, ReadableTable};
 
 use super::node::{AvlNode, NodeId};
 use crate::store::AVL_NODES;
@@ -116,6 +116,18 @@ pub trait NodeArena {
     fn durable_seq_handle(&self) -> Option<Arc<AtomicU64>> {
         None
     }
+
+    /// Open a snapshot read session for a bulk cold-read walk.
+    ///
+    /// While the returned guard is alive, every cache miss reads through
+    /// one already-open redb read transaction and one already-open table
+    /// handle instead of opening its own. Closing is by `Drop`.
+    ///
+    /// Arenas with no disk tier (e.g. [`MemoryArena`]) return an inert
+    /// guard.
+    fn begin_read_session(&self) -> ReadSession {
+        ReadSession::inert()
+    }
 }
 
 // ============================================================================
@@ -138,6 +150,88 @@ pub enum CommitDurability {
     /// The bytes are in persist job `seq`, which has not committed yet.
     /// The nodes stay pinned until the durable watermark reaches `seq`.
     PendingJob(u64),
+}
+
+// ============================================================================
+// Read sessions
+// ============================================================================
+
+/// The redb handles a read session keeps open.
+///
+/// Only the table is stored: `ReadOnlyTable` owns a clone of the
+/// transaction's `Arc<TransactionGuard>`, so holding it pins the same
+/// snapshot the originating `ReadTransaction` did.
+type SessionTable = ReadOnlyTable<u64, &'static [u8]>;
+
+/// What an open session holds: the table handle (which pins the redb
+/// snapshot) and the durable watermark observed just before that snapshot
+/// was opened. Every persist job at or below `durable_floor` is in the
+/// snapshot; anything the worker commits later is not, and the arena keeps
+/// those nodes pinned in cache for as long as the session lives.
+struct SessionState {
+    table: SessionTable,
+    durable_floor: u64,
+}
+
+/// Session state shared between an arena and its live [`ReadSession`].
+///
+/// Shared ownership (rather than a borrow of the arena) is what lets the
+/// state-apply walk hold a session open across `&mut AvlTree` mutations:
+/// the guard closes the session on drop without borrowing the tree.
+type SessionSlot = Arc<Mutex<Option<SessionState>>>;
+
+/// Lock a session slot, tolerating poisoning.
+///
+/// The slot holds a redb read handle and nothing else — a panic elsewhere
+/// cannot leave it half-updated, so there is no invariant for poisoning to
+/// protect.
+fn lock_session(slot: &SessionSlot) -> MutexGuard<'_, Option<SessionState>> {
+    slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// RAII handle for an open snapshot read session.
+///
+/// A session pins one redb snapshot. On the persist-pipeline path that
+/// snapshot can lag the committed database: `NodeArena::commit` is NOT the
+/// redb write boundary there — it only queues a job, and the worker thread
+/// commits it later and advances the durable watermark. Two rules keep a
+/// lagging snapshot harmless:
+///
+/// * **Pin floor.** While a session is open, the arena releases no pin
+///   for a job above the watermark it observed when the session opened
+///   (`SessionState::durable_floor`). A node whose durable copy postdates
+///   the snapshot therefore stays in the clean cache and is never read
+///   from disk through the stale snapshot — neither missing (not yet in
+///   the snapshot) nor stale (an in-place rewrite the snapshot predates).
+/// * **Miss fallback.** A cache miss the session's table cannot serve is
+///   retried on a fresh one-shot transaction, so the session is only ever
+///   a fast path for reads that hit, never the authority on absence.
+///
+/// Callers still scope the guard to a single walk (one hydration, or one
+/// block's pre-persist mutation walk): a session defers redb page reuse and
+/// holds pins past their natural release for as long as it lives, and
+/// [`NodeArena::commit`] / [`NodeArena::abort`] close any guard a panicking
+/// walk leaked so neither cost outlives the block boundary.
+#[must_use = "the read session closes as soon as the guard is dropped"]
+pub struct ReadSession {
+    slot: Option<SessionSlot>,
+}
+
+impl ReadSession {
+    /// A guard that owns no session. Returned by arenas without a disk
+    /// tier, and by a nested `begin_read_session` whose outer guard already
+    /// owns the session.
+    fn inert() -> Self {
+        Self { slot: None }
+    }
+}
+
+impl Drop for ReadSession {
+    fn drop(&mut self) {
+        if let Some(slot) = &self.slot {
+            *lock_session(slot) = None;
+        }
+    }
 }
 
 // ============================================================================
@@ -299,8 +393,8 @@ pub struct CachedDiskArena {
     clean_cache: RefCell<LruCache<NodeId, AvlNode>>,
     /// Redb handle for cold reads.
     db: Arc<Database>,
-    /// Reusable read transaction for the current block.
-    read_txn: RefCell<Option<redb::ReadTransaction>>,
+    /// Open read session, if a `ReadSession` guard is currently alive.
+    session: SessionSlot,
     /// Byte budget for the clean cache only.
     byte_budget: usize,
     clean_bytes: Cell<usize>,
@@ -350,17 +444,19 @@ impl CachedDiskArena {
     /// `byte_budget`: max bytes for the clean LRU cache (dirty map is unbounded
     /// but small — bounded by per-block mutation count).
     pub fn new(db: Arc<Database>, byte_budget: usize) -> Self {
-        // LruCache needs a NonZeroUsize item cap. We derive it from the byte
-        // budget (min node ~100 bytes) and enforce the actual byte budget
-        // ourselves via clean_bytes tracking.
-        let item_cap = (byte_budget / 100).max(1024);
-        let cap = std::num::NonZeroUsize::new(item_cap).unwrap();
         Self {
             dirty: RefCell::new(HashMap::new()),
             removed: RefCell::new(HashSet::new()),
-            clean_cache: RefCell::new(LruCache::new(cap)),
+            // The byte budget is the only bound on the clean cache:
+            // `enforce_budget` evicts by LRU until `clean_bytes <=
+            // byte_budget`, so an item cap would be a second, redundant
+            // one. `unbounded` starts from an empty table that grows
+            // geometrically with occupancy instead of pre-allocating a
+            // slot per ~100 budgeted bytes — a 1 GiB budget used to
+            // reserve ~10.7M slots up front and fault them in cold.
+            clean_cache: RefCell::new(LruCache::unbounded()),
             db,
-            read_txn: RefCell::new(None),
+            session: SessionSlot::default(),
             byte_budget,
             clean_bytes: Cell::new(0),
             unpersisted: RefCell::new(HashMap::new()),
@@ -374,19 +470,10 @@ impl CachedDiskArena {
         }
     }
 
-    /// Open a read transaction for the current block.
-    /// All cache misses during this block reuse this transaction.
-    pub fn begin_read_session(&self) {
-        let txn = self
-            .db
-            .begin_read()
-            .expect("failed to begin read transaction");
-        *self.read_txn.borrow_mut() = Some(txn);
-    }
-
-    /// Close the read transaction after block processing.
-    pub fn end_read_session(&self) {
-        *self.read_txn.borrow_mut() = None;
+    /// Close any open read session. Called at the commit/abort boundary,
+    /// past which a session's snapshot would be stale.
+    fn clear_session(&self) {
+        *lock_session(&self.session) = None;
     }
 
     /// Access the set of nodes whose labels were computed (for persist_apply).
@@ -403,7 +490,14 @@ impl CachedDiskArena {
     /// cost is proportional to the pins being released, not to the pins
     /// still held.
     fn release_durable_pins(&self) {
-        let durable = self.durable_seq.load(Ordering::Acquire);
+        let mut durable = self.durable_seq.load(Ordering::Acquire);
+        // An open read session pins its snapshot; nodes made durable after
+        // that snapshot must stay in cache until it closes (see
+        // [`ReadSession`]), so the release floor is the watermark the
+        // session opened on.
+        if let Some(session) = lock_session(&self.session).as_ref() {
+            durable = durable.min(session.durable_floor);
+        }
         if durable == self.durable_seen.get() {
             return;
         }
@@ -449,20 +543,25 @@ impl CachedDiskArena {
         }
     }
 
-    /// Load a node from redb. Uses the session read transaction if available.
+    /// Load a node from redb. Uses the open session's table if there is
+    /// one; a miss there is retried on a fresh snapshot, so a session that
+    /// lags the persist worker can never turn a present node into `None`.
     fn load_from_redb(&self, id: NodeId) -> Option<AvlNode> {
-        let txn_borrow = self.read_txn.borrow();
-        if let Some(txn) = txn_borrow.as_ref() {
-            return Self::read_node_from_txn(txn, id);
+        let session = lock_session(&self.session);
+        if let Some(state) = session.as_ref() {
+            if let Some(node) = Self::read_node_from_table(&state.table, id) {
+                return Some(node);
+            }
         }
-        drop(txn_borrow);
-        // No session — open a one-shot read transaction.
+        drop(session);
+        // No session, or the session's snapshot predates this node — open
+        // a one-shot read transaction and table.
         let txn = self.db.begin_read().ok()?;
-        Self::read_node_from_txn(&txn, id)
+        let table = txn.open_table(AVL_NODES).ok()?;
+        Self::read_node_from_table(&table, id)
     }
 
-    fn read_node_from_txn(txn: &redb::ReadTransaction, id: NodeId) -> Option<AvlNode> {
-        let table = txn.open_table(AVL_NODES).ok()?;
+    fn read_node_from_table(table: &SessionTable, id: NodeId) -> Option<AvlNode> {
         let guard = table.get(id).ok()??;
         // Corrupt persisted bytes are unrecoverable here. The
         // `NodeArena::get` contract returns `Option<AvlNode>` (None =
@@ -691,6 +790,10 @@ impl NodeArena for CachedDiskArena {
     }
 
     fn commit(&mut self, durability: CommitDurability) {
+        // A session is walk-scoped; a guard leaked by a panicking walk
+        // must not carry its pin floor and snapshot past the block
+        // boundary, so close it here.
+        self.clear_session();
         // Move dirty → clean. On the synchronous path redb already holds
         // these bytes; on the pipeline path it does not yet, so each node
         // is pinned to the job that carries it and stays unevictable until
@@ -734,6 +837,7 @@ impl NodeArena for CachedDiskArena {
     }
 
     fn abort(&mut self) {
+        self.clear_session();
         self.dirty.get_mut().clear();
         self.removed.get_mut().clear();
         self.clean_cache.get_mut().clear();
@@ -793,5 +897,250 @@ impl NodeArena for CachedDiskArena {
 
     fn durable_seq_handle(&self) -> Option<Arc<AtomicU64>> {
         Some(Arc::clone(&self.durable_seq))
+    }
+
+    fn begin_read_session(&self) -> ReadSession {
+        let mut slot = lock_session(&self.session);
+        if slot.is_some() {
+            // Already inside a session. The outer guard owns it; an inner
+            // guard that closed it on drop would silently downgrade the
+            // rest of the outer walk back to one-shot transactions.
+            return ReadSession::inert();
+        }
+        // A session is a pure optimization: if redb declines to open the
+        // transaction or the table, fall back to per-read transactions
+        // rather than failing the walk.
+        // Read the watermark BEFORE opening the snapshot: the worker
+        // commits a job and then publishes its seq (release), so a
+        // snapshot opened after an acquire load of `n` contains every job
+        // <= n. Jobs above the floor may or may not be in the snapshot,
+        // which is exactly why their pins are held for the session's life.
+        let durable_floor = self.durable_seq.load(Ordering::Acquire);
+        let Ok(txn) = self.db.begin_read() else {
+            return ReadSession::inert();
+        };
+        let Ok(table) = txn.open_table(AVL_NODES) else {
+            return ReadSession::inert();
+        };
+        *slot = Some(SessionState {
+            table,
+            durable_floor,
+        });
+        ReadSession {
+            slot: Some(Arc::clone(&self.session)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redb::Database;
+    use tempfile::TempDir;
+
+    // ----- helpers -----
+
+    /// A leaf whose value encodes `tag`, so a read can be attributed to the
+    /// snapshot it came from.
+    fn leaf(tag: u8) -> AvlNode {
+        AvlNode::Leaf {
+            key: [tag; 32],
+            value: vec![tag; 8],
+            next_key: [0xFF; 32],
+            label: None,
+        }
+    }
+
+    fn leaf_tag(node: &AvlNode) -> u8 {
+        match node {
+            AvlNode::Leaf { value, .. } => value[0],
+            AvlNode::Internal { .. } => panic!("expected a leaf"),
+        }
+    }
+
+    /// Persist `(id, leaf(tag))` for every pair into a committed `AVL_NODES`.
+    fn persist(db: &Database, nodes: &[(NodeId, u8)]) {
+        let txn = crate::begin_write_qr(db).expect("begin write");
+        {
+            let mut table = txn.open_table(AVL_NODES).expect("open avl_nodes");
+            for (id, tag) in nodes {
+                table
+                    .insert(*id, crate::store::node_to_bytes(&leaf(*tag)).as_slice())
+                    .expect("insert node");
+            }
+        }
+        txn.commit().expect("commit");
+    }
+
+    fn fixture(nodes: &[(NodeId, u8)]) -> (TempDir, Arc<Database>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(Database::create(dir.path().join("arena.redb")).expect("create redb"));
+        persist(&db, nodes);
+        (dir, db)
+    }
+
+    impl CachedDiskArena {
+        fn session_is_open(&self) -> bool {
+            lock_session(&self.session).is_some()
+        }
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn read_session_cold_reads_match_sessionless_reads() {
+        let (_dir, db) = fixture(&[(1, 0xA1), (2, 0xA2), (3, 0xA3)]);
+
+        let sessionless = CachedDiskArena::new(Arc::clone(&db), 0);
+        let expected: Vec<u8> = (1..=3)
+            .map(|id| leaf_tag(&sessionless.get(id).expect("cold read")))
+            .collect();
+
+        let arena = CachedDiskArena::new(Arc::clone(&db), 0);
+        let session = arena.begin_read_session();
+        let observed: Vec<u8> = (1..=3)
+            .map(|id| leaf_tag(&arena.get(id).expect("cold read in session")))
+            .collect();
+        drop(session);
+
+        assert_eq!(observed, expected);
+    }
+
+    #[test]
+    fn read_session_missing_node_returns_none() {
+        let (_dir, db) = fixture(&[(1, 0xA1)]);
+        let arena = CachedDiskArena::new(Arc::clone(&db), 0);
+        let _session = arena.begin_read_session();
+        assert!(arena.get(99).is_none());
+    }
+
+    // ----- session lifecycle -----
+
+    #[test]
+    fn read_session_closes_when_guard_drops() {
+        let (_dir, db) = fixture(&[(1, 0xA1)]);
+        let arena = CachedDiskArena::new(db, 0);
+        let session = arena.begin_read_session();
+        assert!(arena.session_is_open());
+        drop(session);
+        assert!(!arena.session_is_open());
+    }
+
+    #[test]
+    fn read_session_nested_guard_drop_leaves_outer_session_open() {
+        let (_dir, db) = fixture(&[(1, 0xA1)]);
+        let arena = CachedDiskArena::new(db, 0);
+        let outer = arena.begin_read_session();
+        let inner = arena.begin_read_session();
+        drop(inner);
+        assert!(
+            arena.session_is_open(),
+            "an inner guard must not close the session its outer guard owns"
+        );
+        drop(outer);
+        assert!(!arena.session_is_open());
+    }
+
+    #[test]
+    fn arena_commit_closes_leaked_read_session() {
+        let (_dir, db) = fixture(&[(1, 0xA1)]);
+        let mut arena = CachedDiskArena::new(db, 1 << 20);
+        std::mem::forget(arena.begin_read_session());
+        assert!(arena.session_is_open());
+        arena.commit(CommitDurability::Durable);
+        assert!(!arena.session_is_open());
+    }
+
+    #[test]
+    fn arena_abort_closes_leaked_read_session() {
+        let (_dir, db) = fixture(&[(1, 0xA1)]);
+        let mut arena = CachedDiskArena::new(db, 1 << 20);
+        std::mem::forget(arena.begin_read_session());
+        assert!(arena.session_is_open());
+        arena.abort();
+        assert!(!arena.session_is_open());
+    }
+
+    // ----- clean-cache sizing -----
+
+    /// The byte budget is the only bound: with no item cap in play, a
+    /// budget sized for three leaves holds exactly three however many
+    /// nodes are read through it.
+    #[test]
+    fn clean_cache_evicts_on_byte_budget_not_item_count() {
+        let nodes: Vec<(NodeId, u8)> = (1..=10u64).map(|id| (id, id as u8)).collect();
+        let (_dir, db) = fixture(&nodes);
+        let three_leaves = 3 * node_byte_size(&leaf(1));
+
+        let arena = CachedDiskArena::new(db, three_leaves);
+        assert_eq!(
+            arena.cache_clean_len(),
+            0,
+            "a freshly built cache holds nothing"
+        );
+        for (id, _) in &nodes {
+            arena.get(*id).expect("cold read");
+        }
+
+        assert_eq!(arena.cache_clean_len(), 3);
+        assert!(arena.cache_clean_bytes() <= three_leaves);
+    }
+
+    #[test]
+    fn clean_cache_occupancy_grows_only_with_reads() {
+        let nodes: Vec<(NodeId, u8)> = (1..=10u64).map(|id| (id, id as u8)).collect();
+        let (_dir, db) = fixture(&nodes);
+
+        // A budget far larger than the working set: occupancy must track
+        // what was read, not what was budgeted.
+        let arena = CachedDiskArena::new(db, 1 << 30);
+        assert_eq!(arena.cache_clean_len(), 0);
+        for (n, (id, _)) in nodes.iter().enumerate() {
+            arena.get(*id).expect("cold read");
+            assert_eq!(arena.cache_clean_len(), n + 1);
+        }
+    }
+
+    /// The reason `commit`/`abort` close the session: an open session pins
+    /// the snapshot it was opened on, so a cold read taken after a redb
+    /// commit would still see the pre-commit bytes.
+    #[test]
+    fn read_session_miss_falls_back_to_a_fresh_snapshot() {
+        let (_dir, db) = fixture(&[(1, 0xA1)]);
+        let arena = CachedDiskArena::new(Arc::clone(&db), 0);
+
+        let _session = arena.begin_read_session();
+        persist(&db, &[(2, 0xC2)]);
+        assert_eq!(
+            leaf_tag(
+                &arena
+                    .get(2)
+                    .expect("a node absent from the session snapshot")
+            ),
+            0xC2,
+            "a session miss must be retried on a fresh snapshot, never reported as absent"
+        );
+    }
+
+    #[test]
+    fn read_session_pins_the_snapshot_it_opened_on() {
+        let (_dir, db) = fixture(&[(1, 0xA1)]);
+        let arena = CachedDiskArena::new(Arc::clone(&db), 0);
+
+        let session = arena.begin_read_session();
+        assert_eq!(leaf_tag(&arena.get(1).expect("cold read")), 0xA1);
+        persist(&db, &[(1, 0xB1)]);
+        assert_eq!(
+            leaf_tag(&arena.get(1).expect("cold read in session")),
+            0xA1,
+            "a session must keep serving its own snapshot"
+        );
+        drop(session);
+
+        assert_eq!(
+            leaf_tag(&arena.get(1).expect("cold read after session")),
+            0xB1,
+            "a closed session must not outlive its snapshot"
+        );
     }
 }

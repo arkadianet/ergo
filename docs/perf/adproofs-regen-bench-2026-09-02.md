@@ -2,6 +2,10 @@
 
 Issue #257, workstream A step 1. Date: 2026-09-02.
 
+> Both secondary findings below were acted on. See
+> [`adproofs-regen-bench-2026-09-03.md`](adproofs-regen-bench-2026-09-03.md)
+> for the before/after tables (#288 read sessions, #289 lazy LRU sizing).
+
 ## What is measured
 
 `StateStore::regenerate_ad_proofs` (the proofHash check PR #256 ran per
