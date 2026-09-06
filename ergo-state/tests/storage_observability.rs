@@ -308,8 +308,36 @@ fn reporter_previous_io_transitions_health_and_links_first_io() {
     assert_eq!(health.previous_io_failures_total, 1);
 }
 
+// ----- serialization of the `emit_report` tracing callsite -----
+//
+// Every test below that reaches `emit_report` — the subscriber test that
+// pins an exact event count, and the three `report_storage_failure`
+// tests — must hold this lock.
+//
+// Two distinct pieces of process-global state make them mutually
+// hostile; neither lives in `StorageFailureReporter`, whose dedupe
+// window and health state are already per-instance:
+//
+//  * tracing's callsite interest cache. `emit_report`'s `error!` is one
+//    `DefaultCallsite` shared by all four tests. The first thread to hit
+//    it runs `DefaultCallsite::register`, which pushes the callsite to
+//    the global registry and only *then* computes its `Interest` from a
+//    snapshot of the live dispatchers. A subscriber-less thread taking
+//    that snapshot caches `Interest::never()`, and if the subscriber
+//    test's `with_default` (i.e. `Dispatch::new` -> `rebuild_interest`)
+//    ran in between, the `never` lands last and silently disables the
+//    callsite — the subscriber test then observes 0-2 of its 3 events
+//    (issue #324).
+//  * `LAST_STORAGE_ERROR`, the single global "most recent failure" slot
+//    a sibling `report_storage_failure` call would overwrite between
+//    another test's write and its read.
+static GLOBAL_EMIT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn reporter_emits_stable_structured_first_io_and_poison_transition_fields() {
+    let _guard = GLOBAL_EMIT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let writer = SharedBuf::new();
     let subscriber = tracing_subscriber::fmt()
         .json()
@@ -384,14 +412,13 @@ fn reporter_emits_stable_structured_first_io_and_poison_transition_fields() {
 // atomic). `last_storage_error()`, however, reads a single global "most
 // recent" slot that a concurrently-running sibling test can legitimately
 // overwrite between this test's write and its read (review fix P2-3) —
-// so every test in this group that touches `report_storage_failure`
-// serializes on `LAST_ERROR_TEST_LOCK`, not just the one asserting exact
-// content, since an unguarded sibling call is exactly what would race it.
-static LAST_ERROR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// so every test in this group serializes on `GLOBAL_EMIT_TEST_LOCK`, not
+// just the one asserting exact content, since an unguarded sibling call
+// is exactly what would race it.
 
 #[test]
 fn report_storage_failure_state_subsystem_increments_state_counter() {
-    let _guard = LAST_ERROR_TEST_LOCK
+    let _guard = GLOBAL_EMIT_TEST_LOCK
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let (state_before, _indexer_before) = storage_error_totals();
@@ -402,7 +429,7 @@ fn report_storage_failure_state_subsystem_increments_state_counter() {
 
 #[test]
 fn report_storage_failure_indexer_subsystem_increments_indexer_counter() {
-    let _guard = LAST_ERROR_TEST_LOCK
+    let _guard = GLOBAL_EMIT_TEST_LOCK
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let indexer_context = StorageFailureContext {
@@ -422,7 +449,7 @@ fn report_storage_failure_indexer_subsystem_increments_indexer_counter() {
 
 #[test]
 fn report_storage_failure_sets_last_storage_error_with_store_prefix() {
-    let _guard = LAST_ERROR_TEST_LOCK
+    let _guard = GLOBAL_EMIT_TEST_LOCK
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let unique = DynamicFailure {
