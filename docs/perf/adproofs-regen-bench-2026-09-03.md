@@ -91,8 +91,9 @@ directly.
 Read the 16 MiB rows as one regime and the 1 GiB rows as another: at 1M
 boxes a 16 MiB arena evicts continuously while a 1 GiB one never does, so
 the two are not interchangeable. The `#289` column moves the 16 MiB rows
-in both directions — by tens of ms at 10k/100k boxes and by 170–700 ms
-at 1M boxes. These are medians of five, so they do not by themselves
+by under 4 ms at 10k boxes (all four upward), by tens of ms in both
+directions at 100k boxes, and by 170–700 ms in both directions at 1M
+boxes. These are medians of five, so they do not by themselves
 establish the run-to-run spread; the 2026-09-06 re-measurement below is a
 second independent sample of the same rows (1M / 16 MiB hydration
 1812–1985 ms there vs 1749–2523 ms here) and shows the same order of
