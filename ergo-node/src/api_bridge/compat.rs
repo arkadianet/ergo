@@ -17,7 +17,7 @@ use ergo_api::compat::types::{
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::ad_proofs::read_ad_proofs;
 use ergo_ser::autolykos::AutolykosSolution;
-use ergo_ser::block_transactions::read_block_transactions;
+use ergo_ser::block_transactions::read_stored_block_transactions;
 use ergo_ser::difficulty::decode_compact_bits;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_ser::extension::read_extension;
@@ -37,11 +37,16 @@ pub(super) fn parse_header(bytes: &[u8]) -> Result<Header, BridgeError> {
     })
 }
 
+/// Parse a block-transactions section loaded from the node's own store.
+///
+/// Uses [`read_stored_block_transactions`]: the section was validated when the
+/// block was applied, so re-running the box-script acceptance gates here would
+/// only hide the node's own history behind a parse error (mainnet block 545,684
+/// carries a size-delimited tree whose header claims version 5).
 pub(super) fn parse_block_transactions(
     bytes: &[u8],
 ) -> Result<ergo_ser::block_transactions::BlockTransactions, BridgeError> {
-    let mut r = VlqReader::new(bytes);
-    read_block_transactions(&mut r).map_err(|source| BridgeError::Parse {
+    read_stored_block_transactions(bytes).map_err(|source| BridgeError::Parse {
         what: "block_transactions",
         source,
     })

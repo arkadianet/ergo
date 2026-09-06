@@ -100,6 +100,35 @@ pub fn read_block_transactions(r: &mut VlqReader) -> Result<BlockTransactions, R
     Ok(block_transactions)
 }
 
+/// Re-read a block-transactions section the node itself already accepted and
+/// persisted.
+///
+/// Identical to [`read_block_transactions`] except that the reader is marked
+/// TRUSTED (`VlqReader::trusted`), which skips the box-script ACCEPTANCE gates
+/// (`check_tree_version_supported`, `check_header_size_bit`,
+/// `check_resolvable_methods`, `check_sigma_prop_root`). Those gates decide
+/// whether an *incoming* box may enter the chain; re-applying them to bytes the
+/// node has already validated, applied and stored can only make its own history
+/// unreadable.
+///
+/// This is not hypothetical: mainnet block 545,684 (tx[1], output[0]) holds the
+/// size-delimited ErgoTree `cd07021a8e6f59fd4a`, whose header byte claims tree
+/// version 5. Scala accepted it because at that height the activated script
+/// version was below `VersionContext.JitActivationVersion`, where
+/// `VersionContext`'s `require(ergoTreeVersion <= activatedVersion)` does not
+/// apply, and wrapped the body as `UnparsedErgoTree` with its bytes preserved.
+/// The structural parse still runs here, so the box keeps its verbatim
+/// `ergo_tree_bytes` and every identifier derived from them is unchanged — a
+/// reader of stored history sees the same raw `ergoTree` the reference serves.
+///
+/// **Never call this on bytes received from a peer or a client.** Untrusted
+/// sections go through [`read_block_transactions`], whose gates are the
+/// consensus acceptance rules.
+pub fn read_stored_block_transactions(bytes: &[u8]) -> Result<BlockTransactions, ReadError> {
+    let mut r = VlqReader::new(bytes).trusted();
+    read_block_transactions(&mut r)
+}
+
 /// Group-element points per transaction in a block, index-aligned 1:1 with
 /// `BlockTransactions::transactions`; inner `Vec` holds one tx's 33-byte points.
 pub type PerTxGroupElements = Vec<Vec<[u8; 33]>>;

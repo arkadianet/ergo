@@ -6,7 +6,7 @@ use std::sync::Arc;
 use ergo_api::types::ApiRecentBlock;
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::address::{encode_p2pk_from_pubkey, NetworkPrefix};
-use ergo_ser::block_transactions::read_block_transactions;
+use ergo_ser::block_transactions::read_stored_block_transactions;
 use ergo_ser::header::{read_header, Header};
 use ergo_ser::modifier_id::ExpectedSections;
 use ergo_state::reader::ChainStoreReader;
@@ -262,7 +262,7 @@ fn try_recent_block(
             return None;
         }
     };
-    let bt = match read_block_transactions(&mut VlqReader::new(&tx_bytes)) {
+    let bt = match read_stored_block_transactions(&tx_bytes) {
         Ok(bt) => bt,
         Err(e) => {
             tracing::warn!(error = %e, height, "recent_blocks: blockTransactions parse failed; omitting block");

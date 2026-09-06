@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use ergo_primitives::digest::blake2b256;
 use ergo_primitives::reader::VlqReader;
 use ergo_primitives::writer::VlqWriter;
-use ergo_ser::block_transactions::read_block_transactions;
+use ergo_ser::block_transactions::read_stored_block_transactions;
 use ergo_ser::header::read_header;
 use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
 use ergo_ser::transaction::{bytes_to_sign, write_transaction};
@@ -302,13 +302,12 @@ impl StateStore {
                 height,
                 header_id: *header_id,
             })?;
-        let bt = {
-            let mut r = VlqReader::new(&section_bytes);
-            read_block_transactions(&mut r).map_err(|_| TxDiffError::MissingSections {
+        let bt = read_stored_block_transactions(&section_bytes).map_err(|_| {
+            TxDiffError::MissingSections {
                 height,
                 header_id: *header_id,
-            })?
-        };
+            }
+        })?;
         Ok((header_bytes, bt.transactions))
     }
 }

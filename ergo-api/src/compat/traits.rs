@@ -66,6 +66,19 @@ pub trait NodeChainQuery: Send + Sync {
     /// `adProofs: null`.
     fn full_block_by_id(&self, header_id_hex: &str) -> Option<ScalaFullBlock>;
 
+    /// Same lookup as [`Self::full_block_by_id`], but able to tell "the node
+    /// does not have this block" apart from "the node has it and could not
+    /// serialise it". The former is a 404; the latter is a 500 carrying the
+    /// failure — answering 404 for a block the node is storing tells the client
+    /// the chain has a hole it does not have, and a REST walker that trusts it
+    /// stalls there forever.
+    ///
+    /// The default delegates, so a bridge that cannot distinguish the two keeps
+    /// today's behaviour; the store-backed bridge overrides it.
+    fn try_full_block_by_id(&self, header_id_hex: &str) -> Result<Option<ScalaFullBlock>, String> {
+        Ok(self.full_block_by_id(header_id_hex))
+    }
+
     /// `POST /blocks/headerIds` — bulk full-block fetch.
     ///
     /// Mirrors Scala's `getFullBlockByHeaderIds`
@@ -134,6 +147,15 @@ pub trait NodeChainQuery: Send + Sync {
     /// in either case).
     fn block_transactions_by_id(&self, _header_id_hex: &str) -> Option<ScalaBlockTransactions> {
         None
+    }
+
+    /// [`Self::block_transactions_by_id`] with the absent / unserialisable
+    /// distinction of [`Self::try_full_block_by_id`]. Default delegates.
+    fn try_block_transactions_by_id(
+        &self,
+        header_id_hex: &str,
+    ) -> Result<Option<ScalaBlockTransactions>, String> {
+        Ok(self.block_transactions_by_id(header_id_hex))
     }
 
     /// `/blocks/{headerId}/proofFor/{txId}` — Merkle membership proof

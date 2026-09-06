@@ -14,7 +14,7 @@ use std::sync::Arc;
 use ergo_indexer::{ChainTip, HeaderId, IndexerChainSource, IndexerFullBlock};
 use ergo_primitives::digest::Digest32;
 use ergo_primitives::reader::VlqReader;
-use ergo_ser::block_transactions::read_block_transactions;
+use ergo_ser::block_transactions::read_stored_block_transactions;
 use ergo_ser::header::read_header;
 use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
 use ergo_state::reader::ChainStoreReader;
@@ -112,7 +112,7 @@ impl IndexerChainSource for ChainReaderAdapter {
                 return None;
             }
         };
-        let block_txs = match read_block_transactions(&mut VlqReader::new(&section_bytes)) {
+        let block_txs = match read_stored_block_transactions(&section_bytes) {
             Ok(b) => b,
             Err(e) => {
                 warn!(

@@ -29,13 +29,18 @@ pub async fn block_ids_at_height_handler(
 /// minimal error body when the header is unknown, malformed-hex, or any
 /// required section is missing. Scala emits a structured error here; we
 /// match the status code and surface a brief message body.
+///
+/// A block the node HAS but cannot serialise is a 500, never a 404: a 404
+/// asserts the node does not have the block, and a client walking the chain
+/// over REST treats that as a permanent hole.
 pub async fn block_by_id_handler(
     State(q): State<Arc<dyn NodeChainQuery>>,
     Path(header_id): Path<String>,
 ) -> Response {
-    match q.full_block_by_id(&header_id) {
-        Some(block) => Json(block).into_response(),
-        None => not_found("block not found"),
+    match q.try_full_block_by_id(&header_id) {
+        Ok(Some(block)) => Json(block).into_response(),
+        Ok(None) => not_found("block not found"),
+        Err(detail) => internal_error(&format!("block could not be serialised: {detail}")),
     }
 }
 
@@ -52,13 +57,18 @@ pub async fn header_by_id_handler(
 }
 
 /// `/blocks/{headerId}/transactions` — block-transactions section DTO.
+/// 404 only when the section is genuinely absent; a stored section that
+/// fails to serialise is a 500 (see [`block_by_id_handler`]).
 pub async fn block_transactions_by_id_handler(
     State(q): State<Arc<dyn NodeChainQuery>>,
     Path(header_id): Path<String>,
 ) -> Response {
-    match q.block_transactions_by_id(&header_id) {
-        Some(bt) => Json(bt).into_response(),
-        None => not_found("block transactions not found"),
+    match q.try_block_transactions_by_id(&header_id) {
+        Ok(Some(bt)) => Json(bt).into_response(),
+        Ok(None) => not_found("block transactions not found"),
+        Err(detail) => internal_error(&format!(
+            "block transactions could not be serialised: {detail}"
+        )),
     }
 }
 
@@ -305,6 +315,21 @@ pub async fn header_ids_paged_handler(
         ));
     }
     Json(q.header_ids_paged(limit as u32, offset as u32)).into_response()
+}
+
+/// 500 envelope mirroring the not_found shape. Used when the node HOLDS the
+/// requested modifier but could not turn it into a response — a condition a
+/// 404 would misreport as "the node does not have it".
+fn internal_error(detail: &str) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({
+            "error": 500,
+            "reason": "internal-error",
+            "detail": detail
+        })),
+    )
+        .into_response()
 }
 
 fn not_found(detail: &str) -> Response {
