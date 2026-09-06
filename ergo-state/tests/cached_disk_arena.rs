@@ -450,3 +450,67 @@ fn abort_drops_all_pins() {
     arena.abort();
     assert_eq!(arena.cache_unpersisted_bytes(), 0);
 }
+
+/// Cold-read `n` fresh nodes seeded straight into redb, so the clean
+/// cache takes budget pressure WITHOUT a commit (a commit closes any open
+/// read session by design, which is not the path under test here).
+fn cold_read_pressure(arena: &CachedDiskArena, db: &Database, first_id: u64, n: u64) {
+    let nodes: Vec<(u64, AvlNode)> = (first_id..first_id + n)
+        .map(|i| (i, make_leaf((i % 250) as u8, &[i as u8; 100])))
+        .collect();
+    seed_redb(db, &nodes);
+    for (id, node) in &nodes {
+        assert_eq!(leaf_value(&arena.get(*id).unwrap()), leaf_value(node));
+    }
+}
+
+#[test]
+fn open_read_session_holds_pins_of_jobs_acked_during_the_session() {
+    let (db, mut arena, _dir) = make_arena(300);
+    // A session needs the node table to exist (a fresh database has none
+    // until the first persist); seed one unrelated row so the opener does
+    // not fall back to an inert guard.
+    seed_redb(&db, &[(999, make_leaf(0xEE, &[0xEE; 8]))]);
+    let nodes: Vec<(u64, AvlNode)> = (1u64..=10)
+        .map(|i| (i, make_leaf(i as u8, &[i as u8; 100])))
+        .collect();
+    for (id, node) in &nodes {
+        arena.put(*id, node.clone());
+    }
+    arena.commit(CommitDurability::PendingJob(7));
+
+    // A walk opens its session BEFORE the worker commits job 7: the
+    // session's snapshot does not contain these nodes.
+    let session = arena.begin_read_session();
+
+    // The worker commits job 7 and publishes the watermark mid-walk.
+    seed_redb(&db, &nodes);
+    arena
+        .durable_seq_handle()
+        .unwrap()
+        .store(7, std::sync::atomic::Ordering::Release);
+
+    // Budget pressure from cold reads must NOT release the pins while the
+    // session is open: the only copy the session could read from disk is
+    // absent from its snapshot. (The cold reads themselves are misses in
+    // the session snapshot and come back through the fresh-snapshot
+    // fallback.)
+    cold_read_pressure(&arena, &db, 100, 10);
+    assert!(
+        arena.cache_unpersisted_bytes() >= 10 * 100,
+        "pins of a job acked after the session opened stay held"
+    );
+    for (id, node) in &nodes {
+        assert_eq!(leaf_value(&arena.get(*id).unwrap()), leaf_value(node));
+    }
+
+    // Closing the session lifts the floor; the next enforcement releases
+    // and evicts as usual, and the evicted nodes read back from redb.
+    drop(session);
+    cold_read_pressure(&arena, &db, 200, 10);
+    assert_eq!(arena.cache_unpersisted_bytes(), 0);
+    assert!(arena.cache_clean_len() < 20);
+    for (id, node) in &nodes {
+        assert_eq!(leaf_value(&arena.get(*id).unwrap()), leaf_value(node));
+    }
+}

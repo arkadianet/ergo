@@ -132,9 +132,6 @@ pub trait NodeArena {
 
 // ============================================================================
 // Commit durability
-// =====================================================================
-}
-
 // ============================================================================
 
 /// Whether the bytes being moved dirty → clean are already in redb.
@@ -153,7 +150,9 @@ pub enum CommitDurability {
     /// The bytes are in persist job `seq`, which has not committed yet.
     /// The nodes stay pinned until the durable watermark reaches `seq`.
     PendingJob(u64),
-=======
+}
+
+// ============================================================================
 // Read sessions
 // ============================================================================
 
@@ -164,37 +163,55 @@ pub enum CommitDurability {
 /// snapshot the originating `ReadTransaction` did.
 type SessionTable = ReadOnlyTable<u64, &'static [u8]>;
 
+/// What an open session holds: the table handle (which pins the redb
+/// snapshot) and the durable watermark observed just before that snapshot
+/// was opened. Every persist job at or below `durable_floor` is in the
+/// snapshot; anything the worker commits later is not, and the arena keeps
+/// those nodes pinned in cache for as long as the session lives.
+struct SessionState {
+    table: SessionTable,
+    durable_floor: u64,
+}
+
 /// Session state shared between an arena and its live [`ReadSession`].
 ///
 /// Shared ownership (rather than a borrow of the arena) is what lets the
 /// state-apply walk hold a session open across `&mut AvlTree` mutations:
 /// the guard closes the session on drop without borrowing the tree.
-type SessionSlot = Arc<Mutex<Option<SessionTable>>>;
+type SessionSlot = Arc<Mutex<Option<SessionState>>>;
 
 /// Lock a session slot, tolerating poisoning.
 ///
 /// The slot holds a redb read handle and nothing else — a panic elsewhere
 /// cannot leave it half-updated, so there is no invariant for poisoning to
 /// protect.
-fn lock_session(slot: &SessionSlot) -> MutexGuard<'_, Option<SessionTable>> {
+fn lock_session(slot: &SessionSlot) -> MutexGuard<'_, Option<SessionState>> {
     slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// RAII handle for an open snapshot read session.
 ///
-/// INVARIANT: a session must never span a change to the committed redb
-/// contents, or cold reads would serve a stale snapshot while the cache
-/// serves the new one. Two things enforce it:
+/// A session pins one redb snapshot. On the persist-pipeline path that
+/// snapshot can lag the committed database: `NodeArena::commit` is NOT the
+/// redb write boundary there — it only queues a job, and the worker thread
+/// commits it later and advances the durable watermark. Two rules keep a
+/// lagging snapshot harmless:
 ///
-/// * callers scope the guard to a single read-only walk (hydration) or to
-///   the pre-persist mutation walk of one block, dropping it before the
-///   write transaction commits;
-/// * [`NodeArena::commit`] and [`NodeArena::abort`] close any session still
-///   open, so a guard leaked by a panicking walk cannot outlive the block
-///   boundary it was opened in.
+/// * **Pin floor.** While a session is open, the arena releases no pin
+///   for a job above the watermark it observed when the session opened
+///   (`SessionState::durable_floor`). A node whose durable copy postdates
+///   the snapshot therefore stays in the clean cache and is never read
+///   from disk through the stale snapshot — neither missing (not yet in
+///   the snapshot) nor stale (an in-place rewrite the snapshot predates).
+/// * **Miss fallback.** A cache miss the session's table cannot serve is
+///   retried on a fresh one-shot transaction, so the session is only ever
+///   a fast path for reads that hit, never the authority on absence.
 ///
-/// A session pins a redb snapshot for as long as it is held, which defers
-/// page reuse — another reason to keep it bounded by one block.
+/// Callers still scope the guard to a single walk (one hydration, or one
+/// block's pre-persist mutation walk): a session defers redb page reuse and
+/// holds pins past their natural release for as long as it lives, and
+/// [`NodeArena::commit`] / [`NodeArena::abort`] close any guard a panicking
+/// walk leaked so neither cost outlives the block boundary.
 #[must_use = "the read session closes as soon as the guard is dropped"]
 pub struct ReadSession {
     slot: Option<SessionSlot>,
@@ -473,7 +490,14 @@ impl CachedDiskArena {
     /// cost is proportional to the pins being released, not to the pins
     /// still held.
     fn release_durable_pins(&self) {
-        let durable = self.durable_seq.load(Ordering::Acquire);
+        let mut durable = self.durable_seq.load(Ordering::Acquire);
+        // An open read session pins its snapshot; nodes made durable after
+        // that snapshot must stay in cache until it closes (see
+        // [`ReadSession`]), so the release floor is the watermark the
+        // session opened on.
+        if let Some(session) = lock_session(&self.session).as_ref() {
+            durable = durable.min(session.durable_floor);
+        }
         if durable == self.durable_seen.get() {
             return;
         }
@@ -519,15 +543,19 @@ impl CachedDiskArena {
         }
     }
 
-
-    /// Load a node from redb. Uses the open session's table if there is one.
+    /// Load a node from redb. Uses the open session's table if there is
+    /// one; a miss there is retried on a fresh snapshot, so a session that
+    /// lags the persist worker can never turn a present node into `None`.
     fn load_from_redb(&self, id: NodeId) -> Option<AvlNode> {
         let session = lock_session(&self.session);
-        if let Some(table) = session.as_ref() {
-            return Self::read_node_from_table(table, id);
+        if let Some(state) = session.as_ref() {
+            if let Some(node) = Self::read_node_from_table(&state.table, id) {
+                return Some(node);
+            }
         }
         drop(session);
-        // No session — open a one-shot read transaction and table.
+        // No session, or the session's snapshot predates this node — open
+        // a one-shot read transaction and table.
         let txn = self.db.begin_read().ok()?;
         let table = txn.open_table(AVL_NODES).ok()?;
         Self::read_node_from_table(&table, id)
@@ -762,9 +790,9 @@ impl NodeArena for CachedDiskArena {
     }
 
     fn commit(&mut self, durability: CommitDurability) {
-        // Past this boundary the cache holds different bytes than any
-        // snapshot a walk left open, so close it: a leaked session would
-        // serve stale cold reads on the next miss.
+        // A session is walk-scoped; a guard leaked by a panicking walk
+        // must not carry its pin floor and snapshot past the block
+        // boundary, so close it here.
         self.clear_session();
         // Move dirty → clean. On the synchronous path redb already holds
         // these bytes; on the pipeline path it does not yet, so each node
@@ -882,13 +910,22 @@ impl NodeArena for CachedDiskArena {
         // A session is a pure optimization: if redb declines to open the
         // transaction or the table, fall back to per-read transactions
         // rather than failing the walk.
+        // Read the watermark BEFORE opening the snapshot: the worker
+        // commits a job and then publishes its seq (release), so a
+        // snapshot opened after an acquire load of `n` contains every job
+        // <= n. Jobs above the floor may or may not be in the snapshot,
+        // which is exactly why their pins are held for the session's life.
+        let durable_floor = self.durable_seq.load(Ordering::Acquire);
         let Ok(txn) = self.db.begin_read() else {
             return ReadSession::inert();
         };
         let Ok(table) = txn.open_table(AVL_NODES) else {
             return ReadSession::inert();
         };
-        *slot = Some(table);
+        *slot = Some(SessionState {
+            table,
+            durable_floor,
+        });
         ReadSession {
             slot: Some(Arc::clone(&self.session)),
         }
@@ -1010,7 +1047,7 @@ mod tests {
         let mut arena = CachedDiskArena::new(db, 1 << 20);
         std::mem::forget(arena.begin_read_session());
         assert!(arena.session_is_open());
-        arena.commit();
+        arena.commit(CommitDurability::Durable);
         assert!(!arena.session_is_open());
     }
 
@@ -1067,6 +1104,24 @@ mod tests {
     /// The reason `commit`/`abort` close the session: an open session pins
     /// the snapshot it was opened on, so a cold read taken after a redb
     /// commit would still see the pre-commit bytes.
+    #[test]
+    fn read_session_miss_falls_back_to_a_fresh_snapshot() {
+        let (_dir, db) = fixture(&[(1, 0xA1)]);
+        let arena = CachedDiskArena::new(Arc::clone(&db), 0);
+
+        let _session = arena.begin_read_session();
+        persist(&db, &[(2, 0xC2)]);
+        assert_eq!(
+            leaf_tag(
+                &arena
+                    .get(2)
+                    .expect("a node absent from the session snapshot")
+            ),
+            0xC2,
+            "a session miss must be retried on a fresh snapshot, never reported as absent"
+        );
+    }
+
     #[test]
     fn read_session_pins_the_snapshot_it_opened_on() {
         let (_dir, db) = fixture(&[(1, 0xA1)]);
