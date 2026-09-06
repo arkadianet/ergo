@@ -169,3 +169,42 @@ validation critical path at all since #265 replaced regeneration with
 regenerate — mining candidate builds, `/utxo/*` reads, cold block apply —
 and on every cold arena miss anywhere in the node, which is what the #288
 session fixes generically.
+
+## Re-measured 2026-09-06 against `76c15b1d` (post-#316)
+
+Same machine, same command, median of 5 after one warm-up. Baseline is
+origin/main at `76c15b1d`, which now carries #316's pinned clean cache; the
+branch is `5a965e02` (both levers plus the session pin floor / miss
+fallback described above). Hydration and arena-setup columns, ms:
+
+| boxes | cache | txs | setup base | setup branch | hydrate base | hydrate branch | hydrate speed-up |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10,000 | 1024 MiB | 0 | 5.23 | 0.00 | 45.73 | 7.85 | **5.8x** |
+| 10,000 | 1024 MiB | 10 | 6.03 | 0.00 | 45.75 | 7.67 | **6.0x** |
+| 10,000 | 1024 MiB | 100 | 4.92 | 0.00 | 45.67 | 7.75 | **5.9x** |
+| 10,000 | 1024 MiB | 500 | 4.56 | 0.00 | 40.87 | 8.15 | **5.0x** |
+| 10,000 | 16 MiB | 0 | 0.00 | 0.00 | 16.94 | 8.21 | **2.1x** |
+| 10,000 | 16 MiB | 10 | 0.01 | 0.00 | 18.19 | 8.47 | **2.1x** |
+| 10,000 | 16 MiB | 100 | 0.00 | 0.00 | 15.28 | 7.86 | **1.9x** |
+| 10,000 | 16 MiB | 500 | 0.00 | 0.00 | 15.37 | 7.72 | **2.0x** |
+| 100,000 | 1024 MiB | 0 | 5.23 | 0.00 | 322.01 | 116.45 | **2.8x** |
+| 100,000 | 1024 MiB | 10 | 5.31 | 0.00 | 318.75 | 117.05 | **2.7x** |
+| 100,000 | 1024 MiB | 100 | 5.13 | 0.00 | 311.30 | 111.68 | **2.8x** |
+| 100,000 | 1024 MiB | 500 | 5.21 | 0.00 | 299.73 | 117.11 | **2.6x** |
+| 100,000 | 16 MiB | 0 | 0.03 | 0.00 | 199.26 | 119.64 | **1.7x** |
+| 100,000 | 16 MiB | 10 | 0.03 | 0.00 | 188.11 | 127.36 | **1.5x** |
+| 100,000 | 16 MiB | 100 | 0.02 | 0.00 | 214.85 | 129.09 | **1.7x** |
+| 100,000 | 16 MiB | 500 | 0.02 | 0.00 | 200.80 | 129.64 | **1.5x** |
+| 1,000,000 | 1024 MiB | 0 | 5.91 | 0.00 | 2619.63 | 1881.42 | **1.4x** |
+| 1,000,000 | 1024 MiB | 10 | 6.12 | 0.00 | 2611.56 | 1840.99 | **1.4x** |
+| 1,000,000 | 1024 MiB | 100 | 5.74 | 0.00 | 2532.07 | 1873.20 | **1.4x** |
+| 1,000,000 | 1024 MiB | 500 | 6.11 | 0.00 | 2483.90 | 1922.79 | **1.3x** |
+| 1,000,000 | 16 MiB | 0 | 1.07 | 0.00 | 2655.51 | 1985.02 | **1.3x** |
+| 1,000,000 | 16 MiB | 10 | 0.33 | 0.00 | 2593.36 | 1812.42 | **1.4x** |
+| 1,000,000 | 16 MiB | 100 | 0.38 | 0.00 | 2552.21 | 1822.37 | **1.4x** |
+| 1,000,000 | 16 MiB | 500 | 0.39 | 0.00 | 2694.28 | 1854.36 | **1.5x** |
+
+The session-safety rule costs nothing measurable here: this fixture drives
+the hydration walk with no concurrent persist worker, so the pin floor never
+holds anything past its natural release. State-apply and prove columns are
+unchanged within noise (full tables in the PR #310 run log).
