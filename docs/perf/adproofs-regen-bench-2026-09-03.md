@@ -91,8 +91,14 @@ directly.
 Read the 16 MiB rows as one regime and the 1 GiB rows as another: at 1M
 boxes a 16 MiB arena evicts continuously while a 1 GiB one never does, so
 the two are not interchangeable. The `#289` column moves the 16 MiB rows
-around by tens of ms in both directions — that is run-to-run variation on
-a lever that, at a 16 MiB budget, only ever reserved ~168k slots.
+in both directions — by tens of ms at 10k/100k boxes and by 170–700 ms
+at 1M boxes. These are medians of five, so they do not by themselves
+establish the run-to-run spread; the 2026-09-06 re-measurement below is a
+second independent sample of the same rows (1M / 16 MiB hydration
+1812–1985 ms there vs 1749–2523 ms here) and shows the same order of
+scatter on a lever that, at a 16 MiB budget, only ever reserved ~168k
+slots. Treat the 16 MiB 1M-box rows as noise-dominated, not as a #289
+effect in either direction.
 
 ## The 1 GiB / 16 MiB hydration ratio, before and after #289
 
