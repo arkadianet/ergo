@@ -1105,11 +1105,14 @@ mod evaluated_value_reduce_parity_tests {
         );
     }
 
-    // ----- oracle parity: AND / OR / XorOf over boolean-collection literals (#311) -----
+    // ----- oracle parity: AND / OR / XorOf over boolean collections (#311) -----
     //
-    // Every cost below is the live JVM oracle's (sigmastate 6.0.2,
-    // `scripts/jvm_serde_oracle`, `difftest --oracle --surface reduce`),
-    // pinned in `test-vectors/scala/bool_collection_logical_cost.json`.
+    // Every verdict and cost asserted here is loaded from
+    // `test-vectors/scala/bool_collection_logical_cost.json`, whose `expected`
+    // field is the live JVM oracle's verbatim `ACCEPT P:<sigma>|<cost>` line
+    // (sigmastate 6.0.2, `scripts/jvm_serde_oracle`, `difftest --oracle`).
+    // The tests name the vector; the file holds the number — they cannot
+    // drift apart.
     //
     // Derivation: the packed 0x85 form deserializes on the JVM into a plain
     // `ConcreteCollection` of `BooleanConstant` items
@@ -1120,136 +1123,189 @@ mod evaluated_value_reduce_parity_tests {
     // of items their short-circuiting loop VISITED; `XorOf` (trees.scala:239-
     // 245) charges the full length.
 
+    #[derive(serde::Deserialize)]
+    struct BoolCollVector {
+        id: String,
+        tree_hex: String,
+        /// Context-extension block bound to SELF's input; absent = empty.
+        #[serde(default)]
+        ext_hex: Option<String>,
+        /// The oracle's verbatim `ACCEPT P:<sigma_hex>|<jit_cost>` line.
+        expected: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct BoolCollVectorFile {
+        vectors: Vec<BoolCollVector>,
+    }
+
+    const BOOL_COLL_VECTORS_JSON: &str =
+        include_str!("../../test-vectors/scala/bool_collection_logical_cost.json");
+
+    fn bool_coll_vectors() -> Vec<BoolCollVector> {
+        serde_json::from_str::<BoolCollVectorFile>(BOOL_COLL_VECTORS_JSON)
+            .expect("parse bool_collection_logical_cost.json")
+            .vectors
+    }
+
+    /// Reduce the named vector and compare against the JVM's line.
+    fn assert_bool_coll_vector(id: &str) {
+        let vectors = bool_coll_vectors();
+        let v = vectors
+            .iter()
+            .find(|v| v.id == id)
+            .unwrap_or_else(|| panic!("vector {id} missing from JSON"));
+        let payload = v
+            .expected
+            .strip_prefix("ACCEPT P:")
+            .unwrap_or_else(|| panic!("vector {id}: expected `ACCEPT P:…`, got {}", v.expected));
+        let (sigma, cost) = payload
+            .split_once('|')
+            .unwrap_or_else(|| panic!("vector {id}: malformed expected {}", v.expected));
+        let cost: u64 = cost.parse().expect("jit cost");
+        let ext = v.ext_hex.as_deref().unwrap_or(NO_EXT);
+        assert_eq!(
+            reduce(&v.tree_hex, ext, NO_REGS),
+            Ok((sigma.to_string(), cost)),
+            "vector {id} ({})",
+            v.tree_hex
+        );
+    }
+
+    /// Every id the tests below assert. A JSON row not on this list is a
+    /// pinned number nobody checks — `bool_coll_vectors_all_asserted` fails.
+    const BOOL_COLL_VECTOR_IDS: &[&str] = &[
+        "and_packed_ftt",
+        "or_packed_ftt",
+        "xorof_packed_ftt",
+        "and_unpacked_fft",
+        "and_coll_boolean_constant",
+        "and_packed_empty",
+        "and_packed_33_first_false",
+        "and_packed_33_all_true",
+        "and_packed_32_first_false",
+        "or_packed_65_first_true",
+        "or_packed_65_all_false",
+        "or_packed_64_first_true",
+        "xorof_packed_33",
+        "and_getvar_33_first_false",
+        "or_getvar_65_first_true",
+    ];
+
+    #[test]
+    fn bool_coll_vectors_all_asserted() {
+        let mut in_json: Vec<String> = bool_coll_vectors().into_iter().map(|v| v.id).collect();
+        let mut asserted: Vec<String> =
+            BOOL_COLL_VECTOR_IDS.iter().map(|s| s.to_string()).collect();
+        in_json.sort();
+        asserted.sort();
+        assert_eq!(
+            in_json, asserted,
+            "JSON rows and asserted ids must match 1:1"
+        );
+    }
+
     /// THE #311 vector: `sigmaProp(AND(Coll[Boolean](false, true, true)))`,
-    /// packed. 15 (BoolToSigmaProp) + 20 + 3·5 (coll) + 10 + 5 (AND, 1 item
-    /// visited) = 65. Pre-fix Rust: 50.
+    /// packed 0x85. 15 (BoolToSigmaProp) + 20 + 3·5 (coll) + 10 + 5 (AND,
+    /// 1 item visited). Pre-fix Rust charged the flat 20 for the collection.
     #[test]
     fn and_over_packed_bool_collection_matches_scala_cost() {
-        assert_eq!(
-            reduce("00d196850306", NO_EXT, NO_REGS),
-            Ok(("d2".to_string(), 65)),
-        );
+        assert_bool_coll_vector("and_packed_ftt");
     }
 
     /// `sigmaProp(OR(Coll[Boolean](false, true, true)))`, packed.
-    /// 15 + 35 + (5 + 5) = 60. Pre-fix Rust: 45.
     #[test]
     fn or_over_packed_bool_collection_matches_scala_cost() {
-        assert_eq!(
-            reduce("00d197850306", NO_EXT, NO_REGS),
-            Ok(("d3".to_string(), 60)),
-        );
+        assert_bool_coll_vector("or_packed_ftt");
     }
 
     /// `sigmaProp(XorOf(Coll[Boolean](false, true, true)))`, packed.
-    /// 15 + 35 + (20 + 5) = 75. Pre-fix Rust: 60.
     #[test]
     fn xor_of_over_packed_bool_collection_matches_scala_cost() {
-        assert_eq!(
-            reduce("00d1ff850306", NO_EXT, NO_REGS),
-            Ok(("d2".to_string(), 75)),
-        );
+        assert_bool_coll_vector("xorof_packed_ftt");
     }
 
-    /// Control: the UNPACKED 0x83 form `AND(Coll(false, false, true))` with
-    /// explicit FalseLeaf/FalseLeaf/TrueLeaf children costs the same 65 —
-    /// the packed form must not be cheaper than what it abbreviates.
+    /// Control: the UNPACKED 0x83 form with explicit FalseLeaf/FalseLeaf/
+    /// TrueLeaf children costs the same as the packed form — the packed form
+    /// must not be cheaper than what it abbreviates.
     #[test]
     fn and_over_unpacked_bool_collection_matches_scala_cost() {
-        assert_eq!(
-            reduce("00d19683030180807f", NO_EXT, NO_REGS),
-            Ok(("d2".to_string(), 65)),
-        );
+        assert_bool_coll_vector("and_unpacked_fft");
     }
 
     /// Control: a `Coll[Boolean]` CONSTANT (type code 0x0d) is one Constant
-    /// node — Fixed(5), no per-item charge. 15 + 5 + 15 = 35.
+    /// node — Fixed(5), no per-item charge.
     #[test]
     fn and_over_coll_boolean_constant_matches_scala_cost() {
-        assert_eq!(
-            reduce("00d1960d0306", NO_EXT, NO_REGS),
-            Ok(("d2".to_string(), 35)),
-        );
+        assert_bool_coll_vector("and_coll_boolean_constant");
     }
 
     /// Empty packed collection: `AND(Coll[Boolean]())` is `true`; the
-    /// PerItemCost formula still charges one chunk at n = 0. 15 + 20 + 15 = 50.
+    /// PerItemCost formula still charges one chunk at n = 0.
     #[test]
     fn and_over_empty_packed_bool_collection_matches_scala_cost() {
-        assert_eq!(
-            reduce("00d1968500", NO_EXT, NO_REGS),
-            Ok(("d3".to_string(), 50)),
-        );
+        assert_bool_coll_vector("and_packed_empty");
     }
 
-    /// Short-circuit cost across the 32-item AND chunk boundary. 33 packed
-    /// items, first `false`: Scala visits 1 item → 1 chunk. 15 + (20 + 165)
-    /// + (10 + 5) = 215. Charging the full 33 (2 chunks) gives 220.
+    /// Short-circuit cost across the 32-item AND chunk boundary: 33 packed
+    /// items, first `false` — Scala visits 1 item (1 chunk); charging the
+    /// full 33 would be 2 chunks.
     #[test]
     fn and_33_items_first_false_charges_visited_prefix_like_scala() {
-        assert_eq!(
-            reduce("00d1968521feffffff01", NO_EXT, NO_REGS),
-            Ok(("d2".to_string(), 215)),
-        );
+        assert_bool_coll_vector("and_packed_33_first_false");
     }
 
-    /// Same 33 items, all `true`: no short-circuit, 2 chunks. 15 + 185 +
-    /// (10 + 10) = 220.
+    /// Same 33 items, all `true`: no short-circuit, 2 chunks.
     #[test]
     fn and_33_items_all_true_charges_two_chunks_like_scala() {
-        assert_eq!(
-            reduce("00d1968521ffffffff01", NO_EXT, NO_REGS),
-            Ok(("d3".to_string(), 220)),
-        );
+        assert_bool_coll_vector("and_packed_33_all_true");
     }
 
     /// 32 items, first `false`: below the boundary the visited prefix and
-    /// the full length both round to 1 chunk. 15 + (20 + 160) + 15 = 210.
+    /// the full length both round to 1 chunk.
     #[test]
     fn and_32_items_first_false_matches_scala_cost() {
-        assert_eq!(
-            reduce("00d1968520feffffff", NO_EXT, NO_REGS),
-            Ok(("d2".to_string(), 210)),
-        );
+        assert_bool_coll_vector("and_packed_32_first_false");
     }
 
-    /// OR's chunk is 64. 65 packed items, first `true`: Scala visits 1 →
-    /// 15 + (20 + 325) + (5 + 5) = 370. Full-length charging gives 375.
+    /// OR's chunk is 64: 65 packed items, first `true` — 1 visited, 1 chunk.
     #[test]
     fn or_65_items_first_true_charges_visited_prefix_like_scala() {
-        assert_eq!(
-            reduce("00d1978541010000000000000000", NO_EXT, NO_REGS),
-            Ok(("d3".to_string(), 370)),
-        );
+        assert_bool_coll_vector("or_packed_65_first_true");
     }
 
-    /// 65 items, all `false`: no short-circuit, 2 chunks. 15 + 345 + (5 +
-    /// 10) = 375.
+    /// 65 items, all `false`: no short-circuit, 2 chunks.
     #[test]
     fn or_65_items_all_false_charges_two_chunks_like_scala() {
-        assert_eq!(
-            reduce("00d1978541000000000000000000", NO_EXT, NO_REGS),
-            Ok(("d2".to_string(), 375)),
-        );
+        assert_bool_coll_vector("or_packed_65_all_false");
     }
 
-    /// 64 items, first `true`: below the boundary. 15 + (20 + 320) + 10 = 365.
+    /// 64 items, first `true`: below the boundary.
     #[test]
     fn or_64_items_first_true_matches_scala_cost() {
-        assert_eq!(
-            reduce("00d19785400100000000000000", NO_EXT, NO_REGS),
-            Ok(("d3".to_string(), 365)),
-        );
+        assert_bool_coll_vector("or_packed_64_first_true");
     }
 
-    /// XorOf never short-circuits: 33 items → 2 chunks. 15 + 185 + (20 +
-    /// 10) = 230.
+    /// XorOf never short-circuits: 33 items → 2 chunks.
     #[test]
     fn xor_of_33_items_charges_full_length_like_scala() {
-        assert_eq!(
-            reduce("00d1ff8521feffffff01", NO_EXT, NO_REGS),
-            Ok(("d2".to_string(), 230)),
-        );
+        assert_bool_coll_vector("xorof_packed_33");
+    }
+
+    /// Runtime-produced collection, not a literal: `sigmaProp(AND(getVar
+    /// [Coll[Boolean]](1).get))` over an extension var holding 33 booleans,
+    /// first `false`. The visited-prefix rule applies to whatever value
+    /// reaches `AND`, not only to 0x85/0x83 literals.
+    #[test]
+    fn and_over_getvar_33_first_false_charges_visited_prefix_like_scala() {
+        assert_bool_coll_vector("and_getvar_33_first_false");
+    }
+
+    /// `sigmaProp(OR(getVar[Coll[Boolean]](1).get))` over 65 booleans,
+    /// first `true` — the OR twin on the runtime path.
+    #[test]
+    fn or_over_getvar_65_first_true_charges_visited_prefix_like_scala() {
+        assert_bool_coll_vector("or_getvar_65_first_true");
     }
 
     // ----- oracle parity: getVar / getReg type-mismatch semantics -----

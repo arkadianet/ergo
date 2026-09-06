@@ -1,7 +1,7 @@
-diff --git b/ergo-sigma/src/evaluator/opcodes/constants.rs a/ergo-sigma/src/evaluator/opcodes/constants.rs
+diff --git a/ergo-sigma/src/evaluator/opcodes/constants.rs b/ergo-sigma/src/evaluator/opcodes/constants.rs
 index 644444ab..d998bafe 100644
---- b/ergo-sigma/src/evaluator/opcodes/constants.rs
-+++ a/ergo-sigma/src/evaluator/opcodes/constants.rs
+--- a/ergo-sigma/src/evaluator/opcodes/constants.rs
++++ b/ergo-sigma/src/evaluator/opcodes/constants.rs
 @@ -105,23 +105,10 @@ pub(in crate::evaluator) fn eval_context(cost: &mut CostAccumulator) -> Result<V
  // 0x85 BoolCollection — packed-bits literal vector. The parser pre-decodes
  // the packed bits into `Payload::BoolCollection`, so the arm wires the

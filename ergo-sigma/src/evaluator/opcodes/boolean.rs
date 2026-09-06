@@ -143,12 +143,10 @@ pub(in crate::evaluator) fn eval_and_collection(
             // visited — the prefix up to and including the first `false`,
             // not the collection length. Past a 32-item chunk boundary the
             // two differ, and cost is consensus.
-            let visited = items
-                .iter()
-                .position(|b| !*b)
-                .map_or(items.len(), |i| i + 1);
+            let first_false = items.iter().position(|b| !*b);
+            let visited = first_false.map_or(items.len(), |i| i + 1);
             add_cost_per_item(cx.cost, 0x96, visited as u32)?;
-            Ok(Value::Bool(items.iter().all(|b| *b)))
+            Ok(Value::Bool(first_false.is_none()))
         }
         _ => {
             add_cost_per_item(cx.cost, 0x96, collection_len(&val, cx.ctx) as u32)?;
@@ -171,9 +169,10 @@ pub(in crate::evaluator) fn eval_or_collection(
             // Scala `OR.eval` (trees.scala:199-212): `while (i < len && !res)`
             // — items visited up to and including the first `true`. Chunk
             // size is 64, so the divergence surfaces at 65+ items.
-            let visited = items.iter().position(|b| *b).map_or(items.len(), |i| i + 1);
+            let first_true = items.iter().position(|b| *b);
+            let visited = first_true.map_or(items.len(), |i| i + 1);
             add_cost_per_item(cx.cost, 0x97, visited as u32)?;
-            Ok(Value::Bool(items.iter().any(|b| *b)))
+            Ok(Value::Bool(first_true.is_some()))
         }
         _ => {
             add_cost_per_item(cx.cost, 0x97, collection_len(&val, cx.ctx) as u32)?;
