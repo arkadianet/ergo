@@ -16,6 +16,8 @@ infrastructure.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-07
+
 ### Added
 
 - **`[mempool]` cost budgets are TOML-tunable.** `global_cost_budget`,
@@ -63,6 +65,47 @@ infrastructure.
   `test-vectors/testnet/utxo_snapshot_manifest_522239.json` (Scala 6.0.3
   testnet) is captured and `manifest_prefix32_rule_matches_scala_manifest`
   pins the rule against it.
+
+- **Standing differential consensus guard (`ergo-difftest`).** Evaluated-value
+  seeding over registers and the context extension (all five Scala
+  `EvaluatedValue` classes at both wire positions), a `reduce_ctx` oracle
+  surface that reduces a script with its SELF registers and extension on the
+  wire, and a nightly JVM-oracle job with a fail-loud guard
+  (`scripts/difftest-guard.sh`). Findings are catalogued in
+  `ergo-difftest/known_bugs/` so the guard re-arms on every fixed class. (#309)
+- **`CONTEXT.headers.size` evaluates** (`SizeOf` over `Coll[Header]`); a script
+  reading it was previously a type error here and a normal value on the
+  reference. `ergo-wallet` gained the distributed-signing rounds of Scala's
+  `ProverUtils` (commitments → partial proof → completion) so a multi-party
+  transaction can be signed without sharing secrets. (#303)
+- Mode 4 composed-lifecycle acceptance tests: a real UTXO snapshot install
+  through boot, and NiPoPoW + UTXO composition in both orders; the install
+  fixture is exported from `ergo_state::test_helpers`. (#319)
+- `ergo-compiler`: the source map survives constant collections collapsed by
+  segregation (#321). `ergo-sigma`: a `value-trace` feature records every
+  evaluated node's value by preorder id, for tooling (#322).
+
+### Security
+- **A peer cannot steer the anchor-map builder into an internal host (SSRF).**
+  See the Fixed entry below; listed here because it is reachable by any peer
+  that advertises a REST URL. (#325)
+- **A flooding peer cannot starve the operator's own transactions, and an
+  unauthenticated caller on a public bind cannot drain the local reserve.**
+  See the two mempool budget entries below. (#300)
+
+### Changed
+- **AVL arena read path (measured, #288/#289).** One redb read session per
+  bulk walk (hydration and the pre-persist mutation walk) instead of a fresh
+  transaction and table per cold node read, and the clean cache's LRU grows
+  into its byte budget instead of reserving an item table up front. Hydration
+  is 5.8x faster at 10k boxes, 2.8x at 100k, 1.4x at 1M; arena construction
+  drops from ~5 ms to ~0. A session pins its redb snapshot: while one is open
+  the arena releases no pin for a persist job above the watermark it observed
+  at open, and a session miss is retried on a fresh snapshot, so a session
+  can never serve a stale or missing node while the persist worker commits
+  behind it. (#310)
+- `GET /mining/candidate` serves the target `b` as a bare JSON number, as the
+  reference does; the decoder accepts both forms. (#308)
 
 ### Fixed
 
@@ -209,6 +252,50 @@ infrastructure.
 - Corrected the documented Mode 3 rollback-window floor in
   `docs/compatibility.md` (`keep_versions + SAFETY_MARGIN` = 250 at the
   defaults, not 232).
+- **Consensus: every Scala `EvaluatedValue` form is accepted in a
+  ContextExtension and in registers** — `Constant`, `ConcreteCollection`
+  (0x83 and the bool-packed 0x85), `Tuple` (0x86) and `GroupGenerator`
+  (0x82) — and `getVar` with a mismatched declared type answers as the
+  reference does. Only constants were accepted before, which made a live
+  mainnet block containing a collection-valued extension entry a
+  reject-valid stall. Transaction and box ids are computed over the
+  canonical re-serialisation of the extension and of GroupElement constants
+  (Scala's `bytesToSign`), so a non-canonical wire form (a bare `TrueLeaf`
+  opcode, a `0x00`-prefixed non-zero point) hashes to the same id on both
+  implementations; ids are pinned to the JVM oracle. (#301) The REST
+  `Preserve` decode mode canonicalises a caller-supplied extension the same
+  way (#323).
+- **Consensus (accept-invalid, found by the first cargo-fuzz run): a zero
+  sigma type prefix and an inline pre-v3 `SHeader` constant are hard
+  rejects**, matching `TypeSerializer.deserialize`'s `InvalidTypePrefix`
+  and `DataSerializer`'s `SerializerException` — both escape the soft-fork
+  wrap on the reference; the node used to wrap them as unparsed trees and
+  accept the box. (#315)
+- **P0: an AVL node whose persist job has not committed is never evicted from
+  the clean cache.** With the persist pipeline on, `arena.commit()` ran before
+  redb held the block's bytes, so budget pressure could evict a node whose
+  only copy was still in the worker's queue; the next cold read then returned
+  stale bytes or nothing. Commits now carry a `CommitDurability`, pinning
+  pipeline-committed nodes until the worker's durable watermark passes their
+  job. (#316)
+- **Mining no longer halts permanently after a transient header/full-block
+  gap.** Candidate building is gated on the applied tip like Scala's
+  `CandidateGenerator`, not on `headers == full`; `[mining]
+  offline_generation` bypasses the start gate. (#302)
+- **Mode 5 (headers-only digest) no longer panics on the first inbound
+  header.** The header pipeline assumed a UTXO store; it is now generic over
+  the store's header traits. (#306)
+- **Autolykos v1 `powSolution.d` is decoded and encoded as an unsigned
+  BigInt** (Scala's `asUnsignedByteArray`), so a block decoded from the
+  reference's REST JSON reconstructs to the right header id; pinned to ten
+  live-captured v1 headers. (#308)
+- **P2P: the dial book holds only declared, routable addresses.** An inbound
+  peer's ephemeral socket is no longer persisted as if it were dialable,
+  learned loopback / RFC 1918 / link-local / CGNAT / special-purpose
+  addresses are never offered as dial candidates, existing books are
+  sanitised on boot, and a dropped duplicate inbound connection is logged.
+  `[peers] allow_local` (default off, Scala `allowLocal`) re-admits the local
+  classes for LAN devnets. (#299)
 
 ## [0.6.0] - 2026-09-03
 
