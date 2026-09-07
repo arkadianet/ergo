@@ -121,6 +121,16 @@ fn reduce_verdict(bytes: &[u8], activated: u8) -> Option<String> {
     check_header_size_bit(&tree).ok()?;
     check_resolvable_methods(&tree).ok()?;
     check_sigma_prop_root(&tree).ok()?;
+    // Scala curve-checks every group element at deserialize
+    // (`GroupElementSerializer.parse`); the production path validates the
+    // reader's recorded points before evaluating, so do the same here.
+    if !r
+        .take_group_elements()
+        .iter()
+        .all(|ge| validate_group_element(*ge).is_ok())
+    {
+        return None;
+    }
     let ctx = minimal_ctx(&tree, activated);
     let mut cost = CostAccumulator::recording_only();
     let sb = reduce_expr_with_cost(&tree.body, &ctx, &tree.constants, &mut cost).ok()?;

@@ -363,7 +363,13 @@ fn deserialize_box_script(
     bytes: &[u8],
     check_group_elements: bool,
 ) -> (Result<ergo_ser::ergo_tree::ErgoTree, String>, usize) {
-    let mut r = VlqReader::new(bytes);
+    // Scoped like every other node-side reader here: the top-level tree is
+    // gated by the explicit `check_tree_version_supported` call below, but a
+    // NESTED box script (an `SBox` constant) is gated inside `read_ergo_tree`
+    // from the reader's scope — unscoped it would run under the default
+    // context (activated 1) and accept a nested future-version tree the JVM
+    // rejects at activated 3.
+    let mut r = VlqReader::new(bytes).with_activated_script_version(ORACLE_ACTIVATED_VERSION);
     let tree = match ergo_ser::ergo_tree::read_ergo_tree(&mut r) {
         Ok(t) => t,
         Err(e) => return (Err(format!("{e:?}")), r.position()),
