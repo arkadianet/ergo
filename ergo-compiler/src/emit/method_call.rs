@@ -46,6 +46,7 @@ impl Scope {
                      (tree_version < 3): Scala GraphBuilding rejects it under v5 activation",
                     method.name,
                 ),
+                pos: None,
             });
         }
         // (a2) V6-only `SGlobal` methods reached through a BARE predef alias
@@ -77,6 +78,7 @@ impl Scope {
                      GraphBuilding rejects it under v5 activation",
                     method.name, V6_ERGO_TREE_VERSION,
                 ),
+                pos: None,
             });
         }
         // (b) Postfix residual `size`: a space-form nullary call (`arr1
@@ -94,6 +96,7 @@ impl Scope {
                        GraphBuilding only lowers the Select path (SizeOf); wire pair \
                        (12,1) is unevaluable on both sides"
                     .into(),
+                pos: None,
             });
         }
         // (c) `Box.getReg[T](<literal>)`: Scala lowers a CONST-index getReg
@@ -128,6 +131,7 @@ impl Scope {
                              const-index form to ExtractRegisterAs and bounds-checks it \
                              at compile time"
                         ),
+                        pos: None,
                     });
                 }
                 let Some((_, inner)) = type_subst.first() else {

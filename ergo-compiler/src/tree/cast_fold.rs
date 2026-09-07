@@ -256,6 +256,7 @@ fn fold_numeric_cast(
     let overflow = |what: String| EmitError::GraphBuildingReject {
         class: "ArithmeticException",
         what,
+        pos: None,
     };
     match (src_tpe, val) {
         (SigmaType::SByte | SigmaType::SShort | SigmaType::SInt | SigmaType::SLong, _) => {

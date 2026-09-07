@@ -216,6 +216,7 @@ fn overflow(what: String) -> EmitError {
     EmitError::GraphBuildingReject {
         class: "ArithmeticException",
         what,
+        pos: None,
     }
 }
 

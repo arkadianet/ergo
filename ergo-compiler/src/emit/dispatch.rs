@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use ergo_ser::opcode::{Expr, IrNode, Payload};
 
+use crate::span::Pos;
 use crate::stype::SType;
 use crate::typed::{node_tpe, MethodRef, TypedExpr};
 
@@ -122,6 +123,7 @@ impl Scope {
                     "bit operator '{}' has no GraphBuilding lowering in Scala 6.0.2",
                     bit_op_symbol(*opcode),
                 ),
+                pos: None,
             }),
 
             // ── boolean binary (lazy) + unary ─────────────────────────────────
@@ -137,6 +139,7 @@ impl Scope {
             T::BitInversion { .. } => Err(EmitError::GraphBuildingReject {
                 class: "GraphBuildingException",
                 what: "bit inversion '~' has no GraphBuilding lowering in Scala 6.0.2".into(),
+                pos: None,
             }),
 
             // ── control / structure ───────────────────────────────────────────
@@ -404,8 +407,10 @@ impl Scope {
                     // (ConstantPlaceholderSerializer parity), so only the index
                     // is emitted.
                     Some(index) => node(0x73, Payload::ConstPlaceholder { index: *index }),
+                    // `!!!` carries no SourceContext — the oracle records
+                    // `REJECT 0:0 StagingException` — so no position here.
                     None if is_predef_function(name) => {
-                        Err(unlowered_predef_reject(name, "StagingException"))
+                        Err(unlowered_predef_reject(name, "StagingException", None))
                     }
                     None => Err(EmitError::InvalidShape(
                         "Ident not bound to any enclosing ValDef or lambda arg",
@@ -418,7 +423,9 @@ impl Scope {
                 body,
                 ..
             } => self.emit_lambda(tpe_params, args, body.as_deref()),
-            T::Apply { func, args, .. } => self.emit_apply(func, args),
+            T::Apply {
+                func, args, pos, ..
+            } => self.emit_apply(func, args, *pos),
             T::Select {
                 obj,
                 field,
@@ -562,12 +569,19 @@ impl Scope {
         &mut self,
         func: &TypedExpr,
         args: &[TypedExpr],
+        pos: Pos,
     ) -> Result<Expr, EmitError> {
         match node_tpe(func) {
             SType::SFunc { .. } => {
                 if let TypedExpr::Ident { name, .. } = func {
                     if args.len() != 1 && self.is_unbound(name) && is_predef_function(name) {
-                        return Err(unlowered_predef_reject(name, "GraphBuildingException"));
+                        // `throwError` cites `node.sourceContext` — the Apply's
+                        // own position (oracle `REJECT 1:11` / `1:85`).
+                        return Err(unlowered_predef_reject(
+                            name,
+                            "GraphBuildingException",
+                            Some(pos),
+                        ));
                     }
                 }
                 let func = self.emit(func)?;

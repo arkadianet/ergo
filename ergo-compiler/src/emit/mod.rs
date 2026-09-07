@@ -75,6 +75,7 @@
 use ergo_ser::opcode::{Expr, IrNode, Payload};
 use ergo_ser::sigma_type::SigmaType;
 
+use crate::span::Pos;
 use crate::typed::TypedExpr;
 
 mod dispatch;
@@ -122,6 +123,14 @@ pub enum EmitError {
         class: &'static str,
         /// What was rejected (names the operator/method/constant family).
         what: String,
+        /// The source offset of the rejected node when the reference's
+        /// exception carries a `SourceContext` (`GraphBuilding.throwError`
+        /// cites `node.sourceContext`, e.g. `REJECT 1:11` for the residual
+        /// `getVarFromInput[Int](0.toShort, 0.toByte)`); `None` when Scala
+        /// itself reports `0:0` (a `!!!` `StagingException`, a fold-time
+        /// `ArithmeticException`, …), so [`crate::CompileError::pos`] stays
+        /// oracle-faithful in both directions.
+        pos: Option<Pos>,
     },
 }
 
@@ -237,6 +246,10 @@ fn is_predef_function(name: &str) -> bool {
 ///   oracle: `getVarFromInput[Int](0.toShort, 0.toByte)` `REJECT 1:11
 ///   GraphBuildingException`, `outerJoin[..](5 args)` likewise.
 ///
+/// `pos` follows the same split: the multi-argument door cites the
+/// application's `SourceContext` (`throwError(…, node.sourceContext)`), the
+/// `!!!` door carries none — the oracle records `0:0` — so it passes `None`.
+///
 /// `why` names the builder's actual precondition so the message is
 /// actionable: every constant-only builder pattern-matches
 /// `Constant[SNumericType]` ids (`SigmaPredef.scala:147,394,405,426,512`) or
@@ -249,7 +262,7 @@ fn is_predef_function(name: &str) -> bool {
 /// (`GraphBuilding.scala:1090-1094`); no such expression-id door exists for
 /// `getVar`/`executeFromVar` (`CONTEXT.getVar[T](expr)` also rejects,
 /// `GraphBuildingException`).
-fn unlowered_predef_reject(name: &str, class: &'static str) -> EmitError {
+fn unlowered_predef_reject(name: &str, class: &'static str, pos: Option<Pos>) -> EmitError {
     let why = match name {
         "getVarFromInput" => {
             "requires two integer LITERAL ids (SigmaPredef.scala:147 matches \
@@ -278,6 +291,7 @@ fn unlowered_predef_reject(name: &str, class: &'static str) -> EmitError {
             "predef function `{name}` {why}; the reference compiler's GraphBuilding \
              stage rejects the un-lowered application ({class})"
         ),
+        pos,
     }
 }
 
@@ -2285,7 +2299,7 @@ mod tests {
                 }],
             );
             match emit(&node).unwrap_err() {
-                EmitError::GraphBuildingReject { class, what } => {
+                EmitError::GraphBuildingReject { class, what, .. } => {
                     assert_eq!(class, "StagingException", "{name}");
                     assert!(what.contains(name), "{name}: {what}");
                 }
@@ -2338,7 +2352,7 @@ mod tests {
         ] {
             let node = unlowered_predef_apply(name, dom, args);
             match emit(&node).unwrap_err() {
-                EmitError::GraphBuildingReject { class, what } => {
+                EmitError::GraphBuildingReject { class, what, .. } => {
                     assert_eq!(class, "GraphBuildingException", "{name}");
                     assert!(what.contains(name), "{name}: {what}");
                 }

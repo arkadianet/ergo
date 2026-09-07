@@ -1002,43 +1002,60 @@ mod tests {
         // V=3: `getVarFromInput` is a V6 (EIP-50) surface on both the predef
         // and the `Context` method table.
         let compile_v3 = |src: &str| compile(&env, src, 3, NetworkPrefix::Testnet);
-        for (src, class) in [
+        // (source, oracle class, oracle `line:col`) — the GraphBuildingException
+        // door cites the application's SourceContext (`throwError`, :457-458);
+        // the StagingException door (`!!!`) carries none, oracle `0:0`.
+        for (src, class, oracle_pos) in [
             (
                 "{ val sib = INPUTS.indices.filter { (i: Int) => INPUTS(i).value > 0 }(0); \
                  sigmaProp(getVarFromInput[GroupElement](sib.toShort, 0.toByte).isDefined) }",
                 "GraphBuildingException",
+                (1, 85),
             ),
             (
                 "sigmaProp(getVarFromInput[Int](0.toShort, 0.toByte).get == 7)",
                 "GraphBuildingException",
+                (1, 11),
             ),
             (
                 "{ val i = INPUTS.size.toByte; sigmaProp(getVar[Int](i).isDefined) }",
                 "StagingException",
+                (0, 0),
             ),
             (
                 "sigmaProp(getVar[Int](0.toByte).isDefined)",
                 "StagingException",
+                (0, 0),
             ),
             (
                 "{ val i = INPUTS.size.toByte; executeFromVar[SigmaProp](i) }",
                 "StagingException",
+                (0, 0),
             ),
             (
                 "sigmaProp(executeFromSelfReg[Boolean](INPUTS.size))",
                 "StagingException",
+                (0, 0),
             ),
             (
                 "{ val s = \"abc\"; sigmaProp(fromBase16(s).size == 1) }",
                 "StagingException",
+                (0, 0),
             ),
             (
                 "{ val s = \"5\"; sigmaProp(bigInt(s) > 0.toBigInt) }",
                 "StagingException",
+                (0, 0),
             ),
         ] {
             let err = compile_v3(src).expect_err(src);
             assert_eq!(err.class(), class, "{src}: {err}");
+            let got = if err.pos() == 0 && oracle_pos == (0, 0) {
+                (0, 0)
+            } else {
+                crate::span::line_col(src, err.pos())
+            };
+            assert_eq!(got, oracle_pos, "{src}: reject position vs oracle");
             assert!(
                 !err.to_string().contains("invalid shape"),
                 "{src}: user-reachable reject framed as a pipeline bug: {err}"
