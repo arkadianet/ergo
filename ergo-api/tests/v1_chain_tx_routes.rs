@@ -297,6 +297,54 @@ impl NodeChainQuery for PrunedChain {
     }
 }
 
+/// A chain the node HAS but cannot serialise — the shape issue #326 hit on
+/// mainnet 545,684, where a stored block whose output carried a
+/// future-version ErgoTree failed to re-parse. Every block read reports the
+/// failure instead of collapsing it into "absent", so the routes must answer
+/// 500 rather than a 404 that would send a chain-walking client hunting for a
+/// hole that is not there.
+struct UnserialisableChain;
+impl NodeChainQuery for UnserialisableChain {
+    fn info(&self) -> ergo_api::compat::types::ScalaInfo {
+        unreachable!("chain.info() is not on the v1 read path")
+    }
+    fn header_ids_at_height(&self, height: u32) -> Vec<String> {
+        (height == HEIGHT).then(block_id).into_iter().collect()
+    }
+    fn header_by_id(&self, header_id_hex: &str) -> Option<ScalaHeader> {
+        (header_id_hex == block_id()).then(scala_header)
+    }
+    fn full_block_by_id(&self, header_id_hex: &str) -> Option<ScalaFullBlock> {
+        self.try_full_block_by_id(header_id_hex).ok().flatten()
+    }
+    fn try_full_block_by_id(&self, header_id_hex: &str) -> Result<Option<ScalaFullBlock>, String> {
+        if header_id_hex == block_id() {
+            return Err(PARSE_FAILURE.to_string());
+        }
+        Ok(None)
+    }
+    fn try_block_transactions_by_id(
+        &self,
+        header_id_hex: &str,
+    ) -> Result<Option<ScalaBlockTransactions>, String> {
+        if header_id_hex == block_id() {
+            return Err(PARSE_FAILURE.to_string());
+        }
+        Ok(None)
+    }
+}
+
+/// What the bridge reports when a stored section will not re-parse; the 500
+/// body must carry it so the operator sees why.
+const PARSE_FAILURE: &str = "parse block_transactions: invalid data";
+
+fn unserialisable() -> Deps {
+    Deps {
+        chain: Some(Arc::new(UnserialisableChain)),
+        ..Deps::default()
+    }
+}
+
 struct StubSubmit {
     result: Result<String, SubmitError>,
 }
@@ -1328,4 +1376,63 @@ async fn status_malformed_id_is_invalid_tx_id() {
     let (status, body) = get(Deps::default(), "/api/v1/transactions/xyz/status").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(reason(&body), "invalid_tx_id");
+}
+
+// ----- chain: stored-but-unserialisable blocks are 500, not 404 (#326) ----
+
+/// `GET /api/v1/chain/blocks/{header_id}` — a stored block that will not
+/// serialise reports the failure; 404 would deny the node has it at all.
+#[tokio::test]
+async fn block_by_id_unserialisable_is_internal_error() {
+    let (status, body) = get(
+        unserialisable(),
+        &format!("/api/v1/chain/blocks/{}", block_id()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(reason(&body), "internal_error");
+    assert_eq!(body["error"]["detail"], serde_json::json!(PARSE_FAILURE));
+}
+
+/// `GET /api/v1/chain/blocks/{header_id}/transactions` — same distinction on
+/// the transactions half, which reads the section directly.
+#[tokio::test]
+async fn block_transactions_unserialisable_is_internal_error() {
+    let (status, body) = get(
+        unserialisable(),
+        &format!("/api/v1/chain/blocks/{}/transactions", block_id()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(reason(&body), "internal_error");
+    assert_eq!(body["error"]["detail"], serde_json::json!(PARSE_FAILURE));
+}
+
+/// `GET /api/v1/chain/proofs/{header_id}` — the AD-proofs route reassembles
+/// the whole block, so it fails the same way. Distinct from the pruned case
+/// above (`ad_proofs_unavailable`, 503): there the block reads fine and only
+/// the section is absent.
+#[tokio::test]
+async fn block_ad_proofs_unserialisable_is_internal_error() {
+    let (status, body) = get(
+        unserialisable(),
+        &format!("/api/v1/chain/proofs/{}", block_id()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(reason(&body), "internal_error");
+    assert_eq!(body["error"]["detail"], serde_json::json!(PARSE_FAILURE));
+}
+
+/// An id the node genuinely does not have still 404s on the same stub — the
+/// 500 is keyed to the unserialisable block, not to the route.
+#[tokio::test]
+async fn unknown_id_on_unserialisable_chain_is_still_block_not_found() {
+    let (status, body) = get(
+        unserialisable(),
+        &format!("/api/v1/chain/blocks/{:064x}", 999u32),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(reason(&body), "block_not_found");
 }
