@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use ergo_ser::opcode::{Expr, IrNode, Payload};
 
+use crate::span::Pos;
 use crate::stype::SType;
 use crate::typed::{node_tpe, MethodRef, TypedExpr};
 
@@ -122,6 +123,7 @@ impl Scope {
                     "bit operator '{}' has no GraphBuilding lowering in Scala 6.0.2",
                     bit_op_symbol(*opcode),
                 ),
+                pos: None,
             }),
 
             // ── boolean binary (lazy) + unary ─────────────────────────────────
@@ -137,6 +139,7 @@ impl Scope {
             T::BitInversion { .. } => Err(EmitError::GraphBuildingReject {
                 class: "GraphBuildingException",
                 what: "bit inversion '~' has no GraphBuilding lowering in Scala 6.0.2".into(),
+                pos: None,
             }),
 
             // ── control / structure ───────────────────────────────────────────
@@ -373,29 +376,26 @@ impl Scope {
                 // Two distinct reasons an Ident can be unbound here, and they
                 // must NOT be conflated (D-C8):
                 //
-                // 1. `name` is a KNOWN predef function (`allZK`/`anyZK`/
-                //    `outerJoin` — `predef_ir.rs`'s `predefined_env`) whose
-                //    Scala `irBuilder` is the literal `PredefFuncInfo(undefined)`
-                //    sentinel (SigmaPredef.scala:79-92/108-123) — genuinely
-                //    UNIMPLEMENTED in the reference compiler itself, not a gap
-                //    in this port. `predef_ir_builder` mirrors that with a
-                //    `None` fall-through, so the typed tree keeps the raw
-                //    `Apply(Ident, args)` shape all the way here — BYTE-
-                //    IDENTICAL to the oracle's own `tce`/`tcs` residual. Scala's
-                //    `compiler.compile` (the `cc`/`cce`/`ccs` verbs this
-                //    crate's `compile()` mirrors) reaches `GraphBuilding.eval`'s
-                //    `Ident` case, `env.getOrElse(n, !!!(...))`, which throws
+                // 1. `name` is a KNOWN predef function (`predef_ir.rs`'s
+                //    `predefined_env`) whose Scala `irBuilder` declined the
+                //    application: the builder is a PARTIAL function — a
+                //    literal-only matcher for the context-var / string-decoder
+                //    families (`getVar[T](expr)`, `bigInt(s)`, …) or the
+                //    `PredefFuncInfo(undefined)` sentinel for `allZK`/`anyZK`/
+                //    `outerJoin` — so `PredefinedFuncApply` never fires and the
+                //    typed tree keeps the raw `Apply(Ident, args)` shape all the
+                //    way here, BYTE-IDENTICAL to the oracle's own `tc` residual
+                //    (`predef_ir_builder` mirrors the partiality with a `None`
+                //    fall-through). Scala's `compiler.compile` (the `cc`/`cce`/
+                //    `ccs` verbs this crate's `compile()` mirrors) evaluates the
+                //    one-argument callee through `GraphBuilding.eval`'s `Ident`
+                //    case, `env.getOrElse(n, !!!(...))`, which throws
                 //    unconditionally (`n` was never bound as a lambda arg or
-                //    block val) — a `StagingException`. Oracle-confirmed:
-                //    literal single-/multi-element `Coll` AND a val-bound
-                //    `Coll` all REJECT identically for both `allZK`/`anyZK` —
-                //    there is no accepting form, not even the "literal Coll
-                //    unwraps to SigmaAnd/SigmaOr" shape this port used to
-                //    assume (that unwrap only fires for the `&&`/`||`
-                //    OPERATOR route, which builds a `SigmaAnd`/`SigmaOr` node
-                //    directly and never passes through `PredefinedFuncApply`
-                //    at all). This is a real, user-reachable REJECT —
-                //    reported as such, not as an internal pipeline bug.
+                //    block val) — a `StagingException`. This is a real,
+                //    user-reachable REJECT — reported as such, not as an
+                //    internal pipeline bug. (A multi-argument residual never
+                //    reaches this arm: `emit_apply` rejects it first with the
+                //    `GraphBuildingException` class Scala throws there.)
                 // 2. Anything else: the binder substitutes env values as
                 //    Constants and the typer only emits Ident for in-scope
                 //    val/lambda-arg names or (1) above, so any OTHER unbound
@@ -407,19 +407,14 @@ impl Scope {
                     // (ConstantPlaceholderSerializer parity), so only the index
                     // is emitted.
                     Some(index) => node(0x73, Payload::ConstPlaceholder { index: *index }),
-                    None => match known_predef_gap(name) {
-                        Some(what) => Err(EmitError::GraphBuildingReject {
-                            class: "StagingException",
-                            what: format!(
-                                "predef function `{what}` has no compile-time lowering \
-                                 (Scala SigmaPredef irBuilder = undefined; GraphBuilding's \
-                                 Ident eval throws for an unbound predef name)"
-                            ),
-                        }),
-                        None => Err(EmitError::InvalidShape(
-                            "Ident not bound to any enclosing ValDef or lambda arg",
-                        )),
-                    },
+                    // `!!!` carries no SourceContext — the oracle records
+                    // `REJECT 0:0 StagingException` — so no position here.
+                    None if is_predef_function(name) => {
+                        Err(unlowered_predef_reject(name, "StagingException", None))
+                    }
+                    None => Err(EmitError::InvalidShape(
+                        "Ident not bound to any enclosing ValDef or lambda arg",
+                    )),
                 },
             },
             T::Lambda {
@@ -428,7 +423,9 @@ impl Scope {
                 body,
                 ..
             } => self.emit_lambda(tpe_params, args, body.as_deref()),
-            T::Apply { func, args, .. } => self.emit_apply(func, args),
+            T::Apply {
+                func, args, pos, ..
+            } => self.emit_apply(func, args, *pos),
             T::Select {
                 obj,
                 field,
@@ -556,13 +553,37 @@ impl Scope {
     ///   `SInt` when narrower (SigmaTyper.scala:261-277; the frontend lowers
     ///   `coll(i)` at typer time, so this arm is defensive normalization);
     /// - anything else → [`EmitError::UnsupportedNode`] naming the callee.
+    ///
+    /// A function-typed callee that is an UNBOUND predef `Ident` is the
+    /// residual of a predef application the typer could not lower (D-C8,
+    /// issue #332 — `getVarFromInput[T](sib.toShort, 0.toByte)`). Scala's
+    /// `GraphBuilding.buildNode` has exactly one `Apply` rule for a
+    /// function callee, `case Apply(f, Seq(x)) if f.tpe.isFunc`
+    /// (`GraphBuilding.scala:729-732`), so a residual with any OTHER arity
+    /// matches nothing and dies at `throwError` ("Don't know how to
+    /// buildNode", `:457-458`) — `GraphBuildingException`. The one-argument
+    /// residual instead evaluates the callee, which the `T::Ident` arm
+    /// rejects with the `StagingException` that `eval`'s `Ident` case throws
+    /// (`:511-512`). Both doors are mirrored here, in the same order.
     pub(crate) fn emit_apply(
         &mut self,
         func: &TypedExpr,
         args: &[TypedExpr],
+        pos: Pos,
     ) -> Result<Expr, EmitError> {
         match node_tpe(func) {
             SType::SFunc { .. } => {
+                if let TypedExpr::Ident { name, .. } = func {
+                    if args.len() != 1 && self.is_unbound(name) && is_predef_function(name) {
+                        // `throwError` cites `node.sourceContext` — the Apply's
+                        // own position (oracle `REJECT 1:11` / `1:85`).
+                        return Err(unlowered_predef_reject(
+                            name,
+                            "GraphBuildingException",
+                            Some(pos),
+                        ));
+                    }
+                }
                 let func = self.emit(func)?;
                 let args = self.items_of(args)?;
                 node(

@@ -1211,6 +1211,42 @@
 //! (byte-for-class match against the oracle) plus a unit-level
 //! `emit::tests::known_predef_gap_ident_returns_graph_building_reject_not_invalid_shape`.
 //!
+//! **Generalized (issue #332, the same class):** the literal-only predef
+//! families have the SAME residual shape. `getVar`/`executeFromVar`/
+//! `getVarFromInput`/`executeFromSelfReg*` irBuilders pattern-match
+//! `Constant[SNumericType]` ids only (`SigmaPredef.scala:147,394,405,426,
+//! 512`); `bigInt`/`unsignedBigInt`/`fromBase16`/`fromBase58`/`fromBase64`/
+//! `deserialize` match an `EvaluatedValue[SString]` literal only. So
+//! `getVarFromInput[GroupElement](sib.toShort, 0.toByte)` — and even
+//! `getVarFromInput[Int](0.toShort, 0.toByte)` — typechecks on both sides
+//! into a raw `Apply(Ident 'getVarFromInput') [Select 'toShort' ..]` (s-expr
+//! byte-identical, golden_seed §27) and Scala's `compiler.compile` REJECTS
+//! it in GraphBuilding. The exception CLASS depends on arity, because
+//! `GraphBuilding.scala` has exactly one function-`Apply` rule,
+//! `case Apply(f, Seq(x)) if f.tpe.isFunc` (`:729-732`): a one-argument
+//! residual evaluates the callee and dies in `eval`'s `Ident` case
+//! (`:511-512`, `StagingException` — `getVar[Int](i)`, `bigInt(s)`,
+//! `fromBase16(s)`, `executeFromSelfReg[T](INPUTS.size)`, and the trio
+//! above); any other arity matches nothing and falls to `throwError`
+//! (`:457-458`, `GraphBuildingException` at the application's position —
+//! `getVarFromInput` with two expression ids, `REJECT 1:11`; `outerJoin`'s
+//! five-argument form, which the earlier `known_predef_gap` mis-classed as
+//! `StagingException`). `emit` now mirrors both doors: `Scope::is_unbound`
+//! together with `is_predef_function` (the `predefined_env` registry, no
+//! per-name list) classify the residual, `emit_apply` rejects the
+//! multi-argument shape
+//! before evaluating the callee, and the `T::Ident` arm rejects the
+//! one-argument shape — `unlowered_predef_reject` carries the class and an
+//! actionable message (the only expression-id door Scala offers is the
+//! METHOD form `CONTEXT.getVarFromInput[T](inputId, varId)`,
+//! `GraphBuilding.scala:1090-1094`, byte-exact on our side;
+//! `CONTEXT.getVar[T](expr)` also rejects in Scala). Mixed literal/
+//! expression id pairs (`getVarFromInput[Int](0.toShort, 0)`) are TYPER
+//! rejects on both sides (`SigmaTyper.scala:244-250` narrows only when BOTH
+//! are constants, so `[SShort, SInt]` fails `unifyTypeLists`), position-
+//! and class-exact. The full matrix is pinned in golden_seed §27 and, via
+//! the compile recapture, `compile_seed.json`.
+//!
 //! Also fixed: `typer/predef_ir.rs`'s `unmap_const`
 //! (the `emit::map_const` reverse mapping `deserialize[T]` uses, D-T2 above)
 //! was missing the `ConstPayload::ProveDlog` arm — a real

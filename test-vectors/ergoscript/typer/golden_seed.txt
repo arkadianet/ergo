@@ -724,3 +724,57 @@ tc	val x = 1	REJECT 1:1 ParserException
 # point. Rendering-only deviation (R3 family); the VALUE (compressed wire
 # bytes) is exact per the compile capture above.
 tcs	g2	OK (ConstantNode:GroupElement (CGroupElement (Ecp @(7d152c041ea8e1dc2191843d1fa9db55b68f88fef695e2c791d40444b365afc2,56915849f52cc8f76f5fd7e4bf60db4a43bf633e1b1383f85fe89164bfadcbdb,9075b4ee4d4788cabb49f7f81c221151fa2f68914d0aa833388fa11ff621a970))))
+
+# ── § 27: issue #332 — `byteArrayToLong(..) + ..` re-typing quirk and the un-lowered
+# predef residual (`getVarFromInput[T](expr, expr)`) ─────────────────────────────
+#
+# Captured 2026-09-07, sigma-state 6.0.2, ORACLE_TREE_VERSION=3, ORACLE_NETWORK=
+# testnet; REJECT positions re-derived in fresh-JVM mode (tc1.sh) and identical to
+# the batch capture. `$shards` from the issue is played by the `tcs` env's `x: Int`.
+#
+# (a) Bug 1 of the issue is NOT a Rust divergence: the reference typer rejects the
+# same sources at the same node. `byteArrayToLong(...)` lowers to `ByteArrayToLong`
+# at `Apply` time (PredefinedFuncApply); `+`/`*`/`^`/shifts go through the
+# MethodCallLike arm (SigmaTyper.scala:302-304 types the receiver, then :349-355
+# call `bimap`, whose :573 `assignType(env, l)` RE-TYPES the already-typed
+# receiver), and `ByteArrayToLong`/`ByteArrayToBigInt` have no pass-through arm
+# in the final match (:526-540) → "Don't know how to assignType(ByteArrayToLong)"
+# at the Apply's position. `-`/`/`/`%` are parser-built `ArithOp`s typed ONCE
+# (:470-474) and accept; hoisting the conversion into a `val` makes the re-typed
+# receiver an `Ident` and accepts. The nested `&& { … }` block is irrelevant — the
+# top-level form rejects identically (1:85 = its `byteArrayToLong`).
+#
+# (b) Bug 2: the global `getVarFromInput` irBuilder is a partial function over
+# `Constant[SNumericType]` ids (SigmaPredef.scala:147), so with `.toShort`/`.toByte`
+# expression ids the typer keeps the raw `Apply(Ident 'getVarFromInput')` — a
+# typecheck-ACCEPT on both sides (records below) that the FULL compile rejects in
+# GraphBuilding (`GraphBuildingException` for the two-argument residual,
+# `StagingException` for one-argument residuals such as `getVar[Int](i)` — see
+# compile_seed.json, regenerated from these records, and lib.rs D-C8). Mixed
+# literal/expression pairs are typer REJECTs (:244-250 narrows only when BOTH ids
+# are constants → `[SShort, SInt]` fails unifyTypeLists). The method form
+# `CONTEXT.getVarFromInput[T](expr, expr)` is the accepted door (byte-exact).
+tcs	{ val o = getVar[GroupElement](0); val ok = o.isDefined && { val nh = blake2b256(o.get.getEncoded); val r = ((byteArrayToLong(nh.slice(0, 8)) % x.toLong) + x.toLong) % x.toLong; r == 1L }; sigmaProp(ok) }	REJECT 1:111 TyperException
+tcs	{ val o = getVar[GroupElement](0); val nh = blake2b256(o.get.getEncoded); val r = ((byteArrayToLong(nh.slice(0, 8)) % x.toLong) + x.toLong) % x.toLong; sigmaProp(o.isDefined && r == 1L) }	REJECT 1:85 TyperException
+tcs	{ val o = getVar[GroupElement](0); val nh = blake2b256(o.get.getEncoded); val k = byteArrayToLong(nh.slice(0, 8)); val ok = o.isDefined && { val r = ((k % x.toLong) + x.toLong) % x.toLong; r == 1L }; sigmaProp(ok) }	OK (Block:SigmaProp [(ValNode:Option[GroupElement] 'o' (GetVar:Option[GroupElement] @0)) (ValNode:Coll[Byte] 'nh' (CalcBlake2b256:Coll[Byte] (MethodCall:Coll[Byte] (OptionGet:GroupElement (Ident:Option[GroupElement] 'o')) %GroupElement.getEncoded [] {}))) (ValNode:Long 'k' (ByteArrayToLong:Long (Slice:Coll[Byte] (Ident:Coll[Byte] 'nh') (ConstantNode:Int @0) (ConstantNode:Int @8)))) (ValNode:Boolean 'ok' (BinAnd:Boolean (OptionIsDefined:Boolean (Ident:Option[GroupElement] 'o')) (Block:Boolean [(ValNode:Long 'r' (ArithOp:Long (ArithOp:Long (ArithOp:Long (Ident:Long 'k') (Select:Long (ConstantNode:Int @10) 'toLong') @-98) (Select:Long (ConstantNode:Int @10) 'toLong') @-102) (Select:Long (ConstantNode:Int @10) 'toLong') @-98))] (EQ:Boolean (Ident:Long 'r') (ConstantNode:Long @1)))))] (BoolToSigmaProp:SigmaProp (Ident:Boolean 'ok')))
+tcs	{ val o = getVar[Coll[Byte]](0); val ok = o.isDefined && { val r = byteArrayToLong(o.get) % x.toLong; r == 1L }; sigmaProp(ok) }	OK (Block:SigmaProp [(ValNode:Option[Coll[Byte]] 'o' (GetVar:Option[Coll[Byte]] @0)) (ValNode:Boolean 'ok' (BinAnd:Boolean (OptionIsDefined:Boolean (Ident:Option[Coll[Byte]] 'o')) (Block:Boolean [(ValNode:Long 'r' (ArithOp:Long (ByteArrayToLong:Long (OptionGet:Coll[Byte] (Ident:Option[Coll[Byte]] 'o'))) (Select:Long (ConstantNode:Int @10) 'toLong') @-98))] (EQ:Boolean (Ident:Long 'r') (ConstantNode:Long @1)))))] (BoolToSigmaProp:SigmaProp (Ident:Boolean 'ok')))
+tcs	{ val o = getVar[GroupElement](0); val ok = o.isDefined && { val nh = blake2b256(o.get.getEncoded); byteArrayToLong(nh.slice(0, 8)) == 1L }; sigmaProp(ok) }	OK (Block:SigmaProp [(ValNode:Option[GroupElement] 'o' (GetVar:Option[GroupElement] @0)) (ValNode:Boolean 'ok' (BinAnd:Boolean (OptionIsDefined:Boolean (Ident:Option[GroupElement] 'o')) (Block:Boolean [(ValNode:Coll[Byte] 'nh' (CalcBlake2b256:Coll[Byte] (MethodCall:Coll[Byte] (OptionGet:GroupElement (Ident:Option[GroupElement] 'o')) %GroupElement.getEncoded [] {})))] (EQ:Boolean (ByteArrayToLong:Long (Slice:Coll[Byte] (Ident:Coll[Byte] 'nh') (ConstantNode:Int @0) (ConstantNode:Int @8))) (ConstantNode:Long @1)))))] (BoolToSigmaProp:SigmaProp (Ident:Boolean 'ok')))
+tc	sigmaProp(byteArrayToLong(Coll(1.toByte)) + 1L == 2L)	REJECT 1:11 TyperException
+tc	sigmaProp(byteArrayToLong(Coll(1.toByte)) * 1L == 2L)	REJECT 1:11 TyperException
+tc	sigmaProp(byteArrayToLong(Coll(1.toByte)) - 1L == 2L)	OK (BoolToSigmaProp:SigmaProp (EQ:Boolean (ArithOp:Long (ByteArrayToLong:Long (ConcreteCollection:Coll[Byte] [(Select:Byte (ConstantNode:Int @1) 'toByte')] #Byte)) (ConstantNode:Long @1) @-103) (ConstantNode:Long @2)))
+tc	sigmaProp(byteArrayToLong(Coll(1.toByte)) % 2L == 1L)	OK (BoolToSigmaProp:SigmaProp (EQ:Boolean (ArithOp:Long (ByteArrayToLong:Long (ConcreteCollection:Coll[Byte] [(Select:Byte (ConstantNode:Int @1) 'toByte')] #Byte)) (ConstantNode:Long @2) @-98) (ConstantNode:Long @1)))
+tc	sigmaProp(byteArrayToBigInt(Coll(1.toByte)) + 1.toBigInt == 2.toBigInt)	REJECT 1:11 TyperException
+tc	{ val sib = INPUTS.indices.filter { (i: Int) => INPUTS(i).value > 0 }(0); sigmaProp(getVarFromInput[GroupElement](sib.toShort, 0.toByte).isDefined) }	OK (Block:SigmaProp [(ValNode:Int 'sib' (ByIndex:Int (Filter:Coll[Int] (MethodCall:Coll[Int] (Inputs:Coll[Box]) %SCollection.indices [] {}) (Lambda:(Int) => Boolean [] [i:#Int] #Boolean (GT:Boolean (Select:Long (ByIndex:Box (Inputs:Coll[Box]) (Ident:Int 'i') None) 'value') (Upcast:Long (ConstantNode:Int @0))))) (ConstantNode:Int @0) None))] (BoolToSigmaProp:SigmaProp (OptionIsDefined:Boolean (Apply:Option[GroupElement] (Ident:(Short,Byte) => Option[GroupElement] 'getVarFromInput') [(Select:Short (Ident:Int 'sib') 'toShort') (Select:Byte (ConstantNode:Int @0) 'toByte')]))))
+tc	sigmaProp(getVarFromInput[Int](0.toShort, 0.toByte).get == 7)	OK (BoolToSigmaProp:SigmaProp (EQ:Boolean (OptionGet:Int (Apply:Option[Int] (Ident:(Short,Byte) => Option[Int] 'getVarFromInput') [(Select:Short (ConstantNode:Int @0) 'toShort') (Select:Byte (ConstantNode:Int @0) 'toByte')])) (ConstantNode:Int @7)))
+tc	sigmaProp(getVarFromInput[Int](0, 0).get == 7)	OK (BoolToSigmaProp:SigmaProp (EQ:Boolean (OptionGet:Int (MethodCall:Option[Int] (Context:Context) %Context.getVarFromInput [(ConstantNode:Short @0) (ConstantNode:Byte @0)] {#T->#Int})) (ConstantNode:Int @7)))
+tc	{ val sib = INPUTS.indices.filter { (i: Int) => INPUTS(i).value > 0 }(0); sigmaProp(CONTEXT.getVarFromInput[GroupElement](sib.toShort, 0.toByte).isDefined) }	OK (Block:SigmaProp [(ValNode:Int 'sib' (ByIndex:Int (Filter:Coll[Int] (MethodCall:Coll[Int] (Inputs:Coll[Box]) %SCollection.indices [] {}) (Lambda:(Int) => Boolean [] [i:#Int] #Boolean (GT:Boolean (Select:Long (ByIndex:Box (Inputs:Coll[Box]) (Ident:Int 'i') None) 'value') (Upcast:Long (ConstantNode:Int @0))))) (ConstantNode:Int @0) None))] (BoolToSigmaProp:SigmaProp (OptionIsDefined:Boolean (MethodCall:Option[GroupElement] (Context:Context) %Context.getVarFromInput [(Select:Short (Ident:Int 'sib') 'toShort') (Select:Byte (ConstantNode:Int @0) 'toByte')] {#T->#GroupElement}))))
+tc	sigmaProp(getVarFromInput[Int](0.toShort, 0).isDefined)	REJECT 1:11 TyperException
+tc	sigmaProp(getVarFromInput[Int](0, 0.toByte).isDefined)	REJECT 1:11 TyperException
+tc	{ val s = 1.toShort; sigmaProp(getVarFromInput[Int](s, 0).isDefined) }	REJECT 1:32 TyperException
+tc	{ val i = INPUTS.size.toByte; sigmaProp(getVar[Int](i).isDefined) }	OK (Block:SigmaProp [(ValNode:Byte 'i' (Select:Byte (Select:Int (Inputs:Coll[Box]) 'size') 'toByte'))] (BoolToSigmaProp:SigmaProp (OptionIsDefined:Boolean (Apply:Option[Int] (Ident:(Byte) => Option[Int] 'getVar') [(Ident:Byte 'i')]))))
+tc	sigmaProp(getVar[Int](0.toByte).isDefined)	OK (BoolToSigmaProp:SigmaProp (OptionIsDefined:Boolean (Apply:Option[Int] (Ident:(Byte) => Option[Int] 'getVar') [(Select:Byte (ConstantNode:Int @0) 'toByte')])))
+tc	{ val i = INPUTS.size.toByte; executeFromVar[SigmaProp](i) }	OK (Block:SigmaProp [(ValNode:Byte 'i' (Select:Byte (Select:Int (Inputs:Coll[Box]) 'size') 'toByte'))] (Apply:SigmaProp (Ident:(Byte) => SigmaProp 'executeFromVar') [(Ident:Byte 'i')]))
+tc	sigmaProp(executeFromSelfReg[Boolean](INPUTS.size))	OK (BoolToSigmaProp:SigmaProp (Apply:Boolean (Ident:(Int) => Boolean 'executeFromSelfReg') [(Select:Int (Inputs:Coll[Box]) 'size')]))
+tc	{ val s = "abc"; sigmaProp(fromBase16(s).size == 1) }	OK (Block:SigmaProp [(ValNode:String 's' (ConstantNode:String 'abc'))] (BoolToSigmaProp:SigmaProp (EQ:Boolean (Select:Int (Apply:Coll[Byte] (Ident:(String) => Coll[Byte] 'fromBase16') [(Ident:String 's')]) 'size') (ConstantNode:Int @1))))
+tc	{ val s = "5"; sigmaProp(bigInt(s) > 0.toBigInt) }	OK (Block:SigmaProp [(ValNode:String 's' (ConstantNode:String '5'))] (BoolToSigmaProp:SigmaProp (GT:Boolean (Apply:BigInt (Ident:(String) => BigInt 'bigInt') [(Ident:String 's')]) (Select:BigInt (ConstantNode:Int @0) 'toBigInt'))))
+tc	{ val i = INPUTS.size.toByte; sigmaProp(CONTEXT.getVar[Int](i).isDefined) }	OK (Block:SigmaProp [(ValNode:Byte 'i' (Select:Byte (Select:Int (Inputs:Coll[Box]) 'size') 'toByte'))] (BoolToSigmaProp:SigmaProp (OptionIsDefined:Boolean (Apply:Option[Int] (Select:(Context,Byte) => Option[Int] (Context:Context) 'getVar') [(Ident:Byte 'i')]))))

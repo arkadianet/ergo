@@ -626,6 +626,19 @@ pub fn predef_ir_builder(
         }
         // allZK/anyZK/outerJoin/serialize(binder-handled)/PK(binder-handled):
         // no typer-time irBuilder → fall through.
+        //
+        // Every `None` above — this arm AND the literal-only families that
+        // return `None` on a non-constant id/string (`getVar`, `executeFromVar`,
+        // `getVarFromInput`, `executeFromSelfReg*`, `bigInt`, `fromBase*`,
+        // `deserialize`) — is Scala's `PredefinedFuncApply.unapply` declining
+        // (`SigmaPredef.scala:745-752`, `isDefinedAt` on the builder's partial
+        // function): the typer keeps the raw `Apply(Ident, args)` on both sides
+        // (typecheck-ACCEPT, golden_seed §27), and the FULL compile rejects it
+        // at emit with the class Scala's GraphBuilding throws for the residual's
+        // ARITY — `StagingException` for a unary application (the callee is
+        // evaluated, GraphBuilding.scala:729-732 → :511-512), `GraphBuildingException`
+        // at the application's position for any other arity (no Apply rule
+        // matches, :457-458) — see `emit::unlowered_predef_reject` (D-C8 / #332).
         _ => None,
     }
 }

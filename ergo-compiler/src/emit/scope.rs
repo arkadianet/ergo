@@ -92,6 +92,14 @@ impl Scope {
             .find_map(|frame| frame.get(name).map(|(id, _)| *id))
     }
 
+    /// `name` resolves to NOTHING in this scope: no enclosing `val`/lambda
+    /// arg binding and no contract-template placeholder — the emit-side
+    /// analogue of `GraphBuilding.eval`'s `env.getOrElse(n, !!!(...))` miss
+    /// (`GraphBuilding.scala:511-512`).
+    pub(crate) fn is_unbound(&self, name: &str) -> bool {
+        self.lookup(name).is_none() && !self.placeholders.contains_key(name)
+    }
+
     /// Take the next binding id and record `name` in the innermost frame.
     pub(crate) fn bind(&mut self, name: &str, tpe: SigmaType) -> u32 {
         let id = self.next_id;

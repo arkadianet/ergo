@@ -73,6 +73,7 @@ pub(crate) fn graph_building_lambda_reject(root: &Expr) -> Option<EmitError> {
                         what: "zero-arg lambda: Scala's graph construction rejects a \
                                FuncValue definition with no arguments (even unused)"
                             .into(),
+                        pos: None,
                     });
                 }
                 if !dead
@@ -85,6 +86,7 @@ pub(crate) fn graph_building_lambda_reject(root: &Expr) -> Option<EmitError> {
                         what: "lambda with a function-typed parameter: Scala's \
                                GraphBuilding cannot lower a higher-order user lambda"
                             .into(),
+                        pos: None,
                     });
                 }
                 stack.push((body, dead));
@@ -98,6 +100,7 @@ pub(crate) fn graph_building_lambda_reject(root: &Expr) -> Option<EmitError> {
                              only 1-arg applications",
                             args.len(),
                         ),
+                        pos: None,
                     });
                 }
                 stack.push((func.as_ref(), dead));

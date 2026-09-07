@@ -108,12 +108,17 @@ impl CompileError {
     /// `typer/assign/mod.rs`). The post-typecheck phases (`Root`/`Emit`/
     /// `Serializer`/`Write`) return `0`: they operate on position-less IR
     /// nodes, and the route-level Scala throws carry no SourceContext (the
-    /// oracle records `REJECT 0:0 Exception` for them).
+    /// oracle records `REJECT 0:0 Exception` for them). The one exception is
+    /// a [`EmitError::GraphBuildingReject`] whose Scala counterpart cites a
+    /// `SourceContext` (`GraphBuilding.throwError(…, node.sourceContext)`,
+    /// e.g. the un-lowered multi-argument predef application of issue #332,
+    /// oracle `REJECT 1:11`): it carries that node's offset.
     pub fn pos(&self) -> Pos {
         match self {
             CompileError::Parse(e) => e.pos(),
             CompileError::Bind(e) => e.pos(),
             CompileError::Type(e) => e.pos(),
+            CompileError::Emit(EmitError::GraphBuildingReject { pos: Some(p), .. }) => *p,
             CompileError::Root { .. }
             | CompileError::Emit(_)
             | CompileError::Serializer { .. }

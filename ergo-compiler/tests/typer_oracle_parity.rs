@@ -344,19 +344,20 @@ fn seed_reject_records_position_parity() {
         .iter()
         .map(|&(s, reason)| format!("{s:?} ({reason})"))
         .collect();
+    // 22 through §26; §27 (issue #332) adds 8 positioned typer rejects.
     assert_eq!(
         positioned,
-        22,
+        30,
         "swept {positioned} positioned reject records (pre-deviation-filter), \
-         expected exactly 22 — seed may have shrunk/grown. Currently excluded \
+         expected exactly 30 — seed may have shrunk/grown. Currently excluded \
          from the exact-match count: [{}]",
         deviation_notes.join(", ")
     );
     assert_eq!(
         checked,
-        21,
+        29,
         "checked {checked} positioned reject records for EXACT line:col parity \
-         (positioned minus POSITION_DEVIATION_SOURCES), expected exactly 21 — \
+         (positioned minus POSITION_DEVIATION_SOURCES), expected exactly 29 — \
          a POSITION_DEVIATION_SOURCES entry was added/removed. Currently \
          excluded: [{}]",
         deviation_notes.join(", ")
