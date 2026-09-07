@@ -984,6 +984,77 @@ mod tests {
         }
     }
 
+    /// Issue #332 (D-C8 generalized): a predef whose Scala irBuilder is a
+    /// literal-only partial function, applied to EXPRESSION arguments,
+    /// typechecks on both sides into a residual `Apply(Ident, args)` and is
+    /// rejected by Scala's GraphBuilding stage — with the class fixed by the
+    /// residual's arity (`GraphBuilding.scala:729-732` has one function-Apply
+    /// rule, for exactly one argument). Oracle, 2026-09-07 (sigma-state
+    /// 6.0.2, V=3): the two-id `getVarFromInput` forms `REJECT 1:11/1:85
+    /// GraphBuildingException`; the one-argument forms `REJECT 0:0
+    /// StagingException`. Before the fix every one of these surfaced as the
+    /// internal `InvalidShape("Ident not bound ...")` message the issue was
+    /// filed on. The method form with expression ids is the accepted door and
+    /// is byte-exact against the oracle (compile_seed.json, golden_seed §27).
+    #[test]
+    fn compile_unlowered_predef_apply_rejects_with_scala_graph_building_class() {
+        let env = ScriptEnv::new();
+        // V=3: `getVarFromInput` is a V6 (EIP-50) surface on both the predef
+        // and the `Context` method table.
+        let compile_v3 = |src: &str| compile(&env, src, 3, NetworkPrefix::Testnet);
+        for (src, class) in [
+            (
+                "{ val sib = INPUTS.indices.filter { (i: Int) => INPUTS(i).value > 0 }(0); \
+                 sigmaProp(getVarFromInput[GroupElement](sib.toShort, 0.toByte).isDefined) }",
+                "GraphBuildingException",
+            ),
+            (
+                "sigmaProp(getVarFromInput[Int](0.toShort, 0.toByte).get == 7)",
+                "GraphBuildingException",
+            ),
+            (
+                "{ val i = INPUTS.size.toByte; sigmaProp(getVar[Int](i).isDefined) }",
+                "StagingException",
+            ),
+            (
+                "sigmaProp(getVar[Int](0.toByte).isDefined)",
+                "StagingException",
+            ),
+            (
+                "{ val i = INPUTS.size.toByte; executeFromVar[SigmaProp](i) }",
+                "StagingException",
+            ),
+            (
+                "sigmaProp(executeFromSelfReg[Boolean](INPUTS.size))",
+                "StagingException",
+            ),
+            (
+                "{ val s = \"abc\"; sigmaProp(fromBase16(s).size == 1) }",
+                "StagingException",
+            ),
+            (
+                "{ val s = \"5\"; sigmaProp(bigInt(s) > 0.toBigInt) }",
+                "StagingException",
+            ),
+        ] {
+            let err = compile_v3(src).expect_err(src);
+            assert_eq!(err.class(), class, "{src}: {err}");
+            assert!(
+                !err.to_string().contains("invalid shape"),
+                "{src}: user-reachable reject framed as a pipeline bug: {err}"
+            );
+        }
+        // The literal-id form and the method form both compile (byte-exact
+        // against the oracle: compile_seed.json).
+        for src in [
+            "sigmaProp(getVarFromInput[Int](0, 0).get == 7)",
+            "{ val sib = INPUTS.indices.filter { (i: Int) => INPUTS(i).value > 0 }(0); \
+             sigmaProp(CONTEXT.getVarFromInput[GroupElement](sib.toShort, 0.toByte).isDefined) }",
+        ] {
+            compile_v3(src).unwrap_or_else(|e| panic!("{src}: {e}"));
+        }
+    }
+
     #[test]
     fn compile_constant_fold_overflow_rejects_arithmetic_exception_class() {
         // Oracle: `REJECT 0:0 ArithmeticException` on the whole family

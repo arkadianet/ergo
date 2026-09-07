@@ -201,22 +201,83 @@ fn bit_op_symbol(opcode: i8) -> &'static str {
     }
 }
 
-/// Predef function names the TYPER accepts (present in `predefined_env`,
-/// `typer/predef_ir.rs`) but whose Scala `irBuilder` is the literal
-/// `PredefFuncInfo(undefined)` sentinel (`SigmaPredef.scala:79-92` for
-/// `allZK`/`anyZK`, `:108-123` for `outerJoin`) — genuinely unimplemented in
-/// the REFERENCE compiler itself, not merely unported. `predef_ir_builder`
-/// (`typer/predef_ir.rs`, comment at its match's tail) falls through with
-/// `None` for exactly these three names, so their typed tree keeps the raw
-/// `Apply(Ident, args)` shape all the way to here — see the `T::Ident` arm's
-/// doc comment (D-C8) for the full oracle-probe citation. Returns the bare
-/// function name for the `GraphBuildingReject` message when `name` is one of
-/// these; `None` for every other identifier (which means "genuine pipeline
-/// bug" at the call site, not "known predef gap").
-fn known_predef_gap(name: &str) -> Option<&str> {
-    match name {
-        "allZK" | "anyZK" | "outerJoin" => Some(name),
-        _ => None,
+/// Is `name` a predefined function the TYPER knows (`predefined_env`,
+/// `typer/predef_ir.rs` — the port of `SigmaPredef.funcs`)?
+///
+/// An `Ident` carrying such a name that reaches emit UNBOUND (no enclosing
+/// `val`/lambda arg/placeholder) is the residual `Apply(Ident, args)` shape
+/// of a predef application whose Scala `irBuilder` declined the arguments —
+/// `PredefinedFuncApply.unapply` (`SigmaPredef.scala:745-752`) only fires
+/// when the builder partial function `isDefinedAt(func, args)`, and the
+/// typer keeps the raw `Apply` otherwise (`SigmaTyper.scala:295-296`).
+/// That is a real, oracle-confirmed user REJECT in the reference compiler
+/// (see [`unlowered_predef_reject`]), never a pipeline bug; any OTHER
+/// unbound identifier remains one. The env is version-independent
+/// (`predefined_env` ignores its argument), so the V6 pin is inert.
+fn is_predef_function(name: &str) -> bool {
+    crate::typer::predefined_env(V6_ERGO_TREE_VERSION).contains_key(name)
+}
+
+/// The GraphBuilding-parity reject for a predef application that survived
+/// the typer un-lowered (D-C8, generalized for issue #332).
+///
+/// `class` is the exception the reference compiler throws for the shape,
+/// decided by the CALLER from the application's arity, because
+/// `GraphBuilding.scala` (6.0.2) reaches the residual through two different
+/// doors:
+/// - one argument: `case Apply(f, Seq(x)) if f.tpe.isFunc` (`:729-732`)
+///   evaluates the callee first, and `eval`'s `Ident` case
+///   (`:511-512`, `env.getOrElse(n, !!!(...))`) throws `StagingException`
+///   for a name no `val`/lambda bound — oracle: `getVar[Int](i)`,
+///   `executeFromVar[SigmaProp](i)`, `bigInt(s)`, `fromBase16(s)`,
+///   `allZK(Coll(..))` all `REJECT 0:0 StagingException`;
+/// - any other arity: no `Apply` rule matches, so `buildNode` falls to
+///   `throwError` (`:457-458`, "Don't know how to buildNode") —
+///   `GraphBuildingException` AT the application's source position —
+///   oracle: `getVarFromInput[Int](0.toShort, 0.toByte)` `REJECT 1:11
+///   GraphBuildingException`, `outerJoin[..](5 args)` likewise.
+///
+/// `why` names the builder's actual precondition so the message is
+/// actionable: every constant-only builder pattern-matches
+/// `Constant[SNumericType]` ids (`SigmaPredef.scala:147,394,405,426,512`) or
+/// an `EvaluatedValue[SString]` literal (`:159,193,204,220,234,248` and
+/// `deserialize`, `:169-180`); `allZK`/`anyZK`/`outerJoin` register
+/// `PredefFuncInfo(undefined)` (`:79-92`, `:108-123`) and have no lowering at
+/// all. The `getVarFromInput` hint is oracle-backed: the METHOD form
+/// `CONTEXT.getVarFromInput[T](inputId, varId)` is a plain `MethodCall` whose
+/// GraphBuilding rule takes arbitrary `Short`/`Byte` expressions
+/// (`GraphBuilding.scala:1090-1094`); no such expression-id door exists for
+/// `getVar`/`executeFromVar` (`CONTEXT.getVar[T](expr)` also rejects,
+/// `GraphBuildingException`).
+fn unlowered_predef_reject(name: &str, class: &'static str) -> EmitError {
+    let why = match name {
+        "getVarFromInput" => {
+            "requires two integer LITERAL ids (SigmaPredef.scala:147 matches \
+             `Constant[SNumericType]` only); for computed ids use the method form \
+             `CONTEXT.getVarFromInput[T](inputId, varId)`"
+        }
+        "getVar" | "executeFromVar" | "executeFromSelfReg" | "executeFromSelfRegWithDefault" => {
+            "requires an integer LITERAL id (its SigmaPredef irBuilder matches \
+             `Constant[SNumericType]` only; the reference compiler has no \
+             expression-id form of this function)"
+        }
+        "bigInt" | "unsignedBigInt" | "fromBase16" | "fromBase58" | "fromBase64"
+        | "deserialize" => {
+            "requires a string LITERAL argument (its SigmaPredef irBuilder is a \
+             compile-time decoder over `EvaluatedValue[SString]` only)"
+        }
+        "allZK" | "anyZK" | "outerJoin" => {
+            "has no compile-time lowering at all (SigmaPredef irBuilder = undefined, \
+             unimplemented in the reference compiler itself)"
+        }
+        _ => "was applied to arguments its SigmaPredef irBuilder does not accept",
+    };
+    EmitError::GraphBuildingReject {
+        class,
+        what: format!(
+            "predef function `{name}` {why}; the reference compiler's GraphBuilding \
+             stage rejects the un-lowered application ({class})"
+        ),
     }
 }
 
@@ -2172,36 +2233,57 @@ mod tests {
         ));
     }
 
-    /// D-C8: `allZK`/`anyZK`/`outerJoin` are KNOWN predefs (present in
-    /// `predefined_env`) with no Scala irBuilder — reaching them here as a
+    /// A residual `Apply(Ident <predef>, args)` — the shape the typer keeps
+    /// when a predef's Scala irBuilder declines the arguments (D-C8).
+    fn unlowered_predef_apply(name: &str, dom: Vec<SType>, args: Vec<TypedExpr>) -> TypedExpr {
+        TypedExpr::Apply {
+            func: Box::new(TypedExpr::Ident {
+                name: name.to_string(),
+                tpe: SType::SFunc {
+                    dom,
+                    range: Box::new(SType::SSigmaProp),
+                    tpe_params: vec![],
+                },
+                pos: 0,
+            }),
+            args,
+            tpe: SType::SSigmaProp,
+            pos: 0,
+        }
+    }
+
+    /// D-C8: a KNOWN predef (present in `predefined_env`) reaching emit as a
     /// bare unbound `Apply(Ident, args)` is a real, oracle-confirmed user
-    /// REJECT (`StagingException`; literal single-/multi-element `Coll` AND
-    /// val-bound forms all reject), not a pipeline bug. Must classify as
-    /// `GraphBuildingReject`, never
-    /// `InvalidShape` — the two are user-facing-vs-internal, not
-    /// interchangeable (`unbound_ident_returns_invalid_shape` above pins the
-    /// genuine-bug case stays `InvalidShape`).
+    /// REJECT, not a pipeline bug — the irBuilder-undefined trio
+    /// (`allZK`/`anyZK`/`outerJoin`) and, since issue #332, the literal-only
+    /// families (`getVar[T](expr)`, `bigInt(s)`, …). Must classify as
+    /// `GraphBuildingReject`, never `InvalidShape` — the two are
+    /// user-facing-vs-internal, not interchangeable
+    /// (`unbound_ident_returns_invalid_shape` above pins the genuine-bug case
+    /// stays `InvalidShape`). The class follows Scala's arity split: a
+    /// ONE-argument residual evaluates the callee (`GraphBuilding.scala:729`)
+    /// and dies in `eval`'s `Ident` case — `StagingException` (oracle:
+    /// `getVar[Int](i)`, `bigInt(s)`, `allZK(Coll(..))` all `REJECT 0:0
+    /// StagingException`).
     #[test]
-    fn known_predef_gap_ident_returns_graph_building_reject_not_invalid_shape() {
-        for name in ["allZK", "anyZK", "outerJoin"] {
-            let node = TypedExpr::Apply {
-                func: Box::new(TypedExpr::Ident {
-                    name: name.to_string(),
-                    tpe: SType::SFunc {
-                        dom: vec![SType::SColl(Box::new(SType::SSigmaProp))],
-                        range: Box::new(SType::SSigmaProp),
-                        tpe_params: vec![],
-                    },
-                    pos: 0,
-                }),
-                args: vec![TypedExpr::Constant {
-                    value: ConstPayload::ByteColl(vec![]),
-                    tpe: SType::SColl(Box::new(SType::SSigmaProp)),
+    fn unlowered_one_arg_predef_apply_returns_staging_exception_reject() {
+        let coll_sp = SType::SColl(Box::new(SType::SSigmaProp));
+        for (name, dom, arg_tpe) in [
+            ("allZK", coll_sp.clone(), coll_sp.clone()),
+            ("anyZK", coll_sp.clone(), coll_sp.clone()),
+            ("getVar", SType::SByte, SType::SByte),
+            ("executeFromVar", SType::SByte, SType::SByte),
+            ("bigInt", SType::SString, SType::SString),
+        ] {
+            let node = unlowered_predef_apply(
+                name,
+                vec![dom],
+                vec![TypedExpr::Ident {
+                    name: "i".to_string(),
+                    tpe: arg_tpe,
                     pos: 0,
                 }],
-                tpe: SType::SSigmaProp,
-                pos: 0,
-            };
+            );
             match emit(&node).unwrap_err() {
                 EmitError::GraphBuildingReject { class, what } => {
                     assert_eq!(class, "StagingException", "{name}");
@@ -2210,6 +2292,111 @@ mod tests {
                 other => panic!("{name}: expected GraphBuildingReject, got {other:?}"),
             }
         }
+    }
+
+    /// Issue #332: the global `getVarFromInput[T](inputId, varId)` with
+    /// non-literal ids. Scala's typer keeps the raw two-argument
+    /// `Apply(Ident 'getVarFromInput')` (its irBuilder matches
+    /// `Constant[SNumericType]` only, SigmaPredef.scala:147) and
+    /// `GraphBuilding.buildNode` has no rule for a multi-argument function
+    /// `Apply`, so it falls to `throwError` — oracle: `REJECT 1:11
+    /// GraphBuildingException` for `getVarFromInput[Int](0.toShort,
+    /// 0.toByte)`, and `outerJoin[..](5 args)` takes the same door. Before
+    /// the fix this arm reported the internal `InvalidShape("Ident not
+    /// bound...")` message the issue was filed on.
+    #[test]
+    fn unlowered_multi_arg_predef_apply_returns_graph_building_exception_reject() {
+        let short_id = TypedExpr::Downcast {
+            input: Box::new(int_c(0)),
+            tpe: SType::SShort,
+            pos: 0,
+        };
+        let byte_id = TypedExpr::Downcast {
+            input: Box::new(int_c(0)),
+            tpe: SType::SByte,
+            pos: 0,
+        };
+        let coll_sp = SType::SColl(Box::new(SType::SSigmaProp));
+        for (name, dom, args) in [
+            (
+                "getVarFromInput",
+                vec![SType::SShort, SType::SByte],
+                vec![short_id, byte_id],
+            ),
+            (
+                "outerJoin",
+                vec![coll_sp.clone(); 5],
+                vec![
+                    TypedExpr::Ident {
+                        name: "c".to_string(),
+                        tpe: coll_sp.clone(),
+                        pos: 0,
+                    };
+                    5
+                ],
+            ),
+        ] {
+            let node = unlowered_predef_apply(name, dom, args);
+            match emit(&node).unwrap_err() {
+                EmitError::GraphBuildingReject { class, what } => {
+                    assert_eq!(class, "GraphBuildingException", "{name}");
+                    assert!(what.contains(name), "{name}: {what}");
+                }
+                other => panic!("{name}: expected GraphBuildingReject, got {other:?}"),
+            }
+        }
+    }
+
+    /// The D-C8 gate must not fire for an APPLIED lambda/val whose name
+    /// shadows a predef: a bound name is a `ValUse`, never a residual.
+    #[test]
+    fn bound_name_shadowing_a_predef_is_not_a_predef_residual() {
+        // { val getVar = {(b: Byte) => sigmaProp(true)}; getVar(1.toByte) }
+        let lam = TypedExpr::Lambda {
+            tpe_params: vec![],
+            args: vec![("b".to_string(), SType::SByte)],
+            given_res_type: SType::NoType,
+            body: Some(Box::new(TypedExpr::BoolToSigmaProp {
+                value: Box::new(TypedExpr::Constant {
+                    value: ConstPayload::Bool(true),
+                    tpe: SType::SBoolean,
+                    pos: 0,
+                }),
+                tpe: SType::SSigmaProp,
+                pos: 0,
+            })),
+            tpe: SType::SFunc {
+                dom: vec![SType::SByte],
+                range: Box::new(SType::SSigmaProp),
+                tpe_params: vec![],
+            },
+            pos: 0,
+        };
+        let node = TypedExpr::Block {
+            bindings: vec![TypedExpr::ValNode {
+                name: "getVar".to_string(),
+                given_type: SType::NoType,
+                body: Box::new(lam),
+                tpe: SType::SFunc {
+                    dom: vec![SType::SByte],
+                    range: Box::new(SType::SSigmaProp),
+                    tpe_params: vec![],
+                },
+                pos: 0,
+            }],
+            result: Box::new(unlowered_predef_apply(
+                "getVar",
+                vec![SType::SByte],
+                vec![TypedExpr::Constant {
+                    value: ConstPayload::Byte(1),
+                    tpe: SType::SByte,
+                    pos: 0,
+                }],
+            )),
+            tpe: SType::SSigmaProp,
+            pos: 0,
+        };
+        assert!(emit(&node).is_ok(), "{:?}", emit(&node));
     }
 
     #[test]

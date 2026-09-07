@@ -66,6 +66,35 @@ infrastructure.
 
 ### Fixed
 
+- **ErgoScript compiler: un-lowered predef applications now reject the way the
+  Scala compiler does, not as an internal "invalid shape" error (#332).**
+  The global-function forms `getVarFromInput[T](sib.toShort, 0.toByte)`,
+  `getVar[T](expr)`, `executeFromVar[T](expr)`, `executeFromSelfReg[T](expr)`
+  and `bigInt`/`fromBase16`/`fromBase58`/`fromBase64`/`deserialize` over a
+  non-literal string used to fail with `emit error: invalid shape reached
+  emit: Ident not bound to any enclosing ValDef or lambda arg` — a message
+  that frames a real reference-compiler verdict as a node bug. The Scala
+  compiler (sigma-state 6.0.2) typechecks these into a residual
+  `Apply(Ident)` (each predef's irBuilder only matches literal ids/strings,
+  `SigmaPredef.scala:147,394,405,426,512` and the string decoders) and then
+  rejects them in GraphBuilding: `GraphBuildingException` for a multi-argument
+  residual (no `Apply` rule matches, `GraphBuilding.scala:457-458`),
+  `StagingException` for a one-argument one (the callee is evaluated first,
+  `:729-732` → `:511-512`). Emit now mirrors both doors with the same classes
+  and an actionable message (for computed ids use the method form
+  `CONTEXT.getVarFromInput[T](inputId, varId)`, the only expression-id door
+  Scala offers — byte-exact on this node). The `outerJoin` residual is also
+  re-classed `GraphBuildingException` (it is five-argument). Compile-time
+  only: no ErgoTree bytes change and no consensus impact. The issue's other
+  report — `byteArrayToLong(nh.slice(0, 8)) % $shards.toLong + …` failing
+  with `Don't know how to assignType(ByteArrayToLong)` — is confirmed a
+  faithful mirror of the reference typer (it rejects at the same position and
+  class: `+`/`*` re-type their already-typed left operand through `bimap`,
+  `SigmaTyper.scala:349-355,573`, and `ByteArrayToLong` has no pass-through
+  arm at `:526-540`; the nested `&& { … }` block is irrelevant), so it is
+  pinned as an oracle vector rather than changed; hoisting the conversion
+  into a `val` is the accepted form on both compilers.
+
 - **JIT cost parity for `AND`/`OR`/`XorOf` over boolean-collection literals.**
   The packed `ConcreteCollectionBooleanConstant` (0x85) form is a wire
   optimisation only: the reference deserializes it into a plain
