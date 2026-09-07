@@ -30,6 +30,24 @@ mod common;
 
 use ergo_node::run_inner;
 
+/// A data dir private to one test — unique per test *and* per process.
+///
+/// These tests used to point `data_dir` at a fixed
+/// `std::env::temp_dir().join("ergo-mode…")` path. Those names are
+/// constants, so every concurrent `cargo test` on the machine (a
+/// second worktree, a re-run, the workspace gate's other test
+/// binaries) aimed the same `state.redb` at the same file, and the
+/// second opener lost the redb file lock: "Database already open.
+/// Cannot acquire lock." (issue #318). They also survived the run, so
+/// the next run booted onto a populated dir and took the
+/// `peek_state_type` path instead of the fresh-dir path under test.
+///
+/// The returned guard must stay bound for the body of the test: it
+/// removes the directory when dropped.
+fn test_data_dir() -> tempfile::TempDir {
+    tempfile::tempdir().expect("test data dir")
+}
+
 // Phase 4 lifted the Mode 3 activation gate. `blocks_to_keep > 0`
 // is now a LIVE runtime path provided `blocks_to_keep >= ROLLBACK_WINDOW
 // + SAFETY_MARGIN` (TOML-time check); direct NodeConfig construction
@@ -50,8 +68,8 @@ async fn run_inner_rejects_snapshot_sentinel_at_runtime_gate() {
     // (Phase 4 backstop). Reject reason must reference the
     // invalid sentinel value, not just "some boot error" — that
     // would mask drift if the gate moved or changed.
-    let mut cfg =
-        common::make_test_config(std::env::temp_dir().join("ergo-mode3-utxoboot-rejected"));
+    let data_dir = test_data_dir();
+    let mut cfg = common::make_test_config(data_dir.path().to_path_buf());
     cfg.blocks_to_keep = -2;
     let err = match run_inner(cfg).await {
         Ok(_) => panic!("must reject -2"),
@@ -68,8 +86,8 @@ async fn run_inner_rejects_snapshot_sentinel_at_runtime_gate() {
 async fn run_inner_rejects_below_archive_sentinel_at_runtime_gate() {
     // `< -1` must reject at the runtime gate (same backstop
     // path as `-2`).
-    let mut cfg =
-        common::make_test_config(std::env::temp_dir().join("ergo-mode3-minus-three-rejected"));
+    let data_dir = test_data_dir();
+    let mut cfg = common::make_test_config(data_dir.path().to_path_buf());
     cfg.blocks_to_keep = -3;
     let err = match run_inner(cfg).await {
         Ok(_) => panic!("must reject -3"),
@@ -88,8 +106,8 @@ async fn run_inner_rejects_sub_floor_pruning_at_runtime_gate() {
     // SAFETY_MARGIN` must reject at the runtime gate. TOML
     // loader catches this, but the runtime backstop covers
     // direct-construction callers.
-    let mut cfg =
-        common::make_test_config(std::env::temp_dir().join("ergo-mode3-sub-floor-rejected"));
+    let data_dir = test_data_dir();
+    let mut cfg = common::make_test_config(data_dir.path().to_path_buf());
     cfg.blocks_to_keep = 5;
     let err = match run_inner(cfg).await {
         Ok(_) => panic!("must reject sub-floor"),
@@ -111,7 +129,8 @@ async fn run_inner_accepts_canonical_mode_5() {
     // The digest backend now ships — `run_inner` opens a genesis-seeded
     // `DigestStateStore` and boots the node — so the activation gate
     // admits this combo. Mirrors `run_inner_accepts_canonical_headers_only`.
-    let mut cfg = common::make_test_config(std::env::temp_dir().join("ergo-mode5-digest-accepted"));
+    let data_dir = test_data_dir();
+    let mut cfg = common::make_test_config(data_dir.path().to_path_buf());
     cfg.state_type = ergo_node::config::StateType::Digest;
     // verify_transactions=true and blocks_to_keep=-1 are the make_test_config
     // defaults — that IS the canonical Mode 5 row.
@@ -151,7 +170,8 @@ async fn mode_5_survives_a_sync_tick() {
     // reach the header pipeline. Its sibling
     // `mode5_header_sync_e2e::mode_5_syncs_a_header_from_a_real_peer` drives a
     // real P2P peer that hands the node a header and asserts the tip advances.
-    let mut cfg = common::make_test_config(std::env::temp_dir().join("ergo-mode5-sync-tick"));
+    let data_dir = test_data_dir();
+    let mut cfg = common::make_test_config(data_dir.path().to_path_buf());
     cfg.state_type = ergo_node::config::StateType::Digest;
     // Digest backend has no box store, so the loader/runtime disable the mempool.
     cfg.mempool_config.enabled = false;
@@ -174,7 +194,8 @@ async fn mode_6_survives_a_sync_tick() {
     // confusion — it is NOT a digest-backend mode today). This test pins that
     // the canonical headers-only config boots and survives steady-state ticks;
     // backend routing itself is enforced by the accept/reject gate tests above.
-    let mut cfg = common::make_test_config(std::env::temp_dir().join("ergo-mode6-sync-tick"));
+    let data_dir = test_data_dir();
+    let mut cfg = common::make_test_config(data_dir.path().to_path_buf());
     cfg.state_type = ergo_node::config::StateType::Digest;
     cfg.verify_transactions = false;
     cfg.blocks_to_keep = 0;
@@ -199,8 +220,8 @@ async fn run_inner_rejects_partial_headers_only_combo() {
     // Both canonical combos are LIVE runtime paths — pinned by
     // `run_inner_accepts_canonical_headers_only` (Mode 6) and
     // `run_inner_accepts_canonical_mode_5` (Mode 5).
-    let mut cfg =
-        common::make_test_config(std::env::temp_dir().join("ergo-mode6-headers-partial-rejected"));
+    let data_dir = test_data_dir();
+    let mut cfg = common::make_test_config(data_dir.path().to_path_buf());
     cfg.state_type = ergo_node::config::StateType::Digest;
     cfg.verify_transactions = false;
     // blocks_to_keep stays at -1 — that's what makes this partial.
@@ -226,9 +247,8 @@ async fn run_inner_accepts_canonical_headers_only() {
     // `build_api_identity_canonical_mode_6_emits_headers_only`).
     //
     // Drop the handle to shut the node down cleanly.
-    let mut cfg = common::make_test_config(
-        std::env::temp_dir().join("ergo-mode6-headers-canonical-accepted"),
-    );
+    let data_dir = test_data_dir();
+    let mut cfg = common::make_test_config(data_dir.path().to_path_buf());
     cfg.state_type = ergo_node::config::StateType::Digest;
     cfg.verify_transactions = false;
     cfg.blocks_to_keep = 0;
@@ -258,9 +278,8 @@ async fn run_inner_rejects_digest_plus_mining_via_programmatic_backstop() {
     // base config so the runtime gate is not short-circuited by
     // the broader Mode 5 rejection arm; the test specifically
     // exercises the mining + Digest sub-arm.
-    let mut cfg = common::make_test_config(
-        std::env::temp_dir().join("ergo-mode-digest-plus-mining-rejected"),
-    );
+    let data_dir = test_data_dir();
+    let mut cfg = common::make_test_config(data_dir.path().to_path_buf());
     cfg.state_type = ergo_node::config::StateType::Digest;
     cfg.verify_transactions = false;
     cfg.blocks_to_keep = 0;
@@ -282,8 +301,8 @@ async fn run_inner_rejects_claim_storage_rent_without_indexer() {
     // this too, but a directly-built NodeConfig bypasses that path. Base
     // config is utxo Mode 1 (make_test_config defaults), so the digest +
     // mining arm does not short-circuit it first.
-    let mut cfg =
-        common::make_test_config(std::env::temp_dir().join("ergo-claim-rent-no-indexer-rejected"));
+    let data_dir = test_data_dir();
+    let mut cfg = common::make_test_config(data_dir.path().to_path_buf());
     cfg.mining_config.enabled = true;
     cfg.mining_config.claim_storage_rent = true;
     cfg.indexer_config.enabled = false;
@@ -301,9 +320,8 @@ async fn run_inner_rejects_claim_storage_rent_without_indexer() {
 
 #[tokio::test]
 async fn run_inner_rejects_digest_plus_indexer_via_programmatic_backstop() {
-    let mut cfg = common::make_test_config(
-        std::env::temp_dir().join("ergo-mode-digest-plus-indexer-rejected"),
-    );
+    let data_dir = test_data_dir();
+    let mut cfg = common::make_test_config(data_dir.path().to_path_buf());
     cfg.state_type = ergo_node::config::StateType::Digest;
     cfg.verify_transactions = false;
     cfg.blocks_to_keep = 0;
@@ -323,9 +341,8 @@ async fn run_inner_rejects_digest_plus_enabled_mempool_via_programmatic_backstop
     // backend is digest, but a programmatic constructor that
     // leaves `mempool_config.enabled = true` would otherwise
     // spawn the admission task against the missing box store.
-    let mut cfg = common::make_test_config(
-        std::env::temp_dir().join("ergo-mode-digest-plus-mempool-rejected"),
-    );
+    let data_dir = test_data_dir();
+    let mut cfg = common::make_test_config(data_dir.path().to_path_buf());
     cfg.state_type = ergo_node::config::StateType::Digest;
     cfg.verify_transactions = false;
     cfg.blocks_to_keep = 0;
@@ -350,8 +367,8 @@ async fn run_inner_rejects_mode_6_plus_utxo_bootstrap() {
     // the integration-level pin that the rejection also fires through
     // `run_inner`'s real entry point, so a future refactor that
     // disconnects the validator from boot cannot silently regress.
-    let mut cfg =
-        common::make_test_config(std::env::temp_dir().join("ergo-mode6-plus-utxoboot-rejected"));
+    let data_dir = test_data_dir();
+    let mut cfg = common::make_test_config(data_dir.path().to_path_buf());
     cfg.state_type = ergo_node::config::StateType::Digest;
     cfg.verify_transactions = false;
     cfg.blocks_to_keep = 0;
@@ -395,8 +412,8 @@ async fn run_inner_accepts_nipopow_with_utxo_bootstrap_after_part2_14_6_lift() {
     // This test only asserts the gates are lifted; the actual
     // bootstrap pipeline needs live peers and is covered by
     // integration testing.
-    let mut cfg =
-        common::make_test_config(std::env::temp_dir().join("ergo-nipopow-utxoboot-accepted"));
+    let data_dir = test_data_dir();
+    let mut cfg = common::make_test_config(data_dir.path().to_path_buf());
     cfg.utxo_bootstrap = true;
     cfg.nipopow_bootstrap = true;
     let handle = run_inner(cfg)
@@ -433,8 +450,8 @@ async fn run_inner_accepts_utxo_bootstrap_after_2j_gate_lift() {
     // This test only asserts the gate is lifted; the actual
     // bootstrap pipeline needs live peers and is covered by
     // integration testing.
-    let mut cfg =
-        common::make_test_config(std::env::temp_dir().join("ergo-mode2-bootstrap-accepted"));
+    let data_dir = test_data_dir();
+    let mut cfg = common::make_test_config(data_dir.path().to_path_buf());
     cfg.utxo_bootstrap = true;
     let handle = run_inner(cfg)
         .await
@@ -449,8 +466,8 @@ async fn run_inner_rejects_verify_transactions_false_alone() {
     // (vT=false + state_type=Utxo), the runtime gate refuses it.
     // The state_type check fires first only if it's non-default; with
     // Utxo, the gate falls through to the verify_transactions check.
-    let mut cfg =
-        common::make_test_config(std::env::temp_dir().join("ergo-vt-false-utxo-rejected"));
+    let data_dir = test_data_dir();
+    let mut cfg = common::make_test_config(data_dir.path().to_path_buf());
     cfg.verify_transactions = false;
     let err = match run_inner(cfg).await {
         Ok(_) => panic!("vT=false must be rejected"),
