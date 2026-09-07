@@ -32,12 +32,12 @@ import sigma.ast.{ErgoTree, JitCost}
 import sigma.serialization.{ConstantSerializer, ErgoTreeSerializer, GroupElementSerializer, SigmaSerializer, TypeSerializer}
 import sigma.ast.DeserializationSigmaBuilder
 import sigma.util.Extensions.EcpOps
-import org.ergoplatform.{ErgoBox, ErgoBoxCandidate, ErgoLikeContext, ErgoLikeTransaction}
+import org.ergoplatform.{ErgoBox, ErgoBoxCandidate, ErgoLikeContext, ErgoLikeInterpreter, ErgoLikeTransaction}
 import org.ergoplatform.validation.ValidationRules
 import org.ergoplatform.modifiers.mempool.ErgoTransactionSerializer
 import org.ergoplatform.modifiers.history.header.HeaderSerializer
 import sigmastate.eval.CPreHeader
-import sigmastate.interpreter.{CErgoTreeEvaluator, CostAccumulator}
+import sigmastate.interpreter.{CErgoTreeEvaluator, CostAccumulator, Interpreter}
 import sigmastate.interpreter.CErgoTreeEvaluator.DefaultEvalSettings
 
 object ErgoSerdeOracle {
@@ -127,10 +127,31 @@ object ErgoSerdeOracle {
     "ACCEPT " + reduceRepr(v) + "|" + accu.totalCost.value
   }
 
-  private def reduce(bytes: Array[Byte]): String = {
+  private def reduce(bytes: Array[Byte], activated: Byte): String = {
     val t = tree.deserializeErgoTree(bytes)
-    VersionContext.withVersions(3.toByte, t.version) {
-      evalIn(dummyReduceContext(t, 3.toByte), t)
+    VersionContext.withVersions(activated, t.version) {
+      evalIn(dummyReduceContext(t, activated), t)
+    }
+  }
+
+  // ── verify surface: the node-side SPEND path, `Interpreter.verify` ──────────
+  // Deserializes the tree the way a STORED box is re-read (the default
+  // VersionContext, activated 1 — `ErgoBoxSerializer.parse` from the UTXO db
+  // runs under no explicit scope), then verifies it under `activated` with an
+  // empty proof and message. This is where `checkSoftForkCondition`
+  // (Interpreter.scala:298-331) runs BEFORE any reduction: a tree whose header
+  // version exceeds the activated version is an InterpreterException even though
+  // the box itself was legally created under an earlier context (#327 M1).
+  //   ACCEPT <true|false>|<cost>   verify returned
+  //   REJECT <ExceptionName>       verify threw
+  private def verifySpend(bytes: Array[Byte], activated: Byte): String = {
+    val t = VersionContext.withVersions(1.toByte, 1.toByte) { tree.deserializeErgoTree(bytes) }
+    val ctx = dummyReduceContext(t, activated)
+    val interpreter = new ErgoLikeInterpreter { override type CTX = ErgoLikeContext }
+    val proof: Array[Byte] = Array.emptyByteArray
+    interpreter.verify(Interpreter.emptyEnv, t, ctx, proof, Array.emptyByteArray) match {
+      case scala.util.Success((ok, cost)) => "ACCEPT " + ok + "|" + cost
+      case scala.util.Failure(e)          => "REJECT " + e.getClass.getSimpleName
     }
   }
 
@@ -141,30 +162,41 @@ object ErgoSerdeOracle {
   // registers — come from the WIRE, and the box's ergoTree is the script that
   // reads them. `reduce` can only ever exercise that vocabulary at parse; this
   // surface exercises it through evaluation and cost as well.
-  private def reduceCtx(bytes: Array[Byte]): String = {
+  private def reduceCtx(bytes: Array[Byte], activated: Byte): String = {
     val r = SigmaSerializer.startReader(bytes)
     val extension = ContextExtension.serializer.parse(r)
     val candidate = ErgoBoxCandidate.serializer.parse(r)
     val selfBox = candidate.toBox(bytesToId(Array.fill(32)(0: Byte)), 0.toShort)
     val t = selfBox.ergoTree
-    VersionContext.withVersions(3.toByte, t.version) {
-      evalIn(reduceContext(selfBox, extension, 3.toByte), t)
+    VersionContext.withVersions(activated, t.version) {
+      evalIn(reduceContext(selfBox, extension, activated), t)
     }
   }
 
-  def handle(surface: String, hexStr: String): String =
+  // A surface may carry an explicit activated script version as `<surface>@<n>`
+  // (e.g. `ergo_box_candidate@1`), to bless the reference's verdict under a
+  // historical `VersionContext` — the `ergoTreeVersion <= activatedVersion`
+  // require is inert below JitActivationVersion (2), so the same bytes flip
+  // between ACCEPT and REJECT across activated versions (#327). A bare surface
+  // name keeps the mainnet 6.0.2 default of 3.
+  def handle(surfaceSpec: String, hexStr: String): String = {
+    val (surface, activated): (String, Byte) = surfaceSpec.split("@", 2) match {
+      case Array(s, v) => (s, v.toByte)
+      case _           => (surfaceSpec, 3.toByte)
+    }
     Base16.decode(hexStr) match {
       case scala.util.Failure(_) => "ERR not-hex"
       case scala.util.Success(bytes) =>
         try
           // Match the consensus node's runtime: activatedVersion = 3 (mainnet
-          // 6.0.2, = MAX_SUPPORTED_TREE_VERSION). WITHOUT this the oracle runs at
-          // the default activatedVersion = 1, whose `withVersions` require
-          // short-circuits, so a tree whose header version exceeds the activated
-          // version is NEVER rejected — a false ACCEPT vs the node, which rejects
-          // it (#120). deserializeErgoTree overrides the tree-version arg from the
-          // header; only the activated version (first arg) matters here.
-          VersionContext.withVersions(3.toByte, 0.toByte) {
+          // 6.0.2, = MAX_SUPPORTED_TREE_VERSION) unless the surface spec says
+          // otherwise. WITHOUT this the oracle runs at the default
+          // activatedVersion = 1, whose `withVersions` require short-circuits, so
+          // a tree whose header version exceeds the activated version is NEVER
+          // rejected — a false ACCEPT vs the node, which rejects it (#120).
+          // deserializeErgoTree overrides the tree-version arg from the header;
+          // only the activated version (first arg) matters here.
+          VersionContext.withVersions(activated, 0.toByte) {
           surface match {
             case "ergo_tree" =>
               val t = tree.deserializeErgoTree(bytes)
@@ -191,8 +223,9 @@ object ErgoSerdeOracle {
             case "header" =>
               val h = HeaderSerializer.parseBytes(bytes)
               acc(hex(HeaderSerializer.toBytes(h)))
-            case "reduce" => reduce(bytes)
-            case "reduce_ctx" => reduceCtx(bytes)
+            case "reduce" => reduce(bytes, activated)
+            case "verify" => verifySpend(bytes, activated)
+            case "reduce_ctx" => reduceCtx(bytes, activated)
             case "mc_root" =>
               // MethodCall-root classifier for the typechecker-registry harness:
               // deserialize (checkType = true, like the box reader) and report
@@ -335,6 +368,7 @@ object ErgoSerdeOracle {
           case e: Throwable => "REJECT " + e.getClass.getSimpleName
         }
     }
+  }
 
   // Fault injection for the guard's own failure-path test. When
   // DIFFTEST_ORACLE_DIE_AFTER=<n> is set, the oracle answers n queries and then

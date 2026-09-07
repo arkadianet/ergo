@@ -655,6 +655,19 @@ pub enum EvalError {
     /// preserve the verbatim bytes and this surfaces the reject at evaluation.
     #[error("cannot evaluate an unparsed (soft-fork-wrapped) ErgoTree")]
     UnparsedErgoTree,
+    /// Scala `Interpreter.checkSoftForkCondition` (`Interpreter.scala:325-328`),
+    /// run by `verify` BEFORE any reduction (`:362-365`): with the activated
+    /// script version within this interpreter's range, a tree whose header
+    /// version exceeds it is an `InterpreterException` — "ErgoTree version N is
+    /// higher than activated M". The box itself may be legal (created under an
+    /// earlier context whose `VersionContext` require was inert, see
+    /// `ergo_ser::ergo_tree::check_tree_version_supported`); it is the SPEND at
+    /// this activated version that is refused.
+    #[error("ErgoTree version {tree_version} is higher than activated {activated_script_version}")]
+    TreeVersionAboveActivated {
+        tree_version: u8,
+        activated_script_version: u8,
+    },
 }
 
 // `?` propagation for the cost API. Both impls preserve the typed

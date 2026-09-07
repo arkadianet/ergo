@@ -59,6 +59,11 @@ pub(super) fn build_tip_context(state: &NodeState) -> Option<OwnedTipContext> {
         height: tip_height_next,
         miner_pubkey: *tip_header.solution.pk().as_bytes(),
         pre_header_timestamp: tip_header.timestamp,
+        // Scala reads `stateContext.blockVersion` = the VOTED parameters'
+        // `blockVersion` (`ErgoStateContext.scala:109`, `ErgoMemPool.scala:258`);
+        // `exBlockVersion` (`ErgoStateContext.scala:222`) requires that value to
+        // equal `header.version` for every accepted block, so the header is an
+        // equivalent source.
         activated_script_version: tip_header.version.saturating_sub(1),
         pre_header_version: tip_header.version,
         pre_header_parent_id: *tip_header.parent_id.as_bytes(),

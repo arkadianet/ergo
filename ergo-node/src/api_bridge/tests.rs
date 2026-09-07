@@ -1914,23 +1914,88 @@ fn block_545684_stored_section_serves_future_version_tree_matching_scala() {
     );
 }
 
+/// The UNTRUSTED consensus reader — the one every peer-delivered section goes
+/// through — must accept mainnet block 545,684 and keep its future-version
+/// tree byte-for-byte (issue #327).
+///
+/// Header version 2 → the reference parses the section under its default
+/// `VersionContext` (activated 1), where the `ergoTreeVersion <= activatedVersion`
+/// require is inert (`VersionContext.scala:20`, `BlockTransactions.scala:184-202`);
+/// the version-5 body fails rule 1001 and is kept as an `UnparsedErgoTree` with
+/// its `propositionBytes` verbatim. The static `version > 3` gate rejected the
+/// block instead, wedging a from-genesis sync. The bytes are bound to the
+/// `transactionsRoot` the reference signed by `mainnet_block_545684_section_bytes`.
+#[test]
+fn block_545684_untrusted_consensus_reader_accepts_the_future_version_tree() {
+    let v = mainnet_block_545684_sections();
+    assert_eq!(
+        v.header.version, 2,
+        "fixture must be a header-version-2 block"
+    );
+    let bytes = mainnet_block_545684_section_bytes(&v);
+
+    let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
+    let bt = ergo_ser::block_transactions::read_block_transactions(&mut r)
+        .expect("the consensus reader must accept a block the reference node accepts");
+    assert!(r.is_empty(), "section must be consumed exactly");
+    assert_eq!(
+        r.activated_script_version(),
+        None,
+        "a pre-6.0 section leaves the reader in the default context",
+    );
+
+    let out = &bt.transactions[1].output_candidates[0];
+    assert_eq!(out.ergo_tree().version, 5);
+    assert!(out.ergo_tree().has_size);
+    assert_eq!(hex::encode(out.ergo_tree_bytes()), "cd07021a8e6f59fd4a");
+    assert!(
+        matches!(out.ergo_tree().body, ergo_ser::opcode::Expr::Unparsed(_)),
+        "the future-version body stays opaque, like Scala's UnparsedErgoTree",
+    );
+    // The box round-trips with its raw tree bytes (box id parity with Scala).
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    ergo_ser::ergo_box::write_ergo_box_candidate(&mut w, out).unwrap();
+    let box_bytes = w.result();
+    let mut rr = ergo_primitives::reader::VlqReader::new(&box_bytes);
+    let again = ergo_ser::ergo_box::read_ergo_box_candidate(&mut rr).unwrap();
+    assert_eq!(again.ergo_tree_bytes(), out.ergo_tree_bytes());
+    assert_eq!(
+        hex::encode(transaction_id(&bt.transactions[1]).unwrap().as_bytes()),
+        v.block_transactions.transactions[1].id,
+    );
+}
+
 // ----- error paths -----
 
-/// The consensus reader is untouched: bytes arriving from a peer still run
-/// the box-script acceptance gates, so only the node's own stored sections
-/// gain the leniency. (Whether the version gate should itself be keyed to the
-/// block's activated script version is a separate consensus question; this
-/// pins today's behaviour so a change to it is deliberate.)
+/// The same bytes under a 6.0 scope (activated 3) are what a mempool /
+/// P2P transaction parse sees today, and there the reference rejects a
+/// version-5 tree with a `SerializerException` — so must we.
 #[test]
-fn block_545684_untrusted_section_still_hits_the_tree_version_gate() {
+fn block_545684_transaction_is_rejected_under_todays_activated_version() {
     let v = mainnet_block_545684_sections();
-    let bytes = mainnet_block_545684_section_bytes(&v);
-    let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
-    let err = ergo_ser::block_transactions::read_block_transactions(&mut r)
-        .expect_err("the untrusted consensus reader must still gate a version-5 tree");
-    let rendered = format!("{err:?}");
-    assert!(
-        rendered.contains("ErgoTree version 5"),
-        "unexpected rejection reason: {rendered}",
-    );
+    let bytes = ergo_rest_json::decode::decode_block_transactions_with_mode(
+        &v.block_transactions,
+        ergo_rest_json::decode::DecodeMode::Preserve,
+    )
+    .expect("on-chain blockTransactions JSON must decode in Preserve mode");
+    let bt = ergo_ser::block_transactions::read_block_transactions(
+        &mut ergo_primitives::reader::VlqReader::new(&bytes),
+    )
+    .expect("section parses in the default context");
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    write_transaction(&mut w, &bt.transactions[1]).unwrap();
+    let tx_bytes = w.result();
+    for activated in [2u8, 3] {
+        let mut r = ergo_primitives::reader::VlqReader::new(&tx_bytes)
+            .with_activated_script_version(activated);
+        let err = ergo_ser::transaction::read_transaction(&mut r)
+            .expect_err("activated >= 2 must gate a version-5 tree");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("ErgoTree version 5"),
+            "unexpected rejection reason: {rendered}",
+        );
+    }
+    let mut r = ergo_primitives::reader::VlqReader::new(&tx_bytes).with_activated_script_version(1);
+    ergo_ser::transaction::read_transaction(&mut r).expect("activated 1: the require is inert");
 }

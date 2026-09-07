@@ -159,7 +159,15 @@ impl ErgoBoxCandidate {
         let mut tr = VlqReader::new(&ergo_tree_bytes);
         let parsed_tree = read_ergo_tree(&mut tr)
             .map_err(|e| WriteError::InvalidData(format!("ergo_tree_bytes do not parse: {e}")))?;
-        crate::ergo_tree::check_tree_version_supported(&parsed_tree).map_err(|e| {
+        // `tr` / `rr` below are fresh, never-scoped readers: this constructor
+        // has no `VersionContext` of its own (it is not a consensus parse — its
+        // callers hand it already-parsed values), so it runs under Scala's
+        // default context, activated 1, spelled out rather than looked up.
+        crate::ergo_tree::check_tree_version_supported(
+            &parsed_tree,
+            crate::ergo_tree::DEFAULT_ACTIVATED_SCRIPT_VERSION,
+        )
+        .map_err(|e| {
             WriteError::InvalidData(format!("ergo_tree_bytes have an unsupported version: {e}"))
         })?;
         crate::ergo_tree::check_header_size_bit(&parsed_tree).map_err(|e| {

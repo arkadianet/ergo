@@ -135,7 +135,7 @@ pub fn validate_transaction(
     }
 
     // Stage 1: deserialize (also collects every group element seen on the wire)
-    let (tx, group_elements) = deserialize_transaction(tx_bytes)?;
+    let (tx, group_elements) = deserialize_transaction(tx_bytes, cx.ctx.activated_script_version)?;
 
     // Stage 1.5: every group element must be on-curve. Scala rejects an off-curve
     // / bad-prefix point while deserializing the transaction; the node's
@@ -234,6 +234,14 @@ pub fn validate_transaction_parsed(
     // and delegate. The production block validator uses the variant below to
     // skip this re-parse — it already collected the points at the one
     // authoritative deserialize.
+    //
+    // This re-parse is NOT the acceptance decision for `tx`: the caller's parse
+    // that produced `tx` already ran the box-script gates under its own
+    // `VersionContext` scope (the block reader's wire-derived one, or the
+    // mempool's tip-activated one). It therefore runs under the reader's default
+    // context — re-gating here at the block's activated version would reject a
+    // pre-6.0 block's transaction the reference parses under its default
+    // context (see `check_tree_version_supported`).
     let group_elements = {
         let mut r = VlqReader::new(original_bytes);
         read_transaction(&mut r).map_err(|e| ValidationError::Deserialization(e.to_string()))?;
@@ -339,10 +347,17 @@ pub fn validate_transaction_parsed_with_group_elements(
 /// Returns the parsed transaction and every group element seen during the parse
 /// (collected on the reader's sideband), so the caller can curve-check them —
 /// matching Scala's deserialize-time `GroupElementSerializer.parse`.
+///
+/// `activated_script_version` scopes the box-script version gate exactly as
+/// Scala's transaction-level parse does (`ErgoMemPool.scala:259`,
+/// `ErgoNodeViewSynchronizer.scala:778`: `VersionContext.withVersions(activated,
+/// activated)`): this entry point is the single-transaction (mempool / API)
+/// path, whose activated version is the tip's.
 fn deserialize_transaction(
     tx_bytes: &[u8],
+    activated_script_version: u8,
 ) -> Result<(Transaction, Vec<[u8; 33]>), ValidationError> {
-    let mut r = VlqReader::new(tx_bytes);
+    let mut r = VlqReader::new(tx_bytes).with_activated_script_version(activated_script_version);
     let tx =
         read_transaction(&mut r).map_err(|e| ValidationError::Deserialization(e.to_string()))?;
     if !r.is_empty() {

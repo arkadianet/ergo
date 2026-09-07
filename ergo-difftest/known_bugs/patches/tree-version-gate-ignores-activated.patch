@@ -1,0 +1,13 @@
+--- a/ergo-ser/src/ergo_tree/gates.rs
++++ b/ergo-ser/src/ergo_tree/gates.rs
+@@ -92,8 +92,8 @@
+     tree: &ErgoTree,
+     activated_script_version: u8,
+ ) -> Result<(), ReadError> {
+-    if activated_script_version >= JIT_ACTIVATION_VERSION && tree.version > activated_script_version
+-    {
++    let _ = (activated_script_version, JIT_ACTIVATION_VERSION);
++    if tree.version > 3 {
+         return Err(ReadError::HardReject(format!(
+             "ErgoTree version {} exceeds the activated script version {} (VersionContext require, SerializerException)",
+             tree.version, activated_script_version

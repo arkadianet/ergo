@@ -1527,32 +1527,83 @@ fn sizeless_v0_v6_embeddable_type_accepts_only_under_activated_v6() {
     );
 }
 
-/// `check_tree_version_supported` HARD-rejects a tree whose version exceeds
-/// the activated/max supported version (Scala throws a `SerializerException`
-/// at deserialize via `VersionContext.withVersions`), and accepts v0..=3.
-/// Oracle-confirmed against sigma-state 6.0.2: `0c0208d3`/`0d…`/`0f…` (v4/5/7)
-/// all THROW, `080208d3` (v0) PARSES.
+/// `check_tree_version_supported` is Scala's `VersionContext` require
+/// (`VersionContext.scala:20`): INERT below `JitActivationVersion` (2), and a
+/// HARD reject of `tree.version > activated` from activated 2 on. Oracle
+/// (sigma-state 6.0.2, `tree_version_oracle_parity.rs`): `0c0208d3`/`0d…`/`0f…`
+/// (v4/5/7) THROW at activated 3 and PARSE at activated 1; `0b0208d3` (v3)
+/// PARSES at 3 and THROWS at 2.
 #[test]
-fn check_tree_version_supported_rejects_future_versions() {
+fn check_tree_version_supported_is_keyed_to_the_activated_version() {
     // read_ergo_tree stays lenient: it wraps v4..=7 trees as Unparsed...
-    for hex in ["0c0208d3", "0d0208d3", "0f0208d3"] {
+    let future = ["0c0208d3", "0d0208d3", "0f0208d3"];
+    for hex in future {
         let tree = parse_tree(hex);
         assert!(tree.version > 3, "{hex}: version {} not > 3", tree.version);
-        // ...but the box-script gate hard-rejects them.
+        // ...and below activated 2 the require is inert (mainnet 545,684 class).
+        for activated in [0, 1] {
+            assert!(
+                check_tree_version_supported(&tree, activated).is_ok(),
+                "{hex}: version {} must pass at activated {activated}",
+                tree.version
+            );
+        }
+        // ...but from activated 2 on the box-script gate hard-rejects them.
+        for activated in [2, 3] {
+            assert!(
+                matches!(
+                    check_tree_version_supported(&tree, activated),
+                    Err(ReadError::HardReject(_))
+                ),
+                "{hex}: version {} must hard-reject at activated {activated}",
+                tree.version
+            );
+        }
+    }
+    // The threshold is the activated version itself, not a static maximum:
+    // a v3 tree is rejected at activated 2 and accepted at 3.
+    let v3 = parse_tree("0b0208d3");
+    assert!(matches!(
+        check_tree_version_supported(&v3, 2),
+        Err(ReadError::HardReject(_))
+    ));
+    assert!(check_tree_version_supported(&v3, 3).is_ok());
+    // v0 is accepted everywhere.
+    let v0 = parse_tree("080208d3");
+    for activated in 0..=3 {
+        assert!(check_tree_version_supported(&v0, activated).is_ok());
+    }
+}
+
+/// The box readers take the activated version from their reader's scope:
+/// unscoped = Scala's default context (activated 1, inert), scoped = the
+/// caller's `withVersions`. Same box bytes, opposite verdicts.
+#[test]
+fn box_reader_tree_version_gate_follows_the_reader_scope() {
+    use crate::ergo_box::read_ergo_box_candidate;
+    // value 1 · v5 size-delimited sigmaProp(true) tree · height 0 · no tokens ·
+    // no registers.
+    let box_hex = "010d0208d3000000";
+    let bytes = hex::decode(box_hex).unwrap();
+
+    let mut unscoped = VlqReader::new(&bytes);
+    let candidate = read_ergo_box_candidate(&mut unscoped)
+        .expect("default context (activated 1): the require is inert");
+    assert_eq!(candidate.ergo_tree().version, 5);
+    assert_eq!(candidate.ergo_tree_bytes(), &bytes[1..5]);
+
+    let mut at_one = VlqReader::new(&bytes).with_activated_script_version(1);
+    assert!(read_ergo_box_candidate(&mut at_one).is_ok());
+
+    for activated in [2u8, 3] {
+        let mut scoped = VlqReader::new(&bytes).with_activated_script_version(activated);
         assert!(
             matches!(
-                check_tree_version_supported(&tree),
+                read_ergo_box_candidate(&mut scoped),
                 Err(ReadError::HardReject(_))
             ),
-            "{hex}: version {} must hard-reject",
-            tree.version
+            "activated {activated} must hard-reject a v5 tree"
         );
-    }
-    // v0..=3 are accepted.
-    for hex in ["080208d3", "0b0208d3"] {
-        let tree = parse_tree(hex);
-        assert!(tree.version <= 3);
-        assert!(check_tree_version_supported(&tree).is_ok());
     }
 }
 
@@ -1706,14 +1757,23 @@ fn size_delimited_body_nested_high_version_sbox_trusted_vs_strict() {
         w.result()
     };
 
-    // Strict (untrusted) consensus reader: the nested v5 tree inside the
-    // size-delimited body hard-rejects.
-    let mut strict = VlqReader::new(&bytes);
+    // Strict (untrusted) consensus reader scoped to activated 3: the nested v5
+    // tree inside the size-delimited body hard-rejects.
+    let mut strict = VlqReader::new(&bytes).with_activated_script_version(3);
     read_ergo_tree(&mut strict)
         .expect_err("strict must reject a nested high-version tree inside a size-delimited body");
 
-    // Trusted reader: the body sub-reader inherits trust, so it round-trips.
-    let mut trusted = VlqReader::new(&bytes).trusted();
+    // Unscoped reader (Scala's default context, activated 1): the require is
+    // inert, so the nested v5 tree is admitted (#327).
+    let mut default_ctx = VlqReader::new(&bytes);
+    read_ergo_tree(&mut default_ctx)
+        .expect("the default context must admit a nested high-version tree");
+
+    // Trusted reader: the body sub-reader inherits trust, so it round-trips even
+    // under activated 3.
+    let mut trusted = VlqReader::new(&bytes)
+        .with_activated_script_version(3)
+        .trusted();
     read_ergo_tree(&mut trusted)
         .expect("trusted must accept a stored size-delimited body with a nested high-version tree");
 }

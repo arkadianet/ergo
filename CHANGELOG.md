@@ -107,6 +107,30 @@ infrastructure.
   chain-walking client hunting for a hole that is not there; the block routes
   now separate "absent" from "present and unserialisable" and carry the parse
   failure in the 500 body.
+- **Consensus (reject-valid): the ErgoTree version gate is keyed to the
+  activated script version the parse runs under, not a static maximum
+  (#327).** Scala's rule is `VersionContext.scala:20`:
+  `require(activatedVersion < JitActivationVersion(2) || ergoTreeVersion <=
+  activatedVersion)`, re-thrown by `deserializeErgoTree` as a hard
+  `SerializerException` — so a future-version box script is refused only from
+  activated 2 on, and below that its body is parsed and, failing, kept as an
+  `UnparsedErgoTree` (size bit set) exactly like our opaque wrap. The reference
+  scopes that context per parse: the block-transactions reader from the wire
+  block version for header version >= 4 only (`BlockTransactions.scala:184-202`),
+  the mempool / P2P transaction parse to the tip's activated version, and
+  everything else (stored boxes, every pre-6.0 section) under the default
+  context (activated 1). `check_tree_version_supported` rejected
+  `version > 3` unconditionally instead. Live counterexample: mainnet block
+  545,684 (header version 2), tx[1] output[0] `cd07021a8e6f59fd4a` — header 0xcd
+  = version 5 + size bit — which the reference accepts and which is later spent
+  by storage rent at 1,596,890; a from-genesis sync on the previous gate wedged
+  there. The gate now takes the activated version, `VlqReader` carries the
+  parse's `VersionContext` scope (`with_activated_script_version`), the block
+  reader sets it from the wire block version like Scala, and the mempool /
+  validation transaction parse sets it from the tip. JVM verdicts for the
+  545,684 box/transaction and synthetic v0–v7 trees at activated 0/1/2/3 are
+  pinned verbatim in `test-vectors/scala/tree_version_activated_oracle.json`
+  (`ErgoSerdeOracle.scala` gained a `<surface>@<activated>` spec for this).
 
 - **A peer can no longer steer the anchor-map builder into GET-ing an
   internal host (SSRF).** `http_get` now resolves the advertised REST host

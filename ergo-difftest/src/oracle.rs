@@ -256,6 +256,13 @@ pub fn oracle_surfaces() -> Vec<SurfaceSpec> {
     ]
 }
 
+/// The activated script version the JVM oracle runs every surface under
+/// (`ErgoSerdeOracle.scala` `handle`: `VersionContext.withVersions(3, …)`, mainnet
+/// 6.0.2). The node-side readers are scoped to the same version so the
+/// `ergoTreeVersion <= activatedVersion` gate (`check_tree_version_supported`)
+/// fires on both sides for the same bytes.
+const ORACLE_ACTIVATED_VERSION: u8 = 3;
+
 /// `ergo_tree`: the CONSENSUS surface = `read_ergo_tree` + the four gates the
 /// box-script readers enforce after parsing: `check_header_size_bit` (rule 1012),
 /// `check_tree_version_supported` (tree version > activated, #120),
@@ -282,7 +289,7 @@ fn ergo_tree_verdict(bytes: &[u8]) -> (Verdict, usize) {
 }
 
 fn ergo_box_candidate_verdict(bytes: &[u8]) -> (Verdict, usize) {
-    let mut r = VlqReader::new(bytes);
+    let mut r = VlqReader::new(bytes).with_activated_script_version(ORACLE_ACTIVATED_VERSION);
     match ergo_ser::ergo_box::read_ergo_box_candidate(&mut r) {
         Err(e) => (Verdict::Reject(format!("{e:?}")), r.position()),
         Ok(candidate) => {
@@ -298,7 +305,7 @@ fn ergo_box_candidate_verdict(bytes: &[u8]) -> (Verdict, usize) {
 }
 
 fn transaction_verdict(bytes: &[u8]) -> (Verdict, usize) {
-    let mut r = VlqReader::new(bytes);
+    let mut r = VlqReader::new(bytes).with_activated_script_version(ORACLE_ACTIVATED_VERSION);
     match ergo_ser::transaction::read_transaction(&mut r) {
         Err(e) => (Verdict::Reject(format!("{e:?}")), r.position()),
         Ok(tx) => {
@@ -356,7 +363,13 @@ fn deserialize_box_script(
     bytes: &[u8],
     check_group_elements: bool,
 ) -> (Result<ergo_ser::ergo_tree::ErgoTree, String>, usize) {
-    let mut r = VlqReader::new(bytes);
+    // Scoped like every other node-side reader here: the top-level tree is
+    // gated by the explicit `check_tree_version_supported` call below, but a
+    // NESTED box script (an `SBox` constant) is gated inside `read_ergo_tree`
+    // from the reader's scope — unscoped it would run under the default
+    // context (activated 1) and accept a nested future-version tree the JVM
+    // rejects at activated 3.
+    let mut r = VlqReader::new(bytes).with_activated_script_version(ORACLE_ACTIVATED_VERSION);
     let tree = match ergo_ser::ergo_tree::read_ergo_tree(&mut r) {
         Ok(t) => t,
         Err(e) => return (Err(format!("{e:?}")), r.position()),
@@ -378,7 +391,9 @@ fn deserialize_box_script(
     if let Err(e) = ergo_ser::ergo_tree::check_header_size_bit(&tree) {
         return (Err(format!("{e:?}")), consumed);
     }
-    if let Err(e) = ergo_ser::ergo_tree::check_tree_version_supported(&tree) {
+    if let Err(e) =
+        ergo_ser::ergo_tree::check_tree_version_supported(&tree, ORACLE_ACTIVATED_VERSION)
+    {
         return (Err(format!("{e:?}")), consumed);
     }
     if let Err(e) = ergo_ser::ergo_tree::check_resolvable_methods(&tree) {
@@ -575,7 +590,7 @@ fn reduce_ctx_verdict(bytes: &[u8]) -> (Verdict, usize) {
     use ergo_ser::ergo_box::{serialize_ergo_box, ErgoBox};
     use ergo_sigma::evaluator::{reduce_expr_with_cost, EvalBox, ReductionContext};
 
-    let mut r = VlqReader::new(bytes);
+    let mut r = VlqReader::new(bytes).with_activated_script_version(ORACLE_ACTIVATED_VERSION);
     let extension = match ergo_ser::input::read_context_extension(&mut r) {
         Ok(e) => e,
         Err(e) => return (Verdict::Reject(format!("extension: {e:?}")), r.position()),
@@ -596,13 +611,17 @@ fn reduce_ctx_verdict(bytes: &[u8]) -> (Verdict, usize) {
     let tree = candidate.ergo_tree().clone();
     for gate in [
         ergo_ser::ergo_tree::check_header_size_bit as fn(&_) -> _,
-        ergo_ser::ergo_tree::check_tree_version_supported,
         ergo_ser::ergo_tree::check_resolvable_methods,
         ergo_ser::ergo_tree::check_sigma_prop_root,
     ] {
         if let Err(e) = gate(&tree) {
             return (Verdict::Reject(format!("{e:?}")), consumed);
         }
+    }
+    if let Err(e) =
+        ergo_ser::ergo_tree::check_tree_version_supported(&tree, ORACLE_ACTIVATED_VERSION)
+    {
+        return (Verdict::Reject(format!("{e:?}")), consumed);
     }
     if matches!(tree.body, ergo_ser::opcode::Expr::Unparsed(_)) {
         return (Verdict::Reject("UnparsedErgoTree".into()), consumed);
@@ -701,7 +720,7 @@ fn reduce_ctx_verdict(bytes: &[u8]) -> (Verdict, usize) {
 /// and canonical encoding is a separate check (`ergoTransactionNonCanonical`) run
 /// by the full validator, not by `statelessValidity`.
 fn validate_verdict(bytes: &[u8]) -> (Verdict, usize) {
-    let mut r = VlqReader::new(bytes);
+    let mut r = VlqReader::new(bytes).with_activated_script_version(ORACLE_ACTIVATED_VERSION);
     let tx = match ergo_ser::transaction::read_transaction(&mut r) {
         Err(e) => return (Verdict::Reject(format!("{e:?}")), r.position()),
         Ok(tx) => tx,

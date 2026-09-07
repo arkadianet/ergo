@@ -69,6 +69,21 @@ pub struct VlqReader<'a> {
     /// The structural parse is unchanged; only the acceptance checks are gated.
     /// NEVER set this on a reader fed untrusted block/transaction bytes.
     trusted: bool,
+    /// The ACTIVATED script version this parse runs under — the Rust twin of
+    /// Scala's ambient `VersionContext.current.activatedVersion`, which
+    /// `ErgoTreeSerializer.deserializeErgoTree` reads to decide whether a box
+    /// script's header version is acceptable (`VersionContext.scala:20`:
+    /// `require(activatedVersion < JitActivationVersion || ergoTreeVersion <=
+    /// activatedVersion)`). `None` (the default) is Scala's default context
+    /// (`VersionContext._defaultContext`, activated version 1), under which the
+    /// reference parses everything it does not explicitly scope — stored boxes,
+    /// and the transactions of every pre-6.0 (header version < 4) block
+    /// section. `ergo-ser` resolves `None` to that default; callers that model a
+    /// Scala `VersionContext.withVersions(activated, …)` scope set it explicitly:
+    /// the block-transactions reader from the wire block version (header
+    /// version >= 4 only, `BlockTransactionsSerializer.parse`), and the
+    /// mempool / P2P transaction parse from the tip's activated version.
+    activated_script_version: Option<u8>,
 }
 
 /// Errors produced while decoding a Scorex-style byte stream.
@@ -136,7 +151,32 @@ impl<'a> VlqReader<'a> {
             ergo_tree_version: None,
             embeddable_activated_version: None,
             trusted: false,
+            activated_script_version: None,
         }
+    }
+
+    /// Set the activated script version this reader parses under (see the
+    /// [`activated_script_version`](Self::activated_script_version) field).
+    /// Returns `self` for use at construction
+    /// (`VlqReader::new(bytes).with_activated_script_version(v)`).
+    #[must_use]
+    pub fn with_activated_script_version(mut self, version: u8) -> Self {
+        self.activated_script_version = Some(version);
+        self
+    }
+
+    /// Set (or clear) the activated script version on an already-constructed
+    /// reader, returning the previous value so a caller can scope the change
+    /// exactly like Scala's `VersionContext.withVersions { … }` and restore it
+    /// afterwards.
+    pub fn set_activated_script_version(&mut self, version: Option<u8>) -> Option<u8> {
+        std::mem::replace(&mut self.activated_script_version, version)
+    }
+
+    /// The activated script version this reader parses under, or `None` for
+    /// Scala's default context.
+    pub fn activated_script_version(&self) -> Option<u8> {
+        self.activated_script_version
     }
 
     /// Mark this reader as decoding a TRUSTED, already-validated source (see the
