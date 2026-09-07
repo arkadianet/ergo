@@ -20,6 +20,54 @@ const COST_PER_TREE_BYTE: u64 = 2;
 /// charged when `activated_script_version >= V6_SOFT_FORK_VERSION`.
 const V6_SOFT_FORK_VERSION: u8 = 3;
 
+/// Scala `VersionContext.MaxSupportedScriptVersion` (`VersionContext.scala:48`):
+/// the highest activated script version this interpreter implements.
+const MAX_SUPPORTED_SCRIPT_VERSION: u8 = 3;
+
+/// Scala `Interpreter.checkSoftForkCondition` (`Interpreter.scala:298-331`),
+/// which `verify` runs BEFORE `fullReduction` (`:362-365`):
+///
+/// ```text
+/// if (context.activatedScriptVersion > VersionContext.MaxSupportedScriptVersion) {
+///   if (ergoTree.version > VersionContext.MaxSupportedScriptVersion) return Some(true -> initCost)
+/// } else {
+///   if (ergoTree.version > context.activatedScriptVersion) throw new InterpreterException(…)
+/// }
+/// None
+/// ```
+///
+/// `Some(true)` = accept the spend without verification (a soft fork this
+/// interpreter does not implement is active AND the script needs it: rely on
+/// the upgraded majority); `Err` = the tree's header version exceeds the
+/// activated version, an `InterpreterException`; `None` = proceed. The second
+/// arm is a real consensus rule on historical spends: a v3 tree box is legally
+/// CREATED under header version 1..3 (the deserialize-time `VersionContext`
+/// require is inert below activated 2, and a pre-6.0 block section parses
+/// under the default context — `ergo_ser::ergo_tree::check_tree_version_supported`),
+/// but SPENDING it by script at activated 2 (header version 3, mainnet
+/// 889,856–1,628,159) is refused by the reference. It also means a v4+ tree
+/// can never be spent by script at activated < 2 (`4 > 1`), whatever its body.
+/// Runs after the storage-rent path in the validator, as `ErgoInterpreter.verify`
+/// tries rent first and only falls through to `super.verify`.
+fn check_soft_fork_condition(
+    ergo_tree: &ErgoTree,
+    activated_script_version: u8,
+) -> Result<Option<bool>, VerifySpendingError> {
+    if activated_script_version > MAX_SUPPORTED_SCRIPT_VERSION {
+        if ergo_tree.version > MAX_SUPPORTED_SCRIPT_VERSION {
+            return Ok(Some(true));
+        }
+    } else if ergo_tree.version > activated_script_version {
+        return Err(VerifySpendingError::Eval(
+            super::evaluator::EvalError::TreeVersionAboveActivated {
+                tree_version: ergo_tree.version,
+                activated_script_version,
+            },
+        ));
+    }
+    Ok(None)
+}
+
 /// Re-serialized length of a parsed ErgoTree.
 ///
 /// FALLBACK ONLY: used for the deserialize-substitution cost when the spent
@@ -171,6 +219,13 @@ pub fn verify_spending_proof_with_context_and_cost(
     ctx: &super::evaluator::ReductionContext<'_>,
     cost: &mut CostAccumulator,
 ) -> Result<bool, VerifySpendingError> {
+    // Scala `verify` runs `checkSoftForkCondition` first (`Interpreter.scala:362`):
+    // the tree-version-vs-activated rule, and the "accept without verification"
+    // arm for a soft fork this interpreter does not implement.
+    if let Some(accepted) = check_soft_fork_condition(ergo_tree, ctx.activated_script_version)? {
+        return Ok(accepted);
+    }
+
     // Whole-tree, pre-reduction parity checks Scala performs at context build /
     // deserialize (ContextExtension key domain via `toSigmaContext`; every
     // GroupElement constant on-curve via `GroupElementSerializer.parse`). These
@@ -1388,5 +1443,73 @@ mod evaluated_value_reduce_parity_tests {
             ergo_ser::sigma_value::SECP256K1_GENERATOR,
             crate::evaluator::SECP256K1_GENERATOR
         );
+    }
+}
+
+#[cfg(test)]
+mod soft_fork_condition_tests {
+    use super::*;
+    use ergo_primitives::reader::VlqReader;
+
+    // ----- helpers -----
+
+    fn tree(hex: &str) -> ErgoTree {
+        let bytes = hex::decode(hex).unwrap();
+        // Parse under the default context (activated 1), as a stored box is.
+        ergo_ser::ergo_tree::read_ergo_tree(&mut VlqReader::new(&bytes)).unwrap()
+    }
+
+    fn verify_at(tree: &ErgoTree, activated: u8) -> Result<bool, VerifySpendingError> {
+        let ctx = super::super::evaluator::ReductionContext {
+            activated_script_version: activated,
+            ergo_tree_version: tree.version,
+            ..super::super::evaluator::ReductionContext::minimal(0, 0)
+        };
+        verify_spending_proof_with_context(tree, &[], &[], &ctx)
+    }
+
+    // ----- happy path -----
+
+    /// `Interpreter.scala:325-328`: a tree at or below the activated version
+    /// proceeds to reduction (sigmaProp(true) with an empty proof verifies).
+    #[test]
+    fn spend_tree_version_at_or_below_activated_proceeds() {
+        assert!(verify_at(&tree("0b0208d3"), 3).unwrap());
+        assert!(verify_at(&tree("0a0208d3"), 2).unwrap());
+        assert!(verify_at(&tree("080208d3"), 0).unwrap());
+    }
+
+    /// `Interpreter.scala:304-318`: an activated version this interpreter does
+    /// not implement AND a tree needing it → accepted without verification.
+    #[test]
+    fn spend_under_unsupported_activation_accepts_future_tree_unverified() {
+        assert!(verify_at(&tree("0d0208d3"), 4).unwrap());
+    }
+
+    // ----- error paths -----
+
+    /// A v3 tree box is legally created under header version 1..3 but
+    /// script-spending it at activated 2 is an InterpreterException (JVM
+    /// `verify@2 0b0208d3` → REJECT InterpreterException); a v5 tree can never
+    /// be script-spent below activated 2.
+    #[test]
+    fn spend_tree_version_above_activated_is_rejected_before_reduction() {
+        for (hex, activated) in [("0b0208d3", 2u8), ("0d0208d3", 1), ("0c0208d3", 3)] {
+            let t = tree(hex);
+            match verify_at(&t, activated) {
+                Err(VerifySpendingError::Eval(
+                    super::super::evaluator::EvalError::TreeVersionAboveActivated {
+                        tree_version,
+                        activated_script_version,
+                    },
+                )) => {
+                    assert_eq!(tree_version, t.version);
+                    assert_eq!(activated_script_version, activated);
+                }
+                other => panic!(
+                    "{hex} at activated {activated}: expected the version reject, got {other:?}"
+                ),
+            }
+        }
     }
 }

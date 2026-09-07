@@ -240,6 +240,10 @@ pub fn validate_full_block(
         height: header.height,
         miner_pubkey: *header.solution.pk().as_bytes(),
         pre_header_timestamp: header.timestamp,
+        // Scala derives this from the voted parameters' `blockVersion`
+        // (`ErgoStateContext.scala:109`); `exBlockVersion` (`:222`) pins that
+        // value to `header.version` for every accepted block, so the header is
+        // an equivalent source.
         activated_script_version: header.version.saturating_sub(1),
         pre_header_version: header.version,
         pre_header_parent_id: *header.parent_id.as_bytes(),
@@ -523,6 +527,10 @@ fn validate_full_block_parallel_impl(
         height: header.height,
         miner_pubkey: *header.solution.pk().as_bytes(),
         pre_header_timestamp: header.timestamp,
+        // Scala derives this from the voted parameters' `blockVersion`
+        // (`ErgoStateContext.scala:109`); `exBlockVersion` (`:222`) pins that
+        // value to `header.version` for every accepted block, so the header is
+        // an equivalent source.
         activated_script_version: header.version.saturating_sub(1),
         pre_header_version: header.version,
         pre_header_parent_id: *header.parent_id.as_bytes(),

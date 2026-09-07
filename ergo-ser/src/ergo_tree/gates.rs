@@ -48,8 +48,9 @@ pub fn check_header_size_bit(tree: &ErgoTree) -> Result<(), ReadError> {
 /// as `UnparsedErgoTree` and the box is hard-rejected, size bit or not. The
 /// four cases, with `JitActivationVersion = 2`:
 ///
-/// - **activated < 2** (header version 1 or 2, i.e. mainnet below the 5.0
-///   activation at 843,776): the `require` is INERT — any tree version is
+/// - **activated < 2** (header version 1 or 2; on mainnet header version 2
+///   starts at 417,792 and version 3 — activated 2 — at 889,856, version 4 at
+///   1,628,160): the `require` is INERT — any tree version is
 ///   admitted to the body parse. A future-version body that then fails
 ///   (rule 1001 / an unknown opcode …) is a `ValidationException`, so WITH the
 ///   size bit `deserializeErgoTree` keeps it as `UnparsedErgoTree` with its
@@ -77,7 +78,12 @@ pub fn check_header_size_bit(tree: &ErgoTree) -> Result<(), ReadError> {
 /// output[0] `cd07021a8e6f59fd4a` — header 0xcd = version 5 + size bit — is kept
 /// as an `UnparsedErgoTree` and later spent by storage rent at 1,596,890 (header
 /// version 3); the previous static `version > 3` gate wedged a from-genesis sync
-/// on that block (#327). The mempool / P2P transaction parse is scoped to the
+/// on that block (#327). Spending such a box BY SCRIPT is a separate rule:
+/// `Interpreter.checkSoftForkCondition` (`Interpreter.scala:325-328`) refuses a
+/// tree whose version exceeds the activated version at verify time
+/// (`ergo_sigma::reduce`), so a v4+ tree can never be script-spent below
+/// activated 2, and a v3 tree box created then cannot be script-spent at
+/// activated 2. The mempool / P2P transaction parse is scoped to the
 /// tip's activated version (`ErgoMemPool.scala:259`, `ErgoNodeViewSynchronizer
 /// .scala:778`), so a future-version tree is refused at admission today.
 ///

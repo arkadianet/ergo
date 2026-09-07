@@ -1,5 +1,5 @@
 {
-  "_source": "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala (sigma-state 6.0.2 + ergo-core 6.0.2), run 2026-09-07 with the <surface>@<activated> spec; `oracle` is the JVM output line verbatim",
+  "_source": "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala (sigma-state 6.0.2 + ergo-core 6.0.2), runs 2026-09-07 with the <surface>@<activated> spec; `oracle` is the JVM output line verbatim",
   "_rule": "VersionContext.scala:20 require(activatedVersion < JitActivationVersion(2) || ergoTreeVersion <= activatedVersion); a failing require is re-thrown by ErgoTreeSerializer.deserializeErgoTree as a SerializerException (hard reject, size bit or not); below activated 2 the require is inert and a failing body is kept as UnparsedErgoTree when the size bit is set",
   "_issue": "#327",
   "vectors": [
@@ -268,6 +268,113 @@
       "hex": "010b0208d3000000",
       "oracle": "ACCEPT 010b0208d3000000",
       "note": "ErgoBoxCandidate: value 1, v3 size-delimited sigmaProp(true), height 0, no tokens, no registers"
+    },
+    {
+      "surface": "reduce",
+      "activated_version": 2,
+      "hex": "0b0208d3",
+      "oracle": "REJECT SerializerException",
+      "note": "v3 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "reduce",
+      "activated_version": 3,
+      "hex": "0b0208d3",
+      "oracle": "ACCEPT P:d3|5",
+      "note": "v3 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "reduce",
+      "activated_version": 2,
+      "hex": "0a0208d3",
+      "oracle": "ACCEPT P:d3|5",
+      "note": "v2 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "reduce",
+      "activated_version": 1,
+      "hex": "0d0208d3",
+      "oracle": "ACCEPT P:d3|5",
+      "note": "v5 + size bit, sigmaProp(true)",
+      "node_known_gap": "the node wraps every tree above MAX_SUPPORTED_TREE_VERSION (3) opaquely at parse and cannot reduce it, while the JVM parses a v5 body below activated 2 and reduces it; unreachable on the spend path because checkSoftForkCondition (Interpreter.scala:325-328) rejects a v5 tree at activated < 2 first — see verify@1 0d0208d3"
+    },
+    {
+      "surface": "reduce",
+      "activated_version": 1,
+      "hex": "0b0208d3",
+      "oracle": "ACCEPT P:d3|5",
+      "note": "v3 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "reduce",
+      "activated_version": 3,
+      "hex": "0c0208d3",
+      "oracle": "REJECT SerializerException",
+      "note": "v4 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "mc_root",
+      "activated_version": 1,
+      "hex": "0d0208d3",
+      "oracle": "SIGMA",
+      "note": "v5 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "verify",
+      "activated_version": 1,
+      "hex": "0d0208d3",
+      "oracle": "REJECT InterpreterException",
+      "note": "v5 + size bit, sigmaProp(true); `verify` = Interpreter.verify with the tree deserialized under the default (stored-box) context, empty proof/message: checkSoftForkCondition (Interpreter.scala:325-328) runs before reduction"
+    },
+    {
+      "surface": "verify",
+      "activated_version": 1,
+      "hex": "0b0208d3",
+      "oracle": "REJECT InterpreterException",
+      "note": "v3 + size bit, sigmaProp(true); `verify` = Interpreter.verify with the tree deserialized under the default (stored-box) context, empty proof/message: checkSoftForkCondition (Interpreter.scala:325-328) runs before reduction"
+    },
+    {
+      "surface": "verify",
+      "activated_version": 2,
+      "hex": "0b0208d3",
+      "oracle": "REJECT InterpreterException",
+      "note": "v3 + size bit, sigmaProp(true); `verify` = Interpreter.verify with the tree deserialized under the default (stored-box) context, empty proof/message: checkSoftForkCondition (Interpreter.scala:325-328) runs before reduction"
+    },
+    {
+      "surface": "verify",
+      "activated_version": 3,
+      "hex": "0b0208d3",
+      "oracle": "ACCEPT true|5",
+      "note": "v3 + size bit, sigmaProp(true); `verify` = Interpreter.verify with the tree deserialized under the default (stored-box) context, empty proof/message: checkSoftForkCondition (Interpreter.scala:325-328) runs before reduction"
+    },
+    {
+      "surface": "verify",
+      "activated_version": 2,
+      "hex": "0a0208d3",
+      "oracle": "ACCEPT true|5",
+      "note": "v2 + size bit, sigmaProp(true); `verify` = Interpreter.verify with the tree deserialized under the default (stored-box) context, empty proof/message: checkSoftForkCondition (Interpreter.scala:325-328) runs before reduction"
+    },
+    {
+      "surface": "verify",
+      "activated_version": 3,
+      "hex": "0c0208d3",
+      "oracle": "REJECT InterpreterException",
+      "note": "v4 + size bit, sigmaProp(true); `verify` = Interpreter.verify with the tree deserialized under the default (stored-box) context, empty proof/message: checkSoftForkCondition (Interpreter.scala:325-328) runs before reduction"
+    },
+    {
+      "surface": "verify",
+      "activated_version": 1,
+      "hex": "cd07021a8e6f59fd4a",
+      "oracle": "REJECT InterpreterException",
+      "note": "mainnet block 545,684 tx[1] output[0] ergoTree (UnparsedErgoTree below activated 2); `verify` = Interpreter.verify with the tree deserialized under the default (stored-box) context, empty proof/message: checkSoftForkCondition (Interpreter.scala:325-328) runs before reduction"
     }
-  ]
+  ],
+  "_surfaces": {
+    "ergo_tree": "ErgoTreeSerializer.deserializeErgoTree under withVersions(activated, …)",
+    "ergo_box_candidate": "ErgoBoxCandidate.serializer.parse",
+    "transaction": "ErgoTransactionSerializer.parseBytes",
+    "reduce": "deserialize under activated + CErgoTreeEvaluator.eval in the dummy context (no Interpreter.verify pre-checks)",
+    "verify": "deserialize under the default context (activated 1, as a stored box is re-read) + ErgoLikeInterpreter.verify at activated with empty proof/message",
+    "mc_root": "rule-1001 wrap classifier"
+  }
 }

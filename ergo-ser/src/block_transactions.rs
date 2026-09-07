@@ -2,6 +2,7 @@ use ergo_primitives::digest::ModifierId;
 use ergo_primitives::reader::{ReadError, VlqReader};
 use ergo_primitives::writer::VlqWriter;
 
+use crate::ergo_tree::DEFAULT_ACTIVATED_SCRIPT_VERSION;
 use crate::error::WriteError;
 use crate::transaction::{read_transaction, write_transaction, Transaction};
 
@@ -89,6 +90,15 @@ pub fn write_block_transactions_with_version(
 /// version whose transactions the reference parses under an explicit
 /// `VersionContext.withVersions(blockVersion - 1, …)` scope.
 pub const INTERPRETER_60_BLOCK_VERSION: u8 = 4;
+
+/// Scala `BlockTransactionsSerializer.parse` (`BlockTransactions.scala:189`):
+/// the one public-testnet block whose transactions the reference parses under
+/// `VersionContext.withVersions(1, 1)` despite its block version being >= 4 —
+/// it carries a v7 tree in a v4 block.
+pub const TESTNET_V7_TREE_IN_V4_BLOCK_HEADER_ID: [u8; 32] = [
+    0x3f, 0x5a, 0x4a, 0xcb, 0xdf, 0xd7, 0x6a, 0x97, 0xf2, 0xfd, 0xf3, 0x87, 0x55, 0x9c, 0x2a, 0x67,
+    0xb4, 0xea, 0x5f, 0x9e, 0x9b, 0xcf, 0x66, 0xef, 0x07, 0x9c, 0xde, 0x76, 0x6c, 0x6e, 0x93, 0x98,
+];
 
 /// Decode the wire form produced by either [`write_block_transactions`]
 /// (v1) or [`write_block_transactions_with_version`] (any version). The
@@ -189,8 +199,20 @@ pub fn read_block_transactions_with_group_elements(
     // a signed `Byte` (`.toByte` of the marker), so a marker at or above 0x80
     // compares BELOW `Interpreter60Version` there — mirror that with the `i8`
     // comparison (see `v2_marker_gate_is_signed_no_marker_above_version_127`).
+    //
+    // One carve-out (`BlockTransactions.scala:188-193`): the section of public
+    // testnet header `3f5a4acb…` — a v7 tree included in a v4 block before the
+    // 6.0 rules were enforced there — is parsed under `withVersions(1, 1)`
+    // instead ("todo: public testnet bug with v7 tree included in v4 block,
+    // remove after testnet relaunch"). Without it a testnet IBD wedges on that
+    // block exactly as mainnet did on 545,684.
     let previous_activated = if (block_version as i8) >= INTERPRETER_60_BLOCK_VERSION as i8 {
-        Some(r.set_activated_script_version(Some(block_version - 1)))
+        let activated = if header_id.as_bytes() == &TESTNET_V7_TREE_IN_V4_BLOCK_HEADER_ID {
+            DEFAULT_ACTIVATED_SCRIPT_VERSION
+        } else {
+            block_version - 1
+        };
+        Some(r.set_activated_script_version(Some(activated)))
     } else {
         None
     };
@@ -399,7 +421,11 @@ mod tests {
     /// (`0d0208d3`), as a block-transactions section under wire block version
     /// `block_version`.
     fn section_with_v5_tree_output(block_version: u8) -> Vec<u8> {
-        let tree_bytes = hex::decode("0d0208d3").unwrap();
+        section_with_tree_output(block_version, "0d0208d3", [0x11; 32])
+    }
+
+    fn section_with_tree_output(block_version: u8, tree_hex: &str, header_id: [u8; 32]) -> Vec<u8> {
+        let tree_bytes = hex::decode(tree_hex).unwrap();
         let tree = read_ergo_tree(&mut VlqReader::new(&tree_bytes)).unwrap();
         let tx = Transaction {
             inputs: vec![],
@@ -415,12 +441,40 @@ mod tests {
             )],
         };
         let bt = BlockTransactions {
-            header_id: ModifierId::from_bytes([0x11; 32]),
+            header_id: ModifierId::from_bytes(header_id),
             transactions: vec![tx],
         };
         let mut w = VlqWriter::new();
         write_block_transactions_with_version(&mut w, &bt, block_version).unwrap();
         w.result()
+    }
+
+    /// `BlockTransactions.scala:188-193`: the public-testnet section
+    /// `3f5a4acb…` (a v7 tree in a v4 block) is parsed under `withVersions(1, 1)`
+    /// — accepted — while the same v7 tree under any other v4 header id is the
+    /// normal activated-3 hard reject.
+    #[test]
+    fn read_block_transactions_testnet_v7_in_v4_carve_out_matches_scala() {
+        let v7_tree = "0f0208d3";
+        let bytes = section_with_tree_output(4, v7_tree, TESTNET_V7_TREE_IN_V4_BLOCK_HEADER_ID);
+        let mut r = VlqReader::new(&bytes);
+        let bt =
+            read_block_transactions(&mut r).expect("the testnet carve-out parses under (1, 1)");
+        assert_eq!(
+            bt.transactions[0].output_candidates[0].ergo_tree().version,
+            7
+        );
+        assert_eq!(r.activated_script_version(), None, "scope restored");
+
+        let mut other = [0x11u8; 32];
+        other[0] = 0x3f;
+        let bytes = section_with_tree_output(4, v7_tree, other);
+        let mut r = VlqReader::new(&bytes);
+        let err = read_block_transactions(&mut r).expect_err("any other v4 header id: activated 3");
+        assert!(
+            format!("{err}").contains("ErgoTree version 7 exceeds"),
+            "{err}"
+        );
     }
 
     /// Scala `BlockTransactionsSerializer.parse` scopes the transaction parse to

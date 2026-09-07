@@ -32,12 +32,12 @@ import sigma.ast.{ErgoTree, JitCost}
 import sigma.serialization.{ConstantSerializer, ErgoTreeSerializer, GroupElementSerializer, SigmaSerializer, TypeSerializer}
 import sigma.ast.DeserializationSigmaBuilder
 import sigma.util.Extensions.EcpOps
-import org.ergoplatform.{ErgoBox, ErgoBoxCandidate, ErgoLikeContext, ErgoLikeTransaction}
+import org.ergoplatform.{ErgoBox, ErgoBoxCandidate, ErgoLikeContext, ErgoLikeInterpreter, ErgoLikeTransaction}
 import org.ergoplatform.validation.ValidationRules
 import org.ergoplatform.modifiers.mempool.ErgoTransactionSerializer
 import org.ergoplatform.modifiers.history.header.HeaderSerializer
 import sigmastate.eval.CPreHeader
-import sigmastate.interpreter.{CErgoTreeEvaluator, CostAccumulator}
+import sigmastate.interpreter.{CErgoTreeEvaluator, CostAccumulator, Interpreter}
 import sigmastate.interpreter.CErgoTreeEvaluator.DefaultEvalSettings
 
 object ErgoSerdeOracle {
@@ -134,6 +134,27 @@ object ErgoSerdeOracle {
     }
   }
 
+  // ── verify surface: the node-side SPEND path, `Interpreter.verify` ──────────
+  // Deserializes the tree the way a STORED box is re-read (the default
+  // VersionContext, activated 1 — `ErgoBoxSerializer.parse` from the UTXO db
+  // runs under no explicit scope), then verifies it under `activated` with an
+  // empty proof and message. This is where `checkSoftForkCondition`
+  // (Interpreter.scala:298-331) runs BEFORE any reduction: a tree whose header
+  // version exceeds the activated version is an InterpreterException even though
+  // the box itself was legally created under an earlier context (#327 M1).
+  //   ACCEPT <true|false>|<cost>   verify returned
+  //   REJECT <ExceptionName>       verify threw
+  private def verifySpend(bytes: Array[Byte], activated: Byte): String = {
+    val t = VersionContext.withVersions(1.toByte, 1.toByte) { tree.deserializeErgoTree(bytes) }
+    val ctx = dummyReduceContext(t, activated)
+    val interpreter = new ErgoLikeInterpreter { override type CTX = ErgoLikeContext }
+    val proof: Array[Byte] = Array.emptyByteArray
+    interpreter.verify(Interpreter.emptyEnv, t, ctx, proof, Array.emptyByteArray) match {
+      case scala.util.Success((ok, cost)) => "ACCEPT " + ok + "|" + cost
+      case scala.util.Failure(e)          => "REJECT " + e.getClass.getSimpleName
+    }
+  }
+
   // ── reduce_ctx surface: `contextExtension · ergoBoxCandidate` frame ────────
   // Both halves are self-delimiting, so ONE reader consumes them in sequence.
   // The frame exists so the two positions Scala parses as an `EvaluatedValue`
@@ -203,6 +224,7 @@ object ErgoSerdeOracle {
               val h = HeaderSerializer.parseBytes(bytes)
               acc(hex(HeaderSerializer.toBytes(h)))
             case "reduce" => reduce(bytes, activated)
+            case "verify" => verifySpend(bytes, activated)
             case "reduce_ctx" => reduceCtx(bytes, activated)
             case "mc_root" =>
               // MethodCall-root classifier for the typechecker-registry harness:

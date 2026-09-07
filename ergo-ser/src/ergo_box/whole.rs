@@ -97,9 +97,12 @@ pub fn parse_ergo_box_bytes(
             tree_reader.remaining()
         )));
     }
+    // `r` is this function's own fresh reader — a vector-assisted parse with no
+    // caller `VersionContext`, so the gate runs under Scala's default context
+    // (activated 1), spelled out rather than looked up.
     crate::ergo_tree::check_tree_version_supported(
         &ergo_tree,
-        crate::ergo_tree::reader_activated_script_version(&r),
+        crate::ergo_tree::DEFAULT_ACTIVATED_SCRIPT_VERSION,
     )?;
     crate::ergo_tree::check_header_size_bit(&ergo_tree)?;
     crate::ergo_tree::check_resolvable_methods(&ergo_tree)?;
