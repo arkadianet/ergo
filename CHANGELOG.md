@@ -83,6 +83,31 @@ infrastructure.
   form is pinned to the live JVM oracle (sigmastate 6.0.2) and the known-bug
   catalog re-arms the differential guard on both. (#311)
 
+- **A stored block is served, never 404'd, when an output carries a
+  future-version ErgoTree (#326).** Re-reading a block section the node has
+  already validated and persisted no longer re-runs the box-script ACCEPTANCE
+  gates (`check_tree_version_supported` and siblings): those gates decide what
+  may ENTER the chain, and applying them to the node's own history only makes
+  that history unreadable. Mainnet block 545,684 (tx[1], output[0]) holds
+  `cd07021a8e6f59fd4a`, a size-delimited ErgoTree whose header byte claims tree
+  version 5 — accepted by Scala at a height whose activated script version was
+  below `VersionContext.JitActivationVersion`, where
+  `require(ergoTreeVersion <= activatedVersion)` does not apply, and kept as an
+  `UnparsedErgoTree` with its bytes verbatim. Every stored-section re-read now
+  goes through `read_stored_block_transactions`, whose reader is marked trusted
+  — the scala-compat `/blocks/{id}` and `/blocks/{id}/transactions` routes and
+  their `/api/v1/chain/*` twins, the extra-index and snapshot block walks, the
+  wallet rollback bridge, and the tx-diff and snapshot-base state paths. Such a
+  box is emitted with its raw on-chain `ergoTree` hex, matching the reference
+  node field for field. Bytes arriving from a peer or a client stay untrusted,
+  so the consensus acceptance path is byte-for-byte unchanged.
+
+- **A block the node holds but cannot serialise answers 500, not 404
+  (#326).** A 404 asserts the node does not have the block, which sends a
+  chain-walking client hunting for a hole that is not there; the block routes
+  now separate "absent" from "present and unserialisable" and carry the parse
+  failure in the 500 body.
+
 - **A peer can no longer steer the anchor-map builder into GET-ing an
   internal host (SSRF).** `http_get` now resolves the advertised REST host
   first and connects only to an address that passes the dial book's

@@ -17,7 +17,7 @@ use std::sync::Arc;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use ergo_api::compat::traits::NodeChainQuery;
-use ergo_api::compat::types::{Parameters, ScalaFullBlock, ScalaInfo};
+use ergo_api::compat::types::{Parameters, ScalaBlockTransactions, ScalaFullBlock, ScalaInfo};
 use ergo_api::server::router;
 use ergo_api::traits::NodeReadState;
 use ergo_api::types::{
@@ -29,6 +29,13 @@ use tower::ServiceExt;
 
 const FIXTURE_700K: &str = include_str!("fixtures/scala/blocks/700000.json");
 const HEADER_ID_700K: &str = "54dd49ffbb32d35d8d6c41f3b427c68ac3cec91f6718fb7a50ec0d18d36e982a";
+/// A block the stub HOLDS but cannot serialise — the shape issue #326 hit on
+/// mainnet 545,684, where a 404 wrongly told clients the chain had a hole.
+const HEADER_ID_UNSERIALISABLE: &str =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+/// What the bridge reports when a stored section will not re-parse; the 500
+/// body must carry it so the operator sees why.
+const PARSE_FAILURE: &str = "parse block_transactions: invalid data";
 
 struct StubReadState;
 impl NodeReadState for StubReadState {
@@ -176,10 +183,31 @@ impl NodeChainQuery for StubCompat {
     }
 
     fn full_block_by_id(&self, header_id_hex: &str) -> Option<ScalaFullBlock> {
-        if header_id_hex == HEADER_ID_700K {
-            Some(self.full_block_700k.clone())
-        } else {
-            None
+        self.try_full_block_by_id(header_id_hex).ok().flatten()
+    }
+
+    fn try_full_block_by_id(&self, header_id_hex: &str) -> Result<Option<ScalaFullBlock>, String> {
+        match header_id_hex {
+            HEADER_ID_700K => Ok(Some(self.full_block_700k.clone())),
+            HEADER_ID_UNSERIALISABLE => Err(PARSE_FAILURE.to_string()),
+            _ => Ok(None),
+        }
+    }
+
+    fn block_transactions_by_id(&self, header_id_hex: &str) -> Option<ScalaBlockTransactions> {
+        self.try_block_transactions_by_id(header_id_hex)
+            .ok()
+            .flatten()
+    }
+
+    fn try_block_transactions_by_id(
+        &self,
+        header_id_hex: &str,
+    ) -> Result<Option<ScalaBlockTransactions>, String> {
+        match header_id_hex {
+            HEADER_ID_700K => Ok(Some(self.full_block_700k.block_transactions.clone())),
+            HEADER_ID_UNSERIALISABLE => Err(PARSE_FAILURE.to_string()),
+            _ => Ok(None),
         }
     }
 }
@@ -244,6 +272,50 @@ async fn malformed_hex_returns_404() {
 async fn wrong_length_id_returns_404() {
     let too_short = "ab".repeat(20); // 40 chars
     let path = format!("/blocks/{too_short}");
+    let (status, _) = json_get(build_app(), &path).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// A block the node holds but cannot serialise is 500, never 404: a 404
+/// asserts absence, and a client walking the chain over REST treats that as a
+/// permanent hole (issue #326).
+#[tokio::test]
+async fn unserialisable_block_returns_500_not_404() {
+    let path = format!("/blocks/{HEADER_ID_UNSERIALISABLE}");
+    let (status, body) = json_get(build_app(), &path).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["error"], 500);
+    assert!(
+        body["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains(PARSE_FAILURE)),
+        "the 500 body must carry the parse failure: {body}",
+    );
+}
+
+/// The transactions half makes the same distinction: it reads the stored
+/// section directly, so it is the route that actually trips over an
+/// unserialisable block first.
+#[tokio::test]
+async fn unserialisable_block_transactions_returns_500_not_404() {
+    let path = format!("/blocks/{HEADER_ID_UNSERIALISABLE}/transactions");
+    let (status, body) = json_get(build_app(), &path).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["error"], 500);
+    assert!(
+        body["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains(PARSE_FAILURE)),
+        "the 500 body must carry the parse failure: {body}",
+    );
+}
+
+/// A section the node genuinely does not have is still 404 — the 500 is keyed
+/// to the unserialisable block, not to the route.
+#[tokio::test]
+async fn unknown_block_transactions_returns_404() {
+    let unknown = "0".repeat(64);
+    let path = format!("/blocks/{unknown}/transactions");
     let (status, _) = json_get(build_app(), &path).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }

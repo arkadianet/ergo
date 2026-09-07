@@ -209,14 +209,18 @@ impl NodeChainQuery for ScalaCompatBridge {
     }
 
     fn full_block_by_id(&self, header_id_hex: &str) -> Option<ScalaFullBlock> {
-        let header_id = parse_header_id(header_id_hex)?;
-        match assemble_full_block(&self.store_reader, &header_id) {
-            Ok(opt) => opt,
-            Err(e) => {
-                warn!(handler = "full_block_by_id", header_id = %header_id_hex, error = %e, "scala-compat handler failed");
-                None
-            }
-        }
+        self.try_full_block_by_id(header_id_hex).ok().flatten()
+    }
+
+    fn try_full_block_by_id(&self, header_id_hex: &str) -> Result<Option<ScalaFullBlock>, String> {
+        // A malformed id names no block at all — absent, not a failure.
+        let Some(header_id) = parse_header_id(header_id_hex) else {
+            return Ok(None);
+        };
+        assemble_full_block(&self.store_reader, &header_id).map_err(|e| {
+            warn!(handler = "full_block_by_id", header_id = %header_id_hex, error = %e, "scala-compat handler failed");
+            e.to_string()
+        })
     }
 
     fn header_by_id(&self, header_id_hex: &str) -> Option<ScalaHeader> {
@@ -231,14 +235,22 @@ impl NodeChainQuery for ScalaCompatBridge {
     }
 
     fn block_transactions_by_id(&self, header_id_hex: &str) -> Option<ScalaBlockTransactions> {
-        let header_id = parse_header_id(header_id_hex)?;
-        match load_and_encode_block_transactions(&self.store_reader, &header_id) {
-            Ok(opt) => opt,
-            Err(e) => {
-                warn!(handler = "block_transactions_by_id", header_id = %header_id_hex, error = %e, "scala-compat handler failed");
-                None
-            }
-        }
+        self.try_block_transactions_by_id(header_id_hex)
+            .ok()
+            .flatten()
+    }
+
+    fn try_block_transactions_by_id(
+        &self,
+        header_id_hex: &str,
+    ) -> Result<Option<ScalaBlockTransactions>, String> {
+        let Some(header_id) = parse_header_id(header_id_hex) else {
+            return Ok(None);
+        };
+        load_and_encode_block_transactions(&self.store_reader, &header_id).map_err(|e| {
+            warn!(handler = "block_transactions_by_id", header_id = %header_id_hex, error = %e, "scala-compat handler failed");
+            e.to_string()
+        })
     }
 
     fn nipopow_header_by_id(

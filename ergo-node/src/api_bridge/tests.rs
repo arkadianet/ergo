@@ -1806,3 +1806,131 @@ fn encode_pow_solutions_v1_d_matches_scala_served_number() {
         other => panic!("h=3 must decode to a v1 solution, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------
+// Stored-section re-read: future-version ErgoTree (issue #326)
+// ---------------------------------------------------------------
+
+// ----- helpers -----
+
+/// `{header, blockTransactions}` slice of Scala's `GET /blocks/{id}`.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlockSectionsVector {
+    header: ergo_api::compat::types::ScalaHeader,
+    block_transactions: ScalaBlockTransactions,
+}
+
+/// Mainnet block 545,684 as the Scala reference node serves it. tx[1]'s
+/// first output carries `cd07021a8e6f59fd4a` — a size-delimited ErgoTree
+/// whose header byte claims tree version 5.
+fn mainnet_block_545684_sections() -> BlockSectionsVector {
+    let path = vectors_dir().join("block_545684_future_version_tree.json");
+    let raw =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
+}
+
+/// Canonical section bytes for the fixture, bound to Scala's own
+/// `transactionsRoot`: the Merkle root over `txIds ++ witnessIds` recomputed
+/// from these bytes must equal the root in the header the reference signed,
+/// so the bytes really are mainnet's block-transactions section and not a
+/// re-encoding artefact.
+fn mainnet_block_545684_section_bytes(v: &BlockSectionsVector) -> Vec<u8> {
+    let bytes = ergo_rest_json::decode::decode_block_transactions_with_mode(
+        &v.block_transactions,
+        ergo_rest_json::decode::DecodeMode::Preserve,
+    )
+    .expect("on-chain blockTransactions JSON must decode in Preserve mode");
+    assert_eq!(
+        bytes.len() as u32,
+        v.block_transactions.size,
+        "canonical section length must match Scala's reported section size",
+    );
+
+    let bt = ergo_ser::block_transactions::read_stored_block_transactions(&bytes)
+        .expect("stored-section read must accept the node's own history");
+    let tx_ids: Vec<[u8; 32]> = bt
+        .transactions
+        .iter()
+        .map(|tx| *transaction_id(tx).expect("tx id").as_bytes())
+        .collect();
+    let tx_refs: Vec<&[u8]> = tx_ids.iter().map(|id| id.as_slice()).collect();
+    let witness_data: Vec<Vec<u8>> = bt
+        .transactions
+        .iter()
+        .map(|tx| {
+            let mut proofs = Vec::new();
+            for input in &tx.inputs {
+                proofs.extend_from_slice(&input.spending_proof.proof);
+            }
+            ergo_crypto::autolykos::common::blake2b256(&proofs)[1..].to_vec()
+        })
+        .collect();
+    let witness_refs: Vec<&[u8]> = witness_data.iter().map(|w| w.as_slice()).collect();
+    let root = ergo_crypto::merkle::transactions_root(&tx_refs, Some(&witness_refs));
+    assert_eq!(
+        hex::encode(root),
+        v.header.transactions_root,
+        "section bytes must hash to the transactionsRoot Scala signed into the header",
+    );
+    bytes
+}
+
+// ----- oracle parity -----
+
+/// Serving a stored block whose output carries a future-version ErgoTree
+/// must reproduce Scala's JSON exactly, raw `ergoTree` hex included.
+///
+/// Mainnet block 545,684 tx[1] output[0] is `cd07021a8e6f59fd4a`: size bit
+/// set, header version 5. Scala accepted it at a height whose activated
+/// script version was below `VersionContext.JitActivationVersion`, where
+/// `require(ergoTreeVersion <= activatedVersion)` does not apply, and kept
+/// the body as an `UnparsedErgoTree` with its bytes verbatim. Re-reading the
+/// stored section through the consensus ACCEPTANCE gates instead turned the
+/// whole block into a 404 (issue #326).
+#[test]
+fn block_545684_stored_section_serves_future_version_tree_matching_scala() {
+    let v = mainnet_block_545684_sections();
+    let bytes = mainnet_block_545684_section_bytes(&v);
+
+    let header_bytes = ergo_rest_json::decode::decode_scala_header(&v.header)
+        .expect("fixture header must decode")
+        .0;
+    let header = parse_header(&header_bytes).expect("header bytes must parse");
+
+    let bt = parse_block_transactions(&bytes).expect("stored section must parse");
+    let encoded = encode_block_transactions(&bt, &v.header.id, bytes.len() as u32, &header)
+        .expect("stored section must encode");
+
+    assert_eq!(
+        encoded.transactions[1].outputs[0].ergo_tree, "cd07021a8e6f59fd4a",
+        "the future-version tree must be emitted as its raw on-chain bytes",
+    );
+    assert_eq!(
+        serde_json::to_value(&encoded).expect("encoded DTO serializes"),
+        serde_json::to_value(&v.block_transactions).expect("fixture DTO serializes"),
+        "the served blockTransactions must match the reference node's JSON field for field",
+    );
+}
+
+// ----- error paths -----
+
+/// The consensus reader is untouched: bytes arriving from a peer still run
+/// the box-script acceptance gates, so only the node's own stored sections
+/// gain the leniency. (Whether the version gate should itself be keyed to the
+/// block's activated script version is a separate consensus question; this
+/// pins today's behaviour so a change to it is deliberate.)
+#[test]
+fn block_545684_untrusted_section_still_hits_the_tree_version_gate() {
+    let v = mainnet_block_545684_sections();
+    let bytes = mainnet_block_545684_section_bytes(&v);
+    let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
+    let err = ergo_ser::block_transactions::read_block_transactions(&mut r)
+        .expect_err("the untrusted consensus reader must still gate a version-5 tree");
+    let rendered = format!("{err:?}");
+    assert!(
+        rendered.contains("ErgoTree version 5"),
+        "unexpected rejection reason: {rendered}",
+    );
+}

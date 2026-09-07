@@ -205,7 +205,7 @@ pub(crate) fn build_wallet_block_txs_from_read_txn(
     header_id: &[u8; 32],
 ) -> Result<Option<Vec<OwnedBlockTxData>>, StateError> {
     use ergo_primitives::reader::VlqReader;
-    use ergo_ser::block_transactions::read_block_transactions;
+    use ergo_ser::block_transactions::read_stored_block_transactions;
     use ergo_ser::header::read_header;
     use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
     use ergo_ser::transaction::transaction_id;
@@ -241,9 +241,9 @@ pub(crate) fn build_wallet_block_txs_from_read_txn(
         Err(e) => return Err(e.into()),
     };
 
-    // Parse the block transactions.
-    let mut r = VlqReader::new(&bt_bytes);
-    let bt = read_block_transactions(&mut r).map_err(|e| {
+    // Parse the block transactions. Trusted: these are the node's own applied
+    // and persisted bytes, so the box-script acceptance gates must not re-run.
+    let bt = read_stored_block_transactions(&bt_bytes).map_err(|e| {
         StateError::Serialization(format!("block_txs parse in wallet rollback: {e:?}"))
     })?;
 

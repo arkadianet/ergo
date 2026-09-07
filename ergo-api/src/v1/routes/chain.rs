@@ -23,6 +23,17 @@ use crate::v1::cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page};
 use crate::v1::error::V1Error;
 use crate::v1::error::{v1_error, Reason};
 
+/// The node HAS the block but could not turn it into a response. Distinct
+/// from [`block_not_found`]: a 404 asserts the node does not have the block,
+/// which sends a chain-walking client looking for a hole that is not there.
+fn block_unserialisable(detail: String) -> Response {
+    v1_error(
+        Reason::InternalError,
+        "the block is stored but could not be serialised",
+        detail,
+    )
+}
+
 fn block_not_found() -> Response {
     v1_error(
         Reason::BlockNotFound,
@@ -129,6 +140,7 @@ pub async fn list_blocks(State(state): State<V1State>, V1Query(q): V1Query<ListQ
         (status = 200, description = "Full block", body = V1Block),
         (status = 400, description = "Malformed header id", body = V1Error),
         (status = 404, description = "No block with that header id", body = V1Error),
+        (status = 500, description = "Block is stored but could not be serialised", body = V1Error),
         (status = 503, description = "Chain reader unavailable", body = V1Error),
     ),
 )]
@@ -141,9 +153,10 @@ pub async fn block_by_id(State(state): State<V1State>, Path(id): Path<String>) -
         return invalid_hex();
     }
     let tip = state.read.status().best_full_block_height;
-    match chain.full_block_by_id(&id) {
-        Some(fb) => Json(block_from_scala(state.network, &fb, tip)).into_response(),
-        None => block_not_found(),
+    match chain.try_full_block_by_id(&id) {
+        Ok(Some(fb)) => Json(block_from_scala(state.network, &fb, tip)).into_response(),
+        Ok(None) => block_not_found(),
+        Err(detail) => block_unserialisable(detail),
     }
 }
 
@@ -156,6 +169,7 @@ pub async fn block_by_id(State(state): State<V1State>, Path(id): Path<String>) -
         (status = 200, description = "Block transactions (single page)", body = Collection<V1BlockTx>),
         (status = 400, description = "Malformed header id", body = V1Error),
         (status = 404, description = "No block with that header id", body = V1Error),
+        (status = 500, description = "Block is stored but could not be serialised", body = V1Error),
         (status = 503, description = "Chain reader unavailable", body = V1Error),
     ),
 )]
@@ -167,8 +181,8 @@ pub async fn block_transactions(State(state): State<V1State>, Path(id): Path<Str
     if !valid_modifier_id(&id) {
         return invalid_hex();
     }
-    match chain.block_transactions_by_id(&id) {
-        Some(bt) => {
+    match chain.try_block_transactions_by_id(&id) {
+        Ok(Some(bt)) => {
             let tip = state.read.status().best_full_block_height;
             let height = chain.header_by_id(&id).map(|h| h.height);
             let items = bt
@@ -178,7 +192,8 @@ pub async fn block_transactions(State(state): State<V1State>, Path(id): Path<Str
                 .collect();
             Json(Collection::single_page(items)).into_response()
         }
-        None => block_not_found(),
+        Ok(None) => block_not_found(),
+        Err(detail) => block_unserialisable(detail),
     }
 }
 
@@ -397,6 +412,7 @@ pub async fn modifier_by_id(State(state): State<V1State>, Path(id): Path<String>
         (status = 200, description = "AD-proofs section", body = V1BlockAdProofs),
         (status = 400, description = "Malformed header id", body = V1Error),
         (status = 404, description = "No block with that header id", body = V1Error),
+        (status = 500, description = "Block is stored but could not be serialised", body = V1Error),
         (status = 503, description = "AD-proofs pruned in UTXO/non-archival mode, or chain reader unavailable", body = V1Error),
     ),
 )]
@@ -408,8 +424,8 @@ pub async fn block_ad_proofs(State(state): State<V1State>, Path(id): Path<String
     if !valid_modifier_id(&id) {
         return invalid_hex();
     }
-    match chain.full_block_by_id(&id) {
-        Some(fb) => match fb.ad_proofs {
+    match chain.try_full_block_by_id(&id) {
+        Ok(Some(fb)) => match fb.ad_proofs {
             Some(p) => Json(V1BlockAdProofs {
                 header_id: id,
                 proof_bytes: p.proof_bytes,
@@ -423,7 +439,8 @@ pub async fn block_ad_proofs(State(state): State<V1State>, Path(id): Path<String
                 "AD-proofs are pruned in UTXO / non-archival mode",
             ),
         },
-        None => block_not_found(),
+        Ok(None) => block_not_found(),
+        Err(detail) => block_unserialisable(detail),
     }
 }
 

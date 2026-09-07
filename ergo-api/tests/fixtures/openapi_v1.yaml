@@ -1269,6 +1269,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Block is stored but could not be serialised
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
           description: Chain reader unavailable
           content:
@@ -1305,6 +1311,12 @@ paths:
                 $ref: '#/components/schemas/V1Error'
         '404':
           description: No block with that header id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Block is stored but could not be serialised
           content:
             application/json:
               schema:
@@ -1509,6 +1521,12 @@ paths:
                 $ref: '#/components/schemas/V1Error'
         '404':
           description: No block with that header id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Block is stored but could not be serialised
           content:
             application/json:
               schema:

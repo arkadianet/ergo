@@ -25,7 +25,7 @@ use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
 use ergo_avltree_rust::batch_node::AVLTree as OracleTree;
 use ergo_primitives::digest::{ADDigest, Digest32};
 use ergo_primitives::reader::VlqReader;
-use ergo_ser::block_transactions::read_block_transactions;
+use ergo_ser::block_transactions::read_stored_block_transactions;
 use ergo_ser::ergo_box::{read_ergo_box, ErgoBox};
 use ergo_ser::header::Header;
 use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
@@ -558,7 +558,7 @@ impl CommittedSnapshot {
             })?;
 
         // 3. Decode and sanity-check the header_id linkage.
-        let bt = read_block_transactions(&mut VlqReader::new(&bytes))
+        let bt = read_stored_block_transactions(&bytes)
             .map_err(|e| StateError::Serialization(format!("try_advance_base: {e}")))?;
         if bt.header_id.as_bytes() != &tip {
             return Err(StateError::InternalInvariant {
