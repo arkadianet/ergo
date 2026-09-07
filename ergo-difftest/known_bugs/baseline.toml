@@ -57,11 +57,3 @@ note = "contextExtension·ergoBoxCandidate frame carrying 0x85 and 0x83 extensio
 key  = "ergo_box_candidate/ef25eeb513cc52ed"
 ref  = "issue #312"
 note = "GroupGenerator (0x82) in R4/R6: rust Reject(unsupported expression opcode 0x82 in register value) vs jvm ACCEPT byte-exact. Persists on the reduce_ctx reduction channel."
-
-# ---------------------------------------------------------------------------
-# Issue #311 — JIT cost divergence, same proposition on both sides.
-# ---------------------------------------------------------------------------
-[[baseline]]
-key  = "reduce/eae7d58bd90f6ba5"
-ref  = "issue #311"
-note = "sigmaProp(AND(Coll[Boolean](true,true,false))) in the 0x85 packed form: both reduce to FalseProp, node cost 50 vs reference cost 65."

@@ -638,9 +638,12 @@ fn eval_op(
         // switches the companion from `ConcreteCollection` to this variant
         // when all items are boolean constants, affecting only the emitted
         // opcode byte (0x85 vs 0x83); `eval` is the same
-        // `ConcreteCollection.eval` at values.scala:858, cost Fixed(20).
-        // Our parser pre-decodes the packed bits into `Payload::BoolCollection`,
-        // so the arm only has to wire the Vec<bool> to Value::CollBool.
+        // `ConcreteCollection.eval` at values.scala:858 — Fixed(20) for the
+        // collection plus `Constant.eval` Fixed(5) for EVERY item (the packed
+        // form deserializes to BooleanConstant items on the JVM; see the
+        // callee's docblock). Our parser pre-decodes the packed bits into
+        // `Payload::BoolCollection`, so the arm only has to wire the
+        // Vec<bool> to Value::CollBool and charge 20 + 5·n.
         (0x85, Payload::BoolCollection { bits }) => {
             opcodes::constants::eval_bool_collection(bits, cost)
         }
