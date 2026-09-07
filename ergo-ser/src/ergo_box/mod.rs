@@ -159,7 +159,11 @@ impl ErgoBoxCandidate {
         let mut tr = VlqReader::new(&ergo_tree_bytes);
         let parsed_tree = read_ergo_tree(&mut tr)
             .map_err(|e| WriteError::InvalidData(format!("ergo_tree_bytes do not parse: {e}")))?;
-        crate::ergo_tree::check_tree_version_supported(&parsed_tree).map_err(|e| {
+        crate::ergo_tree::check_tree_version_supported(
+            &parsed_tree,
+            crate::ergo_tree::reader_activated_script_version(&tr),
+        )
+        .map_err(|e| {
             WriteError::InvalidData(format!("ergo_tree_bytes have an unsupported version: {e}"))
         })?;
         crate::ergo_tree::check_header_size_bit(&parsed_tree).map_err(|e| {

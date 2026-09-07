@@ -1,0 +1,273 @@
+{
+  "_source": "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala (sigma-state 6.0.2 + ergo-core 6.0.2), run 2026-09-07 with the <surface>@<activated> spec; `oracle` is the JVM output line verbatim",
+  "_rule": "VersionContext.scala:20 require(activatedVersion < JitActivationVersion(2) || ergoTreeVersion <= activatedVersion); a failing require is re-thrown by ErgoTreeSerializer.deserializeErgoTree as a SerializerException (hard reject, size bit or not); below activated 2 the require is inert and a failing body is kept as UnparsedErgoTree when the size bit is set",
+  "_issue": "#327",
+  "vectors": [
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 1,
+      "hex": "c0843dcd07021a8e6f59fd4a92a7210000",
+      "oracle": "ACCEPT c0843dcd07021a8e6f59fd4a92a7210000",
+      "note": "mainnet block 545,684 tx[1] output[0] (box 551242f6…): standalone ErgoBoxCandidate bytes, tree cd07021a8e6f59fd4a = header 0xcd (version 5, size bit, declared size 7)"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 2,
+      "hex": "c0843dcd07021a8e6f59fd4a92a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "mainnet block 545,684 tx[1] output[0] (box 551242f6…): standalone ErgoBoxCandidate bytes, tree cd07021a8e6f59fd4a = header 0xcd (version 5, size bit, declared size 7)"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 3,
+      "hex": "c0843dcd07021a8e6f59fd4a92a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "mainnet block 545,684 tx[1] output[0] (box 551242f6…): standalone ErgoBoxCandidate bytes, tree cd07021a8e6f59fd4a = header 0xcd (version 5, size bit, declared size 7)"
+    },
+    {
+      "surface": "transaction",
+      "activated_version": 1,
+      "hex": "017669e6fa925cb92d6a1d4dfc6d7787de26136cdcd1dd1fc6d2b550320245b521380a583b449d8a410a5408b68a3b5b27928d34013c93597dae6e29f851ecec2da07b0e687903349aa372c20422a36868d6a1f68e236f9ff70c00000002c0843dcd07021a8e6f59fd4a92a7210000c0843d1005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a5730492a7210000",
+      "oracle": "ACCEPT 017669e6fa925cb92d6a1d4dfc6d7787de26136cdcd1dd1fc6d2b550320245b521380a583b449d8a410a5408b68a3b5b27928d34013c93597dae6e29f851ecec2da07b0e687903349aa372c20422a36868d6a1f68e236f9ff70c00000002c0843dcd07021a8e6f59fd4a92a7210000c0843d1005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a5730492a7210000",
+      "note": "mainnet block 545,684 tx[1] (id 8e29f851…) transaction bytes; output[0] is the version-5 tree"
+    },
+    {
+      "surface": "transaction",
+      "activated_version": 2,
+      "hex": "017669e6fa925cb92d6a1d4dfc6d7787de26136cdcd1dd1fc6d2b550320245b521380a583b449d8a410a5408b68a3b5b27928d34013c93597dae6e29f851ecec2da07b0e687903349aa372c20422a36868d6a1f68e236f9ff70c00000002c0843dcd07021a8e6f59fd4a92a7210000c0843d1005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a5730492a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "mainnet block 545,684 tx[1] (id 8e29f851…) transaction bytes; output[0] is the version-5 tree"
+    },
+    {
+      "surface": "transaction",
+      "activated_version": 3,
+      "hex": "017669e6fa925cb92d6a1d4dfc6d7787de26136cdcd1dd1fc6d2b550320245b521380a583b449d8a410a5408b68a3b5b27928d34013c93597dae6e29f851ecec2da07b0e687903349aa372c20422a36868d6a1f68e236f9ff70c00000002c0843dcd07021a8e6f59fd4a92a7210000c0843d1005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a5730492a7210000",
+      "oracle": "REJECT SerializerException",
+      "note": "mainnet block 545,684 tx[1] (id 8e29f851…) transaction bytes; output[0] is the version-5 tree"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "cd07021a8e6f59fd4a",
+      "oracle": "ACCEPT cd07021a8e6f59fd4a",
+      "note": "mainnet block 545,684 tx[1] output[0] ergoTree: version 5, size bit set; body 02 1a = ByteConstant(26), so rule 1001 wraps it as UnparsedErgoTree below activated 2"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "cd07021a8e6f59fd4a",
+      "oracle": "REJECT SerializerException",
+      "note": "mainnet block 545,684 tx[1] output[0] ergoTree: version 5, size bit set; body 02 1a = ByteConstant(26), so rule 1001 wraps it as UnparsedErgoTree below activated 2"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "cd07021a8e6f59fd4a",
+      "oracle": "REJECT SerializerException",
+      "note": "mainnet block 545,684 tx[1] output[0] ergoTree: version 5, size bit set; body 02 1a = ByteConstant(26), so rule 1001 wraps it as UnparsedErgoTree below activated 2"
+    },
+    {
+      "surface": "mc_root",
+      "activated_version": 1,
+      "hex": "cd07021a8e6f59fd4a",
+      "oracle": "WRAP",
+      "note": "mainnet block 545,684 tx[1] output[0] ergoTree: version 5, size bit set; body 02 1a = ByteConstant(26), so rule 1001 wraps it as UnparsedErgoTree below activated 2"
+    },
+    {
+      "surface": "reduce",
+      "activated_version": 1,
+      "hex": "cd07021a8e6f59fd4a",
+      "oracle": "REJECT ValidationException",
+      "note": "mainnet block 545,684 tx[1] output[0] ergoTree: version 5, size bit set; body 02 1a = ByteConstant(26), so rule 1001 wraps it as UnparsedErgoTree below activated 2"
+    },
+    {
+      "surface": "reduce",
+      "activated_version": 3,
+      "hex": "cd07021a8e6f59fd4a",
+      "oracle": "REJECT SerializerException",
+      "note": "mainnet block 545,684 tx[1] output[0] ergoTree: version 5, size bit set; body 02 1a = ByteConstant(26), so rule 1001 wraps it as UnparsedErgoTree below activated 2"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "080208d3",
+      "oracle": "ACCEPT 080208d3",
+      "note": "v0 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "0b0208d3",
+      "oracle": "ACCEPT 0b0208d3",
+      "note": "v3 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "0c0208d3",
+      "oracle": "ACCEPT 0c0208d3",
+      "note": "v4 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "0d0208d3",
+      "oracle": "ACCEPT 0d0208d3",
+      "note": "v5 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "0f0208d3",
+      "oracle": "ACCEPT 0f0208d3",
+      "note": "v7 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "080208d3",
+      "oracle": "ACCEPT 080208d3",
+      "note": "v0 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "0a0208d3",
+      "oracle": "ACCEPT 0a0208d3",
+      "note": "v2 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "0b0208d3",
+      "oracle": "REJECT SerializerException",
+      "note": "v3 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "0c0208d3",
+      "oracle": "REJECT SerializerException",
+      "note": "v4 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "0d0208d3",
+      "oracle": "REJECT SerializerException",
+      "note": "v5 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 2,
+      "hex": "0f0208d3",
+      "oracle": "REJECT SerializerException",
+      "note": "v7 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "080208d3",
+      "oracle": "ACCEPT 080208d3",
+      "note": "v0 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "0b0208d3",
+      "oracle": "ACCEPT 0b0208d3",
+      "note": "v3 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "0c0208d3",
+      "oracle": "REJECT SerializerException",
+      "note": "v4 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "0d0208d3",
+      "oracle": "REJECT SerializerException",
+      "note": "v5 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "0f0208d3",
+      "oracle": "REJECT SerializerException",
+      "note": "v7 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 0,
+      "hex": "0d0208d3",
+      "oracle": "ACCEPT 0d0208d3",
+      "note": "v5 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "0d0208d3",
+      "oracle": "ACCEPT 0d0208d3",
+      "note": "v5 + size bit, sigmaProp(true)"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 1,
+      "hex": "0501d3",
+      "oracle": "REJECT ValidationException",
+      "note": "v5 WITHOUT the size bit: CheckHeaderSizeBit (rule 1012) throws before the VersionContext scope, at every activated version"
+    },
+    {
+      "surface": "ergo_tree",
+      "activated_version": 3,
+      "hex": "0501d3",
+      "oracle": "REJECT ValidationException",
+      "note": "v5 WITHOUT the size bit: CheckHeaderSizeBit (rule 1012) throws before the VersionContext scope, at every activated version"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 1,
+      "hex": "010d0208d3000000",
+      "oracle": "ACCEPT 010d0208d3000000",
+      "note": "ErgoBoxCandidate: value 1, v5 size-delimited sigmaProp(true), height 0, no tokens, no registers"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 2,
+      "hex": "010d0208d3000000",
+      "oracle": "REJECT SerializerException",
+      "note": "ErgoBoxCandidate: value 1, v5 size-delimited sigmaProp(true), height 0, no tokens, no registers"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 3,
+      "hex": "010d0208d3000000",
+      "oracle": "REJECT SerializerException",
+      "note": "ErgoBoxCandidate: value 1, v5 size-delimited sigmaProp(true), height 0, no tokens, no registers"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 1,
+      "hex": "010b0208d3000000",
+      "oracle": "ACCEPT 010b0208d3000000",
+      "note": "ErgoBoxCandidate: value 1, v3 size-delimited sigmaProp(true), height 0, no tokens, no registers"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 2,
+      "hex": "010b0208d3000000",
+      "oracle": "REJECT SerializerException",
+      "note": "ErgoBoxCandidate: value 1, v3 size-delimited sigmaProp(true), height 0, no tokens, no registers"
+    },
+    {
+      "surface": "ergo_box_candidate",
+      "activated_version": 3,
+      "hex": "010b0208d3000000",
+      "oracle": "ACCEPT 010b0208d3000000",
+      "note": "ErgoBoxCandidate: value 1, v3 size-delimited sigmaProp(true), height 0, no tokens, no registers"
+    }
+  ]
+}

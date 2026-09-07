@@ -63,20 +63,23 @@ pub fn read_ergo_box_candidate_indexed(
     let ergo_tree = read_ergo_tree(r)?;
     // Box-script ACCEPTANCE gates, skipped only when the reader is decoding a
     // TRUSTED, already-validated source (`VlqReader::trusted`) — the node's own
-    // persisted block sections and indexer rows. Mainnet carries boxes these
-    // gates hard-reject (block 545,684 tx[1] output[0] holds the size-delimited
-    // `cd07021a8e6f59fd4a`, an ErgoTree whose header claims version 5): they
-    // were accepted at a height whose activated script version was below
+    // persisted block sections and indexer rows (#326): re-running consensus
+    // acceptance while re-reading data the node already accepted and persisted
+    // is wrong and makes such a block unreadable. The structural `read_ergo_tree`
+    // parse above still runs, so `ergo_tree_bytes` — and every identifier derived
+    // from them — is identical either way. Untrusted block / transaction bytes
+    // keep the reader untrusted, so the consensus path runs every gate; the
+    // tree-version gate is keyed to the activated script version the reader is
+    // scoped to (#327, `check_tree_version_supported`): mainnet block 545,684
+    // tx[1] output[0] holds the size-delimited `cd07021a8e6f59fd4a` (header
+    // version 5), accepted at a height whose activated version was below
     // `VersionContext.JitActivationVersion`, where Scala's
-    // `require(ergoTreeVersion <= activatedVersion)` is inert. Re-running
-    // consensus acceptance while re-reading data the node already accepted and
-    // persisted is wrong and makes such a block unreadable. The structural
-    // `read_ergo_tree` parse above still runs, so `ergo_tree_bytes` — and every
-    // identifier derived from them — is identical either way. Untrusted block /
-    // transaction bytes keep the reader untrusted, so the consensus path is
-    // byte-for-byte unchanged.
+    // `require(ergoTreeVersion <= activatedVersion)` is inert.
     if !r.is_trusted() {
-        crate::ergo_tree::check_tree_version_supported(&ergo_tree)?;
+        crate::ergo_tree::check_tree_version_supported(
+            &ergo_tree,
+            crate::ergo_tree::reader_activated_script_version(r),
+        )?;
         crate::ergo_tree::check_header_size_bit(&ergo_tree)?;
         crate::ergo_tree::check_resolvable_methods(&ergo_tree)?;
         crate::ergo_tree::check_sigma_prop_root(&ergo_tree)?;

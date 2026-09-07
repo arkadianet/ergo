@@ -12,6 +12,7 @@
 //!   (one continuous decision tree mirroring Scala's `deserializeErgoTree`).
 //! * `hash.rs` — indexer-facing tree-hash / template-hash utilities.
 
+use ergo_primitives::reader::VlqReader;
 use ergo_primitives::writer::VlqWriter;
 
 use crate::error::WriteError;
@@ -152,3 +153,24 @@ fn write_ergo_tree_body(w: &mut VlqWriter, tree: &ErgoTree) -> Result<(), WriteE
 /// Trees with higher versions are accepted without body parsing (soft-fork).
 /// Matches Scala's VersionContext.MaxSupportedScriptVersion = 3.
 const MAX_SUPPORTED_TREE_VERSION: u8 = 3;
+
+/// Scala `VersionContext._defaultContext.activatedVersion` (`VersionContext.scala:58`):
+/// the activated script version every parse runs under when no
+/// `VersionContext.withVersions` scope is active. The reference parses stored
+/// boxes and the transactions of every pre-6.0 block section (header version
+/// < 4) under this default, so it is what a [`VlqReader`] without an explicit
+/// [`activated_script_version`](VlqReader::activated_script_version) means.
+pub const DEFAULT_ACTIVATED_SCRIPT_VERSION: u8 = 1;
+
+/// Scala `VersionContext.JitActivationVersion` (`VersionContext.scala:51`): the
+/// activated script version from which `VersionContext` starts requiring
+/// `ergoTreeVersion <= activatedVersion` (the check "added in 5.0").
+pub const JIT_ACTIVATION_VERSION: u8 = 2;
+
+/// The activated script version a reader's parse runs under: the explicit
+/// [`VlqReader::activated_script_version`] when a caller scoped one, else Scala's
+/// default context ([`DEFAULT_ACTIVATED_SCRIPT_VERSION`]).
+pub fn reader_activated_script_version(r: &VlqReader) -> u8 {
+    r.activated_script_version()
+        .unwrap_or(DEFAULT_ACTIVATED_SCRIPT_VERSION)
+}

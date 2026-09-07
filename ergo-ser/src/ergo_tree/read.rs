@@ -112,11 +112,14 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         let body_start = r.position();
 
         // A future-version tree is wrapped LENIENTLY here (the conformance hook
-        // feeds size-stripped trees, template-hashing relies on the wrap) and
-        // hard-rejected at the box-script layer via `check_tree_version_supported`.
-        // Scala HARD-rejects it at deserialize (`VersionContext.withVersions`
-        // throws when treeVersion > activated). The reader advances to the
-        // declared-size end, as on every wrap path.
+        // feeds size-stripped trees, template-hashing relies on the wrap); the
+        // box-script layer decides via `check_tree_version_supported`, keyed to
+        // the activated version the parse runs under: Scala HARD-rejects it at
+        // deserialize from activated 2 on (`VersionContext.withVersions` throws
+        // when treeVersion > activated), and below that admits the body to the
+        // parse — where a body that fails is kept as `UnparsedErgoTree` exactly
+        // like this wrap. The reader advances to the declared-size end, as on
+        // every wrap path.
         if version > MAX_SUPPORTED_TREE_VERSION {
             let full = take_unparsed_size_region(r, tree_start, body_start, declared_size)?;
             return Ok((
@@ -151,6 +154,11 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
             // the outer reader is decoding a trusted stored box. No effect on the
             // (default, untrusted) consensus path.
             inner.set_trusted(r.is_trusted());
+            // Likewise the activated-version scope: Scala's `VersionContext` is
+            // ambient to the whole nested parse, so a nested box script inside
+            // this body is gated against the same activated version as the
+            // outer reader (`check_tree_version_supported`).
+            inner.set_activated_script_version(r.activated_script_version());
             // Gate embeddable type codes (e.g. SUnsignedBigInt, v6-only) against
             // this tree's header version, like Scala's version-scoped
             // `getEmbeddableType`. Covers segregated constants + the body.

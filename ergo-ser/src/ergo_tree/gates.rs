@@ -1,12 +1,12 @@
 //! Consensus reject-gates applied by the box-script readers after
 //! [`super::read_ergo_tree`]'s lenient parse: rule 1012 (header size bit),
-//! tree-version support, method resolvability, and the rule-1001
-//! SigmaProp-root check.
+//! the activated-version tree-version check, method resolvability, and the
+//! rule-1001 SigmaProp-root check.
 
 use ergo_primitives::reader::ReadError;
 
 use super::type_infer::determinable_root_type;
-use super::{ErgoTree, MAX_SUPPORTED_TREE_VERSION};
+use super::{ErgoTree, JIT_ACTIVATION_VERSION};
 
 /// Scala `CheckHeaderSizeBit` (validation rule 1012, in `deserializeErgoTree`
 /// via `deserializeHeaderAndSize`): a non-zero ErgoTree version REQUIRES the
@@ -28,36 +28,75 @@ pub fn check_header_size_bit(tree: &ErgoTree) -> Result<(), ReadError> {
     Ok(())
 }
 
-/// Reject a tree whose header version exceeds the maximum this node supports
-/// (= the network's activated script version). Scala's `deserializeErgoTree`
-/// wraps the parse in `VersionContext.withVersions(activatedScriptVersion,
-/// treeVersion)`, whose `require(treeVersion <= activatedVersion)` throws an
-/// `IllegalArgumentException` that is re-thrown as a `SerializerException`
-/// ("Tree version (N) is above activated script version") — NOT a
-/// `ValidationException`, so it is never soft-fork-wrapped and the box is
-/// hard-rejected at creation (`ErgoTreeSerializer.scala` deserializeErgoTree
-/// inner catch; confirmed against the 6.0.2 oracle: a v4/v5/v7 tree throws even
-/// with the size bit set).
+/// Reject a tree whose header version exceeds the ACTIVATED script version the
+/// parse runs under — Scala's `VersionContext` invariant, keyed to the
+/// activated version, NOT to a static maximum.
+///
+/// The reference rule (`VersionContext.scala:17-21`):
+///
+/// ```text
+/// case class VersionContext(activatedVersion: Byte, ergoTreeVersion: Byte) {
+///   require(activatedVersion < JitActivationVersion || ergoTreeVersion <= activatedVersion, …)
+/// ```
+///
+/// `ErgoTreeSerializer.deserializeErgoTree` (`ErgoTreeSerializer.scala:148-154`)
+/// constructs that context with `activatedVersion = VersionContext.current
+/// .activatedVersion` and the header's tree version, INSIDE its inner
+/// `try`; a failing `require` is an `IllegalArgumentException` re-thrown as a
+/// `SerializerException` ("Tree version (N) is above activated script version",
+/// `:191-193`) — NOT a `ValidationException`, so the outer catch never wraps it
+/// as `UnparsedErgoTree` and the box is hard-rejected, size bit or not. The
+/// four cases, with `JitActivationVersion = 2`:
+///
+/// - **activated < 2** (header version 1 or 2, i.e. mainnet below the 5.0
+///   activation at 843,776): the `require` is INERT — any tree version is
+///   admitted to the body parse. A future-version body that then fails
+///   (rule 1001 / an unknown opcode …) is a `ValidationException`, so WITH the
+///   size bit `deserializeErgoTree` keeps it as `UnparsedErgoTree` with its
+///   `propositionBytes` verbatim (`:197-203`); WITHOUT the size bit
+///   `CheckHeaderSizeBit` (rule 1012, `:219`) has already thrown outside the
+///   inner `try` for any `version != 0` — [`check_header_size_bit`] covers that
+///   unconditionally.
+/// - **activated >= 2** and `tree.version <= activated`: accepted.
+/// - **activated >= 2** and `tree.version > activated`: hard `SerializerException`
+///   with or without the size bit. Confirmed against the 6.0.2 oracle at
+///   activated 3: v4/v5/v7 size-delimited trees THROW; at activated 1 and 2 the
+///   same bytes PARSE (see `tree_version_oracle_parity.rs`).
+/// - **activated > MaxSupportedScriptVersion (3)**: a future soft fork this node
+///   does not implement; the tree gate is the least of it (the node cannot
+///   evaluate such blocks at all). `MAX_SUPPORTED_TREE_VERSION` therefore only
+///   bounds what `read_ergo_tree` parses — it is NOT this gate's threshold.
+///
+/// Which activated version applies is the caller's `VersionContext` scope, and
+/// the reference's block path is NOT "the block's activated version": Scala only
+/// scopes `BlockTransactionsSerializer.parse` from the wire block version for
+/// `blockVersion >= Interpreter60Version (4)` (`BlockTransactions.scala:185-201`);
+/// every earlier block, and every stored box re-read (`ErgoBoxSerializer.parse`
+/// from the UTXO db), runs under the default context, activated 1 (`VersionContext
+/// .scala:58`). Live counterexample: mainnet block 545,684 (header version 2), tx[1]
+/// output[0] `cd07021a8e6f59fd4a` — header 0xcd = version 5 + size bit — is kept
+/// as an `UnparsedErgoTree` and later spent by storage rent at 1,596,890 (header
+/// version 3); the previous static `version > 3` gate wedged a from-genesis sync
+/// on that block (#327). The mempool / P2P transaction parse is scoped to the
+/// tip's activated version (`ErgoMemPool.scala:259`, `ErgoNodeViewSynchronizer
+/// .scala:778`), so a future-version tree is refused at admission today.
 ///
 /// As with [`check_header_size_bit`], [`read_ergo_tree`] stays lenient (it wraps
 /// a future-version tree so the conformance hook and template-hash paths keep
 /// working); this box-script gate supplies the hard rejection at the consensus
 /// box-parse layer. Uses [`ReadError::HardReject`] so a nested `SBox`-constant
 /// inner tree with a future version also escapes the enclosing tree's soft-fork
-/// wrap. `MAX_SUPPORTED_TREE_VERSION` equals the activated script version this
-/// node is built for; a future activation is a node upgrade that raises it.
-///
-/// We gate on the static max rather than the per-block `activatedScriptVersion`
-/// (matching the static `check_resolvable_methods` gate). The only case the two
-/// disagree is re-validating a historical block at a height where activated was
-/// below 3 with a higher-version tree — unreachable, since a tree of version N
-/// cannot be created until version N is activated, so no such tree exists in
-/// real pre-activation history.
-pub fn check_tree_version_supported(tree: &ErgoTree) -> Result<(), ReadError> {
-    if tree.version > MAX_SUPPORTED_TREE_VERSION {
+/// wrap. Readers obtain `activated_script_version` from their reader's scope via
+/// [`super::reader_activated_script_version`].
+pub fn check_tree_version_supported(
+    tree: &ErgoTree,
+    activated_script_version: u8,
+) -> Result<(), ReadError> {
+    if activated_script_version >= JIT_ACTIVATION_VERSION && tree.version > activated_script_version
+    {
         return Err(ReadError::HardReject(format!(
-            "ErgoTree version {} exceeds the maximum supported version {} (above activated script version)",
-            tree.version, MAX_SUPPORTED_TREE_VERSION
+            "ErgoTree version {} exceeds the activated script version {} (VersionContext require, SerializerException)",
+            tree.version, activated_script_version
         )));
     }
     Ok(())

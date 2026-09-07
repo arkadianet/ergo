@@ -276,7 +276,7 @@ budget_iters   = 50000
 trigger_hex    = "0D01D3"
 # Same as unparsed-tree-canonical: 0D = header (version=5, has_size=1). Bugged (no check_tree_version): accepts; JVM: version > activatedVersion → reject
 expected_canonical = ""
-note = "ORACLE: version=5 > MAX(3). Bugged: Oracle accept (no version check); JVM: 'Tree version (5) is above activated script version' → reject."
+note = "ORACLE: version=5 > activated 3. Bugged: Oracle accept (no version check); JVM: 'Tree version (5) is above activated script version' → reject. The gate is keyed to the activated version since #327 (see entry 33): the oracle runs at activated 3, where this trigger still rejects."
 
 # ---------------------------------------------------------------------------
 # 16. ergtree-uintexact-count-overflow
@@ -746,3 +746,42 @@ budget_iters   = 50000
 trigger_hex    = "00d1968521feffffff01"
 expected_canonical = ""
 note = "ORACLE reduce cost. difftest --oracle --repro 00d1968521feffffff01 --surface reduce: clean AGREE (P:d2|215==215), patched Canonical (rust P:d2|220 vs jvm P:d2|215). OR twin: 00d1978541010000000000000000 (65 items, first true)."
+
+# 35. tree-version-gate-ignores-activated  [#327, reject-valid, PATCH VERIFIED]
+# ---------------------------------------------------------------------------
+# The inverse of #15: `check_tree_version_supported` (#120) rejected any tree
+# whose header version exceeded a STATIC maximum (3), while Scala's
+# `VersionContext` require (`VersionContext.scala:20`) is inert below
+# `JitActivationVersion` (2) and otherwise compares against the ACTIVATED
+# version the parse runs under. Mainnet block 545,684 (header version 2, parsed
+# by the reference under its default context, activated 1) carries a version-5
+# size-delimited tree (`cd07021a8e6f59fd4a`) the reference keeps as an
+# `UnparsedErgoTree`; the static gate wedged a from-genesis sync there.
+#
+# The `difftest --oracle` channel runs both sides at activated 3, where the
+# trigger REJECTS on both — it cannot see this class. Detection is the pinned
+# oracle vector file instead: `ErgoSerdeOracle.scala` accepts a
+# `<surface>@<activated>` spec, and `ergo-validation/tests/tree_version_oracle_
+# parity.rs` diffs the node's scoped readers against
+# `test-vectors/scala/tree_version_activated_oracle.json` (verbatim JVM output at
+# activated 0/1/2/3).
+#
+# CLEAN HEAD:   ergo_box_candidate@1 c0843dcd07021a8e6f59fd4a92a7210000 → Rust ACCEPT, JVM ACCEPT → AGREE
+# PATCHED HEAD: ergo_box_candidate@1 c0843dcd07021a8e6f59fd4a92a7210000 → Rust REJECT, JVM ACCEPT → DIVERGE
+[[bug]]
+id             = "tree-version-gate-ignores-activated"
+surface        = "ergo_box_candidate"
+class          = "accept-reject"
+wire_reachable = false
+fix_file       = "ergo-ser/src/ergo_tree/gates.rs;ergo-ser/src/block_transactions.rs"
+reinject       = "In gates.rs::check_tree_version_supported, drop the `activated_script_version >= JIT_ACTIVATION_VERSION &&` conjunct and compare `tree.version > 3` (the pre-#327 static maximum). Patch: known_bugs/patches/tree-version-gate-ignores-activated.patch"
+budget_iters   = 0
+trigger_hex    = ""
+# Wire trigger (NOT routed through the difftest oracle channel, see above):
+# ergo_box_candidate@1 c0843dcd07021a8e6f59fd4a92a7210000 — mainnet 545,684 tx[1]
+# output[0] as a standalone ErgoBoxCandidate: value 1e6, tree cd07021a8e6f59fd4a
+# (v5 + size bit), height 545682, no tokens/registers. wire_reachable=false only
+# so reinject_gate.sh skips it: its oracle channel runs at activated 3, where the
+# bugged and fixed gates agree.
+expected_canonical = ""
+note = "VECTOR-FILE: cargo test -p ergo-validation --test tree_version_oracle_parity. The difftest oracle channel (activated 3) agrees on both heads for this trigger; the class is only visible at activated < 2, i.e. through the @activated oracle spec. Reject-valid: a from-genesis IBD wedge at 545,684 (the box is later spent by storage rent at 1,596,890, header version 3, without script evaluation)."

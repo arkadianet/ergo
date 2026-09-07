@@ -97,7 +97,10 @@ pub fn parse_ergo_box_bytes(
             tree_reader.remaining()
         )));
     }
-    crate::ergo_tree::check_tree_version_supported(&ergo_tree)?;
+    crate::ergo_tree::check_tree_version_supported(
+        &ergo_tree,
+        crate::ergo_tree::reader_activated_script_version(&r),
+    )?;
     crate::ergo_tree::check_header_size_bit(&ergo_tree)?;
     crate::ergo_tree::check_resolvable_methods(&ergo_tree)?;
     crate::ergo_tree::check_sigma_prop_root(&ergo_tree)?;

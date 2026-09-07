@@ -131,16 +131,20 @@ fn skip_ergo_tree(r: &mut VlqReader) -> Result<(), ReadError> {
         // `get_bytes(size)` skip desynced the box tail when size != body length.)
         r.set_position(tree_start);
         let (sub_tree, _) = crate::ergo_tree::read_ergo_tree_tracking_wrap(r)?;
-        // A future-version inner tree is HARD-rejected (Scala's
+        // A future-version inner tree is HARD-rejected from activated 2 on (Scala's
         // `VersionContext.withVersions` throws a `SerializerException` the enclosing
-        // tree does not catch). `read_ergo_tree` wrapped it leniently; reject here —
+        // tree does not catch; below that the require is inert — see
+        // `check_tree_version_supported`). `read_ergo_tree` wrapped it leniently; reject here —
         // UNLESS the reader is decoding a TRUSTED, already-validated stored box
         // (`VlqReader::trusted`), where a legacy high-version opaque NESTED tree
         // must round-trip exactly like the top-level case (the indexer re-reading
         // its own `INDEXED_BOX` rows). The structural parse above already advanced
         // the reader, so only the acceptance check is skipped.
         if !r.is_trusted() {
-            crate::ergo_tree::check_tree_version_supported(&sub_tree)?;
+            crate::ergo_tree::check_tree_version_supported(
+                &sub_tree,
+                crate::ergo_tree::reader_activated_script_version(r),
+            )?;
         }
     } else {
         // SIZELESS nested box script (an `SBox` constant's inner ErgoTree). This
@@ -422,8 +426,10 @@ mod tests {
 
     /// A nested `SBox` constant whose inner ErgoTree is a HIGH-VERSION
     /// size-delimited (opaque) tree (header `0xcd` = version 5, has_size) is
-    /// HARD-rejected by the strict consensus reader (`check_tree_version_supported`
-    /// inside `skip_ergo_tree`), but a TRUSTED reader accepts it. This is the
+    /// HARD-rejected by a consensus reader scoped to activated >= 2
+    /// (`check_tree_version_supported` inside `skip_ergo_tree`), admitted by an
+    /// unscoped reader (Scala's default context, activated 1 — #327), and
+    /// accepted by a TRUSTED reader under any scope. This is the
     /// nested mirror of the top-level legacy-box case: a stored box can carry such
     /// a tree nested in a register / `SBox` constant / context-extension, and the
     /// indexer (re-reading its OWN already-validated data with a trusted reader)
@@ -436,14 +442,23 @@ mod tests {
         let tree = hex::decode("cd07021a8e6f59fd4a").unwrap();
         let box_bytes = sbox_constant_bytes(&tree);
 
-        // Strict (untrusted) consensus reader rejects the future-version tree.
-        let mut strict = VlqReader::new(&box_bytes);
+        // Strict (untrusted) consensus reader scoped to activated 3 rejects the
+        // future-version tree.
+        let mut strict = VlqReader::new(&box_bytes).with_activated_script_version(3);
         read_value(&mut strict, &SigmaType::SBox)
             .expect_err("strict reader must reject a version-5 nested box-constant tree");
 
-        // Trusted reader (already-validated stored data) accepts it, landing the
-        // box-field boundary exactly.
-        let mut trusted = VlqReader::new(&box_bytes).trusted();
+        // Unscoped reader (default context, activated 1): the require is inert.
+        let mut default_ctx = VlqReader::new(&box_bytes);
+        let val = read_value(&mut default_ctx, &SigmaType::SBox)
+            .expect("default context must admit a version-5 nested box-constant tree");
+        assert_eq!(val, SigmaValue::OpaqueBoxBytes(box_bytes.clone()));
+
+        // Trusted reader (already-validated stored data) accepts it even under
+        // activated 3, landing the box-field boundary exactly.
+        let mut trusted = VlqReader::new(&box_bytes)
+            .with_activated_script_version(3)
+            .trusted();
         let val = read_value(&mut trusted, &SigmaType::SBox)
             .expect("trusted reader must accept a stored high-version nested opaque tree");
         assert!(

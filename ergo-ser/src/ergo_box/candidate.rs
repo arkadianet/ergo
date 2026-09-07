@@ -44,8 +44,8 @@ pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, Re
     // Box-script ACCEPTANCE gates. Skipped only when the reader is decoding a
     // TRUSTED, already-validated source (`VlqReader::trusted` — set ONLY by the
     // indexer when re-reading its own stored `INDEXED_BOX` rows). A legacy stored
-    // row can carry a high-version size-delimited (opaque) ErgoTree that these
-    // gates hard-reject; re-validating consensus while reading the node's own
+    // row can carry a high-version size-delimited (opaque) ErgoTree that a reader
+    // scoped to activated >= 2 hard-rejects; re-validating consensus while reading the node's own
     // already-accepted data is wrong and makes the row (and the rebuild that
     // scans it, and apply/rollback/API materialization) unreadable. The
     // structural `read_ergo_tree` parse above already ran, so `ergo_tree_bytes` /
@@ -53,7 +53,10 @@ pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, Re
     // transaction bytes the reader is NOT trusted, so these run exactly as
     // before — the consensus path is byte-for-byte unchanged.
     if !r.is_trusted() {
-        crate::ergo_tree::check_tree_version_supported(&ergo_tree)?;
+        crate::ergo_tree::check_tree_version_supported(
+            &ergo_tree,
+            crate::ergo_tree::reader_activated_script_version(r),
+        )?;
         crate::ergo_tree::check_header_size_bit(&ergo_tree)?;
         crate::ergo_tree::check_resolvable_methods(&ergo_tree)?;
         crate::ergo_tree::check_sigma_prop_root(&ergo_tree)?;

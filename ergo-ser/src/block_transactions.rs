@@ -85,6 +85,11 @@ pub fn write_block_transactions_with_version(
     Ok(())
 }
 
+/// Scala `Header.Interpreter60Version` (`Header.scala:148`): the first block
+/// version whose transactions the reference parses under an explicit
+/// `VersionContext.withVersions(blockVersion - 1, …)` scope.
+pub const INTERPRETER_60_BLOCK_VERSION: u8 = 4;
+
 /// Decode the wire form produced by either [`write_block_transactions`]
 /// (v1) or [`write_block_transactions_with_version`] (any version). The
 /// reader auto-detects the optional v2+ marker by checking whether the
@@ -152,7 +157,7 @@ pub fn read_block_transactions_with_group_elements(
     // putUInt(MaxTransactionsInBlock + blockVersion) before the tx count.
     // If the first VLQ > MaxTransactionsInBlock, it's a version marker.
     let ver_or_count = r.get_u32_exact()?;
-    let count = if ver_or_count > MAX_TRANSACTIONS_IN_BLOCK {
+    let (block_version, count) = if ver_or_count > MAX_TRANSACTIONS_IN_BLOCK {
         // v2+ marker: ver_or_count = MAX_TRANSACTIONS_IN_BLOCK + block_version,
         // the real tx count follows. The v1 branch (else arm) is bounded
         // by the marker check itself; the post-marker count needs an
@@ -164,9 +169,30 @@ pub fn read_block_transactions_with_group_elements(
                 "BlockTransactions v2 count {post_marker_count} > cap {MAX_TRANSACTIONS_IN_BLOCK}"
             )));
         }
-        post_marker_count as usize
+        (
+            (ver_or_count - MAX_TRANSACTIONS_IN_BLOCK) as u8,
+            post_marker_count as usize,
+        )
     } else {
-        ver_or_count as usize
+        (1, ver_or_count as usize)
+    };
+
+    // Scala `BlockTransactionsSerializer.parse` (`BlockTransactions.scala:184-202`)
+    // scopes the transaction parse in `VersionContext.withVersions(blockVersion - 1,
+    // blockVersion - 1)` ONLY for `blockVersion >= Header.Interpreter60Version (4)`;
+    // every earlier block's transactions parse under whatever context is ambient —
+    // the default (activated 1) on the network and db paths — so their box
+    // scripts never hit the `ergoTreeVersion <= activatedVersion` require (see
+    // `check_tree_version_supported`). Mirror that scoping exactly, keyed to the
+    // WIRE block version as the reference is, and restore the caller's context
+    // afterwards like the `withVersions` dynamic scope. Scala's `blockVersion` is
+    // a signed `Byte` (`.toByte` of the marker), so a marker at or above 0x80
+    // compares BELOW `Interpreter60Version` there — mirror that with the `i8`
+    // comparison (see `v2_marker_gate_is_signed_no_marker_above_version_127`).
+    let previous_activated = if (block_version as i8) >= INTERPRETER_60_BLOCK_VERSION as i8 {
+        Some(r.set_activated_script_version(Some(block_version - 1)))
+    } else {
+        None
     };
 
     // Discard any points read before the first transaction (header_id/count
@@ -176,12 +202,19 @@ pub fn read_block_transactions_with_group_elements(
 
     let mut transactions = Vec::with_capacity(count.min(TRANSACTIONS_VEC_SOFT_CAP));
     let mut per_tx_group_elements = Vec::with_capacity(count.min(TRANSACTIONS_VEC_SOFT_CAP));
-    for tx_idx in 0..count {
-        let tx = read_transaction(r)
-            .map_err(|e| ReadError::InvalidData(format!("tx[{tx_idx}]: {e}")))?;
-        transactions.push(tx);
-        per_tx_group_elements.push(r.take_group_elements());
+    let parsed = (|| {
+        for tx_idx in 0..count {
+            let tx = read_transaction(r)
+                .map_err(|e| ReadError::InvalidData(format!("tx[{tx_idx}]: {e}")))?;
+            transactions.push(tx);
+            per_tx_group_elements.push(r.take_group_elements());
+        }
+        Ok::<(), ReadError>(())
+    })();
+    if let Some(previous) = previous_activated {
+        r.set_activated_script_version(previous);
     }
+    parsed?;
     Ok((
         BlockTransactions {
             header_id,
@@ -195,7 +228,7 @@ pub fn read_block_transactions_with_group_elements(
 mod tests {
     use super::*;
     use crate::ergo_box::ErgoBoxCandidate;
-    use crate::ergo_tree::ErgoTree;
+    use crate::ergo_tree::{read_ergo_tree, ErgoTree};
     use crate::input::{ContextExtension, Input, SpendingProof};
     use crate::opcode::Expr;
     use crate::register::AdditionalRegisters;
@@ -360,6 +393,75 @@ mod tests {
         w.put_bytes(&[0xAA; 32]); // header_id
         w.put_u32(MAX_TRANSACTIONS_IN_BLOCK + block_version as u32);
         w.result()
+    }
+
+    /// A transaction carrying a size-delimited v5 sigmaProp(true) output box
+    /// (`0d0208d3`), as a block-transactions section under wire block version
+    /// `block_version`.
+    fn section_with_v5_tree_output(block_version: u8) -> Vec<u8> {
+        let tree_bytes = hex::decode("0d0208d3").unwrap();
+        let tree = read_ergo_tree(&mut VlqReader::new(&tree_bytes)).unwrap();
+        let tx = Transaction {
+            inputs: vec![],
+            data_inputs: vec![],
+            output_candidates: vec![ErgoBoxCandidate::from_trusted_raw_parts(
+                1,
+                tree,
+                tree_bytes,
+                0,
+                vec![],
+                AdditionalRegisters::default(),
+                vec![0],
+            )],
+        };
+        let bt = BlockTransactions {
+            header_id: ModifierId::from_bytes([0x11; 32]),
+            transactions: vec![tx],
+        };
+        let mut w = VlqWriter::new();
+        write_block_transactions_with_version(&mut w, &bt, block_version).unwrap();
+        w.result()
+    }
+
+    /// Scala `BlockTransactionsSerializer.parse` scopes the transaction parse to
+    /// `VersionContext(blockVersion - 1, …)` only for `blockVersion >= 4`; earlier
+    /// sections parse under the ambient (default, activated 1) context, where
+    /// the `ergoTreeVersion <= activatedVersion` require is inert. A v5 tree
+    /// therefore parses in a v1/v2/v3 section and is a hard reject in a v4 one
+    /// (the mainnet 545,684 class, #327).
+    #[test]
+    fn read_block_transactions_scopes_tree_version_gate_to_wire_block_version() {
+        for block_version in [1u8, 2, 3] {
+            let bytes = section_with_v5_tree_output(block_version);
+            let mut r = VlqReader::new(&bytes);
+            let bt = read_block_transactions(&mut r)
+                .unwrap_or_else(|e| panic!("block version {block_version}: {e}"));
+            assert_eq!(
+                bt.transactions[0].output_candidates[0].ergo_tree().version,
+                5
+            );
+            assert!(r.is_empty());
+        }
+        let bytes = section_with_v5_tree_output(4);
+        let mut r = VlqReader::new(&bytes);
+        let err = read_block_transactions(&mut r).expect_err("v4 section: activated 3 < tree 5");
+        assert!(
+            format!("{err}").contains("ErgoTree version 5 exceeds the activated script version 3"),
+            "{err}"
+        );
+    }
+
+    /// The v4+ scope is dynamic like `withVersions { … }`: the caller's own
+    /// reader context is restored on return, on both the accept and reject
+    /// paths.
+    #[test]
+    fn read_block_transactions_restores_the_callers_activated_version() {
+        for block_version in [3u8, 4] {
+            let bytes = section_with_v5_tree_output(block_version);
+            let mut r = VlqReader::new(&bytes).with_activated_script_version(1);
+            let _ = read_block_transactions(&mut r);
+            assert_eq!(r.activated_script_version(), Some(1));
+        }
     }
 
     #[test]

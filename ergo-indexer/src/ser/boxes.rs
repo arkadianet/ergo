@@ -203,10 +203,10 @@ mod tests {
     fn reads_legacy_high_version_opaque_tree_box_leniently() {
         // A REAL mainnet `INDEXED_BOX` row (global index 5918565) whose box
         // carries a size-delimited ErgoTree with header version 5 — stored by a
-        // legacy node before the consensus version-cap gates existed. The strict
-        // consensus box reader hard-rejects `version > MAX_SUPPORTED_TREE_VERSION`
-        // even for an opaque (size-delimited) tree, but the indexer must read its
-        // own already-validated stored data leniently. Regression: the
+        // legacy node before the consensus version-cap gates existed. A consensus
+        // box reader scoped to an activated version >= 2 hard-rejects a tree whose
+        // version exceeds it even when opaque (size-delimited), but the indexer
+        // must read its own already-validated stored data leniently. Regression: the
         // secondary-index rebuild halted mid-scan ("ErgoTree version 5 exceeds the
         // maximum supported version 3") when it re-read this box through the
         // strict reader.
@@ -231,11 +231,17 @@ mod tests {
         );
         assert!(b.is_spent());
 
-        // And the STRICT consensus box reader STILL rejects the same box — the
-        // lenient path is additive and never weakens consensus parsing.
+        // The consensus box reader keys the version gate to the activated version
+        // it is scoped to (#327): a reader scoped to today's activated 3 STILL
+        // rejects the same box — the trusted path is additive and never weakens
+        // consensus parsing — while the unscoped (Scala default-context) read the
+        // UTXO store uses accepts it, as the reference does for its stored boxes.
         let box_bytes = ergo_ser::ergo_box::serialize_ergo_box(&b.box_data).unwrap();
+        let mut r = VlqReader::new(&box_bytes).with_activated_script_version(3);
+        ergo_ser::ergo_box::read_ergo_box(&mut r)
+            .expect_err("a reader scoped to activated 3 must reject the version-5 tree");
         let mut r = VlqReader::new(&box_bytes);
         ergo_ser::ergo_box::read_ergo_box(&mut r)
-            .expect_err("strict consensus reader must still reject the version-5 tree");
+            .expect("the default-context stored-box read must accept the version-5 tree");
     }
 }

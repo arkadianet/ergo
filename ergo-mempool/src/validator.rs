@@ -148,9 +148,15 @@ impl Validator for ErgoValidator {
         data_input_view: &dyn UtxoView,
         cx: &mut ergo_validation::TxValidationCtx<'_>,
     ) -> Result<Validated, ValidationErr> {
-        // Deserialize. Trailing-byte check mirrors ergo-validation.
+        // Deserialize. Trailing-byte check mirrors ergo-validation. The parse
+        // is scoped to the tip's activated script version exactly as Scala's
+        // mempool parse is (`ErgoMemPool.scala:259`: `VersionContext.withVersions(
+        // scriptVersion, scriptVersion)`), so a box script whose header version
+        // exceeds the activated version is refused at admission — this parse,
+        // not the `peek_*` prefilters, is the acceptance decision.
         let tx = {
-            let mut r = VlqReader::new(tx_bytes);
+            let mut r = VlqReader::new(tx_bytes)
+                .with_activated_script_version(cx.ctx.activated_script_version);
             let parsed = read_transaction(&mut r).map_err(|_| ValidationErr::Deserialize)?;
             if !r.is_empty() {
                 return Err(ValidationErr::Deserialize);
