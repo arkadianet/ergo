@@ -309,6 +309,33 @@ fn write_snapshot(dir: &PathBuf, ts_unix_ms: u64, code: &str, events: &[String],
     }
 }
 
+/// Chronological order of a snapshot file, parsed from its name:
+/// `(ts_unix_ms, seq)` out of `incident-{ts_unix_ms}-{seq:06}.json`.
+///
+/// The name is the only trustworthy clock here. A file's mtime is a
+/// different clock: it comes from the filesystem, it can be touched from
+/// outside, and — because Linux stamps new inodes from a coarse clock on
+/// most kernels — a burst of snapshots written inside one tick shares a
+/// single mtime, which orders them not at all. The name carries the
+/// caller's `ts_unix_ms` and a process-monotonic sequence, so it stays
+/// exact under a burst.
+///
+/// Parsed numerically rather than compared lexically: `{seq:06}` only
+/// pads to six digits, so a process that writes more than 999_999
+/// snapshots widens the field and lexical order would break at that
+/// boundary.
+///
+/// `None` for a name that does not carry both numbers; the caller decides
+/// what to do with an unparseable file (retention sorts it newest, so it
+/// is never deleted on our guess).
+fn snapshot_order_key(name: &str) -> Option<(u64, u64)> {
+    let stem = name.strip_prefix("incident-")?.strip_suffix(".json")?;
+    let mut parts = stem.split('-');
+    let ms = parts.next()?.parse::<u64>().ok()?;
+    let seq = parts.next().unwrap_or("0").parse::<u64>().ok()?;
+    Some((ms, seq))
+}
+
 /// Keep the newest [`RETAIN`] `incident-*.json` files.
 fn enforce_retention(dir: &PathBuf) {
     use std::fs;
@@ -326,18 +353,8 @@ fn enforce_retention(dir: &PathBuf) {
             .collect(),
         Err(_) => return,
     };
-    // Sort by the timestamp + sequence parsed FROM THE NAME: mtimes can
-    // collide or be touched externally, and sequence suffixes are not
-    // zero-padded so lexical order lies about chronology.
-    fn name_key(name: &str) -> Option<(u64, u64)> {
-        let stem = name.strip_prefix("incident-")?.strip_suffix(".json")?;
-        let mut parts = stem.split('-');
-        let ms = parts.next()?.parse::<u64>().ok()?;
-        let seq = parts.next().unwrap_or("0").parse::<u64>().ok()?;
-        Some((ms, seq))
-    }
     while files.len() > RETAIN {
-        files.sort_by_key(|(name, _)| name_key(name).unwrap_or((u64::MAX, u64::MAX)));
+        files.sort_by_key(|(name, _)| snapshot_order_key(name).unwrap_or((u64::MAX, u64::MAX)));
         let oldest = files.remove(0);
         let _ = fs::remove_file(dir.join(&oldest.0));
     }
@@ -384,23 +401,35 @@ mod tests {
             })
             .count();
         assert!(count <= RETAIN, "retention must prune, got {count}");
-        // Newest file (by modification time — sequence suffixes are not
-        // zero-padded) carries its own code + gauges + events arrays.
-        let mut snaps: Vec<(std::path::PathBuf, std::fs::Metadata)> = std::fs::read_dir(&dir_path)
+        // Order the retained files by the SAME key retention ordered them
+        // by — the (ts, seq) in the name. Sorting by mtime instead would
+        // make this assertion read an arbitrary file: every snapshot in
+        // this loop lands inside one clock tick, and on a kernel that
+        // stamps new inodes from the coarse clock all ten share an mtime,
+        // leaving a stable sort in `read_dir` order, which is a hash order.
+        let mut snaps: Vec<(u64, u64, std::path::PathBuf)> = std::fs::read_dir(&dir_path)
             .unwrap()
             .filter_map(|e| {
                 let p = e.unwrap().path();
                 let name = p.file_name()?.to_string_lossy().to_string();
-                if name.starts_with("incident-") && name.ends_with(".json") {
-                    Some((p.clone(), p.metadata().unwrap()))
-                } else {
-                    None
-                }
+                let (ms, seq) = snapshot_order_key(&name)?;
+                Some((ms, seq, p))
             })
             .collect();
-        snaps.sort_by_key(|(_, m)| m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH));
+        snaps.sort_unstable();
         assert_eq!(snaps.len(), RETAIN, "retention must prune");
-        let text = std::fs::read_to_string(&snaps.last().unwrap().0).unwrap();
+
+        // Retention keeps the NEWEST ten, so the two oldest timestamps are
+        // gone and the rest are present exactly once — pinned by value, not
+        // by whichever file the directory happened to hand back last.
+        let kept: Vec<u64> = snaps.iter().map(|(ms, _, _)| *ms).collect();
+        let expected: Vec<u64> = (2..12u64).map(|i| 1_700_000_000_000 + i * 1_000).collect();
+        assert_eq!(kept, expected, "retention must keep the newest {RETAIN}");
+
+        // The newest file carries its own code + gauges + events arrays.
+        let (newest_ms, _, newest) = snaps.last().unwrap();
+        assert_eq!(*newest_ms, 1_700_000_011_000, "code-11 is the newest write");
+        let text = std::fs::read_to_string(newest).unwrap();
         assert!(text.contains("\"code\":\"code-11\""));
         assert!(text.contains("\"last_gauges\":{\"peers\":3}"));
         assert!(text.contains("\"events\":["));
