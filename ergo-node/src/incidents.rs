@@ -325,21 +325,25 @@ fn write_snapshot(dir: &PathBuf, ts_unix_ms: u64, code: &str, events: &[String],
 /// snapshots widens the field and lexical order would break at that
 /// boundary.
 ///
-/// `None` for a name that does not carry both numbers — including a
-/// sequence-less `incident-{ts}.json`, which no version of this node has
-/// ever written. Retention sorts an unidentified file newest and so never
-/// deletes it: whoever put a foreign file in the incident directory keeps
-/// it. The cost of that choice is that such a file occupies one of the
-/// [`RETAIN`] slots for good, which is the cheaper mistake of the two.
+/// `None` for anything that is not exactly a name this node writes — a
+/// sequence-less `incident-{ts}.json`, an operator's
+/// `incident-{ts}-{seq}-backup.json`, an unpadded `-1` where we write
+/// `-000001`. Retention leaves every such file alone: whoever put it in
+/// the incident directory keeps it. The cost is that it occupies one of
+/// the [`RETAIN`] slots for good, which is the cheaper mistake of the two.
 fn snapshot_order_key(name: &str) -> Option<(u64, u64)> {
     let stem = name.strip_prefix("incident-")?.strip_suffix(".json")?;
-    let mut parts = stem.split('-');
-    let ms = parts.next()?.parse::<u64>().ok()?;
-    let seq = parts.next()?.parse::<u64>().ok()?;
-    // Exactly two fields, or it is not ours: an operator's
-    // `incident-{ts}-{seq}-backup.json` must not inherit the original's
-    // order key and be rotated away underneath them.
-    if parts.next().is_some() {
+    let (ts_field, seq_field) = stem.split_once('-')?;
+    let ms = ts_field.parse::<u64>().ok()?;
+    let seq = seq_field.parse::<u64>().ok()?;
+    // Round-trip against the exact format `write_snapshot` emits. Parsing
+    // alone is too generous: it accepts `-1` for `-000001`, a `+` sign, a
+    // second `-` field and leading zeros on the timestamp, none of which
+    // this node writes — and a name we did not write is a name we must not
+    // delete. Re-rendering also keeps the check honest past 999_999, where
+    // `{seq:06}` widens on its own and a hardcoded width would start
+    // rejecting our own files.
+    if format!("{ms}") != ts_field || format!("{seq:06}") != seq_field {
         return None;
     }
     Some((ms, seq))
@@ -364,6 +368,14 @@ fn enforce_retention(dir: &PathBuf) {
     };
     while files.len() > RETAIN {
         files.sort_by_key(|(name, _)| snapshot_order_key(name).unwrap_or((u64::MAX, u64::MAX)));
+        // Unidentified names sort last, so an unidentified name in front
+        // means every file left is unidentified and none of them is ours
+        // to delete. Over-retaining is the price of never deleting someone
+        // else's file; without this the sort key would be a coin toss and
+        // one of them would go.
+        if snapshot_order_key(&files[0].0).is_none() {
+            break;
+        }
         let oldest = files.remove(0);
         let _ = fs::remove_file(dir.join(&oldest.0));
     }
@@ -461,6 +473,21 @@ mod tests {
             snapshot_order_key("incident-1700000000000-000001-backup.json"),
             None
         );
+        // Not the encoding we write: `{seq:06}` pads to six.
+        assert_eq!(snapshot_order_key("incident-1700000000000-1.json"), None);
+        assert_eq!(
+            snapshot_order_key("incident-1700000000000-+000001.json"),
+            None
+        );
+        assert_eq!(
+            snapshot_order_key("incident-01700000000000-000001.json"),
+            None
+        );
+        // Past the pad width the field grows on its own, and that is ours.
+        assert_eq!(
+            snapshot_order_key("incident-1700000000000-1000000.json"),
+            Some((1_700_000_000_000, 1_000_000))
+        );
         assert_eq!(snapshot_order_key("notes.txt"), None);
     }
 
@@ -526,6 +553,28 @@ mod tests {
         enforce_retention(&dir_path);
         assert!(foreign.exists(), "an unidentified file must survive");
         assert!(backup.exists(), "an operator's copy must survive");
+    }
+
+    /// More unidentified files than [`RETAIN`] must still cost nothing:
+    /// they all share the same sort key, so without a stop condition
+    /// retention would delete whichever one the directory listed first.
+    #[test]
+    fn retention_deletes_nothing_when_every_file_is_unidentified() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_path_buf();
+        let names: Vec<String> = (0..RETAIN + 1)
+            .map(|i| format!("incident-1700000000000-{i:06}-backup.json"))
+            .collect();
+        for name in &names {
+            std::fs::write(dir_path.join(name), "{}").unwrap();
+        }
+        enforce_retention(&dir_path);
+        for name in &names {
+            assert!(
+                dir_path.join(name).exists(),
+                "{name} was deleted on a guessed order"
+            );
+        }
     }
 
     #[test]
