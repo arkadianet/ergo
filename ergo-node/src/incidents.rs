@@ -325,14 +325,17 @@ fn write_snapshot(dir: &PathBuf, ts_unix_ms: u64, code: &str, events: &[String],
 /// snapshots widens the field and lexical order would break at that
 /// boundary.
 ///
-/// `None` for a name that does not carry both numbers; the caller decides
-/// what to do with an unparseable file (retention sorts it newest, so it
-/// is never deleted on our guess).
+/// `None` for a name that does not carry both numbers — including a
+/// sequence-less `incident-{ts}.json`, which no version of this node has
+/// ever written. Retention sorts an unidentified file newest and so never
+/// deletes it: whoever put a foreign file in the incident directory keeps
+/// it. The cost of that choice is that such a file occupies one of the
+/// [`RETAIN`] slots for good, which is the cheaper mistake of the two.
 fn snapshot_order_key(name: &str) -> Option<(u64, u64)> {
     let stem = name.strip_prefix("incident-")?.strip_suffix(".json")?;
     let mut parts = stem.split('-');
     let ms = parts.next()?.parse::<u64>().ok()?;
-    let seq = parts.next().unwrap_or("0").parse::<u64>().ok()?;
+    let seq = parts.next()?.parse::<u64>().ok()?;
     Some((ms, seq))
 }
 
@@ -433,6 +436,82 @@ mod tests {
         assert!(text.contains("\"code\":\"code-11\""));
         assert!(text.contains("\"last_gauges\":{\"peers\":3}"));
         assert!(text.contains("\"events\":["));
+    }
+
+    #[test]
+    fn snapshot_order_key_reads_both_numbers_or_declines() {
+        assert_eq!(
+            snapshot_order_key("incident-1700000000000-000007.json"),
+            Some((1_700_000_000_000, 7))
+        );
+        // No sequence field: not a name this node writes, so it is not
+        // ours to order — and therefore not ours to delete.
+        assert_eq!(snapshot_order_key("incident-1700000000000.json"), None);
+        assert_eq!(snapshot_order_key("incident-.json"), None);
+        assert_eq!(snapshot_order_key("incident-abc-000001.json"), None);
+        assert_eq!(snapshot_order_key("incident-1700000000000-xx.json"), None);
+        assert_eq!(snapshot_order_key("notes.txt"), None);
+    }
+
+    /// `{seq:06}` pads to six digits, so the field widens at 1_000_000 and
+    /// a lexical comparison would rank `0999999` above `1000000`. The key
+    /// parses the numbers, so ordering survives the boundary — and this is
+    /// the case a fixture set with distinct timestamps cannot catch, since
+    /// there the timestamp alone decides.
+    #[test]
+    fn retention_orders_by_sequence_numerically_when_timestamps_tie() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_path_buf();
+        const TS: u64 = 1_700_000_000_000;
+        // Straddle the width boundary, and hand them to the filesystem in
+        // an order that is neither numeric nor lexical.
+        let seqs: Vec<u64> = vec![
+            1_000_004, 999_998, 1_000_000, 999_995, 1_000_003, 999_999, 1_000_001, 999_996,
+            1_000_002, 999_997, 1_000_005, 999_994,
+        ];
+        for seq in &seqs {
+            std::fs::write(
+                dir_path.join(format!("incident-{TS}-{seq:06}.json")),
+                format!("{{\"incident\":{{\"seq\":{seq}}}}}"),
+            )
+            .unwrap();
+        }
+        enforce_retention(&dir_path);
+
+        let mut kept: Vec<u64> = std::fs::read_dir(&dir_path)
+            .unwrap()
+            .filter_map(|e| {
+                let name = e.unwrap().file_name().to_string_lossy().to_string();
+                snapshot_order_key(&name).map(|(_, seq)| seq)
+            })
+            .collect();
+        kept.sort_unstable();
+        let mut expected = seqs.clone();
+        expected.sort_unstable();
+        expected.drain(..expected.len() - RETAIN);
+        assert_eq!(
+            kept, expected,
+            "retention must keep the {RETAIN} numerically largest sequences"
+        );
+    }
+
+    /// An `incident-*.json` this node did not write is never deleted on a
+    /// guess about its age.
+    #[test]
+    fn retention_leaves_a_file_it_cannot_order_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_path_buf();
+        let foreign = dir_path.join("incident-keepme.json");
+        std::fs::write(&foreign, "{}").unwrap();
+        for i in 0..RETAIN as u64 + 4 {
+            std::fs::write(
+                dir_path.join(format!("incident-{}-{i:06}.json", 1_700_000_000_000u64 + i)),
+                "{}",
+            )
+            .unwrap();
+        }
+        enforce_retention(&dir_path);
+        assert!(foreign.exists(), "an unidentified file must survive");
     }
 
     #[test]
