@@ -336,6 +336,12 @@ fn snapshot_order_key(name: &str) -> Option<(u64, u64)> {
     let mut parts = stem.split('-');
     let ms = parts.next()?.parse::<u64>().ok()?;
     let seq = parts.next()?.parse::<u64>().ok()?;
+    // Exactly two fields, or it is not ours: an operator's
+    // `incident-{ts}-{seq}-backup.json` must not inherit the original's
+    // order key and be rotated away underneath them.
+    if parts.next().is_some() {
+        return None;
+    }
     Some((ms, seq))
 }
 
@@ -450,6 +456,11 @@ mod tests {
         assert_eq!(snapshot_order_key("incident-.json"), None);
         assert_eq!(snapshot_order_key("incident-abc-000001.json"), None);
         assert_eq!(snapshot_order_key("incident-1700000000000-xx.json"), None);
+        // A copy someone made beside the original is not the original.
+        assert_eq!(
+            snapshot_order_key("incident-1700000000000-000001-backup.json"),
+            None
+        );
         assert_eq!(snapshot_order_key("notes.txt"), None);
     }
 
@@ -503,6 +514,8 @@ mod tests {
         let dir_path = dir.path().to_path_buf();
         let foreign = dir_path.join("incident-keepme.json");
         std::fs::write(&foreign, "{}").unwrap();
+        let backup = dir_path.join("incident-1700000000000-000000-backup.json");
+        std::fs::write(&backup, "{}").unwrap();
         for i in 0..RETAIN as u64 + 4 {
             std::fs::write(
                 dir_path.join(format!("incident-{}-{i:06}.json", 1_700_000_000_000u64 + i)),
@@ -512,6 +525,7 @@ mod tests {
         }
         enforce_retention(&dir_path);
         assert!(foreign.exists(), "an unidentified file must survive");
+        assert!(backup.exists(), "an operator's copy must survive");
     }
 
     #[test]
