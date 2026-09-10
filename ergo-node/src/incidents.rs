@@ -309,6 +309,46 @@ fn write_snapshot(dir: &PathBuf, ts_unix_ms: u64, code: &str, events: &[String],
     }
 }
 
+/// Chronological order of a snapshot file, parsed from its name:
+/// `(ts_unix_ms, seq)` out of `incident-{ts_unix_ms}-{seq:06}.json`.
+///
+/// The name is the only trustworthy clock here. A file's mtime is a
+/// different clock: it comes from the filesystem, it can be touched from
+/// outside, and — because Linux stamps new inodes from a coarse clock on
+/// most kernels — a burst of snapshots written inside one tick shares a
+/// single mtime, which orders them not at all. The name carries the
+/// caller's `ts_unix_ms` and a process-monotonic sequence, so it stays
+/// exact under a burst.
+///
+/// Parsed numerically rather than compared lexically: `{seq:06}` only
+/// pads to six digits, so a process that writes more than 999_999
+/// snapshots widens the field and lexical order would break at that
+/// boundary.
+///
+/// `None` for anything that is not exactly a name this node writes — a
+/// sequence-less `incident-{ts}.json`, an operator's
+/// `incident-{ts}-{seq}-backup.json`, an unpadded `-1` where we write
+/// `-000001`. Retention leaves every such file alone: whoever put it in
+/// the incident directory keeps it. The cost is that it occupies one of
+/// the [`RETAIN`] slots for good, which is the cheaper mistake of the two.
+fn snapshot_order_key(name: &str) -> Option<(u64, u64)> {
+    let stem = name.strip_prefix("incident-")?.strip_suffix(".json")?;
+    let (ts_field, seq_field) = stem.split_once('-')?;
+    let ms = ts_field.parse::<u64>().ok()?;
+    let seq = seq_field.parse::<u64>().ok()?;
+    // Round-trip against the exact format `write_snapshot` emits. Parsing
+    // alone is too generous: it accepts `-1` for `-000001`, a `+` sign, a
+    // second `-` field and leading zeros on the timestamp, none of which
+    // this node writes — and a name we did not write is a name we must not
+    // delete. Re-rendering also keeps the check honest past 999_999, where
+    // `{seq:06}` widens on its own and a hardcoded width would start
+    // rejecting our own files.
+    if format!("{ms}") != ts_field || format!("{seq:06}") != seq_field {
+        return None;
+    }
+    Some((ms, seq))
+}
+
 /// Keep the newest [`RETAIN`] `incident-*.json` files.
 fn enforce_retention(dir: &PathBuf) {
     use std::fs;
@@ -326,18 +366,16 @@ fn enforce_retention(dir: &PathBuf) {
             .collect(),
         Err(_) => return,
     };
-    // Sort by the timestamp + sequence parsed FROM THE NAME: mtimes can
-    // collide or be touched externally, and sequence suffixes are not
-    // zero-padded so lexical order lies about chronology.
-    fn name_key(name: &str) -> Option<(u64, u64)> {
-        let stem = name.strip_prefix("incident-")?.strip_suffix(".json")?;
-        let mut parts = stem.split('-');
-        let ms = parts.next()?.parse::<u64>().ok()?;
-        let seq = parts.next().unwrap_or("0").parse::<u64>().ok()?;
-        Some((ms, seq))
-    }
     while files.len() > RETAIN {
-        files.sort_by_key(|(name, _)| name_key(name).unwrap_or((u64::MAX, u64::MAX)));
+        files.sort_by_key(|(name, _)| snapshot_order_key(name).unwrap_or((u64::MAX, u64::MAX)));
+        // Unidentified names sort last, so an unidentified name in front
+        // means every file left is unidentified and none of them is ours
+        // to delete. Over-retaining is the price of never deleting someone
+        // else's file; without this the sort key would be a coin toss and
+        // one of them would go.
+        if snapshot_order_key(&files[0].0).is_none() {
+            break;
+        }
         let oldest = files.remove(0);
         let _ = fs::remove_file(dir.join(&oldest.0));
     }
@@ -384,26 +422,159 @@ mod tests {
             })
             .count();
         assert!(count <= RETAIN, "retention must prune, got {count}");
-        // Newest file (by modification time — sequence suffixes are not
-        // zero-padded) carries its own code + gauges + events arrays.
-        let mut snaps: Vec<(std::path::PathBuf, std::fs::Metadata)> = std::fs::read_dir(&dir_path)
+        // Order the retained files by the SAME key retention ordered them
+        // by — the (ts, seq) in the name. Sorting by mtime instead would
+        // make this assertion read an arbitrary file: every snapshot in
+        // this loop lands inside one clock tick, and on a kernel that
+        // stamps new inodes from the coarse clock all ten share an mtime,
+        // leaving a stable sort in `read_dir` order, which is a hash order.
+        let mut snaps: Vec<(u64, u64, std::path::PathBuf)> = std::fs::read_dir(&dir_path)
             .unwrap()
             .filter_map(|e| {
                 let p = e.unwrap().path();
                 let name = p.file_name()?.to_string_lossy().to_string();
-                if name.starts_with("incident-") && name.ends_with(".json") {
-                    Some((p.clone(), p.metadata().unwrap()))
-                } else {
-                    None
-                }
+                let (ms, seq) = snapshot_order_key(&name)?;
+                Some((ms, seq, p))
             })
             .collect();
-        snaps.sort_by_key(|(_, m)| m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH));
+        snaps.sort_unstable();
         assert_eq!(snaps.len(), RETAIN, "retention must prune");
-        let text = std::fs::read_to_string(&snaps.last().unwrap().0).unwrap();
+
+        // Retention keeps the NEWEST ten, so the two oldest timestamps are
+        // gone and the rest are present exactly once — pinned by value, not
+        // by whichever file the directory happened to hand back last.
+        let kept: Vec<u64> = snaps.iter().map(|(ms, _, _)| *ms).collect();
+        let expected: Vec<u64> = (2..12u64).map(|i| 1_700_000_000_000 + i * 1_000).collect();
+        assert_eq!(kept, expected, "retention must keep the newest {RETAIN}");
+
+        // The newest file carries its own code + gauges + events arrays.
+        let (newest_ms, _, newest) = snaps.last().unwrap();
+        assert_eq!(*newest_ms, 1_700_000_011_000, "code-11 is the newest write");
+        let text = std::fs::read_to_string(newest).unwrap();
         assert!(text.contains("\"code\":\"code-11\""));
         assert!(text.contains("\"last_gauges\":{\"peers\":3}"));
         assert!(text.contains("\"events\":["));
+    }
+
+    #[test]
+    fn snapshot_order_key_reads_both_numbers_or_declines() {
+        assert_eq!(
+            snapshot_order_key("incident-1700000000000-000007.json"),
+            Some((1_700_000_000_000, 7))
+        );
+        // No sequence field: not a name this node writes, so it is not
+        // ours to order — and therefore not ours to delete.
+        assert_eq!(snapshot_order_key("incident-1700000000000.json"), None);
+        assert_eq!(snapshot_order_key("incident-.json"), None);
+        assert_eq!(snapshot_order_key("incident-abc-000001.json"), None);
+        assert_eq!(snapshot_order_key("incident-1700000000000-xx.json"), None);
+        // A copy someone made beside the original is not the original.
+        assert_eq!(
+            snapshot_order_key("incident-1700000000000-000001-backup.json"),
+            None
+        );
+        // Not the encoding we write: `{seq:06}` pads to six.
+        assert_eq!(snapshot_order_key("incident-1700000000000-1.json"), None);
+        assert_eq!(
+            snapshot_order_key("incident-1700000000000-+000001.json"),
+            None
+        );
+        assert_eq!(
+            snapshot_order_key("incident-01700000000000-000001.json"),
+            None
+        );
+        // Past the pad width the field grows on its own, and that is ours.
+        assert_eq!(
+            snapshot_order_key("incident-1700000000000-1000000.json"),
+            Some((1_700_000_000_000, 1_000_000))
+        );
+        assert_eq!(snapshot_order_key("notes.txt"), None);
+    }
+
+    /// `{seq:06}` pads to six digits, so the field widens at 1_000_000 and
+    /// a lexical comparison would rank `0999999` above `1000000`. The key
+    /// parses the numbers, so ordering survives the boundary — and this is
+    /// the case a fixture set with distinct timestamps cannot catch, since
+    /// there the timestamp alone decides.
+    #[test]
+    fn retention_orders_by_sequence_numerically_when_timestamps_tie() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_path_buf();
+        const TS: u64 = 1_700_000_000_000;
+        // Straddle the width boundary, and hand them to the filesystem in
+        // an order that is neither numeric nor lexical.
+        let seqs: Vec<u64> = vec![
+            1_000_004, 999_998, 1_000_000, 999_995, 1_000_003, 999_999, 1_000_001, 999_996,
+            1_000_002, 999_997, 1_000_005, 999_994,
+        ];
+        for seq in &seqs {
+            std::fs::write(
+                dir_path.join(format!("incident-{TS}-{seq:06}.json")),
+                format!("{{\"incident\":{{\"seq\":{seq}}}}}"),
+            )
+            .unwrap();
+        }
+        enforce_retention(&dir_path);
+
+        let mut kept: Vec<u64> = std::fs::read_dir(&dir_path)
+            .unwrap()
+            .filter_map(|e| {
+                let name = e.unwrap().file_name().to_string_lossy().to_string();
+                snapshot_order_key(&name).map(|(_, seq)| seq)
+            })
+            .collect();
+        kept.sort_unstable();
+        let mut expected = seqs.clone();
+        expected.sort_unstable();
+        expected.drain(..expected.len() - RETAIN);
+        assert_eq!(
+            kept, expected,
+            "retention must keep the {RETAIN} numerically largest sequences"
+        );
+    }
+
+    /// An `incident-*.json` this node did not write is never deleted on a
+    /// guess about its age.
+    #[test]
+    fn retention_leaves_a_file_it_cannot_order_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_path_buf();
+        let foreign = dir_path.join("incident-keepme.json");
+        std::fs::write(&foreign, "{}").unwrap();
+        let backup = dir_path.join("incident-1700000000000-000000-backup.json");
+        std::fs::write(&backup, "{}").unwrap();
+        for i in 0..RETAIN as u64 + 4 {
+            std::fs::write(
+                dir_path.join(format!("incident-{}-{i:06}.json", 1_700_000_000_000u64 + i)),
+                "{}",
+            )
+            .unwrap();
+        }
+        enforce_retention(&dir_path);
+        assert!(foreign.exists(), "an unidentified file must survive");
+        assert!(backup.exists(), "an operator's copy must survive");
+    }
+
+    /// More unidentified files than [`RETAIN`] must still cost nothing:
+    /// they all share the same sort key, so without a stop condition
+    /// retention would delete whichever one the directory listed first.
+    #[test]
+    fn retention_deletes_nothing_when_every_file_is_unidentified() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_path_buf();
+        let names: Vec<String> = (0..RETAIN + 1)
+            .map(|i| format!("incident-1700000000000-{i:06}-backup.json"))
+            .collect();
+        for name in &names {
+            std::fs::write(dir_path.join(name), "{}").unwrap();
+        }
+        enforce_retention(&dir_path);
+        for name in &names {
+            assert!(
+                dir_path.join(name).exists(),
+                "{name} was deleted on a guessed order"
+            );
+        }
     }
 
     #[test]
