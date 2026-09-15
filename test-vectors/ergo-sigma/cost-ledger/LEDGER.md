@@ -8,9 +8,9 @@ Source ledger: sigmastate `v6.0.2 23dd29f612249c169d09fae9bca76d7cc02e144c`, erg
 
 | category | OPEN | CLOSED | DIVERGENT | N-A | total |
 |---|---:|---:|---:|---:|---:|
-| OP | 98 | 0 | 0 | 3 | 101 |
+| OP | 95 | 3 | 0 | 3 | 101 |
 | METHOD | 62 | 0 | 0 | 0 | 62 |
-| EVAL | 23 | 0 | 0 | 1 | 24 |
+| EVAL | 22 | 1 | 0 | 1 | 24 |
 | INTERP | 11 | 1 | 0 | 0 | 12 |
 | ROUND | 2 | 1 | 0 | 0 | 3 |
 | ORDER | 8 | 0 | 0 | 0 | 8 |
@@ -18,7 +18,7 @@ Source ledger: sigmastate `v6.0.2 23dd29f612249c169d09fae9bca76d7cc02e144c`, erg
 | TX | 6 | 0 | 0 | 0 | 6 |
 | BLOCK | 8 | 0 | 0 | 0 | 8 |
 | VERSION | 9 | 0 | 0 | 1 | 10 |
-| **all** | 230 | 2 | 0 | 5 | 237 |
+| **all** | 226 | 6 | 0 | 5 | 237 |
 
 States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test with an independent oracle; DIVERGENT = confirmed mismatch, fix pending; N-A = reviewed rationale in note.
 
@@ -38,7 +38,7 @@ States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test w
 | `OP-0x80` | OPEN | FalseLeaf.costKind FixedCost(5) | `ergo-sigma/src/cost_table.rs:35` | L1,L2 | — |  |
 | `OP-0x81` | N-A | UnitConstant — no serializer registration | `ergo-sigma/src/cost_table.rs:161` | L1 | — | unreachable from wire bytes; parser rejects bare opcode (costing.md §4) |
 | `OP-0x82` | OPEN | GroupGenerator.costKind FixedCost(10) | `ergo-sigma/src/cost_table.rs` | L1,L2 | — |  |
-| `OP-0x83` | OPEN | ConcreteCollection.costKind FixedCost(20) | `ergo-sigma/src/cost_table.rs:36` | L1,L2 | — | candidate: JVM-verbatim vector test-vectors/scala/bool_collection_logical_cost.json (difftest regressions) — annotate with `// ledger:` to close |
+| `OP-0x83` | CLOSED | ConcreteCollection.costKind FixedCost(20) | `ergo-sigma/src/cost_table.rs:36` | L1,L2 | `ergo-sigma::reduce::and_over_packed_bool_collection_matches_scala_cost`<br>`ergo-sigma::reduce::or_over_packed_bool_collection_matches_scala_cost`<br>`ergo-sigma::reduce::xor_of_over_packed_bool_collection_matches_scala_cost`<br>`ergo-sigma::reduce::and_over_unpacked_bool_collection_matches_scala_cost`<br>`ergo-sigma::reduce::and_over_empty_packed_bool_collection_matches_scala_cost`<br>`ergo-sigma::reduce::and_33_items_first_false_charges_visited_prefix_like_scala`<br>`ergo-sigma::reduce::and_33_items_all_true_charges_two_chunks_like_scala`<br>`ergo-sigma::reduce::and_32_items_first_false_matches_scala_cost`<br>`ergo-sigma::reduce::or_65_items_first_true_charges_visited_prefix_like_scala`<br>`ergo-sigma::reduce::or_65_items_all_false_charges_two_chunks_like_scala`<br>`ergo-sigma::reduce::or_64_items_first_true_matches_scala_cost`<br>`ergo-sigma::reduce::xor_of_33_items_charges_full_length_like_scala` | JVM-verbatim ACCEPT lines in test-vectors/scala/bool_collection_logical_cost.json; consumed by ergo-sigma/src/reduce.rs |
 | `OP-0x85` | OPEN | ConcreteCollectionBooleanConstant shares ConcreteCollection.costKind | `ergo-sigma/src/cost_table.rs` | L1,L2 | — |  |
 | `OP-0x86` | OPEN | Tuple.costKind FixedCost(15) | `ergo-sigma/src/cost_table.rs:37` | L1,L2 | — |  |
 | `OP-0x87-0x8B` | N-A | Select1..Select5 — no serializer registration | `ergo-sigma/src/cost_table.rs:39` | L1 | — | only SelectField (0x8C) is registered; unreachable |
@@ -50,8 +50,8 @@ States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test w
 | `OP-0x93` | OPEN | EQ — DynamicCost via DataValueComparer.equalDataValues | `ergo-sigma/src/evaluator/cost.rs::eq_with_cost` | L2 | — | no static row; see EVAL-eq-* |
 | `OP-0x94` | OPEN | NEQ — DynamicCost, same as EQ | `ergo-sigma/src/evaluator/cost.rs::eq_with_cost` | L2 | — |  |
 | `OP-0x95` | OPEN | If.costKind FixedCost(10) | `ergo-sigma/src/cost_table.rs:61` | L1,L2 | — |  |
-| `OP-0x96` | OPEN | AND.costKind PerItemCost(10,5,32) | `ergo-sigma/src/cost_table.rs:62` | L1,L2 | — | candidate: bool_collection_logical_cost.json — annotate to close |
-| `OP-0x97` | OPEN | OR.costKind PerItemCost(5,5,64) | `ergo-sigma/src/cost_table.rs:63` | L1,L2 | — | candidate: bool_collection_logical_cost.json — annotate to close |
+| `OP-0x96` | CLOSED | AND.costKind PerItemCost(10,5,32) | `ergo-sigma/src/cost_table.rs:62` | L1,L2 | `ergo-sigma::reduce::and_over_packed_bool_collection_matches_scala_cost`<br>`ergo-sigma::reduce::and_over_unpacked_bool_collection_matches_scala_cost`<br>`ergo-sigma::reduce::and_over_coll_boolean_constant_matches_scala_cost`<br>`ergo-sigma::reduce::and_over_empty_packed_bool_collection_matches_scala_cost`<br>`ergo-sigma::reduce::and_33_items_first_false_charges_visited_prefix_like_scala`<br>`ergo-sigma::reduce::and_33_items_all_true_charges_two_chunks_like_scala`<br>`ergo-sigma::reduce::and_32_items_first_false_matches_scala_cost`<br>`ergo-sigma::reduce::and_over_getvar_33_first_false_charges_visited_prefix_like_scala` | JVM-verbatim ACCEPT lines in test-vectors/scala/bool_collection_logical_cost.json; consumed by ergo-sigma/src/reduce.rs |
+| `OP-0x97` | CLOSED | OR.costKind PerItemCost(5,5,64) | `ergo-sigma/src/cost_table.rs:63` | L1,L2 | `ergo-sigma::reduce::or_over_packed_bool_collection_matches_scala_cost`<br>`ergo-sigma::reduce::or_65_items_first_true_charges_visited_prefix_like_scala`<br>`ergo-sigma::reduce::or_65_items_all_false_charges_two_chunks_like_scala`<br>`ergo-sigma::reduce::or_64_items_first_true_matches_scala_cost`<br>`ergo-sigma::reduce::or_over_getvar_65_first_true_charges_visited_prefix_like_scala` | JVM-verbatim ACCEPT lines in test-vectors/scala/bool_collection_logical_cost.json; consumed by ergo-sigma/src/reduce.rs |
 | `OP-0x98` | OPEN | AtLeast.costKind PerItemCost(20,3,5) via addSeqCost over children | `ergo-sigma/src/cost_table.rs` | L1,L2 | — |  |
 | `OP-0x99` | OPEN | Minus FixedCost(15) / BigInt 20 (TypeBased) | `ergo-sigma/src/cost_table.rs:69,231` | L1,L2 | — | arith_cost dynamic |
 | `OP-0x9A` | OPEN | Plus FixedCost(15) / BigInt 20 | `ergo-sigma/src/cost_table.rs:68,231` | L1,L2 | — |  |
@@ -199,7 +199,7 @@ States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test w
 
 | id | state | Scala | Rust | layers | tests | note |
 |---|---|---|---|---|---|---|
-| `EVAL-const-inline` | OPEN | Constant.costKind FixedCost(5) (values.scala) | `ergo-sigma/src/evaluator/dispatch.rs:321` | L1,L2 | — | candidate: bool_collection_logical_cost.json (20 + 5*n) — annotate to close |
+| `EVAL-const-inline` | CLOSED | Constant.costKind FixedCost(5) (values.scala) | `ergo-sigma/src/evaluator/dispatch.rs:321` | L1,L2 | `ergo-sigma::reduce::and_over_packed_bool_collection_matches_scala_cost`<br>`ergo-sigma::reduce::or_over_packed_bool_collection_matches_scala_cost`<br>`ergo-sigma::reduce::xor_of_over_packed_bool_collection_matches_scala_cost`<br>`ergo-sigma::reduce::and_over_unpacked_bool_collection_matches_scala_cost`<br>`ergo-sigma::reduce::and_over_coll_boolean_constant_matches_scala_cost`<br>`ergo-sigma::reduce::and_33_items_first_false_charges_visited_prefix_like_scala`<br>`ergo-sigma::reduce::and_33_items_all_true_charges_two_chunks_like_scala`<br>`ergo-sigma::reduce::and_32_items_first_false_matches_scala_cost`<br>`ergo-sigma::reduce::or_65_items_first_true_charges_visited_prefix_like_scala`<br>`ergo-sigma::reduce::or_65_items_all_false_charges_two_chunks_like_scala`<br>`ergo-sigma::reduce::or_64_items_first_true_matches_scala_cost`<br>`ergo-sigma::reduce::xor_of_33_items_charges_full_length_like_scala` | JVM-verbatim ACCEPT lines in test-vectors/scala/bool_collection_logical_cost.json; consumed by ergo-sigma/src/reduce.rs |
 | `EVAL-hasdeserialize-fork` | OPEN | Interpreter.fullReduction: ErgoTree.hasDeserialize → toProposition(inline constants) + EmptyConstants; +4 per constant ref | `ergo-sigma/src/evaluator/dispatch.rs:107-315` | L2 | — | dead-branch deserialize nodes still trigger the fork |
 | `EVAL-addtoenv` | OPEN | AddToEnvironment FixedCost(5) per HOF element / per Apply | `ergo-sigma/src/evaluator/opcodes/collection.rs:285` | L2 | — |  |
 | `EVAL-numeric-cast` | OPEN | Upcast/Downcast TypeBasedCost: 30 when target SBigInt/SUnsignedBigInt else 10 | `ergo-sigma/src/evaluator/opcodes/cast.rs:16` | L1,L2 | — |  |

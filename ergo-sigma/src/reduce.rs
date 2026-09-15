@@ -1,3 +1,5 @@
+//! Oracle: test-vectors/scala/bool_collection_logical_cost.json
+
 use ergo_primitives::cost::{CostAccumulator, CostError, JitCost};
 use ergo_ser::ergo_tree::ErgoTree;
 use ergo_ser::opcode::{Expr, IrNode, Payload};
@@ -1267,18 +1269,21 @@ mod evaluated_value_reduce_parity_tests {
     /// THE #311 vector: `sigmaProp(AND(Coll[Boolean](false, true, true)))`,
     /// packed 0x85. 15 (BoolToSigmaProp) + 20 + 3·5 (coll) + 10 + 5 (AND,
     /// 1 item visited). Pre-fix Rust charged the flat 20 for the collection.
+    // ledger: OP-0x83, OP-0x96, EVAL-const-inline
     #[test]
     fn and_over_packed_bool_collection_matches_scala_cost() {
         assert_bool_coll_vector("and_packed_ftt");
     }
 
     /// `sigmaProp(OR(Coll[Boolean](false, true, true)))`, packed.
+    // ledger: OP-0x83, OP-0x97, EVAL-const-inline
     #[test]
     fn or_over_packed_bool_collection_matches_scala_cost() {
         assert_bool_coll_vector("or_packed_ftt");
     }
 
     /// `sigmaProp(XorOf(Coll[Boolean](false, true, true)))`, packed.
+    // ledger: OP-0x83, EVAL-const-inline
     #[test]
     fn xor_of_over_packed_bool_collection_matches_scala_cost() {
         assert_bool_coll_vector("xorof_packed_ftt");
@@ -1287,6 +1292,7 @@ mod evaluated_value_reduce_parity_tests {
     /// Control: the UNPACKED 0x83 form with explicit FalseLeaf/FalseLeaf/
     /// TrueLeaf children costs the same as the packed form — the packed form
     /// must not be cheaper than what it abbreviates.
+    // ledger: OP-0x83, OP-0x96, EVAL-const-inline
     #[test]
     fn and_over_unpacked_bool_collection_matches_scala_cost() {
         assert_bool_coll_vector("and_unpacked_fft");
@@ -1294,6 +1300,7 @@ mod evaluated_value_reduce_parity_tests {
 
     /// Control: a `Coll[Boolean]` CONSTANT (type code 0x0d) is one Constant
     /// node — Fixed(5), no per-item charge.
+    // ledger: OP-0x96, EVAL-const-inline
     #[test]
     fn and_over_coll_boolean_constant_matches_scala_cost() {
         assert_bool_coll_vector("and_coll_boolean_constant");
@@ -1301,6 +1308,7 @@ mod evaluated_value_reduce_parity_tests {
 
     /// Empty packed collection: `AND(Coll[Boolean]())` is `true`; the
     /// PerItemCost formula still charges one chunk at n = 0.
+    // ledger: OP-0x83, OP-0x96
     #[test]
     fn and_over_empty_packed_bool_collection_matches_scala_cost() {
         assert_bool_coll_vector("and_packed_empty");
@@ -1309,12 +1317,14 @@ mod evaluated_value_reduce_parity_tests {
     /// Short-circuit cost across the 32-item AND chunk boundary: 33 packed
     /// items, first `false` — Scala visits 1 item (1 chunk); charging the
     /// full 33 would be 2 chunks.
+    // ledger: OP-0x83, OP-0x96, EVAL-const-inline
     #[test]
     fn and_33_items_first_false_charges_visited_prefix_like_scala() {
         assert_bool_coll_vector("and_packed_33_first_false");
     }
 
     /// Same 33 items, all `true`: no short-circuit, 2 chunks.
+    // ledger: OP-0x83, OP-0x96, EVAL-const-inline
     #[test]
     fn and_33_items_all_true_charges_two_chunks_like_scala() {
         assert_bool_coll_vector("and_packed_33_all_true");
@@ -1322,30 +1332,35 @@ mod evaluated_value_reduce_parity_tests {
 
     /// 32 items, first `false`: below the boundary the visited prefix and
     /// the full length both round to 1 chunk.
+    // ledger: OP-0x83, OP-0x96, EVAL-const-inline
     #[test]
     fn and_32_items_first_false_matches_scala_cost() {
         assert_bool_coll_vector("and_packed_32_first_false");
     }
 
     /// OR's chunk is 64: 65 packed items, first `true` — 1 visited, 1 chunk.
+    // ledger: OP-0x83, OP-0x97, EVAL-const-inline
     #[test]
     fn or_65_items_first_true_charges_visited_prefix_like_scala() {
         assert_bool_coll_vector("or_packed_65_first_true");
     }
 
     /// 65 items, all `false`: no short-circuit, 2 chunks.
+    // ledger: OP-0x83, OP-0x97, EVAL-const-inline
     #[test]
     fn or_65_items_all_false_charges_two_chunks_like_scala() {
         assert_bool_coll_vector("or_packed_65_all_false");
     }
 
     /// 64 items, first `true`: below the boundary.
+    // ledger: OP-0x83, OP-0x97, EVAL-const-inline
     #[test]
     fn or_64_items_first_true_matches_scala_cost() {
         assert_bool_coll_vector("or_packed_64_first_true");
     }
 
     /// XorOf never short-circuits: 33 items → 2 chunks.
+    // ledger: OP-0x83, EVAL-const-inline
     #[test]
     fn xor_of_33_items_charges_full_length_like_scala() {
         assert_bool_coll_vector("xorof_packed_33");
@@ -1355,6 +1370,7 @@ mod evaluated_value_reduce_parity_tests {
     /// [Coll[Boolean]](1).get))` over an extension var holding 33 booleans,
     /// first `false`. The visited-prefix rule applies to whatever value
     /// reaches `AND`, not only to 0x85/0x83 literals.
+    // ledger: OP-0x96
     #[test]
     fn and_over_getvar_33_first_false_charges_visited_prefix_like_scala() {
         assert_bool_coll_vector("and_getvar_33_first_false");
@@ -1362,6 +1378,7 @@ mod evaluated_value_reduce_parity_tests {
 
     /// `sigmaProp(OR(getVar[Coll[Boolean]](1).get))` over 65 booleans,
     /// first `true` — the OR twin on the runtime path.
+    // ledger: OP-0x97
     #[test]
     fn or_over_getvar_65_first_true_charges_visited_prefix_like_scala() {
         assert_bool_coll_vector("or_getvar_65_first_true");
