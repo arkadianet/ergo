@@ -55,7 +55,7 @@ object ComputeTransactionCosts extends JsonCodecs with PowSchemeReaders
   val PARAM_BLOCK_VERSION: Byte       = 123.toByte // 0x7b
 
   // Active voted parameters — defaults match mainnet initial state.
-  // activatedScriptVersion = blockVersion - 1 (JIT cost model since EIP-37 ~h417792)
+  // activatedScriptVersion = blockVersion - 1; block version 3 activates JIT costing.
   case class ActiveParams(
     storageFeeFactor: Int = 1250000,
     minValuePerByte:  Int = 360,
@@ -240,6 +240,16 @@ object ComputeTransactionCosts extends JsonCodecs with PowSchemeReaders
       case None => header(block(height))
     }
 
+    val selectedHeights = sys.env.get("COST_HEIGHTS").map { path =>
+      val source = scala.io.Source.fromFile(path, "UTF-8")
+      val rows = try parse(source.mkString).right.get.asArray.get finally source.close()
+      rows.map(_.asNumber.get.toInt.get)
+    }.getOrElse((startHeight to endHeight).toVector)
+    require(selectedHeights.nonEmpty && selectedHeights == selectedHeights.distinct.sorted,
+      "Selected heights must be nonempty, unique and increasing")
+    require(selectedHeights.head == startHeight && selectedHeights.last == endHeight,
+      "Selected heights must match the declared endpoints")
+
     var active = ActiveParams()
     val epoch = (startHeight / VOTING_EPOCH_LENGTH) * VOTING_EPOCH_LENGTH
     val epochBlock = block(epoch)
@@ -262,7 +272,18 @@ object ComputeTransactionCosts extends JsonCodecs with PowSchemeReaders
     val fixtureHeaders = mutable.Map[Int, Header](ancestors.map(h => h.height -> h): _*)
     val fixtureParameters = mutable.Map[String, Json]()
     val fixtureContexts = mutable.Map[String, Json]()
-    for (height <- startHeight to endHeight) {
+    var previousHeight = startHeight - 1
+    for (height <- selectedHeights) {
+      if (height != previousHeight + 1) {
+        val epochHeight = (height / VOTING_EPOCH_LENGTH) * VOTING_EPOCH_LENGTH
+        val epochJson = block(epochHeight)
+        active = parseParamsFromExtension(extensionFields(epochJson.hcursor), ActiveParams())
+          .getOrElse(throw new IllegalStateException(s"Missing epoch parameters at $epochHeight"))
+        settings = validationSettings(epochJson)
+        ancestors = (height - 1 to height - 9 by -1).map(contextHeader)
+        ancestors.foreach(h => fixtureHeaders(h.height) = h)
+      }
+      previousHeight = height
       val json = block(height)
       val current = contextHeader(height)
       require(current.id == header(json).id, s"Extracted header differs from node at $height")
@@ -313,7 +334,9 @@ object ComputeTransactionCosts extends JsonCodecs with PowSchemeReaders
           "block_cost" -> Json.fromLong(total), "init_block_cost" -> Json.fromLong(init),
           "token_block_cost" -> Json.fromLong(token),
           "inputs" -> Json.arr(recorder.inputs.map(_.json): _*))
-        fixtureTransactions += results.last.deepMerge(Json.obj("tx_bytes" -> Json.fromString(Base16.encode(tx.bytes))))
+        fixtureTransactions += results.last.deepMerge(Json.obj(
+          "tx_bytes" -> Json.fromString(Base16.encode(tx.bytes)),
+          "bytes_to_sign" -> Json.fromString(Base16.encode(tx.messageToSign))))
         tx.outputs.foreach(b => cache(Base16.encode(b.id)) = b)
       }
       System.err.println(s"h=$height: ${txs.size} accepted and reconciled")
