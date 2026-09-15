@@ -2,7 +2,7 @@
 """Hand-serialized METHOD trees; expected costs are written only by the JVM.
 
 Wire authority: ergo-ser/src/opcode/write.rs and sigma_value serializers.
-Run with PYTHONDONTWRITEBYTECODE=1; select avl-serialize or rest.
+Run with PYTHONDONTWRITEBYTECODE=1 and the argument avl-serialize.
 """
 import argparse
 import json
