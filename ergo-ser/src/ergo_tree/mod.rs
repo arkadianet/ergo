@@ -7,7 +7,8 @@
 //!   submodules.
 //! * `gates.rs` — consensus reject-gate functions the box-script readers
 //!   apply after the lenient parse.
-//! * `type_infer.rs` — the rule-1001 static type-inference subsystem.
+//! * `root_type.rs` — the rule-1001 definite non-SigmaProp judgment.
+//! * `type_infer.rs` — exact static typing for embedded substitution.
 //! * `read.rs` — [`read_ergo_tree`] and the soft-fork wrap machinery
 //!   (one continuous decision tree mirroring Scala's `deserializeErgoTree`).
 //! * `hash.rs` — indexer-facing tree-hash / template-hash utilities.
@@ -23,6 +24,7 @@ use crate::sigma_value::{write_constant, SigmaValue};
 mod gates;
 mod hash;
 mod read;
+mod root_type;
 #[cfg(test)]
 mod tests;
 mod type_infer;
@@ -37,7 +39,8 @@ pub use hash::{
 };
 pub(crate) use read::read_ergo_tree_tracking_wrap;
 pub use read::{read_ergo_tree, read_ergo_tree_with_activated_version};
-pub use type_infer::{determinable_root_type_of, substitution_type_of};
+pub use root_type::determinable_root_type_of;
+pub use type_infer::substitution_type_of;
 
 const VERSION_MASK: u8 = 0x07;
 const SIZE_FLAG: u8 = 0x08;

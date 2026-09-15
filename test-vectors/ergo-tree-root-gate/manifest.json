@@ -1,0 +1,15 @@
+{
+  "oracle": "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala",
+  "scala": "2.12",
+  "sigma_state": "6.0.2",
+  "ergo_core": "6.0.2",
+  "command": "scala-cli --skip-cli-updates run scripts/jvm_serde_oracle/ErgoSerdeOracle.scala --server=false --suppress-outdated-dependency-warning < test-vectors/ergo-tree-root-gate/requests.txt > test-vectors/ergo-tree-root-gate/responses.txt",
+  "selected": 28,
+  "executed": 28,
+  "failed": 0,
+  "sha256": {
+    "requests.txt": "8823df6abbd5d2f0ca82bd4ecf1108f6b53fe499e0fb1ec1191e5deb79ffe40c",
+    "responses.txt": "73e888fe5dba0159c38e802041fe290c147843f180300afb95a580cfa96e237f",
+    "cases.json": "a6184270bcbb2e6e82a3433345c8df9ade05bae74e10ea7109391d0a69b706ad"
+  }
+}

@@ -7,7 +7,7 @@ use ergo_primitives::reader::{ReadError, VlqReader};
 use crate::opcode;
 use crate::sigma_value::read_constant;
 
-use super::type_infer::determinable_root_type;
+use super::root_type::determinable_root_type;
 use super::{
     ErgoTree, CONSTANTS_VEC_SOFT_CAP, CONSTANT_SEGREGATION_FLAG, MAX_PROPOSITION_BYTES,
     MAX_SUPPORTED_TREE_VERSION, SIZE_FLAG, VERSION_MASK,
