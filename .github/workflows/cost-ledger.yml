@@ -27,7 +27,6 @@ jobs:
   tracked-cost-fixtures:
     runs-on: ubuntu-latest
     env:
-      NEXTEST_NO_TESTS: pass
       NEXTEST_EXPERIMENTAL_LIBTEST_JSON: "1"
       NEXTEST_MESSAGE_FORMAT_VERSION: "0.1"
       COST_LEDGER_TEST_RESULTS: target/cost-ledger-test-results.json
@@ -43,6 +42,8 @@ jobs:
           key: cost-ledger
       - uses: taiki-e/install-action@nextest
       - name: Tracked cost fixtures
+        env:
+          NEXTEST_NO_TESTS: warn
         run: cargo nextest run -p ergo-sigma -p ergo-validation -E 'test(/cost_(pin|ledger_fixtures|sweeps|block_fixtures|crypto_truncation)/)'
       - name: Record workspace passing evidence
         run: |

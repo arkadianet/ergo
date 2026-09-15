@@ -152,9 +152,9 @@ def resolve_test(repo: Path, reference: str, rid: str) -> set[str]:
                                 for m in REF_RE.finditer(text))
                 if not annotated or not any(re.fullmatch(r"\s*#\[test\]\s*", t) for t in preceding):
                     raise ValueError(f"{reference}: fn {function} needs #[test] and // ledger: {rid} within 3 lines")
-                oracle = re.search(
-                    r"^\s*//! Oracle:\s*.*?(?:test-vectors/[^\s`]+|scripts/[^\s`]*jvm[^\s`]*|[^\s`]+\.scala)(?:\s|`|$)",
-                    source, re.M)
+                oracle = any(re.search(
+                    r"^[ \t]*//! Oracle:[ \t]*.*?(?:test-vectors/[^\s`]+|scripts/[^\s`]*jvm[^\s`]*|[^\s`]+\.scala)(?:[ \t]|`|$)",
+                    text) for text in lines)
                 if not oracle:
                     raise ValueError(f"{reference}: {path.relative_to(repo)} needs //! Oracle: naming test-vectors/... or a JVM script")
                 name = "::".join(modules + [name for _, name in inline] + [function])
@@ -332,6 +332,12 @@ def selftest() -> int:
             self.path.unlink()
             self.assertTrue(self.errors())
 
+        def test_closure_empty_oracle_next_line_path_rejected(self):
+            self.path.write_text(self.source.replace(
+                "//! Oracle: test-vectors/oracle.json",
+                '//! Oracle:\nconst SOURCE: &str = "test-vectors/oracle.json";'))
+            self.assertTrue(any("needs //! Oracle:" in error for error in self.errors()))
+
         def test_closure_invalid_reference_rejected(self):
             for reference in ["sample::pin", "../sample::pin::test", "sample::pin::missing"]:
                 with self.subTest(reference=reference):
@@ -399,6 +405,41 @@ def selftest() -> int:
             self.assertTrue(audit_errors(self.repo))
             audit.write_text("All obligations accounted for.")
             self.assertEqual(audit_errors(self.repo), [])
+
+        def test_main_strict_audit_states_enforced(self):
+            meta = dict(scala_sigmastate="6.0.2", scala_ergo="6.0.2", oracle_node="6.0.5", updated="2026-09-15")
+            row = dict(self.row, cat="OP", scala="oracle", rust="sample", layer="L1", note="")
+            self.path.write_text(self.source.replace(", OP-0x73", ""))
+            toml = self.repo / "ledger.toml"
+            toml.write_text("[meta]\n" + "\n".join(f"{k} = {json.dumps(v)}" for k, v in meta.items())
+                            + "\n[[rows]]\n" + "\n".join(f"{k} = {json.dumps(v)}" for k, v in row.items()))
+            md = self.repo / "LEDGER.md"
+            md.write_text(render(meta, [row]))
+            results = self.repo / "results.json"
+            results.write_text(json.dumps(dict(type="test", event="ok", name=self.name)))
+            audit = self.repo / "inventory-audit.md"
+            with patch.dict(os.environ, {"COST_LEDGER_TEST_RESULTS": str(results)}, clear=True), \
+                    patch.dict(globals(), REPO=self.repo, TOML=toml, MD=md, LEDGER_DIR=self.repo), \
+                    patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout="sample/tests/it/pin.rs")):
+                for contents, expected, diagnostic in [
+                    (None, 1, "STRICT: inventory-audit.md is missing"),
+                    ("UNRESOLVED obligation", 1, "STRICT: inventory-audit.md contains UNRESOLVED"),
+                    ("All obligations accounted for.", 0, ""),
+                ]:
+                    with self.subTest(audit=contents):
+                        if contents is not None:
+                            audit.write_text(contents)
+                        with patch.object(sys, "argv", ["cost-ledger.py", "check"]), \
+                                contextlib.redirect_stdout(io.StringIO()):
+                            self.assertEqual(main(), 0)
+                        output = io.StringIO()
+                        with patch.object(sys, "argv", ["cost-ledger.py", "check", "--strict"]), \
+                                contextlib.redirect_stdout(output):
+                            self.assertEqual(main(), expected)
+                        if diagnostic:
+                            self.assertIn(diagnostic, output.getvalue())
+                        else:
+                            self.assertNotIn("STRICT:", output.getvalue())
 
     result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(LedgerTests))
     return 0 if result.wasSuccessful() else 1
