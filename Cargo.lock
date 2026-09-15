@@ -758,6 +758,7 @@ dependencies = [
 name = "ergo-difftest"
 version = "0.7.0"
 dependencies = [
+ "anyhow",
  "bytes",
  "ergo-primitives",
  "ergo-rest-json",

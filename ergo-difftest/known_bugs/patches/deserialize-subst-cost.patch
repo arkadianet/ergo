@@ -1,0 +1,11 @@
+--- a/ergo-sigma/src/reduce.rs
++++ b/ergo-sigma/src/reduce.rs
+@@ -13,7 +13,7 @@
+ 
+ /// Scala `Interpreter.CostPerTreeByte` (`Interpreter.scala:88`) — the
+ /// per-ergo-tree-byte cost of the deserialize-substitution pass.
+-pub const COST_PER_TREE_BYTE: u64 = 2;
++pub const COST_PER_TREE_BYTE: u64 = 0;
+ 
+ /// Scala `VersionContext.V6SoftForkVersion` (`VersionContext.scala:56`): the
+ /// activated-script version at/after which `isV6Activated` is true. Our

@@ -92,6 +92,18 @@ pub fn validate_scripts(
     message: &[u8],
     cx: &mut TxValidationCtx<'_>,
 ) -> Result<(), ValidationError> {
+    validate_scripts_at_index(tx, resolved_inputs, resolved_data_inputs, message, cx, None)
+}
+
+/// Run the production script path for all inputs or one oracle-selected input.
+pub(crate) fn validate_scripts_at_index(
+    tx: &Transaction,
+    resolved_inputs: &[ErgoBox],
+    resolved_data_inputs: &[ErgoBox],
+    message: &[u8],
+    cx: &mut TxValidationCtx<'_>,
+    only: Option<(usize, &ergo_ser::ergo_tree::ErgoTree)>,
+) -> Result<(), ValidationError> {
     let eval_headers: Vec<EvalHeader> = cx
         .last_headers
         .iter()
@@ -143,6 +155,9 @@ pub fn validate_scripts(
         .map(|i| i.spending_proof.extension().values.clone())
         .collect();
     for (i, (input, resolved)) in tx.inputs.iter().zip(resolved_inputs).enumerate() {
+        if only.is_some_and(|(index, _)| index != i) {
+            continue;
+        }
         // Storage rent path: if the box is old enough, proof is empty,
         // and context extension contains the output index variable,
         // check storage rent rules instead of script verification.
@@ -208,7 +223,7 @@ pub fn validate_scripts(
                     key_length: 32,
                     value_length_opt: None,
                 });
-        let ergo_tree = resolved.candidate.ergo_tree();
+        let ergo_tree = only.map_or_else(|| resolved.candidate.ergo_tree(), |(_, tree)| tree);
 
         let reduction_ctx = ReductionContext {
             height: cx.ctx.height,

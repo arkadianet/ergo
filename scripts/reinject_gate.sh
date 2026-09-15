@@ -23,7 +23,8 @@
 #   0  all bugs passed both assertions (or were skipped with explanation)
 #   1  at least one assertion failed (false positive on clean HEAD or missed on patched)
 #
-# Security: this script only creates temporary git worktrees and removes them on exit.
+# The verify class patches and restores the current worktree with a local backup.
+# Other classes create temporary git worktrees and remove them on exit.
 # It never pushes or modifies the main working tree's git history.
 
 set -euo pipefail
@@ -184,7 +185,7 @@ detection_cmd() {
         panic)
             echo "$difftest --repro $trigger --surface $surface"
             ;;
-        accept-reject|cost|reduce)
+        accept-reject|cost|reduce|verify)
             echo "$difftest --oracle --oracle-script $ORACLE_SCRIPT --repro $trigger --surface $surface"
             ;;
         *)
@@ -283,6 +284,48 @@ for id in "${BUG_IDS[@]}"; do
         fi
         echo "[SKIP] $id: --generated mode for hermetic surfaces (canonical/panic) uses trigger_hex path"
         ((SKIP++)) || true
+        continue
+    fi
+
+    if [[ "$class" == "verify" ]]; then
+        # Verify probes use the current worktree, including uncommitted surface work.
+        # Keep backups and transcripts inside it and restore on every exit path.
+        gate_dir="$REPO_ROOT/.superpowers/reinject-$id"
+        mkdir -p "$gate_dir"
+        source_file="$REPO_ROOT/ergo-sigma/src/reduce.rs"
+        backup="$gate_dir/reduce.rs.backup"
+        if [[ -e "$backup" ]]; then
+            echo "[FAIL] unresolved backup: $backup"
+            exit 1
+        fi
+        cp "$source_file" "$backup"
+        restore_verify() {
+            cp "$backup" "$source_file"
+            rm -f "$backup"
+        }
+        trap restore_verify EXIT
+        cargo build -p ergo-difftest --quiet
+        target_dir="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+        binary="$target_dir/debug/difftest"
+        "$binary" --oracle --repro "$trigger" --surface verify > "$gate_dir/clean.log" 2>&1
+        cat "$gate_dir/clean.log"
+        git apply "$patch_file"
+        cargo build -p ergo-difftest --quiet
+        set +e
+        "$binary" --oracle --repro "$trigger" --surface verify > "$gate_dir/patched.log" 2>&1
+        patched_exit=$?
+        set -e
+        cat "$gate_dir/patched.log"
+        restore_verify
+        trap - EXIT
+        cargo build -p ergo-difftest --quiet
+        if [[ "$patched_exit" -eq 1 ]] && grep -q '\[Canonical\] verify' "$gate_dir/patched.log"; then
+            echo "[PASS] $id: clean agrees; injected cost produces verify delta"
+            ((PASS++)) || true
+        else
+            echo "[FAIL] $id: expected cost divergence, got exit $patched_exit"
+            ((FAIL++)) || true
+        fi
         continue
     fi
 

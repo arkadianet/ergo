@@ -332,6 +332,21 @@ pub fn registry(only: Option<&str>) -> Vec<Surface> {
                 )
             }),
         },
+        Surface {
+            name: "verify",
+            run: Box::new(|b| {
+                let (verdict, _) = crate::oracle::verify_verdict(b);
+                match verdict {
+                    crate::oracle::Verdict::Accept(record)
+                        if serde_json::from_str::<serde_json::Value>(&record)
+                            .is_ok_and(|r| r["verdict"] == "Accept") =>
+                    {
+                        Outcome::Accepted
+                    }
+                    _ => Outcome::Rejected,
+                }
+            }),
+        },
         // ----- read-only no-panic -----
         // `deserialize_batch_merkle_proof` takes the whole byte slice (and a
         // `WriteError`-typed result), so it can't go through `ro_check`/`rw!`;
