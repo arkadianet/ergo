@@ -77,6 +77,26 @@ pub mod test_helpers {
     use ergo_ser::ergo_box::{ErgoBox, ErgoBoxCandidate};
     use ergo_sigma::evaluator::EvalBox;
 
+    /// Exercise one input through the production storage-rent and verify branches.
+    pub fn validate_script_input(
+        tx: &ergo_ser::transaction::Transaction,
+        inputs: &[ErgoBox],
+        data: &[ErgoBox],
+        message: &[u8],
+        cx: &mut crate::tx::TxValidationCtx<'_>,
+        index: usize,
+        tree: &ergo_ser::ergo_tree::ErgoTree,
+    ) -> Result<(), ValidationError> {
+        crate::tx::script::validate_scripts_at_index(
+            tx,
+            inputs,
+            data,
+            message,
+            cx,
+            Some((index, tree)),
+        )
+    }
+
     /// Convert a sealed [`ErgoBox`] (with its in-block index) into the
     /// evaluator's per-input box representation.
     pub fn ergo_box_to_eval_box(b: &ErgoBox, index: usize) -> Result<EvalBox, ValidationError> {

@@ -15,10 +15,10 @@ Source ledger: sigmastate `v6.0.2 23dd29f612249c169d09fae9bca76d7cc02e144c`, erg
 | ROUND | 2 | 1 | 0 | 0 | 3 |
 | ORDER | 8 | 0 | 0 | 0 | 8 |
 | LIMIT | 3 | 0 | 0 | 0 | 3 |
-| TX | 7 | 0 | 0 | 1 | 8 |
+| TX | 6 | 0 | 1 | 1 | 8 |
 | BLOCK | 12 | 0 | 0 | 1 | 13 |
 | VERSION | 23 | 0 | 0 | 1 | 24 |
-| **all** | 160 | 104 | 0 | 19 | 283 |
+| **all** | 159 | 104 | 1 | 19 | 283 |
 
 States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test with an independent oracle; DIVERGENT = confirmed mismatch, fix pending; N-A = reviewed rationale in note.
 
@@ -301,7 +301,7 @@ States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test w
 |---|---|---|---|---|---|---|
 | `TX-init-formula` | OPEN | ergo-core/src/main/scala/org/ergoplatform/modifiers/mempool/ErgoTransaction.scala:370; initialCost = interpreterInitCost + inputs*inputCost + dataInputs*dataInputCost + outputs*outputCost (addExact/multiplyExact) | `ergo-validation/src/tx/script/cost.rs:22-60` | L3,L4 | — | cost_total_oracle_* prove totals for 5 txs but do not isolate the formula; L4 per-input breakdown closes it |
 | `TX-token-cost` | OPEN | ergo-core/src/main/scala/org/ergoplatform/modifiers/mempool/ErgoTransaction.scala:191; token cost = (in entries + out entries + in distinct ids + out distinct ids) * tokenAccessCost | `ergo-validation/src/tx/script/cost.rs:121-144` | L3,L4 | — | counting rule must be pinned to the Scala anchor by the enumeration |
-| `TX-storage-rent` | OPEN | ergo-wallet/src/main/scala/org/ergoplatform/wallet/interpreter/ErgoInterpreter.scala:72; StorageContractCost is **50 BC**. Exceptions recover into ordinary verification; a successfully returned `false` does not trigger `recoverWith`. Monetary storage fee is not computational cost. `ergo-wallet/src/main/scala/org/ergoplatform/wallet/interpreter/ErgoInterpreter.scala:81`, `:82`; `ergo-wallet/src/main/scala/org/ergoplatform/wallet/protocol/Constants.scala:21`. | `ergo-validation/src/tx/script/mod.rs:216-264` | L2,L3,L4 | — | rent-eligible fixtures from mainnet (rent branch has corpora) |
+| `TX-storage-rent` | DIVERGENT | ergo-wallet/src/main/scala/org/ergoplatform/wallet/interpreter/ErgoInterpreter.scala:72; StorageContractCost is **50 BC**. Exceptions recover into ordinary verification; a successfully returned `false` does not trigger `recoverWith`. Monetary storage fee is not computational cost. `ergo-wallet/src/main/scala/org/ergoplatform/wallet/interpreter/ErgoInterpreter.scala:81`, `:82`; `ergo-wallet/src/main/scala/org/ergoplatform/wallet/protocol/Constants.scala:21`. | `ergo-validation/src/tx/script/mod.rs:216-264` | L2,L3,L4 | `ergo-difftest::oracle::verify::tests::verify_rent_jvm_fixtures_expose_block_unit_divergence` | Task 3.2 confirmed cost-only divergence (accept-invalid at a block cost boundary): production Rust charges STORAGE_CONTRACT_COST=50 as JIT (5 BC); JVM wallet charges 50 BC. Independent fixtures: test-vectors/ergo-sigma/verify/cases.json rent_expired and rent_init. Tracking: .superpowers/sdd/2026-09-15-jit-cost-conformance-plan/task-3.2-report.md; controller must assign the fix PR (this task never pushes). |
 | `TX-scripts-skipped-pairing` | OPEN | src/main/scala/org/ergoplatform/nodeView/state/ErgoState.scala:135; At `currentHeight <= checkpointHeight`, Scala bypasses **transaction execution/cost validation** and returns `Valid(0L)`, not merely script verification. `src/main/scala/org/ergoplatform/nodeView/state/ErgoState.scala:135`. | `ergo-validation/src/tx/mod.rs:210-227` | L4 | — |  |
 | `TX-voted-params` | OPEN | ergo-core/src/main/scala/org/ergoplatform/settings/Parameters.scala:48; Parameters ids 4 maxBlockCost, 5 tokenAccessCost, 6 inputCost, 7 dataInputCost, 8 outputCost from epoch extension | `ergo-validation/src/active_params/mod.rs` | L4 | — | cost_total_oracle_epoch_1499136_uses_voted_params is JVM-backed for one epoch — name it once it carries the ledger id |
 | `TX-accumulator-shared` | OPEN | ergo-core/src/main/scala/org/ergoplatform/modifiers/mempool/ErgoTransaction.scala:153; all inputs of a tx accumulate into one running cost | `ergo-validation/src/tx/script/mod.rs:89-324` | L3 | — |  |

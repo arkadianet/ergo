@@ -1,0 +1,465 @@
+[
+  {
+    "name": "deserialize_dead_branch",
+    "request": {
+      "tree_hex": "00d1959385030101d40100",
+      "ctx_ext_hex": "00",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d00d1959385030101d4010000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d00d1959385030101d4010000000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [],
+      "headers_hex": [],
+      "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+    },
+    "expected": {
+      "verdict": "Accept",
+      "eval_block_cost": 26,
+      "crypto_block_cost": 0,
+      "rent_block_cost": 0,
+      "rent_path": false,
+      "total_block_cost": 26,
+      "failure_class": null,
+      "rejection_detail": "",
+      "legacy": "P:d3|43"
+    }
+  },
+  {
+    "name": "deserialize_nonzero_init",
+    "request": {
+      "tree_hex": "00d1959385030101d40100",
+      "ctx_ext_hex": "00",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 17,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d00d1959385030101d4010000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d00d1959385030101d4010000000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [],
+      "headers_hex": [],
+      "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+    },
+    "expected": {
+      "verdict": "Accept",
+      "eval_block_cost": 26,
+      "crypto_block_cost": 0,
+      "rent_block_cost": 0,
+      "rent_path": false,
+      "total_block_cost": 43,
+      "failure_class": null,
+      "rejection_detail": "",
+      "legacy": "P:d3|43"
+    }
+  },
+  {
+    "name": "true",
+    "request": {
+      "tree_hex": "0008d3",
+      "ctx_ext_hex": "00",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008d300000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008d300000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [],
+      "headers_hex": [],
+      "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+    },
+    "expected": {
+      "verdict": "Accept",
+      "eval_block_cost": 5,
+      "crypto_block_cost": 0,
+      "rent_block_cost": 0,
+      "rent_path": false,
+      "total_block_cost": 5,
+      "failure_class": null,
+      "rejection_detail": "",
+      "legacy": "P:d3|5"
+    }
+  },
+  {
+    "name": "false",
+    "request": {
+      "tree_hex": "0008d2",
+      "ctx_ext_hex": "00",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008d200000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008d200000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [],
+      "headers_hex": [],
+      "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+    },
+    "expected": {
+      "verdict": "RejectScript",
+      "eval_block_cost": 5,
+      "crypto_block_cost": 0,
+      "rent_block_cost": 0,
+      "rent_path": false,
+      "total_block_cost": 5,
+      "failure_class": null,
+      "rejection_detail": "Script reduced to false or proof invalid",
+      "legacy": "P:d2|5"
+    }
+  },
+  {
+    "name": "p2pk_empty",
+    "request": {
+      "tree_hex": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "ctx_ext_hex": "00",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [],
+      "headers_hex": [],
+      "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+    },
+    "expected": {
+      "verdict": "RejectScript",
+      "eval_block_cost": 5,
+      "crypto_block_cost": 398,
+      "rent_block_cost": 0,
+      "rent_path": false,
+      "total_block_cost": 403,
+      "failure_class": null,
+      "rejection_detail": "Script reduced to false or proof invalid",
+      "legacy": "P:cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798|5"
+    }
+  },
+  {
+    "name": "p2pk_nonzero_init",
+    "request": {
+      "tree_hex": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "ctx_ext_hex": "00",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 17,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [],
+      "headers_hex": [],
+      "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+    },
+    "expected": {
+      "verdict": "RejectScript",
+      "eval_block_cost": 5,
+      "crypto_block_cost": 398,
+      "rent_block_cost": 0,
+      "rent_path": false,
+      "total_block_cost": 420,
+      "failure_class": null,
+      "rejection_detail": "Script reduced to false or proof invalid",
+      "legacy": "P:cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798|5"
+    }
+  },
+  {
+    "name": "p2pk_limit_4",
+    "request": {
+      "tree_hex": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "ctx_ext_hex": "00",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 4,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [],
+      "headers_hex": [],
+      "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+    },
+    "expected": {
+      "verdict": "RejectCost",
+      "eval_block_cost": "unavailable",
+      "crypto_block_cost": "unavailable",
+      "rent_block_cost": 0,
+      "rent_path": false,
+      "total_block_cost": 5,
+      "failure_class": "sigma.exceptions.CostLimitException",
+      "rejection_detail": "sigma.exceptions.CostLimitException: Estimated execution cost 5 exceeds the limit 4",
+      "legacy": "unavailable"
+    }
+  },
+  {
+    "name": "p2pk_limit_402",
+    "request": {
+      "tree_hex": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "ctx_ext_hex": "00",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 402,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [],
+      "headers_hex": [],
+      "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+    },
+    "expected": {
+      "verdict": "RejectCost",
+      "eval_block_cost": 5,
+      "crypto_block_cost": 398,
+      "rent_block_cost": 0,
+      "rent_path": false,
+      "total_block_cost": 403,
+      "failure_class": "sigma.exceptions.CostLimitException",
+      "rejection_detail": "sigma.exceptions.CostLimitException: Estimated execution cost 403 exceeds the limit 402",
+      "legacy": "P:cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798|5"
+    }
+  },
+  {
+    "name": "p2pk_limit_403",
+    "request": {
+      "tree_hex": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "ctx_ext_hex": "00",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 403,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [],
+      "headers_hex": [],
+      "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+    },
+    "expected": {
+      "verdict": "RejectScript",
+      "eval_block_cost": 5,
+      "crypto_block_cost": 398,
+      "rent_block_cost": 0,
+      "rent_path": false,
+      "total_block_cost": 403,
+      "failure_class": null,
+      "rejection_detail": "Script reduced to false or proof invalid",
+      "legacy": "P:cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798|5"
+    }
+  },
+  {
+    "name": "p2pk_limit_404",
+    "request": {
+      "tree_hex": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "ctx_ext_hex": "00",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 404,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [],
+      "headers_hex": [],
+      "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+    },
+    "expected": {
+      "verdict": "RejectScript",
+      "eval_block_cost": 5,
+      "crypto_block_cost": 398,
+      "rent_block_cost": 0,
+      "rent_path": false,
+      "total_block_cost": 403,
+      "failure_class": null,
+      "rejection_detail": "Script reduced to false or proof invalid",
+      "legacy": "P:cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798|5"
+    }
+  },
+  {
+    "name": "version_mismatch",
+    "request": {
+      "tree_hex": "00d1959385030101d40100",
+      "ctx_ext_hex": "00",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 1,
+      "self_box_hex": "c0843d00d1959385030101d4010000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d00d1959385030101d4010000000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [],
+      "headers_hex": [],
+      "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+    },
+    "expected": {
+      "verdict": "RejectOther",
+      "eval_block_cost": "unavailable",
+      "crypto_block_cost": "unavailable",
+      "rent_block_cost": 0,
+      "rent_path": false,
+      "total_block_cost": "unavailable",
+      "failure_class": "java.lang.IllegalArgumentException",
+      "rejection_detail": "java.lang.IllegalArgumentException: requirement failed: tree_version_expected differs from serialized tree",
+      "legacy": "unavailable"
+    }
+  },
+  {
+    "name": "rent_expired",
+    "request": {
+      "tree_hex": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "ctx_ext_hex": "017f0300",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [
+        "c0843d0008d3c094400000"
+      ],
+      "headers_hex": [],
+      "pre_header_hex": "0400000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000100a400279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+      "rent": true,
+      "storage_fee_factor": 1250000
+    },
+    "known_divergence": true,
+    "expected": {
+      "verdict": "Accept",
+      "eval_block_cost": 0,
+      "crypto_block_cost": 0,
+      "rent_block_cost": 50,
+      "rent_path": true,
+      "total_block_cost": 50,
+      "failure_class": null,
+      "rejection_detail": "",
+      "legacy": "unavailable"
+    }
+  },
+  {
+    "name": "rent_init",
+    "request": {
+      "tree_hex": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "ctx_ext_hex": "017f0300",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 17,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [
+        "c0843d0008d3c094400000"
+      ],
+      "headers_hex": [],
+      "pre_header_hex": "0400000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000100a400279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+      "rent": true,
+      "storage_fee_factor": 1250000
+    },
+    "known_divergence": true,
+    "expected": {
+      "verdict": "Accept",
+      "eval_block_cost": 0,
+      "crypto_block_cost": 0,
+      "rent_block_cost": 50,
+      "rent_path": true,
+      "total_block_cost": 67,
+      "failure_class": null,
+      "rejection_detail": "",
+      "legacy": "unavailable"
+    }
+  },
+  {
+    "name": "rent_fallback",
+    "request": {
+      "tree_hex": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "ctx_ext_hex": "00",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [
+        "c0843d0008d3c094400000"
+      ],
+      "headers_hex": [],
+      "pre_header_hex": "0400000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000100a400279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+      "rent": true,
+      "storage_fee_factor": 1250000
+    },
+    "known_divergence": false,
+    "expected": {
+      "verdict": "RejectScript",
+      "eval_block_cost": 5,
+      "crypto_block_cost": 398,
+      "rent_block_cost": 0,
+      "rent_path": true,
+      "total_block_cost": 403,
+      "failure_class": null,
+      "rejection_detail": "Script reduced to false or proof invalid",
+      "legacy": "P:cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798|5"
+    }
+  }
+]
