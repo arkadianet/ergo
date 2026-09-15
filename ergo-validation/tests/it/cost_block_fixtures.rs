@@ -32,6 +32,7 @@ struct Fixture {
     schema_version: u32,
     ledger: Vec<String>,
     manifest: Value,
+    boundary_basis: Option<Value>,
     parameters: BTreeMap<String, i32>,
     parent_boxes_hex: Vec<String>,
     bootstrap_box_hex: String,
@@ -533,6 +534,28 @@ fn block_boundaries_running_accumulator_matches_jvm() {
     for case in [exact, over, single, forward, reverse] {
         replay(case);
     }
+}
+
+// ledger: ORDER-init-token
+#[test]
+fn block_token_remaining_budget_matches_jvm() {
+    let case = fixture("e-token-order");
+    assert_eq!(case.transactions_hex.len(), 2);
+    let prefix = case.boundary_basis.as_ref().unwrap()["single_p2pk"]["sum_block_cost"]
+        .as_u64()
+        .unwrap();
+    let remaining = case.parameters["4"] as u64 - prefix;
+    let initial = 10000 + case.parameters["6"] as u64 + case.parameters["8"] as u64;
+    assert!(initial <= remaining);
+    assert!(initial + 4 * case.parameters["5"] as u64 > remaining);
+    assert_eq!(jvm_verdict(&case.expected), "RejectCost");
+    assert!(case
+        .expected
+        .rejection_detail
+        .as_ref()
+        .unwrap()
+        .ends_with(": assets cost"));
+    replay(case);
 }
 
 #[test]
