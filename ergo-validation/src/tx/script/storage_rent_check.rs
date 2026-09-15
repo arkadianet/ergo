@@ -6,7 +6,7 @@ use crate::context::ProtocolParams;
 /// Storage rent variable ID in context extension (Scala: Constants.StorageIndexVarId).
 pub(super) const STORAGE_INDEX_VAR_ID: u8 = 127;
 
-/// Block cost charged for a storage rent check (Scala: Constants.StorageContractCost).
+/// Storage rent check cost in block units (50 BC = 500 JIT; Scala: Constants.StorageContractCost).
 pub const STORAGE_CONTRACT_COST: u64 = 50;
 
 /// Predicate: a spending input opts into the storage-rent path
