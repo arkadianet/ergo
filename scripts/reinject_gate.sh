@@ -23,7 +23,7 @@
 #   0  all bugs passed both assertions (or were skipped with explanation)
 #   1  at least one assertion failed (false positive on clean HEAD or missed on patched)
 #
-# The verify class patches and restores the current worktree with a local backup.
+# The verify class patches an isolated copy inside the current worktree.
 # Other classes create temporary git worktrees and remove them on exit.
 # It never pushes or modifies the main working tree's git history.
 
@@ -288,35 +288,35 @@ for id in "${BUG_IDS[@]}"; do
     fi
 
     if [[ "$class" == "verify" ]]; then
-        # Verify probes use the current worktree, including uncommitted surface work.
-        # Keep backups and transcripts inside it and restore on every exit path.
+        # Copy tracked sources, including uncommitted edits, into an isolated tree.
+        # The gate never patches or restores the caller's source files.
         gate_dir="$REPO_ROOT/.superpowers/reinject-$id"
         mkdir -p "$gate_dir"
-        source_file="$REPO_ROOT/ergo-sigma/src/reduce.rs"
-        backup="$gate_dir/reduce.rs.backup"
-        if [[ -e "$backup" ]]; then
-            echo "[FAIL] unresolved backup: $backup"
-            exit 1
-        fi
-        cp "$source_file" "$backup"
-        restore_verify() {
-            cp "$backup" "$source_file"
-            rm -f "$backup"
+        scratch="$(mktemp -d "$gate_dir/source.XXXXXX")"
+        cleanup_verify() {
+            rm -rf "$scratch"
         }
-        trap restore_verify EXIT
-        cargo build -p ergo-difftest --quiet
-        target_dir="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
-        binary="$target_dir/debug/difftest"
-        "$binary" --oracle --repro "$trigger" --surface verify > "$gate_dir/clean.log" 2>&1
-        cat "$gate_dir/clean.log"
-        git apply "$patch_file"
-        cargo build -p ergo-difftest --quiet
-        set +e
-        "$binary" --oracle --repro "$trigger" --surface verify > "$gate_dir/patched.log" 2>&1
-        patched_exit=$?
-        set -e
-        cat "$gate_dir/patched.log"
-        restore_verify
+        trap cleanup_verify EXIT
+        git -C "$REPO_ROOT" ls-files --cached --others --exclude-standard -z |
+            tar -C "$REPO_ROOT" --null -T - -cf - | tar -xf - -C "$scratch"
+        (
+            cd "$scratch"
+            cargo build -p ergo-difftest --quiet
+            target_dir="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+            binary="$target_dir/debug/difftest"
+            "$binary" --oracle --repro "$trigger" --surface verify > "$gate_dir/clean.log" 2>&1
+            cat "$gate_dir/clean.log"
+            patch --batch --forward -p1 < "$patch_file"
+            cargo build -p ergo-difftest --quiet
+            set +e
+            "$binary" --oracle --repro "$trigger" --surface verify > "$gate_dir/patched.log" 2>&1
+            patched_exit=$?
+            set -e
+            cat "$gate_dir/patched.log"
+            printf '%s\n' "$patched_exit" > "$gate_dir/patched.exit"
+        )
+        patched_exit="$(cat "$gate_dir/patched.exit")"
+        cleanup_verify
         trap - EXIT
         cargo build -p ergo-difftest --quiet
         if [[ "$patched_exit" -eq 1 ]] && grep -q '\[Canonical\] verify' "$gate_dir/patched.log"; then
