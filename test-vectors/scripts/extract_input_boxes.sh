@@ -18,6 +18,12 @@ if [ $# -lt 3 ]; then
     exit 1
 fi
 
+# A replay manifest identifies only external inputs absent from the progressive
+# UTXO view. Fetch those exact IDs and retain already captured boxes.
+if [[ -n "${L4_DIAGNOSTICS:-}" ]]; then
+    exec python3 "$SCRIPT_DIR/extract_l4_missing_boxes.py" "$@"
+fi
+
 START_HEIGHT=$1
 END_HEIGHT=$2
 OUTPUT_FILE=$3
