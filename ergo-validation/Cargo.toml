@@ -39,6 +39,7 @@ cost-trace = ["ergo-sigma/cost-trace"]
 diagnostics = ["cost-trace"]
 
 [dev-dependencies]
+ergo-state = { workspace = true }
 ergo-validation = { path = ".", features = ["test-helpers", "cost-trace"] }
 ergo-rest-json  = { workspace = true }
 hex             = { workspace = true }

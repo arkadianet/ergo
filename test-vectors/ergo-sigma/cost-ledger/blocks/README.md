@@ -1,8 +1,10 @@
 # Synthetic block fixture schema (version 1)
 
-Producer and consumer: `scripts/jvm_block_oracle/BlockOracle.scala`.
+Producer: `scripts/jvm_block_oracle/BlockOracle.scala`.
 Builder: `scripts/devnet-mixed/build-block.py`.
-A complete tracked example is `scripts/jvm_block_oracle/p2pk.json.gz`.
+The Rust consumer is `ergo-validation/tests/it/cost_block_fixtures.rs`.
+The tracked smoke fixture is `p2pk.json.gz`; identical bytes are pinned at
+`scripts/jvm_block_oracle/p2pk.json.gz`.
 All hex fields encode the pinned JVM's canonical serialization; numbers are JSON
 integers. Gzip input is accepted by the oracle.
 
@@ -11,6 +13,7 @@ integers. Gzip input is accepted by the oracle.
 | Field | Meaning |
 |---|---|
 | `schema_version` | Exactly `1`. |
+| `ledger` | Row IDs carried into the output; defaults to `["BLOCK-parallel-equiv"]` for the smoke corpus. |
 | `parent_boxes_hex` | Serialized target input/data boxes, present before and after parent-chain replay. Duplicate box IDs are forbidden. |
 | `parameters` | Complete devnet parameter table, decimal byte IDs mapped to integers. The example uses the exact `DevnetLaunchParameters` table, including block version 3. |
 | `transactions_hex` | Nonempty ordered array of signed `ErgoTransaction` bytes for the target. In-block dependencies are allowed. |
@@ -32,6 +35,8 @@ The builder adds:
 
 | Field | Meaning |
 |---|---|
+| `ledger` | Required array of ledger row IDs covered by the fixture. |
+| `manifest` | Required design §3 provenance: Scala versions/source SHAs, Rust revision/toolchain/features, tool revision/hash/Scala CLI/JVM, synthetic chain context/versions/voted parameters, command/seeds/timestamp, SHA-256 evidence. |
 | `genesis_state_root` | AVL digest of the initial boxes, before applying parent blocks. |
 | `initial_box_order_hex` | All initial serialized boxes in the exact JVM AVL insertion order, including the bootstrap box. |
 | `parent_headers_hex` | Oldest-first headers, exactly matching `parent_blocks[*].header_hex`. |
@@ -105,3 +110,35 @@ Fixture/setup errors terminate the oracle with a nonzero exit status.
 
 This schema supplies state-application evidence. It does not claim that the
 synthetic chain passes a full node's history/difficulty-retargeting rules.
+
+## Reproducibility and Rust consumption
+
+`build`, `smoke`, and `capture` attach `ledger` and `manifest`. `capture` replays
+an existing fixture and replaces `expected` with the production JVM observation:
+
+```sh
+python3 scripts/jvm_block_oracle/run.py capture scripts/jvm_block_oracle/p2pk.json.gz scripts/jvm_block_oracle/.work/p2pk-captured.json
+```
+
+`manifest.evidence.input_sha256` hashes the exact input file bytes (including gzip
+framing). `output_payload_sha256` hashes UTF-8 compact JSON in producer field order
+with only `manifest` omitted, avoiding a self-referential file hash. Compression
+and whitespace do not change this payload. A generated smoke request has no input
+file; its frozen bytes are included in the hashed output. `node_app_version` is
+null because the offline oracle loads pinned node classes without a running node.
+The tool's source hash identifies uncommitted producer changes at capture time.
+
+The Rust runner inserts the recorded initial boxes into `AvlTree`, authenticates
+all 128 parent transitions with `DigestProofVerifier`, and replays blocks 2–128
+through the sequential validator. The first block has no parent validation context;
+its PoW, genesis parent ID, section commitments and authenticated state transition
+are checked directly. Epoch parameters are parsed from the extension, and the
+last ten checked headers plus parent extension supply target validation context.
+Both target validators run with scripts enabled; observed sequential and parallel
+per-transaction costs must agree and their sum must equal the JVM total. The
+successful target transition must also match the oracle's final root.
+
+The initial corpus contains one accepted P2PK target. Rejected targets deliberately
+fail this runner until JVM exception-to-semantic-failure mappings and unavailable
+cost handling are added with independent rejection fixtures. This smoke does not
+establish multi-transaction layering, cost-cap boundaries, or rejection precedence.

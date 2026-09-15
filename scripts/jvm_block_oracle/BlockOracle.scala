@@ -25,6 +25,7 @@ import sigma.ast.{ErgoTree, SigmaPropConstant}
 import sigma.serialization.SigmaSerializer
 import scala.collection.JavaConverters._
 import scala.util.Try
+import scala.sys.process._
 
 /** Oracle: production UtxoState.applyModifier, with an identity return-value observer. */
 object BlockOracle {
@@ -40,6 +41,47 @@ object BlockOracle {
   }
   def write(path: String, json: Json): Unit = Files.write(Paths.get(path), (json.spaces2 + "\n").getBytes("UTF-8")) match { case _ => () }
   def field[A: io.circe.Decoder](c: HCursor, name: String): A = c.get[A](name).right.get
+  def sha256(raw: Array[Byte]): String = hex(java.security.MessageDigest.getInstance("SHA-256").digest(raw))
+  def manifest(fixture: Json, command: String, input: Option[String]): Json = {
+    def output(args: String*): String = Process(args).!!.trim
+    val revision = output("git", "rev-parse", "HEAD")
+    val script = "scripts/jvm_block_oracle/BlockOracle.scala"
+    val payload = fixture.mapObject(_.remove("manifest"))
+    val c = fixture.hcursor
+    val version = field[Int](c.downField("parameters").success.get, "123")
+    Json.obj(
+      "scala" -> Json.obj("ergo_version" -> Json.fromString("6.0.5"),
+        "sigmastate_version" -> Json.fromString("6.0.6"), "node_app_version" -> Json.Null,
+        "source_shas" -> Json.obj("sigmastate_v6.0.6" -> Json.fromString("ab0b15ceb9d34f2ccd6e68e3e2a8aa27cd16a042"),
+          "ergo_v6.0.5" -> Json.fromString("5528ef569a41ebccbc8658212e6ee3c97d990b96"),
+          "sigmastate_v6.0.2" -> Json.fromString("23dd29f612249c169d09fae9bca76d7cc02e144c"),
+          "ergo_v6.0.2" -> Json.fromString("2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1"))),
+      "rust" -> Json.obj("git_sha" -> Json.fromString(revision),
+        "toolchain" -> Json.fromString(output("rustc", "--version")),
+        "features" -> Json.arr(Json.fromString("ergo-validation/test-helpers"),
+          Json.fromString("ergo-validation/cost-trace"))),
+      "tool" -> Json.obj("script" -> Json.fromString(script), "git_sha" -> Json.fromString(revision),
+        "script_sha256" -> Json.fromString(sha256(Files.readAllBytes(Paths.get(script)))),
+        "scala_cli" -> Json.fromString(output("scala-cli", "version", "--cli-version")),
+        "jvm" -> Json.fromString(System.getProperty("java.runtime.version"))),
+      "context" -> Json.obj("network" -> Json.fromString("synthetic devnet"),
+        "chain_id" -> c.downField("genesis_state_root").focus.get,
+        "height_range" -> Json.arr(Json.fromInt(1),
+          Json.fromInt(decodeBlock(field[Json](c, "block")).height)),
+        "activated_script_version" -> Json.fromInt(version - 1), "block_version" -> Json.fromInt(version),
+        "voted_params" -> field[Json](c, "parameters")),
+      "run" -> Json.obj("command" -> Json.fromString(command), "seeds" -> Json.Null,
+        "timestamp" -> Json.fromString(java.time.Instant.now.toString)),
+      "evidence" -> Json.obj(
+        "input_sha256" -> input.map(p => Json.fromString(sha256(Files.readAllBytes(Paths.get(p))))).getOrElse(Json.Null),
+        "output_payload_sha256" -> Json.fromString(sha256(payload.noSpaces.getBytes("UTF-8"))),
+        "hash_scope" -> Json.fromString("UTF-8 compact output JSON excluding manifest; input hash covers exact file bytes")))
+  }
+  def withManifest(fixture: Json, command: String, input: Option[String]): Json = {
+    val tagged = fixture.deepMerge(Json.obj("ledger" -> fixture.hcursor.downField("ledger").focus
+      .getOrElse(Json.arr(Json.fromString("BLOCK-parallel-equiv")))))
+    tagged.deepMerge(Json.obj("manifest" -> manifest(tagged, command, input)))
+  }
   def box(value: String): ErgoBox = ErgoBox.sigmaSerializer.parse(SigmaSerializer.startReader(bytes(value)))
   def tx(value: String): ErgoTransaction = ErgoTransactionSerializer.parseBytes(bytes(value))
   def extension(c: HCursor): ExtensionCandidate = ExtensionCandidate(
@@ -316,9 +358,15 @@ object BlockOracle {
     require(sigmaJar.endsWith("sigma-state_2.12-6.0.6.jar"), "expected sigma-state 6.0.6: " + sigmaJar)
     val result = args.toList match {
       case "build" :: input :: output :: Nil =>
-        val fixture = build(read(input)); write(output, fixture)
+        val fixture = withManifest(build(read(input)), "python3 scripts/jvm_block_oracle/run.py " + args.mkString(" "), Some(input)); write(output, fixture)
         Json.obj("built" -> Json.fromString(output))
       case "evaluate" :: input :: Nil => evaluate(read(input))
+      case "capture" :: input :: output :: Nil =>
+        val fixture = read(input)
+        val observed = evaluate(fixture)
+        write(output, withManifest(fixture.deepMerge(Json.obj("expected" -> observed)),
+          "python3 scripts/jvm_block_oracle/run.py " + args.mkString(" "), Some(input)))
+        observed
       case "self-test" :: input :: Nil => selfTest(read(input))
       case "smoke" :: output :: Nil =>
         val fixture = build(smokeRequest())
@@ -327,9 +375,10 @@ object BlockOracle {
         // JVM transaction initialization is 10000 + 2000 input + 100 output.
         require(field[String](result.hcursor, "verdict") == "Accept", result.noSpaces)
         require(field[Long](result.hcursor, "sum_block_cost") == 12503L, result.noSpaces)
-        write(output, fixture.deepMerge(Json.obj("expected" -> result)))
+        write(output, withManifest(fixture.deepMerge(Json.obj("expected" -> result)),
+          "python3 scripts/jvm_block_oracle/run.py " + args.mkString(" "), None))
         result
-      case _ => throw new IllegalArgumentException("build REQUEST OUTPUT | evaluate FIXTURE | smoke OUTPUT | self-test FIXTURE")
+      case _ => throw new IllegalArgumentException("build REQUEST OUTPUT | evaluate FIXTURE | capture FIXTURE OUTPUT | smoke OUTPUT | self-test FIXTURE")
     }
     stdout.println(result.noSpaces)
   }
