@@ -43,8 +43,11 @@
 // Optional rent=true selects the actual wallet ErgoInterpreter rent implementation,
 // including its 50 BC return, eligibility checks and recoverWith fallback.
 // rent requires storage_fee_factor (the voted parameter); rent_path echoes rent.
-// Rent success returns 50, even with nonzero initCost or a lower cost limit, as
-// the wallet interpreter does; transaction-level limit checks are outside this API.
+// Completed rent reports eval=0, crypto=0, rent_block_cost=50 and total=init+50.
+// The wallet returns 50 independently of init/limit; transaction validation supplies
+// init=0 per input and accumulates externally. This API includes the supplied init
+// in its total; transaction-level limit checks remain outside this API.
+// Ordinary verification and rent fallback report rent_block_cost=0.
 // Failure mapping (cause chain, cost takes precedence):
 // CostLimitException => RejectCost; SigmaException, ValidationException,
 // SerializerException, IllegalArgumentException, NoSuchElementException,
@@ -290,10 +293,11 @@ object EvaluatedValueOracle {
     var verifying = false
     var eval = unavailable
     var crypto = unavailable
+    var rentCost = Json.fromLong(0)
     var legacy = unavailable
     def record(verdict: String, total: Json, error: Option[Throwable], detail: String): Json =
       Json.obj("verdict" -> Json.fromString(verdict), "eval_block_cost" -> eval,
-        "crypto_block_cost" -> crypto, "rent_path" -> Json.fromBoolean(rent),
+        "crypto_block_cost" -> crypto, "rent_block_cost" -> rentCost, "rent_path" -> Json.fromBoolean(rent),
         "total_block_cost" -> total,
         "failure_class" -> error.map(e => Json.fromString(e.getClass.getName)).getOrElse(Json.Null),
         "rejection_detail" -> Json.fromString(detail), "legacy" -> legacy)
@@ -362,8 +366,9 @@ object EvaluatedValueOracle {
       }
       // The wallet rent path returns without invoking fullReduction.
       if (rentCompleted && result.isSuccess) {
-        eval = Json.fromLong(result.get._2)
+        eval = Json.fromLong(0)
         crypto = Json.fromLong(0)
+        rentCost = Json.fromLong(result.get._2)
       }
       if (interpreter.reduction.isDefined) {
         legacy = Try(VersionContext.withVersions(activated, tree.version) {
@@ -382,7 +387,7 @@ object EvaluatedValueOracle {
       }
       result match {
         case Success((ok, cost)) => record(if (ok) "Accept" else "RejectScript",
-          Json.fromLong(cost), None, if (ok) "" else "Script reduced to false or proof invalid")
+          Json.fromLong(if (rentCompleted) Math.addExact(init, cost) else cost), None, if (ok) "" else "Script reduced to false or proof invalid")
         case Failure(e) =>
           val (verdict, selected) = failure(e, verifying)
           val cost = if (verdict == "RejectCost") failureCost(e)
@@ -421,12 +426,20 @@ object EvaluatedValueOracle {
     def check(name: String, req: Json, expected: (String, Json)*): Unit = {
       val actual = verifyLine(req.noSpaces)
       require(actual.asObject.get.keys.toSet == Set("verdict", "eval_block_cost",
-        "crypto_block_cost", "rent_path", "total_block_cost", "failure_class",
+        "crypto_block_cost", "rent_block_cost", "rent_path", "total_block_cost", "failure_class",
         "rejection_detail", "legacy"), name + ": response schema")
       expected.foreach { case (key, value) =>
         require(actual.hcursor.downField(key).focus.contains(value),
           name + ": " + key + " expected " + value + ", got " + actual.noSpaces)
       }
+      val c = actual.hcursor
+      for {
+        init <- req.hcursor.get[Long]("init_cost_block").toOption
+        eval <- c.get[Long]("eval_block_cost").toOption
+        crypto <- c.get[Long]("crypto_block_cost").toOption
+        rent <- c.get[Long]("rent_block_cost").toOption
+        total <- c.get[Long]("total_block_cost").toOption
+      } require(init + eval + crypto + rent == total, name + ": breakdown identity")
       count += 1
     }
     def str(s: String) = Json.fromString(s)
@@ -502,11 +515,12 @@ object EvaluatedValueOracle {
       "outputs_hex" -> Json.arr(str(hex(ErgoBoxCandidate.serializer.toBytes(
         new ErgoBoxCandidate(1000000L, trueTree, 1051200))))))
     check("rent_expired_box_accept", rent, "verdict" -> str("Accept"),
-      "eval_block_cost" -> num(50), "crypto_block_cost" -> num(0),
+      "eval_block_cost" -> num(0), "rent_block_cost" -> num(50), "crypto_block_cost" -> num(0),
       "total_block_cost" -> num(50), "rent_path" -> Json.True, "legacy" -> unavailable)
     check("rent_low_limit_nonzero_init_wallet_cost",
       patch(rent, "init_cost_block" -> num(17), "cost_limit_block" -> num(49)),
-      "verdict" -> str("Accept"), "total_block_cost" -> num(50))
+      "verdict" -> str("Accept"), "eval_block_cost" -> num(0),
+      "crypto_block_cost" -> num(0), "rent_block_cost" -> num(50), "total_block_cost" -> num(67))
     check("rent_unexpired_box_fallback_reject_script",
       patch(rent, "pre_header_hex" -> request().hcursor.downField("pre_header_hex").focus.get),
       "verdict" -> str("RejectScript"), "total_block_cost" -> num(403))
@@ -519,7 +533,7 @@ object EvaluatedValueOracle {
       "verdict" -> str("RejectScript"), "total_block_cost" -> num(403))
     check("rent_uncovered_fee_bad_output_reject_script",
       patch(rent, "storage_fee_factor" -> num(0)),
-      "verdict" -> str("RejectScript"), "eval_block_cost" -> num(50),
+      "verdict" -> str("RejectScript"), "eval_block_cost" -> num(0), "rent_block_cost" -> num(50),
       "crypto_block_cost" -> num(0), "total_block_cost" -> num(50))
     check("rent_fallback_low_limit_reject_cost",
       patch(rent, "ctx_ext_hex" -> str("017f0302"), "cost_limit_block" -> num(402)),
@@ -531,6 +545,24 @@ object EvaluatedValueOracle {
     require(lowExpression.hcursor.get[String]("verdict") == Right("RejectCost"))
     require(lowExpression.hcursor.get[Long]("total_block_cost").exists(_ > 0))
     count += 2
+    val deserializeTree = treeSer.deserializeErgoTree(treeSer.serializeErgoTree(
+      ErgoTree.fromProposition(DeserializeContext(1.toByte, SSigmaProp))))
+    require(deserializeTree.hasDeserialize, "deserialize serialized tree must select substitution")
+    val deserialize = patch(request(deserializeTree), "init_cost_block" -> num(17),
+      "ctx_ext_hex" -> str(hex(ContextExtension.serializer.toBytes(extOf(
+        (1: Byte) -> ByteArrayConstant(ValueSerializer.serialize(
+          SigmaPropConstant(sigma.data.TrivialProp.TrueProp))))))))
+    // Pinned JVM observation: init=17, reduction=14 BC, total=31 BC.
+    // Internal cost is 315 JIT: limit=31 BC rejects before BC truncation; 32 accepts.
+    // These requests traverse serialized DeserializeContext substitution in verify.
+    for (limit <- Seq(30, 31, 32)) {
+      check("deserialize_context_nonzero_init_limit_" + limit + "_verdict",
+        patch(deserialize, "cost_limit_block" -> num(limit)),
+        "verdict" -> str(if (limit < 32) "RejectCost" else "Accept"),
+        "total_block_cost" -> num(31), "rent_block_cost" -> num(0),
+        "eval_block_cost" -> (if (limit < 32) unavailable else num(14)),
+        "crypto_block_cost" -> (if (limit < 32) unavailable else num(0)))
+    }
     println("verify self-test: " + count + " passed, 0 failed")
   }
 
