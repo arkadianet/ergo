@@ -347,6 +347,8 @@ fn crypto_constants_match_scala() {
             "{name}"
         );
     }
+    // Partial descriptor pins: chunk size and the threshold formula remain
+    // mapped to INTERP-crypto-threshold in the constant inventory.
     for (name, base, per_chunk) in [
         (
             "SigSerializer.ParsePolynomial",
@@ -505,17 +507,29 @@ fn constant_inventory_unaccounted_entries_fail() {
         "JitCost.MaxBlockCost",
         "JitCost.MaxValue",
         "JitCost.Scale",
-        "SigSerializer.EvaluatePolynomial",
         "SigSerializer.ParseChallenge_ProveDHT",
         "SigSerializer.ParseChallenge_ProveDlog",
-        "SigSerializer.ParsePolynomial",
     ]);
     let exclusions = assert_exclusions(&[
         ("JitCost.MinValue", "INTERP-jitcost-minvalue"),
         ("CErgoTreeEvaluator.DataBlockSize", "EVAL-datablocksize"),
     ]);
-    let mapped_open = BTreeSet::from(["Interpreter.CostPerByteDeserialized"]);
-    assert_open(&ledger(), "INTERP-embedded-script-deser");
+    let mapped_open = BTreeMap::from([
+        (
+            "Interpreter.CostPerByteDeserialized",
+            "INTERP-embedded-script-deser",
+        ),
+        ("SigSerializer.ParsePolynomial", "INTERP-crypto-threshold"),
+        (
+            "SigSerializer.EvaluatePolynomial",
+            "INTERP-crypto-threshold",
+        ),
+    ]);
+    let rows = ledger();
+    for id in mapped_open.values() {
+        assert_open(&rows, id);
+    }
+    let mapped_open: BTreeSet<_> = mapped_open.keys().copied().collect();
     let actual: BTreeSet<_> = json["constants"]
         .as_object()
         .unwrap()
