@@ -527,7 +527,15 @@ fn verify_fixture(path: &Path, fixture: Fixture, ledger: &Ledger) -> Result<bool
             }
             _ => false,
         };
-        let tracking = "test-vectors/ergo-sigma/cost-ledger/fixtures/eval/DIVERGENCES.md";
+        let tracking = if path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|family| family == "interpreter")
+        {
+            "test-vectors/ergo-sigma/cost-ledger/fixtures/interpreter/DIVERGENCES.md"
+        } else {
+            "test-vectors/ergo-sigma/cost-ledger/fixtures/eval/DIVERGENCES.md"
+        };
         ensure!(
             classified
                 && known.tracking == tracking
