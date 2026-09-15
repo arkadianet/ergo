@@ -1,4 +1,5 @@
 //> using scala 2.12
+//> using options -Xfatal-warnings
 //> using dep org.scorexfoundation::sigma-state:6.0.2
 //> using dep org.ergoplatform::ergo-wallet:6.0.2
 //> using dep io.circe::circe-core:0.13.0
@@ -45,7 +46,6 @@ object CostConstants {
         case DynamicCost => descriptor("Dynamic")
         case PowHitCostKind => descriptor("Dynamic").deepMerge(Json.obj(
           "class" -> str(PowHitCostKind.getClass.getName)))
-        case other => sys.error(s"Unrecognized cost kind: $other")
       }
     } catch {
       // This is the precise exception raised by Value.notSupportedError.

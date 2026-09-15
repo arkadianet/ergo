@@ -16,9 +16,21 @@ def require(condition, message):
         raise ValueError(message)
 
 
-def circe(value):
-    """Circe Printer.spaces2 uses spaced colons and inline empty arrays/objects."""
-    return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, separators=(",", " : "))
+def circe(value, depth=0):
+    """Match Circe Printer.spaces2, including multiline empty containers."""
+    indent = "  " * depth
+    child_indent = indent + "  "
+    if isinstance(value, dict):
+        entries = [json.dumps(key, ensure_ascii=False) + " : " + circe(value[key], depth + 1)
+                   for key in sorted(value)]
+        opening, closing = "{", "}"
+    elif isinstance(value, list):
+        entries = [circe(item, depth + 1) for item in value]
+        opening, closing = "[", "]"
+    else:
+        return json.dumps(value, ensure_ascii=False)
+    body = (child_indent + (",\n" + child_indent).join(entries) + "\n") if entries else ""
+    return opening + "\n" + body + indent + closing
 
 
 def main():
