@@ -33,7 +33,7 @@ struct Request {
     pre_header_hex: String,
     #[serde(default)]
     rent: Option<bool>,
-    storage_fee_factor: Option<i32>,
+    storage_fee_factor: Option<Value>,
 }
 
 fn decode<T>(
@@ -209,15 +209,18 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
     };
     let mut params = ergo_validation::context::ProtocolParams::mainnet_default();
     if rent {
-        params.storage_fee_factor = req
-            .storage_fee_factor
-            .context("storage_fee_factor required for rent")?;
+        params.storage_fee_factor = serde_json::from_value(
+            req.storage_fee_factor
+                .context("storage_fee_factor required for rent")?,
+        )
+        .context("storage_fee_factor must be an i32")?;
         ensure!(
             params.storage_fee_factor >= 0,
             "storage_fee_factor must be nonnegative"
         );
     }
-    let mut cost = CostAccumulator::new(JitCost::from_block_cost(req.cost_limit_block)?);
+    let limit = JitCost::from_block_cost(req.cost_limit_block)?;
+    let mut cost = CostAccumulator::new(limit);
     let baseline = JitCost::from_block_cost(req.init_cost_block)?;
     if let Err(e) = cost.add(baseline) {
         output["verdict"] = json!("RejectCost");
@@ -239,12 +242,7 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
             &tx, &inputs, &data, &message, &mut cx, index, &tree,
         )
         .map(|()| true)
-        .map_err(|error| {
-            (
-                cost.total_block_cost() > req.cost_limit_block,
-                error.to_string(),
-            )
-        })
+        .map_err(|error| (cost.total() > limit, error.to_string()))
     } else {
         ergo_sigma::reduce::verify_spending_proof_with_context_and_cost(
             &tree, &proof, &message, &ctx, &mut cost,
@@ -448,6 +446,37 @@ mod tests {
     }
 
     // ----- oracle parity -----
+
+    #[test]
+    fn verify_rent_fallback_fractional_overrun_reject_cost() {
+        let cases: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../test-vectors/ergo-sigma/verify/fix-cases.json"
+        ))
+        .unwrap();
+        let case = &cases[0];
+        assert_eq!(case["name"], "rent-fallback-fractional-overrun");
+        assert_eq!(case["expected"]["verdict"], "RejectCost");
+        assert_eq!(
+            comparable(&actual(&case["request"]).to_string()),
+            comparable(&case["expected"].to_string())
+        );
+    }
+
+    #[test]
+    fn verify_storage_fee_factor_conditional_validation_matches_jvm() {
+        let cases: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../test-vectors/ergo-sigma/verify/fix-cases.json"
+        ))
+        .unwrap();
+        for case in &cases[1..] {
+            assert_eq!(
+                comparable(&actual(&case["request"]).to_string()),
+                comparable(&case["expected"].to_string()),
+                "{}",
+                case["name"]
+            );
+        }
+    }
 
     #[test]
     fn verify_rent_jvm_fixtures_block_costs_match() {
