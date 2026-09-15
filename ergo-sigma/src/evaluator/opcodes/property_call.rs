@@ -28,6 +28,398 @@ use super::super::eval_ctx::EvalCtx;
 use super::super::helpers::{coll_elem_type, collection_to_values, resolve_box};
 use super::super::types::{BoxSource, EvalError, ReductionContext, Value, SECP256K1_GENERATOR};
 
+/// No-argument method prices shared by charging sites and the L1 inventory.
+pub fn no_arg_cost_rows() -> Vec<((u8, u8), &'static str, CostKind)> {
+    vec![
+        (
+            (101, 1),
+            "dataInputs",
+            CostKind::Fixed(JitCost::from_jit(COST_CONTEXT_DATA_INPUTS)),
+        ),
+        (
+            (101, 2),
+            "headers",
+            CostKind::Fixed(JitCost::from_jit(COST_CONTEXT_HEADERS)),
+        ),
+        (
+            (101, 3),
+            "preHeader",
+            CostKind::Fixed(JitCost::from_jit(COST_CONTEXT_PRE_HEADER)),
+        ),
+        (
+            (101, 8),
+            "selfBoxIndex",
+            CostKind::Fixed(JitCost::from_jit(COST_CONTEXT_SELF_BOX_INDEX)),
+        ),
+        (
+            (101, 9),
+            "LastBlockUtxoRootHash",
+            CostKind::Fixed(JitCost::from_jit(COST_CONTEXT_LAST_BLOCK_UTXO_ROOT_HASH)),
+        ),
+        (
+            (101, 10),
+            "minerPubKey",
+            CostKind::Fixed(JitCost::from_jit(COST_CONTEXT_MINER_PUB_KEY)),
+        ),
+        (
+            (104, 1),
+            "id",
+            CostKind::Fixed(JitCost::from_jit(COST_HEADER_PROPERTIES)),
+        ),
+        (
+            (104, 2),
+            "version",
+            CostKind::Fixed(JitCost::from_jit(COST_HEADER_PROPERTIES)),
+        ),
+        (
+            (104, 3),
+            "parentId",
+            CostKind::Fixed(JitCost::from_jit(COST_HEADER_PROPERTIES)),
+        ),
+        (
+            (104, 4),
+            "ADProofsRoot",
+            CostKind::Fixed(JitCost::from_jit(COST_HEADER_PROPERTIES)),
+        ),
+        (
+            (104, 5),
+            "stateRoot",
+            CostKind::Fixed(JitCost::from_jit(COST_HEADER_PROPERTIES)),
+        ),
+        (
+            (104, 6),
+            "transactionsRoot",
+            CostKind::Fixed(JitCost::from_jit(COST_HEADER_PROPERTIES)),
+        ),
+        (
+            (104, 7),
+            "timestamp",
+            CostKind::Fixed(JitCost::from_jit(COST_HEADER_PROPERTIES)),
+        ),
+        (
+            (104, 8),
+            "nBits",
+            CostKind::Fixed(JitCost::from_jit(COST_HEADER_PROPERTIES)),
+        ),
+        (
+            (104, 9),
+            "height",
+            CostKind::Fixed(JitCost::from_jit(COST_HEADER_PROPERTIES)),
+        ),
+        (
+            (104, 10),
+            "extensionRoot",
+            CostKind::Fixed(JitCost::from_jit(COST_HEADER_PROPERTIES)),
+        ),
+        (
+            (104, 11),
+            "minerPk",
+            CostKind::Fixed(JitCost::from_jit(COST_HEADER_PROPERTIES)),
+        ),
+        (
+            (104, 12),
+            "powOnetimePk",
+            CostKind::Fixed(JitCost::from_jit(COST_HEADER_PROPERTIES)),
+        ),
+        (
+            (104, 13),
+            "powNonce",
+            CostKind::Fixed(JitCost::from_jit(COST_HEADER_PROPERTIES)),
+        ),
+        (
+            (104, 14),
+            "powDistance",
+            CostKind::Fixed(JitCost::from_jit(COST_HEADER_PROPERTIES)),
+        ),
+        (
+            (104, 15),
+            "votes",
+            CostKind::Fixed(JitCost::from_jit(COST_HEADER_PROPERTIES)),
+        ),
+        (
+            (104, 16),
+            "checkPow",
+            CostKind::Fixed(JitCost::from_jit(COST_HEADER_CHECK_POW)),
+        ),
+        (
+            (105, 1),
+            "version",
+            CostKind::Fixed(JitCost::from_jit(COST_PRE_HEADER_VERSION)),
+        ),
+        (
+            (105, 2),
+            "parentId",
+            CostKind::Fixed(JitCost::from_jit(COST_PRE_HEADER_PARENT_ID)),
+        ),
+        (
+            (105, 3),
+            "timestamp",
+            CostKind::Fixed(JitCost::from_jit(COST_PRE_HEADER_TIMESTAMP)),
+        ),
+        (
+            (105, 4),
+            "nBits",
+            CostKind::Fixed(JitCost::from_jit(COST_PRE_HEADER_N_BITS)),
+        ),
+        (
+            (105, 5),
+            "height",
+            CostKind::Fixed(JitCost::from_jit(COST_PRE_HEADER_HEIGHT)),
+        ),
+        (
+            (105, 6),
+            "minerPk",
+            CostKind::Fixed(JitCost::from_jit(COST_PRE_HEADER_MINER_PK)),
+        ),
+        (
+            (105, 7),
+            "votes",
+            CostKind::Fixed(JitCost::from_jit(COST_PRE_HEADER_VOTES)),
+        ),
+        (
+            (106, 1),
+            "groupGenerator",
+            CostKind::Fixed(JitCost::from_jit(COST_GLOBAL_GROUP_GENERATOR)),
+        ),
+        (
+            (106, 10),
+            "none",
+            CostKind::Fixed(JitCost::from_jit(COST_GLOBAL_NONE)),
+        ),
+        (
+            (99, 1),
+            "value",
+            CostKind::Fixed(JitCost::from_jit(COST_BOX_VALUE)),
+        ),
+        (
+            (99, 2),
+            "propositionBytes",
+            CostKind::Fixed(JitCost::from_jit(COST_BOX_PROPOSITION_BYTES)),
+        ),
+        (
+            (99, 3),
+            "bytes",
+            CostKind::Fixed(JitCost::from_jit(COST_BOX_BYTES)),
+        ),
+        (
+            (99, 4),
+            "bytesWithoutRef",
+            CostKind::Fixed(JitCost::from_jit(COST_BOX_BYTES_WITHOUT_REF)),
+        ),
+        (
+            (99, 5),
+            "id",
+            CostKind::Fixed(JitCost::from_jit(COST_BOX_ID)),
+        ),
+        (
+            (99, 6),
+            "creationInfo",
+            CostKind::Fixed(JitCost::from_jit(COST_BOX_CREATION_INFO)),
+        ),
+        (
+            (99, 8),
+            "tokens",
+            CostKind::Fixed(JitCost::from_jit(COST_BOX_TOKENS)),
+        ),
+        (
+            (100, 1),
+            "digest",
+            CostKind::Fixed(JitCost::from_jit(COST_AVL_DIGEST)),
+        ),
+        (
+            (100, 2),
+            "enabledOperations",
+            CostKind::Fixed(JitCost::from_jit(COST_AVL_ENABLED_OPERATIONS)),
+        ),
+        (
+            (100, 3),
+            "keyLength",
+            CostKind::Fixed(JitCost::from_jit(COST_AVL_KEY_LENGTH)),
+        ),
+        (
+            (100, 4),
+            "valueLengthOpt",
+            CostKind::Fixed(JitCost::from_jit(COST_AVL_VALUE_LENGTH_OPT)),
+        ),
+        (
+            (100, 5),
+            "isInsertAllowed",
+            CostKind::Fixed(JitCost::from_jit(COST_AVL_IS_INSERT_ALLOWED)),
+        ),
+        (
+            (100, 6),
+            "isUpdateAllowed",
+            CostKind::Fixed(JitCost::from_jit(COST_AVL_IS_UPDATE_ALLOWED)),
+        ),
+        (
+            (100, 7),
+            "isRemoveAllowed",
+            CostKind::Fixed(JitCost::from_jit(COST_AVL_IS_REMOVE_ALLOWED)),
+        ),
+        (
+            (7, 2),
+            "getEncoded",
+            CostKind::Fixed(JitCost::from_jit(COST_GROUP_ELEMENT_GET_ENCODED)),
+        ),
+        (
+            (7, 5),
+            "negate",
+            CostKind::Fixed(JitCost::from_jit(COST_GROUP_ELEMENT_NEGATE)),
+        ),
+        (
+            (2, 6),
+            "toBytes",
+            CostKind::Fixed(JitCost::from_jit(COST_NUMERIC_TO_BYTES_TO_BITS)),
+        ),
+        (
+            (2, 7),
+            "toBits",
+            CostKind::Fixed(JitCost::from_jit(COST_NUMERIC_TO_BYTES_TO_BITS)),
+        ),
+        (
+            (3, 6),
+            "toBytes",
+            CostKind::Fixed(JitCost::from_jit(COST_NUMERIC_TO_BYTES_TO_BITS)),
+        ),
+        (
+            (3, 7),
+            "toBits",
+            CostKind::Fixed(JitCost::from_jit(COST_NUMERIC_TO_BYTES_TO_BITS)),
+        ),
+        (
+            (4, 6),
+            "toBytes",
+            CostKind::Fixed(JitCost::from_jit(COST_NUMERIC_TO_BYTES_TO_BITS)),
+        ),
+        (
+            (4, 7),
+            "toBits",
+            CostKind::Fixed(JitCost::from_jit(COST_NUMERIC_TO_BYTES_TO_BITS)),
+        ),
+        (
+            (5, 6),
+            "toBytes",
+            CostKind::Fixed(JitCost::from_jit(COST_NUMERIC_TO_BYTES_TO_BITS)),
+        ),
+        (
+            (5, 7),
+            "toBits",
+            CostKind::Fixed(JitCost::from_jit(COST_NUMERIC_TO_BYTES_TO_BITS)),
+        ),
+        (
+            (6, 6),
+            "toBytes",
+            CostKind::Fixed(JitCost::from_jit(COST_NUMERIC_TO_BYTES_TO_BITS)),
+        ),
+        (
+            (6, 7),
+            "toBits",
+            CostKind::Fixed(JitCost::from_jit(COST_NUMERIC_TO_BYTES_TO_BITS)),
+        ),
+        (
+            (9, 6),
+            "toBytes",
+            CostKind::Fixed(JitCost::from_jit(COST_NUMERIC_TO_BYTES_TO_BITS)),
+        ),
+        (
+            (9, 7),
+            "toBits",
+            CostKind::Fixed(JitCost::from_jit(COST_NUMERIC_TO_BYTES_TO_BITS)),
+        ),
+        (
+            (2, 8),
+            "bitwiseInverse",
+            CostKind::Fixed(JitCost::from_jit(COST_NUMERIC_BITWISE_INVERSE)),
+        ),
+        (
+            (3, 8),
+            "bitwiseInverse",
+            CostKind::Fixed(JitCost::from_jit(COST_NUMERIC_BITWISE_INVERSE)),
+        ),
+        (
+            (4, 8),
+            "bitwiseInverse",
+            CostKind::Fixed(JitCost::from_jit(COST_NUMERIC_BITWISE_INVERSE)),
+        ),
+        (
+            (5, 8),
+            "bitwiseInverse",
+            CostKind::Fixed(JitCost::from_jit(COST_NUMERIC_BITWISE_INVERSE)),
+        ),
+        (
+            (6, 8),
+            "bitwiseInverse",
+            CostKind::Fixed(JitCost::from_jit(COST_NUMERIC_BITWISE_INVERSE)),
+        ),
+        (
+            (9, 8),
+            "bitwiseInverse",
+            CostKind::Fixed(JitCost::from_jit(COST_UNSIGNED_BIGINT_BITWISE_INVERSE)),
+        ),
+        (
+            (6, 14),
+            "toUnsigned",
+            CostKind::Fixed(JitCost::from_jit(COST_BIGINT_TO_UNSIGNED)),
+        ),
+        (
+            (9, 19),
+            "toSigned",
+            CostKind::Fixed(JitCost::from_jit(COST_UNSIGNED_BIGINT_TO_SIGNED)),
+        ),
+        ((12, 14), "indices", COST_INDICES),
+        ((12, 30), "reverse", COST_REVERSE),
+    ]
+}
+
+pub const COST_CONTEXT_DATA_INPUTS: u64 = 15;
+pub const COST_CONTEXT_HEADERS: u64 = 15;
+pub const COST_CONTEXT_PRE_HEADER: u64 = 15;
+pub const COST_CONTEXT_SELF_BOX_INDEX: u64 = 20;
+pub const COST_CONTEXT_LAST_BLOCK_UTXO_ROOT_HASH: u64 = 15;
+pub const COST_CONTEXT_MINER_PUB_KEY: u64 = 20;
+pub const COST_HEADER_PROPERTIES: u64 = 10;
+pub const COST_HEADER_CHECK_POW: u64 = 700;
+pub const COST_PRE_HEADER_VERSION: u64 = 10;
+pub const COST_PRE_HEADER_PARENT_ID: u64 = 10;
+pub const COST_PRE_HEADER_TIMESTAMP: u64 = 10;
+pub const COST_PRE_HEADER_N_BITS: u64 = 10;
+pub const COST_PRE_HEADER_HEIGHT: u64 = 10;
+pub const COST_PRE_HEADER_MINER_PK: u64 = 10;
+pub const COST_PRE_HEADER_VOTES: u64 = 10;
+pub const COST_GLOBAL_GROUP_GENERATOR: u64 = 10;
+pub const COST_GLOBAL_NONE: u64 = 5;
+pub const COST_BOX_VALUE: u64 = 8;
+pub const COST_BOX_PROPOSITION_BYTES: u64 = 10;
+pub const COST_BOX_BYTES: u64 = 12;
+pub const COST_BOX_BYTES_WITHOUT_REF: u64 = 12;
+pub const COST_BOX_ID: u64 = 12;
+pub const COST_BOX_CREATION_INFO: u64 = 16;
+pub const COST_BOX_TOKENS: u64 = 15;
+pub const COST_AVL_DIGEST: u64 = 15;
+pub const COST_AVL_ENABLED_OPERATIONS: u64 = 15;
+pub const COST_AVL_KEY_LENGTH: u64 = 15;
+pub const COST_AVL_VALUE_LENGTH_OPT: u64 = 15;
+pub const COST_AVL_IS_INSERT_ALLOWED: u64 = 15;
+pub const COST_AVL_IS_UPDATE_ALLOWED: u64 = 15;
+pub const COST_AVL_IS_REMOVE_ALLOWED: u64 = 15;
+pub const COST_GROUP_ELEMENT_GET_ENCODED: u64 = 250;
+pub const COST_GROUP_ELEMENT_NEGATE: u64 = 45;
+pub const COST_NUMERIC_TO_BYTES_TO_BITS: u64 = 5;
+pub const COST_NUMERIC_BITWISE_INVERSE: u64 = 5;
+pub const COST_UNSIGNED_BIGINT_BITWISE_INVERSE: u64 = 5;
+pub const COST_BIGINT_TO_UNSIGNED: u64 = 5;
+pub const COST_UNSIGNED_BIGINT_TO_SIGNED: u64 = 10;
+pub const COST_INDICES: CostKind = CostKind::PerItem {
+    base: JitCost::from_jit(20),
+    per_chunk: JitCost::from_jit(2),
+    chunk_size: 16,
+};
+pub const COST_REVERSE: CostKind = CostKind::PerItem {
+    base: JitCost::from_jit(20),
+    per_chunk: JitCost::from_jit(2),
+    chunk_size: 100,
+};
+
 /// Entry point for `0xDB PropertyCall`.
 pub(in crate::evaluator) fn eval_property_call(
     type_id: u8,
@@ -75,24 +467,24 @@ pub(super) fn eval_no_arg_method(
     match (type_id, method_id) {
         // SContext(101).dataInputs(1) -> Coll[Box]            cost: 15
         (101, 1) => {
-            add_method_cost(cost, 15)?;
+            add_method_cost(cost, COST_CONTEXT_DATA_INPUTS)?;
             Ok(Some(Value::BoxCollection(BoxSource::DataInputs)))
         }
         // SContext(101).headers(2) -> Coll[Header]            cost: 15
         (101, 2) => {
-            add_method_cost(cost, 15)?;
+            add_method_cost(cost, COST_CONTEXT_HEADERS)?;
             Ok(Some(Value::CollHeader(ctx.last_headers.to_vec())))
         }
         // SContext(101).preHeader(3) -> PreHeader             cost: 15
         (101, 3) => {
-            add_method_cost(cost, 15)?;
+            add_method_cost(cost, COST_CONTEXT_PRE_HEADER)?;
             Ok(Some(Value::PreHeader))
         }
         // SContext(101).selfBoxIndex(8) -> Int                cost: 20
         // Pre-JIT (activatedVersion < 2) always returns -1
         // (sigmastate-interpreter#603, preserved as consensus).
         (101, 8) => {
-            add_method_cost(cost, 20)?;
+            add_method_cost(cost, COST_CONTEXT_SELF_BOX_INDEX)?;
             if ctx.activated_script_version < 2 {
                 Ok(Some(Value::Int(-1)))
             } else {
@@ -109,7 +501,7 @@ pub(super) fn eval_no_arg_method(
         // (values.scala:1495). Emitted as a 0xDB PropertyCall, so it belongs in
         // the no-arg table; mirrors the inline 0xA6 LastBlockUtxoRootHash arm.
         (101, 9) => {
-            add_method_cost(cost, 15)?;
+            add_method_cost(cost, COST_CONTEXT_LAST_BLOCK_UTXO_ROOT_HASH)?;
             let avl = ctx
                 .last_block_utxo_root
                 .clone()
@@ -118,12 +510,12 @@ pub(super) fn eval_no_arg_method(
         }
         // SContext(101).minerPubKey(10) -> Coll[Byte]         cost: 20
         (101, 10) => {
-            add_method_cost(cost, 20)?;
+            add_method_cost(cost, COST_CONTEXT_MINER_PUB_KEY)?;
             Ok(Some(Value::CollBytes(ctx.miner_pubkey.to_vec())))
         }
         // SHeader(104) property methods 1-15                  cost: 10
         (104, mid @ 1..=15) => {
-            add_method_cost(cost, 10)?;
+            add_method_cost(cost, COST_HEADER_PROPERTIES)?;
             let h = match obj_val {
                 Value::Header(h) => h,
                 other => {
@@ -184,7 +576,7 @@ pub(super) fn eval_no_arg_method(
         // above, so no match-order hazard). The v6 soft-fork gate is applied by
         // the dispatcher before this point.
         (104, 16) => {
-            add_method_cost(cost, 700)?;
+            add_method_cost(cost, COST_HEADER_CHECK_POW)?;
             let eh = match obj_val {
                 Value::Header(h) => h,
                 other => {
@@ -201,36 +593,36 @@ pub(super) fn eval_no_arg_method(
         }
         // SPreHeader(105) property methods 1-7                cost: 10
         (105, 1) => {
-            add_method_cost(cost, 10)?;
+            add_method_cost(cost, COST_PRE_HEADER_VERSION)?;
             Ok(Some(Value::Byte(ctx.pre_header_version as i8)))
         }
         (105, 2) => {
-            add_method_cost(cost, 10)?;
+            add_method_cost(cost, COST_PRE_HEADER_PARENT_ID)?;
             Ok(Some(Value::CollBytes(ctx.pre_header_parent_id.to_vec())))
         }
         (105, 3) => {
-            add_method_cost(cost, 10)?;
+            add_method_cost(cost, COST_PRE_HEADER_TIMESTAMP)?;
             Ok(Some(Value::Long(ctx.pre_header_timestamp as i64)))
         }
         (105, 4) => {
-            add_method_cost(cost, 10)?;
+            add_method_cost(cost, COST_PRE_HEADER_N_BITS)?;
             Ok(Some(Value::Long(ctx.pre_header_n_bits as i64)))
         }
         (105, 5) => {
-            add_method_cost(cost, 10)?;
+            add_method_cost(cost, COST_PRE_HEADER_HEIGHT)?;
             Ok(Some(Value::Int(ctx.height as i32)))
         }
         (105, 6) => {
-            add_method_cost(cost, 10)?;
+            add_method_cost(cost, COST_PRE_HEADER_MINER_PK)?;
             Ok(Some(Value::GroupElement(ctx.miner_pubkey)))
         }
         (105, 7) => {
-            add_method_cost(cost, 10)?;
+            add_method_cost(cost, COST_PRE_HEADER_VOTES)?;
             Ok(Some(Value::CollBytes(ctx.pre_header_votes.to_vec())))
         }
         // SGlobal(106).groupGenerator(1) -> GroupElement      cost: 10
         (106, 1) => {
-            add_method_cost(cost, 10)?;
+            add_method_cost(cost, COST_GLOBAL_GROUP_GENERATOR)?;
             Ok(Some(Value::GroupElement(SECP256K1_GENERATOR)))
         }
         // SGlobal(106).none(10)[T] -> Option[T]               cost: 5
@@ -242,7 +634,7 @@ pub(super) fn eval_no_arg_method(
         // type-erased, so it is not needed here. The soft-fork gate is
         // applied in eval_property_call (this is a v6 method).
         (106, 10) => {
-            add_method_cost(cost, 5)?;
+            add_method_cost(cost, COST_GLOBAL_NONE)?;
             Ok(Some(Value::Opt(None)))
         }
         // SBox(99) accessor method-forms 1..6 — the PropertyCall twins of the
@@ -253,25 +645,25 @@ pub(super) fn eval_no_arg_method(
         // re-evaluate the receiver and double-charge it.
         // SBox(99).value(1) -> Long                            cost: 8 (ExtractAmount)
         (99, 1) => {
-            add_method_cost(cost, 8)?;
+            add_method_cost(cost, COST_BOX_VALUE)?;
             let b = resolve_box(obj_val, ctx)?;
             Ok(Some(Value::Long(b.value)))
         }
         // SBox(99).propositionBytes(2) -> Coll[Byte]           cost: 10 (ExtractScriptBytes)
         (99, 2) => {
-            add_method_cost(cost, 10)?;
+            add_method_cost(cost, COST_BOX_PROPOSITION_BYTES)?;
             let b = resolve_box(obj_val, ctx)?;
             Ok(Some(Value::CollBytes(b.script_bytes.clone())))
         }
         // SBox(99).bytes(3) -> Coll[Byte] (retained)           cost: 12 (ExtractBytes)
         (99, 3) => {
-            add_method_cost(cost, 12)?;
+            add_method_cost(cost, COST_BOX_BYTES)?;
             let b = resolve_box(obj_val, ctx)?;
             Ok(Some(Value::CollBytes(b.raw_bytes.clone())))
         }
         // SBox(99).bytesWithoutRef(4) -> Coll[Byte] (canonical) cost: 12 (ExtractBytesWithNoRef)
         (99, 4) => {
-            add_method_cost(cost, 12)?;
+            add_method_cost(cost, COST_BOX_BYTES_WITHOUT_REF)?;
             let b = resolve_box(obj_val, ctx)?;
             Ok(Some(Value::CollBytes(
                 super::box_context::box_candidate_bytes_canonical(b)?,
@@ -279,14 +671,14 @@ pub(super) fn eval_no_arg_method(
         }
         // SBox(99).id(5) -> Coll[Byte]                         cost: 12 (ExtractId)
         (99, 5) => {
-            add_method_cost(cost, 12)?;
+            add_method_cost(cost, COST_BOX_ID)?;
             let b = resolve_box(obj_val, ctx)?;
             Ok(Some(Value::CollBytes(b.id.to_vec())))
         }
         // SBox(99).creationInfo(6) -> (Int, Coll[Byte])        cost: 16 (ExtractCreationInfo)
         // 34-byte ref = 32-byte txId ++ 2-byte big-endian output index.
         (99, 6) => {
-            add_method_cost(cost, 16)?;
+            add_method_cost(cost, COST_BOX_CREATION_INFO)?;
             let b = resolve_box(obj_val, ctx)?;
             let mut ref_bytes = Vec::with_capacity(34);
             ref_bytes.extend_from_slice(&b.transaction_id);
@@ -298,13 +690,13 @@ pub(super) fn eval_no_arg_method(
         }
         // SBox(99).tokens(8) -> Coll[(Coll[Byte], Long)]      cost: 15
         (99, 8) => {
-            add_method_cost(cost, 15)?;
+            add_method_cost(cost, COST_BOX_TOKENS)?;
             let b = resolve_box(obj_val, ctx)?;
             Ok(Some(Value::Tokens(b.tokens.clone())))
         }
         // SAvlTree(100) no-arg properties                     cost: 15
         (100, 1) => {
-            add_method_cost(cost, 15)?;
+            add_method_cost(cost, COST_AVL_DIGEST)?;
             match obj_val {
                 Value::AvlTree(avl) => Ok(Some(Value::CollBytes(avl.digest.clone()))),
                 other => Err(EvalError::TypeError {
@@ -314,7 +706,7 @@ pub(super) fn eval_no_arg_method(
             }
         }
         (100, 2) => {
-            add_method_cost(cost, 15)?;
+            add_method_cost(cost, COST_AVL_ENABLED_OPERATIONS)?;
             match obj_val {
                 Value::AvlTree(avl) => {
                     let flags = (if avl.insert_allowed { 1u8 } else { 0 })
@@ -330,7 +722,7 @@ pub(super) fn eval_no_arg_method(
             }
         }
         (100, 3) => {
-            add_method_cost(cost, 15)?;
+            add_method_cost(cost, COST_AVL_KEY_LENGTH)?;
             match obj_val {
                 // key_length is i32 (Scala keyLength: Int): a wrapped-negative
                 // length surfaces as a negative SInt here, matching the
@@ -343,7 +735,7 @@ pub(super) fn eval_no_arg_method(
             }
         }
         (100, 4) => {
-            add_method_cost(cost, 15)?;
+            add_method_cost(cost, COST_AVL_VALUE_LENGTH_OPT)?;
             match obj_val {
                 Value::AvlTree(avl) => Ok(Some(Value::Opt(
                     avl.value_length_opt.map(|v| Box::new(Value::Int(v))),
@@ -358,7 +750,7 @@ pub(super) fn eval_no_arg_method(
         // -> Boolean, FixedCost(JitCost(15)). Zero-arg flag accessors over the
         // enabledOperations bits (Scala SAvlTreeMethods, V5+/ungated).
         (100, 5) => {
-            add_method_cost(cost, 15)?;
+            add_method_cost(cost, COST_AVL_IS_INSERT_ALLOWED)?;
             match obj_val {
                 Value::AvlTree(avl) => Ok(Some(Value::Bool(avl.insert_allowed))),
                 other => Err(EvalError::TypeError {
@@ -368,7 +760,7 @@ pub(super) fn eval_no_arg_method(
             }
         }
         (100, 6) => {
-            add_method_cost(cost, 15)?;
+            add_method_cost(cost, COST_AVL_IS_UPDATE_ALLOWED)?;
             match obj_val {
                 Value::AvlTree(avl) => Ok(Some(Value::Bool(avl.update_allowed))),
                 other => Err(EvalError::TypeError {
@@ -378,7 +770,7 @@ pub(super) fn eval_no_arg_method(
             }
         }
         (100, 7) => {
-            add_method_cost(cost, 15)?;
+            add_method_cost(cost, COST_AVL_IS_REMOVE_ALLOWED)?;
             match obj_val {
                 Value::AvlTree(avl) => Ok(Some(Value::Bool(avl.remove_allowed))),
                 other => Err(EvalError::TypeError {
@@ -393,12 +785,7 @@ pub(super) fn eval_no_arg_method(
         // flat 20): chunks(n) = (n-1)/16+1, so cost(n<=16)=22, (17..=32)=24, …
         (12, 14) => {
             let len = collection_len(obj_val, ctx);
-            let delta = CostKind::PerItem {
-                base: JitCost::from_jit(20),
-                per_chunk: JitCost::from_jit(2),
-                chunk_size: 16,
-            }
-            .compute(len as u32)?;
+            let delta = COST_INDICES.compute(len as u32)?;
             cost.add(delta)?;
             #[cfg(feature = "cost-trace")]
             crate::cost_trace::record(
@@ -411,7 +798,7 @@ pub(super) fn eval_no_arg_method(
         // SGroupElement(7).getEncoded(2) -> Coll[Byte]
         // Scala SGroupElement.GetEncodedMethod.costKind = FixedCost(JitCost(250)).
         (7, 2) => {
-            add_method_cost(cost, 250)?;
+            add_method_cost(cost, COST_GROUP_ELEMENT_GET_ENCODED)?;
             match obj_val {
                 Value::GroupElement(bytes) => Ok(Some(Value::CollBytes(bytes.to_vec()))),
                 _ => Err(EvalError::TypeError {
@@ -424,7 +811,7 @@ pub(super) fn eval_no_arg_method(
         // Scala SGroupElement.NegateMethod.costKind = FixedCost(JitCost(45)).
         // Compressed SEC1 negation flips the prefix byte (02↔03).
         (7, 5) => {
-            add_method_cost(cost, 45)?;
+            add_method_cost(cost, COST_GROUP_ELEMENT_NEGATE)?;
             match obj_val {
                 Value::GroupElement(bytes) => {
                     let mut negated = *bytes;
@@ -461,7 +848,7 @@ pub(super) fn eval_no_arg_method(
         // receiver type is itself v6-only, so these arms are not
         // reachable pre-v6 through any constructible value.
         (2..=6, 6 | 7) | (9, 6 | 7) => {
-            add_method_cost(cost, 5)?;
+            add_method_cost(cost, COST_NUMERIC_TO_BYTES_TO_BITS)?;
             let bytes = numeric_big_endian_bytes(obj_val)?;
             Ok(Some(if method_id == 6 {
                 Value::CollBytes(bytes)
@@ -475,7 +862,7 @@ pub(super) fn eval_no_arg_method(
         // shared no-arg table (it was previously only in eval_method_call's
         // args-arms and thus unreachable via PropertyCall).
         (2..=6, 8) => {
-            add_method_cost(cost, 5)?;
+            add_method_cost(cost, COST_NUMERIC_BITWISE_INVERSE)?;
             match obj_val {
                 Value::Byte(n) => Ok(Some(Value::Byte(!n))),
                 Value::Short(n) => Ok(Some(Value::Short(!n))),
@@ -491,7 +878,7 @@ pub(super) fn eval_no_arg_method(
         // SUnsignedBigInt.bitwiseInverse(8) -> (2^256 - 1) XOR n (masked
         // complement in the unsigned 256-bit domain). Zero-arg, FixedCost(5).
         (9, 8) => {
-            add_method_cost(cost, 5)?;
+            add_method_cost(cost, COST_UNSIGNED_BIGINT_BITWISE_INVERSE)?;
             match obj_val {
                 Value::UnsignedBigInt(n) => {
                     let mask =
@@ -508,7 +895,7 @@ pub(super) fn eval_no_arg_method(
         // Errors if the receiver is negative (the unsigned type can't represent
         // it). The compiler emits this as 0xDB PropertyCall.
         (6, 14) => {
-            add_method_cost(cost, 5)?;
+            add_method_cost(cost, COST_BIGINT_TO_UNSIGNED)?;
             match obj_val {
                 Value::BigInt(n) => {
                     if n.sign() == num_bigint::Sign::Minus {
@@ -528,7 +915,7 @@ pub(super) fn eval_no_arg_method(
         // SUnsignedBigInt.toSigned(19) -> BigInt. Zero-arg, FixedCost(10).
         // Errors if the value would not fit signed 256-bit (>= 2^255).
         (9, 19) => {
-            add_method_cost(cost, 10)?;
+            add_method_cost(cost, COST_UNSIGNED_BIGINT_TO_SIGNED)?;
             match obj_val {
                 Value::UnsignedBigInt(a) => {
                     let two_pow_255 = num_bigint::BigInt::from(1) << 255;
@@ -550,11 +937,7 @@ pub(super) fn eval_no_arg_method(
         // PropertyCall, so it lives in the shared no-arg table.
         (12, 30) => {
             let n = collection_len(obj_val, ctx) as u32;
-            let reverse_cost = CostKind::PerItem {
-                base: JitCost::from_jit(20),
-                per_chunk: JitCost::from_jit(2),
-                chunk_size: 100,
-            };
+            let reverse_cost = COST_REVERSE;
             cost.add(reverse_cost.compute(n)?)?;
             let reversed = match obj_val.clone() {
                 Value::CollBytes(mut v) => {

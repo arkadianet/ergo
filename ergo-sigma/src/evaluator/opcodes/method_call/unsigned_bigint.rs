@@ -3,6 +3,15 @@
 //! original file, lifted whole. `expect_unsigned_bigint` is shared with the
 //! `numeric` sibling (`SBigInt.toUnsignedMod`), so it is `pub(super)`.
 
+pub const COST_BITWISE: u64 = 5;
+pub const COST_SHIFT_LEFT: u64 = 5;
+pub const COST_SHIFT_RIGHT: u64 = 5;
+pub const COST_MOD_INVERSE: u64 = 150;
+pub const COST_PLUS_MOD: u64 = 30;
+pub const COST_SUBTRACT_MOD: u64 = 30;
+pub const COST_MULTIPLY_MOD: u64 = 40;
+pub const COST_MOD_OP: u64 = 20;
+
 use ergo_ser::opcode::Expr;
 use num_integer::Integer;
 use num_traits::One;
@@ -37,7 +46,7 @@ pub(super) fn bitwise(
     let a = expect_unsigned_bigint(&obj_val, "SUnsignedBigInt bitwise receiver")?.clone();
     let b_val = cx.eval_expr(&args[0])?;
     let b = expect_unsigned_bigint(&b_val, "SUnsignedBigInt bitwise operand")?;
-    add_method_cost(cx.cost, 5)?;
+    add_method_cost(cx.cost, COST_BITWISE)?;
     // Inputs are in [0, 2^256); or/and/xor stay in range (no mask).
     let r = match method_id {
         9 => a | b,
@@ -63,7 +72,7 @@ pub(super) fn shift_left(
             })
         }
     };
-    add_method_cost(cx.cost, 5)?;
+    add_method_cost(cx.cost, COST_SHIFT_LEFT)?;
     if !(0..256).contains(&bits) {
         return Err(EvalError::RuntimeException(
             "SUnsignedBigInt.shiftLeft: shift count out of range [0, 256)",
@@ -94,7 +103,7 @@ pub(super) fn shift_right(
             })
         }
     };
-    add_method_cost(cx.cost, 5)?;
+    add_method_cost(cx.cost, COST_SHIFT_RIGHT)?;
     if !(0..256).contains(&bits) {
         return Err(EvalError::RuntimeException(
             "SUnsignedBigInt.shiftRight: shift count out of range [0, 256)",
@@ -122,7 +131,7 @@ pub(super) fn mod_inverse(
     let a = expect_unsigned_bigint(&obj_val, "SUnsignedBigInt.modInverse receiver")?;
     let m_val = cx.eval_expr(&args[0])?;
     let m = expect_unsigned_bigint(&m_val, "SUnsignedBigInt.modInverse modulus")?;
-    add_method_cost(cx.cost, 150)?;
+    add_method_cost(cx.cost, COST_MOD_INVERSE)?;
     // Java's BigInteger.modInverse throws on a non-positive modulus;
     // guard m == 0 here so a crafted `modInverse(1, 0)` rejects the
     // transaction instead of panicking on `1 % 0` below.
@@ -160,7 +169,7 @@ pub(super) fn plus_mod(
     let b = expect_unsigned_bigint(&b_val, "SUnsignedBigInt.plusMod addend")?;
     let m_val = cx.eval_expr(&args[1])?;
     let m = expect_unsigned_bigint(&m_val, "SUnsignedBigInt.plusMod modulus")?;
-    add_method_cost(cx.cost, 30)?;
+    add_method_cost(cx.cost, COST_PLUS_MOD)?;
     if m.sign() == num_bigint::Sign::NoSign {
         return Err(EvalError::RuntimeException(
             "SUnsignedBigInt.plusMod: modulus is zero",
@@ -180,7 +189,7 @@ pub(super) fn subtract_mod(
     let b = expect_unsigned_bigint(&b_val, "SUnsignedBigInt.subtractMod subtrahend")?;
     let m_val = cx.eval_expr(&args[1])?;
     let m = expect_unsigned_bigint(&m_val, "SUnsignedBigInt.subtractMod modulus")?;
-    add_method_cost(cx.cost, 30)?;
+    add_method_cost(cx.cost, COST_SUBTRACT_MOD)?;
     if m.sign() == num_bigint::Sign::NoSign {
         return Err(EvalError::RuntimeException(
             "SUnsignedBigInt.subtractMod: modulus is zero",
@@ -209,7 +218,7 @@ pub(super) fn multiply_mod(
     let b = expect_unsigned_bigint(&b_val, "SUnsignedBigInt.multiplyMod multiplier")?;
     let m_val = cx.eval_expr(&args[1])?;
     let m = expect_unsigned_bigint(&m_val, "SUnsignedBigInt.multiplyMod modulus")?;
-    add_method_cost(cx.cost, 40)?;
+    add_method_cost(cx.cost, COST_MULTIPLY_MOD)?;
     if m.sign() == num_bigint::Sign::NoSign {
         return Err(EvalError::RuntimeException(
             "SUnsignedBigInt.multiplyMod: modulus is zero",
@@ -227,7 +236,7 @@ pub(super) fn mod_op(
     let a = expect_unsigned_bigint(&obj_val, "SUnsignedBigInt.mod receiver")?;
     let m_val = cx.eval_expr(&args[0])?;
     let m = expect_unsigned_bigint(&m_val, "SUnsignedBigInt.mod modulus")?;
-    add_method_cost(cx.cost, 20)?;
+    add_method_cost(cx.cost, COST_MOD_OP)?;
     if m.sign() == num_bigint::Sign::NoSign {
         return Err(EvalError::RuntimeException(
             "SUnsignedBigInt.mod: modulus is zero",

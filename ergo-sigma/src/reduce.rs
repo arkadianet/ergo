@@ -9,11 +9,11 @@ use thiserror::Error;
 
 /// Cost of evaluating a SigmaProp constant (trivial reduction path).
 /// Source: sigmastate-interpreter Interpreter.scala:533
-const EVAL_SIGMA_PROP_CONSTANT: JitCost = JitCost::from_jit(50);
+pub const EVAL_SIGMA_PROP_CONSTANT: JitCost = JitCost::from_jit(50);
 
 /// Scala `Interpreter.CostPerTreeByte` (`Interpreter.scala:88`) — the
 /// per-ergo-tree-byte cost of the deserialize-substitution pass.
-const COST_PER_TREE_BYTE: u64 = 2;
+pub const COST_PER_TREE_BYTE: u64 = 2;
 
 /// Scala `VersionContext.V6SoftForkVersion` (`VersionContext.scala:56`): the
 /// activated-script version at/after which `isV6Activated` is true. Our

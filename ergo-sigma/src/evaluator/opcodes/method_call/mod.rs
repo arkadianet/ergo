@@ -30,8 +30,8 @@ mod unsigned_bigint;
 // `serialize_put_cost` is exercised directly by the evaluator test-suite via
 // the path `crate::evaluator::opcodes::method_call::serialize_put_cost`; keep
 // that path stable by re-exporting it from its new home in `global`. The
-// re-export is consumed only under `cfg(test)`, hence the `allow`.
-#[allow(unused_imports)]
+// re-export is consumed only under `cfg(test)`.
+#[cfg(test)]
 pub(in crate::evaluator) use global::serialize_put_cost;
 
 pub(in crate::evaluator) fn eval_method_call(
@@ -203,4 +203,113 @@ pub(super) fn check_arity(args: &[Expr], expected: usize) -> Result<(), EvalErro
         });
     }
     Ok(())
+}
+
+/// Prices charged by argument-taking method handlers and the shared no-arg table.
+/// Methods lowered to opcodes and dynamic formulas are inventoried separately.
+pub fn method_cost_rows() -> Vec<((u8, u8), &'static str, ergo_primitives::cost::CostKind)> {
+    use ergo_primitives::cost::{CostKind, JitCost};
+    let fixed = |value| CostKind::Fixed(JitCost::from_jit(value));
+    let mut rows = super::property_call::no_arg_cost_rows();
+    rows.extend([
+        ((12, 26), "indexOf", coll::COST_INDEX_OF),
+        ((12, 29), "zip", coll::COST_ZIP),
+        ((12, 31), "startsWith", coll::COST_STARTS_ENDS_WITH),
+        ((12, 32), "endsWith", coll::COST_STARTS_ENDS_WITH),
+        ((12, 33), "get", fixed(coll::COST_GET)),
+        ((12, 15), "flatMap", coll::COST_FLAT_MAP),
+        ((12, 19), "patch", coll::COST_PATCH),
+        ((12, 20), "updated", coll::COST_UPDATED),
+        ((12, 21), "updateMany", coll::COST_UPDATE_MANY),
+        ((106, 6), "encodeNbits", fixed(global::COST_ENCODE_NBITS)),
+        ((106, 7), "decodeNbits", fixed(global::COST_DECODE_NBITS)),
+        ((106, 9), "some", fixed(global::COST_SOME)),
+        ((106, 4), "deserializeTo", global::COST_DESERIALIZE_TO),
+        (
+            (106, 5),
+            "fromBigEndianBytes",
+            fixed(global::COST_FROM_BIG_ENDIAN_BYTES),
+        ),
+        (
+            (100, 8),
+            "updateOperations",
+            fixed(avl::COST_UPDATE_OPERATIONS),
+        ),
+        ((100, 15), "updateDigest", fixed(avl::COST_UPDATE_DIGEST)),
+        ((36, 7), "map", fixed(option::COST_MAP)),
+        ((36, 8), "filter", fixed(option::COST_FILTER)),
+        (
+            (6, 15),
+            "toUnsignedMod",
+            fixed(numeric::COST_TO_UNSIGNED_MOD),
+        ),
+        ((7, 6), "expUnsigned", fixed(misc::COST_EXP)),
+        ((2, 9), "bitwiseOr", fixed(numeric::COST_BITWISE)),
+        ((2, 10), "bitwiseAnd", fixed(numeric::COST_BITWISE)),
+        ((2, 11), "bitwiseXor", fixed(numeric::COST_BITWISE)),
+        ((2, 12), "shiftLeft", fixed(numeric::COST_SHIFT)),
+        ((2, 13), "shiftRight", fixed(numeric::COST_SHIFT)),
+        ((3, 9), "bitwiseOr", fixed(numeric::COST_BITWISE)),
+        ((3, 10), "bitwiseAnd", fixed(numeric::COST_BITWISE)),
+        ((3, 11), "bitwiseXor", fixed(numeric::COST_BITWISE)),
+        ((3, 12), "shiftLeft", fixed(numeric::COST_SHIFT)),
+        ((3, 13), "shiftRight", fixed(numeric::COST_SHIFT)),
+        ((4, 9), "bitwiseOr", fixed(numeric::COST_BITWISE)),
+        ((4, 10), "bitwiseAnd", fixed(numeric::COST_BITWISE)),
+        ((4, 11), "bitwiseXor", fixed(numeric::COST_BITWISE)),
+        ((4, 12), "shiftLeft", fixed(numeric::COST_SHIFT)),
+        ((4, 13), "shiftRight", fixed(numeric::COST_SHIFT)),
+        ((5, 9), "bitwiseOr", fixed(numeric::COST_BITWISE)),
+        ((5, 10), "bitwiseAnd", fixed(numeric::COST_BITWISE)),
+        ((5, 11), "bitwiseXor", fixed(numeric::COST_BITWISE)),
+        ((5, 12), "shiftLeft", fixed(numeric::COST_SHIFT)),
+        ((5, 13), "shiftRight", fixed(numeric::COST_SHIFT)),
+        ((6, 9), "bitwiseOr", fixed(numeric::COST_BITWISE)),
+        ((6, 10), "bitwiseAnd", fixed(numeric::COST_BITWISE)),
+        ((6, 11), "bitwiseXor", fixed(numeric::COST_BITWISE)),
+        ((6, 12), "shiftLeft", fixed(numeric::COST_SHIFT)),
+        ((6, 13), "shiftRight", fixed(numeric::COST_SHIFT)),
+        ((9, 9), "bitwiseOr", fixed(unsigned_bigint::COST_BITWISE)),
+        ((9, 10), "bitwiseAnd", fixed(unsigned_bigint::COST_BITWISE)),
+        ((9, 11), "bitwiseXor", fixed(unsigned_bigint::COST_BITWISE)),
+        (
+            (9, 12),
+            "shiftLeft",
+            fixed(unsigned_bigint::COST_SHIFT_LEFT),
+        ),
+        (
+            (9, 13),
+            "shiftRight",
+            fixed(unsigned_bigint::COST_SHIFT_RIGHT),
+        ),
+        (
+            (9, 14),
+            "modInverse",
+            fixed(unsigned_bigint::COST_MOD_INVERSE),
+        ),
+        ((9, 15), "plusMod", fixed(unsigned_bigint::COST_PLUS_MOD)),
+        (
+            (9, 16),
+            "subtractMod",
+            fixed(unsigned_bigint::COST_SUBTRACT_MOD),
+        ),
+        (
+            (9, 17),
+            "multiplyMod",
+            fixed(unsigned_bigint::COST_MULTIPLY_MOD),
+        ),
+        ((9, 18), "mod", fixed(unsigned_bigint::COST_MOD_OP)),
+    ]);
+    // These handlers charge through the same opcode declarations.
+    for (ids, name, opcode) in [
+        ((99, 7), "getRegV5", 0xC6),
+        ((99, 19), "getReg", 0xC6),
+        ((101, 12), "getVarFromInput", 0xE3),
+        ((106, 2), "xor", 0x9B),
+    ] {
+        if let Ok(cost) = crate::cost_table::opcode_cost(opcode) {
+            rows.push((ids, name, cost));
+        }
+    }
+    rows
 }

@@ -3,6 +3,43 @@
 //! updateMany(21). Each was one arm of the `eval_method_call` match; the
 //! router in `mod.rs` delegates by `(type_id, method_id)`.
 
+pub const COST_INDEX_OF: CostKind = CostKind::PerItem {
+    base: JitCost::from_jit(20),
+    per_chunk: JitCost::from_jit(10),
+    chunk_size: 2,
+};
+pub const COST_ZIP: CostKind = CostKind::PerItem {
+    base: JitCost::from_jit(10),
+    per_chunk: JitCost::from_jit(1),
+    chunk_size: 10,
+};
+pub const COST_STARTS_ENDS_WITH: CostKind = CostKind::PerItem {
+    base: JitCost::from_jit(10),
+    per_chunk: JitCost::from_jit(1),
+    chunk_size: 10,
+};
+pub const COST_FLAT_MAP: CostKind = CostKind::PerItem {
+    base: JitCost::from_jit(60),
+    per_chunk: JitCost::from_jit(10),
+    chunk_size: 8,
+};
+pub const COST_PATCH: CostKind = CostKind::PerItem {
+    base: JitCost::from_jit(30),
+    per_chunk: JitCost::from_jit(2),
+    chunk_size: 10,
+};
+pub const COST_UPDATED: CostKind = CostKind::PerItem {
+    base: JitCost::from_jit(20),
+    per_chunk: JitCost::from_jit(1),
+    chunk_size: 10,
+};
+pub const COST_UPDATE_MANY: CostKind = CostKind::PerItem {
+    base: JitCost::from_jit(20),
+    per_chunk: JitCost::from_jit(2),
+    chunk_size: 10,
+};
+pub const COST_GET: u64 = 30;
+
 use ergo_primitives::cost::{CostKind, JitCost};
 use ergo_ser::opcode::Expr;
 use ergo_ser::sigma_type::SigmaType;
@@ -59,11 +96,7 @@ pub(super) fn index_of(
             break;
         }
     }
-    let index_of_cost = CostKind::PerItem {
-        base: JitCost::from_jit(20),
-        per_chunk: JitCost::from_jit(10),
-        chunk_size: 2,
-    };
+    let index_of_cost = COST_INDEX_OF;
     let index_of_delta = index_of_cost.compute(iters)?;
     cx.cost.add(index_of_delta)?;
     #[cfg(feature = "cost-trace")]
@@ -86,11 +119,7 @@ pub(super) fn zip(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
     }
     let ys_val = cx.eval_expr(&args[0])?;
     let n = collection_len(&obj_val, cx.ctx) as u32;
-    let zip_cost = CostKind::PerItem {
-        base: JitCost::from_jit(10),
-        per_chunk: JitCost::from_jit(1),
-        chunk_size: 10,
-    };
+    let zip_cost = COST_ZIP;
     cx.cost.add(zip_cost.compute(n)?)?;
     // Capture each operand's element type before
     // `collection_to_values` consumes the carrier; the
@@ -131,11 +160,7 @@ pub(super) fn starts_ends_with(
     check_arity(args, 1)?;
     let prefix_val = cx.eval_expr(&args[0])?;
     let pn = collection_len(&prefix_val, cx.ctx) as u32;
-    let cmp_cost = CostKind::PerItem {
-        base: JitCost::from_jit(10),
-        per_chunk: JitCost::from_jit(1),
-        chunk_size: 10,
-    };
+    let cmp_cost = COST_STARTS_ENDS_WITH;
     cx.cost.add(cmp_cost.compute(pn)?)?;
     let (_ka, a) = collection_to_values(obj_val, cx.ctx)?;
     let (_kb, b) = collection_to_values(prefix_val, cx.ctx)?;
@@ -171,7 +196,7 @@ pub(super) fn get(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
             })
         }
     };
-    add_method_cost(cx.cost, 30)?;
+    add_method_cost(cx.cost, COST_GET)?;
     let (_kind, items) = collection_to_values(obj_val, cx.ctx)?;
     if idx < 0 || (idx as usize) >= items.len() {
         Ok(Value::Opt(None))
@@ -456,14 +481,7 @@ pub(super) fn flat_map(
             // compute(0) = 70 (chunks truncate to 1), matching the
             // empty-result case.
             let out_len = collection_len(&result, cx.ctx) as u32;
-            cx.cost.add(
-                CostKind::PerItem {
-                    base: JitCost::from_jit(60),
-                    per_chunk: JitCost::from_jit(10),
-                    chunk_size: 8,
-                }
-                .compute(out_len)?,
-            )?;
+            cx.cost.add(COST_FLAT_MAP.compute(out_len)?)?;
             Ok(result)
         }
         _ => Err(EvalError::TypeError {
@@ -549,11 +567,7 @@ pub(super) fn patch(
     let xs_len = collection_len(&obj_val, cx.ctx);
     let patch_len = collection_len(&patch_val, cx.ctx);
     let cost_n = (xs_len + patch_len) as u32;
-    let patch_cost = CostKind::PerItem {
-        base: JitCost::from_jit(30),
-        per_chunk: JitCost::from_jit(2),
-        chunk_size: 10,
-    };
+    let patch_cost = COST_PATCH;
     let patch_delta = patch_cost.compute(cost_n)?;
     cx.cost.add(patch_delta)?;
     #[cfg(feature = "cost-trace")]
@@ -649,11 +663,7 @@ pub(super) fn updated(
     // Prior fallback through `add_cost_per_item(cx.cost, 0xDC, n)`
     // resolved to `Fixed(4)` — under-charging vs. Scala.
     let n = collection_len(&obj_val, cx.ctx);
-    let updated_cost = CostKind::PerItem {
-        base: JitCost::from_jit(20),
-        per_chunk: JitCost::from_jit(1),
-        chunk_size: 10,
-    };
+    let updated_cost = COST_UPDATED;
     let updated_delta = updated_cost.compute(n as u32)?;
     cx.cost.add(updated_delta)?;
     #[cfg(feature = "cost-trace")]
@@ -885,12 +895,7 @@ pub(super) fn update_many(
     let values_val = cx.eval_expr(&args[1])?;
     // PerItemCost(20,2,10) over the receiver length, charged before
     // the operation (matches Scala addSeqCost wrapping the block).
-    let delta = CostKind::PerItem {
-        base: JitCost::from_jit(20),
-        per_chunk: JitCost::from_jit(2),
-        chunk_size: 10,
-    }
-    .compute(n as u32)?;
+    let delta = COST_UPDATE_MANY.compute(n as u32)?;
     cx.cost.add(delta)?;
     #[cfg(feature = "cost-trace")]
     crate::cost_trace::record(

@@ -56,6 +56,7 @@ pub use tx::reemission::{
 };
 pub use tx::script::{
     compute_tx_init_cost, compute_tx_init_cost_with_costs, INTERPRETER_INIT_COST,
+    STORAGE_CONTRACT_COST,
 };
 pub use tx::CheckedTransaction;
 pub use tx::{validate_transaction, validate_transaction_parsed};
