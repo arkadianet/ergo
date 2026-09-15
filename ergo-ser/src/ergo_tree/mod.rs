@@ -37,7 +37,7 @@ pub use hash::{
 };
 pub(crate) use read::read_ergo_tree_tracking_wrap;
 pub use read::{read_ergo_tree, read_ergo_tree_with_activated_version};
-pub use type_infer::determinable_root_type_of;
+pub use type_infer::{determinable_root_type_of, substitution_type_of};
 
 const VERSION_MASK: u8 = 0x07;
 const SIZE_FLAG: u8 = 0x08;

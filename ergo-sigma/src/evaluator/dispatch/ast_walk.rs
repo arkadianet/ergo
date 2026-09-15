@@ -283,20 +283,29 @@ pub(super) fn substitute_deserialize(
     if let Some((SigmaType::SColl(inner), SigmaValue::Coll(CollValue::Bytes(bytes)))) = value {
         if **inner == SigmaType::SByte {
             let script = deserialize_measured(bytes, cost)?;
-            if super::super::helpers::infer_expr_type(&script, &Default::default(), &[])
-                .is_some_and(|actual| actual != *tpe)
-            {
+            let actual = ergo_ser::ergo_tree::substitution_type_of(&script);
+            if actual.as_ref() != Some(tpe) {
+                if matches!(node.payload, Payload::DeserializeRegister { .. }) {
+                    return Err(EvalError::RuntimeException(
+                        "DeserializeRegister script type mismatch",
+                    ));
+                }
                 return Err(EvalError::TypeError {
                     expected: "matching deserialized script type",
-                    got: format!("expected {tpe:?}"),
+                    got: format!("expected {tpe:?}, inferred {actual:?}"),
                 });
             }
             *expr = script;
             return Ok(());
         }
     }
-    if let Some(default) = default {
-        *expr = default.clone();
+    // A present incompatible register fails the unchecked cast inside Scala's
+    // rewrite strategy, leaving the node unresolved. Only absence uses default;
+    // an unresolved node rejects if evaluation reaches it, including with default.
+    if value.is_none() {
+        if let Some(default) = default {
+            *expr = default.clone();
+        }
     }
     Ok(())
 }
@@ -316,4 +325,49 @@ fn deserialize_measured(
     let charge = JitCost::from_block_cost(bytes.len() as u64 * 2).map_err(CostError::from)?;
     cost.add(charge)?;
     Ok(script)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ergo_ser::ergo_tree::substitution_type_of;
+
+    // ----- helpers -----
+
+    fn op(opcode: u8, payload: Payload) -> Expr {
+        Expr::Op(IrNode { opcode, payload })
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn substitution_type_collection_exact_type() {
+        let script = op(
+            0x83,
+            Payload::ConcreteCollection {
+                elem_type: SigmaType::SInt,
+                items: vec![],
+            },
+        );
+        assert_eq!(
+            substitution_type_of(&script),
+            Some(SigmaType::SColl(Box::new(SigmaType::SInt)))
+        );
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn substitution_type_unknown_or_imprecise_rejected() {
+        let unknown = op(0x72, Payload::ValUse { id: 1 });
+        assert_eq!(substitution_type_of(&unknown), None);
+        let imprecise = op(
+            0x86,
+            Payload::Tuple {
+                items: vec![unknown],
+            },
+        );
+        assert_eq!(substitution_type_of(&imprecise), None);
+        assert_eq!(substitution_type_of(&Expr::Unparsed(vec![])), None);
+    }
 }

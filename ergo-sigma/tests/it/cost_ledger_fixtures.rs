@@ -343,7 +343,9 @@ fn jvm_failure(
             | EvalError::InternalOpcode(..),
         ) => Ok(("RejectScript", "java.lang.RuntimeException")),
         VerifySpendingError::Eval(EvalError::RuntimeException(
-            "Cannot compare SigmaBoolean values: unknown type" | "Unknown type SString",
+            "Cannot compare SigmaBoolean values: unknown type"
+            | "Unknown type SString"
+            | "DeserializeRegister script type mismatch",
         )) => Ok(("RejectOther", "java.lang.RuntimeException")),
         VerifySpendingError::Eval(EvalError::InvocationTargetException("Unknown type SString")) => {
             Ok(("RejectOther", "java.lang.reflect.InvocationTargetException"))

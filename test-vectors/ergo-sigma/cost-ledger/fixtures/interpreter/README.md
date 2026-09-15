@@ -16,6 +16,28 @@ dead variable does not fail. All ten cases match after Task 0.8's eager,
 bottom-up substitution fix. The original four before/after measurements are in
 [DIVERGENCES.md](DIVERGENCES.md).
 
+## Substitution types
+
+`deserialize-types.json.gz` adds 16 JVM probes with segregated v3 trees and
+init=17: absent R4 with a true default, present Int/Coll[Int]/Coll[Byte] R4,
+and embedded IntConstant/ConcreteCollection[Int] expressions where SigmaProp
+is required. Every shape runs on both live and dead branches.
+
+Only absence selects the register default. A present incompatible register
+causes the unchecked byte-array cast to fail inside `Rewriter.strategy`
+(sigmastate v6.0.2 `core/shared/src/main/scala/sigma/kiama/rewriting/Rewriter.scala:180-190`).
+The strategy catches ClassCastException and leaves the deserialize node in
+place: live evaluation rejects with RuntimeException, while a dead branch
+accepts. This full-verification result refines the cast-only interpretation.
+
+Both sources reject embedded type mismatches even on dead branches. Register
+mismatches produce RuntimeException (`RejectOther` in the oracle classifier);
+context mismatches produce ValidationException (`RejectScript`). Rejection
+costs are unavailable from the JVM and are not replaced with invented totals.
+Rust requires a precise static type from the shared serializer typer; unknown
+or sentinel types reject. Accepted absent/default cases total 51 BC and
+accepted byte-script/default cases total 55 BC, on either branch.
+
 ## Crypto shapes
 
 `crypto-shapes.json.gz` wraps serialized SigmaBoolean constants in v0 ErgoTrees.
@@ -51,6 +73,8 @@ limits. Unavailable rejection components remain the literal `unavailable`.
 ## Reproduce
 
 ```sh
+PYTHONDONTWRITEBYTECODE=1 python3 ergo-difftest/src/gen/interpreter_deserialize_types.py
+scripts/gen-cost-fixture.sh test-vectors/ergo-sigma/cost-ledger/fixtures/interpreter/deserialize-types.json.gz
 python3 ergo-difftest/src/gen/interpreter_cost.py
 scripts/gen-cost-fixture.sh test-vectors/ergo-sigma/cost-ledger/fixtures/interpreter/deserialize-substitution.json.gz
 python3 ergo-difftest/src/gen/interpreter_crypto_cost.py
