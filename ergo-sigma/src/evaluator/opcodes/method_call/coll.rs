@@ -56,6 +56,40 @@ use crate::evaluator::helpers::{
 use crate::evaluator::opcodes::binding::check_closure_param_types;
 use crate::evaluator::types::{EvalError, Value};
 
+// Reflection-based methods evaluate arguments before their method charge.
+pub(super) fn apply(
+    obj_val: Value,
+    args: &[Expr],
+    cx: &mut EvalCtx<'_>,
+) -> Result<Value, EvalError> {
+    check_arity(args, 1)?;
+    let index = cx.eval_expr(&args[0])?;
+    super::super::super::cost::add_cost(cx.cost, 0xB2)?;
+    let Value::Int(index) = index else {
+        return Err(EvalError::TypeError {
+            expected: "Int index",
+            got: format!("{index:?}"),
+        });
+    };
+    let (_, items) = collection_to_values(obj_val, cx.ctx)?;
+    usize::try_from(index)
+        .ok()
+        .and_then(|i| items.get(i))
+        .cloned()
+        .ok_or(EvalError::TypeError {
+            expected: "valid collection index",
+            got: format!("index={index}, len={}", items.len()),
+        })
+}
+
+pub(super) fn map(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, EvalError> {
+    check_arity(args, 1)?;
+    let mapper = cx.eval_expr(&args[0])?;
+    let n = collection_len(&obj_val, cx.ctx);
+    super::super::super::cost::add_cost_per_item(cx.cost, 0xAD, n as u32)?;
+    super::super::collection::map_values(obj_val, mapper, cx)
+}
+
 // Reflection-based Coll.getOrElse evaluates both arguments eagerly, even in v3.
 pub(super) fn get_or_else(
     obj_val: Value,

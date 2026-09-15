@@ -2,21 +2,15 @@
 //! type-inference subsystem: a faithful replica of Scala's parse-order
 //! `valDefTypeStore` plus the root-type judgement mirrored from Scala's
 //! deserialize-time `Value.tpe` derivation.
+//! Oracle: scripts/jvm_serde_oracle/MethodTypes.scala
+//! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/interpreter/deserialize-types.json.gz
 
 use super::ErgoTree;
 
-/// The deserialized root's static type WHEN it is trivially determinable from
-/// the parsed IR: an inline `Const` carries its own type, a `ConstPlaceholder`
-/// resolves to its segregated constant's type (Scala
-/// `ConstantPlaceholderSerializer.parse` gives the placeholder the constant's
-/// `tpe`), and the boolean-literal leaves `TrueLeaf`/`FalseLeaf` are
-/// unconditionally `SBoolean`. Scala's `CheckDeserializedScriptIsSigmaProp`
-/// rejects (→ soft-fork wrap under `has_size`, hard reject when sizeless) any
-/// root whose type is not `SSigmaProp`. For every other `Op` root shape we have
-/// no typechecker and accept — a genuinely non-sigma operator root would fail
-/// later at evaluation. Returns `None` when the root type is not statically
-/// known here (including an out-of-range placeholder index, which we leave to
-/// the existing lenient handling).
+mod method_registry;
+
+/// Root type for rule 1001 (`CheckDeserializedScriptIsSigmaProp`). The gate
+/// treats unknown types leniently; embedded substitution requires an exact type.
 pub(super) fn determinable_root_type(tree: &ErgoTree) -> Option<crate::sigma_type::SigmaType> {
     determinable_root_type_of(&tree.body, &tree.constants)
 }
@@ -199,10 +193,14 @@ fn infer_type(
             }
             Payload::BoolCollection { .. } => Some(SigmaType::SColl(Box::new(SigmaType::SBoolean))),
             Payload::Tuple { items } => {
-                for i in items {
-                    infer_type(i, store, constants);
-                }
-                Some(SigmaType::SAny)
+                let types: Vec<_> = items
+                    .iter()
+                    .map(|i| infer_type(i, store, constants))
+                    .collect();
+                types
+                    .into_iter()
+                    .collect::<Option<Vec<_>>>()
+                    .map(SigmaType::STuple)
             }
             // ARG-DEPENDENT roots whose type is a PROJECTION of a child's type
             // (Scala computes these bottom-up at deserialize). Every child is
@@ -263,18 +261,8 @@ fn infer_type(
             // [`ValDefTypeStore`]). An untrusted (`None`) entry or an id with
             // no prior write resolves lenient (see [`infer_type`] residuals).
             Payload::ValUse { id } => store.get(id).cloned().flatten(),
-            // FuncValue (`FuncValueSerializer.parse`): each arg's DECLARED
-            // type is written to the store BEFORE the body is parsed — and
-            // never popped. Scala `FuncValue.tpe = SFunc(args.map(_.tpe),
-            // body.tpe)` — never SigmaProp, so a FuncValue root always fails
-            // rule 1001 (oracle-verified). The `SFunc` is built only when the
-            // body type is PRECISE ([`type_is_precise`]): `SAny` inside a
-            // computed type is this typer's imprecision sentinel, and
-            // embedding it would later compare as a real type in [`agree`] (a
-            // false `specializeFor` mismatch = a reject-valid). An imprecise
-            // body degrades the whole function to the top-level `SAny`
-            // sentinel (still non-SigmaProp; `Unknown` to [`agree`]). The
-            // declared arg types are wire-exact and kept as-is.
+            // FuncValue writes declared arguments before its body, without popping
+            // them. Its result is the full function type, including tuple ranges.
             Payload::FuncValue { args, body } => {
                 for (id, tpe) in args {
                     store.insert(*id, tpe.clone());
@@ -282,14 +270,12 @@ fn infer_type(
                 let body_t = infer_type(body, store, constants);
                 let dom: Option<Vec<SigmaType>> = args.iter().map(|(_, t)| t.clone()).collect();
                 match (dom, body_t) {
-                    (Some(t_dom), Some(t_range)) if type_is_precise(&t_range) => {
-                        Some(SigmaType::SFunc {
-                            t_dom,
-                            t_range: Box::new(t_range),
-                            tpe_params: vec![],
-                        })
-                    }
-                    _ => Some(SigmaType::SAny),
+                    (Some(t_dom), Some(t_range)) => Some(SigmaType::SFunc {
+                        t_dom,
+                        t_range: Box::new(t_range),
+                        tpe_params: vec![],
+                    }),
+                    _ => None,
                 }
             }
             // SelectField `tuple._i`: the i-th component type of the input tuple
@@ -352,21 +338,21 @@ fn infer_type(
                     .iter()
                     .map(|a| infer_type(a, store, constants))
                     .collect();
-                method_call_result_type(*type_id, *method_id, obj_type, &arg_types, args, type_args)
+                method_call_result_type(*type_id, *method_id, obj_type, &arg_types, type_args)
             }
-            // Apply's result is the callee's range; kept lenient (as before the
-            // store rework) — the children are still walked for their bindings.
+            // Apply projects a function range or collection element type (values.scala).
             Payload::FuncApply { func, args } => {
-                infer_type(func, store, constants);
+                let t = infer_type(func, store, constants);
                 for a in args {
                     infer_type(a, store, constants);
                 }
-                None
+                match t {
+                    Some(SigmaType::SFunc { t_range, .. }) => Some(*t_range),
+                    Some(SigmaType::SColl(elem)) => Some(*elem),
+                    _ => None,
+                }
             }
-            // SigmaAnd / SigmaOr (0xEA / 0xEB) ARE SigmaProp — lenient `None`
-            // is the same accept verdict at the root, and a `None` store entry
-            // for a sigma-collection rhs can only turn "accept" into "accept"
-            // (only a determinable non-SigmaProp type rejects).
+            // Sigma conjunctions retain SigmaProp after visiting every child.
             Payload::SigmaCollection { items } => {
                 for i in items {
                     infer_type(i, store, constants);
@@ -378,10 +364,31 @@ fn infer_type(
             // script rooted at one fails CheckDeserializedScriptIsSigmaProp just
             // like an inline non-SigmaProp `Const`.
             Payload::Zero => Some(zero_arg_root_type(node.opcode)),
-            // Generic operator payloads: walk every child (store evolution),
-            // then classify by opcode — relations, arithmetic, etc. whose
-            // result is unconditionally non-SigmaProp get `Some(SAny)`;
-            // SigmaProp-capable opcodes stay lenient (`None`).
+            // Collection transforms preserve the input or project the mapper range.
+            Payload::Two(input, mapper) if node.opcode == 0xAD => {
+                infer_type(input, store, constants);
+                match infer_type(mapper, store, constants) {
+                    Some(SigmaType::SFunc { t_range, .. }) => Some(SigmaType::SColl(t_range)),
+                    _ => None,
+                }
+            }
+            Payload::Two(input, other)
+                if matches!(node.opcode, 0xB3 | 0xB5 | 0xF2 | 0xF3 | 0xF5..=0xF8) =>
+            {
+                let t = infer_type(input, store, constants);
+                infer_type(other, store, constants);
+                t
+            }
+            Payload::Three(input, from, until) if node.opcode == 0xB4 => {
+                let t = infer_type(input, store, constants);
+                infer_type(from, store, constants);
+                infer_type(until, store, constants);
+                t
+            }
+            Payload::One(input) if matches!(node.opcode, 0xF0 | 0xF1) => {
+                infer_type(input, store, constants)
+            }
+            // Fixed-result operators still visit all children in wire order.
             Payload::One(a) => {
                 infer_type(a, store, constants);
                 op_root_non_sigma_type(node.opcode)
@@ -404,10 +411,8 @@ fn infer_type(
                 infer_type(d, store, constants);
                 op_root_non_sigma_type(node.opcode)
             }
-            // Childless payloads with no statically-tracked type here:
-            // `TaggedVar` (0x71, type-tag dependent) and `NoneValue` (0xDF,
-            // not parser-reachable) — both resolve through the opcode
-            // classifier to `None` (lenient).
+            // TaggedVar has no type in the serialized payload; NoneValue has
+            // no registered Scala serializer. Neither supplies a substitution type.
             Payload::TaggedVar { .. } | Payload::NoneValue { .. } => {
                 op_root_non_sigma_type(node.opcode)
             }
@@ -416,15 +421,7 @@ fn infer_type(
     }
 }
 
-/// `true` when a computed type is PRECISE — i.e. contains no `SAny`, which this
-/// typer also uses as its "non-`SigmaProp`, but exact type not tracked"
-/// sentinel (a non-landmine `MethodCall`, a `Tuple` literal, a non-SigmaProp
-/// operator, an unknown leaf, …). A sentinel is only safe at the TOP level of a
-/// type (where [`agree`] maps it to `Unknown`); embedding one inside a
-/// constructed type (the `FuncValue` → `SFunc` range) would let it structurally
-/// compare against a real type and manufacture a false mismatch (a
-/// reject-valid). A REAL wire `SAny` degraded by this check only widens
-/// leniency — the safe direction.
+/// Substitution requires a concrete type without unknown/Any components.
 fn type_is_precise(t: &crate::sigma_type::SigmaType) -> bool {
     use crate::sigma_type::SigmaType;
     match t {
@@ -444,189 +441,119 @@ fn type_is_precise(t: &crate::sigma_type::SigmaType) -> bool {
     }
 }
 
-/// The result static type of a `MethodCall` / `PropertyCall`, for the rule-1001
-/// root judgement, from the ALREADY-INFERRED receiver/arg types (the caller's
-/// single-pass walk computes each exactly once, in wire order). Scala computes
-/// `MethodCall.tpe` as the SMethod's result type specialized for the
-/// receiver/arg types; the only methods whose specialized result can be
-/// `SigmaProp` are the 7 the `difftest --methodcall` harness verified
-/// END-TO-END against the JVM reference (every other of the 199 registered methods
-/// returns a concrete type or an `Option`/`Coll`/tuple wrapper — structurally never
-/// `SigmaProp`). Each of the 7 is a projection of the receiver / args / explicit
-/// type, exactly mirroring the `ByIndex` / `OptionGet` / `Fold` / `Deserialize`
-/// arms of [`infer_type`]. A result type VARIABLE that occurs more than once
-/// (`getOrElse`'s receiver + default, `fold`'s zero + op range) is reconciled with
-/// [`agree`] — Scala `unifyTypeLists` makes the result `SigmaProp` only
-/// when ALL occurrences are, so checking just one would accept a tree Scala rejects.
-///
-/// (A determinable occurrence MISMATCH actually makes Scala THROW at deserialize —
-/// `specializeFor`'s `IllegalArgumentException` — which our structural parser does
-/// not replicate at parse time. The rule-1001 verdict still matches where it is
-/// enforced: this returns `SAny` (non-`SigmaProp`), so a SIZELESS conflict root is
-/// rejected as Scala rejects it. A has_size conflict tree is soft-fork-wrapped here
-/// vs hard-rejected by Scala — a pre-existing parse-layer accept-invalid, the safe
-/// direction, outside this rule-1001 root typer.)
-///
-/// Reject-valid-safe by construction:
-///  - a non-determinable projection returns `None` (lenient), so a SigmaProp-capable
-///    method whose receiver type we cannot pin never gets rejected;
-///  - every OTHER `(type_id, method_id)` returns `SAny` (non-`SigmaProp`). For the
-///    192 known non-landmine methods this is the harness's verified result; an
-///    UNKNOWN method is rejected by Scala at method resolution (so a non-`SigmaProp`
-///    root verdict matches). The landmine set MUST stay complete — adding a method
-///    here that can return `SigmaProp` without listing it would be a reject-valid.
+/// Specialize the JVM-extracted signature using Scala's directional unification.
+/// A failed unification leaves the template unchanged (SMethod.specializeFor).
 fn method_call_result_type(
     type_id: u8,
     method_id: u8,
     obj_type: Option<crate::sigma_type::SigmaType>,
     arg_types: &[Option<crate::sigma_type::SigmaType>],
-    args: &[crate::opcode::Expr],
     type_args: &[crate::sigma_type::SigmaType],
 ) -> Option<crate::sigma_type::SigmaType> {
     use crate::sigma_type::SigmaType;
-    let arg_ty = |i: usize| arg_types.get(i).cloned().flatten();
-    // The receiver's Coll / Option element type (the result type variable `IV`/`T`).
-    let coll_elem = || match &obj_type {
-        Some(SigmaType::SColl(elem)) => Some((**elem).clone()),
-        _ => None,
-    };
-    let opt_elem = || match &obj_type {
-        Some(SigmaType::SOption(elem)) => Some((**elem).clone()),
-        _ => None,
-    };
-    // Each landmine's result is the receiver/explicit projection, GATED on every
-    // signature constraint Scala's `specializeFor` (`unifyTypeLists`) enforces: a
-    // FIXED-type arg must equal its signature type, and every additional occurrence
-    // of the result type variable must agree with the receiver/zero. A determinable
-    // violation leaves the variable unbound -> non-`SigmaProp` (`SAny`, reject); an
-    // undeterminable one -> `None` (lenient). See [`gated`] / [`agree`].
-    let int = Some(SigmaType::SInt);
-    match (type_id, method_id) {
-        // Coll.apply(index: SInt): IV. `IV` is only in the receiver, but the index
-        // must be SInt (else specializeFor fails and IV stays unbound).
-        (12, 10) => gated(coll_elem(), &[agree(arg_ty(0), int)]),
-        // Coll.getOrElse(index: SInt, default: IV): IV. index = SInt; default = IV.
-        (12, 2) => {
-            let elem = coll_elem();
-            gated(
-                elem.clone(),
-                &[agree(arg_ty(0), int), agree(elem, arg_ty(1))],
-            )
+    let (signature, explicit) = method_registry::signature(type_id, method_id)?;
+    let mut subst = std::collections::HashMap::new();
+    for (param, arg) in explicit.iter().zip(type_args) {
+        if let SigmaType::STypeVar(name) = param {
+            subst.insert(name.clone(), arg.clone());
         }
-        // Coll.fold(zero: OV, op: (OV, IV) => OV): OV. OV = zero = op arg0 = op range;
-        // IV (receiver elem) = op arg1. The op's declared arg types come from the
-        // syntactic `FuncValue` payload (wire-exact); its RANGE from the op's
-        // inferred `SFunc` type (precise by construction, and also available
-        // when the op is a `ValUse` of a stored lambda).
-        (12, 5) => {
-            let zero = arg_ty(0);
-            let (op_a0, op_a1) = args.get(1).map_or((None, None), func_value_arg_types);
-            let op_range = match arg_ty(1) {
-                Some(SigmaType::SFunc { t_range, .. }) => Some(*t_range),
-                _ => None,
-            };
-            gated(
-                zero.clone(),
-                &[
-                    agree(zero.clone(), op_range),
-                    agree(zero, op_a0),
-                    agree(coll_elem(), op_a1),
-                ],
-            )
-        }
-        // Option.get: the receiver Option's element type (`T` only in the receiver).
-        (36, 3) => opt_elem(),
-        // Option.getOrElse(default: T): T. T = receiver elem = default.
-        (36, 4) => {
-            let elem = opt_elem();
-            gated(elem.clone(), &[agree(elem, arg_ty(0))])
-        }
-        // Global.deserializeTo[T] / fromBigEndianBytes[T]: the explicit type arg `T`.
-        // Scala applies the EXPLICIT type subst (T -> ...) to the method BEFORE
-        // `specializeFor`, and `specializeFor` returns that already-substituted method
-        // even when `unifyTypeLists` fails — so the result is `T` REGARDLESS of the
-        // receiver or the `Coll[Byte]` value arg. Oracle-verified: a has_size
-        // `deserializeTo[SigmaProp]` on a `Global`, a `Box`(SELF), or with an `Int`
-        // value arg ALL classify SIGMA. Hence no receiver/arg gating here.
-        (106, 4) | (106, 5) => type_args.first().cloned(),
-        // Every other method (and any unknown one) is non-SigmaProp.
-        _ => Some(SigmaType::SAny),
     }
-}
-
-/// Three-state result of comparing two inferred types for `specializeFor`
-/// unification: `Some(Match)` they are equal, `Some(Mismatch)` a determinable
-/// conflict (Scala fails to unify), `None`-side -> `Unknown` (non-determinable).
-#[derive(PartialEq)]
-enum Unify {
-    Match,
-    Mismatch,
-    Unknown,
-}
-
-/// Compare two occurrences of a unified type (or an arg against its fixed signature
-/// type, passed as `b`): equal -> `Match`, both PRECISELY determinable but different
-/// -> `Mismatch`, otherwise `Unknown`. `SAny` is the typer's "non-`SigmaProp`, but
-/// precise type not tracked" sentinel (returned for a non-landmine `MethodCall`, a
-/// `Tuple`, a non-`SigmaProp` operator, …), NOT a literal `SAny` — so it is treated
-/// as `Unknown`, never a `Mismatch`. Reporting `Mismatch` for it would reject a tree
-/// Scala accepts, e.g. `Coll[SigmaProp].apply(coll.size)` whose `SInt` index the
-/// sentinel hides (a reject-valid).
-fn agree(
-    a: Option<crate::sigma_type::SigmaType>,
-    b: Option<crate::sigma_type::SigmaType>,
-) -> Unify {
-    use crate::sigma_type::SigmaType::SAny;
-    match (a, b) {
-        (Some(SAny), _) | (_, Some(SAny)) | (None, _) | (_, None) => Unify::Unknown,
-        (Some(x), Some(y)) if x == y => Unify::Match,
-        (Some(_), Some(_)) => Unify::Mismatch,
-    }
-}
-
-/// Fold a landmine's projected `result` with its signature `checks`: any determinable
-/// `Mismatch` makes `specializeFor` fail -> non-`SigmaProp` (`SAny`, reject); else any
-/// `Unknown` -> lenient (`None`); else the projected result.
-fn gated(
-    result: Option<crate::sigma_type::SigmaType>,
-    checks: &[Unify],
-) -> Option<crate::sigma_type::SigmaType> {
-    if checks.contains(&Unify::Mismatch) {
-        Some(crate::sigma_type::SigmaType::SAny)
-    } else if checks.contains(&Unify::Unknown) {
-        None
+    let signature = apply_type_subst(&signature, &subst);
+    let SigmaType::SFunc { t_dom, t_range, .. } = signature else {
+        return None;
+    };
+    let actual: Option<Vec<_>> = std::iter::once(obj_type)
+        .chain(arg_types.iter().cloned())
+        .collect();
+    let actual = actual?;
+    subst.clear();
+    if unify_type_lists(&t_dom, &actual, &mut subst) {
+        Some(apply_type_subst(&t_range, &subst))
     } else {
-        result
+        Some(*t_range)
     }
 }
 
-/// The first two declared argument types of a `FuncValue` operand (e.g.
-/// `Coll.fold`'s `(OV, IV) => OV` reducer). `(None, None)` for a non-`FuncValue`.
-fn func_value_arg_types(
-    op: &crate::opcode::Expr,
-) -> (
-    Option<crate::sigma_type::SigmaType>,
-    Option<crate::sigma_type::SigmaType>,
-) {
-    if let crate::opcode::Expr::Op(node) = op {
-        if let crate::opcode::Payload::FuncValue { args, .. } = &node.payload {
-            let a0 = args.first().and_then(|(_, t)| t.clone());
-            let a1 = args.get(1).and_then(|(_, t)| t.clone());
-            return (a0, a1);
-        }
+type TypeSubst = std::collections::HashMap<String, crate::sigma_type::SigmaType>;
+
+fn apply_type_subst(
+    t: &crate::sigma_type::SigmaType,
+    subst: &TypeSubst,
+) -> crate::sigma_type::SigmaType {
+    use crate::sigma_type::SigmaType::*;
+    match t {
+        STypeVar(name) => subst.get(name).cloned().unwrap_or_else(|| t.clone()),
+        SColl(e) => SColl(Box::new(apply_type_subst(e, subst))),
+        SOption(e) => SOption(Box::new(apply_type_subst(e, subst))),
+        STuple(items) => STuple(items.iter().map(|t| apply_type_subst(t, subst)).collect()),
+        SFunc {
+            t_dom,
+            t_range,
+            tpe_params,
+        } => SFunc {
+            t_dom: t_dom.iter().map(|t| apply_type_subst(t, subst)).collect(),
+            t_range: Box::new(apply_type_subst(t_range, subst)),
+            tpe_params: tpe_params
+                .iter()
+                .filter(|t| !matches!(t, STypeVar(n) if subst.contains_key(n)))
+                .cloned()
+                .collect(),
+        },
+        _ => t.clone(),
     }
-    (None, None)
 }
 
-/// Classify fixed-result operators. Sigma constructors have an exact type;
-/// other classified operators use the non-SigmaProp sentinel when their exact
-/// type is not tracked. Substitution rejects that sentinel conservatively.
+/// Scala zips domains without an arity check; nested tuples/functions check lengths.
+fn unify_type_lists(
+    a: &[crate::sigma_type::SigmaType],
+    b: &[crate::sigma_type::SigmaType],
+    subst: &mut TypeSubst,
+) -> bool {
+    a.iter().zip(b).all(|(a, b)| unify_types(a, b, subst))
+}
+
+fn unify_types(
+    a: &crate::sigma_type::SigmaType,
+    b: &crate::sigma_type::SigmaType,
+    subst: &mut TypeSubst,
+) -> bool {
+    use crate::sigma_type::SigmaType::*;
+    match (a, b) {
+        (STypeVar(a), STypeVar(b)) => a == b,
+        (STypeVar(name), t) => match subst.get(name) {
+            Some(previous) => previous == t,
+            None => {
+                subst.insert(name.clone(), t.clone());
+                true
+            }
+        },
+        (SColl(a), SColl(b)) | (SOption(a), SOption(b)) => unify_types(a, b, subst),
+        (SColl(a), STuple(_)) => unify_types(a, &SAny, subst),
+        (STuple(a), STuple(b)) => a.len() == b.len() && unify_type_lists(a, b, subst),
+        (
+            SFunc {
+                t_dom: a,
+                t_range: ar,
+                ..
+            },
+            SFunc {
+                t_dom: b,
+                t_range: br,
+                ..
+            },
+        ) => a.len() == b.len() && unify_type_lists(a, b, subst) && unify_types(ar, br, subst),
+        (SBoolean, SSigmaProp) | (SAny, _) => true,
+        _ => a == b,
+    }
+}
+
+/// Fixed-result opcode types from the pinned Scala AST declarations.
 fn op_root_non_sigma_type(opcode: u8) -> Option<crate::sigma_type::SigmaType> {
     if matches!(opcode, 0x98 | 0xCD | 0xCE | 0xD1 | 0xEA | 0xEB) {
         return Some(crate::sigma_type::SigmaType::SSigmaProp);
     }
     use crate::sigma_type::SigmaType::*;
-    let fixed = match opcode {
+    match opcode {
         0x8F..=0x94
         | 0x96
         | 0x97
@@ -647,44 +574,7 @@ fn op_root_non_sigma_type(opcode: u8) -> Option<crate::sigma_type::SigmaType> {
         0xC7 => Some(STuple(vec![SInt, SColl(Box::new(SByte))])),
         0xB7 => Some(SOption(Box::new(SColl(Box::new(SByte))))),
         _ => None,
-    };
-    if fixed.is_some() {
-        return fixed;
     }
-    let never_sigma = matches!(
-        opcode,
-        0x8F..=0x94                    // Lt Le Gt Ge Eq Neq -> SBoolean
-        // NB: ArithOp (Minus 0x99, Plus 0x9A, Multiply 0x9C, Division 0x9D,
-        // Modulo 0x9E, Min 0xA1, Max 0xA2) is NOT here: Scala types it as
-        // `left.tpe` with NO operand type-check, so a SigmaProp left operand makes
-        // the whole op SigmaProp (oracle-verified ACCEPT). It is handled by the
-        // arg-dependent left-operand arm in `infer_type`.
-        | 0x9F | 0xA0                  // Exponentiate / MultiplyGroup (operand-typed -> reject sigma)
-        | 0x7A | 0x7B | 0x7C           // LongToByteArray ByteArrayToBigInt ByteArrayToLong
-        | 0xB1                         // SizeOf -> SInt
-        | 0xCB | 0xCC                  // CalcBlake2b256 CalcSha256 -> Coll[SByte]
-        | 0xC1 | 0xC2 | 0xC3 | 0xC4 | 0xC5 | 0xC7  // Extract{Amount,ScriptBytes,Bytes,BytesNoRef,Id,CreationInfo}
-        | 0xCF | 0xD0                  // SigmaPropIsProven -> SBoolean, SigmaPropBytes -> Coll[SByte]
-        // Boolean-result operators (predicates / Bool logic) -> SBoolean.
-        | 0x96 | 0x97                  // And Or (Bool BinAnd/BinOr over Coll[Boolean]; NOT SigmaAnd/Or 0xEA/0xEB)
-        | 0xAE | 0xAF                  // Exists ForAll
-        | 0xE6                         // OptionIsDefined
-        | 0xEC | 0xED | 0xEF | 0xF4 | 0xFF  // BinOr BinAnd LogicalNot BinXor XorOf
-        // Numeric / byte-collection-result operators -> never SigmaProp.
-        | 0x9B                         // Xor (byte-array)
-        | 0xE7 | 0xE8 | 0xE9           // ModQ PlusModQ MinusModQ
-        | 0xF0 | 0xF1 | 0xF2 | 0xF3 | 0xF5 | 0xF6 | 0xF7 | 0xF8  // Negation BitInversion BitOr BitAnd BitXor BitShift{Right,Left,RightZeroed}
-        // Fixed-result structural ops.
-        | 0x74                         // SubstConstants -> Coll[SByte]
-        | 0xB7                         // TreeLookup -> Option[Coll[SByte]]
-        | 0xEE                         // DecodePoint -> SGroupElement
-        | 0xB3 | 0xB5                  // Append Filter -> Coll
-        | 0xAD | 0xB4 // MapCollection Slice -> Coll
-                      // NB: Fold (0xB0) / ByIndex (0xB2) / OptionGet (0xE4) / OptionGetOrElse
-                      // (0xE5) are arg-dependent (result = accumulator / element type) and are
-                      // handled by dedicated arms — they CAN be SigmaProp.
-    );
-    never_sigma.then_some(crate::sigma_type::SigmaType::SAny)
 }
 
 /// Statically-known result type of a zero-argument (leaf) ErgoTree opcode. EVERY
@@ -702,7 +592,7 @@ fn zero_arg_root_type(opcode: u8) -> crate::sigma_type::SigmaType {
         0x82 => SGroupElement,                // GroupGenerator
         0xA3 => SInt,                         // Height
         0xA4 | 0xA5 => SColl(Box::new(SBox)), // Inputs / Outputs
-        0xA6 => SAvlTree,                     // LastBlockUtxoRootHash
+        0xA6 | 0xB6 => SAvlTree,              // LastBlockUtxoRootHash
         0xA7 => SBox,                         // Self
         0xAC => SColl(Box::new(SByte)),       // MinerPubkey
         0xDD => SGlobal,                      // Global
@@ -723,6 +613,8 @@ mod tests {
     use crate::opcode::{Expr, IrNode, Payload};
     use crate::sigma_type::SigmaType;
     use crate::sigma_value::{SigmaBoolean, SigmaValue};
+
+    // ----- helpers -----
 
     fn op(opcode: u8, payload: Payload) -> Expr {
         Expr::Op(IrNode { opcode, payload })
@@ -791,7 +683,9 @@ mod tests {
         determinable_root_type_of(body, &[])
     }
 
-    /// The Finding-E accept-invalid, fixed: `{ val x = 0L; val x = 0L; x }`
+    // ----- oracle parity -----
+
+    /// `{ val x = 0L; val x = 0L; x }`
     /// resolves the root `ValUse` from the last store write (SLong) → the gate
     /// rejects, as Scala does. And last-write-wins in the ACCEPT direction:
     /// `{ val x = 0L; val x = sigma; x }` is SigmaProp (a first-write-wins bug
@@ -960,7 +854,7 @@ mod tests {
     }
 
     /// A `FuncValue` types as `SFunc(declared args, body.tpe)` when the body is
-    /// precise, degrading to the `SAny` sentinel otherwise — never SigmaProp
+    /// determinable, returning `None` otherwise — never SigmaProp
     /// either way (a FuncValue root always rejects).
     #[test]
     fn func_value_types_as_sfunc_when_precise() {
@@ -973,10 +867,8 @@ mod tests {
                 tpe_params: vec![],
             })
         );
-        // Imprecise body (a Tuple literal types as the SAny sentinel) -> the
-        // function degrades to top-level SAny (still non-SigmaProp) rather
-        // than embedding the sentinel where `agree` could mis-compare it.
-        let imprecise = func_value(
+        // Tuple component types remain precise inside a function range.
+        let tuple_range = func_value(
             vec![(1, Some(SigmaType::SLong))],
             op(
                 0x86,
@@ -985,6 +877,13 @@ mod tests {
                 },
             ),
         );
-        assert_eq!(root(&imprecise), Some(SigmaType::SAny));
+        assert_eq!(
+            root(&tuple_range),
+            Some(SigmaType::SFunc {
+                t_dom: vec![SigmaType::SLong],
+                t_range: Box::new(SigmaType::STuple(vec![SigmaType::SLong, SigmaType::SLong])),
+                tpe_params: vec![],
+            })
+        );
     }
 }
