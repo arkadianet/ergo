@@ -36,10 +36,10 @@ cost-trace = ["ergo-sigma/cost-trace"]
 # would skip them; the feature gate makes the same intent explicit at
 # the build-graph level, and the dedicated CI lane runs them by
 # passing the feature flag.
-diagnostics = []
+diagnostics = ["cost-trace"]
 
 [dev-dependencies]
-ergo-validation = { path = ".", features = ["test-helpers"] }
+ergo-validation = { path = ".", features = ["test-helpers", "cost-trace"] }
 ergo-rest-json  = { workspace = true }
 hex             = { workspace = true }
 serde           = { workspace = true, features = ["derive"] }

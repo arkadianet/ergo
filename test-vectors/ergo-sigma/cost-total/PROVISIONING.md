@@ -1,252 +1,163 @@
-# Scala-anchored ergo-sigma cost-total fixtures
+# JVM transaction cost fixtures
 
-`.json` files in this tree pin Rust transaction-validation cost
-against the live Scala `sigmastate-interpreter` running on a
-mainnet-synced Ergo node. The fixture is **in-tree**: tx bodies +
-per-height header context live in the JSON, so the test runs in
-default `cargo test` with no network and no feature flag. Input
-boxes are resolved against the existing tracked
-`test-vectors/mainnet/input_boxes_*.json` pool; the fixture
-deliberately is not self-contained on that surface — see the
-follow-up at the bottom.
+## Reconciled breakdown fixture
 
-## Fixture contract
+`breakdown_700000_700001.json` contains all **10 of 10** mainnet transactions
+at heights 700000–700001. It bundles canonical JVM transaction and box bytes,
+11 headers (699991–700001), voted parameters, and the runtime artifact manifest.
+The default integration test
+`ergo-validation::it::cost_parity::transaction_breakdown_mainnet_all_ten_match_jvm`
+checks box and transaction IDs, accepts every transaction through Rust's production
+validator, and compares every cost field in **block cost units**.
+
+The extractor's stdout contract is:
 
 ```jsonc
-{
-  "headers": {
-    "<height>": {
-      "timestamp":   <u64>,
-      "n_bits":      <u64>,
-      "version":     <u8>,
-      "miner_pk_hex": "<66-hex>"   // 33-byte compressed secp256k1 pk
-    }
-  },
-  "transactions": [
-    {
-      "tx_id":      "<64-hex>",  // mainnet tx id
-      "height":     <u32>,       // block height
-      "block_cost": <u64>,       // Scala `totalCost.toBlockCost`
-      "tx_bytes":   "<hex>"      // canonical tx serialization
-    }
-  ]
-}
+[
+  {
+    "tx_id": "<transaction id>",
+    "height": 700000,
+    "block_cost": 12356,
+    "init_block_cost": 12200,
+    "token_block_cost": 0,
+    "inputs": [
+      {"index": 0, "eval_block_cost": 156, "crypto_block_cost": 0, "rent": 0}
+    ]
+  }
+]
 ```
 
-**`block_cost` unit**: block-cost units (NOT raw JitCost). The Rust
-oracle calls `cost.total_block_cost()` which downcasts JitCost to
-block units the same way Scala's `toBlockCost` does — drift in the
-scale factor (×10) would fail the test.
+These example numbers are the JVM result for transaction
+`e4cea1c9…` in the fixture. `rent` is **50 BC** when the wallet interpreter's
+storage-rent branch succeeds, otherwise 0. It is computational cost, not the
+monetary storage fee. Input order is significant.
 
-**`block_cost` scope**: per-transaction. The Scala extractor sums
-`initCost + tokenCost + Σ per-input scriptCost`. The Rust path runs
-the same accumulation through `validate_transaction` →
-`compute_tx_init_cost` (added up-front) → per-input
-`verify_spending_proof_with_context_and_cost` (charged into the same
-`CostAccumulator`).
+### Observation and reconciliation
 
-**Context approximations** (must match on Rust + Scala sides):
+The extractor calls unmodified `ErgoTransaction.validateStateful` with
+`accumulatedCost = 0`. Its `RecordingInterpreter` wraps the wallet verifier
+that this call actually uses:
 
-* `headers = empty` — scripts that read `CONTEXT.headers[i]` may
-  diverge. No fixture entry currently hits this. The Rust oracle
-  passes `last_headers: &[]` to mirror the Scala extractor's `Colls.emptyColl` argument.
-* `LastBlockUtxoRootHash` parity is **partial**: the Scala extractor
-  seeds `prevStateRoot` from the previous block's `stateRoot` (see
-  `ComputeTransactionCosts.scala:188-205`), but with
-  `last_headers: &[]` the Rust validator computes
-  `last_block_utxo_root = None` (from `eval_headers.first()`). So
-  scripts reading `CONTEXT.LastBlockUtxoRootHash` would diverge
-  silently — both harnesses produce different values, and neither
-  signals the difference. None of the current fixture txs hit
-  opcode `0xA6` (`SContext.LastBlockUtxoRootHash`); a future
-  extension that does will need a richer Rust-side context that
-  threads `prevStateRoot` through. This is the audit follow-up
-  noted at the bottom of this document.
-* `ValidationRules = currentSettings` (assumed stable on mainnet).
-* `pre_header_parent_id = 0`, `pre_header_votes = 0` — scripts that
-  read these would diverge. None of the fixture txs do.
-* `activated_script_version = version - 1` per consensus spec.
+- `fullReduction` records the returned reduction cost from that invocation.
+- `checkExpiredBox` observes whether the rent predicate returned true. A thrown
+  exception still follows the wallet's ordinary `recoverWith` fallback.
+- `verify` returns the original result unchanged. Crypto cost is its returned
+  total minus the observed reduction and successful rent charge. Thus Scala's
+  per-input crypto rounding is preserved.
+- Input contexts retain `costLimit = maxCost - currentTxCost` and `initCost = 0`.
+  No input is re-run to obtain its breakdown.
+- Transaction initialization uses the JVM interpreter constant and active
+  parameters; token counting uses `ErgoBoxAssetExtractor`, the node's helper.
+- Before emitting a transaction, the extractor requires
+  `init + token + Σ(eval + crypto + rent) == block_cost`, where `block_cost`
+  is the returned `validateStateful` payload. Missing/reordered observations,
+  missing boxes, rejected transactions, and reconciliation failures abort the
+  process. No partial stdout fixture is emitted.
 
-**Box fidelity invariant**: the Rust oracle asserts
-`reconstructed.box_id() == fixture.boxId` for every input box
-*before* it enters the in-memory UTXO. The validator does not
-re-verify box IDs after resolving inputs from the UTXO map, so a
-fabricated body (e.g. a register encoding `read_constant` cannot
-parse) would otherwise pass silently. The id check fails loudly
-instead — drift on register bytes is non-bypassable.
+Rust records initialization, token, and input boundary observations under its
+`cost-trace` feature, alongside the evaluator's existing rounded crypto trace.
+The test compares these observations from one `validate_transaction` invocation.
+It also independently reconciles the Rust observations to the charged total.
+The crate's test-only dependency enables recording in offline tests; normal
+production builds do not enable it. Diagnostic range tests additionally require
+`--features diagnostics` and now require the breakdown fields in their vectors.
+Legacy aggregate-only range JSON must be regenerated before running those tests.
 
-## Provenance
+### Context fidelity
 
-| File | Heights | Tx count | Notes |
-|------|---------|----------|-------|
-| `mainnet_700000_700001.json` | 700000-700001 | 5 (of 10) | 5 of the block's txs failed extraction in the Scala harness — see "Drop-rate" below. |
+The JVM receives the current header and nine preceding headers through
+`ErgoStateContext`. Rust receives the same nine ancestors, newest first.
+Preheader fields and the previous state digest come from these real headers.
+Epoch parameters and validation settings are loaded before the first requested
+height and refreshed at epoch boundaries. Chain configuration comes from the
+pinned Ergo reference checkout's `mainnet.conf` and `application.conf`.
 
-## How to extract (and extend)
+The bundled Rust test uses the recorded voted parameters. Its default validation
+rule settings match this fixture's epoch. Broader fixtures with changed validation
+rules need those settings threaded through the Rust harness as well. The legacy
+diagnostic range harness still uses default cost parameters and progressive UTXO
+resolution, so it is not evidence for cross-epoch parameter parity or full coverage
+of an arbitrary range.
 
-### Prerequisites
+### Reproduction
 
-* A mainnet-synced Ergo node with `/extraIndex` enabled (default
-  `http://localhost:9053`). Override the extractor via `NODE_URL`.
-* `scala-cli >= 1.0` (the existing harness was built against
-  Scala 2.12 + `org.ergoplatform::ergo-wallet:6.1.0`).
+Requirements: scala-cli 1.12, an Ergo node with extraIndex (captured against
+6.0.5 at `http://localhost:9053`), and the Ergo v6.0.5 source configuration.
+`NODE_URL` and `ERGO_REFERENCE` override these locations.
 
-### Two-step extraction
+Artifacts are pinned to **ergo-core/ergo-wallet 6.0.5**, with
+**sigma-state 6.0.6**. The extractor asserts the resolved Sigma jar version
+at runtime and emits it in both stderr's manifest and the bundled fixture.
+See `../cost-ledger/reconciliation.md` for the source-version reconciliation.
 
-1. Run the Scala harness to get `(tx_id, height, block_cost)`:
+The 6.0.5 Ergo artifacts were unavailable in the local cache and Maven Central.
+They were built with `publishLocal` from a worktree-local archive of the
+reference checkout's `v6.0.5` tag. Because an archive nested in this Rust worktree
+inherits the enclosing Git version through sbt-dynver, the successful command was:
 
-   ```bash
-   scala-cli run test-vectors/scripts/scala/ComputeTransactionCosts.scala \
-     -- <start_height> <end_height>
-   ```
+```bash
+sbt 'set ThisBuild / version := "6.0.5"' \
+  avldb/publishLocal ergoWallet/publishLocal ergoCore/publishLocal
+```
 
-   Output is JSON to stdout. Capture into a temp file.
+Run that command in the archived Scala source directory. The extractor enables
+`ivy2Local` and the GitLab Maven repository needed for `leveldbjni-all:1.18.3`.
+No fallback to 6.0.2 was needed. Do not override `SIGMASTATE_VERSION`.
 
-2. Augment with `tx_bytes` and per-height header context. The cheap
-   way is a small Python helper that pulls the missing pieces from
-   the same Scala node:
+From the Rust workspace root:
 
-   ```python
-   import json, urllib.request
+```bash
+COST_FIXTURE=test-vectors/ergo-sigma/cost-total/breakdown_700000_700001.json \
+scala-cli run test-vectors/scripts/scala/ComputeTransactionCosts.scala \
+  --server=false --suppress-outdated-dependency-warning -- 700000 700001
 
-   COSTS_RAW = "<paste step 1 output here>"
-   NODE     = "http://localhost:9053"
-   TX_SRCS  = [
-       "test-vectors/mainnet/transactions_700000.json",
-       "test-vectors/mainnet/transactions_700000_700200.json",
-   ]
+cargo test -p ergo-validation --test it \
+  cost_parity::transaction_breakdown_mainnet_all_ten_match_jvm
+```
 
-   costs = json.loads(COSTS_RAW)
-   target = {c["tx_id"]: c for c in costs}
+`COST_FIXTURE` is optional. Without it, the script emits only the transaction
+array to stdout and the manifest/progress to stderr. The fixture's costs and
+canonical bytes come from the same extraction run.
 
-   bytes_by_id = {}
-   for path in TX_SRCS:
-       try:
-           with open(path) as f:
-               for tx in json.load(f):
-                   if tx["id"] in target and tx["id"] not in bytes_by_id:
-                       bytes_by_id[tx["id"]] = tx["bytes"]
-       except FileNotFoundError:
-           continue
+### Drop-rate cause and resolution
 
-   txs = []
-   for tid, c in target.items():
-       txs.append({**c, "tx_bytes": bytes_by_id[tid]})
+Running the original extractor at 700000–700001 reproduced **5 passed, 5 failed**.
+The exception stack starts at `scala.collection.mutable.WrappedArray.make`,
+called from the extractor's `countTokens` helper. A token ID is a Sigma
+`Coll[Byte]` (`sigma.data.CollOverArray`), not a JVM `Array[Byte]`; passing it to
+`WrappedArray.make` raises `scala.MatchError`. All five failures occurred while
+counting tokens, **before script verification**.
 
-   headers = {}
-   for h in sorted({c["height"] for c in costs}):
-       block_id = json.load(urllib.request.urlopen(
-           f"{NODE}/blocks/at/{h}", timeout=10))[0]
-       hj = json.load(urllib.request.urlopen(
-           f"{NODE}/blocks/{block_id}/header", timeout=10))
-       headers[str(h)] = {
-           "timestamp":    hj["timestamp"],
-           "n_bits":       hj["nBits"],
-           "version":      hj["version"],
-           "miner_pk_hex": hj["powSolutions"]["pk"],
-       }
+The earlier attribution to stubbed register/data-input context was incorrect.
+The production `ErgoBoxAssetExtractor` now performs token counting, eliminating
+that conversion. The pinned extractor reports:
 
-   with open("mainnet_<start>_<end>.json", "w") as f:
-       json.dump({"headers": headers, "transactions": txs}, f, indent=2)
-   ```
+```text
+h=700000: 3 accepted and reconciled
+h=700001: 7 accepted and reconciled
+Done: 10 accepted and reconciled, 0 dropped
+```
 
-   The `tx_bytes` lookup walks the existing tracked
-   `transactions_*.json` files (which are produced by the same
-   audit corpus). Heights covered there: 700000 (tracked) plus
-   any locally-extracted ranges. If `tx_bytes` is missing for any
-   `tx_id`, the helper fails loudly; capture more breadth before
-   re-running.
+This fixture covers 18 inputs, five token-bearing transactions, and mixed
+trivial/script and cryptographic proofs. It does not contain successful rent
+spends or nonempty data-input lists. Existing JVM verify fixtures under
+`../verify/cases.json` cover rent success and fallback; this mainnet fixture
+alone is not a claim of complete rent, rejection, or cost-formula coverage.
+No ledger rows are closed by the extractor migration.
 
-3. Save under `test-vectors/ergo-sigma/cost-total/mainnet_<start>_<end>.json`
-   and add a row to the Provenance table above.
+## Legacy aggregate fixture
 
-### Drop-rate
+`mainnet_700000_700001.json` retains the original five successfully extracted
+transactions and is consumed by `ergo-validation/tests/cost_total_oracle.rs`.
+It has aggregate costs only, a partial preheader, empty context headers, and
+resolves boxes from `test-vectors/mainnet/input_boxes_700000_700010.json`.
+That test checks reconstructed box IDs before validating transactions.
 
-Roughly half of mainnet transactions fail the Scala extractor with
-`Coll(...) of class CollOverArray` errors — scripts that read
-register or data-input contexts the extractor's stub doesn't model.
-Dropped transactions are NOT a parity gap, just unextractable through
-this harness. To raise the success rate, extend
-`ComputeTransactionCosts.scala` to populate per-input
-`ContextExtension` (currently `input.spendingProof.extension`) and
-optionally `CONTEXT.headers`.
-
-## What this fixture pins
-
-* Each `(tx_id, block_cost)` pair is the live Scala interpreter's
-  `totalCost.toBlockCost` on mainnet bytes.
-* The Rust oracle (`ergo-validation/tests/cost_total_oracle.rs`)
-  drives the production `validate_transaction` path the chain
-  validator uses — not a parallel cost path — and asserts
-  `cost.total_block_cost() == fixture.block_cost` exactly.
-* Two reject-path tests pin the cost-limit gate at the precise
-  boundary the chain consensus relies on:
-  * Init-cost over budget surfaces `ValidationError::CostExceeded`
-    with current/limit in JitCost units.
-  * Per-input script eval over budget surfaces
-    `ValidationError::ScriptError` whose `reason` carries the
-    JitCost-unit numbers.
-  Both error envelopes have separate tests so drift in either is
-  detected.
-
-A drift in the happy path is chain-fork-class: the cost-limit reject
-path is the protocol gate.
-
-## What this fixture does NOT yet cover
-
-* **`LastBlockUtxoRootHash` / opcode `0xA6`**: the Scala extractor
-  seeds `prevStateRoot` but the Rust harness's `last_headers: &[]`
-  resolves `last_block_utxo_root` to `None`. Scripts reading
-  `0xA6` diverge silently. None of the current fixtures hit it.
-* **`CONTEXT.headers`**: both harnesses pass `headers = empty`.
-* **Non-default active params**: the Rust oracle uses
-  `ProtocolParams::mainnet_default()`. Its cost-bearing fields
-  (`max_block_cost = 8_001_091`, `input_cost = 2_000`,
-  `data_input_cost = 100`, `output_cost = 100`,
-  `token_access_cost = 100`) match the voted snapshot at h=700000
-  — which is why these fixtures pass under defaults. The
-  authoritative path for height-derived params is
-  `ProtocolParams::from_active(&ActiveProtocolParameters)`. A
-  cross-epoch fixture whose epoch's voted values diverge from
-  `mainnet_default()` would need a tracked
-  `ActiveProtocolParameters` snapshot threaded through
-  `from_active`; until that snapshot ships this oracle cannot
-  detect param-snapshot drift for cross-epoch ranges.
-* **Cross-epoch voting boundaries**: every fixture entry lives in
-  a single epoch.
-* **Selection bias**: the extractor drops ~50% of mainnet txs
-  (register/data-input dependencies it can't model). The
-  retained subset under-represents context-heavy scripts —
-  exactly the scripts most likely to expose cost/context bugs.
-
-## Known follow-ups
-
-* **`LastBlockUtxoRootHash` parity**: thread the Scala extractor's
-  `prevStateRoot` through to the Rust harness so opcode `0xA6`
-  scripts can be measured. Today both harnesses stub this
-  surface but with different values (Scala = previous block's
-  `stateRoot`; Rust = `None`). A fixture exercising this opcode
-  must be added once context plumbing exists.
-* **`CONTEXT.headers` parity**: both harnesses currently pass
-  `headers = empty`. Add a fixture that reads
-  `CONTEXT.headers[i]` to validate that the empty-stub assumption
-  doesn't silently mask drift for header-reading scripts.
-* **Cross-epoch coverage**: every fixture entry today lives within
-  a single voting epoch with mainnet default params. Extend across
-  a voting boundary so `cost.total()` is exercised under a
-  non-default active params snapshot.
-* **Raise Scala-extractor success rate**: the harness drops ~50%
-  of mainnet txs (register/data-input dependencies stubbed). Wider
-  extraction breadth strengthens both this oracle and
-  `cost_parity.rs`.
-* **Per-input granularity**: current fixtures expose only the
-  aggregate `block_cost`. If a Rust drift bug surfaces, the next
-  diagnostic step is per-input cost; modify the Scala extractor to
-  emit `script_cost[i]` per input.
-* **Decouple from input-box pool**: input-box bytes still come from
-  the existing tracked
-  `test-vectors/mainnet/input_boxes_700000_700010.json`. Future
-  ranges either need a matching `input_boxes_*` capture or to bundle
-  input-box bytes directly into the fixture.
+Its five retained totals agree with the new extraction. Its empty Rust header
+context does not reconstruct the Scala previous state digest, so it provides no
+coverage for scripts reading `CONTEXT.headers` or `LastBlockUtxoRootHash`.
+The bundled breakdown fixture supplies the full header context and input bytes
+for the new field-by-field test. Neither fixture proves cross-epoch parity.
 
 ## Compressed evidence storage
 
