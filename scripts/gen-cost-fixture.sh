@@ -71,6 +71,14 @@ manifest["run"] = {"command": " ".join(command), "fixture": str(path.relative_to
     "skipped": 0, "failed": 0}
 manifest["evidence"] = {"request_jsonl_sha256": sha(request_bytes),
     "response_jsonl_sha256": sha(response_bytes)}
+# Timestamps describe changed evidence, not an identical repeat invocation.
+previous = fixture.get("manifest", {})
+comparison = json.loads(json.dumps(manifest))
+comparison["date"] = previous.get("date")
+comparison["run"]["timestamp_utc"] = previous.get("run", {}).get("timestamp_utc")
+if (comparison == previous and fixture.get("expected") == response
+        and previous.get("date") and previous.get("run", {}).get("timestamp_utc")):
+    manifest = comparison
 fixture["manifest"] = manifest
 fixture["expected"] = response
 # Complete all oracle and metadata operations before replacing the fixture.

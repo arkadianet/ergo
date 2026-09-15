@@ -190,10 +190,7 @@ opcode_rows! {
     0x9B => per_item(10, 2, 128),
 
     // BitOp family (Scala trees.scala:926-941; FixedCost(JitCost::from_jit(1))).
-    // Reject-only on the executor (these opcodes are not yet
-    // implementable) — cost still accumulates before the eval
-    // error so a future flip-to-executable does not change cost
-    // accounting.
+    // Declaration pins only: inherited Value.eval throws without charging.
     0xF2 => fixed(1), // BitOr
     0xF3 => fixed(1), // BitAnd
     0xF5 => fixed(1), // BitXor

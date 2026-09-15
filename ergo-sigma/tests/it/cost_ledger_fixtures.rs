@@ -1,4 +1,4 @@
-//! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/interpreter/p2pk.json
+//! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/interpreter/
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/op-fixed/
 //! Generator: scripts/gen-cost-fixture.sh (JVM verify)
 //!
@@ -216,27 +216,14 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
     if let Err(e) = cost.add(baseline) {
         output["verdict"] = json!("RejectCost");
         output["total_block_cost"] = json!(cost.total_block_cost());
-        output["failure_class"] = json!("RustCostError");
+        output["failure_class"] = json!("sigma.exceptions.CostLimitException");
         output["rejection_detail"] = json!(e.to_string());
         return Ok(());
     }
     ergo_sigma::cost_trace::enable();
-    let result = {
-        ergo_sigma::reduce::verify_spending_proof_with_context_and_cost(
-            &tree, &proof, &message, &ctx, &mut cost,
-        )
-        .map_err(|e| {
-            (
-                matches!(
-                    e,
-                    ergo_sigma::reduce::VerifySpendingError::Eval(
-                        ergo_sigma::evaluator::EvalError::CostExceeded(_)
-                    )
-                ),
-                e.to_string(),
-            )
-        })
-    };
+    let result = ergo_sigma::reduce::verify_spending_proof_with_context_and_cost(
+        &tree, &proof, &message, &ctx, &mut cost,
+    );
     let trace = ergo_sigma::cost_trace::take().context("verify trace")?;
     if let Some((_, snapped)) = trace.snaps.last() {
         output["eval_block_cost"] = json!((snapped - baseline.value()) / 10);
@@ -250,7 +237,9 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
                 output["rejection_detail"] = json!("Script reduced to false or proof invalid");
             }
         }
-        Err((is_cost, detail)) => {
+        Err(error) => {
+            let (verdict, failure_class) = jvm_failure(&error)?;
+            let is_cost = verdict == "RejectCost";
             if req.observe_evaluator_failure {
                 ensure!(
                     baseline.value() == 0,
@@ -258,19 +247,46 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
                 );
                 output["evaluator_failure_block_cost"] = json!(cost.total_block_cost());
             }
-            output["verdict"] = json!(if is_cost {
-                "RejectCost"
-            } else {
-                "RejectScript"
-            });
+            output["verdict"] = json!(verdict);
             if is_cost || !trace.snaps.is_empty() {
                 output["total_block_cost"] = json!(cost.total_block_cost());
             }
-            output["failure_class"] = json!("RustVerifyError");
-            output["rejection_detail"] = json!(detail);
+            output["failure_class"] = json!(failure_class);
+            output["rejection_detail"] = json!(error.to_string());
         }
     }
     Ok(())
+}
+
+// Semantic equivalence for the oracle verify failure table (design section 4).
+// CostExceeded -> CostLimitException, including baseline exhaustion.
+// Non-executable/deprecated/internal nodes and TaggedVariable (0x71)
+// -> RuntimeException from Value.eval (op-fixed rejection fixtures).
+// Interpreter version guards -> InterpreterException.
+// Unknown Rust errors fail the adapter: their JVM class needs oracle evidence;
+// comparing only exception presence would silently accept the wrong failure.
+fn jvm_failure(
+    error: &ergo_sigma::reduce::VerifySpendingError,
+) -> Result<(&'static str, &'static str)> {
+    use ergo_sigma::evaluator::EvalError;
+    use ergo_sigma::reduce::VerifySpendingError;
+    match error {
+        VerifySpendingError::Eval(EvalError::CostExceeded(_)) => {
+            Ok(("RejectCost", "sigma.exceptions.CostLimitException"))
+        }
+        VerifySpendingError::Eval(
+            EvalError::UnsupportedOpcode(0x71)
+            | EvalError::NotExecutable(..)
+            | EvalError::DeprecatedOpcode(_)
+            | EvalError::InternalOpcode(..),
+        ) => Ok(("RejectScript", "java.lang.RuntimeException")),
+        VerifySpendingError::Eval(
+            EvalError::SoftForkNotActivated { .. }
+            | EvalError::UnparsedErgoTree
+            | EvalError::TreeVersionAboveActivated { .. },
+        ) => Ok(("RejectScript", "sigma.exceptions.InterpreterException")),
+        _ => anyhow::bail!("no oracle-backed JVM failure mapping for {error:?}"),
+    }
 }
 
 #[derive(Deserialize)]
@@ -279,14 +295,6 @@ struct Fixture {
     ledger: Vec<String>,
     request: Value,
     expected: Value,
-    #[serde(default)]
-    divergence: Option<Divergence>,
-}
-
-#[derive(Deserialize)]
-struct Divergence {
-    ledger_id: String,
-    rust_evaluator_failure_block_cost: u64,
 }
 
 #[derive(Deserialize)]
@@ -297,7 +305,6 @@ struct Ledger {
 #[derive(Deserialize)]
 struct LedgerRow {
     id: String,
-    state: String,
 }
 
 fn fixture_paths(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
@@ -329,7 +336,6 @@ fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
     paths.sort();
     ensure!(!paths.is_empty(), "no cost fixtures selected");
     let selected = paths.len();
-    let mut documented_divergences = 0;
     for path in paths {
         let fixture: Fixture = serde_json::from_slice(
             &std::fs::read(&path).with_context(|| path.display().to_string())?,
@@ -356,13 +362,15 @@ fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
             fixture.manifest["generator"]
                 .as_str()
                 .is_some_and(|s| s.starts_with("scripts/gen-cost-fixture.sh@")),
-            "missing generator"
+            "{}: missing manifest.generator",
+            path.display()
         );
         ensure!(
             fixture.manifest["date"]
                 .as_str()
                 .is_some_and(|s| !s.is_empty()),
-            "missing generation date"
+            "{}: missing manifest.date",
+            path.display()
         );
         let mut actual = record(false);
         verify(&serde_json::to_vec(&fixture.request)?, &mut actual)
@@ -386,20 +394,14 @@ fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
             }
             assert_eq!(&actual[field], expected, "{}: {field}", path.display());
         }
-        // Language-specific exception names have no shared precedence here.
         let failure_class = fixture
             .expected
             .get("failure_class")
             .with_context(|| format!("{}: missing failure_class", path.display()))?;
         assert_eq!(
-            actual["failure_class"].is_null(),
-            failure_class.is_null(),
-            "{}: failure presence",
-            path.display()
-        );
-        ensure!(
-            fixture.divergence.is_none() || fixture.request["observe_evaluator_failure"] == true,
-            "{}: divergence requires a failure observation",
+            &actual["failure_class"],
+            failure_class,
+            "{}: failure_class",
             path.display()
         );
         if fixture.request["observe_evaluator_failure"] == true {
@@ -409,38 +411,12 @@ fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
                 "{}: missing JVM failure observation",
                 path.display()
             );
-            if let Some(divergence) = &fixture.divergence {
-                let id = &divergence.ledger_id;
-                ensure!(
-                    fixture.ledger.iter().any(|row| row == id)
-                        && ledger
-                            .rows
-                            .iter()
-                            .any(|row| &row.id == id && row.state == "DIVERGENT"),
-                    "untracked divergence"
-                );
-                assert_eq!(actual["verdict"], "RejectScript");
-                assert_eq!(
-                    actual["evaluator_failure_block_cost"],
-                    divergence.rust_evaluator_failure_block_cost,
-                    "{}: recorded divergence changed",
-                    path.display()
-                );
-                assert_ne!(
-                    &actual["evaluator_failure_block_cost"],
-                    expected,
-                    "{}: divergence resolved; close its ledger row",
-                    path.display()
-                );
-                documented_divergences += 1;
-            } else {
-                assert_eq!(
-                    &actual["evaluator_failure_block_cost"],
-                    expected,
-                    "{}: evaluator failure cost",
-                    path.display()
-                );
-            }
+            assert_eq!(
+                &actual["evaluator_failure_block_cost"],
+                expected,
+                "{}: evaluator failure cost",
+                path.display()
+            );
         }
         for field in ["rent_block_cost", "rent_path"] {
             if let Some(expected) = fixture.expected.get(field) {
@@ -448,6 +424,6 @@ fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
             }
         }
     }
-    eprintln!("cost fixtures: selected={selected} executed={selected} skipped=0 failed=0 documented_divergences={documented_divergences}");
+    eprintln!("cost fixtures: selected={selected} executed={selected} skipped=0 failed=0");
     Ok(())
 }

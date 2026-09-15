@@ -100,11 +100,5 @@
     "rejection_detail": "java.lang.RuntimeException: Should be overriden in class sigma.ast.BitOp: BitOp(IntConstant(1),IntConstant(1),-8)",
     "legacy": "unavailable",
     "evaluator_failure_block_cost": 1
-  },
-  "divergence": {
-    "ledger_id": "ORDER-bitop-charge-then-reject",
-    "classification": "cost-only on rejected scripts",
-    "rust_evaluator_failure_block_cost": 2,
-    "description": "JVM inherited eval adds no charge; Rust adds one JIT unit before rejection. The prefix exposes the discrepancy in block units. Rust behavior is intentionally unchanged."
   }
 }
