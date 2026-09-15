@@ -27,8 +27,6 @@ jobs:
   tracked-cost-fixtures:
     runs-on: ubuntu-latest
     env:
-      NEXTEST_EXPERIMENTAL_LIBTEST_JSON: "1"
-      NEXTEST_MESSAGE_FORMAT_VERSION: "0.1"
       COST_LEDGER_TEST_RESULTS: target/cost-ledger-test-results.json
     steps:
       - uses: actions/checkout@v4
@@ -46,6 +44,11 @@ jobs:
           NEXTEST_NO_TESTS: warn
         run: cargo nextest run -p ergo-sigma -p ergo-validation -E 'test(/cost_(pin|ledger_fixtures|sweeps|block_fixtures|crypto_truncation)/)'
       - name: Record workspace passing evidence
+        env:
+          # libtest-json is experimental and makes --message-format mandatory, so it is
+          # scoped to this step only; the fixture step above runs nextest in its default mode.
+          NEXTEST_EXPERIMENTAL_LIBTEST_JSON: "1"
+          NEXTEST_MESSAGE_FORMAT_VERSION: "0.1"
         run: |
           mkdir -p target
           cargo nextest run --workspace --message-format libtest-json > "$COST_LEDGER_TEST_RESULTS"
