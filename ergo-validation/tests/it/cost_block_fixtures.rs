@@ -202,6 +202,10 @@ fn jvm_verdict(expected: &Expected) -> &'static str {
         && detail.contains("=> Success((false,")
     {
         "RejectScript"
+    } else if detail.starts_with("Scripts of all transaction inputs should pass verification. ")
+        && detail.ends_with("=> Failure(sigma.exceptions.InterpreterException: ErgoTree version 3 is higher than activated 2)")
+    {
+        "RejectVersion"
     } else {
         panic!("unmapped JVM rejection: {detail}");
     }
@@ -219,6 +223,10 @@ fn rust_verdict(error: Option<&BlockValidationError>) -> &'static str {
             error: ValidationError::ProofFailed { .. },
             ..
         }) => "RejectScript",
+        Some(BlockValidationError::Transaction {
+            error: ValidationError::ScriptError { index: 0, reason },
+            ..
+        }) if reason.ends_with("ErgoTree version 3 is higher than activated 2") => "RejectVersion",
         Some(error) => panic!("unmapped Rust rejection: {error:?}"),
     }
 }
@@ -416,6 +424,18 @@ fn replay(fixture: Fixture) {
         parallel.as_ref().err(),
     ] {
         assert_eq!(rust_verdict(actual), expected, "{actual:?}");
+        if fixture.parameters["4"] == 25005 && fixture.transactions_hex.len() == 3 {
+            assert!(
+                matches!(
+                    actual,
+                    Some(BlockValidationError::BlockCostExceeded {
+                        total: 37509,
+                        limit: 25005
+                    })
+                ),
+                "{actual:?}"
+            );
+        }
     }
     if expected != "Accept" {
         // Failed JVM execution has no payload; a deferred Rust sum is not substituted.
@@ -568,7 +588,18 @@ fn block_v6_devnet_context_matches_jvm() {
         serde_json::json!([3])
     );
     assert_eq!(case.expected.verdict, "Accept");
+    assert_eq!(case.expected.sum_block_cost, Some(12104));
+    let control = fixture("f-v5-control");
+    assert_eq!(control.parameters["123"], 3);
+    assert_eq!(control.transactions_hex, case.transactions_hex);
+    assert_eq!(control.parent_boxes_hex, case.parent_boxes_hex);
+    assert_eq!(control.parent_state_root, case.parent_state_root);
+    let mut v5_params = case.parameters.clone();
+    v5_params.insert("123".into(), 3);
+    assert_eq!(control.parameters, v5_params);
+    assert_eq!(jvm_verdict(&control.expected), "RejectVersion");
     replay(case);
+    replay(control);
 }
 
 #[test]
