@@ -1,4 +1,5 @@
 //! Phase 2: differential testing against the Scala reference node.
+//! Oracle: scripts/jvm_serde_oracle/ErgoSerdeOracle.scala
 //!
 //! Spawns the JVM serde oracle (`scripts/jvm_serde_oracle/ErgoSerdeOracle.scala`,
 //! the real `sigma-state` the consensus node runs) once and streams inputs to
@@ -1089,6 +1090,8 @@ mod tests {
         // (name, tree bytes, assert_parity). `assert_parity = false` probes are
         // reported only (documented residuals outside the rule-1001 typer).
         let probes: Vec<(&str, Vec<u8>, bool)> = vec![
+            ("empty_payload_rejected_without_protocol_error", vec![], true),
+            ("function_unbound_body_rejected", from_hex("00d9007201").unwrap(), true),
             (
                 // The Finding-E accept-invalid: root ValUse of a reused id is
                 // SLong at its parse position -> Scala REJECTS.

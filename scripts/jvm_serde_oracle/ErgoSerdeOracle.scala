@@ -385,8 +385,9 @@ object ErgoSerdeOracle {
     while (line != null) {
       val t = line.trim
       if (t.nonEmpty) {
-        val parts = t.split("\\s+", 2)
-        println(if (parts.length == 2) handle(parts(0), parts(1)) else "ERR bad-line")
+        // Preserve an empty hex payload: zero bytes are a valid fuzz input.
+        val parts = line.dropWhile(_.isWhitespace).split("\\s+", 2)
+        println(if (parts.length == 2) handle(parts(0), parts(1).trim) else "ERR bad-line")
         answered += 1
         if (dieAfter.exists(answered >= _)) {
           Console.err.println(s"DIFFTEST_ORACLE_DIE_AFTER: exiting after $answered queries")
