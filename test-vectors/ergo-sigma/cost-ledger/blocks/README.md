@@ -138,7 +138,59 @@ Both target validators run with scripts enabled; observed sequential and paralle
 per-transaction costs must agree and their sum must equal the JVM total. The
 successful target transition must also match the oracle's final root.
 
-The initial corpus contains one accepted P2PK target. Rejected targets deliberately
-fail this runner until JVM exception-to-semantic-failure mappings and unavailable
-cost handling are added with independent rejection fixtures. This smoke does not
-establish multi-transaction layering, cost-cap boundaries, or rejection precedence.
+The runner maps the pinned JVM `MalformedModifierError` to `RejectCost` only
+for rule 307's accumulated-cost message or rule 119's embedded
+`sigma.exceptions.CostLimitException`. A rule-119 `Success((false,...))` maps to
+`RejectScript`, exercised by the invalid-signature control. Unknown JVM and Rust
+errors fail the test; an arbitrary rejection cannot satisfy cost parity. Rejected
+execution retains null cost, and the fixture must preserve its parent root.
+The Rust validators return validation results without applying rejected blocks.
+
+## Boundary families
+
+Regenerate all families in one JVM invocation so the ordered fixtures share the
+same signed transactions (P2PK signatures use JVM prover randomness):
+
+```sh
+python3 scripts/jvm_block_oracle/run.py families scripts/jvm_block_oracle/.work
+```
+
+Compress each named JSON output with Python `gzip.compress(bytes, mtime=0)` into
+this directory. `capture` independently replays any tracked gzip fixture.
+Each generated fixture records its JVM baseline in `boundary_basis`; the builder
+measures production execution before choosing the boundary cap. The original
+signed bytes, state, parameters, source hash and reproduction command are retained.
+
+| Fixture | Cap | JVM result | Evidence |
+|---|---:|---|---|
+| `a-exact-sum` | 37509 | Accept, 37509 | Three independent P2PK transactions at equality |
+| `b-sum-plus-one` | 37508 | RejectCost, unavailable | Identical transactions exceed cap by one |
+| `c-single-cap` | 12503 | Accept, 12503 | Single P2PK exactly at cap |
+| `d-mid-block`, `d-mid-block-reversed` | 25005 | RejectCost, unavailable | Same three transactions reversed; JVM identifies transaction two as failing |
+| `e-token-order` | 24703 | RejectCost, unavailable | Prefix 12503 leaves 12200; structural init 12100 passes, then four token accesses add 400 and fail rule 307 |
+| `f-v6-devnet` | 12105 | Accept, 12105 | Block version 4, activated version 3, ErgoTree version 3 true proposition |
+| `rejection-script-control` | 1000000 | RejectScript, unavailable | Invalid P2PK signature must not count as cost rejection |
+
+These fixtures establish the named boundary obligations, not exhaustive proofs
+for arbitrary scripts or full-node history/difficulty validation.
+
+### Requested Long multiplication overflow
+
+`BLOCK-overflow-fixture` remains OPEN. A serialized block cannot provide the
+requested overflowing `initialCost` multiplication under the pinned JVM types:
+
+- `ErgoTransaction.validateStateful` lines 370–374 widens collection `.size: Int`
+  and `Parameters` cost-table `Int` values to `Long` before multiplying.
+- Even `Int.MinValue * Int.MinValue` after widening is `2^62`, below `Long.MaxValue`.
+  A collection size is nonnegative, giving an even tighter bound.
+- `ErgoLikeTransactionSerializer` in sigma-state's
+  `data/shared/src/main/scala/org/ergoplatform/ErgoLikeTransaction.scala`
+  lines 148, 155, 172 reads all three counts with `getUShort` (maximum 65535).
+  With every positive tariff at `Int.MaxValue`, all three initialization products
+  plus the 10000 interpreter constant total at most **422206022428435**, below
+  `Long.MaxValue` (9223372036854775807). Adding the running cost bounded by the
+  `Int` block cap still cannot overflow `Long`.
+
+A helper called with invented Long counts, a narrower JIT overflow, or a block
+rejected for size/cap does not demonstrate the requested production multiplication
+overflow. No such substitute is represented as closure evidence.
