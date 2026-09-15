@@ -329,13 +329,19 @@ object BlockOracle {
           sigma.interpreter.ProverResult(Array.fill(56)(0.toByte), sigma.interpreter.ContextExtension.empty))),
           first.dataInputs, first.outputCandidates)
         (request(inputs.take(1), Seq(invalid), 1000000), single, Seq.empty[String])
-      case "f-v6-devnet" =>
-        val v6Tree = ErgoTree.fromProposition(ErgoTree.HeaderType @@ 3.toByte, SigmaPropConstant(sigma.data.TrivialProp.TrueProp))
+      case "f-v6-devnet" | "f-v5-control" =>
+        // Serialized BlockValue eagerly evaluates a 201-byte collection reverse before True.
+        // Collection method 30 is available only in v6; no compiler can fold it away.
+        val v6Tree = sigma.VersionContext.withVersions(3.toByte, 3.toByte) {
+          sigma.serialization.ErgoTreeSerializer.DefaultSerializer.deserializeErgoTree(
+            bytes("0bd501d801d60adb0c1e0ec90100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008d3"))
+        }
         val input = new ErgoBox(1000000000L, v6Tree, sigma.Colls.emptyColl, Map.empty,
           scorex.util.bytesToId(Array.fill(32)(30.toByte)), 0.toShort, 0)
         val transaction = bootstrapTransaction(input, 128)
         val total = measure(Seq(input), Seq(transaction), 4)
-        (request(Seq(input), Seq(transaction), field[Int](total.hcursor, "sum_block_cost"), 4),
+        (request(Seq(input), Seq(transaction), 1000000,
+          if (name == "f-v5-control") 3 else 4),
           total, Seq.empty[String])
       case _ => throw new IllegalArgumentException("unknown family " + name)
     }
@@ -435,7 +441,7 @@ object BlockOracle {
     val result = args.toList match {
       case "families" :: directory :: Nil =>
         val names = Seq("a-exact-sum", "b-sum-plus-one", "c-single-cap", "d-mid-block",
-          "d-mid-block-reversed", "e-token-order", "f-v6-devnet", "rejection-script-control")
+          "d-mid-block-reversed", "e-token-order", "f-v6-devnet", "f-v5-control", "rejection-script-control")
         Json.obj(names.map(name => name -> family(name, directory + "/" + name + ".json")): _*)
       case "family" :: name :: output :: Nil => family(name, output)
       case "build" :: input :: output :: Nil =>

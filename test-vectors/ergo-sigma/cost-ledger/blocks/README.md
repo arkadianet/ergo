@@ -168,7 +168,8 @@ signed bytes, state, parameters, source hash and reproduction command are retain
 | `c-single-cap` | 12503 | Accept, 12503 | Single P2PK exactly at cap |
 | `d-mid-block`, `d-mid-block-reversed` | 25005 | RejectCost, unavailable | Same three transactions reversed; JVM identifies transaction two as failing |
 | `e-token-order` | 24703 | RejectCost, unavailable | Prefix 12503 leaves 12200; structural init 12100 passes, then four token accesses add 400 and fail rule 307 |
-| `f-v6-devnet` | 12105 | Accept, 12105 | Block version 4, activated version 3, ErgoTree version 3 true proposition |
+| `f-v6-devnet` | 1000000 | Accept, 12104 | Block version 4, activated version 3, ErgoTree version 3 eagerly evaluates Coll.reverse on 201 bytes before True |
+| `f-v5-control` | 1000000 | RejectVersion, unavailable | Identical signed transaction and input state, rebuilt under block version 3; JVM rejects tree version 3 above activated 2 |
 | `rejection-script-control` | 1000000 | RejectScript, unavailable | Invalid P2PK signature must not count as cost rejection |
 
 These fixtures establish the named boundary obligations, not exhaustive proofs
@@ -194,3 +195,10 @@ requested overflowing `initialCost` multiplication under the pinned JVM types:
 A helper called with invented Long counts, a narrower JIT overflow, or a block
 rejected for size/cap does not demonstrate the requested production multiplication
 overflow. No such substitute is represented as closure evidence.
+
+The version control rebuilds the block envelope and parent chain under parameter
+123 = 3 while preserving signed transaction bytes, input boxes and parent UTXO
+root. Both Rust validators must report the specific tree-version error. Family
+(f) uses cap 1000000 because its observed 12104 cost is below the 12105 needed
+by the true-script bootstrap parent transactions. Family (d) additionally pins
+the Rust deferred-sum error to `BlockCostExceeded { total: 37509, limit: 25005 }`.
