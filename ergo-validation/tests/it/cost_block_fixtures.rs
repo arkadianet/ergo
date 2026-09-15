@@ -222,6 +222,13 @@ fn rust_verdict(error: Option<&BlockValidationError>) -> &'static str {
     }
 }
 
+fn fixture(name: &str) -> Fixture {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../test-vectors/ergo-sigma/cost-ledger/blocks")
+        .join(format!("{name}.json.gz"));
+    serde_json::from_reader(flate2::read::GzDecoder::new(File::open(path).unwrap())).unwrap()
+}
+
 fn replay(fixture: Fixture) {
     assert_eq!(fixture.schema_version, 1);
     assert!(fixture.ledger.iter().any(|id| id == "BLOCK-parallel-equiv"));
@@ -478,4 +485,11 @@ fn block_fixtures_both_validators_match_jvm() {
         paths.len(),
         paths.len()
     );
+}
+
+#[test]
+fn block_invalid_signature_is_script_rejection() {
+    let case = fixture("rejection-script-control");
+    assert_eq!(jvm_verdict(&case.expected), "RejectScript");
+    replay(case);
 }
