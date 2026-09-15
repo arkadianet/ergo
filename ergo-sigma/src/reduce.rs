@@ -99,10 +99,9 @@ fn serialized_ergo_tree_len(tree: &ErgoTree) -> Result<usize, VerifySpendingErro
 /// Mirrors Scala's `Interpreter.fullReduction` (`Interpreter.scala:203-228`)
 /// which only takes the fast path on the exact pattern
 /// `SigmaPropConstant(p)` and falls through to
-/// `CErgoTreeEvaluator.evalToCrypto` for everything else, including
-/// scripts whose body is a top-level `SBoolean` constant (legal under
-/// 6.0 / v3 ErgoTrees — the evaluator owns the implicit
-/// `Bool → SigmaProp` coercion and its cost accounting).
+/// `CErgoTreeEvaluator.evalToCrypto` for other body shapes. Non-SigmaProp
+/// roots, including top-level `SBoolean` constants, are rejected during
+/// ErgoTree parsing for all tree versions.
 ///
 /// Two of these variants are caller-must-fall-through (the trivial
 /// path didn't match Scala's `SigmaPropConstant(p)` pattern); two
@@ -114,9 +113,8 @@ pub enum ReductionError {
     #[error("ErgoTree does not trivially reduce to a sigma proposition")]
     NotTriviallyReducible,
     /// Body IS a single constant, but not of type `SSigmaProp`
-    /// (e.g. a top-level `SBoolean` root, common in v3 ErgoTrees
-    /// under 6.0 semantics). The full evaluator handles the implicit
-    /// `Bool → SigmaProp` coercion and charges the correct cost.
+    /// in an internally constructed tree. Non-SigmaProp roots are
+    /// rejected during parsing for every ErgoTree version.
     /// Caller MUST fall through.
     #[error("body constant type is {0:?}, not SSigmaProp — full evaluator needed")]
     BodyConstantNotSigmaProp(SigmaType),
@@ -283,10 +281,9 @@ pub fn verify_spending_proof_with_context_and_cost(
 
     // Try trivial reduction first. Mirrors Scala
     // `Interpreter.fullReduction:210-225`: the fast path only handles
-    // the `SigmaPropConstant(p)` pattern; every other body shape
-    // (including v3 / 6.0 top-level `SBoolean` roots) goes through
-    // the full evaluator, which owns the implicit `Bool → SigmaProp`
-    // coercion and its cost accounting.
+    // the `SigmaPropConstant(p)` pattern; other body shapes go through
+    // the full evaluator. Non-SigmaProp roots are rejected during parsing
+    // for every ErgoTree version.
     let proposition = match trivial_reduce(ergo_tree) {
         Ok(prop) => {
             // Scala charges Eval_SigmaPropConstant(50) for trivially-reducible scripts
