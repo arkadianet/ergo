@@ -16,8 +16,34 @@ def closure(t, body):
     return bytes([0xd9, 1, 1, t]) + body
 
 
+def failure_probes():
+    # OptionGet(None) throws while evaluating the receiver, before either envelope.
+    receiver = b'\xe4\xe3\x02\x0e'
+    cases = []
+    for label, target in [('property', prop(12, 14, receiver)),
+                          ('method', call(12, 29, receiver, bytecoll(b''))),
+                          ('argument', call(12, 29, bytecoll(b''), receiver))]:
+        cases += cases_for('throwing-' + label, target, failure=True)
+    save('failure-envelope', ['METHOD-coll-indices', 'METHOD-coll-zip', 'ORDER-propertycall-receiver', 'ORDER-methodcall-arguments', 'ORDER-optionget-input'], cases)
+
+    cases = []
+    for k, table in [(0, 16), (1, 16), (33, 16), (2, 0), (32, 15)]:
+        for n in (0, 129):
+            target = call(106, 8, b'\xdd', num(4, k), bytecoll(bytes(n)),
+                          bytecoll(b''), bytecoll(b''), num(4, table))
+            cases += cases_for(f'invalid-powHit-k{k}-N{table}-n{n}', target, failure=True)
+    save('failure-powHit', ['METHOD-global-powHit', 'ORDER-powHit-validation'], cases)
+
+    cases = []
+    for label, target in [('header-property', prop(104, 9, b'\xa7')),
+                          ('encodeNbits-method', call(106, 6, b'\xdd', num(4)))]:
+        cases += cases_for('malformed-' + label, target, failure=True)
+    save('failure-fixed', ['METHOD-header-props', 'METHOD-global-encodeNbits', 'ORDER-fixed-method-invocation'], cases)
+
+
 def main():
     wire.OUT.mkdir(exist_ok=True)
+    failure_probes()
     for name, mid, k in [('indices', 14, 16), ('reverse', 30, 100), ('indexOf', 26, 2),
                          ('zip', 29, 10), ('startsEndsWith', 31, 10), ('flatMap', 15, 8),
                          ('patch', 19, 10), ('updated', 20, 10), ('updateMany', 21, 10)]:

@@ -14,8 +14,8 @@ pub(in crate::evaluator) fn eval_option_get(
     inner: &Expr,
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
-    add_cost(cx.cost, 0xE4)?;
     let val = cx.eval_expr(inner)?;
+    add_cost(cx.cost, 0xE4)?;
     match val {
         Value::Opt(Some(v)) => Ok(*v),
         Value::Opt(None) => Err(EvalError::TypeError {
