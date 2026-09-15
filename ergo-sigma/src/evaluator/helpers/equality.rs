@@ -30,12 +30,8 @@ pub(crate) fn reflect_sstring_error(error: EvalError) -> EvalError {
 /// meaningful Ergo equality — comparing them via Rust PartialEq would
 /// produce results based on evaluator representation, not semantic identity.
 pub(crate) fn require_comparable(l: &Value, r: &Value) -> Result<(), EvalError> {
-    // Scala EQ/NEQ validates top-level operand types before the comparer.
-    // SString is unsupported here; tuple validation is shallow, so nested
-    // strings can still reach DataValueComparer's String arm.
-    if matches!(l, Value::Str(_)) || matches!(r, Value::Str(_)) {
-        return Err(EvalError::RuntimeException("Unknown type SString"));
-    }
+    // EQ/NEQ rejects each bare String immediately after evaluating that
+    // operand. Nested strings remain valid for recursive comparison.
     check_comparable(l)?;
     check_comparable(r)
 }

@@ -328,8 +328,9 @@ fn eq_with_cost_inner(
         // Boxed-element collection carrier: dispatch on the element-type tag.
         Value::CollGeneric(a, elem_type) => {
             cost.add(JitCost::from_jit(cost_table::MATCH_TYPE))?;
-            let match_len = a.len() == coll_len(right, ctx);
-            if !match_len {
+            if a.len() != coll_len(right, ctx)
+                || super::helpers::coll_elem_type(left) != super::helpers::coll_elem_type(right)
+            {
                 return Ok(false); // Scala `return false` after the lone MatchType.
             }
             if let Some(kind) = descriptor_cost_kind(elem_type) {
@@ -341,7 +342,9 @@ fn eq_with_cost_inner(
         // Box and Header carriers use the same descriptor loop as CollGeneric.
         Value::BoxCollection(_) | Value::CollBox(_) | Value::CollHeader(_) => {
             cost.add(JitCost::from_jit(cost_table::MATCH_TYPE))?;
-            if coll_len(left, ctx) != coll_len(right, ctx) {
+            if coll_len(left, ctx) != coll_len(right, ctx)
+                || super::helpers::coll_elem_type(left) != super::helpers::coll_elem_type(right)
+            {
                 return Ok(false);
             }
             let kind = if matches!(left, Value::CollHeader(_)) {
@@ -465,7 +468,7 @@ fn eq_with_cost_inner(
 
 /// Descriptor equality compares uncosted elements, then charges the examined
 /// count. An element error skips this deferred charge (Scala equalCOA_Prim).
-/// The caller has charged MatchType and checked lengths.
+/// The caller has charged MatchType and checked collection element types and lengths.
 fn descriptor_coll_eq(
     left: &Value,
     right: &Value,
