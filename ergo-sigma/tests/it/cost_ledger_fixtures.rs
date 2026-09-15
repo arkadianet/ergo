@@ -286,7 +286,7 @@ fn jvm_failure(
             | EvalError::InternalOpcode(..),
         ) => Ok(("RejectScript", "java.lang.RuntimeException")),
         VerifySpendingError::Eval(EvalError::RuntimeException(
-            "Cannot compare SigmaBoolean values: unknown type",
+            "Cannot compare SigmaBoolean values: unknown type" | "Unknown type SString",
         )) => Ok(("RejectOther", "java.lang.RuntimeException")),
         VerifySpendingError::Eval(
             EvalError::SoftForkNotActivated { .. }
@@ -532,12 +532,32 @@ fn cost_ledger_divergence_invalid_annotations_rejected() -> Result<()> {
         .as_array()
         .context("cases")?
         .iter()
-        .find(|case| case.get("known_divergence").is_some())
-        .context("known divergence")?
+        .find(|case| case["name"] == "group-equal-n0-prefix0")
+        .context("oracle case")?
         .clone();
     case["manifest"] = document["manifest"].clone();
     case["ledger"] = document["ledger"].clone();
-    let ledger: Ledger = toml::from_str(&std::fs::read_to_string(root.join("ledger.toml"))?)?;
+    let mut ledger: Ledger = toml::from_str(&std::fs::read_to_string(root.join("ledger.toml"))?)?;
+    // Synthetic metadata exercises runner validation; oracle expectations in
+    // the tracked fixture stay unchanged and the parity test uses them directly.
+    let actual_eval = case["expected"]["eval_block_cost"].clone();
+    let actual_total = case["expected"]["total_block_cost"].clone();
+    case["expected"]["eval_block_cost"] = json!(999);
+    case["expected"]["total_block_cost"] = json!(999);
+    case["known_divergence"] = json!({
+        "ledger": "EVAL-eq-coll-descriptor",
+        "classification": "cost-only",
+        "tracking": "test-vectors/ergo-sigma/cost-ledger/fixtures/eval/DIVERGENCES.md",
+        "differences": {
+            "eval_block_cost": {"rust": actual_eval, "jvm": 999},
+            "total_block_cost": {"rust": actual_total, "jvm": 999}
+        }
+    });
+    for row in &mut ledger.rows {
+        if row.id == "EVAL-eq-coll-descriptor" {
+            row.state = "DIVERGENT".to_owned();
+        }
+    }
     let check = |value: Value| verify_fixture(&path, serde_json::from_value(value)?, &ledger);
     assert!(check(case.clone())?);
 

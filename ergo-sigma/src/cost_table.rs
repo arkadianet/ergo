@@ -272,8 +272,9 @@ pub const EQ_COA_HEADER: CostKind = per_item(15, 5, 1);
 pub const EQ_COA_SIGMA_PROP: CostKind = per_item(15, 5, 1);
 pub const EQ_COLL: CostKind = per_item(10, 2, 1);
 
-/// Adds the dynamic cost for EQ/NEQ comparison of a value, matching Scala's
-/// `DataValueComparer.equalDataValues`.
+/// Adds fixed equality costs or the cost of comparing every collection item.
+/// Consensus collection equality uses the evaluator's two-operand comparer to
+/// charge only examined items; this one-operand helper cannot detect mismatch.
 ///
 /// Scala's EQ costs embed the dispatch cost (CasePosition * MatchType) in each
 /// type-specific constant. No separate MATCH_TYPE is charged at the top level
@@ -291,8 +292,8 @@ pub fn add_eq_cost(
         Value::Bool(_) | Value::Byte(_) | Value::Short(_) | Value::Int(_) | Value::Long(_) => {
             cost.add(JitCost::from_jit(EQ_PRIM))
         }
-        // Unit — cheap equality; Scala charges a single EQ_Prim for it
-        Value::Unit => cost.add(JitCost::from_jit(EQ_PRIM)),
+        // Scala Unit equality has no cost wrapper.
+        Value::Unit => Ok(()),
         Value::BigInt(_) | Value::UnsignedBigInt(_) => cost.add(JitCost::from_jit(EQ_BIGINT)),
         // Case 4: group element — cost includes dispatch
         Value::GroupElement(_) => cost.add(JitCost::from_jit(EQ_GROUP_ELEMENT)),
@@ -351,14 +352,11 @@ pub fn add_eq_cost(
             }
             Ok(())
         }
-        // SString EQ mirrors the pre-carrier Coll[Byte] cost (strings were
-        // lowered to Coll[Byte] before the Value::Str carrier), so EQ
-        // behavior is unchanged; only SGlobal.serialize uses SString's
-        // cheaper length cost.
+        // Scala String.length counts UTF-16 code units and uses EQ_COA_Short.
         Value::Str(s) => {
             cost.add(JitCost::from_jit(MATCH_TYPE))?;
             if colls_match_len {
-                cost.add_per_item(EQ_COA_BYTE, s.len() as u32)?;
+                cost.add_per_item(EQ_COA_SHORT, s.encode_utf16().count() as u32)?;
             }
             Ok(())
         }
