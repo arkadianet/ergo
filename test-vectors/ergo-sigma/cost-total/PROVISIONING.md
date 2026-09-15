@@ -247,3 +247,11 @@ path is the protocol gate.
   `test-vectors/mainnet/input_boxes_700000_700010.json`. Future
   ranges either need a matching `input_boxes_*` capture or to bundle
   input-box bytes directly into the fixture.
+
+## Compressed evidence storage
+
+The epoch-extension corpus is stored as deterministic `mainnet-epochs.json.gz`.
+`scripts/cost_fixture_io.py` writes gzip without filenames or timestamps.
+Evidence SHA-256 hashes cover uncompressed JSON bytes, never gzip archives.
+Historical source hashes and revision identifiers retain their original provenance;
+changing storage does not regenerate oracle evidence.
