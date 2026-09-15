@@ -1,50 +1,46 @@
 //> using scala 2.12
-//> using dep org.ergoplatform::ergo-wallet:6.1.0
-//> using dep io.circe::circe-parser:0.14.5
+//> using options -Xfatal-warnings
+//> using dep org.ergoplatform::ergo-core:6.0.5
+//> using dep org.ergoplatform::ergo-wallet:6.0.5
+//> using dep org.scorexfoundation::sigma-state:6.0.6
+//> using dep io.circe::circe-parser:0.13.0
+//> using repository ivy2Local
+//> using repository "https://gitlab.com/api/v4/projects/61211221/packages/maven"
 
-// Validates mainnet transactions using the real Scala sigmastate-interpreter
-// and outputs per-tx block-cost values for differential testing against Rust.
-//
-// Connects to a running Ergo node API to fetch blocks and resolve input boxes.
-// Requires: node running with extraIndex enabled.
-//
-// Usage: scala-cli run ComputeTransactionCosts.scala -- <start_height> <end_height>
-//
-// Output: JSON array to stdout:
-//   [{"tx_id":"...","height":N,"block_cost":N}, ...]
-//
-// Params are loaded from the most recent epoch boundary extension on startup,
-// then refreshed at each subsequent epoch boundary. This ensures correct
-// activatedScriptVersion and cost constants across voting-param changes.
+// Usage: scala-cli run ComputeTransactionCosts.scala --server=false -- <start> <end>
+// Requires an extraIndex node (NODE_URL) and the v6.0.5 source configuration
+// (ERGO_REFERENCE). Stdout is the transaction array; stderr includes a manifest.
+// Any missing input, validation failure, or reconciliation mismatch aborts extraction.
 
 import org.ergoplatform._
 import org.ergoplatform.sdk.JsonCodecs
-import org.ergoplatform.sdk.CBlockchainParameters
 import org.ergoplatform.wallet.interpreter.ErgoInterpreter
+import org.ergoplatform.modifiers.mempool.ErgoTransaction
+import org.ergoplatform.wallet.boxes.ErgoBoxAssetExtractor
+import org.ergoplatform.modifiers.history.header.Header
+import org.ergoplatform.modifiers.history.extension.ExtensionCandidate
+import org.ergoplatform.nodeView.state.{ErgoStateContext, VotingData}
+import org.ergoplatform.settings._
 import io.circe.parser._
 import io.circe._
 import scorex.util.encode.Base16
-import sigma.Colls
-import sigma.data.{AvlTreeData, AvlTreeFlags, CGroupElement}
-import sigma.serialization.{GroupElementSerializer, SigmaSerializer}
-import org.ergoplatform.validation.ValidationRules
-import sigmastate.eval.CPreHeader
-import sigmastate.interpreter.Interpreter
-
+import sigma.ast.ErgoTree
+import sigmastate.interpreter.Interpreter.{ScriptEnv, VerificationResult, ReductionResult}
+import com.typesafe.config.ConfigFactory
+import net.ceedubs.ficus.Ficus._
+import net.ceedubs.ficus.readers.ArbitraryTypeReader._
 import java.io._
 import java.net._
 import java.nio.ByteBuffer
 import scala.collection.mutable
-import scala.util.{Try, Success, Failure}
+import scala.util.Try
 
-object ComputeTransactionCosts extends JsonCodecs {
-
+object ComputeTransactionCosts extends JsonCodecs with PowSchemeReaders
+    with ModifierIdReader with SettingsReaders {
   val NODE_URL: String = sys.env.getOrElse("NODE_URL", "http://localhost:9053")
-
   // Mainnet voting epoch length (Parameters.votingLength in chainSettings)
   val VOTING_EPOCH_LENGTH = 1024
 
-  val INTERPRETER_INIT_COST = 10000L
 
   // Parameter byte IDs matching Scala Parameters.scala constants.
   // System params are stored in extension fields with 2-byte keys: 0x00 ++ paramId
@@ -101,20 +97,65 @@ object ComputeTransactionCosts extends JsonCodecs {
     ))
   }
 
-  def makeInterpreter(p: ActiveParams): ErgoInterpreter =
-    new ErgoInterpreter(CBlockchainParameters(
-      storageFeeFactor       = p.storageFeeFactor,
-      minValuePerByte        = p.minValuePerByte,
-      maxBlockSize           = p.maxBlockSize,
-      tokenAccessCost        = p.tokenAccessCost,
-      inputCost              = p.inputCost,
-      dataInputCost          = p.dataInputCost,
-      outputCost             = p.outputCost,
-      maxBlockCost           = p.maxBlockCost.toInt,
-      softForkStartingHeight = None,
-      softForkVotesCollected = None,
-      blockVersion           = p.blockVersion.toByte
-    ))
+
+  def parameters(p: ActiveParams, height: Int): Parameters = new Parameters(height, Map(
+    PARAM_STORAGE_FEE_FACTOR -> p.storageFeeFactor,
+    PARAM_MIN_VALUE_PER_BYTE -> p.minValuePerByte,
+    PARAM_MAX_BLOCK_SIZE -> p.maxBlockSize,
+    PARAM_MAX_BLOCK_COST -> p.maxBlockCost.toInt,
+    PARAM_TOKEN_ACCESS_COST -> p.tokenAccessCost,
+    PARAM_INPUT_COST -> p.inputCost,
+    PARAM_DATA_INPUT_COST -> p.dataInputCost,
+    PARAM_OUTPUT_COST -> p.outputCost,
+    PARAM_BLOCK_VERSION -> p.blockVersion
+  ), ErgoValidationSettingsUpdate.empty)
+
+  case class InputCost(index: Int, eval: Long, crypto: Long, rent: Long) {
+    def json: Json = Json.obj(
+      "index" -> Json.fromInt(index), "eval_block_cost" -> Json.fromLong(eval),
+      "crypto_block_cost" -> Json.fromLong(crypto), "rent" -> Json.fromLong(rent))
+  }
+
+  // Overrides observe return values from the production calls without changing
+  // execution, budget, version context, or rounding. No input is re-evaluated.
+  class RecordingInterpreter(p: Parameters) extends ErgoInterpreter(p) {
+    val inputs = mutable.ArrayBuffer[InputCost]()
+    private var reductionCost: Option[Long] = None
+    private var rentSucceeded = false
+
+    override def fullReduction(tree: ErgoTree, ctx: CTX, env: ScriptEnv): ReductionResult = {
+      val result = super.fullReduction(tree, ctx, env)
+      reductionCost = Some(result.cost)
+      result
+    }
+
+    override protected def checkExpiredBox(box: ErgoBox, output: ErgoBoxCandidate,
+                                          height: Int): Boolean = {
+      val result = super.checkExpiredBox(box, output, height)
+      rentSucceeded = result
+      result
+    }
+
+    override def verify(env: ScriptEnv, tree: ErgoTree, ctx: CTX,
+                        proof: Array[Byte], message: Array[Byte]): Try[VerificationResult] = {
+      reductionCost = None
+      rentSucceeded = false
+      require(ctx.initCost == 0L, s"unexpected input initCost: ${ctx.initCost}")
+      val result = super.verify(env, tree, ctx, proof, message)
+      result.foreach { case (valid, total) =>
+        if (valid) {
+          val rent = if (rentSucceeded) 50L else 0L
+          // Soft-fork acceptance can bypass fullReduction and return initCost.
+          val eval = reductionCost.getOrElse(0L)
+          val crypto = total - eval - rent
+          require(crypto >= 0 && (!rentSucceeded || total == 50L),
+            s"invalid input breakdown: total=$total eval=$eval rent=$rent")
+          inputs += InputCost(ctx.selfIndex, eval, crypto, rent)
+        }
+      }
+      result
+    }
+  }
 
   // Extract extension fields as (keyHex, valueHex) pairs from a block JSON cursor.
   def extensionFields(cursor: HCursor): Vector[(String, String)] =
@@ -145,250 +186,119 @@ object ComputeTransactionCosts extends JsonCodecs {
     sb.toString()
   }
 
-  // Build AvlTreeData from a 33-byte stateRoot hex (header.stateRoot from API).
-  // Ergo's UTXO tree allows all operations; keyLength=32 (box IDs).
-  def stateRootToAvlTree(stateRootHex: String): AvlTreeData =
-    AvlTreeData(
-      Colls.fromArray(Base16.decode(stateRootHex).get),
-      AvlTreeFlags.AllOperationsAllowed,
-      32
-    )
-
-  def fetchExtensionFields(height: Int): Option[Vector[(String, String)]] = Try {
-    val ids = parse(httpGet(s"/blocks/at/$height")).getOrElse(Json.arr())
-      .asArray.getOrElse(Vector.empty).flatMap(_.asString)
-    if (ids.isEmpty) None
-    else {
-      val blockJson = parse(httpGet(s"/blocks/${ids.head}")).getOrElse(Json.Null)
-      Some(extensionFields(blockJson.hcursor))
-    }
-  }.toOption.flatten
-
   def main(args: Array[String]): Unit = {
-    if (args.length < 2) {
-      System.err.println("Usage: ComputeTransactionCosts <start_height> <end_height>")
-      System.exit(1)
-    }
-
+    require(args.length == 2, "Usage: ComputeTransactionCosts <start_height> <end_height>")
     val startHeight = args(0).toInt
-    val endHeight   = args(1).toInt
+    val endHeight = args(1).toInt
+    require(startHeight > 10 && endHeight >= startHeight)
+    val sigmaJar = classOf[sigma.VersionContext].getProtectionDomain.getCodeSource.getLocation.toString
+    val version = "6.0.6"
+    require(sigmaJar.endsWith(s"sigma-state_2.12-$version.jar"),
+      s"Expected resolved sigma-state $version, found $sigmaJar")
+    val reference = sys.env.getOrElse("ERGO_REFERENCE",
+      s"${sys.props("user.home")}/coding/development/arkadianet/ergo-scala")
+    val config = ConfigFactory.defaultOverrides().withFallback(ConfigFactory.parseFile(new File(s"$reference/src/main/resources/mainnet.conf")))
+      .withFallback(ConfigFactory.parseFile(new File(s"$reference/src/main/resources/application.conf")))
+      .resolve()
+    implicit val chainSettings: ChainSettings = config.as[ChainSettings]("ergo.chain")
+    val manifest = Json.obj(
+      "ergo_core_version" -> Json.fromString("6.0.5"),
+      "ergo_wallet_version" -> Json.fromString("6.0.5"),
+      "sigma_state_version" -> Json.fromString(version),
+      "sigma_state_jar" -> Json.fromString(sigmaJar),
+      "node_url" -> Json.fromString(NODE_URL),
+      "start_height" -> Json.fromInt(startHeight), "end_height" -> Json.fromInt(endHeight)
+    )
+    System.err.println(Json.obj("manifest" -> manifest).noSpaces)
 
-    // Seed params from the most recent epoch start so activatedScriptVersion is correct
-    // even if we start mid-epoch.
-    var activeParams: ActiveParams = ActiveParams()
-    var interpreter: ErgoInterpreter = makeInterpreter(activeParams)
-
-    val initEpochStart = (startHeight / VOTING_EPOCH_LENGTH) * VOTING_EPOCH_LENGTH
-    if (initEpochStart >= VOTING_EPOCH_LENGTH) {
-      System.err.println(s"Seeding params from epoch start h=$initEpochStart ...")
-      fetchExtensionFields(initEpochStart)
-        .flatMap(f => parseParamsFromExtension(f, activeParams))
-        .foreach { p =>
-          activeParams = p
-          interpreter  = makeInterpreter(activeParams)
-          System.err.println(s"  blockVersion=${p.blockVersion} maxBlockCost=${p.maxBlockCost} inputCost=${p.inputCost}")
-        }
+    def block(height: Int): Json = {
+      val ids = parse(httpGet(s"/blocks/at/$height")).right.get.asArray.get
+      require(ids.nonEmpty, s"No block at height $height")
+      parse(httpGet(s"/blocks/${ids.head.asString.get}")).right.get
     }
+    def header(json: Json): Header = json.hcursor.downField("header").as[Header](Header.jsonDecoder).right.get
 
-    // Seed lastBlockUtxoRoot from block at startHeight-1 so that scripts which check
-    // CONTEXT.LastBlockUtxoRootHash get the correct AVL tree digest.
-    var prevStateRoot: AvlTreeData = AvlTreeData.dummy
-    if (startHeight > 0) Try {
-      val prevIds = parse(httpGet(s"/blocks/at/${startHeight - 1}")).getOrElse(Json.arr())
-        .asArray.getOrElse(Vector.empty).flatMap(_.asString)
-      if (prevIds.nonEmpty) {
-        val prevBlock = parse(httpGet(s"/blocks/${prevIds.head}")).getOrElse(Json.Null)
-        prevBlock.hcursor.downField("header").get[String]("stateRoot").toOption
-          .foreach { sr =>
-            prevStateRoot = stateRootToAvlTree(sr)
-            System.err.println(s"Seeded prevStateRoot from h=${startHeight - 1}: ${sr.take(12)}...")
-          }
-      }
+    var active = ActiveParams()
+    val epoch = (startHeight / VOTING_EPOCH_LENGTH) * VOTING_EPOCH_LENGTH
+    val epochBlock = block(epoch)
+    def validationSettings(json: Json): ErgoValidationSettings =
+      ErgoValidationSettings.parseExtension(ExtensionCandidate(extensionFields(json.hcursor).map {
+        case (key, value) => Base16.decode(key).get -> Base16.decode(value).get
+      })).get
+    var settings = validationSettings(epochBlock)
+    active = parseParamsFromExtension(extensionFields(epochBlock.hcursor), active)
+      .getOrElse(throw new IllegalStateException(s"Missing epoch parameters at $epoch"))
+    // Current header plus nine ancestors is the node's full-block context.
+    var ancestors = (startHeight - 1 to startHeight - 9 by -1).map(h => header(block(h)))
+    val cache = mutable.Map[String, ErgoBox]()
+    def box(id: Array[Byte]): ErgoBox = {
+      val hex = Base16.encode(id)
+      cache.getOrElseUpdate(hex, decode[ErgoBox](httpGet(s"/blockchain/box/byId/$hex"))(ergoBoxDecoder).right.get)
     }
-
-    val results   = mutable.ArrayBuffer[String]()
-    var passCount = 0
-    var failCount = 0
-
-    val boxCache = mutable.Map[String, ErgoBox]()
-
+    val results = mutable.ArrayBuffer[Json]()
+    val fixtureTransactions = mutable.ArrayBuffer[Json]()
+    val fixtureHeaders = mutable.Map[Int, Header](ancestors.map(h => h.height -> h): _*)
+    val fixtureParameters = mutable.Map[String, Json]()
     for (height <- startHeight to endHeight) {
-      try {
-        val blockIdsJson = parse(httpGet(s"/blocks/at/$height")).getOrElse(Json.arr())
-        val blockIds     = blockIdsJson.asArray.getOrElse(Vector.empty).flatMap(_.asString)
-
-        if (blockIds.nonEmpty) {
-          val blockId  = blockIds.head
-          val blockJson = parse(httpGet(s"/blocks/$blockId")).getOrElse(Json.Null)
-          val cursor   = blockJson.hcursor
-
-          // Refresh params at epoch boundaries.
-          parseParamsFromExtension(extensionFields(cursor), activeParams) match {
-            case Some(parsed) if parsed != activeParams =>
-              System.err.println(
-                s"  h=$height: params updated — blockVersion=${parsed.blockVersion} maxBlockCost=${parsed.maxBlockCost}")
-              activeParams = parsed
-              interpreter  = makeInterpreter(activeParams)
-            case _ => ()
-          }
-
-          // activatedScriptVersion = blockVersion - 1 per Ergo consensus spec
-          val activatedScriptVersion = (activeParams.blockVersion - 1).toByte
-
-          val headerCursor = cursor.downField("header")
-          val headerVersion = headerCursor.get[Int]("version")
-            .getOrElse(activeParams.blockVersion).toByte
-          val timestamp  = headerCursor.get[Long]("timestamp").getOrElse(0L)
-          val nBits      = headerCursor.get[Long]("nBits").getOrElse(0L)
-          val minerPkHex = headerCursor.downField("powSolutions")
-            .get[String]("pk").getOrElse("")
-
-          if (minerPkHex.isEmpty) {
-            System.err.println(s"  Skip h=$height: no minerPk in header")
-          } else {
-            val minerPkBytes = Base16.decode(minerPkHex).get
-            val minerPkEcp   = GroupElementSerializer.parse(SigmaSerializer.startReader(minerPkBytes))
-            val minerPkGe    = CGroupElement(minerPkEcp)
-
-            val txsArray = cursor.downField("blockTransactions")
-              .downField("transactions").focus
-              .flatMap(_.asArray).getOrElse(Vector.empty)
-
-            for (txJson <- txsArray) {
-              val txId = txJson.hcursor.get[String]("id").getOrElse("unknown")
-
-              val txResult: Try[Long] = Try {
-                val tx = txJson.as[ErgoLikeTransaction](ergoLikeTransactionDecoder)
-                  .getOrElse(throw new RuntimeException("tx decode failed"))
-
-                val inputBoxes: IndexedSeq[ErgoBox] = tx.inputs.map { input =>
-                  val boxIdHex = Base16.encode(input.boxId)
-                  boxCache.getOrElseUpdate(boxIdHex, {
-                    decode[ErgoBox](httpGet(s"/blockchain/box/byId/$boxIdHex"))(ergoBoxDecoder)
-                      .getOrElse(throw new RuntimeException(s"box decode failed: $boxIdHex"))
-                  })
-                }.toIndexedSeq
-
-                val dataBoxes: IndexedSeq[ErgoBox] = tx.dataInputs.map { di =>
-                  val boxIdHex = Base16.encode(di.boxId)
-                  boxCache.getOrElseUpdate(boxIdHex, {
-                    decode[ErgoBox](httpGet(s"/blockchain/box/byId/$boxIdHex"))(ergoBoxDecoder)
-                      .getOrElse(throw new RuntimeException(s"data box decode failed: $boxIdHex"))
-                  })
-                }.toIndexedSeq
-
-                val initCost: Long = INTERPRETER_INIT_COST +
-                  inputBoxes.size.toLong          * activeParams.inputCost +
-                  dataBoxes.size.toLong           * activeParams.dataInputCost +
-                  tx.outputCandidates.size.toLong * activeParams.outputCost
-
-                val (inNum, inDistinct)   = countTokens(inputBoxes)
-                val (outNum, outDistinct) = countTokensCandidates(tx.outputCandidates)
-                val tokenCost = ((inNum + outNum) + (inDistinct + outDistinct)) * activeParams.tokenAccessCost
-
-                var totalCost: Long = initCost + tokenCost
-                val messageToSign   = tx.messageToSign
-
-                for ((box, idx) <- inputBoxes.zipWithIndex) {
-                  val input = tx.inputs(idx)
-
-                  val preHeader = CPreHeader(
-                    version  = headerVersion,
-                    parentId = Colls.fromArray(Array.fill(32)(0.toByte)),
-                    timestamp = timestamp,
-                    nBits    = nBits,
-                    height   = height,
-                    minerPk  = minerPkGe,
-                    votes    = Colls.fromArray(Array.fill(3)(0.toByte))
-                  )
-
-                  // Remaining approximations (documented limitations):
-                  //   headers = empty  (scripts that index CONTEXT.headers may differ)
-                  //   ValidationRules = current (sigma validation settings; stable on mainnet)
-                  val ctx = new ErgoLikeContext(
-                    prevStateRoot,
-                    Colls.emptyColl,
-                    preHeader,
-                    dataBoxes,
-                    inputBoxes,
-                    tx,
-                    idx,
-                    input.spendingProof.extension,
-                    ValidationRules.currentSettings,
-                    activeParams.maxBlockCost - totalCost,
-                    0L,
-                    activatedScriptVersion
-                  )
-
-                  val verifyResult = interpreter.verify(
-                    Interpreter.emptyEnv,
-                    box.ergoTree,
-                    ctx,
-                    input.spendingProof.proof,
-                    messageToSign
-                  ).get
-
-                  val (isValid, scriptCost) = verifyResult
-                  if (!isValid) throw new RuntimeException(s"proof rejected at input $idx")
-                  totalCost += scriptCost
-                }
-
-                totalCost
-              }
-
-              txResult match {
-                case Success(cost) =>
-                  results += s"""  {"tx_id": "$txId", "height": $height, "block_cost": $cost}"""
-                  passCount += 1
-                case Failure(e) =>
-                  failCount += 1
-                  if (!e.getMessage.contains("HTTP 404"))
-                    System.err.println(s"  FAIL h=$height tx=$txId: ${e.getMessage}")
-              }
-            }
-          }
-          // Advance prevStateRoot to this block's output state for the next iteration.
-          cursor.downField("header").get[String]("stateRoot").toOption
-            .foreach(sr => prevStateRoot = stateRootToAvlTree(sr))
-        }
-      } catch {
-        case e: Exception =>
-          System.err.println(s"  ERROR at height $height: ${e.getMessage}")
+      val json = block(height)
+      val current = header(json)
+      fixtureHeaders(height) = current
+      parseParamsFromExtension(extensionFields(json.hcursor), active).foreach { p =>
+        active = p
+        settings = validationSettings(json)
       }
-
-      if (height % 10 == 0)
-        System.err.println(s"  h=$height: $passCount passed, $failCount failed")
-    }
-
-    System.err.println(s"\nDone: $passCount passed, $failCount failed")
-    System.err.println(s"Box cache size: ${boxCache.size}")
-
-    println("[")
-    println(results.mkString(",\n"))
-    println("]")
-  }
-
-  private def countTokens(boxes: IndexedSeq[ErgoBox]): (Long, Long) = {
-    var total = 0L
-    val distinct = mutable.Set[mutable.WrappedArray[Byte]]()
-    boxes.foreach { b =>
-      b.additionalTokens.toArray.foreach { case (id, _) =>
-        total += 1
-        distinct += mutable.WrappedArray.make(id)
+      val p = parameters(active, height)
+      fixtureParameters(height.toString) = Json.obj(
+        "storage_fee_factor" -> Json.fromInt(p.storageFeeFactor),
+        "min_value_per_byte" -> Json.fromInt(p.minValuePerByte),
+        "max_block_cost" -> Json.fromInt(p.maxBlockCost),
+        "input_cost" -> Json.fromInt(p.inputCost), "data_input_cost" -> Json.fromInt(p.dataInputCost),
+        "output_cost" -> Json.fromInt(p.outputCost), "token_access_cost" -> Json.fromInt(p.tokenAccessCost),
+        "block_version" -> Json.fromInt(p.blockVersion))
+      val state = new ErgoStateContext(current +: ancestors, None, chainSettings.genesisStateDigest,
+        p, settings, VotingData.empty)
+      val txs = json.hcursor.downField("blockTransactions").downField("transactions").as[Vector[Json]].right.get
+      for (txJson <- txs) {
+        val tx = ErgoTransaction(txJson.as[ErgoLikeTransaction](ergoLikeTransactionDecoder).right.get)
+        val boxes = tx.inputs.map(i => box(i.boxId)).toIndexedSeq
+        val data = tx.dataInputs.map(i => box(i.boxId)).toIndexedSeq
+        val recorder = new RecordingInterpreter(p)
+        val total = tx.validateStateful(boxes, data, state, 0L)(recorder).result.toTry.get
+        val init = ErgoInterpreter.interpreterInitCost.toLong + boxes.size.toLong * p.inputCost +
+          data.size.toLong * p.dataInputCost + tx.outputCandidates.size.toLong * p.outputCost
+        val (inAssets, inCount) = ErgoBoxAssetExtractor.extractAssets(boxes).get
+        val (outAssets, outCount) = tx.outAssetsTry.get
+        val token = ErgoBoxAssetExtractor.totalAssetsAccessCost(
+          inCount, inAssets.size, outCount, outAssets.size, p.tokenAccessCost).toLong
+        require(recorder.inputs.map(_.index) == tx.inputs.indices,
+          s"Missing/reordered input observations for ${tx.id}")
+        val reconciled = init + token + recorder.inputs.map(i => i.eval + i.crypto + i.rent).sum
+        require(reconciled == total,
+          s"Reconciliation failed for ${tx.id}: $reconciled != validateStateful $total")
+        results += Json.obj("tx_id" -> Json.fromString(tx.id), "height" -> Json.fromInt(height),
+          "block_cost" -> Json.fromLong(total), "init_block_cost" -> Json.fromLong(init),
+          "token_block_cost" -> Json.fromLong(token),
+          "inputs" -> Json.arr(recorder.inputs.map(_.json): _*))
+        fixtureTransactions += results.last.deepMerge(Json.obj("tx_bytes" -> Json.fromString(Base16.encode(tx.bytes))))
+        tx.outputs.foreach(b => cache(Base16.encode(b.id)) = b)
       }
+      System.err.println(s"h=$height: ${txs.size} accepted and reconciled")
+      ancestors = (current +: ancestors).take(9)
     }
-    (total, distinct.size.toLong)
-  }
-
-  private def countTokensCandidates(candidates: IndexedSeq[ErgoBoxCandidate]): (Long, Long) = {
-    var total = 0L
-    val distinct = mutable.Set[mutable.WrappedArray[Byte]]()
-    candidates.foreach { c =>
-      c.additionalTokens.toArray.foreach { case (id, _) =>
-        total += 1
-        distinct += mutable.WrappedArray.make(id)
-      }
+    System.err.println(s"Done: ${results.size} accepted and reconciled, 0 dropped")
+    sys.env.get("COST_FIXTURE").foreach { path =>
+      val fixture = Json.obj("manifest" -> manifest,
+        "headers" -> Json.arr(fixtureHeaders.toSeq.sortBy(_._1).map { case (h, hdr) =>
+          Json.obj("height" -> Json.fromInt(h), "bytes" -> Json.fromString(Base16.encode(hdr.bytes)))
+        }: _*),
+        "parameters" -> Json.obj(fixtureParameters.toSeq: _*),
+        "boxes" -> Json.arr(cache.toSeq.sortBy(_._1).map { case (id, b) =>
+          Json.obj("box_id" -> Json.fromString(id), "bytes" -> Json.fromString(Base16.encode(b.bytes)))
+        }: _*),
+        "transactions" -> Json.arr(fixtureTransactions: _*))
+      val writer = new PrintWriter(new File(path), "UTF-8")
+      try writer.println(fixture.spaces2) finally writer.close()
     }
-    (total, distinct.size.toLong)
+    println(Json.arr(results: _*).spaces2)
   }
 }

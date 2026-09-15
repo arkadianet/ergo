@@ -6,7 +6,7 @@ set -euo pipefail
 # that the cost_parity test needs:
 #
 #   transactions_<start>_<end>.json
-#   headers_<start>_<end+300>.json
+#   headers_<start-9>_<end+300>.json
 #   tx_costs_<start>_<end>.json
 #
 # Requires: scala-cli, running Ergo node with extraIndex enabled.
@@ -44,9 +44,10 @@ HEADER_PAD=300  # extra blocks beyond range end for header context
 
 extract_range() {
     local idx=$1 start=$2 end=$3
+    local header_start=$((start - 9))
     local header_end=$((end + HEADER_PAD))
     local tx_file="${OUT_DIR}/transactions_${start}_${end}.json"
-    local hdr_file="${OUT_DIR}/headers_${start}_${header_end}.json"
+    local hdr_file="${OUT_DIR}/headers_${header_start}_${header_end}.json"
     local cost_file="${OUT_DIR}/tx_costs_${start}_${end}.json"
 
     echo "━━━ Range $idx: blocks $start–$end ━━━" >&2
@@ -64,7 +65,7 @@ extract_range() {
 
     if $need_hdr; then
         echo "  [2/3] Extracting headers..." >&2
-        "${SCRIPT_DIR}/extract_headers_batch.sh" "$start" "$header_end" "$hdr_file" 2>&1 | sed 's/^/    /' >&2
+        "${SCRIPT_DIR}/extract_headers_batch.sh" "$header_start" "$header_end" "$hdr_file" 2>&1 | sed 's/^/    /' >&2
     fi
 
     if $need_cost; then
@@ -129,5 +130,5 @@ fi
 
 echo "════════════════════════════════════════════════════════════" >&2
 echo "All extractions complete. Run the parity test:" >&2
-echo "  cargo test -p ergo-validation --test cost_parity -- --nocapture" >&2
+echo "  cargo test -p ergo-validation --features diagnostics --test it cost_parity::ranges -- --nocapture" >&2
 echo "════════════════════════════════════════════════════════════" >&2
