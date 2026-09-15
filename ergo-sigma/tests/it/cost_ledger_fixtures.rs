@@ -74,6 +74,10 @@ fn record(rent: bool) -> Value {
 fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
     use ergo_validation::test_helpers::{candidate_to_eval_box, ergo_box_to_eval_box};
     let value: Value = serde_json::from_slice(bytes).context("verify request JSON")?;
+    ensure!(
+        value.get("validation_settings_replaced_rules").is_none(),
+        "validation-settings overrides require JVM-only evidence until L4/L5 plumbing exists"
+    );
     let rent = value.get("rent").and_then(Value::as_bool).unwrap_or(false);
     *output = record(rent);
     let req: Request = serde_json::from_value(value).context("verify request fields")?;
@@ -294,6 +298,7 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
                     error,
                     ergo_sigma::reduce::VerifySpendingError::Eval(
                         ergo_sigma::evaluator::EvalError::TreeVersionAboveActivated { .. }
+                            | ergo_sigma::evaluator::EvalError::UnparsedErgoTree
                     )
                 )
             {

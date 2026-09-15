@@ -69,6 +69,22 @@ def main():
             wire.save(f'lazy-default-v{v}-{variant}', ['VERSION-v6-lazy-defaults'], cases('unused-default', body, v, 3))
 
 
+def fix_probes():
+    """Fix-round evidence, preserving the existing activation controls."""
+    method = block([b'\xdc\x6a\x03\xdd\x01' + num(4, 1)])
+    wire.save('method-pre-v3', ['VERSION-v6-method-gate'],
+              cases('v6-method-pre-v3', method, 2, 3, False, 17))
+    source = json.loads(read_fixture_text(wire.OUT / 'gate-validation.json.gz'))
+    probe = copy.deepcopy(source['cases'][0])
+    probe['name'] = 'validation-replaced-rule-soft-fork'
+    probe.pop('expected', None)
+    probe['request'].pop('observe_deserialization_failure', None)
+    probe['request']['validation_settings_replaced_rules'] = {'1000': 1001}
+    # .jvm is deliberate: this is JVM-only evidence for an OPEN L4/L5 row.
+    fixture = {'ledger': ['VERSION-tree-version-gate'], 'cases': [probe]}
+    write_fixture_text(wire.OUT / 'gate-soft-fork.jvm', json.dumps(fixture, indent=2) + '\n')
+
+
 def failure_limits():
     """Build budgets from JVM observations, never calculate expected costs."""
     for name in ('upcast-v3', 'gate-validation'):
@@ -97,9 +113,11 @@ def failure_limits():
 
 
 if __name__ == '__main__':
-    if sys.argv[1:] == ['--failure-limits']:
+    if sys.argv[1:] == ['--fix-probes']:
+        fix_probes()
+    elif sys.argv[1:] == ['--failure-limits']:
         failure_limits()
     elif sys.argv[1:]:
-        sys.exit('usage: version_cost.py [--failure-limits]')
+        sys.exit('usage: version_cost.py [--failure-limits|--fix-probes]')
     else:
         main()
