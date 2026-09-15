@@ -39,6 +39,7 @@ pub fn genesis_boxes_for(network: Network) -> Vec<([u8; 32], Vec<u8>)> {
     match network {
         Network::Mainnet => mainnet_genesis_boxes(),
         Network::Testnet => testnet_genesis_boxes(),
+        Network::Devnet => testnet_genesis_boxes(),
     }
 }
 

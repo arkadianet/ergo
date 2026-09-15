@@ -161,6 +161,7 @@ pub struct Candidate {
 #[allow(clippy::too_many_arguments)]
 pub fn generate_candidate<V: CandidateStateView>(
     view: &V,
+    network: ergo_chain_spec::Network,
     mode: BuildMode,
     mempool: MempoolReadSnapshot,
     miner_pk: &[u8; 33],
@@ -198,17 +199,21 @@ pub fn generate_candidate<V: CandidateStateView>(
     let candidate_height = parent_height + 1;
     let mut timings = PhaseTimings::default();
 
-    let parent_header_bytes = view
-        .get_header_bytes(&parent_id)
-        .map_err(state_err)?
-        .ok_or_else(|| MiningError::StateRead {
-            op: "load_parent_header",
-            reason: format!(
-                "best_full_block_id {} not in HEADERS",
-                hex::encode(parent_id)
-            ),
-        })?;
-    let parent_header = {
+    let devnet = network == ergo_chain_spec::Network::Devnet;
+    let genesis = devnet && parent_height == 0;
+    let parent_header = if genesis {
+        crate::genesis::parent_header()
+    } else {
+        let parent_header_bytes = view
+            .get_header_bytes(&parent_id)
+            .map_err(state_err)?
+            .ok_or_else(|| MiningError::StateRead {
+                op: "load_parent_header",
+                reason: format!(
+                    "best_full_block_id {} not in HEADERS",
+                    hex::encode(parent_id)
+                ),
+            })?;
         let mut r = VlqReader::new(&parent_header_bytes);
         read_header(&mut r).map_err(|e| MiningError::Decode {
             op: "parent_header",
@@ -216,9 +221,15 @@ pub fn generate_candidate<V: CandidateStateView>(
         })?
     };
 
-    // 2. Snapshot params + applied-chain window
     let (active_params, validation_settings) = view.tip_snapshot_params().map_err(state_err)?;
-    let last_headers = view.last_applied_chain_window_10().map_err(state_err)?;
+    let last_headers = if devnet && parent_height < 10 {
+        let heights: Vec<u32> = (1..=parent_height).rev().collect();
+        load_epoch_headers(view, &heights, &parent_header)?
+    } else {
+        view.last_applied_chain_window_10()
+            .map_err(state_err)?
+            .to_vec()
+    };
 
     // 2b. Epoch-boundary recompute. At a voting-epoch start the candidate's
     //     extension must carry the recomputed parameter map + cumulative
@@ -299,15 +310,19 @@ pub fn generate_candidate<V: CandidateStateView>(
     );
 
     // 3. Difficulty retarget (or parent's nBits when non-recalc)
-    let epoch_len = epoch_length_for_height(candidate_height, chain_config);
-    let needed_heights = previous_heights_for_recalculation(candidate_height, epoch_len);
-    let epoch_headers = load_epoch_headers(view, &needed_heights, &parent_header)?;
-    let new_n_bits = next_n_bits(candidate_height, &epoch_headers, chain_config).map_err(|e| {
-        MiningError::IdComputation {
-            op: "difficulty_retarget",
-            reason: e.to_string(),
-        }
-    })?;
+    let new_n_bits = if genesis {
+        parent_header.n_bits
+    } else {
+        let epoch_len = epoch_length_for_height(candidate_height, chain_config);
+        let needed_heights = previous_heights_for_recalculation(candidate_height, epoch_len);
+        let epoch_headers = load_epoch_headers(view, &needed_heights, &parent_header)?;
+        next_n_bits(candidate_height, &epoch_headers, chain_config).map_err(|e| {
+            MiningError::IdComputation {
+                op: "difficulty_retarget",
+                reason: e.to_string(),
+            }
+        })?
+    };
 
     // 4. Timestamp: clamped monotonic.
     let now_ms = std::time::SystemTime::now()
@@ -346,30 +361,37 @@ pub fn generate_candidate<V: CandidateStateView>(
     //    validation-settings chunks. Both are the exact inverse of the parser
     //    the validator runs, so the serialized extension re-parses to the same
     //    params/settings the validator recomputes.
-    let parent_extension_bytes = read_parent_extension_bytes(view, &parent_header)?;
-    let parent_interlinks = unpack_interlinks_from_extension(&parent_extension_bytes)?;
-    // A non-genesis parent must carry interlinks; an empty set means its stored
-    // extension is malformed or missing them. Fail the build with a typed error
-    // here rather than panicking the engine task downstream (`update_interlinks`
-    // asserts a non-empty interlinks vector for a non-genesis header).
-    if *parent_header.parent_id.as_bytes() != [0u8; 32] && parent_interlinks.is_empty() {
-        return Err(MiningError::Decode {
-            op: "parent_interlinks",
-            reason: "non-genesis parent extension carries no interlinks fields".into(),
-        });
-    }
-    let epoch_boundary_fields = epoch_payload
-        .as_ref()
-        .map(|p| p.extension_fields())
-        .unwrap_or_default();
-    let extension_fields = build_candidate_extension_fields(
-        &parent_header,
-        &parent_interlinks,
-        candidate_height,
-        voting_settings.voting_length,
-        &epoch_boundary_fields,
-        custom_extension_fields,
-    )?;
+    let extension_fields = if genesis {
+        custom_extension_fields
+            .iter()
+            .map(|(k, v)| (k.to_vec(), v.clone()))
+            .collect()
+    } else {
+        let parent_extension_bytes = read_parent_extension_bytes(view, &parent_header)?;
+        let parent_interlinks = unpack_interlinks_from_extension(&parent_extension_bytes)?;
+        // A non-genesis parent must carry interlinks; an empty set means its stored
+        // extension is malformed or missing them. Fail the build with a typed error
+        // here rather than panicking the engine task downstream (`update_interlinks`
+        // asserts a non-empty interlinks vector for a non-genesis header).
+        if *parent_header.parent_id.as_bytes() != [0u8; 32] && parent_interlinks.is_empty() {
+            return Err(MiningError::Decode {
+                op: "parent_interlinks",
+                reason: "non-genesis parent extension carries no interlinks fields".into(),
+            });
+        }
+        let epoch_boundary_fields = epoch_payload
+            .as_ref()
+            .map(|p| p.extension_fields())
+            .unwrap_or_default();
+        build_candidate_extension_fields(
+            &parent_header,
+            &parent_interlinks,
+            candidate_height,
+            voting_settings.voting_length,
+            &epoch_boundary_fields,
+            custom_extension_fields,
+        )?
+    };
 
     // 8. Coinbase: emission tx. Three regimes:
     //   - reemission = Some + height > activation_height: post-EIP-27,
@@ -381,7 +403,11 @@ pub fn generate_candidate<V: CandidateStateView>(
     //   - reemission = None: network has no EIP-27 protocol (new
     //     public testnet); always pre-EIP-27 emission tx.
     let phase_start = std::time::Instant::now();
-    let emission_box = lookup_emission_box_from_parent(view, &parent_id, &parent_header)?;
+    let emission_box = if genesis {
+        crate::genesis::emission_box(view)?
+    } else {
+        lookup_emission_box_from_parent(view, &parent_id, &parent_header)?
+    };
     let emission_tx = match reemission {
         Some(reem) if candidate_height > reem.activation_height => {
             build_post_eip27_emission_tx(&emission_box, miner_pk, candidate_height, monetary, reem)?

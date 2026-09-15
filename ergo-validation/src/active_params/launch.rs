@@ -49,6 +49,10 @@ pub fn scala_launch_for_network(net: Network) -> ActiveProtocolParameters {
     match net {
         Network::Mainnet => scala_launch_mainnet(),
         Network::Testnet => scala_launch_testnet(),
+        Network::Devnet => ActiveProtocolParameters {
+            block_version: 4,
+            ..scala_launch_mainnet()
+        },
     }
 }
 
@@ -62,6 +66,19 @@ pub fn scala_launch() -> ActiveProtocolParameters {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- happy path -----
+
+    #[test]
+    fn devnet_launch_scala_devnet60_params_match() {
+        let devnet = scala_launch_for_network(Network::Devnet);
+        assert_eq!(devnet.block_version, 4);
+        assert_eq!(devnet.max_block_cost, 1_000_000);
+        assert!(devnet.proposed_update.rules_to_disable.is_empty());
+        assert!(devnet.activated_update.rules_to_disable.is_empty());
+        assert_eq!(scala_launch_for_network(Network::Mainnet).block_version, 1);
+        assert_eq!(scala_launch_for_network(Network::Testnet).block_version, 1);
+    }
 
     #[test]
     fn scala_launch_testnet_matches_mainnet() {

@@ -53,6 +53,8 @@ pub enum Network {
     Mainnet,
     /// Public testnet.
     Testnet,
+    /// Isolated conformance chain configured by scripts/devnet-mixed/genesis.conf.
+    Devnet,
 }
 
 impl Network {
@@ -62,6 +64,7 @@ impl Network {
         match self {
             Network::Mainnet => "mainnet",
             Network::Testnet => "testnet",
+            Network::Devnet => "devnet",
         }
     }
 }
@@ -79,6 +82,7 @@ impl std::str::FromStr for Network {
         match s.to_lowercase().as_str() {
             "mainnet" => Ok(Network::Mainnet),
             "testnet" => Ok(Network::Testnet),
+            "devnet" => Ok(Network::Devnet),
             other => Err(format!("unknown network: {other}")),
         }
     }
@@ -113,11 +117,18 @@ impl NetworkParams {
         address_prefix: NetworkPrefix::Testnet,
     };
 
+    /// Private-chain identity; no public network uses this magic.
+    pub const DEVNET: NetworkParams = NetworkParams {
+        magic: [7, 7, 7, 7],
+        address_prefix: NetworkPrefix::Testnet,
+    };
+
     /// Identity for the given [`Network`].
     pub const fn for_network(net: Network) -> NetworkParams {
         match net {
             Network::Mainnet => Self::MAINNET,
             Network::Testnet => Self::TESTNET,
+            Network::Devnet => Self::DEVNET,
         }
     }
 }
@@ -216,11 +227,21 @@ impl DifficultyParams {
         }
     }
 
+    /// Difficulty one until the campaign's unreachable epoch boundary.
+    pub fn devnet() -> Self {
+        Self {
+            epoch_length: 1 << 25,
+            desired_interval_ms: 20_000,
+            ..Self::testnet()
+        }
+    }
+
     /// Schedule for the given [`Network`].
     pub fn for_network(net: Network) -> Self {
         match net {
             Network::Mainnet => Self::mainnet(),
             Network::Testnet => Self::testnet(),
+            Network::Devnet => Self::devnet(),
         }
     }
 }
@@ -451,6 +472,14 @@ impl GenesisParams {
         }
     }
 
+    /// Shared testnet box set with no pinned public height-one block.
+    pub fn devnet() -> Self {
+        Self {
+            header_id: None,
+            ..Self::testnet()
+        }
+    }
+
     /// Dispatch to the per-network genesis parameters. Mirrors the
     /// `for_network` accessor on the sibling chain-spec params types so
     /// boot can resolve the genesis state digest without a manual match.
@@ -458,6 +487,7 @@ impl GenesisParams {
         match net {
             Network::Mainnet => Self::mainnet(),
             Network::Testnet => Self::testnet(),
+            Network::Devnet => Self::devnet(),
         }
     }
 }
@@ -595,6 +625,31 @@ impl ChainSpec {
         }
     }
 
+    /// Private campaign matching the Scala overrides in genesis.conf.
+    /// Scala uses Devnet60LaunchParameters (version 4, empty rule update).
+    pub fn devnet() -> Self {
+        Self {
+            network: Network::Devnet,
+            network_params: NetworkParams::DEVNET,
+            difficulty: DifficultyParams::devnet(),
+            voting: VotingParams {
+                voting_length: 1 << 25,
+                ..VotingParams::testnet()
+            },
+            monetary: MonetaryParams::testnet(),
+            reemission: None,
+            genesis: GenesisParams::devnet(),
+            block_timing: BlockTimingParams {
+                desired_interval_ms: 20_000,
+                ..BlockTimingParams::testnet()
+            },
+            bootstrap: BootstrapParams {
+                seed_peers: Vec::new(),
+                checkpoint: None,
+            },
+        }
+    }
+
     /// Spec for the given [`Network`]. This is the only place that
     /// branches on `Network::Mainnet` vs `Network::Testnet`; downstream
     /// code takes narrow views.
@@ -602,6 +657,7 @@ impl ChainSpec {
         match net {
             Network::Mainnet => Self::mainnet(),
             Network::Testnet => Self::testnet(),
+            Network::Devnet => Self::devnet(),
         }
     }
 
@@ -751,6 +807,51 @@ mod tests {
     // ----- happy path -----
 
     #[test]
+    fn devnet_campaign_params_isolated() {
+        let d = ChainSpec::devnet();
+        assert_eq!(d.network_params.magic, [7, 7, 7, 7]);
+        assert_eq!(d.network_params.address_prefix as u8, 16);
+        assert_eq!(d.difficulty.initial_difficulty, [1]);
+        assert_eq!(d.difficulty.epoch_length, 33_554_432);
+        assert_eq!(d.voting.voting_length, 33_554_432);
+        assert_eq!(d.difficulty.desired_interval_ms, 20_000);
+        assert!(d.genesis.header_id.is_none());
+        assert!(d.bootstrap.seed_peers.is_empty());
+        assert!(d.bootstrap.checkpoint.is_none());
+        assert_eq!(
+            d.genesis.state_digest,
+            GenesisParams::testnet().state_digest
+        );
+    }
+
+    #[test]
+    fn public_networks_devnet_construction_unaffected() {
+        let before = [ChainSpec::mainnet(), ChainSpec::testnet()];
+        let _devnet = ChainSpec::devnet();
+        for (old, new) in before
+            .iter()
+            .zip([ChainSpec::mainnet(), ChainSpec::testnet()])
+        {
+            assert_eq!(old.network_params, new.network_params);
+            assert_eq!(old.difficulty, new.difficulty);
+            assert_eq!(old.voting, new.voting);
+            assert_eq!(old.monetary, new.monetary);
+            assert_eq!(old.reemission, new.reemission);
+            assert_eq!(old.genesis.state_digest, new.genesis.state_digest);
+            assert_eq!(old.genesis.header_id, new.genesis.header_id);
+            assert_eq!(old.genesis.boxes_json, new.genesis.boxes_json);
+            assert_eq!(old.block_timing, new.block_timing);
+            assert_eq!(old.bootstrap, new.bootstrap);
+        }
+        assert_eq!(before[0].difficulty.epoch_length, 1024);
+        assert_eq!(before[1].difficulty.epoch_length, 128);
+        assert_eq!(before[0].voting.voting_length, 1024);
+        assert_eq!(before[1].voting.voting_length, 128);
+        assert_eq!(before[0].difficulty.desired_interval_ms, 120_000);
+        assert_eq!(before[1].difficulty.desired_interval_ms, 45_000);
+    }
+
+    #[test]
     fn emission_script_trees_mainnet_constants_are_cross_checked() {
         let trees = ChainSpec::mainnet()
             .emission_script_trees()
@@ -812,7 +913,7 @@ mod tests {
 
     #[test]
     fn network_roundtrips_through_str() {
-        for net in [Network::Mainnet, Network::Testnet] {
+        for net in [Network::Mainnet, Network::Testnet, Network::Devnet] {
             assert_eq!(net.as_str().parse::<Network>().unwrap(), net);
         }
     }
@@ -833,6 +934,15 @@ mod tests {
             NetworkParams::for_network(Network::Testnet),
             NetworkParams::TESTNET
         );
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn network_from_str_unknown_errors() {
+        assert!("unknown".parse::<Network>().is_err());
+        assert!("".parse::<Network>().is_err());
+        assert!("MAINNET\0".parse::<Network>().is_err());
     }
 
     // ----- oracle parity -----
@@ -871,17 +981,6 @@ mod tests {
         assert_eq!(NetworkParams::TESTNET.address_prefix as u8, 0x10);
     }
 
-    // ----- error paths -----
-
-    #[test]
-    fn network_from_str_unknown_errors() {
-        assert!("devnet".parse::<Network>().is_err());
-        assert!("".parse::<Network>().is_err());
-        assert!("MAINNET\0".parse::<Network>().is_err());
-    }
-
-    // ----- difficulty -----
-
     #[test]
     fn difficulty_mainnet_matches_scala_conf() {
         // mainnet.conf:9-37 — protocolVersion 4, initialDifficultyHex "011765000000",
@@ -918,8 +1017,6 @@ mod tests {
         assert_eq!(p.initial_difficulty, vec![0x01]);
         assert_eq!(p.desired_interval_ms, 45_000);
     }
-
-    // ----- voting / monetary / reemission -----
 
     #[test]
     fn voting_mainnet_matches_scala_conf() {
@@ -963,8 +1060,6 @@ mod tests {
         );
     }
 
-    // ----- genesis / timing / bootstrap -----
-
     #[test]
     fn genesis_mainnet_matches_scala_conf() {
         // mainnet.conf:21,33 — genesisId and genesisStateDigestHex.
@@ -982,8 +1077,6 @@ mod tests {
         assert!(!boxes.is_empty());
         assert!(boxes.starts_with('['));
     }
-
-    // ----- testnet oracle parity -----
 
     #[test]
     fn voting_testnet_matches_scala_conf() {
@@ -1076,8 +1169,6 @@ mod tests {
         // header staleness tolerated before "synced" flips false.
         assert_eq!(p.header_freshness_threshold_ms(), 12_000_000);
     }
-
-    // ----- ChainSpec aggregate -----
 
     #[test]
     fn chain_spec_for_network_dispatches_correctly() {
