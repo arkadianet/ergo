@@ -1,6 +1,6 @@
 //! `0xDC MethodCall` — dispatch on `(type_id, method_id)` to the
 //! corresponding type-method handler. Scala charges `MethodCall`
-//! overhead (4) at entry plus per-method cost; this module is the
+//! overhead (4) after receiver evaluation plus per-method cost; this module is the
 //! single largest opcode in the evaluator.
 //!
 //! Cost discipline is per-method: each arm calls `add_method_cost(cx.cost, n)`
@@ -10,7 +10,7 @@
 //!
 //! The `(type_id, method_id)` match body was decomposed into per-receiver-type
 //! sibling modules; `eval_method_call` is now a thin router that charges the
-//! dispatcher cost, applies the v6 soft-fork gate, evaluates the receiver once,
+//! dispatcher cost after applying the v6 soft-fork gate and evaluating the receiver,
 //! and delegates each arm to a named handler in the sibling below.
 
 use ergo_ser::opcode::Expr;
@@ -42,7 +42,6 @@ pub(in crate::evaluator) fn eval_method_call(
     type_args: &[ergo_ser::sigma_type::SigmaType],
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
-    add_cost(cx.cost, 0xDC)?;
     // Soft-fork activation gate for EIP-50 / Sigma 6.0 methods.
     // Scala parity: `MethodCall.evaluate` cross-checks
     // `method.methodVersion` (declared in `_v6Methods`) against
@@ -57,6 +56,7 @@ pub(in crate::evaluator) fn eval_method_call(
         cx.ctx.require_method_version(type_id, method_id, 3)?;
     }
     let obj_val = cx.eval_expr(obj)?;
+    add_cost(cx.cost, 0xDC)?;
     match (type_id, method_id) {
         (12, 2) => coll::get_or_else(obj_val, args, cx),
         (12, 26) => coll::index_of(obj_val, args, cx),
