@@ -17,6 +17,7 @@ use ergo_sigma::evaluator::{EvalHeader, ReductionContext};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 // ----- helpers -----
@@ -311,12 +312,36 @@ struct LedgerRow {
     id: String,
 }
 
+fn read_fixture(path: &Path) -> Result<Vec<u8>> {
+    let compressed = path.with_extension("json.gz");
+    let path = if path.extension().is_some_and(|ext| ext == "json") && compressed.exists() {
+        compressed.as_path()
+    } else {
+        path
+    };
+    let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut bytes = Vec::new();
+    if path.extension().is_some_and(|ext| ext == "gz") {
+        flate2::read::GzDecoder::new(file)
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("decompress {}", path.display()))?;
+    } else {
+        std::io::BufReader::new(file)
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("read {}", path.display()))?;
+    }
+    Ok(bytes)
+}
+
 fn fixture_paths(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
     for entry in std::fs::read_dir(directory).context("fixture directory")? {
         let path = entry.context("fixture entry")?.path();
         if path.is_dir() {
             fixture_paths(&path, paths)?;
-        } else if path.extension().is_some_and(|ext| ext == "json") {
+        } else if path.to_string_lossy().ends_with(".json.gz")
+            || (path.extension().is_some_and(|ext| ext == "json")
+                && !path.with_extension("json.gz").exists())
+        {
             paths.push(path);
         }
     }
@@ -438,7 +463,7 @@ fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
     let mut fixtures = Vec::new();
     for path in paths {
         let value: Value = serde_json::from_slice(
-            &std::fs::read(&path).with_context(|| path.display().to_string())?,
+            &read_fixture(&path).with_context(|| path.display().to_string())?,
         )
         .with_context(|| format!("parse {}", path.display()))?;
         if let Some(cases) = value.get("cases") {
