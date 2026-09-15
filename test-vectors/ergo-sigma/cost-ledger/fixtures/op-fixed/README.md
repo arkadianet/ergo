@@ -45,15 +45,12 @@ JVM evaluator run using the same parsed tree/context and a retained accumulator;
 it is restricted to zero-init, non-rent trees without deserialization nodes.
 It does not replace the full verify result or claim access to its accumulator.
 
-The runner compares available block costs and verdicts. For these script errors,
-exception *presence* is shared; Java and Rust exception names have no common
-semantic ordering. JVM inherited `Value.eval` errors are classified as
-RejectScript by their specific exception message; unrelated RuntimeExceptions
-retain RejectOther.
+The runner compares available block costs, verdicts, and JVM failure classes
+through its documented typed Rust semantic-equivalence table. Non-executable,
+deprecated, and internal opcode errors map to the inherited Value.eval
+java.lang.RuntimeException; unrelated Rust failures need an explicit mapping.
 
-BitOp boundary fixtures document a cost-only discrepancy under
-`ORDER-bitop-charge-then-reject`. Their `divergence` metadata records the observed
-Rust value separately from JVM `expected`. The runner requires the linked row to
-be DIVERGENT, checks that exact discrepancy, fails if it changes or disappears,
-and reports the number of documented divergences. No evaluator behavior is
-changed. Successful test execution is not a claim of BitOp conformance.
+BitOp boundary fixtures measure 1 BC on both implementations; minimal bindings
+measure 0 BC. Both reject without charging the declared BitOp Fixed(1).
+The six OP rows and ORDER-bitop-charge-then-reject are CLOSED against these
+unchanged JVM expectations. The runner requires exact observed cost equality.

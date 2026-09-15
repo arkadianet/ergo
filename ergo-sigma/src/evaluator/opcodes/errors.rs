@@ -1,22 +1,9 @@
 //! Reject-only opcode arms.
 //!
-//! Two distinct cost disciplines are preserved here:
-//!
-//! - **Charge-then-reject** (BitOp family `0xF2 0xF3 0xF5 0xF6 0xF7 0xF8`):
-//!   Scala registers these as `Fixed(1)` and accumulates cost before
-//!   the reject for parity with `Value.eval` default at
-//!   `values.scala:101`. A shared helper would silently lose the
-//!   charge.
-//! - **Zero-cost reject** (`0xCF 0xD6 0xD7 0xE7 0xE8 0xE9 0xF1 0xB6 0xB7`):
-//!   internal / deprecated / not-executable arms. Scala declares
-//!   `costKind = Value.notSupportedError` and never charges.
-//!
-//! Each arm therefore gets its own `eval_<opname>` rather than a
-//! shared `reject(opcode)` helper.
+//! These nodes inherit Scala Value.eval, which throws without charging
+//! (values.scala:101). Declared costKind entries, including BitOp Fixed(1),
+//! do not imply an evaluator charge. Each arm preserves its typed rejection.
 
-use ergo_primitives::cost::CostAccumulator;
-
-use super::super::cost::add_cost;
 use super::super::types::{EvalError, Value};
 
 // 0xB6 CreateAvlTree — zero-cost reject.
@@ -38,45 +25,33 @@ pub(in crate::evaluator) fn eval_tree_lookup() -> Result<Value, EvalError> {
     Err(EvalError::NotExecutable(0xB7, "TreeLookup"))
 }
 
-// 0xF2 BitOr — charge-then-reject.
-pub(in crate::evaluator) fn eval_bit_or(cost: &mut CostAccumulator) -> Result<Value, EvalError> {
-    add_cost(cost, 0xF2)?;
+// 0xF2 BitOr — zero-cost reject.
+pub(in crate::evaluator) fn eval_bit_or() -> Result<Value, EvalError> {
     Err(EvalError::NotExecutable(0xF2, "BitOr"))
 }
 
-// 0xF3 BitAnd — charge-then-reject.
-pub(in crate::evaluator) fn eval_bit_and(cost: &mut CostAccumulator) -> Result<Value, EvalError> {
-    add_cost(cost, 0xF3)?;
+// 0xF3 BitAnd — zero-cost reject.
+pub(in crate::evaluator) fn eval_bit_and() -> Result<Value, EvalError> {
     Err(EvalError::NotExecutable(0xF3, "BitAnd"))
 }
 
-// 0xF5 BitXor — charge-then-reject.
-pub(in crate::evaluator) fn eval_bit_xor(cost: &mut CostAccumulator) -> Result<Value, EvalError> {
-    add_cost(cost, 0xF5)?;
+// 0xF5 BitXor — zero-cost reject.
+pub(in crate::evaluator) fn eval_bit_xor() -> Result<Value, EvalError> {
     Err(EvalError::NotExecutable(0xF5, "BitXor"))
 }
 
-// 0xF6 BitShiftRight — charge-then-reject.
-pub(in crate::evaluator) fn eval_bit_shift_right(
-    cost: &mut CostAccumulator,
-) -> Result<Value, EvalError> {
-    add_cost(cost, 0xF6)?;
+// 0xF6 BitShiftRight — zero-cost reject.
+pub(in crate::evaluator) fn eval_bit_shift_right() -> Result<Value, EvalError> {
     Err(EvalError::NotExecutable(0xF6, "BitShiftRight"))
 }
 
-// 0xF7 BitShiftLeft — charge-then-reject.
-pub(in crate::evaluator) fn eval_bit_shift_left(
-    cost: &mut CostAccumulator,
-) -> Result<Value, EvalError> {
-    add_cost(cost, 0xF7)?;
+// 0xF7 BitShiftLeft — zero-cost reject.
+pub(in crate::evaluator) fn eval_bit_shift_left() -> Result<Value, EvalError> {
     Err(EvalError::NotExecutable(0xF7, "BitShiftLeft"))
 }
 
-// 0xF8 BitShiftRightZeroed — charge-then-reject.
-pub(in crate::evaluator) fn eval_bit_shift_right_zeroed(
-    cost: &mut CostAccumulator,
-) -> Result<Value, EvalError> {
-    add_cost(cost, 0xF8)?;
+// 0xF8 BitShiftRightZeroed — zero-cost reject.
+pub(in crate::evaluator) fn eval_bit_shift_right_zeroed() -> Result<Value, EvalError> {
     Err(EvalError::NotExecutable(0xF8, "BitShiftRightZeroed"))
 }
 

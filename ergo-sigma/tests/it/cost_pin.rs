@@ -118,6 +118,12 @@ fn opcode_cost_table_matches_scala_constants() {
         ("NoneValue", "OP-0xDF"),
     ]);
     let mapped_rejections = BTreeMap::from([
+        ("BitOr", "OP-0xF2"),
+        ("BitAnd", "OP-0xF3"),
+        ("BitXor", "OP-0xF5"),
+        ("BitShiftRight", "OP-0xF6"),
+        ("BitShiftLeft", "OP-0xF7"),
+        ("BitShiftRightZeroed", "OP-0xF8"),
         ("TaggedVariable", "OP-TaggedVariable-A003"),
         ("ModQ", "OP-0xE7-0xE9"),
         ("PlusModQ", "OP-0xE7-0xE9"),
@@ -149,6 +155,8 @@ fn opcode_cost_table_matches_scala_constants() {
                     rust.get(&opcode).copied()
                 };
                 if let Some(price) = price {
+                    // A price pins costKind even for mapped rejecting nodes;
+                    // only the L2 fixtures establish whether eval charges it.
                     assert_kind(name, price, kind);
                 } else if !exclusions.contains(name) && !mapped_rejections.contains_key(name) {
                     unaccounted.push(name);

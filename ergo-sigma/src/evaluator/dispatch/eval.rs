@@ -648,18 +648,15 @@ fn eval_op(
             opcodes::constants::eval_bool_collection(bits, cost)
         }
 
-        // Reject-only arms. Two cost disciplines preserved here:
-        // charge-then-reject for the BitOp family (0xF2/F3/F5/F6/F7/F8),
-        // zero-cost reject for the rest. See opcodes/errors.rs for
-        // per-arm provenance docblocks.
+        // Reject-only arms inherit Value.eval and throw without charging.
         (0xB6, _) => opcodes::errors::eval_create_avl_tree(),
         (0xB7, _) => opcodes::errors::eval_tree_lookup(),
-        (0xF2, _) => opcodes::errors::eval_bit_or(cost),
-        (0xF3, _) => opcodes::errors::eval_bit_and(cost),
-        (0xF5, _) => opcodes::errors::eval_bit_xor(cost),
-        (0xF6, _) => opcodes::errors::eval_bit_shift_right(cost),
-        (0xF7, _) => opcodes::errors::eval_bit_shift_left(cost),
-        (0xF8, _) => opcodes::errors::eval_bit_shift_right_zeroed(cost),
+        (0xF2, _) => opcodes::errors::eval_bit_or(),
+        (0xF3, _) => opcodes::errors::eval_bit_and(),
+        (0xF5, _) => opcodes::errors::eval_bit_xor(),
+        (0xF6, _) => opcodes::errors::eval_bit_shift_right(),
+        (0xF7, _) => opcodes::errors::eval_bit_shift_left(),
+        (0xF8, _) => opcodes::errors::eval_bit_shift_right_zeroed(),
         (0xCF, _) => opcodes::errors::eval_sigma_prop_is_proven(),
 
         // FunDef — standalone reject, same rule as ValDef above:
