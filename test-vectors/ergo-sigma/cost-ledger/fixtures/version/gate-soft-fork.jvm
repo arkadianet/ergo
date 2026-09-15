@@ -1,0 +1,109 @@
+{
+  "ledger": [
+    "VERSION-tree-version-gate"
+  ],
+  "cases": [
+    {
+      "name": "validation-replaced-rule-soft-fork",
+      "construction": {
+        "body_hex": "d40800",
+        "prefix": 0
+      },
+      "request": {
+        "tree_hex": "0b03d40800",
+        "ctx_ext_hex": "01000e020101",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 17,
+        "activated_version": 3,
+        "tree_version_expected": 3,
+        "self_box_hex": "c0843d0b03d40800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0b03d40800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+        "validation_settings_replaced_rules": {
+          "1000": 1001
+        }
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 10,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 27,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "unavailable",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    }
+  ],
+  "manifest": {
+    "scala": {
+      "ergo_version": "6.0.2",
+      "sigmastate_version": "6.0.2",
+      "ergo_wallet_version": "6.0.2",
+      "node_app_version": null,
+      "source_shas": {
+        "sigmastate_v6.0.2": "23dd29f612249c169d09fae9bca76d7cc02e144c",
+        "ergo_v6.0.2": "2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1"
+      },
+      "note": "Standalone JVM oracle using the published/local 6.0.2 fallback artifacts pinned in the script; no node or mainnet request was used."
+    },
+    "rust": {
+      "git_sha": "83c0f91b230c4bb494f45433b3e1cc9c37692b5b",
+      "toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
+      "features": [
+        "ergo-sigma/cost-trace",
+        "ergo-validation/test-helpers"
+      ]
+    },
+    "tool": {
+      "script": "scripts/gen-cost-fixture.sh",
+      "git_sha": "83c0f91b230c4bb494f45433b3e1cc9c37692b5b",
+      "script_sha256": "444b39b1dc56085878ef2111859eeae4a5cd88ac1ea5b2b0f56d7e0e074b2946",
+      "oracle_script": "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala",
+      "oracle_sha256": "a68d698272ab9db8029332d575745a1ef7bf2b08f83751eeefa89e7e92c06ae2",
+      "scala_cli": "Scala CLI version: 1.12.1\nScala version (default): 3.8.1\nYour Scala CLI version is outdated. The newest version is 1.17.0\nIt is recommended that you update Scala CLI through the same tool or method you used for its initial installation for avoiding the creation of outdated duplicates.",
+      "scala_directive": "2.12",
+      "jvm": "openjdk version \"17.0.17\" 2025-10-21 LTS\nOpenJDK Runtime Environment Corretto-17.0.17.10.1 (build 17.0.17+10-LTS)\nOpenJDK 64-Bit Server VM Corretto-17.0.17.10.1 (build 17.0.17+10-LTS, mixed mode, sharing)"
+    },
+    "context": {
+      "network": "synthetic offline context",
+      "height": 0,
+      "block_version": 4,
+      "activated_script_version": 3,
+      "ergo_tree_version": 3,
+      "voted_params": {
+        "4": null,
+        "5": null,
+        "6": null,
+        "7": null,
+        "8": null
+      }
+    },
+    "run": {
+      "command": "scala-cli --skip-cli-updates run scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala --server=false --suppress-outdated-dependency-warning -- verify",
+      "fixture": "test-vectors/ergo-sigma/cost-ledger/fixtures/version/gate-soft-fork.jvm",
+      "timestamp_utc": "2026-09-15T19:10:38.660355+00:00",
+      "seeds": null,
+      "selected": 1,
+      "executed": 1,
+      "skipped": 0,
+      "failed": 0
+    },
+    "evidence": {
+      "request_jsonl_sha256": "a9ee709c502c67f82089bf7bb9c59a241ef16bce03f08c2b189d20dd76885782",
+      "response_jsonl_sha256": "bbd5226a88b10ead8d622915e4625bf1141fa055dee7a88dc24a840a589cbed9"
+    },
+    "scala_sigmastate": "6.0.2",
+    "generator": "scripts/gen-cost-fixture.sh@83c0f91b230c4bb494f45433b3e1cc9c37692b5b",
+    "date": "2026-09-15T19:10:38.660355+00:00"
+  }
+}

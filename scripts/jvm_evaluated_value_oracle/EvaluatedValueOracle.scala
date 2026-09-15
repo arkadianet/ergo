@@ -266,6 +266,16 @@ object EvaluatedValueOracle {
     var gateFailureCost: Option[Long] = None
     var gateBypass = false
     var deserializedCost: Option[Long] = None
+    var propositionFailureCost: Option[Long] = None
+    abstract override protected def propositionFromErgoTree(tree: ErgoTree, ctx: ErgoLikeContext): sigma.ast.Value[sigma.ast.SSigmaProp.type] = {
+      try super.propositionFromErgoTree(tree, ctx)
+      catch {
+        case NonFatal(e) =>
+          // This stage has only the context baseline, before reduction charges.
+          propositionFailureCost = Some(ctx.initCost)
+          throw e
+      }
+    }
     abstract override protected def checkSoftForkCondition(tree: ErgoTree, ctx: ErgoLikeContext): Option[Interpreter.VerificationResult] = {
       try {
         val result = super.checkSoftForkCondition(tree, ctx)
@@ -372,8 +382,16 @@ object EvaluatedValueOracle {
         data.map(b => DataInput(b.id)), outputs)
       val root = headers.headOption.map(h => ErgoInterpreter.avlTreeFromDigest(h.stateRoot.digest))
         .getOrElse(AvlTreeData.dummy)
+      // ReplacedRule makes the caught validation exception a recognized soft fork
+      // (core/.../ValidationRules.scala:248, Interpreter.scala:249).
+      val replacements = cursor.get[Option[Map[String, Short]]]("validation_settings_replaced_rules")
+        .fold(throw _, identity).getOrElse(Map.empty)
+      val validationSettings = replacements.foldLeft(ValidationRules.currentSettings) {
+        case (settings, (id, replacement)) =>
+          settings.updated(id.toShort, sigma.validation.ReplacedRule(replacement))
+      }
       val ctx = new ErgoLikeContext(root, Colls.fromArray(headers.toArray), preHeader,
-        data, inputs, tx, selfIndex, ext, ValidationRules.currentSettings,
+        data, inputs, tx, selfIndex, ext, validationSettings,
         limit, init, activated).withErgoTreeVersion(expected)
       var rentCompleted = false
       val interpreter: ErgoLikeInterpreter with ObservedReduction = if (rent) {
@@ -444,7 +462,7 @@ object EvaluatedValueOracle {
             else if (cursor.get[Boolean]("observe_deserialization_failure").getOrElse(false)) {
               require(selected.isInstanceOf[sigma.validation.ValidationException], "expected deserialization validation failure")
               interpreter.deserializedCost.map(Json.fromLong).getOrElse(unavailable)
-            } else interpreter.gateFailureCost.orElse(interpreter.chargedCrypto).map(Json.fromLong).getOrElse(unavailable)
+            } else interpreter.gateFailureCost.orElse(interpreter.propositionFailureCost).orElse(interpreter.chargedCrypto).map(Json.fromLong).getOrElse(unavailable)
           record(verdict, cost, Some(selected), e.toString)
       }
     } catch {
