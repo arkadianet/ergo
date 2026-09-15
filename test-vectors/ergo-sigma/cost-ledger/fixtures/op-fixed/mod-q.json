@@ -1,0 +1,103 @@
+{
+  "manifest": {
+    "scala": {
+      "ergo_version": "6.0.2",
+      "sigmastate_version": "6.0.2",
+      "ergo_wallet_version": "6.0.2",
+      "node_app_version": null,
+      "source_shas": {
+        "sigmastate_v6.0.2": "23dd29f612249c169d09fae9bca76d7cc02e144c",
+        "ergo_v6.0.2": "2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1"
+      },
+      "note": "Standalone JVM oracle using the published/local 6.0.2 fallback artifacts pinned in the script; no node or mainnet request was used."
+    },
+    "rust": {
+      "git_sha": "6ac4f46bfc4c47630af754681c6584251ae38410",
+      "toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
+      "features": [
+        "ergo-sigma/cost-trace",
+        "ergo-validation/test-helpers"
+      ]
+    },
+    "tool": {
+      "script": "scripts/gen-cost-fixture.sh",
+      "git_sha": "6ac4f46bfc4c47630af754681c6584251ae38410",
+      "script_sha256": "9d37a5b6f0640f6b86281ea1f96ce8f530e4fbf045bf638a135c55a2bc69fee4",
+      "oracle_script": "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala",
+      "oracle_sha256": "a8f007806a69d84f73cf0b7bbcaeeef8fcd212608358bca1e5fcfb668467514c",
+      "scala_cli": "Scala CLI version: 1.12.1\nScala version (default): 3.8.1\nYour Scala CLI version is outdated. The newest version is 1.17.0\nIt is recommended that you update Scala CLI through the same tool or method you used for its initial installation for avoiding the creation of outdated duplicates.",
+      "scala_directive": "2.12",
+      "jvm": "openjdk version \"17.0.17\" 2025-10-21 LTS\nOpenJDK Runtime Environment Corretto-17.0.17.10.1 (build 17.0.17+10-LTS)\nOpenJDK 64-Bit Server VM Corretto-17.0.17.10.1 (build 17.0.17+10-LTS, mixed mode, sharing)"
+    },
+    "context": {
+      "network": "synthetic offline context",
+      "height": 0,
+      "block_version": 4,
+      "activated_script_version": 3,
+      "ergo_tree_version": 0,
+      "voted_params": {
+        "4": null,
+        "5": null,
+        "6": null,
+        "7": null,
+        "8": null
+      }
+    },
+    "run": {
+      "command": "scala-cli run scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala --server=false --suppress-outdated-dependency-warning -- verify",
+      "fixture": "test-vectors/ergo-sigma/cost-ledger/fixtures/op-fixed/mod-q.json",
+      "timestamp_utc": "2026-09-15T15:16:15.456614+00:00",
+      "seeds": null,
+      "selected": 1,
+      "executed": 1,
+      "skipped": 0,
+      "failed": 0
+    },
+    "evidence": {
+      "request_jsonl_sha256": "9dfdf94ef437a8e3cfb2f209a9b8e96360616688a9f0c9becc10d1a8d0d61e0a",
+      "response_jsonl_sha256": "b55ed93fcb7dac6d97ce0ebdedb84360487abfa82e5d09ba5fedce468d5f8967"
+    },
+    "scala_sigmastate": "6.0.2",
+    "generator": "scripts/gen-cost-fixture.sh@6ac4f46bfc4c47630af754681c6584251ae38410",
+    "date": "2026-09-15T15:16:15.456614+00:00"
+  },
+  "ledger": [
+    "OP-0xE7-0xE9"
+  ],
+  "construction": {
+    "method": "hand-serialized; no ErgoScript compiler",
+    "body_hex": "d801d600e706010108d3",
+    "description": "BlockValue binds the modular operation on BigInt(1) operand(s), then returns SigmaProp(true); inherited evaluation rejects before binding."
+  },
+  "request": {
+    "tree_hex": "00d801d600e706010108d3",
+    "ctx_ext_hex": "00",
+    "proof_hex": "",
+    "message_hex": "",
+    "cost_limit_block": 1000000,
+    "init_cost_block": 0,
+    "activated_version": 3,
+    "tree_version_expected": 0,
+    "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+    "inputs_hex": [
+      "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+    ],
+    "data_inputs_hex": [],
+    "outputs_hex": [],
+    "headers_hex": [],
+    "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+    "observe_evaluator_failure": true
+  },
+  "expected": {
+    "verdict": "RejectScript",
+    "eval_block_cost": "unavailable",
+    "crypto_block_cost": "unavailable",
+    "rent_block_cost": 0,
+    "rent_path": false,
+    "total_block_cost": "unavailable",
+    "failure_class": "java.lang.RuntimeException",
+    "rejection_detail": "java.lang.RuntimeException: Should be overriden in class sigma.ast.ModQ: ModQ(ConstantNode(CBigInt(1),SBigInt$))",
+    "legacy": "unavailable",
+    "evaluator_failure_block_cost": 0
+  }
+}
