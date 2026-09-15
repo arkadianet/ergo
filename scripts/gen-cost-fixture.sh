@@ -38,7 +38,7 @@ request = requests[0]
 if any(r.get("rent", False) for r in requests):
     sys.exit("wallet rent fixtures belong in the transaction runner")
 script = "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala"
-command = ["scala-cli", "run", script, "--server=false",
+command = ["scala-cli", "--skip-cli-updates", "run", script, "--server=false",
            "--suppress-outdated-dependency-warning", "--", "verify"]
 request_bytes = "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in requests).encode()
 # One response per request, with diagnostics left on stderr.
