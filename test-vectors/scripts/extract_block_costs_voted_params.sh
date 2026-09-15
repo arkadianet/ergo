@@ -6,9 +6,8 @@ set -euo pipefail
 # Runs the Scala oracle (ComputeTransactionCosts.scala) against a live node
 # with extraIndex enabled and produces a JSON corpus of per-tx block costs.
 #
-# Output format: JSON array of {tx_id, height, block_cost} records.
-#   Only passing transactions are included (~50% at 700k range; DEX/oracle-pool
-#   contracts that call error() are excluded with a stderr warning).
+# Output: per-transaction totals and per-input breakdowns from validateStateful.
+# Missing inputs, rejection, or a reconciliation mismatch abort extraction.
 #
 # Usage:
 #   NODE_URL=http://localhost:9053 \
@@ -22,9 +21,9 @@ set -euo pipefail
 #   - Refreshing params at each epoch boundary
 #   - Using the previous block's stateRoot as lastBlockUtxoRoot
 #
-# Remaining approximations in the oracle (documented limitations):
-#   - CONTEXT.headers = empty (scripts that index CONTEXT.headers may differ)
-#   - ValidationRules = current (sigma validation settings; stable on mainnet)
+# Context: current header plus nine ancestors; epoch validation settings.
+# Set COST_HEADERS to an extracted headers_*.json covering START-9 through END
+# to use the same canonical header bytes as the Rust replay.
 #
 # Path (a) POST /transactions/check: unavailable for historical txs — the node
 # rejects them because their inputs are no longer in the UTXO set (verified
@@ -54,7 +53,7 @@ mkdir -p "$(dirname "$OUTPUT")"
 echo "[extract] Running Scala oracle for h=$START..$END → $OUTPUT" >&2
 echo "[extract] NODE_URL=$NODE_URL" >&2
 
-NODE_URL="$NODE_URL" scala-cli run "$SCALA_ORACLE" -- "$START" "$END" > "$OUTPUT"
+NODE_URL="$NODE_URL" scala-cli run "$SCALA_ORACLE" --server=false --suppress-outdated-dependency-warning -- "$START" "$END" > "$OUTPUT"
 
 RECORD_COUNT=$(python3 -c "import json; d=json.load(open('$OUTPUT')); print(len(d))" 2>/dev/null || echo "?")
 echo "[extract] done: $RECORD_COUNT records written to $OUTPUT" >&2
