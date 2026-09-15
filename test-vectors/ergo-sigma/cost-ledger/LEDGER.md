@@ -9,7 +9,7 @@ Source ledger: sigmastate `v6.0.2 23dd29f612249c169d09fae9bca76d7cc02e144c`, erg
 | category | OPEN | CLOSED | DIVERGENT | N-A | total |
 |---|---:|---:|---:|---:|---:|
 | OP | 23 | 76 | 0 | 11 | 110 |
-| METHOD | 4 | 65 | 1 | 2 | 72 |
+| METHOD | 4 | 66 | 0 | 2 | 72 |
 | EVAL | 0 | 25 | 0 | 2 | 27 |
 | INTERP | 10 | 5 | 0 | 1 | 16 |
 | ROUND | 1 | 2 | 0 | 0 | 3 |
@@ -18,7 +18,7 @@ Source ledger: sigmastate `v6.0.2 23dd29f612249c169d09fae9bca76d7cc02e144c`, erg
 | TX | 6 | 1 | 0 | 1 | 8 |
 | BLOCK | 12 | 0 | 0 | 1 | 13 |
 | VERSION | 23 | 0 | 0 | 1 | 24 |
-| **all** | 89 | 175 | 1 | 19 | 284 |
+| **all** | 89 | 176 | 0 | 19 | 284 |
 
 States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test with an independent oracle; DIVERGENT = confirmed mismatch, fix pending; N-A = reviewed rationale in note.
 
@@ -177,7 +177,7 @@ States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test w
 | `METHOD-coll-reverse` | CLOSED | data/shared/src/main/scala/sigma/ast/methods.scala:1126; SCollectionMethods.reverse (v6) PerItemCost(20,2,100) | `property_call.rs` | L1,L2 | `ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` |  |
 | `METHOD-coll-indexOf` | CLOSED | data/shared/src/main/scala/sigma/ast/methods.scala:1070; indexOf: equalDataValues per iteration + PerItemCost(20,10,2) over iterations | `method_call/coll.rs:28-70` | L2 | `ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` | finding #15 fixed here |
 | `METHOD-coll-zip` | CLOSED | data/shared/src/main/scala/sigma/ast/methods.scala:1105; zip PerItemCost(10,1,10) over xs.length | `method_call/coll.rs:89` | L1,L2 | `ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` |  |
-| `METHOD-coll-startsEndsWith` | DIVERGENT | data/shared/src/main/scala/sigma/ast/methods.scala:1143-1158 startsWith/endsWith (v6) Zip_CostKind PerItemCost(10,1,10) over xs.length (RECEIVER length) | `method_call/coll.rs:134` | L1,L2 | `ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` | cost-only: Rust charges argument length; JVM charges receiver length. 26 observed block-cost divergences tracked at test-vectors/ergo-sigma/cost-ledger/fixtures/method/DIVERGENCES.md. Production fix deferred under design section 7. |
+| `METHOD-coll-startsEndsWith` | CLOSED | data/shared/src/main/scala/sigma/ast/methods.scala:1143-1158 startsWith/endsWith (v6) Zip_CostKind PerItemCost(10,1,10) over xs.length (RECEIVER length) | `ergo-sigma/src/evaluator/opcodes/method_call/coll.rs:185` | L1,L2 | `ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` | Task 0.7 fix: charge receiver length like Scala. JVM 6.0.2 fixtures/method/coll-startsEndsWith.json.gz: all 360 cases match, including all 26 formerly divergent cases. Fix evidence and before/after values: fixtures/method/DIVERGENCES.md. |
 | `METHOD-coll-get` | CLOSED | data/shared/src/main/scala/sigma/ast/methods.scala:1183; get (v6) FixedCost(30) | `method_call/coll.rs:174` | L1,L2 | `ergo-sigma::it::cost_pin::method_cost_table_matches_scala_constants` |  |
 | `METHOD-coll-flatMap` | CLOSED | data/shared/src/main/scala/sigma/ast/methods.scala:982; FlatMapMethod_CostKind PerItemCost(60,10,8) over OUTPUT length | `method_call/coll.rs:460` | L1,L2 | `ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` |  |
 | `METHOD-coll-patch` | CLOSED | data/shared/src/main/scala/sigma/ast/methods.scala:1013; PatchMethod PerItemCost(30,2,10) over xs.length + patch.length | `method_call/coll.rs:552` | L1,L2 | `ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` |  |
