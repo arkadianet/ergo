@@ -944,6 +944,7 @@ dependencies = [
 name = "ergo-sigma"
 version = "0.7.0"
 dependencies = [
+ "anyhow",
  "bytes",
  "ergo-crypto",
  "ergo-primitives",

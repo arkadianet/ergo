@@ -1,0 +1,96 @@
+{
+  "manifest": {
+    "scala": {
+      "ergo_version": "6.0.2",
+      "sigmastate_version": "6.0.2",
+      "ergo_wallet_version": "6.0.2",
+      "node_app_version": null,
+      "source_shas": {
+        "sigmastate_v6.0.2": "23dd29f612249c169d09fae9bca76d7cc02e144c",
+        "ergo_v6.0.2": "2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1"
+      },
+      "note": "Standalone JVM oracle using the published/local 6.0.2 fallback artifacts pinned in the script; no node or mainnet request was used."
+    },
+    "rust": {
+      "git_sha": "96084c2abc4f225b7a068323febffda3bf4610f5",
+      "toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
+      "features": [
+        "ergo-sigma/cost-trace",
+        "ergo-validation/test-helpers"
+      ]
+    },
+    "tool": {
+      "script": "scripts/gen-cost-fixture.sh",
+      "git_sha": "96084c2abc4f225b7a068323febffda3bf4610f5",
+      "script_sha256": "465d678349ed9fe31375418030bf089a67e62ef10b46728a401a44f00e111738",
+      "oracle_script": "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala",
+      "oracle_sha256": "f6259d9fa0b60402b305eb9d19de8edeaee3a0d21f390c632fa0e837368cd33d",
+      "scala_cli": "Scala CLI version: 1.12.1\nScala version (default): 3.8.1\nYour Scala CLI version is outdated. The newest version is 1.17.0\nIt is recommended that you update Scala CLI through the same tool or method you used for its initial installation for avoiding the creation of outdated duplicates.",
+      "scala_directive": "2.12",
+      "jvm": "openjdk version \"17.0.17\" 2025-10-21 LTS\nOpenJDK Runtime Environment Corretto-17.0.17.10.1 (build 17.0.17+10-LTS)\nOpenJDK 64-Bit Server VM Corretto-17.0.17.10.1 (build 17.0.17+10-LTS, mixed mode, sharing)"
+    },
+    "context": {
+      "network": "synthetic offline context",
+      "height": 0,
+      "block_version": 4,
+      "activated_script_version": 3,
+      "ergo_tree_version": 0,
+      "voted_params": {
+        "4": null,
+        "5": null,
+        "6": null,
+        "7": null,
+        "8": null
+      }
+    },
+    "run": {
+      "command": "scala-cli run scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala --server=false -- verify",
+      "fixture": "test-vectors/ergo-sigma/cost-ledger/fixtures/interpreter/p2pk.json",
+      "timestamp_utc": "2026-09-15T14:57:40.267717+00:00",
+      "seeds": null,
+      "selected": 1,
+      "executed": 1,
+      "skipped": 0,
+      "failed": 0
+    },
+    "evidence": {
+      "request_jsonl_sha256": "e0f359b5f9cbbd6f91c40cbbad09a5cc13ae9642d8a13af4e410d6c71ac9d236",
+      "response_jsonl_sha256": "1b34ce97c539b8aaf146b8a7decc4d73c35cc132a2b33b2f74595762abb5362d"
+    },
+    "scala_sigmastate": "6.0.2",
+    "generator": "scripts/gen-cost-fixture.sh@96084c2abc4f225b7a068323febffda3bf4610f5",
+    "date": "2026-09-15T14:57:40.267717+00:00"
+  },
+  "ledger": [
+    "INTERP-eval-sigmaprop-constant"
+  ],
+  "request": {
+    "tree_hex": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+    "ctx_ext_hex": "00",
+    "proof_hex": "",
+    "message_hex": "",
+    "cost_limit_block": 1000000,
+    "init_cost_block": 0,
+    "activated_version": 3,
+    "tree_version_expected": 0,
+    "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+    "inputs_hex": [
+      "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+    ],
+    "data_inputs_hex": [],
+    "outputs_hex": [],
+    "headers_hex": [],
+    "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+  },
+  "expected": {
+    "verdict": "RejectScript",
+    "eval_block_cost": 5,
+    "crypto_block_cost": 398,
+    "rent_block_cost": 0,
+    "rent_path": false,
+    "total_block_cost": 403,
+    "failure_class": null,
+    "rejection_detail": "Script reduced to false or proof invalid",
+    "legacy": "P:cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798|5"
+  }
+}

@@ -34,7 +34,8 @@ cost-trace = []
 value-trace = []
 
 [dev-dependencies]
-ergo-validation = { workspace = true }
+ergo-validation = { workspace = true, features = ["test-helpers", "cost-trace"] }
+anyhow = "1"
 hex        = { workspace = true }
 serde      = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
