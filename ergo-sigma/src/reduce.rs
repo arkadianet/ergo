@@ -296,7 +296,9 @@ pub fn verify_spending_proof_with_context_and_cost(
         }
         Err(ReductionError::NotTriviallyReducible)
         | Err(ReductionError::BodyConstantNotSigmaProp(_)) => {
-            // Fall through to evaluator — cost owned by evaluator path.
+            // The evaluator substitutes deserialize nodes bottom-up before the first
+            // expression charge, adding 2 BC per embedded script byte after the
+            // whole-tree charge above. These aligned charges survive the eval snap.
             super::evaluator::reduce_expr_with_cost(
                 &ergo_tree.body,
                 ctx,

@@ -193,3 +193,127 @@ pub(super) fn inline_placeholders(expr: &Expr, constants: &[(SigmaType, SigmaVal
         payload,
     })
 }
+
+/// Substitute bottom-up, visiting dead branches and defaults before their parent.
+/// Inserted scripts are not revisited, matching Scala `everywherebu`.
+pub(super) fn substitute_deserialize(
+    expr: &mut Expr,
+    ctx: &super::ReductionContext<'_>,
+    cost: &mut ergo_primitives::cost::CostAccumulator,
+) -> Result<(), super::EvalError> {
+    use super::EvalError;
+    use ergo_ser::sigma_value::CollValue;
+    let Expr::Op(node) = expr else {
+        return Ok(());
+    };
+    let children: Vec<&mut Expr> = match &mut node.payload {
+        Payload::Zero
+        | Payload::ValUse { .. }
+        | Payload::ConstPlaceholder { .. }
+        | Payload::TaggedVar { .. }
+        | Payload::BoolCollection { .. }
+        | Payload::GetVar { .. }
+        | Payload::DeserializeContext { .. }
+        | Payload::NoneValue { .. } => vec![],
+        Payload::One(a) => vec![a],
+        Payload::Two(a, b) => vec![a, b],
+        Payload::Three(a, b, c) => vec![a, b, c],
+        Payload::Four(a, b, c, d) => vec![a, b, c, d],
+        Payload::ValDef { rhs, .. } | Payload::FunDef { rhs, .. } => vec![rhs],
+        Payload::BlockValue { items, result } => {
+            let mut v: Vec<&mut Expr> = items.iter_mut().collect();
+            v.push(result);
+            v
+        }
+        Payload::FuncValue { body, .. } => vec![body],
+        Payload::MethodCall { obj, args, .. } => {
+            let mut v = vec![obj.as_mut()];
+            v.extend(args.iter_mut());
+            v
+        }
+        Payload::ConcreteCollection { items, .. }
+        | Payload::Tuple { items }
+        | Payload::SigmaCollection { items } => items.iter_mut().collect(),
+        Payload::SelectField { input, .. }
+        | Payload::ExtractRegisterAs { input, .. }
+        | Payload::NumericCast { input, .. } => vec![input],
+        Payload::DeserializeRegister { default, .. } => {
+            default.as_deref_mut().into_iter().collect()
+        }
+        Payload::ByIndex {
+            input,
+            index,
+            default,
+        } => {
+            let mut v = vec![input.as_mut(), index.as_mut()];
+            v.extend(default.as_deref_mut());
+            v
+        }
+        Payload::FuncApply { func, args } => {
+            let mut v = vec![func.as_mut()];
+            v.extend(args.iter_mut());
+            v
+        }
+    };
+    for child in children {
+        substitute_deserialize(child, ctx, cost)?;
+    }
+    let (value, tpe, default) = match &node.payload {
+        Payload::DeserializeContext { id, tpe } => {
+            (ctx.extension.get(id).map(|(t, v)| (t, v)), tpe, None)
+        }
+        Payload::DeserializeRegister {
+            reg_id,
+            tpe,
+            default,
+        } => {
+            let value = ctx
+                .self_box
+                .and_then(|b| {
+                    reg_id
+                        .checked_sub(4)
+                        .and_then(|i| b.registers.get(i as usize))
+                        .and_then(Option::as_ref)
+                })
+                .map(|r| (&r.tpe, &r.value));
+            (value, tpe, default.as_deref())
+        }
+        _ => return Ok(()),
+    };
+    if let Some((SigmaType::SColl(inner), SigmaValue::Coll(CollValue::Bytes(bytes)))) = value {
+        if **inner == SigmaType::SByte {
+            let script = deserialize_measured(bytes, cost)?;
+            if super::super::helpers::infer_expr_type(&script, &Default::default(), &[])
+                .is_some_and(|actual| actual != *tpe)
+            {
+                return Err(EvalError::TypeError {
+                    expected: "matching deserialized script type",
+                    got: format!("expected {tpe:?}"),
+                });
+            }
+            *expr = script;
+            return Ok(());
+        }
+    }
+    if let Some(default) = default {
+        *expr = default.clone();
+    }
+    Ok(())
+}
+
+/// Scala parses before `addCostChecked`, then charges the entire supplied buffer.
+fn deserialize_measured(
+    bytes: &[u8],
+    cost: &mut ergo_primitives::cost::CostAccumulator,
+) -> Result<Expr, super::EvalError> {
+    use ergo_primitives::cost::{CostError, JitCost};
+    let mut reader = ergo_primitives::reader::VlqReader::new(bytes);
+    let script =
+        ergo_ser::opcode::parse_body(&mut reader, 0).map_err(|e| super::EvalError::TypeError {
+            expected: "valid serialized expression",
+            got: format!("deserialization error: {e}"),
+        })?;
+    let charge = JitCost::from_block_cost(bytes.len() as u64 * 2).map_err(CostError::from)?;
+    cost.add(charge)?;
+    Ok(script)
+}

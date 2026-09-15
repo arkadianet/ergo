@@ -1,4 +1,14 @@
-# Interpreter substitution divergence
+# Interpreter substitution divergence — resolved
+
+Task 0.8 resolves this discovery: eager bottom-up substitution now charges
+2 BC per supplied embedded byte after parsing, before evaluation. The ten JVM
+fixtures cover live/dead nodes and missing live/dead variables for both sources.
+All fields match; known-divergence annotations are removed. Both
+INTERP-embedded-script-deser and INTERP-deser-subst are CLOSED.
+
+## Historical discovery evidence
+
+The following records the before-fix measurements and original disposition.
 
 Tracking: Task 3.4e discovery; controller dispatch Task 0.5 owns the fix.
 Classification: **cost-only**, with limit-boundary risk. No production Rust code

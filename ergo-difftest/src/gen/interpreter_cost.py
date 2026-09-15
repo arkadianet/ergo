@@ -32,19 +32,20 @@ def main():
     long = b'\xd1\x93' + coll + coll  # BoolToSigmaProp(EQ(bytes, bytes))
     assert len(long) == 300
     for source in ('context', 'register'):
-        for name, script in [('tiny', tiny), ('long', long)]:
+        for name, script in [('tiny', tiny), ('long', long), ('dead', long), ('missing-live', tiny), ('missing-dead', tiny)]:
             node = bytes.fromhex('d40800' if source == 'context' else 'd5040800')
             # Segregated v3 tree: one Boolean constant, referenced as If condition.
-            payload = b'\x01\x01\x01\x95\x73\x00' + node + tiny
+            condition = 0 if name in ('dead', 'missing-dead') else 1
+            payload = b'\x01\x01' + bytes([condition]) + b'\x95\x73\x00' + node + tiny
             tree = b'\x1b' + vlq(len(payload)) + payload
             script_constant = b'\x0e' + vlq(len(script)) + script
-            registers = b'\x01' + script_constant if source == 'register' else b'\x00'
+            registers = b'\x01' + script_constant if source == 'register' and not name.startswith('missing') else b'\x00'
             self_box = (vlq(1000000) + tree + b'\x00\x00' + registers + bytes(33)).hex()
             request = dict(BASE, tree_hex=tree.hex(), self_box_hex=self_box,
                            inputs_hex=[self_box], init_cost_block=17,
                            tree_version_expected=3, activated_version=3,
                            ctx_ext_hex=(b'\x01\x00' + script_constant).hex()
-                           if source == 'context' else '00')
+                           if source == 'context' and not name.startswith('missing') else '00')
             cases.append({'name': f'{source}-{name}',
                           'construction': {'embedded_script_hex': script.hex(),
                                            'embedded_script_bytes': len(script),
@@ -56,12 +57,11 @@ def main():
     if fixture_path(path).exists():
         old = json.loads(read_fixture_text(path))
         if [c['request'] for c in old['cases']] == [c['request'] for c in cases]:
-            if 'manifest' in old:
-                value['manifest'] = old['manifest']
-            for case, previous in zip(cases, old['cases']):
-                for field in ('expected', 'known_divergence'):
-                    if field in previous:
-                        case[field] = previous[field]
+            value['manifest'] = old['manifest']
+        for case in cases:
+            for previous in old['cases']:
+                if previous['request'] == case['request'] and 'expected' in previous:
+                    case['expected'] = previous['expected']
     write_fixture_text(path, json.dumps(value, indent=2) + '\n')
 
 
