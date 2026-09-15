@@ -1,5 +1,6 @@
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/interpreter/
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/op-fixed/
+//! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/op-per-item/
 //! Generator: scripts/gen-cost-fixture.sh (JVM verify)
 //!
 //! UTF-8 JSON request bytes, with the JVM's exact field names and embedded
@@ -285,6 +286,9 @@ fn jvm_failure(
             | EvalError::UnparsedErgoTree
             | EvalError::TreeVersionAboveActivated { .. },
         ) => Ok(("RejectScript", "sigma.exceptions.InterpreterException")),
+        VerifySpendingError::Eval(EvalError::RuntimeException(
+            "SigmaAnd requires nonempty children" | "SigmaOr requires nonempty children",
+        )) => Ok(("RejectScript", "java.lang.IllegalArgumentException")),
         _ => anyhow::bail!("no oracle-backed JVM failure mapping for {error:?}"),
     }
 }
@@ -319,12 +323,108 @@ fn fixture_paths(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+fn verify_fixture(path: &Path, fixture: Fixture, ledger: &Ledger) -> Result<()> {
+    ensure!(
+        !fixture.ledger.is_empty(),
+        "{}: missing ledger ids",
+        path.display()
+    );
+    for id in &fixture.ledger {
+        ensure!(
+            ledger.rows.iter().any(|row| &row.id == id),
+            "{}: unknown ledger id {id}",
+            path.display()
+        );
+    }
+    ensure!(
+        fixture.manifest["scala_sigmastate"] == "6.0.2",
+        "{}: unpinned oracle",
+        path.display()
+    );
+    ensure!(
+        fixture.manifest["generator"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("scripts/gen-cost-fixture.sh@")),
+        "{}: missing manifest.generator",
+        path.display()
+    );
+    ensure!(
+        fixture.manifest["date"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
+        "{}: missing manifest.date",
+        path.display()
+    );
+    let mut actual = record(false);
+    verify(&serde_json::to_vec(&fixture.request)?, &mut actual)
+        .with_context(|| format!("verify {}", path.display()))?;
+    for field in [
+        "verdict",
+        "eval_block_cost",
+        "crypto_block_cost",
+        "total_block_cost",
+    ] {
+        let expected = fixture
+            .expected
+            .get(field)
+            .with_context(|| format!("{}: missing {field}", path.display()))?;
+        // Section 4: an unavailable rejected-input cost is not a mismatch.
+        if field != "verdict"
+            && actual["verdict"] != "Accept"
+            && (actual[field] == "unavailable" || *expected == "unavailable")
+        {
+            continue;
+        }
+        ensure!(
+            &actual[field] == expected,
+            "{}: {field}: Rust={} JVM={expected}",
+            path.display(),
+            actual[field]
+        );
+    }
+    let failure_class = fixture
+        .expected
+        .get("failure_class")
+        .with_context(|| format!("{}: missing failure_class", path.display()))?;
+    ensure!(
+        &actual["failure_class"] == failure_class,
+        "{}: failure_class: Rust={} JVM={failure_class}",
+        path.display(),
+        actual["failure_class"]
+    );
+    if fixture.request["observe_evaluator_failure"] == true {
+        let expected = &fixture.expected["evaluator_failure_block_cost"];
+        ensure!(
+            expected.is_u64(),
+            "{}: missing JVM failure observation",
+            path.display()
+        );
+        ensure!(
+            &actual["evaluator_failure_block_cost"] == expected,
+            "{}: evaluator failure cost: Rust={} JVM={expected}",
+            path.display(),
+            actual["evaluator_failure_block_cost"]
+        );
+    }
+    for field in ["rent_block_cost", "rent_path"] {
+        if let Some(expected) = fixture.expected.get(field) {
+            ensure!(
+                &actual[field] == expected,
+                "{}: {field}: Rust={} JVM={expected}",
+                path.display(),
+                actual[field]
+            );
+        }
+    }
+    Ok(())
+}
+
 // ----- happy path -----
 // ----- round-trips -----
 // ----- error paths -----
 // ----- oracle parity -----
 
-// ledger: INTERP-eval-sigmaprop-constant, OP-0x95, OP-0xDA, OP-0xE7-0xE9, OP-0xEC, OP-0xED, OP-0xF2, OP-0xF3, OP-0xF5, OP-0xF6, OP-0xF7, OP-0xF8, OP-TaggedVariable-A003, ORDER-bitop-charge-then-reject
+// ledger: OP-0x96, OP-0xB3, OP-0x98, OP-0xCB, OP-0xD8, ROUND-perItem-chunking, OP-0xAE, OP-0xB5, OP-0xB0, OP-0xAF, OP-0xAD, OP-0x97, OP-0xCC, OP-0xEA, OP-0xEB, OP-0xD0, OP-0xB4, OP-0x74, OP-0xFF, OP-0x9B, INTERP-eval-sigmaprop-constant, OP-0x95, OP-0xDA, OP-0xE7-0xE9, OP-0xEC, OP-0xED, OP-0xF2, OP-0xF3, OP-0xF5, OP-0xF6, OP-0xF7, OP-0xF8, OP-TaggedVariable-A003, ORDER-bitop-charge-then-reject
 #[test]
 fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-vectors/ergo-sigma/cost-ledger");
@@ -335,95 +435,39 @@ fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
     fixture_paths(&root.join("fixtures"), &mut paths)?;
     paths.sort();
     ensure!(!paths.is_empty(), "no cost fixtures selected");
-    let selected = paths.len();
+    let mut fixtures = Vec::new();
     for path in paths {
-        let fixture: Fixture = serde_json::from_slice(
+        let value: Value = serde_json::from_slice(
             &std::fs::read(&path).with_context(|| path.display().to_string())?,
         )
         .with_context(|| format!("parse {}", path.display()))?;
-        ensure!(
-            !fixture.ledger.is_empty(),
-            "{}: missing ledger ids",
-            path.display()
-        );
-        for id in &fixture.ledger {
-            ensure!(
-                ledger.rows.iter().any(|row| &row.id == id),
-                "{}: unknown ledger id {id}",
-                path.display()
-            );
-        }
-        ensure!(
-            fixture.manifest["scala_sigmastate"] == "6.0.2",
-            "{}: unpinned oracle",
-            path.display()
-        );
-        ensure!(
-            fixture.manifest["generator"]
-                .as_str()
-                .is_some_and(|s| s.starts_with("scripts/gen-cost-fixture.sh@")),
-            "{}: missing manifest.generator",
-            path.display()
-        );
-        ensure!(
-            fixture.manifest["date"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty()),
-            "{}: missing manifest.date",
-            path.display()
-        );
-        let mut actual = record(false);
-        verify(&serde_json::to_vec(&fixture.request)?, &mut actual)
-            .with_context(|| format!("verify {}", path.display()))?;
-        for field in [
-            "verdict",
-            "eval_block_cost",
-            "crypto_block_cost",
-            "total_block_cost",
-        ] {
-            let expected = fixture
-                .expected
-                .get(field)
-                .with_context(|| format!("{}: missing {field}", path.display()))?;
-            // Section 4: an unavailable rejected-input cost is not a mismatch.
-            if field != "verdict"
-                && actual["verdict"] != "Accept"
-                && (actual[field] == "unavailable" || *expected == "unavailable")
-            {
-                continue;
+        if let Some(cases) = value.get("cases") {
+            let cases = cases.as_array().context("fixture cases must be an array")?;
+            ensure!(!cases.is_empty(), "{}: empty cases", path.display());
+            for (index, case) in cases.iter().enumerate() {
+                let mut case = case.clone();
+                case["manifest"] = value["manifest"].clone();
+                case["ledger"] = value["ledger"].clone();
+                let label = PathBuf::from(format!("{} [case {index}]", path.display()));
+                let fixture: Fixture = serde_json::from_value(case)
+                    .with_context(|| format!("parse {}", label.display()))?;
+                fixtures.push((label, fixture));
             }
-            assert_eq!(&actual[field], expected, "{}: {field}", path.display());
-        }
-        let failure_class = fixture
-            .expected
-            .get("failure_class")
-            .with_context(|| format!("{}: missing failure_class", path.display()))?;
-        assert_eq!(
-            &actual["failure_class"],
-            failure_class,
-            "{}: failure_class",
-            path.display()
-        );
-        if fixture.request["observe_evaluator_failure"] == true {
-            let expected = &fixture.expected["evaluator_failure_block_cost"];
-            ensure!(
-                expected.is_u64(),
-                "{}: missing JVM failure observation",
-                path.display()
-            );
-            assert_eq!(
-                &actual["evaluator_failure_block_cost"],
-                expected,
-                "{}: evaluator failure cost",
-                path.display()
-            );
-        }
-        for field in ["rent_block_cost", "rent_path"] {
-            if let Some(expected) = fixture.expected.get(field) {
-                assert_eq!(&actual[field], expected, "{}: {field}", path.display());
-            }
+        } else {
+            let fixture: Fixture = serde_json::from_value(value)
+                .with_context(|| format!("parse {}", path.display()))?;
+            fixtures.push((path, fixture));
         }
     }
-    eprintln!("cost fixtures: selected={selected} executed={selected} skipped=0 failed=0");
+    let selected = fixtures.len();
+    let mut failed = 0;
+    for (path, fixture) in fixtures {
+        if let Err(error) = verify_fixture(&path, fixture, &ledger) {
+            eprintln!("{error:#}");
+            failed += 1;
+        }
+    }
+    eprintln!("cost fixtures: selected={selected} executed={selected} skipped=0 failed={failed}");
+    ensure!(failed == 0, "{failed} cost fixtures diverged");
     Ok(())
 }
