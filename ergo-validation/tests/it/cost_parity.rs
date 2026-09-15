@@ -1,5 +1,6 @@
 //! Oracle: test-vectors/scripts/scala/ComputeTransactionCosts.scala
 //! Oracle: scripts/jvm_checkpoint_oracle/CheckpointOracle.scala
+//! Oracle: test-vectors/ergo-sigma/cost-total/l4-v6-reject-valid.json
 //! Field-by-field block-unit comparisons against one JVM validateStateful run.
 
 use ergo_primitives::cost::{CostAccumulator, JitCost};
@@ -231,6 +232,10 @@ fn replay_fixture(
             token_access_cost: p.token_access_cost,
             ..ProtocolParams::mainnet_default()
         };
+        assert_eq!(
+            p.block_version, hdr.version,
+            "voted version must match block"
+        );
         let ctx = TransactionContext {
             height: h,
             miner_pubkey: *hdr.solution.pk().as_bytes(),
@@ -435,6 +440,16 @@ fn transaction_activation_boundaries_match_jvm() {
         heights,
         [417_791, 417_792, 417_793, 889_855, 889_856, 889_857, 1_628_159, 1_628_160, 1_628_161]
     );
+    replay_fixture(fixture, None, &[]);
+}
+
+// ledger: TX-l4-v6-activation-reject-valid
+#[test]
+fn transaction_v6_activation_spends_match_jvm() {
+    let fixture = serde_json::from_str(include_str!(
+        "../../../test-vectors/ergo-sigma/cost-total/l4-v6-reject-valid.json"
+    ))
+    .unwrap();
     replay_fixture(fixture, None, &[]);
 }
 
@@ -960,16 +975,6 @@ mod ranges {
             .unwrap()
             .join()
             .unwrap();
-    }
-
-    // ledger: TX-l4-v6-activation-reject-valid
-    #[test]
-    fn transaction_v6_activation_spends_match_jvm() {
-        let fixture = serde_json::from_str(include_str!(
-            "../../../test-vectors/ergo-sigma/cost-total/l4-v6-reject-valid.json"
-        ))
-        .unwrap();
-        super::replay_fixture(fixture, None, &[]);
     }
 
     #[test]
