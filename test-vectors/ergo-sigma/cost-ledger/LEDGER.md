@@ -10,7 +10,7 @@ Source ledger: sigmastate `v6.0.2 23dd29f612249c169d09fae9bca76d7cc02e144c`, erg
 |---|---:|---:|---:|---:|---:|
 | OP | 23 | 76 | 0 | 11 | 110 |
 | METHOD | 31 | 39 | 0 | 2 | 72 |
-| EVAL | 1 | 23 | 0 | 2 | 26 |
+| EVAL | 1 | 24 | 0 | 2 | 27 |
 | INTERP | 10 | 5 | 0 | 1 | 16 |
 | ROUND | 1 | 2 | 0 | 0 | 3 |
 | ORDER | 7 | 1 | 0 | 0 | 8 |
@@ -18,7 +18,7 @@ Source ledger: sigmastate `v6.0.2 23dd29f612249c169d09fae9bca76d7cc02e144c`, erg
 | TX | 6 | 1 | 0 | 1 | 8 |
 | BLOCK | 12 | 0 | 0 | 1 | 13 |
 | VERSION | 23 | 0 | 0 | 1 | 24 |
-| **all** | 117 | 147 | 0 | 19 | 283 |
+| **all** | 117 | 148 | 0 | 19 | 284 |
 
 States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test with an independent oracle; DIVERGENT = confirmed mismatch, fix pending; N-A = reviewed rationale in note.
 
@@ -218,6 +218,7 @@ States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test w
 
 | id | state | Scala | Rust | layers | tests | note |
 |---|---|---|---|---|---|---|
+| `EVAL-sstring-rejected` | CLOSED | sigmastate v6.0.2 core/shared/src/main/scala/sigma/ast/SType.scala:187-212; Value.checkType evaluator call sites | `ergo-sigma/src/evaluator/helpers/equality.rs` | L2 | `ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` | Bug-compatible shallow SString rejection at Value.checkType sites; 330 JVM verify cases plus strings-direct, including observed failure costs, eager/lazy defaults and shallow-container controls. Task 0.6. |
 | `EVAL-const-inline` | CLOSED | data/shared/src/main/scala/sigma/ast/values.scala:380; Constant.costKind FixedCost(5) (values.scala) | `ergo-sigma/src/evaluator/dispatch.rs:321` | L1,L2 | `ergo-sigma::reduce::and_over_packed_bool_collection_matches_scala_cost`<br>`ergo-sigma::reduce::or_over_packed_bool_collection_matches_scala_cost`<br>`ergo-sigma::reduce::xor_of_over_packed_bool_collection_matches_scala_cost`<br>`ergo-sigma::reduce::and_over_unpacked_bool_collection_matches_scala_cost`<br>`ergo-sigma::reduce::and_over_coll_boolean_constant_matches_scala_cost`<br>`ergo-sigma::reduce::and_33_items_first_false_charges_visited_prefix_like_scala`<br>`ergo-sigma::reduce::and_33_items_all_true_charges_two_chunks_like_scala`<br>`ergo-sigma::reduce::and_32_items_first_false_matches_scala_cost`<br>`ergo-sigma::reduce::or_65_items_first_true_charges_visited_prefix_like_scala`<br>`ergo-sigma::reduce::or_65_items_all_false_charges_two_chunks_like_scala`<br>`ergo-sigma::reduce::or_64_items_first_true_matches_scala_cost`<br>`ergo-sigma::reduce::xor_of_33_items_charges_full_length_like_scala`<br>`ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` | JVM-verbatim ACCEPT lines in test-vectors/scala/bool_collection_logical_cost.json; consumed by ergo-sigma/src/reduce.rs |
 | `EVAL-hasdeserialize-fork` | CLOSED | interpreter/shared/src/main/scala/sigmastate/interpreter/Interpreter.scala:218; Interpreter.fullReduction: ErgoTree.hasDeserialize → toProposition(inline constants) + EmptyConstants; +4 per constant ref | `ergo-sigma/src/evaluator/dispatch.rs:107-315` | L2 | `ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` | JVM fixtures/eval/deserialize.json.gz: segregated refs 1, 2, 5, paired dead-branch DeserializeRegister with an absent-R4 default; all ten prefixes. SELF embeds the evaluated guard. JVM supplementary evaluator totals show +4 JIT per reference; full verify includes substitution bytes. |
 | `EVAL-addtoenv` | CLOSED | data/shared/src/main/scala/sigma/ast/values.scala:1047; AddToEnvironment FixedCost(5) per HOF element / per Apply | `ergo-sigma/src/evaluator/opcodes/collection.rs:285` | L2 | `ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` |  |

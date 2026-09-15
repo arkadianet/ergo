@@ -475,7 +475,10 @@ fn eval_op(
                     // Boxed-element coll carrier (no typed Vec<GE>).
                     let mut vals = Vec::with_capacity(items.len());
                     for item in items {
-                        vals.push(eval_expr(item, ctx, constants, env, depth, cost, trace)?);
+                        vals.push(
+                            eval_expr(item, ctx, constants, env, depth, cost, trace)
+                                .and_then(crate::evaluator::helpers::reject_sstring)?,
+                        );
                     }
                     Ok(Value::CollGeneric(vals, Box::new(SigmaType::SGroupElement)))
                 }
@@ -490,7 +493,10 @@ fn eval_op(
                     // serialize-back preserve the right `Coll[T]` T.
                     let mut vals = Vec::with_capacity(items.len());
                     for item in items {
-                        vals.push(eval_expr(item, ctx, constants, env, depth, cost, trace)?);
+                        vals.push(
+                            eval_expr(item, ctx, constants, env, depth, cost, trace)
+                                .and_then(crate::evaluator::helpers::reject_sstring)?,
+                        );
                     }
                     Ok(Value::CollGeneric(vals, Box::new(elem_type.clone())))
                 }
