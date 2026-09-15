@@ -1,105 +1,132 @@
-# Mixed Scala/Rust devnet — blocked prerequisite
+# Mixed Scala/Rust devnet
 
-Task 7.1 is **BLOCKED** on candidate
-`b3d508c8eff7db2f333a1051fb00b8343b415da6`. This directory does not yet
-provide an executable mixed-node recipe. `build-block.py` is the existing
-Task 6.2 synthetic-block builder, not a node launcher or a mixed-node smoke.
+This recipe runs Scala Ergo **6.0.5 / sigma-state 6.0.6** and the Rust node
+built from this worktree on one isolated chain. Both nodes validate every
+block. The external worker submits a solution to the selected node's mining
+API, then waits for the other node to receive and validate the block over
+P2P. It never relays blocks through HTTP during the smoke.
 
-## Reproduce the blocker
+## Run
 
-From the worktree root, with the configured shared Cargo target directory:
+From the repository root, with the Task 6.2 JVM classpath already provisioned:
 
 ```sh
 cargo build -p ergo-node
-~/.cache/cargo-target/debug/ergo-node --network devnet \
-  --data-dir scripts/devnet-mixed/.work/rust
+scripts/devnet-mixed/start.sh
+python3 scripts/devnet-mixed/smoke.py --first rust --blocks 100
+scripts/devnet-mixed/stop.sh
 ```
 
-Observed on 2026-09-15 UTC: build succeeds; node exits with status 1:
+Always run `stop.sh`, including after a failed smoke. It stops only processes
+whose command line and working directory identify this recipe. Data is
+preserved; the smoke requires fresh height-zero state. To rerun, stop both
+nodes and move `.work/rust` and `.work/scala` aside within `.work/` first.
+`start.sh` refuses occupied ports and cleans up its nodes on startup failure.
+Use `RUST_NODE=/absolute/path/to/ergo-node` to override the default configured
+Cargo-target binary at `/home/rkadias/.cache/cargo-target/debug/ergo-node`.
 
-```text
-config load failed: unknown network: devnet
-```
+The classpath comes from `scripts/jvm_block_oracle/.work/classpath`.
+Its provisioning script extracts Ergo commit
+`5528ef569a41ebccbc8658212e6ee3c97d990b96` and adds the documented
+identity-return cost observer to `UtxoState`. This recipe does not alter that
+classpath or source tree. It launches `org.ergoplatform.ErgoApp` directly.
+Java 17 and scala-cli 1.12 are used. `Solve.scala` pins Scala 2.12,
+ergo-core 6.0.5, sigma-state 6.0.6 and circe-parser 0.14.15.
 
-Configuration loading fails before node startup. No node was started, no
-blocks were mined, and no state root or wallet funding was established.
-The required smoke, **50 blocks mined by each side in turn**, is unexecuted
-(0 Scala-mined, 0 Rust-mined; heights and state roots unavailable).
+## Chain identity
 
-## Why configuration alone cannot unblock this
+| Setting | Shared value |
+| --- | --- |
+| P2P magic | `[7, 7, 7, 7]` |
+| Address prefix | `16` |
+| Genesis state root | `cb63aa99a3060f341781d8662b58bf18b9ad258db4fe88d09f8f71cb668cad4502` |
+| Genesis boxes | `test-vectors/testnet/genesis_boxes.json` (three JVM boxes) |
+| Pinned height-one header | None; generated for each fresh campaign |
+| Initial difficulty | `1` (`initialDifficultyHex = "01"`) |
+| Difficulty / voting epoch | `33554432` (`1 << 25`) |
+| Block interval | `20s` |
+| Soft-fork / activation epochs | `32` / `32` |
+| Monetary rules | Standard emission, reward delay `720` |
+| Re-emission | Disabled |
+| Launch block version | `4`, empty validation-rule update |
+| Public seeds / checkpoints | None |
 
-- `ergo-chain-spec/src/lib.rs`: `Network` contains only `Mainnet` and
-  `Testnet`; `network_from_str_unknown_errors` explicitly rejects `devnet`.
-- `ergo-node/src/config/load.rs`: the parsed network selects a compiled
-  `ChainSpec`. Public-network seed peers are appended to configured peers.
-  Substituting `testnet` would not provide the isolated devnet identity.
-- `ergo-node/src/config/toml_sections.rs`: `TomlChain` exposes checkpoints
-  and a genesis **header ID**, but no genesis-box, state-digest, difficulty,
-  epoch-length, magic-byte, or launch-parameter overrides. Unknown TOML
-  fields must not be mistaken for implemented chain settings.
-- The compiled testnet difficulty epoch is 128 blocks. The required shared
-  difficulty-1 chain without epoch boundaries cannot be configured here.
-- `~/apps/ergo-devnet-stark/README.md` identifies its binary as built from
-  `feat/eip-0045-stark`, with `Network::Devnet`, magic `[7,7,7,7]`, and empty
-  seeds. Its TOML is not executable by this candidate. Reusing that binary
-  would not test Rust built at the candidate revision.
-- Wallets funded from genesis require common, independently verified genesis
-  boxes and their state digest, plus known test signing keys. The current
-  Rust configuration cannot load such a genesis. Mining rewards alone would
-  not satisfy the genesis-funding requirement.
+`genesis.conf` defines the Scala overrides; `ChainSpec::devnet()` mirrors
+them in Rust. Scala's `networkType = "devnet60"` selects the version-4
+launch parameters. Plain Scala `"devnet"` selects version 3 instead.
+Rust selects its private spec with `network = "devnet"`. No public-network
+seed is appended. Epoch boundaries are beyond this campaign, rather than
+removed mathematically: do not run this recipe to height 33,554,432.
 
-The task permits changes only under `scripts/devnet-mixed/`. Adding the
-missing Rust chain support exceeds that scope. No alternative public-network
-configuration, borrowed Rust binary, or synthetic block result is presented
-as a successful mixed-devnet campaign.
+The Rust miner supports the seeded height-zero state and short header windows.
+It keeps an empty `CONTEXT.headers` at genesis and the actual available
+headers before height ten. Its height-zero carrier is never persisted or
+included in interlinks. Only devnet announces locally accepted mined headers
+immediately; this also lets an empty Scala peer request a Rust genesis block.
+Mainnet/Testnet retain their existing mining gates and consensus parameters.
 
-## Reserved recipe layout
+Scala's candidate generator emits a **version-1 first header**, even with
+version-4 launch parameters. `--first scala` therefore uses the pinned JVM
+Autolykos-v1 solver for that first solution. Rust's first header is version 4;
+subsequent candidates use version 4. Difficulty-one v2 work accepts the
+recorded zero nonce; both nodes perform their normal PoW checks.
 
-These are proposed locations and ports, not running services or verified
-configuration. All runtime paths are relative to this directory.
+## Ports, files, and keys
 
-| Item | Path or loopback port | Status |
-| --- | --- | --- |
-| Shared chain/genesis configuration | `genesis.conf` | Pending Rust chain support and funded genesis |
-| Scala configuration | `scala-node.conf` | Pending shared chain |
-| Rust configuration | `rust-node.toml` | Pending devnet support |
-| Lifecycle scripts | `start.sh`, `stop.sh` | Pending valid configurations |
-| Scala REST / P2P | `19553` / `19530` | Proposed; unbound by this task |
-| Rust REST / P2P | `19554` / `19531` | Proposed; unbound by this task |
-| Scala data / logs / PID | `.work/scala/`, `.work/scala.log`, `.work/scala.pid` | Not created |
-| Rust data / logs / PID | `.work/rust/`, `.work/rust.log`, `.work/rust.pid` | Not created |
-| Smoke evidence | `.work/smoke.json` | Not created |
+| Item | Value / path relative to `scripts/devnet-mixed/` |
+| --- | --- |
+| Scala REST / P2P | `127.0.0.1:19553` / `127.0.0.1:19530` |
+| Rust REST / P2P | `127.0.0.1:19554` / `127.0.0.1:19531` |
+| Chain overrides | `genesis.conf` |
+| Node configs | `scala-node.conf`, `rust-node.toml` |
+| Lifecycle | `start.sh`, `stop.sh`, `lifecycle.py` |
+| External worker / driver | `Solve.scala`, `smoke.py` |
+| Console logging config | `logback.xml` |
+| Node databases | `.work/scala/`, `.work/rust/` |
+| Logs / PIDs | `.work/{scala,rust}.log`, `.work/{scala,rust}.pid` |
+| Runtime evidence | `.work/smoke.json`, `.work/smoke.log` |
 
-The proposed ports avoid 9053, 9063, 9052, 9073, 9072, and 19099.
-This task did not query or alter the extraction oracle on port 9053.
-There are no task-owned node processes to stop; a `stop.sh` is not supplied
-for services that cannot yet be launched.
+All listening sockets are loopback. No use is made of ports 9053, 9063, 9052,
+9073, 9072, or 19099, or of installations under `~/apps`.
 
-## Prerequisites and completion procedure
+Both miners pay the public test key with secret scalar **1**, compressed
+public key `0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798`.
+The API key is the standard local test key **hello**. These values are
+intentionally reproducible and carry no real funds.
 
-1. Provide candidate Rust support for an isolated devnet: unique magic and
-   empty public seeds, difficulty 1, matching launch parameters, no difficulty
-   or voting epoch boundaries during the campaign, and configurable funded
-   genesis boxes with their independently computed state root.
-2. Define one shared chain specification and verify both adapters consume
-   identical genesis, monetary, difficulty, voting, and launch parameters.
-   Scala's `devnet`, `devnet60`, and `testnet` select different launch settings;
-   matching the genesis digest alone is insufficient.
-3. Base the Rust config and lifecycle on `~/apps/ergo-devnet-stark/`, and the
-   Scala config shape on `~/apps/ergo-node-scala/testnet/`. A Scala 6.0.5 JAR
-   is available at `~/apps/ergo-node-scala/mainnet/ergo-6.0.5.jar`; verify its
-   reported version before use. Task 6.2 also provisions a pinned classpath
-   at `../jvm_block_oracle/.work/classpath` using Ergo source
-   `5528ef569a41ebccbc8658212e6ee3c97d990b96` and sigmastate 6.0.6.
-   That classpath includes the documented cost-observation wrapper.
-4. Keep all node data, logs, and PID files in this worktree. Bind loopback,
-   peer the two nodes, verify genesis-funded wallet balances, and mine
-   strictly alternately: 50 blocks per node, 100 blocks total. After each
-   block wait for the other node to validate it through P2P; compare final
-   height, best block ID, and UTXO state root.
-5. Record commands, timestamps, candidate SHA/toolchain/features, Scala/JVM
-   pins, chain settings, per-node mining counts, final commitments, and
-   input/output SHA-256 hashes. Stop both task-owned nodes, then record the
-   actual smoke result here. Task 7.1 cannot be called complete before this.
+**Funding limitation:** this uses the independently verified standard genesis
+box set. It does not initialize wallets with spendable genesis allocations.
+Mining rewards mature after 720 blocks. Thus the separate Task 7.1 requirement
+for wallets funded from genesis remains outstanding; this recipe proves the
+mixed-node mining/validation prerequisite, not funded-wallet workloads or the
+full cost-heavy L6 campaign.
 
-No ledger rows are closed by this blocker reproduction.
+## Smoke evidence
+
+The driver selects 100 blocks, strictly alternating 50 Rust / 50 Scala. For
+each block it records miner, height, header version, block ID, state root,
+candidate and solution, and waits for matching commitments on both nodes.
+The manifest also records node versions, source and executable hashes, config
+and tool hashes, and selected/executed/skipped/failed counts.
+
+Recorded run: **PASS — 100 selected, 100 executed, 0 skipped, 0 failed**;
+50 blocks mined by Rust and 50 by Scala, strictly alternating. Both nodes
+reached height **100** with:
+
+- Block ID: `acbfbdacf69e3ea08c2d7a635bdf45851d6b6e4decdd76404afe66ab7d32498b`
+- State root: `3e87598aebaf1ff398cedc3b56394fa963132b3f33cb4ad038be84445c074ec608`
+- Rust implementation revision: `a33b9f0baebc0cbb475c914f4a79df32340b1e20`
+- Rust executable SHA-256: `49c10ac8a589857551c55136a39fe3369cffc364058c653f14c7fc53f5630701`
+- Started (UTC): `2026-09-15T22:53:26.845468+00:00`
+
+Every height matched, including Rust's first block propagating to the empty
+Scala peer. All 100 headers were version 4. See [per-block evidence](smoke-evidence.json)
+and the [environment, inputs, gate and shutdown receipt](smoke-environment.json).
+The receipt records concurrent test-helper/dev-dependency edits separately;
+the shared worktree was not claimed to be clean.
+
+`cargo fmt --all -- --check` and warning-denying workspace clippy passed.
+`cargo nextest` was unavailable; `cargo test --workspace` passed with
+**6,997 passed, 0 failed, 97 ignored** (including doctests). Both nodes were
+stopped afterward and all four recipe ports were verified closed.
+No cost-ledger rows are closed by this recipe.
