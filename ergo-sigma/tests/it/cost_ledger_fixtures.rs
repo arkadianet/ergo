@@ -508,12 +508,7 @@ fn verify_fixture(path: &Path, fixture: Fixture, ledger: &Ledger) -> Result<bool
             }
             _ => false,
         };
-        let tracking = match known.ledger.as_str() {
-            "METHOD-coll-startsEndsWith" => {
-                "test-vectors/ergo-sigma/cost-ledger/fixtures/method/DIVERGENCES.md"
-            }
-            _ => "test-vectors/ergo-sigma/cost-ledger/fixtures/eval/DIVERGENCES.md",
-        };
+        let tracking = "test-vectors/ergo-sigma/cost-ledger/fixtures/eval/DIVERGENCES.md";
         ensure!(
             classified
                 && known.tracking == tracking
