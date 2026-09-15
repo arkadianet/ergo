@@ -14,6 +14,32 @@ def main():
     for source in ('register', 'context'):
         probes = [('collection-mismatch', bytes.fromhex('830004'), True),
                   ('constant-mismatch', bytes.fromhex('0402'), True)]
+        coll = bytes.fromhex('830108') + true
+        index = bytes.fromhex('0400')
+        identity = bytes.fromhex('d90101087201')
+        def by_index(value):
+            return b'\xb2' + value + index + b'\x00'
+        def method(type_id, method_id, obj, *args):
+            return (bytes([0xdc, type_id, method_id]) + obj + vlq(len(args)) + b''.join(args)
+                    if args else bytes([0xdb, type_id, method_id]) + obj)
+        probes += [(label, value, True) for label, value in [
+            ('tuple-select', b'\x8c\x86\x02' + true + true + b'\x01'),
+            ('by-index', by_index(coll)),
+            ('option-get-or-else', bytes.fromhex('e5e30108') + true),
+            ('method-sigma', method(12, 10, coll, index)),
+            ('if-sigma', b'\x95\x7f' + true + true),
+            ('block-sigma', b'\xd8\x01\xd6\x01' + true + b'\x72\x01'),
+            ('slice-index', by_index(b'\xb4' + coll + index + bytes.fromhex('0402'))),
+            ('map-index', by_index(b'\xad' + coll + identity)),
+            ('append-index', by_index(b'\xb3' + coll + coll)),
+            ('filter-index', by_index(b'\xb5' + coll + bytes.fromhex('d90101087f'))),
+            ('fold-sigma', b'\xb0' + coll + true + bytes.fromhex('d90101600208088c720101')),
+            ('apply-sigma', b'\xda' + identity + b'\x01' + true),
+            ('method-map-index', by_index(method(12, 3, coll, identity))),
+            ('method-size-index', method(12, 10, coll, method(12, 1, bytes.fromhex('830008')))),
+            ('method-option-get', b'\xe4' + method(106, 9, b'\xdd', true) + b'\x08'),
+            ('context-height-if', b'\x95\x93' + method(101, 6, b'\xfe') + bytes.fromhex('0400') + true + true),
+        ]]
         if source == 'register':
             probes += [('absent-default', None, False),
                        ('int-default', bytes.fromhex('0402'), False),

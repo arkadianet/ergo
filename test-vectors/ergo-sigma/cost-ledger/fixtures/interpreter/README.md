@@ -18,7 +18,7 @@ bottom-up substitution fix. The original four before/after measurements are in
 
 ## Substitution types
 
-`deserialize-types.json.gz` adds 16 JVM probes with segregated v3 trees and
+`deserialize-types.json.gz` contains 80 JVM probes with segregated v3 trees and
 init=17: absent R4 with a true default, present Int/Coll[Int]/Coll[Byte] R4,
 and embedded IntConstant/ConcreteCollection[Int] expressions where SigmaProp
 is required. Every shape runs on both live and dead branches.
@@ -37,6 +37,21 @@ costs are unavailable from the JVM and are not replaced with invented totals.
 Rust requires a precise static type from the shared serializer typer; unknown
 or sentinel types reject. Accepted absent/default cases total 51 BC and
 accepted byte-script/default cases total 55 BC, on either branch.
+
+The 64 positive probes run 16 expression shapes through both sources and both
+branches: tuple selection, ByIndex, Option.getOrElse, a SigmaProp-returning
+method, If, BlockValue, Slice, Map, Append, Filter, Fold, Apply, method Map,
+method size used as an index, Option.get after Global.some, and Context.HEIGHT.
+All accept on both JVM and Rust. The shared serializer typer preserves component
+and function types and specializes the complete 199-method JVM signature registry.
+The verify-surface corpus test in ergo-difftest independently checks verdicts.
+
+Regenerate method signatures with:
+
+```sh
+scala-cli --skip-cli-updates run scripts/jvm_serde_oracle/MethodTypes.scala --server=false --suppress-outdated-dependency-warning > ergo-ser/src/ergo_tree/type_infer/method_registry.rs
+cargo fmt --all
+```
 
 ## Crypto shapes
 
