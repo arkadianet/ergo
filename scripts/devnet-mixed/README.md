@@ -11,6 +11,8 @@ P2P. It never relays blocks through HTTP during the smoke.
 From the repository root, with the Task 6.2 JVM classpath already provisioned:
 
 ```sh
+test -z "$(git status --porcelain)"
+git rev-parse HEAD
 cargo build -p ergo-node
 scripts/devnet-mixed/start.sh
 python3 scripts/devnet-mixed/smoke.py --first rust --blocks 100
@@ -96,37 +98,34 @@ intentionally reproducible and carry no real funds.
 
 **Funding limitation:** this uses the independently verified standard genesis
 box set. It does not initialize wallets with spendable genesis allocations.
-Mining rewards mature after 720 blocks. Thus the separate Task 7.1 requirement
-for wallets funded from genesis remains outstanding; this recipe proves the
-mixed-node mining/validation prerequisite, not funded-wallet workloads or the
-full cost-heavy L6 campaign.
+Mining rewards mature after 720 blocks. **Task 7.3 owns the wallet-funding
+prerequisite**, including mining through the 720-block maturity delay before
+funded-wallet workloads. This recipe proves the mixed-node mining/validation
+prerequisite; the full cost-heavy L6 campaign remains separate.
 
 ## Smoke evidence
 
 The driver selects 100 blocks, strictly alternating 50 Rust / 50 Scala. For
-each block it records miner, height, header version, block ID, state root,
-candidate and solution, and waits for matching commitments on both nodes.
+each block it records both nodes' height, block ID and state root, plus miner,
+header version, candidate and solution, and waits for matching commitments on both nodes.
 The manifest also records node versions, source and executable hashes, config
 and tool hashes, and selected/executed/skipped/failed counts.
 
-Recorded run: **PASS — 100 selected, 100 executed, 0 skipped, 0 failed**;
-50 blocks mined by Rust and 50 by Scala, strictly alternating. Both nodes
-reached height **100** with:
+The committed receipts below are regenerated from a clean committed source tree.
+`smoke.py` rejects a dirty tree and records `git rev-parse HEAD`, empty
+`git status --porcelain` before and after the campaign, and the running binary's
+SHA-256. Both nodes' commitments are persisted at every height and checked by
+reading the receipt back from disk.
 
-- Block ID: `acbfbdacf69e3ea08c2d7a635bdf45851d6b6e4decdd76404afe66ab7d32498b`
-- State root: `3e87598aebaf1ff398cedc3b56394fa963132b3f33cb4ad038be84445c074ec608`
-- Rust implementation revision: `a33b9f0baebc0cbb475c914f4a79df32340b1e20`
-- Rust executable SHA-256: `49c10ac8a589857551c55136a39fe3369cffc364058c653f14c7fc53f5630701`
-- Started (UTC): `2026-09-15T22:53:26.845468+00:00`
+Verify the committed receipt and its source inputs:
 
-Every height matched, including Rust's first block propagating to the empty
-Scala peer. All 100 headers were version 4. See [per-block evidence](smoke-evidence.json)
-and the [environment, inputs, gate and shutdown receipt](smoke-environment.json).
-The receipt records concurrent test-helper/dev-dependency edits separately;
-the shared worktree was not claimed to be clean.
+```sh
+python3 scripts/devnet-mixed/verify-receipt.py
+```
 
-`cargo fmt --all -- --check` and warning-denying workspace clippy passed.
-`cargo nextest` was unavailable; `cargo test --workspace` passed with
-**6,997 passed, 0 failed, 97 ignored** (including doctests). Both nodes were
-stopped afterward and all four recipe ports were verified closed.
+To reproduce the build, use the receipt's `rust.git_sha` in this worktree with a
+clean status, then run `cargo build -p ergo-node` with the recorded toolchain
+and default features. Compare `sha256sum /home/rkadias/.cache/cargo-target/debug/ergo-node`
+with `rust.binary_sha256` (build paths and toolchain must match).
+
 No cost-ledger rows are closed by this recipe.
