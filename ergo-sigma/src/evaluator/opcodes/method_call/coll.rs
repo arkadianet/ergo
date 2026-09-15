@@ -40,6 +40,7 @@ pub const COST_UPDATE_MANY: CostKind = CostKind::PerItem {
 };
 pub const COST_GET: u64 = 30;
 
+use crate::evaluator::helpers::{reflect_sstring_error, reject_sstring};
 use ergo_primitives::cost::{CostKind, JitCost};
 use ergo_ser::opcode::Expr;
 use ergo_ser::sigma_type::SigmaType;
@@ -54,6 +55,36 @@ use crate::evaluator::helpers::{
 };
 use crate::evaluator::opcodes::binding::check_closure_param_types;
 use crate::evaluator::types::{EvalError, Value};
+
+// Reflection-based Coll.getOrElse evaluates both arguments eagerly, even in v3.
+pub(super) fn get_or_else(
+    obj_val: Value,
+    args: &[Expr],
+    cx: &mut EvalCtx<'_>,
+) -> Result<Value, EvalError> {
+    if args.len() != 2 {
+        return Err(EvalError::ArityMismatch {
+            expected: 2,
+            got: args.len(),
+        });
+    }
+    let index = cx.eval_expr(&args[0])?;
+    let default = cx.eval_expr(&args[1])?;
+    super::super::super::cost::add_cost(cx.cost, 0xB2)?;
+    let default = reject_sstring(default).map_err(reflect_sstring_error)?;
+    let Value::Int(index) = index else {
+        return Err(EvalError::TypeError {
+            expected: "Int index",
+            got: format!("{index:?}"),
+        });
+    };
+    let (_, items) = collection_to_values(obj_val, cx.ctx)?;
+    Ok(usize::try_from(index)
+        .ok()
+        .and_then(|i| items.get(i))
+        .cloned()
+        .unwrap_or(default))
+}
 
 // SCollection(12).indexOf(26) -> Int
 // Cost: PerItemCost(20, 10, 2) charged on actual iterations.
@@ -281,7 +312,7 @@ pub(super) fn flat_map(
             for item in items {
                 // Scala closure invocation: Value.checkType runs
                 // before the AddToEnvironment charge.
-                check_closure_param_types(&param_types)?;
+                check_closure_param_types(&param_types).map_err(reflect_sstring_error)?;
                 let mut call_env = (*captured_env).clone();
                 if let Some(param_id) = params.first() {
                     // Scala FuncValue closure binds its argument on each
@@ -297,7 +328,9 @@ pub(super) fn flat_map(
                     cx.depth,
                     cx.cost,
                     cx.trace,
-                )?;
+                )
+                .and_then(reject_sstring)
+                .map_err(reflect_sstring_error)?;
                 inner_colls.push(inner);
             }
 

@@ -10,7 +10,7 @@ use ergo_ser::opcode::Expr;
 
 use super::super::cost::{add_cost, eq_with_cost};
 use super::super::eval_ctx::EvalCtx;
-use super::super::helpers::require_comparable;
+use super::super::helpers::{reject_sstring, require_comparable};
 use super::super::types::{EvalError, Value};
 use super::cast::apply_pre_v3_auto_upcast;
 
@@ -155,8 +155,8 @@ pub(in crate::evaluator) fn eval_eq(
     right: &Expr,
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
-    let l = cx.eval_expr(left)?;
-    let r = cx.eval_expr(right)?;
+    let l = cx.eval_expr(left).and_then(reject_sstring)?;
+    let r = cx.eval_expr(right).and_then(reject_sstring)?;
     let (l, r) = apply_pre_v3_auto_upcast(l, r, cx)?;
     reject_mixed_numeric_equality(&l, &r)?;
     require_comparable(&l, &r)?;
@@ -169,8 +169,8 @@ pub(in crate::evaluator) fn eval_neq(
     right: &Expr,
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
-    let l = cx.eval_expr(left)?;
-    let r = cx.eval_expr(right)?;
+    let l = cx.eval_expr(left).and_then(reject_sstring)?;
+    let r = cx.eval_expr(right).and_then(reject_sstring)?;
     let (l, r) = apply_pre_v3_auto_upcast(l, r, cx)?;
     reject_mixed_numeric_equality(&l, &r)?;
     require_comparable(&l, &r)?;

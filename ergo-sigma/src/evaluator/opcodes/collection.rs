@@ -13,6 +13,7 @@
 //! length, then the predicate is evaluated, then per-element AddToEnv
 //! charges land before each closure body call.
 
+use crate::evaluator::helpers::reject_sstring;
 use ergo_primitives::cost::JitCost;
 use ergo_ser::opcode::Expr;
 use ergo_ser::sigma_type::SigmaType;
@@ -89,7 +90,7 @@ pub(in crate::evaluator) fn eval_by_index(
     // when the index is in bounds. V3+ trees (isV3OrLaterErgoTreeVersion)
     // evaluate it lazily, only on an out-of-bounds index.
     let mut eager_default = match default {
-        Some(d) if !cx.ctx.is_v3_ergo_tree() => Some(cx.eval_expr(d)?),
+        Some(d) if !cx.ctx.is_v3_ergo_tree() => Some(cx.eval_expr(d).and_then(reject_sstring)?),
         _ => None,
     };
     // Charge sequencing per Scala ByIndex.eval: input, index, and the
@@ -263,7 +264,7 @@ fn take_default(
 ) -> Result<Value, EvalError> {
     match eager.take() {
         Some(v) => Ok(v),
-        None => cx.eval_expr(d),
+        None => cx.eval_expr(d).and_then(reject_sstring),
     }
 }
 
@@ -304,7 +305,8 @@ pub(in crate::evaluator) fn eval_forall(
                     cx.depth,
                     cx.cost,
                     cx.trace,
-                )?;
+                )
+                .and_then(reject_sstring)?;
                 match result {
                     Value::Bool(false) => return Ok(Value::Bool(false)),
                     Value::Bool(true) => {}
@@ -367,7 +369,8 @@ pub(in crate::evaluator) fn eval_filter(
                     cx.depth,
                     cx.cost,
                     cx.trace,
-                )?;
+                )
+                .and_then(reject_sstring)?;
                 if matches!(keep, Value::Bool(true)) {
                     result.push(item);
                 }
@@ -390,9 +393,9 @@ pub(in crate::evaluator) fn eval_fold(
 ) -> Result<Value, EvalError> {
     let coll = cx.eval_expr(coll_expr)?;
     let n = collection_len(&coll, cx.ctx);
-    add_cost_per_item(cx.cost, 0xB0, n as u32)?;
-    let mut acc = cx.eval_expr(zero_expr)?;
+    let mut acc = cx.eval_expr(zero_expr).and_then(reject_sstring)?;
     let op = cx.eval_expr(op_expr)?;
+    add_cost_per_item(cx.cost, 0xB0, n as u32)?;
     let (_coll_kind, items) = collection_to_values(coll, cx.ctx)?;
     match op {
         Value::Func {
@@ -425,7 +428,8 @@ pub(in crate::evaluator) fn eval_fold(
                     cx.depth,
                     cx.cost,
                     cx.trace,
-                )?;
+                )
+                .and_then(reject_sstring)?;
             }
             Ok(acc)
         }
@@ -467,15 +471,18 @@ pub(in crate::evaluator) fn eval_map_collection(
                 if let Some(param_id) = params.first() {
                     call_env.insert(*param_id, item);
                 }
-                result.push(eval_expr(
-                    &body,
-                    cx.ctx,
-                    cx.constants,
-                    &mut call_env,
-                    cx.depth,
-                    cx.cost,
-                    cx.trace,
-                )?);
+                result.push(
+                    eval_expr(
+                        &body,
+                        cx.ctx,
+                        cx.constants,
+                        &mut call_env,
+                        cx.depth,
+                        cx.cost,
+                        cx.trace,
+                    )
+                    .and_then(reject_sstring)?,
+                );
             }
             // Build type bindings for type inference: captured env + param types
             let mut param_bindings = std::collections::HashMap::new();
@@ -537,7 +544,8 @@ pub(in crate::evaluator) fn eval_exists(
                     cx.depth,
                     cx.cost,
                     cx.trace,
-                )?;
+                )
+                .and_then(reject_sstring)?;
                 if matches!(result, Value::Bool(true)) {
                     return Ok(Value::Bool(true));
                 }

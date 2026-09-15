@@ -3,6 +3,7 @@
 pub const COST_MAP: u64 = 20;
 pub const COST_FILTER: u64 = 20;
 
+use crate::evaluator::helpers::{reflect_sstring_error, reject_sstring};
 use ergo_primitives::cost::JitCost;
 use ergo_ser::opcode::Expr;
 
@@ -38,7 +39,7 @@ pub(super) fn map(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
             } => {
                 // Scala closure invocation: Value.checkType runs
                 // before the AddToEnvironment charge.
-                check_closure_param_types(&param_types)?;
+                check_closure_param_types(&param_types).map_err(reflect_sstring_error)?;
                 cx.cost.add(JitCost::from_jit(5))?;
                 #[cfg(feature = "cost-trace")]
                 crate::cost_trace::record("AddToEnv", 5, cx.cost.total().value());
@@ -54,7 +55,9 @@ pub(super) fn map(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
                     cx.depth,
                     cx.cost,
                     cx.trace,
-                )?;
+                )
+                .and_then(reject_sstring)
+                .map_err(reflect_sstring_error)?;
                 Ok(Value::Opt(Some(Box::new(result))))
             }
             _ => Err(EvalError::TypeError {
@@ -95,7 +98,7 @@ pub(super) fn filter(
                 body,
             } => {
                 // Scala closure invocation runs Value.checkType.
-                check_closure_param_types(&param_types)?;
+                check_closure_param_types(&param_types).map_err(reflect_sstring_error)?;
                 let mut call_env = (*captured_env).clone();
                 if let Some(param_id) = params.first() {
                     call_env.insert(*param_id, *inner.clone());
@@ -108,7 +111,9 @@ pub(super) fn filter(
                     cx.depth,
                     cx.cost,
                     cx.trace,
-                )?;
+                )
+                .and_then(reject_sstring)
+                .map_err(reflect_sstring_error)?;
                 match result {
                     Value::Bool(true) => Ok(Value::Opt(Some(inner))),
                     Value::Bool(false) => Ok(Value::Opt(None)),
