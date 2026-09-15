@@ -487,6 +487,54 @@ fn block_fixtures_both_validators_match_jvm() {
     );
 }
 
+// ledger: BLOCK-accum-equiv, BLOCK-per-tx-cap, BLOCK-sum-op, LIMIT-block-sum
+#[test]
+fn block_boundaries_running_accumulator_matches_jvm() {
+    let exact = fixture("a-exact-sum");
+    assert_eq!(
+        exact.expected.sum_block_cost,
+        Some(exact.parameters["4"] as u64)
+    );
+    let over = fixture("b-sum-plus-one");
+    assert_eq!(exact.transactions_hex, over.transactions_hex);
+    assert_eq!(exact.parameters["4"], over.parameters["4"] + 1);
+    let single = fixture("c-single-cap");
+    assert_eq!(single.transactions_hex.len(), 1);
+    assert_eq!(
+        single.expected.sum_block_cost,
+        Some(single.parameters["4"] as u64)
+    );
+    let forward = fixture("d-mid-block");
+    let reverse = fixture("d-mid-block-reversed");
+    assert_eq!(forward.transactions_hex.len(), 3);
+    assert_eq!(
+        forward.transactions_hex.iter().rev().collect::<Vec<_>>(),
+        reverse.transactions_hex.iter().collect::<Vec<_>>()
+    );
+    assert_eq!(forward.parameters, reverse.parameters);
+    assert_eq!(
+        forward.parameters["4"] as u64 + 1,
+        2 * single.expected.sum_block_cost.unwrap()
+    );
+    for mid in [&forward, &reverse] {
+        let bytes = hex::decode(&mid.transactions_hex[1]).unwrap();
+        let tx = read_transaction(&mut VlqReader::new(&bytes)).unwrap();
+        let id = ergo_ser::transaction::transaction_id(&tx).unwrap();
+        assert!(mid
+            .expected
+            .rejection_detail
+            .as_ref()
+            .unwrap()
+            .contains(&hex::encode(id.as_bytes())));
+    }
+    for rejected in [&over, &forward, &reverse] {
+        assert_eq!(jvm_verdict(&rejected.expected), "RejectCost");
+    }
+    for case in [exact, over, single, forward, reverse] {
+        replay(case);
+    }
+}
+
 #[test]
 fn block_invalid_signature_is_script_rejection() {
     let case = fixture("rejection-script-control");
