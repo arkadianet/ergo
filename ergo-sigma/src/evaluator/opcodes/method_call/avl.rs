@@ -73,17 +73,11 @@ pub(super) fn contains(
         per_chunk: JitCost::from_jit(10),
         chunk_size: 1,
     };
-    // Scala contains_eval (CErgoTreeEvaluator.scala:78-93): a bad
-    // proof yields reconstructedTree=None and performLookup ->
-    // Failure -> `case Failure(_) => false`. It NEVER throws —
-    // construction OR lookup failure both return false, as does a
-    // witnessed-absent key (Success(None)). The LookupAvlTree cost is
-    // charged over bv.treeHeight, which equals the digest's height
-    // byte (rootNodeHeight = startingDigest.last, set BEFORE the proof
-    // parse) even on a failed construction — so the lookup cost is the
-    // same on both paths.
+    // Construct before charging lookup. Invalid metadata or proof reconstruction
+    // is retained as a failed verifier; contains maps its lookup failure to false.
+    let verifier = try_make_avl_verifier(avl, &proof);
     cx.cost.add(lookup_cost.compute(avl_cost_height(avl))?)?;
-    match try_make_avl_verifier(avl, &proof) {
+    match verifier {
         Some(mut bv) => match bv.lookup(&key) {
             Ok(Some(_)) => Ok(Value::Bool(true)),
             Ok(None) | Err(_) => Ok(Value::Bool(false)),
@@ -140,20 +134,11 @@ pub(super) fn get(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
         per_chunk: JitCost::from_jit(10),
         chunk_size: 1,
     };
-    // Scala get_eval (CErgoTreeEvaluator.scala:95-109): charges
-    // LookupAvlTree(treeHeight) then performs the lookup; a Failure
-    // (bad-proof construction OR a lookup that throws) calls
-    // syntax.error -> errored (NOT version-gated). Only a witnessed-
-    // absent key (Success(None)) returns None. The LookupAvlTree cost
-    // is charged BEFORE the lookup runs (Scala's addSeqCost adds the
-    // cost before the block), so it is charged on the construction-
-    // failure path too; height = avl_cost_height (digest height on
-    // valid metadata/bad proof, 0 for invalid metadata e.g.
-    // keyLength==0). (The cost is consensus-inert here since a get
-    // failure errors and the tx is rejected, but matching Scala's
-    // charge order keeps the accumulator faithful.)
+    // A reconstructed verifier with a bad proof still pays for lookup; get
+    // reports that lookup failure as InterpreterException, including at v3.
+    let verifier = try_make_avl_verifier(avl, &proof);
     cx.cost.add(lookup_cost.compute(avl_cost_height(avl))?)?;
-    match try_make_avl_verifier(avl, &proof) {
+    match verifier {
         Some(mut bv) => match bv.lookup(&key) {
             Ok(Some(v)) => Ok(Value::Opt(Some(Box::new(Value::CollBytes(v))))),
             Ok(None) => Ok(Value::Opt(None)),

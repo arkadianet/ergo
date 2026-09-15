@@ -29,6 +29,8 @@ def bytecoll(data):
 
 
 def save(name, ids, cases):
+    if name.startswith('failure-'):
+        ids = ids + ['ORDER-if-condition']
     wire.save(name, ids, cases)
 
 
@@ -110,12 +112,36 @@ def avl_serialize():
         save('serialize-' + name, ids, cases)
 
 
+def failure_probes():
+    preheader = prop(101, 3, b'\xfe')
+    cases = []
+    for label, value in [('preheader', preheader),
+                         ('tuple', b'\x86\x02' + num(4) + preheader),
+                         ('coll', coll(105, [preheader])),
+                         ('nested', b'\x86\x02' + bytecoll(bytes(128)) + coll(105, [preheader]))]:
+        cases += cases_for('serialize-failure-' + label,
+                           call(106, 3, b'\xdd', value), failure=True)
+    save('failure-serialize', ['METHOD-global-serialize', 'ORDER-serialize-incremental'], cases)
+
+    vectors = json.loads(read_fixture_text(ROOT / 'test-vectors/ergo-sigma/avl-proof-parity/scala_avl_vectors.json.gz'))
+    v = next(v for v in vectors if v['op']['kind'] == 'lookup' and v['name'].startswith('valid_'))
+    cases = []
+    for key_length in (0, 0xffffffff, v['keyLength']):
+        avl = b'\x64' + bytes.fromhex(v['startDigestHex']) + b'\x07' + vlq(key_length) + b'\x00'
+        for mid in (9, 10):
+            for n in (0, 1, 65):
+                target = call(100, mid, avl, bytecoll(bytes.fromhex(v['op']['keyHex'])), bytecoll(bytes(n)))
+                cases += cases_for(f'avl-method{mid}-keyLength{key_length}-proof{n}', target, failure=(mid == 10))
+    save('failure-avl', ['METHOD-avl-contains', 'METHOD-avl-get', 'ORDER-avl-verifier-lookup'], cases)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('family', choices=['avl-serialize'])
     parser.parse_args()
     wire.OUT.mkdir(exist_ok=True)
     avl_serialize()
+    failure_probes()
 
 
 if __name__ == '__main__':

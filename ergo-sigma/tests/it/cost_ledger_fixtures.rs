@@ -311,6 +311,25 @@ fn jvm_failure(
         VerifySpendingError::Eval(EvalError::RuntimeException(
             "SigmaAnd requires nonempty children" | "SigmaOr requires nonempty children",
         )) => Ok(("RejectScript", "java.lang.IllegalArgumentException")),
+        VerifySpendingError::Eval(EvalError::TypeError {
+            expected: "Some value",
+            got,
+        }) if got == "None" => Ok(("RejectScript", "java.util.NoSuchElementException")),
+        VerifySpendingError::Eval(EvalError::TypeError {
+            expected: "valid AVL proof for get",
+            ..
+        }) => Ok(("RejectScript", "sigma.exceptions.InterpreterException")),
+        VerifySpendingError::Eval(EvalError::RuntimeException(
+            "SGlobal.powHit: k must be in [2, 32]" | "SGlobal.powHit: N must be >= 16",
+        ))
+        | VerifySpendingError::Eval(EvalError::TypeError {
+            expected: "Header for SHeader access" | "BigInt for SGlobal.encodeNbits",
+            ..
+        }) => Ok(("RejectScript", "java.lang.IllegalArgumentException")),
+        VerifySpendingError::Eval(EvalError::TypeError {
+            expected: "serializable value for SubstConstants",
+            got,
+        }) if got == "PreHeader" => Ok(("RejectScript", "sigma.serialization.SerializerException")),
         _ => anyhow::bail!("no oracle-backed JVM failure mapping for {error:?}"),
     }
 }
@@ -627,7 +646,7 @@ fn cost_ledger_divergence_invalid_annotations_rejected() -> Result<()> {
 
 // ----- oracle parity -----
 
-// ledger: METHOD-coll-flatMap, METHOD-coll-indexOf, METHOD-coll-indices, METHOD-coll-patch, METHOD-coll-reverse, METHOD-coll-startsEndsWith, METHOD-coll-updateMany, METHOD-coll-updated, METHOD-coll-zip, METHOD-global-deserializeTo, METHOD-global-powHit, METHOD-global-xor, EVAL-avl-cost-height, METHOD-avl-contains, METHOD-avl-get, METHOD-avl-getMany, METHOD-avl-insert, METHOD-avl-insertOrUpdate, METHOD-avl-remove, METHOD-avl-update, METHOD-global-serialize, METHOD-global-serialize-E042, METHOD-global-serialize-E043, METHOD-global-serialize-E044, METHOD-global-serialize-E045, METHOD-global-serialize-E046, METHOD-global-serialize-E047, METHOD-option-map, METHOD-option-filter, EVAL-sstring-rejected, OP-0x96, OP-0xB3, OP-0x98, OP-0xCB, OP-0xD8, ROUND-perItem-chunking, OP-0xAE, OP-0xB5, OP-0xB0, OP-0xAF, OP-0xAD, OP-0x97, OP-0xCC, OP-0xEA, OP-0xEB, OP-0xD0, OP-0xB4, OP-0x74, OP-0xFF, OP-0x9B, INTERP-eval-sigmaprop-constant, OP-0x95, OP-0xDA, OP-0xE7-0xE9, OP-0xEC, OP-0xED, OP-0xF2, OP-0xF3, OP-0xF5, OP-0xF6, OP-0xF7, OP-0xF8, OP-TaggedVariable-A003, ORDER-bitop-charge-then-reject, EVAL-const-inline, EVAL-hasdeserialize-fork, EVAL-addtoenv, EVAL-numeric-cast, EVAL-arith-bigint, EVAL-eq-prim, EVAL-eq-matchtype, EVAL-eq-tuple, EVAL-eq-groupelement, EVAL-eq-bigint, EVAL-eq-avltree, EVAL-eq-box, EVAL-eq-option, EVAL-eq-preheader, EVAL-eq-header, EVAL-eq-coll-sigmaprop-descriptor, EVAL-eq-coll-fallback, EVAL-eq-tokens, EVAL-eq-sigmaboolean, EVAL-deferred-charge-on-exception, EVAL-eq-boxcollection, EVAL-eq-coll-descriptor, EVAL-eq-mismatch-and-unit-E032
+// ledger: ORDER-propertycall-receiver, ORDER-methodcall-arguments, ORDER-powHit-validation, ORDER-serialize-incremental, ORDER-fixed-method-invocation, ORDER-avl-verifier-lookup, ORDER-if-condition, ORDER-optionget-input, METHOD-header-props, METHOD-global-encodeNbits, METHOD-coll-flatMap, METHOD-coll-indexOf, METHOD-coll-indices, METHOD-coll-patch, METHOD-coll-reverse, METHOD-coll-startsEndsWith, METHOD-coll-updateMany, METHOD-coll-updated, METHOD-coll-zip, METHOD-global-deserializeTo, METHOD-global-powHit, METHOD-global-xor, EVAL-avl-cost-height, METHOD-avl-contains, METHOD-avl-get, METHOD-avl-getMany, METHOD-avl-insert, METHOD-avl-insertOrUpdate, METHOD-avl-remove, METHOD-avl-update, METHOD-global-serialize, METHOD-global-serialize-E042, METHOD-global-serialize-E043, METHOD-global-serialize-E044, METHOD-global-serialize-E045, METHOD-global-serialize-E046, METHOD-global-serialize-E047, METHOD-option-map, METHOD-option-filter, EVAL-sstring-rejected, OP-0x96, OP-0xB3, OP-0x98, OP-0xCB, OP-0xD8, ROUND-perItem-chunking, OP-0xAE, OP-0xB5, OP-0xB0, OP-0xAF, OP-0xAD, OP-0x97, OP-0xCC, OP-0xEA, OP-0xEB, OP-0xD0, OP-0xB4, OP-0x74, OP-0xFF, OP-0x9B, INTERP-eval-sigmaprop-constant, OP-0x95, OP-0xDA, OP-0xE7-0xE9, OP-0xEC, OP-0xED, OP-0xF2, OP-0xF3, OP-0xF5, OP-0xF6, OP-0xF7, OP-0xF8, OP-TaggedVariable-A003, ORDER-bitop-charge-then-reject, EVAL-const-inline, EVAL-hasdeserialize-fork, EVAL-addtoenv, EVAL-numeric-cast, EVAL-arith-bigint, EVAL-eq-prim, EVAL-eq-matchtype, EVAL-eq-tuple, EVAL-eq-groupelement, EVAL-eq-bigint, EVAL-eq-avltree, EVAL-eq-box, EVAL-eq-option, EVAL-eq-preheader, EVAL-eq-header, EVAL-eq-coll-sigmaprop-descriptor, EVAL-eq-coll-fallback, EVAL-eq-tokens, EVAL-eq-sigmaboolean, EVAL-deferred-charge-on-exception, EVAL-eq-boxcollection, EVAL-eq-coll-descriptor, EVAL-eq-mismatch-and-unit-E032
 #[test]
 fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-vectors/ergo-sigma/cost-ledger");
