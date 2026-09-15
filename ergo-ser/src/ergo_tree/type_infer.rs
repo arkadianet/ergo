@@ -47,6 +47,12 @@ pub fn determinable_root_type_of(
     infer_type(body, &mut store, constants)
 }
 
+/// Exact static type for embedded-script substitution. Unlike the rule-1001
+/// gate, substitution must not accept an unknown type or an imprecision sentinel.
+pub fn substitution_type_of(body: &crate::opcode::Expr) -> Option<crate::sigma_type::SigmaType> {
+    determinable_root_type_of(body, &[]).filter(type_is_precise)
+}
+
 /// The node-side replica of Scala's `ValDefTypeStore`
 /// (`sigma/serialization/ValDefTypeStore.scala`): a single FLAT, never-scoped,
 /// last-write-wins map from binding id to type, shared across the whole reader
@@ -612,24 +618,39 @@ fn func_value_arg_types(
     (None, None)
 }
 
-/// A non-`SSigmaProp` result type for operator (generic `One`/`Two`/`Three`
-/// payload) opcodes whose result is UNCONDITIONALLY non-SigmaProp regardless of
-/// argument types. Returns `Some(SAny)` for those (the gate only needs
-/// `!= SSigmaProp`); `None` otherwise. Every listed opcode is oracle-verified to
-/// reject a well-formed sizeless root (Scala 6.0.2, rule 1001).
-///
-/// NOT listed — and therefore left lenient (`None`) — are opcodes that CAN be
-/// `SigmaProp` (`ProveDlog`/`ProveDHTuple` 0xCD/0xCE, `BoolToSigmaProp` 0xD1,
-/// `AtLeast` 0x98, `SigmaAnd`/`SigmaOr` 0xEA/0xEB — all oracle-verified to ACCEPT)
-/// and those whose result type DEPENDS on their arguments (`If` 0x95,
-/// `BlockValue`/`FuncValue`/`FuncApply`, `SelectField`/`ByIndex`/`ValUse`/
-/// `OptionGet`, `TaggedVar` 0x71). Adding any of those would reject a
-/// Scala-accepted (SigmaProp-rooted) tree — a reject-valid. Payloads carrying an
-/// explicit static type (`ConcreteCollection`, `Tuple`, `GetVar`,
-/// `ExtractRegisterAs`, `NumericCast`, `Deserialize{Context,Register}`) and
-/// `MethodCall`/`PropertyCall` (see [`method_call_result_type`]) are classified by
-/// [`infer_type`]'s dedicated arms BEFORE this fallback.
+/// Classify fixed-result operators. Sigma constructors have an exact type;
+/// other classified operators use the non-SigmaProp sentinel when their exact
+/// type is not tracked. Substitution rejects that sentinel conservatively.
 fn op_root_non_sigma_type(opcode: u8) -> Option<crate::sigma_type::SigmaType> {
+    if matches!(opcode, 0x98 | 0xCD | 0xCE | 0xD1 | 0xEA | 0xEB) {
+        return Some(crate::sigma_type::SigmaType::SSigmaProp);
+    }
+    use crate::sigma_type::SigmaType::*;
+    let fixed = match opcode {
+        0x8F..=0x94
+        | 0x96
+        | 0x97
+        | 0xAE
+        | 0xAF
+        | 0xCF
+        | 0xE6
+        | 0xEC
+        | 0xED
+        | 0xEF
+        | 0xF4
+        | 0xFF => Some(SBoolean),
+        0xB1 => Some(SInt),
+        0x7C | 0xC1 => Some(SLong),
+        0x7B | 0xE7..=0xE9 => Some(SBigInt),
+        0x9F | 0xA0 | 0xEE => Some(SGroupElement),
+        0x74 | 0x7A | 0x9B | 0xC2..=0xC5 | 0xCB | 0xCC | 0xD0 => Some(SColl(Box::new(SByte))),
+        0xC7 => Some(STuple(vec![SInt, SColl(Box::new(SByte))])),
+        0xB7 => Some(SOption(Box::new(SColl(Box::new(SByte))))),
+        _ => None,
+    };
+    if fixed.is_some() {
+        return fixed;
+    }
     let never_sigma = matches!(
         opcode,
         0x8F..=0x94                    // Lt Le Gt Ge Eq Neq -> SBoolean
