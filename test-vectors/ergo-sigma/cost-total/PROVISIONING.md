@@ -204,8 +204,20 @@ hashes. `METHOD-context-headers` gains L4 evidence. No replay evidence is claime
 for `OP-0xA6` or `METHOD-context-lastBlockUtxoRootHash`: a scan of output trees in
 700000–700200, 900000–901000, 1100000–1101000, 1500000–1501000, and
 1853000–1854000 found no parsed use of either root accessor. Byte matches inside
-constants are not opcode execution. A range containing a root-reading spend is
-still required for task 5.3; those two rows retain their existing L1 evidence.
+constants are not opcode execution. The controller ruling permits L2 evidence for these two accessors instead of a
+mainnet root-reading spend. Their tracked fixture is
+`cost-ledger/fixtures/context/last-block-utxo-root.json.gz`, regenerated with:
+
+```bash
+scripts/gen-cost-fixture.sh test-vectors/ergo-sigma/cost-ledger/fixtures/context/last-block-utxo-root.json.gz
+```
+
+It uses hand-serialized trees for opcode `0xA6` and method `(101,9)`, comparing
+`digest` to the extracted previous state root. Both JVM verify and Rust consume
+the same nine ancestor frames from the tracked 900058 breakdown. The newest
+ancestor supplies the state root. Each accessor accepts with that window and
+rejects with an empty window; costs and verdicts come from JVM 6.0.2 verify.
+This is a synthetic L2 spend with real mainnet headers, not an L4 spend.
 
 ## Compressed evidence storage
 
