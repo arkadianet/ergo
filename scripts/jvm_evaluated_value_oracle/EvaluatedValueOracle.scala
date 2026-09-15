@@ -239,6 +239,8 @@ object EvaluatedValueOracle {
     chain.collectFirst { case e: CostLimitException => ("RejectCost", e) }
       .getOrElse {
         val script = chain.find {
+          case e: RuntimeException if e.getMessage != null &&
+              e.getMessage.startsWith("Should be overriden in class sigma.ast.") => true
           case _: sigma.SigmaException | _: sigma.validation.ValidationException |
                _: sigma.serialization.SerializerException | _: IllegalArgumentException |
                _: NoSuchElementException | _: IndexOutOfBoundsException |
@@ -295,12 +297,14 @@ object EvaluatedValueOracle {
     var crypto = unavailable
     var rentCost = Json.fromLong(0)
     var legacy = unavailable
+    var evaluatorFailureCost = unavailable
     def record(verdict: String, total: Json, error: Option[Throwable], detail: String): Json =
       Json.obj("verdict" -> Json.fromString(verdict), "eval_block_cost" -> eval,
         "crypto_block_cost" -> crypto, "rent_block_cost" -> rentCost, "rent_path" -> Json.fromBoolean(rent),
         "total_block_cost" -> total,
         "failure_class" -> error.map(e => Json.fromString(e.getClass.getName)).getOrElse(Json.Null),
-        "rejection_detail" -> Json.fromString(detail), "legacy" -> legacy)
+        "rejection_detail" -> Json.fromString(detail), "legacy" -> legacy,
+        "evaluator_failure_block_cost" -> evaluatorFailureCost)
     try {
       val cursor = parse(line).fold(throw _, identity).hcursor
       def str(key: String) = cursor.get[String](key).fold(throw _, identity)
@@ -390,6 +394,20 @@ object EvaluatedValueOracle {
           Json.fromLong(if (rentCompleted) Math.addExact(init, cost) else cost), None, if (ok) "" else "Script reduced to false or proof invalid")
         case Failure(e) =>
           val (verdict, selected) = failure(e, verifying)
+          // Supplementary evaluation exposes the accumulator retained on a throw.
+          // This is not a substitute for the full verify result, which stays unavailable.
+          if (cursor.get[Boolean]("observe_evaluator_failure").getOrElse(false)) {
+            require(!tree.hasDeserialize && init == 0 && !rent,
+              "failure observation requires a plain evaluator tree with zero init cost")
+            VersionContext.withVersions(activated, tree.version) {
+              val accu = new CostAccumulator(JitCost.fromBlockCost(0),
+                Some(JitCost.fromBlockCost(Math.toIntExact(limit))))
+              val evaluated = Try(CErgoTreeEvaluator.eval(ctx.toSigmaContext(), accu,
+                tree.constants, tree.toProposition(false), DefaultEvalSettings))
+              require(evaluated.isFailure, "failure observation unexpectedly succeeded")
+              evaluatorFailureCost = Json.fromLong(accu.totalCost.toBlockCost)
+            }
+          }
           val cost = if (verdict == "RejectCost") failureCost(e)
             else interpreter.chargedCrypto.map(Json.fromLong).getOrElse(unavailable)
           record(verdict, cost, Some(selected), e.toString)
@@ -427,7 +445,7 @@ object EvaluatedValueOracle {
       val actual = verifyLine(req.noSpaces)
       require(actual.asObject.get.keys.toSet == Set("verdict", "eval_block_cost",
         "crypto_block_cost", "rent_block_cost", "rent_path", "total_block_cost", "failure_class",
-        "rejection_detail", "legacy"), name + ": response schema")
+        "rejection_detail", "legacy", "evaluator_failure_block_cost"), name + ": response schema")
       expected.foreach { case (key, value) =>
         require(actual.hcursor.downField(key).focus.contains(value),
           name + ": " + key + " expected " + value + ", got " + actual.noSpaces)

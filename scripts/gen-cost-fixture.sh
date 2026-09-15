@@ -30,7 +30,8 @@ request = fixture["request"]
 if request.get("rent", False):
     sys.exit("wallet rent fixtures belong in the transaction runner")
 script = "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala"
-command = ["scala-cli", "run", script, "--server=false", "--", "verify"]
+command = ["scala-cli", "run", script, "--server=false",
+           "--suppress-outdated-dependency-warning", "--", "verify"]
 request_bytes = (json.dumps(request, separators=(",", ":")) + "\n").encode()
 # Exactly one verify request, with diagnostics left on stderr.
 response_bytes = subprocess.run(command, input=request_bytes, stdout=subprocess.PIPE,

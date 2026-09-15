@@ -1,4 +1,5 @@
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/interpreter/p2pk.json
+//! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/op-fixed/
 //! Generator: scripts/gen-cost-fixture.sh (JVM verify)
 //!
 //! UTF-8 JSON request bytes, with the JVM's exact field names and embedded
@@ -37,6 +38,8 @@ struct Request {
     pre_header_hex: String,
     #[serde(default)]
     rent: Option<bool>,
+    #[serde(default)]
+    observe_evaluator_failure: bool,
 }
 
 fn decode<T>(
@@ -248,6 +251,13 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
             }
         }
         Err((is_cost, detail)) => {
+            if req.observe_evaluator_failure {
+                ensure!(
+                    baseline.value() == 0,
+                    "failure observation requires zero init"
+                );
+                output["evaluator_failure_block_cost"] = json!(cost.total_block_cost());
+            }
             output["verdict"] = json!(if is_cost {
                 "RejectCost"
             } else {
@@ -269,6 +279,14 @@ struct Fixture {
     ledger: Vec<String>,
     request: Value,
     expected: Value,
+    #[serde(default)]
+    divergence: Option<Divergence>,
+}
+
+#[derive(Deserialize)]
+struct Divergence {
+    ledger_id: String,
+    rust_evaluator_failure_block_cost: u64,
 }
 
 #[derive(Deserialize)]
@@ -279,6 +297,7 @@ struct Ledger {
 #[derive(Deserialize)]
 struct LedgerRow {
     id: String,
+    state: String,
 }
 
 fn fixture_paths(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
@@ -298,7 +317,7 @@ fn fixture_paths(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
 // ----- error paths -----
 // ----- oracle parity -----
 
-// ledger: INTERP-eval-sigmaprop-constant
+// ledger: INTERP-eval-sigmaprop-constant, OP-0x95, OP-0xDA, OP-0xE7-0xE9, OP-0xEC, OP-0xED, OP-0xF2, OP-0xF3, OP-0xF5, OP-0xF6, OP-0xF7, OP-0xF8, OP-TaggedVariable-A003, ORDER-bitop-charge-then-reject
 #[test]
 fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-vectors/ergo-sigma/cost-ledger");
@@ -310,6 +329,7 @@ fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
     paths.sort();
     ensure!(!paths.is_empty(), "no cost fixtures selected");
     let selected = paths.len();
+    let mut documented_divergences = 0;
     for path in paths {
         let fixture: Fixture = serde_json::from_slice(
             &std::fs::read(&path).with_context(|| path.display().to_string())?,
@@ -352,13 +372,75 @@ fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
             "eval_block_cost",
             "crypto_block_cost",
             "total_block_cost",
-            "failure_class",
         ] {
             let expected = fixture
                 .expected
                 .get(field)
                 .with_context(|| format!("{}: missing {field}", path.display()))?;
+            // Section 4: an unavailable rejected-input cost is not a mismatch.
+            if field != "verdict"
+                && actual["verdict"] != "Accept"
+                && (actual[field] == "unavailable" || *expected == "unavailable")
+            {
+                continue;
+            }
             assert_eq!(&actual[field], expected, "{}: {field}", path.display());
+        }
+        // Language-specific exception names have no shared precedence here.
+        let failure_class = fixture
+            .expected
+            .get("failure_class")
+            .with_context(|| format!("{}: missing failure_class", path.display()))?;
+        assert_eq!(
+            actual["failure_class"].is_null(),
+            failure_class.is_null(),
+            "{}: failure presence",
+            path.display()
+        );
+        ensure!(
+            fixture.divergence.is_none() || fixture.request["observe_evaluator_failure"] == true,
+            "{}: divergence requires a failure observation",
+            path.display()
+        );
+        if fixture.request["observe_evaluator_failure"] == true {
+            let expected = &fixture.expected["evaluator_failure_block_cost"];
+            ensure!(
+                expected.is_u64(),
+                "{}: missing JVM failure observation",
+                path.display()
+            );
+            if let Some(divergence) = &fixture.divergence {
+                let id = &divergence.ledger_id;
+                ensure!(
+                    fixture.ledger.iter().any(|row| row == id)
+                        && ledger
+                            .rows
+                            .iter()
+                            .any(|row| &row.id == id && row.state == "DIVERGENT"),
+                    "untracked divergence"
+                );
+                assert_eq!(actual["verdict"], "RejectScript");
+                assert_eq!(
+                    actual["evaluator_failure_block_cost"],
+                    divergence.rust_evaluator_failure_block_cost,
+                    "{}: recorded divergence changed",
+                    path.display()
+                );
+                assert_ne!(
+                    &actual["evaluator_failure_block_cost"],
+                    expected,
+                    "{}: divergence resolved; close its ledger row",
+                    path.display()
+                );
+                documented_divergences += 1;
+            } else {
+                assert_eq!(
+                    &actual["evaluator_failure_block_cost"],
+                    expected,
+                    "{}: evaluator failure cost",
+                    path.display()
+                );
+            }
         }
         for field in ["rent_block_cost", "rent_path"] {
             if let Some(expected) = fixture.expected.get(field) {
@@ -366,6 +448,6 @@ fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
             }
         }
     }
-    eprintln!("cost fixtures: selected={selected} executed={selected} skipped=0 failed=0");
+    eprintln!("cost fixtures: selected={selected} executed={selected} skipped=0 failed=0 documented_divergences={documented_divergences}");
     Ok(())
 }

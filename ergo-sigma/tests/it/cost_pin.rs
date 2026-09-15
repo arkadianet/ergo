@@ -117,14 +117,22 @@ fn opcode_cost_table_matches_scala_constants() {
         ("UnitConstant", "OP-0x81"),
         ("NoneValue", "OP-0xDF"),
     ]);
-    let mapped_open = BTreeMap::from([
+    let mapped_rejections = BTreeMap::from([
         ("TaggedVariable", "OP-TaggedVariable-A003"),
         ("ModQ", "OP-0xE7-0xE9"),
         ("PlusModQ", "OP-0xE7-0xE9"),
         ("MinusModQ", "OP-0xE7-0xE9"),
     ]);
-    for id in mapped_open.values() {
-        assert_open(&rows, id);
+    for id in mapped_rejections.values() {
+        // These declarations inherit a rejecting evaluator. Independent L2
+        // fixtures can close the obligation or establish a divergence.
+        assert!(
+            matches!(
+                rows.get(*id).map(String::as_str),
+                Some("OPEN" | "CLOSED" | "DIVERGENT")
+            ),
+            "unmapped rejection obligation {id}"
+        );
     }
     let mut seen = BTreeSet::new();
     let mut unaccounted = Vec::new();
@@ -142,7 +150,7 @@ fn opcode_cost_table_matches_scala_constants() {
                 };
                 if let Some(price) = price {
                     assert_kind(name, price, kind);
-                } else if !exclusions.contains(name) && !mapped_open.contains_key(name) {
+                } else if !exclusions.contains(name) && !mapped_rejections.contains_key(name) {
                     unaccounted.push(name);
                 }
             }
