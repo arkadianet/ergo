@@ -8,7 +8,7 @@ Source ledger: sigmastate `v6.0.2 23dd29f612249c169d09fae9bca76d7cc02e144c`, erg
 
 | category | OPEN | CLOSED | DIVERGENT | N-A | total |
 |---|---:|---:|---:|---:|---:|
-| OP | 40 | 59 | 0 | 11 | 110 |
+| OP | 38 | 61 | 0 | 11 | 110 |
 | METHOD | 31 | 39 | 0 | 2 | 72 |
 | EVAL | 15 | 9 | 0 | 2 | 26 |
 | INTERP | 10 | 5 | 0 | 1 | 16 |
@@ -18,7 +18,7 @@ Source ledger: sigmastate `v6.0.2 23dd29f612249c169d09fae9bca76d7cc02e144c`, erg
 | TX | 6 | 1 | 0 | 1 | 8 |
 | BLOCK | 12 | 0 | 0 | 1 | 13 |
 | VERSION | 23 | 0 | 0 | 1 | 24 |
-| **all** | 149 | 115 | 0 | 19 | 283 |
+| **all** | 147 | 117 | 0 | 19 | 283 |
 
 States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test with an independent oracle; DIVERGENT = confirmed mismatch, fix pending; N-A = reviewed rationale in note.
 
@@ -110,8 +110,8 @@ States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test w
 | `OP-0xE5` | CLOSED | data/shared/src/main/scala/sigma/ast/transformers.scala:649; OptionGetOrElse.costKind FixedCost(20) | `ergo-sigma/src/cost_table.rs` | L1,L2 | `ergo-sigma::it::cost_pin::opcode_cost_table_matches_scala_constants` |  |
 | `OP-0xE6` | CLOSED | data/shared/src/main/scala/sigma/ast/transformers.scala:667; OptionIsDefined.costKind FixedCost(10) | `ergo-sigma/src/cost_table.rs` | L1,L2 | `ergo-sigma::it::cost_pin::opcode_cost_table_matches_scala_constants` |  |
 | `OP-0xE7-0xE9` | CLOSED | data/shared/src/main/scala/sigma/ast/trees.scala:962; ModQ declares F(1) at `data/shared/src/main/scala/sigma/ast/trees.scala:962`; modular binary operations inherit F(1) at line 973. Their `costKind` does **not** throw. They lack evaluator implementations and inherit the uncharged throwing evaluator at `data/shared/src/main/scala/sigma/ast/values.scala:101`. | `ergo-sigma/src/evaluator/opcodes/errors.rs:90` | L1,L2 | `ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` | zero-cost reject Scala declares Fixed(1) but the inherited Value.eval throws WITHOUT charging; JVM fixtures/op-fixed/{mod-q,plus-mod-q,minus-mod-q}-boundary.json measure RejectScript and supplementary evaluator failure cost 1 BC at a 19-JIT prefix; an erroneous one-JIT charge produces 2 BC. Minimal fixtures measure 0 BC. Both sides agree; full verify failure costs remain unavailable. |
-| `OP-0xEA` | OPEN | data/shared/src/main/scala/sigma/ast/trees.scala:149; SigmaAnd.costKind PerItemCost(10,2,1) | `ergo-sigma/src/cost_table.rs` | L1,L2 | — |  |
-| `OP-0xEB` | OPEN | data/shared/src/main/scala/sigma/ast/trees.scala:180; SigmaOr.costKind PerItemCost(10,2,1) | `ergo-sigma/src/cost_table.rs` | L1,L2 | — |  |
+| `OP-0xEA` | CLOSED | data/shared/src/main/scala/sigma/ast/trees.scala:149; SigmaAnd.costKind PerItemCost(10,2,1) | `ergo-sigma/src/cost_table.rs` | L1,L2 | `ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` | fixed: empty children rejected; JVM evidence fixtures/op-per-item/sigma-and-empty.json (ten prefixes, charged-to-failure and java.lang.IllegalArgumentException); nonempty boundaries in sigma-and.json. Empty Coll[SigmaProp] is reachable from wire bytes (ConcreteCollection with 0 items); accept-invalid/fork-class divergence fixed at CAND/COR normalization. Controller-authorized Task 0.4 fix in this branch. |
+| `OP-0xEB` | CLOSED | data/shared/src/main/scala/sigma/ast/trees.scala:180; SigmaOr.costKind PerItemCost(10,2,1) | `ergo-sigma/src/cost_table.rs` | L1,L2 | `ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` | fixed: empty children rejected; JVM evidence fixtures/op-per-item/sigma-or-empty.json (ten prefixes, charged-to-failure and java.lang.IllegalArgumentException); nonempty boundaries in sigma-or.json. Empty Coll[SigmaProp] is reachable from wire bytes (ConcreteCollection with 0 items); accept-invalid/fork-class divergence fixed at CAND/COR normalization. Controller-authorized Task 0.4 fix in this branch. |
 | `OP-0xEC` | CLOSED | data/shared/src/main/scala/sigma/ast/trees.scala:1257; BinOr.costKind FixedCost(20) | `ergo-sigma/src/cost_table.rs:64` | L1,L2 | `ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` | short-circuit: right operand uncosted when left is true |
 | `OP-0xED` | CLOSED | data/shared/src/main/scala/sigma/ast/trees.scala:1280; BinAnd.costKind FixedCost(20) | `ergo-sigma/src/cost_table.rs:65` | L1,L2 | `ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` | short-circuit |
 | `OP-0xEE` | CLOSED | data/shared/src/main/scala/sigma/ast/trees.scala:530; DecodePoint.costKind FixedCost(300) | `ergo-sigma/src/cost_table.rs` | L1,L2 | `ergo-sigma::it::cost_pin::opcode_cost_table_matches_scala_constants` |  |
