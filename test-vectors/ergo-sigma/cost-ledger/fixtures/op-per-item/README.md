@@ -71,7 +71,7 @@ boundary tests can close the declared descriptor obligation. Task 3.4e owns the 
 
 ```sh
 python3 scripts/gen-op-per-item.py
-for fixture in test-vectors/ergo-sigma/cost-ledger/fixtures/op-per-item/*.json; do
+for fixture in test-vectors/ergo-sigma/cost-ledger/fixtures/op-per-item/*.json.gz; do
     scripts/gen-cost-fixture.sh "$fixture"
 done
 cargo test -p ergo-sigma --test it cost_ledger_fixtures -- --nocapture
