@@ -17,7 +17,7 @@ import org.ergoplatform.sdk.JsonCodecs
 import org.ergoplatform.wallet.interpreter.ErgoInterpreter
 import org.ergoplatform.modifiers.mempool.ErgoTransaction
 import org.ergoplatform.wallet.boxes.ErgoBoxAssetExtractor
-import org.ergoplatform.modifiers.history.header.Header
+import org.ergoplatform.modifiers.history.header.{Header, HeaderSerializer}
 import org.ergoplatform.modifiers.history.extension.ExtensionCandidate
 import org.ergoplatform.nodeView.state.{ErgoStateContext, VotingData}
 import org.ergoplatform.settings._
@@ -201,7 +201,11 @@ object ComputeTransactionCosts extends JsonCodecs with PowSchemeReaders
       .withFallback(ConfigFactory.parseFile(new File(s"$reference/src/main/resources/application.conf")))
       .resolve()
     implicit val chainSettings: ChainSettings = config.as[ChainSettings]("ergo.chain")
+    val nodeVersion = parse(httpGet("/info")).right.get.hcursor.get[String]("appVersion").right.get
+    require(nodeVersion == "6.0.5", s"Expected oracle node 6.0.5, found $nodeVersion")
     val manifest = Json.obj(
+      "node_app_version" -> Json.fromString(nodeVersion),
+      "headers_source" -> Json.fromString(sys.env.getOrElse("COST_HEADERS", "node block headers")),
       "ergo_core_version" -> Json.fromString("6.0.5"),
       "ergo_wallet_version" -> Json.fromString("6.0.5"),
       "sigma_state_version" -> Json.fromString(version),
@@ -218,6 +222,24 @@ object ComputeTransactionCosts extends JsonCodecs with PowSchemeReaders
     }
     def header(json: Json): Header = json.hcursor.downField("header").as[Header](Header.jsonDecoder).right.get
 
+    // Both replay engines can consume the same canonical extracted header bytes.
+    val extractedHeaders = sys.env.get("COST_HEADERS").map { path =>
+      val source = scala.io.Source.fromFile(path, "UTF-8")
+      val rows = try parse(source.mkString).right.get.asArray.get finally source.close()
+      rows.map { row =>
+        val c = row.hcursor
+        val h = c.get[Int]("height").right.get
+        val hdr = HeaderSerializer.parseBytesTry(Base16.decode(c.get[String]("bytes").right.get).get).get
+        require(hdr.height == h, s"Header height mismatch at $h")
+        h -> hdr
+      }.toMap
+    }
+    def contextHeader(height: Int): Header = extractedHeaders match {
+      case Some(headers) => headers.getOrElse(height,
+        throw new IllegalArgumentException(s"Missing context header $height"))
+      case None => header(block(height))
+    }
+
     var active = ActiveParams()
     val epoch = (startHeight / VOTING_EPOCH_LENGTH) * VOTING_EPOCH_LENGTH
     val epochBlock = block(epoch)
@@ -229,7 +251,7 @@ object ComputeTransactionCosts extends JsonCodecs with PowSchemeReaders
     active = parseParamsFromExtension(extensionFields(epochBlock.hcursor), active)
       .getOrElse(throw new IllegalStateException(s"Missing epoch parameters at $epoch"))
     // Current header plus nine ancestors is the node's full-block context.
-    var ancestors = (startHeight - 1 to startHeight - 9 by -1).map(h => header(block(h)))
+    var ancestors = (startHeight - 1 to startHeight - 9 by -1).map(contextHeader)
     val cache = mutable.Map[String, ErgoBox]()
     def box(id: Array[Byte]): ErgoBox = {
       val hex = Base16.encode(id)
@@ -239,9 +261,14 @@ object ComputeTransactionCosts extends JsonCodecs with PowSchemeReaders
     val fixtureTransactions = mutable.ArrayBuffer[Json]()
     val fixtureHeaders = mutable.Map[Int, Header](ancestors.map(h => h.height -> h): _*)
     val fixtureParameters = mutable.Map[String, Json]()
+    val fixtureContexts = mutable.Map[String, Json]()
     for (height <- startHeight to endHeight) {
       val json = block(height)
-      val current = header(json)
+      val current = contextHeader(height)
+      require(current.id == header(json).id, s"Extracted header differs from node at $height")
+      (current +: ancestors).sliding(2).foreach { pair =>
+        require(pair.head.parentId == pair.last.id, s"Disconnected context at ${pair.head.height}")
+      }
       fixtureHeaders(height) = current
       parseParamsFromExtension(extensionFields(json.hcursor), active).foreach { p =>
         active = p
@@ -257,6 +284,13 @@ object ComputeTransactionCosts extends JsonCodecs with PowSchemeReaders
         "block_version" -> Json.fromInt(p.blockVersion))
       val state = new ErgoStateContext(current +: ancestors, None, chainSettings.genesisStateDigest,
         p, settings, VotingData.empty)
+      require(state.sigmaLastHeaders.length == 9, "Expected nine script-visible ancestors")
+      require(Base16.encode(state.previousStateDigest.toArray) == Base16.encode(ancestors.head.stateRoot),
+        s"Previous state digest differs from parent at $height")
+      fixtureContexts(height.toString) = Json.obj(
+        "header_heights" -> Json.arr(ancestors.map(h => Json.fromInt(h.height)): _*),
+        "header_ids" -> Json.arr(ancestors.map(h => Json.fromString(h.id)): _*),
+        "previous_state_digest" -> Json.fromString(Base16.encode(state.previousStateDigest.toArray)))
       val txs = json.hcursor.downField("blockTransactions").downField("transactions").as[Vector[Json]].right.get
       for (txJson <- txs) {
         val tx = ErgoTransaction(txJson.as[ErgoLikeTransaction](ergoLikeTransactionDecoder).right.get)
@@ -292,6 +326,7 @@ object ComputeTransactionCosts extends JsonCodecs with PowSchemeReaders
           Json.obj("height" -> Json.fromInt(h), "bytes" -> Json.fromString(Base16.encode(hdr.bytes)))
         }: _*),
         "parameters" -> Json.obj(fixtureParameters.toSeq: _*),
+        "contexts" -> Json.obj(fixtureContexts.toSeq: _*),
         "boxes" -> Json.arr(cache.toSeq.sortBy(_._1).map { case (id, b) =>
           Json.obj("box_id" -> Json.fromString(id), "bytes" -> Json.fromString(Base16.encode(b.bytes)))
         }: _*),

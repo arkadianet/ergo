@@ -133,26 +133,53 @@ struct Parameters {
 }
 
 #[derive(Deserialize)]
+struct RecordedContext {
+    header_heights: Vec<u32>,
+    header_ids: Vec<String>,
+    previous_state_digest: String,
+}
+
+#[derive(Deserialize)]
 struct Fixture {
     manifest: serde_json::Value,
+    #[serde(default)]
+    contexts: HashMap<String, RecordedContext>,
     headers: Vec<HeaderBytes>,
     boxes: Vec<BoxBytes>,
     parameters: HashMap<String, Parameters>,
     transactions: Vec<FixtureTransaction>,
 }
 
-// ----- oracle parity -----
+/// Require the exact block-validation window, newest first. The script layer
+/// derives LastBlockUtxoRootHash from the first ancestor's state root.
+fn replay_headers(headers: &HashMap<u32, header::Header>, height: u32) -> Vec<header::Header> {
+    let ancestors: Vec<_> = (height - 9..height)
+        .rev()
+        .map(|h| {
+            headers
+                .get(&h)
+                .unwrap_or_else(|| panic!("missing context header {h}"))
+                .clone()
+        })
+        .collect();
+    let mut child = &headers[&height];
+    for parent in &ancestors {
+        assert_eq!(
+            child.parent_id,
+            header::serialize_header(parent).unwrap().1,
+            "disconnected context at {}",
+            child.height
+        );
+        child = parent;
+    }
+    ancestors
+}
 
-#[test]
-fn transaction_breakdown_mainnet_all_ten_match_jvm() {
-    let fixture: Fixture = serde_json::from_str(include_str!(
-        "../../../test-vectors/ergo-sigma/cost-total/breakdown_700000_700001.json"
-    ))
-    .unwrap();
+fn replay_fixture(fixture: Fixture, headers_spend: Option<&str>) {
     assert_eq!(fixture.manifest["ergo_core_version"], "6.0.5");
     assert_eq!(fixture.manifest["ergo_wallet_version"], "6.0.5");
     assert_eq!(fixture.manifest["sigma_state_version"], "6.0.6");
-    assert_eq!(fixture.transactions.len(), 10);
+    let mut checked_headers_spends = 0;
     let headers: HashMap<_, _> = fixture
         .headers
         .iter()
@@ -200,7 +227,24 @@ fn transaction_breakdown_mainnet_all_ten_match_jvm() {
             pre_header_n_bits: u64::from(hdr.n_bits),
             pre_header_votes: hdr.votes,
         };
-        let last_headers: Vec<_> = (h - 9..h).rev().map(|i| headers[&i].clone()).collect();
+        let last_headers = replay_headers(&headers, h);
+        if let Some(recorded) = fixture.contexts.get(&h.to_string()) {
+            assert_eq!(
+                last_headers.iter().map(|h| h.height).collect::<Vec<_>>(),
+                recorded.header_heights
+            );
+            assert_eq!(
+                last_headers
+                    .iter()
+                    .map(|h| hex::encode(header::serialize_header(h).unwrap().1.as_bytes()))
+                    .collect::<Vec<_>>(),
+                recorded.header_ids
+            );
+            assert_eq!(
+                hex::encode(last_headers[0].state_root.as_bytes()),
+                recorded.previous_state_digest
+            );
+        }
         let mut cost = CostAccumulator::new(JitCost::from_block_cost(p.max_block_cost).unwrap());
         let mut cx = TxValidationCtx {
             ctx: &ctx,
@@ -220,7 +264,61 @@ fn transaction_breakdown_mainnet_all_ten_match_jvm() {
         let trace = cost_trace::take().unwrap();
         result.unwrap_or_else(|e| panic!("{}: JVM Accept, Rust {e}", tx.cost.tx_id));
         compare_breakdown(&tx.cost, cost.total_block_cost(), &trace);
+        if headers_spend == Some(tx.cost.tx_id.as_str()) {
+            // The selected mainnet spend must actually read the header window:
+            // its JVM-accepted script fails when the window is absent.
+            let mut missing_cost =
+                CostAccumulator::new(JitCost::from_block_cost(p.max_block_cost).unwrap());
+            let mut missing_cx = TxValidationCtx {
+                ctx: &ctx,
+                params: &params,
+                cost: &mut missing_cost,
+                last_headers: &[],
+                rules: TxValidationRules::default(),
+            };
+            let error = validate_transaction(
+                &bytes,
+                &utxo,
+                &LocalPolicy::default_policy(),
+                &mut missing_cx,
+            )
+            .expect_err("selected spend must require CONTEXT.headers");
+            assert!(
+                error.to_string().contains("index"),
+                "unexpected missing-header error: {error}"
+            );
+            checked_headers_spends += 1;
+        }
     }
+    assert_eq!(checked_headers_spends, usize::from(headers_spend.is_some()));
+}
+
+// ----- oracle parity -----
+
+#[test]
+fn transaction_breakdown_mainnet_all_ten_match_jvm() {
+    let fixture: Fixture = serde_json::from_str(include_str!(
+        "../../../test-vectors/ergo-sigma/cost-total/breakdown_700000_700001.json"
+    ))
+    .unwrap();
+    assert_eq!(fixture.transactions.len(), 10);
+    replay_fixture(fixture, None);
+}
+
+// ledger: METHOD-context-headers
+#[test]
+fn context_headers_mainnet_900058_matches_jvm() {
+    let fixture: Fixture = serde_json::from_str(include_str!(
+        "../../../test-vectors/ergo-sigma/cost-total/breakdown_900058_900058.json"
+    ))
+    .unwrap();
+    assert_eq!(fixture.transactions.len(), 12);
+    assert_eq!(fixture.contexts.len(), 1);
+    assert_eq!(fixture.manifest["node_app_version"], "6.0.5");
+    replay_fixture(
+        fixture,
+        Some("897d79ef0ca57b715e0176a22924ba396ff6bb25e23d8e604be136453f581781"),
+    );
 }
 
 #[cfg(feature = "diagnostics")]
@@ -378,10 +476,6 @@ mod ranges {
             })
             .collect();
 
-        // Sorted heights for building last-nine context.
-        let mut sorted_heights: Vec<u32> = headers_by_height.keys().copied().collect();
-        sorted_heights.sort();
-
         let header_info: HashMap<u32, ([u8; 33], u64)> = headers_by_height
             .iter()
             .map(|(&h, hdr)| (h, (*hdr.solution.pk().as_bytes(), hdr.timestamp)))
@@ -424,17 +518,7 @@ mod ranges {
             let mut cost =
                 CostAccumulator::new(JitCost::from_block_cost(BLOCK_COST_LIMIT).unwrap());
 
-            // Build last nine headers for CONTEXT.headers.
-            // Find up to nine headers with height < current block height.
-            let last_headers: Vec<ergo_ser::header::Header> = {
-                let pos = sorted_heights.partition_point(|&h| h < v.height);
-                let start = pos.saturating_sub(9);
-                sorted_heights[start..pos]
-                    .iter()
-                    .rev()
-                    .filter_map(|h| headers_by_height.get(h).cloned())
-                    .collect()
-            };
+            let last_headers = super::replay_headers(&headers_by_height, v.height);
 
             let mut tx_cx = ergo_validation::TxValidationCtx {
                 ctx: &ctx,
@@ -519,7 +603,7 @@ mod ranges {
         if !cost_file.exists() || !tx_file.exists() {
             return None;
         }
-        let header_file = find_header_file(dir, start, end)?;
+        let header_file = find_header_file(dir, start.checked_sub(9)?, end)?;
         Some(CostRange {
             label: format!("{start}-{end}"),
             cost_file,

@@ -68,6 +68,18 @@ Legacy aggregate-only range JSON must be regenerated before running those tests.
 The JVM receives the current header and nine preceding headers through
 `ErgoStateContext`. Rust receives the same nine ancestors, newest first.
 Preheader fields and the previous state digest come from these real headers.
+`COST_HEADERS=path/to/headers_START_END.json` makes the extractor parse the same
+canonical header bytes as Rust. The file must cover the requested start minus
+nine through the requested end, inclusively. Both engines check the parent-ID
+chain and reject missing ancestors. The JVM also checks each current header
+against the node and records script-visible header IDs/heights and the previous
+state digest in `contexts`; Rust checks these independent observations.
+
+The runtime fields are `TxValidationCtx.last_headers` and the derived
+`ReductionContext.last_block_utxo_root`; `TransactionContext` itself does not
+have those fields. The first ancestor supplies the previous block's state root.
+The brief's ten-header count includes the current preheader: only nine ancestors
+are script-visible, per the reconciled block-validation rule.
 Epoch parameters and validation settings are loaded before the first requested
 height and refreshed at epoch boundaries. Chain configuration comes from the
 pinned Ergo reference checkout's `mainnet.conf` and `application.conf`.
@@ -158,6 +170,42 @@ context does not reconstruct the Scala previous state digest, so it provides no
 coverage for scripts reading `CONTEXT.headers` or `LastBlockUtxoRootHash`.
 The bundled breakdown fixture supplies the full header context and input bytes
 for the new field-by-field test. Neither fixture proves cross-epoch parity.
+
+
+## Context-reading replay at 900058
+
+`breakdown_900058_900058.json` contains all **12 transactions** from this block,
+canonical boxes, ten headers (900049–900058), voted parameters, and JVM context
+observations. Every transaction's per-input breakdown and total is checked in
+`ergo-validation/tests/it/cost_parity.rs`. The spend
+`897d79ef0ca57b715e0176a22924ba396ff6bb25e23d8e604be136453f581781`
+reads `CONTEXT.headers` (method `(101,2)`) in its mainnet contract. Removing the
+header window makes this spend fail with an index error, so this is execution
+coverage rather than a byte-pattern match in constants or a dead branch.
+
+Reproduce from the workspace root:
+
+```bash
+python3 - <<'PY_HEADERS'
+import json
+from pathlib import Path
+fixture = json.loads(Path("test-vectors/ergo-sigma/cost-total/breakdown_900058_900058.json").read_text())
+Path("test-vectors/mainnet/headers_900049_900058.json").write_text(json.dumps(fixture["headers"], indent=2) + "\n")
+PY_HEADERS
+COST_HEADERS=test-vectors/mainnet/headers_900049_900058.json \
+COST_FIXTURE=test-vectors/ergo-sigma/cost-total/breakdown_900058_900058.json \
+scala-cli run test-vectors/scripts/scala/ComputeTransactionCosts.scala \
+  --server=false --suppress-outdated-dependency-warning -- 900058 900058
+cargo test -p ergo-validation --test it cost_parity::
+```
+
+The accompanying `context_900058_manifest.json` records the selection and input
+hashes. `METHOD-context-headers` gains L4 evidence. No replay evidence is claimed
+for `OP-0xA6` or `METHOD-context-lastBlockUtxoRootHash`: a scan of output trees in
+700000–700200, 900000–901000, 1100000–1101000, 1500000–1501000, and
+1853000–1854000 found no parsed use of either root accessor. Byte matches inside
+constants are not opcode execution. A range containing a root-reading spend is
+still required for task 5.3; those two rows retain their existing L1 evidence.
 
 ## Compressed evidence storage
 
