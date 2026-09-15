@@ -68,6 +68,7 @@ object BlockOracle {
         "chain_id" -> c.downField("genesis_state_root").focus.get,
         "height_range" -> Json.arr(Json.fromInt(1),
           Json.fromInt(decodeBlock(field[Json](c, "block")).height)),
+        "ergo_tree_versions" -> Json.arr(field[Vector[String]](c, "parent_boxes_hex").map(b => Json.fromInt(box(b).ergoTree.version)): _*),
         "activated_script_version" -> Json.fromInt(version - 1), "block_version" -> Json.fromInt(version),
         "voted_params" -> field[Json](c, "parameters")),
       "run" -> Json.obj("command" -> Json.fromString(command), "seeds" -> Json.Null,
@@ -144,7 +145,7 @@ object BlockOracle {
   def bootstrapTransaction(input: ErgoBox, height: Int): ErgoTransaction =
     ErgoTransaction(IndexedSeq(Input(input.id, sigma.interpreter.ProverResult(Array.emptyByteArray,
       sigma.interpreter.ContextExtension.empty))), IndexedSeq.empty,
-      IndexedSeq(new ErgoBoxCandidate(input.value, input.ergoTree, height)))
+      IndexedSeq(new ErgoBoxCandidate(input.value, input.ergoTree, height, input.additionalTokens)))
   def proof(state: UtxoState, transactions: Seq[ErgoTransaction]) = {
     val operations = ErgoState.stateChanges(transactions).get.operations
     state.persistentProver.avlProver.generateProofForOperations(operations).get
@@ -252,7 +253,7 @@ object BlockOracle {
   def signP2pk(input: ErgoBox, height: Int): ErgoTransaction = {
     val secret = sigmastate.crypto.DLogProtocol.DLogProverInput(java.math.BigInteger.ONE)
     val unsigned = new UnsignedErgoLikeTransaction(IndexedSeq(new UnsignedInput(input.id)), IndexedSeq.empty,
-      IndexedSeq(new ErgoBoxCandidate(input.value, input.ergoTree, height)))
+      IndexedSeq(new ErgoBoxCandidate(input.value, input.ergoTree, height, input.additionalTokens)))
     val prover = new ErgoLikeInterpreter with sigmastate.interpreter.ProverInterpreter {
       override type CTX = ErgoLikeContext
       override val secrets = IndexedSeq(secret)
@@ -271,6 +272,81 @@ object BlockOracle {
       "parameters" -> Json.obj(DevnetLaunchParameters.parametersTable.toSeq.map { case (k, v) => k.toString -> Json.fromInt(v) }: _*),
       "parent_boxes_hex" -> Json.arr(Json.fromString(hex(input.bytes))),
       "transactions_hex" -> Json.arr(Json.fromString(hex(signed.bytes))))
+  }
+  /** Each boundary is derived from a successful production JVM block application. */
+  lazy val familyInputs: Seq[ErgoBox] = {
+    val tree = ErgoTree.fromProposition(SigmaPropConstant(
+      sigmastate.crypto.DLogProtocol.DLogProverInput(java.math.BigInteger.ONE).publicImage))
+    val inputs = (10 to 12).map(i => new ErgoBox(1000000000L, tree, sigma.Colls.emptyColl,
+      Map.empty, scorex.util.bytesToId(Array.fill(32)(i.toByte)), 0.toShort, 0))
+    inputs
+  }
+  lazy val familyTransactions: Seq[ErgoTransaction] = familyInputs.map(signP2pk(_, 128))
+  def family(name: String, output: String): Json = {
+    val inputs = familyInputs
+    val signed = familyTransactions
+    val tree = inputs.head.ergoTree
+    def request(boxes: Seq[ErgoBox], transactions: Seq[ErgoTransaction], cap: Int, version: Int = 3): Json =
+      Json.obj("schema_version" -> Json.fromInt(1),
+        "parameters" -> Json.obj(DevnetLaunchParameters.parametersTable.toSeq.map {
+          case (k, v) => k.toString -> Json.fromInt(if (k == 4) cap else if (k == 123) version else v)
+        }: _*),
+        "parent_boxes_hex" -> Json.arr(boxes.map(b => Json.fromString(hex(b.bytes))): _*),
+        "transactions_hex" -> Json.arr(transactions.map(t => Json.fromString(hex(t.bytes))): _*))
+    def measure(boxes: Seq[ErgoBox], transactions: Seq[ErgoTransaction], version: Int = 3): Json = {
+      val observed = evaluate(build(request(boxes, transactions, 1000000, version)))
+      require(field[String](observed.hcursor, "verdict") == "Accept", observed.noSpaces)
+      observed
+    }
+    val single = measure(inputs.take(1), signed.take(1))
+    val unit = field[Int](single.hcursor, "sum_block_cost")
+    val (seed, basis, rows) = name match {
+      case "a-exact-sum" | "b-sum-plus-one" =>
+        val total = measure(inputs, signed)
+        val cap = field[Int](total.hcursor, "sum_block_cost") - (if (name.startsWith("b")) 1 else 0)
+        (request(inputs, signed, cap), total, Seq("BLOCK-sum-op", "LIMIT-block-sum"))
+      case "c-single-cap" =>
+        (request(inputs.take(1), signed.take(1), unit), single, Seq("BLOCK-per-tx-cap"))
+      case "d-mid-block" | "d-mid-block-reversed" =>
+        val ordered = if (name.endsWith("reversed")) signed.reverse else signed
+        val prefix = measure(inputs, ordered.take(2))
+        (request(inputs, ordered, field[Int](prefix.hcursor, "sum_block_cost") - 1), prefix,
+          Seq("BLOCK-accum-equiv", "BLOCK-per-tx-cap", "BLOCK-sum-op", "LIMIT-block-sum"))
+      case "e-token-order" =>
+        val tokens = sigma.Colls.fromArray(Array((sigma.data.Digest32Coll @@
+          sigma.Colls.fromArray(Array.fill(32)(42.toByte)), 1L)))
+        val tokenBox = new ErgoBox(1000000000L, tree, tokens, Map.empty,
+          scorex.util.bytesToId(Array.fill(32)(20.toByte)), 0.toShort, 0)
+        val tokenTx = signP2pk(tokenBox, 128)
+        val tokenTotal = measure(Seq(tokenBox), Seq(tokenTx))
+        // The production initialCost expression is 10000 + inputCost + outputCost.
+        // Remaining 12200 passes structural init (12100), but not token access (400).
+        (request(Seq(inputs.head, tokenBox), Seq(signed.head, tokenTx), unit + 12200),
+          tokenTotal, Seq("ORDER-init-token"))
+      case "rejection-script-control" =>
+        val first = signed.head
+        val invalid = ErgoTransaction(first.inputs.map(i => Input(i.boxId,
+          sigma.interpreter.ProverResult(Array.fill(56)(0.toByte), sigma.interpreter.ContextExtension.empty))),
+          first.dataInputs, first.outputCandidates)
+        (request(inputs.take(1), Seq(invalid), 1000000), single, Seq.empty[String])
+      case "f-v6-devnet" =>
+        val v6Tree = ErgoTree.fromProposition(ErgoTree.HeaderType @@ 3.toByte, SigmaPropConstant(sigma.data.TrivialProp.TrueProp))
+        val input = new ErgoBox(1000000000L, v6Tree, sigma.Colls.emptyColl, Map.empty,
+          scorex.util.bytesToId(Array.fill(32)(30.toByte)), 0.toShort, 0)
+        val transaction = bootstrapTransaction(input, 128)
+        val total = measure(Seq(input), Seq(transaction), 4)
+        (request(Seq(input), Seq(transaction), field[Int](total.hcursor, "sum_block_cost"), 4),
+          total, Seq.empty[String])
+      case _ => throw new IllegalArgumentException("unknown family " + name)
+    }
+    val fixture = build(seed)
+    val observed = evaluate(fixture)
+    val captured = fixture.deepMerge(Json.obj("expected" -> observed,
+      "ledger" -> Json.arr((Seq("BLOCK-parallel-equiv") ++ rows).map(Json.fromString): _*),
+      "boundary_basis" -> Json.obj("single_p2pk" -> single, "unlimited_target_or_prefix" -> basis)))
+    write(output, withManifest(captured,
+      "python3 scripts/jvm_block_oracle/run.py family " + name + " " + output, None))
+    observed
   }
   def selfTest(fixture: Json): Json = {
     var count = 0
@@ -357,6 +433,11 @@ object BlockOracle {
     val sigmaJar = classOf[sigma.VersionContext].getProtectionDomain.getCodeSource.getLocation.toString
     require(sigmaJar.endsWith("sigma-state_2.12-6.0.6.jar"), "expected sigma-state 6.0.6: " + sigmaJar)
     val result = args.toList match {
+      case "families" :: directory :: Nil =>
+        val names = Seq("a-exact-sum", "b-sum-plus-one", "c-single-cap", "d-mid-block",
+          "d-mid-block-reversed", "e-token-order", "f-v6-devnet", "rejection-script-control")
+        Json.obj(names.map(name => name -> family(name, directory + "/" + name + ".json")): _*)
+      case "family" :: name :: output :: Nil => family(name, output)
       case "build" :: input :: output :: Nil =>
         val fixture = withManifest(build(read(input)), "python3 scripts/jvm_block_oracle/run.py " + args.mkString(" "), Some(input)); write(output, fixture)
         Json.obj("built" -> Json.fromString(output))

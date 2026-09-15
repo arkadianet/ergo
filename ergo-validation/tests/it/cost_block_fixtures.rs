@@ -1,4 +1,4 @@
-//! Oracle: test-vectors/ergo-sigma/cost-ledger/blocks/p2pk.json.gz
+//! Oracle: test-vectors/ergo-sigma/cost-ledger/blocks/
 //! JVM producer: scripts/jvm_block_oracle/BlockOracle.scala (Ergo 6.0.5).
 
 use std::{collections::BTreeMap, fs::File, path::Path};
@@ -17,10 +17,10 @@ use ergo_validation::{
     active_params::parse_active_params,
     block::{
         validate_full_block, validate_full_block_parallel_with_costs,
-        validate_full_block_with_costs, BlockValidationContext,
+        validate_full_block_with_costs, BlockValidationContext, BlockValidationError,
     },
     header::CheckedHeader,
-    ProtocolParams, UtxoView,
+    ProtocolParams, UtxoView, ValidationError,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -50,6 +50,7 @@ struct Expected {
     verdict: String,
     sum_block_cost: Option<u64>,
     failure_class: Option<String>,
+    rejection_detail: Option<String>,
     state_root_before: String,
     state_root_after: String,
 }
@@ -171,6 +172,53 @@ fn context<'a>(
         last_headers: headers,
         script_validation_checkpoint: None,
         reemission: None,
+    }
+}
+
+fn jvm_verdict(expected: &Expected) -> &'static str {
+    if expected.verdict == "Accept" {
+        assert_eq!(expected.failure_class, None);
+        assert_eq!(expected.rejection_detail, None);
+        return "Accept";
+    }
+    assert_eq!(expected.verdict, "Reject");
+    assert_eq!(
+        expected.failure_class.as_deref(),
+        Some("org.ergoplatform.validation.MalformedModifierError")
+    );
+    let detail = expected
+        .rejection_detail
+        .as_deref()
+        .expect("JVM rejection detail");
+    // Rule 307 and the rule-119 embedded CostLimitException are independently captured.
+    if detail
+        .starts_with("Accumulated cost of block transactions should not exceed <maxBlockCost>. ")
+        || (detail.starts_with("Scripts of all transaction inputs should pass verification. ")
+            && detail.contains("=> Failure(sigma.exceptions.CostLimitException: "))
+    {
+        "RejectCost"
+    } else if detail.starts_with("Scripts of all transaction inputs should pass verification. ")
+        && detail.contains("=> Success((false,")
+    {
+        "RejectScript"
+    } else {
+        panic!("unmapped JVM rejection: {detail}");
+    }
+}
+
+fn rust_verdict(error: Option<&BlockValidationError>) -> &'static str {
+    match error {
+        None => "Accept",
+        Some(BlockValidationError::BlockCostExceeded { .. })
+        | Some(BlockValidationError::Transaction {
+            error: ValidationError::CostExceeded { .. },
+            ..
+        }) => "RejectCost",
+        Some(BlockValidationError::Transaction {
+            error: ValidationError::ProofFailed { .. },
+            ..
+        }) => "RejectScript",
+        Some(error) => panic!("unmapped Rust rejection: {error:?}"),
     }
 }
 
@@ -353,13 +401,27 @@ fn replay(fixture: Fixture) {
         &target.extension,
         &ctx,
     );
-    assert_eq!(
-        sequential.as_ref().err().map(|e| format!("{e:?}")),
-        parallel.as_ref().err().map(|e| format!("{e:?}"))
-    );
-    // This smoke corpus has accepted targets; rejection fixtures need semantic JVM error mappings.
-    assert_eq!(fixture.expected.verdict, "Accept");
-    assert_eq!(fixture.expected.failure_class, None);
+    let expected = jvm_verdict(&fixture.expected);
+    for actual in [
+        sequential.as_ref().err(),
+        observed.as_ref().err(),
+        parallel.as_ref().err(),
+    ] {
+        assert_eq!(rust_verdict(actual), expected, "{actual:?}");
+    }
+    if expected != "Accept" {
+        // Failed JVM execution has no payload; a deferred Rust sum is not substituted.
+        assert_eq!(fixture.expected.sum_block_cost, None);
+        assert_eq!(
+            fixture.expected.state_root_before,
+            fixture.expected.state_root_after
+        );
+        assert_eq!(
+            hex::encode(state.0.root_digest().as_bytes()),
+            fixture.parent_state_root
+        );
+        return;
+    }
     let sequential = sequential.expect("sequential JVM acceptance");
     let (observed, costs) = observed.expect("observed sequential JVM acceptance");
     let (parallel, mut parallel_costs) = parallel.expect("parallel JVM acceptance");
