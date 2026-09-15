@@ -21,6 +21,8 @@ The differential compares verdict, eval/crypto/rent/total block costs and
 rent_path, including costs on rejected proofs. Runtime-specific diagnostics
 and the supplementary legacy evaluator record are retained but not compared.
 
-`known_divergence` marks the two rent fixtures that expose the production
-Rust charge of 5 BC versus the JVM's 50 BC. The test asserts that mismatch;
-it does not convert those outcomes to agreement. TX-storage-rent is DIVERGENT.
+`known_divergence` records the original finding for the two rent fixtures.
+All cases now participate in parity assertions: the production rent shortcut
+charges 50 BC (500 JIT), including a total of 67 BC with init cost 17.
+The transaction script regressions in `ergo-validation/tests/it/cost_storage_rent.rs`
+cover shortcut success and fallback for TX-storage-rent.

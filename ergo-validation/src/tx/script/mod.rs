@@ -188,11 +188,12 @@ pub(crate) fn validate_scripts_at_index(
             );
             if rent_ok {
                 // Storage rent check passed — skip script/proof verification.
-                // Charge the fixed storage contract cost.
+                // Convert the fixed block-unit charge to the JIT accumulator unit.
                 cx.cost
-                    .add(ergo_primitives::cost::JitCost::from_jit(
-                        STORAGE_CONTRACT_COST,
-                    ))
+                    .add(
+                        ergo_primitives::cost::JitCost::from_block_cost(STORAGE_CONTRACT_COST)
+                            .map_err(|e| ValidationError::JitCostOverflow(e.to_string()))?,
+                    )
                     .map_err(|e| match e {
                         ergo_primitives::cost::CostError::LimitExceeded { current, limit } => {
                             ValidationError::CostExceeded { current, limit }

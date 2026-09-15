@@ -450,16 +450,19 @@ mod tests {
     // ----- oracle parity -----
 
     #[test]
-    fn verify_rent_jvm_fixtures_expose_block_unit_divergence() {
+    fn verify_rent_jvm_fixtures_block_costs_match() {
         for case in fixtures()
             .into_iter()
-            .filter(|case| case["known_divergence"] == true)
+            .filter(|case| case["expected"]["rent_block_cost"] == 50)
         {
             let result = actual(&case["request"]);
             assert_eq!(case["expected"]["rent_block_cost"], 50);
             assert_eq!(result["verdict"], case["expected"]["verdict"]);
-            assert_eq!(result["rent_block_cost"], 5);
-            assert_ne!(
+            assert_eq!(
+                result["rent_block_cost"],
+                case["expected"]["rent_block_cost"]
+            );
+            assert_eq!(
                 result["total_block_cost"],
                 case["expected"]["total_block_cost"]
             );
@@ -468,10 +471,7 @@ mod tests {
 
     #[test]
     fn verify_jvm_fixtures_costs_and_verdicts_match() {
-        for case in fixtures()
-            .into_iter()
-            .filter(|case| case["known_divergence"] != true)
-        {
+        for case in fixtures() {
             let result = actual(&case["request"]);
             assert_eq!(
                 comparable(&result.to_string()),
