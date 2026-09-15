@@ -11,14 +11,14 @@ Source ledger: sigmastate `v6.0.2 23dd29f612249c169d09fae9bca76d7cc02e144c`, erg
 | OP | 98 | 0 | 0 | 3 | 101 |
 | METHOD | 62 | 0 | 0 | 0 | 62 |
 | EVAL | 23 | 0 | 0 | 1 | 24 |
-| INTERP | 11 | 0 | 1 | 0 | 12 |
-| ROUND | 2 | 0 | 1 | 0 | 3 |
+| INTERP | 11 | 1 | 0 | 0 | 12 |
+| ROUND | 2 | 1 | 0 | 0 | 3 |
 | ORDER | 8 | 0 | 0 | 0 | 8 |
 | LIMIT | 3 | 0 | 0 | 0 | 3 |
 | TX | 6 | 0 | 0 | 0 | 6 |
 | BLOCK | 8 | 0 | 0 | 0 | 8 |
 | VERSION | 9 | 0 | 0 | 1 | 10 |
-| **all** | 230 | 0 | 2 | 5 | 237 |
+| **all** | 230 | 2 | 0 | 5 | 237 |
 
 States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test with an independent oracle; DIVERGENT = confirmed mismatch, fix pending; N-A = reviewed rationale in note.
 
@@ -235,7 +235,7 @@ States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test w
 | `INTERP-crypto-dht` | OPEN | ProveDHTuple = 10 + 6450 + 680 = 7140 | `ergo-sigma/src/crypto_cost.rs:34` | L1,L2 | — |  |
 | `INTERP-crypto-conjunction` | OPEN | CAND/COR: ToBytes_Conjunction 15 + children | `ergo-sigma/src/crypto_cost.rs:41` | L1,L2 | — |  |
 | `INTERP-crypto-threshold` | OPEN | Interpreter.scala:580-587 CTHRESHOLD: nCoefs = n - k (NO max(..,1)); ParsePolynomial.cost(nCoefs) + EvaluatePolynomial.cost(nCoefs) * n + ToBytes_ProofTreeConjecture 15 + children | `ergo-sigma/src/crypto_cost.rs:56 (parse_chunks = max(n_coefs, 1))` | L1,L2 | — | SUSPECT divergence: for k == n (nCoefs = 0, reachable via a serialized CTHRESHOLD constant) Scala charges base-only (10 and 3*n), Rust charges one chunk (20 and 6*n). Needs a JVM vector; open DIVERGENT if confirmed. |
-| `INTERP-crypto-trunc` | DIVERGENT | addCryptoCost: estimateCryptoVerifyCost(sb).toBlockCost then addCostChecked(baseCost, cryptoCost, costLimit) | `ergo-sigma/src/reduce.rs:314-327` | L2,L3 | — | CONFIRMED 2026-09-15: Rust adds raw JIT crypto after the snap; remainders (AND 5, OR 5, 2-of-3 3) carry across inputs; JIT-unit limit check rejects at the exact limit where Scala accepts. Fix PR: prerequisite (spec §9). Class: reject-valid / cost-only. |
+| `INTERP-crypto-trunc` | CLOSED | addCryptoCost: estimateCryptoVerifyCost(sb).toBlockCost then addCostChecked(baseCost, cryptoCost, costLimit) | `ergo-sigma/src/reduce.rs:314-327` | L2,L3 | `ergo-validation::it::cost_crypto_truncation::conjunction_two_inputs_block_cost_matches_scala`<br>`ergo-validation::it::cost_crypto_truncation::conjunction_tx_at_exact_scala_limit_accepts` | JVM ErgoTransaction.validateStateful (ergo-core/ergo-wallet/sigma-state 6.0.2): multi_input_conjunction_cost.json, TX-A 15704 and TX-B 22916 block units; recorded C-1/C/C+1 verdicts pass after per-input crypto truncation. Fix: task 0.1 on feat/jit-cost-conformance; PR unavailable (owner forbids pushing). |
 | `INTERP-costlimit-op` | OPEN | CostAccumulator.scala:55 add first, throw iff accumulatedCost > limit (equality allowed; counter already incremented on throw); Interpreter.addCostChecked same operator | `ergo-primitives/src/cost.rs:282-294` | L3 | — | Rust compares in JIT units against limit*10; Scala compares block units — equivalence must be proven per ROUND-snap and INTERP-crypto-trunc |
 | `INTERP-jitcost-bounds` | OPEN | JitCost.+ Math.addExact; fromBlockCost Math.multiplyExact(blockCost,10); Int.MaxValue bound | `ergo-primitives/src/cost.rs:53-162` | L1 | — | Rust returns typed Overflow instead of throwing; unreachable from honest input (pin test exists, Rust-oracled) |
 | `INTERP-toblockcost` | OPEN | JitCost.toBlockCost = value / 10 (Int division) | `ergo-primitives/src/cost.rs:137` | L1,L3 | — |  |
@@ -246,7 +246,7 @@ States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test w
 | id | state | Scala | Rust | layers | tests | note |
 |---|---|---|---|---|---|---|
 | `ROUND-snap-per-input` | OPEN | Interpreter.verify: per-input eval JitCost .toBlockCost before crypto cost | `ergo-primitives/src/cost.rs:312 + ergo-sigma/src/reduce.rs:314` | L2,L3 | — | Rust snap drops delta%10 of the accumulator since baseline; must equal Scala's per-input truncation for every input sequence |
-| `ROUND-crypto-per-input` | DIVERGENT | addCryptoCost .toBlockCost per input | `ergo-sigma/src/reduce.rs:320-327` | L3 | — | same defect as INTERP-crypto-trunc; closes with it |
+| `ROUND-crypto-per-input` | CLOSED | addCryptoCost .toBlockCost per input | `ergo-sigma/src/reduce.rs:320-327` | L3 | `ergo-validation::it::cost_crypto_truncation::conjunction_two_inputs_block_cost_matches_scala`<br>`ergo-validation::it::cost_crypto_truncation::conjunction_tx_at_exact_scala_limit_accepts` | JVM ErgoTransaction.validateStateful (ergo-core/ergo-wallet/sigma-state 6.0.2): multi_input_conjunction_cost.json, TX-A 15704 and TX-B 22916 block units; recorded C-1/C/C+1 verdicts pass after per-input crypto truncation. Fix: task 0.1 on feat/jit-cost-conformance; PR unavailable (owner forbids pushing). |
 | `ROUND-perItem-chunking` | OPEN | PerItemCost.cost(n) = base + perChunk * chunks, chunks = (n-1)/chunkSize + 1 with JVM truncation toward zero; n=0 with chunkSize=1 gives 0 chunks | `ergo-primitives/src/cost.rs:195-222` | L1,L2 | — | per_item_zero_items_chunk_size_one_uses_zero_chunks is Rust-oracled; needs a JVM vector at n=0 for chunk_size 1 and >=2 |
 
 ## ORDER

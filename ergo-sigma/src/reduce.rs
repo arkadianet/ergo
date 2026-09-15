@@ -315,15 +315,19 @@ pub fn verify_spending_proof_with_context_and_cost(
     #[cfg(feature = "cost-trace")]
     super::cost_trace::record_snap(before_snap, cost.total().value());
 
-    // AOT: charge crypto verification cost based on the reduced sigma proposition.
+    // Scala `Interpreter.addCryptoCost` adds `estimateCryptoVerifyCost(sb).toBlockCost`,
+    // i.e. the per-input crypto JitCost is truncated to a block-unit multiple before it
+    // joins the running total. Adding the raw JitCost would carry the remainder into
+    // the next input's snap baseline and into the JIT-unit limit check.
     let crypto_cost = super::crypto_cost::estimate_crypto_cost(&proposition);
+    let crypto_cost_snapped = JitCost::from_jit_block_aligned(crypto_cost);
     #[cfg(feature = "cost-trace")]
     super::cost_trace::record(
-        format!("Crypto:{}", crypto_cost.value()),
-        crypto_cost.value(),
-        cost.total().value() + crypto_cost.value(),
+        format!("Crypto:{}", crypto_cost_snapped.value()),
+        crypto_cost_snapped.value(),
+        cost.total().value() + crypto_cost_snapped.value(),
     );
-    cost.add(crypto_cost)
+    cost.add(crypto_cost_snapped)
         .map_err(|e| VerifySpendingError::Eval(e.into()))?;
 
     super::verify::verify_sigma_proof(&proposition, proof_bytes, bytes_to_sign)
