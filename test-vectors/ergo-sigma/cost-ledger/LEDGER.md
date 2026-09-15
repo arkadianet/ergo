@@ -15,10 +15,10 @@ Source ledger: sigmastate `v6.0.2 23dd29f612249c169d09fae9bca76d7cc02e144c`, erg
 | ROUND | 0 | 3 | 0 | 0 | 3 |
 | ORDER | 5 | 12 | 0 | 0 | 17 |
 | LIMIT | 1 | 2 | 0 | 0 | 3 |
-| TX | 5 | 2 | 0 | 1 | 8 |
+| TX | 5 | 2 | 1 | 1 | 9 |
 | BLOCK | 12 | 0 | 0 | 1 | 13 |
 | VERSION | 18 | 5 | 0 | 1 | 24 |
-| **all** | 70 | 202 | 0 | 21 | 293 |
+| **all** | 70 | 202 | 1 | 21 | 294 |
 
 States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test with an independent oracle; DIVERGENT = confirmed mismatch, fix pending; N-A = reviewed rationale in note.
 
@@ -317,6 +317,7 @@ States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test w
 | `TX-accumulator-shared` | CLOSED | ergo-core/src/main/scala/org/ergoplatform/modifiers/mempool/ErgoTransaction.scala:153; all inputs of a tx accumulate into one running cost | `ergo-validation/src/tx/script/mod.rs:89-324` | L3 | `ergo-validation::it::cost_sweeps::cost_sweeps_all_classes_match_jvm` | Imported TX-A/TX-B and fresh nonzero-accumulator JVM validateStateful sweeps compare full transaction totals and independent boundary verdicts across multiple inputs. |
 | `TX-verifier-failure-sentinel-T009` | OPEN | ergo-core/src/main/scala/org/ergoplatform/modifiers/mempool/ErgoTransaction.scala:140 | `unverified` | L3,L5 | — | T009: verifier Failure yields false and maxCost+1 as a rejection sentinel. Subsequent script and accumulated-cost checks reject; this sentinel is not an accepted execution cost. |
 | `TX-statefulValidity-narrowing-T012` | N-A | ergo-core/src/main/scala/org/ergoplatform/modifiers/mempool/ErgoTransaction.scala:449 | `unverified` | L1 | — | T012: convenience statefulValidity converts successful Long cost with ordinary toInt. Block validation calls validateStateful directly and retains Long, so this narrowing is outside the requested block-validation accounting path. |
+| `TX-l4-range-voted-params` | DIVERGENT | ergo v6.0.5 src/main/scala/org/ergoplatform/settings/Parameters.scala; test-vectors/scripts/scala/ComputeTransactionCosts.scala historical epoch parameters | `ergo-validation/tests/it/cost_parity.rs::ranges::assert_range_parity and run_range` | L4 | — | cost-only: eight mainnet replay transactions accepted by both sides have different init and total block costs; all per-input eval/crypto/rent fields match. The range runner uses ProtocolParams::mainnet_default rather than historical voted input/output costs. Tracking: feat/jit-cost-conformance task 5.1; test-vectors/ergo-sigma/cost-ledger/results/l4-2026-09-16.json contains all eight tx IDs, per-input diffs and source hashes. Follow-up must thread voted parameters and rerun the complete selection; no silent baseline. Rust-minus-JVM totals: 750000 -3, 889000 -2933, 900000 -2526, 1000000 -659, 1100000 -2119, 1300000 -505, 1500000 -1826, 1750000 -605 block units. The runner also fixes its accumulator limit at 1000000; this separate coverage limitation is not claimed as an observed divergence. |
 
 ## BLOCK
 
