@@ -712,6 +712,7 @@
       ],
       "input_vectors" : [
       ],
+      "note" : "Whole-file SHA-256 is recorded in scala-constants.json.sha256 (avoids self-reference).",
       "output" : {
         "file" : "test-vectors/ergo-sigma/cost-ledger/scala-constants.json",
         "hash_scope" : "UTF-8 circe spaces2 sorted-key JSON excluding manifest and final newline (avoids self-reference)",

@@ -20,6 +20,7 @@ import org.ergoplatform.sdk.wallet.secrets.DlogSecretKey
 import org.ergoplatform.wallet.interpreter.{ErgoInterpreter, ErgoProvingInterpreter}
 import scorex.util.{bytesToId}
 import scorex.util.encode.Base16
+import sigma.exceptions.CostLimitException
 import sigma.Colls
 import sigma.ast.{ErgoTree, SigmaPropConstant}
 import sigma.serialization.GroupElementSerializer
@@ -27,7 +28,8 @@ import sigma.data.{CAND, CTHRESHOLD, SigmaBoolean, CGroupElement}
 import sigmastate.crypto.DLogProtocol.DLogProverInput
 import sigmastate.eval.CPreHeader
 import sigmastate.interpreter.Interpreter
-import scala.util.{Success, Failure}
+import sigmastate.interpreter.Interpreter.{ScriptEnv, VerificationResult}
+import scala.util.{Success, Failure, Try}
 
 object CryptoCostOracle extends PowSchemeReaders with ModifierIdReader with SettingsReaders {
   def main(args: Array[String]): Unit = {
@@ -57,17 +59,31 @@ object CryptoCostOracle extends PowSchemeReaders with ModifierIdReader with Sett
         IndexedSeq.empty, IndexedSeq(new ErgoBoxCandidate(n * 1000000000L, outTree, 1000000)))
       val signed = prover.sign(unsigned, boxes, IndexedSeq.empty, context(1000000)).get
       val tx = ErgoTransaction(signed.inputs, signed.dataInputs, signed.outputCandidates)
+      def isCostLimit(error: Throwable): Boolean =
+        Iterator.iterate(error)(_.getCause).takeWhile(_ != null)
+          .exists(_.isInstanceOf[CostLimitException])
       def validate(limit: Int) = {
-        implicit val verifier: ErgoInterpreter = new ErgoInterpreter(params(limit))
-        tx.validateStateful(boxes, IndexedSeq.empty, context(limit), accumulatedCost = 0L).result.toTry
+        var interpreterCostFailure = false
+        implicit val verifier: ErgoInterpreter = new ErgoInterpreter(params(limit)) {
+          override def verify(env: ScriptEnv, exp: ErgoTree, context: CTX,
+                              proof: Array[Byte], message: Array[Byte]): Try[VerificationResult] = {
+            val result = super.verify(env, exp, context, proof, message)
+            // Transaction validation embeds this failure in text and drops its cause chain.
+            result.failed.foreach(error => interpreterCostFailure ||= isCostLimit(error))
+            result
+          }
+        }
+        val result = tx.validateStateful(boxes, IndexedSeq.empty, context(limit), accumulatedCost = 0L).result.toTry
+        (result, interpreterCostFailure)
       }
-      val cost = validate(1000000).get
+      val cost = validate(1000000)._1.get
       val sweep = Seq(cost - 1, cost, cost + 1).map { limit =>
-        val (verdict, detail) = validate(limit.toInt) match {
+        val (result, interpreterCostFailure) = validate(limit.toInt)
+        val (verdict, detail) = result match {
           case Success(_) => ("Accept", "")
           case Failure(e) =>
             val detail = e.toString
-            require(detail.toLowerCase.contains("cost"), detail)
+            require(interpreterCostFailure || isCostLimit(e), detail)
             ("RejectCost", detail)
         }
         Json.obj("limit" -> Json.fromLong(limit), "verdict" -> Json.fromString(verdict),
