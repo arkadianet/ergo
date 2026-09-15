@@ -16,9 +16,9 @@ Source ledger: sigmastate `v6.0.2 23dd29f612249c169d09fae9bca76d7cc02e144c`, erg
 | ORDER | 5 | 12 | 0 | 0 | 17 |
 | LIMIT | 1 | 2 | 0 | 0 | 3 |
 | TX | 1 | 7 | 0 | 2 | 10 |
-| BLOCK | 12 | 0 | 0 | 1 | 13 |
+| BLOCK | 11 | 1 | 0 | 1 | 13 |
 | VERSION | 17 | 6 | 0 | 1 | 24 |
-| **all** | 65 | 208 | 0 | 22 | 295 |
+| **all** | 64 | 209 | 0 | 22 | 295 |
 
 States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test with an independent oracle; DIVERGENT = confirmed mismatch, fix pending; N-A = reviewed rationale in note.
 
@@ -327,7 +327,7 @@ States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test w
 | `BLOCK-per-tx-cap` | OPEN | ergo-core/src/main/scala/org/ergoplatform/modifiers/mempool/ErgoTransaction.scala:391; each tx validated with maxCost = maxBlockCost and accumulatedCost = block running total | `ergo-validation/src/block/validate.rs:311,611 (fresh accumulator, cap = full block limit)` | L5 | — |  |
 | `BLOCK-accum-equiv` | OPEN | src/main/scala/org/ergoplatform/nodeView/state/ErgoState.scala:140; running accumulatedCost passed into every validateStateful | `fresh per-tx accumulator + deferred sum (validate.rs:339,681)` | L3,L5 | — | prove: for every block and every limit, Scala's prefix check and Rust's (per-tx ≤ cap ∧ sum ≤ cap) yield the same verdict; monotone non-negative costs make them equal in block units, but JIT-unit remainders break it until INTERP-crypto-trunc is fixed |
 | `BLOCK-sum-op` | OPEN | reject iff accumulated block cost > maxBlockCost (equality allowed) — ergo-core/src/main/scala/org/ergoplatform/modifiers/mempool/ErgoTransaction.scala:377,394 via ErgoState.execTransactions | `ergo-validation/src/block/validate.rs:339,681` | L5,L6 | — |  |
-| `BLOCK-parallel-equiv` | OPEN | src/main/scala/org/ergoplatform/nodeView/state/ErgoState.scala:140; sequential Scala reference only; Rust-internal equivalence obligation under design spec section 4. | `ergo-validation/src/block/validate.rs:748 validate_full_block_parallel_with_costs` | L5 | — | Keep OPEN: parallel Rust validator must match sequential (sum_block_cost, verdict, failure_class) on every fixture; no independent Scala parallel charge. |
+| `BLOCK-parallel-equiv` | CLOSED | src/main/scala/org/ergoplatform/nodeView/state/ErgoState.scala:140; sequential Scala reference only; Rust-internal equivalence obligation under design spec section 4. | `ergo-validation/src/block/validate.rs:765 validate_full_block_parallel_with_costs` | L5 | `ergo-validation::it::cost_block_fixtures::block_fixtures_both_validators_match_jvm` | Both Rust validators match the pinned JVM accepted P2PK block (12503), including observed per-tx sums, with authenticated synthetic parent replay. The runner covers every tracked block fixture; the current corpus is one accepted transaction. Rejection mappings, multi-tx layering and boundary fixtures remain separate obligations. |
 | `BLOCK-overflow` | OPEN | ergo-core/src/main/scala/org/ergoplatform/modifiers/mempool/ErgoTransaction.scala:370; addExact/multiplyExact throw ArithmeticException → block invalid | `typed JitCostOverflow / saturating init arithmetic` | L5 | — | unreachable from honest input; prove both sides reject (not accept) if ever reached |
 | `BLOCK-rejection-state-unchanged` | OPEN | src/main/scala/org/ergoplatform/nodeView/state/UtxoState.scala:209; failed applyModifier leaves state unchanged | `ergo-state apply path` | L6 | — | devnet before/after state commitments |
 | `BLOCK-param-voting` | OPEN | 16,384 is a threshold tested against the **current** maxBlockCost before lowering, not a clamp on the proposed value. Generic step is `max(1,current/100)`. `ergo-core/src/main/scala/org/ergoplatform/settings/Parameters.scala:170`, `:176`, `:354`. | `ergo-validation/src/voting/` | L4,L5 | — | cost parameters reach the accounting through this path; L4 boundary ranges exercise it |
