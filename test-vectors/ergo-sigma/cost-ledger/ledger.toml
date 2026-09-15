@@ -1,0 +1,301 @@
+# JIT-cost conformance ledger — AUTHORITATIVE (LEDGER.md is rendered from this file).
+#
+# One row per Scala cost obligation on the block-validation path. A row is CLOSED only
+# when a named test, backed by an independent oracle (JVM extract, JVM verdict, or
+# mainnet bytes), passes and carries a `// ledger: <id>` comment. Tests whose expected
+# value is computed by Rust code cannot close a row.
+#
+# Categories: OP (opcode costKind), METHOD (SMethod cost), EVAL (evaluator charge not a
+# costKind), INTERP (Interpreter-level), TX (ErgoTransaction-level), BLOCK (state-level),
+# ORDER (charge-order deviation to prove verdict-neutral), ROUND (truncation/snap),
+# LIMIT (comparison against a budget), VERSION (activation/version branch).
+# States: OPEN | CLOSED | DIVERGENT | N-A (N-A needs a reviewed rationale in `note`).
+# Layers: L1 source pin, L2 per-op JVM fixture, L3 boundary sweep, L4 mainnet replay,
+# L5 block fixture, L6 mixed devnet.
+#
+# Scala anchors: sigmastate v6.0.2 (23dd29f6) and ergo v6.0.2 (2cdbb8cf). Paths are
+# relative to those checkouts. Line numbers are filled by the L1 extractor task; rows
+# created from the Rust side carry the Scala symbol name until then.
+#
+# Rust anchors: this repo at the ledger's last-updated commit.
+
+# ---------------------------------------------------------------------------------------
+# OP — per-opcode costKind (ergo-sigma/src/cost_table.rs::opcode_cost)
+# ---------------------------------------------------------------------------------------
+rows = [
+  {id="OP-0x72", cat="OP", scala="ValUse.costKind FixedCost(5)", rust="ergo-sigma/src/cost_table.rs:31", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x73", cat="OP", scala="ConstantPlaceholder.costKind FixedCost(1)", rust="ergo-sigma/src/cost_table.rs:32", layer="L1,L2", state="OPEN", tests=[], note="charged before bounds check (ORDER-constplaceholder)"},
+  {id="OP-0x74", cat="OP", scala="SubstConstants.costKind PerItemCost(100,100,1)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x7A", cat="OP", scala="LongToByteArray.costKind FixedCost(17)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x7B", cat="OP", scala="ByteArrayToBigInt.costKind FixedCost(30)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x7C", cat="OP", scala="ByteArrayToLong.costKind FixedCost(16)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x7D", cat="OP", scala="Downcast.costKind TypeBasedCost (10 / 30 BigInt-family)", rust="ergo-sigma/src/evaluator/opcodes/cast.rs:16", layer="L1,L2", state="OPEN", tests=[], note="dynamic; table Fixed(10) is not the whole rule"},
+  {id="OP-0x7E", cat="OP", scala="Upcast.costKind TypeBasedCost (10 / 30 BigInt-family)", rust="ergo-sigma/src/evaluator/opcodes/cast.rs:16", layer="L1,L2", state="OPEN", tests=[], note="dynamic"},
+  {id="OP-0x7F", cat="OP", scala="TrueLeaf.costKind FixedCost(5)", rust="ergo-sigma/src/cost_table.rs:34", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x80", cat="OP", scala="FalseLeaf.costKind FixedCost(5)", rust="ergo-sigma/src/cost_table.rs:35", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x81", cat="OP", scala="UnitConstant — no serializer registration", rust="ergo-sigma/src/cost_table.rs:161", layer="L1", state="N-A", tests=[], note="unreachable from wire bytes; parser rejects bare opcode (costing.md §4)"},
+  {id="OP-0x82", cat="OP", scala="GroupGenerator.costKind FixedCost(10)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x83", cat="OP", scala="ConcreteCollection.costKind FixedCost(20)", rust="ergo-sigma/src/cost_table.rs:36", layer="L1,L2", state="OPEN", tests=[], note="candidate: JVM-verbatim vector test-vectors/scala/bool_collection_logical_cost.json (difftest regressions) — annotate with `// ledger:` to close"},
+  {id="OP-0x85", cat="OP", scala="ConcreteCollectionBooleanConstant shares ConcreteCollection.costKind", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x86", cat="OP", scala="Tuple.costKind FixedCost(15)", rust="ergo-sigma/src/cost_table.rs:37", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x87-0x8B", cat="OP", scala="Select1..Select5 — no serializer registration", rust="ergo-sigma/src/cost_table.rs:39", layer="L1", state="N-A", tests=[], note="only SelectField (0x8C) is registered; unreachable"},
+  {id="OP-0x8C", cat="OP", scala="SelectField.costKind FixedCost(10)", rust="ergo-sigma/src/cost_table.rs:38", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x8F", cat="OP", scala="LT.costKind FixedCost(20)", rust="ergo-sigma/src/cost_table.rs:45", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x90", cat="OP", scala="LE.costKind FixedCost(20)", rust="ergo-sigma/src/cost_table.rs:46", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x91", cat="OP", scala="GT.costKind FixedCost(20)", rust="ergo-sigma/src/cost_table.rs:47", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x92", cat="OP", scala="GE.costKind FixedCost(20)", rust="ergo-sigma/src/cost_table.rs:48", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x93", cat="OP", scala="EQ — DynamicCost via DataValueComparer.equalDataValues", rust="ergo-sigma/src/evaluator/cost.rs::eq_with_cost", layer="L2", state="OPEN", tests=[], note="no static row; see EVAL-eq-*"},
+  {id="OP-0x94", cat="OP", scala="NEQ — DynamicCost, same as EQ", rust="ergo-sigma/src/evaluator/cost.rs::eq_with_cost", layer="L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x95", cat="OP", scala="If.costKind FixedCost(10)", rust="ergo-sigma/src/cost_table.rs:61", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x96", cat="OP", scala="AND.costKind PerItemCost(10,5,32)", rust="ergo-sigma/src/cost_table.rs:62", layer="L1,L2", state="OPEN", tests=[], note="candidate: bool_collection_logical_cost.json — annotate to close"},
+  {id="OP-0x97", cat="OP", scala="OR.costKind PerItemCost(5,5,64)", rust="ergo-sigma/src/cost_table.rs:63", layer="L1,L2", state="OPEN", tests=[], note="candidate: bool_collection_logical_cost.json — annotate to close"},
+  {id="OP-0x98", cat="OP", scala="AtLeast.costKind PerItemCost(20,3,5) via addSeqCost over children", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x99", cat="OP", scala="Minus FixedCost(15) / BigInt 20 (TypeBased)", rust="ergo-sigma/src/cost_table.rs:69,231", layer="L1,L2", state="OPEN", tests=[], note="arith_cost dynamic"},
+  {id="OP-0x9A", cat="OP", scala="Plus FixedCost(15) / BigInt 20", rust="ergo-sigma/src/cost_table.rs:68,231", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x9B", cat="OP", scala="Xor(byte arrays).costKind PerItemCost(10,2,128)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note="also reached via Global.xor (106,2)"},
+  {id="OP-0x9C", cat="OP", scala="Multiply FixedCost(15) / BigInt 25", rust="ergo-sigma/src/cost_table.rs:70,233", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x9D", cat="OP", scala="Division FixedCost(15) / BigInt 25", rust="ergo-sigma/src/cost_table.rs:71,233", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x9E", cat="OP", scala="Modulo FixedCost(15) / BigInt 25", rust="ergo-sigma/src/cost_table.rs:72,233", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0x9F", cat="OP", scala="Exponentiate.costKind FixedCost(900)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note="also GroupElement.exp method (7,6); 6.0.6 'audit Exponentiate' commit in reconciliation"},
+  {id="OP-0xA0", cat="OP", scala="MultiplyGroup.costKind FixedCost(40)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xA1", cat="OP", scala="Min FixedCost(5) / BigInt 10", rust="ergo-sigma/src/cost_table.rs:73,235", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xA2", cat="OP", scala="Max FixedCost(5) / BigInt 10", rust="ergo-sigma/src/cost_table.rs:74,235", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xA3", cat="OP", scala="Height.costKind FixedCost(26)", rust="ergo-sigma/src/cost_table.rs:78", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xA4", cat="OP", scala="Inputs.costKind FixedCost(10)", rust="ergo-sigma/src/cost_table.rs:79", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xA5", cat="OP", scala="Outputs.costKind FixedCost(10)", rust="ergo-sigma/src/cost_table.rs:80", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xA6", cat="OP", scala="LastBlockUtxoRootHash.costKind FixedCost(15)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2,L4", state="OPEN", tests=[], note="L4 context currently approximates prevStateRoot (PROVISIONING.md)"},
+  {id="OP-0xA7", cat="OP", scala="Self.costKind FixedCost(10)", rust="ergo-sigma/src/cost_table.rs:81", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xAC", cat="OP", scala="MinerPubkey.costKind FixedCost(20)", rust="ergo-sigma/src/cost_table.rs:82", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xAD", cat="OP", scala="MapCollection.costKind PerItemCost(20,1,10)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note="+AddToEnv per element (EVAL-addtoenv)"},
+  {id="OP-0xAE", cat="OP", scala="Exists.costKind PerItemCost(3,1,10)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xAF", cat="OP", scala="ForAll.costKind PerItemCost(3,1,10)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xB0", cat="OP", scala="Fold.costKind PerItemCost(3,1,10)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xB1", cat="OP", scala="SizeOf.costKind FixedCost(14)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xB2", cat="OP", scala="ByIndex.costKind FixedCost(30)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xB3", cat="OP", scala="Append.costKind PerItemCost(20,2,100)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xB4", cat="OP", scala="Slice.costKind PerItemCost(10,2,100)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xB5", cat="OP", scala="Filter.costKind PerItemCost(20,1,10)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xB6", cat="OP", scala="CreateAvlTree.costKind = notSupportedError", rust="ergo-sigma/src/evaluator/opcodes/errors.rs:90", layer="L1,L2", state="OPEN", tests=[], note="zero-cost reject; prove no charge before the error"},
+  {id="OP-0xB7", cat="OP", scala="TreeLookup.costKind = notSupportedError", rust="ergo-sigma/src/evaluator/opcodes/errors.rs:90", layer="L1,L2", state="OPEN", tests=[], note="zero-cost reject"},
+  {id="OP-0xC1", cat="OP", scala="ExtractAmount.costKind FixedCost(8)", rust="ergo-sigma/src/cost_table.rs:87", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xC2", cat="OP", scala="ExtractScriptBytes.costKind FixedCost(10)", rust="ergo-sigma/src/cost_table.rs:88", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xC3", cat="OP", scala="ExtractBytes.costKind FixedCost(12)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xC4", cat="OP", scala="ExtractBytesWithNoRef.costKind FixedCost(12)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xC5", cat="OP", scala="ExtractId.costKind FixedCost(12)", rust="ergo-sigma/src/cost_table.rs:89", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xC6", cat="OP", scala="ExtractRegisterAs.costKind FixedCost(50)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note="also charged by Box.getReg methods (99,7)/(99,19)"},
+  {id="OP-0xC7", cat="OP", scala="ExtractCreationInfo.costKind FixedCost(16)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xCB", cat="OP", scala="CalcBlake2b256.costKind PerItemCost(20,7,128)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xCC", cat="OP", scala="CalcSha256.costKind PerItemCost(80,8,64)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xCD", cat="OP", scala="CreateProveDlog.costKind FixedCost(10)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xCE", cat="OP", scala="CreateProveDHTuple.costKind FixedCost(20)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xCF", cat="OP", scala="SigmaPropIsProven = notSupportedError", rust="ergo-sigma/src/evaluator/opcodes/errors.rs:90", layer="L1", state="OPEN", tests=[], note="zero-cost reject"},
+  {id="OP-0xD0", cat="OP", scala="SigmaPropBytes.costKind PerItemCost(35,6,1)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xD1", cat="OP", scala="BoolToSigmaProp.costKind FixedCost(15)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note="also the implicit v3 Bool-root coercion (VERSION-v3-bool-root)"},
+  {id="OP-0xD4", cat="OP", scala="DeserializeContext.costKind PerItemCost(1,10,128)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note="+ INTERP-deser-subst init cost; + EVAL-hasdeserialize fork"},
+  {id="OP-0xD5", cat="OP", scala="DeserializeRegister.costKind PerItemCost(1,10,128)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xD6", cat="OP", scala="ValDef — AddToEnvironment FixedCost(5) per BlockValue item", rust="ergo-sigma/src/evaluator/opcodes/binding.rs:81", layer="L1,L2", state="OPEN", tests=[], note="charged AFTER rhs eval (ORDER-blockvalue-valdef)"},
+  {id="OP-0xD7", cat="OP", scala="FunDef standalone = notSupportedError", rust="ergo-sigma/src/evaluator/opcodes/errors.rs:90", layer="L1", state="OPEN", tests=[], note="zero-cost reject"},
+  {id="OP-0xD8", cat="OP", scala="BlockValue.costKind PerItemCost(1,1,10)", rust="ergo-sigma/src/evaluator/opcodes/binding.rs:76", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xD9", cat="OP", scala="FuncValue.costKind FixedCost(5)", rust="ergo-sigma/src/evaluator/opcodes/binding.rs:222", layer="L1,L2", state="OPEN", tests=[], note="creation only"},
+  {id="OP-0xDA", cat="OP", scala="Apply.costKind FixedCost(30) + AddToEnvironment(5) per call", rust="ergo-sigma/src/evaluator/opcodes/binding.rs:265,295", layer="L1,L2", state="OPEN", tests=[], note="codex enumeration: FuncApplyCode belongs to Apply"},
+  {id="OP-0xDB", cat="OP", scala="PropertyCall.costKind FixedCost(4)", rust="ergo-sigma/src/evaluator/opcodes/property_call.rs:38", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xDC", cat="OP", scala="MethodCall.costKind FixedCost(4)", rust="ergo-sigma/src/evaluator/opcodes/method_call/mod.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xDD", cat="OP", scala="Global.costKind FixedCost(5)", rust="ergo-sigma/src/cost_table.rs:84", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xDF", cat="OP", scala="NoneValue — no serializer registration", rust="ergo-sigma/src/cost_table.rs:110", layer="L1", state="N-A", tests=[], note="flows through constant encoding; bare opcode rejected by parser"},
+  {id="OP-0xE3", cat="OP", scala="GetVar.costKind FixedCost(10)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note="also Context.getVarFromInput (101,12) charges this row"},
+  {id="OP-0xE4", cat="OP", scala="OptionGet.costKind FixedCost(15)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xE5", cat="OP", scala="OptionGetOrElse.costKind FixedCost(20)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xE6", cat="OP", scala="OptionIsDefined.costKind FixedCost(10)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xE7-0xE9", cat="OP", scala="ModQ / PlusModQ / MinusModQ = notSupportedError", rust="ergo-sigma/src/evaluator/opcodes/errors.rs:90", layer="L1", state="OPEN", tests=[], note="zero-cost reject"},
+  {id="OP-0xEA", cat="OP", scala="SigmaAnd.costKind PerItemCost(10,2,1)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xEB", cat="OP", scala="SigmaOr.costKind PerItemCost(10,2,1)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xEC", cat="OP", scala="BinOr.costKind FixedCost(20)", rust="ergo-sigma/src/cost_table.rs:64", layer="L1,L2", state="OPEN", tests=[], note="short-circuit: right operand uncosted when left is true"},
+  {id="OP-0xED", cat="OP", scala="BinAnd.costKind FixedCost(20)", rust="ergo-sigma/src/cost_table.rs:65", layer="L1,L2", state="OPEN", tests=[], note="short-circuit"},
+  {id="OP-0xEE", cat="OP", scala="DecodePoint.costKind FixedCost(300)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xEF", cat="OP", scala="LogicalNot.costKind FixedCost(15)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2,L4", state="OPEN", tests=[], note="was Fixed(20): found by cost_parity 889k (trace_mismatch_889k.rs); fixed; needs a tracked independent vector to CLOSE"},
+  {id="OP-0xF0", cat="OP", scala="Negation.costKind FixedCost(30)", rust="ergo-sigma/src/cost_table.rs:75", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xF1", cat="OP", scala="BitInversion = notSupportedError", rust="ergo-sigma/src/evaluator/opcodes/errors.rs:90", layer="L1", state="OPEN", tests=[], note="zero-cost reject"},
+  {id="OP-0xF2", cat="OP", scala="BitOr.costKind FixedCost(1) then not-supported", rust="ergo-sigma/src/cost_table.rs:182", layer="L1,L2", state="OPEN", tests=[], note="charge-then-reject"},
+  {id="OP-0xF3", cat="OP", scala="BitAnd.costKind FixedCost(1) then not-supported", rust="ergo-sigma/src/cost_table.rs:182", layer="L1,L2", state="OPEN", tests=[], note="charge-then-reject"},
+  {id="OP-0xF4", cat="OP", scala="BinXor.costKind FixedCost(20)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xF5", cat="OP", scala="BitXor.costKind FixedCost(1) then not-supported", rust="ergo-sigma/src/cost_table.rs:182", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xF6", cat="OP", scala="BitShiftRight.costKind FixedCost(1) then not-supported", rust="ergo-sigma/src/cost_table.rs:182", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xF7", cat="OP", scala="BitShiftLeft.costKind FixedCost(1) then not-supported", rust="ergo-sigma/src/cost_table.rs:182", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xF8", cat="OP", scala="BitShiftRightZeroed.costKind FixedCost(1) then not-supported", rust="ergo-sigma/src/cost_table.rs:182", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xFE", cat="OP", scala="Context.costKind FixedCost(1)", rust="ergo-sigma/src/cost_table.rs:83", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="OP-0xFF", cat="OP", scala="XorOf.costKind PerItemCost(20,5,32)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+
+  # -------------------------------------------------------------------------------------
+  # EVAL — evaluator charges that are not a node costKind
+  # -------------------------------------------------------------------------------------
+  {id="EVAL-const-inline", cat="EVAL", scala="Constant.costKind FixedCost(5) (values.scala)", rust="ergo-sigma/src/evaluator/dispatch.rs:321", layer="L1,L2", state="OPEN", tests=[], note="candidate: bool_collection_logical_cost.json (20 + 5*n) — annotate to close"},
+  {id="EVAL-hasdeserialize-fork", cat="EVAL", scala="Interpreter.fullReduction: ErgoTree.hasDeserialize → toProposition(inline constants) + EmptyConstants; +4 per constant ref", rust="ergo-sigma/src/evaluator/dispatch.rs:107-315", layer="L2", state="OPEN", tests=[], note="dead-branch deserialize nodes still trigger the fork"},
+  {id="EVAL-addtoenv", cat="EVAL", scala="AddToEnvironment FixedCost(5) per HOF element / per Apply", rust="ergo-sigma/src/evaluator/opcodes/collection.rs:285", layer="L2", state="OPEN", tests=[], note=""},
+  {id="EVAL-numeric-cast", cat="EVAL", scala="Upcast/Downcast TypeBasedCost: 30 when target SBigInt/SUnsignedBigInt else 10", rust="ergo-sigma/src/evaluator/opcodes/cast.rs:16", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="EVAL-arith-bigint", cat="EVAL", scala="ArithOp TypeBasedCost: BigInt +/- 20, * / % 25, min/max 10", rust="ergo-sigma/src/cost_table.rs:215-242", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="EVAL-eq-prim", cat="EVAL", scala="DataValueComparer EQ_Prim = 3 (dispatch embedded)", rust="ergo-sigma/src/cost_table.rs:246", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="EVAL-eq-matchtype", cat="EVAL", scala="DataValueComparer MatchType = 1", rust="ergo-sigma/src/cost_table.rs:245", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="EVAL-eq-tuple", cat="EVAL", scala="EQ_Tuple = 4 then element recursion", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="EVAL-eq-groupelement", cat="EVAL", scala="EQ_GroupElement = 172", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="EVAL-eq-bigint", cat="EVAL", scala="EQ_BigInt = 5 (BigInt, UnsignedBigInt)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="EVAL-eq-avltree", cat="EVAL", scala="EQ_AvlTree = 6", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="EVAL-eq-box", cat="EVAL", scala="EQ_Box = 6", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="EVAL-eq-option", cat="EVAL", scala="EQ_Option = 4 then inner recursion on (Some,Some)", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="EVAL-eq-preheader", cat="EVAL", scala="EQ_PreHeader = 4", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="EVAL-eq-header", cat="EVAL", scala="EQ_Header = 6", rust="ergo-sigma/src/cost_table.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="EVAL-eq-coll-descriptor", cat="EVAL", scala="EQ_COA_* descriptors: Bool/Byte(15,2,128) Short(15,2,96) Int(15,2,64) Long(15,2,48) BigInt(15,7,5) GroupElement/Box/Header(15,5,1) AvlTree(15,5,2) PreHeader(15,3,1)", rust="ergo-sigma/src/cost_table.rs:321-374", layer="L1,L2", state="OPEN", tests=[], note="SUSPECT divergence: Scala equalCOA_Prim (DataValueComparer.scala:159-176) returns i = items ACTUALLY compared (stops at first mismatch) as the addSeqCost item count; costing.md §6.2 and Rust charge the FULL length. Also String equality uses EQ_COA_Short over len (DataValueComparer.scala:403), not the Coll[Byte] descriptor. Needs JVM vectors with an early mismatch."},
+  {id="EVAL-eq-coll-sigmaprop-descriptor", cat="EVAL", scala="no Scala descriptor for Coll[SigmaProp]", rust="ergo-sigma/src/evaluator/cost.rs:250", layer="L2", state="OPEN", tests=[], note="Rust keeps (15,5,1) 'pending a vector' — must be proven or removed"},
+  {id="EVAL-eq-coll-fallback", cat="EVAL", scala="equalColls fallback: per-element equalDataValues, stop at first unequal, then EQ_Coll PerItemCost(10,2,1) over compared count", rust="ergo-sigma/src/evaluator/cost.rs:428-471", layer="L2", state="OPEN", tests=[], note=""},
+  {id="EVAL-eq-tokens", cat="EVAL", scala="Coll[(Coll[Byte],Long)] expansion: MatchType, PerItem(10,2,1), per element EQ_Tuple + 2 MatchType + (15,2,128)@32 + EQ_Prim", rust="ergo-sigma/src/cost_table.rs:375-395", layer="L2", state="OPEN", tests=[], note="finding #16 (token-eq cost) fixed here"},
+  {id="EVAL-eq-sigmaboolean", cat="EVAL", scala="DataValueComparer.equalSigmaBoolean: MatchType per node, EQ_GroupElement per point, DHT short-circuit, conjecture arms throw on mismatch", rust="ergo-sigma/src/evaluator/cost.rs:6-100", layer="L2", state="OPEN", tests=[], note="order-sensitive error behaviour"},
+  {id="EVAL-eq-boxcollection", cat="EVAL", scala="Coll[Box] via lazy carrier: EQ_COA_Box (15,5,1) after MatchType", rust="ergo-sigma/src/evaluator/cost.rs:179-196", layer="L2", state="OPEN", tests=[], note=""},
+  {id="EVAL-max-depth", cat="EVAL", scala="no Scala equivalent (JVM stack)", rust="ergo-sigma/src/evaluator/types.rs:650", layer="L2", state="N-A", tests=[], note="MAX_EVAL_DEPTH=100 is a Rust guard, not a cost; must be proven unreachable for any tree Scala accepts — tracked outside this ledger"},
+  {id="EVAL-avl-cost-height", cat="EVAL", scala="AvlTree cost height = digest trailing byte; 0 when metadata invalid (BatchAVLVerifier requires fail before rootNodeHeight)", rust="ergo-sigma/src/evaluator/cost.rs:477-514", layer="L2", state="OPEN", tests=[], note="one JVM-blessed contains-on-bad-proof vector exists in avl_scala_oracle_parity.rs — name it"},
+
+  # -------------------------------------------------------------------------------------
+  # METHOD — per-method costs (property_call.rs no-arg table + method_call/*.rs)
+  # -------------------------------------------------------------------------------------
+  {id="METHOD-context-dataInputs", cat="METHOD", scala="SContextMethods.dataInputs 15", rust="ergo-sigma/src/evaluator/opcodes/property_call.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-context-headers", cat="METHOD", scala="SContextMethods.headers 15", rust="property_call.rs", layer="L1,L2", state="OPEN", tests=[], note="window-size divergence family #238 resolved separately"},
+  {id="METHOD-context-preHeader", cat="METHOD", scala="SContextMethods.preHeader 15", rust="property_call.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-context-selfBoxIndex", cat="METHOD", scala="SContextMethods.selfBoxIndex 20 (pre-JIT returns -1, sigmastate#603)", rust="property_call.rs", layer="L1,L2", state="OPEN", tests=[], note="VERSION-selfboxindex-bug"},
+  {id="METHOD-context-lastBlockUtxoRootHash", cat="METHOD", scala="SContextMethods.LastBlockUtxoRootHash 15", rust="property_call.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-context-minerPubKey", cat="METHOD", scala="SContextMethods.minerPubKey 20", rust="property_call.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-context-getVarFromInput", cat="METHOD", scala="SContextMethods.getVarFromInput (v6) — charges GetVar cost", rust="method_call/misc.rs:904", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-header-props", cat="METHOD", scala="SHeaderMethods 1..15 property accessors 10 each", rust="property_call.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-header-checkPow", cat="METHOD", scala="SHeaderMethods.checkPow (v6) FixedCost(700)", rust="method_call/misc.rs:183", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-preheader-props", cat="METHOD", scala="SPreHeaderMethods 1..7 accessors 10 each", rust="property_call.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-global-groupGenerator", cat="METHOD", scala="SGlobalMethods.groupGenerator 10", rust="property_call.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-global-xor", cat="METHOD", scala="SGlobalMethods.xor → Xor PerItemCost(10,2,128)", rust="method_call/global.rs:312", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-global-serialize", cat="METHOD", scala="SGlobalMethods.serialize (v6): StartWriterCost 10 + SigmaByteWriter per-put model", rust="method_call/global.rs:333-660", layer="L1,L2", state="OPEN", tests=[], note="per-put model is the largest hand-ported formula; needs many vectors"},
+  {id="METHOD-global-deserializeTo", cat="METHOD", scala="SGlobalMethods.deserializeTo (v6) PerItemCost(100,32,32)", rust="method_call/global.rs:186", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-global-fromBigEndianBytes", cat="METHOD", scala="SGlobalMethods.fromBigEndianBytes (v6) 10", rust="method_call/global.rs:253", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-global-encodeNbits", cat="METHOD", scala="SGlobalMethods.encodeNbits (v6) 25", rust="method_call/global.rs:35", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-global-decodeNbits", cat="METHOD", scala="SGlobalMethods.decodeNbits (v6) 50", rust="method_call/global.rs:55", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-global-powHit", cat="METHOD", scala="SGlobalMethods.powHit (v6) — formula", rust="method_call/global.rs:90-153", layer="L1,L2", state="OPEN", tests=[], note="dynamic pow_cost; formula must be pinned"},
+  {id="METHOD-global-some", cat="METHOD", scala="SGlobalMethods.some (v6) 5", rust="method_call/global.rs:72", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-global-none", cat="METHOD", scala="SGlobalMethods.none (v6) 5", rust="property_call.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-box-tokens", cat="METHOD", scala="SBoxMethods.tokens 15", rust="property_call.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-box-getReg", cat="METHOD", scala="SBoxMethods.getReg (v5 (99,7) and v6 typed (99,19)) — ExtractRegisterAs cost 50", rust="method_call/misc.rs:779,837", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-avl-props", cat="METHOD", scala="SAvlTreeMethods digest/enabledOperations/keyLength/valueLengthOpt/isInsertAllowed/isUpdateAllowed/isRemoveAllowed 15 each", rust="property_call.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-avl-updateOperations", cat="METHOD", scala="SAvlTreeMethods.updateOperations FixedCost(45)", rust="method_call/avl.rs:550", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-avl-updateDigest", cat="METHOD", scala="SAvlTreeMethods.updateDigest FixedCost(40)", rust="method_call/avl.rs:511", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-avl-contains", cat="METHOD", scala="contains: CreateAvlVerifier PerItemCost(110,20,64) over proof len + LookupAvlTree PerItemCost(40,10,1) over height", rust="method_call/avl.rs:62-70", layer="L2", state="OPEN", tests=[], note="avl_scala_oracle_parity.rs has JVM vectors; name the closing tests"},
+  {id="METHOD-avl-get", cat="METHOD", scala="get: same as contains", rust="method_call/avl.rs:129-137", layer="L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-avl-getMany", cat="METHOD", scala="getMany: CreateAvlVerifier + LookupAvlTree per key", rust="method_call/avl.rs:222-230", layer="L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-avl-insert", cat="METHOD", scala="insert: isInsertAllowed 15; CreateAvlVerifier; InsertIntoAvlTree PerItemCost(40,10,1) over max(height,1) per entry; updateDigest_Info 40 on success", rust="method_call/avl.rs:662-700", layer="L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-avl-update", cat="METHOD", scala="update: isUpdateAllowed 15; CreateAvlVerifier; UpdateAvlTree PerItemCost(120,20,1); updateDigest_Info 40", rust="method_call/avl.rs:668-700", layer="L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-avl-insertOrUpdate", cat="METHOD", scala="insertOrUpdate (v6): isUpdateAllowed 15 + isInsertAllowed 15; CreateAvlVerifier; (120,20,1); updateDigest_Info 40", rust="method_call/avl.rs:674-700", layer="L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-avl-remove", cat="METHOD", scala="remove: isRemoveAllowed 15; CreateAvlVerifier; RemoveAvlTree PerItemCost(100,15,1) per key (cfor); digest_Info 15 unconditional; updateDigest_Info 40 on success", rust="method_call/avl.rs:435-467", layer="L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-coll-indices", cat="METHOD", scala="SCollectionMethods.IndicesMethod_CostKind PerItemCost(20,2,16)", rust="property_call.rs:342", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-coll-reverse", cat="METHOD", scala="SCollectionMethods.reverse (v6) PerItemCost(20,2,100)", rust="property_call.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-coll-indexOf", cat="METHOD", scala="indexOf: equalDataValues per iteration + PerItemCost(20,10,2) over iterations", rust="method_call/coll.rs:28-70", layer="L2", state="OPEN", tests=[], note="finding #15 fixed here"},
+  {id="METHOD-coll-zip", cat="METHOD", scala="zip PerItemCost(10,1,10) over xs.length", rust="method_call/coll.rs:89", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-coll-startsEndsWith", cat="METHOD", scala="methods.scala:1143-1158 startsWith/endsWith (v6) Zip_CostKind PerItemCost(10,1,10) over xs.length (RECEIVER length)", rust="method_call/coll.rs:134", layer="L1,L2", state="OPEN", tests=[], note="verify Rust uses the receiver length, not the argument length"},
+  {id="METHOD-coll-get", cat="METHOD", scala="get (v6) FixedCost(30)", rust="method_call/coll.rs:174", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-coll-flatMap", cat="METHOD", scala="FlatMapMethod_CostKind PerItemCost(60,10,8) over OUTPUT length", rust="method_call/coll.rs:460", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-coll-patch", cat="METHOD", scala="PatchMethod PerItemCost(30,2,10) over xs.length + patch.length", rust="method_call/coll.rs:552", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-coll-updated", cat="METHOD", scala="UpdatedMethod PerItemCost(20,1,10) over length", rust="method_call/coll.rs:652", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-coll-updateMany", cat="METHOD", scala="UpdateManyMethod PerItemCost(20,2,10) over receiver length, before op", rust="method_call/coll.rs:888", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-option-map", cat="METHOD", scala="SOptionMethods.map 20 (+AddToEnv 5 when Some)", rust="method_call/option.rs:25,39", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-option-filter", cat="METHOD", scala="SOptionMethods.filter 20", rust="method_call/option.rs:83", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-groupelement-getEncoded", cat="METHOD", scala="SGroupElementMethods.getEncoded FixedCost(250)", rust="property_call.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-groupelement-negate", cat="METHOD", scala="SGroupElementMethods.negate FixedCost(45)", rust="property_call.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-groupelement-exp", cat="METHOD", scala="SGroupElementMethods.exp → Exponentiate 900", rust="method_call/misc.rs:237", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-numeric-toBytes-toBits", cat="METHOD", scala="SNumericTypeMethods toBytes/toBits (v6) 5", rust="property_call.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-numeric-bitwise", cat="METHOD", scala="SNumericTypeMethods bitwiseInverse/Or/And/Xor (v6) 5", rust="method_call/numeric.rs:43", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-numeric-shift", cat="METHOD", scala="SNumericTypeMethods shiftLeft/shiftRight (v6) 5", rust="method_call/numeric.rs:110", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-bigint-toUnsigned", cat="METHOD", scala="SBigIntMethods.toUnsigned (v6) 5", rust="property_call.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-bigint-toUnsignedMod", cat="METHOD", scala="SBigIntMethods.toUnsignedMod (v6) 15", rust="method_call/numeric.rs:208", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-ubigint-toSigned", cat="METHOD", scala="SUnsignedBigIntMethods.toSigned (v6) 10", rust="property_call.rs", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-ubigint-bitwise", cat="METHOD", scala="SUnsignedBigIntMethods bitwiseOr/And/Xor (v6) 5", rust="method_call/unsigned_bigint.rs:40", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-ubigint-shift", cat="METHOD", scala="SUnsignedBigIntMethods shiftLeft/shiftRight (v6) 5", rust="method_call/unsigned_bigint.rs:66,97", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-ubigint-modInverse", cat="METHOD", scala="SUnsignedBigIntMethods.modInverse (v6) 150", rust="method_call/unsigned_bigint.rs:125", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-ubigint-plusMod", cat="METHOD", scala="SUnsignedBigIntMethods.plusMod (v6) 30", rust="method_call/unsigned_bigint.rs:163", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-ubigint-subtractMod", cat="METHOD", scala="SUnsignedBigIntMethods.subtractMod (v6) 30", rust="method_call/unsigned_bigint.rs:183", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-ubigint-multiplyMod", cat="METHOD", scala="SUnsignedBigIntMethods.multiplyMod (v6) 40", rust="method_call/unsigned_bigint.rs:212", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-ubigint-mod", cat="METHOD", scala="SUnsignedBigIntMethods.mod (v6) 20", rust="method_call/unsigned_bigint.rs:230", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="METHOD-unclaimed-inventory", cat="METHOD", scala="every SMethod in every type companion not listed above", rust="method_call/mod.rs fallthrough → EvalError::TypeError", layer="L1", state="OPEN", tests=[], note="L1 extractor must list every method Scala can dispatch; each either maps to a row or is proven unreachable/unsupported identically on both sides"},
+
+  # -------------------------------------------------------------------------------------
+  # INTERP — Interpreter-level charges and conversions
+  # -------------------------------------------------------------------------------------
+  {id="INTERP-init-cost", cat="INTERP", scala="ErgoInterpreter.interpreterInitCost = 10000 (block units, not votable)", rust="ergo-validation/src/tx/script/cost.rs:13", layer="L1,L3,L4", state="OPEN", tests=[], note="cost_limit_rejects_at_init_cost_charge exists but is Rust-oracled"},
+  {id="INTERP-eval-sigmaprop-constant", cat="INTERP", scala="Interpreter.fullReduction: Eval_SigmaPropConstant FixedCost(50) on the trivial path, then .toBlockCost", rust="ergo-sigma/src/reduce.rs:10,292", layer="L2,L4", state="OPEN", tests=[], note="P2PK path; L4 covers it massively but no tracked independent vector names the row"},
+  {id="INTERP-deser-subst", cat="INTERP", scala="reductionWithDeserialize: ergoTree.bytes.length * CostPerTreeByte(2) added to initCost, checked against costLimit", rust="ergo-sigma/src/reduce.rs:14,242", layer="L2,L3", state="OPEN", tests=[], note="documented coverage gap: reduce oracle bypasses it (manifest.toml #6); needs the L2 verify surface"},
+  {id="INTERP-crypto-dlog", cat="INTERP", scala="estimateCryptoVerifyCost ProveDlog = ParseChallenge 10 + ComputeCommitments_Schnorr 3400 + ToBytes_Schnorr 570 = 3980", rust="ergo-sigma/src/crypto_cost.rs:31", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="INTERP-crypto-dht", cat="INTERP", scala="ProveDHTuple = 10 + 6450 + 680 = 7140", rust="ergo-sigma/src/crypto_cost.rs:34", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="INTERP-crypto-conjunction", cat="INTERP", scala="CAND/COR: ToBytes_Conjunction 15 + children", rust="ergo-sigma/src/crypto_cost.rs:41", layer="L1,L2", state="OPEN", tests=[], note=""},
+  {id="INTERP-crypto-threshold", cat="INTERP", scala="Interpreter.scala:580-587 CTHRESHOLD: nCoefs = n - k (NO max(..,1)); ParsePolynomial.cost(nCoefs) + EvaluatePolynomial.cost(nCoefs) * n + ToBytes_ProofTreeConjecture 15 + children", rust="ergo-sigma/src/crypto_cost.rs:56 (parse_chunks = max(n_coefs, 1))", layer="L1,L2", state="OPEN", tests=[], note="SUSPECT divergence: for k == n (nCoefs = 0, reachable via a serialized CTHRESHOLD constant) Scala charges base-only (10 and 3*n), Rust charges one chunk (20 and 6*n). Needs a JVM vector; open DIVERGENT if confirmed."},
+  {id="INTERP-crypto-trunc", cat="INTERP", scala="addCryptoCost: estimateCryptoVerifyCost(sb).toBlockCost then addCostChecked(baseCost, cryptoCost, costLimit)", rust="ergo-sigma/src/reduce.rs:314-327", layer="L2,L3", state="DIVERGENT", tests=[], note="CONFIRMED 2026-09-15: Rust adds raw JIT crypto after the snap; remainders (AND 5, OR 5, 2-of-3 3) carry across inputs; JIT-unit limit check rejects at the exact limit where Scala accepts. Fix PR: prerequisite (spec §9). Class: reject-valid / cost-only."},
+  {id="INTERP-costlimit-op", cat="INTERP", scala="CostAccumulator.scala:55 add first, throw iff accumulatedCost > limit (equality allowed; counter already incremented on throw); Interpreter.addCostChecked same operator", rust="ergo-primitives/src/cost.rs:282-294", layer="L3", state="OPEN", tests=[], note="Rust compares in JIT units against limit*10; Scala compares block units — equivalence must be proven per ROUND-snap and INTERP-crypto-trunc"},
+  {id="INTERP-jitcost-bounds", cat="INTERP", scala="JitCost.+ Math.addExact; fromBlockCost Math.multiplyExact(blockCost,10); Int.MaxValue bound", rust="ergo-primitives/src/cost.rs:53-162", layer="L1", state="OPEN", tests=[], note="Rust returns typed Overflow instead of throwing; unreachable from honest input (pin test exists, Rust-oracled)"},
+  {id="INTERP-toblockcost", cat="INTERP", scala="JitCost.toBlockCost = value / 10 (Int division)", rust="ergo-primitives/src/cost.rs:137", layer="L1,L3", state="OPEN", tests=[], note=""},
+
+  # -------------------------------------------------------------------------------------
+  # ROUND / ORDER / LIMIT — rounding, charge order, budget comparisons
+  # -------------------------------------------------------------------------------------
+  {id="ROUND-snap-per-input", cat="ROUND", scala="Interpreter.verify: per-input eval JitCost .toBlockCost before crypto cost", rust="ergo-primitives/src/cost.rs:312 + ergo-sigma/src/reduce.rs:314", layer="L2,L3", state="OPEN", tests=[], note="Rust snap drops delta%10 of the accumulator since baseline; must equal Scala's per-input truncation for every input sequence"},
+  {id="ROUND-crypto-per-input", cat="ROUND", scala="addCryptoCost .toBlockCost per input", rust="ergo-sigma/src/reduce.rs:320-327", layer="L3", state="DIVERGENT", tests=[], note="same defect as INTERP-crypto-trunc; closes with it"},
+  {id="ROUND-perItem-chunking", cat="ROUND", scala="PerItemCost.cost(n) = base + perChunk * chunks, chunks = (n-1)/chunkSize + 1 with JVM truncation toward zero; n=0 with chunkSize=1 gives 0 chunks", rust="ergo-primitives/src/cost.rs:195-222", layer="L1,L2", state="OPEN", tests=[], note="per_item_zero_items_chunk_size_one_uses_zero_chunks is Rust-oracled; needs a JVM vector at n=0 for chunk_size 1 and >=2"},
+  {id="ORDER-init-token", cat="ORDER", scala="ErgoTransaction.validateStateful: initialCost (interpreter+inputs+dataInputs+outputs) checked first; token cost added later in the chain", rust="ergo-validation/src/tx/script/cost.rs:46 (single up-front add incl. tokens)", layer="L3,L5", state="OPEN", tests=[], note="obligation: verdict unchanged for every limit value, including limits between init and init+token"},
+  {id="ORDER-pre-v3-upcast", cat="ORDER", scala="DeserializationSigmaBuilder.applyUpcast inserts Upcast at parse time (charged mid-eval)", rust="ergo-sigma/src/evaluator/opcodes/cast.rs:36-118 (charged after both operands)", layer="L2,L3", state="OPEN", tests=[], note="totals identical on success; prove identical verdict at the limit"},
+  {id="ORDER-blockvalue-valdef", cat="ORDER", scala="BlockValue: addFixedCost(AddToEnvironment) wraps only the env update, after rhs eval", rust="ergo-sigma/src/evaluator/opcodes/binding.rs:81-100", layer="L2,L3", state="OPEN", tests=[], note=""},
+  {id="ORDER-constplaceholder", cat="ORDER", scala="ConstantPlaceholder cost charged before index bounds check", rust="ergo-sigma/src/evaluator/opcodes/binding.rs:29-40", layer="L2", state="OPEN", tests=[], note=""},
+  {id="ORDER-hof-charge", cat="ORDER", scala="HOFs: collection eval → PerItem charge over length → lambda → AddToEnv per element → body", rust="ergo-sigma/src/evaluator/opcodes/collection.rs:265-369", layer="L2,L3", state="OPEN", tests=[], note=""},
+  {id="ORDER-comparison-charge", cat="ORDER", scala="LT/LE/GT/GE cost charged after both operands", rust="ergo-sigma/src/evaluator/opcodes/comparison.rs:18-39", layer="L2,L3", state="OPEN", tests=[], note=""},
+  {id="ORDER-bitop-charge-then-reject", cat="ORDER", scala="BitOp family: costKind Fixed(1) accumulated, then Value.eval default throws", rust="ergo-sigma/src/evaluator/opcodes/errors.rs:42-82", layer="L2,L3", state="OPEN", tests=[], note="charged-to-failure value observable on both sides"},
+  {id="ORDER-crypto-before-verify", cat="ORDER", scala="crypto cost added before sigma-proof verification runs", rust="ergo-sigma/src/reduce.rs:320-330", layer="L3", state="OPEN", tests=[], note="cost-limit failure must precede a proof failure at the limit"},
+  {id="LIMIT-tx-start", cat="LIMIT", scala="validateStateful: maxCost >= initialCost + accumulatedCost (bsBlockTransactionsCost)", rust="ergo-validation/src/tx/mod.rs:144-151 (init add into fresh per-tx accumulator)", layer="L3,L5", state="OPEN", tests=[], note="Scala includes the block's running total; Rust checks per-tx then sums — see BLOCK-accum-equiv"},
+  {id="LIMIT-per-input", cat="LIMIT", scala="ErgoTransaction.scala:135-136: each input verified with costLimit = maxCost - currentTxCost (REMAINING budget) and initCost = 0; CostLimitException iff cost > limit", rust="ergo-primitives/src/cost.rs:282-294 per add (single tx-wide accumulator vs cap)", layer="L3", state="OPEN", tests=[], note="Rust: running total vs cap; Scala: per-input cost vs remaining budget — equal in block units by monotonicity; JIT remainders break it until INTERP-crypto-trunc is fixed"},
+  {id="LIMIT-block-sum", cat="LIMIT", scala="ErgoState.execTransactions: per-tx validateStateful(accumulatedCost) with bsBlockTransactionsCost (ValidationRules.scala:174); UtxoState.scala:84 delegates; equality allowed (maxCost >= cost)", rust="ergo-validation/src/block/validate.rs:339,681", layer="L5,L6", state="OPEN", tests=[], note="operator and unit (block) must match; Scala anchor to be pinned by enumeration"},
+
+  # -------------------------------------------------------------------------------------
+  # TX — transaction-level accounting
+  # -------------------------------------------------------------------------------------
+  {id="TX-init-formula", cat="TX", scala="initialCost = interpreterInitCost + inputs*inputCost + dataInputs*dataInputCost + outputs*outputCost (addExact/multiplyExact)", rust="ergo-validation/src/tx/script/cost.rs:22-60", layer="L3,L4", state="OPEN", tests=[], note="cost_total_oracle_* prove totals for 5 txs but do not isolate the formula; L4 per-input breakdown closes it"},
+  {id="TX-token-cost", cat="TX", scala="token cost = (in entries + out entries + in distinct ids + out distinct ids) * tokenAccessCost", rust="ergo-validation/src/tx/script/cost.rs:121-144", layer="L3,L4", state="OPEN", tests=[], note="counting rule must be pinned to the Scala anchor by the enumeration"},
+  {id="TX-storage-rent", cat="TX", scala="StorageContractCost = 50 charged instead of script when rent conditions hold; recoverWith → normal verify on failure", rust="ergo-validation/src/tx/script/mod.rs:216-264", layer="L2,L3,L4", state="OPEN", tests=[], note="rent-eligible fixtures from mainnet (rent branch has corpora)"},
+  {id="TX-scripts-skipped-pairing", cat="TX", scala="below checkpoint (scripts not verified) → no cost charged", rust="ergo-validation/src/tx/mod.rs:210-227", layer="L4", state="OPEN", tests=[], note=""},
+  {id="TX-voted-params", cat="TX", scala="Parameters ids 4 maxBlockCost, 5 tokenAccessCost, 6 inputCost, 7 dataInputCost, 8 outputCost from epoch extension", rust="ergo-validation/src/active_params/mod.rs", layer="L4", state="OPEN", tests=[], note="cost_total_oracle_epoch_1499136_uses_voted_params is JVM-backed for one epoch — name it once it carries the ledger id"},
+  {id="TX-accumulator-shared", cat="TX", scala="all inputs of a tx accumulate into one running cost", rust="ergo-validation/src/tx/script/mod.rs:89-324", layer="L3", state="OPEN", tests=[], note=""},
+
+  # -------------------------------------------------------------------------------------
+  # BLOCK — state-level enforcement
+  # -------------------------------------------------------------------------------------
+  {id="BLOCK-per-tx-cap", cat="BLOCK", scala="each tx validated with maxCost = maxBlockCost and accumulatedCost = block running total", rust="ergo-validation/src/block/validate.rs:311,611 (fresh accumulator, cap = full block limit)", layer="L5", state="OPEN", tests=[], note=""},
+  {id="BLOCK-accum-equiv", cat="BLOCK", scala="running accumulatedCost passed into every validateStateful", rust="fresh per-tx accumulator + deferred sum (validate.rs:339,681)", layer="L3,L5", state="OPEN", tests=[], note="prove: for every block and every limit, Scala's prefix check and Rust's (per-tx ≤ cap ∧ sum ≤ cap) yield the same verdict; monotone non-negative costs make them equal in block units, but JIT-unit remainders break it until INTERP-crypto-trunc is fixed"},
+  {id="BLOCK-sum-op", cat="BLOCK", scala="reject iff accumulated block cost > maxBlockCost (equality allowed) — ErgoTransaction.scala:377,394 via ErgoState.execTransactions", rust="ergo-validation/src/block/validate.rs:339,681", layer="L5,L6", state="OPEN", tests=[], note=""},
+  {id="BLOCK-parallel-equiv", cat="BLOCK", scala="n/a (Scala is sequential)", rust="ergo-validation/src/block/validate.rs:748 validate_full_block_parallel_with_costs", layer="L5", state="OPEN", tests=[], note="parallel validator must match sequential (sum, verdict, failure_class) on every fixture"},
+  {id="BLOCK-overflow", cat="BLOCK", scala="addExact/multiplyExact throw ArithmeticException → block invalid", rust="typed JitCostOverflow / saturating init arithmetic", layer="L5", state="OPEN", tests=[], note="unreachable from honest input; prove both sides reject (not accept) if ever reached"},
+  {id="BLOCK-rejection-state-unchanged", cat="BLOCK", scala="failed applyModifier leaves state unchanged", rust="ergo-state apply path", layer="L6", state="OPEN", tests=[], note="devnet before/after state commitments"},
+
+  # -------------------------------------------------------------------------------------
+  # VERSION — activation / version branches that change a charge
+  # -------------------------------------------------------------------------------------
+  {id="VERSION-jit-activation", cat="VERSION", scala="Header.scala:142 Interpreter50Version = 3: JIT costing active from BLOCK version 3 (v5.0), activatedScriptVersion 2; HardeningVersion = 2 is the 4.0 hard fork; Interpreter60Version = 4", rust="ergo-validation/src/context.rs:164 activated_script_version", layer="L4", state="OPEN", tests=[], note="v1 blocks: confirm whether Scala re-verifies with JIT or skips (checkpoint) — the ledger must state which"},
+  {id="VERSION-pre-v3-upcast", cat="VERSION", scala="applyUpcast only for ErgoTree version < 3", rust="ergo-sigma/src/evaluator/opcodes/cast.rs:75", layer="L2,L4", state="OPEN", tests=[], note=""},
+  {id="VERSION-v3-bool-root", cat="VERSION", scala="v3/6.0 trees allow SBoolean root; implicit BoolToSigmaProp coercion costed by evaluator", rust="ergo-sigma/src/reduce.rs:25-47", layer="L2", state="OPEN", tests=[], note=""},
+  {id="VERSION-v6-method-gate", cat="VERSION", scala="_v6Methods require activatedScriptVersion >= 3 (EIP-50)", rust="ergo-sigma/src/evaluator/opcodes/method_call/mod.rs:172-190", layer="L2", state="OPEN", tests=[], note="cost of a gated method on a pre-v6 context: rejection with what charged-to-failure value?"},
+  {id="VERSION-selfboxindex-bug", cat="VERSION", scala="selfBoxIndex returns -1 when activatedScriptVersion < 2 (sigmastate#603)", rust="property_call.rs", layer="L2", state="OPEN", tests=[], note="bug-compatible row"},
+  {id="VERSION-tree-version-gate", cat="VERSION", scala="tree version > activated within supported versions → REJECT; future-version bypass only when both activated and tree versions exceed the supported maximum (checkSoftForkCondition / trySoftForkable)", rust="PR #331 activated-version gate", layer="L4", state="OPEN", tests=[], note="three fixtures needed: rejection, future-version bypass, recognized validation-exception; pin the cost charged in each"},
+  {id="VERSION-hardening-creation-height", cat="VERSION", scala="blockVersion <= HardeningVersion changes maxCreationHeightInInputs (not a cost)", rust="n/a", layer="L4", state="N-A", tests=[], note="listed for completeness of validateStateful branches; no cost effect"},
+  {id="VERSION-v6-lazy-defaults", cat="VERSION", scala="v3-tree lazy default arguments can avoid charging an unused expression (codex enumeration note)", rust="unverified", layer="L2", state="OPEN", tests=[], note="from the blind enumeration; must be located in Scala source and mirrored or proven unreachable"},
+  # -------------------------------------------------------------------------------------
+  # Added from the blind enumeration final review (2026-09-15); Task 1.3 elaborates each.
+  # -------------------------------------------------------------------------------------
+  {id="EVAL-deferred-charge-on-exception", cat="EVAL", scala="enumeration E012-E013: charges deferred/skipped when an exception aborts an operation mid-charge", rust="unverified", layer="L2,L3", state="OPEN", tests=[], note="charged-to-failure value must match on both sides"},
+  {id="INTERP-embedded-script-deser", cat="INTERP", scala="enumeration I003: measured deserialization cost of embedded scripts (DeserializeContext/Register) beyond the tree-byte init cost", rust="ergo-sigma/src/reduce.rs / dispatch.rs", layer="L2", state="OPEN", tests=[], note=""},
+  {id="VERSION-subst-retention", cat="VERSION", scala="enumeration G002: activation-dependent retention of substituted constants after deserialization", rust="unverified", layer="L2", state="OPEN", tests=[], note=""},
+  {id="BLOCK-param-voting", cat="BLOCK", scala="enumeration B009-B012 / G024-G025: Parameters.scala:168-176 step max(1,current/100), min 16384 for maxBlockCost, update only on approved vote; fork vote increments block version", rust="ergo-validation/src/voting/", layer="L4,L5", state="OPEN", tests=[], note="cost parameters reach the accounting through this path; L4 boundary ranges exercise it"},
+  {id="VERSION-branches-G007-G020", cat="VERSION", scala="enumeration G007-G020: versioned execution branches that change charged execution (to be split into one row each in Task 1.3)", rust="various", layer="L2", state="OPEN", tests=[], note="placeholder group row; Task 1.3 must replace it with individual rows"},
+  {id="METHOD-global-serialize-writer-callbacks", cat="METHOD", scala="enumeration E042-E047: each SigmaByteWriter callback charge site (putByte/putShort/putInt/putLong/putBytes/putUInt uncharged/unsigned-byte inheritance)", rust="method_call/global.rs:556-660", layer="L1,L2", state="OPEN", tests=[], note="split METHOD-global-serialize into per-callback rows"},
+  {id="BLOCK-overflow-fixture", cat="BLOCK", scala="addExact/multiplyExact ArithmeticException → Try failure → rollback (UtxoState.scala:139,209)", rust="typed overflow", layer="L5", state="OPEN", tests=[], note="explicit fixture required (final review)"},
+]
+
+[meta]
+schema = 1
+scala_sigmastate = "v6.0.2 23dd29f612249c169d09fae9bca76d7cc02e144c"
+scala_ergo = "v6.0.2 2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1"
+oracle_node = "ergo 6.0.5 (sigmastate 6.0.6) localhost:9053"
+updated = "2026-09-15"
