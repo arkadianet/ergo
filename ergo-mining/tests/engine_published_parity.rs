@@ -472,6 +472,7 @@ fn on_loop_build_with_fields(
 ) -> (Candidate, WorkMessage) {
     let (c, w, _timings) = generate_candidate(
         store,
+        ergo_chain_spec::Network::Mainnet,
         BuildMode::Full,
         MempoolReadSnapshot::empty(),
         &MINER_PK,
@@ -881,6 +882,7 @@ fn build_full_surface<V: ergo_mining::state_view::CandidateStateView>(
 ) -> FullSurface {
     let (c, w, _timings) = generate_candidate(
         view,
+        ergo_chain_spec::Network::Mainnet,
         BuildMode::Full,
         MempoolReadSnapshot::empty(),
         &MINER_PK,
@@ -1017,6 +1019,7 @@ fn generate_candidate_measures_phase_timings() {
         .expect("committed state present");
     let (_c, _w, timings) = generate_candidate(
         &snapshot,
+        ergo_chain_spec::Network::Mainnet,
         BuildMode::Full,
         MempoolReadSnapshot::empty(),
         &MINER_PK,
@@ -1146,6 +1149,7 @@ fn generate_candidate_non_genesis_parent_without_interlinks_errors_without_panic
 
     let err = generate_candidate(
         &store,
+        ergo_chain_spec::Network::Mainnet,
         BuildMode::Full,
         MempoolReadSnapshot::empty(),
         &MINER_PK,
@@ -1204,6 +1208,7 @@ fn minimal_build_equals_full_build_on_quiet_chain() {
     // Minimal build: emission-only, no mempool, no rent.
     let (min_c, _min_w, _) = generate_candidate(
         &snap,
+        ergo_chain_spec::Network::Mainnet,
         BuildMode::Minimal,
         MempoolReadSnapshot::empty(),
         &MINER_PK,
@@ -1223,6 +1228,7 @@ fn minimal_build_equals_full_build_on_quiet_chain() {
     // Full build: same snapshot, empty mempool, no rent — enrichment is a no-op.
     let (full_c, _full_w, _) = generate_candidate(
         &snap,
+        ergo_chain_spec::Network::Mainnet,
         BuildMode::Full,
         MempoolReadSnapshot::empty(),
         &MINER_PK,
@@ -1392,6 +1398,7 @@ fn minimal_build_equals_full_build_on_quiet_chain_post_eip27() {
     // Minimal build: emission-only, no mempool, no rent.
     let (min_c, _min_w, _) = generate_candidate(
         &snap,
+        ergo_chain_spec::Network::Mainnet,
         BuildMode::Minimal,
         MempoolReadSnapshot::empty(),
         &MINER_PK,
@@ -1411,6 +1418,7 @@ fn minimal_build_equals_full_build_on_quiet_chain_post_eip27() {
     // Full build: same snapshot, empty mempool, no rent — enrichment is a no-op.
     let (full_c, _full_w, _) = generate_candidate(
         &snap,
+        ergo_chain_spec::Network::Mainnet,
         BuildMode::Full,
         MempoolReadSnapshot::empty(),
         &MINER_PK,
@@ -1499,6 +1507,7 @@ fn offloop_matches_onloop_under(regime: &Regime) {
         .expect("committed state present");
     let (snap_c, snap_w, _timings) = generate_candidate(
         &snap,
+        ergo_chain_spec::Network::Mainnet,
         BuildMode::Full,
         MempoolReadSnapshot::empty(),
         &MINER_PK,
@@ -1627,6 +1636,7 @@ fn generated_candidate_emits_configured_param_votes() {
 
     let (c, _w, _timings) = generate_candidate(
         &store,
+        ergo_chain_spec::Network::Mainnet,
         BuildMode::Full,
         MempoolReadSnapshot::empty(),
         &MINER_PK,
@@ -1659,6 +1669,7 @@ fn generated_candidate_emits_neutral_votes_without_targets() {
 
     let (c, _w, _timings) = generate_candidate(
         &store,
+        ergo_chain_spec::Network::Mainnet,
         BuildMode::Full,
         MempoolReadSnapshot::empty(),
         &MINER_PK,
