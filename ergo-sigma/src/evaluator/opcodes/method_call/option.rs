@@ -26,8 +26,8 @@ pub(super) fn map(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
             got: args.len(),
         });
     }
-    add_method_cost(cx.cost, COST_MAP)?;
     let func_val = cx.eval_expr(&args[0])?;
+    add_method_cost(cx.cost, COST_MAP)?;
     match obj_val {
         Value::Opt(None) => Ok(Value::Opt(None)),
         Value::Opt(Some(inner)) => match func_val {
@@ -84,10 +84,9 @@ pub(super) fn filter(
             got: args.len(),
         });
     }
-    // Scala `FilterMethod` is `FixedCost(JitCost(20))` (methods.scala
-    // SOptionMethods) — same as `map`; charging 10 diverges on consensus cost.
-    add_method_cost(cx.cost, COST_FILTER)?;
+    // Scala evaluates the callback expression before the fixed method tariff.
     let func_val = cx.eval_expr(&args[0])?;
+    add_method_cost(cx.cost, COST_FILTER)?;
     match obj_val {
         Value::Opt(None) => Ok(Value::Opt(None)),
         Value::Opt(Some(inner)) => match func_val {
@@ -97,8 +96,11 @@ pub(super) fn filter(
                 param_types,
                 body,
             } => {
-                // Scala closure invocation runs Value.checkType.
+                // Scala validates the parameter before charging its binding.
                 check_closure_param_types(&param_types).map_err(reflect_sstring_error)?;
+                cx.cost.add(JitCost::from_jit(5))?;
+                #[cfg(feature = "cost-trace")]
+                crate::cost_trace::record("AddToEnv", 5, cx.cost.total().value());
                 let mut call_env = (*captured_env).clone();
                 if let Some(param_id) = params.first() {
                     call_env.insert(*param_id, *inner.clone());
