@@ -64,8 +64,12 @@ DeserializeContext and DeserializeRegister declare `PerItemCost(1,10,128)` in
 Register substitution uses the same method through `ErgoLikeInterpreter`.
 Successful full-verify fixtures would exercise interpreter substitution, not
 these OP descriptors. Empty embedded bytes also cannot deserialize an expression.
-These OP rows remain OPEN. L1 JVM descriptor extraction and direct `cost(n)`
-boundary tests can close the declared descriptor obligation. Task 3.4e owns the separate embedded-script accounting obligation.
+Controller disposition: these OP rows remained OPEN until JVM evidence confirmed
+non-charging; Task 3.4e now marks them N-A. The tiny (2-byte) and 300-byte context
+and register fixtures confirm the measured byte charge without the descriptor.
+Direct L1 `cost(n)` tests cannot close an unreachable execution charge. See
+[interpreter divergence evidence](../interpreter/DIVERGENCES.md) for exact totals;
+`INTERP-embedded-script-deser` remains DIVERGENT pending the separate fix.
 
 ## Reproduce
 
