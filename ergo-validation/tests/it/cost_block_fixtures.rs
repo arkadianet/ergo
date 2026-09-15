@@ -559,6 +559,19 @@ fn block_token_remaining_budget_matches_jvm() {
 }
 
 #[test]
+fn block_v6_devnet_context_matches_jvm() {
+    let case = fixture("f-v6-devnet");
+    assert_eq!(case.parameters["123"], 4);
+    assert_eq!(case.manifest["context"]["activated_script_version"], 3);
+    assert_eq!(
+        case.manifest["context"]["ergo_tree_versions"],
+        serde_json::json!([3])
+    );
+    assert_eq!(case.expected.verdict, "Accept");
+    replay(case);
+}
+
+#[test]
 fn block_invalid_signature_is_script_rejection() {
     let case = fixture("rejection-script-control");
     assert_eq!(jvm_verdict(&case.expected), "RejectScript");
