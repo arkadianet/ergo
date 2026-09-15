@@ -1,6 +1,7 @@
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/interpreter/
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/op-fixed/
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/op-per-item/
+//! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/eval/
 //! Generator: scripts/gen-cost-fixture.sh (JVM verify)
 //!
 //! UTF-8 JSON request bytes, with the JVM's exact field names and embedded
@@ -265,6 +266,8 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
 // Non-executable/deprecated/internal nodes and TaggedVariable (0x71)
 // -> RuntimeException from Value.eval (op-fixed rejection fixtures).
 // Interpreter version guards -> InterpreterException.
+// Conjecture equality's bare RuntimeException -> RejectOther, as classified by
+// the JVM adapter; the supplementary evaluator observation retains its cost.
 // Unknown Rust errors fail the adapter: their JVM class needs oracle evidence;
 // comparing only exception presence would silently accept the wrong failure.
 fn jvm_failure(
@@ -282,6 +285,9 @@ fn jvm_failure(
             | EvalError::DeprecatedOpcode(_)
             | EvalError::InternalOpcode(..),
         ) => Ok(("RejectScript", "java.lang.RuntimeException")),
+        VerifySpendingError::Eval(EvalError::RuntimeException(
+            "Cannot compare SigmaBoolean values: unknown type",
+        )) => Ok(("RejectOther", "java.lang.RuntimeException")),
         VerifySpendingError::Eval(
             EvalError::SoftForkNotActivated { .. }
             | EvalError::UnparsedErgoTree
@@ -300,6 +306,16 @@ struct Fixture {
     ledger: Vec<String>,
     request: Value,
     expected: Value,
+    #[serde(default)]
+    known_divergence: Option<KnownDivergence>,
+}
+
+#[derive(Deserialize)]
+struct KnownDivergence {
+    ledger: String,
+    classification: String,
+    tracking: String,
+    differences: Value,
 }
 
 #[derive(Deserialize)]
@@ -310,6 +326,7 @@ struct Ledger {
 #[derive(Deserialize)]
 struct LedgerRow {
     id: String,
+    state: String,
 }
 
 fn read_fixture(path: &Path) -> Result<Vec<u8>> {
@@ -348,7 +365,7 @@ fn fixture_paths(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn verify_fixture(path: &Path, fixture: Fixture, ledger: &Ledger) -> Result<()> {
+fn verify_fixture(path: &Path, fixture: Fixture, ledger: &Ledger) -> Result<bool> {
     ensure!(
         !fixture.ledger.is_empty(),
         "{}: missing ledger ids",
@@ -383,6 +400,7 @@ fn verify_fixture(path: &Path, fixture: Fixture, ledger: &Ledger) -> Result<()> 
     let mut actual = record(false);
     verify(&serde_json::to_vec(&fixture.request)?, &mut actual)
         .with_context(|| format!("verify {}", path.display()))?;
+    let mut differences = serde_json::Map::new();
     for field in [
         "verdict",
         "eval_block_cost",
@@ -395,28 +413,28 @@ fn verify_fixture(path: &Path, fixture: Fixture, ledger: &Ledger) -> Result<()> 
             .with_context(|| format!("{}: missing {field}", path.display()))?;
         // Section 4: an unavailable rejected-input cost is not a mismatch.
         if field != "verdict"
-            && actual["verdict"] != "Accept"
+            && (actual["verdict"] != "Accept" || fixture.expected["verdict"] != "Accept")
             && (actual[field] == "unavailable" || *expected == "unavailable")
         {
             continue;
         }
-        ensure!(
-            &actual[field] == expected,
-            "{}: {field}: Rust={} JVM={expected}",
-            path.display(),
-            actual[field]
-        );
+        if &actual[field] != expected {
+            differences.insert(
+                field.to_owned(),
+                json!({"rust": actual[field], "jvm": expected}),
+            );
+        }
     }
     let failure_class = fixture
         .expected
         .get("failure_class")
         .with_context(|| format!("{}: missing failure_class", path.display()))?;
-    ensure!(
-        &actual["failure_class"] == failure_class,
-        "{}: failure_class: Rust={} JVM={failure_class}",
-        path.display(),
-        actual["failure_class"]
-    );
+    if &actual["failure_class"] != failure_class {
+        differences.insert(
+            "failure_class".to_owned(),
+            json!({"rust": actual["failure_class"], "jvm": failure_class}),
+        );
+    }
     if fixture.request["observe_evaluator_failure"] == true {
         let expected = &fixture.expected["evaluator_failure_block_cost"];
         ensure!(
@@ -424,12 +442,12 @@ fn verify_fixture(path: &Path, fixture: Fixture, ledger: &Ledger) -> Result<()> 
             "{}: missing JVM failure observation",
             path.display()
         );
-        ensure!(
-            &actual["evaluator_failure_block_cost"] == expected,
-            "{}: evaluator failure cost: Rust={} JVM={expected}",
-            path.display(),
-            actual["evaluator_failure_block_cost"]
-        );
+        if &actual["evaluator_failure_block_cost"] != expected {
+            differences.insert(
+                "evaluator_failure_block_cost".to_owned(),
+                json!({"rust": actual["evaluator_failure_block_cost"], "jvm": expected}),
+            );
+        }
     }
     for field in ["rent_block_cost", "rent_path"] {
         if let Some(expected) = fixture.expected.get(field) {
@@ -441,15 +459,132 @@ fn verify_fixture(path: &Path, fixture: Fixture, ledger: &Ledger) -> Result<()> 
             );
         }
     }
-    Ok(())
+    let differences = Value::Object(differences);
+    if let Some(known) = fixture.known_divergence {
+        ensure!(
+            fixture.ledger.contains(&known.ledger)
+                && ledger
+                    .rows
+                    .iter()
+                    .any(|row| row.id == known.ledger && row.state == "DIVERGENT"),
+            "{}: known divergence requires an attached DIVERGENT ledger row",
+            path.display()
+        );
+        let classified = match known.classification.as_str() {
+            "cost-only" => differences.as_object().is_some_and(|fields| {
+                fields.keys().all(|field| {
+                    matches!(
+                        field.as_str(),
+                        "eval_block_cost" | "total_block_cost" | "evaluator_failure_block_cost"
+                    )
+                })
+            }),
+            "accept-invalid" => {
+                actual["verdict"] == "Accept"
+                    && matches!(
+                        fixture.expected["verdict"].as_str(),
+                        Some("RejectScript" | "RejectOther")
+                    )
+                    && differences.as_object().is_some_and(|fields| {
+                        fields
+                            .keys()
+                            .all(|field| matches!(field.as_str(), "verdict" | "failure_class"))
+                    })
+            }
+            _ => false,
+        };
+        ensure!(
+            classified
+                && known.tracking
+                    == "test-vectors/ergo-sigma/cost-ledger/fixtures/eval/DIVERGENCES.md"
+                && differences
+                    .as_object()
+                    .is_some_and(|fields| !fields.is_empty()),
+            "{}: stale or misclassified divergence; triage required",
+            path.display()
+        );
+        ensure!(
+            differences == known.differences,
+            "{}: recorded divergence changed: {differences}",
+            path.display()
+        );
+        Ok(true)
+    } else {
+        ensure!(
+            differences == json!({}),
+            "{}: unexplained divergence: {differences}",
+            path.display()
+        );
+        Ok(false)
+    }
 }
 
 // ----- happy path -----
 // ----- round-trips -----
 // ----- error paths -----
+
+#[test]
+fn cost_ledger_divergence_invalid_annotations_rejected() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-vectors/ergo-sigma/cost-ledger");
+    let path = root.join("fixtures/eval/collection-group.json.gz");
+    let document: Value = serde_json::from_slice(&read_fixture(&path)?)?;
+    let mut case = document["cases"]
+        .as_array()
+        .context("cases")?
+        .iter()
+        .find(|case| case.get("known_divergence").is_some())
+        .context("known divergence")?
+        .clone();
+    case["manifest"] = document["manifest"].clone();
+    case["ledger"] = document["ledger"].clone();
+    let ledger: Ledger = toml::from_str(&std::fs::read_to_string(root.join("ledger.toml"))?)?;
+    let check = |value: Value| verify_fixture(&path, serde_json::from_value(value)?, &ledger);
+    assert!(check(case.clone())?);
+
+    let mut changed = case.clone();
+    changed["known_divergence"]["differences"]["eval_block_cost"]["rust"] = json!(0);
+    assert!(check(changed)
+        .unwrap_err()
+        .to_string()
+        .contains("recorded divergence changed"));
+
+    let mut untracked = case.clone();
+    untracked
+        .as_object_mut()
+        .context("case object")?
+        .remove("known_divergence");
+    assert!(check(untracked)
+        .unwrap_err()
+        .to_string()
+        .contains("unexplained divergence"));
+
+    let mut stale = case.clone();
+    for field in ["eval_block_cost", "total_block_cost"] {
+        stale["expected"][field] = case["known_divergence"]["differences"][field]["rust"].clone();
+    }
+    assert!(check(stale)
+        .unwrap_err()
+        .to_string()
+        .contains("stale or misclassified divergence"));
+
+    let mut closed_ledger = ledger;
+    for row in &mut closed_ledger.rows {
+        if row.id == "EVAL-eq-coll-descriptor" {
+            row.state = "CLOSED".to_owned();
+        }
+    }
+    assert!(
+        verify_fixture(&path, serde_json::from_value(case)?, &closed_ledger)
+            .unwrap_err()
+            .to_string()
+            .contains("requires an attached DIVERGENT ledger row")
+    );
+    Ok(())
+}
+
 // ----- oracle parity -----
 
-// ledger: OP-0x96, OP-0xB3, OP-0x98, OP-0xCB, OP-0xD8, ROUND-perItem-chunking, OP-0xAE, OP-0xB5, OP-0xB0, OP-0xAF, OP-0xAD, OP-0x97, OP-0xCC, OP-0xEA, OP-0xEB, OP-0xD0, OP-0xB4, OP-0x74, OP-0xFF, OP-0x9B, INTERP-eval-sigmaprop-constant, OP-0x95, OP-0xDA, OP-0xE7-0xE9, OP-0xEC, OP-0xED, OP-0xF2, OP-0xF3, OP-0xF5, OP-0xF6, OP-0xF7, OP-0xF8, OP-TaggedVariable-A003, ORDER-bitop-charge-then-reject
+// ledger: OP-0x96, OP-0xB3, OP-0x98, OP-0xCB, OP-0xD8, ROUND-perItem-chunking, OP-0xAE, OP-0xB5, OP-0xB0, OP-0xAF, OP-0xAD, OP-0x97, OP-0xCC, OP-0xEA, OP-0xEB, OP-0xD0, OP-0xB4, OP-0x74, OP-0xFF, OP-0x9B, INTERP-eval-sigmaprop-constant, OP-0x95, OP-0xDA, OP-0xE7-0xE9, OP-0xEC, OP-0xED, OP-0xF2, OP-0xF3, OP-0xF5, OP-0xF6, OP-0xF7, OP-0xF8, OP-TaggedVariable-A003, ORDER-bitop-charge-then-reject, EVAL-const-inline, EVAL-hasdeserialize-fork, EVAL-addtoenv, EVAL-numeric-cast, EVAL-arith-bigint, EVAL-eq-prim, EVAL-eq-matchtype, EVAL-eq-tuple, EVAL-eq-groupelement, EVAL-eq-bigint, EVAL-eq-avltree, EVAL-eq-box, EVAL-eq-option, EVAL-eq-preheader, EVAL-eq-header, EVAL-eq-coll-sigmaprop-descriptor, EVAL-eq-coll-fallback, EVAL-eq-tokens, EVAL-eq-sigmaboolean, EVAL-deferred-charge-on-exception, EVAL-eq-boxcollection, EVAL-eq-coll-descriptor, EVAL-eq-mismatch-and-unit-E032
 #[test]
 fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-vectors/ergo-sigma/cost-ledger");
@@ -486,13 +621,18 @@ fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
     }
     let selected = fixtures.len();
     let mut failed = 0;
+    let mut known_divergent = 0;
     for (path, fixture) in fixtures {
-        if let Err(error) = verify_fixture(&path, fixture, &ledger) {
-            eprintln!("{error:#}");
-            failed += 1;
+        match verify_fixture(&path, fixture, &ledger) {
+            Ok(true) => known_divergent += 1,
+            Ok(false) => (),
+            Err(error) => {
+                eprintln!("{error:#}");
+                failed += 1;
+            }
         }
     }
-    eprintln!("cost fixtures: selected={selected} executed={selected} skipped=0 failed={failed}");
+    eprintln!("cost fixtures: selected={selected} executed={selected} skipped=0 failed={failed} known_divergent={known_divergent}");
     ensure!(failed == 0, "{failed} cost fixtures diverged");
     Ok(())
 }
