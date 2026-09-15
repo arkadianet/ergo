@@ -195,6 +195,35 @@ fn cost_sweeps_all_classes_match_jvm() {
         );
         let points = sweep["points"].as_array().unwrap();
         assert!(points.len() >= 3);
+        if sweep["base_fixture"] == "test-vectors/scala/multi_input_conjunction_cost.json" {
+            let original = read_json(&base);
+            assert_eq!(sweep["context"], original["context"]);
+            assert_eq!(accumulated, 0);
+            let case = original["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|case| case["name"] == sweep["case"]["name"])
+                .expect("imported case");
+            assert_eq!(&sweep["case"], case, "preserve imported bytes and verdicts");
+            let imported = case["sweep"].as_array().unwrap();
+            assert_eq!(points.len(), imported.len());
+            for (point, original) in points.iter().zip(imported) {
+                assert_eq!(point["limit"], original["limit"]);
+                assert_eq!(point["verdict"], original["verdict"]);
+            }
+            assert!(sweep["manifest"]["evidence"]["per_limit_oracle_sha256"]
+                .as_str()
+                .is_some_and(|hash| hash.len() == 64));
+        }
+        for point in points {
+            if point["verdict"] == "Accept" {
+                assert!(
+                    point["total"].as_u64().is_some(),
+                    "accepted JVM total required"
+                );
+            }
+        }
         let measured = sweep["measured_total"]
             .as_u64()
             .expect("JVM measured total");
