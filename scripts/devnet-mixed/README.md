@@ -245,6 +245,19 @@ candidate API avoids reusing a cached candidate without the workload. Boundary
 injections submit full blocks to both nodes and compare `/info` commitments.
 HTTP admission alone never counts as block acceptance. Compressed artifacts
 and manifests live under `test-vectors/ergo-sigma/cost-ledger/results/`.
+Each campaign writes one `l6-YYYY-MM-DD-artifacts.tar.gz` and a plain-text
+`l6-YYYY-MM-DD-artifacts.index.txt` (tab-separated member path, byte size,
+SHA-256). The tar contains sorted regular files with mtime/uid/gid zero and
+empty owner names; gzip has no filename or timestamp (`gzip -n` semantics).
+Evidence references use `archive.tar.gz#member/path`; hashes still authenticate
+the original compressed member bytes. Every run also records the whole archive
+hash, refreshed with its payload digest as attempts add evidence. The shared
+Rust evidence checks read members directly from the archive and verify member
+hashes, the archive hash, and the index. Historical nested result snapshots
+retain their original bytes and paths. To inspect a member, use
+`tar -xOzf <archive.tar.gz> <member/path> | gzip -dc`.
+The campaign chain identifier is `sha256:<genesis.conf digest>` at every height;
+the voted parameters separately record the campaign cost-cap override.
 
 **Recorded outcome: BLOCKED on `BLOCK-L6-mining-safety-gap`.** The resumed
 campaign used the executable rebuilt from `9fd384a6` in both directions.

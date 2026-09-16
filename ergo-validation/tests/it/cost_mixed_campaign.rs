@@ -1,11 +1,62 @@
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16.json
 //! Live Scala 6.0.5 verdicts and JVM BuildBlock.scala transaction costs.
 
-use std::path::Path;
+use std::{collections::BTreeMap, io::Read, path::Path};
+
+use sha2::{Digest, Sha256};
 
 use serde_json::Value;
 
 // ----- helpers -----
+
+fn campaign_members(root: &Path, results: &Value) -> BTreeMap<String, Vec<u8>> {
+    let archive_path = "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz";
+    let bytes = std::fs::read(root.join(archive_path)).unwrap();
+    assert_eq!(&bytes[3..8], &[0, 0, 0, 0, 0]); // No gzip filename or timestamp.
+    let digest = hex::encode(Sha256::digest(&bytes));
+    for run in results["runs"].as_array().unwrap() {
+        assert_eq!(run["manifest"]["evidence"][archive_path], digest);
+    }
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()));
+    let mut members = BTreeMap::new();
+    let mut index = String::new();
+    let mut previous_name = String::new();
+    for entry in archive.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        assert!(entry.header().entry_type().is_file());
+        assert_eq!(entry.header().mtime().unwrap(), 0);
+        assert_eq!(entry.header().uid().unwrap(), 0);
+        assert_eq!(entry.header().gid().unwrap(), 0);
+        let name = entry.path().unwrap().to_str().unwrap().to_owned();
+        assert!(previous_name < name);
+        previous_name.clone_from(&name);
+        let mut payload = Vec::new();
+        entry.read_to_end(&mut payload).unwrap();
+        index.push_str(&format!(
+            "{name}\t{}\t{}\n",
+            payload.len(),
+            hex::encode(Sha256::digest(&payload))
+        ));
+        assert!(members
+            .insert(format!("{archive_path}#{name}"), payload)
+            .is_none());
+    }
+    assert_eq!(
+        index,
+        std::fs::read_to_string(root.join(archive_path.replace(".tar.gz", ".index.txt"))).unwrap()
+    );
+    for run in results["runs"].as_array().unwrap() {
+        for (name, expected) in run["manifest"]["evidence"].as_object().unwrap() {
+            if name.starts_with(&format!("{archive_path}#")) {
+                assert_eq!(
+                    hex::encode(Sha256::digest(&members[name])),
+                    expected.as_str().unwrap()
+                );
+            }
+        }
+    }
+    members
+}
 
 fn commitment(info: &Value) -> (&Value, &Value, &Value) {
     (
@@ -25,6 +76,7 @@ fn check_direction(direction: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let path = root.join("test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16.json");
     let results: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let members = campaign_members(root, &results);
     let runs = results["runs"].as_array().unwrap();
     let successes: Vec<_> = runs
         .iter()
@@ -79,7 +131,7 @@ fn check_direction(direction: &str) {
             .as_str()
             .unwrap();
         let oracle: Value = serde_json::from_reader(flate2::read::GzDecoder::new(
-            std::fs::File::open(root.join(oracle_path)).unwrap(),
+            members[oracle_path].as_slice(),
         ))
         .unwrap();
         assert_eq!(record["oracle"], oracle);
@@ -156,13 +208,12 @@ fn mixed_campaign_rust_low_cap_records_selection_divergence() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let path = root.join("test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16.json");
     let results: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let members = campaign_members(root, &results);
     let archive = results["safety_gap_resolution"]["archived_result"]
         .as_str()
         .unwrap();
-    let original: Value = serde_json::from_reader(flate2::read::GzDecoder::new(
-        std::fs::File::open(root.join(archive)).unwrap(),
-    ))
-    .unwrap();
+    let original: Value =
+        serde_json::from_reader(flate2::read::GzDecoder::new(members[archive].as_slice())).unwrap();
     let results = original;
     let run = &results["runs"][1];
     assert_eq!(run["direction"], "rust-mines");

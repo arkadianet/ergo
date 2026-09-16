@@ -13,6 +13,7 @@ import sys
 import time
 import urllib.error
 
+from artifacts import read_members, write_archive
 from smoke import ROOT, HERE, WORK, URLS, PK, api, tips, wait_for as poll_until
 
 RESULTS = ROOT / 'test-vectors/ergo-sigma/cost-ledger/results'
@@ -170,20 +171,28 @@ def main():
     if any(item['direction'] == direction and item['status'] == 'PASS' for item in results['runs']):
         raise RuntimeError('successful direction already recorded; preserve its result and use a fresh campaign')
     results['runs'].append(run)
+    archive_path = RESULTS / f'l6-{started.date()}-artifacts.tar.gz'
+    members = read_members(archive_path)
     def save():
-        run.pop('payload_sha256_excluding_this_field', None)
-        run['payload_sha256_excluding_this_field'] = hashlib.sha256(
-            json.dumps(run, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        # The shared archive grows across attempts; refresh every enclosing digest.
+        for item in results['runs']:
+            if archive_path.exists():
+                item['manifest']['evidence'][str(archive_path.relative_to(ROOT))] = sha(archive_path)
+            item.pop('payload_sha256_excluding_this_field', None)
+            item['payload_sha256_excluding_this_field'] = hashlib.sha256(
+                json.dumps(item, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         write(output, results)
     def archive(path):
-        directory = RESULTS / ('l6-' + str(started.date()) + '-artifacts')
-        directory.mkdir(exist_ok=True)
-        compressed = directory / (f'resumed-attempt-{len(results["runs"])}-' + path.name + '.gz')
+        member = f'l6-{started.date()}-artifacts/resumed-attempt-{len(results["runs"])}-{path.name}.gz'
+        member = str(RESULTS.relative_to(ROOT) / member)
         payload = path.read_bytes()
-        compressed.write_bytes(gzip.compress(payload, mtime=0))
-        name = str(compressed.relative_to(ROOT))
-        run['manifest']['evidence'][name] = sha(compressed)
-        return {'path': name, 'sha256': sha(compressed), 'uncompressed_sha256': hashlib.sha256(payload).hexdigest()}
+        compressed = gzip.compress(payload, mtime=0)
+        members[member] = compressed
+        write_archive(archive_path, members)
+        name = str(archive_path.relative_to(ROOT)) + '#' + member
+        digest = hashlib.sha256(compressed).hexdigest()
+        run['manifest']['evidence'][name] = digest
+        return {'path': name, 'sha256': digest, 'uncompressed_sha256': hashlib.sha256(payload).hexdigest()}
     def retain_build(path):
         return {suffix or 'block': archive(Path(str(path) + suffix))
                 for suffix in ('', '.oracle.json', '.transactions.json')}
@@ -243,12 +252,12 @@ def main():
             raise RuntimeError('both nodes must use the campaign genesis cost cap')
         run['manifest']['rust']['binary_sha256'] = sha(Path('/proc') / (WORK / 'rust.pid').read_text().strip() / 'exe')
         run['manifest']['context'] = {'network': 'private devnet / devnet60',
-            'chain_id': initial['scala']['stateRoot'] if height == 0 else initial['scala']['genesisBlockId'],
+            'chain_id': 'sha256:' + sha(HERE / 'genesis.conf'),
             'height_range': [height, None], 'activated_script_version': 3, 'block_version': 4,
             'voted_params': {str(k): initial['scala']['parameters'][v] for k, v in
                             ((4, 'maxBlockCost'), (5, 'tokenAccessCost'), (6, 'inputCost'), (7, 'dataInputCost'), (8, 'outputCost'))}}
         wait_for(lambda: all(api(n, '/peers/connected') for n in URLS), 'mixed-devnet P2P handshake')
-        for path in (HERE / 'campaign.py', HERE / 'campaign.sh', HERE / 'BuildBlock.scala',
+        for path in (HERE / 'artifacts.py', HERE / 'campaign.py', HERE / 'campaign.sh', HERE / 'BuildBlock.scala',
                      HERE / 'CampaignTransactions.scala', HERE / 'CampaignParameters.scala', HERE / 'build-block.py',
                      HERE / 'lifecycle.py', HERE / 'genesis.conf', WORK / 'campaign-scala-node.conf', WORK / 'campaign-rust-node.toml'):
             run['manifest']['evidence'][str(path.relative_to(ROOT))] = sha(path)

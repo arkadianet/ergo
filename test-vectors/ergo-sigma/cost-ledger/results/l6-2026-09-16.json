@@ -8654,17 +8654,17 @@
         {
           "artifacts": {
             "block": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-0.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-0.json.gz",
               "sha256": "5f894083aee7107c0687c0ef16b92678cb62f93cfe96e795e0ca60d33bfd9208",
               "uncompressed_sha256": "7cd1f5593fefe9acaa6b264de7fc5656fd3644836e8213f9cb6b51f2e9161bab"
             },
             ".oracle.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-0.json.oracle.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-0.json.oracle.json.gz",
               "sha256": "ce8818f39f0812afb74c279fae90ca028f5e7ef7c9de3d6a3348e618e749bd6f",
               "uncompressed_sha256": "41c3b706eba968454ba4b76f06be0b6d80a0b09bde9184c2688e2b65a8cd9cd5"
             },
             ".transactions.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-0.json.transactions.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-0.json.transactions.json.gz",
               "sha256": "7ac40124cabce7e6981c97d0b06093ba4aa24006e37912bdc46e799150212bb6",
               "uncompressed_sha256": "10cf572ca0e687803c04b0f257bb0593f859936370faf1fe7a40a3ec83768b77"
             }
@@ -9054,17 +9054,17 @@
         {
           "artifacts": {
             "block": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-1.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-1.json.gz",
               "sha256": "1dde7664219eb37e516960eaf81e251bf0a9053e4a92d2bd7be233856efc7b02",
               "uncompressed_sha256": "bb4b61e484890810f4d28b9f2ab3649b1b16234d11066947751c7c8123cf12d5"
             },
             ".oracle.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-1.json.oracle.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-1.json.oracle.json.gz",
               "sha256": "f3c91b54ad5169cb37ad07177d37d48a1ab0cf9db37a84fdd0d463c0be331ad7",
               "uncompressed_sha256": "d83ee720ec0bf4f14c1ade3b7483d30882a11a3cfd090c4f08ff06a52e5336b8"
             },
             ".transactions.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-1.json.transactions.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-1.json.transactions.json.gz",
               "sha256": "9139e1050b694707fb3901e09d409d05504177ac11b4220fb39fd1629b930a18",
               "uncompressed_sha256": "4acd6d9f253ce722391a8ef96058dc70e303e1c5d148c21ad6f0bb0f2171a585"
             }
@@ -9466,17 +9466,17 @@
         {
           "artifacts": {
             "block": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-2.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-2.json.gz",
               "sha256": "40227c39ef46cf65e0667c07d3284b71e9ff17d2fc78d396ce255b12aecf3285",
               "uncompressed_sha256": "716222455820092adf88239aea45a11f4578dde6c4cf134b87cafcb8f7813ea7"
             },
             ".oracle.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-2.json.oracle.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-2.json.oracle.json.gz",
               "sha256": "460cd45dce8d7abf78d3c67775f2ec9af014f40ded7a801a49c9b290a5c62fb8",
               "uncompressed_sha256": "6db70e6bc372df74d01920bc41cf544ae8411b43a9ef2abeca82c13919f91a70"
             },
             ".transactions.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-2.json.transactions.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-2.json.transactions.json.gz",
               "sha256": "f4dbe5f2a3ca69edf3ad249be1f7a1beda0d9d03bf856031502b4e8a0df3ebc8",
               "uncompressed_sha256": "c9c6b73ae398c9b7a21d6ff337a207bd784ad34eb5ec111d82679b79b273f713"
             }
@@ -9878,17 +9878,17 @@
         {
           "artifacts": {
             "block": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-3.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-3.json.gz",
               "sha256": "4fe44c67b004c163f0eb63b53d4d5d9dd6dd0ee19fc6765ea40f06d98aeac1b3",
               "uncompressed_sha256": "8efdf9aafb19f39945acf29c765d33838598337b6c0adf996e2e4ae306926d92"
             },
             ".oracle.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-3.json.oracle.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-3.json.oracle.json.gz",
               "sha256": "21010159777aef757fdd466f63df9ab56fd589813daf44a2e5ae0c0478ac80ba",
               "uncompressed_sha256": "a060199d9d7dea5ea534e777a341de1c0e3f6722f2002f1fc212cbee879b3110"
             },
             ".transactions.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-3.json.transactions.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-3.json.transactions.json.gz",
               "sha256": "43ef794f233e2f76ea9c554e56d41ada4ded5b94e0c85515a524c2350f2aba52",
               "uncompressed_sha256": "f9c427bbef1c4b69e7c324faa1dc4c3768189410eb637beeeed6665cb1c2ad85"
             }
@@ -10691,17 +10691,17 @@
           },
           "artifacts": {
             "block": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-over-cap.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-over-cap.json.gz",
               "sha256": "037765774390af1845bea491f05d179961bf6c09106b3a653aec7f4d7b649767",
               "uncompressed_sha256": "d6871bb6c56ec06eb171e7d9390fbe7a2ebc6c645f88dae8d9d4d36c3ff5c57b"
             },
             ".oracle.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-over-cap.json.oracle.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-over-cap.json.oracle.json.gz",
               "sha256": "a58d08cf216c89c5cc706c70da146568979878cf0c3dfb6f0b3c3ed7a5b013bf",
               "uncompressed_sha256": "406baa9dafdd28d71129f0c07d74edbea4db9418702025c8b803980223a419af"
             },
             ".transactions.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-over-cap.json.transactions.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-over-cap.json.transactions.json.gz",
               "sha256": "7f508e372b01db698f215fb23d5fd3ec0c1c31543255aac268612fac13557c27",
               "uncompressed_sha256": "054827777c55bee7bab4c771da3175e72e9b05fee135fe0fc3482dfc8e17df2f"
             }
@@ -10915,17 +10915,17 @@
           },
           "artifacts": {
             "block": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-at-cap.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-at-cap.json.gz",
               "sha256": "63d3a3d25c43cd567fa1e963ceb5e4535981bae35e34fba3b7e7bfe1a61eb643",
               "uncompressed_sha256": "1bf3ac431721dde7c233ead752a71cde7c1df5b683058a222349fe60214a685d"
             },
             ".oracle.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-at-cap.json.oracle.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-at-cap.json.oracle.json.gz",
               "sha256": "8578d648a9c2c9e8d34dc12db704087334ceddb0fde57f0e308ec0c6b75f20e5",
               "uncompressed_sha256": "864c90d7e85c2f558f69a176ae3d24d1dc1c3f67b98ba4383c38caf8ce6c8c39"
             },
             ".transactions.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-at-cap.json.transactions.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-at-cap.json.transactions.json.gz",
               "sha256": "70fe4bddee9ec03546acd1efc1921051bcf75cbcb3d6859ca688dda4f3730834",
               "uncompressed_sha256": "57a60c03f21fd8d8336b089be525087df28fdfbe068f527bd4b1d46290603f64"
             }
@@ -11137,17 +11137,17 @@
           },
           "artifacts": {
             "block": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-single-at-cap.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-single-at-cap.json.gz",
               "sha256": "04432506998185eb4067ad305aab76dd16999d485d4af39c6995317ae8c6776e",
               "uncompressed_sha256": "f9d4c2aaaa5256c9e9ffddeacc11aa3ae782128dc338cd6a4b286b572687a387"
             },
             ".oracle.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-single-at-cap.json.oracle.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-single-at-cap.json.oracle.json.gz",
               "sha256": "81c78bac25075751407c4dd7baea6f3783072761ee751bb41d04cc9a17c153cf",
               "uncompressed_sha256": "3e4997428b2e605063c77880b40fb68d22b69178a843de9a03e1c12954dc588b"
             },
             ".transactions.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-single-at-cap.json.transactions.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-single-at-cap.json.transactions.json.gz",
               "sha256": "ed3b4f540f333067038cde7ca1f81080cebeb6e7c18523bb17edcc64f879b265",
               "uncompressed_sha256": "05346ccc1f1b0b825d0bd5885afde238b5b86d5375af77b8ce57751d912d513f"
             }
@@ -11200,8 +11200,8 @@
           "test-vectors/ergo-sigma/cost-ledger/fixtures/method/coll-flatMap.json.gz": "b36c460eb1338ec4fee39549b8f73ad466aa38f4060fc14ef690f5dbe0c12982",
           "test-vectors/ergo-sigma/cost-ledger/fixtures/method/coll-zip.json.gz": "6568d19c625b1f740fc7945661ca1c2b470f52ce19ec06b0392b3707bb4e0a8e",
           "test-vectors/ergo-sigma/cost-ledger/fixtures/method/global-xor.json.gz": "068f317392c10fc1b2f0028384960a831dd26ff70ad277fa6e34991980dc5df5",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala.log.gz": "64e560405ace01b463e7d16fc4d8c24b08ae98a58a31626d12919a85c036ba85",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-rust.log.gz": "772e1174a6b7e80ba02839adb3a2835c48a84cc3de07f00fdae236e21d5e59a2",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala.log.gz": "64e560405ace01b463e7d16fc4d8c24b08ae98a58a31626d12919a85c036ba85",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-rust.log.gz": "772e1174a6b7e80ba02839adb3a2835c48a84cc3de07f00fdae236e21d5e59a2",
           "scripts/devnet-mixed/campaign.py": "749ec7f07a74dbd171e5acc31cbd79531a2d3af6d4e012d3f8965f39eb5e3168",
           "scripts/devnet-mixed/campaign.sh": "ad3baa651182191a38befa873abfa479b4957bbe0df0f69ecc0e920cce22812d",
           "scripts/devnet-mixed/BuildBlock.scala": "b4ac27e2f8a8501672afe98651123b5fa28c3eba6db2d3ac61129e1846e5b41d",
@@ -11212,44 +11212,45 @@
           "scripts/devnet-mixed/genesis.conf": "d74120d8f73d4b6fe22c3cf3564df34cbdd82d96713ff2d519d45179cd208f0d",
           "scripts/devnet-mixed/.work/campaign-scala-node.conf": "5b036f6543f6d1afe47a07cf74f1336da2de6b0acf5c4e6cac2f3627234ec548",
           "scripts/devnet-mixed/.work/campaign-rust-node.toml": "8a12ab6ac35e06b04fce14905c199421e0cf1879c6764ff3e2c6c3ceeb429ffc",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-warmup.json.gz": "d61b5d8bde60ba5600f56c4365d5121143ed09429d078ffc8f6485039a94a7b9",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-fund.json.gz": "059553d4a1782f21a7d56e23aea2d14c16f960b4d94e7bf15876dacf17330cc9",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-fund.json.oracle.json.gz": "cc5b56cfd59ba8b0a9c9cc080b234592606e7f5bf8b25b128f0371488a120826",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-fund.json.transactions.json.gz": "22166968adf8e4b7eb1f557462905f90b2cfb589766b8c67478ef0869a802e60",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-0.json.gz": "5f894083aee7107c0687c0ef16b92678cb62f93cfe96e795e0ca60d33bfd9208",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-0.json.oracle.json.gz": "ce8818f39f0812afb74c279fae90ca028f5e7ef7c9de3d6a3348e618e749bd6f",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-0.json.transactions.json.gz": "7ac40124cabce7e6981c97d0b06093ba4aa24006e37912bdc46e799150212bb6",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-1.json.gz": "1dde7664219eb37e516960eaf81e251bf0a9053e4a92d2bd7be233856efc7b02",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-1.json.oracle.json.gz": "f3c91b54ad5169cb37ad07177d37d48a1ab0cf9db37a84fdd0d463c0be331ad7",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-1.json.transactions.json.gz": "9139e1050b694707fb3901e09d409d05504177ac11b4220fb39fd1629b930a18",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-2.json.gz": "40227c39ef46cf65e0667c07d3284b71e9ff17d2fc78d396ce255b12aecf3285",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-2.json.oracle.json.gz": "460cd45dce8d7abf78d3c67775f2ec9af014f40ded7a801a49c9b290a5c62fb8",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-2.json.transactions.json.gz": "f4dbe5f2a3ca69edf3ad249be1f7a1beda0d9d03bf856031502b4e8a0df3ebc8",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-3.json.gz": "4fe44c67b004c163f0eb63b53d4d5d9dd6dd0ee19fc6765ea40f06d98aeac1b3",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-3.json.oracle.json.gz": "21010159777aef757fdd466f63df9ab56fd589813daf44a2e5ae0c0478ac80ba",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-3.json.transactions.json.gz": "43ef794f233e2f76ea9c554e56d41ada4ded5b94e0c85515a524c2350f2aba52",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-over-cap.json.gz": "037765774390af1845bea491f05d179961bf6c09106b3a653aec7f4d7b649767",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-over-cap.json.oracle.json.gz": "a58d08cf216c89c5cc706c70da146568979878cf0c3dfb6f0b3c3ed7a5b013bf",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-over-cap.json.transactions.json.gz": "7f508e372b01db698f215fb23d5fd3ec0c1c31543255aac268612fac13557c27",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-warmup.json.gz": "d61b5d8bde60ba5600f56c4365d5121143ed09429d078ffc8f6485039a94a7b9",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-fund.json.gz": "059553d4a1782f21a7d56e23aea2d14c16f960b4d94e7bf15876dacf17330cc9",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-fund.json.oracle.json.gz": "cc5b56cfd59ba8b0a9c9cc080b234592606e7f5bf8b25b128f0371488a120826",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-fund.json.transactions.json.gz": "22166968adf8e4b7eb1f557462905f90b2cfb589766b8c67478ef0869a802e60",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-0.json.gz": "5f894083aee7107c0687c0ef16b92678cb62f93cfe96e795e0ca60d33bfd9208",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-0.json.oracle.json.gz": "ce8818f39f0812afb74c279fae90ca028f5e7ef7c9de3d6a3348e618e749bd6f",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-0.json.transactions.json.gz": "7ac40124cabce7e6981c97d0b06093ba4aa24006e37912bdc46e799150212bb6",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-1.json.gz": "1dde7664219eb37e516960eaf81e251bf0a9053e4a92d2bd7be233856efc7b02",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-1.json.oracle.json.gz": "f3c91b54ad5169cb37ad07177d37d48a1ab0cf9db37a84fdd0d463c0be331ad7",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-1.json.transactions.json.gz": "9139e1050b694707fb3901e09d409d05504177ac11b4220fb39fd1629b930a18",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-2.json.gz": "40227c39ef46cf65e0667c07d3284b71e9ff17d2fc78d396ce255b12aecf3285",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-2.json.oracle.json.gz": "460cd45dce8d7abf78d3c67775f2ec9af014f40ded7a801a49c9b290a5c62fb8",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-2.json.transactions.json.gz": "f4dbe5f2a3ca69edf3ad249be1f7a1beda0d9d03bf856031502b4e8a0df3ebc8",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-3.json.gz": "4fe44c67b004c163f0eb63b53d4d5d9dd6dd0ee19fc6765ea40f06d98aeac1b3",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-3.json.oracle.json.gz": "21010159777aef757fdd466f63df9ab56fd589813daf44a2e5ae0c0478ac80ba",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-workload-3.json.transactions.json.gz": "43ef794f233e2f76ea9c554e56d41ada4ded5b94e0c85515a524c2350f2aba52",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-over-cap.json.gz": "037765774390af1845bea491f05d179961bf6c09106b3a653aec7f4d7b649767",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-over-cap.json.oracle.json.gz": "a58d08cf216c89c5cc706c70da146568979878cf0c3dfb6f0b3c3ed7a5b013bf",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-over-cap.json.transactions.json.gz": "7f508e372b01db698f215fb23d5fd3ec0c1c31543255aac268612fac13557c27",
           "scripts/devnet-mixed/.work/scala-mines-sum-over-cap.json": "d6871bb6c56ec06eb171e7d9390fbe7a2ebc6c645f88dae8d9d4d36c3ff5c57b",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-at-cap.json.gz": "63d3a3d25c43cd567fa1e963ceb5e4535981bae35e34fba3b7e7bfe1a61eb643",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-at-cap.json.oracle.json.gz": "8578d648a9c2c9e8d34dc12db704087334ceddb0fde57f0e308ec0c6b75f20e5",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-at-cap.json.transactions.json.gz": "70fe4bddee9ec03546acd1efc1921051bcf75cbcb3d6859ca688dda4f3730834",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-at-cap.json.gz": "63d3a3d25c43cd567fa1e963ceb5e4535981bae35e34fba3b7e7bfe1a61eb643",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-at-cap.json.oracle.json.gz": "8578d648a9c2c9e8d34dc12db704087334ceddb0fde57f0e308ec0c6b75f20e5",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-sum-at-cap.json.transactions.json.gz": "70fe4bddee9ec03546acd1efc1921051bcf75cbcb3d6859ca688dda4f3730834",
           "scripts/devnet-mixed/.work/scala-mines-sum-at-cap.json": "1bf3ac431721dde7c233ead752a71cde7c1df5b683058a222349fe60214a685d",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-single-at-cap.json.gz": "04432506998185eb4067ad305aab76dd16999d485d4af39c6995317ae8c6776e",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-single-at-cap.json.oracle.json.gz": "81c78bac25075751407c4dd7baea6f3783072761ee751bb41d04cc9a17c153cf",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-single-at-cap.json.transactions.json.gz": "ed3b4f540f333067038cde7ca1f81080cebeb6e7c18523bb17edcc64f879b265",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-single-at-cap.json.gz": "04432506998185eb4067ad305aab76dd16999d485d4af39c6995317ae8c6776e",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-single-at-cap.json.oracle.json.gz": "81c78bac25075751407c4dd7baea6f3783072761ee751bb41d04cc9a17c153cf",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-single-at-cap.json.transactions.json.gz": "ed3b4f540f333067038cde7ca1f81080cebeb6e7c18523bb17edcc64f879b265",
           "scripts/devnet-mixed/.work/scala-mines-single-at-cap.json": "f9d4c2aaaa5256c9e9ffddeacc11aa3ae782128dc338cd6a4b286b572687a387",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-scala-mines-final-scala.log.gz": "0cce116699c99d39b6eb1d900860f6d471cc0b983759369208eae76798032777",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-scala-mines-final-rust.log.gz": "968684a96a36a52fd29ed37fdf4428037b8b8ee00161c4d762c7f960608988ed",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-campaign.py.gz": "259524af8f2ebc4bee29993e3e9092e874015b065f8f3b779989b39df1927b71",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-campaign.sh.gz": "5b2bb1cedd1a82bad9719d367168255718e4508832d399b5f8e8f82a11f9f3ad",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-lifecycle.py.gz": "bb2ac66785ffd801a93e4046b5fc1d17583a88793779ed2c7f17a813277f37e1",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-BuildBlock.scala.gz": "817e6ca3a861b9b7e00f4264c9cb49218ef72437ea0b5869f608c43a722a4b31",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-CampaignTransactions.scala.gz": "775b2b385f72b49fc38fcb9d332fbf9432616cc23b187bd0062191f626ee44a0",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-CampaignParameters.scala.gz": "bb863967c4bcd49da77249d74734a91f4a89a49c1c558f3f0fec41ada234caa2",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-build-block.py.gz": "5967c1a70f5b07bf75e3ba478216c412c43da734489475c054f2a3aabce70873",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-genesis.conf.gz": "0199608e15657b222c8cda5266d39f7a85b4c225c3dd68b675b3ec056c7f330e"
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-scala-mines-final-scala.log.gz": "0cce116699c99d39b6eb1d900860f6d471cc0b983759369208eae76798032777",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-scala-mines-final-rust.log.gz": "968684a96a36a52fd29ed37fdf4428037b8b8ee00161c4d762c7f960608988ed",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-campaign.py.gz": "259524af8f2ebc4bee29993e3e9092e874015b065f8f3b779989b39df1927b71",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-campaign.sh.gz": "5b2bb1cedd1a82bad9719d367168255718e4508832d399b5f8e8f82a11f9f3ad",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-lifecycle.py.gz": "bb2ac66785ffd801a93e4046b5fc1d17583a88793779ed2c7f17a813277f37e1",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-BuildBlock.scala.gz": "817e6ca3a861b9b7e00f4264c9cb49218ef72437ea0b5869f608c43a722a4b31",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-CampaignTransactions.scala.gz": "775b2b385f72b49fc38fcb9d332fbf9432616cc23b187bd0062191f626ee44a0",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-CampaignParameters.scala.gz": "bb863967c4bcd49da77249d74734a91f4a89a49c1c558f3f0fec41ada234caa2",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-build-block.py.gz": "5967c1a70f5b07bf75e3ba478216c412c43da734489475c054f2a3aabce70873",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-genesis.conf.gz": "0199608e15657b222c8cda5266d39f7a85b4c225c3dd68b675b3ec056c7f330e",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz": "80d1d961ff03ff19b9dd4cc0b7c8488310955fd4c9c236a66ee2a0ddcac4ae13"
         },
         "context": {
           "network": "private devnet / devnet60",
@@ -11332,23 +11333,23 @@
         }
       ],
       "warmup_artifact": {
-        "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-warmup.json.gz",
+        "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-warmup.json.gz",
         "sha256": "d61b5d8bde60ba5600f56c4365d5121143ed09429d078ffc8f6485039a94a7b9",
         "uncompressed_sha256": "c3c363c943eb9a4a39b4e19db0221a319ee7770cbc5e5249d76ba8581da5c396"
       },
       "funding_artifacts": {
         "block": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-fund.json.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-fund.json.gz",
           "sha256": "059553d4a1782f21a7d56e23aea2d14c16f960b4d94e7bf15876dacf17330cc9",
           "uncompressed_sha256": "f54be28c3cb17412e83b766e3edc0a72184a5c8b2493c758e457301882461386"
         },
         ".oracle.json": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-fund.json.oracle.json.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-fund.json.oracle.json.gz",
           "sha256": "cc5b56cfd59ba8b0a9c9cc080b234592606e7f5bf8b25b128f0371488a120826",
           "uncompressed_sha256": "f5c3bf223fbea3f021cb9e3ad42a0ee4047569890931fa857b22d507ce073c91"
         },
         ".transactions.json": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-fund.json.transactions.json.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-fund.json.transactions.json.gz",
           "sha256": "22166968adf8e4b7eb1f557462905f90b2cfb589766b8c67478ef0869a802e60",
           "uncompressed_sha256": "b49a460cd057454edef8f819691426255f4821b0e1f331dd8e997672d1a28ecd"
         }
@@ -11441,54 +11442,54 @@
       "stopped": true,
       "node_logs": {
         "scala": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-scala-mines-final-scala.log.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-scala-mines-final-scala.log.gz",
           "sha256": "0cce116699c99d39b6eb1d900860f6d471cc0b983759369208eae76798032777",
           "uncompressed_sha256": "c8b8cd8d58e0cd8c6f55c2237988e45539eb810451b4677ac00d31b321971e43"
         },
         "rust": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-scala-mines-final-rust.log.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-scala-mines-final-rust.log.gz",
           "sha256": "968684a96a36a52fd29ed37fdf4428037b8b8ee00161c4d762c7f960608988ed",
           "uncompressed_sha256": "54c0d3cdd7b8753274dc572126e8aae481068219b7f81733e95153ff4621ca42"
         }
       },
       "source_snapshots": {
         "scripts/devnet-mixed/campaign.py": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-campaign.py.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-campaign.py.gz",
           "sha256": "259524af8f2ebc4bee29993e3e9092e874015b065f8f3b779989b39df1927b71",
           "uncompressed_sha256": "749ec7f07a74dbd171e5acc31cbd79531a2d3af6d4e012d3f8965f39eb5e3168"
         },
         "scripts/devnet-mixed/campaign.sh": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-campaign.sh.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-campaign.sh.gz",
           "sha256": "5b2bb1cedd1a82bad9719d367168255718e4508832d399b5f8e8f82a11f9f3ad",
           "uncompressed_sha256": "ad3baa651182191a38befa873abfa479b4957bbe0df0f69ecc0e920cce22812d"
         },
         "scripts/devnet-mixed/lifecycle.py": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-lifecycle.py.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-lifecycle.py.gz",
           "sha256": "bb2ac66785ffd801a93e4046b5fc1d17583a88793779ed2c7f17a813277f37e1",
           "uncompressed_sha256": "c4e5fb6457966d660a155d8887f869d4ca0d706463c602e5c4c4412a9668919f"
         },
         "scripts/devnet-mixed/BuildBlock.scala": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-BuildBlock.scala.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-BuildBlock.scala.gz",
           "sha256": "817e6ca3a861b9b7e00f4264c9cb49218ef72437ea0b5869f608c43a722a4b31",
           "uncompressed_sha256": "b4ac27e2f8a8501672afe98651123b5fa28c3eba6db2d3ac61129e1846e5b41d"
         },
         "scripts/devnet-mixed/CampaignTransactions.scala": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-CampaignTransactions.scala.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-CampaignTransactions.scala.gz",
           "sha256": "775b2b385f72b49fc38fcb9d332fbf9432616cc23b187bd0062191f626ee44a0",
           "uncompressed_sha256": "e93d4adf78979027b28a7639e28a4ba7b5616f61eae7e24950e62de0906bf6ff"
         },
         "scripts/devnet-mixed/CampaignParameters.scala": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-CampaignParameters.scala.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-CampaignParameters.scala.gz",
           "sha256": "bb863967c4bcd49da77249d74734a91f4a89a49c1c558f3f0fec41ada234caa2",
           "uncompressed_sha256": "deaa8d73e40a6cd50afdb037d1c52c7c0c0d26a7068fbeb1a032003a65e70b04"
         },
         "scripts/devnet-mixed/build-block.py": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-build-block.py.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-build-block.py.gz",
           "sha256": "5967c1a70f5b07bf75e3ba478216c412c43da734489475c054f2a3aabce70873",
           "uncompressed_sha256": "ed4db124cc5cf0db577df08180cad06f252ea7bb73a5ad17995cab4019b9dcf4"
         },
         "scripts/devnet-mixed/genesis.conf": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-genesis.conf.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-genesis.conf.gz",
           "sha256": "0199608e15657b222c8cda5266d39f7a85b4c225c3dd68b675b3ec056c7f330e",
           "uncompressed_sha256": "d74120d8f73d4b6fe22c3cf3564df34cbdd82d96713ff2d519d45179cd208f0d"
         }
@@ -11502,7 +11503,7 @@
         ],
         "pid_files_absent": true
       },
-      "payload_sha256_excluding_this_field": "1395dcea888d939c1fff420bb19cb2efecbbe2e596d97d11b9752d20284ab595"
+      "payload_sha256_excluding_this_field": "632a0078e929ef6f7fe66f3687e7b1a5bbc99538b49de05d6771e8b2d1e0e3dc"
     },
     {
       "direction": "rust-mines",
@@ -11524,17 +11525,17 @@
         {
           "artifacts": {
             "block": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-workload-0.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-workload-0.json.gz",
               "sha256": "0e9da311fa5c4abddb6cf8071e09a740c89bfd1b97c0efd6706f2f618bd4b2ef",
               "uncompressed_sha256": "e0e620a5bbb718f50b324f952a415f485dcb9918846266fe1c5dcedd70495cd5"
             },
             ".oracle.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-workload-0.json.oracle.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-workload-0.json.oracle.json.gz",
               "sha256": "dbd348173877a33b6b414127fd0f2db6c4f92b9493ca422f6be6cbc837063156",
               "uncompressed_sha256": "e0d3a688ecfd1d755ca907b10396eb2d7cf2813e8877ab018dee14615006a305"
             },
             ".transactions.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-workload-0.json.transactions.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-workload-0.json.transactions.json.gz",
               "sha256": "ec3efb1f0fcb050fbc45d02715347364facd950a29b3a40d7ce773f85d52da4f",
               "uncompressed_sha256": "4fcbce249eb41d5d8688b02c4f195e2a53f9812611c599e6ba0e2476285888e3"
             }
@@ -12091,8 +12092,8 @@
           "test-vectors/ergo-sigma/cost-ledger/fixtures/method/coll-flatMap.json.gz": "b36c460eb1338ec4fee39549b8f73ad466aa38f4060fc14ef690f5dbe0c12982",
           "test-vectors/ergo-sigma/cost-ledger/fixtures/method/coll-zip.json.gz": "6568d19c625b1f740fc7945661ca1c2b470f52ce19ec06b0392b3707bb4e0a8e",
           "test-vectors/ergo-sigma/cost-ledger/fixtures/method/global-xor.json.gz": "068f317392c10fc1b2f0028384960a831dd26ff70ad277fa6e34991980dc5df5",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-scala.log.gz": "eeccbef4adeda281c52e549da53d6275c1292e6fd590b9927168d3d155e6fc78",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust.log.gz": "58c5dd592b5362c23f72894ba9386bb3b7c07cc39ebfe1c9c89d2a3a420b2d43",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-scala.log.gz": "eeccbef4adeda281c52e549da53d6275c1292e6fd590b9927168d3d155e6fc78",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust.log.gz": "58c5dd592b5362c23f72894ba9386bb3b7c07cc39ebfe1c9c89d2a3a420b2d43",
           "scripts/devnet-mixed/campaign.py": "e8e79c8f7123adf42602501dcd069b20fe78130d882e99c8b54855ef3deb8e65",
           "scripts/devnet-mixed/campaign.sh": "ad3baa651182191a38befa873abfa479b4957bbe0df0f69ecc0e920cce22812d",
           "scripts/devnet-mixed/BuildBlock.scala": "b4ac27e2f8a8501672afe98651123b5fa28c3eba6db2d3ac61129e1846e5b41d",
@@ -12103,23 +12104,24 @@
           "scripts/devnet-mixed/genesis.conf": "d74120d8f73d4b6fe22c3cf3564df34cbdd82d96713ff2d519d45179cd208f0d",
           "scripts/devnet-mixed/.work/campaign-scala-node.conf": "5b036f6543f6d1afe47a07cf74f1336da2de6b0acf5c4e6cac2f3627234ec548",
           "scripts/devnet-mixed/.work/campaign-rust-node.toml": "8a12ab6ac35e06b04fce14905c199421e0cf1879c6764ff3e2c6c3ceeb429ffc",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-fund.json.gz": "e087b8f3cc599901163409ed9f193fa437d213775bed2daf53dc0c2ecce2c0b4",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-fund.json.oracle.json.gz": "563c9c6d3c06101829559d8f38b046b5b42c23e0cac49138feaa239392110546",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-fund.json.transactions.json.gz": "98884d21f242f2064f4c8ff987c75bc77073af3e1ff1f7d5963907a501f0e337",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-workload-0.json.gz": "0e9da311fa5c4abddb6cf8071e09a740c89bfd1b97c0efd6706f2f618bd4b2ef",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-workload-0.json.oracle.json.gz": "dbd348173877a33b6b414127fd0f2db6c4f92b9493ca422f6be6cbc837063156",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-workload-0.json.transactions.json.gz": "ec3efb1f0fcb050fbc45d02715347364facd950a29b3a40d7ce773f85d52da4f",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-rust-observed-source-campaign.py.gz": "ced538d0ee7b319ff1c31af2f5d10c5d6d6875ba45ba5ecc7df335d66b6ab3f0",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-campaign.sh.gz": "5b2bb1cedd1a82bad9719d367168255718e4508832d399b5f8e8f82a11f9f3ad",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-lifecycle.py.gz": "bb2ac66785ffd801a93e4046b5fc1d17583a88793779ed2c7f17a813277f37e1",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-BuildBlock.scala.gz": "817e6ca3a861b9b7e00f4264c9cb49218ef72437ea0b5869f608c43a722a4b31",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-CampaignTransactions.scala.gz": "775b2b385f72b49fc38fcb9d332fbf9432616cc23b187bd0062191f626ee44a0",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-CampaignParameters.scala.gz": "bb863967c4bcd49da77249d74734a91f4a89a49c1c558f3f0fec41ada234caa2",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-build-block.py.gz": "5967c1a70f5b07bf75e3ba478216c412c43da734489475c054f2a3aabce70873",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-genesis.conf.gz": "0199608e15657b222c8cda5266d39f7a85b4c225c3dd68b675b3ec056c7f330e",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-9fd384a6-candidate.rs.gz": "78b0877b80683794d2d52f4ebb762b38523d76a5eaba0f01e67a5c223566de82",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-9fd384a6-tx_selection.rs.gz": "84cef7cda564099a6dbf2f7bb8ef7a9bd68179d91f023388c276706b381ce6fe",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-scala-6.0.5-CandidateGenerator.scala.gz": "b45311aafcd356b226ac4990abe2fe19fa5d6d625a00c7ee9184eb1d97ff69ad"
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-fund.json.gz": "e087b8f3cc599901163409ed9f193fa437d213775bed2daf53dc0c2ecce2c0b4",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-fund.json.oracle.json.gz": "563c9c6d3c06101829559d8f38b046b5b42c23e0cac49138feaa239392110546",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-fund.json.transactions.json.gz": "98884d21f242f2064f4c8ff987c75bc77073af3e1ff1f7d5963907a501f0e337",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-workload-0.json.gz": "0e9da311fa5c4abddb6cf8071e09a740c89bfd1b97c0efd6706f2f618bd4b2ef",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-workload-0.json.oracle.json.gz": "dbd348173877a33b6b414127fd0f2db6c4f92b9493ca422f6be6cbc837063156",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-workload-0.json.transactions.json.gz": "ec3efb1f0fcb050fbc45d02715347364facd950a29b3a40d7ce773f85d52da4f",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-rust-observed-source-campaign.py.gz": "ced538d0ee7b319ff1c31af2f5d10c5d6d6875ba45ba5ecc7df335d66b6ab3f0",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-campaign.sh.gz": "5b2bb1cedd1a82bad9719d367168255718e4508832d399b5f8e8f82a11f9f3ad",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-lifecycle.py.gz": "bb2ac66785ffd801a93e4046b5fc1d17583a88793779ed2c7f17a813277f37e1",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-BuildBlock.scala.gz": "817e6ca3a861b9b7e00f4264c9cb49218ef72437ea0b5869f608c43a722a4b31",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-CampaignTransactions.scala.gz": "775b2b385f72b49fc38fcb9d332fbf9432616cc23b187bd0062191f626ee44a0",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-CampaignParameters.scala.gz": "bb863967c4bcd49da77249d74734a91f4a89a49c1c558f3f0fec41ada234caa2",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-build-block.py.gz": "5967c1a70f5b07bf75e3ba478216c412c43da734489475c054f2a3aabce70873",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-genesis.conf.gz": "0199608e15657b222c8cda5266d39f7a85b4c225c3dd68b675b3ec056c7f330e",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-9fd384a6-candidate.rs.gz": "78b0877b80683794d2d52f4ebb762b38523d76a5eaba0f01e67a5c223566de82",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-9fd384a6-tx_selection.rs.gz": "84cef7cda564099a6dbf2f7bb8ef7a9bd68179d91f023388c276706b381ce6fe",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-scala-6.0.5-CandidateGenerator.scala.gz": "b45311aafcd356b226ac4990abe2fe19fa5d6d625a00c7ee9184eb1d97ff69ad",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz": "80d1d961ff03ff19b9dd4cc0b7c8488310955fd4c9c236a66ee2a0ddcac4ae13"
         },
         "context": {
           "network": "private devnet / devnet60",
@@ -12205,24 +12207,24 @@
         "starting_height": 727,
         "required_height": 720,
         "warmup_artifact": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-warmup.json.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-warmup.json.gz",
           "sha256": "d61b5d8bde60ba5600f56c4365d5121143ed09429d078ffc8f6485039a94a7b9",
           "uncompressed_sha256": "c3c363c943eb9a4a39b4e19db0221a319ee7770cbc5e5249d76ba8581da5c396"
         }
       },
       "funding_artifacts": {
         "block": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-fund.json.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-fund.json.gz",
           "sha256": "e087b8f3cc599901163409ed9f193fa437d213775bed2daf53dc0c2ecce2c0b4",
           "uncompressed_sha256": "161fb34df7411a8a54fdf5cd27448bcad6b0d4c3730e877ab402b6111da5f0a0"
         },
         ".oracle.json": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-fund.json.oracle.json.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-fund.json.oracle.json.gz",
           "sha256": "563c9c6d3c06101829559d8f38b046b5b42c23e0cac49138feaa239392110546",
           "uncompressed_sha256": "ee35a561dccf1c6d38c23be38466a75752fde3956fd036e07690668558bea11c"
         },
         ".transactions.json": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-fund.json.transactions.json.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust-mines-fund.json.transactions.json.gz",
           "sha256": "98884d21f242f2064f4c8ff987c75bc77073af3e1ff1f7d5963907a501f0e337",
           "uncompressed_sha256": "836c306ab331a30afbe2582ba873b7005221a054bcd9f0399ce9f5c86c0fd0d8"
         }
@@ -12230,12 +12232,12 @@
       "error": "mined candidate omitted workload transaction",
       "failure_logs": {
         "scala": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-scala.log.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-scala.log.gz",
           "sha256": "eeccbef4adeda281c52e549da53d6275c1292e6fd590b9927168d3d155e6fc78",
           "uncompressed_sha256": "462ecabf0c2f8fd1dc595902d1cffa2caf51e6c57c917bfa966b78d58f1288a4"
         },
         "rust": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust.log.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-2-rust.log.gz",
           "sha256": "58c5dd592b5362c23f72894ba9386bb3b7c07cc39ebfe1c9c89d2a3a420b2d43",
           "uncompressed_sha256": "8f11e64829d891201d5a5a1283aef96d461be39f005216e3f077c06f87ff71f1"
         }
@@ -12330,59 +12332,59 @@
       "diagnosis": "Rust reserves a fixed 150000 block-cost safety gap; at cap 37509 its user-transaction budget saturates to zero. Scala uses safeGap=0 below 1000000. Rust completed a Full MempoolRefresh before mining the emission-only block.",
       "source_snapshots": {
         "scripts/devnet-mixed/campaign.py": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-rust-observed-source-campaign.py.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-rust-observed-source-campaign.py.gz",
           "sha256": "ced538d0ee7b319ff1c31af2f5d10c5d6d6875ba45ba5ecc7df335d66b6ab3f0",
           "uncompressed_sha256": "e8e79c8f7123adf42602501dcd069b20fe78130d882e99c8b54855ef3deb8e65"
         },
         "scripts/devnet-mixed/campaign.sh": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-campaign.sh.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-campaign.sh.gz",
           "sha256": "5b2bb1cedd1a82bad9719d367168255718e4508832d399b5f8e8f82a11f9f3ad",
           "uncompressed_sha256": "ad3baa651182191a38befa873abfa479b4957bbe0df0f69ecc0e920cce22812d"
         },
         "scripts/devnet-mixed/lifecycle.py": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-lifecycle.py.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-lifecycle.py.gz",
           "sha256": "bb2ac66785ffd801a93e4046b5fc1d17583a88793779ed2c7f17a813277f37e1",
           "uncompressed_sha256": "c4e5fb6457966d660a155d8887f869d4ca0d706463c602e5c4c4412a9668919f"
         },
         "scripts/devnet-mixed/BuildBlock.scala": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-BuildBlock.scala.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-BuildBlock.scala.gz",
           "sha256": "817e6ca3a861b9b7e00f4264c9cb49218ef72437ea0b5869f608c43a722a4b31",
           "uncompressed_sha256": "b4ac27e2f8a8501672afe98651123b5fa28c3eba6db2d3ac61129e1846e5b41d"
         },
         "scripts/devnet-mixed/CampaignTransactions.scala": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-CampaignTransactions.scala.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-CampaignTransactions.scala.gz",
           "sha256": "775b2b385f72b49fc38fcb9d332fbf9432616cc23b187bd0062191f626ee44a0",
           "uncompressed_sha256": "e93d4adf78979027b28a7639e28a4ba7b5616f61eae7e24950e62de0906bf6ff"
         },
         "scripts/devnet-mixed/CampaignParameters.scala": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-CampaignParameters.scala.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-CampaignParameters.scala.gz",
           "sha256": "bb863967c4bcd49da77249d74734a91f4a89a49c1c558f3f0fec41ada234caa2",
           "uncompressed_sha256": "deaa8d73e40a6cd50afdb037d1c52c7c0c0d26a7068fbeb1a032003a65e70b04"
         },
         "scripts/devnet-mixed/build-block.py": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-build-block.py.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-build-block.py.gz",
           "sha256": "5967c1a70f5b07bf75e3ba478216c412c43da734489475c054f2a3aabce70873",
           "uncompressed_sha256": "ed4db124cc5cf0db577df08180cad06f252ea7bb73a5ad17995cab4019b9dcf4"
         },
         "scripts/devnet-mixed/genesis.conf": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-genesis.conf.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-observed-source-genesis.conf.gz",
           "sha256": "0199608e15657b222c8cda5266d39f7a85b4c225c3dd68b675b3ec056c7f330e",
           "uncompressed_sha256": "d74120d8f73d4b6fe22c3cf3564df34cbdd82d96713ff2d519d45179cd208f0d"
         }
       },
       "diagnostic_sources": {
         "ergo-mining/src/candidate.rs": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-9fd384a6-candidate.rs.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-9fd384a6-candidate.rs.gz",
           "sha256": "78b0877b80683794d2d52f4ebb762b38523d76a5eaba0f01e67a5c223566de82",
           "uncompressed_sha256": "76f031c8d73482fc688bb34f100bfcb76e44fb2908bc48dae6b01afda6a499ad"
         },
         "ergo-mining/src/tx_selection.rs": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-9fd384a6-tx_selection.rs.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-9fd384a6-tx_selection.rs.gz",
           "sha256": "84cef7cda564099a6dbf2f7bb8ef7a9bd68179d91f023388c276706b381ce6fe",
           "uncompressed_sha256": "6d4a0b7037c0de88b4afc6999d878c237169363460bfec4d06d8c0b0d6c80e0b"
         },
         "scala-6.0.5-CandidateGenerator.scala": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-scala-6.0.5-CandidateGenerator.scala.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-scala-6.0.5-CandidateGenerator.scala.gz",
           "sha256": "b45311aafcd356b226ac4990abe2fe19fa5d6d625a00c7ee9184eb1d97ff69ad",
           "uncompressed_sha256": "51a2a90252dbaa5dfab9c649fc9fe1c8fdd0ca5de852a69ef255cd1a4d665706"
         }
@@ -12397,7 +12399,7 @@
         "pid_files_absent": true
       },
       "resolution_commit": "07a4f410",
-      "payload_sha256_excluding_this_field": "ccc31c4de2b419f530c253f26f442ef38d7d035aaa7bc4799122cd0b524d5abb"
+      "payload_sha256_excluding_this_field": "942e93d65e1f360e60e22e0121e34173e95105a0439f81b7f5828469a67f1a0c"
     },
     {
       "direction": "rust-mines",
@@ -12412,17 +12414,17 @@
         {
           "artifacts": {
             "block": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-0.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-0.json.gz",
               "sha256": "528904305d288bba5d9659a101b0acb1d704d6bf4a357104b79dffc3e4895972",
               "uncompressed_sha256": "bd002470998daa2932433146c50773b1f87fd78ee021172af8120edcbc0af79e"
             },
             ".oracle.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-0.json.oracle.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-0.json.oracle.json.gz",
               "sha256": "7a57e4043faca221ef63e4f8a1d33e5c80082ddd2d053c885aa9f8bf59e942e2",
               "uncompressed_sha256": "a4c58d5dd8de85c86049b2ec9d90d13bd3e3f39dd3222717bb8b93e30e3daf52"
             },
             ".transactions.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-0.json.transactions.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-0.json.transactions.json.gz",
               "sha256": "075e5d2085ba25c76d00c16213166f40ca7810e9b1a41c49c49a5c75ba3ae35e",
               "uncompressed_sha256": "2477e8f2b6cc719e085c455ab2a06de07272ca9b516daf3ac20790402affabc7"
             }
@@ -12801,17 +12803,17 @@
         {
           "artifacts": {
             "block": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-1.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-1.json.gz",
               "sha256": "f0e01ca9745f74128d75518a955c2654860294ad03067e23cc0e8893c71c450f",
               "uncompressed_sha256": "f4b9e16919d16aa4ab7118bccfe723042f2f267b0139e95ae9e83c24f2da078c"
             },
             ".oracle.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-1.json.oracle.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-1.json.oracle.json.gz",
               "sha256": "5fee7c5599c890fed0c4969c3705dd9cf57ae031b978debb64940e419b7300c9",
               "uncompressed_sha256": "f590ee09fb3612f86ce08cdca423e08544db1e1100af98ff144963c81ff81318"
             },
             ".transactions.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-1.json.transactions.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-1.json.transactions.json.gz",
               "sha256": "a7da03a7762abac96c172d9e928f3b629aa4f2cd9734408d5e2cbc512e71275d",
               "uncompressed_sha256": "64f5e1e558879f3a6ca2f87b25b09f94e569c043b89b4821442b9eb59889d226"
             }
@@ -13202,17 +13204,17 @@
         {
           "artifacts": {
             "block": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-2.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-2.json.gz",
               "sha256": "464ecf4eeb7b18e3fe84806bfc3407f90c788cb7a1a2d7ec705522dafb59ade3",
               "uncompressed_sha256": "03fb4565a1021dff380f11335b64224b881ca3e45549e5aebefde508897633ce"
             },
             ".oracle.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-2.json.oracle.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-2.json.oracle.json.gz",
               "sha256": "0caf65b657153d2169bbe08d876397b01d158e4e39e26400ed0da904d2b284d3",
               "uncompressed_sha256": "b9341de91ca1ffdd5c7fc61b3f82798590fc5015f74ab83f6bf8a7eca744dd2a"
             },
             ".transactions.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-2.json.transactions.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-2.json.transactions.json.gz",
               "sha256": "1ca16172006b3d3b3c93cd9799332730aea728328494a05e52a70fca57ccae26",
               "uncompressed_sha256": "68ad4382dcb8625fc94f5be02e85ca238791c43fb0d854c46036fa6fce402caa"
             }
@@ -13603,17 +13605,17 @@
         {
           "artifacts": {
             "block": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-3.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-3.json.gz",
               "sha256": "ac771b5ea09f90b23329668c8b874f76ec787b2391c3cdb7c9ddf29f3a9b3d0a",
               "uncompressed_sha256": "8c2211772ee02c25eae37489ab263c52b905e2b4cdb1ecceb2f149658bc8849e"
             },
             ".oracle.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-3.json.oracle.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-3.json.oracle.json.gz",
               "sha256": "cafce3110beb5b0af0c9ac328248103238bb774d16a883a75551ae2869a34eec",
               "uncompressed_sha256": "7b9f1409c1297d6fd7ee6caba815240659a334b45dc3504bd0a085f93bd1e432"
             },
             ".transactions.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-3.json.transactions.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-3.json.transactions.json.gz",
               "sha256": "45b58cee5a90eba016498d933944b17c75c4b90430a78cedb83361e5728bb304",
               "uncompressed_sha256": "5bf337700fc1aabe83865343630349385b8d271da9d04a2aa8d89430b7dc8c39"
             }
@@ -14401,17 +14403,17 @@
           },
           "artifacts": {
             "block": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-over-cap.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-over-cap.json.gz",
               "sha256": "fefe85412d8eb6805fc38c0dc3dfdc6adaaee1961975728ac10692567b4eca85",
               "uncompressed_sha256": "1c87f95c0fc40e4d90751927137b5ac89043640c8a12ced99aa58caae617c28e"
             },
             ".oracle.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-over-cap.json.oracle.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-over-cap.json.oracle.json.gz",
               "sha256": "936215b81e235513741e585a75935ee7867aaee410098f0c8966e5c587b32a8d",
               "uncompressed_sha256": "77f05c47e3be108f9a8b3fb02c6b4a196932817a4c09bd12e7087560691b4ca5"
             },
             ".transactions.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-over-cap.json.transactions.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-over-cap.json.transactions.json.gz",
               "sha256": "940e7d4b905253bb8f8510605ca4fde265888ed687c35ced3e2c579e9e4bfde0",
               "uncompressed_sha256": "eb34afae34c86f18d2b36d99c4b80d13ffc79c1e6f5b3318d2d054e9accb4293"
             }
@@ -14625,17 +14627,17 @@
           },
           "artifacts": {
             "block": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-at-cap.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-at-cap.json.gz",
               "sha256": "a8c69e28981cf84e131b2dd2d5f4deef075c3d7af451bb13817d020f332ad61a",
               "uncompressed_sha256": "ca5cd92cfe1106645179d3c9d16d9bcaf75975f328b0541e4e963a141ce177d9"
             },
             ".oracle.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-at-cap.json.oracle.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-at-cap.json.oracle.json.gz",
               "sha256": "fb69cddc5f651145ecb1c788996bc36cbb0344596ee0ed1b553af3b611018cd9",
               "uncompressed_sha256": "90c9fdd4ce2ffd88ea482680e8da6ed33a26a5b8c0199944b4fa3b0ffc0dcecc"
             },
             ".transactions.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-at-cap.json.transactions.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-at-cap.json.transactions.json.gz",
               "sha256": "002fa742fc75f04bd48f63ae7100699cca845d06dac4fece77e0243314c3f61e",
               "uncompressed_sha256": "1094c89d6079316b11c0ca5d00e88e2b6187cf9ff38765c6b239ab21602e9d3b"
             }
@@ -14847,17 +14849,17 @@
           },
           "artifacts": {
             "block": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-single-at-cap.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-single-at-cap.json.gz",
               "sha256": "dbc817a0bb2a1e656410ee5347c78a0fa86b469289d920e4c4f968c07f206ab4",
               "uncompressed_sha256": "0b55dd55553053845c849c824a94c8c4f7cdfc156d4187cffd8024621231517e"
             },
             ".oracle.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-single-at-cap.json.oracle.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-single-at-cap.json.oracle.json.gz",
               "sha256": "2fb924f77ae1f5ea6bac5cc506d4842f3b27f68a45e2e4c1f3cd71cfd9678fb8",
               "uncompressed_sha256": "b104c4b8ec500632a4cc745ffab916f350a4b12f952e952cd096cd8fe7495d39"
             },
             ".transactions.json": {
-              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-single-at-cap.json.transactions.json.gz",
+              "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-single-at-cap.json.transactions.json.gz",
               "sha256": "ee24b8f0fa90241d9e08fd43391df7e7e906e5e43ce8db72343c9c38167ccdda",
               "uncompressed_sha256": "a75821cb0a73e6753b0e874083ccfdc2a415f7de1067b1f08d34183b9dff6cf8"
             }
@@ -14908,8 +14910,8 @@
           "test-vectors/ergo-sigma/cost-ledger/fixtures/method/coll-flatMap.json.gz": "b36c460eb1338ec4fee39549b8f73ad466aa38f4060fc14ef690f5dbe0c12982",
           "test-vectors/ergo-sigma/cost-ledger/fixtures/method/coll-zip.json.gz": "6568d19c625b1f740fc7945661ca1c2b470f52ce19ec06b0392b3707bb4e0a8e",
           "test-vectors/ergo-sigma/cost-ledger/fixtures/method/global-xor.json.gz": "068f317392c10fc1b2f0028384960a831dd26ff70ad277fa6e34991980dc5df5",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-scala.log.gz": "fdf483eb82706ede5f1d4eec8dac3f4a98ef088309b3357a05bc597f2719e8b4",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust.log.gz": "418a9bc8965efdbc7ece1527f5f1a55a2d39e42f9941e7674cfac9032fe53b1d",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-scala.log.gz": "fdf483eb82706ede5f1d4eec8dac3f4a98ef088309b3357a05bc597f2719e8b4",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust.log.gz": "418a9bc8965efdbc7ece1527f5f1a55a2d39e42f9941e7674cfac9032fe53b1d",
           "scripts/devnet-mixed/campaign.py": "25bc922575ee381904724fddc29028b353365a7d0900270d9168dde52d2766dc",
           "scripts/devnet-mixed/campaign.sh": "ad3baa651182191a38befa873abfa479b4957bbe0df0f69ecc0e920cce22812d",
           "scripts/devnet-mixed/BuildBlock.scala": "b4ac27e2f8a8501672afe98651123b5fa28c3eba6db2d3ac61129e1846e5b41d",
@@ -14920,45 +14922,46 @@
           "scripts/devnet-mixed/genesis.conf": "d74120d8f73d4b6fe22c3cf3564df34cbdd82d96713ff2d519d45179cd208f0d",
           "scripts/devnet-mixed/.work/campaign-scala-node.conf": "5b036f6543f6d1afe47a07cf74f1336da2de6b0acf5c4e6cac2f3627234ec548",
           "scripts/devnet-mixed/.work/campaign-rust-node.toml": "8a12ab6ac35e06b04fce14905c199421e0cf1879c6764ff3e2c6c3ceeb429ffc",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-fund.json.gz": "ddaa0b319d5f5a964051b3dd053172f4415d01d9d77f869a92202765029917eb",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-fund.json.oracle.json.gz": "55965271788741455e23dc5d7ee86324b3dfac33e18487c983d454d8f9239434",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-fund.json.transactions.json.gz": "65210bf9f05bd8c894397ecdb2b32d53df67eeac2abda396035eb152375a593b",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-0.json.gz": "528904305d288bba5d9659a101b0acb1d704d6bf4a357104b79dffc3e4895972",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-0.json.oracle.json.gz": "7a57e4043faca221ef63e4f8a1d33e5c80082ddd2d053c885aa9f8bf59e942e2",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-0.json.transactions.json.gz": "075e5d2085ba25c76d00c16213166f40ca7810e9b1a41c49c49a5c75ba3ae35e",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-1.json.gz": "f0e01ca9745f74128d75518a955c2654860294ad03067e23cc0e8893c71c450f",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-1.json.oracle.json.gz": "5fee7c5599c890fed0c4969c3705dd9cf57ae031b978debb64940e419b7300c9",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-1.json.transactions.json.gz": "a7da03a7762abac96c172d9e928f3b629aa4f2cd9734408d5e2cbc512e71275d",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-2.json.gz": "464ecf4eeb7b18e3fe84806bfc3407f90c788cb7a1a2d7ec705522dafb59ade3",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-2.json.oracle.json.gz": "0caf65b657153d2169bbe08d876397b01d158e4e39e26400ed0da904d2b284d3",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-2.json.transactions.json.gz": "1ca16172006b3d3b3c93cd9799332730aea728328494a05e52a70fca57ccae26",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-3.json.gz": "ac771b5ea09f90b23329668c8b874f76ec787b2391c3cdb7c9ddf29f3a9b3d0a",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-3.json.oracle.json.gz": "cafce3110beb5b0af0c9ac328248103238bb774d16a883a75551ae2869a34eec",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-3.json.transactions.json.gz": "45b58cee5a90eba016498d933944b17c75c4b90430a78cedb83361e5728bb304",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-over-cap.json.gz": "fefe85412d8eb6805fc38c0dc3dfdc6adaaee1961975728ac10692567b4eca85",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-over-cap.json.oracle.json.gz": "936215b81e235513741e585a75935ee7867aaee410098f0c8966e5c587b32a8d",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-over-cap.json.transactions.json.gz": "940e7d4b905253bb8f8510605ca4fde265888ed687c35ced3e2c579e9e4bfde0",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-fund.json.gz": "ddaa0b319d5f5a964051b3dd053172f4415d01d9d77f869a92202765029917eb",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-fund.json.oracle.json.gz": "55965271788741455e23dc5d7ee86324b3dfac33e18487c983d454d8f9239434",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-fund.json.transactions.json.gz": "65210bf9f05bd8c894397ecdb2b32d53df67eeac2abda396035eb152375a593b",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-0.json.gz": "528904305d288bba5d9659a101b0acb1d704d6bf4a357104b79dffc3e4895972",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-0.json.oracle.json.gz": "7a57e4043faca221ef63e4f8a1d33e5c80082ddd2d053c885aa9f8bf59e942e2",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-0.json.transactions.json.gz": "075e5d2085ba25c76d00c16213166f40ca7810e9b1a41c49c49a5c75ba3ae35e",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-1.json.gz": "f0e01ca9745f74128d75518a955c2654860294ad03067e23cc0e8893c71c450f",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-1.json.oracle.json.gz": "5fee7c5599c890fed0c4969c3705dd9cf57ae031b978debb64940e419b7300c9",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-1.json.transactions.json.gz": "a7da03a7762abac96c172d9e928f3b629aa4f2cd9734408d5e2cbc512e71275d",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-2.json.gz": "464ecf4eeb7b18e3fe84806bfc3407f90c788cb7a1a2d7ec705522dafb59ade3",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-2.json.oracle.json.gz": "0caf65b657153d2169bbe08d876397b01d158e4e39e26400ed0da904d2b284d3",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-2.json.transactions.json.gz": "1ca16172006b3d3b3c93cd9799332730aea728328494a05e52a70fca57ccae26",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-3.json.gz": "ac771b5ea09f90b23329668c8b874f76ec787b2391c3cdb7c9ddf29f3a9b3d0a",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-3.json.oracle.json.gz": "cafce3110beb5b0af0c9ac328248103238bb774d16a883a75551ae2869a34eec",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-workload-3.json.transactions.json.gz": "45b58cee5a90eba016498d933944b17c75c4b90430a78cedb83361e5728bb304",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-over-cap.json.gz": "fefe85412d8eb6805fc38c0dc3dfdc6adaaee1961975728ac10692567b4eca85",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-over-cap.json.oracle.json.gz": "936215b81e235513741e585a75935ee7867aaee410098f0c8966e5c587b32a8d",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-over-cap.json.transactions.json.gz": "940e7d4b905253bb8f8510605ca4fde265888ed687c35ced3e2c579e9e4bfde0",
           "scripts/devnet-mixed/.work/rust-mines-sum-over-cap.json": "1c87f95c0fc40e4d90751927137b5ac89043640c8a12ced99aa58caae617c28e",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-at-cap.json.gz": "a8c69e28981cf84e131b2dd2d5f4deef075c3d7af451bb13817d020f332ad61a",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-at-cap.json.oracle.json.gz": "fb69cddc5f651145ecb1c788996bc36cbb0344596ee0ed1b553af3b611018cd9",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-at-cap.json.transactions.json.gz": "002fa742fc75f04bd48f63ae7100699cca845d06dac4fece77e0243314c3f61e",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-at-cap.json.gz": "a8c69e28981cf84e131b2dd2d5f4deef075c3d7af451bb13817d020f332ad61a",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-at-cap.json.oracle.json.gz": "fb69cddc5f651145ecb1c788996bc36cbb0344596ee0ed1b553af3b611018cd9",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-sum-at-cap.json.transactions.json.gz": "002fa742fc75f04bd48f63ae7100699cca845d06dac4fece77e0243314c3f61e",
           "scripts/devnet-mixed/.work/rust-mines-sum-at-cap.json": "ca5cd92cfe1106645179d3c9d16d9bcaf75975f328b0541e4e963a141ce177d9",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-single-at-cap.json.gz": "dbc817a0bb2a1e656410ee5347c78a0fa86b469289d920e4c4f968c07f206ab4",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-single-at-cap.json.oracle.json.gz": "2fb924f77ae1f5ea6bac5cc506d4842f3b27f68a45e2e4c1f3cd71cfd9678fb8",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-single-at-cap.json.transactions.json.gz": "ee24b8f0fa90241d9e08fd43391df7e7e906e5e43ce8db72343c9c38167ccdda",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-single-at-cap.json.gz": "dbc817a0bb2a1e656410ee5347c78a0fa86b469289d920e4c4f968c07f206ab4",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-single-at-cap.json.oracle.json.gz": "2fb924f77ae1f5ea6bac5cc506d4842f3b27f68a45e2e4c1f3cd71cfd9678fb8",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-single-at-cap.json.transactions.json.gz": "ee24b8f0fa90241d9e08fd43391df7e7e906e5e43ce8db72343c9c38167ccdda",
           "scripts/devnet-mixed/.work/rust-mines-single-at-cap.json": "0b55dd55553053845c849c824a94c8c4f7cdfc156d4187cffd8024621231517e",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-scala.log.gz": "c3ccc9efa0d6c32161561da8ad92de311f1c274de5dec4f290dea0852540d84e",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-rust.log.gz": "42d691023a0414ee21f3319e77ebe37407cf52fb43b10203fea4cfbca515e984",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-campaign.py.gz": "ad1c3124850d978f27b6719f50c7c43d6b5ef29a3418ae1380eb6db15ccb211f",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-campaign.sh.gz": "5b2bb1cedd1a82bad9719d367168255718e4508832d399b5f8e8f82a11f9f3ad",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-BuildBlock.scala.gz": "817e6ca3a861b9b7e00f4264c9cb49218ef72437ea0b5869f608c43a722a4b31",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-CampaignTransactions.scala.gz": "775b2b385f72b49fc38fcb9d332fbf9432616cc23b187bd0062191f626ee44a0",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-CampaignParameters.scala.gz": "bb863967c4bcd49da77249d74734a91f4a89a49c1c558f3f0fec41ada234caa2",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-build-block.py.gz": "5967c1a70f5b07bf75e3ba478216c412c43da734489475c054f2a3aabce70873",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-lifecycle.py.gz": "bb2ac66785ffd801a93e4046b5fc1d17583a88793779ed2c7f17a813277f37e1",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-genesis.conf.gz": "0199608e15657b222c8cda5266d39f7a85b4c225c3dd68b675b3ec056c7f330e",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-campaign-scala-node.conf.gz": "faca4c326c88c3dc38b8c06cf1571e7b3c87f859297bf5b0a80ccb72d1c8afb9",
-          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-campaign-rust-node.toml.gz": "89c66ea4be173def836dc74e498acdeb9ec4cd392dae4c11d07dd0b11a5e4054"
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-scala.log.gz": "c3ccc9efa0d6c32161561da8ad92de311f1c274de5dec4f290dea0852540d84e",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-rust.log.gz": "42d691023a0414ee21f3319e77ebe37407cf52fb43b10203fea4cfbca515e984",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-campaign.py.gz": "ad1c3124850d978f27b6719f50c7c43d6b5ef29a3418ae1380eb6db15ccb211f",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-campaign.sh.gz": "5b2bb1cedd1a82bad9719d367168255718e4508832d399b5f8e8f82a11f9f3ad",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-BuildBlock.scala.gz": "817e6ca3a861b9b7e00f4264c9cb49218ef72437ea0b5869f608c43a722a4b31",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-CampaignTransactions.scala.gz": "775b2b385f72b49fc38fcb9d332fbf9432616cc23b187bd0062191f626ee44a0",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-CampaignParameters.scala.gz": "bb863967c4bcd49da77249d74734a91f4a89a49c1c558f3f0fec41ada234caa2",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-build-block.py.gz": "5967c1a70f5b07bf75e3ba478216c412c43da734489475c054f2a3aabce70873",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-lifecycle.py.gz": "bb2ac66785ffd801a93e4046b5fc1d17583a88793779ed2c7f17a813277f37e1",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-genesis.conf.gz": "0199608e15657b222c8cda5266d39f7a85b4c225c3dd68b675b3ec056c7f330e",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-campaign-scala-node.conf.gz": "faca4c326c88c3dc38b8c06cf1571e7b3c87f859297bf5b0a80ccb72d1c8afb9",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-campaign-rust-node.toml.gz": "89c66ea4be173def836dc74e498acdeb9ec4cd392dae4c11d07dd0b11a5e4054",
+          "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz": "80d1d961ff03ff19b9dd4cc0b7c8488310955fd4c9c236a66ee2a0ddcac4ae13"
         },
         "context": {
           "network": "private devnet / devnet60",
@@ -15044,24 +15047,24 @@
         "starting_height": 729,
         "required_height": 720,
         "warmup_artifact": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-warmup.json.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-1-scala-mines-warmup.json.gz",
           "sha256": "d61b5d8bde60ba5600f56c4365d5121143ed09429d078ffc8f6485039a94a7b9",
           "uncompressed_sha256": "c3c363c943eb9a4a39b4e19db0221a319ee7770cbc5e5249d76ba8581da5c396"
         }
       },
       "funding_artifacts": {
         "block": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-fund.json.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-fund.json.gz",
           "sha256": "ddaa0b319d5f5a964051b3dd053172f4415d01d9d77f869a92202765029917eb",
           "uncompressed_sha256": "0027679241cbc2e6ecd7cabd44d82fe10bd059af2808a9869c4fcfa17b94c484"
         },
         ".oracle.json": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-fund.json.oracle.json.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-fund.json.oracle.json.gz",
           "sha256": "55965271788741455e23dc5d7ee86324b3dfac33e18487c983d454d8f9239434",
           "uncompressed_sha256": "a8544b58e14e30aa8f74cc6005d5b3641997ea7d54509239f9bd7240fcb152a2"
         },
         ".transactions.json": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-fund.json.transactions.json.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/resumed-attempt-3-rust-mines-fund.json.transactions.json.gz",
           "sha256": "65210bf9f05bd8c894397ecdb2b32d53df67eeac2abda396035eb152375a593b",
           "uncompressed_sha256": "304cf3938a338e85de3efaa6dfe495d770d7f0de142fe96add36e8219034080c"
         }
@@ -15154,64 +15157,64 @@
       "stopped": true,
       "node_logs": {
         "scala": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-scala.log.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-scala.log.gz",
           "sha256": "c3ccc9efa0d6c32161561da8ad92de311f1c274de5dec4f290dea0852540d84e",
           "uncompressed_sha256": "e3603cd2b20050722de3ba060ae74e94f6c7bdd3931319ecf50039fa21ee8479"
         },
         "rust": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-rust.log.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-rust.log.gz",
           "sha256": "42d691023a0414ee21f3319e77ebe37407cf52fb43b10203fea4cfbca515e984",
           "uncompressed_sha256": "75bae78e2fa2c3af12fbc7484e70e9016090361ab9c3e242dd77bd682a6fef54"
         }
       },
       "source_snapshots": {
         "scripts/devnet-mixed/campaign.py": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-campaign.py.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-campaign.py.gz",
           "sha256": "ad1c3124850d978f27b6719f50c7c43d6b5ef29a3418ae1380eb6db15ccb211f",
           "uncompressed_sha256": "25bc922575ee381904724fddc29028b353365a7d0900270d9168dde52d2766dc"
         },
         "scripts/devnet-mixed/campaign.sh": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-campaign.sh.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-campaign.sh.gz",
           "sha256": "5b2bb1cedd1a82bad9719d367168255718e4508832d399b5f8e8f82a11f9f3ad",
           "uncompressed_sha256": "ad3baa651182191a38befa873abfa479b4957bbe0df0f69ecc0e920cce22812d"
         },
         "scripts/devnet-mixed/BuildBlock.scala": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-BuildBlock.scala.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-BuildBlock.scala.gz",
           "sha256": "817e6ca3a861b9b7e00f4264c9cb49218ef72437ea0b5869f608c43a722a4b31",
           "uncompressed_sha256": "b4ac27e2f8a8501672afe98651123b5fa28c3eba6db2d3ac61129e1846e5b41d"
         },
         "scripts/devnet-mixed/CampaignTransactions.scala": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-CampaignTransactions.scala.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-CampaignTransactions.scala.gz",
           "sha256": "775b2b385f72b49fc38fcb9d332fbf9432616cc23b187bd0062191f626ee44a0",
           "uncompressed_sha256": "e93d4adf78979027b28a7639e28a4ba7b5616f61eae7e24950e62de0906bf6ff"
         },
         "scripts/devnet-mixed/CampaignParameters.scala": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-CampaignParameters.scala.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-CampaignParameters.scala.gz",
           "sha256": "bb863967c4bcd49da77249d74734a91f4a89a49c1c558f3f0fec41ada234caa2",
           "uncompressed_sha256": "deaa8d73e40a6cd50afdb037d1c52c7c0c0d26a7068fbeb1a032003a65e70b04"
         },
         "scripts/devnet-mixed/build-block.py": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-build-block.py.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-build-block.py.gz",
           "sha256": "5967c1a70f5b07bf75e3ba478216c412c43da734489475c054f2a3aabce70873",
           "uncompressed_sha256": "ed4db124cc5cf0db577df08180cad06f252ea7bb73a5ad17995cab4019b9dcf4"
         },
         "scripts/devnet-mixed/lifecycle.py": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-lifecycle.py.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-lifecycle.py.gz",
           "sha256": "bb2ac66785ffd801a93e4046b5fc1d17583a88793779ed2c7f17a813277f37e1",
           "uncompressed_sha256": "c4e5fb6457966d660a155d8887f869d4ca0d706463c602e5c4c4412a9668919f"
         },
         "scripts/devnet-mixed/genesis.conf": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-genesis.conf.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-genesis.conf.gz",
           "sha256": "0199608e15657b222c8cda5266d39f7a85b4c225c3dd68b675b3ec056c7f330e",
           "uncompressed_sha256": "d74120d8f73d4b6fe22c3cf3564df34cbdd82d96713ff2d519d45179cd208f0d"
         },
         "scripts/devnet-mixed/.work/campaign-scala-node.conf": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-campaign-scala-node.conf.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-campaign-scala-node.conf.gz",
           "sha256": "faca4c326c88c3dc38b8c06cf1571e7b3c87f859297bf5b0a80ccb72d1c8afb9",
           "uncompressed_sha256": "5b036f6543f6d1afe47a07cf74f1336da2de6b0acf5c4e6cac2f3627234ec548"
         },
         "scripts/devnet-mixed/.work/campaign-rust-node.toml": {
-          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-campaign-rust-node.toml.gz",
+          "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/task-0.11-campaign-rust-node.toml.gz",
           "sha256": "89c66ea4be173def836dc74e498acdeb9ec4cd392dae4c11d07dd0b11a5e4054",
           "uncompressed_sha256": "8a12ab6ac35e06b04fce14905c199421e0cf1879c6764ff3e2c6c3ceeb429ffc"
         }
@@ -15225,16 +15228,16 @@
         ],
         "pid_files_absent": true
       },
-      "payload_sha256_excluding_this_field": "c83f6804978d2c78bf43ecf6e8e8a03bea72a108eb5809fc494a7ea3a50baed1"
+      "payload_sha256_excluding_this_field": "68b502dd508dba38ca9ca353d17898f6da5934b45a71ca432d7e47b0e6ba30f2"
     }
   ],
   "superseded_result": {
-    "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/stopped-before-9fd384a6.json.gz",
+    "path": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/stopped-before-9fd384a6.json.gz",
     "sha256": "168870042acd210e60c275b994a2d7ff0d7d51f411b6b780813d4a677d53ed83",
     "resolution_commit": "9fd384a6"
   },
   "safety_gap_resolution": {
-    "archived_result": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/stopped-before-07a4f410.json.gz",
+    "archived_result": "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz#test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts/stopped-before-07a4f410.json.gz",
     "sha256": "676e2da36991572360fc56f9638670f8ea8c2d75e4fd241088c7d0e1bf8c333d",
     "resolution_commit": "07a4f410",
     "previous_divergence": {
