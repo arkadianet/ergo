@@ -150,8 +150,14 @@ impl Oracle {
     pub fn query_raw(&mut self, surface: &str, bytes: &[u8]) -> io::Result<String> {
         if surface == "verify" {
             if self.verify_oracle.is_none() {
+                // Resolve from the crate manifest, not the caller's working
+                // directory: `spawn_command` sets no cwd, so a relative path
+                // would break any run started outside the repository root.
                 self.verify_oracle = Some(Box::new(Self::spawn_command(
-                    "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala",
+                    concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala"
+                    ),
                     true,
                 )?));
             }
