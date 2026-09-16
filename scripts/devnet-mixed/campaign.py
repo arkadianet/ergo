@@ -6,17 +6,34 @@ import gzip
 import hashlib
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
 import time
 import urllib.error
 
-from smoke import ROOT, HERE, WORK, URLS, PK, api, tips, wait_for
+from smoke import ROOT, HERE, WORK, URLS, PK, api, tips, wait_for as poll_until
 
 RESULTS = ROOT / 'test-vectors/ergo-sigma/cost-ledger/results'
 VECTORS = RESULTS.parent
 CAP = 37509
+
+
+def require_peers():
+    try:
+        counts = {node: len(api(node, '/peers/connected')) for node in URLS}
+    except (OSError, ValueError) as error:
+        raise RuntimeError('P2P health unavailable; campaign aborted') from error
+    if any(count < 1 for count in counts.values()):
+        raise RuntimeError('P2P disconnected; campaign aborted: ' + str(counts))
+
+
+def wait_for(callback, description, timeout=180):
+    def connected_callback():
+        require_peers()
+        return callback()
+    return poll_until(connected_callback, description, timeout)
 
 
 def sha(path):
@@ -28,6 +45,7 @@ def write(path, value):
 
 
 def observations():
+    require_peers()
     return {node: api(node, '/info') for node in URLS}
 
 
@@ -102,9 +120,20 @@ def prepare():
 def build(name, *options):
     output = WORK / (name + '.json')
     with (WORK / (name + '-build.log')).open('w') as log:
-        subprocess.run([sys.executable, str(HERE / 'build-block.py'), '--live', *map(str, options),
+        process = subprocess.Popen([sys.executable, str(HERE / 'build-block.py'), '--live', *map(str, options),
                         str(output)], cwd=ROOT, env=environment(), stdout=log,
-                       stderr=subprocess.STDOUT, check=True)
+                        stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            while process.poll() is None:
+                require_peers()
+                time.sleep(0.25)
+            if process.returncode:
+                raise RuntimeError(f'block builder failed ({process.returncode}); see {log.name}')
+        except BaseException:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait()
+            raise
     return output
 
 
@@ -149,7 +178,7 @@ def main():
     def archive(path):
         directory = RESULTS / ('l6-' + str(started.date()) + '-artifacts')
         directory.mkdir(exist_ok=True)
-        compressed = directory / (f'attempt-{len(results["runs"])}-' + path.name + '.gz')
+        compressed = directory / (f'resumed-attempt-{len(results["runs"])}-' + path.name + '.gz')
         payload = path.read_bytes()
         compressed.write_bytes(gzip.compress(payload, mtime=0))
         name = str(compressed.relative_to(ROOT))
@@ -173,7 +202,10 @@ def main():
             except RuntimeError:
                 after = observations()
         else:
-            time.sleep(5)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                require_peers()
+                time.sleep(0.25)
             after = observations()
         record['after'] = after
         record['verdicts'] = {n: 'Accept' if i['bestFullHeaderId'] == block['header']['id']
@@ -193,6 +225,11 @@ def main():
         return record
     try:
         subprocess.run([str(HERE / 'stop.sh')], check=True)
+        for node in URLS:
+            log = WORK / (node + '.log')
+            if log.exists():
+                archive(log)
+                log.write_text('')
         prepare()
         subprocess.run([str(HERE / 'start.sh')], env=environment(), check=True)
         def starting_tip():
@@ -231,9 +268,11 @@ def main():
                 if block['header']['height'] % 25 == 0:
                     print(f'warmup height {block["header"]["height"]}', flush=True)
                 save()
-        elif (WORK / 'warmup-observations.json').exists():
-            run['warmup'] = json.loads((WORK / 'warmup-observations.json').read_text())
-            run['warmup_artifact'] = archive(WORK / 'warmup-blocks.json')
+        else:
+            run['maturity'] = {'starting_height': height, 'required_height': 720}
+            prior = [item for item in results['runs'][:-1] if item['status'] == 'PASS' and item['warmup']]
+            if prior:
+                run['maturity']['warmup_artifact'] = prior[-1]['warmup_artifact']
         trees = WORK / (direction + '-trees.json')
         write(trees, [item['tree_hex'] for item in selected])
         fund_path = build(direction + '-fund', '--campaign-stage', 'fund', '--workload-trees', trees)
@@ -282,7 +321,7 @@ def main():
             pending['after'] = after
             ids = [tx['id'] for tx in mined['blockTransactions']['transactions']]
             if transaction['id'] not in ids:
-                raise RuntimeError('mined candidate omitted workload transaction')
+                raise RuntimeError('DIVERGENCE: mined candidate omitted workload transaction')
             save()
         for stage, expected, total in (('sum-over-cap', 'RejectCost', CAP + 1),
                                        ('sum-at-cap', 'Accept', CAP), ('single-at-cap', 'Accept', CAP)):
@@ -322,7 +361,7 @@ def main():
                for n in ('rust',) if (WORK / (n + '.log')).exists()):
             run['status'] = 'DIVERGENT'
         try:
-            run['final'] = observations()
+            run['final'] = {n: api(n, '/info') for n in URLS}
         except OSError:
             pass
         raise
@@ -331,6 +370,11 @@ def main():
             subprocess.run([str(HERE / 'stop.sh')], check=True)
         finally:
             run['stopped'] = not any((WORK / (n + '.pid')).exists() for n in URLS)
+            attempted = {item['selection']['case'] for item in run['workload']}
+            attempted.update(item['case'] for item in run['injections'])
+            run['skipped_items'] = [name for name in [item['case'] for item in selected] +
+                ['sum-over-cap', 'sum-at-cap', 'single-at-cap'] if name not in attempted]
+            run['skipped'] = len(run['skipped_items'])
             if 'context' in run['manifest']:
                 run['manifest']['context']['height_range'][1] = run.get('final', {}).get('scala', {}).get('fullHeight')
             save()

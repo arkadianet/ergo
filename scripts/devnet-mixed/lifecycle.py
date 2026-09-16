@@ -67,7 +67,7 @@ def start():
                 process = subprocess.Popen(command, cwd=ROOT, stdout=log,
                                            stderr=subprocess.STDOUT, start_new_session=True)
             (WORK / (name + '.pid')).write_text(str(process.pid))
-        for name, port in (('scala', 19553), ('rust', 19554)):
+            port = {'scala': 19553, 'rust': 19554}[name]
             deadline = time.monotonic() + 60
             while True:
                 try:
@@ -82,6 +82,17 @@ def start():
                     if time.monotonic() > deadline:
                         raise RuntimeError(f'{name} did not become ready; see .work/{name}.log')
                     time.sleep(0.5)
+        deadline = time.monotonic() + 180
+        while True:
+            connected = []
+            for port in (19553, 19554):
+                with urllib.request.urlopen(f'http://127.0.0.1:{port}/peers/connected', timeout=2) as response:
+                    connected.append(len(json.load(response)) >= 1)
+            if all(connected):
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError('both nodes must complete the P2P handshake before mining')
+            time.sleep(0.25)
     except BaseException:
         stop()
         raise

@@ -246,21 +246,28 @@ injections submit full blocks to both nodes and compare `/info` commitments.
 HTTP admission alone never counts as block acceptance. Compressed artifacts
 and manifests live under `test-vectors/ergo-sigma/cost-ledger/results/`.
 
-**Recorded outcome: BLOCKED, no L6 rows closed.** All 720 warm-up blocks had
-matching roots. Both nodes accepted the funding-only block at height 723, but
-Rust's emission discovery unconditionally selected its first ordinary output
-as the next emission box. Rust then repeatedly failed candidate construction
-with `EmissionInvariant` (1,000,000,000 available versus 67,500,000,000 required).
-Scala retained the previous emission box and mined height 724. The later
-propagation timeout occurred with zero connected peers on both nodes; it does
-not demonstrate a cost-validation rejection. The evidence and source anchors
-are recorded in `BLOCK-L6-emission-box-discovery` (DIVERGENT).
+**Recorded outcome: BLOCKED on `BLOCK-L6-mining-safety-gap`.** The resumed
+campaign used the executable rebuilt from `9fd384a6` in both directions.
+Lifecycle startup waits for initialized Scala before launching Rust, then
+requires a connected peer on both nodes. Campaign waits and JVM construction
+abort if either node loses its peer.
 
-The controller's stop-on-disagreement rule prevented the Rust-mined direction
-and all live cap injections. Independent JVM preflight confirmed **37509**
-accepted for both three transactions and one transaction, and **37510**
-rejected with unchanged state. These preflight results are **not L6 evidence**.
-Both private processes are stopped. The driver refuses to resume a results
-file containing a divergence; resolve the ledger issue before a fresh campaign.
-The final startup/P2P checks, early emission-failure detection, and additional
-failure capture were syntax-checked after shutdown; they have not been live-run.
+The fresh chain completed all 720 maturity blocks with matching commitments.
+Scala mined all four selected workloads, including v6 `Coll.reverse`. Both
+nodes accepted the three-transaction **37509** block, rejected **37510** with
+unchanged height/full-tip ID/state root, and accepted one transaction at
+**37509**. This direction passed **7/7** cases.
+
+The Rust direction admitted the v6 workload but its completed full candidate
+omitted it. Rust reserves a fixed **150000** cost gap even under the **37509**
+cap; Scala reserves **0** below **1000000**. Both nodes accepted Rust's
+emission-only height-729 block with matching commitments. This is a mining
+selection disagreement, not a block-validation disagreement. The mandatory
+stop rule leaves six Rust-direction cases skipped and full L6 closure pending.
+The emission-discovery fix passed the fresh funding/mining transition.
+
+Both processes are stopped and all four private ports are closed. The result
+file preserves both directions and links the compressed prior stopped result;
+all earlier artifacts remain. Source snapshots distinguish harness changes
+between directions. The driver refuses to resume a recorded divergence until
+its ledger obligation is resolved and the result is explicitly archived.
