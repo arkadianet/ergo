@@ -315,9 +315,9 @@ pub(crate) fn persist_transition(
     Ok(())
 }
 
-/// Restart-only recovery retains a bounded historical suffix. Normal apply
+/// Startup and rollback recovery retain a bounded historical suffix. Normal apply
 /// carries a compact transition directly from the transactions being applied.
-fn recover_identity(
+pub(super) fn recover_identity(
     txn: &WriteTransaction,
     tip: &[u8; 32],
     limit: usize,
@@ -576,6 +576,12 @@ mod tests {
         header.state_root = root;
         let (bytes, id) = serialize_header(&header).unwrap();
         store.store_header(id.as_bytes(), &bytes).unwrap();
+        if store.height == 0 && height > 1 {
+            // Synthetic post-activation checkpoint starts the retained suffix.
+            store
+                .test_force_put_header_chain_index(height, id.as_bytes())
+                .unwrap();
+        }
         let mut writer = VlqWriter::new();
         write_block_transactions_with_version(
             &mut writer,
@@ -712,6 +718,85 @@ mod tests {
         drop(store);
         let store = StateStore::open(&path).unwrap();
         assert_eq!(store.emission_identity(&tip).unwrap(), Some(Some(expected)));
+    }
+
+    #[test]
+    fn emission_identity_legacy_rollback_omission_branch_survives_restart() {
+        for pipeline in [false, true] {
+            let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let path = dir.path().join("state.redb");
+            let (mut store, seed) = seeded_store(&path);
+            let reem = ReemissionParams::mainnet();
+            let height = reem.activation_height + 1;
+            let mut tx = transaction(seed, height);
+            tx.output_candidates[0].tokens.push(ergo_ser::token::Token {
+                token_id: reem.emission_nft_id,
+                amount: 1,
+            });
+            tx.output_candidates
+                .push(transaction(seed, height).output_candidates.remove(0));
+            let target_id = box_id(&output_box(&tx).unwrap()).unwrap();
+            let target = apply(&mut store, height, vec![tx], 1);
+            let mut tx = transaction(target_id, height + 1);
+            tx.output_candidates[0].tokens.push(ergo_ser::token::Token {
+                token_id: reem.emission_nft_id,
+                amount: 1,
+            });
+            tx.output_candidates
+                .push(transaction(seed, height + 1).output_candidates.remove(0));
+            let old_id = box_id(&output_box(&tx).unwrap()).unwrap();
+            let old_tip = apply(&mut store, height + 1, vec![tx], 2);
+            let txn = crate::begin_write_qr(&store.db).unwrap();
+            txn.open_table(EMISSION_IDENTITIES)
+                .unwrap()
+                .retain(|_, _| false)
+                .unwrap();
+            // The synthetic retained suffix already has its header index.
+            txn.open_table(super::super::STATE_META)
+                .unwrap()
+                .insert("hci_version", [1u8].as_slice())
+                .unwrap();
+            txn.commit().unwrap();
+            drop(store);
+
+            let mut store = StateStore::open(&path).unwrap();
+            assert_eq!(
+                store.emission_identity(&old_tip).unwrap(),
+                Some(Some(old_id))
+            );
+            assert_eq!(store.emission_identity(&target).unwrap(), None);
+            if pipeline {
+                store.enable_persist_pipeline(8);
+            }
+            // Leave a persistence job in flight for rollback to flush.
+            apply(&mut store, height + 2, vec![], 3);
+            store.rollback_to(height, None, None).unwrap();
+            assert_eq!(store.chain_state.best_full_block_id, target);
+            assert_eq!(
+                store.emission_identity(&target).unwrap(),
+                Some(Some(target_id))
+            );
+            assert_eq!(store.emission_identity(&old_tip).unwrap(), None);
+            let branch = apply(&mut store, height + 1, vec![], 4);
+            let tip = apply(&mut store, height + 2, vec![], 5);
+            store.flush_persist_pipeline().unwrap();
+            for id in [branch, tip] {
+                assert_eq!(store.emission_identity(&id).unwrap(), Some(Some(target_id)));
+            }
+            let snapshot = store.committed_snapshot().unwrap().unwrap();
+            assert_eq!(
+                snapshot.emission_identity(&tip).unwrap(),
+                Some(Some(target_id))
+            );
+            drop(snapshot);
+            drop(store);
+            let store = StateStore::open(&path).unwrap();
+            assert_eq!(store.chain_state.best_full_block_id, tip);
+            assert_eq!(
+                store.emission_identity(&tip).unwrap(),
+                Some(Some(target_id))
+            );
+        }
     }
 
     // ----- error paths -----

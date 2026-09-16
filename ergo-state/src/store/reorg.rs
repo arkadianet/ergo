@@ -415,6 +415,10 @@ impl StateStore {
             tip_id
         };
 
+        // Legacy databases may lack the restored tip row even after startup
+        // recovered the newer tip. Recover before publishing the rollback.
+        super::emission::recover_identity(&write_txn, &new_tip_id, 4096)?;
+
         // Voted parameters: drop every row whose key is strictly above
         // the rollback target. Genesis row at key 0 is preserved.
         // Rollback failures route through the same VotedParamsWriteFailed
