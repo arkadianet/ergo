@@ -330,6 +330,7 @@ impl StateStore {
         // boot-consistency check (operator-config + persisted-
         // sentinel cross-check, in `ergo-node/src/node/boot.rs`)
         // owns this migration.
+        store.recover_emission_identity(&store.chain_state.best_full_block_id)?;
         Ok(store)
     }
 

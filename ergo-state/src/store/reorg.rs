@@ -379,6 +379,9 @@ impl StateStore {
                 chain_table.remove(h as u64)?;
                 let key = undo_log_key(h, hid);
                 undo_table.remove(key.as_slice())?;
+                write_txn
+                    .open_table(super::emission::EMISSION_IDENTITIES)?
+                    .remove(hid.as_slice())?;
             }
 
             // Update state meta

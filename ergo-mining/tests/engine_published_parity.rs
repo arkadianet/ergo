@@ -421,6 +421,9 @@ fn synced_store_with_parent_interlinks(
         .store_block_section_typed(&ext_section_id, &ext_bytes, TYPE_EXTENSION)
         .expect("store extension section");
 
+    store
+        .recover_emission_identity(&tip)
+        .expect("recover synthetic parent identity");
     (dir, store, tip)
 }
 

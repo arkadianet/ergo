@@ -1,234 +1,57 @@
-//! Discover an unspent emission output on the applied parent ancestry.
+//! Discover the emission input from the committed parent's persisted identity.
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/emission-discovery.json
-//!
-//! Blocks may omit emission and may put ordinary transactions first. Discovery
-//! follows parent IDs (not the best-header height index) and resolves the matched
-//! box against the same committed UTXO view used to build the candidate.
-
-use ergo_primitives::digest::{blake2b256, ModifierId};
-use ergo_primitives::reader::VlqReader;
-use ergo_ser::block_transactions::read_block_transactions;
-use ergo_ser::ergo_box::ErgoBox;
-use ergo_ser::header::{read_header, Header};
-use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
-use ergo_state::store::StateError;
 
 use crate::error::MiningError;
 use crate::state_view::CandidateStateView;
 use ergo_chain_spec::{Network, ReemissionParams};
+use ergo_ser::ergo_box::ErgoBox;
+use ergo_ser::header::Header;
 
-/// Look up the next emission input using the selected network's contract.
+/// Resolve the committed identity in constant time, including exhaustion.
 pub fn lookup_tip_emission_box<V: CandidateStateView>(
     view: &V,
     parent_header_id: &[u8; 32],
-    network: Network,
-    reemission: Option<&ReemissionParams>,
-) -> Result<ErgoBox, MiningError> {
-    let header = load_header(view, parent_header_id)?;
-    lookup_emission_box_from_parent(view, parent_header_id, &header, network, reemission)
-}
-
-fn load_header<V: CandidateStateView>(view: &V, id: &[u8; 32]) -> Result<Header, MiningError> {
-    let bytes = view
-        .get_header_bytes(id)
-        .map_err(state_err)?
+    _network: Network,
+    _reemission: Option<&ReemissionParams>,
+) -> Result<Option<ErgoBox>, MiningError> {
+    let identity = view
+        .emission_identity(parent_header_id)
+        .map_err(|e| MiningError::StateRead {
+            op: "emission_identity",
+            reason: e.to_string(),
+        })?
         .ok_or_else(|| MiningError::StateRead {
-            op: "emission_parent_header",
-            reason: format!("parent header {} not stored", hex::encode(id)),
+            op: "emission_identity",
+            reason: "emission metadata unavailable after bounded legacy recovery".into(),
         })?;
-    read_header(&mut VlqReader::new(&bytes)).map_err(|e| MiningError::Decode {
-        op: "emission_parent_header",
-        reason: format!("{e:?}"),
-    })
-}
-
-/// The current networks share the same monetary emission proposition.
-/// Read it from the JVM genesis fixture, independently of the miner's key.
-fn emission_tree(network: Network) -> Vec<u8> {
-    let genesis = ergo_chain_spec::GenesisParams::for_network(network);
-    let boxes: serde_json::Value =
-        serde_json::from_str(genesis.boxes_json.expect("network genesis boxes"))
-            .expect("embedded genesis JSON");
-    hex::decode(
-        boxes[0]["ergoTree"]
-            .as_str()
-            .expect("genesis emission tree"),
-    )
-    .expect("genesis tree hex")
-}
-
-fn has_emission_box(
-    tx: &ergo_ser::transaction::Transaction,
-    height: u32,
-    tree: &[u8],
-    reemission: Option<&ReemissionParams>,
-) -> bool {
-    let Some(output) = tx.output_candidates.first() else {
-        return false;
-    };
-    if let Some(reem) = reemission.filter(|r| height > r.activation_height) {
-        tx.output_candidates.len() == 2
-            && output
-                .tokens
-                .first()
-                .is_some_and(|t| t.token_id == reem.emission_nft_id)
-    } else {
-        output.ergo_tree_bytes() == tree
-    }
-}
-
-fn output_box(tx: &ergo_ser::transaction::Transaction) -> Result<ErgoBox, MiningError> {
-    let bytes =
-        ergo_ser::transaction::bytes_to_sign(tx).map_err(|e| MiningError::IdComputation {
-            op: "bytes_to_sign",
-            reason: format!("{e:?}"),
-        })?;
-    Ok(ErgoBox {
-        candidate: tx.output_candidates[0].clone(),
-        transaction_id: ModifierId::from(blake2b256(&bytes)),
-        index: 0,
-    })
-}
-
-fn box_id(b: &ErgoBox) -> Result<ergo_primitives::digest::Digest32, MiningError> {
-    b.box_id().map_err(|e| MiningError::IdComputation {
-        op: "emission_box_id",
-        reason: format!("{e:?}"),
-    })
-}
-
-fn genesis_id(network: Network) -> ergo_primitives::digest::Digest32 {
-    let genesis = ergo_chain_spec::GenesisParams::for_network(network);
-    let boxes: serde_json::Value =
-        serde_json::from_str(genesis.boxes_json.expect("network genesis boxes"))
-            .expect("embedded genesis JSON");
-    let id = hex::decode(boxes[0]["boxId"].as_str().expect("genesis emission id"))
-        .expect("genesis id hex");
-    ergo_primitives::digest::Digest32::from_bytes(id.try_into().expect("32-byte genesis id"))
-}
-
-/// Reconstruct Scala's tracked emission identity along the applied ancestry.
-/// The genesis input or unique post-EIP-27 NFT anchors the lineage. Later
-/// blocks update it only by spending that identity; unrelated contract outputs
-/// cannot replace an unspent tracked box. This uses no best-header index or
-/// process-local cache, so rollback and committed snapshots share the same rule.
-/// Pre-EIP-27 recovery requires history back to the genesis emission spend.
-pub fn lookup_emission_box_from_parent<V: CandidateStateView>(
-    view: &V,
-    parent_header_id: &[u8; 32],
-    parent_header: &Header,
-    network: Network,
-    reemission: Option<&ReemissionParams>,
-) -> Result<ErgoBox, MiningError> {
-    let tree = emission_tree(network);
-    let genesis = genesis_id(network);
-    let mut header = parent_header.clone();
-    let mut id = *parent_header_id;
-    let mut pending = Vec::new();
-    let mut tracked = Some(genesis);
-    loop {
-        let section_id = compute_section_id(
-            TYPE_BLOCK_TRANSACTIONS,
-            &id,
-            header.transactions_root.as_bytes(),
-        );
-        let bytes = view
-            .block_section(&section_id)
-            .map_err(state_err)?
-            .ok_or_else(|| MiningError::StateRead {
-                op: "emission_block_transactions",
-                reason: format!(
-                    "BlockTransactions section {} not stored",
-                    hex::encode(section_id)
-                ),
-            })?;
-        let bt = read_block_transactions(&mut VlqReader::new(&bytes)).map_err(|e| {
-            MiningError::Decode {
-                op: "BlockTransactions",
-                reason: format!("{e:?}"),
-            }
-        })?;
-        // The NFT is unique: after activation it independently identifies the
-        // tracked emission output without replaying pre-activation history.
-        if reemission.is_some_and(|r| header.height > r.activation_height) {
-            if let Some(tx) = bt
-                .transactions
-                .iter()
-                .find(|tx| has_emission_box(tx, header.height, &tree, reemission))
-            {
-                tracked = Some(box_id(&output_box(tx)?)?);
-                break;
-            }
-        }
-        let genesis_spent = bt
-            .transactions
-            .iter()
-            .any(|tx| tx.inputs.iter().any(|i| i.box_id == genesis));
-        pending.push((header.height, bt.transactions));
-        if genesis_spent || header.height <= 1 {
-            break;
-        }
-        id = *header.parent_id.as_bytes();
-        let parent = load_header(view, &id)?;
-        if parent.height.checked_add(1) != Some(header.height) {
-            return Err(MiningError::EmissionInvariant {
-                op: "emission_box_lookup",
-                reason: "nonconsecutive applied ancestry".into(),
-            });
-        }
-        header = parent;
-    }
-    for (height, txs) in pending.into_iter().rev() {
-        tracked = next_emission_id(tracked, &txs, height, &tree, reemission)?;
-    }
-    tracked
-        .and_then(|id| view.get_box(&id))
-        .ok_or_else(|| MiningError::EmissionInvariant {
-            op: "emission_box_lookup",
-            reason: "tracked emission box is absent from committed UTXO state".into(),
+    identity
+        .map(|id| {
+            view.get_box(&id)
+                .ok_or_else(|| MiningError::EmissionInvariant {
+                    op: "emission_box_lookup",
+                    reason: "tracked emission box is absent from committed UTXO state".into(),
+                })
         })
-}
-
-/// Scala UtxoStateReader.extractEmissionBox: reverse spending search, retain
-/// when unspent, and use the first matching transaction for untracked recovery.
-fn next_emission_id(
-    tracked: Option<ergo_primitives::digest::Digest32>,
-    txs: &[ergo_ser::transaction::Transaction],
-    height: u32,
-    tree: &[u8],
-    reemission: Option<&ReemissionParams>,
-) -> Result<Option<ergo_primitives::digest::Digest32>, MiningError> {
-    let selected = if let Some(id) = tracked {
-        match txs
-            .iter()
-            .rev()
-            .find(|tx| tx.inputs.iter().any(|i| i.box_id == id))
-        {
-            Some(tx) => has_emission_box(tx, height, tree, reemission).then_some(tx),
-            None => return Ok(Some(id)),
-        }
-    } else {
-        // Scala filters AFTER find, rather than selecting a later large output.
-        txs.iter()
-            .find(|tx| has_emission_box(tx, height, tree, reemission))
-            .filter(|tx| tx.output_candidates[0].value > 100_000 * 1_000_000_000)
-    };
-    selected
-        .map(|tx| output_box(tx).and_then(|b| box_id(&b)))
         .transpose()
 }
 
-fn state_err(e: StateError) -> MiningError {
-    MiningError::StateRead {
-        op: "emission_box_lookup",
-        reason: format!("{e:?}"),
-    }
+/// Candidate path uses the same persisted parent identity as public lookup.
+pub fn lookup_emission_box_from_parent<V: CandidateStateView>(
+    view: &V,
+    parent_header_id: &[u8; 32],
+    _parent_header: &Header,
+    network: Network,
+    reemission: Option<&ReemissionParams>,
+) -> Result<Option<ErgoBox>, MiningError> {
+    lookup_tip_emission_box(view, parent_header_id, network, reemission)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ergo_primitives::digest::ModifierId;
     use ergo_primitives::digest::{ADDigest, Digest32};
+    use ergo_primitives::reader::VlqReader;
     use ergo_primitives::writer::VlqWriter;
     use ergo_ser::autolykos::AutolykosSolution;
     use ergo_ser::block_transactions::{write_block_transactions_with_version, BlockTransactions};
@@ -236,8 +59,12 @@ mod tests {
     use ergo_ser::ergo_tree::read_ergo_tree;
     use ergo_ser::header::{serialize_header, Header};
     use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+    use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
     use ergo_ser::register::AdditionalRegisters;
     use ergo_ser::transaction::Transaction;
+    use ergo_state::store::emission::{
+        box_id, emission_tree, genesis_id, has_emission_box, next_emission_id, output_box,
+    };
     use ergo_state::store::StateStore;
 
     // ----- helpers -----
@@ -323,6 +150,7 @@ mod tests {
             header.transactions_root.as_bytes(),
         );
         store.store_block_section(&section, &w.result()).unwrap();
+        store.recover_emission_identity(id.as_bytes()).unwrap();
         *id.as_bytes()
     }
 
@@ -368,7 +196,10 @@ mod tests {
         spam.inputs[0].box_id = Digest32::from_bytes([0xbb; 32]);
         let tip = store_block(&store, &hdr, vec![ordinary_tx(), spam]);
         let actual = lookup_tip_emission_box(&store, &tip, Network::Devnet, None).unwrap();
-        assert_eq!(box_id(&actual).unwrap(), box_id(&expected).unwrap());
+        assert_eq!(
+            box_id(actual.as_ref().unwrap()).unwrap(),
+            box_id(&expected).unwrap()
+        );
     }
 
     #[test]
@@ -392,7 +223,10 @@ mod tests {
         hdr.parent_id = ModifierId::from_bytes(first);
         let tip = store_block(&store, &hdr, vec![ordinary_tx()]);
         let actual = lookup_tip_emission_box(&store, &tip, Network::Mainnet, Some(&reem)).unwrap();
-        assert_eq!(box_id(&actual).unwrap(), box_id(&expected).unwrap());
+        assert_eq!(
+            box_id(actual.as_ref().unwrap()).unwrap(),
+            box_id(&expected).unwrap()
+        );
     }
 
     #[test]
@@ -461,6 +295,99 @@ mod tests {
         assert_eq!(
             next_emission_id(None, &[small, synthetic_emission_tx()], 1, &tree, None).unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn emission_lookup_exhausted_identity_returns_none() {
+        let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        let emission = synthetic_emission_tx();
+        let mut spent = ordinary_tx();
+        spent.inputs[0].box_id = box_id(&output_box(&emission).unwrap()).unwrap();
+        let (mut header, _, _) = synth_header();
+        let first = store_block(&store, &header, vec![emission]);
+        header.height = 2;
+        header.parent_id = ModifierId::from_bytes(first);
+        let tip = store_block(&store, &header, vec![spent]);
+        assert!(lookup_tip_emission_box(&store, &tip, Network::Devnet, None)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn emission_matching_noncanonical_encoding_preserves_scala_equality() {
+        let canonical = emission_tree(Network::Devnet);
+        // Constant-segregated tree: encode its constant count with an extra
+        // zero VLQ group. Scala compares the parsed constants and root.
+        assert_eq!(canonical[0] & 0x10, 0x10);
+        let mut encoded = canonical.clone();
+        assert!(encoded[1] < 128);
+        encoded[1] |= 0x80;
+        encoded.insert(2, 0);
+        let parsed = read_ergo_tree(&mut VlqReader::new(&encoded)).unwrap();
+        let mut tx = synthetic_emission_tx();
+        let old = &tx.output_candidates[0];
+        tx.output_candidates[0] = ErgoBoxCandidate::from_trusted_raw_parts(
+            old.value,
+            parsed,
+            encoded.clone(),
+            old.creation_height,
+            old.tokens.clone(),
+            AdditionalRegisters::empty(),
+            vec![0],
+        );
+        assert_ne!(encoded, canonical);
+        assert!(has_emission_box(&tx, 1, &canonical, None));
+        assert!(next_emission_id(None, &[tx.clone()], 1, &canonical, None)
+            .unwrap()
+            .is_some());
+        encoded[0] |= 0x40;
+        let old = &tx.output_candidates[0];
+        tx.output_candidates[0] = ErgoBoxCandidate::from_trusted_raw_parts(
+            old.value,
+            old.ergo_tree().clone(),
+            encoded,
+            old.creation_height,
+            old.tokens.clone(),
+            AdditionalRegisters::empty(),
+            vec![0],
+        );
+        assert!(!has_emission_box(&tx, 1, &canonical, None));
+    }
+
+    // ----- round-trips -----
+
+    #[test]
+    fn emission_lookup_restart_after_omission_retains_identity_without_history() {
+        let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let path = dir.path().join("state.redb");
+        let mut store = StateStore::open(&path).unwrap();
+        let emission = synthetic_emission_tx();
+        let expected = output_box(&emission).unwrap();
+        seed_box(&mut store, &expected);
+        let (mut header, _, _) = synth_header();
+        let first = store_block(&store, &header, vec![emission]);
+        header.height = 2;
+        header.parent_id = ModifierId::from_bytes(first);
+        let tip = store_block(&store, &header, vec![ordinary_tx()]);
+        let section = compute_section_id(
+            TYPE_BLOCK_TRANSACTIONS,
+            &tip,
+            header.transactions_root.as_bytes(),
+        );
+        // Corrupt the retained section to prove lookup never replays history.
+        store.store_block_section(&section, &[0xff]).unwrap();
+        drop(store);
+        let store = StateStore::open(&path).unwrap();
+        let actual = lookup_tip_emission_box(&store, &tip, Network::Devnet, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(box_id(&actual).unwrap(), box_id(&expected).unwrap());
+        let snapshot = store.committed_snapshot().unwrap().unwrap();
+        assert_eq!(
+            snapshot.emission_identity(&tip).unwrap(),
+            store.emission_identity(&tip).unwrap()
         );
     }
 
