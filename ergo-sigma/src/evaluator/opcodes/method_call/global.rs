@@ -151,11 +151,18 @@ pub(super) fn pow_hit(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, Eval
             .wrapping_mul((total_len / 128 + 1) as i32)
             .wrapping_mul(7),
     );
-    cx.cost.add(JitCost::try_from_jit(pow_cost as u64)?)?;
+    // Scala keeps the wrapped Int in a signed `JitCost`; a negative value only
+    // arises for a `k` far outside [2, 32], which the `require` below then
+    // rejects. Rust's JitCost is unsigned, so the negative wrap is not charged
+    // (the input is rejected either way); it must not surface as a cost
+    // overflow, which routes to a different failure class than Scala's.
+    if pow_cost >= 0 {
+        cx.cost.add(JitCost::try_from_jit(pow_cost as u64)?)?;
+    }
     // Scala `hitForVersion2ForMessageWithChecks` bounds: reject
     // (RuntimeException, matching Scala's `require`) rather than
     // compute on out-of-range parameters.
-    if !(2..=32).contains(&k) {
+    if pow_cost < 0 || !(2..=32).contains(&k) {
         return Err(EvalError::RuntimeException(
             "SGlobal.powHit: k must be in [2, 32]",
         ));
