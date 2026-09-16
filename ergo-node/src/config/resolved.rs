@@ -189,6 +189,8 @@ pub struct NodeConfig {
     /// may include a port (`"example.com:9099"`) to pin it, or omit one
     /// to match any port.
     pub api_allowed_hosts: Vec<String>,
+    /// Devnet-only POST /blocks opt-in; defaults to false.
+    pub allow_direct_block_submit: bool,
     /// Resolved mempool configuration. All fields populated from `[mempool]`
     /// section + CLI overrides. Defaults match `MempoolConfig::default()`.
     pub mempool_config: MempoolConfig,

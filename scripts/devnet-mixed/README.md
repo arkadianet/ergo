@@ -147,3 +147,67 @@ Formatting and warning-denying clippy passed. Nextest was unavailable;
 `cargo test --workspace` passed with **6,997 passed, 0 failed,
 97 ignored** including doctests. Both nodes were stopped and all four
 recipe ports were verified closed.
+
+## Direct full-block submission (Task 7.2)
+
+Rust `POST /blocks` requires **both** `Network::Devnet` and
+`[api] allow_direct_block_submit = true` (enabled in `rust-node.toml`).
+The default is false. Mainnet and testnet return HTTP 403 even with the flag;
+the gate runs before JSON decoding. The bridge also enforces the gate before
+PoW checking or sending any event. The existing header/section validation and
+`LocalFullBlock` → `inject_local_full_block` → `Action::AssembleBlock` path
+performs the same block application as sync. HTTP 200 acknowledges admission;
+check the full tip and state root to confirm application.
+
+Scala already provides this route: source pin v6.0.2
+`src/main/scala/org/ergoplatform/http/api/BlocksApiRoute.scala:126` checks PoW,
+then sends `LocallyGeneratedModifier` for the header and each section.
+`ErgoNodeViewHolder.scala:664` passes these to `pmodModify`; its state update
+at line 233 calls `state.applyModifier`. This path does not submit transactions
+to the mempool. The live verification uses Scala 6.0.5 / sigma-state 6.0.6.
+
+To build a full REST block on the current Scala devnet tip:
+
+```sh
+scripts/devnet-mixed/stop.sh
+cargo build -p ergo-node
+scripts/devnet-mixed/start.sh
+python3 scripts/devnet-mixed/build-block.py --live scripts/devnet-mixed/.work/block.json
+# Or supply an exact, ordered array of signed Scala transaction JSON objects:
+python3 scripts/devnet-mixed/build-block.py --live transactions.json scripts/devnet-mixed/.work/block.json
+# Verify a new direct submission to each node and matching tips/state roots:
+python3 scripts/devnet-mixed/direct-submit.py
+scripts/devnet-mixed/stop.sh
+```
+
+Always stop the recipe after a failure, using `stop.sh`. The builder only reads
+REST port 19553. `BuildBlock.scala` reconstructs the configured genesis and
+replays the parent blocks into a temporary database under `.work/`, generates
+JVM AVL proofs, mines at difficulty 1, and validates the result with
+`UtxoState.applyModifier`. It never opens a live node database. With no supplied
+transactions it builds an emission transaction; a supplied nonempty array is
+used exactly as given. The result is ready for either node's `POST /blocks`.
+No mining-solution or mempool submission is involved. The existing positional
+`build-block.py REQUEST OUTPUT` synthetic-fixture mode remains available.
+
+This builder is for short, unforked private chains before the first voting
+boundary (33,554,432); it replays from genesis on each invocation and refuses
+ambiguous height lookups or a tip that changes during construction. It validates
+supplied transactions, so intentional invalid-block construction remains a
+separate campaign concern.
+
+Verified on 2026-09-16 UTC, continuing the preserved 100-block recipe chain:
+
+| POST recipient | Height reached by both | Block ID |
+| --- | --- | --- |
+| Rust, 19554 | 101 | `9d6b7e362764bb1b357d1e693fe34a288420acfaa2b5dc8eedc70bcf11788355` |
+| Scala, 19553 | 102 | `71c44eba17b6a435221894316260c4b8dd057ecd61ed08bb5189a42bede09707` |
+
+Both requests returned HTTP 200; both nodes reported the submitted block ID
+and identical state roots after each request. The other node received each
+block through P2P. `direct-submit-evidence.json` records versions, source and
+binary hashes, input/output hashes, parameters, and observations (2 selected,
+2 executed, 0 skipped, 0 failed). This is a pre-commit working-tree verification;
+the receipt records its base revision and working diff hash. Both recipe-owned
+processes were stopped using their PID files after verification. No cost-ledger
+row is closed by this transport test.

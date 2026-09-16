@@ -46,6 +46,19 @@ use crate::types::ApiSubmitError;
 /// - `timeout` → 504
 /// - `internal_error` → 500
 pub async fn submit_handler(State(submit): State<Arc<dyn NodeSubmit>>, body: Bytes) -> Response {
+    if !submit.direct_block_submit_enabled() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiSubmitError {
+                error: 403,
+                reason: "direct_block_submit_disabled".to_string(),
+                detail: Some(
+                    "requires devnet and [api] allow_direct_block_submit = true".to_string(),
+                ),
+            }),
+        )
+            .into_response();
+    }
     let block: ScalaFullBlock = match serde_json::from_slice(&body) {
         Ok(b) => b,
         Err(e) => {

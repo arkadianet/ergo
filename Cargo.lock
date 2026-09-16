@@ -864,6 +864,7 @@ version = "0.7.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "axum",
  "bincode",
  "clap",
  "ergo-api",

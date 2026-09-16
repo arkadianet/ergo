@@ -1350,6 +1350,7 @@ fn cfg_with_mode(
         api_bind: None,
         api_key_hash: None,
         api_allowed_hosts: Vec::new(),
+        allow_direct_block_submit: false,
         mempool_config,
         mempool_sort_policy: "cost".into(),
         indexer_config: IndexerConfig::default(),

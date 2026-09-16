@@ -898,7 +898,8 @@ fn make_bridge() -> (
 ) {
     let (submit_tx, submit_rx) = tokio::sync::mpsc::channel::<SubmitRequest>(4);
     let (event_tx, event_rx) = tokio::sync::mpsc::channel::<crate::peer_loop::PeerEvent>(4);
-    let bridge = SubmitBridge::new(submit_tx, event_tx);
+    let bridge = SubmitBridge::new(submit_tx, event_tx)
+        .with_direct_block_submit(ergo_chain_spec::Network::Devnet, true);
     (bridge, submit_rx, event_rx)
 }
 
@@ -957,7 +958,8 @@ async fn submit_full_block_overloaded_when_event_channel_full() {
     let (submit_tx, _submit_rx) = tokio::sync::mpsc::channel::<SubmitRequest>(4);
     // Capacity 1 so we can fill with a single placeholder event.
     let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<crate::peer_loop::PeerEvent>(1);
-    let bridge = SubmitBridge::new(submit_tx, event_tx.clone());
+    let bridge = SubmitBridge::new(submit_tx, event_tx.clone())
+        .with_direct_block_submit(ergo_chain_spec::Network::Devnet, true);
 
     // Fill the event channel with a synthetic LocalFullBlock placeholder
     // (the reply oneshot is leaked here — we never drive it; the
@@ -987,7 +989,8 @@ async fn submit_full_block_closed_event_channel_returns_shutting_down() {
     let (submit_tx, _submit_rx) = tokio::sync::mpsc::channel::<SubmitRequest>(4);
     let (event_tx, event_rx) = tokio::sync::mpsc::channel::<crate::peer_loop::PeerEvent>(4);
     drop(event_rx); // emulate "main loop has shut down"
-    let bridge = SubmitBridge::new(submit_tx, event_tx);
+    let bridge = SubmitBridge::new(submit_tx, event_tx)
+        .with_direct_block_submit(ergo_chain_spec::Network::Devnet, true);
 
     let err = bridge
         .submit_full_block(mainnet_block_836113())
@@ -1002,7 +1005,8 @@ async fn submit_full_block_closed_event_channel_returns_shutting_down() {
 async fn submit_full_block_ok_reply_relays_header_id() {
     let (submit_tx, _submit_rx) = tokio::sync::mpsc::channel::<SubmitRequest>(4);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<crate::peer_loop::PeerEvent>(4);
-    let bridge = SubmitBridge::new(submit_tx, event_tx);
+    let bridge = SubmitBridge::new(submit_tx, event_tx)
+        .with_direct_block_submit(ergo_chain_spec::Network::Devnet, true);
 
     // Spawn a task that mimics the action-loop handler: drain
     // the event, reply with a deterministic header_id.
@@ -1032,7 +1036,8 @@ async fn submit_full_block_ok_reply_relays_header_id() {
 async fn submit_full_block_oneshot_dropped_returns_shutting_down() {
     let (submit_tx, _submit_rx) = tokio::sync::mpsc::channel::<SubmitRequest>(4);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<crate::peer_loop::PeerEvent>(4);
-    let bridge = SubmitBridge::new(submit_tx, event_tx);
+    let bridge = SubmitBridge::new(submit_tx, event_tx)
+        .with_direct_block_submit(ergo_chain_spec::Network::Devnet, true);
 
     let action_loop = tokio::spawn(async move {
         let event = event_rx.recv().await.expect("event must arrive");

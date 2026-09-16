@@ -107,7 +107,9 @@ pub(super) fn build_scaffold(
     )
     .into_dyn();
     let submit_bridge: Arc<dyn ergo_api::NodeSubmit> =
-        SubmitBridge::new(submit_tx.clone(), event_tx.clone()).into_dyn();
+        SubmitBridge::new(submit_tx.clone(), event_tx.clone())
+            .with_direct_block_submit(config.network, config.allow_direct_block_submit)
+            .into_dyn();
 
     Ok(Scaffold {
         api_info,

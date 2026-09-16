@@ -1117,6 +1117,7 @@ impl NodeConfig {
             api_bind,
             api_key_hash,
             api_allowed_hosts,
+            allow_direct_block_submit: toml_cfg.api.allow_direct_block_submit.unwrap_or(false),
             mempool_config,
             mempool_sort_policy,
             indexer_config,
