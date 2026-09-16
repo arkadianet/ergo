@@ -66,7 +66,7 @@ use crate::extension_builder::build_candidate_extension_fields;
 use crate::reemission::{build_post_eip27_emission_tx, ReemissionSettings};
 use crate::state_view::CandidateStateView;
 use crate::storage_rent_claim::build_budget_bounded_rent_claim;
-use crate::tx_selection::DEFAULT_COST_SAFETY_GAP;
+use crate::tx_selection::block_cost_safety_gap;
 use crate::work_message::WorkMessage;
 use ergo_validation::pre_header::{
     build_last_block_utxo_root, CandidatePreHeader, CandidateValidationContext,
@@ -506,10 +506,11 @@ pub fn generate_candidate<V: CandidateStateView>(
         //     claim on the same box is excluded. Zero fee; proceeds to the
         //     miner P2PK.
         let max_block_cost = active_params.max_block_cost as u64;
+        let safety_gap = block_cost_safety_gap(max_block_cost);
         let max_block_size = active_params.max_block_size as u64;
         let phase_start = std::time::Instant::now();
         let rent_cost_ceiling = max_block_cost
-            .saturating_sub(DEFAULT_COST_SAFETY_GAP)
+            .saturating_sub(safety_gap)
             .saturating_sub(emission_cost)
             .saturating_sub(max_block_cost / 16);
         let rent_size_ceiling = max_block_size
@@ -542,7 +543,7 @@ pub fn generate_candidate<V: CandidateStateView>(
         //     checks neither).
         let phase_start = std::time::Instant::now();
         let cost_budget = max_block_cost
-            .saturating_sub(DEFAULT_COST_SAFETY_GAP)
+            .saturating_sub(safety_gap)
             .saturating_sub(emission_cost)
             .saturating_sub(rent_cost);
         let size_budget = max_block_size
@@ -577,7 +578,7 @@ pub fn generate_candidate<V: CandidateStateView>(
         //     rebuilt from the kept set, so a trimmed tx never leaves a stale
         //     spend behind.
         let mut user_checked = selected.checked; // Vec<(CheckedTransaction, cost)>
-        let cost_ceiling = max_block_cost.saturating_sub(DEFAULT_COST_SAFETY_GAP);
+        let cost_ceiling = max_block_cost.saturating_sub(safety_gap);
         let checked_fee = loop {
             let user_raw: Vec<Transaction> = user_checked
                 .iter()
