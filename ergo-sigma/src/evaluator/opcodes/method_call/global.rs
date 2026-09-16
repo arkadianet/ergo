@@ -33,6 +33,7 @@ use crate::evaluator::types::{EvalError, Value};
 pub(super) fn encode_nbits(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, EvalError> {
     check_arity(args, 1)?;
     let v_val = cx.eval_expr(&args[0])?;
+    add_method_cost(cx.cost, COST_ENCODE_NBITS)?;
     let v = match &v_val {
         Value::BigInt(n) => n,
         other => {
@@ -42,7 +43,6 @@ pub(super) fn encode_nbits(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value,
             })
         }
     };
-    add_method_cost(cx.cost, COST_ENCODE_NBITS)?;
     Ok(Value::Long(encode_compact_bits(v)))
 }
 
@@ -144,10 +144,25 @@ pub(super) fn pow_hit(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, Eval
             })
         }
     };
+    // PowHitCostKind, charged before the (heavy) hit computation.
+    let total_len = msg.len() + nonce.len() + h.len();
+    let pow_cost = 500i32.wrapping_add(
+        k.wrapping_add(1)
+            .wrapping_mul((total_len / 128 + 1) as i32)
+            .wrapping_mul(7),
+    );
+    // Scala keeps the wrapped Int in a signed `JitCost`; a negative value only
+    // arises for a `k` far outside [2, 32], which the `require` below then
+    // rejects. Rust's JitCost is unsigned, so the negative wrap is not charged
+    // (the input is rejected either way); it must not surface as a cost
+    // overflow, which routes to a different failure class than Scala's.
+    if pow_cost >= 0 {
+        cx.cost.add(JitCost::try_from_jit(pow_cost as u64)?)?;
+    }
     // Scala `hitForVersion2ForMessageWithChecks` bounds: reject
     // (RuntimeException, matching Scala's `require`) rather than
     // compute on out-of-range parameters.
-    if !(2..=32).contains(&k) {
+    if pow_cost < 0 || !(2..=32).contains(&k) {
         return Err(EvalError::RuntimeException(
             "SGlobal.powHit: k must be in [2, 32]",
         ));
@@ -157,10 +172,6 @@ pub(super) fn pow_hit(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, Eval
             "SGlobal.powHit: N must be >= 16",
         ));
     }
-    // PowHitCostKind, charged before the (heavy) hit computation.
-    let total_len = msg.len() + nonce.len() + h.len();
-    let pow_cost = 500u64 + (k as u64 + 1) * (total_len as u64 / 128 + 1) * 7;
-    cx.cost.add(JitCost::try_from_jit(pow_cost)?)?;
     let hit =
         ergo_crypto::autolykos::v2::hit_for_v2_pow(k as usize, &msg, &nonce, &h, n_param as u32);
     Ok(Value::UnsignedBigInt(num_bigint::BigInt::from(hit)))
@@ -339,186 +350,192 @@ pub(super) fn xor(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, EvalErro
 pub(super) fn serialize(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, EvalError> {
     check_arity(args, 1)?;
     let v = cx.eval_expr(&args[0])?;
-    let (target_type, sv) = crate::evaluator::helpers::value_to_typed_sigma(&v, Some(cx.ctx))?;
-    // Scala `DataSerializer.serialize(SHeader)` is gated on
-    // `isV3OrLaterErgoTreeVersion` PER materialized header — and the
-    // v6 method gate only checks `activatedScriptVersion`, so a tree
-    // with `ergo_tree_version < 3` spent post-activation must still
-    // reject any header-carrying value here (mirrors the
-    // deserializeTo[SHeader] gate, GHSA-hfj8-hjph-7r78). An empty
-    // Coll[Header] (no materialized header) is accepted. SAvlTree and
-    // the primitives are NOT ergo-tree-version gated.
-    if sv.contains_header() && !cx.ctx.is_v3_ergo_tree() {
-        return Err(EvalError::TypeError {
-            expected: "ErgoTree version >= 3 for SHeader serialization",
-            got: format!("ergo_tree_version {}", cx.ctx.ergo_tree_version),
-        });
-    }
-    // `DataSerializer.serialize(SOption)` is gated identically (matches
-    // SOption only at isV3OrLaterErgoTreeVersion, else throws). A pre-v3
-    // tree building an Option via some/none and serializing it must be
-    // rejected. Value-based: an empty Coll[Option] is accepted.
-    if sv.contains_option() && !cx.ctx.is_v3_ergo_tree() {
-        return Err(EvalError::TypeError {
-            expected: "ErgoTree version >= 3 for SOption serialization",
-            got: format!("ergo_tree_version {}", cx.ctx.ergo_tree_version),
-        });
-    }
-    // Charged before producing the bytes (Scala charges
-    // StartWriterCost up front, then per-put during the write; the
-    // total on success is identical). `try_from_jit` is panic-safe.
-    let total_cost = 10u64 + serialize_put_cost(&target_type, &sv)?;
-    cx.cost.add(JitCost::try_from_jit(total_cost)?)?;
+    add_method_cost(cx.cost, 10)?;
     let mut w = ergo_primitives::writer::VlqWriter::new();
-    ergo_ser::sigma_value::write_value(&mut w, &target_type, &sv).map_err(|e| {
-        EvalError::TypeError {
-            expected: "serializable value for SGlobal.serialize",
-            got: format!("{e:?}"),
-        }
-    })?;
+    serialize_runtime_value(&v, &mut w, cx)?;
     Ok(Value::CollBytes(w.result()))
 }
 
-/// Dynamic-cost (`DynamicCost`) part of `SGlobal.serialize`: the sum of
-/// `SigmaByteWriter` per-put JitCost that v6.0.2
-/// `DataSerializer.serialize(value, tpe, w)` emits. The caller adds
-/// `StartWriterCost` (= 10) on top. Per-put cost model (v6.0.2
-/// `SigmaByteWriter`): put(Byte)/putBoolean/putOption-tag = 1;
-/// putShort/putInt/putLong = 3; putUShort/putULong = 3; putUInt = 0;
-/// putBytes(n)/putBits(n) = `PerItemCost(3,1,1).cost(n)` = 3 + n (for every
-/// n, since chunks(0) = 0). SAvlTree and SHeader are modelled here (their
-/// `value_to_typed_sigma` arms produce the carriers); SBox serialize is a
-/// separate follow-up. `value_to_typed_sigma` still rejects any value with no
-/// Scala-anchored serialize bytes, so unsupported carriers never reach here.
+/// Walk runtime containers in write order. Converting a whole tuple first would
+/// reject a later unsupported element before charging writes for earlier ones.
+fn serialize_runtime_value(
+    value: &Value,
+    writer: &mut ergo_primitives::writer::VlqWriter,
+    cx: &mut EvalCtx<'_>,
+) -> Result<(), EvalError> {
+    match value {
+        Value::Tuple(items) => {
+            for item in items {
+                serialize_runtime_value(item, writer, cx)?;
+            }
+        }
+        Value::CollGeneric(items, elem_type) => {
+            add_method_cost(cx.cost, 3)?;
+            let len = u16::try_from(items.len()).map_err(|_| EvalError::TypeError {
+                expected: "collection length <= 65535 for SGlobal.serialize",
+                got: items.len().to_string(),
+            })?;
+            writer.put_u16(len);
+            for item in items {
+                if let Some(tpe) = crate::evaluator::helpers::value_to_sigma_type(item) {
+                    if !crate::evaluator::helpers::sigma_type_compatible(elem_type, &tpe) {
+                        return Err(EvalError::TypeError {
+                            expected: "element matches CollGeneric elem_type",
+                            got: format!("declared {elem_type:?}, found {tpe:?}"),
+                        });
+                    }
+                }
+                serialize_runtime_value(item, writer, cx)?;
+            }
+        }
+        Value::Opt(value) => {
+            require_serialization_version(
+                &SigmaType::SOption(Box::new(SigmaType::SAny)),
+                cx.ctx.ergo_tree_version,
+            )?;
+            add_method_cost(cx.cost, 1)?;
+            writer.put_u8(u8::from(value.is_some()));
+            if let Some(value) = value {
+                serialize_runtime_value(value, writer, cx)?;
+            }
+        }
+        _ => {
+            let (tpe, sv) = crate::evaluator::helpers::value_to_typed_sigma(value, Some(cx.ctx))?;
+            visit_serialization_puts(&tpe, &sv, cx.ctx.ergo_tree_version, &mut |delta| {
+                add_method_cost(cx.cost, delta)
+            })?;
+            ergo_ser::sigma_value::write_value(writer, &tpe, &sv).map_err(|e| {
+                EvalError::TypeError {
+                    expected: "serializable value for SGlobal.serialize",
+                    got: format!("{e:?}"),
+                }
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn require_serialization_version(tpe: &SigmaType, version: u8) -> Result<(), EvalError> {
+    let expected = match tpe {
+        SigmaType::SHeader if version < 3 => "ErgoTree version >= 3 for SHeader serialization",
+        SigmaType::SOption(_) if version < 3 => "ErgoTree version >= 3 for SOption serialization",
+        SigmaType::SUnsignedBigInt if version < 3 => {
+            "ErgoTree version >= 3 for SUnsignedBigInt serialization"
+        }
+        _ => return Ok(()),
+    };
+    Err(EvalError::TypeError {
+        expected,
+        got: format!("ergo_tree_version {version}"),
+    })
+}
+
+/// Sum the JVM writer callbacks for direct cost-model tests.
+#[cfg(test)]
 pub(in crate::evaluator) fn serialize_put_cost(
-    tpe: &ergo_ser::sigma_type::SigmaType,
+    tpe: &SigmaType,
     sv: &ergo_ser::sigma_value::SigmaValue,
 ) -> Result<u64, EvalError> {
+    let mut total = 0;
+    visit_serialization_puts(tpe, sv, 3, &mut |delta| {
+        total += delta;
+        Ok(())
+    })?;
+    Ok(total)
+}
+
+/// Visit each SigmaByteWriter callback in serialization order. Returning at the
+/// first failed charge preserves the charged-to-failure cost at a tight limit.
+fn visit_serialization_puts(
+    tpe: &SigmaType,
+    sv: &ergo_ser::sigma_value::SigmaValue,
+    version: u8,
+    charge: &mut impl FnMut(u64) -> Result<(), EvalError>,
+) -> Result<(), EvalError> {
     use ergo_ser::sigma_type::SigmaType as T;
     use ergo_ser::sigma_value::{CollValue, SigmaValue as Sv};
-    let cost = match (tpe, sv) {
-        (T::SUnit, _) => 0,
-        (T::SBoolean, _) => 1,
-        (T::SByte, _) => 1,
-        (T::SShort, _) | (T::SInt, _) | (T::SLong, _) => 3,
-        // putUShort(len) = 3, then putBytes(byteLen) = 3 + byteLen.
-        (T::SBigInt, Sv::BigInt(v)) => 6 + v.to_signed_bytes_be().len() as u64,
+    require_serialization_version(tpe, version)?;
+    match (tpe, sv) {
+        (T::SUnit, _) => {}
+        (T::SBoolean | T::SByte, _) => charge(1)?,
+        (T::SShort | T::SInt | T::SLong, _) => charge(3)?,
+        (T::SBigInt, Sv::BigInt(v)) => {
+            charge(3)?;
+            charge(3 + v.to_signed_bytes_be().len() as u64)?;
+        }
         (T::SUnsignedBigInt, Sv::BigInt(v)) => {
-            // Unsigned magnitude bytes; zero is encoded as length 0.
-            let byte_len = if v.sign() == num_bigint::Sign::NoSign {
+            let len = if v.sign() == num_bigint::Sign::NoSign {
                 0
             } else {
                 v.to_bytes_be().1.len()
             };
-            6 + byte_len as u64
+            charge(3)?;
+            charge(3 + len as u64)?;
         }
-        // GroupElementSerializer: putBytes(33).
-        (T::SGroupElement, _) => 3 + 33,
-        // SString: Scala writes putUInt-NO-INFO(len) (0 cost) + putBytes(n)
-        // = 3 + n, strictly cheaper than Coll[Byte]'s putUShort = 6 + n. The
-        // distinct `Value::Str` carrier keeps SString from aliasing to
-        // Coll[Byte] at the value layer, so this arm (not the Coll one) is
-        // taken. Bytes are byte-identical to Coll[Byte] (VLQ length + bytes).
-        (T::SString, Sv::Str(s)) => 3 + s.len() as u64,
-        (T::SSigmaProp, Sv::SigmaProp(sb)) => sigma_boolean_put_cost(sb),
-        // putUShort(len) = 3, then the element body.
+        (T::SGroupElement, _) => charge(36)?,
+        (T::SString, Sv::Str(s)) => charge(3 + s.len() as u64)?,
+        (T::SSigmaProp, Sv::SigmaProp(sb)) => visit_sigma_boolean_puts(sb, charge)?,
         (T::SColl(elem), Sv::Coll(coll)) => {
-            3 + match coll {
-                CollValue::Bytes(b) => 3 + b.len() as u64,
-                CollValue::BoolBits(bits) => 3 + bits.len() as u64,
+            charge(3)?;
+            match coll {
+                CollValue::Bytes(b) => charge(3 + b.len() as u64)?,
+                CollValue::BoolBits(bits) => charge(3 + bits.len() as u64)?,
                 CollValue::Values(vals) => {
-                    let mut s = 0u64;
-                    for x in vals {
-                        s += serialize_put_cost(elem, x)?;
+                    for value in vals {
+                        visit_serialization_puts(elem, value, version, charge)?;
                     }
-                    s
                 }
             }
         }
-        // putOption tag (1), then the body iff Some.
         (T::SOption(elem), Sv::Opt(opt)) => {
-            1 + match opt {
-                Some(inner) => serialize_put_cost(elem, inner)?,
-                None => 0,
+            charge(1)?;
+            if let Some(value) = opt {
+                visit_serialization_puts(elem, value, version, charge)?;
             }
         }
-        // No length prefix; just the concatenated item costs.
         (T::STuple(types), Sv::Tuple(vals)) => {
-            let mut s = 0u64;
-            for (t, x) in types.iter().zip(vals.iter()) {
-                s += serialize_put_cost(t, x)?;
+            for (tpe, value) in types.iter().zip(vals) {
+                visit_serialization_puts(tpe, value, version, charge)?;
             }
-            s
         }
-        // AvlTreeData.serializer (mirrors ergo_ser::write_avl_tree):
-        //   putBytes(digest 33) = chunk(33)=36 + putUByte(flags)=1
-        //   + putUInt(keyLength)=0 + putOption(valueLengthOpt) tag=1
-        //   (+ if Some: inner putUInt=0).
-        // Constant 38 regardless of flags / keyLength / Some-vs-None, because
-        // putUInt costs 0 and the option tag byte is always written.
-        (T::SAvlTree, Sv::AvlTree(avl)) => (3 + avl.digest.len() as u64) + 1 + 1,
-        // ErgoHeader.sigmaSerializer = HeaderWithoutPowSerializer +
-        // AutolykosSolution.sigmaSerializer (mirrors ergo_ser::write_header +
-        // write_solution). chunk(n) = 3 + n. put_u8 = 1; put_u64(timestamp) =
-        // putULong = 3; put_u32(height) = putUInt = 0 (NOT 3); write_nbits =
-        // putBytes(4) = chunk(4). The version>1 block adds putUByte(len)=1 +
-        // chunk(unparsedLen). V2 PoW = chunk(pk 33) + chunk(nonce 8); V1 PoW =
-        // chunk(pk 33) + chunk(w 33) + chunk(nonce 8) + putUByte(dLen)=1 +
-        // chunk(dLen). Charges exactly what write_header/write_solution emit,
-        // so cost == bytes for every header version.
+        (T::SAvlTree, Sv::AvlTree(avl)) => {
+            charge(3 + avl.digest.len() as u64)?;
+            charge(1)?; // flags; keyLength uses uncharged putUInt
+            charge(1)?; // valueLength option tag; its body uses putUInt
+        }
         (T::SHeader, Sv::Header(h)) => {
-            let chunk = |n: usize| 3 + n as u64;
-            let mut c = 1; // put_u8(version)
-            c += chunk(h.parent_id.as_bytes().len());
-            c += chunk(h.ad_proofs_root.as_bytes().len());
-            c += chunk(h.transactions_root.as_bytes().len());
-            c += chunk(h.state_root.as_bytes().len());
-            c += 3; // put_u64(timestamp) = putULong
-            c += chunk(h.extension_root.as_bytes().len());
-            c += chunk(4); // write_nbits — 4-byte compact difficulty
-                           // put_u32(height) = putUInt = 0 (no charge)
-            c += chunk(h.votes.len());
-            // Signed-Byte version comparison, matching the header writer
-            // (`ergo_ser::header::write_header_without_pow`) so this serialize
-            // cost agrees with the bytes actually emitted: a version > 127 is
-            // signed-negative, so no unparsed-bytes section is written or
-            // charged. (Unreachable: a script can only serialize real context
-            // headers, versions 1-4.)
-            if (h.version as i8) > ergo_ser::header::INITIAL_VERSION as i8 {
-                c += 1; // put_u8(unparsed_bytes.len())
-                c += chunk(h.unparsed_bytes.len());
+            charge(1)?;
+            for n in [
+                h.parent_id.as_bytes().len(),
+                h.ad_proofs_root.as_bytes().len(),
+                h.transactions_root.as_bytes().len(),
+                h.state_root.as_bytes().len(),
+            ] {
+                charge(3 + n as u64)?;
             }
-            c += match &h.solution {
+            charge(3)?; // timestamp
+            charge(3 + h.extension_root.as_bytes().len() as u64)?;
+            charge(7)?; // nBits; height uses uncharged putUInt
+            charge(3 + h.votes.len() as u64)?;
+            if (h.version as i8) > ergo_ser::header::INITIAL_VERSION as i8 {
+                charge(1)?;
+                charge(3 + h.unparsed_bytes.len() as u64)?;
+            }
+            match &h.solution {
                 ergo_ser::autolykos::AutolykosSolution::V2 { pk, nonce } => {
-                    chunk(pk.as_bytes().len()) + chunk(nonce.len())
+                    charge(3 + pk.as_bytes().len() as u64)?;
+                    charge(3 + nonce.len() as u64)?;
                 }
                 ergo_ser::autolykos::AutolykosSolution::V1 { pk, w, nonce, d } => {
-                    chunk(pk.as_bytes().len())
-                        + chunk(w.as_bytes().len())
-                        + chunk(nonce.len())
-                        + 1 // put_u8(d.len())
-                        + chunk(d.len())
+                    charge(3 + pk.as_bytes().len() as u64)?;
+                    charge(3 + w.as_bytes().len() as u64)?;
+                    charge(3 + nonce.len() as u64)?;
+                    charge(1)?;
+                    charge(3 + d.len() as u64)?;
                 }
-            };
-            c
+            }
         }
-        // ErgoBox.sigmaSerializer (= ErgoBoxCandidate.
-        // serializeBodyWithIndexedDigests + the 32-byte txId and
-        // putUShort(index) tail). Mirrors the SigmaByteWriter put-cost
-        // sequence exactly (chunk(n) = 3 + n; putULong/putUShort = 3;
-        // putUInt = 0; putUByte = 1):
-        //   putULong(value)=3 + putBytes(ergoTree)=chunk(treeLen)
-        //   + putUInt(height)=0 + putUByte(nTokens)=1
-        //   + Σ_tokens [putBytes(id 32)=35 + putULong(amount)=3]
-        //   + putUByte(nRegs)=1 + Σ_regs putValue
-        //   + putBytes(txId 32)=35 + putUShort(index)=3.
-        // The box bytes carried by `OpaqueBoxBytes` are byte-identical to
-        // Scala serialize(box) (the InlineBox carrier preserves the verbatim
-        // tree and register bytes), so re-parsing recovers the exact structure
-        // Scala costs. `read_ergo_box_candidate` leaves txId+index trailing,
-        // which the formula charges explicitly.
         (T::SBox, Sv::OpaqueBoxBytes(bytes)) => {
-            let chunk = |n: usize| 3 + n as u64;
             let mut r = ergo_primitives::reader::VlqReader::new(bytes);
             let candidate = ergo_ser::ergo_box::read_ergo_box_candidate(&mut r).map_err(|e| {
                 EvalError::TypeError {
@@ -526,23 +543,31 @@ pub(in crate::evaluator) fn serialize_put_cost(
                     got: format!("box parse error: {e}"),
                 }
             })?;
-            let mut c = 3; // putULong(value)
-            c += chunk(candidate.ergo_tree_bytes().len()); // putBytes(ergoTree)
-                                                           // putUInt(height) = 0
-            c += 1; // putUByte(nTokens)
-            c += candidate.tokens.len() as u64 * (chunk(32) + 3); // per token
-            c += 1; // putUByte(nRegs)
-            let reg_slices = ergo_ser::register::split_register_bytes(candidate.register_bytes())
-                .map_err(|e| EvalError::TypeError {
-                expected: "parseable SBox register bytes for SGlobal.serialize cost",
-                got: format!("register split error: {e}"),
-            })?;
-            for slice in &reg_slices {
-                c += register_put_value_cost(slice)?;
+            charge(3)?;
+            charge(3 + candidate.ergo_tree_bytes().len() as u64)?;
+            charge(1)?;
+            for _ in &candidate.tokens {
+                charge(35)?;
+                charge(3)?;
             }
-            c += chunk(32); // putBytes(txId)
-            c += 3; // putUShort(index)
-            c
+            charge(1)?;
+            let registers = ergo_ser::register::split_register_bytes(candidate.register_bytes())
+                .map_err(|e| EvalError::TypeError {
+                    expected: "parseable SBox register bytes for SGlobal.serialize cost",
+                    got: format!("register split error: {e}"),
+                })?;
+            for bytes in registers {
+                let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
+                let expr = ergo_ser::opcode::parse_expr(&mut r, 0, 0).map_err(|e| {
+                    EvalError::TypeError {
+                        expected: "parseable register value for SGlobal.serialize cost",
+                        got: format!("register parse error: {e}"),
+                    }
+                })?;
+                visit_expr_puts(&expr, version, charge)?;
+            }
+            charge(35)?;
+            charge(3)?;
         }
         _ => {
             return Err(EvalError::TypeError {
@@ -550,119 +575,96 @@ pub(in crate::evaluator) fn serialize_put_cost(
                 got: format!("{tpe:?}"),
             })
         }
-    };
-    Ok(cost)
+    }
+    Ok(())
 }
 
-/// JitCost of `TypeSerializer.serialize(tpe)`. Scala writes a serialized type
-/// only via `w.put`/`w.putUByte` (each `PutByteCost` = 1), so the cost equals
-/// the serialized type's byte length. `ergo_ser::sigma_type::write_type` IS the
-/// TypeSerializer encoder, so serialize-and-count is exact for every type
-/// (including the pair/triple/quad/tuple-n encodings).
-fn type_enc_bytes(tpe: &ergo_ser::sigma_type::SigmaType) -> Result<u64, EvalError> {
+/// TypeSerializer emits one byte callback per encoded type byte.
+fn visit_type_puts(
+    tpe: &SigmaType,
+    charge: &mut impl FnMut(u64) -> Result<(), EvalError>,
+) -> Result<(), EvalError> {
     let mut w = ergo_primitives::writer::VlqWriter::new();
-    // A type whose length/count overflows Scala's single-byte wire form (e.g. a
-    // lossy-decoded STypeVar name > 255 bytes) makes Scala's `putUByte` throw a
-    // SerializerException mid-cost; mirror that as a runtime eval failure rather
-    // than a panic.
     ergo_ser::sigma_type::write_type(&mut w, tpe).map_err(|_| {
         EvalError::RuntimeException("TypeSerializer.serialize: type too large for wire format")
     })?;
-    Ok(w.result().len() as u64)
+    for _ in w.result() {
+        charge(1)?;
+    }
+    Ok(())
 }
 
-/// JitCost of `SigmaByteWriter.putValue(v)` for a box register value, mirroring
-/// `ValueSerializer.serialize`. The register's ORIGINAL bytes decide the
-/// encoding — a tuple value can be stored EITHER as a Constant (leading type
-/// code <= 0x70) OR as a CreateTuple expression (0x86), and the normalized
-/// parsed value loses that distinction — so cost is derived structurally from
-/// the parsed expression (`parse_expr` round-trips both forms).
-fn register_put_value_cost(bytes: &[u8]) -> Result<u64, EvalError> {
-    let mut r = ergo_primitives::reader::VlqReader::new(bytes);
-    // Box registers parse with tree_version 0 (`read_register_value`), so a box
-    // that already materialized as a value carries registers this parser
-    // accepts; re-parsing here cannot spuriously reject.
-    let expr = ergo_ser::opcode::parse_expr(&mut r, 0, 0).map_err(|e| EvalError::TypeError {
-        expected: "parseable register value for SGlobal.serialize cost",
-        got: format!("register parse error: {e}"),
-    })?;
-    expr_put_value_cost(&expr)
-}
-
-/// Recursive `putValue` cost over a parsed register expression. The valid
-/// register `EvaluatedValue` forms (Scala: `Constant`, `Tuple`,
-/// `ConcreteCollection`) each cost their `ValueSerializer.serialize` puts:
-///   - Constant: `ValueSerializer` takes the constant path (no opCode byte) ->
-///     `ConstantSerializer` = `putType` + `DataSerializer` =
-///     `type_enc_bytes(tpe)` + `serialize_put_cost(tpe, value)`.
-///   - CreateTuple (0x86): `put(opCode)` = 1, then `TupleSerializer` writes
-///     `putUByte(count)` = 1 and `putValue` per item.
-///   - ConcreteCollection (0x83): `put(opCode)` = 1, then
-///     `ConcreteCollectionSerializer` writes `putUShort(size)` = 3,
-///     `putType(elemType)`, and `putValue` per item.
-///
-/// All recurse, so nested constants / tuples / collections are costed exactly.
-fn expr_put_value_cost(expr: &Expr) -> Result<u64, EvalError> {
+/// Original register expressions preserve Constant versus CreateTuple encoding.
+fn visit_expr_puts(
+    expr: &Expr,
+    version: u8,
+    charge: &mut impl FnMut(u64) -> Result<(), EvalError>,
+) -> Result<(), EvalError> {
     use ergo_ser::opcode::{IrNode, Payload};
     match expr {
-        Expr::Const { tpe, val } => Ok(type_enc_bytes(tpe)? + serialize_put_cost(tpe, val)?),
+        Expr::Const { tpe, val } => {
+            visit_type_puts(tpe, charge)?;
+            visit_serialization_puts(tpe, val, version, charge)?;
+        }
         Expr::Op(IrNode {
             opcode: 0x86,
             payload: Payload::Tuple { items },
         }) => {
-            let mut c = 1 + 1; // put(opCode) + putUByte(count)
+            charge(1)?;
+            charge(1)?;
             for item in items {
-                c += expr_put_value_cost(item)?;
+                visit_expr_puts(item, version, charge)?;
             }
-            Ok(c)
         }
-        // ConcreteCollection is a valid register `EvaluatedValue`
-        // (`ConcreteCollection extends EvaluatedCollection extends
-        // EvaluatedValue`), so a collection-valued register must be costed, not
-        // rejected. `read_register_value` admits only the 0x83 form here (the
-        // 0x85 boolean-packed variant is rejected upstream during box parse, so
-        // it never reaches this cost path).
         Expr::Op(IrNode {
             opcode: 0x83,
             payload: Payload::ConcreteCollection { elem_type, items },
         }) => {
-            // put(opCode)=1 + putUShort(size)=3 + putType(elemType)
-            let mut c = 1 + 3 + type_enc_bytes(elem_type)?;
+            charge(1)?;
+            charge(3)?;
+            visit_type_puts(elem_type, charge)?;
             for item in items {
-                c += expr_put_value_cost(item)?;
+                visit_expr_puts(item, version, charge)?;
             }
-            Ok(c)
         }
-        Expr::Op(IrNode { opcode, .. }) => Err(EvalError::TypeError {
+        _ => return Err(EvalError::TypeError {
             expected:
                 "Constant, CreateTuple, or ConcreteCollection register value for SGlobal.serialize",
-            got: format!("register opcode 0x{opcode:02X}"),
-        }),
-        Expr::Unparsed(_) => Err(EvalError::TypeError {
-            expected:
-                "Constant, CreateTuple, or ConcreteCollection register value for SGlobal.serialize",
-            got: "unparsed-tree body".to_string(),
+            got: format!("{expr:?}"),
         }),
     }
+    Ok(())
 }
 
-/// Per-put JitCost for serializing a `SigmaBoolean` via Scala's
-/// `SigmaBoolean.serializer`: a 1-byte opCode tag per node, plus
-/// `putBytes(33)` = 36 per GroupElement and `putUShort` = 3 per child
-/// count (CTHRESHOLD writes both `k` and the count).
-fn sigma_boolean_put_cost(sb: &ergo_ser::sigma_value::SigmaBoolean) -> u64 {
+fn visit_sigma_boolean_puts(
+    sb: &ergo_ser::sigma_value::SigmaBoolean,
+    charge: &mut impl FnMut(u64) -> Result<(), EvalError>,
+) -> Result<(), EvalError> {
     use ergo_ser::sigma_value::SigmaBoolean as Sb;
+    charge(1)?;
     match sb {
-        Sb::TrivialProp(_) => 1,
-        Sb::ProveDlog(_) => 1 + (3 + 33),
-        Sb::ProveDHTuple { .. } => 1 + 4 * (3 + 33),
+        Sb::TrivialProp(_) => {}
+        Sb::ProveDlog(_) => charge(36)?,
+        Sb::ProveDHTuple { .. } => {
+            for _ in 0..4 {
+                charge(36)?;
+            }
+        }
         Sb::Cand(children) | Sb::Cor(children) => {
-            1 + 3 + children.iter().map(sigma_boolean_put_cost).sum::<u64>()
+            charge(3)?;
+            for child in children {
+                visit_sigma_boolean_puts(child, charge)?;
+            }
         }
         Sb::Cthreshold { children, .. } => {
-            1 + 3 + 3 + children.iter().map(sigma_boolean_put_cost).sum::<u64>()
+            charge(3)?;
+            charge(3)?;
+            for child in children {
+                visit_sigma_boolean_puts(child, charge)?;
+            }
         }
     }
+    Ok(())
 }
 
 /// Bitcoin-style "compact" difficulty encoding used by Ergo's
