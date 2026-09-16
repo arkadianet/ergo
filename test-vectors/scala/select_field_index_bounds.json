@@ -1,0 +1,18 @@
+{
+  "_note": [
+    "JVM parse verdicts for SelectField (0x8C) field indexes, recorded 2026-09-17 with",
+    "`cargo run -p ergo-difftest -- --oracle --repro <hex> --surface ergo_tree` against",
+    "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala (sigma-state 6.0.2). Scala constructs",
+    "`SelectField(input, fieldIndex)` whose `tpe = input.tpe.items(fieldIndex - 1)`",
+    "(data/shared/src/main/scala/sigma/ast/transformers.scala:291-294) at deserialization,",
+    "so an index of 0 or above the tuple arity throws IndexOutOfBoundsException and the",
+    "tree fails to deserialize (a plain exception, not a ValidationException: no soft-fork",
+    "wrapping). Body of every tree: BoolToSigmaProp(EQ(SelectField(Tuple(1, 2), idx), c))."
+  ],
+  "cases": [
+    { "name": "index_zero_rejected",        "tree_hex": "00d1938c860204020404000402", "jvm": "Reject", "jvm_detail": "IndexOutOfBoundsException" },
+    { "name": "index_above_arity_rejected", "tree_hex": "00d1938c860204020404030402", "jvm": "Reject", "jvm_detail": "IndexOutOfBoundsException" },
+    { "name": "index_one_accepted",         "tree_hex": "00d1938c860204020404010402", "jvm": "Accept", "jvm_detail": null },
+    { "name": "index_two_accepted",         "tree_hex": "00d1938c860204020404020404", "jvm": "Accept", "jvm_detail": null }
+  ]
+}

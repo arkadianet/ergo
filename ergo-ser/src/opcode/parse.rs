@@ -381,6 +381,37 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
         ArgPattern::SelectField => {
             let input = parse_expr(r, next, _tree_version)?;
             let field_idx = r.get_u8()?;
+            // Scala builds `SelectField(input, fieldIndex)` at deserialization and
+            // its `tpe = input.tpe.items(fieldIndex - 1)` (transformers.scala:294)
+            // throws IndexOutOfBoundsException for index 0 and for an index above
+            // the tuple arity. `deserializeErgoTree` does not catch it, so the tree
+            // hard-rejects even under a size-delimited header (no soft-fork wrap).
+            // Oracle: test-vectors/scala/select_field_index_bounds.json. The arity
+            // half is enforced here for a literal tuple or a tuple constant input;
+            // other tuple shapes reject at evaluation (see `eval_select_field`).
+            if field_idx == 0 {
+                return Err(ReadError::HardReject(
+                    "SelectField index 0 (indexes are 1-based)".into(),
+                ));
+            }
+            let literal_arity = match &input {
+                Expr::Op(IrNode {
+                    payload: Payload::Tuple { items },
+                    ..
+                }) => Some(items.len()),
+                Expr::Const {
+                    tpe: SigmaType::STuple(types),
+                    ..
+                } => Some(types.len()),
+                _ => None,
+            };
+            if let Some(arity) = literal_arity {
+                if field_idx as usize > arity {
+                    return Err(ReadError::HardReject(format!(
+                        "SelectField index {field_idx} exceeds tuple arity {arity}"
+                    )));
+                }
+            }
             Payload::SelectField {
                 input: Box::new(input),
                 field_idx,
@@ -711,6 +742,37 @@ mod tests {
                 pk: ergo_primitives::group_element::GroupElement::from_bytes([0x02; 33]),
                 nonce: [0; 8],
             },
+        }
+    }
+
+    // ----- oracle parity -----
+
+    /// Vector: `test-vectors/scala/select_field_index_bounds.json` (JVM parse
+    /// verdicts from `ErgoSerdeOracle.scala`, sigma-state 6.0.2). Scala computes
+    /// `input.tpe.items(fieldIndex - 1)` while deserializing `SelectField`, so
+    /// index 0 and an index above the tuple arity throw IndexOutOfBoundsException
+    /// and the tree fails to deserialize; indexes 1 and 2 on a pair parse.
+    #[test]
+    fn select_field_index_zero_and_above_arity_hard_reject_like_scala() {
+        use crate::ergo_tree::read_ergo_tree;
+        for (hex, name) in [
+            ("00d1938c860204020404000402", "index_zero_rejected"),
+            ("00d1938c860204020404030402", "index_above_arity_rejected"),
+        ] {
+            let bytes = hex::decode(hex).unwrap();
+            let mut r = VlqReader::new(&bytes);
+            let err = read_ergo_tree(&mut r)
+                .err()
+                .unwrap_or_else(|| panic!("{name} parsed"));
+            assert!(matches!(err, ReadError::HardReject(_)), "{name}: {err:?}");
+        }
+        for (hex, name) in [
+            ("00d1938c860204020404010402", "index_one_accepted"),
+            ("00d1938c860204020404020404", "index_two_accepted"),
+        ] {
+            let bytes = hex::decode(hex).unwrap();
+            let mut r = VlqReader::new(&bytes);
+            read_ergo_tree(&mut r).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         }
     }
 }
