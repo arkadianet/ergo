@@ -1,0 +1,97 @@
+{
+  "manifest": {
+    "scala": {
+      "ergo_version": "6.0.2",
+      "sigmastate_version": "6.0.2",
+      "ergo_wallet_version": "6.0.2",
+      "node_app_version": null,
+      "source_shas": {
+        "sigmastate_v6.0.2": "23dd29f612249c169d09fae9bca76d7cc02e144c",
+        "ergo_v6.0.2": "2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1"
+      },
+      "note": "Standalone JVM oracle using the published/local 6.0.2 fallback artifacts pinned in the script; no node or mainnet request was used."
+    },
+    "rust": {
+      "git_sha": "898ca9585544ad22a3b5e48d9aec7ce769fad374",
+      "toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
+      "features": [
+        "ergo-sigma/cost-trace",
+        "ergo-validation/test-helpers"
+      ]
+    },
+    "tool": {
+      "script": "scripts/gen-cost-fixture.sh",
+      "git_sha": "898ca9585544ad22a3b5e48d9aec7ce769fad374",
+      "script_sha256": "2e45450094442a80be77745a20cbc67ee11c3665229e66bead99e7bd740a95bc",
+      "oracle_script": "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala",
+      "oracle_sha256": "a8f007806a69d84f73cf0b7bbcaeeef8fcd212608358bca1e5fcfb668467514c",
+      "scala_cli": "Scala CLI version: 1.12.1\nScala version (default): 3.8.1",
+      "scala_directive": "2.12",
+      "jvm": "openjdk version \"17.0.17\" 2025-10-21 LTS\nOpenJDK Runtime Environment Corretto-17.0.17.10.1 (build 17.0.17+10-LTS)\nOpenJDK 64-Bit Server VM Corretto-17.0.17.10.1 (build 17.0.17+10-LTS, mixed mode, sharing)"
+    },
+    "context": {
+      "network": "synthetic offline context",
+      "height": 0,
+      "block_version": 4,
+      "activated_script_version": 3,
+      "ergo_tree_version": 0,
+      "voted_params": {
+        "4": null,
+        "5": null,
+        "6": null,
+        "7": null,
+        "8": null
+      }
+    },
+    "run": {
+      "command": "scala-cli run scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala --server=false --suppress-outdated-dependency-warning -- verify",
+      "fixture": "test-vectors/ergo-sigma/cost-ledger/fixtures/interpreter/p2pk-cost-limit.json",
+      "timestamp_utc": "2026-09-15T15:26:04.629168+00:00",
+      "seeds": null,
+      "selected": 1,
+      "executed": 1,
+      "skipped": 0,
+      "failed": 0
+    },
+    "evidence": {
+      "request_jsonl_sha256": "3e75b9799a7b11ca24166a592ef260de2e1aa6151ae2e419059df74811a32678",
+      "response_jsonl_sha256": "a8ef975f97e9016def0579e5e81d5d9513ed950d9d61e7e3aa312917323cb7fa"
+    },
+    "scala_sigmastate": "6.0.2",
+    "generator": "scripts/gen-cost-fixture.sh@898ca9585544ad22a3b5e48d9aec7ce769fad374",
+    "date": "2026-09-15T15:26:04.629168+00:00"
+  },
+  "ledger": [
+    "INTERP-eval-sigmaprop-constant"
+  ],
+  "request": {
+    "tree_hex": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+    "ctx_ext_hex": "00",
+    "proof_hex": "",
+    "message_hex": "",
+    "cost_limit_block": 402,
+    "init_cost_block": 0,
+    "activated_version": 3,
+    "tree_version_expected": 0,
+    "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+    "inputs_hex": [
+      "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+    ],
+    "data_inputs_hex": [],
+    "outputs_hex": [],
+    "headers_hex": [],
+    "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+  },
+  "expected": {
+    "verdict": "RejectCost",
+    "eval_block_cost": 5,
+    "crypto_block_cost": 398,
+    "rent_block_cost": 0,
+    "rent_path": false,
+    "total_block_cost": 403,
+    "failure_class": "sigma.exceptions.CostLimitException",
+    "rejection_detail": "sigma.exceptions.CostLimitException: Estimated execution cost 403 exceeds the limit 402",
+    "legacy": "P:cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798|5",
+    "evaluator_failure_block_cost": "unavailable"
+  }
+}

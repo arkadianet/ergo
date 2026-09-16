@@ -1,0 +1,73 @@
+{
+  "scala": {
+    "ergo_version": "6.0.2",
+    "sigmastate_version": "6.0.2",
+    "ergo_wallet_version": "6.0.2",
+    "node_app_version": null,
+    "source_shas": {
+      "sigmastate_v6.0.2": "23dd29f612249c169d09fae9bca76d7cc02e144c",
+      "ergo_v6.0.2": "2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1"
+    },
+    "note": "Standalone JVM oracle using the published/local 6.0.2 fallback artifacts pinned in the script; no node or mainnet request was used."
+  },
+  "rust": {
+    "git_sha": "11a39db5b1fabb32974306585e31ada2fe2ff093",
+    "working_tree": "Task 3.2 fix and concurrent storage-rent changes; see task-3.2-fix-report.md for tested commit",
+    "toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "features": [
+      "ergo-sigma/cost-trace",
+      "ergo-validation/test-helpers"
+    ]
+  },
+  "tool": {
+    "script": "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala",
+    "git_sha": "2210c7645fd83b3ba0e8053cf4c8534858cc0e85",
+    "script_sha256": "f6259d9fa0b60402b305eb9d19de8edeaee3a0d21f390c632fa0e837368cd33d",
+    "scala_cli": "1.12.1",
+    "scala_directive": "2.12",
+    "jvm": "OpenJDK Corretto 17.0.17.10.1 (17.0.17+10-LTS)"
+  },
+  "context": {
+    "network": "synthetic offline contexts",
+    "heights": [
+      0,
+      1051200
+    ],
+    "activated_script_version": [
+      3
+    ],
+    "block_version": [
+      4
+    ],
+    "voted_params": {
+      "4": null,
+      "5": null,
+      "6": null,
+      "7": null,
+      "8": null
+    },
+    "storage_fee_factor": "Explicit request field when rent=true; includes invalid schema probes. No block/transaction parameter pricing is exercised."
+  },
+  "run": {
+    "commands": [
+      "scala-cli run scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala --server=false -- verify < test-vectors/ergo-sigma/verify/requests.jsonl > test-vectors/ergo-sigma/verify/responses.jsonl",
+      "scala-cli run scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala --server=false -- verify < test-vectors/ergo-sigma/verify/fix-requests.jsonl > test-vectors/ergo-sigma/verify/fix-responses.jsonl"
+    ],
+    "seeds": null,
+    "timestamp_utc": "2026-09-15T14:51:01.994308+00:00",
+    "selected": 22,
+    "executed": 22,
+    "skipped": 0,
+    "failed": 0,
+    "note": "Counts are successful JVM fixture generation and exact JSON comparison, including expected rejection cases."
+  },
+  "evidence": {
+    "test-vectors/ergo-sigma/verify/cases.json": "89693f88c35fffe277750e83225e71fd48e227aee50a65d6b4d51f32eae92043",
+    "test-vectors/ergo-sigma/verify/requests.jsonl": "489e69abfdcffad54889d563b5d94ed3f0f45e3c02c6d042932457869fbac776",
+    "test-vectors/ergo-sigma/verify/responses.jsonl": "f78cd15164462a08883bd566fcf1f66747e695ed6648513ffb93cc8fa7f56714",
+    "test-vectors/ergo-sigma/verify/deserialize-subst-request.json": "9961ed4568462431454ce5687e3b77cb537a105ba5b5255d9500fdcdbe6a2a63",
+    "test-vectors/ergo-sigma/verify/fix-cases.json": "c0120ddebe63d240311ccdd61987ff501f783a769c8649a9260db508dbf283bf",
+    "test-vectors/ergo-sigma/verify/fix-requests.jsonl": "33690278a22b450b0f31e71a3b83e116a5d39545f5124d3ee40cd65f01343188",
+    "test-vectors/ergo-sigma/verify/fix-responses.jsonl": "0ad5ed978771e7b0af3c2aaa5c66d243d7b898bb9f759155c55b58e44f0fed5b"
+  }
+}

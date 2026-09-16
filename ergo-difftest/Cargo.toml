@@ -13,11 +13,12 @@ publish    = false
 default-run = "difftest"
 
 [dependencies]
+anyhow = "1"
 ergo-primitives = { workspace = true }
 ergo-ser        = { workspace = true }
-ergo-sigma      = { workspace = true }
+ergo-sigma      = { workspace = true, features = ["cost-trace"] }
 ergo-state      = { workspace = true }
-ergo-validation = { workspace = true }
+ergo-validation = { workspace = true, features = ["test-helpers"] }
 ergo-rest-json  = { workspace = true }
 num-bigint      = { workspace = true }
 serde           = { workspace = true, features = ["derive"] }
