@@ -1,10 +1,18 @@
 {
+  "conformance_scope": "L4 required selection only; ledger retains 57 OPEN obligations.",
+  "conformance_status": "PASS",
   "epoch_manifest": "test-vectors/ergo-sigma/cost-total/mainnet-epochs.json.gz",
   "executed": 101187,
-  "failed": 2,
+  "failed": 0,
   "missing_required_ranges": [],
   "node_version": "6.0.5",
   "oracle": "test-vectors/scripts/scala/ComputeTransactionCosts.scala",
+  "oracle_capture": {
+    "ComputeTransactionCosts.scala": "f51c44dd7e55876a44ba88164f1129925aeb2bde28cc7a1fba62a51f32526dd2",
+    "fixture.json": "ab63a667d611d9bd01546e0bb4fcbee2c0a0842fbd7d61695228d8354c4f293d",
+    "heights.json": "18f3b641e4bdf381ee7344ebcbe4affa93e3d6661ff2a9033aa5f78e74622cf0",
+    "note": "Signing-byte metadata was supplemented after the accepted cost capture; the cost oracle source at capture time is hashed separately."
+  },
   "ranges": [
     {
       "end": 157696,
@@ -3869,22 +3877,9 @@
     {
       "end": 1629184,
       "executed": 15216,
-      "failed": 2,
-      "failures": [
-        {
-          "height": 1628276,
-          "missing_boxes": [],
-          "reason": "JVM Accept, Rust rejected: input 0: spending proof verification failed",
-          "tx_id": "c045a8c340f5916ee81d4f48534a31fb64de73a9e9aa9d7cad375aee718a2d7c"
-        },
-        {
-          "height": 1628279,
-          "missing_boxes": [],
-          "reason": "JVM Accept, Rust rejected: input 0: spending proof verification failed",
-          "tx_id": "dc5073f59f78a263835902b6d29654d57dbff3f16426293d59e8d20614bc6f95"
-        }
-      ],
-      "matched": 15214,
+      "failed": 0,
+      "failures": [],
+      "matched": 15216,
       "selected": 15216,
       "skipped": [],
       "start": 1627136
@@ -5454,10 +5449,21 @@
       1751000
     ]
   ],
-  "rust_revision": "36b3aa9643dcb0a499c66c0c419eb4e311049473",
+  "run": {
+    "command": "L4_RESULTS=../.superpowers/task-8.1-l4-raw.json L4_DIAGNOSTICS=../.superpowers/task-8.1-l4-diagnostics.json cargo test -p ergo-validation --features diagnostics --test it cost_parity_required_selection_matches_jvm -- --nocapture",
+    "features": [
+      "diagnostics"
+    ],
+    "log_sha256": "76a029dceb6901107a991a8cd931408ca3052ddf45c86ded8041d67f3d813509",
+    "raw_output_sha256": "cbebeeb312b0899e955135b6ef930935c518ddc83af9b22e6990e3543b04b988",
+    "rust_toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "seeds": null,
+    "timestamp": "2026-09-16T03:01:12.852682+00:00"
+  },
+  "rust_revision": "cea3b0fa72ec85b4aca6563052f4d2c846e1f812",
   "selected": 101187,
+  "selection_unit": "range/transaction pair; overlapping required ranges replay the same transaction independently",
   "sigma_state_version": "6.0.6",
-  "tip_height": 1873956,
   "source_and_input_sha256": {
     "ergo-crypto/src/autolykos/common.rs": "86db5fb8424358bc352e882549241bcdecc2b078d9c412e64bccdb181e7c6b3a",
     "ergo-crypto/src/autolykos/mod.rs": "d3dd9443e1ff4342067d935b003c61d90564a102fb6860ea171535dc7c59a740",
@@ -5492,8 +5498,8 @@
     "ergo-ser/src/ergo_tree/read.rs": "cb509a23f05d4d858f5fc55bd6e8a3bda47ed1974a75138d1559ac612045df5a",
     "ergo-ser/src/ergo_tree/root_type.rs": "5afae4dc714eb73fa9b19a8692c550801f1dea440e97b5df0309f7db2c202bf2",
     "ergo-ser/src/ergo_tree/tests.rs": "e55dd1785d53fb3d47940e074d737781be58fd7619d6f648fc7aa7bd28ce12d2",
-    "ergo-ser/src/ergo_tree/type_infer/method_registry.rs": "e9cc9a7a5645db00e25e2a384021830882de570e3a4f5e8115b19b0c0ed85445",
     "ergo-ser/src/ergo_tree/type_infer.rs": "94d7b5c9583a42a85d2a4d9ea27c94f1878cecf2d08c652bf19f845a3887a4e6",
+    "ergo-ser/src/ergo_tree/type_infer/method_registry.rs": "e9cc9a7a5645db00e25e2a384021830882de570e3a4f5e8115b19b0c0ed85445",
     "ergo-ser/src/error.rs": "3b3cf115f118e433fafbc455dfe2b3ea9373578c49a20903a285809203e67944",
     "ergo-ser/src/extension.rs": "b61cd5bddb6c8f391559082bb2cfdf7221cb9930fcb7ebda622520e8a3f16e42",
     "ergo-ser/src/header.rs": "97bfdc44f2f6edf44c77c389fc4fefc92ee58e74b8c66d30731ee5f2987221b5",
@@ -5542,8 +5548,9 @@
     "ergo-sigma/src/evaluator/helpers/mod.rs": "a8c2639c93687ed80b3e302489c18def886283516eea46c3b8ade5a2b019822b",
     "ergo-sigma/src/evaluator/helpers/serialize.rs": "a8b329d9021236555dd53b4dea3f39146b8f1d523a26c157a6e3a4d361f7ddcc",
     "ergo-sigma/src/evaluator/helpers/subst_constants.rs": "8ff03e0b4151037003302bcc31052c5d215bef1de95293e387e9ece2e5c13556",
-    "ergo-sigma/src/evaluator/helpers/type_infer.rs": "a40d2849be29ffb04fea1304501d407cfa79264902e2a2a99fb97ac6af65cd27",
+    "ergo-sigma/src/evaluator/helpers/type_infer.rs": "ae347ab9fd1e750531cbd16f58a8b00d5d12fb52ed68622703e10ba7f5698f3c",
     "ergo-sigma/src/evaluator/mod.rs": "14c3fdf2a133af42b32706dbab6d81e86bc21d4187595a4128c2f46e797e889f",
+    "ergo-sigma/src/evaluator/opcodes.rs": "32e26603df1629de038ff9a3dea2da2e5afad99982ccc26f793dd692f9ce167b",
     "ergo-sigma/src/evaluator/opcodes/arithmetic.rs": "61f97cab6132633053c118780a823a2a0b16e917938cd2df4414ae265ba7deb9",
     "ergo-sigma/src/evaluator/opcodes/binding.rs": "29295152e18787cf9283b0954d1a109fa1be3df4f2f95a537cf0f197e71f2217",
     "ergo-sigma/src/evaluator/opcodes/boolean.rs": "86d765d443b675830cdc3d50d4d19b29f37449954266b67db6ea87b6e54a5eff",
@@ -5564,7 +5571,6 @@
     "ergo-sigma/src/evaluator/opcodes/option.rs": "9cc2644279fb4806bef10e5e036ab9cd76c1f2926468a1d53fa2570fb4f6c281",
     "ergo-sigma/src/evaluator/opcodes/property_call.rs": "3126a2c1089cf1a23491de1863fb25dccf24771f974be095483729a51c72c5f8",
     "ergo-sigma/src/evaluator/opcodes/sigma.rs": "d43b7738e4ce6eba96dfd355e10bf3b016ceb6c71f4d535ad2f630e5f71e61bc",
-    "ergo-sigma/src/evaluator/opcodes.rs": "32e26603df1629de038ff9a3dea2da2e5afad99982ccc26f793dd692f9ce167b",
     "ergo-sigma/src/evaluator/tests.rs": "66d07b5c84f49c1e5ba3e59adce18d06fc8acc49da491d1c659366506d39c931",
     "ergo-sigma/src/evaluator/types.rs": "86f79c035b57e01ffc0d25ffe82771a974a4bd7f8692fd91e4643ea1c6c3d9b8",
     "ergo-sigma/src/lib.rs": "010932af126af59a80abca1af5a1ed63390bb3a79fa53c6de8179eac3f688e12",
@@ -5581,10 +5587,10 @@
     "ergo-validation/src/block/fork_vote.rs": "5417ed9b9188794cfd41853c80f19b62cdab3e9f8313814d579d7abd4ab99c99",
     "ergo-validation/src/block/interlinks.rs": "fab656c7f0a7dfca4165304d667b32e9a93663c2f655dbd993ad9ebc6baa8558",
     "ergo-validation/src/block/layering.rs": "7f8b57f127ef7e2bbdfa0973802c1c74d29dff7cd11e153cf561e2230c416336",
-    "ergo-validation/src/block/mod.rs": "531334a2ffc67c197637e913d72b5e77382aa24c9eca142f1bad84dc29875946",
+    "ergo-validation/src/block/mod.rs": "b5c1b98151e07eb25c90a235d0ef773d2bcde065dd7d32428a532b713f1ee8c7",
     "ergo-validation/src/block/overlay.rs": "041444e435cc875d1f7f31d096e7c97f2d9a68d49e8a4a7e244244492d13ca59",
     "ergo-validation/src/block/size.rs": "d4233f0bfaa52c69a8d8509169e1cd43f647eb85ed1920b5bd84efb7a73587ea",
-    "ergo-validation/src/block/validate.rs": "894d7e9ded3adf0eb712407898ae453d2c7d32c85b4fddd1d127b871653fa221",
+    "ergo-validation/src/block/validate.rs": "96d4340bfef963ee7caa1d6caf67a072df19a8048a5275ed12cc056535d0e72d",
     "ergo-validation/src/context.rs": "29de1e2a940df58b37084af4051fefe141ba0e1d385bc8ba97427170a6d8f30b",
     "ergo-validation/src/cost.rs": "0d9e4abae8a513de6be27ea96ab10093af572a3750cbbcb3238d13d6692d603c",
     "ergo-validation/src/error.rs": "827e35636c1ba8cee6b036f77fd39b8f579becab1010a1f833328a48bf61ff42",
@@ -5623,8 +5629,8 @@
     "ergo-validation/src/voting/recompute/update_params.rs": "68b9304d5a65c6af5be3d343fda992b9573a6f6791564e1726d84d97e9a32d2a",
     "ergo-validation/src/voting/validation_settings.rs": "9b174843c78a7b3f84fbdba4d364530859a90fd592acfeacdd783d9bdd59fe75",
     "ergo-validation/src/voting/votes.rs": "7b5012016ce039e2da278ce5acdd7e8ac053229bfbde7214b6dc51531a1f6774",
-    "ergo-validation/tests/it/cost_parity.rs": "8851fb8ac9f743e94a30a9301ef6637bfab5e2a3e333cff0dfae9d9f973f367a",
-    "test-vectors/ergo-sigma/cost-total/mainnet-epochs.json.gz": "1bbecd925dcf80ff31072ddc0130532c5a77e61221c46fe118e6a3203f4634a0",
+    "ergo-validation/tests/it/cost_parity.rs": "87f545ea9e33a437c34979f2351b9afe09edbeca9f062db640fd69c107339f60",
+    "test-vectors/ergo-sigma/cost-total/mainnet-epochs.json.gz": "a327d08fe3b8416eed8ac7c60f96d4aa90ce56f0a91854e931490236550843df",
     "test-vectors/mainnet/headers_1099991_1101300.json": "86e11368a38daa2e2ab34644f491eb3ea7331cc526dd2be82f8f819beb815126",
     "test-vectors/mainnet/headers_1197047_1197056.json": "62f2bfaea3b8a047e96eccfcd79ce48e8b3a060e0eb5c6cd0eec2bd8ba8fb907",
     "test-vectors/mainnet/headers_1200119_1200128.json": "09e77671ae2abca7a2de78e46c80b15a4638357c07cf31ce7d24df0a00cccfbf",
@@ -6804,14 +6810,13 @@
     "test-vectors/mainnet/tx_costs_900000_901000.json": "a3fc61396a7b7865b95fd9f132ced1b35f92da1a309f3e3c9a3373edb20b0cc9",
     "test-vectors/scripts/scala/ComputeTransactionCosts.scala": "c168b360346895c980286458917b4e99e53d59cfcd7eb06402b65701279529e5"
   },
-  "worktree_dirty": true,
-  "conformance_status": "DIVERGENT",
-  "oracle_capture": {
-    "ComputeTransactionCosts.scala": "f51c44dd7e55876a44ba88164f1129925aeb2bde28cc7a1fba62a51f32526dd2",
-    "fixture.json": "ab63a667d611d9bd01546e0bb4fcbee2c0a0842fbd7d61695228d8354c4f293d",
-    "heights.json": "18f3b641e4bdf381ee7344ebcbe4affa93e3d6661ff2a9033aa5f78e74622cf0",
-    "note": "Signing-byte metadata was supplemented after the accepted cost capture; the cost oracle source at capture time is hashed separately."
+  "superseded_result": {
+    "failed": 2,
+    "note": "The checked-in manifest still recorded two failures; full candidate replay confirms fixes. Original evidence is retained in Git history.",
+    "rust_revision": "36b3aa9643dcb0a499c66c0c419eb4e311049473"
   },
+  "tip_height": 1873956,
   "unique_transactions": 94500,
-  "selection_unit": "range/transaction pair; overlapping required ranges replay the same transaction independently"
+  "worktree_dirty": false,
+  "worktree_scope": "Tracked implementation clean at replay; untracked closure report and pre-existing op_per_item.py are not build inputs."
 }
