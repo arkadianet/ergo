@@ -31,8 +31,10 @@ infrastructure.
   recovery scans at most 4096 blocks / 32 MiB. Mainnet post-EIP-27 tips resolve
   from one block. If history is insufficient, mining stays unavailable until
   an emission-NFT-bearing block is applied.
-- Mining candidates use Scala's tiered cost safety gap. The mainnet user-tx
-  budget per mined block changes from the old fixed value to 150,000.
+- Mining candidates use Scala's tiered cost safety gap: 150,000 block-cost
+  units are reserved at the current mainnet maximum. The user-transaction
+  budget is `max(0, voted maximum block cost - safety reserve - emission cost
+  - rent cost)`, using saturating subtraction.
 
 ## [0.7.0] - 2026-09-07
 
