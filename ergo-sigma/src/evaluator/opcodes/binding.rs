@@ -273,7 +273,14 @@ pub(in crate::evaluator) fn eval_select_field(
     let tuple = cx.eval_expr(input)?;
     match tuple {
         Value::Tuple(items) => {
-            let idx = (field_idx as usize).saturating_sub(1);
+            // 1-based like Scala's `productElement(fieldIndex - 1)`; index 0 is
+            // already a parse-time hard reject, this keeps eval consistent for
+            // any internally constructed tree.
+            let idx = (field_idx as usize)
+                .checked_sub(1)
+                .ok_or(EvalError::RuntimeException(
+                    "SelectField index 0 (indexes are 1-based)",
+                ))?;
             items.get(idx).cloned().ok_or(EvalError::TypeError {
                 expected: "valid tuple index",
                 got: format!("index {field_idx} in tuple of len {}", items.len()),
