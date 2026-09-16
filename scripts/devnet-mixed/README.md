@@ -271,3 +271,12 @@ file preserves both directions and links the compressed prior stopped result;
 all earlier artifacts remain. Source snapshots distinguish harness changes
 between directions. The driver refuses to resume a recorded divergence until
 its ledger obligation is resolved and the result is explicitly archived.
+
+Task 0.11 supersedes the blocked outcome above: Rust rebuilt from `07a4f410`
+uses Scala's tiered safety gap and passed **7/7** Rust-mines cases, reaching
+height 736. Together with the retained **7/7** Scala-mines direction, both
+nodes accepted both exact-cap injections and rejected 37510 at cap 37509 with
+unchanged commitments. The original stopped result is archived as
+`stopped-before-07a4f410.json.gz`; its historical run is marked
+`RESOLVED_DIVERGENCE`, with the original DIVERGENT status retained in that
+archive. Both nodes are stopped and all four private ports are closed.

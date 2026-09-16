@@ -21,15 +21,11 @@ fn paired(infos: &Value) {
     assert_eq!(commitment(&infos["scala"]), commitment(&infos["rust"]));
 }
 
-// ----- oracle parity -----
-
-#[test]
-fn mixed_campaign_scala_direction_matches_jvm_boundaries() {
+fn check_direction(direction: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let path = root.join("test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16.json");
     let results: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     let runs = results["runs"].as_array().unwrap();
-    let direction = "scala-mines";
     let successes: Vec<_> = runs
         .iter()
         .filter(|run| run["direction"] == direction && run["status"] == "PASS")
@@ -139,12 +135,35 @@ fn mixed_campaign_scala_direction_matches_jvm_boundaries() {
     }
 }
 
+// ----- oracle parity -----
+
+#[test]
+fn mixed_campaign_scala_direction_matches_jvm_boundaries() {
+    check_direction("scala-mines");
+}
+
+// ledger: BLOCK-rejection-state-unchanged
+#[test]
+fn mixed_campaign_both_directions_rejection_preserves_state() {
+    for direction in ["scala-mines", "rust-mines"] {
+        check_direction(direction);
+    }
+}
+
 // ledger: BLOCK-L6-mining-safety-gap
 #[test]
 fn mixed_campaign_rust_low_cap_records_selection_divergence() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let path = root.join("test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16.json");
     let results: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let archive = results["safety_gap_resolution"]["archived_result"]
+        .as_str()
+        .unwrap();
+    let original: Value = serde_json::from_reader(flate2::read::GzDecoder::new(
+        std::fs::File::open(root.join(archive)).unwrap(),
+    ))
+    .unwrap();
+    let results = original;
     let run = &results["runs"][1];
     assert_eq!(run["direction"], "rust-mines");
     assert_eq!(run["status"], "DIVERGENT");
