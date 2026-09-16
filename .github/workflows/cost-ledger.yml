@@ -27,6 +27,10 @@ jobs:
         run: python3 scripts/jvm_cost_constants_extractor/verify.py
       - name: Ledger integrity
         run: python3 scripts/cost-ledger.py check
+      - name: Inventory diff self-tests
+        run: python3 scripts/cost-ledger-diff.py --selftest
+      - name: Inventory diff (enumeration vs ledger must be empty)
+        run: python3 scripts/cost-ledger-diff.py
 
   tracked-cost-fixtures:
     runs-on: ubuntu-latest
