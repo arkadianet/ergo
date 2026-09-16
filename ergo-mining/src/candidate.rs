@@ -406,7 +406,7 @@ pub fn generate_candidate<V: CandidateStateView>(
     let emission_box = if genesis {
         crate::genesis::emission_box(view)?
     } else {
-        lookup_emission_box_from_parent(view, &parent_id, &parent_header)?
+        lookup_emission_box_from_parent(view, &parent_id, &parent_header, network, reemission)?
     };
     let emission_tx = match reemission {
         Some(reem) if candidate_height > reem.activation_height => {

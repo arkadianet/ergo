@@ -182,30 +182,29 @@ impl Regime {
     }
 }
 
-/// A trivially-true ErgoTree (`SBoolean true`, inline): `header 0x00`, body
-/// `0x01 0x01`. Reduces to `TrivialProp(true)`, so the emission tx's single
-/// input verifies with an empty spending proof — the same shape the
-/// `ergo-mining::emission_box` discovery test relies on.
-fn trivial_true_tree() -> (Vec<u8>, ergo_ser::ergo_tree::ErgoTree) {
-    // `00 08 d3` = Const(SSigmaProp, TrivialProp::true): a SigmaProp root, the
-    // only kind a box script may have (CheckDeserializedScriptIsSigmaProp).
-    let bytes = vec![0x00u8, 0x08, 0xd3];
-    let mut r = VlqReader::new(&bytes);
-    let tree = read_ergo_tree(&mut r).expect("trivial-true tree decodes");
-    (bytes, tree)
-}
-
-/// The emission tx that the parent block "applied": one input (an arbitrary
-/// prior box id) and `output[0]` = the emission box the candidate will consume.
+/// The emission tx that the parent block "applied": one input (the genesis
+/// emission box id) and `output[0]` = the emission box the candidate will consume.
 /// A second output keeps the shape close to a real coinbase but only
 /// `output[0]` matters for emission-box discovery. `output[0]` carries the
 /// regime's emission tokens (none pre-EIP-27; NFT + reemission stash for
 /// post-EIP-27), so the candidate's post-activation emission tx finds the
 /// 2-token box `build_post_eip27_emission_tx` requires.
 fn parent_emission_tx(regime: &Regime) -> Transaction {
-    let (tree_bytes, tree) = trivial_true_tree();
+    let genesis: serde_json::Value = serde_json::from_str(
+        ergo_chain_spec::GenesisParams::mainnet()
+            .boxes_json
+            .unwrap(),
+    )
+    .unwrap();
+    let tree_bytes = hex::decode(genesis[0]["ergoTree"].as_str().unwrap()).unwrap();
+    let tree = read_ergo_tree(&mut VlqReader::new(&tree_bytes)).unwrap();
     let input = Input {
-        box_id: Digest32::from_bytes([0xAAu8; 32]),
+        box_id: Digest32::from_bytes(
+            hex::decode(genesis[0]["boxId"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        ),
         spending_proof: SpendingProof::new(Vec::new(), ContextExtension::empty()).unwrap(),
     };
     let emission_out = ErgoBoxCandidate::from_trusted_raw_parts(

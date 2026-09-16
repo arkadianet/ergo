@@ -115,26 +115,26 @@ const EMISSION_BOX_VALUE: u64 = 73_000_000_000_000;
 
 // ----- chain construction -----
 
-/// A trivially-true ErgoTree (`SBoolean true`, inline): header `0x00`, body
-/// `0x01 0x01`. Reduces to `TrivialProp(true)`, so the emission tx's single
-/// input verifies with an empty spending proof.
-fn trivial_true_tree() -> (Vec<u8>, ergo_ser::ergo_tree::ErgoTree) {
-    // `00 08 d3` = Const(SSigmaProp, TrivialProp::true): a SigmaProp root, the
-    // only kind a box script may have (CheckDeserializedScriptIsSigmaProp).
-    let bytes = vec![0x00u8, 0x08, 0xd3];
-    let mut r = VlqReader::new(&bytes);
-    let tree = read_ergo_tree(&mut r).expect("trivial-true tree decodes");
-    (bytes, tree)
-}
-
-/// The emission tx the parent block "applied": one input (an arbitrary prior
+/// The emission tx the parent block "applied": one input (the genesis emission
 /// box id) and `output[0]` = the emission box the candidate will consume. A
 /// second output keeps the coinbase shape close to real, but only `output[0]`
 /// matters for emission-box discovery.
 fn parent_emission_tx() -> Transaction {
-    let (tree_bytes, tree) = trivial_true_tree();
+    let genesis: serde_json::Value = serde_json::from_str(
+        ergo_chain_spec::GenesisParams::mainnet()
+            .boxes_json
+            .unwrap(),
+    )
+    .unwrap();
+    let tree_bytes = hex::decode(genesis[0]["ergoTree"].as_str().unwrap()).unwrap();
+    let tree = read_ergo_tree(&mut VlqReader::new(&tree_bytes)).unwrap();
     let input = Input {
-        box_id: Digest32::from_bytes([0xAAu8; 32]),
+        box_id: Digest32::from_bytes(
+            hex::decode(genesis[0]["boxId"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        ),
         spending_proof: SpendingProof::new(Vec::new(), ContextExtension::empty()).unwrap(),
     };
     let emission_out = ErgoBoxCandidate::from_trusted_raw_parts(

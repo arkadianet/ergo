@@ -16,9 +16,9 @@ Source ledger: sigmastate `v6.0.2 23dd29f612249c169d09fae9bca76d7cc02e144c`, erg
 | ORDER | 5 | 12 | 0 | 0 | 17 |
 | LIMIT | 0 | 3 | 0 | 0 | 3 |
 | TX | 1 | 7 | 0 | 2 | 10 |
-| BLOCK | 6 | 4 | 1 | 3 | 14 |
+| BLOCK | 6 | 5 | 0 | 3 | 14 |
 | VERSION | 17 | 6 | 0 | 1 | 24 |
-| **all** | 58 | 213 | 1 | 24 | 296 |
+| **all** | 58 | 214 | 0 | 24 | 296 |
 
 States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test with an independent oracle; DIVERGENT = confirmed mismatch, fix pending; N-A = reviewed rationale in note.
 
@@ -337,7 +337,7 @@ States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test w
 | `BLOCK-updated-context-before-validation-B006` | OPEN | src/main/scala/org/ergoplatform/nodeView/state/UtxoState.scala:139 | `unverified` | L4,L5 | — | B006: appendFullBlock produces newStateContext before applyTransactions. Transaction validation receives that updated context, including applicable epoch parameters and block version. |
 | `BLOCK-cost-parameter-defaults-B008` | OPEN | ergo-core/src/main/scala/org/ergoplatform/settings/Parameters.scala:306 | `unverified` | L1,L4 | — | B008: default BC values are tokenAccessCost=100, inputCost=2000, dataInputCost=100, outputCost=100 and maxBlockCost=1000000; see Parameters.scala:306,308,310,312,318. Current voted parameters replace defaults during validation. |
 | `BLOCK-physical-utxo-operations-B016` | N-A | src/main/scala/org/ergoplatform/nodeView/state/UtxoState.scala:87 | `unverified` | L1 | — | B016: physical stateChanges and AVL database operations execute after transaction validation and have no independent JIT tariff. Script-level AVL method charges are separate obligations. |
-| `BLOCK-L6-emission-box-discovery` | DIVERGENT | src/main/scala/org/ergoplatform/nodeView/state/UtxoStateReader.scala:77-113; extractEmissionBox retains the previous unspent emission box when a valid block does not spend it | `ergo-mining/src/emission_box.rs:94-121; lookup_emission_box_from_parent unconditionally takes tx[0].output[0]` | L6 | — | Task 7.3 stopped: both nodes accepted funding-only block 6b83c24a2c6d751ba9683b3773293868e41dfe4500dc911208c170ee51067a0e at height 723 with root 6c689d5db0e0f7b62e5215f37294dbeed8bfc9612499f3e20a632f7373f4f1900b. Rust then used its ordinary 1000000000-value output as emission and repeatedly failed candidate construction (required emission 67500000000); Scala retained the actual emission box and mined height 724. Evidence: results/l6-2026-09-16.json plus compressed logs/artifacts. This is a mining integration mismatch, not a demonstrated JIT-cost or block-validation disagreement. Both peers were disconnected at the later propagation timeout. Rust-mines and all live cap injections remain unexecuted; BLOCK-rejection-state-unchanged remains OPEN. |
+| `BLOCK-L6-emission-box-discovery` | CLOSED | src/main/scala/org/ergoplatform/nodeView/state/UtxoStateReader.scala:77-113; extractEmissionBox retains the previous unspent emission box when a valid block does not spend it | `ergo-mining/src/emission_box.rs; reconstruct emission spending lineage from genesis or the post-EIP-27 NFT and resolve against committed UTXO state` | L6 | `ergo-mining::emission_box::emission_tracking_l6_funding_to_miner_retains_scala_box` | Task 0.10 fix: selection follows the emission contract and tracked input identity, not tx[0].output[0]. Archived Scala 6.0.5 height-723 funding transaction and UtxoState log independently pin the retained box fb491e83f7c207f02643e59d360717b646a59a13d4ac2233888449378a368401 in emission-discovery.json. Unit tests cover unrelated miner payments, contract spam, spend/exhaustion, unspent resolution, and the EIP-27 predicate. The positional defect also affects mainnet funding-only blocks. Closure is for this discovery regression only; no campaign rerun, Rust-mines or live cap-injection claim. BLOCK-rejection-state-unchanged remains OPEN. Archived propagation timeout had zero peers from Rust startup and dial-backoff starvation, not an observed validation rejection. Pre-EIP-27 reconstruction requires ancestry back to the genesis emission spend; see task-0.10-report.md. |
 
 ## VERSION
 
