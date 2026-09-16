@@ -129,3 +129,21 @@ and default features. Compare `sha256sum /home/rkadias/.cache/cargo-target/debug
 with `rust.binary_sha256` (build paths and toolchain must match).
 
 No cost-ledger rows are closed by this recipe.
+
+Recorded fix-round run: **PASS — 100 selected, 100 executed, 0 skipped, 0 failed**;
+50 Rust-mined and 50 Scala-mined blocks, strictly alternating. All 100 paired
+observations match and all headers are version 4. Both nodes reached height **100**:
+
+- Block ID: `dc71492d5dd58b583dca84e4642e17dc91f904535ced226a49a2e92071225953`
+- State root: `3e87598aebaf1ff398cedc3b56394fa963132b3f33cb4ad038be84445c074ec608`
+- Clean source revision: `3cdc04e7db47f140cb05dc05c04a70526a935902`
+- Binary SHA-256: `6e57a5719907f5e8bfe29a12dd73cfdd2692f7277c7b62b163bf0783c98902b3`
+- Started (UTC): `2026-09-16T00:01:07.529177+00:00`
+- Elapsed: **3060.232 seconds**
+
+See [per-block evidence](smoke-evidence.json) and the
+[environment, source, gate and shutdown receipt](smoke-environment.json).
+Formatting and warning-denying clippy passed. Nextest was unavailable;
+`cargo test --workspace` passed with **6,997 passed, 0 failed,
+97 ignored** including doctests. Both nodes were stopped and all four
+recipe ports were verified closed.

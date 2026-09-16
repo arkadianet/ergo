@@ -1565,10 +1565,13 @@
   },
   "scala_node_app_version": "6.0.5",
   "rust": {
-    "git_sha": "a33b9f0baebc0cbb475c914f4a79df32340b1e20",
+    "git_sha": "3cdc04e7db47f140cb05dc05c04a70526a935902",
     "toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
     "features": "default",
-    "binary_sha256": "49c10ac8a589857551c55136a39fe3369cffc364058c653f14c7fc53f5630701"
+    "binary_sha256": "6e57a5719907f5e8bfe29a12dd73cfdd2692f7277c7b62b163bf0783c98902b3",
+    "git_status_porcelain": "",
+    "git_status_porcelain_after": "",
+    "git_sha_after": "3cdc04e7db47f140cb05dc05c04a70526a935902"
   },
   "context": {
     "height_range": [
@@ -1588,18 +1591,18 @@
   },
   "run": {
     "command": "python3 scripts/devnet-mixed/smoke.py --first rust --blocks 100",
-    "timestamp": "2026-09-15T22:53:26.845468+00:00",
-    "seeds": "No PRNG: scalar-1 miner key and zero nonce; node-generated wall-clock timestamps",
+    "timestamp": "2026-09-16T00:01:07.529177+00:00",
     "selected": 100,
     "executed": 100,
     "skipped": 0,
     "failed": 0,
-    "completed_timestamp": "2026-09-15T23:37:56.421000+00:00",
-    "elapsed_seconds": 2669.576
+    "seeds": "No PRNG: scalar-1 miner key and zero nonce; node-generated wall-clock timestamps",
+    "completed_timestamp": "2026-09-16T00:52:07.761000+00:00",
+    "elapsed_seconds": 3060.232
   },
-  "classpath_capture_timestamp": "2026-09-15T23:02:46.581648+00:00",
+  "classpath_capture_timestamp": "2026-09-16T00:52:19.104835+00:00",
   "shutdown": {
-    "timestamp": "2026-09-15T23:38:24.759966+00:00",
+    "timestamp": "2026-09-16T00:52:19.104961+00:00",
     "command": "scripts/devnet-mixed/stop.sh",
     "pid_files_absent": true,
     "closed_ports": [
@@ -1621,24 +1624,21 @@
     "result_summaries_including_doctests": 312
   },
   "evidence_sha256": {
-    "scripts/devnet-mixed/smoke-evidence.json": "0e3af495ba5963ac45dff541ecbe4a151445e43e3294f35a1bc28e77ba5110cf",
-    "scripts/devnet-mixed/fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "scripts/devnet-mixed/fmt-check.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "scripts/devnet-mixed/clippy.log": "2461b00c8697c4189b2de92ca6fb05b5d72273c78a0a47b1ce4e83ccca077b70",
-    "scripts/devnet-mixed/nextest.log": "4a3b20df1a8304e07af92033d53652667dc8029c14342451acc62690cd1cb2d9",
-    "scripts/devnet-mixed/test.log": "6908329fd05c48f7ffcdb8aed53b96fc46a4bd71fe13b8f120c287055513a58a",
-    "scripts/devnet-mixed/build.log": "ca1e5afcbcce8bba4815dbd7180340cf7cfbe1f08e7e25205d5fbf070bd4cb0f"
+    "scripts/devnet-mixed/smoke-evidence.json": "a27d7e8870927d98bec73b5739f601eb3cbd661ddf7b249969e0f7e66fb9c9bc",
+    "scripts/devnet-mixed/.work/fix-fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "scripts/devnet-mixed/.work/fix-fmt-check.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "scripts/devnet-mixed/.work/fix-clippy.log": "5a9707379244e05ab08928f34a8e9eb45b07f1bdc6d816cb602ab38abbccd3b5",
+    "scripts/devnet-mixed/.work/fix-nextest.log": "4a3b20df1a8304e07af92033d53652667dc8029c14342451acc62690cd1cb2d9",
+    "scripts/devnet-mixed/.work/fix-test.log": "d4a09c35c42f325299b503be17f526a9937ffc53766b7427454477dea4e7bc78",
+    "scripts/devnet-mixed/.work/fix-build.log": "eb4e89aad96360499b1b9d92df433abd535322fd57e96f0d83ff927628708ef7"
   },
   "source_provenance": {
-    "base_commit": "a33b9f0baebc0cbb475c914f4a79df32340b1e20",
-    "dirty_paths_at_launch": [
-      "Cargo.lock",
-      "ergo-validation/Cargo.toml",
-      "ergo-validation/src/block/mod.rs",
-      "ergo-validation/src/block/validate.rs",
-      "ergo-validation/tests/it/main.rs"
-    ],
-    "note": "Concurrent test-helper/dev-dependency edits were present in the shared worktree. They were not included in this task commit. Per-file hashes in smoke-evidence.json record the launch-time sources; the default-feature running executable is identified separately."
+    "git_sha": "3cdc04e7db47f140cb05dc05c04a70526a935902",
+    "git_status_porcelain": "",
+    "build_command": "cargo build -p ergo-node",
+    "binary_sha256": "6e57a5719907f5e8bfe29a12dd73cfdd2692f7277c7b62b163bf0783c98902b3",
+    "binary_path": "scripts/devnet-mixed/.work/fix-ergo-node",
+    "git_status_porcelain_after_build": ""
   },
   "public_constructor_audit": {
     "baseline": "36b3aa9643dcb0a499c66c0c419eb4e311049473",
