@@ -1,0 +1,198 @@
+{
+  "manifest": {
+    "scala": {
+      "ergo_version": "6.0.2",
+      "ergo_wallet_version": "6.0.2",
+      "sigmastate_version": "6.0.2",
+      "node_app_version": "not used (standalone JVM)",
+      "source_shas": {
+        "ergo": "2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1",
+        "sigmastate": "23dd29f612249c169d09fae9bca76d7cc02e144c"
+      },
+      "artifacts": [
+        {
+          "file": "ergo-core_2.12.jar",
+          "sha256": "d1b96ea02cf9a4434d31aa24bf43d3828bba0daf8b414161844bb7e7fa178272"
+        },
+        {
+          "file": "ergo-wallet_2.12.jar",
+          "sha256": "dfa0ce2760ee471d23354f032a68b1b9b0dcf986b239805ecda9aef156617425"
+        },
+        {
+          "file": "sigma-state_2.12-6.0.2.jar",
+          "sha256": "0dbd3b31ef94affec83f8f0f6c5a9891c45da1e975ff6016a0574fc5aa1418e6"
+        }
+      ]
+    },
+    "rust": {
+      "git_sha": "9aee724f9397abd7dbf87a7c54735f570ee56613",
+      "toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
+      "features": []
+    },
+    "tool": {
+      "script": "scripts/jvm_crypto_cost_oracle/CryptoCostOracle.scala",
+      "git_sha": "9aee724f9397abd7dbf87a7c54735f570ee56613",
+      "working_tree_script_sha256": {
+        "scripts/jvm_crypto_cost_oracle/CryptoCostOracle.scala": "636f2afe90e6f250a7335e1509e1ecff9528079096f6612e4457a611f3c4b825",
+        "scripts/jvm_crypto_cost_oracle/generate.py": "6af263634b272ef783062c0bab6242a5ff8bf5445b0bb78d2c7b7a1136cdaa26"
+      },
+      "scala_cli_version": "1.12.1",
+      "jvm_version": "17.0.17+10-LTS"
+    },
+    "context": {
+      "network": "synthetic transactions with mainnet chain settings",
+      "height_range": [
+        1000000,
+        1000000
+      ],
+      "accumulated_cost": 0,
+      "max_cost": 1000000,
+      "headers": [],
+      "previous_state_digest": "mainnet genesisStateDigest from reference configuration",
+      "height": 1000000,
+      "activated_script_version": 2,
+      "block_version": 3,
+      "ergo_tree_version": 0,
+      "timestamp": 0,
+      "n_bits": 0,
+      "miner_pk_hex": "0290805fd8884ab7893d074822343b051efdc924086f11465e1c17c3ac4df35166",
+      "voted_params": {
+        "1": 1250000,
+        "2": 360,
+        "3": 524288,
+        "4": 1000000,
+        "5": 100,
+        "6": 2000,
+        "7": 100,
+        "8": 100,
+        "123": 3
+      }
+    },
+    "run": {
+      "command": "python3 scripts/jvm_crypto_cost_oracle/generate.py",
+      "scala_command": "scala-cli run scripts/jvm_crypto_cost_oracle/CryptoCostOracle.scala --server=false -- /home/rkadias/coding/reference/ergo-core/ergo/src/main/resources <temporary output.json>",
+      "seeds": "Three fresh DLog secrets and fresh prover randomness; replay uses captured public bytes",
+      "timestamp": "2026-09-15T13:04:22.090107+00:00",
+      "selected": 8,
+      "executed": 8,
+      "skipped": 0,
+      "failed": 0
+    },
+    "evidence": {
+      "input_sha256": {
+        "TX-A.tx_bytes": "a33d822811a8bef6b954693486efa5669b575f8167f4016684b6fe81bdf26e19",
+        "TX-A.input_boxes[0].bytes": "ea096e7ee0bc6cc0638d1806ef2a3b0118861f66b8c33931d18a0665d293bd6f",
+        "TX-A.input_boxes[1].bytes": "b3faa068830d74cb632ab2a9ece0558d7d48702caf5dff8263e557918a38e187",
+        "TX-B.tx_bytes": "69cca2b0d2e5d445cfa34d0f959c156f078df77a2f85149b5214ec8baf3da55b",
+        "TX-B.input_boxes[0].bytes": "9e6570e97b3fcf4dc57f4ee82cb892ca250c82de9b228a5a40fa7aa2e69c823c",
+        "TX-B.input_boxes[1].bytes": "a1ac187e1f372a9c54591b02e2ed0585e904c0b45693fbc6ee8202a313fb564c",
+        "TX-B.input_boxes[2].bytes": "887713906d47a1661e734903fca8a4b4b65eca9868f1da86f9632fea7291266f",
+        "TX-B.input_boxes[3].bytes": "307fb00ecff1bd7f9681164887b69d62475f4d8fec81e5266e7eb3528c18379e"
+      },
+      "config_sha256": {
+        "application.conf": "2348654f74dd9f5ba8dcbc8e7415ee02d1f7f8fddc2be43ccddc45e0fce92727",
+        "mainnet.conf": "81b7c666a9b105e6038cbcc4ee1945a1f8496f941dd08c669737586c7b2ef66d"
+      },
+      "cases_sha256": "10781d43646bb97464f02a937115d7bb1f57701bb3980ec16493ea4fbfa61010",
+      "output_sha256": "Whole-file hash in multi_input_conjunction_cost.json.sha256 (avoids self-reference)"
+    }
+  },
+  "context": {
+    "height": 1000000,
+    "activated_script_version": 2,
+    "block_version": 3,
+    "ergo_tree_version": 0,
+    "timestamp": 0,
+    "n_bits": 0,
+    "miner_pk_hex": "0290805fd8884ab7893d074822343b051efdc924086f11465e1c17c3ac4df35166",
+    "voted_params": {
+      "1": 1250000,
+      "2": 360,
+      "3": 524288,
+      "4": 1000000,
+      "5": 100,
+      "6": 2000,
+      "7": 100,
+      "8": 100,
+      "123": 3
+    }
+  },
+  "cases": [
+    {
+      "name": "TX-A",
+      "tx_bytes": "0245168f537667a50b1c5e12b066e711d0d0469885181c5df9316e9ecd6b3be23c585490ba55844ea347f293a4a120475450856b0b28156f79f6656e1df76fb90caa7c9af0e3ef7d9d80b7cb1fd191c12371718c47078edaaae4dec066e901ec7671a2f01a004b748d5897e0044527c7e8ab82824837a91b885a006e93fda5f581e8ddbb35965a63cc204799b332058fe87fbf4249e3f315e779b1587dfdbb4754e8630f403fceb39fc165ce59e5f94bc59841f88b5c5f7a2f9cd57b2939dc4fb467d196c868204d8e0e88dcc0c0f2f7c877653bdff0ec0fb1f8b0b30505d8dc51639045b064f58f6c801d9f740005150124596a0000000180a8d6b9070008cd0290805fd8884ab7893d074822343b051efdc924086f11465e1c17c3ac4df35166c0843d0000",
+      "input_boxes": [
+        {
+          "box_id": "45168f537667a50b1c5e12b066e711d0d0469885181c5df9316e9ecd6b3be23c",
+          "bytes": "8094ebdc0300089602cd0290805fd8884ab7893d074822343b051efdc924086f11465e1c17c3ac4df35166cd02d9f8e1bc7e55b1e8e9e7f63418260f30ea1c7363fd1f3efaa63246ee2b8d5ffac0843d0000010101010101010101010101010101010101010101010101010101010101010100"
+        },
+        {
+          "box_id": "6e93fda5f581e8ddbb35965a63cc204799b332058fe87fbf4249e3f315e779b1",
+          "bytes": "8094ebdc0300089602cd0290805fd8884ab7893d074822343b051efdc924086f11465e1c17c3ac4df35166cd02d9f8e1bc7e55b1e8e9e7f63418260f30ea1c7363fd1f3efaa63246ee2b8d5ffac0843d0000020202020202020202020202020202020202020202020202020202020202020201"
+        }
+      ],
+      "crypto_jit_per_input": 7975,
+      "block_cost": 15704,
+      "verdict": "Accept",
+      "sweep": [
+        {
+          "limit": 15703,
+          "verdict": "RejectCost",
+          "detail": "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. 7937a81bd645e07695b9f68b5a5fa23c96c5c1ff16329941cfd2d45d50415a2c: #1 => Failure(sigma.exceptions.CostLimitException: Estimated execution cost 802 exceeds the limit 801)"
+        },
+        {
+          "limit": 15704,
+          "verdict": "Accept",
+          "detail": ""
+        },
+        {
+          "limit": 15705,
+          "verdict": "Accept",
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "name": "TX-B",
+      "tx_bytes": "04b7d2664b0ef32cc9846356ca4187bef7db2322c07ae2afa65aa89477d9cb3eaa9001558425d54bb6687e26e4c54847cbddae3d5f9dea71820aa099448bc60f8af95a6d7eb215a8cd4bcc9588179a6d2e5cdd2e1559c110ef44b499cf6af3ee56af566b1edea12eab5fc8d8bc03468965e9bc3aaf3c445fecb572105f816557e2c0d37504a61e42692568ca9c8b23a7fb3903070f4b0bb93e1b3272279b5e89fe180510d7ceeb1a153ee1aa207fdb95445a1a00fb07d47fa6600df06338760b13b87f84509b7a550b4e29d4934902b074fee3129001a11e66c3d8a379d1471123dd9ae2026b7f01a76b5d7e0b44329387a07a817907b98c33554a0812f1a541f8c0b8d98967b07977b95426ebc8a5859b7fb13533badabdeaa28d6db3d84a423698558162a9307a009d02b1623b00033941a89ccca8d4e5d2427cd0cf9279a93fe05b9a4f5d51e86839324d5cc8307b13e15a52c9fd1f29d490126af2f7d149fbf83b061d9e00c3e5b30685adf2f37716b2a8ebe8eeb9c7b8d96ec5ef536ca3c706735fb2aecf90013a3045b877637855f6f2e6c0f7cb789219d1a4567094d5424cc3179a533ba259cffd442ccccffc6c5c85008fe381a584d29960833311e153fc2b86dfa08863e18959f47b4fd6be336e2ee9023bb4e0ba45fbd086c2c5faae6e7effeda841c76b57385e57b6d8a3e3e4612dfc3733ef3a1aa9185628817ed78c598474d5efe1ae7108fc2015482d77a09d19d3b51c268400814a3eeffae8e98852b0c6932e59fe3e06e33af06679d7d771d1346f19991f6e9001943b61d98ff0b5a4573e15c148289cc403f0a9585e6156018fe32d488328bcd04bebe95136e23e7830d864025d245a90d226d9c1cb4798f2c9b2b94c30c7d0930dd55c73710ddd467a06948e8711527912c07872e1efcd4c824daf6659af5eb7bd46ff942efb65b7426d291e7481d240736fb1f1abf55876b58ca04273d42657aa1a625b28f1f327a41bdef5c5b538ba0000000180d0acf30e0008cd0290805fd8884ab7893d074822343b051efdc924086f11465e1c17c3ac4df35166c0843d0000",
+      "input_boxes": [
+        {
+          "box_id": "b7d2664b0ef32cc9846356ca4187bef7db2322c07ae2afa65aa89477d9cb3eaa",
+          "bytes": "8094ebdc030008980203cd0290805fd8884ab7893d074822343b051efdc924086f11465e1c17c3ac4df35166cd02d9f8e1bc7e55b1e8e9e7f63418260f30ea1c7363fd1f3efaa63246ee2b8d5ffacd0318ecedde9cdff72192f3a439933d5f54934d800ad52f002b0e38ea1896637e64c0843d0000010101010101010101010101010101010101010101010101010101010101010100"
+        },
+        {
+          "box_id": "fb07d47fa6600df06338760b13b87f84509b7a550b4e29d4934902b074fee312",
+          "bytes": "8094ebdc030008980203cd0290805fd8884ab7893d074822343b051efdc924086f11465e1c17c3ac4df35166cd02d9f8e1bc7e55b1e8e9e7f63418260f30ea1c7363fd1f3efaa63246ee2b8d5ffacd0318ecedde9cdff72192f3a439933d5f54934d800ad52f002b0e38ea1896637e64c0843d0000020202020202020202020202020202020202020202020202020202020202020201"
+        },
+        {
+          "box_id": "c3e5b30685adf2f37716b2a8ebe8eeb9c7b8d96ec5ef536ca3c706735fb2aecf",
+          "bytes": "8094ebdc030008980203cd0290805fd8884ab7893d074822343b051efdc924086f11465e1c17c3ac4df35166cd02d9f8e1bc7e55b1e8e9e7f63418260f30ea1c7363fd1f3efaa63246ee2b8d5ffacd0318ecedde9cdff72192f3a439933d5f54934d800ad52f002b0e38ea1896637e64c0843d0000030303030303030303030303030303030303030303030303030303030303030302"
+        },
+        {
+          "box_id": "814a3eeffae8e98852b0c6932e59fe3e06e33af06679d7d771d1346f19991f6e",
+          "bytes": "8094ebdc030008980203cd0290805fd8884ab7893d074822343b051efdc924086f11465e1c17c3ac4df35166cd02d9f8e1bc7e55b1e8e9e7f63418260f30ea1c7363fd1f3efaa63246ee2b8d5ffacd0318ecedde9cdff72192f3a439933d5f54934d800ad52f002b0e38ea1896637e64c0843d0000040404040404040404040404040404040404040404040404040404040404040403"
+        }
+      ],
+      "crypto_jit_per_input": 11993,
+      "block_cost": 22916,
+      "verdict": "Accept",
+      "sweep": [
+        {
+          "limit": 22915,
+          "verdict": "RejectCost",
+          "detail": "org.ergoplatform.validation.MalformedModifierError: Scripts of all transaction inputs should pass verification. 4b0884026901a46fe698187432df939afebf94f402725de0a8f2ae06c365b716: #3 => Failure(sigma.exceptions.CostLimitException: Estimated execution cost 1204 exceeds the limit 1203)"
+        },
+        {
+          "limit": 22916,
+          "verdict": "Accept",
+          "detail": ""
+        },
+        {
+          "limit": 22917,
+          "verdict": "Accept",
+          "detail": ""
+        }
+      ]
+    }
+  ]
+}

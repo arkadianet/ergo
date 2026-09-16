@@ -34,6 +34,12 @@ cost-trace = []
 value-trace = []
 
 [dev-dependencies]
+ergo-validation = { workspace = true }
 hex        = { workspace = true }
 serde      = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+toml       = { workspace = true }
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

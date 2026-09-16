@@ -1,3 +1,5 @@
+//! Oracle: test-vectors/scala/bool_collection_logical_cost.json
+
 use ergo_primitives::cost::{CostAccumulator, CostError, JitCost};
 use ergo_ser::ergo_tree::ErgoTree;
 use ergo_ser::opcode::{Expr, IrNode, Payload};
@@ -7,11 +9,11 @@ use thiserror::Error;
 
 /// Cost of evaluating a SigmaProp constant (trivial reduction path).
 /// Source: sigmastate-interpreter Interpreter.scala:533
-const EVAL_SIGMA_PROP_CONSTANT: JitCost = JitCost::from_jit(50);
+pub const EVAL_SIGMA_PROP_CONSTANT: JitCost = JitCost::from_jit(50);
 
 /// Scala `Interpreter.CostPerTreeByte` (`Interpreter.scala:88`) — the
 /// per-ergo-tree-byte cost of the deserialize-substitution pass.
-const COST_PER_TREE_BYTE: u64 = 2;
+pub const COST_PER_TREE_BYTE: u64 = 2;
 
 /// Scala `VersionContext.V6SoftForkVersion` (`VersionContext.scala:56`): the
 /// activated-script version at/after which `isV6Activated` is true. Our
@@ -97,10 +99,10 @@ fn serialized_ergo_tree_len(tree: &ErgoTree) -> Result<usize, VerifySpendingErro
 /// Mirrors Scala's `Interpreter.fullReduction` (`Interpreter.scala:203-228`)
 /// which only takes the fast path on the exact pattern
 /// `SigmaPropConstant(p)` and falls through to
-/// `CErgoTreeEvaluator.evalToCrypto` for everything else, including
-/// scripts whose body is a top-level `SBoolean` constant (legal under
-/// 6.0 / v3 ErgoTrees — the evaluator owns the implicit
-/// `Bool → SigmaProp` coercion and its cost accounting).
+/// `CErgoTreeEvaluator.evalToCrypto` for other body shapes. Non-SigmaProp
+/// roots with statically determinable types, including top-level `SBoolean`
+/// constants, fail parser rule 1001 for every tree version. Size-delimited
+/// trees are soft-fork wrapped instead of returned as valid parsed trees.
 ///
 /// Two of these variants are caller-must-fall-through (the trivial
 /// path didn't match Scala's `SigmaPropConstant(p)` pattern); two
@@ -112,9 +114,9 @@ pub enum ReductionError {
     #[error("ErgoTree does not trivially reduce to a sigma proposition")]
     NotTriviallyReducible,
     /// Body IS a single constant, but not of type `SSigmaProp`
-    /// (e.g. a top-level `SBoolean` root, common in v3 ErgoTrees
-    /// under 6.0 semantics). The full evaluator handles the implicit
-    /// `Bool → SigmaProp` coercion and charges the correct cost.
+    /// in an internally constructed tree. Statically determinable non-SigmaProp
+    /// roots fail parser rule 1001 for every ErgoTree version; size-delimited
+    /// trees are soft-fork wrapped.
     /// Caller MUST fall through.
     #[error("body constant type is {0:?}, not SSigmaProp — full evaluator needed")]
     BodyConstantNotSigmaProp(SigmaType),
@@ -170,7 +172,7 @@ fn sigma_value_to_sigma_boolean(
         // tpe says SSigmaProp but val isn't — structural malformed.
         // Hard reject; the full evaluator can't recover this either.
         (SigmaType::SSigmaProp, _) => Err(ReductionError::MalformedSigmaPropConstant),
-        // tpe is anything else (e.g. SBoolean root in a v3 tree).
+        // tpe is anything else (e.g. SBoolean in an internally constructed tree).
         // Scala's fast path only matches SigmaPropConstant(p); every
         // other constant type is the evaluator's job, including the
         // implicit Bool → SigmaProp coercion under 6.0. Caller must
@@ -281,10 +283,9 @@ pub fn verify_spending_proof_with_context_and_cost(
 
     // Try trivial reduction first. Mirrors Scala
     // `Interpreter.fullReduction:210-225`: the fast path only handles
-    // the `SigmaPropConstant(p)` pattern; every other body shape
-    // (including v3 / 6.0 top-level `SBoolean` roots) goes through
-    // the full evaluator, which owns the implicit `Bool → SigmaProp`
-    // coercion and its cost accounting.
+    // the `SigmaPropConstant(p)` pattern; other body shapes go through
+    // the full evaluator. Statically determinable non-SigmaProp roots fail
+    // parser rule 1001 for every version; size-delimited trees are soft-fork wrapped.
     let proposition = match trivial_reduce(ergo_tree) {
         Ok(prop) => {
             // Scala charges Eval_SigmaPropConstant(50) for trivially-reducible scripts
@@ -315,15 +316,19 @@ pub fn verify_spending_proof_with_context_and_cost(
     #[cfg(feature = "cost-trace")]
     super::cost_trace::record_snap(before_snap, cost.total().value());
 
-    // AOT: charge crypto verification cost based on the reduced sigma proposition.
+    // Scala `Interpreter.addCryptoCost` adds `estimateCryptoVerifyCost(sb).toBlockCost`,
+    // i.e. the per-input crypto JitCost is truncated to a block-unit multiple before it
+    // joins the running total. Adding the raw JitCost would carry the remainder into
+    // the next input's snap baseline and into the JIT-unit limit check.
     let crypto_cost = super::crypto_cost::estimate_crypto_cost(&proposition);
+    let crypto_cost_snapped = JitCost::from_jit_block_aligned(crypto_cost);
     #[cfg(feature = "cost-trace")]
     super::cost_trace::record(
-        format!("Crypto:{}", crypto_cost.value()),
-        crypto_cost.value(),
-        cost.total().value() + crypto_cost.value(),
+        format!("Crypto:{}", crypto_cost_snapped.value()),
+        crypto_cost_snapped.value(),
+        cost.total().value() + crypto_cost_snapped.value(),
     );
-    cost.add(crypto_cost)
+    cost.add(crypto_cost_snapped)
         .map_err(|e| VerifySpendingError::Eval(e.into()))?;
 
     super::verify::verify_sigma_proof(&proposition, proof_bytes, bytes_to_sign)
@@ -404,10 +409,9 @@ mod tests {
 
     #[test]
     fn trivial_reduce_inline_sboolean_root_falls_through() {
-        // v3 / 6.0 ErgoTrees can have a top-level SBoolean root; Scala's
-        // Interpreter.fullReduction routes these to evalToCrypto, which
-        // applies the implicit Bool → SigmaProp coercion. Our trivial
-        // path must SIGNAL fall-through, not hard-reject.
+        // This internally constructed tree bypasses parser rule 1001.
+        // The trivial path must signal fall-through to the full evaluator
+        // because the body is not a SigmaProp constant.
         let t = inline_const_tree(SigmaType::SBoolean, SigmaValue::Boolean(true));
         let err = trivial_reduce(&t).expect_err("SBoolean root is not the fast path");
         assert!(
@@ -421,9 +425,9 @@ mod tests {
 
     #[test]
     fn trivial_reduce_segregated_sboolean_constant_falls_through() {
-        // The actual shape that surfaced on testnet h=28474: a v3 tree
-        // whose body is `ConstPlaceholder(0)` pointing to a Boolean
-        // constant. Must classify as fall-through, not hard-reject.
+        // This internally constructed tree bypasses parser rule 1001.
+        // Its ConstPlaceholder points to a Boolean constant, so trivial
+        // reduction must signal fall-through to the full evaluator.
         let t = segregated_const_tree(0, vec![(SigmaType::SBoolean, SigmaValue::Boolean(false))]);
         let err = trivial_reduce(&t).expect_err("SBoolean constant is not the fast path");
         assert!(
@@ -1263,18 +1267,21 @@ mod evaluated_value_reduce_parity_tests {
     /// THE #311 vector: `sigmaProp(AND(Coll[Boolean](false, true, true)))`,
     /// packed 0x85. 15 (BoolToSigmaProp) + 20 + 3·5 (coll) + 10 + 5 (AND,
     /// 1 item visited). Pre-fix Rust charged the flat 20 for the collection.
+    // ledger: OP-0x83, OP-0x96, EVAL-const-inline
     #[test]
     fn and_over_packed_bool_collection_matches_scala_cost() {
         assert_bool_coll_vector("and_packed_ftt");
     }
 
     /// `sigmaProp(OR(Coll[Boolean](false, true, true)))`, packed.
+    // ledger: OP-0x83, OP-0x97, EVAL-const-inline
     #[test]
     fn or_over_packed_bool_collection_matches_scala_cost() {
         assert_bool_coll_vector("or_packed_ftt");
     }
 
     /// `sigmaProp(XorOf(Coll[Boolean](false, true, true)))`, packed.
+    // ledger: OP-0x83, EVAL-const-inline
     #[test]
     fn xor_of_over_packed_bool_collection_matches_scala_cost() {
         assert_bool_coll_vector("xorof_packed_ftt");
@@ -1283,6 +1290,7 @@ mod evaluated_value_reduce_parity_tests {
     /// Control: the UNPACKED 0x83 form with explicit FalseLeaf/FalseLeaf/
     /// TrueLeaf children costs the same as the packed form — the packed form
     /// must not be cheaper than what it abbreviates.
+    // ledger: OP-0x83, OP-0x96, EVAL-const-inline
     #[test]
     fn and_over_unpacked_bool_collection_matches_scala_cost() {
         assert_bool_coll_vector("and_unpacked_fft");
@@ -1290,6 +1298,7 @@ mod evaluated_value_reduce_parity_tests {
 
     /// Control: a `Coll[Boolean]` CONSTANT (type code 0x0d) is one Constant
     /// node — Fixed(5), no per-item charge.
+    // ledger: OP-0x96, EVAL-const-inline
     #[test]
     fn and_over_coll_boolean_constant_matches_scala_cost() {
         assert_bool_coll_vector("and_coll_boolean_constant");
@@ -1297,6 +1306,7 @@ mod evaluated_value_reduce_parity_tests {
 
     /// Empty packed collection: `AND(Coll[Boolean]())` is `true`; the
     /// PerItemCost formula still charges one chunk at n = 0.
+    // ledger: OP-0x83, OP-0x96
     #[test]
     fn and_over_empty_packed_bool_collection_matches_scala_cost() {
         assert_bool_coll_vector("and_packed_empty");
@@ -1305,12 +1315,14 @@ mod evaluated_value_reduce_parity_tests {
     /// Short-circuit cost across the 32-item AND chunk boundary: 33 packed
     /// items, first `false` — Scala visits 1 item (1 chunk); charging the
     /// full 33 would be 2 chunks.
+    // ledger: OP-0x83, OP-0x96, EVAL-const-inline
     #[test]
     fn and_33_items_first_false_charges_visited_prefix_like_scala() {
         assert_bool_coll_vector("and_packed_33_first_false");
     }
 
     /// Same 33 items, all `true`: no short-circuit, 2 chunks.
+    // ledger: OP-0x83, OP-0x96, EVAL-const-inline
     #[test]
     fn and_33_items_all_true_charges_two_chunks_like_scala() {
         assert_bool_coll_vector("and_packed_33_all_true");
@@ -1318,30 +1330,35 @@ mod evaluated_value_reduce_parity_tests {
 
     /// 32 items, first `false`: below the boundary the visited prefix and
     /// the full length both round to 1 chunk.
+    // ledger: OP-0x83, OP-0x96, EVAL-const-inline
     #[test]
     fn and_32_items_first_false_matches_scala_cost() {
         assert_bool_coll_vector("and_packed_32_first_false");
     }
 
     /// OR's chunk is 64: 65 packed items, first `true` — 1 visited, 1 chunk.
+    // ledger: OP-0x83, OP-0x97, EVAL-const-inline
     #[test]
     fn or_65_items_first_true_charges_visited_prefix_like_scala() {
         assert_bool_coll_vector("or_packed_65_first_true");
     }
 
     /// 65 items, all `false`: no short-circuit, 2 chunks.
+    // ledger: OP-0x83, OP-0x97, EVAL-const-inline
     #[test]
     fn or_65_items_all_false_charges_two_chunks_like_scala() {
         assert_bool_coll_vector("or_packed_65_all_false");
     }
 
     /// 64 items, first `true`: below the boundary.
+    // ledger: OP-0x83, OP-0x97, EVAL-const-inline
     #[test]
     fn or_64_items_first_true_matches_scala_cost() {
         assert_bool_coll_vector("or_packed_64_first_true");
     }
 
     /// XorOf never short-circuits: 33 items → 2 chunks.
+    // ledger: OP-0x83, EVAL-const-inline
     #[test]
     fn xor_of_33_items_charges_full_length_like_scala() {
         assert_bool_coll_vector("xorof_packed_33");
@@ -1351,6 +1368,7 @@ mod evaluated_value_reduce_parity_tests {
     /// [Coll[Boolean]](1).get))` over an extension var holding 33 booleans,
     /// first `false`. The visited-prefix rule applies to whatever value
     /// reaches `AND`, not only to 0x85/0x83 literals.
+    // ledger: OP-0x96
     #[test]
     fn and_over_getvar_33_first_false_charges_visited_prefix_like_scala() {
         assert_bool_coll_vector("and_getvar_33_first_false");
@@ -1358,6 +1376,7 @@ mod evaluated_value_reduce_parity_tests {
 
     /// `sigmaProp(OR(getVar[Coll[Boolean]](1).get))` over 65 booleans,
     /// first `true` — the OR twin on the runtime path.
+    // ledger: OP-0x97
     #[test]
     fn or_over_getvar_65_first_true_charges_visited_prefix_like_scala() {
         assert_bool_coll_vector("or_getvar_65_first_true");

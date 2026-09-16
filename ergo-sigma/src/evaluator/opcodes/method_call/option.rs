@@ -1,5 +1,8 @@
 //! `SOption` (type_id 36) `0xDC MethodCall` arms: map(7), filter(8).
 
+pub const COST_MAP: u64 = 20;
+pub const COST_FILTER: u64 = 20;
+
 use ergo_primitives::cost::JitCost;
 use ergo_ser::opcode::Expr;
 
@@ -22,7 +25,7 @@ pub(super) fn map(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
             got: args.len(),
         });
     }
-    add_method_cost(cx.cost, 20)?;
+    add_method_cost(cx.cost, COST_MAP)?;
     let func_val = cx.eval_expr(&args[0])?;
     match obj_val {
         Value::Opt(None) => Ok(Value::Opt(None)),
@@ -80,7 +83,7 @@ pub(super) fn filter(
     }
     // Scala `FilterMethod` is `FixedCost(JitCost(20))` (methods.scala
     // SOptionMethods) — same as `map`; charging 10 diverges on consensus cost.
-    add_method_cost(cx.cost, 20)?;
+    add_method_cost(cx.cost, COST_FILTER)?;
     let func_val = cx.eval_expr(&args[0])?;
     match obj_val {
         Value::Opt(None) => Ok(Value::Opt(None)),

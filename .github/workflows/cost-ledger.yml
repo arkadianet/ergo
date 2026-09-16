@@ -1,0 +1,67 @@
+name: Cost ledger
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ledger-integrity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Artifact provenance verification reads the recorded generator commit.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Ledger checker self-tests
+        run: python3 scripts/cost-ledger.py --selftest
+      - name: JVM artifact integrity
+        run: python3 scripts/jvm_cost_constants_extractor/verify.py
+      - name: Ledger integrity
+        run: python3 scripts/cost-ledger.py check
+      - name: Inventory diff self-tests
+        run: python3 scripts/cost-ledger-diff.py --selftest
+      # The enumeration-vs-ledger diff gate is enabled once the inventory map is
+      # refreshed for the rows closed later in this stack (see #346).
+
+  tracked-cost-fixtures:
+    runs-on: ubuntu-latest
+    env:
+      COST_LEDGER_TEST_RESULTS: target/cost-ledger-test-results.json
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cost-ledger
+      - uses: taiki-e/install-action@nextest
+      - name: Tracked cost fixtures
+        env:
+          NEXTEST_NO_TESTS: warn
+        run: cargo nextest run -p ergo-sigma -p ergo-validation -E 'test(/cost_(pin|ledger_fixtures|sweeps|block_fixtures|crypto_truncation)/)'
+      - name: Record workspace passing evidence
+        env:
+          # libtest-json is experimental and makes --message-format mandatory, so it is
+          # scoped to this step only; the fixture step above runs nextest in its default mode.
+          NEXTEST_EXPERIMENTAL_LIBTEST_JSON: "1"
+          NEXTEST_MESSAGE_FORMAT_VERSION: "0.1"
+        run: |
+          mkdir -p target
+          cargo nextest run --workspace --message-format libtest-json > "$COST_LEDGER_TEST_RESULTS"
+      - name: Validate closure evidence
+        if: ${{ always() && !cancelled() }}
+        run: |
+          test -f "$COST_LEDGER_TEST_RESULTS"
+          python3 scripts/cost-ledger.py check

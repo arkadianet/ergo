@@ -2,6 +2,9 @@ use ergo_primitives::cost::{CostAccumulator, CostError, CostKind, JitCost};
 
 use super::evaluator::{EvalError, Value};
 
+/// Cost of visiting an inline constant.
+pub const INLINE_CONSTANT: JitCost = JitCost::from_jit(5);
+
 /// Helper to construct a Fixed cost kind.
 const fn fixed(v: u64) -> CostKind {
     CostKind::Fixed(JitCost::from_jit(v))
@@ -16,183 +19,187 @@ const fn per_item(base: u64, per_chunk: u64, chunk_size: u32) -> CostKind {
     }
 }
 
-/// Returns the `CostKind` for a given opcode, matching Scala's sigmastate-interpreter.
-///
-/// EQ (0x93) and NEQ (0x94) use dynamic cost — call `add_eq_cost` directly instead.
-/// Unknown opcodes return `EvalError::UnsupportedOpcode`. In practice the
-/// dispatcher rejects unknown opcodes before they reach this table
-/// (`dispatch.rs::eval_expr` catch-all), so a hit here would be a missing
-/// cost-row registration for a newly-added executable opcode — a developer
-/// bug, surfaced as a typed error so consensus can route it rather than
-/// panic.
-pub fn opcode_cost(opcode: u8) -> Result<CostKind, EvalError> {
-    Ok(match opcode {
-        // Values
-        0x72 => fixed(5),  // ValUse
-        0x73 => fixed(1),  // ConstPlaceholder
-        0x7E => fixed(10), // Upcast
-        0x7F => fixed(5),  // True
-        0x80 => fixed(5),  // False
-        0x83 => fixed(20), // ConcreteCollection
-        0x86 => fixed(15), // Tuple
-        0x8C => fixed(10), // SelectField
-        // Select1..Select5 (0x87..0x8B): no cost row by design. Scala
-        // registers only SelectField (0x8C); Select1-5 have no
-        // serializer registration so they cannot reach the evaluator
-        // via real wire bytes. The parser rejects them as well.
-
-        // Comparisons (not EQ/NEQ)
-        0x8F => fixed(20), // Lt
-        0x90 => fixed(20), // Le
-        0x91 => fixed(20), // Gt
-        0x92 => fixed(20), // Ge
-
-        // EQ/NEQ — dynamic cost, must be charged via `add_eq_cost` from a
-        // type-aware dispatch site, not via this static table. Surface as a
-        // typed error so a misrouted caller fails the script cleanly rather
-        // than panicking.
-        0x93 | 0x94 => {
-            return Err(EvalError::RuntimeException(
-                "EQ/NEQ opcode routed through opcode_cost; must use add_eq_cost",
-            ))
+// One declaration generates both the dispatch match and the inspectable data.
+macro_rules! opcode_rows {
+    ($($opcode:literal => $cost:expr),* $(,)?) => {
+        /// Static prices used by opcode dispatch, including type-based defaults.
+        pub fn static_rows() -> &'static [(u8, CostKind)] {
+            const ROWS: &[(u8, CostKind)] = &[$(($opcode, $cost)),*];
+            ROWS
         }
 
-        // Boolean logic
-        0x95 => fixed(10),           // If
-        0x96 => per_item(10, 5, 32), // AND
-        0x97 => per_item(5, 5, 64),  // OR
-        0xEC => fixed(20),           // BinOr
-        0xED => fixed(20),           // BinAnd
+        /// EQ/NEQ are dynamic; unknown opcodes have no static price.
+        pub fn opcode_cost(opcode: u8) -> Result<CostKind, EvalError> {
+            match opcode {
+                $($opcode => Ok($cost),)*
+                0x93 | 0x94 => Err(EvalError::RuntimeException(
+                    "EQ/NEQ opcode routed through opcode_cost; must use add_eq_cost",
+                )),
+                _ => Err(EvalError::UnsupportedOpcode(opcode)),
+            }
+        }
+    };
+}
 
-        // Arithmetic
-        0x9A => fixed(15), // Plus
-        0x99 => fixed(15), // Minus
-        0x9C => fixed(15), // Multiply
-        0x9D => fixed(15), // Division
-        0x9E => fixed(15), // Modulo
-        0xA1 => fixed(5),  // Min
-        0xA2 => fixed(5),  // Max
-        0xF0 => fixed(30), // Negation
+opcode_rows! {
+    // Values
+    0x72 => fixed(5),  // ValUse
+    0x73 => fixed(1),  // ConstPlaceholder
+    0x7E => fixed(10), // Upcast
+    0x7F => fixed(5),  // True
+    0x80 => fixed(5),  // False
+    0x83 => fixed(20), // ConcreteCollection
+    0x86 => fixed(15), // Tuple
+    0x8C => fixed(10), // SelectField
+    // Select1..Select5 (0x87..0x8B): no cost row by design. Scala
+    // registers only SelectField (0x8C); Select1-5 have no
+    // serializer registration so they cannot reach the evaluator
+    // via real wire bytes. The parser rejects them as well.
 
-        // Context
-        0xA3 => fixed(26), // Height
-        0xA4 => fixed(10), // Inputs
-        0xA5 => fixed(10), // Outputs
-        0xA7 => fixed(10), // Self
-        0xAC => fixed(20), // MinerPubkey
-        0xFE => fixed(1),  // Context
-        0xDD => fixed(5),  // Global
+    // Comparisons (not EQ/NEQ)
+    0x8F => fixed(20), // Lt
+    0x90 => fixed(20), // Le
+    0x91 => fixed(20), // Gt
+    0x92 => fixed(20), // Ge
 
-        // Box extractors
-        0xC1 => fixed(8),  // ExtractAmount
-        0xC2 => fixed(10), // ExtractScriptBytes
-        0xC5 => fixed(12), // ExtractId
-        0xC6 => fixed(50), // ExtractRegisterAs
-        0xC7 => fixed(16), // ExtractCreationInfo
-        0xC3 => fixed(12), // ExtractBytes
-        0xC4 => fixed(12), // ExtractBytesNoRef
+    // EQ/NEQ — dynamic cost, must be charged via `add_eq_cost` from a
+    // type-aware dispatch site, not via this static table. Surface as a
+    // typed error so a misrouted caller fails the script cleanly rather
+    // than panicking.
 
-        // Collection ops
-        0xB1 => fixed(14),            // SizeOf
-        0xB2 => fixed(30),            // ByIndex
-        0xAD => per_item(20, 1, 10),  // Map
-        0xB5 => per_item(20, 1, 10),  // Filter
-        0xAE => per_item(3, 1, 10),   // Exists
-        0xAF => per_item(3, 1, 10),   // ForAll
-        0xB0 => per_item(3, 1, 10),   // Fold
-        0xB4 => per_item(10, 2, 100), // Slice
-        0xB3 => per_item(20, 2, 100), // Append
+    // Boolean logic
+    0x95 => fixed(10),           // If
+    0x96 => per_item(10, 5, 32), // AND
+    0x97 => per_item(5, 5, 64),  // OR
+    0xEC => fixed(20),           // BinOr
+    0xED => fixed(20),           // BinAnd
 
-        // Option ops
-        0xE4 => fixed(15), // OptionGet
-        0xE5 => fixed(20), // OptionGetOrElse
-        0xE6 => fixed(10), // OptionIsDefined
-        // 0xDF NoneValue: no cost row. Scala has no serializer
-        // registration for 0xDF; `None: Option[T]` flows through the
-        // constant-encoding path. The parser rejects 0xDF.
+    // Arithmetic
+    0x9A => fixed(15), // Plus
+    0x99 => fixed(15), // Minus
+    0x9C => fixed(15), // Multiply
+    0x9D => fixed(15), // Division
+    0x9E => fixed(15), // Modulo
+    0xA1 => fixed(5),  // Min
+    0xA2 => fixed(5),  // Max
+    0xF0 => fixed(30), // Negation
 
-        // Sigma props
-        0xD1 => fixed(15), // BoolToSigmaProp
-        0xCD => fixed(10), // ProveDlog
-        0xCE => fixed(20), // ProveDHTuple
-        // AtLeast (k-of-n threshold): Scala `sigma.ast.AtLeast.costKind`
-        // = PerItemCost(baseCost=20, perChunkCost=3, chunkSize=5), charged
-        // via addSeqCost over the number of children.
-        0x98 => per_item(20, 3, 5),
-        0xEA => per_item(10, 2, 1), // SigmaAnd
-        0xEB => per_item(10, 2, 1), // SigmaOr
-        0xD0 => per_item(35, 6, 1), // SigmaPropBytes
+    // Context
+    0xA3 => fixed(26), // Height
+    0xA4 => fixed(10), // Inputs
+    0xA5 => fixed(10), // Outputs
+    0xA7 => fixed(10), // Self
+    0xAC => fixed(20), // MinerPubkey
+    0xFE => fixed(1),  // Context
+    0xDD => fixed(5),  // Global
 
-        // Crypto/hash
-        0xCB => per_item(20, 7, 128), // CalcBlake2b256
-        0xCC => per_item(80, 8, 64),  // CalcSha256
-        0xEE => fixed(300),           // DecodePoint
-        0xFF => per_item(20, 5, 32),  // XorOf
+    // Box extractors
+    0xC1 => fixed(8),  // ExtractAmount
+    0xC2 => fixed(10), // ExtractScriptBytes
+    0xC5 => fixed(12), // ExtractId
+    0xC6 => fixed(50), // ExtractRegisterAs
+    0xC7 => fixed(16), // ExtractCreationInfo
+    0xC3 => fixed(12), // ExtractBytes
+    0xC4 => fixed(12), // ExtractBytesNoRef
 
-        // SubstConstants
-        0x74 => per_item(100, 100, 1), // SubstConstants
+    // Collection ops
+    0xB1 => fixed(14),            // SizeOf
+    0xB2 => fixed(30),            // ByIndex
+    0xAD => per_item(20, 1, 10),  // Map
+    0xB5 => per_item(20, 1, 10),  // Filter
+    0xAE => per_item(3, 1, 10),   // Exists
+    0xAF => per_item(3, 1, 10),   // ForAll
+    0xB0 => per_item(3, 1, 10),   // Fold
+    0xB4 => per_item(10, 2, 100), // Slice
+    0xB3 => per_item(20, 2, 100), // Append
 
-        // Control flow / environment
-        0xD6 => fixed(5),           // ValDef
-        0xD8 => per_item(1, 1, 10), // BlockValue
-        0xD9 => fixed(5),           // FuncValue — creation only; AddToEnv(5) charged per call
-        0xDA => fixed(30),          // FuncApply
-        0xDB => fixed(4),           // PropertyCall
-        0xDC => fixed(4),           // MethodCall
+    // Option ops
+    0xE4 => fixed(15), // OptionGet
+    0xE5 => fixed(20), // OptionGetOrElse
+    0xE6 => fixed(10), // OptionIsDefined
+    // 0xDF NoneValue: no cost row. Scala has no serializer
+    // registration for 0xDF; `None: Option[T]` flows through the
+    // constant-encoding path. The parser rejects 0xDF.
 
-        // Context extension
-        0xE3 => fixed(10),            // GetVar
-        0xD4 => per_item(1, 10, 128), // DeserializeContext
-        0xD5 => per_item(1, 10, 128), // DeserializeRegister
+    // Sigma props
+    0xD1 => fixed(15), // BoolToSigmaProp
+    0xCD => fixed(10), // ProveDlog
+    0xCE => fixed(20), // ProveDHTuple
+    // AtLeast (k-of-n threshold): Scala `sigma.ast.AtLeast.costKind`
+    // = PerItemCost(baseCost=20, perChunkCost=3, chunkSize=5), charged
+    // via addSeqCost over the number of children.
+    0x98 => per_item(20, 3, 5),
+    0xEA => per_item(10, 2, 1), // SigmaAnd
+    0xEB => per_item(10, 2, 1), // SigmaOr
+    0xD0 => per_item(35, 6, 1), // SigmaPropBytes
 
-        // Type conversions
-        0x7A => fixed(17), // LongToByteArray
-        0x7C => fixed(16), // ByteArrayToLong
-        0x7B => fixed(30), // ByteArrayToBigInt
-        0x7D => fixed(10), // Downcast
+    // Crypto/hash
+    0xCB => per_item(20, 7, 128), // CalcBlake2b256
+    0xCC => per_item(80, 8, 64),  // CalcSha256
+    0xEE => fixed(300),           // DecodePoint
+    0xFF => per_item(20, 5, 32),  // XorOf
 
-        // Logical
-        0xEF => fixed(15), // LogicalNot — Scala: FixedCost(JitCost::from_jit(15))
+    // SubstConstants
+    0x74 => per_item(100, 100, 1), // SubstConstants
 
-        // Group ops
-        0x9F => fixed(900), // Exponentiate
-        0xA0 => fixed(40),  // MultiplyGroup
+    // Control flow / environment
+    0xD6 => fixed(5),           // ValDef
+    0xD8 => per_item(1, 1, 10), // BlockValue
+    0xD9 => fixed(5),           // FuncValue — creation only; AddToEnv(5) charged per call
+    0xDA => fixed(30),          // FuncApply
+    0xDB => fixed(4),           // PropertyCall
+    0xDC => fixed(4),           // MethodCall
 
-        // 0x81 UnitConstant: no cost row. Scala does not register a
-        // serializer for 0x81; SUnit values flow through the
-        // constant-encoding path. The parser rejects 0x81.
+    // Context extension
+    0xE3 => fixed(10),            // GetVar
+    0xD4 => per_item(1, 10, 128), // DeserializeContext
+    0xD5 => per_item(1, 10, 128), // DeserializeRegister
 
-        // ConcreteCollectionBooleanConstant — shares ConcreteCollection.costKind
-        // Fixed(20) per Scala values.scala:887-891 (companion delegates to
-        // ConcreteCollection at values.scala:878).
-        0x85 => fixed(20),
+    // Type conversions
+    0x7A => fixed(17), // LongToByteArray
+    0x7C => fixed(16), // ByteArrayToLong
+    0x7B => fixed(30), // ByteArrayToBigInt
+    0x7D => fixed(10), // Downcast
 
-        // GroupGenerator — Scala values.scala:712 FixedCost(JitCost::from_jit(10)).
-        0x82 => fixed(10),
+    // Logical
+    0xEF => fixed(15), // LogicalNot — Scala: FixedCost(JitCost::from_jit(15))
 
-        // LastBlockUtxoRootHash — Scala values.scala:1495 FixedCost(JitCost::from_jit(15)).
-        0xA6 => fixed(15),
+    // Group ops
+    0x9F => fixed(900), // Exponentiate
+    0xA0 => fixed(40),  // MultiplyGroup
 
-        // BinXor — Scala trees.scala:1300 FixedCost(JitCost::from_jit(20)).
-        0xF4 => fixed(20),
+    // 0x81 UnitConstant: no cost row. Scala does not register a
+    // serializer for 0x81; SUnit values flow through the
+    // constant-encoding path. The parser rejects 0x81.
 
-        // Xor (byte-array) — Scala trees.scala:1016 PerItemCost(10, 2, 128).
-        0x9B => per_item(10, 2, 128),
+    // ConcreteCollectionBooleanConstant — shares ConcreteCollection.costKind
+    // Fixed(20) per Scala values.scala:887-891 (companion delegates to
+    // ConcreteCollection at values.scala:878).
+    0x85 => fixed(20),
 
-        // BitOp family (Scala trees.scala:926-941; FixedCost(JitCost::from_jit(1))).
-        // Reject-only on the executor (these opcodes are not yet
-        // implementable) — cost still accumulates before the eval
-        // error so a future flip-to-executable does not change cost
-        // accounting.
-        0xF2 => fixed(1), // BitOr
-        0xF3 => fixed(1), // BitAnd
-        0xF5 => fixed(1), // BitXor
-        0xF6 => fixed(1), // BitShiftRight
-        0xF7 => fixed(1), // BitShiftLeft
-        0xF8 => fixed(1), // BitShiftRightZeroed
+    // GroupGenerator — Scala values.scala:712 FixedCost(JitCost::from_jit(10)).
+    0x82 => fixed(10),
 
-        _ => return Err(EvalError::UnsupportedOpcode(opcode)),
-    })
+    // LastBlockUtxoRootHash — Scala values.scala:1495 FixedCost(JitCost::from_jit(15)).
+    0xA6 => fixed(15),
+
+    // BinXor — Scala trees.scala:1300 FixedCost(JitCost::from_jit(20)).
+    0xF4 => fixed(20),
+
+    // Xor (byte-array) — Scala trees.scala:1016 PerItemCost(10, 2, 128).
+    0x9B => per_item(10, 2, 128),
+
+    // BitOp family (Scala trees.scala:926-941; FixedCost(JitCost::from_jit(1))).
+    // Reject-only on the executor (these opcodes are not yet
+    // implementable) — cost still accumulates before the eval
+    // error so a future flip-to-executable does not change cost
+    // accounting.
+    0xF2 => fixed(1), // BitOr
+    0xF3 => fixed(1), // BitAnd
+    0xF5 => fixed(1), // BitXor
+    0xF6 => fixed(1), // BitShiftRight
+    0xF7 => fixed(1), // BitShiftLeft
+    0xF8 => fixed(1), // BitShiftRightZeroed
 }
 
 /// Whether the given opcode is an arithmetic primitive `arith_cost` knows
@@ -242,16 +249,31 @@ pub fn arith_cost(opcode: u8, is_bigint: bool) -> Result<JitCost, EvalError> {
 }
 
 // EQ/NEQ dynamic cost constants (matching Scala's DataValueComparer)
-pub(crate) const MATCH_TYPE: u64 = 1;
-const EQ_PRIM: u64 = 3;
-pub(crate) const EQ_TUPLE: u64 = 4;
-pub(crate) const EQ_GROUP_ELEMENT: u64 = 172;
-const EQ_BIGINT: u64 = 5;
-const EQ_AVL_TREE: u64 = 6;
-const EQ_BOX: u64 = 6;
-pub(crate) const EQ_OPTION: u64 = 4;
-const EQ_PRE_HEADER: u64 = 4;
-const EQ_HEADER: u64 = 6;
+pub const MATCH_TYPE: u64 = 1;
+pub const EQ_PRIM: u64 = 3;
+pub const EQ_TUPLE: u64 = 4;
+pub const EQ_GROUP_ELEMENT: u64 = 172;
+pub const EQ_BIGINT: u64 = 5;
+pub const EQ_AVL_TREE: u64 = 6;
+pub const EQ_BOX: u64 = 6;
+pub const EQ_OPTION: u64 = 4;
+pub const EQ_PRE_HEADER: u64 = 4;
+pub const EQ_HEADER: u64 = 6;
+
+pub const EQ_COA_BOOLEAN: CostKind = per_item(15, 2, 128);
+pub const EQ_COA_BYTE: CostKind = per_item(15, 2, 128);
+pub const EQ_COA_SHORT: CostKind = per_item(15, 2, 96);
+pub const EQ_COA_INT: CostKind = per_item(15, 2, 64);
+pub const EQ_COA_LONG: CostKind = per_item(15, 2, 48);
+pub const EQ_COA_BIG_INT: CostKind = per_item(15, 7, 5);
+pub const EQ_COA_UNSIGNED_BIG_INT: CostKind = per_item(15, 7, 5);
+pub const EQ_COA_GROUP_ELEMENT: CostKind = per_item(15, 5, 1);
+pub const EQ_COA_AVL_TREE: CostKind = per_item(15, 5, 2);
+pub const EQ_COA_BOX: CostKind = per_item(15, 5, 1);
+pub const EQ_COA_PRE_HEADER: CostKind = per_item(15, 3, 1);
+pub const EQ_COA_HEADER: CostKind = per_item(15, 5, 1);
+pub const EQ_COA_SIGMA_PROP: CostKind = per_item(15, 5, 1);
+pub const EQ_COLL: CostKind = per_item(10, 2, 1);
 
 /// Adds the dynamic cost for EQ/NEQ comparison of a value, matching Scala's
 /// `DataValueComparer.equalDataValues`.
@@ -321,14 +343,14 @@ pub fn add_eq_cost(
         Value::CollBool(v) => {
             cost.add(JitCost::from_jit(MATCH_TYPE))?;
             if colls_match_len {
-                cost.add_per_item(per_item(15, 2, 128), v.len() as u32)?;
+                cost.add_per_item(EQ_COA_BOOLEAN, v.len() as u32)?;
             }
             Ok(())
         }
         Value::CollBytes(v) => {
             cost.add(JitCost::from_jit(MATCH_TYPE))?;
             if colls_match_len {
-                cost.add_per_item(per_item(15, 2, 128), v.len() as u32)?;
+                cost.add_per_item(EQ_COA_BYTE, v.len() as u32)?;
             }
             Ok(())
         }
@@ -339,21 +361,21 @@ pub fn add_eq_cost(
         Value::Str(s) => {
             cost.add(JitCost::from_jit(MATCH_TYPE))?;
             if colls_match_len {
-                cost.add_per_item(per_item(15, 2, 128), s.len() as u32)?;
+                cost.add_per_item(EQ_COA_BYTE, s.len() as u32)?;
             }
             Ok(())
         }
         Value::CollInt(v) => {
             cost.add(JitCost::from_jit(MATCH_TYPE))?;
             if colls_match_len {
-                cost.add_per_item(per_item(15, 2, 64), v.len() as u32)?;
+                cost.add_per_item(EQ_COA_INT, v.len() as u32)?;
             }
             Ok(())
         }
         Value::CollLong(v) => {
             cost.add(JitCost::from_jit(MATCH_TYPE))?;
             if colls_match_len {
-                cost.add_per_item(per_item(15, 2, 48), v.len() as u32)?;
+                cost.add_per_item(EQ_COA_LONG, v.len() as u32)?;
             }
             Ok(())
         }
@@ -361,14 +383,14 @@ pub fn add_eq_cost(
             // Coll[Short]: 16-bit elements — chunk size between bytes (128) and ints (64).
             cost.add(JitCost::from_jit(MATCH_TYPE))?;
             if colls_match_len {
-                cost.add_per_item(per_item(15, 2, 96), v.len() as u32)?;
+                cost.add_per_item(EQ_COA_SHORT, v.len() as u32)?;
             }
             Ok(())
         }
         Value::CollSigmaProp(v) => {
             cost.add(JitCost::from_jit(MATCH_TYPE))?;
             if colls_match_len {
-                cost.add_per_item(per_item(15, 5, 1), v.len() as u32)?;
+                cost.add_per_item(EQ_COA_SIGMA_PROP, v.len() as u32)?;
             }
             Ok(())
         }
@@ -390,7 +412,7 @@ pub fn add_eq_cost(
             // length mismatch → 1 (case-2 MatchType only).
             cost.add(JitCost::from_jit(MATCH_TYPE))?;
             if colls_match_len {
-                cost.add_per_item(per_item(10, 2, 1), v.len() as u32)?;
+                cost.add_per_item(EQ_COLL, v.len() as u32)?;
                 for _ in v {
                     cost.add(JitCost::from_jit(EQ_TUPLE))?;
                     // token_id: Coll[Byte] — one MatchType for the case-2

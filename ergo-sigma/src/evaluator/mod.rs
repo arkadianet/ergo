@@ -17,3 +17,6 @@ pub use types::*;
 
 #[cfg(test)]
 mod tests;
+
+pub use opcodes::method_call::method_cost_rows;
+pub use opcodes::property_call::no_arg_cost_rows;

@@ -1,15 +1,20 @@
 use ergo_primitives::cost::JitCost;
 use ergo_ser::sigma_value::SigmaBoolean;
 
-const PARSE_CHALLENGE_DLOG: u64 = 10;
-const COMPUTE_COMMITMENTS_SCHNORR: u64 = 3400;
-const TO_BYTES_SCHNORR: u64 = 570;
+pub const PARSE_CHALLENGE_DLOG: u64 = 10;
+pub const COMPUTE_COMMITMENTS_SCHNORR: u64 = 3400;
+pub const TO_BYTES_SCHNORR: u64 = 570;
 
-const PARSE_CHALLENGE_DHT: u64 = 10;
-const COMPUTE_COMMITMENTS_DHT: u64 = 6450;
-const TO_BYTES_DHT: u64 = 680;
+pub const PARSE_CHALLENGE_DHT: u64 = 10;
+pub const COMPUTE_COMMITMENTS_DHT: u64 = 6450;
+pub const TO_BYTES_DHT: u64 = 680;
 
-const TO_BYTES_CONJUNCTION: u64 = 15;
+pub const TO_BYTES_CONJUNCTION: u64 = 15;
+
+pub const PARSE_POLYNOMIAL_BASE: u64 = 10;
+pub const PARSE_POLYNOMIAL_PER_CHUNK: u64 = 10;
+pub const EVALUATE_POLYNOMIAL_BASE: u64 = 3;
+pub const EVALUATE_POLYNOMIAL_PER_CHUNK: u64 = 3;
 
 /// JitCost charged for verifying `prop` ahead-of-time, before the actual
 /// sigma-proof verification runs. Mirrors the Scala interpreter's
@@ -49,9 +54,11 @@ pub fn estimate_crypto_cost(prop: &SigmaBoolean) -> JitCost {
                 .sum();
             // ParsePolynomial: PerItemCost(base=10, perChunk=10, chunk=1).cost(nCoefs)
             let parse_chunks = if n_coefs == 0 { 1 } else { n_coefs };
-            let parse_cost = 10 + 10 * parse_chunks as u64;
+            let parse_cost =
+                PARSE_POLYNOMIAL_BASE + PARSE_POLYNOMIAL_PER_CHUNK * parse_chunks as u64;
             // EvaluatePolynomial: PerItemCost(base=3, perChunk=3, chunk=1).cost(nCoefs) * nChildren
-            let eval_per_child = 3 + 3 * parse_chunks as u64;
+            let eval_per_child =
+                EVALUATE_POLYNOMIAL_BASE + EVALUATE_POLYNOMIAL_PER_CHUNK * parse_chunks as u64;
             let eval_cost = eval_per_child * n_children as u64;
             JitCost::from_jit(parse_cost + eval_cost + TO_BYTES_CONJUNCTION + children_cost)
         }

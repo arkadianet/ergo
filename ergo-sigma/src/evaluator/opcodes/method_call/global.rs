@@ -5,6 +5,16 @@
 //! (`serialize_put_cost` and its recursive helpers) — both used only by these
 //! arms.
 
+pub const COST_DESERIALIZE_TO: CostKind = CostKind::PerItem {
+    base: JitCost::from_jit(100),
+    per_chunk: JitCost::from_jit(32),
+    chunk_size: 32,
+};
+pub const COST_ENCODE_NBITS: u64 = 25;
+pub const COST_DECODE_NBITS: u64 = 50;
+pub const COST_SOME: u64 = 5;
+pub const COST_FROM_BIG_ENDIAN_BYTES: u64 = 10;
+
 use ergo_primitives::cost::{CostKind, JitCost};
 use ergo_ser::opcode::Expr;
 use ergo_ser::sigma_type::SigmaType;
@@ -32,7 +42,7 @@ pub(super) fn encode_nbits(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value,
             })
         }
     };
-    add_method_cost(cx.cost, 25)?;
+    add_method_cost(cx.cost, COST_ENCODE_NBITS)?;
     Ok(Value::Long(encode_compact_bits(v)))
 }
 
@@ -52,7 +62,7 @@ pub(super) fn decode_nbits(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value,
             })
         }
     };
-    add_method_cost(cx.cost, 50)?;
+    add_method_cost(cx.cost, COST_DECODE_NBITS)?;
     Ok(Value::BigInt(decode_compact_bits(compact)))
 }
 
@@ -69,7 +79,7 @@ pub(super) fn decode_nbits(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value,
 pub(super) fn some(args: &[Expr], cx: &mut EvalCtx<'_>) -> Result<Value, EvalError> {
     check_arity(args, 1)?;
     let v = cx.eval_expr(&args[0])?;
-    add_method_cost(cx.cost, 5)?;
+    add_method_cost(cx.cost, COST_SOME)?;
     Ok(Value::Opt(Some(Box::new(v))))
 }
 
@@ -183,11 +193,7 @@ pub(super) fn deserialize_to(
     // PerItemCost(baseCost = JitCost(100), perChunkCost = JitCost(32),
     // chunkSize = 32). The node previously carried (30, 20, 32) from
     // the pre-release 6.0-deserialize draft, under-charging deserialize.
-    let cost_kind = CostKind::PerItem {
-        base: JitCost::from_jit(100),
-        per_chunk: JitCost::from_jit(32),
-        chunk_size: 32,
-    };
+    let cost_kind = COST_DESERIALIZE_TO;
     cx.cost.add(cost_kind.compute(bytes.len() as u32)?)?;
     // Scala parity: `SGlobalMethods.deserializeTo_eval` calls
     // `DataSerializer.deserialize(typeArg, reader)`. That is the
@@ -250,7 +256,7 @@ pub(super) fn from_big_endian_bytes(
         .first()
         .cloned()
         .unwrap_or(ergo_ser::sigma_type::SigmaType::SAny);
-    add_method_cost(cx.cost, 10)?;
+    add_method_cost(cx.cost, COST_FROM_BIG_ENDIAN_BYTES)?;
     use ergo_ser::sigma_type::SigmaType as S;
     match tpe {
         S::SByte if bytes.len() == 1 => Ok(Value::Byte(bytes[0] as i8)),
