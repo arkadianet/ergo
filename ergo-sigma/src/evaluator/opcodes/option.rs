@@ -35,11 +35,24 @@ pub(in crate::evaluator) fn eval_option_get_or_else(
     default_expr: &Expr,
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
-    add_cost(cx.cost, 0xE5)?;
     let val = cx.eval_expr(opt_expr)?;
+    let eager_default = if cx.ctx.is_v3_ergo_tree() {
+        None
+    } else {
+        Some(
+            cx.eval_expr(default_expr)
+                .and_then(super::super::helpers::reject_sstring)?,
+        )
+    };
+    add_cost(cx.cost, 0xE5)?;
     match val {
         Value::Opt(Some(v)) => Ok(*v),
-        Value::Opt(None) => cx.eval_expr(default_expr),
+        Value::Opt(None) => match eager_default {
+            Some(value) => Ok(value),
+            None => cx
+                .eval_expr(default_expr)
+                .and_then(super::super::helpers::reject_sstring),
+        },
         _ => Err(EvalError::TypeError {
             expected: "Option for OptionGetOrElse",
             got: format!("{val:?}"),

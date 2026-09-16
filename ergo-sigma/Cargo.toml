@@ -34,6 +34,7 @@ cost-trace = []
 value-trace = []
 
 [dev-dependencies]
+flate2 = { workspace = true }
 ergo-validation = { workspace = true, features = ["test-helpers", "cost-trace"] }
 anyhow = "1"
 hex        = { workspace = true }

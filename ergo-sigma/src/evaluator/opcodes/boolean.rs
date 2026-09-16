@@ -22,8 +22,8 @@ pub(in crate::evaluator) fn eval_bool_to_sigma_prop(
     inner: &Expr,
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
-    add_cost(cx.cost, 0xD1)?;
     let val = cx.eval_expr(inner)?;
+    add_cost(cx.cost, 0xD1)?;
     if let Some(t) = cx.trace.as_mut() {
         t.push(TraceEntry {
             label: "BoolToSigmaProp".into(),

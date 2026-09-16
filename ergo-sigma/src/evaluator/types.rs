@@ -607,6 +607,9 @@ pub enum EvalError {
     /// raised inside `ExactIntegral` / `BigIntegerOps`.
     #[error("runtime exception: {0}")]
     RuntimeException(&'static str),
+    /// Runtime failure inside a Scala reflection-invoked method.
+    #[error("invocation target exception: {0}")]
+    InvocationTargetException(&'static str),
     /// `ctx.last_headers` was empty when an opcode (e.g., `LastBlockUtxoRootHash`)
     /// required the parent header. Indicates a context-construction invariant
     /// was violated upstream — the caller is responsible for populating the

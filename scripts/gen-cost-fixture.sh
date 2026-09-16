@@ -13,12 +13,16 @@ import sys
 import tomllib
 
 root = Path.cwd().resolve()
+sys.path.insert(0, str(root / "scripts"))
+from cost_fixture_io import read_fixture_text, write_fixture_text
 if len(sys.argv) != 2:
-    sys.exit("usage: scripts/gen-cost-fixture.sh <fixture.json>")
+    sys.exit("usage: scripts/gen-cost-fixture.sh <fixture.json.gz>")
 path = Path(sys.argv[1]).resolve()
 if not path.is_relative_to(root / "test-vectors/ergo-sigma/cost-ledger/fixtures"):
     sys.exit("fixture must be inside this worktree's cost-ledger/fixtures directory")
-fixture = json.loads(path.read_text())
+if path.suffix == ".json":
+    path = path.with_suffix(".json.gz")
+fixture = json.loads(read_fixture_text(path))
 ids = fixture.get("ledger")
 if not isinstance(ids, list) or not ids or any(not isinstance(i, str) for i in ids):
     sys.exit("fixture must have nonempty ledger ids before running the JVM")
@@ -93,11 +97,6 @@ fixture["manifest"] = manifest
 for case, response in zip(cases, responses):
     case["expected"] = response
 # Complete all oracle and metadata operations before replacing the fixture.
-staging = path.with_suffix(".json.tmp")
-try:
-    staging.write_text(json.dumps(fixture, indent=2) + "\n")
-    staging.replace(path)
-finally:
-    staging.unlink(missing_ok=True)
+write_fixture_text(path, json.dumps(fixture, indent=2) + "\n")
 print(f"{path.relative_to(root)}: selected={len(cases)} executed={len(cases)} skipped=0 failed=0")
 PY

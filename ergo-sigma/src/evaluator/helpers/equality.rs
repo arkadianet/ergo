@@ -5,11 +5,33 @@
 use super::*;
 use crate::evaluator::types::*;
 
+/// Scala `SType.isValueOfType` has no SString case. Validation is shallow:
+/// strings inside pairs, collections and options remain valid carriers.
+pub(crate) fn reject_sstring(value: Value) -> Result<Value, EvalError> {
+    if matches!(value, Value::Str(_)) {
+        Err(EvalError::RuntimeException("Unknown type SString"))
+    } else {
+        Ok(value)
+    }
+}
+
+/// Reflection wraps failures thrown inside a method, after argument evaluation.
+pub(crate) fn reflect_sstring_error(error: EvalError) -> EvalError {
+    match error {
+        EvalError::RuntimeException("Unknown type SString") => {
+            EvalError::InvocationTargetException("Unknown type SString")
+        }
+        other => other,
+    }
+}
+
 /// Verify a value contains only concrete comparable types, recursively.
 /// Carrier types (SelfBox, BoxRef, BoxCollection, Opt) do not have
 /// meaningful Ergo equality — comparing them via Rust PartialEq would
 /// produce results based on evaluator representation, not semantic identity.
 pub(crate) fn require_comparable(l: &Value, r: &Value) -> Result<(), EvalError> {
+    // EQ/NEQ rejects each bare String immediately after evaluating that
+    // operand. Nested strings remain valid for recursive comparison.
     check_comparable(l)?;
     check_comparable(r)
 }
