@@ -16,6 +16,24 @@ infrastructure.
 
 ## [Unreleased]
 
+### Security
+
+- Restrict `POST /blocks` full-block submission to explicitly opted-in devnets.
+  Every release up to and including v0.7.0 exposed this unauthenticated
+  submission surface on mainnet and testnet. Submitted blocks still required
+  valid PoW and full validation: this granted submission access only, with no
+  consensus bypass.
+
+### Fixed
+
+- Mining emission-box discovery tracks lineage instead of assuming
+  `transactions[0].outputs[0]`. On first start after upgrade, synchronous
+  recovery scans at most 4096 blocks / 32 MiB. Mainnet post-EIP-27 tips resolve
+  from one block. If history is insufficient, mining stays unavailable until
+  an emission-NFT-bearing block is applied.
+- Mining candidates use Scala's tiered cost safety gap. The mainnet user-tx
+  budget per mined block changes from the old fixed value to 150,000.
+
 ## [0.7.0] - 2026-09-07
 
 ### Added

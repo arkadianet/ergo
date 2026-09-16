@@ -60,8 +60,8 @@ def ledger_rows(document: dict) -> dict[str, dict]:
 
 
 def reviewed_fields(row: dict) -> dict[str, str]:
-    # Additions carry their pricing in note; existing Scala fields carry theirs.
-    return {field: normalize(row[field]) for field in ("scala", "note")}
+    # Scala anchors include the audited declarations and formulas. Notes track evidence.
+    return {"scala": normalize(row["scala"])}
 
 
 def normalized_keys(values: dict, label: str) -> dict:
@@ -95,7 +95,8 @@ def differences(enumeration: dict, ledger: dict, audit: dict) -> dict[str, list[
         missing = sorted(set(entry["ledger"]) - ledger.keys())
         if missing:
             enum_only.append(f"{eid}: missing counterparts {', '.join(missing)}")
-        if cells != entry["cells"]:
+        # The last cell is commentary; identity, anchor, formula and gating are audited.
+        if cells[:4] != entry["cells"][:4]:
             changed.append(f"{eid}: enumeration declaration/formula/gating changed")
     owners = {}
     for eid, entry in mappings.items():
@@ -116,7 +117,7 @@ def differences(enumeration: dict, ledger: dict, audit: dict) -> dict[str, list[
         elif not review.get("ledger_only_finding"):
             ledger_only.append(f"{rid}: no counterpart or source-reviewed finding")
         if reviewed_fields(row) != review["fields"]:
-            changed.append(f"{rid}: reviewed Scala formula/anchor or note changed")
+            changed.append(f"{rid}: reviewed Scala formula/anchor changed")
     # Deletions must not silently shrink either audited denominator.
     for eid in sorted(mappings.keys() - enumeration.keys()):
         changed.append(f"{eid}: audited enumeration entry deleted")
@@ -172,6 +173,14 @@ def selftest() -> int:
             self.assertTrue(self.diff()["matched-with-different-constant"])
             self.enumeration = enumeration_rows(self.text.replace("F(5)", "F(7)"))
             self.assertEqual(len(self.diff()["matched-with-different-constant"]), 2)
+
+        def test_evidence_note_changed_ignored(self):
+            self.ledger["OP-0x72"]["note"] = "Fixture renamed; PR #337"
+            self.assertFalse(any(self.diff().values()))
+
+        def test_enumeration_note_changed_ignored(self):
+            self.enumeration["A001"][-1] = "Evidence refreshed"
+            self.assertFalse(any(self.diff().values()))
 
         def test_counterpart_deleted_reported(self):
             del self.ledger["OP-0x72"]

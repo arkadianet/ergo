@@ -57,4 +57,34 @@ mod tests {
             );
         }
     }
+    #[tokio::test]
+    async fn direct_submit_bridge_disabled_rejects_without_dispatch() {
+        let block: ergo_rest_json::ScalaFullBlock = serde_json::from_str(include_str!(
+            "../../../test-vectors/mainnet/block_836113.json"
+        ))
+        .unwrap();
+        for (network, configured) in [
+            (Network::Mainnet, true),
+            (Network::Testnet, true),
+            (Network::Mainnet, false),
+            (Network::Testnet, false),
+            (Network::Devnet, false),
+        ] {
+            let (tx, mut transactions) = tokio::sync::mpsc::channel(1);
+            let (events, mut dispatched) = tokio::sync::mpsc::channel(1);
+            let submit =
+                SubmitBridge::new(tx, events).with_direct_block_submit(network, configured);
+            let error = submit.submit_full_block(block.clone()).await.unwrap_err();
+            assert_eq!(error.reason, "direct_block_submit_disabled");
+            assert_eq!(error.detail, None);
+            assert!(matches!(
+                dispatched.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                transactions.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+        }
+    }
 }

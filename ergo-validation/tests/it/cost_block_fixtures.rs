@@ -24,6 +24,7 @@ use ergo_validation::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 // ----- helpers -----
 
@@ -231,34 +232,112 @@ fn rust_verdict(error: Option<&BlockValidationError>) -> &'static str {
     }
 }
 
+fn read_fixture(path: &Path) -> Fixture {
+    // Preserve Circe's insertion order when reproducing its compact payload hash.
+    let mut value: Value =
+        serde_json::from_reader(flate2::read::GzDecoder::new(File::open(path).unwrap())).unwrap();
+    let manifest = value
+        .as_object_mut()
+        .unwrap()
+        .shift_remove("manifest")
+        .unwrap();
+    assert_eq!(
+        hex::encode(Sha256::digest(serde_json::to_vec(&value).unwrap())),
+        manifest["evidence"]["output_payload_sha256"]
+            .as_str()
+            .unwrap(),
+        "payload hash: {}",
+        path.display()
+    );
+    validate_manifest(&manifest, &value);
+    value["manifest"] = manifest;
+    serde_json::from_value(value).unwrap()
+}
+
+fn validate_manifest(manifest: &Value, payload: &Value) {
+    for pointer in [
+        "/rust/git_sha",
+        "/rust/toolchain",
+        "/tool/script",
+        "/tool/git_sha",
+        "/tool/script_sha256",
+        "/tool/scala_cli",
+        "/tool/jvm",
+        "/context/network",
+        "/context/chain_id",
+        "/run/command",
+        "/run/timestamp",
+        "/evidence/hash_scope",
+    ] {
+        assert!(
+            !manifest
+                .pointer(pointer)
+                .and_then(Value::as_str)
+                .unwrap()
+                .is_empty(),
+            "missing manifest {pointer}"
+        );
+    }
+    for (name, sha) in [
+        ("ergo_v6.0.5", "5528ef569a41ebccbc8658212e6ee3c97d990b96"),
+        (
+            "sigmastate_v6.0.6",
+            "ab0b15ceb9d34f2ccd6e68e3e2a8aa27cd16a042",
+        ),
+        ("ergo_v6.0.2", "2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1"),
+        (
+            "sigmastate_v6.0.2",
+            "23dd29f612249c169d09fae9bca76d7cc02e144c",
+        ),
+    ] {
+        assert_eq!(manifest["scala"]["source_shas"][name], sha);
+    }
+    assert_eq!(manifest["scala"]["ergo_version"], "6.0.5");
+    assert_eq!(manifest["scala"]["sigmastate_version"], "6.0.6");
+    assert!(manifest["scala"].get("node_app_version").is_some());
+    assert!(!manifest["rust"]["features"].as_array().unwrap().is_empty());
+    assert!(manifest["run"].get("seeds").is_some());
+    assert_eq!(
+        manifest["context"]["chain_id"],
+        payload["genesis_state_root"]
+    );
+    assert_eq!(
+        manifest["context"]["height_range"],
+        serde_json::json!([1, 129])
+    );
+    assert_eq!(manifest["context"]["voted_params"], payload["parameters"]);
+    let version = payload["parameters"]["123"].as_u64().unwrap();
+    assert_eq!(manifest["context"]["block_version"], version);
+    assert_eq!(manifest["context"]["activated_script_version"], version - 1);
+    for (pointer, bytes) in [
+        ("/rust/git_sha", 20),
+        ("/tool/git_sha", 20),
+        ("/tool/script_sha256", 32),
+        ("/evidence/output_payload_sha256", 32),
+    ] {
+        assert_eq!(
+            hex::decode(manifest.pointer(pointer).unwrap().as_str().unwrap())
+                .unwrap()
+                .len(),
+            bytes
+        );
+    }
+    let input = manifest["evidence"].get("input_sha256").unwrap();
+    if !input.is_null() {
+        assert_eq!(hex::decode(input.as_str().unwrap()).unwrap().len(), 32);
+    }
+}
+
 fn fixture(name: &str) -> Fixture {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../test-vectors/ergo-sigma/cost-ledger/blocks")
         .join(format!("{name}.json.gz"));
-    serde_json::from_reader(flate2::read::GzDecoder::new(File::open(path).unwrap())).unwrap()
+    read_fixture(&path)
 }
 
 fn replay(fixture: Fixture) {
     assert_eq!(fixture.schema_version, 1);
     assert!(fixture.ledger.iter().any(|id| id == "BLOCK-parallel-equiv"));
-    for field in ["scala", "rust", "tool", "context", "run", "evidence"] {
-        assert!(
-            fixture.manifest[field].is_object(),
-            "missing manifest {field}"
-        );
-    }
-    assert_eq!(fixture.manifest["scala"]["ergo_version"], "6.0.5");
-    assert_eq!(fixture.manifest["scala"]["sigmastate_version"], "6.0.6");
-    assert_eq!(
-        fixture.manifest["evidence"]["output_payload_sha256"]
-            .as_str()
-            .unwrap()
-            .len(),
-        64
-    );
-    if let Some(hash) = fixture.manifest["evidence"]["input_sha256"].as_str() {
-        assert_eq!(hash.len(), 64);
-    }
     let mut initial = fixture.parent_boxes_hex.clone();
     initial.push(fixture.bootstrap_box_hex.clone());
     initial.sort();
@@ -496,9 +575,7 @@ fn block_fixtures_both_validators_match_jvm() {
     assert!(!paths.is_empty(), "block oracle corpus must not be empty");
     for path in &paths {
         eprintln!("block fixture: {}", path.display());
-        let fixture =
-            serde_json::from_reader(flate2::read::GzDecoder::new(File::open(path).unwrap()))
-                .unwrap();
+        let fixture = read_fixture(path);
         replay(fixture);
     }
     eprintln!(
