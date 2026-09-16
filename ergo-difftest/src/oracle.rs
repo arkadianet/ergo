@@ -911,7 +911,9 @@ pub fn reconcile(
         (Verdict::Accept(a), Verdict::Accept(b)) => {
             if spec.name == "verify" {
                 match (verify::comparable(a), verify::comparable(b)) {
-                    (Some(a), Some(b)) if a == b => return Reconciliation::Agree,
+                    (Some(a), Some(b)) if verify::components_agree(&a, &b) => {
+                        return Reconciliation::Agree;
+                    }
                     (Some(_), Some(_)) => {}
                     _ => return Reconciliation::Indeterminate,
                 }

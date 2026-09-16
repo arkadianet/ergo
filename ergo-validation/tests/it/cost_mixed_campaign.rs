@@ -1,7 +1,7 @@
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16.json
 //! Live Scala 6.0.5 verdicts and JVM BuildBlock.scala transaction costs.
 
-use std::{collections::BTreeMap, io::Read, path::Path};
+use std::{collections::BTreeMap, io::Read, path::Path, sync::OnceLock};
 
 use sha2::{Digest, Sha256};
 
@@ -9,7 +9,12 @@ use serde_json::Value;
 
 // ----- helpers -----
 
-fn campaign_members(root: &Path, results: &Value) -> BTreeMap<String, Vec<u8>> {
+fn campaign_members(root: &Path, results: &Value) -> &'static BTreeMap<String, Vec<u8>> {
+    static MEMBERS: OnceLock<BTreeMap<String, Vec<u8>>> = OnceLock::new();
+    MEMBERS.get_or_init(|| load_campaign_members(root, results))
+}
+
+fn load_campaign_members(root: &Path, results: &Value) -> BTreeMap<String, Vec<u8>> {
     let archive_path = "test-vectors/ergo-sigma/cost-ledger/results/l6-2026-09-16-artifacts.tar.gz";
     let bytes = std::fs::read(root.join(archive_path)).unwrap();
     assert_eq!(&bytes[3..8], &[0, 0, 0, 0, 0]); // No gzip filename or timestamp.
