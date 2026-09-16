@@ -191,6 +191,8 @@ pub struct NodeConfig {
     pub api_allowed_hosts: Vec<String>,
     /// Devnet-only POST /blocks opt-in; defaults to false.
     pub allow_direct_block_submit: bool,
+    /// Private devnet genesis cost cap; validated at configuration load.
+    pub devnet_max_block_cost: Option<u32>,
     /// Resolved mempool configuration. All fields populated from `[mempool]`
     /// section + CLI overrides. Defaults match `MempoolConfig::default()`.
     pub mempool_config: MempoolConfig,

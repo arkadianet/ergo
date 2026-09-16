@@ -74,6 +74,7 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
         ),
         api_allowed_hosts: Vec::new(),
         allow_direct_block_submit: false,
+        devnet_max_block_cost: None,
         mempool_config: MempoolConfig::default(),
         mempool_sort_policy: "cost".into(),
         indexer_config: IndexerConfig::default(),

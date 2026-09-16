@@ -211,3 +211,56 @@ binary hashes, input/output hashes, parameters, and observations (2 selected,
 the receipt records its base revision and working diff hash. Both recipe-owned
 processes were stopped using their PID files after verification. No cost-ledger
 row is closed by this transport test.
+
+## Cost campaign (Task 7.3 — blocked)
+
+```sh
+cargo build -p ergo-node
+scripts/devnet-mixed/campaign.sh --direction scala-mines
+scripts/devnet-mixed/campaign.sh --direction rust-mines
+```
+
+The driver owns startup and PID-file shutdown, including failures. It uses
+separate `.work/campaign-{scala,rust}` databases and the same four private
+ports. It mines 720 difficulty-one reward blocks to scalar one before funding
+its campaign wallet from a mature reward. `CampaignParameters.scala` supplies
+a private `Devnet60LaunchParameters` class with parameter 4 = **37509**;
+Rust's `[chain] devnet_max_block_cost` supplies the matching genesis cap.
+Public networks reject this setting; an existing UTXO database with another
+cap is rejected. All other Scala launch parameters, validation, and accounting
+come from the pinned classpath. This override is explicitly recorded in the
+manifest. Ordinary `start.sh` still uses the original configurations.
+
+`build-block.py` follows the accepted full-tip ancestry, so a rejected sibling
+header does not make later construction ambiguous. It supports a batch of
+emission blocks and campaign stages. Each generated campaign block has a
+production JVM oracle sidecar and its signed transactions. The intentional
+rejection mode requires a JVM `CostLimitException` and unchanged state.
+Per-transaction JVM validation separately measures the over-cap total.
+
+The selected workload uses the exact family-(f) v6 `Coll.reverse` tree plus
+spendable L2 `coll-flatMap`, `coll-zip`, and `global-xor` fixture trees. Mining
+uses the requested node's candidate/solution API; Scala's prioritized
+candidate API avoids reusing a cached candidate without the workload. Boundary
+injections submit full blocks to both nodes and compare `/info` commitments.
+HTTP admission alone never counts as block acceptance. Compressed artifacts
+and manifests live under `test-vectors/ergo-sigma/cost-ledger/results/`.
+
+**Recorded outcome: BLOCKED, no L6 rows closed.** All 720 warm-up blocks had
+matching roots. Both nodes accepted the funding-only block at height 723, but
+Rust's emission discovery unconditionally selected its first ordinary output
+as the next emission box. Rust then repeatedly failed candidate construction
+with `EmissionInvariant` (1,000,000,000 available versus 67,500,000,000 required).
+Scala retained the previous emission box and mined height 724. The later
+propagation timeout occurred with zero connected peers on both nodes; it does
+not demonstrate a cost-validation rejection. The evidence and source anchors
+are recorded in `BLOCK-L6-emission-box-discovery` (DIVERGENT).
+
+The controller's stop-on-disagreement rule prevented the Rust-mined direction
+and all live cap injections. Independent JVM preflight confirmed **37509**
+accepted for both three transactions and one transaction, and **37510**
+rejected with unchanged state. These preflight results are **not L6 evidence**.
+Both private processes are stopped. The driver refuses to resume a results
+file containing a divergence; resolve the ledger issue before a fresh campaign.
+The final startup/P2P checks, early emission-failure detection, and additional
+failure capture were syntax-checked after shutdown; they have not been live-run.

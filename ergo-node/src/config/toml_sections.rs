@@ -260,6 +260,8 @@ pub(super) struct TomlMempool {
 #[derive(serde::Deserialize, Default, Debug)]
 #[serde(default)]
 pub(super) struct TomlChain {
+    /// Private devnet genesis cost cap; forbidden on public networks.
+    pub(super) devnet_max_block_cost: Option<u32>,
     /// Override the network's default script-validation checkpoint
     /// height. Use 0 to disable.
     pub(super) script_validation_checkpoint_height: Option<u32>,

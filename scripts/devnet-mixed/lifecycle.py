@@ -20,7 +20,9 @@ def owned(pid):
     try:
         cmd = (proc / 'cmdline').read_bytes().replace(b'\0', b' ').decode()
         return proc.joinpath('cwd').resolve() == ROOT and any(
-            s in cmd for s in ('devnet-mixed/scala-node.conf', 'devnet-mixed/rust-node.toml'))
+            s in cmd for s in ('devnet-mixed/scala-node.conf', 'devnet-mixed/rust-node.toml',
+                           'devnet-mixed/.work/campaign-scala-node.conf',
+                           'devnet-mixed/.work/campaign-rust-node.toml'))
     except FileNotFoundError:
         return False
 
@@ -49,11 +51,15 @@ def start():
     WORK.mkdir(exist_ok=True)
     (WORK / 'scala').mkdir(exist_ok=True)
     cp = (ROOT / 'scripts/jvm_block_oracle/.work/classpath').read_text().strip()
+    if os.environ.get('CAMPAIGN_CLASSPATH'):
+        cp = os.environ['CAMPAIGN_CLASSPATH'] + ':' + cp
+    scala_config = os.environ.get('SCALA_CONFIG', str(HERE / 'scala-node.conf'))
+    rust_config = os.environ.get('RUST_CONFIG', str(HERE / 'rust-node.toml'))
     binary = os.environ.get('RUST_NODE', '/home/rkadias/.cache/cargo-target/debug/ergo-node')
     commands = {
         'scala': ['java', '-Xmx2g', '-Dlogback.configurationFile=' + str(HERE / 'logback.xml'),
-                  '-cp', cp, 'org.ergoplatform.ErgoApp', '--config', str(HERE / 'scala-node.conf')],
-        'rust': [binary, '--config', str(HERE / 'rust-node.toml')],
+                  '-cp', cp, 'org.ergoplatform.ErgoApp', '--config', scala_config],
+        'rust': [binary, '--config', rust_config],
     }
     try:
         for name, command in commands.items():
@@ -67,6 +73,8 @@ def start():
                 try:
                     with urllib.request.urlopen(f'http://127.0.0.1:{port}/info', timeout=2) as response:
                         info = json.load(response)
+                    if info.get('stateRoot') is None:
+                        raise ValueError('node state is not initialized yet')
                     if name == 'scala' and info['appVersion'] != '6.0.5':
                         raise RuntimeError('Scala must be version 6.0.5')
                     break

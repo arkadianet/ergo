@@ -304,6 +304,11 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
     // against the self-stamped sentinel), genesis init (no box arena),
     // the index back-fills, the prune-sentinel activation gate, and
     // `enable_persist_pipeline` — is UTXO-specific and is skipped.
+    let mut launch_parameters =
+        ergo_validation::scala_launch_for_network(config.chain_spec.network);
+    if let Some(cap) = config.devnet_max_block_cost {
+        launch_parameters.max_block_cost = cap as i32;
+    }
     let is_mode_5 = crate::config::is_canonical_mode_5_combo(
         config.state_type,
         config.verify_transactions,
@@ -313,7 +318,7 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
     if is_mode_5 {
         let store = ergo_state::DigestStateStore::open(
             &db_path,
-            ergo_validation::scala_launch_for_network(config.chain_spec.network),
+            launch_parameters,
             config.chain_spec.voting,
             ergo_chain_spec::GenesisParams::for_network(config.chain_spec.network).state_digest,
         )
@@ -352,13 +357,24 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
     let mut store = StateStore::open_with_cache_launch_voting(
         &db_path,
         cache_bytes,
-        ergo_validation::scala_launch_for_network(config.chain_spec.network),
+        launch_parameters,
         config.chain_spec.voting,
     )
     .map_err(|e| {
         report_boot_storage_failure(&db_path, "open_state", &e);
         Box::new(e) as NodeError
     })?;
+    if let Some(cap) = config.devnet_max_block_cost {
+        let genesis = store
+            .active_params_at(0)?
+            .ok_or_else(|| std::io::Error::other("devnet genesis parameters are missing"))?;
+        if genesis.max_block_cost != cap as i32 {
+            return Err(std::io::Error::other(
+                "devnet_max_block_cost differs from the stored genesis; use a fresh data directory",
+            )
+            .into());
+        }
+    }
     // Mode 3: propagate `[node] blocks_to_keep` into the store so
     // `persist_apply` + `execute_batch` know whether to evict
     // sub-sentinel sections on every forward apply. MUST happen
