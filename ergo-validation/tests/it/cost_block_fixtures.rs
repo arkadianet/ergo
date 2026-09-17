@@ -28,6 +28,11 @@ use sha2::{Digest, Sha256};
 
 // ----- helpers -----
 
+/// The only `evidence.hash_scope` this checker implements: it hashes the compact
+/// JSON with `manifest` removed, and hashes inputs over their exact file bytes.
+const SUPPORTED_HASH_SCOPE: &str =
+    "UTF-8 compact output JSON excluding manifest; input hash covers exact file bytes";
+
 #[derive(Deserialize)]
 struct Fixture {
     schema_version: u32,
@@ -267,7 +272,6 @@ fn validate_manifest(manifest: &Value, payload: &Value) {
         "/context/chain_id",
         "/run/command",
         "/run/timestamp",
-        "/evidence/hash_scope",
     ] {
         assert!(
             !manifest
@@ -278,6 +282,16 @@ fn validate_manifest(manifest: &Value, payload: &Value) {
             "missing manifest {pointer}"
         );
     }
+
+    // The integrity check always hashes compact JSON with `manifest` removed, so
+    // a fixture must not be able to declare a different scope and still pass.
+    assert_eq!(
+        manifest
+            .pointer("/evidence/hash_scope")
+            .and_then(Value::as_str),
+        Some(SUPPORTED_HASH_SCOPE),
+        "unsupported evidence.hash_scope"
+    );
     for (name, sha) in [
         ("ergo_v6.0.5", "5528ef569a41ebccbc8658212e6ee3c97d990b96"),
         (
