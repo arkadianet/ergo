@@ -43,6 +43,22 @@ def stop():
         path.unlink()
 
 
+
+def _workspace_node_binary() -> str:
+    """Path to the built `ergo-node` in this checkout's cargo target directory."""
+    metadata = subprocess.run(
+        ['cargo', 'metadata', '--no-deps', '--format-version', '1'],
+        cwd=ROOT, capture_output=True, text=True, check=True,
+    )
+    target = json.loads(metadata.stdout)['target_directory']
+    candidate = Path(target) / 'debug' / 'ergo-node'
+    if not candidate.exists():
+        raise SystemExit(
+            f'ergo-node not built at {candidate}; run `cargo build -p ergo-node` '
+            'or set RUST_NODE to the binary path'
+        )
+    return str(candidate)
+
 def start():
     for port in (19530, 19531, 19553, 19554):
         with socket.socket() as sock:
@@ -55,7 +71,9 @@ def start():
         cp = os.environ['CAMPAIGN_CLASSPATH'] + ':' + cp
     scala_config = os.environ.get('SCALA_CONFIG', str(HERE / 'scala-node.conf'))
     rust_config = os.environ.get('RUST_CONFIG', str(HERE / 'rust-node.toml'))
-    binary = os.environ.get('RUST_NODE', '/home/rkadias/.cache/cargo-target/debug/ergo-node')
+    # No host-specific default: resolve the workspace target dir, else require
+    # RUST_NODE explicitly.
+    binary = os.environ.get('RUST_NODE') or _workspace_node_binary()
     commands = {
         'scala': ['java', '-Xmx2g', '-Dlogback.configurationFile=' + str(HERE / 'logback.xml'),
                   '-cp', cp, 'org.ergoplatform.ErgoApp', '--config', scala_config],
