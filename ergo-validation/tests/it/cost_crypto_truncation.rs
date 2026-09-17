@@ -134,8 +134,15 @@ pub(super) fn validate_with_accumulated(
         ..ProtocolParams::mainnet_default()
     };
     let mut cost = CostAccumulator::new(JitCost::from_block_cost(limit).expect("limit"));
-    cost.add(JitCost::from_block_cost(accumulated).expect("accumulated cost"))
-        .expect("precharge below limit");
+    // A precharge above the limit is the cost rejection the sweep is probing, not
+    // a harness error: the caller supplies generated accumulated/limit pairs.
+    // Same handling as `verify_case` in `cost_sweeps.rs`.
+    if cost
+        .add(JitCost::from_block_cost(accumulated).expect("accumulated cost"))
+        .is_err()
+    {
+        return (Verdict::RejectCost, cost.total_block_cost());
+    }
     let mut tx_ctx = TxValidationCtx {
         ctx: &ctx,
         params: &params,
