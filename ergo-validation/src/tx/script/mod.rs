@@ -158,6 +158,8 @@ pub(crate) fn validate_scripts_at_index(
         if only.is_some_and(|(index, _)| index != i) {
             continue;
         }
+        #[cfg(feature = "cost-trace")]
+        ergo_sigma::cost_trace::record(format!("InputStart:{i}"), 0, cx.cost.total().value());
         // Storage rent path: if the box is old enough, proof is empty,
         // and context extension contains the output index variable,
         // check storage rent rules instead of script verification.
@@ -202,6 +204,19 @@ pub(crate) fn validate_scripts_at_index(
                             ValidationError::JitCostOverflow(je.to_string())
                         }
                     })?;
+                #[cfg(feature = "cost-trace")]
+                {
+                    ergo_sigma::cost_trace::record(
+                        format!("Rent:{i}"),
+                        STORAGE_CONTRACT_COST * 10,
+                        cx.cost.total().value(),
+                    );
+                    ergo_sigma::cost_trace::record(
+                        format!("InputEnd:{i}"),
+                        0,
+                        cx.cost.total().value(),
+                    );
+                }
                 continue;
             }
             // Storage rent check failed — fall through to normal verification.
@@ -260,6 +275,8 @@ pub(crate) fn validate_scripts_at_index(
         )
         .map_err(|e| classify_verify_error(e, i))?;
 
+        #[cfg(feature = "cost-trace")]
+        ergo_sigma::cost_trace::record(format!("InputEnd:{i}"), 0, cx.cost.total().value());
         if !verified {
             return Err(ValidationError::ProofFailed { index: i });
         }

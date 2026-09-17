@@ -1,0 +1,286 @@
+{
+  "oracle" : "Ergo 6.0.5 ErgoState.execTransactions",
+  "fixture" : "test-vectors/ergo-sigma/cost-total/breakdown_700000_700001.json",
+  "observations" : [
+    {
+      "tx_id" : "e4cea1c9b4d3c52cf71e9b66363452e7bb5591f6f262ae27a3c90570dbb5e83a",
+      "height" : 700000,
+      "checkpoint_height" : null,
+      "block_cost" : 12356,
+      "box_reads" : 1
+    },
+    {
+      "tx_id" : "e4cea1c9b4d3c52cf71e9b66363452e7bb5591f6f262ae27a3c90570dbb5e83a",
+      "height" : 700000,
+      "checkpoint_height" : 699999,
+      "block_cost" : 12356,
+      "box_reads" : 1
+    },
+    {
+      "tx_id" : "e4cea1c9b4d3c52cf71e9b66363452e7bb5591f6f262ae27a3c90570dbb5e83a",
+      "height" : 700000,
+      "checkpoint_height" : 700000,
+      "block_cost" : 0,
+      "box_reads" : 0
+    },
+    {
+      "tx_id" : "e4cea1c9b4d3c52cf71e9b66363452e7bb5591f6f262ae27a3c90570dbb5e83a",
+      "height" : 700000,
+      "checkpoint_height" : 700001,
+      "block_cost" : 0,
+      "box_reads" : 0
+    },
+    {
+      "tx_id" : "cba71e328904bfc47b02b4b573fa654ad53db2df19e24a76edbbf3c929336c06",
+      "height" : 700000,
+      "checkpoint_height" : null,
+      "block_cost" : 15701,
+      "box_reads" : 3
+    },
+    {
+      "tx_id" : "cba71e328904bfc47b02b4b573fa654ad53db2df19e24a76edbbf3c929336c06",
+      "height" : 700000,
+      "checkpoint_height" : 699999,
+      "block_cost" : 15701,
+      "box_reads" : 3
+    },
+    {
+      "tx_id" : "cba71e328904bfc47b02b4b573fa654ad53db2df19e24a76edbbf3c929336c06",
+      "height" : 700000,
+      "checkpoint_height" : 700000,
+      "block_cost" : 0,
+      "box_reads" : 0
+    },
+    {
+      "tx_id" : "cba71e328904bfc47b02b4b573fa654ad53db2df19e24a76edbbf3c929336c06",
+      "height" : 700000,
+      "checkpoint_height" : 700001,
+      "block_cost" : 0,
+      "box_reads" : 0
+    },
+    {
+      "tx_id" : "fe9b3f57f8415a88149ac9b313e7c6b997852aa6dd809d40cf22011b68a090f4",
+      "height" : 700000,
+      "checkpoint_height" : null,
+      "block_cost" : 12189,
+      "box_reads" : 1
+    },
+    {
+      "tx_id" : "fe9b3f57f8415a88149ac9b313e7c6b997852aa6dd809d40cf22011b68a090f4",
+      "height" : 700000,
+      "checkpoint_height" : 699999,
+      "block_cost" : 12189,
+      "box_reads" : 1
+    },
+    {
+      "tx_id" : "fe9b3f57f8415a88149ac9b313e7c6b997852aa6dd809d40cf22011b68a090f4",
+      "height" : 700000,
+      "checkpoint_height" : 700000,
+      "block_cost" : 0,
+      "box_reads" : 0
+    },
+    {
+      "tx_id" : "fe9b3f57f8415a88149ac9b313e7c6b997852aa6dd809d40cf22011b68a090f4",
+      "height" : 700000,
+      "checkpoint_height" : 700001,
+      "block_cost" : 0,
+      "box_reads" : 0
+    },
+    {
+      "tx_id" : "70ab864cfdde1165a2eda697bb6d365f86a13b2598c8fe91e93cd71d29957dd4",
+      "height" : 700001,
+      "checkpoint_height" : null,
+      "block_cost" : 12356,
+      "box_reads" : 1
+    },
+    {
+      "tx_id" : "70ab864cfdde1165a2eda697bb6d365f86a13b2598c8fe91e93cd71d29957dd4",
+      "height" : 700001,
+      "checkpoint_height" : 700000,
+      "block_cost" : 12356,
+      "box_reads" : 1
+    },
+    {
+      "tx_id" : "70ab864cfdde1165a2eda697bb6d365f86a13b2598c8fe91e93cd71d29957dd4",
+      "height" : 700001,
+      "checkpoint_height" : 700001,
+      "block_cost" : 0,
+      "box_reads" : 0
+    },
+    {
+      "tx_id" : "70ab864cfdde1165a2eda697bb6d365f86a13b2598c8fe91e93cd71d29957dd4",
+      "height" : 700001,
+      "checkpoint_height" : 700002,
+      "block_cost" : 0,
+      "box_reads" : 0
+    },
+    {
+      "tx_id" : "381b7696e141acb17e496a6f13dcfa8fdee738e0a99e042cb682c1cd5755ca4a",
+      "height" : 700001,
+      "checkpoint_height" : null,
+      "block_cost" : 13337,
+      "box_reads" : 2
+    },
+    {
+      "tx_id" : "381b7696e141acb17e496a6f13dcfa8fdee738e0a99e042cb682c1cd5755ca4a",
+      "height" : 700001,
+      "checkpoint_height" : 700000,
+      "block_cost" : 13337,
+      "box_reads" : 2
+    },
+    {
+      "tx_id" : "381b7696e141acb17e496a6f13dcfa8fdee738e0a99e042cb682c1cd5755ca4a",
+      "height" : 700001,
+      "checkpoint_height" : 700001,
+      "block_cost" : 0,
+      "box_reads" : 0
+    },
+    {
+      "tx_id" : "381b7696e141acb17e496a6f13dcfa8fdee738e0a99e042cb682c1cd5755ca4a",
+      "height" : 700001,
+      "checkpoint_height" : 700002,
+      "block_cost" : 0,
+      "box_reads" : 0
+    },
+    {
+      "tx_id" : "c7b3362a093936aad9b6f772c02ddf78b7d59404d3d44ed1ef95b7e6fe70cd74",
+      "height" : 700001,
+      "checkpoint_height" : null,
+      "block_cost" : 12269,
+      "box_reads" : 1
+    },
+    {
+      "tx_id" : "c7b3362a093936aad9b6f772c02ddf78b7d59404d3d44ed1ef95b7e6fe70cd74",
+      "height" : 700001,
+      "checkpoint_height" : 700000,
+      "block_cost" : 12269,
+      "box_reads" : 1
+    },
+    {
+      "tx_id" : "c7b3362a093936aad9b6f772c02ddf78b7d59404d3d44ed1ef95b7e6fe70cd74",
+      "height" : 700001,
+      "checkpoint_height" : 700001,
+      "block_cost" : 0,
+      "box_reads" : 0
+    },
+    {
+      "tx_id" : "c7b3362a093936aad9b6f772c02ddf78b7d59404d3d44ed1ef95b7e6fe70cd74",
+      "height" : 700001,
+      "checkpoint_height" : 700002,
+      "block_cost" : 0,
+      "box_reads" : 0
+    },
+    {
+      "tx_id" : "cb001dcf98a98b979163d31662e95e1776059da4691550728b7fbef8c7e4778d",
+      "height" : 700001,
+      "checkpoint_height" : null,
+      "block_cost" : 16189,
+      "box_reads" : 2
+    },
+    {
+      "tx_id" : "cb001dcf98a98b979163d31662e95e1776059da4691550728b7fbef8c7e4778d",
+      "height" : 700001,
+      "checkpoint_height" : 700000,
+      "block_cost" : 16189,
+      "box_reads" : 2
+    },
+    {
+      "tx_id" : "cb001dcf98a98b979163d31662e95e1776059da4691550728b7fbef8c7e4778d",
+      "height" : 700001,
+      "checkpoint_height" : 700001,
+      "block_cost" : 0,
+      "box_reads" : 0
+    },
+    {
+      "tx_id" : "cb001dcf98a98b979163d31662e95e1776059da4691550728b7fbef8c7e4778d",
+      "height" : 700001,
+      "checkpoint_height" : 700002,
+      "block_cost" : 0,
+      "box_reads" : 0
+    },
+    {
+      "tx_id" : "0eb34b30c2d222e9ac350b3b94bb42246095a2244319005bb8ada95e1f9d25b2",
+      "height" : 700001,
+      "checkpoint_height" : null,
+      "block_cost" : 16701,
+      "box_reads" : 2
+    },
+    {
+      "tx_id" : "0eb34b30c2d222e9ac350b3b94bb42246095a2244319005bb8ada95e1f9d25b2",
+      "height" : 700001,
+      "checkpoint_height" : 700000,
+      "block_cost" : 16701,
+      "box_reads" : 2
+    },
+    {
+      "tx_id" : "0eb34b30c2d222e9ac350b3b94bb42246095a2244319005bb8ada95e1f9d25b2",
+      "height" : 700001,
+      "checkpoint_height" : 700001,
+      "block_cost" : 0,
+      "box_reads" : 0
+    },
+    {
+      "tx_id" : "0eb34b30c2d222e9ac350b3b94bb42246095a2244319005bb8ada95e1f9d25b2",
+      "height" : 700001,
+      "checkpoint_height" : 700002,
+      "block_cost" : 0,
+      "box_reads" : 0
+    },
+    {
+      "tx_id" : "fa20950619bf1becbcad2bf8c23d29b629e8f33ecde3b5b7cad3070c0f9bc9c0",
+      "height" : 700001,
+      "checkpoint_height" : null,
+      "block_cost" : 16189,
+      "box_reads" : 2
+    },
+    {
+      "tx_id" : "fa20950619bf1becbcad2bf8c23d29b629e8f33ecde3b5b7cad3070c0f9bc9c0",
+      "height" : 700001,
+      "checkpoint_height" : 700000,
+      "block_cost" : 16189,
+      "box_reads" : 2
+    },
+    {
+      "tx_id" : "fa20950619bf1becbcad2bf8c23d29b629e8f33ecde3b5b7cad3070c0f9bc9c0",
+      "height" : 700001,
+      "checkpoint_height" : 700001,
+      "block_cost" : 0,
+      "box_reads" : 0
+    },
+    {
+      "tx_id" : "fa20950619bf1becbcad2bf8c23d29b629e8f33ecde3b5b7cad3070c0f9bc9c0",
+      "height" : 700001,
+      "checkpoint_height" : 700002,
+      "block_cost" : 0,
+      "box_reads" : 0
+    },
+    {
+      "tx_id" : "b49d054081e4a191d048df203bd704ccdfead2eece1e1dcbced6998ccd3090b4",
+      "height" : 700001,
+      "checkpoint_height" : null,
+      "block_cost" : 20545,
+      "box_reads" : 5
+    },
+    {
+      "tx_id" : "b49d054081e4a191d048df203bd704ccdfead2eece1e1dcbced6998ccd3090b4",
+      "height" : 700001,
+      "checkpoint_height" : 700000,
+      "block_cost" : 20545,
+      "box_reads" : 5
+    },
+    {
+      "tx_id" : "b49d054081e4a191d048df203bd704ccdfead2eece1e1dcbced6998ccd3090b4",
+      "height" : 700001,
+      "checkpoint_height" : 700001,
+      "block_cost" : 0,
+      "box_reads" : 0
+    },
+    {
+      "tx_id" : "b49d054081e4a191d048df203bd704ccdfead2eece1e1dcbced6998ccd3090b4",
+      "height" : 700001,
+      "checkpoint_height" : 700002,
+      "block_cost" : 0,
+      "box_reads" : 0
+    }
+  ]
+}

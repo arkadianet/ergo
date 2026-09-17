@@ -19,6 +19,7 @@
 test-vectors/mainnet/transactions_*_[0-9][0-9][0-9][0-9][0-9][0-9]*.json
 test-vectors/mainnet/headers_*_[0-9][0-9][0-9][0-9][0-9][0-9]*.json
 test-vectors/mainnet/tx_costs_*_[0-9][0-9][0-9][0-9][0-9][0-9]*.json
+test-vectors/mainnet/l4_boxes.json
 test-vectors/mainnet/input_boxes_*_[0-9][0-9][0-9][0-9][0-9][0-9]*.json
 test-vectors/testnet/transactions_*_[0-9][0-9][0-9][0-9][0-9][0-9]*.json
 test-vectors/testnet/headers_*_[0-9][0-9][0-9][0-9][0-9][0-9]*.json

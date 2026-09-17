@@ -1,0 +1,131 @@
+{
+  "scala": {
+    "ergo_version": "6.0.5",
+    "sigmastate_version": "6.0.6",
+    "node_app_version": "6.0.5",
+    "source_shas": {
+      "ergo": "5528ef569a41ebccbc8658212e6ee3c97d990b96",
+      "sigmastate": "ab0b15ceb9d34f2ccd6e68e3e2a8aa27cd16a042"
+    }
+  },
+  "rust": {
+    "git_sha": "ddbad55dfae5cc3fb9405ea35db629fdb1f90afb",
+    "working_tree_changes": true,
+    "toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "features": "workspace defaults; ergo-validation test dependency enables cost-trace"
+  },
+  "tool": {
+    "path": "test-vectors/scripts/scala/ComputeTransactionCosts.scala",
+    "base_git_sha": "ddbad55dfae5cc3fb9405ea35db629fdb1f90afb",
+    "sha256": "ac33833e100537425c28432d8b58647ff152eef6f67add2f2942c90fb7c4b3e5",
+    "scala_cli": "1.12.1",
+    "scala": "2.12",
+    "jvm": "Corretto 17.0.17+10-LTS"
+  },
+  "context": {
+    "network": "mainnet",
+    "height_range": [
+      900058,
+      900058
+    ],
+    "activated_script_version": 2,
+    "block_version": 3,
+    "ergo_tree_versions": [
+      0,
+      1
+    ],
+    "voted_parameters": {
+      "900058": {
+        "storage_fee_factor": 1250000,
+        "min_value_per_byte": 360,
+        "max_block_cost": 8001091,
+        "input_cost": 2407,
+        "data_input_cost": 100,
+        "output_cost": 184,
+        "token_access_cost": 100,
+        "block_version": 3
+      }
+    },
+    "observations": {
+      "900058": {
+        "header_heights": [
+          900057,
+          900056,
+          900055,
+          900054,
+          900053,
+          900052,
+          900051,
+          900050,
+          900049
+        ],
+        "header_ids": [
+          "2e270b5ec6392a6c895f2ad5d6aec9d6e0cda4aa506dd31b4aa7812a4662fd4d",
+          "083bf038a994f758210260f2ed12f8ea831e85f31489a0d536f5fb19c79ef6cb",
+          "9ade62d843fb5ee5358eadbcff6ed4b25384f7b20fb57336ee1f772f18cdaaea",
+          "c02720cd105a9a5541082fb860ba63f1b0f509f8e897f66e7aed138f3ae84f89",
+          "97fdd9e30ca852cde52df3cc4afa55e63ed1054aea1f67507856bee5a06deb0f",
+          "8aa4bf58a42e1efb7a16c5e5ec6df0f91097f3798581837ec47ca67902644503",
+          "1fef421982f220ae9a1519ba95bd5a6de145d332948ead06b12993a505e8c5d6",
+          "3ca3967a34a10ddf0923f2a12167fb45174b82c1fd4d08bb3cfc325c70ba2d36",
+          "93ca28f197fc044557c9fe3cfffd1612d6eff7837516e3f12a1727a246f470bb"
+        ],
+        "previous_state_digest": "589b332321b8005c18e5014d7dc724e6d0f52a87247b2033d1804b1e588efe5d19"
+      }
+    },
+    "ergo_tree_version_scope": "all canonical boxes in fixture, including outputs"
+  },
+  "run": {
+    "command": "COST_HEADERS=test-vectors/mainnet/headers_900049_900058.json COST_FIXTURE=test-vectors/ergo-sigma/cost-total/breakdown_900058_900058.json scala-cli run test-vectors/scripts/scala/ComputeTransactionCosts.scala --server=false --suppress-outdated-dependency-warning -- 900058 900058",
+    "timestamp_utc": "2026-09-15T21:03:23.706223+00:00",
+    "seed": null,
+    "selected": 12,
+    "executed": 12,
+    "skipped": 0,
+    "failed": 0,
+    "inputs": 35,
+    "jvm_result": "all accepted and reconciled",
+    "rust_result": "12/12 accepted; every per-input field and total matches JVM; selected spend fails with empty headers",
+    "rust_command": "cargo test --workspace"
+  },
+  "coverage": {
+    "ledger_rows": [
+      "METHOD-context-headers"
+    ],
+    "spend_requiring_headers": "897d79ef0ca57b715e0176a22924ba396ff6bb25e23d8e604be136453f581781",
+    "root_accessor_execution": "not covered; no candidate found",
+    "candidate_scan": {
+      "height_ranges": [
+        [
+          700000,
+          700200
+        ],
+        [
+          900000,
+          901000
+        ],
+        [
+          1100000,
+          1101000
+        ],
+        [
+          1500000,
+          1501000
+        ],
+        [
+          1853000,
+          1854000
+        ]
+      ],
+      "blocks": 4205,
+      "unique_candidate_trees": 487,
+      "method": "grep output ErgoTrees for a6/6502/6509; deserialize candidate roots with JVM sigma-state 6.0.6; follow spentTransactionId via extraIndex"
+    }
+  },
+  "evidence": {
+    "test-vectors/ergo-sigma/cost-total/breakdown_900058_900058.json": "c23f79b1013869396909325169a01832cdf0a5dee04e50ddb710f7efbdc8cf88",
+    "test-vectors/mainnet/headers_900049_900058.json": "0c3794744f30cbbcc85bd1e8d24256625fb95b264ad805ca3669b27400d02dd8",
+    "test-vectors/scripts/scala/ComputeTransactionCosts.scala": "ac33833e100537425c28432d8b58647ff152eef6f67add2f2942c90fb7c4b3e5",
+    "ergo-validation/tests/it/cost_parity.rs": "4c7894e7e08e4344df717ec5544c152a18ff54fc8302f5c973dd641ce829e802"
+  }
+}

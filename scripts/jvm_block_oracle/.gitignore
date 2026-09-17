@@ -1,0 +1,4 @@
+.work/
+.scala-build/
+.bsp/
+__pycache__/
