@@ -307,6 +307,21 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
     let mut launch_parameters =
         ergo_validation::scala_launch_for_network(config.chain_spec.network);
     if let Some(cap) = config.devnet_max_block_cost {
+        // Runtime mirror of the `NodeConfig::load` gate: tests and library
+        // embedders construct `NodeConfig` directly, so without this check a
+        // devnet-only override could rewrite a consensus parameter on mainnet
+        // or testnet, and a value above `i32::MAX` would wrap on the cast.
+        if config.chain_spec.network != ergo_chain_spec::Network::Devnet
+            || cap == 0
+            || cap > i32::MAX as u32
+        {
+            return Err(format!(
+                "NodeConfig: devnet_max_block_cost requires devnet and a positive \
+                 Scala Int (got {cap} on {:?})",
+                config.chain_spec.network
+            )
+            .into());
+        }
         launch_parameters.max_block_cost = cap as i32;
     }
     let is_mode_5 = crate::config::is_canonical_mode_5_combo(
