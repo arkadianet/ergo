@@ -186,6 +186,7 @@ pub struct MiningHandle {
     /// [`MiningHandle::with_reemission_rules`].
     reemission_rules: Option<Arc<ReemissionRuleInputs>>,
     chain_config: Arc<DifficultyParams>,
+    network: ergo_chain_spec::Network,
     /// Per-network voting-epoch settings (length, soft-fork thresholds). Needed
     /// at an epoch-boundary candidate to run `compute_next_params` and to detect
     /// the boundary, exactly as the block validator does. Mainnet:
@@ -263,6 +264,7 @@ impl MiningHandle {
             // callers stay unchanged.
             reemission_rules: None,
             chain_config: Arc::new(chain_config),
+            network: ergo_chain_spec::Network::Mainnet,
             voting_settings: Arc::new(voting_settings),
             claim_storage_rent: false,
             max_storage_rent_claims: 0,
@@ -629,6 +631,17 @@ impl MiningHandle {
         Ok(saw_stale.unwrap_or(SolutionOutcome::InvalidPow))
     }
 
+    /// Select the network whose genesis mining rules apply.
+    pub fn with_network(mut self, network: ergo_chain_spec::Network) -> Self {
+        self.network = network;
+        self
+    }
+
+    /// Network gates private-chain genesis mining.
+    pub fn network(&self) -> ergo_chain_spec::Network {
+        self.network
+    }
+
     /// Borrow the configured mainnet/testnet DifficultyParams the handle
     /// was built with. Mining's submit path forwards this to
     /// `process_header_cfg` so block-version-aware difficulty
@@ -926,7 +939,7 @@ mod tests {
                 miner_pubkey: pk,
             },
             activated_script_version: 2,
-            last_headers: std::array::from_fn(|_| h.clone()),
+            last_headers: vec![h.clone(); 10],
             last_block_utxo_root: build_last_block_utxo_root(ADDigest::from_bytes([0u8; 33])),
         };
         let candidate = Candidate {

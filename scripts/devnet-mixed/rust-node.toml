@@ -1,0 +1,21 @@
+network = "devnet"
+data_dir = "scripts/devnet-mixed/.work/rust"
+[peers]
+known = ["127.0.0.1:19530"]
+bind_addr = "127.0.0.1:19531"
+allow_local = true
+target_outbound = 1
+[api]
+bind = "127.0.0.1:19554"
+[api.security]
+api_key_hash = "324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf"
+[indexer]
+enabled = true
+[mining]
+enabled = true
+offline_generation = true
+miner_public_key_hex = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+
+[sync]
+sync_interval_secs = 1
+sync_interval_stable_secs = 1
