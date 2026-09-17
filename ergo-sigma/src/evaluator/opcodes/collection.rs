@@ -451,6 +451,15 @@ pub(in crate::evaluator) fn eval_map_collection(
     let n = collection_len(&coll, cx.ctx);
     add_cost_per_item(cx.cost, 0xAD, n as u32)?;
     let mapper = cx.eval_expr(mapper_expr)?;
+    map_values(coll, mapper, cx)
+}
+
+/// Map an evaluated collection and closure after the caller's scheduled charge.
+pub(in crate::evaluator) fn map_values(
+    coll: Value,
+    mapper: Value,
+    cx: &mut EvalCtx<'_>,
+) -> Result<Value, EvalError> {
     let (_input_kind, items) = collection_to_values(coll, cx.ctx)?;
     match mapper {
         Value::Func {

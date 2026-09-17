@@ -5,7 +5,7 @@
 
 use ergo_primitives::reader::ReadError;
 
-use super::type_infer::determinable_root_type;
+use super::root_type::determinable_root_type;
 use super::{ErgoTree, JIT_ACTIVATION_VERSION};
 
 /// Scala `CheckHeaderSizeBit` (validation rule 1012, in `deserializeErgoTree`

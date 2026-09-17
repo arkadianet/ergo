@@ -465,6 +465,11 @@ pub(super) fn eval_no_arg_method(
     cost: &mut CostAccumulator,
 ) -> Result<Option<Value>, EvalError> {
     match (type_id, method_id) {
+        // Coll.size uses the SizeOf descriptor.
+        (12, 1) => {
+            add_cost(cost, 0xB1)?;
+            Ok(Some(Value::Int(collection_len(obj_val, ctx) as i32)))
+        }
         // SContext(101).dataInputs(1) -> Coll[Box]            cost: 15
         (101, 1) => {
             add_method_cost(cost, COST_CONTEXT_DATA_INPUTS)?;
@@ -480,6 +485,7 @@ pub(super) fn eval_no_arg_method(
             add_method_cost(cost, COST_CONTEXT_PRE_HEADER)?;
             Ok(Some(Value::PreHeader))
         }
+        (101, 6) => super::constants::eval_height(ctx, cost).map(Some),
         // SContext(101).selfBoxIndex(8) -> Int                cost: 20
         // Pre-JIT (activatedVersion < 2) always returns -1
         // (sigmastate-interpreter#603, preserved as consensus).

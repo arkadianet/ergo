@@ -263,6 +263,35 @@ object EvaluatedValueOracle {
     override type CTX = ErgoLikeContext
     var reduction: Option[Interpreter.ReductionResult] = None
     var chargedCrypto: Option[Long] = None
+    var gateFailureCost: Option[Long] = None
+    var gateBypass = false
+    var deserializedCost: Option[Long] = None
+    var propositionFailureCost: Option[Long] = None
+    abstract override protected def propositionFromErgoTree(tree: ErgoTree, ctx: ErgoLikeContext): sigma.ast.Value[sigma.ast.SSigmaProp.type] = {
+      try super.propositionFromErgoTree(tree, ctx)
+      catch {
+        case NonFatal(e) =>
+          // This stage has only the context baseline, before reduction charges.
+          propositionFailureCost = Some(ctx.initCost)
+          throw e
+      }
+    }
+    abstract override protected def checkSoftForkCondition(tree: ErgoTree, ctx: ErgoLikeContext): Option[Interpreter.VerificationResult] = {
+      try {
+        val result = super.checkSoftForkCondition(tree, ctx)
+        gateBypass = result.isDefined
+        result
+      } catch {
+        case NonFatal(e) =>
+          gateFailureCost = Some(ctx.initCost)
+          throw e
+      }
+    }
+    abstract override protected def deserializeMeasured(ctx: ErgoLikeContext, bytes: Array[Byte]): (ErgoLikeContext, sigma.ast.Value[sigma.ast.SType]) = {
+      val result = super.deserializeMeasured(ctx, bytes)
+      deserializedCost = Some(result._1.initCost)
+      result
+    }
     abstract override protected def addCryptoCost(sb: SigmaBoolean, base: Long, limit: Long): Long = {
       val result = super.addCryptoCost(sb, base, limit)
       chargedCrypto = Some(result)
@@ -321,10 +350,19 @@ object EvaluatedValueOracle {
       rent = cursor.get[Option[Boolean]]("rent").fold(throw _, identity).getOrElse(false)
       val activated = byte("activated_version")
       val expected = byte("tree_version_expected")
+      val treeBytes = bytes("tree_hex")
+      require((treeBytes(0) & 7) == expected, "tree_version_expected differs from serialized tree")
+      val parseOnly = cursor.get[Boolean]("parse_only").getOrElse(false)
+      if (parseOnly) verifying = true
       val tree = VersionContext.withVersions(1.toByte, 1.toByte) {
-        treeSer.deserializeErgoTree(bytes("tree_hex"))
+        treeSer.deserializeErgoTree(treeBytes)
       }
-      require(tree.version == expected, "tree_version_expected differs from serialized tree")
+      if (parseOnly) {
+        // A size-delimited parser retains its ValidationException in Left.
+        // Force that retained result without entering Interpreter.verify.
+        tree.toProposition(false)
+        return record("Accept", unavailable, None, "")
+      }
       val self = box(bytes("self_box_hex"))
       val inputs = array("inputs_hex").map(box)
       val data = array("data_inputs_hex").map(box)
@@ -344,8 +382,16 @@ object EvaluatedValueOracle {
         data.map(b => DataInput(b.id)), outputs)
       val root = headers.headOption.map(h => ErgoInterpreter.avlTreeFromDigest(h.stateRoot.digest))
         .getOrElse(AvlTreeData.dummy)
+      // ReplacedRule makes the caught validation exception a recognized soft fork
+      // (core/.../ValidationRules.scala:248, Interpreter.scala:249).
+      val replacements = cursor.get[Option[Map[String, Short]]]("validation_settings_replaced_rules")
+        .fold(throw _, identity).getOrElse(Map.empty)
+      val validationSettings = replacements.foldLeft(ValidationRules.currentSettings) {
+        case (settings, (id, replacement)) =>
+          settings.updated(id.toShort, sigma.validation.ReplacedRule(replacement))
+      }
       val ctx = new ErgoLikeContext(root, Colls.fromArray(headers.toArray), preHeader,
-        data, inputs, tx, selfIndex, ext, ValidationRules.currentSettings,
+        data, inputs, tx, selfIndex, ext, validationSettings,
         limit, init, activated).withErgoTreeVersion(expected)
       var rentCompleted = false
       val interpreter: ErgoLikeInterpreter with ObservedReduction = if (rent) {
@@ -367,6 +413,10 @@ object EvaluatedValueOracle {
       interpreter.reduction.foreach { r =>
         eval = Json.fromLong(r.cost - init)
         crypto = Json.fromLong(Interpreter.estimateCryptoVerifyCost(r.value).toBlockCost)
+      }
+      if (interpreter.gateBypass) {
+        eval = Json.fromLong(0)
+        crypto = Json.fromLong(0)
       }
       // The wallet rent path returns without invoking fullReduction.
       if (rentCompleted && result.isSuccess) {
@@ -409,7 +459,10 @@ object EvaluatedValueOracle {
             }
           }
           val cost = if (verdict == "RejectCost") failureCost(e)
-            else interpreter.chargedCrypto.map(Json.fromLong).getOrElse(unavailable)
+            else if (cursor.get[Boolean]("observe_deserialization_failure").getOrElse(false)) {
+              require(selected.isInstanceOf[sigma.validation.ValidationException], "expected deserialization validation failure")
+              interpreter.deserializedCost.map(Json.fromLong).getOrElse(unavailable)
+            } else interpreter.gateFailureCost.orElse(interpreter.propositionFailureCost).orElse(interpreter.chargedCrypto).map(Json.fromLong).getOrElse(unavailable)
           record(verdict, cost, Some(selected), e.toString)
       }
     } catch {
@@ -518,7 +571,7 @@ object EvaluatedValueOracle {
         "tree_version_expected" -> num(1), "activated_version" -> num(0)),
       "verdict" -> str("RejectScript"),
       "failure_class" -> str("sigma.exceptions.InterpreterException"),
-      "eval_block_cost" -> unavailable, "total_block_cost" -> unavailable)
+      "eval_block_cost" -> unavailable, "total_block_cost" -> num(0))
     require(verifyLine("{").hcursor.get[String]("verdict") == Right("RejectOther"))
     count += 1
     val wrapped = new RuntimeException("wrapper", new CostLimitException(51, "limit"))

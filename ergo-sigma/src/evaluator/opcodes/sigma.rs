@@ -601,143 +601,26 @@ pub(in crate::evaluator) fn eval_subst_constants(
     Ok(Value::CollBytes(result))
 }
 
-// 0xD4 DeserializeContext(id, type) -> T.
-// Reads a Coll[Byte] from context extension, deserializes as expression,
-// evaluates. Scala validates the deserialized expression's static type
-// matches `tpe` at the AST level. We don't track static types, so type
-// errors surface naturally when the value is consumed in a
-// type-incompatible context.
+// Deserialize nodes remaining after substitution cannot be evaluated.
 pub(in crate::evaluator) fn eval_deserialize_context(
     id: u8,
-    cx: &mut EvalCtx<'_>,
+    _cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
-    let (ext_tpe, ext_val) = cx
-        .ctx
-        .extension
-        .get(&id)
-        .ok_or_else(|| EvalError::TypeError {
-            expected: "context extension variable",
-            got: format!("extension var {id} not found"),
-        })?;
-    let bytes = match (ext_tpe, ext_val) {
-        (SigmaType::SColl(inner), SigmaValue::Coll(coll_val))
-            if matches!(inner.as_ref(), SigmaType::SByte) =>
-        {
-            match coll_val {
-                ergo_ser::sigma_value::CollValue::Bytes(b) => b.clone(),
-                _ => {
-                    return Err(EvalError::TypeError {
-                        expected: "Coll[Byte] for DeserializeContext",
-                        got: "non-byte collection".into(),
-                    })
-                }
-            }
-        }
-        _ => {
-            return Err(EvalError::TypeError {
-                expected: "Coll[Byte] for DeserializeContext",
-                got: format!("{ext_tpe:?}"),
-            })
-        }
-    };
-    add_cost_per_item(cx.cost, 0xD4, bytes.len() as u32)?;
-    // Deserialize as expression subtree (no constant segregation)
-    let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
-    // tree_version=0: the deserialized expression has no header of its
-    // own. The version does not affect method-call parsing — explicit
-    // type-args reads are keyed on `(type_id, method_id)` alone — so a
-    // v6 MethodCall in the payload parses correctly; not-yet-activated
-    // v6 methods are then rejected at evaluation time
-    // (`require_method_version`).
-    let expr = ergo_ser::opcode::parse_body(&mut r, 0).map_err(|e| EvalError::TypeError {
-        expected: "valid serialized expression",
-        got: format!("deserialization error: {e}"),
-    })?;
-    // Reject trailing bytes — full buffer must be consumed
-    if !r.is_empty() {
-        return Err(EvalError::TypeError {
-            expected: "fully consumed DeserializeContext bytes",
-            got: format!("{} trailing bytes", r.remaining()),
-        });
-    }
-    cx.eval_expr(&expr)
+    Err(EvalError::TypeError {
+        expected: "substituted DeserializeContext",
+        got: format!("unresolved extension var {id}"),
+    })
 }
 
-// 0xD5 DeserializeRegister(reg_id, type, default) -> T.
-// Reads Coll[Byte] from SELF box register, deserializes as expression,
-// evaluates. If register is absent and a default expression is provided,
-// evaluates the default.
 pub(in crate::evaluator) fn eval_deserialize_register(
     reg_id: u8,
-    default: Option<&Expr>,
-    cx: &mut EvalCtx<'_>,
+    _default: Option<&Expr>,
+    _cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
-    let self_box = cx.ctx.self_box.ok_or(EvalError::TypeError {
-        expected: "SELF box for DeserializeRegister",
-        got: "no self box in context".into(),
-    })?;
-    if !(4..=9).contains(&reg_id) {
-        return Err(EvalError::TypeError {
-            expected: "register R4-R9 for DeserializeRegister",
-            got: format!("register R{reg_id}"),
-        });
-    }
-    let reg_idx = (reg_id - 4) as usize;
-    match &self_box.registers[reg_idx] {
-        Some(rv) => {
-            let bytes = match (&rv.tpe, &rv.value) {
-                (SigmaType::SColl(inner), SigmaValue::Coll(coll_val))
-                    if matches!(inner.as_ref(), SigmaType::SByte) =>
-                {
-                    match coll_val {
-                        ergo_ser::sigma_value::CollValue::Bytes(b) => b.clone(),
-                        _ => {
-                            return Err(EvalError::TypeError {
-                                expected: "Coll[Byte] for DeserializeRegister",
-                                got: "non-byte collection".into(),
-                            })
-                        }
-                    }
-                }
-                _ => {
-                    return Err(EvalError::TypeError {
-                        expected: "Coll[Byte] for DeserializeRegister",
-                        got: format!("{:?}", rv.tpe),
-                    })
-                }
-            };
-            add_cost_per_item(cx.cost, 0xD5, bytes.len() as u32)?;
-            let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
-            // tree_version=0: the deserialized expression has no header of its
-            // own. The version does not affect method-call parsing — explicit
-            // type-args reads are keyed on `(type_id, method_id)` alone — so a
-            // v6 MethodCall in the payload parses correctly; not-yet-activated
-            // v6 methods are then rejected at evaluation time
-            // (`require_method_version`).
-            let expr =
-                ergo_ser::opcode::parse_body(&mut r, 0).map_err(|e| EvalError::TypeError {
-                    expected: "valid serialized expression in register",
-                    got: format!("deserialization error: {e}"),
-                })?;
-            if !r.is_empty() {
-                return Err(EvalError::TypeError {
-                    expected: "fully consumed DeserializeRegister bytes",
-                    got: format!("{} trailing bytes", r.remaining()),
-                });
-            }
-            cx.eval_expr(&expr)
-        }
-        None => {
-            if let Some(default_expr) = default {
-                cx.eval_expr(default_expr)
-            } else {
-                Err(EvalError::TypeError {
-                    expected: "register present or default for DeserializeRegister",
-                    got: format!("R{} absent with no default", reg_id),
-                })
-            }
-        }
-    }
+    Err(EvalError::TypeError {
+        expected: "substituted DeserializeRegister",
+        got: format!("unresolved register R{reg_id}"),
+    })
 }
 
 // 0xD0 SigmaPropBytes — serialize SigmaProp as ErgoTree proposition bytes.

@@ -59,6 +59,8 @@ pub(in crate::evaluator) fn eval_method_call(
     add_cost(cx.cost, 0xDC)?;
     match (type_id, method_id) {
         (12, 2) => coll::get_or_else(obj_val, args, cx),
+        (12, 3) => coll::map(obj_val, args, cx),
+        (12, 10) => coll::apply(obj_val, args, cx),
         (12, 26) => coll::index_of(obj_val, args, cx),
         (12, 29) => coll::zip(obj_val, args, cx),
         (12, 31) | (12, 32) => coll::starts_ends_with(method_id, obj_val, args, cx),

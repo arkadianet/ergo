@@ -1,3 +1,4 @@
+//! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/version/
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/interpreter/
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/op-fixed/
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/op-per-item/
@@ -44,6 +45,10 @@ struct Request {
     rent: Option<bool>,
     #[serde(default)]
     observe_evaluator_failure: bool,
+    #[serde(default)]
+    observe_deserialization_failure: bool,
+    #[serde(default)]
+    parse_only: bool,
 }
 
 fn decode<T>(
@@ -69,6 +74,10 @@ fn record(rent: bool) -> Value {
 fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
     use ergo_validation::test_helpers::{candidate_to_eval_box, ergo_box_to_eval_box};
     let value: Value = serde_json::from_slice(bytes).context("verify request JSON")?;
+    ensure!(
+        value.get("validation_settings_replaced_rules").is_none(),
+        "validation-settings overrides require JVM-only evidence until L4/L5 plumbing exists"
+    );
     let rent = value.get("rent").and_then(Value::as_bool).unwrap_or(false);
     *output = record(rent);
     let req: Request = serde_json::from_value(value).context("verify request fields")?;
@@ -85,6 +94,31 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
         tree.version == req.tree_version_expected,
         "tree_version_expected differs from serialized tree"
     );
+    if req.parse_only {
+        ensure!(
+            matches!(tree.body, ergo_ser::opcode::Expr::Unparsed(_)),
+            "parse-only rejection requires a retained parser validation failure"
+        );
+        // Recover the parser's rule-1001 reason from the retained wire body.
+        // The fixture has no segregated constants; other unparsed failures
+        // must not be mislabeled as Boolean-root validation.
+        let bytes = hex::decode(&req.tree_hex)?;
+        let mut reader = VlqReader::new(&bytes);
+        let header = reader.get_u8()?;
+        ensure!(header & 0x10 == 0, "parse-only probe must be nonsegregated");
+        if header & 8 != 0 {
+            reader.get_u32_exact()?;
+        }
+        let body = ergo_ser::opcode::parse_body(&mut reader, tree.version)?;
+        ensure!(
+            ergo_tree::determinable_root_type_of(&body, &[])
+                == Some(ergo_ser::sigma_type::SigmaType::SBoolean),
+            "parse-only probe must retain a Boolean root"
+        );
+        output["verdict"] = json!("RejectScript");
+        output["failure_class"] = json!("sigma.validation.ValidationException");
+        return Ok(());
+    }
     let self_box = decode(&req.self_box_hex, ergo_box::read_ergo_box)?;
     let inputs = req
         .inputs_hex
@@ -235,6 +269,11 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
     }
     match result {
         Ok(ok) => {
+            if tree.version > 3 && req.activated_version > 3 {
+                ensure!(trace.snaps.is_empty(), "future-version bypass evaluated");
+                output["eval_block_cost"] = json!(0);
+                output["crypto_block_cost"] = json!(0);
+            }
             output["verdict"] = json!(if ok { "Accept" } else { "RejectScript" });
             output["total_block_cost"] = json!(cost.total_block_cost());
             if !ok {
@@ -252,7 +291,17 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
                 output["evaluator_failure_block_cost"] = json!(cost.total_block_cost());
             }
             output["verdict"] = json!(verdict);
-            if is_cost || !trace.snaps.is_empty() {
+            if is_cost
+                || !trace.snaps.is_empty()
+                || req.observe_deserialization_failure
+                || matches!(
+                    error,
+                    ergo_sigma::reduce::VerifySpendingError::Eval(
+                        ergo_sigma::evaluator::EvalError::TreeVersionAboveActivated { .. }
+                            | ergo_sigma::evaluator::EvalError::UnparsedErgoTree
+                    )
+                )
+            {
                 output["total_block_cost"] = json!(cost.total_block_cost());
             }
             output["failure_class"] = json!(failure_class);
@@ -277,17 +326,31 @@ fn jvm_failure(
     use ergo_sigma::evaluator::EvalError;
     use ergo_sigma::reduce::VerifySpendingError;
     match error {
+        VerifySpendingError::Eval(EvalError::TypeError {
+            expected: "matching numeric types for Plus",
+            ..
+        }) => Ok(("RejectScript", "java.lang.ClassCastException")),
+        VerifySpendingError::Eval(EvalError::TypeError {
+            expected: "matching deserialized script type",
+            ..
+        }) => Ok(("RejectScript", "sigma.validation.ValidationException")),
         VerifySpendingError::Eval(EvalError::CostExceeded(_)) => {
             Ok(("RejectCost", "sigma.exceptions.CostLimitException"))
         }
         VerifySpendingError::Eval(
-            EvalError::UnsupportedOpcode(0x71)
+            EvalError::TypeError {
+                expected: "substituted DeserializeContext" | "substituted DeserializeRegister",
+                ..
+            }
+            | EvalError::UnsupportedOpcode(0x71)
             | EvalError::NotExecutable(..)
             | EvalError::DeprecatedOpcode(_)
             | EvalError::InternalOpcode(..),
         ) => Ok(("RejectScript", "java.lang.RuntimeException")),
         VerifySpendingError::Eval(EvalError::RuntimeException(
-            "Cannot compare SigmaBoolean values: unknown type" | "Unknown type SString",
+            "Cannot compare SigmaBoolean values: unknown type"
+            | "Unknown type SString"
+            | "DeserializeRegister script type mismatch",
         )) => Ok(("RejectOther", "java.lang.RuntimeException")),
         VerifySpendingError::Eval(EvalError::InvocationTargetException("Unknown type SString")) => {
             Ok(("RejectOther", "java.lang.reflect.InvocationTargetException"))
@@ -445,6 +508,25 @@ fn verify_fixture(path: &Path, fixture: Fixture, ledger: &Ledger) -> Result<bool
             .expected
             .get(field)
             .with_context(|| format!("{}: missing {field}", path.display()))?;
+        if fixture.request["parse_only"] == true
+            || ((fixture.request["observe_deserialization_failure"] == true
+                || fixture
+                    .ledger
+                    .iter()
+                    .any(|id| id == "VERSION-v6-method-gate")
+                || fixture
+                    .ledger
+                    .iter()
+                    .any(|id| id == "VERSION-tree-version-gate"))
+                && field == "total_block_cost")
+        {
+            ensure!(
+                &actual[field] == expected,
+                "{}: strict {field}: Rust={} JVM={expected}",
+                path.display(),
+                actual[field]
+            );
+        }
         // Section 4: an unavailable rejected-input cost is not a mismatch.
         if field != "verdict"
             && (actual["verdict"] != "Accept" || fixture.expected["verdict"] != "Accept")
@@ -527,7 +609,15 @@ fn verify_fixture(path: &Path, fixture: Fixture, ledger: &Ledger) -> Result<bool
             }
             _ => false,
         };
-        let tracking = "test-vectors/ergo-sigma/cost-ledger/fixtures/eval/DIVERGENCES.md";
+        let tracking = if path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|family| family == "interpreter")
+        {
+            "test-vectors/ergo-sigma/cost-ledger/fixtures/interpreter/DIVERGENCES.md"
+        } else {
+            "test-vectors/ergo-sigma/cost-ledger/fixtures/eval/DIVERGENCES.md"
+        };
         ensure!(
             classified
                 && known.tracking == tracking
@@ -646,7 +736,7 @@ fn cost_ledger_divergence_invalid_annotations_rejected() -> Result<()> {
 
 // ----- oracle parity -----
 
-// ledger: ORDER-propertycall-receiver, ORDER-methodcall-arguments, ORDER-powHit-validation, ORDER-serialize-incremental, ORDER-fixed-method-invocation, ORDER-avl-verifier-lookup, ORDER-if-condition, ORDER-optionget-input, METHOD-header-props, METHOD-global-encodeNbits, METHOD-coll-flatMap, METHOD-coll-indexOf, METHOD-coll-indices, METHOD-coll-patch, METHOD-coll-reverse, METHOD-coll-startsEndsWith, METHOD-coll-updateMany, METHOD-coll-updated, METHOD-coll-zip, METHOD-global-deserializeTo, METHOD-global-powHit, METHOD-global-xor, EVAL-avl-cost-height, METHOD-avl-contains, METHOD-avl-get, METHOD-avl-getMany, METHOD-avl-insert, METHOD-avl-insertOrUpdate, METHOD-avl-remove, METHOD-avl-update, METHOD-global-serialize, METHOD-global-serialize-E042, METHOD-global-serialize-E043, METHOD-global-serialize-E044, METHOD-global-serialize-E045, METHOD-global-serialize-E046, METHOD-global-serialize-E047, METHOD-option-map, METHOD-option-filter, EVAL-sstring-rejected, OP-0x96, OP-0xB3, OP-0x98, OP-0xCB, OP-0xD8, ROUND-perItem-chunking, OP-0xAE, OP-0xB5, OP-0xB0, OP-0xAF, OP-0xAD, OP-0x97, OP-0xCC, OP-0xEA, OP-0xEB, OP-0xD0, OP-0xB4, OP-0x74, OP-0xFF, OP-0x9B, INTERP-eval-sigmaprop-constant, OP-0x95, OP-0xDA, OP-0xE7-0xE9, OP-0xEC, OP-0xED, OP-0xF2, OP-0xF3, OP-0xF5, OP-0xF6, OP-0xF7, OP-0xF8, OP-TaggedVariable-A003, ORDER-bitop-charge-then-reject, EVAL-const-inline, EVAL-hasdeserialize-fork, EVAL-addtoenv, EVAL-numeric-cast, EVAL-arith-bigint, EVAL-eq-prim, EVAL-eq-matchtype, EVAL-eq-tuple, EVAL-eq-groupelement, EVAL-eq-bigint, EVAL-eq-avltree, EVAL-eq-box, EVAL-eq-option, EVAL-eq-preheader, EVAL-eq-header, EVAL-eq-coll-sigmaprop-descriptor, EVAL-eq-coll-fallback, EVAL-eq-tokens, EVAL-eq-sigmaboolean, EVAL-deferred-charge-on-exception, EVAL-eq-boxcollection, EVAL-eq-coll-descriptor, EVAL-eq-mismatch-and-unit-E032
+// ledger: VERSION-pre-v3-upcast, VERSION-v3-bool-root, VERSION-v6-method-gate, VERSION-selfboxindex-bug, VERSION-tree-version-gate, VERSION-v6-lazy-defaults, INTERP-crypto-conjunction, INTERP-crypto-threshold, INTERP-crypto-trivial-I013, INTERP-costlimit-op, INTERP-embedded-script-deser, INTERP-deser-subst, ORDER-propertycall-receiver, ORDER-methodcall-arguments, ORDER-powHit-validation, ORDER-serialize-incremental, ORDER-fixed-method-invocation, ORDER-avl-verifier-lookup, ORDER-if-condition, ORDER-optionget-input, METHOD-header-props, METHOD-global-encodeNbits, METHOD-coll-flatMap, METHOD-coll-indexOf, METHOD-coll-indices, METHOD-coll-patch, METHOD-coll-reverse, METHOD-coll-startsEndsWith, METHOD-coll-updateMany, METHOD-coll-updated, METHOD-coll-zip, METHOD-global-deserializeTo, METHOD-global-powHit, METHOD-global-xor, EVAL-avl-cost-height, METHOD-avl-contains, METHOD-avl-get, METHOD-avl-getMany, METHOD-avl-insert, METHOD-avl-insertOrUpdate, METHOD-avl-remove, METHOD-avl-update, METHOD-global-serialize, METHOD-global-serialize-E042, METHOD-global-serialize-E043, METHOD-global-serialize-E044, METHOD-global-serialize-E045, METHOD-global-serialize-E046, METHOD-global-serialize-E047, METHOD-option-map, METHOD-option-filter, EVAL-sstring-rejected, OP-0x96, OP-0xB3, OP-0x98, OP-0xCB, OP-0xD8, ROUND-perItem-chunking, OP-0xAE, OP-0xB5, OP-0xB0, OP-0xAF, OP-0xAD, OP-0x97, OP-0xCC, OP-0xEA, OP-0xEB, OP-0xD0, OP-0xB4, OP-0x74, OP-0xFF, OP-0x9B, INTERP-eval-sigmaprop-constant, OP-0x95, OP-0xDA, OP-0xE7-0xE9, OP-0xEC, OP-0xED, OP-0xF2, OP-0xF3, OP-0xF5, OP-0xF6, OP-0xF7, OP-0xF8, OP-TaggedVariable-A003, ORDER-bitop-charge-then-reject, EVAL-const-inline, EVAL-hasdeserialize-fork, EVAL-addtoenv, EVAL-numeric-cast, EVAL-arith-bigint, EVAL-eq-prim, EVAL-eq-matchtype, EVAL-eq-tuple, EVAL-eq-groupelement, EVAL-eq-bigint, EVAL-eq-avltree, EVAL-eq-box, EVAL-eq-option, EVAL-eq-preheader, EVAL-eq-header, EVAL-eq-coll-sigmaprop-descriptor, EVAL-eq-coll-fallback, EVAL-eq-tokens, EVAL-eq-sigmaboolean, EVAL-deferred-charge-on-exception, EVAL-eq-boxcollection, EVAL-eq-coll-descriptor, EVAL-eq-mismatch-and-unit-E032
 #[test]
 fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-vectors/ergo-sigma/cost-ledger");
