@@ -15,14 +15,20 @@ HERE = ROOT / 'scripts/devnet-mixed'
 WORK = HERE / '.work'
 
 
-def owned(pid):
+def owned(pid, configs=None):
+    """A process this recipe started: running from this checkout, against one of
+    the config paths we launched. `configs` carries the resolved paths recorded
+    with the PID, so a node started with a custom SCALA_CONFIG / RUST_CONFIG is
+    still matched — otherwise stop() would drop its PID file and leave it
+    running, and the next campaign would fail to bind its ports."""
     proc = Path('/proc') / str(pid)
+    known = tuple(configs) if configs else (
+        'devnet-mixed/scala-node.conf', 'devnet-mixed/rust-node.toml',
+        'devnet-mixed/.work/campaign-scala-node.conf',
+        'devnet-mixed/.work/campaign-rust-node.toml')
     try:
         cmd = (proc / 'cmdline').read_bytes().replace(b'\0', b' ').decode()
-        return proc.joinpath('cwd').resolve() == ROOT and any(
-            s in cmd for s in ('devnet-mixed/scala-node.conf', 'devnet-mixed/rust-node.toml',
-                           'devnet-mixed/.work/campaign-scala-node.conf',
-                           'devnet-mixed/.work/campaign-rust-node.toml'))
+        return proc.joinpath('cwd').resolve() == ROOT and any(s in cmd for s in known)
     except FileNotFoundError:
         return False
 
@@ -33,14 +39,17 @@ def stop():
         if not path.exists():
             continue
         pid = int(path.read_text())
-        if owned(pid):
+        config_path = WORK / (name + '.config')
+        configs = [config_path.read_text().strip()] if config_path.exists() else None
+        if owned(pid, configs):
             os.kill(pid, signal.SIGTERM)
             deadline = time.monotonic() + 30
-            while owned(pid) and time.monotonic() < deadline:
+            while owned(pid, configs) and time.monotonic() < deadline:
                 time.sleep(0.2)
-            if owned(pid):
+            if owned(pid, configs):
                 raise RuntimeError(f'{name} did not stop; PID {pid} retained')
         path.unlink()
+        config_path.unlink(missing_ok=True)
 
 
 
@@ -84,7 +93,11 @@ def start():
             with (WORK / (name + '.log')).open('a') as log:
                 process = subprocess.Popen(command, cwd=ROOT, stdout=log,
                                            stderr=subprocess.STDOUT, start_new_session=True)
+            # Record the resolved config with the PID so stop() can recognise a
+            # node launched from a custom SCALA_CONFIG / RUST_CONFIG path.
             (WORK / (name + '.pid')).write_text(str(process.pid))
+            (WORK / (name + '.config')).write_text(
+                {'scala': scala_config, 'rust': rust_config}[name])
             port = {'scala': 19553, 'rust': 19554}[name]
             deadline = time.monotonic() + 60
             while True:

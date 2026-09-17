@@ -21,6 +21,23 @@ VECTORS = RESULTS.parent
 CAP = 37509
 
 
+
+def _working_tree_evidence() -> dict:
+    """Record the working tree exactly, not just a hash of it.
+
+    A hash alone lets a PASS stand for uncommitted changes that nobody can
+    reconstruct or review, so the diff itself is archived beside the result and
+    the manifest names the file it is verified against.
+    """
+    diff = subprocess.check_output(['git', 'diff', 'HEAD'], cwd=ROOT)
+    evidence = {'working_diff_sha256': hashlib.sha256(diff).hexdigest(),
+                'working_diff_clean': not diff}
+    if diff:
+        archive = WORK / 'working-diff.patch'
+        archive.write_bytes(diff)
+        evidence['working_diff_path'] = str(archive.relative_to(ROOT))
+    return evidence
+
 def require_peers():
     try:
         counts = {node: len(api(node, '/peers/connected')) for node in URLS}
@@ -157,7 +174,7 @@ def main():
              'scala_launch_override': {'source': 'scripts/devnet-mixed/CampaignParameters.scala', 'parameters': {'4': CAP}, 'scope': 'devnet60 genesis only; original validation and cost code'},
              'rust': {'git_sha': revision, 'features': ['default'],
                       'toolchain': subprocess.check_output(['rustc', '--version'], text=True).strip(),
-                      'working_diff_sha256': hashlib.sha256(subprocess.check_output(['git', 'diff', 'HEAD'], cwd=ROOT)).hexdigest()},
+                      **_working_tree_evidence()},
              'tool': {'script': 'scripts/devnet-mixed/campaign.sh', 'git_sha': revision,
                       'scala_cli_version': subprocess.check_output(['scala-cli', 'version', '--cli'], text=True).strip(),
                       'jvm': subprocess.run(['java', '-version'], capture_output=True, text=True).stderr.strip()},

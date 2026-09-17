@@ -24,8 +24,10 @@ whose command line and working directory identify this recipe. Data is
 preserved; the smoke requires fresh height-zero state. To rerun, stop both
 nodes and move `.work/rust` and `.work/scala` aside within `.work/` first.
 `start.sh` refuses occupied ports and cleans up its nodes on startup failure.
-Use `RUST_NODE=/absolute/path/to/ergo-node` to override the default configured
-Cargo-target binary at `/home/rkadias/.cache/cargo-target/debug/ergo-node`.
+The node binary defaults to `$CARGO_TARGET_DIR/debug/ergo-node` for this
+checkout (cargo's configured target directory, `target/debug/ergo-node` by
+default); build it with `cargo build -p ergo-node`. Set
+`RUST_NODE=/absolute/path/to/ergo-node` to override it.
 
 The classpath comes from `scripts/jvm_block_oracle/.work/classpath`.
 Its provisioning script extracts Ergo commit
@@ -125,7 +127,7 @@ python3 scripts/devnet-mixed/verify-receipt.py
 
 To reproduce the build, use the receipt's `rust.git_sha` in this worktree with a
 clean status, then run `cargo build -p ergo-node` with the recorded toolchain
-and default features. Compare `sha256sum /home/rkadias/.cache/cargo-target/debug/ergo-node`
+and default features. Compare `sha256sum $CARGO_TARGET_DIR/debug/ergo-node`
 with `rust.binary_sha256` (build paths and toolchain must match).
 
 No cost-ledger rows are closed by this recipe.
@@ -212,7 +214,7 @@ the receipt records its base revision and working diff hash. Both recipe-owned
 processes were stopped using their PID files after verification. No cost-ledger
 row is closed by this transport test.
 
-## Cost campaign (Task 7.3 — blocked)
+## Cost campaign (Task 7.3 — completed by Task 0.11)
 
 ```sh
 cargo build -p ergo-node
