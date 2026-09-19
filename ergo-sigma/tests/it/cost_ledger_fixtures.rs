@@ -349,6 +349,8 @@ fn jvm_failure(
                 ..
             }
             | EvalError::UnsupportedOpcode(0x71)
+            // CreateAvlTree inherits Value.eval (values.scala:101-102);
+            // Its sys.error throws RuntimeException before child evaluation.
             | EvalError::NotExecutable(..)
             | EvalError::DeprecatedOpcode(_)
             | EvalError::InternalOpcode(..),
@@ -647,33 +649,9 @@ fn verify_fixture(path: &Path, fixture: Fixture, ledger: &Ledger) -> Result<bool
                             .all(|field| matches!(field.as_str(), "verdict" | "failure_class"))
                     })
             }
-            // The deferred CreateAvlTree parser fix changes rejection stage,
-            // including cost-limit precedence. Pin every differing field below.
-            "rejection-order" => {
-                known.ledger == "OP-0xB6"
-                    && actual["verdict"] == "RejectScript"
-                    && actual["failure_class"] == "sigma.exceptions.InterpreterException"
-                    && matches!(
-                        fixture.expected["verdict"].as_str(),
-                        Some("RejectScript" | "RejectCost")
-                    )
-                    && differences.as_object().is_some_and(|fields| {
-                        fields.keys().all(|field| {
-                            matches!(
-                                field.as_str(),
-                                "verdict"
-                                    | "failure_class"
-                                    | "total_block_cost"
-                                    | "evaluator_failure_block_cost"
-                            )
-                        })
-                    })
-            }
             _ => false,
         };
-        let tracking = if known.ledger == "OP-0xB6" {
-            "test-vectors/ergo-sigma/cost-ledger/fixtures/op-fixed/DIVERGENCES.md"
-        } else if path
+        let tracking = if path
             .parent()
             .and_then(Path::file_name)
             .is_some_and(|family| family == "interpreter")
@@ -814,28 +792,25 @@ fn create_avl_tree_divergence_invalid_annotations_rejected() -> Result<()> {
     case["ledger"] = document["ledger"].clone();
     let ledger: Ledger = toml::from_str(&std::fs::read_to_string(root.join("ledger.toml"))?)?;
     let check = |value: Value| verify_fixture(&path, serde_json::from_value(value)?, &ledger);
-    assert!(check(case.clone())?);
-    let mut changed = case.clone();
-    changed["known_divergence"]["differences"]["evaluator_failure_block_cost"]["rust"] = json!(999);
-    assert!(check(changed)
-        .unwrap_err()
-        .to_string()
-        .contains("recorded divergence changed"));
-    let mut wrong_class = case.clone();
-    wrong_class["known_divergence"]["classification"] = json!("cost-only");
-    assert!(check(wrong_class)
-        .unwrap_err()
-        .to_string()
-        .contains("stale or misclassified divergence"));
-    let mut wrong_row = case.clone();
-    wrong_row["known_divergence"]["ledger"] = json!("OP-0xB7");
-    assert!(check(wrong_row)
+    assert!(!check(case.clone())?);
+
+    // A resolved case must never acquire a divergence exemption on a CLOSED row.
+    let mut stale = case.clone();
+    stale["known_divergence"] = json!({
+        "ledger": "OP-0xB6",
+        "classification": "rejection-order",
+        "tracking": "test-vectors/ergo-sigma/cost-ledger/fixtures/op-fixed/DIVERGENCES.md",
+        "differences": {
+            "evaluator_failure_block_cost": {"rust": 0, "jvm": 1}
+        }
+    });
+    assert!(check(stale)
         .unwrap_err()
         .to_string()
         .contains("requires an attached DIVERGENT ledger row"));
-    case.as_object_mut()
-        .context("case")?
-        .remove("known_divergence");
+
+    // Synthetic metadata tests the runner, not the authoritative JVM expectation.
+    case["expected"]["evaluator_failure_block_cost"] = json!(999);
     assert!(check(case)
         .unwrap_err()
         .to_string()

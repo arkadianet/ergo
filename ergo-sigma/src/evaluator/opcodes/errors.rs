@@ -10,7 +10,8 @@ use super::super::types::{EvalError, Value};
 // `trees.scala:77` "TODO v6.0: implement `eval` method and add support
 // in GraphBuilding". Companion at `trees.scala:87-91` declares
 // `costKind = Value.notSupportedError`. Serializer registered for
-// deserialization parity but no runtime path.
+// deserialization parity. Value.eval (values.scala:101-102) throws before
+// evaluating any children or adding cost; prefixes retain their accumulated cost.
 pub(in crate::evaluator) fn eval_create_avl_tree() -> Result<Value, EvalError> {
     Err(EvalError::NotExecutable(0xB6, "CreateAvlTree"))
 }

@@ -489,6 +489,8 @@ fn op_result_type(opcode: u8) -> Option<crate::sigma_type::SigmaType> {
         0x9F | 0xA0 | 0xEE => Some(SGroupElement),
         0x74 | 0x7A | 0x9B | 0xC2..=0xC5 | 0xCB | 0xCC | 0xD0 => Some(SColl(Box::new(SByte))),
         0xC7 => Some(STuple(vec![SInt, SColl(Box::new(SByte))])),
+        // CreateAvlTreeSerializer reads four expressions; trees.scala:83 returns SAvlTree.
+        0xB6 => Some(SAvlTree),
         0xB7 => Some(SOption(Box::new(SColl(Box::new(SByte))))),
         _ => None,
     }
@@ -509,19 +511,12 @@ fn zero_arg_type(opcode: u8) -> crate::sigma_type::SigmaType {
         0x82 => SGroupElement,                // GroupGenerator
         0xA3 => SInt,                         // Height
         0xA4 | 0xA5 => SColl(Box::new(SBox)), // Inputs / Outputs
-        // 0xA6 LastBlockUtxoRootHash. 0xB6 is Scala's `AvlTreeCode`
-        // (`CreateAvlTree`, `tpe = SAvlTree`, four arguments); this parser routes
-        // it as a deprecated zero-argument leaf (`opcode_pattern`), so the arm is
-        // reached here rather than from `op_result_type`. Either way the type is
-        // `SAvlTree`, never `SigmaProp`, so the rule-1001 root judgement agrees
-        // with Scala (oracle-checked: `00b602010e0004402800` and `00b6` both
-        // reconcile on the `ergo_tree` surface).
-        0xA6 | 0xB6 => SAvlTree,
-        0xA7 => SBox,                   // Self
-        0xAC => SColl(Box::new(SByte)), // MinerPubkey
-        0xDD => SGlobal,                // Global
-        0xFE => SContext,               // Context
-        _ => SAny,                      // deprecated/unknown leaf — still non-SigmaProp
+        0xA6 => SAvlTree,                     // LastBlockUtxoRootHash
+        0xA7 => SBox,                         // Self
+        0xAC => SColl(Box::new(SByte)),       // MinerPubkey
+        0xDD => SGlobal,                      // Global
+        0xFE => SContext,                     // Context
+        _ => SAny,                            // deprecated/unknown leaf — still non-SigmaProp
     }
 }
 

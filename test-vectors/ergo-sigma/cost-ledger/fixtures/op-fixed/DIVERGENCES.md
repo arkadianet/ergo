@@ -1,16 +1,13 @@
-# CreateAvlTree parser residual (OP-0xB6)
+# CreateAvlTree parser parity (OP-0xB6)
 
-Tracking: JIT-cost conformance task 9.1-fix, deferred parser task.
-Classification: rejection-order (both reject; parser arity changes failure class,
-charged-to-failure cost, and cost-limit precedence).
+Resolved by task 9.1e: `fix(ser,sigma): parse CreateAvlTree with its four operands and reject it at evaluation like Scala`.
 
-The pinned sigma-state 6.0.2 JVM parses CreateAvlTree's four operands and rejects
-execution with java.lang.RuntimeException. Rust treats 0xB6 as zero-arity and
-retains an UnparsedErgoTree, rejecting with sigma.exceptions.InterpreterException.
-For opb6-prefix4 the JVM evaluator failure cost is 1 block unit and Rust's is 0.
-At low limits the JVM can reject with CostLimitException instead.
+CreateAvlTree parses four generic expressions in serializer order: operationFlags,
+digest, keyLength, valueLengthOpt. Its static result type is SAvlTree.
+Inherited Value.eval throws java.lang.RuntimeException before evaluating children
+or charging for the node (sigma-state 6.0.2 values.scala:101-102).
 
-All 36 cases in zero-cost-rejects.json.gz carry exact observed Rust/JVM field
-differences; JVM expectations are unchanged. The runner requires this DIVERGENT
-ledger row and fails if the recorded differences change or disappear. This
-annotation does not establish conformance or close OP-0xB6.
+All 36 CreateAvlTree cases in zero-cost-rejects.json.gz compare without divergence
+annotations. The regenerated JVM expectations are unchanged. Prefixes 0..9 expose
+evaluator failure block costs 0,0,0,0,1,1,1,2,2,2; low limits preserve RejectCost
+precedence. Full verify totals on these rejections remain unavailable.

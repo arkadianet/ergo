@@ -8,7 +8,7 @@ Source ledger: sigmastate `v6.0.2 23dd29f612249c169d09fae9bca76d7cc02e144c`, erg
 
 | category | OPEN | CLOSED | DIVERGENT | N-A | total |
 |---|---:|---:|---:|---:|---:|
-| OP | 1 | 95 | 1 | 13 | 110 |
+| OP | 1 | 96 | 0 | 13 | 110 |
 | METHOD | 1 | 69 | 0 | 2 | 72 |
 | EVAL | 0 | 25 | 0 | 2 | 27 |
 | INTERP | 3 | 12 | 0 | 1 | 16 |
@@ -18,7 +18,7 @@ Source ledger: sigmastate `v6.0.2 23dd29f612249c169d09fae9bca76d7cc02e144c`, erg
 | TX | 1 | 7 | 0 | 2 | 10 |
 | BLOCK | 5 | 7 | 0 | 3 | 15 |
 | VERSION | 16 | 7 | 0 | 1 | 24 |
-| **all** | 32 | 240 | 1 | 24 | 297 |
+| **all** | 32 | 241 | 0 | 24 | 297 |
 
 States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test with an independent oracle; DIVERGENT = confirmed mismatch, fix pending; N-A = reviewed rationale in note.
 
@@ -78,7 +78,7 @@ States: OPEN = no independent-oracle evidence yet; CLOSED = named passing test w
 | `OP-0xB3` | CLOSED | data/shared/src/main/scala/sigma/ast/transformers.scala:74; Append.costKind PerItemCost(20,2,100) | `ergo-sigma/src/cost_table.rs` | L1,L2 | `ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` | JVM 6.0.2 verify: fixtures/op-per-item/append.json.gz; lengths 0, 1, k−1, k, k+1, 2k+1 (deduplicated), ten prefixes covering JIT remainders modulo ten. |
 | `OP-0xB4` | CLOSED | data/shared/src/main/scala/sigma/ast/transformers.scala:106; Slice prices `max(0, until-from)`, using ordinary Int subtraction, rather than actual sliced-result length. `data/shared/src/main/scala/sigma/ast/transformers.scala:106` and preceding evaluator body. | `ergo-sigma/src/cost_table.rs` | L1,L2 | `ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` | JVM 6.0.2 verify: fixtures/op-per-item/slice.json.gz; lengths 0, 1, k−1, k, k+1, 2k+1 (deduplicated), ten prefixes covering JIT remainders modulo ten. |
 | `OP-0xB5` | CLOSED | data/shared/src/main/scala/sigma/ast/transformers.scala:134; Filter.costKind PerItemCost(20,1,10) | `ergo-sigma/src/cost_table.rs` | L1,L2 | `ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` | JVM 6.0.2 verify: fixtures/op-per-item/filter.json.gz; lengths 0, 1, k−1, k, k+1, 2k+1 (deduplicated), ten prefixes covering JIT remainders modulo ten. |
-| `OP-0xB6` | DIVERGENT | data/shared/src/main/scala/sigma/ast/trees.scala:89; CreateAvlTree.costKind = notSupportedError | `ergo-sigma/src/evaluator/opcodes/errors.rs:90` | L1,L2 | `ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` | DIVERGENT rejection-order; parser arity fix deferred to the next task. Tracking: test-vectors/ergo-sigma/cost-ledger/fixtures/op-fixed/DIVERGENCES.md. All 36 CreateAvlTree cases retain exact known_divergence field differences. JVM parses four operands and throws java.lang.RuntimeException during eval; Rust retains UnparsedErgoTree and throws sigma.exceptions.InterpreterException. opb6-prefix4: JVM evaluator_failure_block_cost=1 versus Rust=0; JVM verify total unavailable. Low limits also differ RejectCost versus RejectScript. No parser or evaluator fix. |
+| `OP-0xB6` | CLOSED | data/shared/src/main/scala/sigma/ast/trees.scala:79-90; values.scala:101-102; CreateAvlTree inherits unsupported Value.eval | `ergo-ser/src/opcode/types.rs + ergo-sigma/src/evaluator/opcodes/errors.rs` | L1,L2 | `ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` | Fix commit: fix(ser,sigma): parse CreateAvlTree with its four operands and reject it at evaluation like Scala (task 9.1e, PR #347 series). Four generic operands retain SAvlTree and round-trip exactly; evaluation throws java.lang.RuntimeException before children or node charges. All 36 JVM cases match, including low-limit RejectCost precedence. JVM evaluator_failure_block_cost for prefixes 0..9: 0,0,0,0,1,1,1,2,2,2; verify total unavailable on rejection. zero-cost-rejects.json.gz regenerated against sigma-state 6.0.2 with unchanged expectations; no known_divergence markers. |
 | `OP-0xB7` | CLOSED | data/shared/src/main/scala/sigma/ast/trees.scala:1336; TreeLookup.costKind = notSupportedError | `ergo-sigma/src/evaluator/opcodes/errors.rs:90` | L1,L2 | `ergo-sigma::it::cost_ledger_fixtures::cost_ledger_fixtures_jvm_verify_fields_match` | fixtures/op-fixed/zero-cost-rejects.json.gz: all 36 cases for this opcode match JVM runtime rejection and supplementary evaluator failure cost, including ten prefixes and JVM failure-cost boundary sweeps. Full verify rejection totals are unavailable in JVM; an accepting no-op control is included but cannot establish the brief's numeric total-to-total zero-charge comparison. Closed by the passing aggregate JVM comparison under design section 4: unavailable full-verify costs are not compared; observed failure costs and rejection fields match. |
 | `OP-0xC1` | CLOSED | data/shared/src/main/scala/sigma/ast/transformers.scala:394; ExtractAmount.costKind FixedCost(8) | `ergo-sigma/src/cost_table.rs:87` | L1,L2 | `ergo-sigma::it::cost_pin::opcode_cost_table_matches_scala_constants` |  |
 | `OP-0xC2` | CLOSED | data/shared/src/main/scala/sigma/ast/transformers.scala:420; ExtractScriptBytes.costKind FixedCost(10) | `ergo-sigma/src/cost_table.rs:88` | L1,L2 | `ergo-sigma::it::cost_pin::opcode_cost_table_matches_scala_constants` |  |

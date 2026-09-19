@@ -383,7 +383,7 @@ pub(super) fn opcode_pattern(op: u8) -> Option<ArgPattern> {
         0xB3 => Some(Two),     // Append
         0xB4 => Some(Three),   // Slice
         0xB5 => Some(Two),     // Filter
-        0xB6 => Some(Zero),    // AvlTreeCode (deprecated)
+        0xB6 => Some(Four),    // CreateAvlTree: flags, digest, keyLength, valueLengthOpt
         // 0xB7 TreeLookup — Scala registers QuadrupleSerializer at
         // ValueSerializer.scala:55 with 3 inputs (tree, key, proof) +
         // 1 output type. Wire arity = 3. Scala deserializes OK then
@@ -821,4 +821,64 @@ pub fn find_v3_only_method(expr: &Expr) -> Option<(u8, u8)> {
 /// hard-rejects the box. Superset of [`find_v3_only_method`] (adds unknown methods).
 pub fn find_unresolved_v5_method(expr: &Expr) -> Option<(u8, u8)> {
     find_method_matching(expr, |t, m| !is_v5_method(t, m))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Oracle: scripts/jvm_serde_oracle/ErgoSerdeOracle.scala
+    //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/op-fixed/zero-cost-rejects.json.gz
+
+    use super::*;
+    use crate::opcode::{parse_expr, write_expr};
+    use ergo_primitives::{reader::VlqReader, writer::VlqWriter};
+
+    // ----- round-trips -----
+
+    #[test]
+    fn create_avl_tree_four_operands_roundtrip() {
+        let bytes = hex::decode("b602010e0004402800").unwrap();
+        let mut reader = VlqReader::new(&bytes);
+        let expr = parse_expr(&mut reader, 0, 3).unwrap();
+        let Expr::Op(IrNode {
+            opcode: 0xB6,
+            payload: Payload::Four(flags, digest, key_length, value_length),
+        }) = &expr
+        else {
+            panic!("expected four CreateAvlTree operands: {expr:?}");
+        };
+        for (operand, expected) in [
+            (flags, SigmaType::SByte),
+            (digest, SigmaType::SColl(Box::new(SigmaType::SByte))),
+            (key_length, SigmaType::SInt),
+            (value_length, SigmaType::SOption(Box::new(SigmaType::SInt))),
+        ] {
+            assert!(matches!(operand.as_ref(), Expr::Const { tpe, .. } if *tpe == expected));
+        }
+        let mut writer = VlqWriter::new();
+        write_expr(&mut writer, &expr, false).unwrap();
+        assert_eq!(writer.result(), bytes);
+    }
+
+    #[test]
+    fn create_avl_tree_expression_operand_roundtrip() {
+        // Height is an Int expression in the keyLength slot, not a constant.
+        let bytes = hex::decode("b602010e00a32800").unwrap();
+        let expr = parse_expr(&mut VlqReader::new(&bytes), 0, 3).unwrap();
+        assert!(matches!(&expr, Expr::Op(IrNode {
+            payload: Payload::Four(_, _, key_length, _), ..
+        }) if matches!(key_length.as_ref(), Expr::Op(IrNode { opcode: 0xA3, .. }))));
+        let mut writer = VlqWriter::new();
+        write_expr(&mut writer, &expr, false).unwrap();
+        assert_eq!(writer.result(), bytes);
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn create_avl_tree_truncated_operands_rejected() {
+        let bytes = hex::decode("b602010e0004402800").unwrap();
+        for length in 1..bytes.len() {
+            assert!(parse_expr(&mut VlqReader::new(&bytes[..length]), 0, 3).is_err());
+        }
+    }
 }
