@@ -4661,7 +4661,7 @@
     },
     "OP-0xB6": {
       "fields": {
-        "scala": "data/shared/src/main/scala/sigma/ast/trees.scala:89; CreateAvlTree.costKind = notSupportedError"
+        "scala": "data/shared/src/main/scala/sigma/ast/trees.scala:79-90; values.scala:101-102; CreateAvlTree inherits unsupported Value.eval"
       }
     },
     "OP-0xB7": {
