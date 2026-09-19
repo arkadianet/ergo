@@ -33,6 +33,7 @@ def _working_tree_evidence() -> dict:
     evidence = {'working_diff_sha256': hashlib.sha256(diff).hexdigest(),
                 'working_diff_clean': not diff}
     if diff:
+        WORK.mkdir(parents=True, exist_ok=True)
         archive = WORK / 'working-diff.patch'
         archive.write_bytes(diff)
         evidence['working_diff_path'] = str(archive.relative_to(ROOT))
