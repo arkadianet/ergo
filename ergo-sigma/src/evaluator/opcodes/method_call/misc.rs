@@ -255,3 +255,15 @@ pub(super) fn exp(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
     out.copy_from_slice(&result_bytes);
     Ok(Value::GroupElement(out))
 }
+
+// SGroupElementMethods.ExponentiateMethod (methods.scala:647), signed id 3.
+pub(super) fn exp_signed(
+    obj_val: Value,
+    args: &[Expr],
+    cx: &mut EvalCtx<'_>,
+) -> Result<Value, EvalError> {
+    check_arity(args, 1)?;
+    let exponent = cx.eval_expr(&args[0])?;
+    add_method_cost(cx.cost, COST_EXP)?;
+    super::super::sigma::exponentiate(obj_val, exponent)
+}

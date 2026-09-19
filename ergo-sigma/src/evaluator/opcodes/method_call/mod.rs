@@ -103,6 +103,7 @@ pub(in crate::evaluator) fn eval_method_call(
         (9, 16) => unsigned_bigint::subtract_mod(obj_val, args, cx),
         (9, 17) => unsigned_bigint::multiply_mod(obj_val, args, cx),
         (9, 18) => unsigned_bigint::mod_op(obj_val, args, cx),
+        (7, 3) => misc::exp_signed(obj_val, args, cx),
         (7, 6) => misc::exp(obj_val, args, cx),
         // Fall through to the shared no-arg method table for any
         // (type_id, method_id) the args-using arms above did not
@@ -246,6 +247,7 @@ pub fn method_cost_rows() -> Vec<((u8, u8), &'static str, ergo_primitives::cost:
             "toUnsignedMod",
             fixed(numeric::COST_TO_UNSIGNED_MOD),
         ),
+        ((7, 3), "exp", fixed(misc::COST_EXP)),
         ((7, 6), "expUnsigned", fixed(misc::COST_EXP)),
         ((2, 9), "bitwiseOr", fixed(numeric::COST_BITWISE)),
         ((2, 10), "bitwiseAnd", fixed(numeric::COST_BITWISE)),

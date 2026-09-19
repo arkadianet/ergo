@@ -208,6 +208,11 @@ pub(in crate::evaluator) fn eval_exponentiate(
     add_cost(cx.cost, 0x9F)?;
     let lv = cx.eval_expr(left)?;
     let rv = cx.eval_expr(right)?;
+    exponentiate(lv, rv)
+}
+
+/// Shared signed exponentiation for the opcode and SGroupElement.exp.
+pub(in crate::evaluator) fn exponentiate(lv: Value, rv: Value) -> Result<Value, EvalError> {
     match (lv, rv) {
         (Value::GroupElement(ge_bytes), Value::BigInt(exp)) => {
             use k256::elliptic_curve::group::GroupEncoding;
