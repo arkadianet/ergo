@@ -639,7 +639,11 @@ object EvaluatedValueOracle {
 
   def main(args: Array[String]): Unit = {
     if (args.sameElements(Array("verify"))) {
-      scala.io.Source.stdin.getLines().foreach(line => println(verifyLine(line).noSpaces))
+      scala.io.Source.stdin.getLines().foreach { line =>
+        // Parser diagnostics belong on stderr; stdout is one JSON record per request.
+        val result = Console.withOut(System.err) { verifyLine(line) }
+        println(result.noSpaces)
+      }
     } else if (args.sameElements(Array("verify_self_test"))) {
       verify_self_test()
     } else {
