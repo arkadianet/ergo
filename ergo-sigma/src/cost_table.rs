@@ -159,7 +159,7 @@ opcode_rows! {
     0x7A => fixed(17), // LongToByteArray
     0x7C => fixed(16), // ByteArrayToLong
     0x7B => fixed(30), // ByteArrayToBigInt
-    0x7D => fixed(10), // Downcast
+    0x7D => fixed(10), // Downcast fixed-width target; cast.rs selects 30 for BigInt targets
 
     // Logical
     0xEF => fixed(15), // LogicalNot — Scala: FixedCost(JitCost::from_jit(15))
