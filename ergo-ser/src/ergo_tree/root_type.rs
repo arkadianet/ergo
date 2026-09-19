@@ -415,6 +415,14 @@ fn type_is_precise(t: &crate::sigma_type::SigmaType) -> bool {
     use crate::sigma_type::SigmaType;
     match t {
         SigmaType::SAny => false,
+        // An unresolved type variable is not a concrete type. `unify_type_lists`
+        // succeeds without binding `T` for methods whose range is
+        // `SOption(STypeVar("T"))` with an empty explicit type-argument list
+        // ((99, 9)-(99, 18), (101, 11)), so the specialized range can still carry
+        // it. Treating that as precise would let it satisfy the exact-type check
+        // in `substitute_deserialize`, whose declared type is read by `read_type`
+        // and may itself be an `STypeVar`.
+        SigmaType::STypeVar(_) => false,
         SigmaType::SColl(e) | SigmaType::SOption(e) => type_is_precise(e),
         SigmaType::STuple(items) => items.iter().all(type_is_precise),
         SigmaType::SFunc {

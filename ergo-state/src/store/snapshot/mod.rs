@@ -60,6 +60,18 @@ pub struct CommittedSnapshot {
 }
 
 impl CommittedSnapshot {
+    /// Emission metadata from this snapshot's held read transaction.
+    pub fn emission_identity(
+        &self,
+        tip: &[u8; 32],
+    ) -> Result<Option<Option<Digest32>>, StateError> {
+        let table = self.txn.open_table(super::emission::EMISSION_IDENTITIES)?;
+        table
+            .get(tip.as_slice())?
+            .map(|row| super::emission::decode_identity(row.value()))
+            .transpose()
+    }
+
     /// Open a snapshot over one fresh read transaction.
     ///
     /// Returns `Ok(None)` only when there is no committed state to build on

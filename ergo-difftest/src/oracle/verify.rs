@@ -318,6 +318,19 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
     Ok(())
 }
 
+/// Compare observable costs independently; unavailable components carry no evidence.
+pub(super) fn components_agree(a: &Value, b: &Value) -> bool {
+    ["verdict", "rent_path"].iter().all(|key| a[key] == b[key])
+        && [
+            "eval_block_cost",
+            "crypto_block_cost",
+            "rent_block_cost",
+            "total_block_cost",
+        ]
+        .iter()
+        .all(|key| a[key] == "unavailable" || b[key] == "unavailable" || a[key] == b[key])
+}
+
 pub(super) fn comparable(line: &str) -> Option<Value> {
     let record: Value = serde_json::from_str(line).ok()?;
     if !matches!(
@@ -381,7 +394,80 @@ mod tests {
         serde_json::from_str(&record).unwrap()
     }
 
+    fn reconciliation(a: &Value, b: &Value) -> super::super::Reconciliation {
+        let spec = super::super::oracle_surfaces()
+            .into_iter()
+            .find(|s| s.name == "verify")
+            .unwrap();
+        super::super::reconcile(
+            &spec,
+            Verdict::Accept(a.to_string()),
+            Verdict::Accept(b.to_string()),
+            &[],
+        )
+    }
+
     // ----- happy path -----
+
+    #[test]
+    fn verify_unavailable_components_agree_with_numeric_costs() {
+        let record = fixtures()[0]["expected"].clone();
+        for key in [
+            "eval_block_cost",
+            "crypto_block_cost",
+            "rent_block_cost",
+            "total_block_cost",
+        ] {
+            let mut numeric = record.clone();
+            numeric[key] = json!(123);
+            let mut unavailable = numeric.clone();
+            unavailable[key] = json!("unavailable");
+            assert_eq!(
+                reconciliation(&numeric, &unavailable),
+                super::super::Reconciliation::Agree
+            );
+            assert_eq!(
+                reconciliation(&unavailable, &numeric),
+                super::super::Reconciliation::Agree
+            );
+        }
+    }
+
+    #[test]
+    fn verify_numeric_cost_and_verdict_mismatches_diverge() {
+        let record = fixtures()[0]["expected"].clone();
+        for key in [
+            "eval_block_cost",
+            "crypto_block_cost",
+            "rent_block_cost",
+            "total_block_cost",
+            "verdict",
+            "rent_path",
+        ] {
+            let mut a = record.clone();
+            let mut b = record.clone();
+            a["total_block_cost"] = json!("unavailable");
+            b["total_block_cost"] = json!(123);
+            match key {
+                "verdict" => {
+                    a[key] = json!("RejectCost");
+                    b[key] = json!("RejectScript");
+                }
+                "rent_path" => {
+                    a[key] = json!(false);
+                    b[key] = json!(true);
+                }
+                _ => {
+                    a[key] = json!(123);
+                    b[key] = json!(124);
+                }
+            }
+            assert!(matches!(
+                reconciliation(&a, &b),
+                super::super::Reconciliation::Diverges(_)
+            ));
+        }
+    }
 
     #[test]
     fn verify_surface_registered_available() {

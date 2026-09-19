@@ -304,12 +304,12 @@ for id in "${BUG_IDS[@]}"; do
             cargo build -p ergo-difftest --quiet
             target_dir="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
             binary="$target_dir/debug/difftest"
-            "$binary" --oracle --repro "$trigger" --surface verify > "$gate_dir/clean.log" 2>&1
+            "$binary" --oracle --oracle-script "$ORACLE_SCRIPT" --repro "$trigger" --surface verify > "$gate_dir/clean.log" 2>&1
             cat "$gate_dir/clean.log"
             patch --batch --forward -p1 < "$patch_file"
             cargo build -p ergo-difftest --quiet
             set +e
-            "$binary" --oracle --repro "$trigger" --surface verify > "$gate_dir/patched.log" 2>&1
+            "$binary" --oracle --oracle-script "$ORACLE_SCRIPT" --repro "$trigger" --surface verify > "$gate_dir/patched.log" 2>&1
             patched_exit=$?
             set -e
             cat "$gate_dir/patched.log"

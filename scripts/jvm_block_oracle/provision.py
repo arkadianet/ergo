@@ -14,7 +14,15 @@ REVISION = '5528ef569a41ebccbc8658212e6ee3c97d990b96'  # Ergo v6.0.5
 
 
 def main():
-    SOURCE.mkdir(parents=True, exist_ok=True)
+    # Extraction overlays files and sbt has no clean step, so stale sources or
+    # outputs could enter `Runtime / fullClasspath`. Drop the tree and the marker
+    # first: a failed build must not leave `run.py` accepting an old classpath.
+    marker = HERE / '.work/classpath'
+    if marker.exists():
+        marker.unlink()
+    if SOURCE.exists():
+        shutil.rmtree(SOURCE)
+    SOURCE.mkdir(parents=True)
     archive = HERE / '.work/source.tar'
     with archive.open('wb') as output:
         subprocess.run(['git', '-C', str(REFERENCE), 'archive', REVISION], stdout=output, check=True)
@@ -37,7 +45,7 @@ def main():
         subprocess.run(command, cwd=SOURCE, env=environment, stdout=output, stderr=subprocess.STDOUT, check=True)
     lines = log.read_text().splitlines()
     classpath = next(line for line in reversed(lines) if line.startswith('/') and 'scala-library' in line)
-    (HERE / '.work/classpath').write_text(classpath + '\n')
+    marker.write_text(classpath + '\n')
     print('Provisioned Ergo 6.0.5; one UtxoState return-value wrapper')
 
 

@@ -36,6 +36,7 @@ pub(crate) async fn submit_via_node(
 pub(crate) fn map_submit_error(err: SubmitError) -> (StatusCode, ApiSubmitError) {
     let SubmitError { reason, detail } = err;
     let status = match reason.as_str() {
+        "direct_block_submit_disabled" => StatusCode::FORBIDDEN,
         "overloaded" | "shutting_down" | "route_disabled" => StatusCode::SERVICE_UNAVAILABLE,
         "timeout" => StatusCode::GATEWAY_TIMEOUT,
         "internal_error" => StatusCode::INTERNAL_SERVER_ERROR,

@@ -476,6 +476,7 @@ pub(crate) fn verify_or_init_state_type_inner(
 }
 
 mod apply;
+pub mod emission;
 pub use apply::{activation_minimal_full_block_height, compute_minimal_full_block_height};
 mod backfill;
 mod dry_run;
@@ -526,6 +527,7 @@ type UtxoInsertMap = BTreeMap<[u8; 32], Vec<u8>>;
 type UtxoChangeMaps = (UtxoRemoveMap, UtxoInsertMap);
 
 struct UtxoMutation<'a> {
+    emission: emission::EmissionTransition,
     height: u32,
     header_id: &'a [u8; 32],
     expected_state_root: &'a ADDigest,
@@ -1105,6 +1107,7 @@ impl StateStore {
                 self.chain_state.to_persisted().serialize().as_slice(),
             )?;
         }
+        emission::seed_genesis(&write_txn, boxes)?;
         write_txn.commit()?;
         self.tree.clear_dirty();
         // Genesis writes synchronously above, so redb already holds these.
@@ -3616,10 +3619,11 @@ impl StateStore {
         height: u32,
         header_id: &[u8; 32],
         new_digest: &ADDigest,
-        undo: &UndoEntry,
+        undo_and_emission: (&UndoEntry, &emission::EmissionTransition),
         voted_params_row: Option<ergo_validation::ActiveProtocolParameters>,
         wallet_payload: Option<&WalletApplyPayload>,
     ) -> Result<crate::avl::arena::CommitDurability, StateError> {
+        let (undo, emission) = undo_and_emission;
         // Defensive: voted_params_row should be `Some` iff this is an
         // epoch-start block. The caller (block_proc) is the gatekeeper;
         // we double-check here so a misuse fails loud at the storage
@@ -3738,6 +3742,7 @@ impl StateStore {
                 avl_deletes,
                 undo_key,
                 undo_bytes,
+                emission: emission.clone(),
                 state_meta_bytes,
                 alloc_meta_bytes,
                 chain_state_bytes,
@@ -3804,6 +3809,7 @@ impl StateStore {
         {
             let mut undo_table = write_txn.open_table(UNDO_LOG)?;
             undo_table.insert(undo_key.as_slice(), undo_bytes.as_slice())?;
+            emission::persist_transition(&write_txn, header_id, emission)?;
         }
         let t_undo = t0.elapsed();
 
@@ -3884,6 +3890,7 @@ impl StateStore {
                 undo_table.remove(key.as_slice())?;
             }
         }
+        emission::prune_identity(&write_txn, height.checked_sub(self.rollback_window))?;
         let t_prune = t0.elapsed();
 
         // Mode 3 Phase 2a — block-section eviction at the sync

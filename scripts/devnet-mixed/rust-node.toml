@@ -6,6 +6,7 @@ bind_addr = "127.0.0.1:19531"
 allow_local = true
 target_outbound = 1
 [api]
+allow_direct_block_submit = true
 bind = "127.0.0.1:19554"
 [api.security]
 api_key_hash = "324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf"

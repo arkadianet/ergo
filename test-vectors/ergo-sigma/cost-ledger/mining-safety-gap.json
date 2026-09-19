@@ -1,0 +1,45 @@
+{
+  "oracle": "Scala CandidateGenerator.safeGap source constants",
+  "scala": {
+    "ergo_version": "6.0.2",
+    "source_sha": "2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1",
+    "source_path": "src/main/scala/org/ergoplatform/mining/CandidateGenerator.scala",
+    "source_sha256": "ea126dbe09236ec3f1329b421ccaa40bec57d5ee48628e87ec29e0f8349e222b"
+  },
+  "source_excerpt": "      val safeGap = if (state.stateContext.currentParameters.maxBlockCost < 1000000) {\n        0\n      } else if (state.stateContext.currentParameters.maxBlockCost < 5000000) {\n        150000\n      } else {\n        500000\n      }",
+  "units": "block cost",
+  "cases": [
+    [
+      0,
+      0
+    ],
+    [
+      37509,
+      0
+    ],
+    [
+      999999,
+      0
+    ],
+    [
+      1000000,
+      150000
+    ],
+    [
+      4769136,
+      150000
+    ],
+    [
+      4999999,
+      150000
+    ],
+    [
+      5000000,
+      500000
+    ],
+    [
+      18446744073709551615,
+      500000
+    ]
+  ]
+}
