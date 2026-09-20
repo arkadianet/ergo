@@ -51,6 +51,10 @@ jobs:
         env:
           NEXTEST_NO_TESTS: warn
         run: cargo nextest run -p ergo-sigma -p ergo-validation -E 'test(/cost_(pin|ledger_fixtures|sweeps|block_fixtures|crypto_truncation)/)'
+      - name: Fetch the L4 replay inputs (hash-pinned data release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/fetch-l4-inputs.sh
       - name: Record workspace passing evidence
         env:
           # libtest-json is experimental and makes --message-format mandatory, so it is

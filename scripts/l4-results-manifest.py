@@ -88,6 +88,20 @@ def range_context(ranges):
             'ranges': mapped}
 
 
+def vector_evidence():
+    """Hash logical JSON inputs, preserving evidence keys across compression."""
+    directory = ROOT / 'test-vectors/mainnet'
+    paths = {path.with_suffix('') for path in directory.glob('*.json.gz')}
+    paths.update(directory.glob('*.json'))
+    evidence = {}
+    for path in sorted(paths):
+        if path.name.startswith(('tx_costs_', 'transactions_', 'headers_', 'input_boxes_', 'l4_boxes')):
+            compressed = path.with_suffix('.json.gz')
+            raw = gzip.decompress(compressed.read_bytes()) if compressed.exists() else path.read_bytes()
+            evidence[str(path.relative_to(ROOT))] = digest(raw)
+    return evidence
+
+
 def collect(data, original, log, manifest_only, run_command, features, previous=None):
     home = Path.home()
     references = {
@@ -149,9 +163,7 @@ def collect(data, original, log, manifest_only, run_command, features, previous=
     else:
         manifest = {'scala': scala, 'rust': rust, 'tool': tool, 'run': run}
         # The harness scans overlapping header files as well as per-range vectors.
-        for path in sorted((ROOT / 'test-vectors/mainnet').glob('*.json')):
-            if path.name.startswith(('tx_costs_', 'transactions_', 'headers_', 'input_boxes_', 'l4_boxes')):
-                evidence[str(path.relative_to(ROOT))] = digest(path.read_bytes())
+        evidence.update(vector_evidence())
     manifest['context'] = context
     manifest['evidence'] = evidence
     return manifest
