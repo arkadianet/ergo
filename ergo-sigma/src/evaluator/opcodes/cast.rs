@@ -161,8 +161,8 @@ pub(in crate::evaluator) fn eval_upcast(
         // Long → {Long, BigInt}
         (Value::Long(n), SigmaType::SLong) => Ok(Value::Long(n)),
         (Value::Long(n), SigmaType::SBigInt) => Ok(Value::BigInt(n.into())),
-        // BigInt → BigInt (identity)
-        (Value::BigInt(n), SigmaType::SBigInt) => Ok(Value::BigInt(n)),
+        // SType.scala:512: VersionContext.current.isV3OrLaterErgoTreeVersion.
+        (Value::BigInt(n), SigmaType::SBigInt) if cx.ctx.is_v3_ergo_tree() => Ok(Value::BigInt(n)),
         // {Byte, Short, Int, Long} → UnsignedBigInt (v6): a negative source
         // rejects (unsigned cannot represent it).
         (Value::Byte(n), SigmaType::SUnsignedBigInt) => to_unsigned_bigint(n.into()),
