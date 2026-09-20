@@ -5,6 +5,8 @@ use ergo_ser::ergo_box::ErgoBox;
 /// These change at epoch boundaries via soft-fork voting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtocolParams {
+    /// Sigma statuses from the cumulative ACTIVATED update, not a pending vote.
+    pub validation_settings: ergo_sigma::evaluator::SigmaValidationSettings,
     /// Minimum nanoErg per byte of serialized box. Default: 360.
     pub min_value_per_byte: u64,
     /// Maximum cumulative cost for all scripts in a block. Default: 1,000,000.
@@ -40,6 +42,7 @@ impl ProtocolParams {
     /// per-epoch active set is not yet available.
     pub fn mainnet_default() -> Self {
         Self {
+            validation_settings: Default::default(),
             min_value_per_byte: 360,
             // Mainnet value from blockchain parameters (adjusted via voting).
             // The authoritative source is the extension section of the
@@ -104,6 +107,26 @@ impl ProtocolParams {
             "negative token_access_cost leaked past parse boundary"
         );
         Self {
+            validation_settings: ergo_sigma::evaluator::SigmaValidationSettings(
+                active
+                    .activated_update
+                    .status_updates
+                    .iter()
+                    .map(|(id, status)| {
+                        use crate::voting::validation_settings::RuleStatus as Voted;
+                        use ergo_sigma::evaluator::RuleStatus as Sigma;
+                        (
+                            *id,
+                            match status {
+                                Voted::Enabled => Sigma::Enabled,
+                                Voted::Disabled => Sigma::Disabled,
+                                Voted::Replaced(id) => Sigma::Replaced(*id),
+                                Voted::Changed(bytes) => Sigma::Changed(bytes.clone()),
+                            },
+                        )
+                    })
+                    .collect(),
+            ),
             min_value_per_byte: active.min_value_per_byte as u64,
             max_block_cost: active.max_block_cost as u64,
             max_block_size: active.max_block_size as u32,
