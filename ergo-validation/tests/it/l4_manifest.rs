@@ -108,6 +108,25 @@ for path in Path('test-vectors/ergo-sigma/cost-ledger/results').glob('l4-*.json'
 
 #[test]
 fn l4_manifest_compressed_vectors_preserve_input_hashes() {
+    // The replay inputs come from the hash-pinned data release
+    // (scripts/fetch-l4-inputs.sh); only the ledger-evidence CI job fetches
+    // them. Without them there is nothing to hash, so skip rather than fail:
+    // that job runs this test against the real inputs.
+    let mainnet = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("test-vectors/mainnet");
+    let inputs_present = mainnet.join(".l4-inputs.sha256").is_file()
+        || std::fs::read_dir(&mainnet).is_ok_and(|entries| {
+            entries.flatten().any(|e| {
+                e.file_name().to_string_lossy().starts_with("tx_costs_")
+                    && e.file_name().to_string_lossy().ends_with(".json.gz")
+            })
+        });
+    if !inputs_present {
+        eprintln!("skipping: L4 replay inputs absent (run scripts/fetch-l4-inputs.sh)");
+        return;
+    }
     python_check(
         r#"
 from pathlib import Path
