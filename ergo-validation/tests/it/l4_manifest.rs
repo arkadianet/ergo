@@ -105,3 +105,29 @@ for path in Path('test-vectors/ergo-sigma/cost-ledger/results').glob('l4-*.json'
 "#,
     );
 }
+
+#[test]
+fn l4_manifest_compressed_vectors_preserve_input_hashes() {
+    python_check(
+        r#"
+from pathlib import Path
+import gzip
+actual = m['vector_evidence']()
+assert len([name for name in actual if '/tx_costs_' in name]) == 389
+for name, sha in actual.items():
+    path = Path(name)
+    compressed = path.with_suffix('.json.gz')
+    if compressed.exists():
+        raw = compressed.read_bytes()
+        assert raw[3:8] == bytes(5), name
+        assert m['digest'](gzip.decompress(raw)) == sha, name
+    if path.exists():
+        assert m['digest'](path.read_bytes()) == sha, name
+for path in Path('test-vectors/ergo-sigma/cost-ledger/results').glob('l4-*.json'):
+    data = json.loads(path.read_bytes())
+    for name, sha in data['manifest']['evidence'].items():
+        if name.startswith('test-vectors/mainnet/'):
+            assert actual[name] == sha, name
+"#,
+    );
+}
