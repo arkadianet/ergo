@@ -72,7 +72,7 @@ fn parse_sizeless_inner_box_script_scoped(
             constants.push(read_constant(r)?);
         }
     }
-    let body = crate::opcode::parse_body(r, version)?;
+    let body = crate::opcode::parse_body_with_constants(r, version, &constants)?;
     // Sizeless inner tree => version 0 (the caller ran rule 1012 first), so methods
     // resolve against the v5 registry; a v6-only OR genuinely-unknown id makes Scala
     // throw a method-resolution `ValidationException`, hardened by the caller.

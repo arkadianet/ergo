@@ -69,7 +69,8 @@ pub fn determinable_root_type_of(
 ///    store\[y\]=SigmaProp; then store\[x\]=SLong (rebind); the result
 ///    `ValUse(y)` reads SigmaProp → ACCEPT (Scala accepts — `y` was fixed
 ///    BEFORE the rebind; rejecting this shape would be a reject-valid = stall).
-type ValDefTypeStore = std::collections::HashMap<u32, Option<crate::sigma_type::SigmaType>>;
+pub(crate) type ValDefTypeStore =
+    std::collections::HashMap<u32, Option<crate::sigma_type::SigmaType>>;
 
 /// `true` if `val` MATERIALIZES at least one box value (possibly nested in a
 /// collection / option / tuple). A box value is the only constant whose bytes embed
@@ -128,6 +129,23 @@ fn infer_type(
     store: &mut ValDefTypeStore,
     constants: &[(crate::sigma_type::SigmaType, crate::sigma_value::SigmaValue)],
 ) -> Option<crate::sigma_type::SigmaType> {
+    infer_node_type(body, store, constants, false, false, &mut infer_type)
+}
+
+/// Shared node rules. Parsing supplies already computed child types in wire
+/// order; root inference supplies a recursive walk with its lenient root policy.
+pub(crate) fn infer_node_type(
+    body: &crate::opcode::Expr,
+    store: &mut ValDefTypeStore,
+    constants: &[(crate::sigma_type::SigmaType, crate::sigma_value::SigmaValue)],
+    precise_types: bool,
+    parse_time: bool,
+    child_type: &mut impl FnMut(
+        &crate::opcode::Expr,
+        &mut ValDefTypeStore,
+        &[(crate::sigma_type::SigmaType, crate::sigma_value::SigmaValue)],
+    ) -> Option<crate::sigma_type::SigmaType>,
+) -> Option<crate::sigma_type::SigmaType> {
     use crate::opcode::Payload;
     use crate::sigma_type::SigmaType;
     match body {
@@ -159,19 +177,19 @@ fn infer_type(
                 // (after the register id + type), so its bindings evolve the
                 // store even though the result type is the declared `T`.
                 if let Some(d) = default.as_deref() {
-                    infer_type(d, store, constants);
+                    child_type(d, store, constants);
                 }
                 Some(tpe.clone())
             }
             Payload::NumericCast { input, tpe } => {
-                infer_type(input, store, constants);
+                child_type(input, store, constants);
                 Some(tpe.clone())
             }
             // `getVar[T]` / `box.RX[T]` statically return `Option[T]` — never
             // SigmaProp, even for T = SigmaProp (oracle-verified).
             Payload::GetVar { tpe, .. } => Some(SigmaType::SOption(Box::new(tpe.clone()))),
             Payload::ExtractRegisterAs { input, tpe, .. } => {
-                infer_type(input, store, constants);
+                child_type(input, store, constants);
                 Some(SigmaType::SOption(Box::new(tpe.clone())))
             }
             // Collection / tuple literals — `Coll[..]` / a tuple — are never
@@ -179,16 +197,22 @@ fn infer_type(
             // `Coll[SigmaProp]` and `(SigmaProp, SigmaProp)` both reject).
             Payload::ConcreteCollection { elem_type, items } => {
                 for i in items {
-                    infer_type(i, store, constants);
+                    child_type(i, store, constants);
                 }
                 Some(SigmaType::SColl(Box::new(elem_type.clone())))
             }
             Payload::BoolCollection { .. } => Some(SigmaType::SColl(Box::new(SigmaType::SBoolean))),
             Payload::Tuple { items } => {
-                for i in items {
-                    infer_type(i, store, constants);
+                let child_types: Vec<_> = items
+                    .iter()
+                    .map(|i| child_type(i, store, constants))
+                    .collect();
+                let types: Option<Vec<_>> = child_types.into_iter().collect();
+                match types {
+                    Some(types) if precise_types => Some(SigmaType::STuple(types)),
+                    _ if precise_types => None,
+                    _ => Some(SigmaType::SAny),
                 }
-                Some(SigmaType::SAny)
             }
             // ARG-DEPENDENT roots whose type is a PROJECTION of a child's type
             // (Scala computes these bottom-up at deserialize). Every child is
@@ -203,24 +227,24 @@ fn infer_type(
             Payload::Two(left, right)
                 if matches!(node.opcode, 0x99 | 0x9A | 0x9C | 0x9D | 0x9E | 0xA1 | 0xA2) =>
             {
-                let t = infer_type(left, store, constants);
-                infer_type(right, store, constants);
+                let t = child_type(left, store, constants);
+                child_type(right, store, constants);
                 t
             }
             // If: `If.tpe = trueBranch.tpe` (the then-branch, child 1; Scala does
             // NOT unify the branches at deserialize).
             Payload::Three(cond, then_branch, else_branch) if node.opcode == 0x95 => {
-                infer_type(cond, store, constants);
-                let t = infer_type(then_branch, store, constants);
-                infer_type(else_branch, store, constants);
+                child_type(cond, store, constants);
+                let t = child_type(then_branch, store, constants);
+                child_type(else_branch, store, constants);
                 t
             }
             // Fold: result = the accumulator type = the `zero` arg (child 1;
             // wire order input, zero, foldOp — FoldSerializer.scala).
             Payload::Three(coll, zero, fold_op) if node.opcode == 0xB0 => {
-                infer_type(coll, store, constants);
-                let t = infer_type(zero, store, constants);
-                infer_type(fold_op, store, constants);
+                child_type(coll, store, constants);
+                let t = child_type(zero, store, constants);
+                child_type(fold_op, store, constants);
                 t
             }
             // BlockValue `{ vals...; result }`: type = the result expression's
@@ -228,9 +252,9 @@ fn infer_type(
             // `FunDef` item writes the store from its own arm below.
             Payload::BlockValue { items, result } => {
                 for item in items {
-                    infer_type(item, store, constants);
+                    child_type(item, store, constants);
                 }
-                infer_type(result, store, constants)
+                child_type(result, store, constants)
             }
             // ValDef 0xD6 / FunDef 0xD7 (`ValDefSerializer.parse`): the rhs is
             // parsed FIRST under the current store, then `store(id) = rhs.tpe`
@@ -241,7 +265,7 @@ fn infer_type(
             // sigmaProp`), so deriving it from the rhs keeps a `ValUse` of a
             // SigmaProp-RHS binding accepting (oracle-verified).
             Payload::ValDef { id, rhs, .. } | Payload::FunDef { id, rhs, .. } => {
-                let t = infer_type(rhs, store, constants);
+                let t = child_type(rhs, store, constants);
                 store.insert(*id, t.clone());
                 t
             }
@@ -262,19 +286,22 @@ fn infer_type(
             // sentinel (still non-SigmaProp; `Unknown` to [`agree`]). The
             // declared arg types are wire-exact and kept as-is.
             Payload::FuncValue { args, body } => {
-                for (id, tpe) in args {
-                    store.insert(*id, tpe.clone());
+                if !parse_time {
+                    for (id, tpe) in args {
+                        store.insert(*id, tpe.clone());
+                    }
                 }
-                let body_t = infer_type(body, store, constants);
+                let body_t = child_type(body, store, constants);
                 let dom: Option<Vec<SigmaType>> = args.iter().map(|(_, t)| t.clone()).collect();
                 match (dom, body_t) {
-                    (Some(t_dom), Some(t_range)) if type_is_precise(&t_range) => {
+                    (Some(t_dom), Some(t_range)) if precise_types || type_is_precise(&t_range) => {
                         Some(SigmaType::SFunc {
                             t_dom,
                             t_range: Box::new(t_range),
                             tpe_params: vec![],
                         })
                     }
+                    _ if precise_types => None,
                     _ => Some(SigmaType::SAny),
                 }
             }
@@ -282,7 +309,7 @@ fn infer_type(
             // (1-based). Only resolvable when the input's type is a determinable
             // `STuple` (e.g. a tuple constant); otherwise lenient.
             Payload::SelectField { input, field_idx } => {
-                match infer_type(input, store, constants) {
+                match child_type(input, store, constants) {
                     Some(SigmaType::STuple(items)) => (*field_idx as usize)
                         .checked_sub(1)
                         .and_then(|i| items.get(i))
@@ -296,10 +323,10 @@ fn infer_type(
                 index,
                 default,
             } => {
-                let t = infer_type(input, store, constants);
-                infer_type(index, store, constants);
+                let t = child_type(input, store, constants);
+                child_type(index, store, constants);
                 if let Some(d) = default.as_deref() {
-                    infer_type(d, store, constants);
+                    child_type(d, store, constants);
                 }
                 match t {
                     Some(SigmaType::SColl(elem)) => Some(*elem),
@@ -308,13 +335,13 @@ fn infer_type(
             }
             // OptionGet `opt.get` / OptionGetOrElse `opt.getOrElse(d)`: the option's
             // element type (the option is child 0 in both).
-            Payload::One(opt) if node.opcode == 0xE4 => match infer_type(opt, store, constants) {
+            Payload::One(opt) if node.opcode == 0xE4 => match child_type(opt, store, constants) {
                 Some(SigmaType::SOption(elem)) => Some(*elem),
                 _ => None,
             },
             Payload::Two(opt, default) if node.opcode == 0xE5 => {
-                let t = infer_type(opt, store, constants);
-                infer_type(default, store, constants);
+                let t = child_type(opt, store, constants);
+                child_type(default, store, constants);
                 match t {
                     Some(SigmaType::SOption(elem)) => Some(*elem),
                     _ => None,
@@ -333,21 +360,32 @@ fn infer_type(
                 args,
                 type_args,
             } => {
-                let obj_type = infer_type(obj, store, constants);
+                let obj_type = child_type(obj, store, constants);
                 let arg_types: Vec<Option<SigmaType>> = args
                     .iter()
-                    .map(|a| infer_type(a, store, constants))
+                    .map(|a| child_type(a, store, constants))
                     .collect();
-                method_call_result_type(*type_id, *method_id, obj_type, &arg_types, args, type_args)
+                if precise_types {
+                    super::type_infer::method_call_result_type(
+                        *type_id, *method_id, obj_type, &arg_types, type_args,
+                    )
+                } else {
+                    method_call_result_type(
+                        *type_id, *method_id, obj_type, &arg_types, args, type_args,
+                    )
+                }
             }
             // Apply's result is the callee's range; kept lenient (as before the
             // store rework) — the children are still walked for their bindings.
             Payload::FuncApply { func, args } => {
-                infer_type(func, store, constants);
+                let t = child_type(func, store, constants);
                 for a in args {
-                    infer_type(a, store, constants);
+                    child_type(a, store, constants);
                 }
-                None
+                match t {
+                    Some(SigmaType::SFunc { t_range, .. }) if precise_types => Some(*t_range),
+                    _ => None,
+                }
             }
             // SigmaAnd / SigmaOr (0xEA / 0xEB) ARE SigmaProp — lenient `None`
             // is the same accept verdict at the root, and a `None` store entry
@@ -355,47 +393,100 @@ fn infer_type(
             // (only a determinable non-SigmaProp type rejects).
             Payload::SigmaCollection { items } => {
                 for i in items {
-                    infer_type(i, store, constants);
+                    child_type(i, store, constants);
                 }
-                op_root_non_sigma_type(node.opcode)
+                if precise_types {
+                    super::type_infer::op_result_type(node.opcode)
+                } else {
+                    op_root_non_sigma_type(node.opcode)
+                }
             }
             // A zero-argument (leaf) opcode root has a statically-known type and
             // NONE of them is `SSigmaProp` (see [`zero_arg_root_type`]), so a
             // script rooted at one fails CheckDeserializedScriptIsSigmaProp just
             // like an inline non-SigmaProp `Const`.
-            Payload::Zero => Some(zero_arg_root_type(node.opcode)),
+            Payload::Zero => Some(if precise_types {
+                super::type_infer::zero_arg_type(node.opcode)
+            } else {
+                zero_arg_root_type(node.opcode)
+            }),
+            // Collection transforms preserve the input or project the mapper range.
+            Payload::Two(input, mapper) if precise_types && node.opcode == 0xAD => {
+                child_type(input, store, constants);
+                match child_type(mapper, store, constants) {
+                    Some(SigmaType::SFunc { t_range, .. }) => Some(SigmaType::SColl(t_range)),
+                    _ => None,
+                }
+            }
+            Payload::Two(input, other)
+                if precise_types
+                    && matches!(node.opcode, 0xB3 | 0xB5 | 0xF2 | 0xF3 | 0xF5..=0xF8) =>
+            {
+                let t = child_type(input, store, constants);
+                child_type(other, store, constants);
+                t
+            }
+            Payload::Three(input, from, until) if precise_types && node.opcode == 0xB4 => {
+                let t = child_type(input, store, constants);
+                child_type(from, store, constants);
+                child_type(until, store, constants);
+                t
+            }
+            Payload::One(input) if precise_types && matches!(node.opcode, 0xF0 | 0xF1) => {
+                child_type(input, store, constants)
+            }
             // Generic operator payloads: walk every child (store evolution),
             // then classify by opcode — relations, arithmetic, etc. whose
             // result is unconditionally non-SigmaProp get `Some(SAny)`;
             // SigmaProp-capable opcodes stay lenient (`None`).
             Payload::One(a) => {
-                infer_type(a, store, constants);
-                op_root_non_sigma_type(node.opcode)
+                child_type(a, store, constants);
+                if precise_types {
+                    super::type_infer::op_result_type(node.opcode)
+                } else {
+                    op_root_non_sigma_type(node.opcode)
+                }
             }
             Payload::Two(a, b) => {
-                infer_type(a, store, constants);
-                infer_type(b, store, constants);
-                op_root_non_sigma_type(node.opcode)
+                child_type(a, store, constants);
+                child_type(b, store, constants);
+                if precise_types {
+                    super::type_infer::op_result_type(node.opcode)
+                } else {
+                    op_root_non_sigma_type(node.opcode)
+                }
             }
             Payload::Three(a, b, c) => {
-                infer_type(a, store, constants);
-                infer_type(b, store, constants);
-                infer_type(c, store, constants);
-                op_root_non_sigma_type(node.opcode)
+                child_type(a, store, constants);
+                child_type(b, store, constants);
+                child_type(c, store, constants);
+                if precise_types {
+                    super::type_infer::op_result_type(node.opcode)
+                } else {
+                    op_root_non_sigma_type(node.opcode)
+                }
             }
             Payload::Four(a, b, c, d) => {
-                infer_type(a, store, constants);
-                infer_type(b, store, constants);
-                infer_type(c, store, constants);
-                infer_type(d, store, constants);
-                op_root_non_sigma_type(node.opcode)
+                child_type(a, store, constants);
+                child_type(b, store, constants);
+                child_type(c, store, constants);
+                child_type(d, store, constants);
+                if precise_types {
+                    super::type_infer::op_result_type(node.opcode)
+                } else {
+                    op_root_non_sigma_type(node.opcode)
+                }
             }
             // Childless payloads with no statically-tracked type here:
             // `TaggedVar` (0x71, type-tag dependent) and `NoneValue` (0xDF,
             // not parser-reachable) — both resolve through the opcode
             // classifier to `None` (lenient).
             Payload::TaggedVar { .. } | Payload::NoneValue { .. } => {
-                op_root_non_sigma_type(node.opcode)
+                if precise_types {
+                    super::type_infer::op_result_type(node.opcode)
+                } else {
+                    op_root_non_sigma_type(node.opcode)
+                }
             }
         },
         crate::opcode::Expr::Unparsed(_) => None,
@@ -411,7 +502,7 @@ fn infer_type(
 /// compare against a real type and manufacture a false mismatch (a
 /// reject-valid). A REAL wire `SAny` degraded by this check only widens
 /// leniency — the safe direction.
-fn type_is_precise(t: &crate::sigma_type::SigmaType) -> bool {
+pub(crate) fn type_is_precise(t: &crate::sigma_type::SigmaType) -> bool {
     use crate::sigma_type::SigmaType;
     match t {
         SigmaType::SAny => false,

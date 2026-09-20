@@ -1,7 +1,7 @@
 //! Tests for the ErgoTree codec: round-trips, oracle-parity verdicts,
 //! mainnet JSON fixtures, and soft-fork / depth / overflow edge cases.
 
-use super::type_infer::value_contains_box;
+use super::root_type::value_contains_box;
 use ergo_primitives::digest::blake2b256;
 use ergo_primitives::reader::{ReadError, VlqReader};
 

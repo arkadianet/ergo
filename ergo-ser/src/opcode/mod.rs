@@ -28,3 +28,5 @@ pub use types::{
 };
 pub use walk::{children, node_opcode, preorder};
 pub use write::{write_body, write_expr, write_expr_segregating, ConstantSink};
+
+pub(crate) use parse::parse_body_with_constants;

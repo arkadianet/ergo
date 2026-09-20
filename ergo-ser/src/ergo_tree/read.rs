@@ -369,7 +369,7 @@ fn parse_body(
 
     let saved_pool_len = r.constant_pool_len();
     r.set_constant_pool_len(Some(constants.len()));
-    let body = opcode::parse_body(r, version);
+    let body = opcode::parse_body_with_constants(r, version, &constants);
     r.set_constant_pool_len(saved_pool_len);
     let body = body?;
 

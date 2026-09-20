@@ -6,36 +6,13 @@
 
 mod method_registry;
 
+use super::root_type::{type_is_precise, ValDefTypeStore};
+
 /// Exact static type for embedded-script substitution. Unknown types and
 /// imprecision sentinels cannot establish substitution compatibility.
 pub fn substitution_type_of(body: &crate::opcode::Expr) -> Option<crate::sigma_type::SigmaType> {
     let mut store = ValDefTypeStore::new();
     infer_type(body, &mut store, &[]).filter(type_is_precise)
-}
-
-/// Flat, last-write-wins binding types in serialization order. ValDef writes
-/// after its RHS; FuncValue writes declared arguments before its body and never
-/// pops them. Each ValUse observes the latest preceding write. Unknown RHS types
-/// overwrite earlier bindings with `None`, preventing stale type information.
-type ValDefTypeStore = std::collections::HashMap<u32, Option<crate::sigma_type::SigmaType>>;
-
-/// `true` if `val` MATERIALIZES at least one box value (possibly nested in a
-/// collection / option / tuple). A box value is the only constant whose bytes embed
-/// a nested ErgoTree, which Scala parses on the shared reader — so only an actual
-/// box can pollute `valDefTypeStore`. We key on the VALUE, not the type: an empty
-/// `Coll[SBox]` has a box-bearing type but materializes no box and changes nothing,
-/// so it must NOT trigger `ValUse` leniency (which would be an accept-invalid).
-pub(super) fn value_contains_box(val: &crate::sigma_value::SigmaValue) -> bool {
-    use crate::sigma_value::{CollValue, SigmaValue};
-    match val {
-        SigmaValue::OpaqueBoxBytes(_) => true,
-        // `BoolBits` / `Bytes` collections never hold boxes; only `Values` can.
-        SigmaValue::Coll(CollValue::Values(items)) | SigmaValue::Tuple(items) => {
-            items.iter().any(value_contains_box)
-        }
-        SigmaValue::Opt(Some(inner)) => value_contains_box(inner),
-        _ => false,
-    }
 }
 
 /// Infer each node once, visiting all children in wire order before computing
@@ -48,319 +25,12 @@ fn infer_type(
     store: &mut ValDefTypeStore,
     constants: &[(crate::sigma_type::SigmaType, crate::sigma_value::SigmaValue)],
 ) -> Option<crate::sigma_type::SigmaType> {
-    use crate::opcode::Payload;
-    use crate::sigma_type::SigmaType;
-    match body {
-        crate::opcode::Expr::Const { tpe, val } => {
-            if value_contains_box(val) {
-                // Box pollution point: the nested script may have rebound any
-                // id — every entry written so far is now untrusted. (An id it
-                // may have FRESHLY bound stays absent here and resolves
-                // unknown, which is the same safe direction.)
-                for t in store.values_mut() {
-                    *t = None;
-                }
-            }
-            Some(tpe.clone())
-        }
-        crate::opcode::Expr::Op(node) => match &node.payload {
-            Payload::ConstPlaceholder { index } => {
-                constants.get(*index as usize).map(|(tpe, _)| tpe.clone())
-            }
-            // Payloads carrying their result type EXPLICITLY in the IR.
-            // `Deserialize{Context,Register}[T]` return `T` DIRECTLY, so they CAN
-            // be SigmaProp (accept iff T == SSigmaProp); `NumericCast`'s target is
-            // always a numeric type (never SigmaProp). Returning the declared type
-            // lets the gate accept/reject exactly as Scala does (oracle-verified:
-            // `DeserializeRegister[SigmaProp]` accepts, `[SLong]` rejects).
-            Payload::DeserializeContext { tpe, .. } => Some(tpe.clone()),
-            Payload::DeserializeRegister { tpe, default, .. } => {
-                // The inline default expression is parsed on the same reader
-                // (after the register id + type), so its bindings evolve the
-                // store even though the result type is the declared `T`.
-                if let Some(d) = default.as_deref() {
-                    infer_type(d, store, constants);
-                }
-                Some(tpe.clone())
-            }
-            Payload::NumericCast { input, tpe } => {
-                infer_type(input, store, constants);
-                Some(tpe.clone())
-            }
-            // `getVar[T]` / `box.RX[T]` statically return `Option[T]` — never
-            // SigmaProp, even for T = SigmaProp (oracle-verified).
-            Payload::GetVar { tpe, .. } => Some(SigmaType::SOption(Box::new(tpe.clone()))),
-            Payload::ExtractRegisterAs { input, tpe, .. } => {
-                infer_type(input, store, constants);
-                Some(SigmaType::SOption(Box::new(tpe.clone())))
-            }
-            // Collection / tuple literals — `Coll[..]` / a tuple — are never
-            // SigmaProp even when every element is SigmaProp (oracle-verified:
-            // `Coll[SigmaProp]` and `(SigmaProp, SigmaProp)` both reject).
-            Payload::ConcreteCollection { elem_type, items } => {
-                for i in items {
-                    infer_type(i, store, constants);
-                }
-                Some(SigmaType::SColl(Box::new(elem_type.clone())))
-            }
-            Payload::BoolCollection { .. } => Some(SigmaType::SColl(Box::new(SigmaType::SBoolean))),
-            Payload::Tuple { items } => {
-                let types: Vec<_> = items
-                    .iter()
-                    .map(|i| infer_type(i, store, constants))
-                    .collect();
-                types
-                    .into_iter()
-                    .collect::<Option<Vec<_>>>()
-                    .map(SigmaType::STuple)
-            }
-            // ARG-DEPENDENT roots whose type is a PROJECTION of a child's type
-            // (Scala computes these bottom-up at deserialize). Every child is
-            // still walked (store evolution); only the projected child's type
-            // is kept — a non-determinable child maps to `None`.
-            //
-            // ArithOp (Minus/Plus/Multiply/Division/Modulo/Min/Max): `tpe =
-            // left.tpe` and Scala does NOT type-check the operands at deserialize,
-            // so a SigmaProp LEFT operand makes the op SigmaProp (oracle-verified:
-            // `Plus(sigma, x)` accepts, `Plus(Long, Long)` rejects).
-            Payload::Two(left, right)
-                if matches!(node.opcode, 0x99 | 0x9A | 0x9C | 0x9D | 0x9E | 0xA1 | 0xA2) =>
-            {
-                let t = infer_type(left, store, constants);
-                infer_type(right, store, constants);
-                t
-            }
-            // If: `If.tpe = trueBranch.tpe` (the then-branch, child 1; Scala does
-            // NOT unify the branches at deserialize).
-            Payload::Three(cond, then_branch, else_branch) if node.opcode == 0x95 => {
-                infer_type(cond, store, constants);
-                let t = infer_type(then_branch, store, constants);
-                infer_type(else_branch, store, constants);
-                t
-            }
-            // Fold: result = the accumulator type = the `zero` arg (child 1;
-            // wire order input, zero, foldOp — FoldSerializer.scala).
-            Payload::Three(coll, zero, fold_op) if node.opcode == 0xB0 => {
-                infer_type(coll, store, constants);
-                let t = infer_type(zero, store, constants);
-                infer_type(fold_op, store, constants);
-                t
-            }
-            // BlockValue `{ vals...; result }`: type = the result expression's
-            // type. The items are walked first (in order) — each `ValDef` /
-            // `FunDef` item writes the store from its own arm below.
-            Payload::BlockValue { items, result } => {
-                for item in items {
-                    infer_type(item, store, constants);
-                }
-                infer_type(result, store, constants)
-            }
-            // ValDef 0xD6 / FunDef 0xD7 (`ValDefSerializer.parse`): the rhs is
-            // parsed FIRST under the current store, then `store(id) = rhs.tpe`
-            // (last-write-wins; a non-determinable rhs writes `None` so a
-            // `ValUse` of it stays unknown — never a stale earlier type). The
-            // node's own type is `rhs.tpe` (`ValDef.tpe`, values.scala:924) —
-            // a `FunDef` rhs is NOT always a function (e.g. `fun x =
-            // sigmaProp`), so deriving it from the rhs keeps a `ValUse` of a
-            // SigmaProp-RHS binding accepting (oracle-verified).
-            Payload::ValDef { id, rhs, .. } | Payload::FunDef { id, rhs, .. } => {
-                let t = infer_type(rhs, store, constants);
-                store.insert(*id, t.clone());
-                t
-            }
-            // ValUse: `store(id)` at this parse position (see
-            // [`ValDefTypeStore`]). An untrusted (`None`) entry or an id with
-            // no prior write resolves unknown (see [`infer_type`] residuals).
-            Payload::ValUse { id } => store.get(id).cloned().flatten(),
-            // FuncValue writes declared arguments before its body, without popping
-            // them. Its result is the full function type, including tuple ranges.
-            Payload::FuncValue { args, body } => {
-                for (id, tpe) in args {
-                    store.insert(*id, tpe.clone());
-                }
-                let body_t = infer_type(body, store, constants);
-                let dom: Option<Vec<SigmaType>> = args.iter().map(|(_, t)| t.clone()).collect();
-                match (dom, body_t) {
-                    (Some(t_dom), Some(t_range)) => Some(SigmaType::SFunc {
-                        t_dom,
-                        t_range: Box::new(t_range),
-                        tpe_params: vec![],
-                    }),
-                    _ => None,
-                }
-            }
-            // SelectField `tuple._i`: the i-th component type of the input tuple
-            // (1-based). Only resolvable when the input's type is a determinable
-            // `STuple` (e.g. a tuple constant); otherwise unknown.
-            Payload::SelectField { input, field_idx } => {
-                match infer_type(input, store, constants) {
-                    Some(SigmaType::STuple(items)) => (*field_idx as usize)
-                        .checked_sub(1)
-                        .and_then(|i| items.get(i))
-                        .cloned(),
-                    _ => None,
-                }
-            }
-            // ByIndex `coll(i)`: the element type of the input collection.
-            Payload::ByIndex {
-                input,
-                index,
-                default,
-            } => {
-                let t = infer_type(input, store, constants);
-                infer_type(index, store, constants);
-                if let Some(d) = default.as_deref() {
-                    infer_type(d, store, constants);
-                }
-                match t {
-                    Some(SigmaType::SColl(elem)) => Some(*elem),
-                    _ => None,
-                }
-            }
-            // OptionGet `opt.get` / OptionGetOrElse `opt.getOrElse(d)`: the option's
-            // element type (the option is child 0 in both).
-            Payload::One(opt) if node.opcode == 0xE4 => match infer_type(opt, store, constants) {
-                Some(SigmaType::SOption(elem)) => Some(*elem),
-                _ => None,
-            },
-            Payload::Two(opt, default) if node.opcode == 0xE5 => {
-                let t = infer_type(opt, store, constants);
-                infer_type(default, store, constants);
-                match t {
-                    Some(SigmaType::SOption(elem)) => Some(*elem),
-                    _ => None,
-                }
-            }
-            // MethodCall / PropertyCall: the receiver and value args are walked
-            // first (wire order: obj, then args; the explicit type args carry
-            // no expressions), then the method's result static type is
-            // classified by the (type_id, method_id) registry the `difftest
-            // --methodcall` harness verified end-to-end against the JVM
-            // reference. See [`method_call_result_type`].
-            Payload::MethodCall {
-                type_id,
-                method_id,
-                obj,
-                args,
-                type_args,
-            } => {
-                let obj_type = infer_type(obj, store, constants);
-                let arg_types: Vec<Option<SigmaType>> = args
-                    .iter()
-                    .map(|a| infer_type(a, store, constants))
-                    .collect();
-                method_call_result_type(*type_id, *method_id, obj_type, &arg_types, type_args)
-            }
-            // Apply projects a function range or collection element type (values.scala).
-            Payload::FuncApply { func, args } => {
-                let t = infer_type(func, store, constants);
-                for a in args {
-                    infer_type(a, store, constants);
-                }
-                match t {
-                    Some(SigmaType::SFunc { t_range, .. }) => Some(*t_range),
-                    Some(SigmaType::SColl(elem)) => Some(*elem),
-                    _ => None,
-                }
-            }
-            // Sigma conjunctions retain SigmaProp after visiting every child.
-            Payload::SigmaCollection { items } => {
-                for i in items {
-                    infer_type(i, store, constants);
-                }
-                op_result_type(node.opcode)
-            }
-            // A zero-argument (leaf) opcode root has a statically-known type and
-            // NONE of them is `SSigmaProp` (see [`zero_arg_type`]), so a
-            // script rooted at one fails CheckDeserializedScriptIsSigmaProp just
-            // like an inline non-SigmaProp `Const`.
-            Payload::Zero => Some(zero_arg_type(node.opcode)),
-            // Collection transforms preserve the input or project the mapper range.
-            Payload::Two(input, mapper) if node.opcode == 0xAD => {
-                infer_type(input, store, constants);
-                match infer_type(mapper, store, constants) {
-                    Some(SigmaType::SFunc { t_range, .. }) => Some(SigmaType::SColl(t_range)),
-                    _ => None,
-                }
-            }
-            Payload::Two(input, other)
-                if matches!(node.opcode, 0xB3 | 0xB5 | 0xF2 | 0xF3 | 0xF5..=0xF8) =>
-            {
-                let t = infer_type(input, store, constants);
-                infer_type(other, store, constants);
-                t
-            }
-            Payload::Three(input, from, until) if node.opcode == 0xB4 => {
-                let t = infer_type(input, store, constants);
-                infer_type(from, store, constants);
-                infer_type(until, store, constants);
-                t
-            }
-            Payload::One(input) if matches!(node.opcode, 0xF0 | 0xF1) => {
-                infer_type(input, store, constants)
-            }
-            // Fixed-result operators still visit all children in wire order.
-            Payload::One(a) => {
-                infer_type(a, store, constants);
-                op_result_type(node.opcode)
-            }
-            Payload::Two(a, b) => {
-                infer_type(a, store, constants);
-                infer_type(b, store, constants);
-                op_result_type(node.opcode)
-            }
-            Payload::Three(a, b, c) => {
-                infer_type(a, store, constants);
-                infer_type(b, store, constants);
-                infer_type(c, store, constants);
-                op_result_type(node.opcode)
-            }
-            Payload::Four(a, b, c, d) => {
-                infer_type(a, store, constants);
-                infer_type(b, store, constants);
-                infer_type(c, store, constants);
-                infer_type(d, store, constants);
-                op_result_type(node.opcode)
-            }
-            // TaggedVar has no type in the serialized payload; NoneValue has
-            // no registered Scala serializer. Neither supplies a substitution type.
-            Payload::TaggedVar { .. } | Payload::NoneValue { .. } => op_result_type(node.opcode),
-        },
-        crate::opcode::Expr::Unparsed(_) => None,
-    }
-}
-
-/// Substitution requires a concrete type without unknown/Any components.
-fn type_is_precise(t: &crate::sigma_type::SigmaType) -> bool {
-    use crate::sigma_type::SigmaType;
-    match t {
-        SigmaType::SAny => false,
-        // An unresolved type variable is not a concrete type. `unify_type_lists`
-        // succeeds without binding `T` for methods whose range is
-        // `SOption(STypeVar("T"))` with an empty explicit type-argument list
-        // ((99, 9)-(99, 18), (101, 11)), so the specialized range can still carry
-        // it. Treating that as precise would let it satisfy the exact-type check
-        // in `substitute_deserialize`, whose declared type is read by `read_type`
-        // and may itself be an `STypeVar`.
-        SigmaType::STypeVar(_) => false,
-        SigmaType::SColl(e) | SigmaType::SOption(e) => type_is_precise(e),
-        SigmaType::STuple(items) => items.iter().all(type_is_precise),
-        SigmaType::SFunc {
-            t_dom,
-            t_range,
-            tpe_params,
-        } => {
-            t_dom.iter().all(type_is_precise)
-                && type_is_precise(t_range)
-                && tpe_params.iter().all(type_is_precise)
-        }
-        _ => true,
-    }
+    super::root_type::infer_node_type(body, store, constants, true, false, &mut infer_type)
 }
 
 /// Specialize the JVM-extracted signature using Scala's directional unification.
 /// A failed unification leaves the template unchanged (SMethod.specializeFor).
-fn method_call_result_type(
+pub(super) fn method_call_result_type(
     type_id: u8,
     method_id: u8,
     obj_type: Option<crate::sigma_type::SigmaType>,
@@ -465,7 +135,7 @@ fn unify_types(
 }
 
 /// Fixed-result opcode types from the pinned Scala AST declarations.
-fn op_result_type(opcode: u8) -> Option<crate::sigma_type::SigmaType> {
+pub(super) fn op_result_type(opcode: u8) -> Option<crate::sigma_type::SigmaType> {
     if matches!(opcode, 0x98 | 0xCD | 0xCE | 0xD1 | 0xEA | 0xEB) {
         return Some(crate::sigma_type::SigmaType::SSigmaProp);
     }
@@ -504,7 +174,7 @@ fn op_result_type(opcode: u8) -> Option<crate::sigma_type::SigmaType> {
 /// (A `SigmaProp`-producing op — `ProveDlog`, `BoolToSigmaProp`, `SigmaAnd`, … —
 /// always takes arguments, so it is never a `Zero` leaf.) An unrecognized leaf
 /// falls back to `SAny`, which cannot establish substitution compatibility.
-fn zero_arg_type(opcode: u8) -> crate::sigma_type::SigmaType {
+pub(super) fn zero_arg_type(opcode: u8) -> crate::sigma_type::SigmaType {
     use crate::sigma_type::SigmaType::*;
     match opcode {
         0x7F | 0x80 => SBoolean,              // True / False

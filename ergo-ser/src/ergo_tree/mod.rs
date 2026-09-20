@@ -24,7 +24,7 @@ use crate::sigma_value::{write_constant, SigmaValue};
 mod gates;
 mod hash;
 mod read;
-mod root_type;
+pub(crate) mod root_type;
 #[cfg(test)]
 mod tests;
 mod type_infer;
