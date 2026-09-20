@@ -27,7 +27,7 @@ env:
 
 jobs:
   check:
-    name: Check, clippy, test (${{ matrix.os }})${{ matrix.shard && format(' shard {0}/3', matrix.shard) || '' }}
+    name: Check, clippy, test (${{ matrix.os }})${{ matrix.shard && format(' shard {0}/{1}', matrix.shard, matrix.shards) || '' }}
     runs-on: ${{ matrix.os }}
     # Job-scoped so audit/deny/machete legs never see RUSTC_WRAPPER without
     # a sccache binary installed. Declared here rather than appended to
@@ -42,12 +42,20 @@ jobs:
         include:
           - os: ubuntu-latest
           - os: macos-latest
+            shard: 1
+            shards: 2
+          - os: macos-latest
+            shard: 2
+            shards: 2
           - os: windows-latest
             shard: 1
+            shards: 3
           - os: windows-latest
             shard: 2
+            shards: 3
           - os: windows-latest
             shard: 3
+            shards: 3
 
     steps:
       - uses: actions/checkout@v4
@@ -86,7 +94,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           # Shards share a cache key; each still compiles its test binaries.
-          key: ${{ matrix.os }}
+          # Step-level RUSTFLAGS are not visible to rust-cache, so mirror the
+          # Windows linker experiment in its key to invalidate old artifacts.
+          key: ${{ matrix.os }}${{ runner.os == 'Windows' && '-rust-lld' || '' }}
 
       # Cross-run compilation cache on top of rust-cache: rust-cache restores
       # dependency artifacts, sccache also caches *workspace* crates whose
@@ -102,7 +112,16 @@ jobs:
       # Default-feature linting here; the full --all-features lint runs once
       # on ubuntu below (feature combos don't vary meaningfully per-OS, and
       # --all-features materially grows the dependency graph per leg).
+      # Shard 1 still covers cfg(windows)-specific lints; macOS also lints
+      # once, on shard 1. Ubuntu remains a single unsharded leg.
+      # Windows linker experiment: RUSTFLAGS=-Clinker=rust-lld uses the
+      # toolchain's bundled linker. Changing RUSTFLAGS busts the rust-cache
+      # key: the FIRST run is a cold rebuild; only the second is comparable.
+      # Keep the same step-level flags on every Windows compile/test step.
       - name: cargo clippy
+        if: (runner.os != 'Windows' || matrix.shard == 1) && (runner.os != 'macOS' || matrix.shard == 1)
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-Clinker=rust-lld' || '' }}
         run: cargo clippy --all-targets -- -D warnings
 
       - uses: taiki-e/install-action@nextest
@@ -110,15 +129,21 @@ jobs:
       # nextest: per-test processes with better parallelism; skips doctests,
       # which the ubuntu leg below covers explicitly so coverage is retained.
       - name: cargo nextest run
-        if: runner.os != 'Windows'
+        if: runner.os == 'Linux'
         run: cargo nextest run --all
+
+      - name: cargo nextest run (macOS shard)
+        if: runner.os == 'macOS'
+        run: cargo nextest run --all --partition hash:${{ matrix.shard }}/${{ matrix.shards }}
 
       # The slow redb tests are 15–27x slower on Windows than Ubuntu due
       # to disk waits. Eight threads (2x the runner's four cores) overlap
       # those waits; hash partitions cover every test exactly once.
       - name: cargo nextest run (Windows shard)
         if: runner.os == 'Windows'
-        run: cargo nextest run --all --partition hash:${{ matrix.shard }}/3 --test-threads 8
+        env:
+          RUSTFLAGS: -Clinker=rust-lld
+        run: cargo nextest run --all --partition hash:${{ matrix.shard }}/${{ matrix.shards }} --test-threads 8
 
       # `cargo test --all` above does not build with --features cost-trace,
       # so the feature-gated recording sites in `ergo-sigma` do not get
@@ -130,6 +155,8 @@ jobs:
       # — a feature-gated `cost_trace::record(...)` site referencing the
       # wrong identifier and breaking the build under the feature.
       - name: cargo test (cost-trace feature)
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-Clinker=rust-lld' || '' }}
         run: cargo test -p ergo-sigma --features cost-trace --test it -- cost_trace_smoke traced_untraced_parity
 
       # Doctest coverage lives on the fastest runner only — every other leg
@@ -138,10 +165,13 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo test --all --doc
 
-  check-windows:
+  check-required:
     # Preserve the existing branch-protection context. A failed, cancelled,
     # or skipped matrix must never turn this required check green.
-    name: Check, clippy, test (windows-latest)
+    name: Check, clippy, test (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
     needs: check
     if: always()
     runs-on: ubuntu-latest
