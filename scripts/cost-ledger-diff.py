@@ -64,11 +64,25 @@ def reviewed_fields(row: dict) -> dict[str, str]:
     return {field: normalize(row[field]) for field in ("scala", "note")}
 
 
+def normalized_keys(values: dict, label: str) -> dict:
+    result = {}
+    for key, value in values.items():
+        normalized = normalize(key)
+        if normalized in result:
+            raise ValueError(f"duplicate {label} id after normalization: {normalized}")
+        result[normalized] = value
+    return result
+
+
 def differences(enumeration: dict, ledger: dict, audit: dict) -> dict[str, list[str]]:
     if audit["schema"] != 1:
         raise ValueError("unsupported inventory map schema")
-    mappings = audit["enumeration"]
-    reviewed = audit["ledger"]
+    mappings = normalized_keys(audit["enumeration"], "enumeration")
+    mappings = {
+        eid: {**entry, "ledger": [normalize(rid) for rid in entry["ledger"]]}
+        for eid, entry in mappings.items()
+    }
+    reviewed = normalized_keys(audit["ledger"], "ledger")
     categories = {"in enumeration only": [], "in ledger only": [], "matched-with-different-constant": []}
     enum_only, ledger_only, changed = categories.values()
     for eid, cells in sorted(enumeration.items()):
@@ -127,6 +141,23 @@ def selftest() -> int:
 
         def test_normalization_aliases_equal(self):
             self.assertEqual(normalize("`SColl` . map  0xff"), normalize("Coll.map 0xFF"))
+
+        def test_inventory_audit_aliases_equal(self):
+            self.ledger = {"OP-0xFF": self.ledger["OP-0x72"]}
+            entry = self.audit["enumeration"].pop("A001")
+            entry["ledger"] = ["OP-0xff"]
+            self.audit["enumeration"]["`A001`"] = entry
+            self.audit["ledger"]["OP-0xff"] = self.audit["ledger"].pop("OP-0x72")
+            self.assertFalse(any(self.diff().values()))
+
+        def test_inventory_audit_normalized_collisions_rejected(self):
+            for section, alias in (("enumeration", "`A001`"), ("ledger", "OP-0X72")):
+                with self.subTest(section=section):
+                    entries = self.audit[section]
+                    entries[alias] = next(iter(entries.values()))
+                    with self.assertRaisesRegex(ValueError, f"duplicate {section} id"):
+                        self.diff()
+                    del entries[alias]
 
         def test_enumeration_new_entry_reported(self):
             self.enumeration["A002"] = self.enumeration["A001"]

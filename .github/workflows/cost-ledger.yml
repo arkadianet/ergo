@@ -18,11 +18,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # Artifact provenance verification reads the recorded generator commit.
+          fetch-depth: 0
           persist-credentials: false
       - name: Ledger checker self-tests
         run: python3 scripts/cost-ledger.py --selftest
+      - name: JVM artifact integrity
+        run: python3 scripts/jvm_cost_constants_extractor/verify.py
       - name: Ledger integrity
         run: python3 scripts/cost-ledger.py check
+      - name: Inventory diff self-tests
+        run: python3 scripts/cost-ledger-diff.py --selftest
+      # The enumeration-vs-ledger diff gate is enabled once the inventory map is
+      # refreshed for the rows closed later in this stack (see #346).
 
   tracked-cost-fixtures:
     runs-on: ubuntu-latest

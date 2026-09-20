@@ -100,8 +100,9 @@ fn serialized_ergo_tree_len(tree: &ErgoTree) -> Result<usize, VerifySpendingErro
 /// which only takes the fast path on the exact pattern
 /// `SigmaPropConstant(p)` and falls through to
 /// `CErgoTreeEvaluator.evalToCrypto` for other body shapes. Non-SigmaProp
-/// roots, including top-level `SBoolean` constants, are rejected during
-/// ErgoTree parsing for all tree versions.
+/// roots with statically determinable types, including top-level `SBoolean`
+/// constants, fail parser rule 1001 for every tree version. Size-delimited
+/// trees are soft-fork wrapped instead of returned as valid parsed trees.
 ///
 /// Two of these variants are caller-must-fall-through (the trivial
 /// path didn't match Scala's `SigmaPropConstant(p)` pattern); two
@@ -113,8 +114,9 @@ pub enum ReductionError {
     #[error("ErgoTree does not trivially reduce to a sigma proposition")]
     NotTriviallyReducible,
     /// Body IS a single constant, but not of type `SSigmaProp`
-    /// in an internally constructed tree. Non-SigmaProp roots are
-    /// rejected during parsing for every ErgoTree version.
+    /// in an internally constructed tree. Statically determinable non-SigmaProp
+    /// roots fail parser rule 1001 for every ErgoTree version; size-delimited
+    /// trees are soft-fork wrapped.
     /// Caller MUST fall through.
     #[error("body constant type is {0:?}, not SSigmaProp — full evaluator needed")]
     BodyConstantNotSigmaProp(SigmaType),
@@ -170,7 +172,7 @@ fn sigma_value_to_sigma_boolean(
         // tpe says SSigmaProp but val isn't — structural malformed.
         // Hard reject; the full evaluator can't recover this either.
         (SigmaType::SSigmaProp, _) => Err(ReductionError::MalformedSigmaPropConstant),
-        // tpe is anything else (e.g. SBoolean root in a v3 tree).
+        // tpe is anything else (e.g. SBoolean in an internally constructed tree).
         // Scala's fast path only matches SigmaPropConstant(p); every
         // other constant type is the evaluator's job, including the
         // implicit Bool → SigmaProp coercion under 6.0. Caller must
@@ -282,8 +284,8 @@ pub fn verify_spending_proof_with_context_and_cost(
     // Try trivial reduction first. Mirrors Scala
     // `Interpreter.fullReduction:210-225`: the fast path only handles
     // the `SigmaPropConstant(p)` pattern; other body shapes go through
-    // the full evaluator. Non-SigmaProp roots are rejected during parsing
-    // for every ErgoTree version.
+    // the full evaluator. Statically determinable non-SigmaProp roots fail
+    // parser rule 1001 for every version; size-delimited trees are soft-fork wrapped.
     let proposition = match trivial_reduce(ergo_tree) {
         Ok(prop) => {
             // Scala charges Eval_SigmaPropConstant(50) for trivially-reducible scripts
@@ -407,10 +409,9 @@ mod tests {
 
     #[test]
     fn trivial_reduce_inline_sboolean_root_falls_through() {
-        // v3 / 6.0 ErgoTrees can have a top-level SBoolean root; Scala's
-        // Interpreter.fullReduction routes these to evalToCrypto, which
-        // applies the implicit Bool → SigmaProp coercion. Our trivial
-        // path must SIGNAL fall-through, not hard-reject.
+        // This internally constructed tree bypasses parser rule 1001.
+        // The trivial path must signal fall-through to the full evaluator
+        // because the body is not a SigmaProp constant.
         let t = inline_const_tree(SigmaType::SBoolean, SigmaValue::Boolean(true));
         let err = trivial_reduce(&t).expect_err("SBoolean root is not the fast path");
         assert!(
@@ -424,9 +425,9 @@ mod tests {
 
     #[test]
     fn trivial_reduce_segregated_sboolean_constant_falls_through() {
-        // The actual shape that surfaced on testnet h=28474: a v3 tree
-        // whose body is `ConstPlaceholder(0)` pointing to a Boolean
-        // constant. Must classify as fall-through, not hard-reject.
+        // This internally constructed tree bypasses parser rule 1001.
+        // Its ConstPlaceholder points to a Boolean constant, so trivial
+        // reduction must signal fall-through to the full evaluator.
         let t = segregated_const_tree(0, vec![(SigmaType::SBoolean, SigmaValue::Boolean(false))]);
         let err = trivial_reduce(&t).expect_err("SBoolean constant is not the fast path");
         assert!(
