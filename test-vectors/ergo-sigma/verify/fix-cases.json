@@ -1,0 +1,278 @@
+[
+  {
+    "name": "rent-fallback-fractional-overrun",
+    "request": {
+      "tree_hex": "00d19593850301010100",
+      "ctx_ext_hex": "00",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 4,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d00d1959385030101010000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d00d1959385030101010000000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [
+        "c0843d0008d3c094400000"
+      ],
+      "headers_hex": [],
+      "pre_header_hex": "0400000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000100a400279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+      "rent": true,
+      "storage_fee_factor": 1250000
+    },
+    "expected": {
+      "verdict": "RejectCost",
+      "eval_block_cost": "unavailable",
+      "crypto_block_cost": "unavailable",
+      "rent_block_cost": 0,
+      "rent_path": true,
+      "total_block_cost": 4,
+      "failure_class": "sigma.exceptions.CostLimitException",
+      "rejection_detail": "sigma.exceptions.CostLimitException: Estimated execution cost JitCost(43) exceeds the limit JitCost(40)",
+      "legacy": "unavailable"
+    }
+  },
+  {
+    "name": "rent-disabled-storage-factor-string",
+    "request": {
+      "tree_hex": "0008d3",
+      "ctx_ext_hex": "00",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008d300000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008d300000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [],
+      "headers_hex": [],
+      "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+      "storage_fee_factor": "unused"
+    },
+    "expected": {
+      "verdict": "Accept",
+      "eval_block_cost": 5,
+      "crypto_block_cost": 0,
+      "rent_block_cost": 0,
+      "rent_path": false,
+      "total_block_cost": 5,
+      "failure_class": null,
+      "rejection_detail": "",
+      "legacy": "P:d3|5"
+    }
+  },
+  {
+    "name": "rent-disabled-storage-factor-overflow",
+    "request": {
+      "tree_hex": "0008d3",
+      "ctx_ext_hex": "00",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008d300000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008d300000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [],
+      "headers_hex": [],
+      "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+      "storage_fee_factor": 2147483648
+    },
+    "expected": {
+      "verdict": "Accept",
+      "eval_block_cost": 5,
+      "crypto_block_cost": 0,
+      "rent_block_cost": 0,
+      "rent_path": false,
+      "total_block_cost": 5,
+      "failure_class": null,
+      "rejection_detail": "",
+      "legacy": "P:d3|5"
+    }
+  },
+  {
+    "name": "rent-disabled-storage-factor-negative",
+    "request": {
+      "tree_hex": "0008d3",
+      "ctx_ext_hex": "00",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008d300000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008d300000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [],
+      "headers_hex": [],
+      "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+      "storage_fee_factor": -1
+    },
+    "expected": {
+      "verdict": "Accept",
+      "eval_block_cost": 5,
+      "crypto_block_cost": 0,
+      "rent_block_cost": 0,
+      "rent_path": false,
+      "total_block_cost": 5,
+      "failure_class": null,
+      "rejection_detail": "",
+      "legacy": "P:d3|5"
+    }
+  },
+  {
+    "name": "rent-disabled-storage-factor-object",
+    "request": {
+      "tree_hex": "0008d3",
+      "ctx_ext_hex": "00",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008d300000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008d300000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [],
+      "headers_hex": [],
+      "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+      "storage_fee_factor": {}
+    },
+    "expected": {
+      "verdict": "Accept",
+      "eval_block_cost": 5,
+      "crypto_block_cost": 0,
+      "rent_block_cost": 0,
+      "rent_path": false,
+      "total_block_cost": 5,
+      "failure_class": null,
+      "rejection_detail": "",
+      "legacy": "P:d3|5"
+    }
+  },
+  {
+    "name": "rent-enabled-storage-factor-string",
+    "request": {
+      "tree_hex": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "ctx_ext_hex": "00",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [
+        "c0843d0008d3c094400000"
+      ],
+      "headers_hex": [],
+      "pre_header_hex": "0400000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000100a400279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+      "rent": true,
+      "storage_fee_factor": "unused"
+    },
+    "expected": {
+      "verdict": "RejectOther",
+      "eval_block_cost": "unavailable",
+      "crypto_block_cost": "unavailable",
+      "rent_block_cost": 0,
+      "rent_path": true,
+      "total_block_cost": "unavailable",
+      "failure_class": "io.circe.DecodingFailure$$anon$2",
+      "rejection_detail": "DecodingFailure(Long, List(DownField(storage_fee_factor)))",
+      "legacy": "unavailable"
+    }
+  },
+  {
+    "name": "rent-enabled-storage-factor-overflow",
+    "request": {
+      "tree_hex": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "ctx_ext_hex": "00",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [
+        "c0843d0008d3c094400000"
+      ],
+      "headers_hex": [],
+      "pre_header_hex": "0400000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000100a400279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+      "rent": true,
+      "storage_fee_factor": 2147483648
+    },
+    "expected": {
+      "verdict": "RejectOther",
+      "eval_block_cost": "unavailable",
+      "crypto_block_cost": "unavailable",
+      "rent_block_cost": 0,
+      "rent_path": true,
+      "total_block_cost": "unavailable",
+      "failure_class": "java.lang.ArithmeticException",
+      "rejection_detail": "java.lang.ArithmeticException: integer overflow",
+      "legacy": "unavailable"
+    }
+  },
+  {
+    "name": "rent-enabled-storage-factor-negative",
+    "request": {
+      "tree_hex": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "ctx_ext_hex": "00",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [
+        "c0843d0008d3c094400000"
+      ],
+      "headers_hex": [],
+      "pre_header_hex": "0400000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000100a400279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+      "rent": true,
+      "storage_fee_factor": -1
+    },
+    "expected": {
+      "verdict": "RejectOther",
+      "eval_block_cost": "unavailable",
+      "crypto_block_cost": "unavailable",
+      "rent_block_cost": 0,
+      "rent_path": true,
+      "total_block_cost": "unavailable",
+      "failure_class": "java.lang.IllegalArgumentException",
+      "rejection_detail": "java.lang.IllegalArgumentException: requirement failed: storage_fee_factor must be nonnegative",
+      "legacy": "unavailable"
+    }
+  }
+]

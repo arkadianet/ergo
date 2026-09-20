@@ -23,6 +23,9 @@ use ergo_primitives::writer::VlqWriter;
 
 use crate::to_hex;
 
+mod verify;
+pub(crate) use verify::verify_verdict;
+
 /// A parse verdict from either implementation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verdict {
@@ -55,6 +58,7 @@ pub enum DivergenceKind {
 /// Handle to the long-lived JVM oracle process.
 pub struct Oracle {
     child: Child,
+    verify_oracle: Option<Box<Oracle>>,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     /// Optional request/response transcript (`DIFFTEST_ORACLE_LOG=<path>`).
@@ -68,6 +72,10 @@ impl Oracle {
     /// Spawn `scala-cli run <script>`. The first query blocks through the
     /// oracle's compile/dependency-resolution; subsequent queries are fast.
     pub fn spawn(script: &str) -> io::Result<Oracle> {
+        Self::spawn_command(script, false)
+    }
+
+    fn spawn_command(script: &str, verify: bool) -> io::Result<Oracle> {
         // Open the transcript BEFORE spawning: a bad log path must fail the
         // spawn without ever starting a JVM that nobody would reap.
         //
@@ -85,12 +93,15 @@ impl Oracle {
             ),
             _ => None,
         };
-        let mut child = Command::new("scala-cli")
-            .arg("run")
-            .arg(script)
+        let mut command = Command::new("scala-cli");
+        command.arg("run").arg(script).arg("--server=false");
+        if verify {
+            command.args(["--", "verify"]);
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null()) // compile/resolve noise goes to stderr
+            .stderr(Stdio::null())
             .spawn()?;
         if let Some(log) = transcript.as_mut() {
             let header = writeln!(
@@ -112,6 +123,7 @@ impl Oracle {
         let stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
         Ok(Oracle {
             child,
+            verify_oracle: None,
             stdin,
             stdout,
             transcript,
@@ -120,7 +132,15 @@ impl Oracle {
 
     /// Ask the JVM reference for its verdict on `bytes` at `surface`.
     pub fn query(&mut self, surface: &str, bytes: &[u8]) -> io::Result<Verdict> {
-        Ok(parse_verdict(&self.query_raw(surface, bytes)?))
+        let line = self.query_raw(surface, bytes)?;
+        if surface == "verify" {
+            return Ok(if verify::comparable(&line).is_some() {
+                Verdict::Accept(line)
+            } else {
+                Verdict::Err(format!("malformed verify record: {line}"))
+            });
+        }
+        Ok(parse_verdict(&line))
     }
 
     /// Ask the JVM reference and return its RAW response line (trimmed). Used by
@@ -128,6 +148,43 @@ impl Oracle {
     /// answers `SIGMA` / `WRAP` / `THROW <exc>` for the MethodCall typechecker-
     /// registry harness.
     pub fn query_raw(&mut self, surface: &str, bytes: &[u8]) -> io::Result<String> {
+        if surface == "verify" {
+            if self.verify_oracle.is_none() {
+                // Resolve from the crate manifest, not the caller's working
+                // directory: `spawn_command` sets no cwd, so a relative path
+                // would break any run started outside the repository root.
+                self.verify_oracle = Some(Box::new(Self::spawn_command(
+                    concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala"
+                    ),
+                    true,
+                )?));
+            }
+            let oracle = self
+                .verify_oracle
+                .as_mut()
+                .expect("initialized verify oracle");
+            // Compact valid JSON onto one line. Malformed JSON (including invalid
+            // UTF-8) maps to a request-schema rejection on both implementations.
+            let request = serde_json::from_slice::<serde_json::Value>(bytes)
+                .map(|v| v.to_string())
+                .unwrap_or_else(|_| "null".into());
+            writeln!(oracle.stdin, "{request}")?;
+            oracle.stdin.flush()?;
+            let mut response = String::new();
+            if oracle.stdout.read_line(&mut response)? == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "verify oracle closed output",
+                ));
+            }
+            if let Some(log) = oracle.transcript.as_mut() {
+                writeln!(log, ">> verify {request}\n<< {}", response.trim())?;
+                log.flush()?;
+            }
+            return Ok(response.trim().to_string());
+        }
         let request = to_hex(bytes);
         writeln!(self.stdin, "{surface} {request}")?;
         self.stdin.flush()?;
@@ -233,6 +290,12 @@ pub fn oracle_surfaces() -> Vec<SurfaceSpec> {
             // `P:<prop>|<cost>` string, same as `reduce`.
             name: "reduce_ctx",
             rust_verdict: reduce_ctx_verdict,
+            compare_canonical: true,
+            soft_fork_header: false,
+        },
+        SurfaceSpec {
+            name: "verify",
+            rust_verdict: verify_verdict,
             compare_canonical: true,
             soft_fork_header: false,
         },
@@ -851,6 +914,13 @@ pub fn reconcile(
             DivergenceKind::AcceptReject
         }
         (Verdict::Accept(a), Verdict::Accept(b)) => {
+            if spec.name == "verify" {
+                match (verify::comparable(a), verify::comparable(b)) {
+                    (Some(a), Some(b)) if a == b => return Reconciliation::Agree,
+                    (Some(_), Some(_)) => {}
+                    _ => return Reconciliation::Indeterminate,
+                }
+            }
             if !spec.compare_canonical || a.is_empty() || b.is_empty() || a == b {
                 return Reconciliation::Agree;
             }
@@ -1526,6 +1596,7 @@ mod tests {
         let stdout = io::BufReader::new(child.stdout.take().expect("piped stdout"));
         Oracle {
             child,
+            verify_oracle: None,
             stdin,
             stdout,
             transcript: None,

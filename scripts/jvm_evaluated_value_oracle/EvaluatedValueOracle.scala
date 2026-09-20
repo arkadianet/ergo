@@ -24,7 +24,51 @@
 //> using scala 2.12
 //> using dep org.scorexfoundation::sigma-state:6.0.2
 //> using dep org.ergoplatform::ergo-core:6.0.2
+//> using dep org.ergoplatform::ergo-wallet:6.0.2
 
+// verify manifest: sigma-state/ergo-core/ergo-wallet = 6.0.2 fallback.
+// Requested 6.0.6/6.0.5/6.0.5: core 6.0.5 absent from Ivy/coursier and
+// returns HTTP 404 from Maven Central and the pinned GitLab repository.
+// Usage: scala-cli run <this file> --server=false -- verify < requests.jsonl
+// Self-test: scala-cli run <this file> --server=false -- verify_self_test
+// One JSON request and response per line; no-argument vector output is unchanged.
+// Required request keys: tree_hex, ctx_ext_hex, proof_hex, cost_limit_block,
+// init_cost_block, activated_version, tree_version_expected, self_box_hex,
+// inputs_hex, data_inputs_hex, outputs_hex, headers_hex, pre_header_hex, message_hex.
+// inputs/data_inputs/SELF are full ErgoBox bytes; outputs are ErgoBoxCandidate bytes.
+// Headers are node HeaderSerializer bytes (newest first).
+// PreHeader has no node wire serializer: pre_header_hex is an 89-byte frame,
+// big-endian version:u8, parentId:32, timestamp:i64, nBits:i64, height:i32,
+// minerPk:33, votes:3. With no headers the UTXO root is AvlTreeData.dummy.
+// Optional rent=true selects the actual wallet ErgoInterpreter rent implementation,
+// including its 50 BC return, eligibility checks and recoverWith fallback.
+// rent requires storage_fee_factor (the voted parameter); rent_path echoes rent.
+// Completed rent reports eval=0, crypto=0, rent_block_cost=50 and total=init+50.
+// The wallet returns 50 independently of init/limit; transaction validation supplies
+// init=0 per input and accumulates externally. This API includes the supplied init
+// in its total; transaction-level limit checks remain outside this API.
+// Ordinary verification and rent fallback report rent_block_cost=0.
+// Failure mapping (cause chain, cost takes precedence):
+// CostLimitException => RejectCost; SigmaException, ValidationException,
+// SerializerException, IllegalArgumentException, NoSuchElementException,
+// IndexOutOfBoundsException, ClassCastException, ArithmeticException => RejectScript
+// during verification; all request decoding errors and other exceptions => RejectOther.
+// failure_class is the selected fully qualified exception class (null on Success).
+// Unexposed costs/legacy use "unavailable". CostAccumulator exceptions expose JIT
+// units, converted to BC by /10; addCostChecked exceptions expose BC directly.
+// The breakdown observes fullReduction in the actual verify call, without replay.
+// legacy is supplementary raw evaluator P:<prop>|<jit>, evaluated independently
+// after verification; it cannot affect the verdict or structured costs.
+
+import io.circe.Json
+import io.circe.parser.parse
+import scala.util.{Try, Success, Failure}
+import scala.util.control.NonFatal
+import sigmastate.interpreter.Interpreter
+import sigma.exceptions.CostLimitException
+import org.ergoplatform.modifiers.history.header.{Header => NodeHeader, HeaderSerializer}
+import org.ergoplatform.settings.{Parameters, ErgoValidationSettingsUpdate}
+import org.ergoplatform.wallet.interpreter.ErgoInterpreter
 import scorex.util.encode.Base16
 import scorex.util.bytesToId
 import scorex.crypto.authds.ADKey
@@ -176,7 +220,383 @@ object EvaluatedValueOracle {
     "01" + boxId + "00" + extHex + "00" + "00" + "01" + out
   }
 
-  def main(args: Array[String]): Unit = VersionContext.withVersions(3.toByte, 0.toByte) {
+  // ----- helpers -----
+
+  private val unavailable = Json.fromString("unavailable")
+
+  private def causes(error: Throwable): Vector[Throwable] = {
+    val seen = scala.collection.mutable.ArrayBuffer.empty[Throwable]
+    var next = error
+    while (next != null && !seen.exists(_ eq next)) {
+      seen += next
+      next = next.getCause
+    }
+    seen.toVector
+  }
+
+  private def failure(error: Throwable, verifying: Boolean): (String, Throwable) = {
+    val chain = causes(error)
+    chain.collectFirst { case e: CostLimitException => ("RejectCost", e) }
+      .getOrElse {
+        val script = chain.find {
+          case e: RuntimeException if e.getMessage != null &&
+              e.getMessage.startsWith("Should be overriden in class sigma.ast.") => true
+          case _: sigma.SigmaException | _: sigma.validation.ValidationException |
+               _: sigma.serialization.SerializerException | _: IllegalArgumentException |
+               _: NoSuchElementException | _: IndexOutOfBoundsException |
+               _: ClassCastException | _: ArithmeticException => true
+          case _ => false
+        }
+        if (verifying && script.isDefined) ("RejectScript", script.get)
+        else ("RejectOther", error)
+      }
+  }
+
+  private def failureCost(error: Throwable): Json =
+    causes(error).collectFirst { case e: CostLimitException =>
+      val jit = e.getStackTrace.exists(_.getClassName ==
+        "sigmastate.interpreter.CostAccumulator")
+      Json.fromLong(if (jit) e.estimatedCost / 10 else e.estimatedCost)
+    }.getOrElse(unavailable)
+
+  private trait ObservedReduction extends ErgoLikeInterpreter {
+    override type CTX = ErgoLikeContext
+    var reduction: Option[Interpreter.ReductionResult] = None
+    var chargedCrypto: Option[Long] = None
+    abstract override protected def addCryptoCost(sb: SigmaBoolean, base: Long, limit: Long): Long = {
+      val result = super.addCryptoCost(sb, base, limit)
+      chargedCrypto = Some(result)
+      result
+    }
+    abstract override def fullReduction(tree: ErgoTree, ctx: ErgoLikeContext,
+                                       env: Interpreter.ScriptEnv): Interpreter.ReductionResult = {
+      val result = super.fullReduction(tree, ctx, env)
+      reduction = Some(result)
+      result
+    }
+  }
+
+  private def readPreHeader(bytes: Array[Byte]): PreHeader = {
+    require(bytes.length == 89, "pre_header_hex must contain the 89-byte pre-header frame")
+    val b = java.nio.ByteBuffer.wrap(bytes)
+    def take(n: Int): Array[Byte] = { val result = new Array[Byte](n); b.get(result); result }
+    val version = b.get()
+    val parent = take(32)
+    val timestamp = b.getLong()
+    val nBits = b.getLong()
+    val height = b.getInt()
+    val pk = GroupElementSerializer.parse(SigmaSerializer.startReader(take(33))).toGroupElement
+    CPreHeader(version, Colls.fromArray(parent), timestamp, nBits, height,
+      pk, Colls.fromArray(take(3)))
+  }
+
+  def verifyLine(line: String): Json = {
+    var rent = false
+    var verifying = false
+    var eval = unavailable
+    var crypto = unavailable
+    var rentCost = Json.fromLong(0)
+    var legacy = unavailable
+    var evaluatorFailureCost = unavailable
+    def record(verdict: String, total: Json, error: Option[Throwable], detail: String): Json =
+      Json.obj("verdict" -> Json.fromString(verdict), "eval_block_cost" -> eval,
+        "crypto_block_cost" -> crypto, "rent_block_cost" -> rentCost, "rent_path" -> Json.fromBoolean(rent),
+        "total_block_cost" -> total,
+        "failure_class" -> error.map(e => Json.fromString(e.getClass.getName)).getOrElse(Json.Null),
+        "rejection_detail" -> Json.fromString(detail), "legacy" -> legacy,
+        "evaluator_failure_block_cost" -> evaluatorFailureCost)
+    try {
+      val cursor = parse(line).fold(throw _, identity).hcursor
+      def str(key: String) = cursor.get[String](key).fold(throw _, identity)
+      def number(key: String) = cursor.get[Long](key).fold(throw _, identity)
+      def byte(key: String): Byte = {
+        val n = number(key)
+        require(n >= 0 && n <= 127, key + " is outside the script version range")
+        n.toByte
+      }
+      def bytes(key: String) = Base16.decode(str(key)).get
+      def array(key: String) = cursor.get[Vector[String]](key).fold(throw _, identity)
+        .map(h => Base16.decode(h).get)
+      def box(b: Array[Byte]) = ErgoBox.sigmaSerializer.parse(SigmaSerializer.startReader(b))
+      rent = cursor.get[Option[Boolean]]("rent").fold(throw _, identity).getOrElse(false)
+      val activated = byte("activated_version")
+      val expected = byte("tree_version_expected")
+      val tree = VersionContext.withVersions(1.toByte, 1.toByte) {
+        treeSer.deserializeErgoTree(bytes("tree_hex"))
+      }
+      require(tree.version == expected, "tree_version_expected differs from serialized tree")
+      val self = box(bytes("self_box_hex"))
+      val inputs = array("inputs_hex").map(box)
+      val data = array("data_inputs_hex").map(box)
+      val outputs = array("outputs_hex").map(b =>
+        ErgoBoxCandidate.serializer.parse(SigmaSerializer.startReader(b)))
+      val headers = array("headers_hex").map(b => NodeHeader.toSigma(HeaderSerializer.parseBytes(b)))
+      val preHeader = readPreHeader(bytes("pre_header_hex"))
+      val selfIndex = inputs.indexWhere(b => java.util.Arrays.equals(b.bytes, self.bytes))
+      require(selfIndex >= 0, "self_box_hex must occur in inputs_hex")
+      val ext = ContextExtension.serializer.parse(SigmaSerializer.startReader(bytes("ctx_ext_hex")))
+      val proof = ProverResult(bytes("proof_hex"), ext)
+      val message = bytes("message_hex")
+      val init = number("init_cost_block")
+      val limit = number("cost_limit_block")
+      require(init >= 0 && limit >= 0, "costs must be nonnegative")
+      val tx = new ErgoLikeTransaction(inputs.map(b => Input(b.id, proof)),
+        data.map(b => DataInput(b.id)), outputs)
+      val root = headers.headOption.map(h => ErgoInterpreter.avlTreeFromDigest(h.stateRoot.digest))
+        .getOrElse(AvlTreeData.dummy)
+      val ctx = new ErgoLikeContext(root, Colls.fromArray(headers.toArray), preHeader,
+        data, inputs, tx, selfIndex, ext, ValidationRules.currentSettings,
+        limit, init, activated).withErgoTreeVersion(expected)
+      var rentCompleted = false
+      val interpreter: ErgoLikeInterpreter with ObservedReduction = if (rent) {
+        val factor = Math.toIntExact(number("storage_fee_factor"))
+        require(factor >= 0, "storage_fee_factor must be nonnegative")
+        val params = Parameters(preHeader.height, Map(1.toByte -> factor),
+          ErgoValidationSettingsUpdate.empty)
+        new ErgoInterpreter(params) with ObservedReduction {
+          override protected def checkExpiredBox(box: ErgoBox, output: ErgoBoxCandidate,
+                                                 height: Int): Boolean = {
+            val ok = super.checkExpiredBox(box, output, height)
+            rentCompleted = true
+            ok
+          }
+        }
+      } else new ErgoLikeInterpreter with ObservedReduction
+      verifying = true
+      val result = interpreter.verify(tree, ctx, proof, message)
+      interpreter.reduction.foreach { r =>
+        eval = Json.fromLong(r.cost - init)
+        crypto = Json.fromLong(Interpreter.estimateCryptoVerifyCost(r.value).toBlockCost)
+      }
+      // The wallet rent path returns without invoking fullReduction.
+      if (rentCompleted && result.isSuccess) {
+        eval = Json.fromLong(0)
+        crypto = Json.fromLong(0)
+        rentCost = Json.fromLong(result.get._2)
+      }
+      if (interpreter.reduction.isDefined) {
+        legacy = Try(VersionContext.withVersions(activated, tree.version) {
+          val accu = new CostAccumulator(JitCost.fromBlockCost(0),
+            Some(JitCost.fromBlockCost(Math.toIntExact(limit))))
+          val (v, _) = CErgoTreeEvaluator.eval(ctx.withInitCost(0).toSigmaContext(), accu,
+            tree.constants, tree.toProposition(tree.isConstantSegregation && tree.hasDeserialize),
+            DefaultEvalSettings)
+          val sb = v match {
+            case p: CSigmaProp => p.sigmaTree
+            case b: Boolean => if (b) sigma.data.TrivialProp.TrueProp else sigma.data.TrivialProp.FalseProp
+            case other => throw new IllegalArgumentException("Unexpected evaluator value: " + other)
+          }
+          Json.fromString("P:" + hex(SigmaBoolean.serializer.toBytes(sb)) + "|" + accu.totalCost.value)
+        }).getOrElse(unavailable)
+      }
+      result match {
+        case Success((ok, cost)) => record(if (ok) "Accept" else "RejectScript",
+          Json.fromLong(if (rentCompleted) Math.addExact(init, cost) else cost), None, if (ok) "" else "Script reduced to false or proof invalid")
+        case Failure(e) =>
+          val (verdict, selected) = failure(e, verifying)
+          // Supplementary evaluation exposes the accumulator retained on a throw.
+          // This is not a substitute for the full verify result, which stays unavailable.
+          if (cursor.get[Boolean]("observe_evaluator_failure").getOrElse(false)) {
+            require(!tree.hasDeserialize && init == 0 && !rent,
+              "failure observation requires a plain evaluator tree with zero init cost")
+            VersionContext.withVersions(activated, tree.version) {
+              val accu = new CostAccumulator(JitCost.fromBlockCost(0),
+                Some(JitCost.fromBlockCost(Math.toIntExact(limit))))
+              val evaluated = Try(CErgoTreeEvaluator.eval(ctx.toSigmaContext(), accu,
+                tree.constants, tree.toProposition(false), DefaultEvalSettings))
+              require(evaluated.isFailure, "failure observation unexpectedly succeeded")
+              evaluatorFailureCost = Json.fromLong(accu.totalCost.toBlockCost)
+            }
+          }
+          val cost = if (verdict == "RejectCost") failureCost(e)
+            else interpreter.chargedCrypto.map(Json.fromLong).getOrElse(unavailable)
+          record(verdict, cost, Some(selected), e.toString)
+      }
+    } catch {
+      case NonFatal(e) =>
+        val (verdict, selected) = failure(e, verifying)
+        record(verdict, failureCost(e), Some(selected), e.toString)
+    }
+  }
+
+  // ----- happy path -----
+
+  private def verify_self_test(): Unit = {
+    val pkTree = treeSer.deserializeErgoTree(Base16.decode("0008cd" + hex(dummyPubkey)).get)
+    def request(tree: ErgoTree = pkTree, height: Int = 0): Json = {
+      val self = new ErgoBox(1000000L, tree, Colls.emptyColl, Map.empty,
+        bytesToId(Array.fill(32)(0: Byte)), 0.toShort, 0)
+      val pre = java.nio.ByteBuffer.allocate(89).put(4.toByte)
+        .put(Array.fill(32)(0: Byte)).putLong(3L).putLong(0L).putInt(height)
+        .put(dummyPubkey).put(Array.fill(3)(0: Byte)).array()
+      Json.obj("tree_hex" -> Json.fromString(hex(tree.bytes)),
+        "ctx_ext_hex" -> Json.fromString("00"), "proof_hex" -> Json.fromString(""),
+        "cost_limit_block" -> Json.fromLong(1000000), "init_cost_block" -> Json.fromLong(0),
+        "activated_version" -> Json.fromInt(3), "tree_version_expected" -> Json.fromInt(tree.version),
+        "self_box_hex" -> Json.fromString(hex(self.bytes)),
+        "inputs_hex" -> Json.arr(Json.fromString(hex(self.bytes))),
+        "data_inputs_hex" -> Json.arr(), "outputs_hex" -> Json.arr(),
+        "headers_hex" -> Json.arr(), "pre_header_hex" -> Json.fromString(hex(pre)),
+        "message_hex" -> Json.fromString(""))
+    }
+    def patch(req: Json, values: (String, Json)*): Json = req.deepMerge(Json.obj(values: _*))
+    var count = 0
+    def check(name: String, req: Json, expected: (String, Json)*): Unit = {
+      val actual = verifyLine(req.noSpaces)
+      require(actual.asObject.get.keys.toSet == Set("verdict", "eval_block_cost",
+        "crypto_block_cost", "rent_block_cost", "rent_path", "total_block_cost", "failure_class",
+        "rejection_detail", "legacy", "evaluator_failure_block_cost"), name + ": response schema")
+      expected.foreach { case (key, value) =>
+        require(actual.hcursor.downField(key).focus.contains(value),
+          name + ": " + key + " expected " + value + ", got " + actual.noSpaces)
+      }
+      val c = actual.hcursor
+      for {
+        init <- req.hcursor.get[Long]("init_cost_block").toOption
+        eval <- c.get[Long]("eval_block_cost").toOption
+        crypto <- c.get[Long]("crypto_block_cost").toOption
+        rent <- c.get[Long]("rent_block_cost").toOption
+        total <- c.get[Long]("total_block_cost").toOption
+      } require(init + eval + crypto + rent == total, name + ": breakdown identity")
+      count += 1
+    }
+    def str(s: String) = Json.fromString(s)
+    def num(n: Long) = Json.fromLong(n)
+    val pk = request()
+    check("p2pk_empty_proof_cost_breakdown", pk,
+      "verdict" -> str("RejectScript"), "eval_block_cost" -> num(5),
+      "crypto_block_cost" -> num(398), "total_block_cost" -> num(403),
+      "legacy" -> str("P:cd" + hex(dummyPubkey) + "|5"))
+    val truth = request(ErgoTree.fromProposition(SigmaPropConstant(sigma.data.TrivialProp.TrueProp)))
+    check("true_empty_proof_accept", truth, "verdict" -> str("Accept"),
+      "eval_block_cost" -> num(5), "crypto_block_cost" -> num(0), "total_block_cost" -> num(5))
+    check("false_empty_proof_reject_script",
+      request(ErgoTree.fromProposition(SigmaPropConstant(sigma.data.TrivialProp.FalseProp))),
+      "verdict" -> str("RejectScript"), "total_block_cost" -> num(5))
+    check("p2pk_nonzero_init_cost_preserved", patch(pk, "init_cost_block" -> num(17)),
+      "eval_block_cost" -> num(5), "crypto_block_cost" -> num(398), "total_block_cost" -> num(420))
+
+    val secret = sigmastate.crypto.DLogProtocol.DLogProverInput(java.math.BigInteger.ONE)
+    val prover = new ErgoLikeInterpreter with sigmastate.interpreter.ProverInterpreter {
+      override type CTX = ErgoLikeContext
+      override val secrets = IndexedSeq(secret)
+    }
+    val signature = prover.generateProof(secret.publicImage, Array.emptyByteArray,
+      sigmastate.interpreter.HintsBag.empty)
+    val signed = patch(pk, "proof_hex" -> str(hex(signature)))
+    check("p2pk_valid_proof_accept", signed, "verdict" -> str("Accept"),
+      "eval_block_cost" -> num(5), "crypto_block_cost" -> num(398), "total_block_cost" -> num(403))
+    check("p2pk_wrong_message_reject_script", patch(signed, "message_hex" -> str("01")),
+      "verdict" -> str("RejectScript"), "total_block_cost" -> num(403))
+    for (limit <- Seq(402, 403, 404)) {
+      check("p2pk_signed_limit_" + limit + "_verdict", patch(signed, "cost_limit_block" -> num(limit)),
+        "verdict" -> str(if (limit < 403) "RejectCost" else "Accept"),
+        "total_block_cost" -> num(403))
+    }
+
+    // ----- round-trips -----
+    val original = verifyLine(pk.noSpaces)
+    require(parse(original.noSpaces).fold(throw _, identity) == original)
+    count += 1
+
+    // ----- error paths -----
+    for (limit <- Seq(402, 403, 404)) {
+      check("p2pk_limit_" + limit + "_verdict", patch(pk, "cost_limit_block" -> num(limit)),
+        "verdict" -> str(if (limit < 403) "RejectCost" else "RejectScript"),
+        "total_block_cost" -> num(403))
+    }
+    check("p2pk_reduction_limit_reject_cost", patch(pk, "cost_limit_block" -> num(4)),
+      "verdict" -> str("RejectCost"), "total_block_cost" -> num(5),
+      "eval_block_cost" -> unavailable, "crypto_block_cost" -> unavailable)
+    check("p2pk_init_limit_reject_cost",
+      patch(pk, "init_cost_block" -> num(17), "cost_limit_block" -> num(16)),
+      "verdict" -> str("RejectCost"), "total_block_cost" -> num(22))
+    check("request_tree_version_mismatch_reject_other", patch(pk, "tree_version_expected" -> num(1)),
+      "verdict" -> str("RejectOther"), "total_block_cost" -> unavailable)
+    check("tree_above_activation_reject_script",
+      patch(pk, "tree_hex" -> str("092308cd" + hex(dummyPubkey)),
+        "tree_version_expected" -> num(1), "activated_version" -> num(0)),
+      "verdict" -> str("RejectScript"),
+      "failure_class" -> str("sigma.exceptions.InterpreterException"),
+      "eval_block_cost" -> unavailable, "total_block_cost" -> unavailable)
+    require(verifyLine("{").hcursor.get[String]("verdict") == Right("RejectOther"))
+    count += 1
+    val wrapped = new RuntimeException("wrapper", new CostLimitException(51, "limit"))
+    require(failure(wrapped, true)._1 == "RejectCost" && failureCost(wrapped) == num(51))
+    require(failure(new RuntimeException("cost"), true)._1 == "RejectOther")
+    count += 1
+
+    // ----- oracle parity -----
+    // Oracle: the pinned wallet ErgoInterpreter (StorageContractCost = 50 BC).
+    val rent = patch(request(height = 1051200), "rent" -> Json.True,
+      "storage_fee_factor" -> num(1250000), "ctx_ext_hex" -> str("017f0300"),
+      "outputs_hex" -> Json.arr(str(hex(ErgoBoxCandidate.serializer.toBytes(
+        new ErgoBoxCandidate(1000000L, trueTree, 1051200))))))
+    check("rent_expired_box_accept", rent, "verdict" -> str("Accept"),
+      "eval_block_cost" -> num(0), "rent_block_cost" -> num(50), "crypto_block_cost" -> num(0),
+      "total_block_cost" -> num(50), "rent_path" -> Json.True, "legacy" -> unavailable)
+    check("rent_low_limit_nonzero_init_wallet_cost",
+      patch(rent, "init_cost_block" -> num(17), "cost_limit_block" -> num(49)),
+      "verdict" -> str("Accept"), "eval_block_cost" -> num(0),
+      "crypto_block_cost" -> num(0), "rent_block_cost" -> num(50), "total_block_cost" -> num(67))
+    check("rent_unexpired_box_fallback_reject_script",
+      patch(rent, "pre_header_hex" -> request().hcursor.downField("pre_header_hex").focus.get),
+      "verdict" -> str("RejectScript"), "total_block_cost" -> num(403))
+    check("rent_bad_index_fallback_reject_script", patch(rent, "ctx_ext_hex" -> str("017f0302")),
+      "verdict" -> str("RejectScript"), "eval_block_cost" -> num(5),
+      "crypto_block_cost" -> num(398), "total_block_cost" -> num(403))
+    check("rent_missing_extension_fallback_reject_script", patch(rent, "ctx_ext_hex" -> str("00")),
+      "verdict" -> str("RejectScript"), "total_block_cost" -> num(403))
+    check("rent_bad_type_fallback_reject_script", patch(rent, "ctx_ext_hex" -> str("017f0400")),
+      "verdict" -> str("RejectScript"), "total_block_cost" -> num(403))
+    check("rent_uncovered_fee_bad_output_reject_script",
+      patch(rent, "storage_fee_factor" -> num(0)),
+      "verdict" -> str("RejectScript"), "eval_block_cost" -> num(0), "rent_block_cost" -> num(50),
+      "crypto_block_cost" -> num(0), "total_block_cost" -> num(50))
+    check("rent_fallback_low_limit_reject_cost",
+      patch(rent, "ctx_ext_hex" -> str("017f0302"), "cost_limit_block" -> num(402)),
+      "verdict" -> str("RejectCost"), "total_block_cost" -> num(403))
+    val expression = request(ErgoTree.fromProposition(BoolToSigmaProp(EQ(Height, IntConstant(0)))))
+    val expressionResult = verifyLine(expression.noSpaces)
+    require(expressionResult.hcursor.get[String]("verdict") == Right("Accept"))
+    val lowExpression = verifyLine(patch(expression, "cost_limit_block" -> num(0)).noSpaces)
+    require(lowExpression.hcursor.get[String]("verdict") == Right("RejectCost"))
+    require(lowExpression.hcursor.get[Long]("total_block_cost").exists(_ > 0))
+    count += 2
+    val deserializeTree = treeSer.deserializeErgoTree(treeSer.serializeErgoTree(
+      ErgoTree.fromProposition(DeserializeContext(1.toByte, SSigmaProp))))
+    require(deserializeTree.hasDeserialize, "deserialize serialized tree must select substitution")
+    val deserialize = patch(request(deserializeTree), "init_cost_block" -> num(17),
+      "ctx_ext_hex" -> str(hex(ContextExtension.serializer.toBytes(extOf(
+        (1: Byte) -> ByteArrayConstant(ValueSerializer.serialize(
+          SigmaPropConstant(sigma.data.TrivialProp.TrueProp))))))))
+    // Pinned JVM observation: init=17, reduction=14 BC, total=31 BC.
+    // Internal cost is 315 JIT: limit=31 BC rejects before BC truncation; 32 accepts.
+    // These requests traverse serialized DeserializeContext substitution in verify.
+    for (limit <- Seq(30, 31, 32)) {
+      check("deserialize_context_nonzero_init_limit_" + limit + "_verdict",
+        patch(deserialize, "cost_limit_block" -> num(limit)),
+        "verdict" -> str(if (limit < 32) "RejectCost" else "Accept"),
+        "total_block_cost" -> num(31), "rent_block_cost" -> num(0),
+        "eval_block_cost" -> (if (limit < 32) unavailable else num(14)),
+        "crypto_block_cost" -> (if (limit < 32) unavailable else num(0)))
+    }
+    println("verify self-test: " + count + " passed, 0 failed")
+  }
+
+  def main(args: Array[String]): Unit = {
+    if (args.sameElements(Array("verify"))) {
+      scala.io.Source.stdin.getLines().foreach(line => println(verifyLine(line).noSpaces))
+    } else if (args.sameElements(Array("verify_self_test"))) {
+      verify_self_test()
+    } else {
+      require(args.isEmpty, "Usage: EvaluatedValueOracle [verify|verify_self_test]")
+      dumpVectors()
+    }
+  }
+
+  private def dumpVectors(): Unit = VersionContext.withVersions(3.toByte, 0.toByte) {
+
     // ── hand-crafted bytes: the TrueLeaf / FalseLeaf OPCODES (0x7f / 0x80).
     // `ValueSerializer` never WRITES these for a boolean constant (it routes
     // constants through ConstantSerializer, so TrueLeaf comes out as `0101`),

@@ -1,0 +1,2411 @@
+{
+  "ledger": [
+    "OP-0xD8",
+    "ROUND-perItem-chunking"
+  ],
+  "chunk_size": 10,
+  "cases": [
+    {
+      "name": "block-value-n0-prefix0",
+      "construction": {
+        "n": 0,
+        "prefix": 0,
+        "target_hex": "d80008d3",
+        "body_hex": "d801d60ad80008d308d3"
+      },
+      "request": {
+        "tree_hex": "00d801d60ad80008d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 1,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 1,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|19",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n0-prefix1",
+      "construction": {
+        "n": 0,
+        "prefix": 1,
+        "target_hex": "d80008d3",
+        "body_hex": "d800d801d60ad80008d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d801d60ad80008d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 2,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 2,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|21",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n0-prefix2",
+      "construction": {
+        "n": 0,
+        "prefix": 2,
+        "target_hex": "d80008d3",
+        "body_hex": "d800d800d801d60ad80008d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d800d801d60ad80008d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 2,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 2,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|23",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n0-prefix3",
+      "construction": {
+        "n": 0,
+        "prefix": 3,
+        "target_hex": "d80008d3",
+        "body_hex": "d800d800d800d801d60ad80008d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d800d800d801d60ad80008d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 2,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 2,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|25",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n0-prefix4",
+      "construction": {
+        "n": 0,
+        "prefix": 4,
+        "target_hex": "d80008d3",
+        "body_hex": "d800d800d800d800d801d60ad80008d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d800d800d800d801d60ad80008d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 2,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 2,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|27",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n0-prefix5",
+      "construction": {
+        "n": 0,
+        "prefix": 5,
+        "target_hex": "d80008d3",
+        "body_hex": "950101d801d60ad80008d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d801d60ad80008d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 3,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 3,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|34",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n0-prefix6",
+      "construction": {
+        "n": 0,
+        "prefix": 6,
+        "target_hex": "d80008d3",
+        "body_hex": "950101d800d801d60ad80008d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d801d60ad80008d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 3,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 3,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|36",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n0-prefix7",
+      "construction": {
+        "n": 0,
+        "prefix": 7,
+        "target_hex": "d80008d3",
+        "body_hex": "950101d800d800d801d60ad80008d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d800d801d60ad80008d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 3,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 3,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|38",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n0-prefix8",
+      "construction": {
+        "n": 0,
+        "prefix": 8,
+        "target_hex": "d80008d3",
+        "body_hex": "950101d800d800d800d801d60ad80008d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d800d800d801d60ad80008d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 4,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 4,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|40",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n0-prefix9",
+      "construction": {
+        "n": 0,
+        "prefix": 9,
+        "target_hex": "d80008d3",
+        "body_hex": "950101d800d800d800d800d801d60ad80008d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d800d800d800d801d60ad80008d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 4,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 4,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|42",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n1-prefix0",
+      "construction": {
+        "n": 1,
+        "prefix": 0,
+        "target_hex": "d801d60a010108d3",
+        "body_hex": "d801d60ad801d60a010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d801d60ad801d60a010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 2,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 2,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|29",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n1-prefix1",
+      "construction": {
+        "n": 1,
+        "prefix": 1,
+        "target_hex": "d801d60a010108d3",
+        "body_hex": "d800d801d60ad801d60a010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d801d60ad801d60a010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 3,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 3,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|31",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n1-prefix2",
+      "construction": {
+        "n": 1,
+        "prefix": 2,
+        "target_hex": "d801d60a010108d3",
+        "body_hex": "d800d800d801d60ad801d60a010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d800d801d60ad801d60a010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 3,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 3,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|33",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n1-prefix3",
+      "construction": {
+        "n": 1,
+        "prefix": 3,
+        "target_hex": "d801d60a010108d3",
+        "body_hex": "d800d800d800d801d60ad801d60a010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d800d800d801d60ad801d60a010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 3,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 3,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|35",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n1-prefix4",
+      "construction": {
+        "n": 1,
+        "prefix": 4,
+        "target_hex": "d801d60a010108d3",
+        "body_hex": "d800d800d800d800d801d60ad801d60a010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d800d800d800d801d60ad801d60a010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 3,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 3,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|37",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n1-prefix5",
+      "construction": {
+        "n": 1,
+        "prefix": 5,
+        "target_hex": "d801d60a010108d3",
+        "body_hex": "950101d801d60ad801d60a010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d801d60ad801d60a010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 4,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 4,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|44",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n1-prefix6",
+      "construction": {
+        "n": 1,
+        "prefix": 6,
+        "target_hex": "d801d60a010108d3",
+        "body_hex": "950101d800d801d60ad801d60a010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d801d60ad801d60a010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 4,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 4,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|46",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n1-prefix7",
+      "construction": {
+        "n": 1,
+        "prefix": 7,
+        "target_hex": "d801d60a010108d3",
+        "body_hex": "950101d800d800d801d60ad801d60a010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d800d801d60ad801d60a010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 4,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 4,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|48",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n1-prefix8",
+      "construction": {
+        "n": 1,
+        "prefix": 8,
+        "target_hex": "d801d60a010108d3",
+        "body_hex": "950101d800d800d800d801d60ad801d60a010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d800d800d801d60ad801d60a010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 5,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 5,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|50",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n1-prefix9",
+      "construction": {
+        "n": 1,
+        "prefix": 9,
+        "target_hex": "d801d60a010108d3",
+        "body_hex": "950101d800d800d800d800d801d60ad801d60a010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d800d800d800d801d60ad801d60a010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 5,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 5,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|52",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n9-prefix0",
+      "construction": {
+        "n": 9,
+        "prefix": 0,
+        "target_hex": "d809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d3",
+        "body_hex": "d801d60ad809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d801d60ad809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 10,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 10,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|109",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n9-prefix1",
+      "construction": {
+        "n": 9,
+        "prefix": 1,
+        "target_hex": "d809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d3",
+        "body_hex": "d800d801d60ad809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d801d60ad809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 11,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 11,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|111",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n9-prefix2",
+      "construction": {
+        "n": 9,
+        "prefix": 2,
+        "target_hex": "d809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d3",
+        "body_hex": "d800d800d801d60ad809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d800d801d60ad809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 11,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 11,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|113",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n9-prefix3",
+      "construction": {
+        "n": 9,
+        "prefix": 3,
+        "target_hex": "d809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d3",
+        "body_hex": "d800d800d800d801d60ad809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d800d800d801d60ad809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 11,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 11,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|115",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n9-prefix4",
+      "construction": {
+        "n": 9,
+        "prefix": 4,
+        "target_hex": "d809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d3",
+        "body_hex": "d800d800d800d800d801d60ad809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d800d800d800d801d60ad809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 11,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 11,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|117",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n9-prefix5",
+      "construction": {
+        "n": 9,
+        "prefix": 5,
+        "target_hex": "d809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d3",
+        "body_hex": "950101d801d60ad809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d801d60ad809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 12,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 12,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|124",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n9-prefix6",
+      "construction": {
+        "n": 9,
+        "prefix": 6,
+        "target_hex": "d809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d3",
+        "body_hex": "950101d800d801d60ad809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d801d60ad809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 12,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 12,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|126",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n9-prefix7",
+      "construction": {
+        "n": 9,
+        "prefix": 7,
+        "target_hex": "d809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d3",
+        "body_hex": "950101d800d800d801d60ad809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d800d801d60ad809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 12,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 12,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|128",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n9-prefix8",
+      "construction": {
+        "n": 9,
+        "prefix": 8,
+        "target_hex": "d809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d3",
+        "body_hex": "950101d800d800d800d801d60ad809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d800d800d801d60ad809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 13,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 13,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|130",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n9-prefix9",
+      "construction": {
+        "n": 9,
+        "prefix": 9,
+        "target_hex": "d809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d3",
+        "body_hex": "950101d800d800d800d800d801d60ad809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d800d800d800d801d60ad809d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d612010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 13,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 13,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|132",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n10-prefix0",
+      "construction": {
+        "n": 10,
+        "prefix": 0,
+        "target_hex": "d80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d3",
+        "body_hex": "d801d60ad80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d801d60ad80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 11,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 11,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|119",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n10-prefix1",
+      "construction": {
+        "n": 10,
+        "prefix": 1,
+        "target_hex": "d80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d3",
+        "body_hex": "d800d801d60ad80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d801d60ad80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 12,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 12,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|121",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n10-prefix2",
+      "construction": {
+        "n": 10,
+        "prefix": 2,
+        "target_hex": "d80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d3",
+        "body_hex": "d800d800d801d60ad80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d800d801d60ad80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 12,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 12,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|123",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n10-prefix3",
+      "construction": {
+        "n": 10,
+        "prefix": 3,
+        "target_hex": "d80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d3",
+        "body_hex": "d800d800d800d801d60ad80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d800d800d801d60ad80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 12,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 12,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|125",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n10-prefix4",
+      "construction": {
+        "n": 10,
+        "prefix": 4,
+        "target_hex": "d80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d3",
+        "body_hex": "d800d800d800d800d801d60ad80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d800d800d800d801d60ad80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 12,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 12,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|127",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n10-prefix5",
+      "construction": {
+        "n": 10,
+        "prefix": 5,
+        "target_hex": "d80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d3",
+        "body_hex": "950101d801d60ad80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d801d60ad80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 13,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 13,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|134",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n10-prefix6",
+      "construction": {
+        "n": 10,
+        "prefix": 6,
+        "target_hex": "d80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d3",
+        "body_hex": "950101d800d801d60ad80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d801d60ad80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 13,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 13,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|136",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n10-prefix7",
+      "construction": {
+        "n": 10,
+        "prefix": 7,
+        "target_hex": "d80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d3",
+        "body_hex": "950101d800d800d801d60ad80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d800d801d60ad80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 13,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 13,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|138",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n10-prefix8",
+      "construction": {
+        "n": 10,
+        "prefix": 8,
+        "target_hex": "d80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d3",
+        "body_hex": "950101d800d800d800d801d60ad80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d800d800d801d60ad80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 14,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 14,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|140",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n10-prefix9",
+      "construction": {
+        "n": 10,
+        "prefix": 9,
+        "target_hex": "d80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d3",
+        "body_hex": "950101d800d800d800d800d801d60ad80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d800d800d800d801d60ad80ad60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d613010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 14,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 14,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|142",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n11-prefix0",
+      "construction": {
+        "n": 11,
+        "prefix": 0,
+        "target_hex": "d80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d3",
+        "body_hex": "d801d60ad80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d801d60ad80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 13,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 13,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|130",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n11-prefix1",
+      "construction": {
+        "n": 11,
+        "prefix": 1,
+        "target_hex": "d80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d3",
+        "body_hex": "d800d801d60ad80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d801d60ad80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 13,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 13,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|132",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n11-prefix2",
+      "construction": {
+        "n": 11,
+        "prefix": 2,
+        "target_hex": "d80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d3",
+        "body_hex": "d800d800d801d60ad80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d800d801d60ad80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 13,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 13,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|134",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n11-prefix3",
+      "construction": {
+        "n": 11,
+        "prefix": 3,
+        "target_hex": "d80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d3",
+        "body_hex": "d800d800d800d801d60ad80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d800d800d801d60ad80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 13,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 13,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|136",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n11-prefix4",
+      "construction": {
+        "n": 11,
+        "prefix": 4,
+        "target_hex": "d80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d3",
+        "body_hex": "d800d800d800d800d801d60ad80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d800d800d800d801d60ad80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 13,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 13,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|138",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n11-prefix5",
+      "construction": {
+        "n": 11,
+        "prefix": 5,
+        "target_hex": "d80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d3",
+        "body_hex": "950101d801d60ad80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d801d60ad80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 14,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 14,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|145",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n11-prefix6",
+      "construction": {
+        "n": 11,
+        "prefix": 6,
+        "target_hex": "d80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d3",
+        "body_hex": "950101d800d801d60ad80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d801d60ad80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 14,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 14,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|147",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n11-prefix7",
+      "construction": {
+        "n": 11,
+        "prefix": 7,
+        "target_hex": "d80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d3",
+        "body_hex": "950101d800d800d801d60ad80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d800d801d60ad80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 14,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 14,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|149",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n11-prefix8",
+      "construction": {
+        "n": 11,
+        "prefix": 8,
+        "target_hex": "d80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d3",
+        "body_hex": "950101d800d800d800d801d60ad80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d800d800d801d60ad80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 15,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 15,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|151",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n11-prefix9",
+      "construction": {
+        "n": 11,
+        "prefix": 9,
+        "target_hex": "d80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d3",
+        "body_hex": "950101d800d800d800d800d801d60ad80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d800d800d800d801d60ad80bd60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d614010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 15,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 15,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|153",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n21-prefix0",
+      "construction": {
+        "n": 21,
+        "prefix": 0,
+        "target_hex": "d815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d3",
+        "body_hex": "d801d60ad815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d801d60ad815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 23,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 23,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|231",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n21-prefix1",
+      "construction": {
+        "n": 21,
+        "prefix": 1,
+        "target_hex": "d815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d3",
+        "body_hex": "d800d801d60ad815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d801d60ad815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 23,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 23,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|233",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n21-prefix2",
+      "construction": {
+        "n": 21,
+        "prefix": 2,
+        "target_hex": "d815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d3",
+        "body_hex": "d800d800d801d60ad815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d800d801d60ad815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 23,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 23,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|235",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n21-prefix3",
+      "construction": {
+        "n": 21,
+        "prefix": 3,
+        "target_hex": "d815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d3",
+        "body_hex": "d800d800d800d801d60ad815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d800d800d801d60ad815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 23,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 23,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|237",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n21-prefix4",
+      "construction": {
+        "n": 21,
+        "prefix": 4,
+        "target_hex": "d815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d3",
+        "body_hex": "d800d800d800d800d801d60ad815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d308d3"
+      },
+      "request": {
+        "tree_hex": "00d800d800d800d800d801d60ad815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 23,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 23,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|239",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n21-prefix5",
+      "construction": {
+        "n": 21,
+        "prefix": 5,
+        "target_hex": "d815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d3",
+        "body_hex": "950101d801d60ad815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d801d60ad815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 24,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 24,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|246",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n21-prefix6",
+      "construction": {
+        "n": 21,
+        "prefix": 6,
+        "target_hex": "d815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d3",
+        "body_hex": "950101d800d801d60ad815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d801d60ad815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 24,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 24,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|248",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n21-prefix7",
+      "construction": {
+        "n": 21,
+        "prefix": 7,
+        "target_hex": "d815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d3",
+        "body_hex": "950101d800d800d801d60ad815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d800d801d60ad815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 25,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 25,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|250",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n21-prefix8",
+      "construction": {
+        "n": 21,
+        "prefix": 8,
+        "target_hex": "d815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d3",
+        "body_hex": "950101d800d800d800d801d60ad815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d800d800d801d60ad815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 25,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 25,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|252",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "name": "block-value-n21-prefix9",
+      "construction": {
+        "n": 21,
+        "prefix": 9,
+        "target_hex": "d815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d3",
+        "body_hex": "950101d800d800d800d800d801d60ad815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d308d308d3"
+      },
+      "request": {
+        "tree_hex": "00950101d800d800d800d800d801d60ad815d60a0101d60b0101d60c0101d60d0101d60e0101d60f0101d6100101d6110101d6120101d6130101d6140101d6150101d6160101d6170101d6180101d6190101d61a0101d61b0101d61c0101d61d0101d61e010108d308d308d3",
+        "ctx_ext_hex": "00",
+        "proof_hex": "",
+        "message_hex": "",
+        "cost_limit_block": 1000000,
+        "init_cost_block": 0,
+        "activated_version": 3,
+        "tree_version_expected": 0,
+        "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+        "inputs_hex": [
+          "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+        ],
+        "data_inputs_hex": [],
+        "outputs_hex": [],
+        "headers_hex": [],
+        "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
+      },
+      "expected": {
+        "verdict": "Accept",
+        "eval_block_cost": 25,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 25,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|254",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    }
+  ],
+  "manifest": {
+    "scala": {
+      "ergo_version": "6.0.2",
+      "sigmastate_version": "6.0.2",
+      "ergo_wallet_version": "6.0.2",
+      "node_app_version": null,
+      "source_shas": {
+        "sigmastate_v6.0.2": "23dd29f612249c169d09fae9bca76d7cc02e144c",
+        "ergo_v6.0.2": "2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1"
+      },
+      "note": "Standalone JVM oracle using the published/local 6.0.2 fallback artifacts pinned in the script; no node or mainnet request was used."
+    },
+    "rust": {
+      "git_sha": "24e89c9e3eb1e520a90c46fd85fd8b678915af83",
+      "toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
+      "features": [
+        "ergo-sigma/cost-trace",
+        "ergo-validation/test-helpers"
+      ]
+    },
+    "tool": {
+      "script": "scripts/gen-cost-fixture.sh",
+      "git_sha": "24e89c9e3eb1e520a90c46fd85fd8b678915af83",
+      "script_sha256": "e94b8f73a122f141e68b2cf6758fe4d6b31339b44dfc87e5b52e03a529cc58ac",
+      "oracle_script": "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala",
+      "oracle_sha256": "a8f007806a69d84f73cf0b7bbcaeeef8fcd212608358bca1e5fcfb668467514c",
+      "scala_cli": "Scala CLI version: 1.12.1\nScala version (default): 3.8.1",
+      "scala_directive": "2.12",
+      "jvm": "openjdk version \"17.0.17\" 2025-10-21 LTS\nOpenJDK Runtime Environment Corretto-17.0.17.10.1 (build 17.0.17+10-LTS)\nOpenJDK 64-Bit Server VM Corretto-17.0.17.10.1 (build 17.0.17+10-LTS, mixed mode, sharing)"
+    },
+    "context": {
+      "network": "synthetic offline context",
+      "height": 0,
+      "block_version": 4,
+      "activated_script_version": 3,
+      "ergo_tree_version": 0,
+      "voted_params": {
+        "4": null,
+        "5": null,
+        "6": null,
+        "7": null,
+        "8": null
+      }
+    },
+    "run": {
+      "command": "scala-cli run scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala --server=false --suppress-outdated-dependency-warning -- verify",
+      "fixture": "test-vectors/ergo-sigma/cost-ledger/fixtures/op-per-item/block-value.json",
+      "timestamp_utc": "2026-09-15T15:44:20.403740+00:00",
+      "seeds": null,
+      "selected": 60,
+      "executed": 60,
+      "skipped": 0,
+      "failed": 0
+    },
+    "evidence": {
+      "request_jsonl_sha256": "903eab5a4b9ccb2a478b9416d88ccc78d350da1b039bccfa8996b8be1ffc13de",
+      "response_jsonl_sha256": "012dae5ab7c6f46abbec33f6efbaed9cdc4af428b23a35ab9af0fe0f78ef1219"
+    },
+    "scala_sigmastate": "6.0.2",
+    "generator": "scripts/gen-cost-fixture.sh@24e89c9e3eb1e520a90c46fd85fd8b678915af83",
+    "date": "2026-09-15T15:44:20.403740+00:00"
+  }
+}

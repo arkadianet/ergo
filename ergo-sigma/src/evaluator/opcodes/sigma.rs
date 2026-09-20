@@ -502,6 +502,13 @@ pub(in crate::evaluator) fn eval_sigma_and_collection(
     }
     // Cost-free collapse via the shared CAND normalization (FalseProp absorbs,
     // TrueProp drops) — the identical fold AtLeast applies to its children.
+    // Scala v6.0.2 core/shared/src/main/scala/sigma/data/SigmaBoolean.scala:165
+    // CAND.normalized requires nonempty input after the opcode charge.
+    if children.is_empty() {
+        return Err(EvalError::RuntimeException(
+            "SigmaAnd requires nonempty children",
+        ));
+    }
     Ok(Value::SigmaProp(cand_normalized(children)))
 }
 
@@ -536,6 +543,13 @@ pub(in crate::evaluator) fn eval_sigma_or_collection(
     }
     // Cost-free collapse via the shared COR normalization (TrueProp absorbs,
     // FalseProp drops).
+    // Scala v6.0.2 core/shared/src/main/scala/sigma/data/SigmaBoolean.scala:201
+    // COR.normalized requires nonempty input after the opcode charge.
+    if children.is_empty() {
+        return Err(EvalError::RuntimeException(
+            "SigmaOr requires nonempty children",
+        ));
+    }
     Ok(Value::SigmaProp(cor_normalized(children)))
 }
 

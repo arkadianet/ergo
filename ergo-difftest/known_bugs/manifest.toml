@@ -94,19 +94,19 @@ expected_canonical = ""
 note = "TODO: trigger_hex is a P2PK tree with an off-curve point: 0008cd<33-byte off-curve SEC1 point>. Off-curve points have valid SEC1 prefix (02 or 03) but the x coordinate is not on the secp256k1 curve. Complex to hand-craft; use oracle structured mode. The re-inject is in oracle.rs (change check_group_elements=true→false in reduce_verdict's deserialize_box_script call)."
 
 # ---------------------------------------------------------------------------
-# 6. deserialize-subst-cost  [COVERAGE GAP — see note]
+# 6. deserialize-subst-cost
 # ---------------------------------------------------------------------------
 [[bug]]
 id             = "deserialize-subst-cost"
-surface        = "reduce"
-class          = "cost"
-wire_reachable = false
+surface        = "verify"
+class          = "verify"
+wire_reachable = true
 fix_file       = "ergo-sigma/src/reduce.rs"
-reinject       = "reduce.rs:211 self_box.script_bytes.len() -> serialized_ergo_tree_len(ergo_tree)"
+reinject       = "reduce.rs COST_PER_TREE_BYTE -> 0"
 budget_iters   = 50000
-trigger_hex    = ""
+trigger_hex    = "7b22747265655f686578223a2230306431393539333835303330313031643430313030222c226374785f6578745f686578223a223030222c2270726f6f665f686578223a22222c226d6573736167655f686578223a22222c22636f73745f6c696d69745f626c6f636b223a313030303030302c22696e69745f636f73745f626c6f636b223a302c226163746976617465645f76657273696f6e223a332c22747265655f76657273696f6e5f6578706563746564223a302c2273656c665f626f785f686578223a22633038343364303064313935393338353033303130316434303130303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030222c22696e707574735f686578223a5b22633038343364303064313935393338353033303130316434303130303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030225d2c22646174615f696e707574735f686578223a5b5d2c226f7574707574735f686578223a5b5d2c22686561646572735f686578223a5b5d2c227072655f6865616465725f686578223a2230343030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303033303030303030303030303030303030303030303030303030303237396265363637656639646362626163353561303632393563653837306230373032396266636462326463653238643935396632383135623136663831373938303030303030227d"
 expected_canonical = ""
-note = "COVERAGE GAP on the `reduce` oracle surface. The deserialize-substitution INIT cost (ergoTree.bytes.length * CostPerTreeByte) lives in reduce.rs `verify_spending` (the Scala `Interpreter.reductionWithDeserialize` twin). The `reduce` oracle surface calls `ergo_sigma::evaluator::reduce_expr_with_cost` DIRECTLY (see oracle.rs::reduce_verdict) and the JVM oracle calls `CErgoTreeEvaluator.eval` with initCost=0 (ErgoSerdeOracle.scala::reduce) — BOTH bypass reductionWithDeserialize, so re-injecting reduce.rs:211 produces NO delta here. The sigma_expr generator DOES emit the deserialize-node vocabulary (Feature::EvalDeserializeNode, a DeserializeRegister/Context on a dead If branch) for coverage, but this cost bug needs the reduce surface (both sides) to route through the full verify path — a lead-engineer oracle-contract change, not done here. Reachable via the REPLAY driver instead."
+note = "Full verify JSON frame reaches deserialize-substitution init cost on a dead branch. JVM eval/total is 26 block units; removing CostPerTreeByte(2) produces a cost delta. Oracle: scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala verify."
 
 # ---------------------------------------------------------------------------
 # 7. coll-equality-cost  [PATCH VERIFIED, DEMONSTRATED on `reduce`]
