@@ -724,16 +724,10 @@ fn eval_avl_mutate(
     // but Scala's failed performInsert/Update would have nulled it. And
     // updateDigest_Info(40) is charged only on success, so it's skipped here.
     if !all_ok {
-        // insert is the ONLY version-gated op: a failed insert on a pre-v3
-        // ErgoTree throws (syntax.error). `activated_script_version < 3`
-        // implies the ErgoTree version is < 3 (a v3 tree cannot be spent
-        // before v3 activation), so the throw is correct for that case.
-        // PRE-EXISTING GAP (tracked): a legacy ErgoTree-v<3 box spent in a
-        // post-activation (activated>=3) block — Scala throws but we return
-        // None — needs the ErgoTree header version threaded into the eval
-        // context (the same version-threading gap as getReg / SOption-pre-v3
-        // / SHeader); the old no-gate code had this gap too.
-        if matches!(op, AvlMutOp::Insert) && cx.ctx.activated_script_version < 3 {
+        // CErgoTreeEvaluator.scala:150: insertRes.isFailure &&
+        // !VersionContext.current.isV3OrLaterErgoTreeVersion; tree header,
+        // independent of activation. The failed entry is already charged.
+        if matches!(op, AvlMutOp::Insert) && !cx.ctx.is_v3_ergo_tree() {
             return Err(EvalError::RuntimeException(
                 "AvlTree.insert failed on a pre-v3 ErgoTree",
             ));
