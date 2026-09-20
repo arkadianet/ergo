@@ -23,9 +23,13 @@ use ergo_ser::transaction::{bytes_to_sign, read_transaction, transaction_id, wri
 fn diff_per_tx_ids_for_block_303967() {
     // Operator diagnostic: needs a REST capture at this path. Skip, rather than
     // fail, when it is absent so feature-enabled CI runs stay green.
-    let Ok(raw) = std::fs::read_to_string("/tmp/block_303967_txs.json") else {
-        eprintln!("skipping: capture file /tmp/block_303967_txs.json absent");
-        return;
+    let raw = match std::fs::read_to_string("/tmp/block_303967_txs.json") {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("skipping: capture file /tmp/block_303967_txs.json absent");
+            return;
+        }
+        Err(error) => panic!("reading capture /tmp/block_303967_txs.json: {error}"),
     };
     let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let txs_json = value["transactions"]
@@ -132,9 +136,13 @@ fn diff_per_tx_ids_for_block_303967() {
 fn dump_culprit_tx1_bytes() {
     // Operator diagnostic: needs a REST capture at this path. Skip, rather than
     // fail, when it is absent so feature-enabled CI runs stay green.
-    let Ok(raw) = std::fs::read_to_string("/tmp/block_303967_txs.json") else {
-        eprintln!("skipping: capture file /tmp/block_303967_txs.json absent");
-        return;
+    let raw = match std::fs::read_to_string("/tmp/block_303967_txs.json") {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("skipping: capture file /tmp/block_303967_txs.json absent");
+            return;
+        }
+        Err(error) => panic!("reading capture /tmp/block_303967_txs.json: {error}"),
     };
     let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let tx_json = &value["transactions"][1];
