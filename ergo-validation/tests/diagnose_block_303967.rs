@@ -21,7 +21,12 @@ use ergo_ser::transaction::{bytes_to_sign, read_transaction, transaction_id, wri
 
 #[test]
 fn diff_per_tx_ids_for_block_303967() {
-    let raw = std::fs::read_to_string("/tmp/block_303967_txs.json").expect("capture file");
+    // Operator diagnostic: needs a REST capture at this path. Skip, rather than
+    // fail, when it is absent so feature-enabled CI runs stay green.
+    let Ok(raw) = std::fs::read_to_string("/tmp/block_303967_txs.json") else {
+        eprintln!("skipping: capture file /tmp/block_303967_txs.json absent");
+        return;
+    };
     let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let txs_json = value["transactions"]
         .as_array()
@@ -125,7 +130,12 @@ fn diff_per_tx_ids_for_block_303967() {
 ///    decode_scala_transaction is altering them.
 #[test]
 fn dump_culprit_tx1_bytes() {
-    let raw = std::fs::read_to_string("/tmp/block_303967_txs.json").unwrap();
+    // Operator diagnostic: needs a REST capture at this path. Skip, rather than
+    // fail, when it is absent so feature-enabled CI runs stay green.
+    let Ok(raw) = std::fs::read_to_string("/tmp/block_303967_txs.json") else {
+        eprintln!("skipping: capture file /tmp/block_303967_txs.json absent");
+        return;
+    };
     let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let tx_json = &value["transactions"][1];
     let scala_id = tx_json["id"].as_str().unwrap();
