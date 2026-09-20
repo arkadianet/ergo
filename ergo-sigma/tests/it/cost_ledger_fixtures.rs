@@ -1173,3 +1173,78 @@ fn serializer_upcast_versions_match_jvm() -> Result<()> {
     }
     Ok(())
 }
+
+// ledger: VERSION-G013
+#[test]
+fn raw_collection_equality_consumers_match_jvm() -> Result<()> {
+    use ergo_sigma::evaluator::Value as RuntimeValue;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../test-vectors/ergo-sigma/cost-ledger/fixtures/version/raw-coll-equals.json.gz");
+    let fixture: Value = serde_json::from_slice(&read_fixture(&path)?)?;
+    let direct = &fixture["raw_probe"];
+    let direct_cases = direct["cases"].as_array().context("raw equality cases")?;
+    ensure!(direct_cases.len() == 4);
+    for case in direct_cases {
+        let convert = |value: &Value| -> Result<RuntimeValue> {
+            let pairs: Vec<(i32, i32)> = serde_json::from_value(value.clone())?;
+            Ok(RuntimeValue::CollGeneric(
+                pairs
+                    .into_iter()
+                    .map(|(a, b)| {
+                        RuntimeValue::Tuple(vec![RuntimeValue::Int(a), RuntimeValue::Int(b)])
+                    })
+                    .collect(),
+                Box::new(ergo_ser::sigma_type::SigmaType::STuple(vec![
+                    ergo_ser::sigma_type::SigmaType::SInt,
+                    ergo_ser::sigma_type::SigmaType::SInt,
+                ])),
+            ))
+        };
+        let left = convert(&case["left"])?;
+        let right = convert(&case["right"])?;
+        // At activated version 3, Rust uses CollGeneric for both results. Its content
+        // equality matches raw JVM equality at v3; pre-v3 representation-only
+        // inequality is excluded by the serialized consumer's method gate.
+        ensure!(left == right);
+        ensure!(case["same_representation_equals"] == true);
+        ensure!(case["equals"] == (case["version"] == 3));
+        if case["version"] == 3 {
+            ensure!(Value::Bool(left == right) == case["equals"]);
+        }
+    }
+    let cases = fixture["cases"].as_array().context("consumer cases")?;
+    ensure!(cases.len() == 12);
+    for case in cases {
+        let mut actual = record(false);
+        verify(&serde_json::to_vec(&case["request"])?, &mut actual)?;
+        for field in [
+            "verdict",
+            "eval_block_cost",
+            "crypto_block_cost",
+            "total_block_cost",
+        ] {
+            if field != "verdict"
+                && (actual[field] == "unavailable" || case["expected"][field] == "unavailable")
+            {
+                continue;
+            }
+            ensure!(
+                actual[field] == case["expected"][field],
+                "{}: {field}: Rust={} JVM={}",
+                case["name"],
+                actual[field],
+                case["expected"][field]
+            );
+        }
+        if case["version"] == 2 && case["method"] != "EQ" {
+            ensure!(
+                actual["verdict"] != "Accept",
+                "pre-v3 raw consumer must be gated"
+            );
+        } else {
+            ensure!(actual["verdict"] == "Accept");
+        }
+    }
+    Ok(())
+}

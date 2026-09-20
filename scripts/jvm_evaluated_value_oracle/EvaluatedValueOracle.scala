@@ -31,6 +31,10 @@
 // returns HTTP 404 from Maven Central and the pinned GitLab repository.
 // Usage: scala-cli run <this file> --server=false -- verify < requests.jsonl
 // Self-test: scala-cli run <this file> --server=false -- verify_self_test
+// Direct probes: jitcost_probe, accumulator_probe, raw_coll_equals, serialize_expr.
+// Each has a corresponding <command>_self_test. serialize_expr reads one JSON AST:
+// {"op":"Upcast","input_type":"Int","target_type":"Long","value":1}.
+// scripts/gen-evaluated-probe.py captures direct output with a reproducibility manifest.
 // One JSON request and response per line; no-argument vector output is unchanged.
 // Required request keys: tree_hex, ctx_ext_hex, proof_hex, cost_limit_block,
 // init_cost_block, activated_version, tree_version_expected, self_box_hex,
@@ -667,6 +671,28 @@ object EvaluatedValueOracle {
     println("verify self-test: " + count + " passed, 0 failed")
   }
 
+  private def rawCollEquals(): Json = {
+    import sigma.data.RType._
+    val cases = for (version <- Seq(2, 3); reverse <- Seq(false, true)) yield {
+      VersionContext.withVersions(3.toByte, version.toByte) {
+        val pair = Colls.fromItems(1).zip(Colls.fromItems(2))
+        val array = pair.map(p => p)
+        require(pair.isInstanceOf[sigma.PairColl[_, _]])
+        require(array.isInstanceOf[sigma.data.CollOverArray[_]])
+        val result = if (reverse) array.equals(pair) else pair.equals(array)
+        Json.obj("version" -> Json.fromInt(version), "reverse" -> Json.fromBoolean(reverse),
+          "pair_class" -> Json.fromString(pair.getClass.getName),
+          "array_class" -> Json.fromString(array.getClass.getName),
+          "left" -> Json.arr(Json.arr(Json.fromInt(1), Json.fromInt(2))),
+          "right" -> Json.arr(Json.arr(Json.fromInt(1), Json.fromInt(2))),
+          "equals" -> Json.fromBoolean(result),
+          "same_representation_equals" -> Json.fromBoolean(pair.equals(pair) && array.equals(array)))
+      }
+    }
+    Json.obj("oracle" -> Json.fromString("sigma-state:6.0.2 / raw_coll_equals"),
+      "cases" -> Json.arr(cases: _*))
+  }
+
   private def serializeExpr(line: String): Json = {
     val ast = parse(line).right.get
     val h = ast.hcursor
@@ -723,7 +749,18 @@ object EvaluatedValueOracle {
   }
 
   def main(args: Array[String]): Unit = {
-    if (args.sameElements(Array("serialize_expr"))) {
+    if (args.sameElements(Array("raw_coll_equals"))) {
+      println(rawCollEquals().spaces2)
+    } else if (args.sameElements(Array("raw_coll_equals_self_test"))) {
+      val cases = rawCollEquals().hcursor.downField("cases").focus.get.asArray.get
+      require(cases.size == 4)
+      cases.foreach { c =>
+        require(c.hcursor.get[Boolean]("equals").right.get ==
+          (c.hcursor.get[Int]("version").right.get >= 3))
+        require(c.hcursor.get[Boolean]("same_representation_equals").right.get)
+      }
+      println("raw_coll_equals self-test: 4 passed, 0 failed")
+    } else if (args.sameElements(Array("serialize_expr"))) {
       println(serializeExpr(scala.io.Source.stdin.mkString).spaces2)
     } else if (args.sameElements(Array("serialize_expr_self_test"))) {
       val result = serializeExpr("""{"op":"Upcast","input_type":"Int","target_type":"Long","value":1}""")
@@ -764,7 +801,7 @@ object EvaluatedValueOracle {
     } else if (args.sameElements(Array("verify_self_test"))) {
       verify_self_test()
     } else {
-      require(args.isEmpty, "Usage: EvaluatedValueOracle [verify|verify_self_test]")
+      require(args.isEmpty, "Usage: EvaluatedValueOracle [verify|jitcost_probe|accumulator_probe|raw_coll_equals|serialize_expr] (or <command>_self_test)")
       dumpVectors()
     }
   }
