@@ -526,6 +526,12 @@ fn constant_inventory_unaccounted_entries_fail() {
         "JitCost.MaxBlockCost",
         "JitCost.MaxValue",
         "JitCost.Scale",
+        // Pinned through the production launch/from_active path by ergo-validation.
+        "Parameters.TokenAccessCostDefault",
+        "Parameters.InputCostDefault",
+        "Parameters.DataInputCostDefault",
+        "Parameters.OutputCostDefault",
+        "Parameters.MaxBlockCostDefault",
         "SigSerializer.ParseChallenge_ProveDHT",
         "SigSerializer.ParseChallenge_ProveDlog",
     ]);
@@ -580,4 +586,38 @@ fn constant_inventory_unaccounted_entries_fail() {
         unaccounted.is_empty(),
         "JVM constants without a Rust assertion, mapped L2 obligation, or N-A exclusion: {unaccounted:?}"
     );
+}
+
+// ledger: METHOD-unclaimed-inventory
+#[test]
+fn tuple_method_inventory_all_arities_match_jvm() {
+    let json = oracle();
+    let methods = json["tupleMethods"].as_array().unwrap();
+    assert_eq!(methods.len(), 257);
+    let mut names = BTreeSet::new();
+    for method in methods {
+        let name = method["name"].as_str().unwrap();
+        assert!(names.insert(name));
+        let (opcode, first) = match name {
+            "size" => (0xB1, 2),
+            "apply" => (0xB2, 2),
+            accessor => (
+                0x8C,
+                accessor
+                    .strip_prefix('_')
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap()
+                    .max(2),
+            ),
+        };
+        assert_eq!(method["minArity"], first);
+        assert_eq!(method["maxArity"], 255);
+        assert_eq!(method["versions"], serde_json::json!([0, 1, 2, 3]));
+        assert_kind(name, op::opcode_cost(opcode).unwrap(), &method["costKind"]);
+    }
+    assert!(names.contains("size") && names.contains("apply"));
+    for field in 1..=255 {
+        assert!(names.contains(format!("_{field}").as_str()));
+    }
 }

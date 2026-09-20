@@ -129,8 +129,8 @@ def differences(enumeration: dict, ledger: dict, audit: dict) -> dict[str, list[
 def method_differences(constants: dict, ledger: dict, audit: dict) -> list[str]:
     """Check the JVM registry denominator against reviewed enumeration mappings.
 
-    Generated tuple methods are not in MethodsContainer.methods; this check
-    covers the extracted registry only, not the remaining tuple obligation.
+    Synthesized tuple declarations have a separate identity space because
+    inherited methods and accessors can share numeric method IDs.
     """
     reviewed = audit["jvm_methods"]
     seen = set()
@@ -157,6 +157,29 @@ def method_differences(constants: dict, ledger: dict, audit: dict) -> list[str]:
             elif row["state"] == "N-A" and not row["note"].strip():
                 errors.append(f"{key}: N-A counterpart lacks rationale")
     errors.extend(f"{key}: reviewed JVM method deleted" for key in sorted(reviewed.keys() - seen))
+    tuple_reviewed = audit.get("jvm_tuple_methods", {})
+    tuple_seen = set()
+    for method in constants.get("tupleMethods", []):
+        key = method["name"]
+        tuple_seen.add(key)
+        mapping = tuple_reviewed.get(key)
+        if mapping is None:
+            errors.append(f"tuple:{key}: JVM method has no reviewed mapping")
+            continue
+        if any(method[field] != mapping[field] for field in
+               ("typeId", "methodId", "minArity", "maxArity", "versions", "costKind")):
+            errors.append(f"tuple:{key}: JVM declaration changed")
+        targets = mapping.get("ledger", [])
+        if not targets:
+            errors.append(f"tuple:{key}: missing concrete ledger counterpart")
+        for rid in targets:
+            row = ledger.get(normalize(rid))
+            if row is None or rid == "METHOD-unclaimed-inventory":
+                errors.append(f"tuple:{key}: missing concrete ledger obligation {rid}")
+            elif row["state"] == "N-A" and not row["note"].strip():
+                errors.append(f"tuple:{key}: N-A counterpart lacks rationale")
+    errors.extend(f"tuple:{key}: reviewed JVM method deleted"
+                  for key in sorted(tuple_reviewed.keys() - tuple_seen))
     return errors
 
 
@@ -270,6 +293,23 @@ def selftest() -> int:
             self.assertIn("name/version changed", diff()[0])
             method["methodId"] = 2
             self.assertEqual(len(diff()), 2)
+
+        def test_tuple_registry_changes_reported(self):
+            self.ledger["OP-0x72"]["state"] = "CLOSED"
+            method = {"name": "_1", "typeId": 96, "methodId": 1, "minArity": 2, "maxArity": 3,
+                      "versions": [0, 1, 2, 3], "costKind": {"kind": "Fixed", "base": 10}}
+            self.audit["jvm_methods"] = {}
+            self.audit["jvm_tuple_methods"] = {"_1": dict(method, ledger=["OP-0x72"])}
+            constants = {"methods": [], "tupleMethods": [method]}
+            self.assertEqual(method_differences(constants, self.ledger, self.audit), [])
+            method["maxArity"] = 2
+            self.assertIn("tuple:_1: JVM declaration changed",
+                          method_differences(constants, self.ledger, self.audit))
+            self.assertIn("tuple:_1: reviewed JVM method deleted",
+                          method_differences({"methods": []}, self.ledger, self.audit))
+            self.audit["jvm_tuple_methods"] = {}
+            self.assertIn("tuple:_1: JVM method has no reviewed mapping",
+                          method_differences(constants, self.ledger, self.audit))
 
         def test_methods_circular_inventory_mapping_rejected(self):
             self.audit["jvm_methods"] = {"12:1": {"enumeration": "A001", "name": "size", "versions": [3]}}

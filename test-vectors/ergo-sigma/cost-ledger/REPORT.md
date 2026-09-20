@@ -39,6 +39,7 @@ The ledger and linked test names contain the independent JVM/mainnet evidence fo
 
 | Finding | Resulting behavior / evidence | Fix commit | PR |
 |---|---|---|---|
+| SelectField receiver failure | **cost-only/charge-order**; charge FixedCost(10) after receiver evaluation (transformers.scala:298-299). All 862 JVM tuple cases match: 80 Accept / 360 RejectScript / 422 RejectCost; resolves 360 mismatches. | `9998b56a6300da51603bb281d2e31a06fc326b52` | [#349](https://github.com/arkadianet/ergo/pull/349) |
 | Per-input crypto truncation | Truncate each crypto estimate to block units before accumulation; prevents remainder carry and reject-valid exact-limit failures (`INTERP-crypto-trunc`, `ROUND-crypto-per-input`). | [`bc32d5f9`](https://github.com/arkadianet/ergo/commit/bc32d5f9af95e759f3cba66775e87b8be7403a59) | [#337](https://github.com/arkadianet/ergo/pull/337) |
 | Storage-rent unit | Charge StorageContractCost as 50 block units (`TX-storage-rent`). | [`69337be6`](https://github.com/arkadianet/ergo/commit/69337be616c46df214f9ac7144e37aa79a6fa689) | [#339](https://github.com/arkadianet/ergo/pull/339) |
 | Empty SigmaAnd / SigmaOr | Reject empty children as JVM CAND/COR normalization does (`OP-0xEA`, `OP-0xEB`). | [`37737585`](https://github.com/arkadianet/ergo/commit/377375851b58611ecbc09d40679cc9b60678247e) | [#339](https://github.com/arkadianet/ergo/pull/339) |
