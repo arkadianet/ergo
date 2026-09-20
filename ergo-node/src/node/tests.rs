@@ -27,7 +27,7 @@ use crate::peer_loop::PeerEvent;
 use super::identity::build_api_identity;
 use super::peer_actions::flush_actions;
 use super::state::PeerRegistry;
-use super::sync_tick::handle_sync_tick;
+use super::sync_tick::{handle_sync_tick, handle_sync_tick_at};
 
 fn test_peer() -> SocketAddr {
     "127.0.0.1:9999".parse().unwrap()
@@ -159,12 +159,8 @@ fn make_state_with_backend(
             ergo_api::types::ApiIdentity::default(),
         )),
         last_beat: Instant::now(),
-        last_beat_emit: Instant::now()
-            .checked_sub(crate::node::heartbeat::HEARTBEAT_IDLE_INTERVAL)
-            .unwrap_or_else(Instant::now),
-        last_beat_progress_emit: Instant::now()
-            .checked_sub(crate::node::heartbeat::HEARTBEAT_PROGRESS_MIN_INTERVAL)
-            .unwrap_or_else(Instant::now),
+        last_beat_emit: Instant::now(),
+        last_beat_progress_emit: Instant::now(),
         last_beat_height: 0,
         last_beat_headers: 0,
         req_messages_total: 0,
@@ -176,12 +172,8 @@ fn make_state_with_backend(
         last_beat_req_messages: 0,
         last_beat_req_ids: 0,
         last_beat_sections_received: 0,
-        last_dial_at: Instant::now()
-            .checked_sub(Duration::from_secs(60))
-            .unwrap_or_else(Instant::now),
-        last_gossip_at: Instant::now()
-            .checked_sub(ergo_p2p::peer_manager::GOSSIP_INTERVAL)
-            .unwrap_or_else(Instant::now),
+        last_dial_at: Instant::now(),
+        last_gossip_at: Instant::now(),
         last_starve_warn_at: None,
         indexer_handle: None,
         anchor_map: anchor_map::AnchorMap::new(),
@@ -192,9 +184,7 @@ fn make_state_with_backend(
         enable_anchor_scheduler: false,
         sync_interval: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL,
         sync_interval_stable: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL_STABLE,
-        last_sync_broadcast: Instant::now()
-            .checked_sub(ergo_p2p::sync::DEFAULT_SYNC_INTERVAL)
-            .unwrap_or_else(Instant::now),
+        last_sync_broadcast: Instant::now(),
         anchor_tip_cursor: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         snapshot_state: super::snapshot_state::SnapshotState::new(),
         snapshot_bootstrap: ergo_sync::snapshot_bootstrap::SnapshotBootstrap::new(),
@@ -267,12 +257,7 @@ fn penalty_ban_cleans_registry_peer() {
         },
     );
 
-    // `checked_sub` rather than `-` because `Instant - Duration`
-    // panics on monotonic-clock underflow. On a freshly-rebooted
-    // CI host this test would flake otherwise; the floor at `now`
-    // is harmless since the loop only walks forward from this
-    // anchor.
-    let mut t = now.checked_sub(Duration::from_secs(75 * 60)).unwrap_or(now);
+    let mut t = now;
     for _ in 0..30 {
         t += ergo_p2p::peer::SAFE_INTERVAL;
         state.peer_manager.penalize(&peer, Penalty::Spam, t);
@@ -835,31 +820,21 @@ fn no_progress_eviction_does_not_take_dial_backoff() {
     let tmp = tempfile::tempdir().unwrap();
     let peer = test_peer();
 
-    // `checked_sub` rather than `-`: `Instant - Duration` panics on
-    // monotonic-clock underflow on a freshly-booted host.
-    let anchor = |back: Duration| {
-        Instant::now()
-            .checked_sub(back)
-            .unwrap_or_else(Instant::now)
-    };
-
     // Handshaked, then silent for longer than the inactivity window.
     let mut state = make_state(&tmp.path().join("handshaked.redb"));
     state
         .peer_manager
         .add_known_address(peer, ergo_p2p::peer_manager::PeerOrigin::Seed);
-    let long_ago = anchor(ergo_p2p::peer::INACTIVE_TIMEOUT + Duration::from_secs(100));
-    state
-        .peer_manager
-        .register_outbound(peer, long_ago)
-        .unwrap();
+    let base = Instant::now();
+    let now = base + ergo_p2p::peer::INACTIVE_TIMEOUT + Duration::from_secs(100);
+    state.peer_manager.register_outbound(peer, base).unwrap();
     state.peer_manager.mark_tcp_connected(&peer);
     state
         .peer_manager
-        .complete_handshake(&peer, state.our_handshake.peer_spec.clone(), None, long_ago)
+        .complete_handshake(&peer, state.our_handshake.peer_spec.clone(), None, base)
         .unwrap();
 
-    handle_sync_tick(&mut state);
+    handle_sync_tick_at(&mut state, now);
 
     assert_eq!(
         state.peer_manager.peer_count(),
@@ -869,7 +844,7 @@ fn no_progress_eviction_does_not_take_dial_backoff() {
     assert!(
         state
             .peer_manager
-            .addresses_to_connect(Instant::now(), 10)
+            .addresses_to_connect(now, 10)
             .contains(&peer),
         "a no-progress eviction must leave the address immediately dialable",
     );
@@ -879,13 +854,11 @@ fn no_progress_eviction_does_not_take_dial_backoff() {
     state
         .peer_manager
         .add_known_address(peer, ergo_p2p::peer_manager::PeerOrigin::Seed);
-    let stale_dial = anchor(ergo_p2p::peer::CONNECT_TIMEOUT + Duration::from_secs(10));
-    state
-        .peer_manager
-        .register_outbound(peer, stale_dial)
-        .unwrap();
+    let base = Instant::now();
+    let now = base + ergo_p2p::peer::CONNECT_TIMEOUT + Duration::from_secs(10);
+    state.peer_manager.register_outbound(peer, base).unwrap();
 
-    handle_sync_tick(&mut state);
+    handle_sync_tick_at(&mut state, now);
 
     assert_eq!(
         state.peer_manager.peer_count(),
@@ -895,7 +868,7 @@ fn no_progress_eviction_does_not_take_dial_backoff() {
     assert!(
         !state
             .peer_manager
-            .addresses_to_connect(Instant::now(), 10)
+            .addresses_to_connect(now, 10)
             .contains(&peer),
         "a pre-handshake timeout is a dial failure and must take the backoff",
     );

@@ -435,10 +435,10 @@ mod tests {
         // First starved cycle always warns...
         assert!(starve_warn_due(None, now));
         // ...repeats inside the interval are suppressed...
-        let recent = now.checked_sub(Duration::from_secs(60)).unwrap();
-        assert!(!starve_warn_due(Some(recent), now));
+        let soon = now + Duration::from_secs(60);
+        assert!(!starve_warn_due(Some(now), soon));
         // ...and the warn re-fires once the interval has elapsed.
-        let stale = now.checked_sub(STARVE_WARN_INTERVAL).unwrap();
-        assert!(starve_warn_due(Some(stale), now));
+        let later = now + STARVE_WARN_INTERVAL;
+        assert!(starve_warn_due(Some(now), later));
     }
 }
