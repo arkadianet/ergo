@@ -18,6 +18,16 @@ infrastructure.
 
 ### Security
 
+- Apply newly voted parameters before validating epoch-transition transactions
+  in both UTXO and digest processing, preventing acceptance under stale costs.
+- Use parse-time binding types for nonliteral SelectField bounds and pre-v3
+  ByIndex upcasts, matching JVM rejection and charging behavior.
+- Charge SelectField after receiver evaluation, preserving failure costs and
+  cost-limit precedence.
+- Recognize activated validation-rule statuses for interpreter fallback and
+  wrapped trees, retaining JVM version gates and cost-limit rejection.
+- Serialize direct constant Upcast without the cast before tree version 3,
+  matching JVM bytes and embedded-script behavior.
 - Fix Downcast widening and identity conversions (reject-valid).
 - Support signed GroupElement.exp method id 3 (reject-valid).
 - Reject checkPow on Autolykos v1 headers after charging (accept-invalid).
@@ -32,6 +42,19 @@ infrastructure.
   submission surface on mainnet and testnet. Submitted blocks still required
   valid PoW and full validation: this granted submission access only, with no
   consensus bypass.
+
+### Added
+
+- Cumulative validation-settings input from active protocol parameters through
+  script verification, including retained wrapped-tree rule provenance.
+- JVM oracle probes for JitCost overflow, accumulator initialization, versioned
+  expression serialization, raw collection equality and AVL construction.
+- Synthesized tuple-method inventory and accessor fixtures, production launch
+  parameter replay, and transaction verifier-failure sentinel observations.
+- Instrumented JVM block fixtures for short-circuiting, digest cost accounting,
+  voted parameter thresholds and updated-context ordering at epoch transitions.
+- JIT-cost ledger closure: 299 obligations, 274 CLOSED, 25 N-A, zero OPEN and
+  zero DIVERGENT, backed by independent JVM or mainnet evidence.
 
 ### Fixed
 
