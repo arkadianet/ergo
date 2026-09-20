@@ -568,9 +568,16 @@ fn jvm_failure(
     }
 }
 
+fn deserialize_manifest<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<std::rc::Rc<Value>, D::Error> {
+    Value::deserialize(deserializer).map(std::rc::Rc::new)
+}
+
 #[derive(Deserialize)]
 struct Fixture {
-    manifest: Value,
+    #[serde(default, deserialize_with = "deserialize_manifest")]
+    manifest: std::rc::Rc<Value>,
     ledger: Vec<String>,
     request: Value,
     expected: Value,
@@ -1033,7 +1040,7 @@ fn profiling_timing_pairs_jvm_costs_unchanged() -> Result<()> {
     Ok(())
 }
 
-// ledger: OP-0x8C, VERSION-pre-v3-upcast, VERSION-v3-bool-root, VERSION-v6-method-gate, VERSION-selfboxindex-bug, VERSION-tree-version-gate, VERSION-v6-lazy-defaults, INTERP-crypto-conjunction, INTERP-crypto-threshold, INTERP-crypto-trivial-I013, INTERP-costlimit-op, INTERP-embedded-script-deser, INTERP-deser-subst, ORDER-propertycall-receiver, ORDER-methodcall-arguments, ORDER-powHit-validation, ORDER-serialize-incremental, ORDER-fixed-method-invocation, ORDER-avl-verifier-lookup, ORDER-if-condition, ORDER-optionget-input, METHOD-header-props, METHOD-global-encodeNbits, METHOD-coll-flatMap, METHOD-coll-indexOf, METHOD-coll-indices, METHOD-coll-patch, METHOD-coll-reverse, METHOD-coll-startsEndsWith, METHOD-coll-updateMany, METHOD-coll-updated, METHOD-coll-zip, METHOD-global-deserializeTo, METHOD-global-powHit, METHOD-global-xor, EVAL-avl-cost-height, METHOD-avl-contains, METHOD-avl-get, METHOD-avl-getMany, METHOD-avl-insert, METHOD-avl-insertOrUpdate, METHOD-avl-remove, METHOD-avl-update, METHOD-global-serialize, METHOD-global-serialize-E042, METHOD-global-serialize-E043, METHOD-global-serialize-E044, METHOD-global-serialize-E045, METHOD-global-serialize-E046, METHOD-global-serialize-E047, METHOD-option-map, METHOD-option-filter, EVAL-sstring-rejected, OP-0x96, OP-0xB3, OP-0x98, OP-0xCB, OP-0xD8, ROUND-perItem-chunking, OP-0xAE, OP-0xB5, OP-0xB0, OP-0xAF, OP-0xAD, OP-0x97, OP-0xCC, OP-0xEA, OP-0xEB, OP-0xD0, OP-0xB4, OP-0x74, OP-0xFF, OP-0x9B, INTERP-eval-sigmaprop-constant, OP-0x95, OP-0xDA, OP-0xE7-0xE9, OP-0xEC, OP-0xED, OP-0xF2, OP-0xF3, OP-0xF5, OP-0xF6, OP-0xF7, OP-0xF8, OP-TaggedVariable-A003, ORDER-bitop-charge-then-reject, EVAL-const-inline, EVAL-hasdeserialize-fork, EVAL-addtoenv, EVAL-numeric-cast, EVAL-arith-bigint, EVAL-eq-prim, EVAL-eq-matchtype, EVAL-eq-tuple, EVAL-eq-groupelement, EVAL-eq-bigint, EVAL-eq-avltree, EVAL-eq-box, EVAL-eq-option, EVAL-eq-preheader, EVAL-eq-header, EVAL-eq-coll-sigmaprop-descriptor, EVAL-eq-coll-fallback, EVAL-eq-tokens, EVAL-eq-sigmaboolean, EVAL-deferred-charge-on-exception, EVAL-eq-boxcollection, EVAL-eq-coll-descriptor, EVAL-eq-mismatch-and-unit-E032, OP-0x7D, OP-0x7E, OP-0x8F, OP-0x90, OP-0x91, OP-0x92, OP-0x93, OP-0x94, OP-0x99, OP-0x9A, OP-0x9C, OP-0x9D, OP-0x9E, OP-0xA1, OP-0xA2, OP-0xB6, OP-0xB7, OP-0xCF, OP-0xD7, OP-0xF1, METHOD-groupelement-exp, METHOD-box-registers-R0-R3, METHOD-box-registers-R4-R9, VERSION-header-checkPow-G023, INTERP-toblockcost, VERSION-downcast-gate, VERSION-subst-retention, VERSION-G007, VERSION-G008, VERSION-G009, VERSION-G010, VERSION-G011, VERSION-G012, VERSION-G013, VERSION-G014, VERSION-G016, VERSION-G017, VERSION-G018, VERSION-G019, VERSION-G020, ORDER-hof-charge, ORDER-blockvalue-valdef, OP-0xD6, ORDER-comparison-charge, INTERP-profiling-cost-isolation-I023
+// ledger: OP-0x8C, ORDER-avl-escaping-constructor, METHOD-unclaimed-inventory, VERSION-pre-v3-upcast, VERSION-v3-bool-root, VERSION-v6-method-gate, VERSION-selfboxindex-bug, VERSION-tree-version-gate, VERSION-v6-lazy-defaults, INTERP-crypto-conjunction, INTERP-crypto-threshold, INTERP-crypto-trivial-I013, INTERP-costlimit-op, INTERP-embedded-script-deser, INTERP-deser-subst, ORDER-propertycall-receiver, ORDER-methodcall-arguments, ORDER-powHit-validation, ORDER-serialize-incremental, ORDER-fixed-method-invocation, ORDER-avl-verifier-lookup, ORDER-if-condition, ORDER-optionget-input, METHOD-header-props, METHOD-global-encodeNbits, METHOD-coll-flatMap, METHOD-coll-indexOf, METHOD-coll-indices, METHOD-coll-patch, METHOD-coll-reverse, METHOD-coll-startsEndsWith, METHOD-coll-updateMany, METHOD-coll-updated, METHOD-coll-zip, METHOD-global-deserializeTo, METHOD-global-powHit, METHOD-global-xor, EVAL-avl-cost-height, METHOD-avl-contains, METHOD-avl-get, METHOD-avl-getMany, METHOD-avl-insert, METHOD-avl-insertOrUpdate, METHOD-avl-remove, METHOD-avl-update, METHOD-global-serialize, METHOD-global-serialize-E042, METHOD-global-serialize-E043, METHOD-global-serialize-E044, METHOD-global-serialize-E045, METHOD-global-serialize-E046, METHOD-global-serialize-E047, METHOD-option-map, METHOD-option-filter, EVAL-sstring-rejected, OP-0x96, OP-0xB3, OP-0x98, OP-0xCB, OP-0xD8, ROUND-perItem-chunking, OP-0xAE, OP-0xB5, OP-0xB0, OP-0xAF, OP-0xAD, OP-0x97, OP-0xCC, OP-0xEA, OP-0xEB, OP-0xD0, OP-0xB4, OP-0x74, OP-0xFF, OP-0x9B, INTERP-eval-sigmaprop-constant, OP-0x95, OP-0xDA, OP-0xE7-0xE9, OP-0xEC, OP-0xED, OP-0xF2, OP-0xF3, OP-0xF5, OP-0xF6, OP-0xF7, OP-0xF8, OP-TaggedVariable-A003, ORDER-bitop-charge-then-reject, EVAL-const-inline, EVAL-hasdeserialize-fork, EVAL-addtoenv, EVAL-numeric-cast, EVAL-arith-bigint, EVAL-eq-prim, EVAL-eq-matchtype, EVAL-eq-tuple, EVAL-eq-groupelement, EVAL-eq-bigint, EVAL-eq-avltree, EVAL-eq-box, EVAL-eq-option, EVAL-eq-preheader, EVAL-eq-header, EVAL-eq-coll-sigmaprop-descriptor, EVAL-eq-coll-fallback, EVAL-eq-tokens, EVAL-eq-sigmaboolean, EVAL-deferred-charge-on-exception, EVAL-eq-boxcollection, EVAL-eq-coll-descriptor, EVAL-eq-mismatch-and-unit-E032, OP-0x7D, OP-0x7E, OP-0x8F, OP-0x90, OP-0x91, OP-0x92, OP-0x93, OP-0x94, OP-0x99, OP-0x9A, OP-0x9C, OP-0x9D, OP-0x9E, OP-0xA1, OP-0xA2, OP-0xB6, OP-0xB7, OP-0xCF, OP-0xD7, OP-0xF1, METHOD-groupelement-exp, METHOD-box-registers-R0-R3, METHOD-box-registers-R4-R9, VERSION-header-checkPow-G023, INTERP-toblockcost, VERSION-downcast-gate, VERSION-subst-retention, VERSION-G007, VERSION-G008, VERSION-G009, VERSION-G010, VERSION-G011, VERSION-G012, VERSION-G013, VERSION-G014, VERSION-G016, VERSION-G017, VERSION-G018, VERSION-G019, VERSION-G020, ORDER-hof-charge, ORDER-blockvalue-valdef, OP-0xD6, ORDER-comparison-charge, INTERP-profiling-cost-isolation-I023
 #[test]
 fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-vectors/ergo-sigma/cost-ledger");
@@ -1053,13 +1060,16 @@ fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
         if let Some(cases) = value.get("cases") {
             let cases = cases.as_array().context("fixture cases must be an array")?;
             ensure!(!cases.is_empty(), "{}: empty cases", path.display());
+            // The context manifest can contain an entry per request. Share it
+            // across cases so a large family uses linear memory.
+            let manifest = std::rc::Rc::new(value["manifest"].clone());
             for (index, case) in cases.iter().enumerate() {
                 let mut case = case.clone();
-                case["manifest"] = value["manifest"].clone();
                 case["ledger"] = value["ledger"].clone();
                 let label = PathBuf::from(format!("{} [case {index}]", path.display()));
-                let fixture: Fixture = serde_json::from_value(case)
+                let mut fixture: Fixture = serde_json::from_value(case)
                     .with_context(|| format!("parse {}", label.display()))?;
+                fixture.manifest = std::rc::Rc::clone(&manifest);
                 fixtures.push((label, fixture));
             }
         } else {
@@ -1387,5 +1397,197 @@ fn wrapped_tree_validation_rules_match_jvm() -> Result<()> {
             "status probe {case}"
         );
     }
+    Ok(())
+}
+
+// ledger: ORDER-avl-escaping-constructor
+#[test]
+fn avl_constructor_preconditions_match_jvm_probe() -> Result<()> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../test-vectors/ergo-sigma/cost-ledger/fixtures/method/avl-constructor.json.gz");
+    let fixture: Value = serde_json::from_slice(&read_fixture(&path)?)?;
+    let probe = &fixture["constructor_probe"];
+    ensure!(
+        probe["oracle"] == "sigma-state:6.0.2 / scrypto:3.0.0",
+        "pinned constructor"
+    );
+    let cases = probe["cases"].as_array().context("constructor probes")?;
+    ensure!(cases.len() == 472, "all metadata and byte-prefix probes");
+    let mut fatal = 0;
+    let mut prefixes = std::collections::BTreeSet::new();
+    for case in cases {
+        let proof = case["proof_hex"].as_str().context("proof bytes")?;
+        if !proof.is_empty() {
+            prefixes.insert(proof);
+        }
+        if case["key_length"] == i32::MAX {
+            ensure!(
+                case["result"]["exception"] == "java.lang.OutOfMemoryError",
+                "VM array limit"
+            );
+            ensure!(
+                case["result"]["message"] == "Requested array size exceeds VM limit",
+                "deterministic VM limit"
+            );
+            fatal += 1;
+        } else {
+            ensure!(
+                case["result"]["exception"].is_null(),
+                "nonfatal constructor escape"
+            );
+            ensure!(
+                case["result"]["digest_defined"] == false,
+                "failed reconstruction retained"
+            );
+        }
+    }
+    ensure!(fatal == 36 && prefixes.len() == 256, "probe denominator");
+    let verify_cases = fixture["cases"]
+        .as_array()
+        .context("serialized verify probes")?;
+    ensure!(
+        verify_cases.len() == 13952,
+        "metadata, versions, remainders and boundaries"
+    );
+    ensure!(
+        verify_cases
+            .iter()
+            .any(|c| c["expected"]["verdict"] == "Accept"),
+        "contains false control"
+    );
+    ensure!(
+        verify_cases
+            .iter()
+            .any(|c| c["expected"]["verdict"] == "RejectCost"),
+        "boundary controls"
+    );
+    ensure!(
+        verify_cases
+            .iter()
+            .any(|c| c["expected"]["failure_class"] == "sigma.exceptions.InterpreterException"),
+        "get failure controls"
+    );
+    Ok(())
+}
+
+// ledger: ORDER-avl-escaping-constructor
+#[test]
+fn avl_constructor_serialized_boundaries_match_jvm() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-vectors/ergo-sigma/cost-ledger");
+    let path = root.join("fixtures/method/avl-constructor.json.gz");
+    let document: Value = serde_json::from_slice(&read_fixture(&path)?)?;
+    let ledger: Ledger = toml::from_str(&std::fs::read_to_string(root.join("ledger.toml"))?)?;
+    let manifest = std::rc::Rc::new(document["manifest"].clone());
+    let cases = document["cases"].as_array().context("verify probes")?;
+    ensure!(cases.len() == 13952, "serialized probe coverage");
+    for (index, case) in cases.iter().enumerate() {
+        let mut case = case.clone();
+        case["ledger"] = document["ledger"].clone();
+        let mut fixture: Fixture = serde_json::from_value(case)?;
+        fixture.manifest = std::rc::Rc::clone(&manifest);
+        let label = PathBuf::from(format!("{} [case {index}]", path.display()));
+        ensure!(
+            !verify_fixture(&label, fixture, &ledger)?,
+            "unexplained constructor divergence"
+        );
+    }
+    Ok(())
+}
+
+// ledger: ORDER-avl-escaping-constructor
+#[test]
+fn avl_constructor_fatal_jvm_inputs_rejected_with_bounded_cost() -> Result<()> {
+    use ergo_primitives::writer::VlqWriter;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../test-vectors/ergo-sigma/cost-ledger/fixtures/method/avl-constructor.json.gz");
+    let fixture: Value = serde_json::from_slice(&read_fixture(&path)?)?;
+    let probes = fixture["constructor_probe"]["cases"]
+        .as_array()
+        .context("probes")?;
+    let mut checked = 0;
+    for probe in probes.iter().filter(|p| p["key_length"] == i32::MAX) {
+        let digest_len = probe["digest_length"].as_u64().context("digest length")? as usize;
+        let value_len = probe["value_length"].as_i64().map(|v| v as i32);
+        let proof = hex::decode(probe["proof_hex"].as_str().context("proof")?)?;
+        // The explicit pre-allocation guard also covers combinations rejected
+        // earlier by the evaluator's digest/value-length checks.
+        let error = ergo_sigma::avl::AvlVerifier::new(
+            &vec![1; digest_len],
+            &proof,
+            i32::MAX as usize,
+            value_len.map(|v| v as usize),
+            None,
+            None,
+        )
+        .err()
+        .context("fatal metadata must be rejected")?;
+        ensure!(
+            error == "AVL key length exceeds the JVM array limit",
+            "pre-allocation guard"
+        );
+
+        for version in [2u8, 3] {
+            let mut avl = VlqWriter::new();
+            avl.put_u8(0x64);
+            avl.put_bytes(&[1; 33]);
+            avl.put_u8(7);
+            avl.put_u32(i32::MAX as u32);
+            avl.put_u8(u8::from(value_len.is_some()));
+            if let Some(len) = value_len {
+                avl.put_u32(len as u32);
+            }
+            let mut receiver = avl.result();
+            if digest_len != 33 {
+                let mut update = VlqWriter::new();
+                update.put_bytes(&[0xdc, 100, 15]);
+                update.put_bytes(&receiver);
+                update.put_bytes(&[1, 0x0e]);
+                update.put_u32(digest_len as u32);
+                update.put_bytes(&vec![1; digest_len]);
+                receiver = update.result();
+            }
+            let mut body = VlqWriter::new();
+            body.put_bytes(&[0xd8, 1, 0xd6, 10, 0xdc, 100, 10]); // bind get result
+            body.put_bytes(&receiver);
+            body.put_bytes(&[2, 0x0e, 32]);
+            body.put_bytes(&[1; 32]);
+            body.put_u8(0x0e);
+            body.put_u32(proof.len() as u32);
+            body.put_bytes(&proof);
+            body.put_bytes(&[8, 0xd3]);
+            let body = body.result();
+            let mut tree = VlqWriter::new();
+            tree.put_u8(version | 8);
+            tree.put_u32(body.len() as u32);
+            tree.put_bytes(&body);
+            let mut request = fixture["cases"][0]["request"].clone();
+            request["tree_hex"] = json!(hex::encode(tree.result()));
+            request["tree_version_expected"] = json!(version);
+            request["cost_limit_block"] = json!(1000);
+            request["observe_evaluator_failure"] = json!(true);
+            let request = serde_json::to_vec(&request)?;
+            let mut first = Value::Null;
+            verify(&request, &mut first)?;
+            ensure!(
+                first["verdict"] == "RejectScript",
+                "fatal metadata: {first}"
+            );
+            // This is a safety bound, not an invented JVM cost expectation:
+            // the fatal JVM observation exposes no cost or verification verdict.
+            let cost = first["evaluator_failure_block_cost"]
+                .as_u64()
+                .context("bounded failure cost")?;
+            ensure!(cost <= 1000, "bounded cost: {first}");
+            let mut repeated = Value::Null;
+            verify(&request, &mut repeated)?;
+            ensure!(first == repeated, "deterministic rejection");
+            checked += 1;
+        }
+    }
+    ensure!(
+        checked == 72,
+        "all 36 fatal combinations at both tree versions"
+    );
     Ok(())
 }

@@ -771,6 +771,37 @@ object EvaluatedValueOracle {
       "cases" -> Json.arr(cases: _*))
   }
 
+  /** All metadata guards and proof decoding execute inside scrypto's Try.
+    * The fixed hash and absent operation bound cannot be changed by script bytes. */
+  private def avlConstructorProbe(): Json = {
+    val metadata = for {
+      digestLength <- Seq(0, 1, 32, 33, 34, 65)
+      keyLength <- Seq(Int.MinValue, -1, 0, 1, 32, Int.MaxValue)
+      valueLength <- Seq(None, Some(Int.MinValue), Some(-1), Some(0), Some(1), Some(Int.MaxValue))
+    } yield (digestLength, keyLength, valueLength, Array.emptyByteArray)
+    val prefixes = (0 to 255).map(b => (33, 32, Option.empty[Int], Array(b.toByte)))
+    val cases = (metadata ++ prefixes).map { case (dl, kl, vl, proof) =>
+      val digest = Array.fill(dl)(1.toByte)
+      val tree = sigma.data.CAvlTree(AvlTreeData(Colls.fromArray(digest),
+        sigma.data.AvlTreeFlags.AllOperationsAllowed, kl, vl))
+      val result = try {
+        val verifier = sigmastate.eval.CAvlTreeVerifier(tree, Colls.fromArray(proof))
+        Json.obj("exception" -> Json.Null, "tree_height" -> Json.fromInt(verifier.treeHeight),
+          "digest_defined" -> Json.fromBoolean(verifier.digest.isDefined))
+      } catch {
+        case e: OutOfMemoryError if kl == Int.MaxValue =>
+          Json.obj("exception" -> Json.fromString(e.getClass.getName),
+            "message" -> Json.fromString(e.getMessage))
+        case NonFatal(e) => Json.obj("exception" -> Json.fromString(e.getClass.getName))
+      }
+      Json.obj("digest_length" -> Json.fromInt(dl), "key_length" -> Json.fromInt(kl),
+        "value_length" -> vl.map(Json.fromInt).getOrElse(Json.Null),
+        "proof_hex" -> Json.fromString(hex(proof)), "result" -> result)
+    }
+    Json.obj("oracle" -> Json.fromString("sigma-state:6.0.2 / scrypto:3.0.0"),
+      "cases" -> Json.arr(cases: _*))
+  }
+
   private def validationRulesProbe(): Json = {
     import sigma.validation._
     val cases = for {
@@ -805,7 +836,20 @@ object EvaluatedValueOracle {
   }
 
   def main(args: Array[String]): Unit = {
-    if (args.sameElements(Array("validation_rules_probe"))) {
+    if (args.sameElements(Array("avl_constructor_probe"))) {
+      println(avlConstructorProbe().spaces2)
+    } else if (args.sameElements(Array("avl_constructor_probe_self_test"))) {
+      val cases = avlConstructorProbe().hcursor.downField("cases").focus.get.asArray.get
+      require(cases.size == 472)
+      val fatal = cases.filter(_.hcursor.get[Int]("key_length").right.get == Int.MaxValue)
+      require(fatal.size == 36)
+      require(fatal.forall(_.hcursor.downField("result").get[String]("exception").right.get ==
+        "java.lang.OutOfMemoryError"))
+      val ordinary = cases.filterNot(fatal.contains)
+      require(ordinary.forall(_.hcursor.downField("result").downField("exception").focus.contains(Json.Null)))
+      require(ordinary.forall(_.hcursor.downField("result").get[Boolean]("digest_defined").contains(false)))
+      println("avl_constructor_probe_self_test: 472 cases passed")
+    } else if (args.sameElements(Array("validation_rules_probe"))) {
       println(validationRulesProbe().spaces2)
     } else if (args.sameElements(Array("validation_rules_probe_self_test"))) {
       val cases = validationRulesProbe().hcursor.downField("cases").focus.get.asArray.get
