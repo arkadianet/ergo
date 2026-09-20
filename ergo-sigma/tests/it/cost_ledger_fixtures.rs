@@ -1100,3 +1100,76 @@ fn last_block_utxo_root_real_headers_matches_jvm() -> Result<()> {
     }
     Ok(())
 }
+
+// ledger: VERSION-G015
+#[test]
+fn serializer_upcast_versions_match_jvm() -> Result<()> {
+    use ergo_primitives::writer::VlqWriter;
+    use ergo_ser::opcode::{write_expr_versioned, Expr, IrNode, Payload};
+    use ergo_ser::sigma_type::SigmaType;
+    use ergo_ser::sigma_value::SigmaValue;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../test-vectors/ergo-sigma/cost-ledger/fixtures/version/serializer-upcast.json.gz");
+    let fixture: Value = serde_json::from_slice(&read_fixture(&path)?)?;
+    ensure!(fixture["ast"]["op"] == "Upcast");
+    ensure!(fixture["ast"]["input_type"] == "Int");
+    ensure!(fixture["ast"]["target_type"] == "Long");
+    let n = i32::try_from(fixture["ast"]["value"].as_i64().context("AST constant")?)?;
+    let root = Expr::Op(IrNode {
+        opcode: 0xd1,
+        payload: Payload::One(Box::new(Expr::Op(IrNode {
+            opcode: 0x93,
+            payload: Payload::Two(
+                Box::new(Expr::Op(IrNode {
+                    opcode: 0x7e,
+                    payload: Payload::NumericCast {
+                        input: Box::new(Expr::Const {
+                            tpe: SigmaType::SInt,
+                            val: SigmaValue::Int(n),
+                        }),
+                        tpe: SigmaType::SLong,
+                    },
+                })),
+                Box::new(Expr::Const {
+                    tpe: SigmaType::SLong,
+                    val: SigmaValue::Long(i64::from(n)),
+                }),
+            ),
+        }))),
+    });
+    let cases = fixture["cases"].as_array().context("serializer cases")?;
+    ensure!(cases.len() == 2);
+    for case in cases {
+        let version = u8::try_from(case["version"].as_u64().context("version")?)?;
+        let mut writer = VlqWriter::new();
+        write_expr_versioned(&mut writer, &root, version)?;
+        let bytes = hex::encode(writer.result());
+        ensure!(bytes == case["expression_hex"]);
+        ensure!(bytes == fixture[format!("jvm_bytes_v{version}")]);
+        let tree = ergo_tree::ErgoTree {
+            version,
+            has_size: true,
+            constant_segregation: false,
+            constants: vec![],
+            body: root.clone(),
+        };
+        let mut writer = VlqWriter::new();
+        ergo_tree::write_ergo_tree(&mut writer, &tree)?;
+        ensure!(hex::encode(writer.result()) == case["request"]["tree_hex"]);
+        let mut actual = record(false);
+        verify(&serde_json::to_vec(&case["request"])?, &mut actual)?;
+        for field in [
+            "verdict",
+            "eval_block_cost",
+            "crypto_block_cost",
+            "total_block_cost",
+        ] {
+            ensure!(
+                actual[field] == case["expected"][field],
+                "version {version}: {field}"
+            );
+        }
+    }
+    Ok(())
+}

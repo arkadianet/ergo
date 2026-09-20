@@ -148,7 +148,7 @@ fn write_ergo_tree_body(w: &mut VlqWriter, tree: &ErgoTree) -> Result<(), WriteE
             write_constant(w, tpe, val)?;
         }
     }
-    opcode::write_body(w, &tree.body, tree.constant_segregation)?;
+    opcode::write_expr_versioned(w, &tree.body, tree.version)?;
     Ok(())
 }
 

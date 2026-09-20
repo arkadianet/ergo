@@ -667,6 +667,28 @@ object EvaluatedValueOracle {
     println("verify self-test: " + count + " passed, 0 failed")
   }
 
+  private def serializeExpr(line: String): Json = {
+    val ast = parse(line).right.get
+    val h = ast.hcursor
+    require(h.get[String]("op").right.get == "Upcast")
+    require(h.get[String]("input_type").right.get == "Int")
+    require(h.get[String]("target_type").right.get == "Long")
+    val n = h.get[Int]("value").right.get
+    val root = BoolToSigmaProp(EQ(Upcast(IntConstant(n), SLong), LongConstant(n.toLong)))
+    val cases = Seq(2, 3).map { version =>
+      VersionContext.withVersions(3.toByte, version.toByte) {
+        val bytes = ValueSerializer.serialize(root)
+        val tree = Array((version | 8).toByte, bytes.length.toByte) ++ bytes
+        Json.obj("name" -> Json.fromString("upcast-int-long-v" + version),
+          "version" -> Json.fromInt(version), "expression_hex" -> Json.fromString(hex(bytes)),
+          "tree_hex" -> Json.fromString(hex(tree)))
+      }
+    }
+    Json.obj("ast" -> ast, "cases" -> Json.arr(cases: _*),
+      "jvm_bytes_v2" -> cases(0).hcursor.downField("expression_hex").focus.get,
+      "jvm_bytes_v3" -> cases(1).hcursor.downField("expression_hex").focus.get)
+  }
+
   private def accumulatorProbe(): Json = {
     val cases = for (initial <- Seq(9, 10, 11); delta <- Seq(0, 1)) yield {
       val accumulator = new CostAccumulator(JitCost(initial), Some(JitCost(10)))
@@ -701,7 +723,14 @@ object EvaluatedValueOracle {
   }
 
   def main(args: Array[String]): Unit = {
-    if (args.sameElements(Array("accumulator_probe"))) {
+    if (args.sameElements(Array("serialize_expr"))) {
+      println(serializeExpr(scala.io.Source.stdin.mkString).spaces2)
+    } else if (args.sameElements(Array("serialize_expr_self_test"))) {
+      val result = serializeExpr("""{"op":"Upcast","input_type":"Int","target_type":"Long","value":1}""")
+      require(result.hcursor.get[String]("jvm_bytes_v2").right.get == "d19304020502")
+      require(result.hcursor.get[String]("jvm_bytes_v3").right.get == "d1937e0402050502")
+      println("serialize_expr self-test: 2 passed, 0 failed")
+    } else if (args.sameElements(Array("accumulator_probe"))) {
       println(accumulatorProbe().spaces2)
     } else if (args.sameElements(Array("accumulator_probe_self_test"))) {
       val cases = accumulatorProbe().hcursor.downField("cases").focus.get.asArray.get
