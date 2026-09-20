@@ -963,3 +963,20 @@ fn block_digest_delegated_accounting_matches_jvm() {
         replay(case);
     }
 }
+
+// ledger: BLOCK-param-voting
+#[test]
+fn block_epoch_voting_threshold_matches_jvm() {
+    for name in [
+        "i-vote-16384-down",
+        "i-vote-16384-up",
+        "i-vote-16385-down",
+        "i-vote-16385-up",
+        "i-vote-output-one-up",
+    ] {
+        let case = fixture(name);
+        assert!(case.transition.is_some());
+        assert_eq!(case.parent_blocks.len(), 383);
+        replay(case);
+    }
+}
