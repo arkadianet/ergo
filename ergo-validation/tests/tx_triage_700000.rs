@@ -470,6 +470,7 @@ fn diagnose_proof_failed(
                 };
 
                 let ctx = ReductionContext {
+                    validation_settings: Default::default(),
                     height,
                     self_box: Some(&eval_box),
                     self_creation_height: resolved.candidate.creation_height,

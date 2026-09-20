@@ -282,7 +282,7 @@ pub(super) fn substitute_deserialize(
     };
     if let Some((SigmaType::SColl(inner), SigmaValue::Coll(CollValue::Bytes(bytes)))) = value {
         if **inner == SigmaType::SByte {
-            let script = deserialize_measured(bytes, cost)?;
+            let script = deserialize_measured(bytes, ctx, cost)?;
             let actual = ergo_ser::ergo_tree::substitution_type_of(&script);
             if actual.as_ref() != Some(tpe) {
                 if matches!(node.payload, Payload::DeserializeRegister { .. }) {
@@ -290,9 +290,9 @@ pub(super) fn substitute_deserialize(
                         "DeserializeRegister script type mismatch",
                     ));
                 }
-                return Err(EvalError::TypeError {
-                    expected: "matching deserialized script type",
-                    got: format!("expected {tpe:?}, inferred {actual:?}"),
+                return Err(EvalError::SigmaValidation {
+                    rule_id: 1000,
+                    args: vec![],
                 });
             }
             *expr = script;
@@ -313,15 +313,30 @@ pub(super) fn substitute_deserialize(
 /// Scala parses before `addCostChecked`, then charges the entire supplied buffer.
 fn deserialize_measured(
     bytes: &[u8],
+    ctx: &super::ReductionContext<'_>,
     cost: &mut ergo_primitives::cost::CostAccumulator,
 ) -> Result<Expr, super::EvalError> {
     use ergo_primitives::cost::{CostError, JitCost};
     let mut reader = ergo_primitives::reader::VlqReader::new(bytes);
-    let script =
-        ergo_ser::opcode::parse_body(&mut reader, 0).map_err(|e| super::EvalError::TypeError {
-            expected: "valid serialized expression",
-            got: format!("deserialization error: {e}"),
-        })?;
+    reader.set_strict_method_resolution();
+    reader.set_embeddable_activated_version(Some(ctx.activated_script_version));
+    let script = ergo_ser::opcode::parse_body(&mut reader, ctx.ergo_tree_version).map_err(|e| {
+        if let ergo_primitives::reader::ReadError::SigmaValidation { rule_id, args, .. } = e {
+            // ValidationRules: A6 uses new rule identities even for legacy trees.
+            let rule_id = match (rule_id, ctx.activated_script_version >= 3) {
+                (1011, true) => 1016,
+                (1007, true) => 1017,
+                (1008, true) => 1018,
+                _ => rule_id,
+            };
+            super::EvalError::SigmaValidation { rule_id, args }
+        } else {
+            super::EvalError::TypeError {
+                expected: "valid serialized expression",
+                got: format!("deserialization error: {e}"),
+            }
+        }
+    })?;
     let charge = JitCost::from_block_cost(bytes.len() as u64 * 2).map_err(CostError::from)?;
     cost.add(charge)?;
     Ok(script)

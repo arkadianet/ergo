@@ -337,6 +337,24 @@ fn parse_node(
             // tree-header version (v5 for pre-v3, v6 for v3+), so this catches both a
             // v6-only method in a pre-v3 tree and a genuinely unknown id at any version.
             if !is_known_method(type_id, method_id, _tree_version) {
+                if r.strict_method_resolution() {
+                    // MethodsContainer.methodsV5/V6 (methods.scala:146-172).
+                    // An unknown container raises rule 1010, not method rule 1011.
+                    if !(matches!(type_id, 1..=8 | 12 | 36 | 96..=102 | 104..=106)
+                        || type_id == 9 && _tree_version >= 3)
+                    {
+                        return Err(ReadError::SigmaValidation {
+                            rule_id: 1010,
+                            args: vec![type_id],
+                            message: format!("unknown method container {type_id}"),
+                        });
+                    }
+                    return Err(ReadError::SigmaValidation {
+                        rule_id: 1011,
+                        args: vec![type_id, method_id],
+                        message: format!("unknown method {type_id}:{method_id}"),
+                    });
+                }
                 r.mark_unresolved_method_checkpoint();
             }
             // PropertyCall (0xDB) is the zero-args form, but a v6
@@ -388,6 +406,24 @@ fn parse_node(
             // pre-v3 tree AND a genuinely unknown/future `(type_id, method_id)` pair
             // at any version — both wrap under has_size with the same GE-ordering shape.
             if !is_known_method(type_id, method_id, _tree_version) {
+                if r.strict_method_resolution() {
+                    // MethodsContainer.methodsV5/V6 (methods.scala:146-172).
+                    // An unknown container raises rule 1010, not method rule 1011.
+                    if !(matches!(type_id, 1..=8 | 12 | 36 | 96..=102 | 104..=106)
+                        || type_id == 9 && _tree_version >= 3)
+                    {
+                        return Err(ReadError::SigmaValidation {
+                            rule_id: 1010,
+                            args: vec![type_id],
+                            message: format!("unknown method container {type_id}"),
+                        });
+                    }
+                    return Err(ReadError::SigmaValidation {
+                        rule_id: 1011,
+                        args: vec![type_id, method_id],
+                        message: format!("unknown method {type_id}:{method_id}"),
+                    });
+                }
                 r.mark_unresolved_method_checkpoint();
             }
             // v6 / EIP-50: methods whose Scala `SMethod` sets

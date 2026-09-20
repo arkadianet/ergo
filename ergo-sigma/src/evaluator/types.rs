@@ -190,11 +190,51 @@ impl EvalHeader {
     }
 }
 
+/// Status supplied by the cumulative activated validation-settings update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuleStatus {
+    Enabled,
+    Disabled,
+    Replaced(u16),
+    Changed(Vec<u8>),
+}
+
+/// Unspecified rules retain their enabled status.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SigmaValidationSettings(pub std::collections::BTreeMap<u16, RuleStatus>);
+
+impl SigmaValidationSettings {
+    /// SigmaValidationSettings.scala:55-66: replacements recognize a soft fork,
+    /// except the replaced V5 type/method rules after A6. Disabled status alone
+    /// does not recognize these rules (SoftForkChecker.scala:12).
+    pub fn is_soft_fork(&self, rule_id: u16, args: &[u8], activated_version: u8) -> bool {
+        matches!(rule_id, 1000 | 1007 | 1008 | 1011 | 1016 | 1017 | 1018)
+            && match self.0.get(&rule_id) {
+                Some(RuleStatus::Replaced(_)) => {
+                    !(activated_version >= 3 && matches!(rule_id, 1007 | 1008 | 1011))
+                }
+                // SoftForkChecker.scala:35: the exact failed type byte
+                // must occur in the activated ChangedRule payload.
+                Some(RuleStatus::Changed(codes))
+                    if matches!(rule_id, 1007 | 1008 | 1017 | 1018) =>
+                {
+                    matches!(args, [code] if codes.contains(code))
+                }
+                Some(RuleStatus::Changed(codes)) if matches!(rule_id, 1011 | 1016) => {
+                    args.len() == 2 && codes.chunks(2).any(|key| key == args)
+                }
+                _ => false,
+            }
+    }
+}
+
 /// Evaluation context — borrows transaction-scoped box data.
 ///
 /// All box collections are borrowed slices, not owned vectors.
 /// This eliminates per-input cloning during script validation.
 pub struct ReductionContext<'a> {
+    /// Cumulative activated Sigma rule statuses; absent rules are enabled.
+    pub validation_settings: SigmaValidationSettings,
     /// Current block height (CONTEXT.HEIGHT).
     pub height: u32,
     /// The input box being spent — `None` only for non-spending evaluations.
@@ -278,6 +318,7 @@ impl<'a> ReductionContext<'a> {
     /// Minimal context for scripts that only need HEIGHT and SELF.
     pub fn minimal(height: u32, self_creation_height: u32) -> Self {
         Self {
+            validation_settings: Default::default(),
             height,
             self_box: None,
             self_creation_height,
@@ -671,6 +712,9 @@ pub enum EvalError {
     /// preserve the verbatim bytes and this surfaces the reject at evaluation.
     #[error("cannot evaluate an unparsed (soft-fork-wrapped) ErgoTree")]
     UnparsedErgoTree,
+    /// A recognized Sigma deserialization validation rule failed.
+    #[error("Sigma validation rule {rule_id} failed")]
+    SigmaValidation { rule_id: u16, args: Vec<u8> },
     /// Scala `Interpreter.checkSoftForkCondition` (`Interpreter.scala:325-328`),
     /// run by `verify` BEFORE any reduction (`:362-365`): with the activated
     /// script version within this interpreter's range, a tree whose header

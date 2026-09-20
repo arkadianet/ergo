@@ -845,6 +845,7 @@ fn make_verifier_context<'a>(
     self_idx: usize,
 ) -> ergo_sigma::evaluator::ReductionContext<'a> {
     ergo_sigma::evaluator::ReductionContext {
+        validation_settings: Default::default(),
         height,
         self_box: Some(&eval_inputs[self_idx]),
         self_creation_height: eval_inputs[self_idx].creation_height,

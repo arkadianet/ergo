@@ -163,9 +163,11 @@ fn decode_type_at_depth(r: &mut VlqReader, byte: u8, depth: usize) -> Result<Sig
             })
         }
 
-        _ => Err(ReadError::InvalidData(format!(
-            "unknown type code: 0x{byte:02X}"
-        ))),
+        _ => Err(ReadError::SigmaValidation {
+            rule_id: 1008,
+            args: vec![byte],
+            message: format!("unknown type code: 0x{byte:02X}"),
+        }),
     }
 }
 
@@ -507,8 +509,8 @@ mod tests {
         let mut r = VlqReader::new(&data);
         let err = read_type(&mut r).unwrap_err();
         assert!(
-            matches!(err, ReadError::InvalidData(_)),
-            "expected InvalidData, got: {err:?}"
+            matches!(&err, ReadError::SigmaValidation { rule_id: 1008, args, .. } if args == &[0xfe]),
+            "expected type validation rule 1008, got: {err:?}"
         );
     }
 
@@ -599,7 +601,7 @@ mod tests {
         let mut r = VlqReader::new(&[0x6b]);
         let err = read_type(&mut r).expect_err("type code 0x6b must reject");
         assert!(
-            matches!(&err, ReadError::InvalidData(m) if m.contains("unknown type code")),
+            matches!(&err, ReadError::SigmaValidation { rule_id: 1008, args, .. } if args == &[0x6b]),
             "an unknown non-zero type code is a wrappable ValidationException in \
              the reference, so it must stay soft, got: {err:?}"
         );

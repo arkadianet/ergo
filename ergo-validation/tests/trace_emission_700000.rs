@@ -238,6 +238,7 @@ fn trace_inner() {
                             .collect();
 
                         let rctx = ReductionContext {
+                            validation_settings: Default::default(),
                             height: v.height,
                             self_box: Some(&eval_box),
                             self_creation_height: box_data.candidate.creation_height,

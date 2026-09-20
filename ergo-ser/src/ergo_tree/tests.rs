@@ -1511,7 +1511,10 @@ fn sizeless_v0_v6_embeddable_type_accepts_only_under_activated_v6() {
     // Default reader: header-version (0) gate rejects code 9.
     let err = read_ergo_tree(&mut VlqReader::new(&bytes))
         .expect_err("header-v0 reader must reject the v6 embeddable code");
-    assert!(matches!(err, ReadError::InvalidData(_)), "{err:?}");
+    assert!(
+        matches!(&err, ReadError::SigmaValidation { rule_id: 1007, args, .. } if args == &[9]),
+        "{err:?}"
+    );
     // Activated-version reader at v3: accepts, round-trips byte-identically.
     let mut r = VlqReader::new(&bytes);
     let tree = read_ergo_tree_with_activated_version(&mut r, 3)

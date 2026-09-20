@@ -179,6 +179,7 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
     let input_extensions = vec![extension.values.clone(); inputs.len()];
     let ctx = ReductionContext {
+        validation_settings: Default::default(),
         height: pre_context.height,
         self_box: Some(&eval_inputs[index]),
         self_creation_height: self_box.candidate.creation_height,

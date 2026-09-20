@@ -99,6 +99,7 @@ impl ReductionContextOwned {
     /// and `verify_spending_proof_with_context_and_cost` require.
     pub fn as_borrowed(&self) -> ReductionContext<'_> {
         ReductionContext {
+            validation_settings: Default::default(),
             height: self.height,
             self_box: Some(&self.self_box),
             self_creation_height: self.self_creation_height,

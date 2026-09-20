@@ -322,6 +322,7 @@ fn diagnose_auction_divergence_700001() {
 
             // Build reduction context
             let ctx = ReductionContext {
+                validation_settings: Default::default(),
                 height: 700001,
                 self_box: Some(&eval_inputs[inp_idx]),
                 self_creation_height: resolved_box.candidate.creation_height,

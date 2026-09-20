@@ -86,6 +86,7 @@ pub struct VlqReader<'a> {
     /// version >= 4 only, `BlockTransactionsSerializer.parse`), and the
     /// mempool / P2P transaction parse from the tip's activated version.
     activated_script_version: Option<u8>,
+    strict_method_resolution: bool,
 }
 
 /// Errors produced while decoding a Scorex-style byte stream.
@@ -113,6 +114,13 @@ pub enum ReadError {
     /// caller's wire format — supply a short context string.
     #[error("invalid data: {0}")]
     InvalidData(String),
+    /// A Sigma validation rule failed while reading an embedded expression.
+    #[error("invalid data: {message}")]
+    SigmaValidation {
+        rule_id: u16,
+        args: Vec<u8>,
+        message: String,
+    },
     /// Nested value/expression deserialization exceeded the maximum tree depth
     /// (Scala `SigmaConstants.MaxTreeDepth`). Scala raises this as a
     /// `SerializerException` (`DeserializeCallDepthExceeded`), which is NOT in
@@ -155,7 +163,18 @@ impl<'a> VlqReader<'a> {
             embeddable_activated_version: None,
             trusted: false,
             activated_script_version: None,
+            strict_method_resolution: false,
         }
+    }
+
+    /// Resolve embedded-expression methods eagerly, at Scala's serializer boundary.
+    pub fn set_strict_method_resolution(&mut self) {
+        self.strict_method_resolution = true;
+    }
+
+    /// Whether unresolved methods must fail before parsing continues.
+    pub fn strict_method_resolution(&self) -> bool {
+        self.strict_method_resolution
     }
 
     /// Set the activated script version this reader parses under (see the

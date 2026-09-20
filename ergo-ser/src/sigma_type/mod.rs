@@ -218,16 +218,16 @@ fn prim_from_code(code: u8, gate_version: u8) -> Result<SigmaType, ReadError> {
         // hard-rejects sizeless. The node previously accepted code 9 at any
         // version and then hard-rejected on the bigint value read — a reject-valid.
         9 if gate_version >= V6_EMBEDDABLE_TREE_VERSION => Ok(SigmaType::SUnsignedBigInt),
-        9 => Err(ReadError::InvalidData(format!(
+        9 => Err(ReadError::SigmaValidation { rule_id: 1007, args: vec![code], message: format!(
             "embeddable type SUnsignedBigInt (code 9) requires ErgoTree version >= {V6_EMBEDDABLE_TREE_VERSION}, got tree version {gate_version}"
-        ))),
+        ) }),
         // Codes 10 and 11 are NOT in the Scala embeddable set (`embeddableV5`
         // length 9 → codes 1..=8; `embeddableV6` length 10 → codes 1..=9).
         // Scala's `getEmbeddableType` indexes those arrays and throws on an
         // out-of-range code; accepting them as SReserved10/11 was accept-invalid.
-        _ => Err(ReadError::InvalidData(format!(
+        _ => Err(ReadError::SigmaValidation { rule_id: 1007, args: vec![code], message: format!(
             "invalid embeddable type code: {code}"
-        ))),
+        ) }),
     }
 }
 
