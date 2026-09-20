@@ -2,13 +2,20 @@
 """Emit L4 provenance, or add/refresh only the manifest of a recorded result.
 
 --manifest-only never replays transactions. Historical rust/run metadata remains
-attributed to its recorded revision; collection describes today's commands.
+attributed to its recorded revision; a new collection records today's commands.
 The diagnostics harness supplies a closed range-summary log via --log.
+Existing manifests are validated and preserved, including collection metadata.
+Offline idempotence check (from the worktree root):
+    NODE_URL=http://127.0.0.1:1 python3 scripts/l4-results-manifest.py \
+        --manifest-only test-vectors/ergo-sigma/cost-ledger/results/l4-2026-09-16.json \
+        --log .superpowers/task-8.1-l4.log
+    git diff --exit-code -- test-vectors/ergo-sigma/cost-ledger/results/l4-2026-09-16.json
 """
 import argparse
 import gzip
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -81,7 +88,7 @@ def range_context(ranges):
             'ranges': mapped}
 
 
-def collect(data, original, log, manifest_only, run_command, features):
+def collect(data, original, log, manifest_only, run_command, features, previous=None):
     home = Path.home()
     references = {
         'sigmastate_v6.0.2': (home / 'coding/reference/ergo-core/sigmastate-interpreter-v6.0.2', 'v6.0.2'),
@@ -90,14 +97,29 @@ def collect(data, original, log, manifest_only, run_command, features):
         'sigmastate_v6.0.6': (home / 'coding/development/arkadianet/sigmastate-interpreter', 'v6.0.6'),
     }
     shas = {name: command('git', '-C', str(path), 'rev-parse', tag + '^{commit}') for name, (path, tag) in references.items()}
-    with urlopen('http://localhost:9053/info', timeout=30) as response:
-        node = json.load(response)
+    evidence = {EPOCHS: digest((ROOT / EPOCHS).read_bytes()), str(log): digest((ROOT / log).read_bytes()),
+                'recorded_results_bytes_without_manifest': digest(original)}
+    context = range_context(data['ranges'])
+    if manifest_only and previous is not None:
+        if any(previous['evidence'].get(name) != sha for name, sha in evidence.items()):
+            raise ValueError('recorded evidence hash missing or changed')
+        if previous['context'] != context:
+            raise ValueError('recorded context changed')
+        for name, sha in previous['scala']['source_shas'].items():
+            if name in shas and sha != shas[name]:
+                raise ValueError(f'recorded source pin differs: {name}')
+        return previous
     source = (ROOT / ORACLE).read_text()
-    versions = dict(re.findall(r'//> using dep [\w.]+::([\w-]+):([\d.]+)', source))
-    scala = {'ergo_version': versions['ergo-core'], 'sigmastate_version': versions['sigma-state'],
-             'node_app_version': node['appVersion'], 'source_shas': shas}
-    if scala['node_app_version'] != scala['ergo_version']:
-        raise ValueError('node and extractor versions differ')
+    if manifest_only:
+        scala = data['scala']
+    else:
+        with urlopen(os.environ.get('NODE_URL', 'http://localhost:9053').rstrip('/') + '/info', timeout=30) as response:
+            node = json.load(response)
+        versions = dict(re.findall(r'//> using dep [\w.]+::([\w-]+):([\d.]+)', source))
+        scala = {'ergo_version': versions['ergo-core'], 'sigmastate_version': versions['sigma-state'],
+                 'node_app_version': node['appVersion'], 'source_shas': shas}
+        if scala['node_app_version'] != scala['ergo_version']:
+            raise ValueError('node and extractor versions differ')
     rust = {'git_sha': command('git', 'rev-parse', 'HEAD'), 'toolchain': command('rustc', '--version'), 'features': features,
             'working_diff_sha256': digest(command('git', 'diff', 'HEAD', '--', 'ergo-validation', WRITER).encode())}
     tool = {'script': ORACLE, 'script_sha': command('git', 'log', '-1', '--format=%H', '--', ORACLE),
@@ -105,8 +127,6 @@ def collect(data, original, log, manifest_only, run_command, features):
             'jvm': command('java', '-version'), 'writer': WRITER, 'writer_sha256': digest((ROOT / WRITER).read_bytes())}
     now = datetime.now(timezone.utc).isoformat()
     run = {'command': run_command, 'seeds': [], 'timestamp': now}
-    evidence = {EPOCHS: digest((ROOT / EPOCHS).read_bytes()), str(log): digest((ROOT / log).read_bytes()),
-                'recorded_results_bytes_without_manifest': digest(original)}
     if manifest_only:
         # Recomputed hashes validate the original log; current tools cannot be
         # represented as the tools that executed an earlier replay.
@@ -132,7 +152,7 @@ def collect(data, original, log, manifest_only, run_command, features):
         for path in sorted((ROOT / 'test-vectors/mainnet').glob('*.json')):
             if path.name.startswith(('tx_costs_', 'transactions_', 'headers_', 'input_boxes_', 'l4_boxes')):
                 evidence[str(path.relative_to(ROOT))] = digest(path.read_bytes())
-    manifest['context'] = range_context(data['ranges'])
+    manifest['context'] = context
     manifest['evidence'] = evidence
     return manifest
 
@@ -149,8 +169,9 @@ def main():
     raw = args.manifest_only.read_bytes() if args.manifest_only else sys.stdin.buffer.read()
     original = recorded_bytes(raw)
     invocation = shlex.join(['python3', WRITER, *sys.argv[1:]])
+    previous = json.loads(raw).get('manifest')
     manifest = collect(json.loads(original), original, args.log, bool(args.manifest_only),
-                       invocation if args.manifest_only else args.run_command, args.features.split(','))
+                       invocation if args.manifest_only else args.run_command, args.features.split(','), previous)
     output = with_manifest(raw, manifest)
     assert recorded_bytes(output) == original
     if args.manifest_only:
