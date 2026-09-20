@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build an isolated pinned node classpath with one return-value observation."""
+"""Build an isolated pinned node classpath with identity return-value and loop-entry observations."""
 import hashlib
 import os
 from pathlib import Path
@@ -35,6 +35,19 @@ def main():
     assert hashlib.sha256(original.encode()).hexdigest() == '4bc8c1b8f9a49087f50cbd3e45f54bba1e83482f85dde396db13ad89e9b45e6e'
     assert original.count(call) == 1
     path.write_text(original.replace(call, 'CostObservation.observe(' + call + ')'))
+    digest = path.with_name('DigestState.scala')
+    original_digest = digest.read_text()
+    assert hashlib.sha256(original_digest.encode()).hexdigest() == '7b7eadafb4f368271f011d59efbb48b909e82699566551283eaf5056e51e79c5'
+    delegated = 'ErgoState.execTransactions(transactions, currentStateContext, nodeSettings)(checkBoxExistence)'
+    assert original_digest.count(delegated) == 1
+    digest.write_text(original_digest.replace(delegated, 'CostObservation.observe(' + delegated + ')'))
+    execution = path.with_name('ErgoState.scala')
+    original_execution = execution.read_text()
+    assert hashlib.sha256(original_execution.encode()).hexdigest() == 'a0463a6b524b22a9e532871d524e8a3e090f298ebc4cd816b281c8da6aae40c2'
+    entry = 'val tx = transactions(i)'
+    assert original_execution.count(entry) == 1
+    execution.write_text(original_execution.replace(entry,
+        entry + '\n        CostObservation.enter(i, validCostResult.value)'))
     shutil.copyfile(HERE / 'CostObservation.scala', path.with_name('CostObservation.scala'))
     (HERE / '.work/observation-source.sha256').write_text(hashlib.sha256(original.encode()).hexdigest() + '\n')
     command = ['sbt', '-batch', 'set ThisBuild / version := "6.0.5"', 'export Runtime / fullClasspath']
@@ -46,7 +59,7 @@ def main():
     lines = log.read_text().splitlines()
     classpath = next(line for line in reversed(lines) if line.startswith('/') and 'scala-library' in line)
     marker.write_text(classpath + '\n')
-    print('Provisioned Ergo 6.0.5; one UtxoState return-value wrapper')
+    print('Provisioned Ergo 6.0.5; UTXO/digest return-value wrappers and transaction-loop observer')
 
 
 if __name__ == '__main__':
