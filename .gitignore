@@ -78,3 +78,6 @@ docs/research/
 /extract-tools/
 .bsp/
 .scala-build/
+# L4 replay inputs come from the hash-pinned data release (scripts/fetch-l4-inputs.sh)
+test-vectors/mainnet/*.json.gz
+test-vectors/mainnet/.l4-inputs.sha256
