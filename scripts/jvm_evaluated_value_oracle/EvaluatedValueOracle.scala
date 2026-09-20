@@ -261,6 +261,9 @@ object EvaluatedValueOracle {
 
   private trait ObservedReduction extends ErgoLikeInterpreter {
     override type CTX = ErgoLikeContext
+    var measureOperationTime = false
+    override protected def evalSettings: sigma.eval.EvalSettings =
+      DefaultEvalSettings.copy(isMeasureOperationTime = measureOperationTime)
     var reduction: Option[Interpreter.ReductionResult] = None
     var chargedCrypto: Option[Long] = None
     var gateFailureCost: Option[Long] = None
@@ -408,6 +411,8 @@ object EvaluatedValueOracle {
           }
         }
       } else new ErgoLikeInterpreter with ObservedReduction
+      interpreter.measureOperationTime = cursor.get[Option[Boolean]]("measure_operation_time")
+        .fold(throw _, identity).getOrElse(false)
       verifying = true
       val result = interpreter.verify(tree, ctx, proof, message)
       interpreter.reduction.foreach { r =>

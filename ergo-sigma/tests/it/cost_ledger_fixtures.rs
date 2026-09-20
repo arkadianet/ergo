@@ -929,7 +929,39 @@ fn version_divergence_markers_misclassified_cases_rejected() -> Result<()> {
 
 // ----- oracle parity -----
 
-// ledger: VERSION-pre-v3-upcast, VERSION-v3-bool-root, VERSION-v6-method-gate, VERSION-selfboxindex-bug, VERSION-tree-version-gate, VERSION-v6-lazy-defaults, INTERP-crypto-conjunction, INTERP-crypto-threshold, INTERP-crypto-trivial-I013, INTERP-costlimit-op, INTERP-embedded-script-deser, INTERP-deser-subst, ORDER-propertycall-receiver, ORDER-methodcall-arguments, ORDER-powHit-validation, ORDER-serialize-incremental, ORDER-fixed-method-invocation, ORDER-avl-verifier-lookup, ORDER-if-condition, ORDER-optionget-input, METHOD-header-props, METHOD-global-encodeNbits, METHOD-coll-flatMap, METHOD-coll-indexOf, METHOD-coll-indices, METHOD-coll-patch, METHOD-coll-reverse, METHOD-coll-startsEndsWith, METHOD-coll-updateMany, METHOD-coll-updated, METHOD-coll-zip, METHOD-global-deserializeTo, METHOD-global-powHit, METHOD-global-xor, EVAL-avl-cost-height, METHOD-avl-contains, METHOD-avl-get, METHOD-avl-getMany, METHOD-avl-insert, METHOD-avl-insertOrUpdate, METHOD-avl-remove, METHOD-avl-update, METHOD-global-serialize, METHOD-global-serialize-E042, METHOD-global-serialize-E043, METHOD-global-serialize-E044, METHOD-global-serialize-E045, METHOD-global-serialize-E046, METHOD-global-serialize-E047, METHOD-option-map, METHOD-option-filter, EVAL-sstring-rejected, OP-0x96, OP-0xB3, OP-0x98, OP-0xCB, OP-0xD8, ROUND-perItem-chunking, OP-0xAE, OP-0xB5, OP-0xB0, OP-0xAF, OP-0xAD, OP-0x97, OP-0xCC, OP-0xEA, OP-0xEB, OP-0xD0, OP-0xB4, OP-0x74, OP-0xFF, OP-0x9B, INTERP-eval-sigmaprop-constant, OP-0x95, OP-0xDA, OP-0xE7-0xE9, OP-0xEC, OP-0xED, OP-0xF2, OP-0xF3, OP-0xF5, OP-0xF6, OP-0xF7, OP-0xF8, OP-TaggedVariable-A003, ORDER-bitop-charge-then-reject, EVAL-const-inline, EVAL-hasdeserialize-fork, EVAL-addtoenv, EVAL-numeric-cast, EVAL-arith-bigint, EVAL-eq-prim, EVAL-eq-matchtype, EVAL-eq-tuple, EVAL-eq-groupelement, EVAL-eq-bigint, EVAL-eq-avltree, EVAL-eq-box, EVAL-eq-option, EVAL-eq-preheader, EVAL-eq-header, EVAL-eq-coll-sigmaprop-descriptor, EVAL-eq-coll-fallback, EVAL-eq-tokens, EVAL-eq-sigmaboolean, EVAL-deferred-charge-on-exception, EVAL-eq-boxcollection, EVAL-eq-coll-descriptor, EVAL-eq-mismatch-and-unit-E032, OP-0x7D, OP-0x7E, OP-0x8F, OP-0x90, OP-0x91, OP-0x92, OP-0x93, OP-0x94, OP-0x99, OP-0x9A, OP-0x9C, OP-0x9D, OP-0x9E, OP-0xA1, OP-0xA2, OP-0xB6, OP-0xB7, OP-0xCF, OP-0xD7, OP-0xF1, METHOD-groupelement-exp, METHOD-box-registers-R0-R3, METHOD-box-registers-R4-R9, VERSION-header-checkPow-G023, INTERP-toblockcost, VERSION-downcast-gate, VERSION-subst-retention, VERSION-G007, VERSION-G008, VERSION-G009, VERSION-G010, VERSION-G011, VERSION-G012, VERSION-G013, VERSION-G014, VERSION-G016, VERSION-G017, VERSION-G018, ORDER-hof-charge, ORDER-blockvalue-valdef, OP-0xD6, ORDER-comparison-charge
+#[test]
+fn profiling_timing_pairs_jvm_costs_unchanged() -> Result<()> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+        "../test-vectors/ergo-sigma/cost-ledger/fixtures/interpreter/profiling-isolation.json.gz",
+    );
+    let fixture: Value = serde_json::from_slice(&read_fixture(&path)?)?;
+    let cases = fixture["cases"].as_array().context("profiling cases")?;
+    ensure!(cases.len() == 32, "profiling boundary coverage");
+    let mut verdicts = std::collections::BTreeSet::new();
+    for case in cases {
+        let mut paired = case["request"].clone();
+        let timing = paired["measure_operation_time"]
+            .as_bool()
+            .context("explicit profiling switch")?;
+        paired["measure_operation_time"] = json!(!timing);
+        let partner = cases
+            .iter()
+            .find(|candidate| candidate["request"] == paired)
+            .context("missing opposite profiling setting")?;
+        ensure!(
+            case["expected"] == partner["expected"],
+            "profiling changed JVM result"
+        );
+        verdicts.insert(case["expected"]["verdict"].as_str().context("verdict")?);
+    }
+    ensure!(
+        verdicts == std::collections::BTreeSet::from(["Accept", "RejectCost", "RejectScript"]),
+        "profiling must cover valid proofs, invalid proofs and limit rejection"
+    );
+    Ok(())
+}
+
+// ledger: VERSION-pre-v3-upcast, VERSION-v3-bool-root, VERSION-v6-method-gate, VERSION-selfboxindex-bug, VERSION-tree-version-gate, VERSION-v6-lazy-defaults, INTERP-crypto-conjunction, INTERP-crypto-threshold, INTERP-crypto-trivial-I013, INTERP-costlimit-op, INTERP-embedded-script-deser, INTERP-deser-subst, ORDER-propertycall-receiver, ORDER-methodcall-arguments, ORDER-powHit-validation, ORDER-serialize-incremental, ORDER-fixed-method-invocation, ORDER-avl-verifier-lookup, ORDER-if-condition, ORDER-optionget-input, METHOD-header-props, METHOD-global-encodeNbits, METHOD-coll-flatMap, METHOD-coll-indexOf, METHOD-coll-indices, METHOD-coll-patch, METHOD-coll-reverse, METHOD-coll-startsEndsWith, METHOD-coll-updateMany, METHOD-coll-updated, METHOD-coll-zip, METHOD-global-deserializeTo, METHOD-global-powHit, METHOD-global-xor, EVAL-avl-cost-height, METHOD-avl-contains, METHOD-avl-get, METHOD-avl-getMany, METHOD-avl-insert, METHOD-avl-insertOrUpdate, METHOD-avl-remove, METHOD-avl-update, METHOD-global-serialize, METHOD-global-serialize-E042, METHOD-global-serialize-E043, METHOD-global-serialize-E044, METHOD-global-serialize-E045, METHOD-global-serialize-E046, METHOD-global-serialize-E047, METHOD-option-map, METHOD-option-filter, EVAL-sstring-rejected, OP-0x96, OP-0xB3, OP-0x98, OP-0xCB, OP-0xD8, ROUND-perItem-chunking, OP-0xAE, OP-0xB5, OP-0xB0, OP-0xAF, OP-0xAD, OP-0x97, OP-0xCC, OP-0xEA, OP-0xEB, OP-0xD0, OP-0xB4, OP-0x74, OP-0xFF, OP-0x9B, INTERP-eval-sigmaprop-constant, OP-0x95, OP-0xDA, OP-0xE7-0xE9, OP-0xEC, OP-0xED, OP-0xF2, OP-0xF3, OP-0xF5, OP-0xF6, OP-0xF7, OP-0xF8, OP-TaggedVariable-A003, ORDER-bitop-charge-then-reject, EVAL-const-inline, EVAL-hasdeserialize-fork, EVAL-addtoenv, EVAL-numeric-cast, EVAL-arith-bigint, EVAL-eq-prim, EVAL-eq-matchtype, EVAL-eq-tuple, EVAL-eq-groupelement, EVAL-eq-bigint, EVAL-eq-avltree, EVAL-eq-box, EVAL-eq-option, EVAL-eq-preheader, EVAL-eq-header, EVAL-eq-coll-sigmaprop-descriptor, EVAL-eq-coll-fallback, EVAL-eq-tokens, EVAL-eq-sigmaboolean, EVAL-deferred-charge-on-exception, EVAL-eq-boxcollection, EVAL-eq-coll-descriptor, EVAL-eq-mismatch-and-unit-E032, OP-0x7D, OP-0x7E, OP-0x8F, OP-0x90, OP-0x91, OP-0x92, OP-0x93, OP-0x94, OP-0x99, OP-0x9A, OP-0x9C, OP-0x9D, OP-0x9E, OP-0xA1, OP-0xA2, OP-0xB6, OP-0xB7, OP-0xCF, OP-0xD7, OP-0xF1, METHOD-groupelement-exp, METHOD-box-registers-R0-R3, METHOD-box-registers-R4-R9, VERSION-header-checkPow-G023, INTERP-toblockcost, VERSION-downcast-gate, VERSION-subst-retention, VERSION-G007, VERSION-G008, VERSION-G009, VERSION-G010, VERSION-G011, VERSION-G012, VERSION-G013, VERSION-G014, VERSION-G016, VERSION-G017, VERSION-G018, ORDER-hof-charge, ORDER-blockvalue-valdef, OP-0xD6, ORDER-comparison-charge, INTERP-profiling-cost-isolation-I023
 #[test]
 fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-vectors/ergo-sigma/cost-ledger");
