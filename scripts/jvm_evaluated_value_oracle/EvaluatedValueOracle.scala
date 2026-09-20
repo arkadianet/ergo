@@ -327,6 +327,8 @@ object EvaluatedValueOracle {
   }
 
   def verifyLine(line: String): Json = {
+    var wrappedRule = Json.Null
+    var wrappedArgs = Json.Null
     var rent = false
     var verifying = false
     var eval = unavailable
@@ -335,7 +337,7 @@ object EvaluatedValueOracle {
     var legacy = unavailable
     var evaluatorFailureCost = unavailable
     def record(verdict: String, total: Json, error: Option[Throwable], detail: String): Json =
-      Json.obj("verdict" -> Json.fromString(verdict), "eval_block_cost" -> eval,
+      Json.obj("wrapped_rule_id" -> wrappedRule, "wrapped_rule_args" -> wrappedArgs, "verdict" -> Json.fromString(verdict), "eval_block_cost" -> eval,
         "crypto_block_cost" -> crypto, "rent_block_cost" -> rentCost, "rent_path" -> Json.fromBoolean(rent),
         "total_block_cost" -> total,
         "failure_class" -> error.map(e => Json.fromString(e.getClass.getName)).getOrElse(Json.Null),
@@ -361,8 +363,15 @@ object EvaluatedValueOracle {
       require((treeBytes(0) & 7) == expected, "tree_version_expected differs from serialized tree")
       val parseOnly = cursor.get[Boolean]("parse_only").getOrElse(false)
       if (parseOnly) verifying = true
-      val tree = VersionContext.withVersions(1.toByte, 1.toByte) {
+      val parseVersion = cursor.get[Byte]("parse_activated_version").getOrElse(1.toByte)
+      val tree = VersionContext.withVersions(parseVersion, parseVersion) {
         treeSer.deserializeErgoTree(treeBytes)
+      }
+      tree.root match {
+        case Left(unparsed) =>
+          wrappedRule = Json.fromInt(unparsed.error.rule.id.toInt)
+          wrappedArgs = Json.fromString(unparsed.error.args.mkString(","))
+        case _ =>
       }
       if (parseOnly) {
         // A size-delimited parser retains its ValidationException in Left.
@@ -395,7 +404,11 @@ object EvaluatedValueOracle {
         .fold(throw _, identity).getOrElse(Map.empty)
       val disabled = cursor.get[Option[Vector[Short]]]("validation_settings_disabled_rules")
         .fold(throw _, identity).getOrElse(Vector.empty)
-      val withDisabled = disabled.foldLeft(ValidationRules.currentSettings) {
+      val settingsVersion = cursor.get[Byte]("validation_settings_version").getOrElse(1.toByte)
+      val initialSettings = VersionContext.withVersions(settingsVersion, settingsVersion) {
+        ValidationRules.currentSettings
+      }
+      val withDisabled = disabled.foldLeft(initialSettings) {
         case (settings, id) => settings.updated(id, sigma.validation.DisabledRule)
       }
       val changes = cursor.get[Option[Map[String, String]]]("validation_settings_changed_rules")
@@ -518,7 +531,7 @@ object EvaluatedValueOracle {
       val actual = verifyLine(req.noSpaces)
       require(actual.asObject.get.keys.toSet == Set("verdict", "eval_block_cost",
         "crypto_block_cost", "rent_block_cost", "rent_path", "total_block_cost", "failure_class",
-        "rejection_detail", "legacy", "evaluator_failure_block_cost"), name + ": response schema")
+        "rejection_detail", "legacy", "evaluator_failure_block_cost", "wrapped_rule_id", "wrapped_rule_args"), name + ": response schema")
       expected.foreach { case (key, value) =>
         require(actual.hcursor.downField(key).focus.contains(value),
           name + ": " + key + " expected " + value + ", got " + actual.noSpaces)
@@ -654,6 +667,16 @@ object EvaluatedValueOracle {
         "eval_block_cost" -> (if (limit < 32) unavailable else num(14)),
         "crypto_block_cost" -> (if (limit < 32) unavailable else num(0)))
     }
+    val wrappedTree = patch(expression, "tree_hex" -> str("0801fd"),
+      "tree_version_expected" -> num(0), "init_cost_block" -> num(17))
+    check("wrappedTree_opcode_default_rejects", wrappedTree, "verdict" -> str("RejectScript"),
+      "wrapped_rule_id" -> num(1002), "total_block_cost" -> num(17))
+    check("wrappedTree_opcode_replaced_accepts", patch(wrappedTree,
+      "validation_settings_replaced_rules" -> Json.obj("1002" -> num(2000))),
+      "verdict" -> str("Accept"), "eval_block_cost" -> num(5), "total_block_cost" -> num(22))
+    check("wrappedTree_opcode_changed_accepts", patch(wrappedTree,
+      "validation_settings_changed_rules" -> Json.obj("1002" -> str("fd"))),
+      "verdict" -> str("Accept"), "total_block_cost" -> num(22))
     val mismatch = patch(deserialize, "ctx_ext_hex" -> str("01010e020101"))
     check("validation_settings_replaced_rule_accepts", patch(mismatch,
       "validation_settings_replaced_rules" -> Json.obj("1000" -> num(1001))),
@@ -748,8 +771,50 @@ object EvaluatedValueOracle {
       "cases" -> Json.arr(cases: _*))
   }
 
+  private def validationRulesProbe(): Json = {
+    import sigma.validation._
+    val cases = for {
+      version <- Seq(2.toByte, 3.toByte)
+      ruleId <- 1000 to 1019
+      statusName <- Seq("enabled", "disabled", "replaced", "changed_match", "changed_miss")
+    } yield VersionContext.withVersions(version, version) {
+      val settings = org.ergoplatform.validation.ValidationRules.currentSettings
+      val status: RuleStatus = statusName match {
+        case "enabled" => EnabledRule
+        case "disabled" => DisabledRule
+        case "replaced" => ReplacedRule(2000.toShort)
+        case "changed_match" => ChangedRule(Array(4.toByte, 255.toByte))
+        case _ => ChangedRule(Array(3.toByte, 254.toByte))
+      }
+      val args: Seq[Any] = ruleId match {
+        case 1011 | 1016 => Seq(SIntMethods, 255.toByte)
+        // CheckV6Type throws ONE SType, although its Changed override matches
+        // a MethodsContainer/method pair. That branch is unreachable for its errors.
+        case 1019 => Seq(SOption(SInt))
+        case _ => Seq(4.toByte)
+      }
+      val result = settings.get(ruleId.toShort).exists { case (rule, _) =>
+        settings.updated(ruleId.toShort, status).isSoftFork(
+          ValidationException("probe", rule, args))
+      }
+      Json.obj("activated_version" -> Json.fromInt(version), "rule_id" -> Json.fromInt(ruleId),
+        "registered" -> Json.fromBoolean(settings.get(ruleId.toShort).isDefined),
+        "status" -> Json.fromString(statusName), "soft_fork" -> Json.fromBoolean(result))
+    }
+    Json.obj("cases" -> Json.arr(cases: _*))
+  }
+
   def main(args: Array[String]): Unit = {
-    if (args.sameElements(Array("raw_coll_equals"))) {
+    if (args.sameElements(Array("validation_rules_probe"))) {
+      println(validationRulesProbe().spaces2)
+    } else if (args.sameElements(Array("validation_rules_probe_self_test"))) {
+      val cases = validationRulesProbe().hcursor.downField("cases").focus.get.asArray.get
+      require(cases.size == 200)
+      require(cases.exists(c => c.hcursor.get[Boolean]("soft_fork").right.get))
+      require(cases.filter(c => c.hcursor.get[String]("status").right.get == "disabled")
+        .forall(c => !c.hcursor.get[Boolean]("soft_fork").right.get))
+      println("validation_rules_probe_self_test: 200 cases passed")
+    } else if (args.sameElements(Array("raw_coll_equals"))) {
       println(rawCollEquals().spaces2)
     } else if (args.sameElements(Array("raw_coll_equals_self_test"))) {
       val cases = rawCollEquals().hcursor.downField("cases").focus.get.asArray.get

@@ -1,4 +1,5 @@
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/version/
+//! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/version/soft-fork-wrapped.json.gz
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/interpreter/
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/op-fixed/
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/op-per-item/
@@ -34,6 +35,8 @@ struct Request {
     validation_settings_disabled_rules: Vec<u16>,
     #[serde(default)]
     validation_settings_changed_rules: std::collections::BTreeMap<u16, String>,
+    #[serde(default)]
+    parse_activated_version: Option<u8>,
     tree_hex: String,
     ctx_ext_hex: String,
     proof_hex: String,
@@ -89,7 +92,20 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
         req.activated_version <= 127 && req.tree_version_expected <= 127,
         "script version range"
     );
-    let tree = match decode(&req.tree_hex, ergo_tree::read_ergo_tree) {
+    let read_tree = || -> Result<ergo_tree::ErgoTree> {
+        if let Some(version) = req.parse_activated_version {
+            let bytes = hex::decode(&req.tree_hex)?;
+            let mut reader = VlqReader::new(&bytes).with_activated_script_version(version);
+            reader.set_position_limit(Some(4096));
+            Ok(ergo_tree::read_ergo_tree_with_activated_version(
+                &mut reader,
+                version,
+            )?)
+        } else {
+            decode(&req.tree_hex, ergo_tree::read_ergo_tree)
+        }
+    };
+    let tree = match read_tree() {
         Ok(tree) => tree,
         Err(error)
             if matches!(
@@ -114,11 +130,40 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
             output["failure_class"] = json!("java.lang.AssertionError");
             return Ok(());
         }
+        Err(_) if req.parse_activated_version.is_some() => {
+            output["failure_class"] = json!("sigma.serialization.SerializerException");
+            return Ok(());
+        }
         Err(error) => return Err(error),
     };
-    ergo_tree::check_header_size_bit(&tree)?;
-    ergo_tree::check_resolvable_methods(&tree)?;
-    ergo_tree::check_sigma_prop_root(&tree)?;
+    if req.parse_activated_version.is_some() {
+        if ergo_tree::check_header_size_bit(&tree).is_err() {
+            output["failure_class"] = json!("sigma.validation.ValidationException");
+            return Ok(());
+        }
+        if ergo_tree::check_resolvable_methods(&tree).is_err()
+            || ergo_tree::check_sigma_prop_root(&tree).is_err()
+        {
+            output["failure_class"] = json!("sigma.serialization.SerializerException");
+            return Ok(());
+        }
+        // The JVM currentSettings map has no 1017/1018 entries in 6.0.2;
+        // updated() throws before verify, independently of status payload.
+        if req
+            .validation_settings_replaced_rules
+            .keys()
+            .chain(req.validation_settings_changed_rules.keys())
+            .chain(req.validation_settings_disabled_rules.iter())
+            .any(|id| matches!(id, 1017 | 1018))
+        {
+            output["failure_class"] = json!("java.util.NoSuchElementException");
+            return Ok(());
+        }
+    } else {
+        ergo_tree::check_header_size_bit(&tree)?;
+        ergo_tree::check_resolvable_methods(&tree)?;
+        ergo_tree::check_sigma_prop_root(&tree)?;
+    }
     ensure!(
         tree.version == req.tree_version_expected,
         "tree_version_expected differs from serialized tree"
@@ -1245,6 +1290,99 @@ fn raw_collection_equality_consumers_match_jvm() -> Result<()> {
         } else {
             ensure!(actual["verdict"] == "Accept");
         }
+    }
+    Ok(())
+}
+
+// ledger: VERSION-soft-fork-wrapped-rules
+#[test]
+fn wrapped_tree_validation_rules_match_jvm() -> Result<()> {
+    use ergo_sigma::evaluator::{RuleStatus, SigmaValidationSettings};
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../test-vectors/ergo-sigma/cost-ledger/fixtures/version/soft-fork-wrapped.json.gz");
+    let fixture: Value = serde_json::from_slice(&read_fixture(&path)?)?;
+    let cases = fixture["cases"].as_array().context("wrapped cases")?;
+    ensure!(cases.len() == 293);
+    let mut wrapped_rules = std::collections::BTreeSet::new();
+    for case in cases {
+        let req = &case["request"];
+        let bytes = hex::decode(req["tree_hex"].as_str().context("tree bytes")?)?;
+        let version = req["parse_activated_version"].as_u64().unwrap_or(1) as u8;
+        let mut reader = VlqReader::new(&bytes).with_activated_script_version(version);
+        if let Some(rule) = case["expected"]["wrapped_rule_id"].as_u64() {
+            let tree = ergo_tree::read_ergo_tree_with_activated_version(&mut reader, version)?;
+            let ergo_ser::opcode::Expr::Unparsed(unparsed) = &tree.body else {
+                anyhow::bail!("{}: expected retained validation failure", case["name"]);
+            };
+            ensure!(
+                unparsed.validation_error.as_ref().map(|e| u64::from(e.0)) == Some(rule),
+                "{}: retained rule {:?} != JVM {rule}",
+                case["name"],
+                unparsed.validation_error
+            );
+            ensure!(unparsed.bytes == bytes, "preserved wire bytes");
+            let mut writer = ergo_primitives::writer::VlqWriter::new();
+            ergo_tree::write_ergo_tree(&mut writer, &tree)?;
+            ensure!(writer.result() == bytes, "wrapped round trip");
+            wrapped_rules.insert(rule);
+        }
+        let mut actual = record(false);
+        verify(&serde_json::to_vec(req)?, &mut actual)?;
+        for field in [
+            "verdict",
+            "eval_block_cost",
+            "crypto_block_cost",
+            "total_block_cost",
+            "failure_class",
+        ] {
+            if actual[field] == "unavailable" || case["expected"][field] == "unavailable" {
+                continue;
+            }
+            ensure!(
+                actual[field] == case["expected"][field],
+                "{}: {field}: Rust={} JVM={}",
+                case["name"],
+                actual[field],
+                case["expected"][field]
+            );
+        }
+    }
+    ensure!(
+        wrapped_rules
+            == std::collections::BTreeSet::from([
+                1001, 1002, 1007, 1008, 1009, 1010, 1011, 1014, 1016, 1017, 1018, 1019,
+            ])
+    );
+    let probes = fixture["rule_status_probe"]["cases"]
+        .as_array()
+        .context("status probe")?;
+    ensure!(probes.len() == 200);
+    for case in probes {
+        let rule = case["rule_id"].as_u64().context("rule id")? as u16;
+        let version = case["activated_version"].as_u64().context("activation")? as u8;
+        let status = match case["status"].as_str().context("status")? {
+            "enabled" => RuleStatus::Enabled,
+            "disabled" => RuleStatus::Disabled,
+            "replaced" => RuleStatus::Replaced(2000),
+            "changed_match" => RuleStatus::Changed(vec![4, 255]),
+            "changed_miss" => RuleStatus::Changed(vec![3, 254]),
+            other => anyhow::bail!("unknown status {other}"),
+        };
+        let mut settings = SigmaValidationSettings::default();
+        // Scala's settings object is a versioned map. Its absent entries cannot
+        // be updated; retain that map shape when comparing isSoftFork itself.
+        if case["registered"] == true {
+            settings.0.insert(rule, status);
+        }
+        let args: &[u8] = if matches!(rule, 1011 | 1016) {
+            &[4, 255]
+        } else {
+            &[4]
+        };
+        ensure!(
+            json!(settings.is_soft_fork(rule, args, version)) == case["soft_fork"],
+            "status probe {case}"
+        );
     }
     Ok(())
 }
