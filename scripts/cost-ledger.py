@@ -257,7 +257,12 @@ def check(meta: dict, rows: list[dict]) -> int:
     except (ValueError, OSError) as exc:
         errors.append(str(exc))
 
-    if not MD.exists() or MD.read_text() != render(meta, rows):
+    # Rendering indexes every required field, so only check freshness once the
+    # rows are structurally valid; otherwise a malformed row would surface as a
+    # KeyError traceback instead of the collected validation errors.
+    if errors:
+        errors.append("LEDGER.md freshness not checked: fix the structural errors above first")
+    elif not MD.exists() or MD.read_text() != render(meta, rows):
         errors.append("LEDGER.md is stale: run scripts/cost-ledger.py render")
 
     counts = Counter(r["state"] for r in rows)

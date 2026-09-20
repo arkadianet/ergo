@@ -64,8 +64,7 @@ fn contains_sany(t: &SigmaType) -> bool {
 /// This is lightweight structural type inference — not a full type checker,
 /// but sound for the expressions it handles. Walks the IR recursively using
 /// actual type rules (not opcode heuristics). Returns None when it can't
-/// determine the type, which causes empty map results to fall back to
-/// untyped Tuple.
+/// determine the type, which causes empty map results to carry `SAny`.
 pub(crate) fn infer_expr_type(
     expr: &Expr,
     bindings: &std::collections::HashMap<u32, SigmaType>,
@@ -140,7 +139,22 @@ pub(crate) fn infer_op_type(
         // Sigma constructors
         (0xD1 | 0xCD | 0xCE, _) => Some(SigmaType::SSigmaProp),
         (0xEA | 0xEB, _) => Some(SigmaType::SSigmaProp), // SigmaAnd, SigmaOr
-        // SelectField — can't determine without tuple type info
+        // Projections retain their static result types even when a mapper has
+        // no elements from which to recover a runtime type.
+        (0x8C, Payload::SelectField { input, field_idx }) => {
+            match infer_expr_type(input, bindings, constants)? {
+                SigmaType::STuple(fields) => {
+                    fields.get(usize::from(*field_idx).checked_sub(1)?).cloned()
+                }
+                _ => None,
+            }
+        }
+        (0xB2, Payload::ByIndex { input, .. }) => {
+            match infer_expr_type(input, bindings, constants)? {
+                SigmaType::SColl(elem) => Some(*elem),
+                _ => None,
+            }
+        }
         // OptionGet — unwrap the option type
         (0xE4, Payload::One(inner)) => match infer_expr_type(inner, bindings, constants) {
             Some(SigmaType::SOption(t)) => Some(*t),
@@ -149,11 +163,9 @@ pub(crate) fn infer_op_type(
         // Downcast / Upcast — target type is on the node payload directly.
         (0x7D, Payload::NumericCast { tpe, .. }) => Some(tpe.clone()),
         (0x7E, Payload::NumericCast { tpe, .. }) => Some(tpe.clone()),
-        // PropertyCall / MethodCall — limited table for return types that affect
-        // empty-collection inference (e.g. headers.map(_.version) on empty coll).
-        // This is NOT a complete method registry; only the entries that feed
-        // back-to-back map-over-empty-coll sites with Byte/Short outputs.
-        // Broader static-method-type inference is tracked as follow-up.
+        // PropertyCall / MethodCall — return types needed by empty-collection
+        // inference, including token projections and header/AVL accessors.
+        // Methods absent from this table have no inferred return type.
         (
             0xDB | 0xDC,
             Payload::MethodCall {
@@ -161,6 +173,11 @@ pub(crate) fn infer_op_type(
             },
         ) => {
             match (*type_id, *method_id) {
+                // SBox.tokens → Coll[(Coll[Byte], Long)].
+                (99, 8) => Some(SigmaType::SColl(Box::new(SigmaType::STuple(vec![
+                    SigmaType::SColl(Box::new(SigmaType::SByte)),
+                    SigmaType::SLong,
+                ])))),
                 // SHeader.version (type_id=104, method 2) → Byte
                 (104, 2) => Some(SigmaType::SByte),
                 // SPreHeader.version (type_id=105, method 1) → Byte.
