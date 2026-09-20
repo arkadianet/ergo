@@ -3,6 +3,7 @@ import copy
 import datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -16,6 +17,27 @@ VERIFY = 'scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala'
 TX = 'scripts/jvm_cost_sweep_oracle/CostSweepOracle.scala'
 SOURCE = 'test-vectors/scala/multi_input_conjunction_cost.json'
 
+
+
+def _ergo_resources() -> str:
+    """Ergo `src/main/resources` (holds `mainnet.conf`, read by both oracles).
+
+    Not tracked here, so it must be supplied: `ERGO_RESOURCES`, or a checkout at
+    the documented default location.
+    """
+    configured = os.environ.get('ERGO_RESOURCES')
+    candidate = Path(configured) if configured else (
+        Path.home() / 'coding/reference/ergo-core/ergo/src/main/resources'
+    )
+    if not (candidate / 'mainnet.conf').is_file():
+        raise SystemExit(
+            f'mainnet.conf not found under {candidate}; set ERGO_RESOURCES to the '
+            "ergo checkout's src/main/resources (see scripts/gen-cost-sweep.sh)"
+        )
+    return str(candidate)
+
+
+ERGO_RESOURCES = _ergo_resources()
 
 def sha(data):
     return hashlib.sha256(data).hexdigest()
@@ -107,7 +129,7 @@ def imported_points():
         script = Path(tmp) / 'ImportedSweepOracle.scala'
         script.write_text(IMPORTED_ORACLE)
         output = Path(tmp) / 'points.json'
-        scala(str(script), [str(Path.home() / 'coding/reference/ergo-core/ergo/src/main/resources'),
+        scala(str(script), [ERGO_RESOURCES,
                             SOURCE, str(output)])
         return {case['name']: case['points'] for case in json.loads(output.read_text())}
 
@@ -161,7 +183,7 @@ def main():
         return
     with tempfile.TemporaryDirectory(dir=ROOT, prefix='.sweep-') as tmp:
         raw = Path(tmp) / 'tx.json'
-        scala(TX, [str(Path.home() / 'coding/reference/ergo-core/ergo/src/main/resources'), str(raw), SOURCE])
+        scala(TX, [ERGO_RESOURCES, str(raw), SOURCE])
         tx = json.loads(raw.read_text())
     base = 'test-vectors/ergo-sigma/cost-ledger/sweeps/base/transactions.json.gz'
     (ROOT / base).parent.mkdir(exist_ok=True)
