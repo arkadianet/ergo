@@ -1,0 +1,68 @@
+# Required task-4.1 sweep classes; every entry must execute.
+[[classes]]
+name = "L2-eval"
+files = ["eval.json.gz"]
+
+[[classes]]
+name = "L2-interpreter"
+files = ["interpreter.json.gz"]
+
+[[classes]]
+name = "L2-method"
+files = ["method.json.gz"]
+
+[[classes]]
+name = "L2-op-fixed"
+files = ["op-fixed.json.gz"]
+
+[[classes]]
+name = "L2-op-per-item"
+files = ["op-per-item.json.gz"]
+
+[[classes]]
+name = "L2-version"
+files = ["version.json.gz"]
+
+[[classes]]
+name = "TX-A"
+files = ["TX-A.json.gz", "TX-A-accumulated.json.gz"]
+
+[[classes]]
+name = "TX-B"
+files = ["TX-B.json.gz", "TX-B-accumulated.json.gz"]
+
+[[classes]]
+name = "competing-failures"
+files = ["failed-proof.json.gz"]
+
+[[classes]]
+name = "failed-proof-at-C"
+files = ["failed-proof.json.gz"]
+
+[[classes]]
+name = "init-only-exhaustion"
+files = ["TX-B-accumulated.json.gz"]
+
+[[classes]]
+name = "later-input-exhaustion"
+files = ["TX-B-accumulated.json.gz"]
+
+[[classes]]
+name = "pre-v3-upcast"
+files = ["upcast-v2-0.json.gz", "upcast-v2-1.json.gz", "upcast-v2-2.json.gz", "upcast-v2-3.json.gz", "upcast-v2-4.json.gz", "upcast-v2-5.json.gz", "upcast-v2-6.json.gz", "upcast-v2-7.json.gz", "upcast-v2-8.json.gz", "upcast-v2-9.json.gz", "upcast-v2-wide-0.json.gz", "upcast-v2-wide-1.json.gz", "upcast-v2-wide-2.json.gz", "upcast-v2-wide-3.json.gz", "upcast-v2-wide-4.json.gz", "upcast-v2-wide-5.json.gz", "upcast-v2-wide-6.json.gz", "upcast-v2-wide-7.json.gz", "upcast-v2-wide-8.json.gz", "upcast-v2-wide-9.json.gz"]
+
+[[classes]]
+name = "rounding-remainders"
+files = ["eval-remainders-accumulated.json.gz"]
+
+[[classes]]
+name = "storage-rent-fallback"
+files = ["rent_fallback.json.gz"]
+
+[[classes]]
+name = "storage-rent-success"
+files = ["rent-success-accumulated.json.gz"]
+
+[[classes]]
+name = "token-exhaustion"
+files = ["token-exhaustion-accumulated.json.gz"]

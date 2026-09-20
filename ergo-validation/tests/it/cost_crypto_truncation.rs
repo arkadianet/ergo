@@ -15,9 +15,10 @@ use ergo_validation::{TxValidationCtx, TxValidationRules, UtxoView};
 // ----- helpers -----
 
 #[derive(Debug, PartialEq, serde::Deserialize)]
-enum Verdict {
+pub(super) enum Verdict {
     Accept,
     RejectCost,
+    RejectScript,
 }
 
 #[derive(serde::Deserialize)]
@@ -33,7 +34,7 @@ struct SweepPoint {
 }
 
 #[derive(serde::Deserialize)]
-struct Case {
+pub(super) struct Case {
     name: String,
     tx_bytes: String,
     input_boxes: Vec<InputBox>,
@@ -43,7 +44,7 @@ struct Case {
 }
 
 #[derive(serde::Deserialize)]
-struct Context {
+pub(super) struct Context {
     height: u32,
     activated_script_version: u8,
     block_version: u8,
@@ -79,6 +80,15 @@ impl UtxoView for MapUtxo {
 }
 
 fn validate_with_limit(case: &Case, context: &Context, limit: u64) -> (Verdict, u64) {
+    validate_with_accumulated(case, context, limit, 0)
+}
+
+pub(super) fn validate_with_accumulated(
+    case: &Case,
+    context: &Context,
+    limit: u64,
+    accumulated: u64,
+) -> (Verdict, u64) {
     let mut boxes = HashMap::new();
     for input in &case.input_boxes {
         let bytes = hex::decode(&input.bytes).expect("box hex");
@@ -124,6 +134,15 @@ fn validate_with_limit(case: &Case, context: &Context, limit: u64) -> (Verdict, 
         ..ProtocolParams::mainnet_default()
     };
     let mut cost = CostAccumulator::new(JitCost::from_block_cost(limit).expect("limit"));
+    // A precharge above the limit is the cost rejection the sweep is probing, not
+    // a harness error: the caller supplies generated accumulated/limit pairs.
+    // Same handling as `verify_case` in `cost_sweeps.rs`.
+    if cost
+        .add(JitCost::from_block_cost(accumulated).expect("accumulated cost"))
+        .is_err()
+    {
+        return (Verdict::RejectCost, cost.total_block_cost());
+    }
     let mut tx_ctx = TxValidationCtx {
         ctx: &ctx,
         params: &params,
@@ -144,6 +163,7 @@ fn validate_with_limit(case: &Case, context: &Context, limit: u64) -> (Verdict, 
         {
             Verdict::RejectCost
         }
+        Err(ValidationError::ProofFailed { .. }) => Verdict::RejectScript,
         Err(error) => panic!("{} @ limit {limit}: {error}", case.name),
     };
     (verdict, cost.total_block_cost())

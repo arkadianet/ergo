@@ -44,3 +44,5 @@ ergo-rest-json  = { workspace = true }
 hex             = { workspace = true }
 serde           = { workspace = true, features = ["derive"] }
 serde_json      = { workspace = true }
+flate2          = { workspace = true }
+toml            = { workspace = true }
