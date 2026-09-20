@@ -592,6 +592,13 @@ pub(super) fn eval_no_arg_method(
                     })
                 }
             };
+            // CHeader.scala:73 rejects Autolykos v1 after the method charge.
+            // MethodCall reflection wraps the thrown exception.
+            if eh.version == 1 {
+                return Err(EvalError::InvocationTargetException(
+                    "Autolykos v1 is not supported",
+                ));
+            }
             let header = eh.to_header();
             Ok(Some(Value::Bool(
                 ergo_crypto::pow::verify_pow_solution(&header).is_ok(),

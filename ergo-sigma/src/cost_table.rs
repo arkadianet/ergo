@@ -159,7 +159,7 @@ opcode_rows! {
     0x7A => fixed(17), // LongToByteArray
     0x7C => fixed(16), // ByteArrayToLong
     0x7B => fixed(30), // ByteArrayToBigInt
-    0x7D => fixed(10), // Downcast
+    0x7D => fixed(10), // Downcast fixed-width target; cast.rs selects 30 for BigInt targets
 
     // Logical
     0xEF => fixed(15), // LogicalNot — Scala: FixedCost(JitCost::from_jit(15))
@@ -314,7 +314,7 @@ pub fn add_eq_cost(
         // per-element-coll cost would refine this, but parity with
         // the pre-disambiguation behavior is the carrier-refactor
         // goal: no observable cost drift.
-        Value::CollGeneric(elems, _) => {
+        Value::CollGeneric(elems, _) | Value::CollLegacyPair(elems, _, _) => {
             cost.add(JitCost::from_jit(EQ_TUPLE))?;
             for elem in elems {
                 add_eq_cost(cost, elem, true)?;

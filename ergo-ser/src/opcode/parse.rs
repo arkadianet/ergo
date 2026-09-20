@@ -138,6 +138,15 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
 
         ArgPattern::ConstPlaceholder => {
             let index = r.get_u32_exact()?;
+            // ConstantPlaceholderSerializer.scala:20 looks up the type immediately.
+            // ArrayIndexOutOfBoundsException escapes the size-delimited soft-fork wrap.
+            if r.constant_pool_len()
+                .is_some_and(|len| index as usize >= len)
+            {
+                return Err(ReadError::HardReject(format!(
+                    "ConstantPlaceholder index {index} is outside the constant pool"
+                )));
+            }
             Payload::ConstPlaceholder { index }
         }
 
@@ -301,6 +310,11 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
             let mut args = Vec::with_capacity(n_args);
             for _ in 0..n_args {
                 args.push(parse_expr(r, next, _tree_version)?);
+            }
+            if _tree_version >= 3 && args.is_empty() {
+                return Err(ReadError::HardReject(
+                    "MethodCall requires nonempty arguments (Scala AssertionError)".into(),
+                ));
             }
             // Unresolved-method checkpoint: Scala's `MethodCallSerializer.parse`
             // resolves the method (and throws a `ValidationException` when it is not
@@ -480,7 +494,22 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
 
         ArgPattern::ByIndex => {
             let input = parse_expr(r, next, _tree_version)?;
-            let index = parse_expr(r, next, _tree_version)?;
+            let mut index = parse_expr(r, next, _tree_version)?;
+            // Scala ByIndexSerializer inserts a charged Upcast before v3.
+            if _tree_version < 3
+                && matches!(
+                    crate::ergo_tree::substitution_type_of(&index),
+                    Some(SigmaType::SByte | SigmaType::SShort)
+                )
+            {
+                index = Expr::Op(IrNode {
+                    opcode: 0x7E,
+                    payload: Payload::NumericCast {
+                        input: Box::new(index),
+                        tpe: SigmaType::SInt,
+                    },
+                });
+            }
             let has_default = r.get_u8()?;
             let default = if has_default != 0 {
                 Some(Box::new(parse_expr(r, next, _tree_version)?))

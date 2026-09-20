@@ -59,7 +59,7 @@ pub(crate) fn check_comparable(v: &Value) -> Result<(), EvalError> {
             let _ = items;
             Ok(())
         }
-        Value::Tuple(items) | Value::CollGeneric(items, _) => {
+        Value::Tuple(items) | Value::CollGeneric(items, _) | Value::CollLegacyPair(items, _, _) => {
             for item in items {
                 check_comparable(item)?;
             }
@@ -137,20 +137,33 @@ pub(crate) fn values_equal(
             let expanded = expand_box_collection(*src, ctx);
             seq_equal(items, &expanded, ctx)
         }
-        (Value::BoxCollection(src), Value::CollGeneric(items, _)) => {
+        (
+            Value::BoxCollection(src),
+            Value::CollGeneric(items, _) | Value::CollLegacyPair(items, _, _),
+        ) => {
             let expanded = expand_box_collection(*src, ctx);
             seq_equal(&expanded, items, ctx)
         }
-        (Value::CollGeneric(items, _), Value::BoxCollection(src)) => {
+        (
+            Value::CollGeneric(items, _) | Value::CollLegacyPair(items, _, _),
+            Value::BoxCollection(src),
+        ) => {
             let expanded = expand_box_collection(*src, ctx);
             seq_equal(items, &expanded, ctx)
         }
-        (Value::CollBox(a), Value::CollGeneric(b, _)) => seq_equal(a, b, ctx),
-        (Value::CollGeneric(a, _), Value::CollBox(b)) => seq_equal(a, b, ctx),
+        (Value::CollBox(a), Value::CollGeneric(b, _) | Value::CollLegacyPair(b, _, _)) => {
+            seq_equal(a, b, ctx)
+        }
+        (Value::CollGeneric(a, _) | Value::CollLegacyPair(a, _, _), Value::CollBox(b)) => {
+            seq_equal(a, b, ctx)
+        }
         // CollGeneric — boxed-element coll, recurse element-wise.
         // Element-type tag is intentionally not compared (semantic
         // equality is element-wise).
-        (Value::CollGeneric(a, _), Value::CollGeneric(b, _)) => seq_equal(a, b, ctx),
+        (
+            Value::CollGeneric(a, _) | Value::CollLegacyPair(a, _, _),
+            Value::CollGeneric(b, _) | Value::CollLegacyPair(b, _, _),
+        ) => seq_equal(a, b, ctx),
         // Tuple — recurse element-wise (may contain box refs at any depth)
         (Value::Tuple(a), Value::Tuple(b)) => seq_equal(a, b, ctx),
         // Option — recurse into inner value

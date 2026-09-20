@@ -261,6 +261,9 @@ object EvaluatedValueOracle {
 
   private trait ObservedReduction extends ErgoLikeInterpreter {
     override type CTX = ErgoLikeContext
+    var measureOperationTime = false
+    override protected def evalSettings: sigma.eval.EvalSettings =
+      DefaultEvalSettings.copy(isMeasureOperationTime = measureOperationTime)
     var reduction: Option[Interpreter.ReductionResult] = None
     var chargedCrypto: Option[Long] = None
     var gateFailureCost: Option[Long] = None
@@ -408,6 +411,8 @@ object EvaluatedValueOracle {
           }
         }
       } else new ErgoLikeInterpreter with ObservedReduction
+      interpreter.measureOperationTime = cursor.get[Option[Boolean]]("measure_operation_time")
+        .fold(throw _, identity).getOrElse(false)
       verifying = true
       val result = interpreter.verify(tree, ctx, proof, message)
       interpreter.reduction.foreach { r =>
@@ -639,7 +644,11 @@ object EvaluatedValueOracle {
 
   def main(args: Array[String]): Unit = {
     if (args.sameElements(Array("verify"))) {
-      scala.io.Source.stdin.getLines().foreach(line => println(verifyLine(line).noSpaces))
+      scala.io.Source.stdin.getLines().foreach { line =>
+        // Parser diagnostics belong on stderr; stdout is one JSON record per request.
+        val result = Console.withOut(System.err) { verifyLine(line) }
+        println(result.noSpaces)
+      }
     } else if (args.sameElements(Array("verify_self_test"))) {
       verify_self_test()
     } else {

@@ -433,6 +433,10 @@ pub enum Value {
     /// serialized back by `value_to_typed_sigma` (inverse of the
     /// `sigma_to_value` `SColl(non-primitive)` fallback).
     CollGeneric(Vec<Value>, Box<SigmaType>),
+    /// Pre-JIT pair representation: visible zipped items and element type,
+    /// plus untruncated columns for PairOfCols. None denotes a mapped Tuple2
+    /// array, whose nonempty append fails in concatArrays_v4.
+    CollLegacyPair(Vec<Value>, Box<SigmaType>, Option<Box<(Value, Value)>>),
     CollBool(Vec<bool>),
     CollBytes(Vec<u8>),
     /// Token collection: Vec<(token_id_bytes, amount)> — opaque, only supports EQ
@@ -519,13 +523,22 @@ impl PartialEq for Value {
             // compatible types (e.g. an empty `Coll[Tuple]` carrier
             // built two different ways) still compare equal when
             // their `items` match.
-            (Value::CollGeneric(a, _), Value::CollGeneric(b, _)) => a == b,
+            (
+                Value::CollGeneric(a, _) | Value::CollLegacyPair(a, _, _),
+                Value::CollGeneric(b, _) | Value::CollLegacyPair(b, _, _),
+            ) => a == b,
             // Cross-representation: Tokens ↔ CollGeneric of (CollBytes, Long) pairs.
             // Slice/Filter/Map on Tokens produces CollGeneric of Tuple pairs via
             // values_to_collection, but SBox.tokens returns Value::Tokens.
             // Scala sees both as Coll[(Coll[Byte], Long)].
-            (Value::Tokens(tokens), Value::CollGeneric(tuples, _))
-            | (Value::CollGeneric(tuples, _), Value::Tokens(tokens)) => {
+            (
+                Value::Tokens(tokens),
+                Value::CollGeneric(tuples, _) | Value::CollLegacyPair(tuples, _, _),
+            )
+            | (
+                Value::CollGeneric(tuples, _) | Value::CollLegacyPair(tuples, _, _),
+                Value::Tokens(tokens),
+            ) => {
                 tokens.len() == tuples.len()
                     && tokens.iter().zip(tuples.iter()).all(|((id, amt), t)| {
                         matches!(t, Value::Tuple(inner) if inner.len() == 2

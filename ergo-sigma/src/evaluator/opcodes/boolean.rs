@@ -14,10 +14,7 @@ use super::super::eval_ctx::EvalCtx;
 use super::super::helpers::trace_val;
 use super::super::types::{EvalError, Value};
 
-// 0xD1 BoolToSigmaProp — Scala is lenient: if the input is already a
-// SigmaProp it passes through (handles double-wrapped
-// BoolToSigmaProp(BoolToSigmaProp(x)) seen on mainnet). Reject anything
-// else.
+// 0xD1 BoolToSigmaProp — historical SigmaProp pass-through before JIT.
 pub(in crate::evaluator) fn eval_bool_to_sigma_prop(
     inner: &Expr,
     cx: &mut EvalCtx<'_>,
@@ -36,8 +33,8 @@ pub(in crate::evaluator) fn eval_bool_to_sigma_prop(
         } else {
             SigmaBoolean::TrivialProp(false)
         })),
-        // Scala is lenient: if input is already a SigmaProp, pass through.
-        Value::SigmaProp(_) => Ok(val),
+        // trees.scala:39: VersionContext.current.isJitActivated is activation >= 2.
+        Value::SigmaProp(_) if cx.ctx.activated_script_version < 2 => Ok(val),
         _ => Err(EvalError::TypeError {
             expected: "Bool",
             got: format!("{val:?}"),

@@ -1,5 +1,5 @@
 //! Numeric type casts: Upcast (0x7E, widening) and Downcast (0x7D,
-//! narrowing). Downcast follows Scala `SType.scala:370-498`'s
+//! numeric conversion). Downcast follows Scala `SType.scala:370-498`'s
 //! `Math.toIntExact / toShortExact / toByteExact` semantics — overflow
 //! throws (Rust `TryFrom` → `EvalError::RuntimeException`).
 
@@ -161,8 +161,8 @@ pub(in crate::evaluator) fn eval_upcast(
         // Long → {Long, BigInt}
         (Value::Long(n), SigmaType::SLong) => Ok(Value::Long(n)),
         (Value::Long(n), SigmaType::SBigInt) => Ok(Value::BigInt(n.into())),
-        // BigInt → BigInt (identity)
-        (Value::BigInt(n), SigmaType::SBigInt) => Ok(Value::BigInt(n)),
+        // SType.scala:512: VersionContext.current.isV3OrLaterErgoTreeVersion.
+        (Value::BigInt(n), SigmaType::SBigInt) if cx.ctx.is_v3_ergo_tree() => Ok(Value::BigInt(n)),
         // {Byte, Short, Int, Long} → UnsignedBigInt (v6): a negative source
         // rejects (unsigned cannot represent it).
         (Value::Byte(n), SigmaType::SUnsignedBigInt) => to_unsigned_bigint(n.into()),
@@ -179,7 +179,7 @@ pub(in crate::evaluator) fn eval_upcast(
     }
 }
 
-// 0x7D Downcast — numeric type narrowing. Scala SType.scala:370-498 uses
+// 0x7D Downcast — target-directed conversion. Scala SType.scala:407-574 uses
 // Math.toIntExact/toShortExact/toByteExact semantics — overflow throws.
 // Rust equivalent is TryFrom; out-of-range → EvalError::RuntimeException.
 pub(in crate::evaluator) fn eval_downcast(
@@ -190,6 +190,23 @@ pub(in crate::evaluator) fn eval_downcast(
     add_method_cost(cx.cost, numeric_cast_cost(tpe))?;
     let val = cx.eval_expr(input)?;
     match (val, tpe) {
+        // SShort.downcast deliberately excludes Byte; SInt/SLong accept
+        // narrower sources. Signed and unsigned BigInt are not interchangeable.
+        (Value::Byte(n), SigmaType::SInt) => Ok(Value::Int(n.into())),
+        (Value::Short(n), SigmaType::SInt) => Ok(Value::Int(n.into())),
+        (Value::Byte(n), SigmaType::SLong) => Ok(Value::Long(n.into())),
+        (Value::Short(n), SigmaType::SLong) => Ok(Value::Long(n.into())),
+        (Value::Int(n), SigmaType::SLong) => Ok(Value::Long(n.into())),
+        (Value::Byte(n), SigmaType::SBigInt) => Ok(Value::BigInt(n.into())),
+        (Value::Short(n), SigmaType::SBigInt) => Ok(Value::BigInt(n.into())),
+        (Value::Int(n), SigmaType::SBigInt) => Ok(Value::BigInt(n.into())),
+        (Value::Long(n), SigmaType::SBigInt) => Ok(Value::BigInt(n.into())),
+        (Value::BigInt(n), SigmaType::SBigInt) if cx.ctx.is_v3_ergo_tree() => Ok(Value::BigInt(n)),
+        (Value::Byte(n), SigmaType::SUnsignedBigInt) => to_unsigned_bigint(n.into()),
+        (Value::Short(n), SigmaType::SUnsignedBigInt) => to_unsigned_bigint(n.into()),
+        (Value::Int(n), SigmaType::SUnsignedBigInt) => to_unsigned_bigint(n.into()),
+        (Value::Long(n), SigmaType::SUnsignedBigInt) => to_unsigned_bigint(n.into()),
+        (Value::UnsignedBigInt(n), SigmaType::SUnsignedBigInt) => Ok(Value::UnsignedBigInt(n)),
         // Identity
         (Value::Byte(n), SigmaType::SByte) => Ok(Value::Byte(n)),
         (Value::Short(n), SigmaType::SShort) => Ok(Value::Short(n)),
@@ -218,26 +235,34 @@ pub(in crate::evaluator) fn eval_downcast(
             .map_err(|_| EvalError::RuntimeException("Short.toByteExact overflow")),
         // BigInt → smaller (Scala uses BigInt.toInt/toShort/toByte which
         // throw ArithmeticException on overflow; v3+ VersionContext).
-        (Value::BigInt(n), SigmaType::SLong) => {
+        (Value::BigInt(n) | Value::UnsignedBigInt(n), SigmaType::SLong)
+            if cx.ctx.is_v3_ergo_tree() =>
+        {
             let v: i64 = (&n)
                 .try_into()
                 .map_err(|_| EvalError::RuntimeException("BigInt.toLongExact overflow"))?;
             Ok(Value::Long(v))
         }
-        (Value::BigInt(n), SigmaType::SInt) => {
+        (Value::BigInt(n) | Value::UnsignedBigInt(n), SigmaType::SInt)
+            if cx.ctx.is_v3_ergo_tree() =>
+        {
             let v: i32 = (&n)
                 .try_into()
                 .map_err(|_| EvalError::RuntimeException("BigInt.toIntExact overflow"))?;
             Ok(Value::Int(v))
         }
-        (Value::BigInt(ref n), SigmaType::SShort) => {
-            let v: i16 = n
+        (Value::BigInt(n) | Value::UnsignedBigInt(n), SigmaType::SShort)
+            if cx.ctx.is_v3_ergo_tree() =>
+        {
+            let v: i16 = (&n)
                 .try_into()
                 .map_err(|_| EvalError::RuntimeException("BigInt.toShortExact overflow"))?;
             Ok(Value::Short(v))
         }
-        (Value::BigInt(ref n), SigmaType::SByte) => {
-            let v: i8 = n
+        (Value::BigInt(n) | Value::UnsignedBigInt(n), SigmaType::SByte)
+            if cx.ctx.is_v3_ergo_tree() =>
+        {
+            let v: i8 = (&n)
                 .try_into()
                 .map_err(|_| EvalError::RuntimeException("BigInt.toByteExact overflow"))?;
             Ok(Value::Byte(v))

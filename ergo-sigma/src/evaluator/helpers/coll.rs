@@ -65,7 +65,9 @@ pub(crate) fn collection_to_values(
         // `Coll.updated` etc. mutate tuples. The tagged `elem_type`
         // is discarded here; downstream callers that need it should
         // capture via `coll_elem_type` on the input value.
-        Value::CollGeneric(items, _) => Ok((CollKind::Tuple, items)),
+        Value::CollGeneric(items, _) | Value::CollLegacyPair(items, _, _) => {
+            Ok((CollKind::Tuple, items))
+        }
         Value::CollBox(items) => Ok((CollKind::Box, items)),
         Value::CollHeader(headers) => Ok((
             CollKind::Header,
@@ -118,7 +120,9 @@ pub(crate) fn coll_elem_type(v: &Value) -> Option<SigmaType> {
             SigmaType::SColl(Box::new(SigmaType::SByte)),
             SigmaType::SLong,
         ])),
-        Value::CollGeneric(_, elem_type) => Some((**elem_type).clone()),
+        Value::CollGeneric(_, elem_type) | Value::CollLegacyPair(_, elem_type, _) => {
+            Some((**elem_type).clone())
+        }
         _ => None,
     }
 }
@@ -384,7 +388,7 @@ pub(crate) fn unpack_collection(val: Value) -> Result<Vec<Value>, EvalError> {
         // SubstConstants takes a Coll[T] of replacement values; a
         // real STuple is not a collection, so accept only the
         // boxed-element coll carrier here.
-        Value::CollGeneric(items, _) => Ok(items),
+        Value::CollGeneric(items, _) | Value::CollLegacyPair(items, _, _) => Ok(items),
         // Native Coll[Header] carrier (e.g. CONTEXT.headers used as
         // substitution values). Yields Header elements so the
         // subst_constants header v3 gate + value_to_typed_sigma run.
@@ -394,4 +398,22 @@ pub(crate) fn unpack_collection(val: Value) -> Result<Vec<Value>, EvalError> {
             got: format!("{other:?}"),
         }),
     }
+}
+
+/// PairOfCols before JIT retains both columns, including their invisible tails.
+pub(crate) fn legacy_pair(a: Value, b: Value, ctx: &ReductionContext) -> Result<Value, EvalError> {
+    let elem_a = coll_elem_type(&a).unwrap_or(SigmaType::SAny);
+    let elem_b = coll_elem_type(&b).unwrap_or(SigmaType::SAny);
+    let (_, items_a) = collection_to_values(a.clone(), ctx)?;
+    let (_, items_b) = collection_to_values(b.clone(), ctx)?;
+    let items = items_a
+        .into_iter()
+        .zip(items_b)
+        .map(|(a, b)| Value::Tuple(vec![a, b]))
+        .collect();
+    Ok(Value::CollLegacyPair(
+        items,
+        Box::new(SigmaType::STuple(vec![elem_a, elem_b])),
+        Some(Box::new((a, b))),
+    ))
 }

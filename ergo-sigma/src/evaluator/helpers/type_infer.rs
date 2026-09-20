@@ -130,6 +130,8 @@ pub(crate) fn infer_op_type(
         (0xA3, _) => Some(SigmaType::SInt), // Height
         (0xA7, _) => Some(SigmaType::SBox), // Self
         (0xA4 | 0xA5, _) => Some(SigmaType::SColl(Box::new(SigmaType::SBox))), // Inputs, Outputs
+        // CreateAvlTree retains its static type even though evaluation is unsupported.
+        (0xB6, Payload::Four(..)) => Some(SigmaType::SAvlTree),
         // Arithmetic — type of operand (recurse on first arg)
         (0x9A | 0x99 | 0x9C | 0x9D | 0x9E | 0xA1 | 0xA2, Payload::Two(left, _)) => {
             infer_expr_type(left, bindings, constants)
@@ -252,6 +254,8 @@ pub(crate) fn value_to_sigma_type(val: &Value) -> Option<SigmaType> {
                 .collect(),
         )),
         // Boxed-element coll carrier already carries its T.
-        Value::CollGeneric(_, elem_type) => Some(SigmaType::SColl(Box::new((**elem_type).clone()))),
+        Value::CollGeneric(_, elem_type) | Value::CollLegacyPair(_, elem_type, _) => {
+            Some(SigmaType::SColl(Box::new((**elem_type).clone())))
+        }
     }
 }

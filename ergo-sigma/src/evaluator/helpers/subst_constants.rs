@@ -1,4 +1,4 @@
-//! `subst_constants` — the `SubstConstants` (0xD9) template-constant
+//! `subst_constants` — the `SubstConstants` (0x74) template-constant
 //! substitution, depending on `serialize`'s `value_to_typed_sigma` and
 //! `type_infer`'s `sigma_type_compatible`.
 
@@ -28,11 +28,22 @@ use crate::evaluator::types::*;
 ///   (`require(c.tpe == newConst.tpe)`) raises `RuntimeException` (Scala
 ///   throws), surfacing as `errored` — not the `not-implemented` an
 ///   `UnsupportedOpcode` would produce.
+#[cfg(test)]
 pub(crate) fn subst_constants(
     script_bytes: &[u8],
     positions: &[i32],
     new_values: &[Value],
     is_v3_ergo_tree: bool,
+) -> Result<(Vec<u8>, usize), EvalError> {
+    subst_constants_versioned(script_bytes, positions, new_values, is_v3_ergo_tree, true)
+}
+
+pub(crate) fn subst_constants_versioned(
+    script_bytes: &[u8],
+    positions: &[i32],
+    new_values: &[Value],
+    is_v3_ergo_tree: bool,
+    is_jit_activated: bool,
 ) -> Result<(Vec<u8>, usize), EvalError> {
     use ergo_primitives::reader::VlqReader;
     use ergo_primitives::writer::VlqWriter;
@@ -109,7 +120,8 @@ pub(crate) fn subst_constants(
     // segregated) followed by each constant — substituted where a position
     // references it, original otherwise.
     let mut const_w = VlqWriter::new();
-    if constant_segregation {
+    // Pre-JIT serialization writes the count even without segregation.
+    if constant_segregation || !is_jit_activated {
         const_w.put_u32(n_constants as u32);
     }
     for (i, (template_type, original_value)) in constants.iter().enumerate() {
@@ -159,7 +171,7 @@ pub(crate) fn subst_constants(
     // Compose the result: header [+ recomputed size for v3+] + constants + body.
     let mut w = VlqWriter::new();
     w.put_u8(header);
-    if is_v3_ergo_tree && has_size {
+    if is_jit_activated && is_v3_ergo_tree && has_size {
         w.put_u32((const_bytes.len() + tree_bytes.len()) as u32);
     }
     w.put_bytes(&const_bytes);

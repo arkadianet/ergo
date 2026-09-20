@@ -87,7 +87,33 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
         req.activated_version <= 127 && req.tree_version_expected <= 127,
         "script version range"
     );
-    let tree = decode(&req.tree_hex, ergo_tree::read_ergo_tree)?;
+    let tree = match decode(&req.tree_hex, ergo_tree::read_ergo_tree) {
+        Ok(tree) => tree,
+        Err(error)
+            if matches!(
+                error.downcast_ref::<ergo_primitives::reader::ReadError>(),
+                Some(ergo_primitives::reader::ReadError::HardReject(reason))
+                    if reason.starts_with("SHeader value requires ErgoTree version >= 3")
+            ) =>
+        {
+            // version/parser-data-gates: Scala throws from DataSerializer
+            // before Interpreter.verify, so no evaluator cost is observable.
+            output["verdict"] = json!("RejectOther");
+            output["failure_class"] = json!("sigma.serialization.SerializerException");
+            return Ok(());
+        }
+        Err(error)
+            if matches!(
+                error.downcast_ref::<ergo_primitives::reader::ReadError>(),
+                Some(ergo_primitives::reader::ReadError::HardReject(reason))
+                    if reason == "MethodCall requires nonempty arguments (Scala AssertionError)"
+            ) =>
+        {
+            output["failure_class"] = json!("java.lang.AssertionError");
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
     ergo_tree::check_header_size_bit(&tree)?;
     ergo_tree::check_resolvable_methods(&tree)?;
     ergo_tree::check_sigma_prop_root(&tree)?;
@@ -282,7 +308,12 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
             }
         }
         Err(error) => {
-            let (verdict, failure_class) = jvm_failure(&error)?;
+            let (verdict, failure_class) = jvm_failure(&error).with_context(|| {
+                format!(
+                    "Rust accumulator at failure={} block units",
+                    cost.total_block_cost()
+                )
+            })?;
             let is_cost = verdict == "RejectCost";
             if req.observe_evaluator_failure {
                 ensure!(
@@ -327,6 +358,37 @@ fn jvm_failure(
     use ergo_sigma::evaluator::EvalError;
     use ergo_sigma::reduce::VerifySpendingError;
     match error {
+        // eval/order-throwing: serialized Int division by zero throws on the JVM.
+        VerifySpendingError::Eval(EvalError::RuntimeException("Int./ divide by zero")) => {
+            Ok(("RejectScript", "java.lang.ArithmeticException"))
+        }
+        // CBigInt.scala:18 throws ArithmeticException when divide constructs
+        // an out-of-range result in a v3 tree.
+        VerifySpendingError::Eval(EvalError::RuntimeException(
+            "BigInt./ out of 256-bit range",
+        )) => Ok(("RejectScript", "java.lang.ArithmeticException")),
+        // CErgoTreeEvaluator.scala:151 syntax.error on pre-v3 insert failure.
+        VerifySpendingError::Eval(EvalError::RuntimeException(
+            "AvlTree.insert failed on a pre-v3 ErgoTree",
+        )) => Ok(("RejectScript", "sigma.exceptions.InterpreterException")),
+        // CollsOverArrays.scala:54 -> CollectionUtil.concatArrays_v4 returns
+        // Object[] for Tuple2[]; builder.fromArray casts it back to Tuple2[].
+        VerifySpendingError::Eval(EvalError::TypeError {
+            expected: "Tuple2 array for pre-JIT append",
+            ..
+        }) => Ok(("RejectScript", "java.lang.ClassCastException")),
+        // trees.scala:39-40 casts v.asInstanceOf[Boolean] after FixedCost(15)
+        // when VersionContext.current.isJitActivated (activation >= 2).
+        VerifySpendingError::Eval(EvalError::TypeError {
+            expected: "Bool",
+            ..
+        }) => Ok(("RejectScript", "java.lang.ClassCastException")),
+        // version/parser-data-gates: v3 ByIndex retains its Byte operand,
+        // then the evaluator's Int cast throws after charging the input.
+        VerifySpendingError::Eval(EvalError::TypeError {
+            expected: "Int index",
+            got,
+        }) if got == "Byte(0)" => Ok(("RejectScript", "java.lang.ClassCastException")),
         VerifySpendingError::Eval(EvalError::TypeError {
             expected: "matching numeric types for Plus",
             ..
@@ -344,18 +406,54 @@ fn jvm_failure(
                 ..
             }
             | EvalError::UnsupportedOpcode(0x71)
+            // CreateAvlTree inherits Value.eval (values.scala:101-102);
+            // Its sys.error throws RuntimeException before child evaluation.
             | EvalError::NotExecutable(..)
             | EvalError::DeprecatedOpcode(_)
             | EvalError::InternalOpcode(..),
         ) => Ok(("RejectScript", "java.lang.RuntimeException")),
+        // SBoxMethods.registers (methods.scala:1273) creates IR-only R0..R9
+        // descriptors. values.scala:1348 / SMethod.invokeFixed reflection cannot
+        // find these on sigma.Box.
+        VerifySpendingError::Eval(EvalError::TypeError {
+            expected: "supported PropertyCall",
+            got,
+        }) if (9..=18).any(|id| got == &format!("type_id=99, method_id={id}")) => {
+            Ok(("RejectOther", "java.lang.NoSuchMethodException"))
+        }
+        // SType.scala downcast uses Extensions.scala:49-112, 129-203 exact
+        // conversions (also via CBigInt/CUnsignedBigInt), which throw ArithmeticException.
+        VerifySpendingError::Eval(EvalError::RuntimeException(
+            "Long.toIntExact overflow"
+            | "Long.toShortExact overflow"
+            | "Long.toByteExact overflow"
+            | "Int.toShortExact overflow"
+            | "Int.toByteExact overflow"
+            | "Short.toByteExact overflow"
+            | "BigInt.toLongExact overflow"
+            | "BigInt.toIntExact overflow"
+            | "BigInt.toShortExact overflow"
+            | "BigInt.toByteExact overflow",
+        )) => Ok(("RejectScript", "java.lang.ArithmeticException")),
+        // SUnsignedBigInt.downcast/upcast use sys.error for negative inputs.
+        VerifySpendingError::Eval(EvalError::RuntimeException(
+            "cannot cast a negative value to UnsignedBigInt",
+        )) => Ok(("RejectOther", "java.lang.RuntimeException")),
+        // Numeric cast methods use sys.error for unsupported source/target pairs.
+        VerifySpendingError::Eval(EvalError::TypeError {
+            expected: "numeric value for Upcast" | "numeric value for Downcast",
+            ..
+        }) => Ok(("RejectOther", "java.lang.RuntimeException")),
         VerifySpendingError::Eval(EvalError::RuntimeException(
             "Cannot compare SigmaBoolean values: unknown type"
             | "Unknown type SString"
             | "DeserializeRegister script type mismatch",
         )) => Ok(("RejectOther", "java.lang.RuntimeException")),
-        VerifySpendingError::Eval(EvalError::InvocationTargetException("Unknown type SString")) => {
-            Ok(("RejectOther", "java.lang.reflect.InvocationTargetException"))
-        }
+        // CHeader.scala:73 throws after charging; values.scala:1348 invokes
+        // via SMethod.invokeFixed, exposing the reflection wrapper.
+        VerifySpendingError::Eval(EvalError::InvocationTargetException(
+            "Unknown type SString" | "Autolykos v1 is not supported",
+        )) => Ok(("RejectOther", "java.lang.reflect.InvocationTargetException")),
         VerifySpendingError::Eval(
             EvalError::SoftForkNotActivated { .. }
             | EvalError::UnparsedErgoTree
@@ -587,6 +685,14 @@ fn verify_fixture(path: &Path, fixture: Fixture, ledger: &Ledger) -> Result<bool
             "{}: known divergence requires an attached DIVERGENT ledger row",
             path.display()
         );
+        let version_residual = path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|family| family == "version")
+            && matches!(
+                known.ledger.as_str(),
+                "VERSION-G008" | "VERSION-G016" | "VERSION-G018"
+            );
         let classified = match known.classification.as_str() {
             "cost-only" => differences.as_object().is_some_and(|fields| {
                 fields.keys().all(|field| {
@@ -596,21 +702,36 @@ fn verify_fixture(path: &Path, fixture: Fixture, ledger: &Ledger) -> Result<bool
                     )
                 })
             }),
+            "reject-valid" if version_residual => {
+                actual["verdict"] != "Accept" && fixture.expected["verdict"] == "Accept"
+            }
+            "rejection-order" if version_residual => {
+                matches!(
+                    actual["verdict"].as_str(),
+                    Some("RejectCost" | "RejectScript")
+                ) && matches!(
+                    fixture.expected["verdict"].as_str(),
+                    Some("RejectCost" | "RejectScript")
+                ) && actual["verdict"] != fixture.expected["verdict"]
+            }
             "accept-invalid" => {
                 actual["verdict"] == "Accept"
                     && matches!(
                         fixture.expected["verdict"].as_str(),
                         Some("RejectScript" | "RejectOther")
                     )
-                    && differences.as_object().is_some_and(|fields| {
-                        fields
-                            .keys()
-                            .all(|field| matches!(field.as_str(), "verdict" | "failure_class"))
-                    })
+                    && (version_residual
+                        || differences.as_object().is_some_and(|fields| {
+                            fields
+                                .keys()
+                                .all(|field| matches!(field.as_str(), "verdict" | "failure_class"))
+                        }))
             }
             _ => false,
         };
-        let tracking = if path
+        let tracking = if version_residual {
+            "test-vectors/ergo-sigma/cost-ledger/fixtures/version/DIVERGENCES.md"
+        } else if path
             .parent()
             .and_then(Path::file_name)
             .is_some_and(|family| family == "interpreter")
@@ -637,7 +758,7 @@ fn verify_fixture(path: &Path, fixture: Fixture, ledger: &Ledger) -> Result<bool
     } else {
         ensure!(
             differences == json!({}),
-            "{}: unexplained divergence: {differences}",
+            "{}: unexplained divergence: {differences}; Rust record: {actual}",
             path.display()
         );
         Ok(false)
@@ -735,9 +856,112 @@ fn cost_ledger_divergence_invalid_annotations_rejected() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn create_avl_tree_divergence_invalid_annotations_rejected() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-vectors/ergo-sigma/cost-ledger");
+    let path = root.join("fixtures/op-fixed/zero-cost-rejects.json.gz");
+    let document: Value = serde_json::from_slice(&read_fixture(&path)?)?;
+    let mut case = document["cases"]
+        .as_array()
+        .context("cases")?
+        .iter()
+        .find(|case| case["name"] == "opb6-prefix4")
+        .context("CreateAvlTree case")?
+        .clone();
+    case["manifest"] = document["manifest"].clone();
+    case["ledger"] = document["ledger"].clone();
+    let ledger: Ledger = toml::from_str(&std::fs::read_to_string(root.join("ledger.toml"))?)?;
+    let check = |value: Value| verify_fixture(&path, serde_json::from_value(value)?, &ledger);
+    assert!(!check(case.clone())?);
+
+    // A resolved case must never acquire a divergence exemption on a CLOSED row.
+    let mut stale = case.clone();
+    stale["known_divergence"] = json!({
+        "ledger": "OP-0xB6",
+        "classification": "rejection-order",
+        "tracking": "test-vectors/ergo-sigma/cost-ledger/fixtures/op-fixed/DIVERGENCES.md",
+        "differences": {
+            "evaluator_failure_block_cost": {"rust": 0, "jvm": 1}
+        }
+    });
+    assert!(check(stale)
+        .unwrap_err()
+        .to_string()
+        .contains("requires an attached DIVERGENT ledger row"));
+
+    // Synthetic metadata tests the runner, not the authoritative JVM expectation.
+    case["expected"]["evaluator_failure_block_cost"] = json!(999);
+    assert!(check(case)
+        .unwrap_err()
+        .to_string()
+        .contains("unexplained divergence"));
+    Ok(())
+}
+
+#[test]
+fn version_divergence_markers_misclassified_cases_rejected() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-vectors/ergo-sigma/cost-ledger");
+    let ledger: Ledger = toml::from_str(&std::fs::read_to_string(root.join("ledger.toml"))?)?;
+    for name in ["subst-bytes", "parser-data-gates"] {
+        let path = root.join(format!("fixtures/version/{name}.json.gz"));
+        let document: Value = serde_json::from_slice(&read_fixture(&path)?)?;
+        for case in document["cases"].as_array().context("fixture cases")? {
+            if case.get("known_divergence").is_none() {
+                continue;
+            }
+            let mut case = case.clone();
+            case["manifest"] = document["manifest"].clone();
+            case["ledger"] = document["ledger"].clone();
+            assert!(verify_fixture(
+                &path,
+                serde_json::from_value(case.clone())?,
+                &ledger
+            )?);
+            case["known_divergence"]["classification"] = json!("unsupported");
+            let error = verify_fixture(&path, serde_json::from_value(case)?, &ledger).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("stale or misclassified divergence"));
+        }
+    }
+    Ok(())
+}
+
 // ----- oracle parity -----
 
-// ledger: VERSION-pre-v3-upcast, VERSION-v3-bool-root, VERSION-v6-method-gate, VERSION-selfboxindex-bug, VERSION-tree-version-gate, VERSION-v6-lazy-defaults, INTERP-crypto-conjunction, INTERP-crypto-threshold, INTERP-crypto-trivial-I013, INTERP-costlimit-op, INTERP-embedded-script-deser, INTERP-deser-subst, ORDER-propertycall-receiver, ORDER-methodcall-arguments, ORDER-powHit-validation, ORDER-serialize-incremental, ORDER-fixed-method-invocation, ORDER-avl-verifier-lookup, ORDER-if-condition, ORDER-optionget-input, METHOD-header-props, METHOD-global-encodeNbits, METHOD-coll-flatMap, METHOD-coll-indexOf, METHOD-coll-indices, METHOD-coll-patch, METHOD-coll-reverse, METHOD-coll-startsEndsWith, METHOD-coll-updateMany, METHOD-coll-updated, METHOD-coll-zip, METHOD-global-deserializeTo, METHOD-global-powHit, METHOD-global-xor, EVAL-avl-cost-height, METHOD-avl-contains, METHOD-avl-get, METHOD-avl-getMany, METHOD-avl-insert, METHOD-avl-insertOrUpdate, METHOD-avl-remove, METHOD-avl-update, METHOD-global-serialize, METHOD-global-serialize-E042, METHOD-global-serialize-E043, METHOD-global-serialize-E044, METHOD-global-serialize-E045, METHOD-global-serialize-E046, METHOD-global-serialize-E047, METHOD-option-map, METHOD-option-filter, EVAL-sstring-rejected, OP-0x96, OP-0xB3, OP-0x98, OP-0xCB, OP-0xD8, ROUND-perItem-chunking, OP-0xAE, OP-0xB5, OP-0xB0, OP-0xAF, OP-0xAD, OP-0x97, OP-0xCC, OP-0xEA, OP-0xEB, OP-0xD0, OP-0xB4, OP-0x74, OP-0xFF, OP-0x9B, INTERP-eval-sigmaprop-constant, OP-0x95, OP-0xDA, OP-0xE7-0xE9, OP-0xEC, OP-0xED, OP-0xF2, OP-0xF3, OP-0xF5, OP-0xF6, OP-0xF7, OP-0xF8, OP-TaggedVariable-A003, ORDER-bitop-charge-then-reject, EVAL-const-inline, EVAL-hasdeserialize-fork, EVAL-addtoenv, EVAL-numeric-cast, EVAL-arith-bigint, EVAL-eq-prim, EVAL-eq-matchtype, EVAL-eq-tuple, EVAL-eq-groupelement, EVAL-eq-bigint, EVAL-eq-avltree, EVAL-eq-box, EVAL-eq-option, EVAL-eq-preheader, EVAL-eq-header, EVAL-eq-coll-sigmaprop-descriptor, EVAL-eq-coll-fallback, EVAL-eq-tokens, EVAL-eq-sigmaboolean, EVAL-deferred-charge-on-exception, EVAL-eq-boxcollection, EVAL-eq-coll-descriptor, EVAL-eq-mismatch-and-unit-E032
+#[test]
+fn profiling_timing_pairs_jvm_costs_unchanged() -> Result<()> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+        "../test-vectors/ergo-sigma/cost-ledger/fixtures/interpreter/profiling-isolation.json.gz",
+    );
+    let fixture: Value = serde_json::from_slice(&read_fixture(&path)?)?;
+    let cases = fixture["cases"].as_array().context("profiling cases")?;
+    ensure!(cases.len() == 32, "profiling boundary coverage");
+    let mut verdicts = std::collections::BTreeSet::new();
+    for case in cases {
+        let mut paired = case["request"].clone();
+        let timing = paired["measure_operation_time"]
+            .as_bool()
+            .context("explicit profiling switch")?;
+        paired["measure_operation_time"] = json!(!timing);
+        let partner = cases
+            .iter()
+            .find(|candidate| candidate["request"] == paired)
+            .context("missing opposite profiling setting")?;
+        ensure!(
+            case["expected"] == partner["expected"],
+            "profiling changed JVM result"
+        );
+        verdicts.insert(case["expected"]["verdict"].as_str().context("verdict")?);
+    }
+    ensure!(
+        verdicts == std::collections::BTreeSet::from(["Accept", "RejectCost", "RejectScript"]),
+        "profiling must cover valid proofs, invalid proofs and limit rejection"
+    );
+    Ok(())
+}
+
+// ledger: VERSION-pre-v3-upcast, VERSION-v3-bool-root, VERSION-v6-method-gate, VERSION-selfboxindex-bug, VERSION-tree-version-gate, VERSION-v6-lazy-defaults, INTERP-crypto-conjunction, INTERP-crypto-threshold, INTERP-crypto-trivial-I013, INTERP-costlimit-op, INTERP-embedded-script-deser, INTERP-deser-subst, ORDER-propertycall-receiver, ORDER-methodcall-arguments, ORDER-powHit-validation, ORDER-serialize-incremental, ORDER-fixed-method-invocation, ORDER-avl-verifier-lookup, ORDER-if-condition, ORDER-optionget-input, METHOD-header-props, METHOD-global-encodeNbits, METHOD-coll-flatMap, METHOD-coll-indexOf, METHOD-coll-indices, METHOD-coll-patch, METHOD-coll-reverse, METHOD-coll-startsEndsWith, METHOD-coll-updateMany, METHOD-coll-updated, METHOD-coll-zip, METHOD-global-deserializeTo, METHOD-global-powHit, METHOD-global-xor, EVAL-avl-cost-height, METHOD-avl-contains, METHOD-avl-get, METHOD-avl-getMany, METHOD-avl-insert, METHOD-avl-insertOrUpdate, METHOD-avl-remove, METHOD-avl-update, METHOD-global-serialize, METHOD-global-serialize-E042, METHOD-global-serialize-E043, METHOD-global-serialize-E044, METHOD-global-serialize-E045, METHOD-global-serialize-E046, METHOD-global-serialize-E047, METHOD-option-map, METHOD-option-filter, EVAL-sstring-rejected, OP-0x96, OP-0xB3, OP-0x98, OP-0xCB, OP-0xD8, ROUND-perItem-chunking, OP-0xAE, OP-0xB5, OP-0xB0, OP-0xAF, OP-0xAD, OP-0x97, OP-0xCC, OP-0xEA, OP-0xEB, OP-0xD0, OP-0xB4, OP-0x74, OP-0xFF, OP-0x9B, INTERP-eval-sigmaprop-constant, OP-0x95, OP-0xDA, OP-0xE7-0xE9, OP-0xEC, OP-0xED, OP-0xF2, OP-0xF3, OP-0xF5, OP-0xF6, OP-0xF7, OP-0xF8, OP-TaggedVariable-A003, ORDER-bitop-charge-then-reject, EVAL-const-inline, EVAL-hasdeserialize-fork, EVAL-addtoenv, EVAL-numeric-cast, EVAL-arith-bigint, EVAL-eq-prim, EVAL-eq-matchtype, EVAL-eq-tuple, EVAL-eq-groupelement, EVAL-eq-bigint, EVAL-eq-avltree, EVAL-eq-box, EVAL-eq-option, EVAL-eq-preheader, EVAL-eq-header, EVAL-eq-coll-sigmaprop-descriptor, EVAL-eq-coll-fallback, EVAL-eq-tokens, EVAL-eq-sigmaboolean, EVAL-deferred-charge-on-exception, EVAL-eq-boxcollection, EVAL-eq-coll-descriptor, EVAL-eq-mismatch-and-unit-E032, OP-0x7D, OP-0x7E, OP-0x8F, OP-0x90, OP-0x91, OP-0x92, OP-0x93, OP-0x94, OP-0x99, OP-0x9A, OP-0x9C, OP-0x9D, OP-0x9E, OP-0xA1, OP-0xA2, OP-0xB6, OP-0xB7, OP-0xCF, OP-0xD7, OP-0xF1, METHOD-groupelement-exp, METHOD-box-registers-R0-R3, METHOD-box-registers-R4-R9, VERSION-header-checkPow-G023, INTERP-toblockcost, VERSION-downcast-gate, VERSION-subst-retention, VERSION-G007, VERSION-G008, VERSION-G009, VERSION-G010, VERSION-G011, VERSION-G012, VERSION-G013, VERSION-G014, VERSION-G016, VERSION-G017, VERSION-G018, ORDER-hof-charge, ORDER-blockvalue-valdef, OP-0xD6, ORDER-comparison-charge, INTERP-profiling-cost-isolation-I023
 #[test]
 fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-vectors/ergo-sigma/cost-ledger");

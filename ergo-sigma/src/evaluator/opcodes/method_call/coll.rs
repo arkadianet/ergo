@@ -186,6 +186,10 @@ pub(super) fn zip(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
     let n = collection_len(&obj_val, cx.ctx) as u32;
     let zip_cost = COST_ZIP;
     cx.cost.add(zip_cost.compute(n)?)?;
+    // CollsOverArrays.scala:184: VersionContext.current.isJitActivated (>= 2).
+    if cx.ctx.activated_script_version < 2 {
+        return crate::evaluator::helpers::legacy_pair(obj_val, ys_val, cx.ctx);
+    }
     // Capture each operand's element type before
     // `collection_to_values` consumes the carrier; the
     // result is `Coll[(A, B)]`, so the carrier is tagged
@@ -378,7 +382,7 @@ pub(super) fn flat_map(
             // `Tuple(inner)` patterns are real 2-tuple pairs,
             // intentionally unchanged.
             for c in inner_colls.iter_mut() {
-                if let Value::CollGeneric(elems, _) = c {
+                if let Value::CollGeneric(elems, _) | Value::CollLegacyPair(elems, _, _) = c {
                     if elems.is_empty() {
                                         // Will be removed below
                                     } else if elems.iter().all(|e| matches!(e, Value::Tuple(inner) if inner.len() == 2 && matches!(&inner[0], Value::CollBytes(_)))) {
@@ -419,10 +423,12 @@ pub(super) fn flat_map(
                 Value::CollBox(_) => Value::CollBox(vec![]),
                 Value::CollHeader(_) => Value::CollHeader(vec![]),
                 Value::Tokens(_) => Value::Tokens(vec![]),
-                Value::CollGeneric(_, elem) => Value::CollGeneric(vec![], elem.clone()),
+                Value::CollGeneric(_, elem) | Value::CollLegacyPair(_, elem, _) => {
+                    Value::CollGeneric(vec![], elem.clone())
+                }
                 _ => Value::CollBytes(vec![]),
             });
-            inner_colls.retain(|v| !matches!(v, Value::CollGeneric(t, _) if t.is_empty()));
+            inner_colls.retain(|v| !matches!(v, Value::CollGeneric(t, _) | Value::CollLegacyPair(t, _, _) if t.is_empty()));
             let result = if inner_colls.is_empty() {
                 // Empty receiver: no inner collection exists to read the shape
                 // from, so recover the output element type B from the mapper
@@ -523,12 +529,13 @@ pub(super) fn flat_map(
                     // elem_type drives the output tag (all
                     // inners share the same element type under
                     // the IR's static-type system).
-                    Value::CollGeneric(_, elem_type) => {
+                    Value::CollGeneric(_, elem_type) | Value::CollLegacyPair(_, elem_type, _) => {
                         let elem_type = elem_type.clone();
                         let mut out = Vec::new();
                         for c in inner_colls {
                             match c {
-                                Value::CollGeneric(elems, _) => out.extend(elems),
+                                Value::CollGeneric(elems, _)
+                                | Value::CollLegacyPair(elems, _, _) => out.extend(elems),
                                 other => out.push(other),
                             }
                         }
@@ -777,6 +784,7 @@ pub(super) fn updated(
             | Value::Tokens(_)
             | Value::BoxCollection(_)
             | Value::CollGeneric(_, _)
+            | Value::CollLegacyPair(_, _, _)
     ) {
         return Err(EvalError::TypeError {
             expected: "Coll for updated receiver",
@@ -901,7 +909,10 @@ pub(super) fn updated(
         // variants — handles `Opt`, `Header`, real `Tuple`,
         // nested `CollGeneric`) and requiring equality
         // against the carrier's `elem_type`.
-        (Value::CollGeneric(mut coll, elem_type), elem) => {
+        (
+            Value::CollGeneric(mut coll, elem_type) | Value::CollLegacyPair(mut coll, elem_type, _),
+            elem,
+        ) => {
             let elem_ty = value_to_sigma_type(&elem).ok_or(EvalError::TypeError {
                 expected: "element with recoverable SigmaType for Coll.updated",
                 got: format!("{elem:?}"),

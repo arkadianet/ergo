@@ -12,7 +12,8 @@
 //!   (CBigInt.* -> toSignedBigIntValueExact, unconditional). BigInt Modulo
 //!   follows java.math.BigInteger.mod: a non-positive modulus throws
 //!   ("modulus not positive"); for a positive modulus the result is the
-//!   non-negative remainder in [0, b). BigInt Divide has no 256-bit check.
+//!   non-negative remainder in [0, b). BigInt Divide checks the signed range
+//!   for tree version >= 3.
 //!   UnsignedBigInt (v6 SUnsignedBigInt, in ArithOp.impls) Plus/Minus/
 //!   Multiply enforce the UNSIGNED-256-bit bound (CUnsignedBigInt.* ->
 //!   toUnsignedBigIntValueExact, result in [0, 2^256-1] or throw — exact,
@@ -274,7 +275,16 @@ pub(in crate::evaluator) fn eval_division(
         (Value::Short(a), Value::Short(b)) => Ok(Value::Short(a.wrapping_div(b))),
         (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_div(b))),
         (Value::Long(a), Value::Long(b)) => Ok(Value::Long(a.wrapping_div(b))),
-        (Value::BigInt(a), Value::BigInt(b)) => Ok(Value::BigInt(a / b)),
+        (Value::BigInt(a), Value::BigInt(b)) => {
+            let result = a / b;
+            // CBigInt.scala:18,45: VersionContext.current.isV3OrLaterErgoTreeVersion
+            // gates the constructor's signed-range check after divide.
+            if cx.ctx.is_v3_ergo_tree() && !fits_in_256_bits(&result) {
+                Err(EvalError::RuntimeException("BigInt./ out of 256-bit range"))
+            } else {
+                Ok(Value::BigInt(result))
+            }
+        }
         // CUnsignedBigInt.divide = BigInteger.divide (truncating toward zero;
         // both operands non-negative, so this is floor division). Divisor is
         // non-zero (zero handled above). Result <= dividend, so it stays in
@@ -451,7 +461,14 @@ pub(in crate::evaluator) fn eval_xor_of(
     match v {
         Value::CollBool(bs) => {
             add_cost_per_item(cx.cost, 0xFF, bs.len() as u32)?;
-            Ok(Value::Bool(bs.iter().fold(false, |acc, b| acc ^ b)))
+            // CSigmaDslBuilder.scala:117: VersionContext.current.isJitActivated
+            // (activation >= 2); the historical rule is distinct.length == 2.
+            let result = if cx.ctx.activated_script_version >= 2 {
+                bs.iter().fold(false, |acc, b| acc ^ b)
+            } else {
+                bs.contains(&true) && bs.contains(&false)
+            };
+            Ok(Value::Bool(result))
         }
         other => Err(EvalError::TypeError {
             expected: "Coll[Boolean] for XorOf",

@@ -1,0 +1,52 @@
+{
+  "_note": [
+    "JVM parse verdicts recorded 2026-09-20 using scripts/jvm_serde_oracle/ErgoSerdeOracle.scala (sigma-state 6.0.2, Scala 2.12).",
+    "Reproduce: send each `ergo_tree <tree_hex>` line to scala-cli run scripts/jvm_serde_oracle/ErgoSerdeOracle.scala; also probed sized, sizeless-v0, and undersized rejects with cargo run -p ergo-difftest -- --oracle --repro <hex> --surface ergo_tree.",
+    "ConstantPlaceholderSerializer.scala:16-24 reads constantStore.get(id) before constructing the node. ArrayIndexOutOfBoundsException escapes the soft-fork wrap.",
+    "The valid-index controls show that a declared frame size differing from the structural body size is accepted by the JVM; the undersized rejection is caused by the placeholder index."
+  ],
+  "cases": [
+    {
+      "name": "sized_index_one_rejected",
+      "tree_hex": "1b0b010402d801d60a730108d3",
+      "jvm": "Reject",
+      "jvm_detail": "ArrayIndexOutOfBoundsException"
+    },
+    {
+      "name": "sizeless_index_one_rejected",
+      "tree_hex": "10010402d801d60a730108d3",
+      "jvm": "Reject",
+      "jvm_detail": "ArrayIndexOutOfBoundsException"
+    },
+    {
+      "name": "undersized_index_one_rejected",
+      "tree_hex": "1b0a010402d801d60a730108d3",
+      "jvm": "Reject",
+      "jvm_detail": "ArrayIndexOutOfBoundsException"
+    },
+    {
+      "name": "sized_index_zero_accepted",
+      "tree_hex": "1b0b010402d801d60a730008d3",
+      "jvm": "Accept",
+      "jvm_detail": null
+    },
+    {
+      "name": "sizeless_index_zero_accepted",
+      "tree_hex": "10010402d801d60a730008d3",
+      "jvm": "Accept",
+      "jvm_detail": null
+    },
+    {
+      "name": "undersized_index_zero_accepted",
+      "tree_hex": "1b0a010402d801d60a730008d3",
+      "jvm": "Accept",
+      "jvm_detail": null
+    },
+    {
+      "name": "oversized_index_zero_accepted",
+      "tree_hex": "1b0c010402d801d60a730008d3",
+      "jvm": "Accept",
+      "jvm_detail": null
+    }
+  ]
+}

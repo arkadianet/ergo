@@ -8,10 +8,10 @@
 //! The higher-order arms (ForAll / Filter / Fold / Map / Exists)
 //! recurse into `eval_expr` per element and charge an `AddToEnv`
 //! (5 jit) per closure invocation. Cost-charge sequencing is preserved
-//! exactly: the collection is evaluated, then
-//! `add_cost_per_item(opcode, n)` is charged from the materialized
-//! length, then the predicate is evaluated, then per-element AddToEnv
-//! charges land before each closure body call.
+//! exactly: collection and function construction precede the known-length
+//! overhead charge; per-element AddToEnv charges precede each closure body.
+//! Scala transformers.scala:40-45,123-127,160-164,187-191,224-230
+//! uses addSeqCostNoOp for these operations.
 
 use crate::evaluator::helpers::reject_sstring;
 use ergo_primitives::cost::JitCost;
@@ -59,7 +59,7 @@ pub(in crate::evaluator) fn eval_size_of(
         // Boxed-element coll carrier (Coll[Tuple], Coll[Header]
         // fallback, etc.). A real `Value::Tuple` is not a collection
         // and falls through to the type-error arm.
-        Value::CollGeneric(v, _) => Ok(Value::Int(v.len() as i32)),
+        Value::CollGeneric(v, _) | Value::CollLegacyPair(v, _, _) => Ok(Value::Int(v.len() as i32)),
         _ => Err(EvalError::TypeError {
             expected: "Collection",
             got: format!("{val:?}"),
@@ -236,7 +236,7 @@ pub(in crate::evaluator) fn eval_by_index(
         // a real `Value::Tuple` (fixed-arity STuple) falls through to
         // the type-error arm — STuple field access goes through
         // `SelectField` (0x8C), not `ByIndex` (0xB2).
-        Value::CollGeneric(ref items, _) => {
+        Value::CollGeneric(ref items, _) | Value::CollLegacyPair(ref items, _, _) => {
             if idx < items.len() {
                 Ok(items[idx].clone())
             } else if let Some(d) = default {
@@ -276,8 +276,8 @@ pub(in crate::evaluator) fn eval_forall(
 ) -> Result<Value, EvalError> {
     let coll = cx.eval_expr(coll_expr)?;
     let n = collection_len(&coll, cx.ctx);
-    add_cost_per_item(cx.cost, 0xAF, n as u32)?;
     let pred = cx.eval_expr(pred_expr)?;
+    add_cost_per_item(cx.cost, 0xAF, n as u32)?;
     let (_coll_kind, items) = collection_to_values(coll, cx.ctx)?;
     match pred {
         Value::Func {
@@ -335,8 +335,8 @@ pub(in crate::evaluator) fn eval_filter(
 ) -> Result<Value, EvalError> {
     let coll = cx.eval_expr(coll_expr)?;
     let n = collection_len(&coll, cx.ctx);
-    add_cost_per_item(cx.cost, 0xB5, n as u32)?;
     let pred = cx.eval_expr(pred_expr)?;
+    add_cost_per_item(cx.cost, 0xB5, n as u32)?;
     // Filter preserves the input's element type; capture before
     // `collection_to_values` consumes the carrier so the rebuild
     // step can re-tag the `CollGeneric` fallback with the right T.
@@ -449,8 +449,8 @@ pub(in crate::evaluator) fn eval_map_collection(
 ) -> Result<Value, EvalError> {
     let coll = cx.eval_expr(coll_expr)?;
     let n = collection_len(&coll, cx.ctx);
-    add_cost_per_item(cx.cost, 0xAD, n as u32)?;
     let mapper = cx.eval_expr(mapper_expr)?;
+    add_cost_per_item(cx.cost, 0xAD, n as u32)?;
     map_values(coll, mapper, cx)
 }
 
@@ -460,6 +460,11 @@ pub(in crate::evaluator) fn map_values(
     mapper: Value,
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
+    // PairOfCols.map (CollsOverArrays.scala:317) returns CollOverArray,
+    // whereas CollOverArray.map uses builder.fromArray, which unzips pairs.
+    let maps_pair_columns = matches!(coll_elem_type(&coll),
+        Some(SigmaType::STuple(ref types)) if types.len() == 2)
+        && !matches!(&coll, Value::CollLegacyPair(_, _, None));
     let (_input_kind, items) = collection_to_values(coll, cx.ctx)?;
     match mapper {
         Value::Func {
@@ -507,7 +512,17 @@ pub(in crate::evaluator) fn map_values(
                     param_bindings.insert(*id, t.clone());
                 }
             }
-            infer_collection(result, &body, &param_bindings, cx.constants)
+            let result = infer_collection(result, &body, &param_bindings, cx.constants)?;
+            // Only PairOfCols.map leaves a Tuple2 array for pre-JIT append.
+            if cx.ctx.activated_script_version < 2 && maps_pair_columns {
+                if let Value::CollGeneric(items, elem_type) = result {
+                    if matches!(elem_type.as_ref(), SigmaType::STuple(ts) if ts.len() == 2) {
+                        return Ok(Value::CollLegacyPair(items, elem_type, None));
+                    }
+                    return Ok(Value::CollGeneric(items, elem_type));
+                }
+            }
+            Ok(result)
         }
         _ => Err(EvalError::TypeError {
             expected: "Func for MapCollection",
@@ -524,8 +539,8 @@ pub(in crate::evaluator) fn eval_exists(
 ) -> Result<Value, EvalError> {
     let coll = cx.eval_expr(coll_expr)?;
     let n = collection_len(&coll, cx.ctx);
-    add_cost_per_item(cx.cost, 0xAE, n as u32)?;
     let pred = cx.eval_expr(pred_expr)?;
+    add_cost_per_item(cx.cost, 0xAE, n as u32)?;
     let (_coll_kind, items) = collection_to_values(coll, cx.ctx)?;
     match pred {
         Value::Func {
@@ -576,16 +591,81 @@ pub(in crate::evaluator) fn eval_append(
 ) -> Result<Value, EvalError> {
     let left = cx.eval_expr(left_expr)?;
     let right = cx.eval_expr(right_expr)?;
-    // Both operands of Append share the static element type; take it
-    // from the left side before its carrier is consumed.
-    let elem_type = coll_elem_type(&left).unwrap_or(SigmaType::SAny);
-    let (lk, litems) = collection_to_values(left, cx.ctx)?;
-    let (_rk, ritems) = collection_to_values(right, cx.ctx)?;
-    let total = litems.len() + ritems.len();
+    let total = collection_len(&left, cx.ctx) + collection_len(&right, cx.ctx);
     add_cost_per_item(cx.cost, 0xB3, total as u32)?;
-    let mut combined = litems;
-    combined.extend(ritems);
-    values_to_collection(lk, combined, elem_type)
+    append_values(left, right, cx)
+}
+
+/// Append's single charge covers the recursive PairOfCols column appends.
+fn append_values(left: Value, right: Value, cx: &EvalCtx<'_>) -> Result<Value, EvalError> {
+    let elem_type = coll_elem_type(&left).unwrap_or(SigmaType::SAny);
+    // CollsOverArrays.scala:50,184: VersionContext.current.isJitActivated
+    // (activation >= 2) fixes Tuple2 array concatenation and truncates zip sides.
+    if cx.ctx.activated_script_version < 2 {
+        if let Value::CollLegacyPair(items, _, None) = &left {
+            if !items.is_empty() {
+                return Err(EvalError::TypeError {
+                    expected: "Tuple2 array for pre-JIT append",
+                    got: "Object array".into(),
+                });
+            }
+            return Ok(right);
+        }
+        if matches!(&elem_type, SigmaType::STuple(ts) if ts.len() == 2) {
+            let (left_a, left_b) = pair_columns(left, cx)?;
+            let (right_a, right_b) = pair_columns(right, cx)?;
+            let a = append_values(left_a, right_a, cx)?;
+            let b = append_values(left_b, right_b, cx)?;
+            return super::super::helpers::legacy_pair(a, b, cx.ctx);
+        }
+    }
+    let (kind, mut items) = collection_to_values(left, cx.ctx)?;
+    let (_, tail) = collection_to_values(right, cx.ctx)?;
+    items.extend(tail);
+    values_to_collection(kind, items, elem_type)
+}
+
+fn pair_columns(value: Value, cx: &EvalCtx<'_>) -> Result<(Value, Value), EvalError> {
+    if let Value::CollLegacyPair(_, _, Some(columns)) = value {
+        return Ok(*columns);
+    }
+    let Some(SigmaType::STuple(types)) = coll_elem_type(&value) else {
+        return Err(EvalError::TypeError {
+            expected: "pair collection for append",
+            got: format!("{value:?}"),
+        });
+    };
+    if types.len() != 2 {
+        return Err(EvalError::TypeError {
+            expected: "pair collection for append",
+            got: format!("tuple arity {}", types.len()),
+        });
+    }
+    let (_, items) = collection_to_values(value, cx.ctx)?;
+    let mut a = Vec::with_capacity(items.len());
+    let mut b = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            Value::Tuple(mut pair) if pair.len() == 2 => {
+                b.push(pair.pop().expect("pair has two elements"));
+                a.push(pair.pop().expect("pair has two elements"));
+            }
+            other => {
+                return Err(EvalError::TypeError {
+                    expected: "pair for append",
+                    got: format!("{other:?}"),
+                })
+            }
+        }
+    }
+    let kind_a = super::super::helpers::sigma_type_to_coll_kind(&types[0])
+        .unwrap_or(super::super::helpers::CollKind::Tuple);
+    let kind_b = super::super::helpers::sigma_type_to_coll_kind(&types[1])
+        .unwrap_or(super::super::helpers::CollKind::Tuple);
+    Ok((
+        values_to_collection(kind_a, a, types[0].clone())?,
+        values_to_collection(kind_b, b, types[1].clone())?,
+    ))
 }
 
 // 0xB4 Slice(collection, from, until)
@@ -644,4 +724,49 @@ pub(in crate::evaluator) fn eval_slice(
         Vec::new()
     };
     values_to_collection(kind, sliced, elem_type)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::evaluator::types::{Env, ReductionContext};
+    use ergo_primitives::cost::CostAccumulator;
+    use ergo_ser::opcode::{IrNode, Payload};
+
+    // ----- error paths -----
+
+    #[test]
+    fn append_empty_non_pair_right_pre_jit_returns_type_error() {
+        for arity in [0, 1, 3] {
+            let collection = |arity| {
+                Expr::Op(IrNode {
+                    opcode: 0x83,
+                    payload: Payload::ConcreteCollection {
+                        elem_type: SigmaType::STuple(vec![SigmaType::SInt; arity]),
+                        items: vec![],
+                    },
+                })
+            };
+            let ctx = ReductionContext {
+                activated_script_version: 1,
+                ..ReductionContext::minimal(500_000, 0)
+            };
+            let mut cost = CostAccumulator::recording_only();
+            let mut env = Env::new();
+            let mut depth = 0;
+            let mut trace = None;
+            let mut cx = EvalCtx {
+                ctx: &ctx,
+                constants: &[],
+                env: &mut env,
+                depth: &mut depth,
+                cost: &mut cost,
+                trace: &mut trace,
+            };
+            assert!(matches!(
+                eval_append(&collection(2), &collection(arity), &mut cx),
+                Err(EvalError::TypeError { .. })
+            ));
+        }
+    }
 }

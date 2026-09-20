@@ -126,6 +126,40 @@ def differences(enumeration: dict, ledger: dict, audit: dict) -> dict[str, list[
     return categories
 
 
+def method_differences(constants: dict, ledger: dict, audit: dict) -> list[str]:
+    """Check the JVM registry denominator against reviewed enumeration mappings.
+
+    Generated tuple methods are not in MethodsContainer.methods; this check
+    covers the extracted registry only, not the remaining tuple obligation.
+    """
+    reviewed = audit["jvm_methods"]
+    seen = set()
+    errors = []
+    for method in constants["methods"]:
+        key = f'{method["typeId"]}:{method["methodId"]}'
+        if key in seen:
+            raise ValueError(f"duplicate JVM method identity: {key}")
+        seen.add(key)
+        mapping = reviewed.get(key)
+        if mapping is None:
+            errors.append(f"{key}: JVM method has no reviewed mapping")
+            continue
+        if any(method[field] != mapping[field] for field in ("name", "versions")):
+            errors.append(f"{key}: JVM method name/version changed")
+        entry = audit["enumeration"].get(mapping["enumeration"])
+        if not entry or not entry["ledger"]:
+            errors.append(f"{key}: missing enumeration counterpart")
+            continue
+        for rid in entry["ledger"]:
+            row = ledger.get(normalize(rid))
+            if row is None or rid == "METHOD-unclaimed-inventory":
+                errors.append(f"{key}: missing concrete ledger obligation {rid}")
+            elif row["state"] == "N-A" and not row["note"].strip():
+                errors.append(f"{key}: N-A counterpart lacks rationale")
+    errors.extend(f"{key}: reviewed JVM method deleted" for key in sorted(reviewed.keys() - seen))
+    return errors
+
+
 def selftest() -> int:
     class InventoryTests(unittest.TestCase):
         def setUp(self):
@@ -225,6 +259,24 @@ def selftest() -> int:
             with self.assertRaises(ValueError):
                 ledger_rows({"rows": [{"id": "same"}, {"id": "same"}]})
 
+        def test_methods_registry_changes_reported(self):
+            method = {"typeId": 12, "methodId": 1, "name": "size", "versions": [0, 1, 2, 3]}
+            self.audit["jvm_methods"] = {"12:1": {"enumeration": "A001", "name": "size", "versions": [0, 1, 2, 3]}}
+            self.ledger["OP-0x72"].update(state="OPEN", note="")
+            def diff():
+                return method_differences({"methods": [method]}, self.ledger, self.audit)
+            self.assertEqual(diff(), [])
+            method["versions"] = [3]
+            self.assertIn("name/version changed", diff()[0])
+            method["methodId"] = 2
+            self.assertEqual(len(diff()), 2)
+
+        def test_methods_circular_inventory_mapping_rejected(self):
+            self.audit["jvm_methods"] = {"12:1": {"enumeration": "A001", "name": "size", "versions": [3]}}
+            self.audit["enumeration"]["A001"]["ledger"] = ["METHOD-unclaimed-inventory"]
+            errors = method_differences({"methods": [{"typeId": 12, "methodId": 1, "name": "size", "versions": [3]}]}, self.ledger, self.audit)
+            self.assertIn("missing concrete ledger obligation", errors[0])
+
     result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(InventoryTests))
     return 0 if result.wasSuccessful() else 1
 
@@ -234,12 +286,17 @@ def main() -> int:
     parser.add_argument("--enumeration", type=Path, default=DIRECTORY / "scala-enumeration.md")
     parser.add_argument("--ledger", type=Path, default=DIRECTORY / "ledger.toml")
     parser.add_argument("--mapping", type=Path, default=DIRECTORY / "inventory-map.json")
+    parser.add_argument("--constants", type=Path, default=DIRECTORY / "scala-constants.json")
     parser.add_argument("--selftest", action="store_true")
     args = parser.parse_args()
     if args.selftest:
         return selftest()
     try:
         result = differences(enumeration_rows(args.enumeration.read_text()), ledger_rows(tomllib.loads(args.ledger.read_text())), json.loads(args.mapping.read_text()))
+        result["JVM method inventory"] = method_differences(
+            json.loads(args.constants.read_text()),
+            ledger_rows(tomllib.loads(args.ledger.read_text())),
+            json.loads(args.mapping.read_text()))
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print(f"inventory diff: {exc}", file=sys.stderr)
         return 2

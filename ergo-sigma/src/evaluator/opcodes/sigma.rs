@@ -208,6 +208,11 @@ pub(in crate::evaluator) fn eval_exponentiate(
     add_cost(cx.cost, 0x9F)?;
     let lv = cx.eval_expr(left)?;
     let rv = cx.eval_expr(right)?;
+    exponentiate(lv, rv)
+}
+
+/// Shared signed exponentiation for the opcode and SGroupElement.exp.
+pub(in crate::evaluator) fn exponentiate(lv: Value, rv: Value) -> Result<Value, EvalError> {
     match (lv, rv) {
         (Value::GroupElement(ge_bytes), Value::BigInt(exp)) => {
             use k256::elliptic_curve::group::GroupEncoding;
@@ -588,11 +593,12 @@ pub(in crate::evaluator) fn eval_subst_constants(
     // Unpack the collection of new values into individual elements
     let value_items = unpack_collection(new_values)?;
 
-    let (result, n_template_constants) = super::super::helpers::subst_constants(
+    let (result, n_template_constants) = super::super::helpers::subst_constants_versioned(
         &script_bytes,
         &pos_vec,
         &value_items,
         cx.ctx.is_v3_ergo_tree(),
+        cx.ctx.activated_script_version >= 2,
     )?;
     // Scala's ErgoTreeSerializer.substituteConstants returns nItems =
     // number of constants in the template ErgoTree. The evaluator

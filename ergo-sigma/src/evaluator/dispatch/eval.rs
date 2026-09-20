@@ -304,7 +304,7 @@ fn eval_op(
         // Plus (+)
         (0x9A, Payload::Two(left, right)) => opcodes::arithmetic::eval_plus(left, right, &mut cx),
 
-        // BoolToSigmaProp — lenient pass-through for double-wrapped SigmaProp.
+        // BoolToSigmaProp — pre-JIT pass-through for double-wrapped SigmaProp.
         (0xD1, Payload::One(inner)) => opcodes::boolean::eval_bool_to_sigma_prop(inner, &mut cx),
 
         // AtLeast(bound, children) -> SigmaProp

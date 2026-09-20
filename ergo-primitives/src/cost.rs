@@ -243,6 +243,7 @@ pub enum CostError {
 
 /// Accumulates JitCost during evaluation, optionally enforcing a limit.
 /// The accumulator is additive-only -- there is no way to reduce the current cost.
+#[derive(Clone)]
 pub struct CostAccumulator {
     current: JitCost,
     limit: JitCost,
