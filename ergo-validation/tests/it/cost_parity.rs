@@ -653,6 +653,29 @@ mod ranges {
         }
     }
 
+    fn fixture_exists(path: &Path) -> bool {
+        path.with_extension("json.gz").exists() || path.exists()
+    }
+
+    fn read_fixture(path: &Path) -> String {
+        use std::io::Read;
+
+        let compressed = path.with_extension("json.gz");
+        match std::fs::File::open(&compressed) {
+            Ok(file) => {
+                let mut text = String::new();
+                flate2::read::GzDecoder::new(file)
+                    .read_to_string(&mut text)
+                    .unwrap_or_else(|e| panic!("{}: {e}", compressed.display()));
+                text
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+            }
+            Err(e) => panic!("{}: {e}", compressed.display()),
+        }
+    }
+
     fn run_range(
         start: u32,
         end: u32,
@@ -660,9 +683,7 @@ mod ranges {
         captured: &super::MapUtxo,
     ) -> RangeResult {
         let dir = Path::new(VECTORS_DIR);
-        let read = |name: &str| {
-            std::fs::read_to_string(dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
-        };
+        let read = |name: &str| read_fixture(&dir.join(name));
         let expected: Vec<ScalaCostVector> =
             serde_json::from_str(&read(&format!("tx_costs_{start}_{end}.json"))).unwrap();
         let mut txs: Vec<TxVector> =
@@ -675,8 +696,15 @@ mod ranges {
         );
         assert!(txs.iter().all(|tx| (start..=end).contains(&tx.height)));
         let mut headers = HashMap::new();
-        for entry in std::fs::read_dir(dir).unwrap().map(Result::unwrap) {
-            let name = entry.file_name().to_string_lossy().into_owned();
+        // Normalize both storage forms and read each header capture only once.
+        let names: std::collections::BTreeSet<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| {
+                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                name.strip_suffix(".gz").unwrap_or(&name).to_owned()
+            })
+            .collect();
+        for name in names {
             let Some(stem) = name
                 .strip_prefix("headers_")
                 .and_then(|s| s.strip_suffix(".json"))
@@ -708,9 +736,8 @@ mod ranges {
             captured,
         };
         let box_path = dir.join(format!("input_boxes_{start}_{end}.json"));
-        if box_path.exists() {
-            let boxes: Vec<NodeBox> =
-                serde_json::from_str(&std::fs::read_to_string(box_path).unwrap()).unwrap();
+        if fixture_exists(&box_path) {
+            let boxes: Vec<NodeBox> = serde_json::from_str(&read_fixture(&box_path)).unwrap();
             for b in boxes {
                 let candidate = ergo_rest_json::decode_output_with_mode(
                     &b.output,
@@ -861,9 +888,9 @@ mod ranges {
         let selection = requested.map_or_else(|| required.clone(), |r| vec![r]);
         let captured_path = Path::new(VECTORS_DIR).join("l4_boxes.json");
         let mut captured = super::MapUtxo(HashMap::new());
-        if captured_path.exists() {
+        if fixture_exists(&captured_path) {
             let boxes: Vec<super::BoxBytes> =
-                serde_json::from_str(&std::fs::read_to_string(captured_path).unwrap()).unwrap();
+                serde_json::from_str(&read_fixture(&captured_path)).unwrap();
             for b in boxes {
                 let bytes = hex::decode(b.bytes).unwrap();
                 let parsed =
