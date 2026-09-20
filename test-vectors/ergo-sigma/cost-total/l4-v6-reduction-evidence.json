@@ -1,0 +1,121 @@
+{
+  "manifest": {
+    "scala": {
+      "ergo_version": "6.0.2",
+      "sigmastate_version": "6.0.2",
+      "node_app_version": "6.0.5",
+      "source_shas": {
+        "sigma": "23dd29f612249c169d09fae9bca76d7cc02e144c",
+        "ergo": "2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1"
+      }
+    },
+    "rust": {
+      "base_git_sha": "6c2952dea696132e9de9d37fb38f72484896c55f",
+      "toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
+      "features": [
+        "ergo-validation/cost-trace"
+      ],
+      "implementation_sha256": "ae347ab9fd1e750531cbd16f58a8b00d5d12fb52ed68622703e10ba7f5698f3c"
+    },
+    "tool": {
+      "script": "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala",
+      "script_sha256": "a68d698272ab9db8029332d575745a1ef7bf2b08f83751eeefa89e7e92c06ae2",
+      "scala_cli_version": "1.12.1",
+      "jvm_version": "OpenJDK 17.0.17 Corretto-17.0.17.10.1",
+      "git_sha": "6c2952dea696132e9de9d37fb38f72484896c55f"
+    },
+    "context": {
+      "network": "mainnet",
+      "heights": [
+        1628276,
+        1628279
+      ],
+      "activated_script_version": 3,
+      "ergo_tree_version": 1,
+      "block_version": 4,
+      "voted_params": "l4-v6-reject-valid.json:parameters"
+    },
+    "run": {
+      "command": "scala-cli run scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala --server=false --suppress-outdated-dependency-warning -- verify < test-vectors/ergo-sigma/cost-total/l4-v6-reduction-requests.jsonl",
+      "timestamp": "2026-09-15T22:36:39.611700+00:00",
+      "selected": 2,
+      "executed": 2,
+      "skipped": 0,
+      "failed": 0,
+      "seeds": []
+    },
+    "evidence": {
+      "test-vectors/ergo-sigma/cost-total/l4-v6-reduction-requests.jsonl": "5e25ef1671013017090bb18962bbb931a189cfae6c921c169c29844aa4277e37",
+      "test-vectors/ergo-sigma/cost-total/l4-v6-reject-valid.json": "ea8d141a49d242dd1af61106d81fc36e61bb55cdaa2a046068c7a552bdbb430e",
+      "oracle_responses_sha256": "94bcbc871d93f388ca568827ea6300e482adcc3cd8bbd21285ea21a0e571bb93"
+    },
+    "note": "The independent full transaction oracle remains ergo 6.0.5 / sigma-state 6.0.6 in the frozen bundle. The pinned verify surface uses 6.0.2 and independently reproduces both input-0 observations. Requests serialize the frozen boxes/transaction/header context; init=0 isolates input reduction."
+  },
+  "observations": [
+    {
+      "tx_id": "c045a8c340f5916ee81d4f48534a31fb64de73a9e9aa9d7cad375aee718a2d7c",
+      "height": 1628276,
+      "input_index": 0,
+      "verify": {
+        "verdict": "Accept",
+        "eval_block_cost": 440,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 440,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|4403",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    },
+    {
+      "tx_id": "dc5073f59f78a263835902b6d29654d57dbff3f16426293d59e8d20614bc6f95",
+      "height": 1628279,
+      "input_index": 0,
+      "verify": {
+        "verdict": "Accept",
+        "eval_block_cost": 514,
+        "crypto_block_cost": 0,
+        "rent_block_cost": 0,
+        "rent_path": false,
+        "total_block_cost": 514,
+        "failure_class": null,
+        "rejection_detail": "",
+        "legacy": "P:d3|5143",
+        "evaluator_failure_block_cost": "unavailable"
+      }
+    }
+  ],
+  "root_cause": {
+    "mapper": "box => box.tokens(0)._1",
+    "first_wrong_value": "MapCollection(0xAD) produces CollGeneric([], SAny) instead of CollGeneric([], SColl(SByte)); no context field differs.",
+    "first_wrong_boolean": "EQ(0x93) compares that empty map against CollGeneric([], SColl(SByte)) and returns false after MatchType.",
+    "rust_before": {
+      "sigma_prop": "TrivialProp(false)",
+      "eval_block_cost": [
+        374,
+        448
+      ],
+      "crypto_block_cost": [
+        0,
+        0
+      ]
+    },
+    "rust_after": {
+      "sigma_prop": "TrivialProp(true)",
+      "eval_block_cost": [
+        440,
+        514
+      ],
+      "crypto_block_cost": [
+        0,
+        0
+      ],
+      "transaction_block_cost": [
+        23851,
+        23925
+      ]
+    }
+  }
+}

@@ -4,6 +4,7 @@
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/op-per-item/
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/eval/
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/method/
+//! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/context/last-block-utxo-root.json.gz
 //! Generator: scripts/gen-cost-fixture.sh (JVM verify)
 //!
 //! UTF-8 JSON request bytes, with the JVM's exact field names and embedded
@@ -786,5 +787,68 @@ fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
     }
     eprintln!("cost fixtures: selected={selected} executed={selected} skipped=0 failed={failed} known_divergent={known_divergent}");
     ensure!(failed == 0, "{failed} cost fixtures diverged");
+    Ok(())
+}
+
+// ledger: OP-0xA6, METHOD-context-lastBlockUtxoRootHash
+#[test]
+fn last_block_utxo_root_real_headers_matches_jvm() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-vectors/ergo-sigma");
+    let path = root.join("cost-ledger/fixtures/context/last-block-utxo-root.json.gz");
+    let document: Value = serde_json::from_slice(&read_fixture(&path)?)?;
+    let source: Value = serde_json::from_slice(&std::fs::read(
+        root.join("cost-total/breakdown_900058_900058.json"),
+    )?)?;
+    let ledger: Ledger = toml::from_str(&std::fs::read_to_string(
+        root.join("cost-ledger/ledger.toml"),
+    )?)?;
+    let headers: Vec<Value> = source["headers"]
+        .as_array()
+        .context("mainnet headers")?
+        .iter()
+        .rev()
+        .filter(|h| h["height"].as_u64().is_some_and(|height| height < 900058))
+        .map(|h| h["bytes"].clone())
+        .collect();
+    assert_eq!(headers.len(), 9);
+    let digest = source["contexts"]["900058"]["previous_state_digest"]
+        .as_str()
+        .context("mainnet previous state digest")?;
+    let cases = document["cases"].as_array().context("root cases")?;
+    assert_eq!(cases.len(), 4);
+    for (index, case) in cases.iter().enumerate() {
+        // Both serialized accessors compare the digest to independently
+        // extracted mainnet bytes; no-header controls must reject on the JVM.
+        let accessor = if index < 2 { "a6" } else { "db6509fe" };
+        assert_eq!(
+            case["request"]["tree_hex"],
+            format!("00d193db6401{accessor}0e21{digest}")
+        );
+        let real_headers = index % 2 == 0;
+        assert_eq!(
+            case["request"]["headers_hex"],
+            if real_headers {
+                json!(headers)
+            } else {
+                json!([])
+            }
+        );
+        assert_eq!(
+            case["expected"]["verdict"],
+            if real_headers {
+                "Accept"
+            } else {
+                "RejectScript"
+            }
+        );
+        let mut fixture = case.clone();
+        fixture["manifest"] = document["manifest"].clone();
+        fixture["ledger"] = document["ledger"].clone();
+        assert!(!verify_fixture(
+            &path,
+            serde_json::from_value(fixture)?,
+            &ledger
+        )?);
+    }
     Ok(())
 }

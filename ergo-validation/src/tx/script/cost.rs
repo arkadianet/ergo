@@ -65,6 +65,19 @@ pub fn compute_tx_init_cost_with_costs(
         .saturating_add(out_distinct)
         .saturating_mul(token_access_cost);
 
+    #[cfg(feature = "cost-trace")]
+    {
+        ergo_sigma::cost_trace::record(
+            "TxInit",
+            structural.saturating_mul(10),
+            structural.saturating_mul(10),
+        );
+        ergo_sigma::cost_trace::record(
+            "TxToken",
+            token_cost.saturating_mul(10),
+            structural.saturating_add(token_cost).saturating_mul(10),
+        );
+    }
     structural.saturating_add(token_cost)
 }
 
