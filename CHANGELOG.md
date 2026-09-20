@@ -18,6 +18,15 @@ infrastructure.
 
 ### Security
 
+- Fix Downcast widening and identity conversions (reject-valid).
+- Support signed GroupElement.exp method id 3 (reject-valid).
+- Reject checkPow on Autolykos v1 headers after charging (accept-invalid).
+- Reject empty-argument MethodCall in tree v3 (accept-invalid).
+- Enforce the tree-v3 BigInt division result range (accept-invalid).
+- Reject failed AVL inserts on pre-v3 trees at activation 3 (accept-invalid).
+- Reject out-of-range ConstantPlaceholder indices at parse (accept-invalid).
+- Restore charged pre-v3 ByIndex Byte-index Upcast (reject-valid).
+- Reject pre-v3 SFunc type descriptors (accept-invalid).
 - Restrict `POST /blocks` full-block submission to explicitly opted-in devnets.
   Every release up to and including v0.7.0 exposed this unauthenticated
   submission surface on mainnet and testnet. Submitted blocks still required
@@ -26,6 +35,14 @@ infrastructure.
 
 ### Fixed
 
+- Parse all four CreateAvlTree operands before evaluation rejects the node.
+- Reject non-Boolean BoolToSigmaProp after JIT activation and its charge.
+- Preserve pre-JIT xorOf distinct-value semantics.
+- Preserve pre-JIT pair append failures and unequal zip-column alignment.
+- Reject BigInt identity Upcast before tree v3 after its charge.
+- Check pre-A6 substitution cost limits before discarding successful charges.
+- Preserve pre-JIT SubstConstants count and size bytes.
+- Charge HOF overhead after function construction, before closure invocation.
 - Mining emission-box discovery tracks lineage instead of assuming
   `transactions[0].outputs[0]`. On first start after upgrade, synchronous
   recovery scans at most 4096 blocks / 32 MiB. Mainnet post-EIP-27 tips resolve
