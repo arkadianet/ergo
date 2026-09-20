@@ -102,6 +102,16 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
             output["failure_class"] = json!("sigma.serialization.SerializerException");
             return Ok(());
         }
+        Err(error)
+            if matches!(
+                error.downcast_ref::<ergo_primitives::reader::ReadError>(),
+                Some(ergo_primitives::reader::ReadError::HardReject(reason))
+                    if reason == "MethodCall requires nonempty arguments (Scala AssertionError)"
+            ) =>
+        {
+            output["failure_class"] = json!("java.lang.AssertionError");
+            return Ok(());
+        }
         Err(error) => return Err(error),
     };
     ergo_tree::check_header_size_bit(&tree)?;

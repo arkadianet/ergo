@@ -302,6 +302,11 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
             for _ in 0..n_args {
                 args.push(parse_expr(r, next, _tree_version)?);
             }
+            if _tree_version >= 3 && args.is_empty() {
+                return Err(ReadError::HardReject(
+                    "MethodCall requires nonempty arguments (Scala AssertionError)".into(),
+                ));
+            }
             // Unresolved-method checkpoint: Scala's `MethodCallSerializer.parse`
             // resolves the method (and throws a `ValidationException` when it is not
             // in this tree-version's registry) right after the receiver and value
@@ -480,7 +485,22 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
 
         ArgPattern::ByIndex => {
             let input = parse_expr(r, next, _tree_version)?;
-            let index = parse_expr(r, next, _tree_version)?;
+            let mut index = parse_expr(r, next, _tree_version)?;
+            // Scala ByIndexSerializer inserts a charged Upcast before v3.
+            if _tree_version < 3
+                && matches!(
+                    crate::ergo_tree::substitution_type_of(&index),
+                    Some(SigmaType::SByte | SigmaType::SShort)
+                )
+            {
+                index = Expr::Op(IrNode {
+                    opcode: 0x7E,
+                    payload: Payload::NumericCast {
+                        input: Box::new(index),
+                        tpe: SigmaType::SInt,
+                    },
+                });
+            }
             let has_default = r.get_u8()?;
             let default = if has_default != 0 {
                 Some(Box::new(parse_expr(r, next, _tree_version)?))
