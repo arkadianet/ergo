@@ -239,21 +239,11 @@ pub fn verify_spending_proof_with_context_and_cost(
     super::evaluator::pre_reduction_checks(ctx, &ergo_tree.constants, &ergo_tree.body)
         .map_err(VerifySpendingError::Eval)?;
 
-    // Deserialize-substitution cost (Scala `Interpreter.reductionWithDeserialize`,
-    // Interpreter.scala:240-260): a tree that CONTAINS a DeserializeContext /
-    // DeserializeRegister node adds `ergoTree.bytes.length * CostPerTreeByte(2)`
-    // to `initCost`. It is UNCONDITIONAL on `hasDeserialize` — charged even
-    // when the deserialize node is on a dead branch or its context var is
-    // absent (so it is NOT the per-substitution `deserializeMeasured` cost,
-    // which only fires when a node is actually substituted). Gated on V6
-    // activation (`isV6Activated == activatedVersion >= V6SoftForkVersion(3)`):
-    // pre-V6 the charge was not added (Interpreter.scala:250-259). Block-cost
-    // domain (added to initCost, not JIT-scaled), so charged via
-    // `from_block_cost`. Added before the eval baseline to mirror Scala adding
-    // it to `initCost` ahead of reduction.
-    if ctx.activated_script_version >= V6_SOFT_FORK_VERSION
-        && super::evaluator::expr_has_deserialize(&ergo_tree.body)
-    {
+    // Interpreter.scala:246-259 checks initCost + 2*ergoTree.bytes.length
+    // before choosing context1 or context. VersionContext.current.isV6Activated
+    // (activation >= 3) retains the charge; earlier activation discards it only
+    // AFTER the limit check, even for deserialize nodes on dead branches.
+    if super::evaluator::expr_has_deserialize(&ergo_tree.body) {
         // Scala costs `ergoTree.bytes.length` — the ORIGINAL bytes the tree was
         // deserialized from (`ErgoTree.propositionBytes`, Interpreter.scala:246),
         // NOT a re-serialization. On the consensus spend path `self_box` is the
@@ -272,8 +262,14 @@ pub fn verify_spending_proof_with_context_and_cost(
         let subst_block_cost = (tree_len as u64).saturating_mul(COST_PER_TREE_BYTE);
         let subst = JitCost::from_block_cost(subst_block_cost)
             .map_err(|e| VerifySpendingError::Eval(CostError::from(e).into()))?;
-        cost.add(subst)
-            .map_err(|e| VerifySpendingError::Eval(e.into()))?;
+        let mut substituted_cost = cost.clone();
+        let checked = substituted_cost.add(subst);
+        if checked.is_err() || ctx.activated_script_version >= V6_SOFT_FORK_VERSION {
+            // Preserve charged-to-failure cost, including the discarded-context
+            // branch; the successful pre-A6 path keeps the original accumulator.
+            *cost = substituted_cost;
+        }
+        checked.map_err(|e| VerifySpendingError::Eval(e.into()))?;
     }
 
     // Record baseline so we can snap eval cost to block boundary later.
