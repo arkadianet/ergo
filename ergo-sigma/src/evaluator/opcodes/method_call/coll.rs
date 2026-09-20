@@ -179,7 +179,7 @@ pub(super) fn zip(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
 // form the compiler emits — and the 0xDC no-arg fallthrough).
 // SColl(12).startsWith(31) / endsWith(32) -> Boolean
 // EIP-50 v6 methods. Scala cost is `Zip_CostKind`
-// (`PerItemCost(10, 1, 10)`) over the prefix/suffix length.
+// (`PerItemCost(10, 1, 10)`) over the receiver length.
 // Element comparison uses `values_equal` to match the
 // generic-comparison semantics seen elsewhere.
 pub(super) fn starts_ends_with(
@@ -190,9 +190,9 @@ pub(super) fn starts_ends_with(
 ) -> Result<Value, EvalError> {
     check_arity(args, 1)?;
     let prefix_val = cx.eval_expr(&args[0])?;
-    let pn = collection_len(&prefix_val, cx.ctx) as u32;
+    let receiver_len = collection_len(&obj_val, cx.ctx) as u32;
     let cmp_cost = COST_STARTS_ENDS_WITH;
-    cx.cost.add(cmp_cost.compute(pn)?)?;
+    cx.cost.add(cmp_cost.compute(receiver_len)?)?;
     let (_ka, a) = collection_to_values(obj_val, cx.ctx)?;
     let (_kb, b) = collection_to_values(prefix_val, cx.ctx)?;
     if b.len() > a.len() {

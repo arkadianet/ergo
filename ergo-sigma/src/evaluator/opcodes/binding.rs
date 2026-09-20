@@ -199,8 +199,8 @@ pub(in crate::evaluator) fn eval_if(
     else_br: &Expr,
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
-    add_cost(cx.cost, 0x95)?;
     let c = cx.eval_expr(cond)?;
+    add_cost(cx.cost, 0x95)?;
     if let Some(t) = cx.trace.as_mut() {
         t.push(TraceEntry {
             label: "If condition".into(),

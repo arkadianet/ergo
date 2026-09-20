@@ -427,7 +427,6 @@ pub(in crate::evaluator) fn eval_property_call(
     obj: &Expr,
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
-    add_cost(cx.cost, 0xDB)?;
     // Soft-fork activation gate for EIP-50 / Sigma 6.0 methods reached
     // via PropertyCall (e.g. `SGlobal.none`, a zero-arg v6 method).
     // Mirrors the gate in `eval_method_call` and shares the single v6
@@ -438,6 +437,7 @@ pub(in crate::evaluator) fn eval_property_call(
         cx.ctx.require_method_version(type_id, method_id, 3)?;
     }
     let obj_val = cx.eval_expr(obj)?;
+    add_cost(cx.cost, 0xDB)?;
     match eval_no_arg_method(type_id, method_id, &obj_val, cx.ctx, cx.cost)? {
         Some(v) => Ok(v),
         None => Err(EvalError::TypeError {
