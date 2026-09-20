@@ -3,6 +3,10 @@
 //! (used here and by `unsigned_bigint`) lives in the sibling `unsigned_bigint`
 //! module; `expect_bigint` is private to this file.
 
+pub const COST_BITWISE: u64 = 5;
+pub const COST_SHIFT: u64 = 5;
+pub const COST_TO_UNSIGNED_MOD: u64 = 15;
+
 use ergo_ser::opcode::Expr;
 
 use super::check_arity;
@@ -40,7 +44,7 @@ pub(super) fn bitwise(
 ) -> Result<Value, EvalError> {
     check_arity(args, 1)?;
     let rhs_val = cx.eval_expr(&args[0])?;
-    add_method_cost(cx.cost, 5)?;
+    add_method_cost(cx.cost, COST_BITWISE)?;
     let op = method_id; // 9=or, 10=and, 11=xor
     let bin_byte = |a: i8, b: i8| -> i8 {
         match op {
@@ -107,7 +111,7 @@ pub(super) fn shift(
             })
         }
     };
-    add_method_cost(cx.cost, 5)?;
+    add_method_cost(cx.cost, COST_SHIFT)?;
     let is_left = method_id == 12;
     // Scala ExactIntegral.shiftLeft/shiftRight REJECT an
     // out-of-range count: they throw IllegalArgumentException
@@ -205,7 +209,7 @@ pub(super) fn to_unsigned_mod(
     let signed = expect_bigint(&obj_val, "SBigInt.toUnsignedMod receiver")?;
     let m_val = cx.eval_expr(&args[0])?;
     let m = expect_unsigned_bigint(&m_val, "SBigInt.toUnsignedMod modulus")?;
-    add_method_cost(cx.cost, 15)?;
+    add_method_cost(cx.cost, COST_TO_UNSIGNED_MOD)?;
     if m.sign() == num_bigint::Sign::NoSign {
         return Err(EvalError::RuntimeException(
             "SBigInt.toUnsignedMod: modulus is zero",

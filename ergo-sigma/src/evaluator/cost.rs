@@ -184,12 +184,7 @@ fn add_coll_box_eq_cost(
     // MatchType for collection dispatch in equalDataValues (1 only, no inner dispatch)
     cost.add(JitCost::from_jit(1))?;
     if colls_match_len {
-        let delta = CostKind::PerItem {
-            base: JitCost::from_jit(15),
-            per_chunk: JitCost::from_jit(5),
-            chunk_size: 1,
-        }
-        .compute(n)?;
+        let delta = crate::cost_table::EQ_COA_BOX.compute(n)?;
         cost.add(delta)?;
     }
     Ok(())
@@ -231,28 +226,22 @@ fn coll_len(v: &Value, ctx: &ReductionContext<'_>) -> usize {
 /// AvlTree (15,5,2), PreHeader (15,3,1).
 fn descriptor_cost_kind(elem: &ergo_ser::sigma_type::SigmaType) -> Option<CostKind> {
     use ergo_ser::sigma_type::SigmaType as T;
-    let pic = |per_chunk: u64, chunk_size: u32| CostKind::PerItem {
-        base: JitCost::from_jit(15),
-        per_chunk: JitCost::from_jit(per_chunk),
-        chunk_size,
-    };
     Some(match elem {
-        T::SBoolean | T::SByte => pic(2, 128),
-        T::SShort => pic(2, 96),
-        T::SInt => pic(2, 64),
-        T::SLong => pic(2, 48),
-        T::SBigInt | T::SUnsignedBigInt => pic(7, 5),
-        T::SGroupElement => pic(5, 1),
-        T::SAvlTree => pic(5, 2),
-        T::SBox => pic(5, 1),
-        T::SPreHeader => pic(3, 1),
-        T::SHeader => pic(5, 1),
-        // No Scala descriptor for SigmaProp; our typed `CollSigmaProp`
-        // carrier has historically costed (15,5,1) and no vector exercises
-        // a `Coll[SigmaProp]` equality, so keep parity here pending a vector.
-        T::SSigmaProp => pic(5, 1),
-        // SColl/SOption/STuple/SAny/SString/SContext/SGlobal/SFunc/STypeVar/
-        // SUnit/SReserved* → equalColls fallback (no descriptor).
+        T::SBoolean => crate::cost_table::EQ_COA_BOOLEAN,
+        T::SByte => crate::cost_table::EQ_COA_BYTE,
+        T::SShort => crate::cost_table::EQ_COA_SHORT,
+        T::SInt => crate::cost_table::EQ_COA_INT,
+        T::SLong => crate::cost_table::EQ_COA_LONG,
+        T::SBigInt => crate::cost_table::EQ_COA_BIG_INT,
+        T::SUnsignedBigInt => crate::cost_table::EQ_COA_UNSIGNED_BIG_INT,
+        T::SGroupElement => crate::cost_table::EQ_COA_GROUP_ELEMENT,
+        T::SAvlTree => crate::cost_table::EQ_COA_AVL_TREE,
+        T::SBox => crate::cost_table::EQ_COA_BOX,
+        T::SPreHeader => crate::cost_table::EQ_COA_PRE_HEADER,
+        T::SHeader => crate::cost_table::EQ_COA_HEADER,
+        // Rust has a SigmaProp descriptor; the JVM registry has none.
+        // EVAL-eq-coll-sigmaprop-descriptor tracks the formula obligation.
+        T::SSigmaProp => crate::cost_table::EQ_COA_SIGMA_PROP,
         _ => return None,
     })
 }
@@ -411,11 +400,7 @@ fn eq_with_cost_inner(
                             break;
                         }
                     }
-                    let eq_coll = CostKind::PerItem {
-                        base: JitCost::from_jit(10),
-                        per_chunk: JitCost::from_jit(2),
-                        chunk_size: 1,
-                    };
+                    let eq_coll = crate::cost_table::EQ_COLL;
                     cost.add(eq_coll.compute(k_eff)?)?;
                     Ok(all_eq)
                 }
@@ -572,11 +557,7 @@ fn eq_coll_elems(
             break;
         }
     }
-    let eq_coll = CostKind::PerItem {
-        base: JitCost::from_jit(10),
-        per_chunk: JitCost::from_jit(2),
-        chunk_size: 1,
-    };
+    let eq_coll = crate::cost_table::EQ_COLL;
     cost.add(eq_coll.compute(k_eff)?)?;
     Ok(all_eq)
 }

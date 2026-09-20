@@ -49,9 +49,8 @@ use ergo_sigma::reduce::{verify_spending_proof_with_context_and_cost, VerifySpen
 
 use crate::error::ValidationError;
 use crate::tx::TxValidationCtx;
-use storage_rent_check::{
-    check_storage_rent, is_storage_rent_eligible, STORAGE_CONTRACT_COST, STORAGE_INDEX_VAR_ID,
-};
+pub use storage_rent_check::STORAGE_CONTRACT_COST;
+use storage_rent_check::{check_storage_rent, is_storage_rent_eligible, STORAGE_INDEX_VAR_ID};
 
 /// Map a `VerifySpendingError` from the script evaluator onto the
 /// validation envelope, preserving JitCost arithmetic overflow as a

@@ -2,6 +2,8 @@
 //! file: SBox(99).getRegV5(7)/getReg(19), SContext(101).getVarFromInput(12),
 //! SHeader(104).checkPow(16), and SGroupElement(7).exp(6).
 
+pub const COST_EXP: u64 = 900;
+
 use ergo_ser::opcode::Expr;
 use ergo_ser::sigma_type::SigmaType;
 
@@ -234,7 +236,7 @@ pub(super) fn exp(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
             })
         }
     };
-    add_method_cost(cx.cost, 900)?;
+    add_method_cost(cx.cost, COST_EXP)?;
 
     use k256::elliptic_curve::group::GroupEncoding;
     use k256::elliptic_curve::ops::Reduce;

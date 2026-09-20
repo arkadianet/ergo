@@ -5,6 +5,9 @@
 //! helpers (`AvlEntries`, `AvlMutOp`, `extract_avl_entries`, `extract_avl_keys`,
 //! `eval_avl_mutate`).
 
+pub const COST_UPDATE_OPERATIONS: u64 = 45;
+pub const COST_UPDATE_DIGEST: u64 = 40;
+
 use ergo_primitives::cost::{CostKind, JitCost};
 use ergo_ser::opcode::Expr;
 use ergo_ser::sigma_type::SigmaType;
@@ -508,7 +511,7 @@ pub(super) fn update_digest(
             })
         }
     };
-    cx.cost.add(JitCost::from_jit(40))?; // updateDigest FixedCost
+    cx.cost.add(JitCost::from_jit(COST_UPDATE_DIGEST))?; // updateDigest FixedCost
     updated.digest = new_digest;
     Ok(Value::AvlTree(updated))
 }
@@ -547,7 +550,7 @@ pub(super) fn update_operations(
             })
         }
     };
-    cx.cost.add(JitCost::from_jit(45))?; // updateOperations FixedCost
+    cx.cost.add(JitCost::from_jit(COST_UPDATE_OPERATIONS))?; // updateOperations FixedCost
     updated.insert_allowed = flags & 0x01 != 0;
     updated.update_allowed = flags & 0x02 != 0;
     updated.remove_allowed = flags & 0x04 != 0;

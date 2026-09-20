@@ -78,6 +78,11 @@ pub enum JitCostError {
 }
 
 impl JitCost {
+    /// Truncate a JIT cost to a block-unit multiple before adding it to a total.
+    pub const fn from_jit_block_aligned(c: JitCost) -> JitCost {
+        JitCost(c.0 - c.0 % 10)
+    }
+
     /// Zero cost, used as the initial accumulator value.
     pub const ZERO: JitCost = JitCost(0);
 
@@ -337,6 +342,27 @@ impl CostAccumulator {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    // ----- happy path -----
+
+    // Arithmetic-only test; consensus expectations come from the JVM vector.
+    #[test]
+    fn from_jit_block_aligned_drops_remainder() {
+        for (input, expected) in [
+            (0, 0),
+            (9, 0),
+            (10, 10),
+            (3980, 3980),
+            (7975, 7970),
+            (11993, 11990),
+            (2_147_483_647, 2_147_483_640),
+        ] {
+            assert_eq!(
+                JitCost::from_jit_block_aligned(JitCost(input)),
+                JitCost(expected)
+            );
+        }
+    }
 
     #[test]
     fn jit_cost_from_block_cost() {

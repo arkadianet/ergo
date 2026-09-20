@@ -1,0 +1,5212 @@
+{
+  "constants" : {
+    "CErgoTreeEvaluator.DataBlockSize" : {
+      "source" : "jvm",
+      "units" : "bytes",
+      "value" : 512
+    },
+    "Constants.StorageContractCost" : {
+      "source" : "jvm",
+      "units" : "block",
+      "value" : 50
+    },
+    "DataValueComparer.CostOf_MatchType" : {
+      "source" : "jvm",
+      "units" : "jit",
+      "value" : 1
+    },
+    "DataValueComparer.EQ_AvlTree" : {
+      "costKind" : {
+        "base" : 6,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "source" : "reflection"
+    },
+    "DataValueComparer.EQ_BigInt" : {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "source" : "reflection"
+    },
+    "DataValueComparer.EQ_Box" : {
+      "costKind" : {
+        "base" : 6,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "source" : "reflection"
+    },
+    "DataValueComparer.EQ_COA_AvlTree" : {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : 2,
+        "kind" : "PerItem",
+        "perChunk" : 5
+      },
+      "source" : "reflection"
+    },
+    "DataValueComparer.EQ_COA_BigInt" : {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : 5,
+        "kind" : "PerItem",
+        "perChunk" : 7
+      },
+      "source" : "reflection"
+    },
+    "DataValueComparer.EQ_COA_Boolean" : {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : 128,
+        "kind" : "PerItem",
+        "perChunk" : 2
+      },
+      "source" : "reflection"
+    },
+    "DataValueComparer.EQ_COA_Box" : {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : 1,
+        "kind" : "PerItem",
+        "perChunk" : 5
+      },
+      "source" : "reflection"
+    },
+    "DataValueComparer.EQ_COA_Byte" : {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : 128,
+        "kind" : "PerItem",
+        "perChunk" : 2
+      },
+      "source" : "reflection"
+    },
+    "DataValueComparer.EQ_COA_GroupElement" : {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : 1,
+        "kind" : "PerItem",
+        "perChunk" : 5
+      },
+      "source" : "reflection"
+    },
+    "DataValueComparer.EQ_COA_Header" : {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : 1,
+        "kind" : "PerItem",
+        "perChunk" : 5
+      },
+      "source" : "reflection"
+    },
+    "DataValueComparer.EQ_COA_Int" : {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : 64,
+        "kind" : "PerItem",
+        "perChunk" : 2
+      },
+      "source" : "reflection"
+    },
+    "DataValueComparer.EQ_COA_Long" : {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : 48,
+        "kind" : "PerItem",
+        "perChunk" : 2
+      },
+      "source" : "reflection"
+    },
+    "DataValueComparer.EQ_COA_PreHeader" : {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : 1,
+        "kind" : "PerItem",
+        "perChunk" : 3
+      },
+      "source" : "reflection"
+    },
+    "DataValueComparer.EQ_COA_Short" : {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : 96,
+        "kind" : "PerItem",
+        "perChunk" : 2
+      },
+      "source" : "reflection"
+    },
+    "DataValueComparer.EQ_Coll" : {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : 1,
+        "kind" : "PerItem",
+        "perChunk" : 2
+      },
+      "source" : "reflection"
+    },
+    "DataValueComparer.EQ_GroupElement" : {
+      "costKind" : {
+        "base" : 172,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "source" : "reflection"
+    },
+    "DataValueComparer.EQ_Header" : {
+      "costKind" : {
+        "base" : 6,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "source" : "reflection"
+    },
+    "DataValueComparer.EQ_Option" : {
+      "costKind" : {
+        "base" : 4,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "source" : "reflection"
+    },
+    "DataValueComparer.EQ_PreHeader" : {
+      "costKind" : {
+        "base" : 4,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "source" : "reflection"
+    },
+    "DataValueComparer.EQ_Prim" : {
+      "costKind" : {
+        "base" : 3,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "source" : "reflection"
+    },
+    "DataValueComparer.EQ_Tuple" : {
+      "costKind" : {
+        "base" : 4,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "source" : "reflection"
+    },
+    "DataValueComparer.MatchType" : {
+      "costKind" : {
+        "base" : 1,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "source" : "reflection"
+    },
+    "ErgoInterpreter.interpreterInitCost" : {
+      "source" : "jvm",
+      "units" : "block",
+      "value" : 10000
+    },
+    "FiatShamirTree.ToBytes_DHT" : {
+      "costKind" : {
+        "base" : 680,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "source" : "reflection"
+    },
+    "FiatShamirTree.ToBytes_ProofTreeConjecture" : {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "source" : "reflection"
+    },
+    "FiatShamirTree.ToBytes_Schnorr" : {
+      "costKind" : {
+        "base" : 570,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "source" : "reflection"
+    },
+    "Interpreter.ComputeCommitments_DHT" : {
+      "costKind" : {
+        "base" : 6450,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "source" : "reflection"
+    },
+    "Interpreter.ComputeCommitments_Schnorr" : {
+      "costKind" : {
+        "base" : 3400,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "source" : "reflection"
+    },
+    "Interpreter.CostPerByteDeserialized" : {
+      "source" : "jvm",
+      "units" : "block/byte",
+      "value" : 2
+    },
+    "Interpreter.CostPerTreeByte" : {
+      "source" : "jvm",
+      "units" : "block/byte",
+      "value" : 2
+    },
+    "Interpreter.Eval_SigmaPropConstant" : {
+      "costKind" : {
+        "base" : 50,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "source" : "reflection"
+    },
+    "Interpreter.ProveDHTupleVerificationCost" : {
+      "source" : "jvm",
+      "units" : "jit",
+      "value" : 7140
+    },
+    "Interpreter.ProveDlogVerificationCost" : {
+      "source" : "jvm",
+      "units" : "jit",
+      "value" : 3980
+    },
+    "Interpreter.interpreterInitCost" : {
+      "source" : "jvm",
+      "units" : "block",
+      "value" : 10000
+    },
+    "JitCost.MaxBlockCost" : {
+      "scala" : "sigmastate v6.0.2 data/shared/src/main/scala/sigma/ast/JitCost.scala:10-39",
+      "source" : "jvm-derived",
+      "units" : "block",
+      "value" : 214748364
+    },
+    "JitCost.MaxValue" : {
+      "scala" : "sigmastate v6.0.2 data/shared/src/main/scala/sigma/ast/JitCost.scala:10-39",
+      "source" : "jvm-derived",
+      "units" : "jit",
+      "value" : 2147483647
+    },
+    "JitCost.MinValue" : {
+      "scala" : "sigmastate v6.0.2 data/shared/src/main/scala/sigma/ast/JitCost.scala:10-39",
+      "source" : "jvm-derived",
+      "units" : "jit",
+      "value" : -2147483648
+    },
+    "JitCost.Scale" : {
+      "source" : "jvm",
+      "units" : "jit/block",
+      "value" : 10
+    },
+    "SigSerializer.EvaluatePolynomial" : {
+      "costKind" : {
+        "base" : 3,
+        "chunkSize" : 1,
+        "kind" : "PerItem",
+        "perChunk" : 3
+      },
+      "source" : "reflection"
+    },
+    "SigSerializer.ParseChallenge_ProveDHT" : {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "source" : "reflection"
+    },
+    "SigSerializer.ParseChallenge_ProveDlog" : {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "source" : "reflection"
+    },
+    "SigSerializer.ParsePolynomial" : {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : 1,
+        "kind" : "PerItem",
+        "perChunk" : 10
+      },
+      "source" : "reflection"
+    }
+  },
+  "containers" : [
+    {
+      "name" : "SBooleanMethods",
+      "typeId" : 1,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "wireReceiverVersions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name" : "SByteMethods",
+      "typeId" : 2,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "wireReceiverVersions" : [
+        3
+      ]
+    },
+    {
+      "name" : "SShortMethods",
+      "typeId" : 3,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "wireReceiverVersions" : [
+        3
+      ]
+    },
+    {
+      "name" : "SIntMethods",
+      "typeId" : 4,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "wireReceiverVersions" : [
+        3
+      ]
+    },
+    {
+      "name" : "SLongMethods",
+      "typeId" : 5,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "wireReceiverVersions" : [
+        3
+      ]
+    },
+    {
+      "name" : "SBigIntMethods",
+      "typeId" : 6,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "wireReceiverVersions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name" : "SGroupElementMethods",
+      "typeId" : 7,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "wireReceiverVersions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name" : "SSigmaPropMethods",
+      "typeId" : 8,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "wireReceiverVersions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name" : "SUnsignedBigIntMethods",
+      "typeId" : 9,
+      "versions" : [
+        3
+      ],
+      "wireReceiverVersions" : [
+        3
+      ]
+    },
+    {
+      "name" : "SCollectionMethods",
+      "typeId" : 12,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "wireReceiverVersions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name" : "SOptionMethods",
+      "typeId" : 36,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "wireReceiverVersions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name" : "STupleMethods",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "wireReceiverVersions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name" : "SAnyMethods",
+      "typeId" : 97,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "wireReceiverVersions" : [
+      ]
+    },
+    {
+      "name" : "SUnitMethods",
+      "typeId" : 98,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "wireReceiverVersions" : [
+      ]
+    },
+    {
+      "name" : "SBoxMethods",
+      "typeId" : 99,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "wireReceiverVersions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name" : "SAvlTreeMethods",
+      "typeId" : 100,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "wireReceiverVersions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name" : "SContextMethods",
+      "typeId" : 101,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "wireReceiverVersions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name" : "SStringMethods",
+      "typeId" : 102,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "wireReceiverVersions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name" : "SHeaderMethods",
+      "typeId" : 104,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "wireReceiverVersions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name" : "SPreHeaderMethods",
+      "typeId" : 105,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "wireReceiverVersions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name" : "SGlobalMethods",
+      "typeId" : 106,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "wireReceiverVersions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    }
+  ],
+  "manifest" : {
+    "context" : {
+      "activated_script_version" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "block_version" : null,
+      "devnet_chain_id" : null,
+      "ergo_tree_version" : [
+        0,
+        1,
+        2,
+        3
+      ],
+      "height_range" : null,
+      "network" : "source-constants",
+      "voted_params" : {
+        "4" : null,
+        "5" : null,
+        "6" : null,
+        "7" : null,
+        "8" : null
+      }
+    },
+    "evidence" : {
+      "artifacts" : [
+        {
+          "file" : "sigma-state_2.12-6.0.2.jar",
+          "sha256" : "0dbd3b31ef94affec83f8f0f6c5a9891c45da1e975ff6016a0574fc5aa1418e6"
+        },
+        {
+          "file" : "ergo-wallet_2.12.jar",
+          "sha256" : "dfa0ce2760ee471d23354f032a68b1b9b0dcf986b239805ecda9aef156617425"
+        },
+        {
+          "file" : "circe-core_2.12-0.13.0.jar",
+          "sha256" : "20a179d6de105a6ad48242aaec153696beabdff14e4903ad44b3a0c13dcad558"
+        }
+      ],
+      "input_vectors" : [
+      ],
+      "note" : "Whole-file SHA-256 is recorded in scala-constants.json.sha256 (avoids self-reference).",
+      "output" : {
+        "file" : "test-vectors/ergo-sigma/cost-ledger/scala-constants.json",
+        "hash_scope" : "UTF-8 circe spaces2 sorted-key JSON excluding manifest and final newline (avoids self-reference)",
+        "sha256" : "6f3cbb5d569a3b4e2a2f31c9c72dfa0ae10f0cf1805a5f9925ff813eed302225"
+      }
+    },
+    "excluded" : [
+    ],
+    "run" : {
+      "command_line" : "scala-cli run scripts/jvm_cost_constants_extractor/CostConstants.scala --server=false --jvm system -- 62305d0f266eafa8ed4a960f75f6bc754a18629f 2026-09-15T13:41:22Z",
+      "executed" : 346,
+      "failed" : 0,
+      "seeds" : [
+      ],
+      "selected" : 346,
+      "skipped" : 0,
+      "timestamp" : "2026-09-15T13:41:22Z",
+      "timestamp_basis" : "explicit capture timestamp; reuse for byte-identical regeneration"
+    },
+    "rust" : {
+      "features" : [
+      ],
+      "git_sha" : "62305d0f266eafa8ed4a960f75f6bc754a18629f",
+      "toolchain" : "rustc 1.95.0 (59807616e 2026-04-14)"
+    },
+    "scala" : {
+      "ergo_version" : "6.0.2",
+      "node_app_version" : null,
+      "sigmastate_version" : "6.0.2",
+      "source_shas" : {
+        "ergo" : "2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1",
+        "sigmastate" : "23dd29f612249c169d09fae9bca76d7cc02e144c"
+      }
+    },
+    "tool" : {
+      "git_sha" : "62305d0f266eafa8ed4a960f75f6bc754a18629f",
+      "jvm_version" : "17.0.17+10-LTS",
+      "scala_cli_version" : "1.12.1",
+      "scala_version" : "2.12.21",
+      "script" : "scripts/jvm_cost_constants_extractor/CostConstants.scala",
+      "script_sha256" : "586d1bf542eb49065298afeaa6afa668c85996b509e958394e1f663aa8412bd2"
+    }
+  },
+  "methods" : [
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 1,
+      "minVersion" : 0,
+      "name" : "toByte",
+      "typeId" : 2,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 2,
+      "minVersion" : 0,
+      "name" : "toShort",
+      "typeId" : 2,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 3,
+      "minVersion" : 0,
+      "name" : "toInt",
+      "typeId" : 2,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 4,
+      "minVersion" : 0,
+      "name" : "toLong",
+      "typeId" : 2,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 5,
+      "minVersion" : 0,
+      "name" : "toBigInt",
+      "typeId" : 2,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 6,
+      "minVersion" : 0,
+      "name" : "toBytes",
+      "typeId" : 2,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 7,
+      "minVersion" : 0,
+      "name" : "toBits",
+      "typeId" : 2,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 8,
+      "minVersion" : 3,
+      "name" : "bitwiseInverse",
+      "typeId" : 2,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 9,
+      "minVersion" : 3,
+      "name" : "bitwiseOr",
+      "typeId" : 2,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 10,
+      "minVersion" : 3,
+      "name" : "bitwiseAnd",
+      "typeId" : 2,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 11,
+      "minVersion" : 3,
+      "name" : "bitwiseXor",
+      "typeId" : 2,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 12,
+      "minVersion" : 3,
+      "name" : "shiftLeft",
+      "typeId" : 2,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 13,
+      "minVersion" : 3,
+      "name" : "shiftRight",
+      "typeId" : 2,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 1,
+      "minVersion" : 0,
+      "name" : "toByte",
+      "typeId" : 3,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 2,
+      "minVersion" : 0,
+      "name" : "toShort",
+      "typeId" : 3,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 3,
+      "minVersion" : 0,
+      "name" : "toInt",
+      "typeId" : 3,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 4,
+      "minVersion" : 0,
+      "name" : "toLong",
+      "typeId" : 3,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 5,
+      "minVersion" : 0,
+      "name" : "toBigInt",
+      "typeId" : 3,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 6,
+      "minVersion" : 0,
+      "name" : "toBytes",
+      "typeId" : 3,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 7,
+      "minVersion" : 0,
+      "name" : "toBits",
+      "typeId" : 3,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 8,
+      "minVersion" : 3,
+      "name" : "bitwiseInverse",
+      "typeId" : 3,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 9,
+      "minVersion" : 3,
+      "name" : "bitwiseOr",
+      "typeId" : 3,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 10,
+      "minVersion" : 3,
+      "name" : "bitwiseAnd",
+      "typeId" : 3,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 11,
+      "minVersion" : 3,
+      "name" : "bitwiseXor",
+      "typeId" : 3,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 12,
+      "minVersion" : 3,
+      "name" : "shiftLeft",
+      "typeId" : 3,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 13,
+      "minVersion" : 3,
+      "name" : "shiftRight",
+      "typeId" : 3,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 1,
+      "minVersion" : 0,
+      "name" : "toByte",
+      "typeId" : 4,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 2,
+      "minVersion" : 0,
+      "name" : "toShort",
+      "typeId" : 4,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 3,
+      "minVersion" : 0,
+      "name" : "toInt",
+      "typeId" : 4,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 4,
+      "minVersion" : 0,
+      "name" : "toLong",
+      "typeId" : 4,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 5,
+      "minVersion" : 0,
+      "name" : "toBigInt",
+      "typeId" : 4,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 6,
+      "minVersion" : 0,
+      "name" : "toBytes",
+      "typeId" : 4,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 7,
+      "minVersion" : 0,
+      "name" : "toBits",
+      "typeId" : 4,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 8,
+      "minVersion" : 3,
+      "name" : "bitwiseInverse",
+      "typeId" : 4,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 9,
+      "minVersion" : 3,
+      "name" : "bitwiseOr",
+      "typeId" : 4,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 10,
+      "minVersion" : 3,
+      "name" : "bitwiseAnd",
+      "typeId" : 4,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 11,
+      "minVersion" : 3,
+      "name" : "bitwiseXor",
+      "typeId" : 4,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 12,
+      "minVersion" : 3,
+      "name" : "shiftLeft",
+      "typeId" : 4,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 13,
+      "minVersion" : 3,
+      "name" : "shiftRight",
+      "typeId" : 4,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 1,
+      "minVersion" : 0,
+      "name" : "toByte",
+      "typeId" : 5,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 2,
+      "minVersion" : 0,
+      "name" : "toShort",
+      "typeId" : 5,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 3,
+      "minVersion" : 0,
+      "name" : "toInt",
+      "typeId" : 5,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 4,
+      "minVersion" : 0,
+      "name" : "toLong",
+      "typeId" : 5,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 5,
+      "minVersion" : 0,
+      "name" : "toBigInt",
+      "typeId" : 5,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 6,
+      "minVersion" : 0,
+      "name" : "toBytes",
+      "typeId" : 5,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 7,
+      "minVersion" : 0,
+      "name" : "toBits",
+      "typeId" : 5,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 8,
+      "minVersion" : 3,
+      "name" : "bitwiseInverse",
+      "typeId" : 5,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 9,
+      "minVersion" : 3,
+      "name" : "bitwiseOr",
+      "typeId" : 5,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 10,
+      "minVersion" : 3,
+      "name" : "bitwiseAnd",
+      "typeId" : 5,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 11,
+      "minVersion" : 3,
+      "name" : "bitwiseXor",
+      "typeId" : 5,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 12,
+      "minVersion" : 3,
+      "name" : "shiftLeft",
+      "typeId" : 5,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 13,
+      "minVersion" : 3,
+      "name" : "shiftRight",
+      "typeId" : 5,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 1,
+      "minVersion" : 0,
+      "name" : "toByte",
+      "typeId" : 6,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 2,
+      "minVersion" : 0,
+      "name" : "toShort",
+      "typeId" : 6,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 3,
+      "minVersion" : 0,
+      "name" : "toInt",
+      "typeId" : 6,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 4,
+      "minVersion" : 0,
+      "name" : "toLong",
+      "typeId" : 6,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 5,
+      "minVersion" : 0,
+      "name" : "toBigInt",
+      "typeId" : 6,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 6,
+      "minVersion" : 0,
+      "name" : "toBytes",
+      "typeId" : 6,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 7,
+      "minVersion" : 0,
+      "name" : "toBits",
+      "typeId" : 6,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 8,
+      "minVersion" : 3,
+      "name" : "bitwiseInverse",
+      "typeId" : 6,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 9,
+      "minVersion" : 3,
+      "name" : "bitwiseOr",
+      "typeId" : 6,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 10,
+      "minVersion" : 3,
+      "name" : "bitwiseAnd",
+      "typeId" : 6,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 11,
+      "minVersion" : 3,
+      "name" : "bitwiseXor",
+      "typeId" : 6,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 12,
+      "minVersion" : 3,
+      "name" : "shiftLeft",
+      "typeId" : 6,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 13,
+      "minVersion" : 3,
+      "name" : "shiftRight",
+      "typeId" : 6,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 14,
+      "minVersion" : 3,
+      "name" : "toUnsigned",
+      "typeId" : 6,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 15,
+      "minVersion" : 3,
+      "name" : "toUnsignedMod",
+      "typeId" : 6,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 250,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 2,
+      "minVersion" : 0,
+      "name" : "getEncoded",
+      "typeId" : 7,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 900,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 3,
+      "minVersion" : 0,
+      "name" : "exp",
+      "typeId" : 7,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 40,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 4,
+      "minVersion" : 0,
+      "name" : "multiply",
+      "typeId" : 7,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 45,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 5,
+      "minVersion" : 0,
+      "name" : "negate",
+      "typeId" : 7,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 900,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 6,
+      "minVersion" : 3,
+      "name" : "expUnsigned",
+      "typeId" : 7,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 35,
+        "chunkSize" : 1,
+        "kind" : "PerItem",
+        "perChunk" : 6
+      },
+      "methodId" : 1,
+      "minVersion" : 0,
+      "name" : "propBytes",
+      "typeId" : 8,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 2,
+      "minVersion" : 0,
+      "name" : "isProven",
+      "typeId" : 8,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 1,
+      "minVersion" : 3,
+      "name" : "toByte",
+      "typeId" : 9,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 2,
+      "minVersion" : 3,
+      "name" : "toShort",
+      "typeId" : 9,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 3,
+      "minVersion" : 3,
+      "name" : "toInt",
+      "typeId" : 9,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 4,
+      "minVersion" : 3,
+      "name" : "toLong",
+      "typeId" : 9,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "SMethod.costKind is null (no standalone cost descriptor)"
+      },
+      "methodId" : 5,
+      "minVersion" : 3,
+      "name" : "toBigInt",
+      "typeId" : 9,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 6,
+      "minVersion" : 3,
+      "name" : "toBytes",
+      "typeId" : 9,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 7,
+      "minVersion" : 3,
+      "name" : "toBits",
+      "typeId" : 9,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 8,
+      "minVersion" : 3,
+      "name" : "bitwiseInverse",
+      "typeId" : 9,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 9,
+      "minVersion" : 3,
+      "name" : "bitwiseOr",
+      "typeId" : 9,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 10,
+      "minVersion" : 3,
+      "name" : "bitwiseAnd",
+      "typeId" : 9,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 11,
+      "minVersion" : 3,
+      "name" : "bitwiseXor",
+      "typeId" : 9,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 12,
+      "minVersion" : 3,
+      "name" : "shiftLeft",
+      "typeId" : 9,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 13,
+      "minVersion" : 3,
+      "name" : "shiftRight",
+      "typeId" : 9,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 150,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 14,
+      "minVersion" : 3,
+      "name" : "modInverse",
+      "typeId" : 9,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 30,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 15,
+      "minVersion" : 3,
+      "name" : "plusMod",
+      "typeId" : 9,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 30,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 16,
+      "minVersion" : 3,
+      "name" : "subtractMod",
+      "typeId" : 9,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 40,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 17,
+      "minVersion" : 3,
+      "name" : "multiplyMod",
+      "typeId" : 9,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 18,
+      "minVersion" : 3,
+      "name" : "mod",
+      "typeId" : 9,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 19,
+      "minVersion" : 3,
+      "name" : "toSigned",
+      "typeId" : 9,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 14,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 1,
+      "minVersion" : 0,
+      "name" : "size",
+      "typeId" : 12,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "Dynamic",
+        "perChunk" : null
+      },
+      "methodId" : 2,
+      "minVersion" : 0,
+      "name" : "getOrElse",
+      "typeId" : 12,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : 10,
+        "kind" : "PerItem",
+        "perChunk" : 1
+      },
+      "methodId" : 3,
+      "minVersion" : 0,
+      "name" : "map",
+      "typeId" : 12,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 3,
+        "chunkSize" : 10,
+        "kind" : "PerItem",
+        "perChunk" : 1
+      },
+      "methodId" : 4,
+      "minVersion" : 0,
+      "name" : "exists",
+      "typeId" : 12,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 3,
+        "chunkSize" : 10,
+        "kind" : "PerItem",
+        "perChunk" : 1
+      },
+      "methodId" : 5,
+      "minVersion" : 0,
+      "name" : "fold",
+      "typeId" : 12,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 3,
+        "chunkSize" : 10,
+        "kind" : "PerItem",
+        "perChunk" : 1
+      },
+      "methodId" : 6,
+      "minVersion" : 0,
+      "name" : "forall",
+      "typeId" : 12,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : 100,
+        "kind" : "PerItem",
+        "perChunk" : 2
+      },
+      "methodId" : 7,
+      "minVersion" : 0,
+      "name" : "slice",
+      "typeId" : 12,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : 10,
+        "kind" : "PerItem",
+        "perChunk" : 1
+      },
+      "methodId" : 8,
+      "minVersion" : 0,
+      "name" : "filter",
+      "typeId" : 12,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : 100,
+        "kind" : "PerItem",
+        "perChunk" : 2
+      },
+      "methodId" : 9,
+      "minVersion" : 0,
+      "name" : "append",
+      "typeId" : 12,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 30,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 10,
+      "minVersion" : 0,
+      "name" : "apply",
+      "typeId" : 12,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : 16,
+        "kind" : "PerItem",
+        "perChunk" : 2
+      },
+      "methodId" : 14,
+      "minVersion" : 0,
+      "name" : "indices",
+      "typeId" : 12,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 60,
+        "chunkSize" : 8,
+        "kind" : "PerItem",
+        "perChunk" : 10
+      },
+      "methodId" : 15,
+      "minVersion" : 0,
+      "name" : "flatMap",
+      "typeId" : 12,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 30,
+        "chunkSize" : 10,
+        "kind" : "PerItem",
+        "perChunk" : 2
+      },
+      "methodId" : 19,
+      "minVersion" : 0,
+      "name" : "patch",
+      "typeId" : 12,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : 10,
+        "kind" : "PerItem",
+        "perChunk" : 1
+      },
+      "methodId" : 20,
+      "minVersion" : 0,
+      "name" : "updated",
+      "typeId" : 12,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : 10,
+        "kind" : "PerItem",
+        "perChunk" : 2
+      },
+      "methodId" : 21,
+      "minVersion" : 0,
+      "name" : "updateMany",
+      "typeId" : 12,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : 2,
+        "kind" : "PerItem",
+        "perChunk" : 10
+      },
+      "methodId" : 26,
+      "minVersion" : 0,
+      "name" : "indexOf",
+      "typeId" : 12,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : 10,
+        "kind" : "PerItem",
+        "perChunk" : 1
+      },
+      "methodId" : 29,
+      "minVersion" : 0,
+      "name" : "zip",
+      "typeId" : 12,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : 100,
+        "kind" : "PerItem",
+        "perChunk" : 2
+      },
+      "methodId" : 30,
+      "minVersion" : 3,
+      "name" : "reverse",
+      "typeId" : 12,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : 10,
+        "kind" : "PerItem",
+        "perChunk" : 1
+      },
+      "methodId" : 31,
+      "minVersion" : 3,
+      "name" : "startsWith",
+      "typeId" : 12,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : 10,
+        "kind" : "PerItem",
+        "perChunk" : 1
+      },
+      "methodId" : 32,
+      "minVersion" : 3,
+      "name" : "endsWith",
+      "typeId" : 12,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 30,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 33,
+      "minVersion" : 3,
+      "name" : "get",
+      "typeId" : 12,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 2,
+      "minVersion" : 0,
+      "name" : "isDefined",
+      "typeId" : 36,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 3,
+      "minVersion" : 0,
+      "name" : "get",
+      "typeId" : 36,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 4,
+      "minVersion" : 0,
+      "name" : "getOrElse",
+      "typeId" : 36,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 7,
+      "minVersion" : 0,
+      "name" : "map",
+      "typeId" : 36,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 8,
+      "minVersion" : 0,
+      "name" : "filter",
+      "typeId" : 36,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 8,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 1,
+      "minVersion" : 0,
+      "name" : "value",
+      "typeId" : 99,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 2,
+      "minVersion" : 0,
+      "name" : "propositionBytes",
+      "typeId" : 99,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 12,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 3,
+      "minVersion" : 0,
+      "name" : "bytes",
+      "typeId" : 99,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 12,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 4,
+      "minVersion" : 0,
+      "name" : "bytesWithoutRef",
+      "typeId" : 99,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 12,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 5,
+      "minVersion" : 0,
+      "name" : "id",
+      "typeId" : 99,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 16,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 6,
+      "minVersion" : 0,
+      "name" : "creationInfo",
+      "typeId" : 99,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 50,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 7,
+      "minVersion" : 0,
+      "name" : "getRegV5",
+      "typeId" : 99,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 8,
+      "minVersion" : 0,
+      "name" : "tokens",
+      "typeId" : 99,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 50,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 9,
+      "minVersion" : 0,
+      "name" : "R0",
+      "typeId" : 99,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 50,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 10,
+      "minVersion" : 0,
+      "name" : "R1",
+      "typeId" : 99,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 50,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 11,
+      "minVersion" : 0,
+      "name" : "R2",
+      "typeId" : 99,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 50,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 12,
+      "minVersion" : 0,
+      "name" : "R3",
+      "typeId" : 99,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 50,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 13,
+      "minVersion" : 0,
+      "name" : "R4",
+      "typeId" : 99,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 50,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 14,
+      "minVersion" : 0,
+      "name" : "R5",
+      "typeId" : 99,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 50,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 15,
+      "minVersion" : 0,
+      "name" : "R6",
+      "typeId" : 99,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 50,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 16,
+      "minVersion" : 0,
+      "name" : "R7",
+      "typeId" : 99,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 50,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 17,
+      "minVersion" : 0,
+      "name" : "R8",
+      "typeId" : 99,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 50,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 18,
+      "minVersion" : 0,
+      "name" : "R9",
+      "typeId" : 99,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 50,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 19,
+      "minVersion" : 3,
+      "name" : "getReg",
+      "typeId" : 99,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 1,
+      "minVersion" : 0,
+      "name" : "digest",
+      "typeId" : 100,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 2,
+      "minVersion" : 0,
+      "name" : "enabledOperations",
+      "typeId" : 100,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 3,
+      "minVersion" : 0,
+      "name" : "keyLength",
+      "typeId" : 100,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 4,
+      "minVersion" : 0,
+      "name" : "valueLengthOpt",
+      "typeId" : 100,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 5,
+      "minVersion" : 0,
+      "name" : "isInsertAllowed",
+      "typeId" : 100,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 6,
+      "minVersion" : 0,
+      "name" : "isUpdateAllowed",
+      "typeId" : 100,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 7,
+      "minVersion" : 0,
+      "name" : "isRemoveAllowed",
+      "typeId" : 100,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 45,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 8,
+      "minVersion" : 0,
+      "name" : "updateOperations",
+      "typeId" : 100,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "Dynamic",
+        "perChunk" : null
+      },
+      "methodId" : 9,
+      "minVersion" : 0,
+      "name" : "contains",
+      "typeId" : 100,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "Dynamic",
+        "perChunk" : null
+      },
+      "methodId" : 10,
+      "minVersion" : 0,
+      "name" : "get",
+      "typeId" : 100,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "Dynamic",
+        "perChunk" : null
+      },
+      "methodId" : 11,
+      "minVersion" : 0,
+      "name" : "getMany",
+      "typeId" : 100,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "Dynamic",
+        "perChunk" : null
+      },
+      "methodId" : 12,
+      "minVersion" : 0,
+      "name" : "insert",
+      "typeId" : 100,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "Dynamic",
+        "perChunk" : null
+      },
+      "methodId" : 13,
+      "minVersion" : 0,
+      "name" : "update",
+      "typeId" : 100,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "Dynamic",
+        "perChunk" : null
+      },
+      "methodId" : 14,
+      "minVersion" : 0,
+      "name" : "remove",
+      "typeId" : 100,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 40,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 15,
+      "minVersion" : 0,
+      "name" : "updateDigest",
+      "typeId" : 100,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "Dynamic",
+        "perChunk" : null
+      },
+      "methodId" : 16,
+      "minVersion" : 3,
+      "name" : "insertOrUpdate",
+      "typeId" : 100,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 1,
+      "minVersion" : 0,
+      "name" : "dataInputs",
+      "typeId" : 101,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 2,
+      "minVersion" : 0,
+      "name" : "headers",
+      "typeId" : 101,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 3,
+      "minVersion" : 0,
+      "name" : "preHeader",
+      "typeId" : 101,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 4,
+      "minVersion" : 0,
+      "name" : "INPUTS",
+      "typeId" : 101,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 5,
+      "minVersion" : 0,
+      "name" : "OUTPUTS",
+      "typeId" : 101,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 26,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 6,
+      "minVersion" : 0,
+      "name" : "HEIGHT",
+      "typeId" : 101,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 7,
+      "minVersion" : 0,
+      "name" : "SELF",
+      "typeId" : 101,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 8,
+      "minVersion" : 0,
+      "name" : "selfBoxIndex",
+      "typeId" : 101,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 9,
+      "minVersion" : 0,
+      "name" : "LastBlockUtxoRootHash",
+      "typeId" : 101,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 10,
+      "minVersion" : 0,
+      "name" : "minerPubKey",
+      "typeId" : 101,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 11,
+      "minVersion" : 0,
+      "name" : "getVar",
+      "typeId" : 101,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 12,
+      "minVersion" : 3,
+      "name" : "getVarFromInput",
+      "typeId" : 101,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 1,
+      "minVersion" : 0,
+      "name" : "id",
+      "typeId" : 104,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 2,
+      "minVersion" : 0,
+      "name" : "version",
+      "typeId" : 104,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 3,
+      "minVersion" : 0,
+      "name" : "parentId",
+      "typeId" : 104,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 4,
+      "minVersion" : 0,
+      "name" : "ADProofsRoot",
+      "typeId" : 104,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 5,
+      "minVersion" : 0,
+      "name" : "stateRoot",
+      "typeId" : 104,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 6,
+      "minVersion" : 0,
+      "name" : "transactionsRoot",
+      "typeId" : 104,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 7,
+      "minVersion" : 0,
+      "name" : "timestamp",
+      "typeId" : 104,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 8,
+      "minVersion" : 0,
+      "name" : "nBits",
+      "typeId" : 104,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 9,
+      "minVersion" : 0,
+      "name" : "height",
+      "typeId" : 104,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 10,
+      "minVersion" : 0,
+      "name" : "extensionRoot",
+      "typeId" : 104,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 11,
+      "minVersion" : 0,
+      "name" : "minerPk",
+      "typeId" : 104,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 12,
+      "minVersion" : 0,
+      "name" : "powOnetimePk",
+      "typeId" : 104,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 13,
+      "minVersion" : 0,
+      "name" : "powNonce",
+      "typeId" : 104,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 14,
+      "minVersion" : 0,
+      "name" : "powDistance",
+      "typeId" : 104,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 15,
+      "minVersion" : 0,
+      "name" : "votes",
+      "typeId" : 104,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 700,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 16,
+      "minVersion" : 3,
+      "name" : "checkPow",
+      "typeId" : 104,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 1,
+      "minVersion" : 0,
+      "name" : "version",
+      "typeId" : 105,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 2,
+      "minVersion" : 0,
+      "name" : "parentId",
+      "typeId" : 105,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 3,
+      "minVersion" : 0,
+      "name" : "timestamp",
+      "typeId" : 105,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 4,
+      "minVersion" : 0,
+      "name" : "nBits",
+      "typeId" : 105,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 5,
+      "minVersion" : 0,
+      "name" : "height",
+      "typeId" : 105,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 6,
+      "minVersion" : 0,
+      "name" : "minerPk",
+      "typeId" : 105,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 7,
+      "minVersion" : 0,
+      "name" : "votes",
+      "typeId" : 105,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 1,
+      "minVersion" : 0,
+      "name" : "groupGenerator",
+      "typeId" : 106,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : 128,
+        "kind" : "PerItem",
+        "perChunk" : 2
+      },
+      "methodId" : 2,
+      "minVersion" : 0,
+      "name" : "xor",
+      "typeId" : 106,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "Dynamic",
+        "perChunk" : null
+      },
+      "methodId" : 3,
+      "minVersion" : 3,
+      "name" : "serialize",
+      "typeId" : 106,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 100,
+        "chunkSize" : 32,
+        "kind" : "PerItem",
+        "perChunk" : 32
+      },
+      "methodId" : 4,
+      "minVersion" : 3,
+      "name" : "deserializeTo",
+      "typeId" : 106,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 5,
+      "minVersion" : 3,
+      "name" : "fromBigEndianBytes",
+      "typeId" : 106,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 25,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 6,
+      "minVersion" : 3,
+      "name" : "encodeNbits",
+      "typeId" : 106,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 50,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 7,
+      "minVersion" : 3,
+      "name" : "decodeNbits",
+      "typeId" : 106,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "class" : "sigma.ast.PowHitCostKind$",
+        "kind" : "Dynamic",
+        "perChunk" : null
+      },
+      "methodId" : 8,
+      "minVersion" : 3,
+      "name" : "powHit",
+      "typeId" : 106,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 9,
+      "minVersion" : 3,
+      "name" : "some",
+      "typeId" : 106,
+      "versions" : [
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "methodId" : 10,
+      "minVersion" : 3,
+      "name" : "none",
+      "typeId" : 106,
+      "versions" : [
+        3
+      ]
+    }
+  ],
+  "opcodes" : [
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "Constant",
+      "opcode" : 0
+    },
+    {
+      "costKind" : {
+        "base" : 1,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "TaggedVariable",
+      "opcode" : 113
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "ValUse",
+      "opcode" : 114
+    },
+    {
+      "costKind" : {
+        "base" : 1,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "ConstantPlaceholder",
+      "opcode" : 115
+    },
+    {
+      "costKind" : {
+        "base" : 100,
+        "chunkSize" : 1,
+        "kind" : "PerItem",
+        "perChunk" : 100
+      },
+      "name" : "SubstConstants",
+      "opcode" : 116
+    },
+    {
+      "costKind" : {
+        "base" : 17,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "LongToByteArray",
+      "opcode" : 122
+    },
+    {
+      "costKind" : {
+        "base" : 30,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "ByteArrayToBigInt",
+      "opcode" : 123
+    },
+    {
+      "costKind" : {
+        "base" : 16,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "ByteArrayToLong",
+      "opcode" : 124
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "class" : "sigma.ast.NumericCastCostKind$",
+        "kind" : "TypeBased",
+        "perChunk" : null
+      },
+      "name" : "Downcast",
+      "opcode" : 125
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "class" : "sigma.ast.NumericCastCostKind$",
+        "kind" : "TypeBased",
+        "perChunk" : null
+      },
+      "name" : "Upcast",
+      "opcode" : 126
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "TrueLeaf",
+      "opcode" : 127
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "FalseLeaf",
+      "opcode" : 128
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "GroupGenerator",
+      "opcode" : 130
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "ConcreteCollection",
+      "opcode" : 131
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "ConcreteCollectionBooleanConstant",
+      "opcode" : 133
+    },
+    {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "Tuple",
+      "opcode" : 134
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "SelectField",
+      "opcode" : 140
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "class" : "sigma.ast.LT$$anon$8",
+        "kind" : "TypeBased",
+        "perChunk" : null
+      },
+      "name" : "LT",
+      "opcode" : 143
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "class" : "sigma.ast.LE$$anon$9",
+        "kind" : "TypeBased",
+        "perChunk" : null
+      },
+      "name" : "LE",
+      "opcode" : 144
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "class" : "sigma.ast.GT$$anon$10",
+        "kind" : "TypeBased",
+        "perChunk" : null
+      },
+      "name" : "GT",
+      "opcode" : 145
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "class" : "sigma.ast.GE$$anon$11",
+        "kind" : "TypeBased",
+        "perChunk" : null
+      },
+      "name" : "GE",
+      "opcode" : 146
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "Dynamic",
+        "perChunk" : null
+      },
+      "name" : "EQ",
+      "opcode" : 147
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "Dynamic",
+        "perChunk" : null
+      },
+      "name" : "NEQ",
+      "opcode" : 148
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "If",
+      "opcode" : 149
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : 32,
+        "kind" : "PerItem",
+        "perChunk" : 5
+      },
+      "name" : "AND",
+      "opcode" : 150
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : 64,
+        "kind" : "PerItem",
+        "perChunk" : 5
+      },
+      "name" : "OR",
+      "opcode" : 151
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : 5,
+        "kind" : "PerItem",
+        "perChunk" : 3
+      },
+      "name" : "AtLeast",
+      "opcode" : 152
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "class" : "sigma.ast.ArithOp$Minus$$anon$2",
+        "kind" : "TypeBased",
+        "perChunk" : null
+      },
+      "name" : "Minus",
+      "opcode" : 153
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "class" : "sigma.ast.ArithOp$Plus$$anon$1",
+        "kind" : "TypeBased",
+        "perChunk" : null
+      },
+      "name" : "Plus",
+      "opcode" : 154
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : 128,
+        "kind" : "PerItem",
+        "perChunk" : 2
+      },
+      "name" : "Xor",
+      "opcode" : 155
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "class" : "sigma.ast.ArithOp$Multiply$$anon$3",
+        "kind" : "TypeBased",
+        "perChunk" : null
+      },
+      "name" : "Multiply",
+      "opcode" : 156
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "class" : "sigma.ast.ArithOp$Division$$anon$4",
+        "kind" : "TypeBased",
+        "perChunk" : null
+      },
+      "name" : "Division",
+      "opcode" : 157
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "class" : "sigma.ast.ArithOp$Modulo$$anon$5",
+        "kind" : "TypeBased",
+        "perChunk" : null
+      },
+      "name" : "Modulo",
+      "opcode" : 158
+    },
+    {
+      "costKind" : {
+        "base" : 900,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "Exponentiate",
+      "opcode" : 159
+    },
+    {
+      "costKind" : {
+        "base" : 40,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "MultiplyGroup",
+      "opcode" : 160
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "class" : "sigma.ast.ArithOp$Min$$anon$6",
+        "kind" : "TypeBased",
+        "perChunk" : null
+      },
+      "name" : "Min",
+      "opcode" : 161
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "class" : "sigma.ast.ArithOp$Max$$anon$7",
+        "kind" : "TypeBased",
+        "perChunk" : null
+      },
+      "name" : "Max",
+      "opcode" : 162
+    },
+    {
+      "costKind" : {
+        "base" : 26,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "Height",
+      "opcode" : 163
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "Inputs",
+      "opcode" : 164
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "Outputs",
+      "opcode" : 165
+    },
+    {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "LastBlockUtxoRootHash",
+      "opcode" : 166
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "Self",
+      "opcode" : 167
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "MinerPubkey",
+      "opcode" : 172
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : 10,
+        "kind" : "PerItem",
+        "perChunk" : 1
+      },
+      "name" : "MapCollection",
+      "opcode" : 173
+    },
+    {
+      "costKind" : {
+        "base" : 3,
+        "chunkSize" : 10,
+        "kind" : "PerItem",
+        "perChunk" : 1
+      },
+      "name" : "Exists",
+      "opcode" : 174
+    },
+    {
+      "costKind" : {
+        "base" : 3,
+        "chunkSize" : 10,
+        "kind" : "PerItem",
+        "perChunk" : 1
+      },
+      "name" : "ForAll",
+      "opcode" : 175
+    },
+    {
+      "costKind" : {
+        "base" : 3,
+        "chunkSize" : 10,
+        "kind" : "PerItem",
+        "perChunk" : 1
+      },
+      "name" : "Fold",
+      "opcode" : 176
+    },
+    {
+      "costKind" : {
+        "base" : 14,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "SizeOf",
+      "opcode" : 177
+    },
+    {
+      "costKind" : {
+        "base" : 30,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "ByIndex",
+      "opcode" : 178
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : 100,
+        "kind" : "PerItem",
+        "perChunk" : 2
+      },
+      "name" : "Append",
+      "opcode" : 179
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : 100,
+        "kind" : "PerItem",
+        "perChunk" : 2
+      },
+      "name" : "Slice",
+      "opcode" : 180
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : 10,
+        "kind" : "PerItem",
+        "perChunk" : 1
+      },
+      "name" : "Filter",
+      "opcode" : 181
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "Method costKind is not supported for node CreateAvlTree$(182)"
+      },
+      "name" : "CreateAvlTree",
+      "opcode" : 182
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "Method costKind is not supported for node TreeLookup$(183)"
+      },
+      "name" : "TreeLookup",
+      "opcode" : 183
+    },
+    {
+      "costKind" : {
+        "base" : 8,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "ExtractAmount",
+      "opcode" : 193
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "ExtractScriptBytes",
+      "opcode" : 194
+    },
+    {
+      "costKind" : {
+        "base" : 12,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "ExtractBytes",
+      "opcode" : 195
+    },
+    {
+      "costKind" : {
+        "base" : 12,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "ExtractBytesWithNoRef",
+      "opcode" : 196
+    },
+    {
+      "costKind" : {
+        "base" : 12,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "ExtractId",
+      "opcode" : 197
+    },
+    {
+      "costKind" : {
+        "base" : 50,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "ExtractRegisterAs",
+      "opcode" : 198
+    },
+    {
+      "costKind" : {
+        "base" : 16,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "ExtractCreationInfo",
+      "opcode" : 199
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : 128,
+        "kind" : "PerItem",
+        "perChunk" : 7
+      },
+      "name" : "CalcBlake2b256",
+      "opcode" : 203
+    },
+    {
+      "costKind" : {
+        "base" : 80,
+        "chunkSize" : 64,
+        "kind" : "PerItem",
+        "perChunk" : 8
+      },
+      "name" : "CalcSha256",
+      "opcode" : 204
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "CreateProveDlog",
+      "opcode" : 205
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "CreateProveDHTuple",
+      "opcode" : 206
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "Method costKind is not supported for node SigmaPropIsProven$(207)"
+      },
+      "name" : "SigmaPropIsProven",
+      "opcode" : 207
+    },
+    {
+      "costKind" : {
+        "base" : 35,
+        "chunkSize" : 1,
+        "kind" : "PerItem",
+        "perChunk" : 6
+      },
+      "name" : "SigmaPropBytes",
+      "opcode" : 208
+    },
+    {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "BoolToSigmaProp",
+      "opcode" : 209
+    },
+    {
+      "costKind" : {
+        "base" : 1,
+        "chunkSize" : 128,
+        "kind" : "PerItem",
+        "perChunk" : 10
+      },
+      "name" : "DeserializeContext",
+      "opcode" : 212
+    },
+    {
+      "costKind" : {
+        "base" : 1,
+        "chunkSize" : 128,
+        "kind" : "PerItem",
+        "perChunk" : 10
+      },
+      "name" : "DeserializeRegister",
+      "opcode" : 213
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "Method costKind is not supported for node ValDef$(214)"
+      },
+      "name" : "ValDef",
+      "opcode" : 214
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "Method costKind is not supported for node FunDef$(215)"
+      },
+      "name" : "FunDef",
+      "opcode" : 215
+    },
+    {
+      "costKind" : {
+        "base" : 1,
+        "chunkSize" : 10,
+        "kind" : "PerItem",
+        "perChunk" : 1
+      },
+      "name" : "BlockValue",
+      "opcode" : 216
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "FuncValue",
+      "opcode" : 217
+    },
+    {
+      "costKind" : {
+        "base" : 30,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "Apply",
+      "opcode" : 218
+    },
+    {
+      "costKind" : {
+        "base" : 4,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "PropertyCall",
+      "opcode" : 219
+    },
+    {
+      "costKind" : {
+        "base" : 4,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "MethodCall",
+      "opcode" : 220
+    },
+    {
+      "costKind" : {
+        "base" : 5,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "Global",
+      "opcode" : 221
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "GetVar",
+      "opcode" : 227
+    },
+    {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "OptionGet",
+      "opcode" : 228
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "OptionGetOrElse",
+      "opcode" : 229
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "OptionIsDefined",
+      "opcode" : 230
+    },
+    {
+      "costKind" : {
+        "base" : 1,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "ModQ",
+      "opcode" : 231
+    },
+    {
+      "costKind" : {
+        "base" : 1,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "PlusModQ",
+      "opcode" : 232
+    },
+    {
+      "costKind" : {
+        "base" : 1,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "MinusModQ",
+      "opcode" : 233
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : 1,
+        "kind" : "PerItem",
+        "perChunk" : 2
+      },
+      "name" : "SigmaAnd",
+      "opcode" : 234
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : 1,
+        "kind" : "PerItem",
+        "perChunk" : 2
+      },
+      "name" : "SigmaOr",
+      "opcode" : 235
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "BinOr",
+      "opcode" : 236
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "BinAnd",
+      "opcode" : 237
+    },
+    {
+      "costKind" : {
+        "base" : 300,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "DecodePoint",
+      "opcode" : 238
+    },
+    {
+      "costKind" : {
+        "base" : 15,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "LogicalNot",
+      "opcode" : 239
+    },
+    {
+      "costKind" : {
+        "base" : 30,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "Negation",
+      "opcode" : 240
+    },
+    {
+      "costKind" : {
+        "base" : null,
+        "chunkSize" : null,
+        "kind" : "NotSupported",
+        "perChunk" : null,
+        "reason" : "Method costKind is not supported for node BitInversion$(241)"
+      },
+      "name" : "BitInversion",
+      "opcode" : 241
+    },
+    {
+      "costKind" : {
+        "base" : 1,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "BitOr",
+      "opcode" : 242
+    },
+    {
+      "costKind" : {
+        "base" : 1,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "BitAnd",
+      "opcode" : 243
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "BinXor",
+      "opcode" : 244
+    },
+    {
+      "costKind" : {
+        "base" : 1,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "BitXor",
+      "opcode" : 245
+    },
+    {
+      "costKind" : {
+        "base" : 1,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "BitShiftRight",
+      "opcode" : 246
+    },
+    {
+      "costKind" : {
+        "base" : 1,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "BitShiftLeft",
+      "opcode" : 247
+    },
+    {
+      "costKind" : {
+        "base" : 1,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "BitShiftRightZeroed",
+      "opcode" : 248
+    },
+    {
+      "costKind" : {
+        "base" : 1,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "name" : "Context",
+      "opcode" : 254
+    },
+    {
+      "costKind" : {
+        "base" : 20,
+        "chunkSize" : 32,
+        "kind" : "PerItem",
+        "perChunk" : 5
+      },
+      "name" : "XorOf",
+      "opcode" : 255
+    }
+  ]
+}
