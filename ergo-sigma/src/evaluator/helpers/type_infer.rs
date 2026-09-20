@@ -254,6 +254,8 @@ pub(crate) fn value_to_sigma_type(val: &Value) -> Option<SigmaType> {
                 .collect(),
         )),
         // Boxed-element coll carrier already carries its T.
-        Value::CollGeneric(_, elem_type) => Some(SigmaType::SColl(Box::new((**elem_type).clone()))),
+        Value::CollGeneric(_, elem_type) | Value::CollLegacyPair(_, elem_type, _) => {
+            Some(SigmaType::SColl(Box::new((**elem_type).clone())))
+        }
     }
 }

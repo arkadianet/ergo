@@ -180,7 +180,7 @@ pub(super) fn get_many(
     let keys: Vec<Vec<u8>> = match keys_val {
         // Outer `Coll[Coll[Byte]]` is the boxed-element coll
         // carrier; each inner element is a typed `CollBytes`.
-        Value::CollGeneric(items, _) => items
+        Value::CollGeneric(items, _) | Value::CollLegacyPair(items, _, _) => items
             .into_iter()
             .map(|item| match item {
                 Value::CollBytes(k) => Ok(k),
@@ -559,7 +559,7 @@ enum AvlMutOp {
 /// inner element is a real 2-tuple `Value::Tuple`).
 fn extract_avl_entries(v: Value) -> Result<AvlEntries, EvalError> {
     match v {
-        Value::CollGeneric(items, _) => items
+        Value::CollGeneric(items, _) | Value::CollLegacyPair(items, _, _) => items
             .into_iter()
             .map(|item| match item {
                 Value::Tuple(pair) if pair.len() == 2 => {
@@ -600,7 +600,7 @@ fn extract_avl_entries(v: Value) -> Result<AvlEntries, EvalError> {
 /// Extract `Coll[Coll[Byte]]` keys from an evaluated value.
 fn extract_avl_keys(v: Value) -> Result<Vec<Vec<u8>>, EvalError> {
     match v {
-        Value::CollGeneric(items, _) => items
+        Value::CollGeneric(items, _) | Value::CollLegacyPair(items, _, _) => items
             .into_iter()
             .map(|item| match item {
                 Value::CollBytes(k) => Ok(k),

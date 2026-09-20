@@ -187,7 +187,7 @@ fn coll_len(v: &Value, ctx: &ReductionContext<'_>) -> usize {
         Value::CollBox(c) => c.len(),
         Value::CollHeader(c) => c.len(),
         Value::Tokens(c) => c.len(),
-        Value::CollGeneric(c, _) => c.len(),
+        Value::CollGeneric(c, _) | Value::CollLegacyPair(c, _, _) => c.len(),
         Value::BoxCollection(src) => match src {
             BoxSource::Outputs => ctx.outputs.len(),
             BoxSource::Inputs => ctx.inputs.len(),
@@ -326,7 +326,7 @@ fn eq_with_cost_inner(
             }
         }
         // Boxed-element collection carrier: dispatch on the element-type tag.
-        Value::CollGeneric(a, elem_type) => {
+        Value::CollGeneric(a, elem_type) | Value::CollLegacyPair(a, elem_type, _) => {
             cost.add(JitCost::from_jit(cost_table::MATCH_TYPE))?;
             if a.len() != coll_len(right, ctx)
                 || super::helpers::coll_elem_type(left) != super::helpers::coll_elem_type(right)
@@ -446,7 +446,7 @@ fn eq_with_cost_inner(
             cost.add(JitCost::from_jit(cost_table::MATCH_TYPE))?;
             let b_view = match right {
                 Value::Tokens(b) => token_tuple_values(b),
-                Value::CollGeneric(b, _) => b.clone(),
+                Value::CollGeneric(b, _) | Value::CollLegacyPair(b, _, _) => b.clone(),
                 // `require_comparable` gates the operand types; any other right
                 // carrier is unreachable. The case-2 MatchType is charged;
                 // defer the boolean to the uncosted authority.
@@ -478,7 +478,9 @@ fn descriptor_coll_eq(
 ) -> Result<bool, EvalError> {
     fn item(value: &Value, index: usize) -> Result<Value, EvalError> {
         match value {
-            Value::CollGeneric(items, _) | Value::CollBox(items) => Ok(items[index].clone()),
+            Value::CollGeneric(items, _)
+            | Value::CollLegacyPair(items, _, _)
+            | Value::CollBox(items) => Ok(items[index].clone()),
             Value::CollHeader(items) => Ok(Value::Header(Box::new(items[index].clone()))),
             Value::BoxCollection(source) => Ok(Value::BoxRef {
                 source: *source,
@@ -521,7 +523,7 @@ fn eq_coll_fallback(
     // Scala `equalColls` fallback).
     let b_owned;
     let b: &[Value] = match right {
-        Value::CollGeneric(b, _) | Value::CollBox(b) => b,
+        Value::CollGeneric(b, _) | Value::CollLegacyPair(b, _, _) | Value::CollBox(b) => b,
         Value::Tokens(t) => {
             b_owned = token_tuple_values(t);
             &b_owned
@@ -768,7 +770,7 @@ pub(crate) fn collection_len(coll: &Value, ctx: &ReductionContext) -> usize {
         // `CollGeneric` is the boxed-element coll carrier (Coll[Tuple]
         // etc.); a real `Value::Tuple` is not a collection and falls
         // through to the `_ => 0` non-coll branch below.
-        Value::CollGeneric(v, _) => v.len(),
+        Value::CollGeneric(v, _) | Value::CollLegacyPair(v, _, _) => v.len(),
         Value::BoxCollection(src) => match src {
             BoxSource::Outputs => ctx.outputs.len(),
             BoxSource::Inputs => ctx.inputs.len(),

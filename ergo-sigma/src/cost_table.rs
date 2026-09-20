@@ -314,7 +314,7 @@ pub fn add_eq_cost(
         // per-element-coll cost would refine this, but parity with
         // the pre-disambiguation behavior is the carrier-refactor
         // goal: no observable cost drift.
-        Value::CollGeneric(elems, _) => {
+        Value::CollGeneric(elems, _) | Value::CollLegacyPair(elems, _, _) => {
             cost.add(JitCost::from_jit(EQ_TUPLE))?;
             for elem in elems {
                 add_eq_cost(cost, elem, true)?;

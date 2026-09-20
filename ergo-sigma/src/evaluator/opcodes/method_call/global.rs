@@ -369,7 +369,7 @@ fn serialize_runtime_value(
                 serialize_runtime_value(item, writer, cx)?;
             }
         }
-        Value::CollGeneric(items, elem_type) => {
+        Value::CollGeneric(items, elem_type) | Value::CollLegacyPair(items, elem_type, _) => {
             add_method_cost(cx.cost, 3)?;
             let len = u16::try_from(items.len()).map_err(|_| EvalError::TypeError {
                 expected: "collection length <= 65535 for SGlobal.serialize",

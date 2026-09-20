@@ -147,7 +147,7 @@ pub(crate) fn value_to_typed_sigma(
         // element's recovered `SigmaType` against `elem_type`; a
         // mismatch surfaces `TypeError` rather than emitting bytes
         // a Scala decoder would reject.
-        Value::CollGeneric(items, elem_type) => {
+        Value::CollGeneric(items, elem_type) | Value::CollLegacyPair(items, elem_type, _) => {
             let mut sigma_vals: Vec<SigmaValue> = Vec::with_capacity(items.len());
             for item in items {
                 let (t, v) = value_to_typed_sigma(item, ctx)?;
