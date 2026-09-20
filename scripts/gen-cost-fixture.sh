@@ -8,6 +8,7 @@ import datetime
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tomllib
@@ -44,7 +45,24 @@ request_bytes = "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in req
 # One response per request, with diagnostics left on stderr.
 response_bytes = subprocess.run(command, input=request_bytes, stdout=subprocess.PIPE,
                                 check=True).stdout
-responses = [json.loads(line) for line in response_bytes.splitlines() if line.strip()]
+responses = []
+launcher_notice = False
+for line in response_bytes.splitlines():
+    if line.strip():
+        # scala-cli 1.12 can print its cached update notice despite
+        # --skip-cli-updates. It is a launcher diagnostic, not an oracle record.
+        if re.fullmatch(rb"Your Scala CLI \d+\.\d+\.\d+ is outdated, please update Scala CLI to \d+\.\d+\.\d+", line):
+            launcher_notice = True
+            print(line.decode(), file=sys.stderr)
+            continue
+        if launcher_notice and line == b"Run 'curl -sSLf https://scala-cli.virtuslab.org/get | sh' to update Scala CLI.":
+            launcher_notice = False
+            print(line.decode(), file=sys.stderr)
+            continue
+        try:
+            responses.append(json.loads(line))
+        except json.JSONDecodeError:
+            sys.exit(f"non-JSON JVM stdout; fixture unchanged: {line!r}")
 if len(responses) != len(requests):
     sys.exit("JVM response count differs from request count; fixture unchanged")
 for field in ("verdict", "eval_block_cost", "crypto_block_cost", "total_block_cost",
@@ -70,16 +88,18 @@ manifest["tool"] = {"script": generator, "git_sha": revision,
                     "oracle_script": script, "oracle_sha256": sha((root / script).read_bytes()),
                     "scala_cli": output("scala-cli", "version"),
                     "scala_directive": "2.12", "jvm": output("java", "-version")}
-for r in requests:
-    for key in ("pre_header_hex", "activated_version", "tree_version_expected"):
-        if r[key] != request[key]:
-            sys.exit(f"grouped requests disagree on {key}; fixture unchanged")
-pre = bytes.fromhex(request["pre_header_hex"])
-manifest["context"] = {"network": "synthetic offline context",
-    "height": int.from_bytes(pre[49:53], "big"), "block_version": pre[0],
-    "activated_script_version": request["activated_version"],
-    "ergo_tree_version": request["tree_version_expected"],
-    "voted_params": {str(i): None for i in range(4, 9)}}
+def context(r):
+    pre = bytes.fromhex(r["pre_header_hex"])
+    return {"network": "synthetic offline context",
+        "height": int.from_bytes(pre[49:53], "big"), "block_version": pre[0],
+        "activated_script_version": r["activated_version"],
+        "ergo_tree_version": r["tree_version_expected"],
+        "voted_params": {str(i): None for i in range(4, 9)}}
+
+contexts = [context(r) for r in requests]
+# Version-paired fixtures retain the exact context of every request in order.
+manifest["context"] = contexts[0] if all(c == contexts[0] for c in contexts) else {
+    "cases": contexts}
 manifest["run"] = {"command": " ".join(command), "fixture": str(path.relative_to(root)),
     "timestamp_utc": now, "seeds": None, "selected": len(cases), "executed": len(cases),
     "skipped": 0, "failed": 0}

@@ -4253,7 +4253,8 @@
     },
     "G014": {
       "ledger": [
-        "VERSION-G014"
+        "VERSION-G014",
+        "VERSION-downcast-gate"
       ],
       "cells": [
         "7",
@@ -5912,6 +5913,11 @@
       "ledger_only_finding": "Program follow-up obligation at src/main/scala/org/ergoplatform/mining/CandidateGenerator.scala:584-590 (v6.0.2), :682-688 (v6.0.5); safeGap=0 for maxBlockCost < 1000000, 150000 below 5000000, otherwise 500000",
       "fields": {
         "scala": "src/main/scala/org/ergoplatform/mining/CandidateGenerator.scala:584-590 (v6.0.2), :682-688 (v6.0.5); safeGap=0 for maxBlockCost < 1000000, 150000 below 5000000, otherwise 500000"
+      }
+    },
+    "VERSION-downcast-gate": {
+      "fields": {
+        "scala": "core/shared/src/main/scala/sigma/ast/SType.scala:412-413,435-436,460-461,487-488,524; BigInt/UnsignedBigInt-source Downcast and BigInt identity require tree version >=3"
       }
     }
   }
