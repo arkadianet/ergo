@@ -27,7 +27,7 @@ import scala.collection.JavaConverters._
 import scala.util.Try
 import scala.sys.process._
 
-/** Oracle: production UtxoState.applyModifier, with an identity return-value observer. */
+/** Oracle: production UTXO/digest state application, with identity result and loop-entry observers. */
 object BlockOracle {
   // ----- helpers -----
   val home: Path = Paths.get("scripts/jvm_block_oracle").toAbsolutePath
@@ -48,7 +48,9 @@ object BlockOracle {
     val script = "scripts/jvm_block_oracle/BlockOracle.scala"
     val payload = fixture.mapObject(_.remove("manifest"))
     val c = fixture.hcursor
-    val version = field[Int](c.downField("parameters").success.get, "123")
+    val voted = c.downField("transition").downField("updated_parameters").focus
+      .getOrElse(field[Json](c, "parameters"))
+    val version = field[Int](voted.hcursor, "123")
     Json.obj(
       "scala" -> Json.obj("ergo_version" -> Json.fromString("6.0.5"),
         "sigmastate_version" -> Json.fromString("6.0.6"), "node_app_version" -> Json.Null,
@@ -62,6 +64,8 @@ object BlockOracle {
           Json.fromString("ergo-validation/cost-trace"))),
       "tool" -> Json.obj("script" -> Json.fromString(script), "git_sha" -> Json.fromString(revision),
         "script_sha256" -> Json.fromString(sha256(Files.readAllBytes(Paths.get(script)))),
+        "observer_sha256" -> Json.fromString(sha256(Files.readAllBytes(home.resolve("CostObservation.scala")))),
+        "provision_sha256" -> Json.fromString(sha256(Files.readAllBytes(home.resolve("provision.py")))),
         "scala_cli" -> Json.fromString(output("scala-cli", "version", "--cli-version")),
         "jvm" -> Json.fromString(System.getProperty("java.runtime.version"))),
       "context" -> Json.obj("network" -> Json.fromString("synthetic devnet"),
@@ -70,7 +74,7 @@ object BlockOracle {
           Json.fromInt(decodeBlock(field[Json](c, "block")).height)),
         "ergo_tree_versions" -> Json.arr(field[Vector[String]](c, "parent_boxes_hex").map(b => Json.fromInt(box(b).ergoTree.version)): _*),
         "activated_script_version" -> Json.fromInt(version - 1), "block_version" -> Json.fromInt(version),
-        "voted_params" -> field[Json](c, "parameters")),
+        "voted_params" -> voted),
       "run" -> Json.obj("command" -> Json.fromString(command), "seeds" -> Json.Null,
         "timestamp" -> Json.fromString(java.time.Instant.now.toString)),
       "evidence" -> Json.obj(
@@ -151,16 +155,18 @@ object BlockOracle {
     state.persistentProver.avlProver.generateProofForOperations(operations).get
   }
   def mine(state: UtxoState, s: ErgoSettings, p: Parameters,
-           transactions: Seq[ErgoTransaction]): ErgoFullBlock = {
+           transactions: Seq[ErgoTransaction], votes: Array[Byte] = Array.fill(3)(0.toByte), disableVotesRule: Boolean = false): ErgoFullBlock = {
     val context = state.stateContext
     val links = new NipopowAlgos(s.chainSettings)
-    val ext = p.toExtensionCandidate ++ context.validationSettings.toExtensionCandidate ++
+    val validation = if (disableVotesRule) context.validationSettings.updated(
+      ErgoValidationSettingsUpdate(Seq(215.toShort), Seq.empty)) else context.validationSettings
+    val ext = p.toExtensionCandidate ++ validation.toExtensionCandidate ++
       links.interlinksToExtension(links.updateInterlinks(context.lastHeaderOpt, context.lastExtensionOpt))
     val (ad, root) = proof(state, transactions)
     s.chainSettings.powScheme.proveBlock(context.lastHeaderOpt, p.blockVersion,
       s.chainSettings.initialNBits, root, ad, transactions,
       context.lastHeaderOpt.map(_.timestamp + 100).getOrElse(1000L), ext,
-      Array.fill(3)(0.toByte), BigInt(1), 0L, 100000L).get
+      votes, BigInt(1), 0L, 100000L).get
   }
   def checkEnvelope(block: ErgoFullBlock, state: UtxoState, s: ErgoSettings): Unit = {
     state.stateContext.lastHeaderOpt match {
@@ -199,12 +205,19 @@ object BlockOracle {
     require(state.stateContext.currentParameters.parametersTable == parameters(c).parametersTable)
     state
   }
-  def evaluate(fixture: Json): Json = withState(fixture) { (initial, s, _) =>
+  def evaluate(fixture: Json, digest: Boolean = false): Json = withState(fixture) { (initial, s, _) =>
     val state = parents(fixture, initial, s)
     val block = decodeBlock(field[Json](fixture.hcursor, "block"))
     val before = hex(state.rootDigest)
     CostObservation.reset()
-    val applied = Try(checkEnvelope(block, state, s)).flatMap(_ => state.applyModifier(block, None)(_ => ()))
+    val digestState = if (digest) Some(DigestState.recover(state.version, state.rootDigest,
+      state.stateContext, Files.createDirectory(Paths.get(s.directory).resolve("digest")).toFile, s).get) else None
+    val applied = try {
+      Try(checkEnvelope(block, state, s)).flatMap { _ => digestState match {
+        case Some(ds) => ds.applyModifier(block, None)(_ => ()).map(next => hex(next.rootDigest))
+        case None => state.applyModifier(block, None)(_ => ()).map(next => hex(next.rootDigest))
+      }}
+    } finally digestState.foreach(_.close())
     val results = CostObservation.results
     require(results.size <= 1, "one execTransactions call per target block")
     val cost = results.headOption.flatMap(_.payload)
@@ -216,8 +229,11 @@ object BlockOracle {
       "rejection_detail" -> error.map(e => Json.fromString(e.getMessage)).getOrElse(Json.Null),
       "sum_block_cost" -> cost.map(Json.fromLong).getOrElse(Json.Null),
       "exec_transactions_calls" -> Json.fromInt(results.size),
+      "transaction_entries" -> Json.arr(CostObservation.entries.map { case (index, accumulated) =>
+        Json.obj("index" -> Json.fromInt(index), "accumulated_cost" -> Json.fromLong(accumulated))
+      }: _*),
       "state_root_before" -> Json.fromString(before),
-      "state_root_after" -> Json.fromString(hex(state.rootDigest)))
+      "state_root_after" -> Json.fromString(applied.toOption.getOrElse(hex(state.rootDigest))))
   }
   def build(request: Json): Json = withState(request) { (initial, s, p) =>
     val genesisRoot = hex(initial.rootDigest)
@@ -229,9 +245,12 @@ object BlockOracle {
         value.asArray.get
       case None =>
         var bootstrap = bootstrapBox(request.hcursor)
-        (1 to s.chainSettings.voting.votingLength).map { height =>
+        val vote = request.hcursor.get[Int]("epoch_vote").toOption
+        val length = s.chainSettings.voting.votingLength
+        (1 to (if (vote.isDefined) 3 * length - 1 else length)).map { height =>
           val transaction = bootstrapTransaction(bootstrap, height)
-          val block = mine(state, s, p, Seq(transaction))
+          val votes = Array(vote.filter(_ => height >= 2 * length).getOrElse(0).toByte, 0.toByte, 0.toByte)
+          val block = mine(state, s, p, Seq(transaction), votes, disableVotesRule = vote.isDefined && height == length)
           state = state.applyModifier(block, None)(_ => ()).get
           bootstrap = transaction.outputs.head
           encodeBlock(block)
@@ -239,7 +258,12 @@ object BlockOracle {
     }
     val transactions = field[Vector[String]](request.hcursor, "transactions_hex").map(tx)
     require(transactions.nonEmpty, "target needs at least one transaction")
-    val block = mine(state, s, p, transactions)
+    val targetParams = if (request.hcursor.get[Int]("epoch_vote").toOption.isDefined) {
+      val context = state.stateContext
+      context.currentParameters.update(context.currentHeight + 1, false,
+        context.votingData.epochVotes.toSeq, ErgoValidationSettingsUpdate.empty, s.chainSettings.voting)._1
+    } else p
+    val block = mine(state, s, targetParams, transactions)
     request.deepMerge(Json.obj(
       "genesis_state_root" -> Json.fromString(genesisRoot),
       "initial_box_order_hex" -> Json.arr(BoxHolder(field[Vector[String]](request.hcursor, "parent_boxes_hex").map(box) :+
@@ -250,9 +274,9 @@ object BlockOracle {
       "parent_state_root" -> Json.fromString(hex(state.rootDigest)),
       "block" -> encodeBlock(block)))
   }
-  def signP2pk(input: ErgoBox, height: Int): ErgoTransaction = {
+  def signP2pk(input: ErgoBox, height: Int, data: IndexedSeq[DataInput] = IndexedSeq.empty): ErgoTransaction = {
     val secret = sigmastate.crypto.DLogProtocol.DLogProverInput(java.math.BigInteger.ONE)
-    val unsigned = new UnsignedErgoLikeTransaction(IndexedSeq(new UnsignedInput(input.id)), IndexedSeq.empty,
+    val unsigned = new UnsignedErgoLikeTransaction(IndexedSeq(new UnsignedInput(input.id)), data,
       IndexedSeq(new ErgoBoxCandidate(input.value, input.ergoTree, height, input.additionalTokens)))
     val prover = new ErgoLikeInterpreter with sigmastate.interpreter.ProverInterpreter {
       override type CTX = ErgoLikeContext
@@ -260,7 +284,7 @@ object BlockOracle {
     }
     val signature = prover.generateProof(secret.publicImage, unsigned.messageToSign, sigmastate.interpreter.HintsBag.empty)
     ErgoTransaction(IndexedSeq(Input(input.id, sigma.interpreter.ProverResult(signature,
-      sigma.interpreter.ContextExtension.empty))), IndexedSeq.empty, unsigned.outputCandidates)
+      sigma.interpreter.ContextExtension.empty))), data, unsigned.outputCandidates)
   }
   def smokeRequest(): Json = {
     val secret = sigmastate.crypto.DLogProtocol.DLogProverInput(java.math.BigInteger.ONE)
@@ -323,6 +347,31 @@ object BlockOracle {
         // Remaining 12200 passes structural init (12100), but not token access (400).
         (request(Seq(inputs.head, tokenBox), Seq(signed.head, tokenTx), unit + 12200),
           tokenTotal, Seq("ORDER-init-token"))
+      case "g-stop-after-invalid" | "g-stop-control" =>
+        val second = signP2pk(signed.head.outputs.head, 129)
+        val invalid = ErgoTransaction(second.inputs.map(i => Input(i.boxId,
+          sigma.interpreter.ProverResult(Array.fill(56)(0.toByte), sigma.interpreter.ContextExtension.empty))),
+          second.dataInputs, second.outputCandidates)
+        val third = signP2pk(inputs(2), 129, IndexedSeq(DataInput(second.outputs.head.id)))
+        (request(Seq(inputs.head, inputs(2)), Seq(signed.head,
+          if (name == "g-stop-control") second else invalid, third), 1000000),
+          single, Seq("BLOCK-stop-after-invalid-B002"))
+      case "h-digest-accept" | "h-digest-reject" =>
+        (request(inputs.take(2), signed.take(2), if (name == "h-digest-accept") 1000000 else 25005),
+          single, Seq("BLOCK-digest-state-accounting-B005"))
+      case "i-vote-output-one-up" =>
+        (request(inputs.take(1), signed.take(1), 16384).deepMerge(Json.obj(
+          "epoch_vote" -> Json.fromInt(8), "parameters" -> Json.obj("8" -> Json.fromInt(1)))),
+          single, Seq("BLOCK-param-voting"))
+      case n if n.startsWith("i-vote-") =>
+        val parts = n.stripPrefix("i-vote-").split("-")
+        val cap = parts(0).toInt
+        val vote = if (parts(1) == "down") -4 else 4
+        (request(inputs.take(1), signed.take(1), cap).deepMerge(Json.obj("epoch_vote" -> Json.fromInt(vote))),
+          single, Seq("BLOCK-param-voting"))
+      case "j-context-updated" =>
+        (request(inputs.take(1), signed.take(1), 12503).deepMerge(Json.obj("epoch_vote" -> Json.fromInt(6))),
+          single, Seq("BLOCK-updated-context-before-validation-B006"))
       case "rejection-script-control" =>
         val first = signed.head
         val invalid = ErgoTransaction(first.inputs.map(i => Input(i.boxId,
@@ -347,7 +396,55 @@ object BlockOracle {
     }
     val fixture = build(seed)
     val observed = evaluate(fixture)
-    val captured = fixture.deepMerge(Json.obj("expected" -> observed,
+    val extra = if (name.startsWith("h-digest-")) {
+      val delegated = evaluate(fixture, digest = true)
+      require(delegated == observed, "digest and UTXO results differ")
+      Json.obj("digest_expected" -> delegated)
+    } else if (fixture.hcursor.get[Int]("epoch_vote").toOption.isDefined) {
+      withState(fixture) { (initial, s, _) =>
+        val state = parents(fixture, initial, s)
+        val block = decodeBlock(field[Json](fixture.hcursor, "block"))
+        val updated = state.stateContext.appendFullBlock(block).get
+        val stale = new ErgoStateContext(updated.lastHeaders, updated.lastExtensionOpt,
+          updated.genesisStateDigest, state.stateContext.currentParameters,
+          updated.validationSettings, updated.votingData)(s.chainSettings)
+        val staleResult = ErgoState.execTransactions(block.transactions, stale, s.nodeSettings)(id =>
+          Try(state.boxById(id).get))
+        def table(p: Parameters): Json = Json.obj(p.parametersTable.toSeq.map {
+          case (k, v) => k.toString -> Json.fromInt(v)
+        }: _*)
+        Json.obj("transition" -> Json.obj(
+          "previous_parameters" -> table(state.stateContext.currentParameters),
+          "updated_parameters" -> table(updated.currentParameters),
+          "epoch_votes" -> Json.arr(state.stateContext.votingData.epochVotes.map { case (id, count) =>
+            Json.arr(Json.fromInt(id), Json.fromInt(count))
+          }: _*),
+          "stale_verdict" -> Json.fromString(if (staleResult.isValid) "Accept" else "Reject"),
+          "stale_cost" -> staleResult.payload.map(Json.fromLong).getOrElse(Json.Null)))
+      }
+    } else Json.obj()
+    if (name.startsWith("g-stop-")) {
+      val indices = field[Vector[Json]](observed.hcursor, "transaction_entries").map(j => field[Int](j.hcursor, "index"))
+      require(indices == (if (name == "g-stop-control") Vector(0, 1, 2) else Vector(0, 1)))
+      require(field[String](observed.hcursor, "verdict") == (if (name == "g-stop-control") "Accept" else "Reject"))
+    }
+    if (name.startsWith("i-vote-") || name == "j-context-updated") {
+      val transition = extra.hcursor.downField("transition").success.get
+      val votes = field[Vector[Vector[Int]]](transition, "epoch_votes")
+      require(votes.size == 1 && votes.head(1) == 128, "full approved epoch required")
+      if (name.startsWith("i-vote-")) {
+        val expectedValue = Map("i-vote-16384-down" -> 16384, "i-vote-16384-up" -> 16547,
+          "i-vote-16385-down" -> 16222, "i-vote-16385-up" -> 16548, "i-vote-output-one-up" -> 2)(name)
+        val id = if (name == "i-vote-output-one-up") "8" else "4"
+        require(transition.downField("updated_parameters").get[Int](id).right.get == expectedValue)
+        require(field[String](observed.hcursor, "verdict") == "Accept")
+      }
+    }
+    if (name == "j-context-updated") {
+      require(field[String](observed.hcursor, "verdict") == "Reject", observed.noSpaces + extra.noSpaces)
+      require(extra.hcursor.downField("transition").get[String]("stale_verdict").right.get == "Accept")
+    }
+    val captured = fixture.deepMerge(extra).deepMerge(Json.obj("expected" -> observed,
       "ledger" -> Json.arr((Seq("BLOCK-parallel-equiv") ++ rows).map(Json.fromString): _*),
       "boundary_basis" -> Json.obj("single_p2pk" -> single, "unlimited_target_or_prefix" -> basis)))
     write(output, withManifest(captured,
@@ -439,6 +536,12 @@ object BlockOracle {
     val sigmaJar = classOf[sigma.VersionContext].getProtectionDomain.getCodeSource.getLocation.toString
     require(sigmaJar.endsWith("sigma-state_2.12-6.0.6.jar"), "expected sigma-state 6.0.6: " + sigmaJar)
     val result = args.toList match {
+      case "instrumentation-self-test" :: directory :: Nil =>
+        val names = Seq("g-stop-after-invalid", "g-stop-control", "h-digest-accept", "h-digest-reject",
+          "i-vote-16384-down", "i-vote-16384-up", "i-vote-16385-down", "i-vote-16385-up", "i-vote-output-one-up", "j-context-updated")
+        names.foreach(name => family(name, directory + "/" + name + ".json"))
+        Json.obj("selected" -> Json.fromInt(names.size), "executed" -> Json.fromInt(names.size),
+          "failed" -> Json.fromInt(0), "skipped" -> Json.fromInt(0))
       case "families" :: directory :: Nil =>
         val names = Seq("a-exact-sum", "b-sum-plus-one", "c-single-cap", "d-mid-block",
           "d-mid-block-reversed", "e-token-order", "f-v6-devnet", "f-v5-control", "rejection-script-control")

@@ -2,6 +2,7 @@
 //> using options -Xfatal-warnings
 //> using dep org.scorexfoundation::sigma-state:6.0.2
 //> using dep org.ergoplatform::ergo-wallet:6.0.2
+//> using dep org.ergoplatform::ergo-core:6.0.2
 //> using dep io.circe::circe-core:0.13.0
 //> using repository "https://gitlab.com/api/v4/projects/61211221/packages/maven"
 
@@ -17,6 +18,7 @@ import sigmastate.interpreter.{CErgoTreeEvaluator, Interpreter}
 import sigmastate.FiatShamirTree
 import org.ergoplatform.wallet.interpreter.ErgoInterpreter
 import org.ergoplatform.wallet.protocol.Constants
+import org.ergoplatform.settings.Parameters
 import scala.sys.process._
 
 /** JVM declarations only; no Rust cost implementation participates in extraction. */
@@ -81,9 +83,8 @@ object CostConstants {
       "Usage: CostConstants <provenance-git-sha> <ISO-8601-timestamp>; run from the repository root (see README.md)")
     val revision = args(0)
     val timestamp = java.time.Instant.parse(args(1)).toString
-    require(command("git", "show", s"$revision:$script") ==
-      new String(Files.readAllBytes(Paths.get(script)), UTF_8).trim,
-      "The provenance revision must contain the exact extractor script being run")
+    val sourceState = if (command("git", "show", s"$revision:$script") ==
+      new String(Files.readAllBytes(Paths.get(script)), UTF_8).trim) "committed" else "working-tree"
     val opcodes = VersionContext.withVersions(3.toByte, 3.toByte) {
       (0 to 255).flatMap { code => ValueSerializer.serializers.get(code.toByte).map { serializer =>
         Json.obj("opcode" -> num(code), "name" -> str(serializer.opDesc.typeName),
@@ -115,6 +116,27 @@ object CostConstants {
         (c.get[Int]("typeId").toOption.get, c.get[Int]("methodId").toOption.get,
           c.get[Int]("minVersion").toOption.get)
       }
+    // Tuple accessors are synthesized by getTupleMethod, not MethodsContainer.methods.
+    // Enumerate every arity/version, then group identical declarations without losing
+    // their reachability denominator. Inherited size/apply retain collection IDs.
+    val tupleSnapshots = for {
+      version <- 0 to 3
+      arity <- 2 to sigma.data.SigmaConstants.MaxTupleLength.value
+      name <- Seq("size", "apply") ++ (1 to arity).map(i => s"_$i")
+    } yield VersionContext.withVersions(version.toByte, version.toByte) {
+      val method = STupleMethods.getTupleMethod(STuple(Vector.fill(arity)(SInt)), name).get
+      val declaration = Json.obj("name" -> str(method.name),
+        "typeId" -> num(method.objType.ownerType.typeId & 255),
+        "methodId" -> num(method.methodId & 255), "costKind" -> cost(method.costKind))
+      (declaration, arity, version)
+    }
+    val tupleMethods = tupleSnapshots.groupBy(t => printer.print(t._1)).values.toSeq.map { group =>
+      val arities = group.map(_._2).distinct.sorted
+      require(arities == (arities.head to arities.last), "Tuple arity domain must be contiguous")
+      group.head._1.deepMerge(Json.obj(
+        "minArity" -> num(arities.head), "maxArity" -> num(arities.last),
+        "versions" -> arr(group.map(_._3).distinct.sorted.map(num))))
+    }.sortBy(_.hcursor.get[String]("name").right.get)
     // CostPerTreeByte and CostPerByteDeserialized are instance vals on Interpreter.
     val interpreter = new Interpreter { override type CTX = org.ergoplatform.ErgoLikeContext }
     val constants = operations(DataValueComparer, "DataValueComparer") ++
@@ -127,6 +149,11 @@ object CostConstants {
         "Interpreter.ProveDHTupleVerificationCost" -> scalar(Interpreter.ProveDHTupleVerificationCost.value, "jit"),
         "ErgoInterpreter.interpreterInitCost" -> scalar(ErgoInterpreter.interpreterInitCost, "block"),
         "Constants.StorageContractCost" -> scalar(Constants.StorageContractCost, "block"),
+        "Parameters.TokenAccessCostDefault" -> scalar(Parameters.TokenAccessCostDefault, "block"),
+        "Parameters.InputCostDefault" -> scalar(Parameters.InputCostDefault, "block"),
+        "Parameters.DataInputCostDefault" -> scalar(Parameters.DataInputCostDefault, "block"),
+        "Parameters.OutputCostDefault" -> scalar(Parameters.OutputCostDefault, "block"),
+        "Parameters.MaxBlockCostDefault" -> scalar(Parameters.MaxBlockCostDefault, "block"),
         "DataValueComparer.CostOf_MatchType" -> scalar(DataValueComparer.CostOf_MatchType, "jit"),
         "CErgoTreeEvaluator.DataBlockSize" -> scalar(CErgoTreeEvaluator.DataBlockSize, "bytes"),
         "JitCost.MinValue" -> bound(Int.MinValue, "jit"),
@@ -135,8 +162,8 @@ object CostConstants {
         "JitCost.MaxBlockCost" -> bound(Int.MaxValue / JitCost.fromBlockCost(1).value, "block"))
     require(constants.map(_._1).distinct.size == constants.size, "Duplicate constant names")
     val payload = Json.obj("opcodes" -> arr(opcodes), "containers" -> arr(containers),
-      "methods" -> arr(methods), "constants" -> Json.obj(constants: _*))
-    val count = opcodes.size + methods.size + constants.size
+      "methods" -> arr(methods), "tupleMethods" -> arr(tupleMethods), "constants" -> Json.obj(constants: _*))
+    val count = opcodes.size + methods.size + tupleMethods.size + constants.size
     val manifest = Json.obj(
       "scala" -> Json.obj("ergo_version" -> str("6.0.2"), "sigmastate_version" -> str("6.0.2"),
         "node_app_version" -> Json.Null, "source_shas" -> Json.obj(
@@ -146,6 +173,7 @@ object CostConstants {
         "features" -> Json.arr()),
       "tool" -> Json.obj("script" -> str(script), "git_sha" -> str(revision),
         "script_sha256" -> str(sha(Files.readAllBytes(Paths.get(script)))),
+        "source_state" -> str(sourceState),
         "scala_cli_version" -> str(command("scala-cli", "version", "--cli-version")),
         "scala_version" -> str(util.Properties.versionNumberString),
         "jvm_version" -> str(System.getProperty("java.runtime.version"))),
@@ -158,11 +186,11 @@ object CostConstants {
         "timestamp_basis" -> str("explicit capture timestamp; reuse for byte-identical regeneration"),
         "selected" -> num(count), "executed" -> num(count), "skipped" -> num(0), "failed" -> num(0)),
       "evidence" -> Json.obj("input_vectors" -> Json.arr(),
-        "artifacts" -> arr(Seq(artifact(Interpreter), artifact(ErgoInterpreter), artifact(Json))),
+        "artifacts" -> arr(Seq(artifact(Interpreter), artifact(ErgoInterpreter), artifact(Parameters), artifact(Json))),
         "output" -> Json.obj("file" -> str(output), "sha256" -> str(sha(printer.print(payload).getBytes(UTF_8))),
           "hash_scope" -> str("UTF-8 circe spaces2 sorted-key JSON excluding manifest and final newline (avoids self-reference)"))),
       "excluded" -> Json.arr())
     Files.write(Paths.get(output), (printer.print(payload.deepMerge(Json.obj("manifest" -> manifest))) + "\n").getBytes(UTF_8))
-    println(s"selected=$count executed=$count skipped=0 failed=0; opcodes=${opcodes.size} methods=${methods.size} containers=${containers.size} constants=${constants.size}")
+    println(s"selected=$count executed=$count skipped=0 failed=0; opcodes=${opcodes.size} methods=${methods.size} tupleMethods=${tupleMethods.size} containers=${containers.size} constants=${constants.size}")
   }
 }

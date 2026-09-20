@@ -35,6 +35,15 @@ pub struct ProtocolParams {
 }
 
 impl ProtocolParams {
+    /// Select parameters after validating the target block's epoch extension.
+    /// Scala appends that extension before executing the target transactions.
+    pub fn for_block(
+        parent: &crate::active_params::ActiveProtocolParameters,
+        voted: Option<&crate::active_params::ActiveProtocolParameters>,
+    ) -> Self {
+        Self::from_active(voted.unwrap_or(parent))
+    }
+
     /// Mainnet defaults — frozen snapshot of the votable parameters at
     /// the time these were captured. The authoritative path is to derive
     /// `ProtocolParams` from a per-epoch [`crate::ActiveProtocolParameters`] via

@@ -11,5 +11,9 @@ object CostObservation {
     result
   }
 
-  def reset(): Unit = { results = Vector.empty }
+  var entries: Vector[(Int, Long)] = Vector.empty
+
+  def enter(index: Int, accumulated: Long): Unit = { entries :+= index -> accumulated }
+
+  def reset(): Unit = { results = Vector.empty; entries = Vector.empty }
 }

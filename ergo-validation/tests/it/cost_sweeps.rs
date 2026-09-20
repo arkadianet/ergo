@@ -170,7 +170,63 @@ fn read_json(path: &std::path::Path) -> Value {
     serde_json::from_slice(&bytes).expect("fixture JSON")
 }
 
+fn verifier_throws_sweep_matches_jvm(sweep: &Value) -> usize {
+    use super::cost_crypto_truncation::{
+        validate_transaction_case, Context, TransactionCase, Verdict,
+    };
+    let case: TransactionCase = serde_json::from_value(sweep["case"].clone()).unwrap();
+    let context: Context = serde_json::from_value(sweep["context"].clone()).unwrap();
+    assert_eq!(sweep["case"]["block_cost"], "unavailable");
+    let points = sweep["points"].as_array().unwrap();
+    assert_eq!(points.len(), 6);
+    let mut combinations = std::collections::BTreeSet::new();
+    for point in points {
+        let limit = point["limit"].as_u64().unwrap();
+        let accumulated = point["accumulated_block_cost"].as_u64().unwrap();
+        assert!(combinations.insert((accumulated, limit)));
+        assert_eq!(point["verifier_result"], "Failure");
+        assert!(!point["exception"].as_str().unwrap().contains("CostLimit"));
+        assert_eq!(point["verdict"], "RejectScript");
+        assert_eq!(point["total"], "unavailable");
+        let sentinel = point["sentinel_block_cost"].as_u64().unwrap();
+        let before = point["diagnostic_zero_script_total"].as_u64().unwrap();
+        let unchecked = point["diagnostic_unchecked_total"].as_u64().unwrap();
+        assert_eq!(sentinel, limit + 1);
+        assert_eq!(unchecked - before, sentinel);
+        let (verdict, charged) = validate_transaction_case(&case, &context, limit, accumulated);
+        assert_eq!(verdict, Verdict::RejectScript);
+        // The returned number is charged-to-failure, never an accepted execution cost.
+        // A credited sentinel would exceed both the budget and the pre-script total.
+        assert!(
+            charged >= before,
+            "transaction initialization must be charged"
+        );
+        assert!(charged < sentinel, "sentinel must not be credited: {point}");
+        assert!(charged < unchecked);
+    }
+    assert_eq!(
+        combinations,
+        [0, 1000]
+            .into_iter()
+            .flat_map(|accumulated| {
+                [20000, 20001, 1000000]
+                    .into_iter()
+                    .map(move |limit| (accumulated, limit))
+            })
+            .collect()
+    );
+    points.len()
+}
+
 // ----- oracle parity -----
+
+// ledger: TX-verifier-failure-sentinel-T009
+#[test]
+fn verifier_throws_transaction_rejects_without_sentinel_credit() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../test-vectors/ergo-sigma/cost-ledger/sweeps/verifier-throws.json.gz");
+    assert_eq!(verifier_throws_sweep_matches_jvm(&read_json(&path)), 6);
+}
 
 // ledger: VERSION-tree-version-gate, VERSION-G019, VERSION-G020
 #[test]
@@ -230,6 +286,7 @@ fn cost_sweeps_all_classes_match_jvm() {
         "storage-rent-success",
         "storage-rent-fallback",
         "competing-failures",
+        "verifier-throws",
     ] {
         assert!(classes.contains(required), "missing class {required}");
     }
@@ -289,6 +346,10 @@ fn cost_sweeps_all_classes_match_jvm() {
                     "accepted JVM total required"
                 );
             }
+        }
+        if sweep["surface"] == "transaction-verifier-failure" {
+            executed += verifier_throws_sweep_matches_jvm(&sweep);
+            continue;
         }
         let measured = sweep["measured_total"]
             .as_u64()

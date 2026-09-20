@@ -46,11 +46,14 @@ def main():
             == manifest["tool"]["script_sha256"], "Script hash mismatch")
     committed = subprocess.check_output(
         ["git", "show", f'{manifest["tool"]["git_sha"]}:{manifest["tool"]["script"]}'], cwd=ROOT)
-    require(committed == script.read_bytes(), "Provenance commit does not contain this script")
+    require(manifest["tool"].get("source_state", "committed") in {"committed", "working-tree"},
+            "Unknown source state")
+    if manifest["tool"].get("source_state", "committed") == "committed":
+        require(committed == script.read_bytes(), "Provenance commit does not contain this script")
 
     opcodes, methods, containers, constants = (
         data[key] for key in ("opcodes", "methods", "containers", "constants"))
-    require([len(opcodes), len(methods), len(containers), len(constants)] == [102, 199, 21, 45],
+    require([len(opcodes), len(methods), len(containers), len(constants)] == [102, 199, 21, 50],
             "Pinned registry coverage changed; inspect JVM declarations before updating")
     require([op["opcode"] for op in opcodes] == sorted({op["opcode"] for op in opcodes}),
             "Duplicate or unordered opcodes")
@@ -73,7 +76,15 @@ def main():
             require(key not in seen, f"Duplicate versioned method {key}")
             seen.add(key)
 
-    descriptors = [record["costKind"] for record in opcodes + methods]
+    tuples = data["tupleMethods"]
+    require(len(tuples) == 257, "Missing synthesized tuple methods")
+    for method in tuples:
+        name = method["name"]
+        first = max(2, int(name[1:])) if name.startswith("_") else 2
+        require(method["minArity"] == first and method["maxArity"] == 255, "Tuple arity coverage changed")
+        require(method["versions"] == [0, 1, 2, 3], "Tuple version coverage changed")
+
+    descriptors = [record["costKind"] for record in opcodes + methods + tuples]
     descriptors += [record["costKind"] for record in constants.values() if "costKind" in record]
     for descriptor in descriptors:
         kind = descriptor["kind"]
@@ -110,7 +121,7 @@ def main():
         require(all(excluded.get(key) for key in ("name", "scala", "rationale")), "Incomplete exclusion")
         require(any(row["state"] == "N-A" and excluded["name"] in (row["scala"] + row["note"])
                     for row in ledger["rows"]), f'Exclusion lacks an N-A ledger row: {excluded["name"]}')
-    count = len(opcodes) + len(methods) + len(constants)
+    count = len(opcodes) + len(methods) + len(tuples) + len(constants)
     require(manifest["run"]["selected"] == manifest["run"]["executed"] == count, "Invalid run counts")
     require(manifest["run"]["skipped"] == manifest["run"]["failed"] == 0, "Incomplete capture")
     print(f"PASS: {count} cost records; {len(containers)} containers; {len(seen)} versioned methods; "

@@ -153,8 +153,6 @@ pub(super) fn process_block_digest(
         ));
     }
 
-    let active_for_this_block = ProtocolParams::from_active(store.active_params());
-    let params = &active_for_this_block;
     let t_total = Instant::now();
 
     // 1. Load and parse header.
@@ -547,6 +545,10 @@ pub(super) fn process_block_digest(
                 None => None,
             }
         };
+    // The target epoch extension is validated before its parameters price transactions.
+    let active_for_this_block =
+        ProtocolParams::for_block(store.active_params(), voted_params_row.as_ref());
+    let params = &active_for_this_block;
     let ctx = BlockValidationContext {
         parent: &parent_checked,
         utxo: &digest_view,

@@ -727,11 +727,13 @@ pub(crate) fn make_avl_verifier(
 /// third-party `ergo_avltree_rust` crate's eager proof-graph reconstruction
 /// (a malformed/empty/truncated/0x00 proof panics inside
 /// `BatchAVLVerifier::new`). Returns `None` on failure, mirroring scrypto,
-/// where a bad proof yields `reconstructedTree = None` (the constructor
-/// never throws) — so each SAvlTree method arm maps `None` to its Scala
+/// where non-fatal reconstruction failures yield `reconstructedTree = None`
+/// — so each SAvlTree method arm maps `None` to its Scala
 /// per-method outcome (contains → false, get/getMany → error, insert
 /// pre-v3 → error / v3+ → None, update/remove/insertOrUpdate → None)
 /// instead of aborting the whole evaluation.
+/// The JVM's fatal Int.MaxValue-key allocation has no verification verdict;
+/// Rust rejects that metadata before constructing the upstream verifier.
 ///
 /// COST NOTE: a failed construction yields `digest = None`, but its
 /// `treeHeight` is STILL the digest's height byte — scrypto sets

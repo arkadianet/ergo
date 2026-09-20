@@ -1,3 +1,5 @@
+//! Oracle: test-vectors/ergo-sigma/cost-total/breakdown_1_5.json.gz
+//! Oracle: test-vectors/ergo-sigma/cost-ledger/scala-constants.json
 //! Oracle: test-vectors/scripts/scala/ComputeTransactionCosts.scala
 //! Oracle: scripts/jvm_checkpoint_oracle/CheckpointOracle.scala
 //! Oracle: test-vectors/ergo-sigma/cost-total/mainnet-epochs.json.gz
@@ -156,7 +158,7 @@ struct Fixture {
 /// Require the exact block-validation window, newest first. The script layer
 /// derives LastBlockUtxoRootHash from the first ancestor's state root.
 fn replay_headers(headers: &HashMap<u32, header::Header>, height: u32) -> Vec<header::Header> {
-    let ancestors: Vec<_> = (height - 9..height)
+    let ancestors: Vec<_> = (height.saturating_sub(9).max(1)..height)
         .rev()
         .map(|h| {
             headers
@@ -223,16 +225,18 @@ fn replay_fixture(
         let h = tx.cost.height;
         let hdr = &headers[&h];
         let p = &fixture.parameters[&h.to_string()];
-        let params = ProtocolParams {
+        let active = ergo_validation::ActiveProtocolParameters {
             storage_fee_factor: p.storage_fee_factor,
-            min_value_per_byte: p.min_value_per_byte,
-            max_block_cost: p.max_block_cost,
-            input_cost: p.input_cost,
-            data_input_cost: p.data_input_cost,
-            output_cost: p.output_cost,
-            token_access_cost: p.token_access_cost,
-            ..ProtocolParams::mainnet_default()
+            min_value_per_byte: p.min_value_per_byte.try_into().unwrap(),
+            max_block_cost: p.max_block_cost.try_into().unwrap(),
+            input_cost: p.input_cost.try_into().unwrap(),
+            data_input_cost: p.data_input_cost.try_into().unwrap(),
+            output_cost: p.output_cost.try_into().unwrap(),
+            token_access_cost: p.token_access_cost.try_into().unwrap(),
+            block_version: p.block_version,
+            ..ergo_validation::scala_launch_mainnet()
         };
+        let params = ProtocolParams::from_active(&active);
         assert_eq!(
             p.block_version, hdr.version,
             "voted version must match block"
@@ -362,6 +366,74 @@ fn replay_fixture(
 }
 
 // ----- oracle parity -----
+
+// ledger: BLOCK-cost-parameter-defaults-B008
+#[test]
+fn transaction_early_defaults_and_later_votes_match_jvm() {
+    let early: Fixture = serde_json::from_reader(flate2::read::GzDecoder::new(
+        &include_bytes!("../../../test-vectors/ergo-sigma/cost-total/breakdown_1_5.json.gz")[..],
+    ))
+    .unwrap();
+    let later: Fixture = serde_json::from_str(include_str!(
+        "../../../test-vectors/ergo-sigma/cost-total/breakdown_700000_700001.json"
+    ))
+    .unwrap();
+    let constants: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../test-vectors/ergo-sigma/cost-ledger/scala-constants.json"
+    ))
+    .unwrap();
+    let default_costs = [
+        "MaxBlockCostDefault",
+        "TokenAccessCostDefault",
+        "InputCostDefault",
+        "DataInputCostDefault",
+        "OutputCostDefault",
+    ]
+    .map(|name| {
+        constants["constants"][format!("Parameters.{name}")]["value"]
+            .as_u64()
+            .unwrap()
+    });
+    let launch = ProtocolParams::from_active(&ergo_validation::scala_launch_mainnet());
+    assert_eq!(
+        [
+            launch.max_block_cost,
+            launch.token_access_cost,
+            launch.input_cost,
+            launch.data_input_cost,
+            launch.output_cost
+        ],
+        default_costs
+    );
+    assert_eq!(early.transactions.len(), 5);
+    assert_eq!(
+        early
+            .transactions
+            .iter()
+            .map(|tx| tx.cost.height)
+            .collect::<Vec<_>>(),
+        [1, 2, 3, 4, 5]
+    );
+    for p in early.parameters.values() {
+        assert_eq!(
+            [
+                p.max_block_cost,
+                p.token_access_cost,
+                p.input_cost,
+                p.data_input_cost,
+                p.output_cost
+            ],
+            default_costs
+        );
+        assert_eq!(p.block_version, 1);
+    }
+    assert_eq!(later.transactions.len(), 10);
+    for p in later.parameters.values() {
+        assert_ne!(p.max_block_cost, default_costs[0]);
+    }
+    replay_fixture(early, None, &[]);
+    replay_fixture(later, None, &[]);
+}
 
 // ledger: TX-init-formula, TX-token-cost
 #[test]

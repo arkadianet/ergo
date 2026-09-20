@@ -66,3 +66,7 @@ files = ["rent-success-accumulated.json.gz"]
 [[classes]]
 name = "token-exhaustion"
 files = ["token-exhaustion-accumulated.json.gz"]
+
+[[classes]]
+name = "verifier-throws"
+files = ["verifier-throws.json.gz"]

@@ -1,7 +1,7 @@
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/blocks/
 //! JVM producer: scripts/jvm_block_oracle/BlockOracle.scala (Ergo 6.0.5).
 
-use std::{collections::BTreeMap, fs::File, path::Path};
+use std::{collections::BTreeMap, fs::File, path::Path, sync::Mutex};
 
 use ergo_primitives::{digest::Digest32, reader::VlqReader};
 use ergo_ser::{
@@ -12,7 +12,7 @@ use ergo_ser::{
     modifier_id::{compute_section_id, TYPE_AD_PROOFS},
     transaction::read_transaction,
 };
-use ergo_state::{avl::tree::AvlTree, store::StateStore, DigestProofVerifier};
+use ergo_state::{avl::tree::AvlTree, store::StateStore, DigestProofVerifier, DigestUtxoView};
 use ergo_validation::{
     active_params::parse_active_params,
     block::{
@@ -50,10 +50,29 @@ struct Fixture {
     transactions_hex: Vec<String>,
     block: Section,
     expected: Expected,
+    digest_expected: Option<Expected>,
+    transition: Option<Transition>,
+}
+
+#[derive(Deserialize)]
+struct Transition {
+    previous_parameters: BTreeMap<String, i32>,
+    updated_parameters: BTreeMap<String, i32>,
+    epoch_votes: Vec<(i8, i32)>,
+    stale_verdict: String,
+    stale_cost: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+struct Entry {
+    index: usize,
+    accumulated_cost: u64,
 }
 
 #[derive(Deserialize)]
 struct Expected {
+    #[serde(default)]
+    transaction_entries: Vec<Entry>,
     verdict: String,
     sum_block_cost: Option<u64>,
     failure_class: Option<String>,
@@ -121,6 +140,18 @@ impl Section {
 
 struct State(AvlTree);
 
+struct ObservedView<'a> {
+    state: &'a dyn UtxoView,
+    reads: Mutex<Vec<Digest32>>,
+}
+
+impl UtxoView for ObservedView<'_> {
+    fn get_box(&self, id: &Digest32) -> Option<ErgoBox> {
+        self.reads.lock().unwrap().push(*id);
+        self.state.get_box(id)
+    }
+}
+
 impl UtxoView for State {
     fn get_box(&self, id: &Digest32) -> Option<ErgoBox> {
         self.0.lookup(id.as_bytes()).map(|bytes| decode_box(&bytes))
@@ -162,7 +193,7 @@ impl State {
 }
 
 fn context<'a>(
-    state: &'a State,
+    state: &'a dyn UtxoView,
     parents: &'a [Block],
     params: &'a ProtocolParams,
     headers: &'a [CheckedHeader],
@@ -173,7 +204,13 @@ fn context<'a>(
         utxo: state,
         params,
         voting_length: 128,
-        votes_unknown_rule_disabled: false,
+        votes_unknown_rule_disabled:
+            ergo_validation::voting::validation_settings::parse_validation_settings_update(
+                &parent.extension,
+            )
+            .unwrap()
+            .rules_to_disable
+            .contains(&215),
         parent_extension: Some(&parent.extension),
         soft_fork_state: None,
         last_headers: headers,
@@ -233,6 +270,10 @@ fn rust_verdict(error: Option<&BlockValidationError>) -> &'static str {
             error: ValidationError::ScriptError { index: 0, reason },
             ..
         }) if reason.ends_with("ErgoTree version 3 is higher than activated 2") => "RejectVersion",
+        Some(BlockValidationError::Transaction {
+            error: ValidationError::ScriptError { reason, .. },
+            ..
+        }) if reason.starts_with("evaluation error: cost limit exceeded:") => "RejectCost",
         Some(error) => panic!("unmapped Rust rejection: {error:?}"),
     }
 }
@@ -317,9 +358,14 @@ fn validate_manifest(manifest: &Value, payload: &Value) {
     );
     assert_eq!(
         manifest["context"]["height_range"],
-        serde_json::json!([1, 129])
+        serde_json::json!([1, payload["parent_blocks"].as_array().unwrap().len() + 1])
     );
-    assert_eq!(manifest["context"]["voted_params"], payload["parameters"]);
+    assert_eq!(
+        &manifest["context"]["voted_params"],
+        payload
+            .pointer("/transition/updated_parameters")
+            .unwrap_or(&payload["parameters"])
+    );
     let version = payload["parameters"]["123"].as_u64().unwrap();
     assert_eq!(manifest["context"]["block_version"], version);
     assert_eq!(manifest["context"]["activated_script_version"], version - 1);
@@ -368,7 +414,7 @@ fn replay(fixture: Fixture) {
         hex::encode(state.0.root_digest().as_bytes()),
         fixture.genesis_state_root
     );
-    assert_eq!(fixture.parent_blocks.len(), 128);
+    assert!(matches!(fixture.parent_blocks.len(), 128 | 383));
     assert_eq!(
         fixture.parent_headers_hex,
         fixture
@@ -484,10 +530,78 @@ fn replay(fixture: Fixture) {
         .take(10)
         .map(|b| b.header.clone())
         .collect();
-    let ctx = context(&state, &parents, &params, &headers);
-    assert_eq!(fixture.transactions_hex, fixture.block.transactions_hex);
     let target = fixture.block.decode();
-    assert_eq!(target.header.height(), 129);
+    let updated_params = fixture.transition.as_ref().map(|transition| {
+        use ergo_validation::voting::validation_settings::ErgoValidationSettingsUpdate;
+        use ergo_validation::voting::{compute_next_params, VotingSettings};
+        let previous = parse_active_params(&parents.last().unwrap().extension, 256).unwrap();
+        let parsed = parse_active_params(&target.extension, target.header.height()).unwrap();
+        assert_eq!(transition.previous_parameters, fixture.parameters);
+        let mut votes = BTreeMap::new();
+        for block in parents.iter().filter(|b| b.header.height() >= 256) {
+            for vote in block.header.header().votes.iter().filter(|&&v| v != 0) {
+                *votes.entry(*vote as i8).or_insert(0) += 1;
+            }
+        }
+        assert_eq!(
+            votes.into_iter().collect::<Vec<_>>(),
+            transition.epoch_votes
+        );
+        let mut settings = VotingSettings::testnet();
+        settings.soft_fork_epochs = 8;
+        let (computed, _) = compute_next_params(
+            &previous,
+            &transition.epoch_votes,
+            false,
+            &ErgoValidationSettingsUpdate::empty(),
+            target.header.height(),
+            &settings,
+        )
+        .unwrap();
+        assert_eq!(computed, parsed);
+        let table: BTreeMap<_, _> = target
+            .extension
+            .fields
+            .iter()
+            .filter(|f| f.key[0] == 0 && f.key[1] != 124)
+            .map(|f| {
+                (
+                    f.key[1].to_string(),
+                    i32::from_be_bytes(f.value.clone().try_into().unwrap()),
+                )
+            })
+            .collect();
+        assert_eq!(table, transition.updated_parameters);
+        let stale = validate_full_block_with_costs(
+            target.header.clone(),
+            &target.transactions,
+            &target.extension,
+            &context(&state, &parents, &params, &headers),
+        );
+        assert_eq!(
+            if stale.is_ok() { "Accept" } else { "Reject" },
+            transition.stale_verdict
+        );
+        assert_eq!(
+            stale
+                .ok()
+                .map(|(_, costs)| costs.iter().map(|(_, c)| c).sum::<u64>()),
+            transition.stale_cost
+        );
+        ProtocolParams::for_block(&previous, Some(&computed))
+    });
+    let observed_view = ObservedView {
+        state: &state,
+        reads: Mutex::new(Vec::new()),
+    };
+    let ctx = context(
+        &observed_view,
+        &parents,
+        updated_params.as_ref().unwrap_or(&params),
+        &headers,
+    );
+    assert_eq!(fixture.transactions_hex, fixture.block.transactions_hex);
+    assert_eq!(target.header.height() as usize, parents.len() + 1);
     assert_eq!(
         target.header.header().parent_id.as_bytes(),
         ctx.parent.header_id()
@@ -498,19 +612,112 @@ fn replay(fixture: Fixture) {
         &target.extension,
         &ctx,
     );
+    let sequential_reads = std::mem::take(&mut *observed_view.reads.lock().unwrap());
     let observed = validate_full_block_with_costs(
         target.header.clone(),
         &target.transactions,
         &target.extension,
         &ctx,
     );
+    let observed_reads = std::mem::take(&mut *observed_view.reads.lock().unwrap());
     let parallel = validate_full_block_parallel_with_costs(
         target.header.clone(),
         &target.transactions,
         &target.extension,
         &ctx,
     );
+    let parallel_reads = std::mem::take(&mut *observed_view.reads.lock().unwrap());
+    if fixture
+        .ledger
+        .iter()
+        .any(|id| id == "BLOCK-stop-after-invalid-B002")
+    {
+        let third_input = target.transactions.transactions[2].inputs[0].box_id;
+        let executed = fixture
+            .expected
+            .transaction_entries
+            .iter()
+            .any(|entry| entry.index == 2);
+        for reads in [&sequential_reads, &observed_reads, &parallel_reads] {
+            assert_eq!(
+                reads.iter().filter(|id| **id == third_input).count(),
+                usize::from(executed)
+            );
+        }
+        if !executed {
+            for error in [
+                sequential.as_ref().err(),
+                observed.as_ref().err(),
+                parallel.as_ref().err(),
+            ] {
+                assert!(matches!(
+                    error,
+                    Some(BlockValidationError::Transaction { index: 1, .. })
+                ));
+            }
+        }
+    }
     let expected = jvm_verdict(&fixture.expected);
+    if let Some(digest_expected) = &fixture.digest_expected {
+        let txs: Vec<_> = target.transactions.transactions.iter().collect();
+        let (remove, insert) = StateStore::build_utxo_changes_raw(&txs).unwrap();
+        let lookups: Vec<_> = txs
+            .iter()
+            .flat_map(|tx| tx.data_inputs.iter())
+            .map(|input| *input.box_id.as_bytes())
+            .collect();
+        let (_, resolved) = DigestProofVerifier::apply_block_resolving_boxes(
+            compute_section_id(
+                TYPE_AD_PROOFS,
+                target.header.header_id(),
+                target.header.header().ad_proofs_root.as_bytes(),
+            ),
+            &target.proof,
+            target.header.header(),
+            state.0.root_digest().as_bytes(),
+            &lookups,
+            &remove,
+            &insert,
+        )
+        .unwrap();
+        let digest_view =
+            DigestUtxoView::new(&resolved, &target.transactions.transactions).unwrap();
+        let digest_ctx = context(&digest_view, &parents, &params, &headers);
+        for result in [
+            validate_full_block_with_costs(
+                target.header.clone(),
+                &target.transactions,
+                &target.extension,
+                &digest_ctx,
+            ),
+            validate_full_block_parallel_with_costs(
+                target.header.clone(),
+                &target.transactions,
+                &target.extension,
+                &digest_ctx,
+            ),
+        ] {
+            assert_eq!(
+                rust_verdict(result.as_ref().err()),
+                jvm_verdict(digest_expected)
+            );
+            assert_eq!(
+                result
+                    .ok()
+                    .map(|(_, costs)| costs.iter().map(|(_, c)| c).sum::<u64>()),
+                digest_expected.sum_block_cost
+            );
+        }
+        assert_eq!(digest_expected.verdict, fixture.expected.verdict);
+        assert_eq!(
+            digest_expected.sum_block_cost,
+            fixture.expected.sum_block_cost
+        );
+        assert_eq!(
+            digest_expected.transaction_entries,
+            fixture.expected.transaction_entries
+        );
+    }
     for actual in [
         sequential.as_ref().err(),
         observed.as_ref().err(),
@@ -548,6 +755,15 @@ fn replay(fixture: Fixture) {
     let (parallel, mut parallel_costs) = parallel.expect("parallel JVM acceptance");
     parallel_costs.sort_unstable_by_key(|(index, _)| *index);
     assert_eq!(costs, parallel_costs);
+    if !fixture.expected.transaction_entries.is_empty() {
+        let mut accumulated = 0;
+        for ((index, cost), entry) in costs.iter().zip(&fixture.expected.transaction_entries) {
+            assert_eq!(*index, entry.index);
+            assert_eq!(accumulated, entry.accumulated_cost);
+            accumulated += cost;
+        }
+        assert_eq!(costs.len(), fixture.expected.transaction_entries.len());
+    }
     assert_eq!(
         Some(costs.iter().map(|(_, cost)| cost).sum::<u64>()),
         fixture.expected.sum_block_cost
@@ -697,5 +913,80 @@ fn block_v6_devnet_context_matches_jvm() {
 fn block_invalid_signature_is_script_rejection() {
     let case = fixture("rejection-script-control");
     assert_eq!(jvm_verdict(&case.expected), "RejectScript");
+    replay(case);
+}
+
+// ledger: BLOCK-stop-after-invalid-B002
+#[test]
+fn block_invalid_second_skips_third_matches_jvm() {
+    let rejected = fixture("g-stop-after-invalid");
+    let control = fixture("g-stop-control");
+    assert_eq!(
+        ergo_ser::transaction::bytes_to_sign(&rejected.block.decode().transactions.transactions[2])
+            .unwrap(),
+        ergo_ser::transaction::bytes_to_sign(&control.block.decode().transactions.transactions[2])
+            .unwrap()
+    );
+    assert_eq!(
+        rejected
+            .expected
+            .transaction_entries
+            .iter()
+            .map(|e| e.index)
+            .collect::<Vec<_>>(),
+        [0, 1]
+    );
+    assert_eq!(
+        control
+            .expected
+            .transaction_entries
+            .iter()
+            .map(|e| e.index)
+            .collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+    assert_eq!(
+        rejected.expected.transaction_entries,
+        control.expected.transaction_entries[..2]
+    );
+    assert_eq!(control.expected.verdict, "Accept");
+    replay(rejected);
+    replay(control);
+}
+
+// ledger: BLOCK-digest-state-accounting-B005
+#[test]
+fn block_digest_delegated_accounting_matches_jvm() {
+    for name in ["h-digest-accept", "h-digest-reject"] {
+        let case = fixture(name);
+        assert!(case.digest_expected.is_some());
+        replay(case);
+    }
+}
+
+// ledger: BLOCK-param-voting
+#[test]
+fn block_epoch_voting_threshold_matches_jvm() {
+    for name in [
+        "i-vote-16384-down",
+        "i-vote-16384-up",
+        "i-vote-16385-down",
+        "i-vote-16385-up",
+        "i-vote-output-one-up",
+    ] {
+        let case = fixture(name);
+        assert!(case.transition.is_some());
+        assert_eq!(case.parent_blocks.len(), 383);
+        replay(case);
+    }
+}
+
+// ledger: BLOCK-updated-context-before-validation-B006
+#[test]
+fn block_epoch_updated_context_matches_jvm() {
+    let case = fixture("j-context-updated");
+    assert_eq!(case.transition.as_ref().unwrap().stale_verdict, "Accept");
+    assert_eq!(case.expected.verdict, "Reject");
+    assert_eq!(case.parent_blocks.len(), 383);
     replay(case);
 }

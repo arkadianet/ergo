@@ -269,8 +269,9 @@ pub(in crate::evaluator) fn eval_select_field(
     field_idx: u8,
     cx: &mut EvalCtx<'_>,
 ) -> Result<Value, EvalError> {
-    add_cost(cx.cost, 0x8C)?;
     let tuple = cx.eval_expr(input)?;
+    // Scala v6.0.2 transformers.scala:298-299 charges after receiver evaluation.
+    add_cost(cx.cost, 0x8C)?;
     match tuple {
         Value::Tuple(items) => {
             // 1-based like Scala's `productElement(fieldIndex - 1)`; index 0 is

@@ -320,6 +320,31 @@
       "units" : "jit/block",
       "value" : 10
     },
+    "Parameters.DataInputCostDefault" : {
+      "source" : "jvm",
+      "units" : "block",
+      "value" : 100
+    },
+    "Parameters.InputCostDefault" : {
+      "source" : "jvm",
+      "units" : "block",
+      "value" : 2000
+    },
+    "Parameters.MaxBlockCostDefault" : {
+      "source" : "jvm",
+      "units" : "block",
+      "value" : 1000000
+    },
+    "Parameters.OutputCostDefault" : {
+      "source" : "jvm",
+      "units" : "block",
+      "value" : 100
+    },
+    "Parameters.TokenAccessCostDefault" : {
+      "source" : "jvm",
+      "units" : "block",
+      "value" : 100
+    },
     "SigSerializer.EvaluatePolynomial" : {
       "costKind" : {
         "base" : 3,
@@ -706,36 +731,39 @@
           "sha256" : "dfa0ce2760ee471d23354f032a68b1b9b0dcf986b239805ecda9aef156617425"
         },
         {
+          "file" : "ergo-core_2.12.jar",
+          "sha256" : "d1b96ea02cf9a4434d31aa24bf43d3828bba0daf8b414161844bb7e7fa178272"
+        },
+        {
           "file" : "circe-core_2.12-0.13.0.jar",
           "sha256" : "20a179d6de105a6ad48242aaec153696beabdff14e4903ad44b3a0c13dcad558"
         }
       ],
       "input_vectors" : [
       ],
-      "note" : "Whole-file SHA-256 is recorded in scala-constants.json.sha256 (avoids self-reference).",
       "output" : {
         "file" : "test-vectors/ergo-sigma/cost-ledger/scala-constants.json",
         "hash_scope" : "UTF-8 circe spaces2 sorted-key JSON excluding manifest and final newline (avoids self-reference)",
-        "sha256" : "6f3cbb5d569a3b4e2a2f31c9c72dfa0ae10f0cf1805a5f9925ff813eed302225"
+        "sha256" : "b2544e2f0ed33483521c90f7653f75a576850590c1331ef2791074293b343c0f"
       }
     },
     "excluded" : [
     ],
     "run" : {
-      "command_line" : "scala-cli run scripts/jvm_cost_constants_extractor/CostConstants.scala --server=false --jvm system -- 62305d0f266eafa8ed4a960f75f6bc754a18629f 2026-09-15T13:41:22Z",
-      "executed" : 346,
+      "command_line" : "scala-cli run scripts/jvm_cost_constants_extractor/CostConstants.scala --server=false --jvm system -- ee7fa548eefbef5653221a6571e34721c067d848 2026-09-20T04:04:32Z",
+      "executed" : 608,
       "failed" : 0,
       "seeds" : [
       ],
-      "selected" : 346,
+      "selected" : 608,
       "skipped" : 0,
-      "timestamp" : "2026-09-15T13:41:22Z",
+      "timestamp" : "2026-09-20T04:04:32Z",
       "timestamp_basis" : "explicit capture timestamp; reuse for byte-identical regeneration"
     },
     "rust" : {
       "features" : [
       ],
-      "git_sha" : "62305d0f266eafa8ed4a960f75f6bc754a18629f",
+      "git_sha" : "ee7fa548eefbef5653221a6571e34721c067d848",
       "toolchain" : "rustc 1.95.0 (59807616e 2026-04-14)"
     },
     "scala" : {
@@ -748,12 +776,13 @@
       }
     },
     "tool" : {
-      "git_sha" : "62305d0f266eafa8ed4a960f75f6bc754a18629f",
+      "git_sha" : "ee7fa548eefbef5653221a6571e34721c067d848",
       "jvm_version" : "17.0.17+10-LTS",
       "scala_cli_version" : "1.12.1",
       "scala_version" : "2.12.21",
       "script" : "scripts/jvm_cost_constants_extractor/CostConstants.scala",
-      "script_sha256" : "586d1bf542eb49065298afeaa6afa668c85996b509e958394e1f663aa8412bd2"
+      "script_sha256" : "9068376240cdc98e199bc7af6426fa2cd20dffae1767807d4c7354ed216f1bd9",
+      "source_state" : "working-tree"
     }
   },
   "methods" : [
@@ -5207,6 +5236,4891 @@
       },
       "name" : "XorOf",
       "opcode" : 255
+    }
+  ],
+  "tupleMethods" : [
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 1,
+      "minArity" : 2,
+      "name" : "_1",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 10,
+      "minArity" : 10,
+      "name" : "_10",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 100,
+      "minArity" : 100,
+      "name" : "_100",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 101,
+      "minArity" : 101,
+      "name" : "_101",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 102,
+      "minArity" : 102,
+      "name" : "_102",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 103,
+      "minArity" : 103,
+      "name" : "_103",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 104,
+      "minArity" : 104,
+      "name" : "_104",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 105,
+      "minArity" : 105,
+      "name" : "_105",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 106,
+      "minArity" : 106,
+      "name" : "_106",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 107,
+      "minArity" : 107,
+      "name" : "_107",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 108,
+      "minArity" : 108,
+      "name" : "_108",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 109,
+      "minArity" : 109,
+      "name" : "_109",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 11,
+      "minArity" : 11,
+      "name" : "_11",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 110,
+      "minArity" : 110,
+      "name" : "_110",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 111,
+      "minArity" : 111,
+      "name" : "_111",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 112,
+      "minArity" : 112,
+      "name" : "_112",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 113,
+      "minArity" : 113,
+      "name" : "_113",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 114,
+      "minArity" : 114,
+      "name" : "_114",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 115,
+      "minArity" : 115,
+      "name" : "_115",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 116,
+      "minArity" : 116,
+      "name" : "_116",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 117,
+      "minArity" : 117,
+      "name" : "_117",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 118,
+      "minArity" : 118,
+      "name" : "_118",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 119,
+      "minArity" : 119,
+      "name" : "_119",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 12,
+      "minArity" : 12,
+      "name" : "_12",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 120,
+      "minArity" : 120,
+      "name" : "_120",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 121,
+      "minArity" : 121,
+      "name" : "_121",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 122,
+      "minArity" : 122,
+      "name" : "_122",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 123,
+      "minArity" : 123,
+      "name" : "_123",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 124,
+      "minArity" : 124,
+      "name" : "_124",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 125,
+      "minArity" : 125,
+      "name" : "_125",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 126,
+      "minArity" : 126,
+      "name" : "_126",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 127,
+      "minArity" : 127,
+      "name" : "_127",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 128,
+      "minArity" : 128,
+      "name" : "_128",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 129,
+      "minArity" : 129,
+      "name" : "_129",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 13,
+      "minArity" : 13,
+      "name" : "_13",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 130,
+      "minArity" : 130,
+      "name" : "_130",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 131,
+      "minArity" : 131,
+      "name" : "_131",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 132,
+      "minArity" : 132,
+      "name" : "_132",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 133,
+      "minArity" : 133,
+      "name" : "_133",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 134,
+      "minArity" : 134,
+      "name" : "_134",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 135,
+      "minArity" : 135,
+      "name" : "_135",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 136,
+      "minArity" : 136,
+      "name" : "_136",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 137,
+      "minArity" : 137,
+      "name" : "_137",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 138,
+      "minArity" : 138,
+      "name" : "_138",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 139,
+      "minArity" : 139,
+      "name" : "_139",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 14,
+      "minArity" : 14,
+      "name" : "_14",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 140,
+      "minArity" : 140,
+      "name" : "_140",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 141,
+      "minArity" : 141,
+      "name" : "_141",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 142,
+      "minArity" : 142,
+      "name" : "_142",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 143,
+      "minArity" : 143,
+      "name" : "_143",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 144,
+      "minArity" : 144,
+      "name" : "_144",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 145,
+      "minArity" : 145,
+      "name" : "_145",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 146,
+      "minArity" : 146,
+      "name" : "_146",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 147,
+      "minArity" : 147,
+      "name" : "_147",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 148,
+      "minArity" : 148,
+      "name" : "_148",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 149,
+      "minArity" : 149,
+      "name" : "_149",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 15,
+      "minArity" : 15,
+      "name" : "_15",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 150,
+      "minArity" : 150,
+      "name" : "_150",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 151,
+      "minArity" : 151,
+      "name" : "_151",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 152,
+      "minArity" : 152,
+      "name" : "_152",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 153,
+      "minArity" : 153,
+      "name" : "_153",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 154,
+      "minArity" : 154,
+      "name" : "_154",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 155,
+      "minArity" : 155,
+      "name" : "_155",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 156,
+      "minArity" : 156,
+      "name" : "_156",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 157,
+      "minArity" : 157,
+      "name" : "_157",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 158,
+      "minArity" : 158,
+      "name" : "_158",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 159,
+      "minArity" : 159,
+      "name" : "_159",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 16,
+      "minArity" : 16,
+      "name" : "_16",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 160,
+      "minArity" : 160,
+      "name" : "_160",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 161,
+      "minArity" : 161,
+      "name" : "_161",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 162,
+      "minArity" : 162,
+      "name" : "_162",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 163,
+      "minArity" : 163,
+      "name" : "_163",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 164,
+      "minArity" : 164,
+      "name" : "_164",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 165,
+      "minArity" : 165,
+      "name" : "_165",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 166,
+      "minArity" : 166,
+      "name" : "_166",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 167,
+      "minArity" : 167,
+      "name" : "_167",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 168,
+      "minArity" : 168,
+      "name" : "_168",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 169,
+      "minArity" : 169,
+      "name" : "_169",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 17,
+      "minArity" : 17,
+      "name" : "_17",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 170,
+      "minArity" : 170,
+      "name" : "_170",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 171,
+      "minArity" : 171,
+      "name" : "_171",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 172,
+      "minArity" : 172,
+      "name" : "_172",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 173,
+      "minArity" : 173,
+      "name" : "_173",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 174,
+      "minArity" : 174,
+      "name" : "_174",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 175,
+      "minArity" : 175,
+      "name" : "_175",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 176,
+      "minArity" : 176,
+      "name" : "_176",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 177,
+      "minArity" : 177,
+      "name" : "_177",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 178,
+      "minArity" : 178,
+      "name" : "_178",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 179,
+      "minArity" : 179,
+      "name" : "_179",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 18,
+      "minArity" : 18,
+      "name" : "_18",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 180,
+      "minArity" : 180,
+      "name" : "_180",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 181,
+      "minArity" : 181,
+      "name" : "_181",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 182,
+      "minArity" : 182,
+      "name" : "_182",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 183,
+      "minArity" : 183,
+      "name" : "_183",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 184,
+      "minArity" : 184,
+      "name" : "_184",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 185,
+      "minArity" : 185,
+      "name" : "_185",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 186,
+      "minArity" : 186,
+      "name" : "_186",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 187,
+      "minArity" : 187,
+      "name" : "_187",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 188,
+      "minArity" : 188,
+      "name" : "_188",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 189,
+      "minArity" : 189,
+      "name" : "_189",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 19,
+      "minArity" : 19,
+      "name" : "_19",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 190,
+      "minArity" : 190,
+      "name" : "_190",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 191,
+      "minArity" : 191,
+      "name" : "_191",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 192,
+      "minArity" : 192,
+      "name" : "_192",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 193,
+      "minArity" : 193,
+      "name" : "_193",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 194,
+      "minArity" : 194,
+      "name" : "_194",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 195,
+      "minArity" : 195,
+      "name" : "_195",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 196,
+      "minArity" : 196,
+      "name" : "_196",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 197,
+      "minArity" : 197,
+      "name" : "_197",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 198,
+      "minArity" : 198,
+      "name" : "_198",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 199,
+      "minArity" : 199,
+      "name" : "_199",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 2,
+      "minArity" : 2,
+      "name" : "_2",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 20,
+      "minArity" : 20,
+      "name" : "_20",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 200,
+      "minArity" : 200,
+      "name" : "_200",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 201,
+      "minArity" : 201,
+      "name" : "_201",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 202,
+      "minArity" : 202,
+      "name" : "_202",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 203,
+      "minArity" : 203,
+      "name" : "_203",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 204,
+      "minArity" : 204,
+      "name" : "_204",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 205,
+      "minArity" : 205,
+      "name" : "_205",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 206,
+      "minArity" : 206,
+      "name" : "_206",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 207,
+      "minArity" : 207,
+      "name" : "_207",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 208,
+      "minArity" : 208,
+      "name" : "_208",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 209,
+      "minArity" : 209,
+      "name" : "_209",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 21,
+      "minArity" : 21,
+      "name" : "_21",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 210,
+      "minArity" : 210,
+      "name" : "_210",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 211,
+      "minArity" : 211,
+      "name" : "_211",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 212,
+      "minArity" : 212,
+      "name" : "_212",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 213,
+      "minArity" : 213,
+      "name" : "_213",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 214,
+      "minArity" : 214,
+      "name" : "_214",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 215,
+      "minArity" : 215,
+      "name" : "_215",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 216,
+      "minArity" : 216,
+      "name" : "_216",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 217,
+      "minArity" : 217,
+      "name" : "_217",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 218,
+      "minArity" : 218,
+      "name" : "_218",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 219,
+      "minArity" : 219,
+      "name" : "_219",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 22,
+      "minArity" : 22,
+      "name" : "_22",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 220,
+      "minArity" : 220,
+      "name" : "_220",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 221,
+      "minArity" : 221,
+      "name" : "_221",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 222,
+      "minArity" : 222,
+      "name" : "_222",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 223,
+      "minArity" : 223,
+      "name" : "_223",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 224,
+      "minArity" : 224,
+      "name" : "_224",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 225,
+      "minArity" : 225,
+      "name" : "_225",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 226,
+      "minArity" : 226,
+      "name" : "_226",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 227,
+      "minArity" : 227,
+      "name" : "_227",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 228,
+      "minArity" : 228,
+      "name" : "_228",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 229,
+      "minArity" : 229,
+      "name" : "_229",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 23,
+      "minArity" : 23,
+      "name" : "_23",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 230,
+      "minArity" : 230,
+      "name" : "_230",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 231,
+      "minArity" : 231,
+      "name" : "_231",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 232,
+      "minArity" : 232,
+      "name" : "_232",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 233,
+      "minArity" : 233,
+      "name" : "_233",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 234,
+      "minArity" : 234,
+      "name" : "_234",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 235,
+      "minArity" : 235,
+      "name" : "_235",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 236,
+      "minArity" : 236,
+      "name" : "_236",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 237,
+      "minArity" : 237,
+      "name" : "_237",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 238,
+      "minArity" : 238,
+      "name" : "_238",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 239,
+      "minArity" : 239,
+      "name" : "_239",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 24,
+      "minArity" : 24,
+      "name" : "_24",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 240,
+      "minArity" : 240,
+      "name" : "_240",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 241,
+      "minArity" : 241,
+      "name" : "_241",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 242,
+      "minArity" : 242,
+      "name" : "_242",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 243,
+      "minArity" : 243,
+      "name" : "_243",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 244,
+      "minArity" : 244,
+      "name" : "_244",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 245,
+      "minArity" : 245,
+      "name" : "_245",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 246,
+      "minArity" : 246,
+      "name" : "_246",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 247,
+      "minArity" : 247,
+      "name" : "_247",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 248,
+      "minArity" : 248,
+      "name" : "_248",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 249,
+      "minArity" : 249,
+      "name" : "_249",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 25,
+      "minArity" : 25,
+      "name" : "_25",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 250,
+      "minArity" : 250,
+      "name" : "_250",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 251,
+      "minArity" : 251,
+      "name" : "_251",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 252,
+      "minArity" : 252,
+      "name" : "_252",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 253,
+      "minArity" : 253,
+      "name" : "_253",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 254,
+      "minArity" : 254,
+      "name" : "_254",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 255,
+      "minArity" : 255,
+      "name" : "_255",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 26,
+      "minArity" : 26,
+      "name" : "_26",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 27,
+      "minArity" : 27,
+      "name" : "_27",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 28,
+      "minArity" : 28,
+      "name" : "_28",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 29,
+      "minArity" : 29,
+      "name" : "_29",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 3,
+      "minArity" : 3,
+      "name" : "_3",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 30,
+      "minArity" : 30,
+      "name" : "_30",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 31,
+      "minArity" : 31,
+      "name" : "_31",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 32,
+      "minArity" : 32,
+      "name" : "_32",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 33,
+      "minArity" : 33,
+      "name" : "_33",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 34,
+      "minArity" : 34,
+      "name" : "_34",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 35,
+      "minArity" : 35,
+      "name" : "_35",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 36,
+      "minArity" : 36,
+      "name" : "_36",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 37,
+      "minArity" : 37,
+      "name" : "_37",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 38,
+      "minArity" : 38,
+      "name" : "_38",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 39,
+      "minArity" : 39,
+      "name" : "_39",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 4,
+      "minArity" : 4,
+      "name" : "_4",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 40,
+      "minArity" : 40,
+      "name" : "_40",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 41,
+      "minArity" : 41,
+      "name" : "_41",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 42,
+      "minArity" : 42,
+      "name" : "_42",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 43,
+      "minArity" : 43,
+      "name" : "_43",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 44,
+      "minArity" : 44,
+      "name" : "_44",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 45,
+      "minArity" : 45,
+      "name" : "_45",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 46,
+      "minArity" : 46,
+      "name" : "_46",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 47,
+      "minArity" : 47,
+      "name" : "_47",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 48,
+      "minArity" : 48,
+      "name" : "_48",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 49,
+      "minArity" : 49,
+      "name" : "_49",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 5,
+      "minArity" : 5,
+      "name" : "_5",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 50,
+      "minArity" : 50,
+      "name" : "_50",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 51,
+      "minArity" : 51,
+      "name" : "_51",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 52,
+      "minArity" : 52,
+      "name" : "_52",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 53,
+      "minArity" : 53,
+      "name" : "_53",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 54,
+      "minArity" : 54,
+      "name" : "_54",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 55,
+      "minArity" : 55,
+      "name" : "_55",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 56,
+      "minArity" : 56,
+      "name" : "_56",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 57,
+      "minArity" : 57,
+      "name" : "_57",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 58,
+      "minArity" : 58,
+      "name" : "_58",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 59,
+      "minArity" : 59,
+      "name" : "_59",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 6,
+      "minArity" : 6,
+      "name" : "_6",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 60,
+      "minArity" : 60,
+      "name" : "_60",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 61,
+      "minArity" : 61,
+      "name" : "_61",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 62,
+      "minArity" : 62,
+      "name" : "_62",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 63,
+      "minArity" : 63,
+      "name" : "_63",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 64,
+      "minArity" : 64,
+      "name" : "_64",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 65,
+      "minArity" : 65,
+      "name" : "_65",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 66,
+      "minArity" : 66,
+      "name" : "_66",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 67,
+      "minArity" : 67,
+      "name" : "_67",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 68,
+      "minArity" : 68,
+      "name" : "_68",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 69,
+      "minArity" : 69,
+      "name" : "_69",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 7,
+      "minArity" : 7,
+      "name" : "_7",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 70,
+      "minArity" : 70,
+      "name" : "_70",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 71,
+      "minArity" : 71,
+      "name" : "_71",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 72,
+      "minArity" : 72,
+      "name" : "_72",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 73,
+      "minArity" : 73,
+      "name" : "_73",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 74,
+      "minArity" : 74,
+      "name" : "_74",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 75,
+      "minArity" : 75,
+      "name" : "_75",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 76,
+      "minArity" : 76,
+      "name" : "_76",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 77,
+      "minArity" : 77,
+      "name" : "_77",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 78,
+      "minArity" : 78,
+      "name" : "_78",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 79,
+      "minArity" : 79,
+      "name" : "_79",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 8,
+      "minArity" : 8,
+      "name" : "_8",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 80,
+      "minArity" : 80,
+      "name" : "_80",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 81,
+      "minArity" : 81,
+      "name" : "_81",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 82,
+      "minArity" : 82,
+      "name" : "_82",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 83,
+      "minArity" : 83,
+      "name" : "_83",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 84,
+      "minArity" : 84,
+      "name" : "_84",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 85,
+      "minArity" : 85,
+      "name" : "_85",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 86,
+      "minArity" : 86,
+      "name" : "_86",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 87,
+      "minArity" : 87,
+      "name" : "_87",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 88,
+      "minArity" : 88,
+      "name" : "_88",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 89,
+      "minArity" : 89,
+      "name" : "_89",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 9,
+      "minArity" : 9,
+      "name" : "_9",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 90,
+      "minArity" : 90,
+      "name" : "_90",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 91,
+      "minArity" : 91,
+      "name" : "_91",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 92,
+      "minArity" : 92,
+      "name" : "_92",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 93,
+      "minArity" : 93,
+      "name" : "_93",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 94,
+      "minArity" : 94,
+      "name" : "_94",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 95,
+      "minArity" : 95,
+      "name" : "_95",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 96,
+      "minArity" : 96,
+      "name" : "_96",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 97,
+      "minArity" : 97,
+      "name" : "_97",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 98,
+      "minArity" : 98,
+      "name" : "_98",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 10,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 99,
+      "minArity" : 99,
+      "name" : "_99",
+      "typeId" : 96,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 30,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 10,
+      "minArity" : 2,
+      "name" : "apply",
+      "typeId" : 12,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "costKind" : {
+        "base" : 14,
+        "chunkSize" : null,
+        "kind" : "Fixed",
+        "perChunk" : null
+      },
+      "maxArity" : 255,
+      "methodId" : 1,
+      "minArity" : 2,
+      "name" : "size",
+      "typeId" : 12,
+      "versions" : [
+        0,
+        1,
+        2,
+        3
+      ]
     }
   ]
 }

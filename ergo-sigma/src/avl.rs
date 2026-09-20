@@ -116,6 +116,13 @@ impl AvlVerifier {
         max_num_operations: Option<usize>,
         max_deletes: Option<usize>,
     ) -> Result<Self, String> {
+        // scrypto 3.0.0 AuthenticatedTreeOps.scala:33 fatally allocates an
+        // Int.MaxValue-sized infinity key. Reject this wire-reachable class
+        // before constructing the upstream tree; allocation failure cannot
+        // be contained by catch_unwind.
+        if key_length >= i32::MAX as usize {
+            return Err("AVL key length exceeds the JVM array limit".to_string());
+        }
         let digest = bytes::Bytes::from(digest.to_vec());
         let proof = bytes::Bytes::from(proof.to_vec());
         // The upstream crate can `panic!` while parsing a malformed proof into
