@@ -16,7 +16,33 @@ infrastructure.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-21
+
+JIT-cost conformance release. The node's script costing was proven row by row
+against the Scala reference (sigma-state 6.0.2, ergo 6.0.5): a 299-obligation
+ledger, every row closed by independent JVM or mainnet evidence, and 50
+divergences found and fixed along the way. Every fix commit is cited in
+`test-vectors/ergo-sigma/cost-ledger/REPORT.md`.
+
+**Upgrade notes.**
+
+- v0.7.0 and earlier price the transactions of an epoch-transition block with
+  the *previous* epoch's parameters; Scala uses the block's own newly voted
+  parameters. Upgrade before the next voted cost-parameter change activates on
+  mainnet, or the node can disagree with the network at that boundary.
+- On the first start after upgrading, mining nodes run a bounded synchronous
+  recovery of the emission-box identity (at most 4096 blocks / 32 MiB). On a
+  post-EIP-27 mainnet tip this resolves from one block; with insufficient
+  retained history, mining stays unavailable until an emission-NFT-bearing
+  block is applied. Validation is unaffected.
+- The CI ledger-evidence job fetches the L4 mainnet replay inputs from the
+  hash-pinned data release `l4-inputs-2026-09-20` (`scripts/fetch-l4-inputs.sh`).
+
 ### Security
+
+- Enforce end-of-input when receiving a header over P2P, matching the reload
+  path and the other receive sinks: a header with trailing bytes was accepted
+  and stored under a non-canonical id (#347).
 
 - Apply newly voted parameters before validating epoch-transition transactions
   in both UTXO and digest processing, preventing acceptance under stale costs.
@@ -58,6 +84,10 @@ infrastructure.
 
 ### Fixed
 
+- Compiler: reject un-lowered predef applications with the same error class
+  as Scala's GraphBuilding (#334).
+- Incident-snapshot oracle test ordered by the name key instead of mtime,
+  which coarse-clock kernels tie (#335, #336).
 - Parse all four CreateAvlTree operands before evaluation rejects the node.
 - Reject non-Boolean BoolToSigmaProp after JIT activation and its charge.
 - Preserve pre-JIT xorOf distinct-value semantics.
