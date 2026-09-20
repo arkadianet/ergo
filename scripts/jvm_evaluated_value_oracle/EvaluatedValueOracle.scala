@@ -667,8 +667,35 @@ object EvaluatedValueOracle {
     println("verify self-test: " + count + " passed, 0 failed")
   }
 
+  private def jitcostProbe(): Json = {
+    val cases = Seq(("add", 2147483646, 1), ("add", 2147483647, 1),
+      ("from_block_cost", 214748364, 0), ("from_block_cost", 214748365, 0)).map {
+      case (op, a, b) =>
+        val result = try {
+          val cost = if (op == "add") JitCost(a) + JitCost(b) else JitCost.fromBlockCost(a)
+          Json.obj("value" -> Json.fromInt(cost.value), "exception" -> Json.Null)
+        } catch { case NonFatal(e) =>
+          Json.obj("value" -> Json.Null, "exception" -> Json.fromString(e.getClass.getName))
+        }
+        Json.obj("operation" -> Json.fromString(op), "a" -> Json.fromInt(a),
+          "b" -> Json.fromInt(b), "result" -> result)
+    }
+    Json.obj("oracle" -> Json.fromString("sigma-state:6.0.2 / jitcost_probe"),
+      "cases" -> Json.arr(cases: _*))
+  }
+
   def main(args: Array[String]): Unit = {
-    if (args.sameElements(Array("verify"))) {
+    if (args.sameElements(Array("jitcost_probe"))) {
+      println(jitcostProbe().spaces2)
+    } else if (args.sameElements(Array("jitcost_probe_self_test"))) {
+      val cases = jitcostProbe().hcursor.downField("cases").focus.get.asArray.get
+      require(cases.size == 4)
+      require(cases(0).hcursor.downField("result").get[Int]("value").right.get == Int.MaxValue)
+      require(cases(2).hcursor.downField("result").get[Int]("value").right.get == 2147483640)
+      Seq(1, 3).foreach(i => require(cases(i).hcursor.downField("result")
+        .get[String]("exception").right.get == "java.lang.ArithmeticException"))
+      println("jitcost_probe self-test: 4 passed, 0 failed")
+    } else if (args.sameElements(Array("verify"))) {
       scala.io.Source.stdin.getLines().foreach { line =>
         // Parser diagnostics belong on stderr; stdout is one JSON record per request.
         val result = Console.withOut(System.err) { verifyLine(line) }

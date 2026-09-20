@@ -1,0 +1,92 @@
+{
+  "oracle": "sigma-state:6.0.2 / jitcost_probe",
+  "cases": [
+    {
+      "operation": "add",
+      "a": 2147483646,
+      "b": 1,
+      "result": {
+        "value": 2147483647,
+        "exception": null
+      }
+    },
+    {
+      "operation": "add",
+      "a": 2147483647,
+      "b": 1,
+      "result": {
+        "value": null,
+        "exception": "java.lang.ArithmeticException"
+      }
+    },
+    {
+      "operation": "from_block_cost",
+      "a": 214748364,
+      "b": 0,
+      "result": {
+        "value": 2147483640,
+        "exception": null
+      }
+    },
+    {
+      "operation": "from_block_cost",
+      "a": 214748365,
+      "b": 0,
+      "result": {
+        "value": null,
+        "exception": "java.lang.ArithmeticException"
+      }
+    }
+  ],
+  "manifest": {
+    "scala": {
+      "ergo_version": "6.0.2",
+      "sigmastate_version": "6.0.2",
+      "ergo_wallet_version": "6.0.2",
+      "node_app_version": null,
+      "source_shas": {
+        "sigmastate_v6.0.2": "23dd29f612249c169d09fae9bca76d7cc02e144c",
+        "ergo_v6.0.2": "2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1"
+      },
+      "note": "Standalone JVM oracle using the published/local 6.0.2 fallback artifacts pinned in the script; no node or mainnet request was used."
+    },
+    "rust": {
+      "git_sha": "4bc51adde9ab0a0ccb0f86803f3cea7f040c540b",
+      "toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
+      "features": []
+    },
+    "tool": {
+      "script": "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala",
+      "git_sha": "4bc51adde9ab0a0ccb0f86803f3cea7f040c540b",
+      "oracle_sha256": "f86dc9d990dbcb97a798afb2ceb901b0298edd5feffa250b47df5ce26804bca5",
+      "generator": "scripts/gen-evaluated-probe.py",
+      "scala_cli": "Scala CLI version: 1.12.1\nScala version (default): 3.8.1\nYour Scala CLI version is outdated. The newest version is 1.17.1\nIt is recommended that you update Scala CLI through the same tool or method you used for its initial installation for avoiding the creation of outdated duplicates.",
+      "scala_directive": "2.12",
+      "jvm": "openjdk version \"17.0.17\" 2025-10-21 LTS\nOpenJDK Runtime Environment Corretto-17.0.17.10.1 (build 17.0.17+10-LTS)\nOpenJDK 64-Bit Server VM Corretto-17.0.17.10.1 (build 17.0.17+10-LTS, mixed mode, sharing)"
+    },
+    "context": {
+      "network": "offline direct JVM probe",
+      "activated_script_version": 3,
+      "ergo_tree_versions": [
+        2,
+        3
+      ],
+      "voted_params": {}
+    },
+    "run": {
+      "command": "scala-cli --skip-cli-updates run scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala --server=false --suppress-outdated-dependency-warning -- jitcost_probe",
+      "timestamp_utc": "2026-09-20T02:44:29.526513+00:00",
+      "selected": 4,
+      "executed": 4,
+      "skipped": 0,
+      "failed": 0,
+      "seeds": null
+    },
+    "evidence": {
+      "request_jsonl_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "response_json_sha256": "108f8f7ee0e647fa0090c1ba5a9009d7384e5e61ba96b157b1f421624dd944b4"
+    },
+    "scala_sigmastate": "6.0.2",
+    "date": "2026-09-20T02:44:29.526513+00:00"
+  }
+}

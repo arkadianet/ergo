@@ -1,3 +1,4 @@
+//! Oracle: test-vectors/scala/jitcost_bounds.json
 use thiserror::Error;
 
 /// Cost in JIT granularity (10x finer than block cost units).
@@ -669,5 +670,47 @@ mod tests {
             matches!(err, CostError::LimitExceeded { .. }),
             "expected LimitExceeded (honest path), got {err:?}",
         );
+    }
+    // ----- oracle parity -----
+
+    // ledger: INTERP-jitcost-bounds
+    #[test]
+    fn jitcost_boundary_arithmetic_matches_jvm() {
+        #[derive(serde::Deserialize)]
+        struct Outcome {
+            value: Option<u64>,
+            exception: Option<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Case {
+            operation: String,
+            a: u64,
+            b: u64,
+            result: Outcome,
+        }
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            cases: Vec<Case>,
+        }
+        let fixture: Fixture =
+            serde_json::from_str(include_str!("../../test-vectors/scala/jitcost_bounds.json"))
+                .unwrap();
+        assert_eq!(fixture.cases.len(), 4);
+        for case in fixture.cases {
+            let result = match case.operation.as_str() {
+                "add" => JitCost::try_from_jit(case.a)
+                    .unwrap()
+                    .checked_add(JitCost::try_from_jit(case.b).unwrap()),
+                "from_block_cost" => JitCost::from_block_cost(case.a),
+                other => panic!("unknown JVM operation {other}"),
+            };
+            match (case.result.value, case.result.exception.as_deref()) {
+                (Some(value), None) => assert_eq!(result.unwrap().value(), value),
+                (None, Some("java.lang.ArithmeticException")) => {
+                    assert!(matches!(result, Err(JitCostError::Overflow { .. })));
+                }
+                other => panic!("unexpected JVM outcome {other:?}"),
+            }
+        }
     }
 }
