@@ -451,7 +451,14 @@ pub(in crate::evaluator) fn eval_xor_of(
     match v {
         Value::CollBool(bs) => {
             add_cost_per_item(cx.cost, 0xFF, bs.len() as u32)?;
-            Ok(Value::Bool(bs.iter().fold(false, |acc, b| acc ^ b)))
+            // CSigmaDslBuilder.scala:117: VersionContext.current.isJitActivated
+            // (activation >= 2); the historical rule is distinct.length == 2.
+            let result = if cx.ctx.activated_script_version >= 2 {
+                bs.iter().fold(false, |acc, b| acc ^ b)
+            } else {
+                bs.contains(&true) && bs.contains(&false)
+            };
+            Ok(Value::Bool(result))
         }
         other => Err(EvalError::TypeError {
             expected: "Coll[Boolean] for XorOf",
