@@ -51,6 +51,10 @@ jobs:
         env:
           NEXTEST_NO_TESTS: warn
         run: cargo nextest run -p ergo-sigma -p ergo-validation -E 'test(/cost_(pin|ledger_fixtures|sweeps|block_fixtures|crypto_truncation)/)'
+      - name: Fetch the L4 replay inputs (hash-pinned data release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/fetch-l4-inputs.sh
       - name: Record workspace passing evidence
         env:
           # libtest-json is experimental and makes --message-format mandatory, so it is
@@ -59,7 +63,16 @@ jobs:
           NEXTEST_MESSAGE_FORMAT_VERSION: "0.1"
         run: |
           mkdir -p target
-          cargo nextest run --workspace --message-format libtest-json > "$COST_LEDGER_TEST_RESULTS"
+          # Closing tests for the L4 rows live behind ergo-validation's `diagnostics`
+          # feature (the mainnet replay), so a default-feature run would report them
+          # as missing passing evidence. Only that feature: --all-features would also
+          # enable live-node oracle tests that need a running Scala node. The same
+          # feature gates operator-only diagnostics that read local REST captures
+          # (diagnose_block_*, trace_*, parity_triage, eval_error_triage); those are
+          # excluded here and are not closing evidence for any row.
+          cargo nextest run --workspace --features ergo-validation/diagnostics --no-fail-fast \
+            -E 'not (binary(/^diagnose_block_/) | binary(/^trace_/) | binary(parity_triage) | binary(eval_error_triage))' \
+            --message-format libtest-json > "$COST_LEDGER_TEST_RESULTS"
       - name: Validate closure evidence
         if: ${{ always() && !cancelled() }}
         run: |
