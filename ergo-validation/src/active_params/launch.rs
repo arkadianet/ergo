@@ -1,3 +1,5 @@
+//! Oracle: test-vectors/ergo-sigma/cost-ledger/scala-constants.json
+
 use ergo_chain_spec::Network;
 
 use super::ActiveProtocolParameters;
@@ -105,5 +107,32 @@ mod tests {
         assert!(m.proposed_update.status_updates.is_empty());
         assert_eq!(m.activated_update.rules_to_disable, Vec::<u16>::new());
         assert!(m.activated_update.status_updates.is_empty());
+    }
+
+    // ----- oracle parity -----
+
+    // ledger: BLOCK-cost-parameter-defaults-B008
+    #[test]
+    fn launch_cost_defaults_match_jvm() {
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/ergo-sigma/cost-ledger/scala-constants.json"
+        ))
+        .unwrap();
+        let active = scala_launch_mainnet();
+        assert_eq!(active.epoch_start_height, 0);
+        let params = crate::ProtocolParams::from_active(&active);
+        for (name, actual) in [
+            ("TokenAccessCostDefault", params.token_access_cost),
+            ("InputCostDefault", params.input_cost),
+            ("DataInputCostDefault", params.data_input_cost),
+            ("OutputCostDefault", params.output_cost),
+            ("MaxBlockCostDefault", params.max_block_cost),
+        ] {
+            assert_eq!(
+                Some(actual),
+                oracle["constants"][format!("Parameters.{name}")]["value"].as_u64(),
+                "{name}"
+            );
+        }
     }
 }
