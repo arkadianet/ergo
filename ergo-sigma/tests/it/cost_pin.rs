@@ -75,11 +75,15 @@ fn assert_exclusions<'a>(exclusions: &[(&'a str, &str)]) -> BTreeSet<&'a str> {
     exclusions.iter().map(|&(name, _)| name).collect()
 }
 
-fn assert_open(rows: &BTreeMap<String, String>, id: &str) {
-    assert_eq!(
-        rows.get(id).map(String::as_str),
-        Some("OPEN"),
-        "mapped-open obligation {id}"
+fn assert_l2_obligation(rows: &BTreeMap<String, String>, id: &str) {
+    // L1 maps dynamic prices to independent L2 evidence. That evidence may
+    // close a row or establish a divergence without changing the L1 mapping.
+    assert!(
+        matches!(
+            rows.get(id).map(String::as_str),
+            Some("OPEN" | "CLOSED" | "DIVERGENT")
+        ),
+        "unmapped L2 obligation {id}"
     );
 }
 
@@ -167,7 +171,7 @@ fn opcode_cost_table_matches_scala_constants() {
                     .iter()
                     .find(|(n, _)| *n == name)
                     .unwrap_or_else(|| panic!("unaccounted TypeBased {name}"));
-                assert_open(&rows, id);
+                assert_l2_obligation(&rows, id);
                 assert!(
                     rust.contains_key(&opcode),
                     "missing type-based default {name}"
@@ -176,7 +180,7 @@ fn opcode_cost_table_matches_scala_constants() {
             "Dynamic" | "NotSupported" => {
                 // ValDef is charged through AddToEnvironment in BlockValue.
                 assert!(op::opcode_cost(opcode).is_err() || opcode == 0xD6, "{name}");
-                assert_open(&rows, &format!("OP-0x{opcode:02X}"));
+                assert_l2_obligation(&rows, &format!("OP-0x{opcode:02X}"));
             }
             other => panic!("unknown JVM cost kind {other}"),
         }
@@ -184,7 +188,7 @@ fn opcode_cost_table_matches_scala_constants() {
     assert!(rust.keys().all(|id| seen.contains(id)), "Rust-only opcode");
     assert!(
         unaccounted.is_empty(),
-        "JVM declarations without a Rust assertion, mapped-open obligation, or N-A exclusion: {unaccounted:?}"
+        "JVM declarations without a Rust assertion, mapped L2 obligation, or N-A exclusion: {unaccounted:?}"
     );
 }
 
@@ -270,7 +274,7 @@ fn method_cost_table_matches_scala_constants() {
                 }
             }
             "NotSupported" if matches!(ids, (2..=6 | 9, 1..=5)) => {
-                assert_open(&rows, "EVAL-numeric-cast");
+                assert_l2_obligation(&rows, "EVAL-numeric-cast");
                 assert!(
                     !rust.contains_key(&ids),
                     "standalone cast descriptor {ids:?}"
@@ -291,7 +295,7 @@ fn method_cost_table_matches_scala_constants() {
                     (106, 8) => "METHOD-global-powHit",
                     _ => panic!("unaccounted dynamic method {ids:?}"),
                 };
-                assert_open(&rows, row);
+                assert_l2_obligation(&rows, row);
                 assert!(
                     !rust.contains_key(&ids),
                     "static price for dynamic method {ids:?}"
@@ -543,7 +547,7 @@ fn constant_inventory_unaccounted_entries_fail() {
     ]);
     let rows = ledger();
     for id in mapped_open.values() {
-        assert_open(&rows, id);
+        assert_l2_obligation(&rows, id);
     }
     let mapped_open: BTreeSet<_> = mapped_open.keys().copied().collect();
     let actual: BTreeSet<_> = json["constants"]
@@ -575,6 +579,6 @@ fn constant_inventory_unaccounted_entries_fail() {
     let unaccounted: Vec<_> = actual.difference(&accounted).collect();
     assert!(
         unaccounted.is_empty(),
-        "JVM constants without a Rust assertion, mapped-open obligation, or N-A exclusion: {unaccounted:?}"
+        "JVM constants without a Rust assertion, mapped L2 obligation, or N-A exclusion: {unaccounted:?}"
     );
 }

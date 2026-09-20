@@ -2,10 +2,11 @@
 """Hand-serialize per-item trees; expected fields are written only by the JVM tool."""
 import json
 from pathlib import Path
+from cost_fixture_io import fixture_path, read_fixture_text, write_fixture_text
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'test-vectors/ergo-sigma/cost-ledger/fixtures/op-per-item'
-BASE = json.loads((OUT.parent / 'interpreter/p2pk.json').read_text())['request']
+BASE = json.loads(read_fixture_text(OUT.parent / 'interpreter/p2pk.json.gz'))['request']
 
 
 def vlq(n):
@@ -120,20 +121,20 @@ def main():
                 name + '-empty': [c for c in cases if c['construction']['n'] == 0],
             }
         for group_name, group_cases in groups.items():
-            path = OUT / f'{group_name}.json'
+            path = OUT / f'{group_name}.json.gz'
             fixture = {'ledger': [f'OP-0x{op:02X}'], 'chunk_size': k, 'cases': group_cases}
             if name in ('subst-constants', 'block-value'):
                 fixture['ledger'].append('ROUND-perItem-chunking')
             # Preserve independently generated expectations only for identical inputs.
-            if path.exists():
-                old = json.loads(path.read_text())
+            if fixture_path(path).exists():
+                old = json.loads(read_fixture_text(path))
                 if [c['request'] for c in old['cases']] == [c['request'] for c in group_cases]:
                     if 'manifest' in old:
                         fixture['manifest'] = old['manifest']
                     for case, previous in zip(group_cases, old['cases']):
                         if 'expected' in previous:
                             case['expected'] = previous['expected']
-            path.write_text(json.dumps(fixture, indent=2) + '\n')
+            write_fixture_text(path, json.dumps(fixture, indent=2) + '\n')
 
 
 

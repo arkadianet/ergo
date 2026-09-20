@@ -58,6 +58,7 @@ pub(in crate::evaluator) fn eval_method_call(
     }
     let obj_val = cx.eval_expr(obj)?;
     match (type_id, method_id) {
+        (12, 2) => coll::get_or_else(obj_val, args, cx),
         (12, 26) => coll::index_of(obj_val, args, cx),
         (12, 29) => coll::zip(obj_val, args, cx),
         (12, 31) | (12, 32) => coll::starts_ends_with(method_id, obj_val, args, cx),

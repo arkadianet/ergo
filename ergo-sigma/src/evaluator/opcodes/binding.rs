@@ -22,7 +22,7 @@ use ergo_ser::sigma_value::SigmaValue;
 use super::super::cost::{add_cost, add_cost_per_item};
 use super::super::dispatch::{eval_expr, TraceEntry};
 use super::super::eval_ctx::EvalCtx;
-use super::super::helpers::{infer_expr_type, sigma_to_value, trace_val};
+use super::super::helpers::{infer_expr_type, reject_sstring, sigma_to_value, trace_val};
 use super::super::types::{Env, EvalError, Value};
 
 // 0x73 ConstPlaceholder(index)
@@ -36,7 +36,7 @@ pub(in crate::evaluator) fn eval_const_placeholder(
     if idx >= constants.len() {
         return Err(EvalError::ConstantOutOfBounds(index));
     }
-    sigma_to_value(&constants[idx].0, &constants[idx].1)
+    sigma_to_value(&constants[idx].0, &constants[idx].1).and_then(reject_sstring)
 }
 
 // 0x72 ValUse — reference a bound variable
@@ -46,10 +46,13 @@ pub(in crate::evaluator) fn eval_val_use(
     cost: &mut CostAccumulator,
 ) -> Result<Value, EvalError> {
     add_cost(cost, 0x72)?;
-    env.get(&id).cloned().ok_or(EvalError::TypeError {
-        expected: "bound variable",
-        got: format!("unbound ValUse(id={id})"),
-    })
+    env.get(&id)
+        .cloned()
+        .ok_or(EvalError::TypeError {
+            expected: "bound variable",
+            got: format!("unbound ValUse(id={id})"),
+        })
+        .and_then(reject_sstring)
 }
 
 // 0xD8 BlockValue — bind ValDef/FunDef items then return result.
@@ -68,18 +71,9 @@ pub(in crate::evaluator) fn eval_val_use(
 // PRE-block env). Mirrored with a block-local clone; closures created
 // inside the block capture the block env, exactly like Scala's
 // FuncValue capturing `curEnv`.
-/// Scala `Value.checkType(vd, v)` (values.scala:251/998) narrowed to the single
-/// mismatch our runtime value model can exhibit. `SType.isValueOfType` requires
-/// a 2-item `STuple` value to be a `Tuple2`; a register holding a `Tuple`
-/// (0x86 `CreateTuple`) node evaluates to a `Coll` (see
-/// `box_context::read_register_option`), so binding it at a pair type must fail
-/// — bug-for-bug with Scala's InterpreterException "Invalid type returned by
-/// evaluator". The ValDef type is derived from `rhs` (Scala never serializes
-/// it); inference over the immediate `rhs` (empty binding env — the poison's
-/// producing `rhs` is a self-contained register read) is enough to catch it at
-/// its own binding, and any earlier re-binding was already checked. When the
-/// type cannot be inferred, or it is not an `STuple`, the value is accepted
-/// unchanged.
+/// Scala's shallow tuple check also rejects a register's CreateTuple carrier
+/// when it is a Coll rather than Tuple2, and rejects non-pair tuple types.
+/// Bare strings are checked separately before the environment charge.
 fn check_valdef_pair_type(
     rhs: &Expr,
     constants: &[(SigmaType, SigmaValue)],
@@ -144,23 +138,12 @@ pub(in crate::evaluator) fn eval_block_value(
                         cx.cost,
                         cx.trace,
                     )?;
+                    let val = reject_sstring(val)?;
                     // AddToEnvironment — Scala charges it AFTER the rhs
                     // eval (addFixedCost wraps only the env update).
                     add_cost(cx.cost, 0xD6)?;
-                    // Scala `BlockValue.eval` runs `Value.checkType(vd, v)`
-                    // (values.scala:998) with `vd.tpe = rhs.tpe`. The only
-                    // mismatch our value model can produce is a register holding
-                    // a `Tuple` (0x86 `CreateTuple`) node, which evaluates to a
-                    // `Coll` (box_context::read_register_option); binding it where
-                    // a pair `(_, _)` is expected fails `SType.isValueOfType`
-                    // (`isInstanceOf[Tuple2]`), matching Scala's
-                    // InterpreterException "Invalid type returned by evaluator"
-                    // that fails `verifyInput`. Every legitimate `STuple` value
-                    // here is a `Value::Tuple`, so this rejects ONLY the poisoned
-                    // register-Coll — never a valid binding. The `rhs` type is
-                    // derived (Scala never serializes the ValDef type); when it
-                    // cannot be inferred the check is skipped (conservative:
-                    // no new reject-valid).
+                    // The inferred tuple type catches register values whose runtime
+                    // carrier differs from Scala's required Tuple2 representation.
                     check_valdef_pair_type(rhs, cx.constants, &val)?;
                     if let Some(t) = cx.trace.as_mut() {
                         t.push(TraceEntry {
@@ -206,7 +189,7 @@ pub(in crate::evaluator) fn eval_block_value(
             value: trace_val(&result_val),
         });
     }
-    Ok(result_val)
+    reject_sstring(result_val)
 }
 
 // 0x95 If(condition, then_branch, else_branch)
@@ -225,8 +208,8 @@ pub(in crate::evaluator) fn eval_if(
         });
     }
     match c {
-        Value::Bool(true) => cx.eval_expr(then_br),
-        Value::Bool(false) => cx.eval_expr(else_br),
+        Value::Bool(true) => cx.eval_expr(then_br).and_then(reject_sstring),
+        Value::Bool(false) => cx.eval_expr(else_br).and_then(reject_sstring),
         _ => Err(EvalError::TypeError {
             expected: "Bool for If condition",
             got: format!("{c:?}"),
@@ -258,10 +241,9 @@ pub(in crate::evaluator) fn eval_tuple(
             got: items.len(),
         });
     }
-    add_cost(cx.cost, 0x86)?;
     let mut values = Vec::with_capacity(items.len());
     for item in items {
-        let v = cx.eval_expr(item)?;
+        let v = cx.eval_expr(item).and_then(reject_sstring)?;
         // Scala `Tuple.eval` runs `Value.checkType(item, itemV)` per item;
         // `SType.isValueOfType` then `sys.error("Unsupported tuple type")` for
         // any item whose type is a tuple of arity != 2 — only pairs are a valid
@@ -277,6 +259,7 @@ pub(in crate::evaluator) fn eval_tuple(
         }
         values.push(v);
     }
+    add_cost(cx.cost, 0x86)?;
     Ok(Value::Tuple(values))
 }
 
@@ -290,7 +273,14 @@ pub(in crate::evaluator) fn eval_select_field(
     let tuple = cx.eval_expr(input)?;
     match tuple {
         Value::Tuple(items) => {
-            let idx = (field_idx as usize).saturating_sub(1);
+            // 1-based like Scala's `productElement(fieldIndex - 1)`; index 0 is
+            // already a parse-time hard reject, this keeps eval consistent for
+            // any internally constructed tree.
+            let idx = (field_idx as usize)
+                .checked_sub(1)
+                .ok_or(EvalError::RuntimeException(
+                    "SelectField index 0 (indexes are 1-based)",
+                ))?;
             items.get(idx).cloned().ok_or(EvalError::TypeError {
                 expected: "valid tuple index",
                 got: format!("index {field_idx} in tuple of len {}", items.len()),
@@ -335,7 +325,7 @@ pub(in crate::evaluator) fn eval_func_value(
 /// on EVERY invocation. `SType.isValueOfType` is SHALLOW — a `Coll[T]`
 /// parameter accepts any `Coll` value (`case _: SCollectionType[_] =>
 /// x.isInstanceOf[Coll[_]]`, no element recursion) — but it has NO
-/// case for a top-level `STypeVar` and falls through to
+/// case for a top-level `SString` or `STypeVar` and falls through to
 /// `sys.error("Unknown type")`. So a polymorphic lambda
 /// `(x: T) => ...` CREATES fine but ALWAYS errors when invoked, from
 /// any call path: direct `FuncApply` and every HOF loop
@@ -347,6 +337,9 @@ pub(in crate::evaluator) fn check_closure_param_types(
     param_types: &[(u32, Option<SigmaType>)],
 ) -> Result<(), EvalError> {
     for (_, tpe) in param_types {
+        if matches!(tpe, Some(SigmaType::SString)) {
+            return Err(EvalError::RuntimeException("Unknown type SString"));
+        }
         if let Some(SigmaType::STypeVar(name)) = tpe {
             return Err(EvalError::TypeError {
                 expected:
@@ -409,6 +402,7 @@ pub(in crate::evaluator) fn eval_func_apply(
                 cx.cost,
                 cx.trace,
             )
+            .and_then(reject_sstring)
         }
         _ => Err(EvalError::TypeError {
             expected: "Func for FuncApply",
