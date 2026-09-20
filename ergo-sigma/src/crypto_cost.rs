@@ -52,13 +52,12 @@ pub fn estimate_crypto_cost(prop: &SigmaBoolean) -> JitCost {
                 .iter()
                 .map(|c| estimate_crypto_cost(c).value())
                 .sum();
+            // At k == n, Scala charges only the polynomial base costs.
             // ParsePolynomial: PerItemCost(base=10, perChunk=10, chunk=1).cost(nCoefs)
-            let parse_chunks = if n_coefs == 0 { 1 } else { n_coefs };
-            let parse_cost =
-                PARSE_POLYNOMIAL_BASE + PARSE_POLYNOMIAL_PER_CHUNK * parse_chunks as u64;
+            let parse_cost = PARSE_POLYNOMIAL_BASE + PARSE_POLYNOMIAL_PER_CHUNK * n_coefs as u64;
             // EvaluatePolynomial: PerItemCost(base=3, perChunk=3, chunk=1).cost(nCoefs) * nChildren
             let eval_per_child =
-                EVALUATE_POLYNOMIAL_BASE + EVALUATE_POLYNOMIAL_PER_CHUNK * parse_chunks as u64;
+                EVALUATE_POLYNOMIAL_BASE + EVALUATE_POLYNOMIAL_PER_CHUNK * n_coefs as u64;
             let eval_cost = eval_per_child * n_children as u64;
             JitCost::from_jit(parse_cost + eval_cost + TO_BYTES_CONJUNCTION + children_cost)
         }

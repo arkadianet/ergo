@@ -1,82 +1,22 @@
-//! The rule-1001 (`CheckDeserializedScriptIsSigmaProp`) static
-//! type-inference subsystem: a faithful replica of Scala's parse-order
-//! `valDefTypeStore` plus the root-type judgement mirrored from Scala's
+//! Exact substitution type inference: a faithful replica of Scala's parse-order
+//! `valDefTypeStore` plus expression types mirrored from Scala's
 //! deserialize-time `Value.tpe` derivation.
+//! Oracle: scripts/jvm_serde_oracle/MethodTypes.scala
+//! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/interpreter/deserialize-types.json.gz
 
-use super::ErgoTree;
+mod method_registry;
 
-/// The deserialized root's static type WHEN it is trivially determinable from
-/// the parsed IR: an inline `Const` carries its own type, a `ConstPlaceholder`
-/// resolves to its segregated constant's type (Scala
-/// `ConstantPlaceholderSerializer.parse` gives the placeholder the constant's
-/// `tpe`), and the boolean-literal leaves `TrueLeaf`/`FalseLeaf` are
-/// unconditionally `SBoolean`. Scala's `CheckDeserializedScriptIsSigmaProp`
-/// rejects (→ soft-fork wrap under `has_size`, hard reject when sizeless) any
-/// root whose type is not `SSigmaProp`. For every other `Op` root shape we have
-/// no typechecker and accept — a genuinely non-sigma operator root would fail
-/// later at evaluation. Returns `None` when the root type is not statically
-/// known here (including an out-of-range placeholder index, which we leave to
-/// the existing lenient handling).
-pub(super) fn determinable_root_type(tree: &ErgoTree) -> Option<crate::sigma_type::SigmaType> {
-    determinable_root_type_of(&tree.body, &tree.constants)
-}
-
-/// [`determinable_root_type`] over a raw `(body, constants)` pair — so the nested
-/// `SBox`-constant inner-script path (which parses a body + constants without
-/// building an [`ErgoTree`]) can run the same rule-1001 root-type judgement.
-/// Entry point: the root is typed with an EMPTY [`ValDefTypeStore`].
-/// `Some(SSigmaProp)` accepts, `Some(other)` is the wrap/reject verdict, and
-/// `None` is lenient (the root type is not statically determinable). Public so
-/// the `difftest --methodcall` harness can diff this exact verdict against the
-/// JVM reference.
-///
-/// Segregated constants are parsed BEFORE the body on the same Scala reader, so
-/// a constant that materializes a box value (whose nested `ErgoTree` is parsed
-/// on that shared reader) can pre-populate Scala's `valDefTypeStore` with ids
-/// we never see. Starting from an empty store is still exact-or-lenient: an id
-/// the BODY binds overwrites any constant-table pollution before the body can
-/// read it (the body's `ValDef` write is the last write, both here and in
-/// Scala), and an id the body never binds misses our store and resolves `None`
-/// (lenient — Scala reads the polluted type, or throws for a genuinely unbound
-/// id; see [`infer_type`] on both residuals).
-pub fn determinable_root_type_of(
-    body: &crate::opcode::Expr,
-    constants: &[(crate::sigma_type::SigmaType, crate::sigma_value::SigmaValue)],
-) -> Option<crate::sigma_type::SigmaType> {
+/// Exact static type for embedded-script substitution. Unknown types and
+/// imprecision sentinels cannot establish substitution compatibility.
+pub fn substitution_type_of(body: &crate::opcode::Expr) -> Option<crate::sigma_type::SigmaType> {
     let mut store = ValDefTypeStore::new();
-    infer_type(body, &mut store, constants)
+    infer_type(body, &mut store, &[]).filter(type_is_precise)
 }
 
-/// The node-side replica of Scala's `ValDefTypeStore`
-/// (`sigma/serialization/ValDefTypeStore.scala`): a single FLAT, never-scoped,
-/// last-write-wins map from binding id to type, shared across the whole reader
-/// and evolving in PARSE (serialization) order:
-///
-///  - `ValDefSerializer.parse` (ValDef 0xD6 / FunDef 0xD7) parses the `rhs`
-///    FIRST (nested `ValUse`s read the store as it stands), THEN writes
-///    `store(id) = rhs.tpe` — so a later `ValDef` of the same id overwrites.
-///  - `FuncValueSerializer.parse` writes each argument's DECLARED type into the
-///    store BEFORE parsing the body — and never pops it (the flat store has no
-///    scoping), so lambda args survive past the lambda.
-///  - `ValUseSerializer.parse` reads `store(id)` at its parse position:
-///    whatever the most recent write before that point in the byte stream was.
-///
-/// [`infer_type`] therefore walks EVERY node in exact serialization order (not
-/// just the type-determining spine): a rebind buried in an off-spine subtree
-/// mutates the store a later spine `ValUse` reads. The stored value is
-/// `Option<SigmaType>`: `Some(t)` when the writer's rhs/declared type is
-/// statically determinable (then it is EXACT — every `Some` this typer
-/// produces is oracle-verified to equal Scala's `Value.tpe`), `None` when it
-/// is not (a `ValUse` of such an id stays lenient).
-///
-/// Worked examples (parse order = serialization order):
-///  - `{ val x = 0L; val x = 0L; x }` → store\[x\]=SLong, store\[x\]=SLong,
-///    `ValUse(x)`=SLong → root non-SigmaProp → REJECT (Scala rejects).
-///  - `{ val x = sigmaProp; val y = x; val x = 0L; y }` → store\[x\]=SigmaProp;
-///    `ValDef(y, ValUse(x))`: the rhs `ValUse(x)` reads SigmaProp so
-///    store\[y\]=SigmaProp; then store\[x\]=SLong (rebind); the result
-///    `ValUse(y)` reads SigmaProp → ACCEPT (Scala accepts — `y` was fixed
-///    BEFORE the rebind; rejecting this shape would be a reject-valid = stall).
+/// Flat, last-write-wins binding types in serialization order. ValDef writes
+/// after its RHS; FuncValue writes declared arguments before its body and never
+/// pops them. Each ValUse observes the latest preceding write. Unknown RHS types
+/// overwrite earlier bindings with `None`, preventing stale type information.
 type ValDefTypeStore = std::collections::HashMap<u32, Option<crate::sigma_type::SigmaType>>;
 
 /// `true` if `val` MATERIALIZES at least one box value (possibly nested in a
@@ -98,39 +38,11 @@ pub(super) fn value_contains_box(val: &crate::sigma_value::SigmaValue) -> bool {
     }
 }
 
-/// Single-pass static-type inference over the ErgoTree IR — the rule-1001
-/// (`CheckDeserializedScriptIsSigmaProp`) root typechecker, computing the same
-/// `Value.tpe` Scala derives bottom-up at deserialize while threading the
-/// [`ValDefTypeStore`] through EVERY node in exact serialization order (each
-/// arm walks all of its children, in the order the wire serializer emits them,
-/// before computing its own type — so the store at any `ValUse` matches
-/// Scala's at that byte position). Returns the type when it is STATICALLY
-/// DETERMINABLE, or `None` (treated as lenient/accept by the gate) — so an
-/// as-yet-unhandled shape can never reject a tree Scala accepts. Each node is
-/// visited exactly once, so the whole judgement is linear in the tree size (no
-/// re-walking of MethodCall receiver chains — a parse-time CPU-DoS guard).
-///
-/// Two shapes are left lenient (`None`) as DOCUMENTED, oracle-probed residuals
-/// outside this typer:
-///
-///  - A `ValUse` of an id with NO prior write. Scala's `store(id)` throws
-///    `NoSuchElementException` at PARSE — not a `ValidationException`, so
-///    `deserializeErgoTree` does not wrap it: a hard reject even under
-///    `has_size`. That is a PARSE-layer verdict this rule-1001 typer cannot
-///    express (`Some(non-sigma)` would wrap-accept a has_size tree Scala hard
-///    rejects); the node's parser accepts an unbound `ValUse` (pre-existing),
-///    so the typer stays lenient rather than mis-classify. (When a box
-///    constant precedes the `ValUse`, lenient is also the CORRECT direction:
-///    the box's nested script may have bound the id to any type.)
-///  - A constant that MATERIALIZES a box value ([`value_contains_box`]).
-///    Scala parses the box's nested ErgoTree on the SAME reader
-///    (`ErgoTreeSerializer.deserializeErgoTree` saves `constantStore` /
-///    `wasDeserialize` but NOT `valDefTypeStore`), so the nested script's
-///    `ValDef`s — invisible to this walk — can rebind ANY id at the box's
-///    parse position. Positionally exact handling: at the box constant, every
-///    existing store entry becomes untrusted (`None`); a binding the outer
-///    body re-establishes AFTER the box is trusted again (it overwrites the
-///    pollution, last-write-wins — in Scala too).
+/// Infer each node once, visiting all children in wire order before computing
+/// its result. Unknown bindings and box-induced store pollution return `None`;
+/// substitution rejects these types. A box constant's nested script can mutate
+/// Scala's shared binding store, so entries predating that constant become
+/// unknown; later explicit bindings become trusted again.
 fn infer_type(
     body: &crate::opcode::Expr,
     store: &mut ValDefTypeStore,
@@ -144,7 +56,7 @@ fn infer_type(
                 // Box pollution point: the nested script may have rebound any
                 // id — every entry written so far is now untrusted. (An id it
                 // may have FRESHLY bound stays absent here and resolves
-                // lenient, which is the same safe direction.)
+                // unknown, which is the same safe direction.)
                 for t in store.values_mut() {
                     *t = None;
                 }
@@ -193,16 +105,19 @@ fn infer_type(
             }
             Payload::BoolCollection { .. } => Some(SigmaType::SColl(Box::new(SigmaType::SBoolean))),
             Payload::Tuple { items } => {
-                for i in items {
-                    infer_type(i, store, constants);
-                }
-                Some(SigmaType::SAny)
+                let types: Vec<_> = items
+                    .iter()
+                    .map(|i| infer_type(i, store, constants))
+                    .collect();
+                types
+                    .into_iter()
+                    .collect::<Option<Vec<_>>>()
+                    .map(SigmaType::STuple)
             }
             // ARG-DEPENDENT roots whose type is a PROJECTION of a child's type
             // (Scala computes these bottom-up at deserialize). Every child is
             // still walked (store evolution); only the projected child's type
-            // is kept — a non-determinable child maps to `None` (lenient) and
-            // this can NEVER reject a tree Scala accepts.
+            // is kept — a non-determinable child maps to `None`.
             //
             // ArithOp (Minus/Plus/Multiply/Division/Modulo/Min/Max): `tpe =
             // left.tpe` and Scala does NOT type-check the operands at deserialize,
@@ -243,7 +158,7 @@ fn infer_type(
             // ValDef 0xD6 / FunDef 0xD7 (`ValDefSerializer.parse`): the rhs is
             // parsed FIRST under the current store, then `store(id) = rhs.tpe`
             // (last-write-wins; a non-determinable rhs writes `None` so a
-            // `ValUse` of it stays lenient — never a stale earlier type). The
+            // `ValUse` of it stays unknown — never a stale earlier type). The
             // node's own type is `rhs.tpe` (`ValDef.tpe`, values.scala:924) —
             // a `FunDef` rhs is NOT always a function (e.g. `fun x =
             // sigmaProp`), so deriving it from the rhs keeps a `ValUse` of a
@@ -255,20 +170,10 @@ fn infer_type(
             }
             // ValUse: `store(id)` at this parse position (see
             // [`ValDefTypeStore`]). An untrusted (`None`) entry or an id with
-            // no prior write resolves lenient (see [`infer_type`] residuals).
+            // no prior write resolves unknown (see [`infer_type`] residuals).
             Payload::ValUse { id } => store.get(id).cloned().flatten(),
-            // FuncValue (`FuncValueSerializer.parse`): each arg's DECLARED
-            // type is written to the store BEFORE the body is parsed — and
-            // never popped. Scala `FuncValue.tpe = SFunc(args.map(_.tpe),
-            // body.tpe)` — never SigmaProp, so a FuncValue root always fails
-            // rule 1001 (oracle-verified). The `SFunc` is built only when the
-            // body type is PRECISE ([`type_is_precise`]): `SAny` inside a
-            // computed type is this typer's imprecision sentinel, and
-            // embedding it would later compare as a real type in [`agree`] (a
-            // false `specializeFor` mismatch = a reject-valid). An imprecise
-            // body degrades the whole function to the top-level `SAny`
-            // sentinel (still non-SigmaProp; `Unknown` to [`agree`]). The
-            // declared arg types are wire-exact and kept as-is.
+            // FuncValue writes declared arguments before its body, without popping
+            // them. Its result is the full function type, including tuple ranges.
             Payload::FuncValue { args, body } => {
                 for (id, tpe) in args {
                     store.insert(*id, tpe.clone());
@@ -276,19 +181,17 @@ fn infer_type(
                 let body_t = infer_type(body, store, constants);
                 let dom: Option<Vec<SigmaType>> = args.iter().map(|(_, t)| t.clone()).collect();
                 match (dom, body_t) {
-                    (Some(t_dom), Some(t_range)) if type_is_precise(&t_range) => {
-                        Some(SigmaType::SFunc {
-                            t_dom,
-                            t_range: Box::new(t_range),
-                            tpe_params: vec![],
-                        })
-                    }
-                    _ => Some(SigmaType::SAny),
+                    (Some(t_dom), Some(t_range)) => Some(SigmaType::SFunc {
+                        t_dom,
+                        t_range: Box::new(t_range),
+                        tpe_params: vec![],
+                    }),
+                    _ => None,
                 }
             }
             // SelectField `tuple._i`: the i-th component type of the input tuple
             // (1-based). Only resolvable when the input's type is a determinable
-            // `STuple` (e.g. a tuple constant); otherwise lenient.
+            // `STuple` (e.g. a tuple constant); otherwise unknown.
             Payload::SelectField { input, field_idx } => {
                 match infer_type(input, store, constants) {
                     Some(SigmaType::STuple(items)) => (*field_idx as usize)
@@ -346,83 +249,100 @@ fn infer_type(
                     .iter()
                     .map(|a| infer_type(a, store, constants))
                     .collect();
-                method_call_result_type(*type_id, *method_id, obj_type, &arg_types, args, type_args)
+                method_call_result_type(*type_id, *method_id, obj_type, &arg_types, type_args)
             }
-            // Apply's result is the callee's range; kept lenient (as before the
-            // store rework) — the children are still walked for their bindings.
+            // Apply projects a function range or collection element type (values.scala).
             Payload::FuncApply { func, args } => {
-                infer_type(func, store, constants);
+                let t = infer_type(func, store, constants);
                 for a in args {
                     infer_type(a, store, constants);
                 }
-                None
+                match t {
+                    Some(SigmaType::SFunc { t_range, .. }) => Some(*t_range),
+                    Some(SigmaType::SColl(elem)) => Some(*elem),
+                    _ => None,
+                }
             }
-            // SigmaAnd / SigmaOr (0xEA / 0xEB) ARE SigmaProp — lenient `None`
-            // is the same accept verdict at the root, and a `None` store entry
-            // for a sigma-collection rhs can only turn "accept" into "accept"
-            // (only a determinable non-SigmaProp type rejects).
+            // Sigma conjunctions retain SigmaProp after visiting every child.
             Payload::SigmaCollection { items } => {
                 for i in items {
                     infer_type(i, store, constants);
                 }
-                op_root_non_sigma_type(node.opcode)
+                op_result_type(node.opcode)
             }
             // A zero-argument (leaf) opcode root has a statically-known type and
-            // NONE of them is `SSigmaProp` (see [`zero_arg_root_type`]), so a
+            // NONE of them is `SSigmaProp` (see [`zero_arg_type`]), so a
             // script rooted at one fails CheckDeserializedScriptIsSigmaProp just
             // like an inline non-SigmaProp `Const`.
-            Payload::Zero => Some(zero_arg_root_type(node.opcode)),
-            // Generic operator payloads: walk every child (store evolution),
-            // then classify by opcode — relations, arithmetic, etc. whose
-            // result is unconditionally non-SigmaProp get `Some(SAny)`;
-            // SigmaProp-capable opcodes stay lenient (`None`).
+            Payload::Zero => Some(zero_arg_type(node.opcode)),
+            // Collection transforms preserve the input or project the mapper range.
+            Payload::Two(input, mapper) if node.opcode == 0xAD => {
+                infer_type(input, store, constants);
+                match infer_type(mapper, store, constants) {
+                    Some(SigmaType::SFunc { t_range, .. }) => Some(SigmaType::SColl(t_range)),
+                    _ => None,
+                }
+            }
+            Payload::Two(input, other)
+                if matches!(node.opcode, 0xB3 | 0xB5 | 0xF2 | 0xF3 | 0xF5..=0xF8) =>
+            {
+                let t = infer_type(input, store, constants);
+                infer_type(other, store, constants);
+                t
+            }
+            Payload::Three(input, from, until) if node.opcode == 0xB4 => {
+                let t = infer_type(input, store, constants);
+                infer_type(from, store, constants);
+                infer_type(until, store, constants);
+                t
+            }
+            Payload::One(input) if matches!(node.opcode, 0xF0 | 0xF1) => {
+                infer_type(input, store, constants)
+            }
+            // Fixed-result operators still visit all children in wire order.
             Payload::One(a) => {
                 infer_type(a, store, constants);
-                op_root_non_sigma_type(node.opcode)
+                op_result_type(node.opcode)
             }
             Payload::Two(a, b) => {
                 infer_type(a, store, constants);
                 infer_type(b, store, constants);
-                op_root_non_sigma_type(node.opcode)
+                op_result_type(node.opcode)
             }
             Payload::Three(a, b, c) => {
                 infer_type(a, store, constants);
                 infer_type(b, store, constants);
                 infer_type(c, store, constants);
-                op_root_non_sigma_type(node.opcode)
+                op_result_type(node.opcode)
             }
             Payload::Four(a, b, c, d) => {
                 infer_type(a, store, constants);
                 infer_type(b, store, constants);
                 infer_type(c, store, constants);
                 infer_type(d, store, constants);
-                op_root_non_sigma_type(node.opcode)
+                op_result_type(node.opcode)
             }
-            // Childless payloads with no statically-tracked type here:
-            // `TaggedVar` (0x71, type-tag dependent) and `NoneValue` (0xDF,
-            // not parser-reachable) — both resolve through the opcode
-            // classifier to `None` (lenient).
-            Payload::TaggedVar { .. } | Payload::NoneValue { .. } => {
-                op_root_non_sigma_type(node.opcode)
-            }
+            // TaggedVar has no type in the serialized payload; NoneValue has
+            // no registered Scala serializer. Neither supplies a substitution type.
+            Payload::TaggedVar { .. } | Payload::NoneValue { .. } => op_result_type(node.opcode),
         },
         crate::opcode::Expr::Unparsed(_) => None,
     }
 }
 
-/// `true` when a computed type is PRECISE — i.e. contains no `SAny`, which this
-/// typer also uses as its "non-`SigmaProp`, but exact type not tracked"
-/// sentinel (a non-landmine `MethodCall`, a `Tuple` literal, a non-SigmaProp
-/// operator, an unknown leaf, …). A sentinel is only safe at the TOP level of a
-/// type (where [`agree`] maps it to `Unknown`); embedding one inside a
-/// constructed type (the `FuncValue` → `SFunc` range) would let it structurally
-/// compare against a real type and manufacture a false mismatch (a
-/// reject-valid). A REAL wire `SAny` degraded by this check only widens
-/// leniency — the safe direction.
+/// Substitution requires a concrete type without unknown/Any components.
 fn type_is_precise(t: &crate::sigma_type::SigmaType) -> bool {
     use crate::sigma_type::SigmaType;
     match t {
         SigmaType::SAny => false,
+        // An unresolved type variable is not a concrete type. `unify_type_lists`
+        // succeeds without binding `T` for methods whose range is
+        // `SOption(STypeVar("T"))` with an empty explicit type-argument list
+        // ((99, 9)-(99, 18), (101, 11)), so the specialized range can still carry
+        // it. Treating that as precise would let it satisfy the exact-type check
+        // in `substitute_deserialize`, whose declared type is read by `read_type`
+        // and may itself be an `STypeVar`.
+        SigmaType::STypeVar(_) => false,
         SigmaType::SColl(e) | SigmaType::SOption(e) => type_is_precise(e),
         SigmaType::STuple(items) => items.iter().all(type_is_precise),
         SigmaType::SFunc {
@@ -438,232 +358,140 @@ fn type_is_precise(t: &crate::sigma_type::SigmaType) -> bool {
     }
 }
 
-/// The result static type of a `MethodCall` / `PropertyCall`, for the rule-1001
-/// root judgement, from the ALREADY-INFERRED receiver/arg types (the caller's
-/// single-pass walk computes each exactly once, in wire order). Scala computes
-/// `MethodCall.tpe` as the SMethod's result type specialized for the
-/// receiver/arg types; the only methods whose specialized result can be
-/// `SigmaProp` are the 7 the `difftest --methodcall` harness verified
-/// END-TO-END against the JVM reference (every other of the 199 registered methods
-/// returns a concrete type or an `Option`/`Coll`/tuple wrapper — structurally never
-/// `SigmaProp`). Each of the 7 is a projection of the receiver / args / explicit
-/// type, exactly mirroring the `ByIndex` / `OptionGet` / `Fold` / `Deserialize`
-/// arms of [`infer_type`]. A result type VARIABLE that occurs more than once
-/// (`getOrElse`'s receiver + default, `fold`'s zero + op range) is reconciled with
-/// [`agree`] — Scala `unifyTypeLists` makes the result `SigmaProp` only
-/// when ALL occurrences are, so checking just one would accept a tree Scala rejects.
-///
-/// (A determinable occurrence MISMATCH actually makes Scala THROW at deserialize —
-/// `specializeFor`'s `IllegalArgumentException` — which our structural parser does
-/// not replicate at parse time. The rule-1001 verdict still matches where it is
-/// enforced: this returns `SAny` (non-`SigmaProp`), so a SIZELESS conflict root is
-/// rejected as Scala rejects it. A has_size conflict tree is soft-fork-wrapped here
-/// vs hard-rejected by Scala — a pre-existing parse-layer accept-invalid, the safe
-/// direction, outside this rule-1001 root typer.)
-///
-/// Reject-valid-safe by construction:
-///  - a non-determinable projection returns `None` (lenient), so a SigmaProp-capable
-///    method whose receiver type we cannot pin never gets rejected;
-///  - every OTHER `(type_id, method_id)` returns `SAny` (non-`SigmaProp`). For the
-///    192 known non-landmine methods this is the harness's verified result; an
-///    UNKNOWN method is rejected by Scala at method resolution (so a non-`SigmaProp`
-///    root verdict matches). The landmine set MUST stay complete — adding a method
-///    here that can return `SigmaProp` without listing it would be a reject-valid.
+/// Specialize the JVM-extracted signature using Scala's directional unification.
+/// A failed unification leaves the template unchanged (SMethod.specializeFor).
 fn method_call_result_type(
     type_id: u8,
     method_id: u8,
     obj_type: Option<crate::sigma_type::SigmaType>,
     arg_types: &[Option<crate::sigma_type::SigmaType>],
-    args: &[crate::opcode::Expr],
     type_args: &[crate::sigma_type::SigmaType],
 ) -> Option<crate::sigma_type::SigmaType> {
     use crate::sigma_type::SigmaType;
-    let arg_ty = |i: usize| arg_types.get(i).cloned().flatten();
-    // The receiver's Coll / Option element type (the result type variable `IV`/`T`).
-    let coll_elem = || match &obj_type {
-        Some(SigmaType::SColl(elem)) => Some((**elem).clone()),
-        _ => None,
-    };
-    let opt_elem = || match &obj_type {
-        Some(SigmaType::SOption(elem)) => Some((**elem).clone()),
-        _ => None,
-    };
-    // Each landmine's result is the receiver/explicit projection, GATED on every
-    // signature constraint Scala's `specializeFor` (`unifyTypeLists`) enforces: a
-    // FIXED-type arg must equal its signature type, and every additional occurrence
-    // of the result type variable must agree with the receiver/zero. A determinable
-    // violation leaves the variable unbound -> non-`SigmaProp` (`SAny`, reject); an
-    // undeterminable one -> `None` (lenient). See [`gated`] / [`agree`].
-    let int = Some(SigmaType::SInt);
-    match (type_id, method_id) {
-        // Coll.apply(index: SInt): IV. `IV` is only in the receiver, but the index
-        // must be SInt (else specializeFor fails and IV stays unbound).
-        (12, 10) => gated(coll_elem(), &[agree(arg_ty(0), int)]),
-        // Coll.getOrElse(index: SInt, default: IV): IV. index = SInt; default = IV.
-        (12, 2) => {
-            let elem = coll_elem();
-            gated(
-                elem.clone(),
-                &[agree(arg_ty(0), int), agree(elem, arg_ty(1))],
-            )
+    let (signature, explicit) = method_registry::signature(type_id, method_id)?;
+    let mut subst = std::collections::HashMap::new();
+    for (param, arg) in explicit.iter().zip(type_args) {
+        if let SigmaType::STypeVar(name) = param {
+            subst.insert(name.clone(), arg.clone());
         }
-        // Coll.fold(zero: OV, op: (OV, IV) => OV): OV. OV = zero = op arg0 = op range;
-        // IV (receiver elem) = op arg1. The op's declared arg types come from the
-        // syntactic `FuncValue` payload (wire-exact); its RANGE from the op's
-        // inferred `SFunc` type (precise by construction, and also available
-        // when the op is a `ValUse` of a stored lambda).
-        (12, 5) => {
-            let zero = arg_ty(0);
-            let (op_a0, op_a1) = args.get(1).map_or((None, None), func_value_arg_types);
-            let op_range = match arg_ty(1) {
-                Some(SigmaType::SFunc { t_range, .. }) => Some(*t_range),
-                _ => None,
-            };
-            gated(
-                zero.clone(),
-                &[
-                    agree(zero.clone(), op_range),
-                    agree(zero, op_a0),
-                    agree(coll_elem(), op_a1),
-                ],
-            )
-        }
-        // Option.get: the receiver Option's element type (`T` only in the receiver).
-        (36, 3) => opt_elem(),
-        // Option.getOrElse(default: T): T. T = receiver elem = default.
-        (36, 4) => {
-            let elem = opt_elem();
-            gated(elem.clone(), &[agree(elem, arg_ty(0))])
-        }
-        // Global.deserializeTo[T] / fromBigEndianBytes[T]: the explicit type arg `T`.
-        // Scala applies the EXPLICIT type subst (T -> ...) to the method BEFORE
-        // `specializeFor`, and `specializeFor` returns that already-substituted method
-        // even when `unifyTypeLists` fails — so the result is `T` REGARDLESS of the
-        // receiver or the `Coll[Byte]` value arg. Oracle-verified: a has_size
-        // `deserializeTo[SigmaProp]` on a `Global`, a `Box`(SELF), or with an `Int`
-        // value arg ALL classify SIGMA. Hence no receiver/arg gating here.
-        (106, 4) | (106, 5) => type_args.first().cloned(),
-        // Every other method (and any unknown one) is non-SigmaProp.
-        _ => Some(SigmaType::SAny),
     }
-}
-
-/// Three-state result of comparing two inferred types for `specializeFor`
-/// unification: `Some(Match)` they are equal, `Some(Mismatch)` a determinable
-/// conflict (Scala fails to unify), `None`-side -> `Unknown` (non-determinable).
-#[derive(PartialEq)]
-enum Unify {
-    Match,
-    Mismatch,
-    Unknown,
-}
-
-/// Compare two occurrences of a unified type (or an arg against its fixed signature
-/// type, passed as `b`): equal -> `Match`, both PRECISELY determinable but different
-/// -> `Mismatch`, otherwise `Unknown`. `SAny` is the typer's "non-`SigmaProp`, but
-/// precise type not tracked" sentinel (returned for a non-landmine `MethodCall`, a
-/// `Tuple`, a non-`SigmaProp` operator, …), NOT a literal `SAny` — so it is treated
-/// as `Unknown`, never a `Mismatch`. Reporting `Mismatch` for it would reject a tree
-/// Scala accepts, e.g. `Coll[SigmaProp].apply(coll.size)` whose `SInt` index the
-/// sentinel hides (a reject-valid).
-fn agree(
-    a: Option<crate::sigma_type::SigmaType>,
-    b: Option<crate::sigma_type::SigmaType>,
-) -> Unify {
-    use crate::sigma_type::SigmaType::SAny;
-    match (a, b) {
-        (Some(SAny), _) | (_, Some(SAny)) | (None, _) | (_, None) => Unify::Unknown,
-        (Some(x), Some(y)) if x == y => Unify::Match,
-        (Some(_), Some(_)) => Unify::Mismatch,
-    }
-}
-
-/// Fold a landmine's projected `result` with its signature `checks`: any determinable
-/// `Mismatch` makes `specializeFor` fail -> non-`SigmaProp` (`SAny`, reject); else any
-/// `Unknown` -> lenient (`None`); else the projected result.
-fn gated(
-    result: Option<crate::sigma_type::SigmaType>,
-    checks: &[Unify],
-) -> Option<crate::sigma_type::SigmaType> {
-    if checks.contains(&Unify::Mismatch) {
-        Some(crate::sigma_type::SigmaType::SAny)
-    } else if checks.contains(&Unify::Unknown) {
-        None
+    let signature = apply_type_subst(&signature, &subst);
+    let SigmaType::SFunc { t_dom, t_range, .. } = signature else {
+        return None;
+    };
+    let actual: Option<Vec<_>> = std::iter::once(obj_type)
+        .chain(arg_types.iter().cloned())
+        .collect();
+    let actual = actual?;
+    subst.clear();
+    if unify_type_lists(&t_dom, &actual, &mut subst) {
+        Some(apply_type_subst(&t_range, &subst))
     } else {
-        result
+        Some(*t_range)
     }
 }
 
-/// The first two declared argument types of a `FuncValue` operand (e.g.
-/// `Coll.fold`'s `(OV, IV) => OV` reducer). `(None, None)` for a non-`FuncValue`.
-fn func_value_arg_types(
-    op: &crate::opcode::Expr,
-) -> (
-    Option<crate::sigma_type::SigmaType>,
-    Option<crate::sigma_type::SigmaType>,
-) {
-    if let crate::opcode::Expr::Op(node) = op {
-        if let crate::opcode::Payload::FuncValue { args, .. } = &node.payload {
-            let a0 = args.first().and_then(|(_, t)| t.clone());
-            let a1 = args.get(1).and_then(|(_, t)| t.clone());
-            return (a0, a1);
-        }
+type TypeSubst = std::collections::HashMap<String, crate::sigma_type::SigmaType>;
+
+fn apply_type_subst(
+    t: &crate::sigma_type::SigmaType,
+    subst: &TypeSubst,
+) -> crate::sigma_type::SigmaType {
+    use crate::sigma_type::SigmaType::*;
+    match t {
+        STypeVar(name) => subst.get(name).cloned().unwrap_or_else(|| t.clone()),
+        SColl(e) => SColl(Box::new(apply_type_subst(e, subst))),
+        SOption(e) => SOption(Box::new(apply_type_subst(e, subst))),
+        STuple(items) => STuple(items.iter().map(|t| apply_type_subst(t, subst)).collect()),
+        SFunc {
+            t_dom,
+            t_range,
+            tpe_params,
+        } => SFunc {
+            t_dom: t_dom.iter().map(|t| apply_type_subst(t, subst)).collect(),
+            t_range: Box::new(apply_type_subst(t_range, subst)),
+            tpe_params: tpe_params
+                .iter()
+                .filter(|t| !matches!(t, STypeVar(n) if subst.contains_key(n)))
+                .cloned()
+                .collect(),
+        },
+        _ => t.clone(),
     }
-    (None, None)
 }
 
-/// A non-`SSigmaProp` result type for operator (generic `One`/`Two`/`Three`
-/// payload) opcodes whose result is UNCONDITIONALLY non-SigmaProp regardless of
-/// argument types. Returns `Some(SAny)` for those (the gate only needs
-/// `!= SSigmaProp`); `None` otherwise. Every listed opcode is oracle-verified to
-/// reject a well-formed sizeless root (Scala 6.0.2, rule 1001).
-///
-/// NOT listed — and therefore left lenient (`None`) — are opcodes that CAN be
-/// `SigmaProp` (`ProveDlog`/`ProveDHTuple` 0xCD/0xCE, `BoolToSigmaProp` 0xD1,
-/// `AtLeast` 0x98, `SigmaAnd`/`SigmaOr` 0xEA/0xEB — all oracle-verified to ACCEPT)
-/// and those whose result type DEPENDS on their arguments (`If` 0x95,
-/// `BlockValue`/`FuncValue`/`FuncApply`, `SelectField`/`ByIndex`/`ValUse`/
-/// `OptionGet`, `TaggedVar` 0x71). Adding any of those would reject a
-/// Scala-accepted (SigmaProp-rooted) tree — a reject-valid. Payloads carrying an
-/// explicit static type (`ConcreteCollection`, `Tuple`, `GetVar`,
-/// `ExtractRegisterAs`, `NumericCast`, `Deserialize{Context,Register}`) and
-/// `MethodCall`/`PropertyCall` (see [`method_call_result_type`]) are classified by
-/// [`infer_type`]'s dedicated arms BEFORE this fallback.
-fn op_root_non_sigma_type(opcode: u8) -> Option<crate::sigma_type::SigmaType> {
-    let never_sigma = matches!(
-        opcode,
-        0x8F..=0x94                    // Lt Le Gt Ge Eq Neq -> SBoolean
-        // NB: ArithOp (Minus 0x99, Plus 0x9A, Multiply 0x9C, Division 0x9D,
-        // Modulo 0x9E, Min 0xA1, Max 0xA2) is NOT here: Scala types it as
-        // `left.tpe` with NO operand type-check, so a SigmaProp left operand makes
-        // the whole op SigmaProp (oracle-verified ACCEPT). It is handled by the
-        // arg-dependent left-operand arm in `infer_type`.
-        | 0x9F | 0xA0                  // Exponentiate / MultiplyGroup (operand-typed -> reject sigma)
-        | 0x7A | 0x7B | 0x7C           // LongToByteArray ByteArrayToBigInt ByteArrayToLong
-        | 0xB1                         // SizeOf -> SInt
-        | 0xCB | 0xCC                  // CalcBlake2b256 CalcSha256 -> Coll[SByte]
-        | 0xC1 | 0xC2 | 0xC3 | 0xC4 | 0xC5 | 0xC7  // Extract{Amount,ScriptBytes,Bytes,BytesNoRef,Id,CreationInfo}
-        | 0xCF | 0xD0                  // SigmaPropIsProven -> SBoolean, SigmaPropBytes -> Coll[SByte]
-        // Boolean-result operators (predicates / Bool logic) -> SBoolean.
-        | 0x96 | 0x97                  // And Or (Bool BinAnd/BinOr over Coll[Boolean]; NOT SigmaAnd/Or 0xEA/0xEB)
-        | 0xAE | 0xAF                  // Exists ForAll
-        | 0xE6                         // OptionIsDefined
-        | 0xEC | 0xED | 0xEF | 0xF4 | 0xFF  // BinOr BinAnd LogicalNot BinXor XorOf
-        // Numeric / byte-collection-result operators -> never SigmaProp.
-        | 0x9B                         // Xor (byte-array)
-        | 0xE7 | 0xE8 | 0xE9           // ModQ PlusModQ MinusModQ
-        | 0xF0 | 0xF1 | 0xF2 | 0xF3 | 0xF5 | 0xF6 | 0xF7 | 0xF8  // Negation BitInversion BitOr BitAnd BitXor BitShift{Right,Left,RightZeroed}
-        // Fixed-result structural ops.
-        | 0x74                         // SubstConstants -> Coll[SByte]
-        | 0xB7                         // TreeLookup -> Option[Coll[SByte]]
-        | 0xEE                         // DecodePoint -> SGroupElement
-        | 0xB3 | 0xB5                  // Append Filter -> Coll
-        | 0xAD | 0xB4 // MapCollection Slice -> Coll
-                      // NB: Fold (0xB0) / ByIndex (0xB2) / OptionGet (0xE4) / OptionGetOrElse
-                      // (0xE5) are arg-dependent (result = accumulator / element type) and are
-                      // handled by dedicated arms — they CAN be SigmaProp.
-    );
-    never_sigma.then_some(crate::sigma_type::SigmaType::SAny)
+/// Scala zips domains without an arity check; nested tuples/functions check lengths.
+fn unify_type_lists(
+    a: &[crate::sigma_type::SigmaType],
+    b: &[crate::sigma_type::SigmaType],
+    subst: &mut TypeSubst,
+) -> bool {
+    a.iter().zip(b).all(|(a, b)| unify_types(a, b, subst))
+}
+
+fn unify_types(
+    a: &crate::sigma_type::SigmaType,
+    b: &crate::sigma_type::SigmaType,
+    subst: &mut TypeSubst,
+) -> bool {
+    use crate::sigma_type::SigmaType::*;
+    match (a, b) {
+        (STypeVar(a), STypeVar(b)) => a == b,
+        (STypeVar(name), t) => match subst.get(name) {
+            Some(previous) => previous == t,
+            None => {
+                subst.insert(name.clone(), t.clone());
+                true
+            }
+        },
+        (SColl(a), SColl(b)) | (SOption(a), SOption(b)) => unify_types(a, b, subst),
+        (SColl(a), STuple(_)) => unify_types(a, &SAny, subst),
+        (STuple(a), STuple(b)) => a.len() == b.len() && unify_type_lists(a, b, subst),
+        (
+            SFunc {
+                t_dom: a,
+                t_range: ar,
+                ..
+            },
+            SFunc {
+                t_dom: b,
+                t_range: br,
+                ..
+            },
+        ) => a.len() == b.len() && unify_type_lists(a, b, subst) && unify_types(ar, br, subst),
+        (SBoolean, SSigmaProp) | (SAny, _) => true,
+        _ => a == b,
+    }
+}
+
+/// Fixed-result opcode types from the pinned Scala AST declarations.
+fn op_result_type(opcode: u8) -> Option<crate::sigma_type::SigmaType> {
+    if matches!(opcode, 0x98 | 0xCD | 0xCE | 0xD1 | 0xEA | 0xEB) {
+        return Some(crate::sigma_type::SigmaType::SSigmaProp);
+    }
+    use crate::sigma_type::SigmaType::*;
+    match opcode {
+        0x8F..=0x94
+        | 0x96
+        | 0x97
+        | 0xAE
+        | 0xAF
+        | 0xCF
+        | 0xE6
+        | 0xEC
+        | 0xED
+        | 0xEF
+        | 0xF4
+        | 0xFF => Some(SBoolean),
+        0xB1 => Some(SInt),
+        0x7C | 0xC1 => Some(SLong),
+        0x7B | 0xE7..=0xE9 => Some(SBigInt),
+        0x9F | 0xA0 | 0xEE => Some(SGroupElement),
+        0x74 | 0x7A | 0x9B | 0xC2..=0xC5 | 0xCB | 0xCC | 0xD0 => Some(SColl(Box::new(SByte))),
+        0xC7 => Some(STuple(vec![SInt, SColl(Box::new(SByte))])),
+        0xB7 => Some(SOption(Box::new(SColl(Box::new(SByte))))),
+        _ => None,
+    }
 }
 
 /// Statically-known result type of a zero-argument (leaf) ErgoTree opcode. EVERY
@@ -673,20 +501,27 @@ fn op_root_non_sigma_type(opcode: u8) -> Option<crate::sigma_type::SigmaType> {
 /// `MinerPubkey` → `Coll[SByte]`, `Global` → `SGlobal`, `Context` → `SContext`.
 /// (A `SigmaProp`-producing op — `ProveDlog`, `BoolToSigmaProp`, `SigmaAnd`, … —
 /// always takes arguments, so it is never a `Zero` leaf.) An unrecognized leaf
-/// falls back to `SAny`, still `!= SSigmaProp`, so the rule-1001 gate rejects it.
-fn zero_arg_root_type(opcode: u8) -> crate::sigma_type::SigmaType {
+/// falls back to `SAny`, which cannot establish substitution compatibility.
+fn zero_arg_type(opcode: u8) -> crate::sigma_type::SigmaType {
     use crate::sigma_type::SigmaType::*;
     match opcode {
         0x7F | 0x80 => SBoolean,              // True / False
         0x82 => SGroupElement,                // GroupGenerator
         0xA3 => SInt,                         // Height
         0xA4 | 0xA5 => SColl(Box::new(SBox)), // Inputs / Outputs
-        0xA6 => SAvlTree,                     // LastBlockUtxoRootHash
-        0xA7 => SBox,                         // Self
-        0xAC => SColl(Box::new(SByte)),       // MinerPubkey
-        0xDD => SGlobal,                      // Global
-        0xFE => SContext,                     // Context
-        _ => SAny,                            // deprecated/unknown leaf — still non-SigmaProp
+        // 0xA6 LastBlockUtxoRootHash. 0xB6 is Scala's `AvlTreeCode`
+        // (`CreateAvlTree`, `tpe = SAvlTree`, four arguments); this parser routes
+        // it as a deprecated zero-argument leaf (`opcode_pattern`), so the arm is
+        // reached here rather than from `op_result_type`. Either way the type is
+        // `SAvlTree`, never `SigmaProp`, so the rule-1001 root judgement agrees
+        // with Scala (oracle-checked: `00b602010e0004402800` and `00b6` both
+        // reconcile on the `ergo_tree` surface).
+        0xA6 | 0xB6 => SAvlTree,
+        0xA7 => SBox,                   // Self
+        0xAC => SColl(Box::new(SByte)), // MinerPubkey
+        0xDD => SGlobal,                // Global
+        0xFE => SContext,               // Context
+        _ => SAny,                      // deprecated/unknown leaf — still non-SigmaProp
     }
 }
 
@@ -698,10 +533,12 @@ mod tests {
     //! `ergo-difftest/src/oracle.rs`
     //! (`valdef_type_store_shapes_match_jvm_oracle`).
 
-    use super::determinable_root_type_of;
+    use super::{infer_type, ValDefTypeStore};
     use crate::opcode::{Expr, IrNode, Payload};
     use crate::sigma_type::SigmaType;
     use crate::sigma_value::{SigmaBoolean, SigmaValue};
+
+    // ----- helpers -----
 
     fn op(opcode: u8, payload: Payload) -> Expr {
         Expr::Op(IrNode { opcode, payload })
@@ -766,11 +603,20 @@ mod tests {
             },
         )
     }
-    fn root(body: &Expr) -> Option<SigmaType> {
-        determinable_root_type_of(body, &[])
+    fn exact_type_for_test(
+        body: &crate::opcode::Expr,
+        constants: &[(crate::sigma_type::SigmaType, crate::sigma_value::SigmaValue)],
+    ) -> Option<crate::sigma_type::SigmaType> {
+        infer_type(body, &mut ValDefTypeStore::new(), constants)
     }
 
-    /// The Finding-E accept-invalid, fixed: `{ val x = 0L; val x = 0L; x }`
+    fn exact(body: &Expr) -> Option<SigmaType> {
+        exact_type_for_test(body, &[])
+    }
+
+    // ----- oracle parity -----
+
+    /// `{ val x = 0L; val x = 0L; x }`
     /// resolves the root `ValUse` from the last store write (SLong) → the gate
     /// rejects, as Scala does. And last-write-wins in the ACCEPT direction:
     /// `{ val x = 0L; val x = sigma; x }` is SigmaProp (a first-write-wins bug
@@ -778,13 +624,13 @@ mod tests {
     #[test]
     fn duplicate_id_valuse_resolves_to_last_parse_order_write() {
         let dup = block(vec![val_def(1, long0()), val_def(1, long0())], val_use(1));
-        assert_eq!(root(&dup), Some(SigmaType::SLong));
+        assert_eq!(exact(&dup), Some(SigmaType::SLong));
 
         let last_sigma = block(
             vec![val_def(1, long0()), val_def(1, sigma_const())],
             val_use(1),
         );
-        assert_eq!(root(&last_sigma), Some(SigmaType::SSigmaProp));
+        assert_eq!(exact(&last_sigma), Some(SigmaType::SSigmaProp));
     }
 
     /// THE GUARDRAIL (a reject here = reject-valid = chain stall):
@@ -801,11 +647,11 @@ mod tests {
             ],
             val_use(2),
         );
-        assert_eq!(root(&guardrail), Some(SigmaType::SSigmaProp));
+        assert_eq!(exact(&guardrail), Some(SigmaType::SSigmaProp));
     }
 
     /// Off-spine and scope-boundary rebinds all reach the flat store in parse
-    /// order (oracle REJECT for each — the node was lenient-ACCEPT pre-fix):
+    /// order (oracle REJECT for each — the node was unknown-ACCEPT pre-fix):
     /// a rebind nested in a later item's rhs; a `FuncValue` ARG declaration; a
     /// rebind inside a `FuncValue` BODY (no scoping/popping); a `FunDef` write.
     #[test]
@@ -818,7 +664,7 @@ mod tests {
             ],
             val_use(1),
         );
-        assert_eq!(root(&offspine), Some(SigmaType::SLong));
+        assert_eq!(exact(&offspine), Some(SigmaType::SLong));
 
         // { val x = sigma; val f = (id1: Long) => 0L; x } -> the lambda ARG
         // rebinds x to its declared SLong.
@@ -829,7 +675,7 @@ mod tests {
             ],
             val_use(1),
         );
-        assert_eq!(root(&arg_rebind), Some(SigmaType::SLong));
+        assert_eq!(exact(&arg_rebind), Some(SigmaType::SLong));
 
         // { val x = sigma; val f = (id3: Long) => { val x = 0L; 0L }; x } ->
         // the ValDef inside the lambda body rebinds x (flat store, never popped).
@@ -846,7 +692,7 @@ mod tests {
             ],
             val_use(1),
         );
-        assert_eq!(root(&body_rebind), Some(SigmaType::SLong));
+        assert_eq!(exact(&body_rebind), Some(SigmaType::SLong));
 
         // { fun f[T] = sigma; val f = 0L; f } -> FunDef writes like ValDef;
         // the later ValDef wins.
@@ -854,7 +700,7 @@ mod tests {
             vec![fun_def(1, sigma_const()), val_def(1, long0())],
             val_use(1),
         );
-        assert_eq!(root(&fundef_rebind), Some(SigmaType::SLong));
+        assert_eq!(exact(&fundef_rebind), Some(SigmaType::SLong));
 
         // Lambda args SURVIVE the lambda (never popped): a root ValUse of a
         // lambda arg id reads its declared type.
@@ -865,53 +711,53 @@ mod tests {
             )],
             val_use(5),
         );
-        assert_eq!(root(&arg_survives), Some(SigmaType::SLong));
+        assert_eq!(exact(&arg_survives), Some(SigmaType::SLong));
     }
 
-    /// Leniency boundaries that MUST stay lenient (`None` = accept):
+    /// Leniency boundaries that MUST stay unknown (`None` = accept):
     /// a `ValUse` with no prior write (Scala throws at parse — a parse-layer
     /// verdict this typer cannot express, documented residual), and a dup-id
     /// tree whose root does not resolve through the store at all is still
     /// classified.
     #[test]
-    fn unbound_valuse_is_lenient_and_independent_root_still_classified() {
-        assert_eq!(root(&block(vec![], val_use(1))), None);
+    fn unbound_valuse_is_unknown_and_independent_root_still_classified() {
+        assert_eq!(exact(&block(vec![], val_use(1))), None);
         // Use-before-def inside the same block: the write happens AFTER the
         // use in parse order, so the use sees nothing (Scala throws).
         let use_before_def = block(
             vec![val_def(2, val_use(1)), val_def(1, long0())],
             val_use(2),
         );
-        assert_eq!(root(&use_before_def), None);
+        assert_eq!(exact(&use_before_def), None);
         // Root independent of the reused id -> still classified.
         let independent = block(
             vec![val_def(1, long0()), val_def(1, long0())],
             sigma_const(),
         );
-        assert_eq!(root(&independent), Some(SigmaType::SSigmaProp));
+        assert_eq!(exact(&independent), Some(SigmaType::SSigmaProp));
     }
 
     /// Box-constant pollution is POSITIONAL: a box value's nested script parses
     /// on Scala's shared reader at the constant's position, so entries written
-    /// BEFORE it become untrusted (lenient), while a binding (re)established
+    /// BEFORE it become untrusted (unknown), while a binding (re)established
     /// AFTER it is trusted again (it overwrites any pollution, last-write-wins
     /// — in Scala too). A segregated box constant parses before the whole body,
     /// so a body-bound id stays trusted.
     #[test]
     fn box_constant_pollution_is_positional() {
-        // { val x = sigma; val b = box; x } -> x's entry predates the box -> lenient.
+        // { val x = sigma; val b = box; x } -> x's entry predates the box -> unknown.
         let poisoned = block(
             vec![val_def(1, sigma_const()), val_def(2, box_const())],
             val_use(1),
         );
-        assert_eq!(root(&poisoned), None);
+        assert_eq!(exact(&poisoned), None);
 
         // { val b = box; val x = sigma; x } -> x bound after the box -> trusted.
         let rebound = block(
             vec![val_def(2, box_const()), val_def(1, sigma_const())],
             val_use(1),
         );
-        assert_eq!(root(&rebound), Some(SigmaType::SSigmaProp));
+        assert_eq!(exact(&rebound), Some(SigmaType::SSigmaProp));
 
         // Segregated box constant + `{ val x = 0L; x }`: the constant table is
         // parsed BEFORE the body, so the body's ValDef overwrites any pollution
@@ -920,7 +766,7 @@ mod tests {
         let body = block(vec![val_def(1, long0())], val_use(1));
         let constants = vec![(SigmaType::SBox, SigmaValue::OpaqueBoxBytes(vec![]))];
         assert_eq!(
-            determinable_root_type_of(&body, &constants),
+            exact_type_for_test(&body, &constants),
             Some(SigmaType::SLong)
         );
     }
@@ -930,32 +776,29 @@ mod tests {
     /// SigmaProp (accept).
     #[test]
     fn bare_valdef_root_types_as_its_rhs() {
-        assert_eq!(root(&val_def(1, long0())), Some(SigmaType::SLong));
+        assert_eq!(exact(&val_def(1, long0())), Some(SigmaType::SLong));
         assert_eq!(
-            root(&val_def(1, sigma_const())),
+            exact(&val_def(1, sigma_const())),
             Some(SigmaType::SSigmaProp)
         );
-        assert_eq!(root(&fun_def(1, long0())), Some(SigmaType::SLong));
+        assert_eq!(exact(&fun_def(1, long0())), Some(SigmaType::SLong));
     }
 
     /// A `FuncValue` types as `SFunc(declared args, body.tpe)` when the body is
-    /// precise, degrading to the `SAny` sentinel otherwise — never SigmaProp
-    /// either way (a FuncValue root always rejects).
+    /// determinable, returning `None` otherwise.
     #[test]
     fn func_value_types_as_sfunc_when_precise() {
         let lambda = func_value(vec![(1, Some(SigmaType::SLong))], long0());
         assert_eq!(
-            root(&lambda),
+            exact(&lambda),
             Some(SigmaType::SFunc {
                 t_dom: vec![SigmaType::SLong],
                 t_range: Box::new(SigmaType::SLong),
                 tpe_params: vec![],
             })
         );
-        // Imprecise body (a Tuple literal types as the SAny sentinel) -> the
-        // function degrades to top-level SAny (still non-SigmaProp) rather
-        // than embedding the sentinel where `agree` could mis-compare it.
-        let imprecise = func_value(
+        // Tuple component types remain precise inside a function range.
+        let tuple_range = func_value(
             vec![(1, Some(SigmaType::SLong))],
             op(
                 0x86,
@@ -964,6 +807,13 @@ mod tests {
                 },
             ),
         );
-        assert_eq!(root(&imprecise), Some(SigmaType::SAny));
+        assert_eq!(
+            exact(&tuple_range),
+            Some(SigmaType::SFunc {
+                t_dom: vec![SigmaType::SLong],
+                t_range: Box::new(SigmaType::STuple(vec![SigmaType::SLong, SigmaType::SLong])),
+                tpe_params: vec![],
+            })
+        );
     }
 }

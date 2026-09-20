@@ -1,0 +1,114 @@
+[
+  {
+    "name": "function-unbound",
+    "hex": "00d9007201"
+  },
+  {
+    "name": "tuple-unbound",
+    "hex": "00860272010500"
+  },
+  {
+    "name": "collection-unbound",
+    "hex": "008301057201"
+  },
+  {
+    "name": "map-unbound",
+    "hex": "00ada57201"
+  },
+  {
+    "name": "append-unbound",
+    "hex": "00b372017202"
+  },
+  {
+    "name": "slice-unbound",
+    "hex": "00b4720104000400"
+  },
+  {
+    "name": "filter-unbound",
+    "hex": "00b572017202"
+  },
+  {
+    "name": "negation-unbound",
+    "hex": "00f07201"
+  },
+  {
+    "name": "bit-invert-unbound",
+    "hex": "00f17201"
+  },
+  {
+    "name": "method-size-unbound",
+    "hex": "00db0c017201"
+  },
+  {
+    "name": "byte",
+    "hex": "000200"
+  },
+  {
+    "name": "short",
+    "hex": "000300"
+  },
+  {
+    "name": "int",
+    "hex": "000400"
+  },
+  {
+    "name": "long",
+    "hex": "000500"
+  },
+  {
+    "name": "boolean",
+    "hex": "000101"
+  },
+  {
+    "name": "bytes",
+    "hex": "000e0100"
+  },
+  {
+    "name": "tuple",
+    "hex": "00860205000500"
+  },
+  {
+    "name": "function",
+    "hex": "00d9000500"
+  },
+  {
+    "name": "collection",
+    "hex": "008301050500"
+  },
+  {
+    "name": "sized-byte",
+    "hex": "0803020000"
+  },
+  {
+    "name": "sized-short",
+    "hex": "0803030000"
+  },
+  {
+    "name": "sized-int",
+    "hex": "0803040000"
+  },
+  {
+    "name": "sized-long",
+    "hex": "0803050000"
+  },
+  {
+    "name": "sized-boolean",
+    "hex": "0803010100"
+  },
+  {
+    "name": "sized-bytes",
+    "hex": "08040e010000"
+  },
+  {
+    "name": "sized-tuple",
+    "hex": "080786020500050000"
+  },
+  {
+    "name": "sized-function",
+    "hex": "0805d900050000"
+  },
+  {
+    "name": "sized-collection",
+    "hex": "0806830105050000"
+  }
+]

@@ -242,7 +242,7 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
             &tx, &inputs, &data, &message, &mut cx, index, &tree,
         )
         .map(|()| true)
-        .map_err(|error| (cost.total() > limit, error.to_string()))
+        .map_err(|error| (cost.total() > limit, false, error.to_string()))
     } else {
         ergo_sigma::reduce::verify_spending_proof_with_context_and_cost(
             &tree, &proof, &message, &ctx, &mut cost,
@@ -253,6 +253,14 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
                     e,
                     ergo_sigma::reduce::VerifySpendingError::Eval(
                         ergo_sigma::evaluator::EvalError::CostExceeded(_)
+                    )
+                ),
+                matches!(
+                    e,
+                    ergo_sigma::reduce::VerifySpendingError::Eval(
+                        ergo_sigma::evaluator::EvalError::RuntimeException(
+                            "DeserializeRegister script type mismatch"
+                        )
                     )
                 ),
                 e.to_string(),
@@ -292,9 +300,11 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
                 output["rejection_detail"] = json!("Script reduced to false or proof invalid");
             }
         }
-        Err((is_cost, detail)) => {
+        Err((is_cost, is_other, detail)) => {
             output["verdict"] = json!(if is_cost {
                 "RejectCost"
+            } else if is_other {
+                "RejectOther"
             } else {
                 "RejectScript"
             });
@@ -517,5 +527,31 @@ mod tests {
                     .collect::<Vec<_>>()
             );
         }
+    }
+
+    #[test]
+    fn deserialize_fixture_corpus_verify_verdicts_match_jvm() {
+        let fixture: Value = serde_json::from_reader(flate2::read::GzDecoder::new(
+            &include_bytes!("../../../test-vectors/ergo-sigma/cost-ledger/fixtures/interpreter/deserialize-types.json.gz")[..],
+        )).expect("JVM fixture JSON");
+        let cases = fixture["cases"].as_array().expect("fixture cases");
+        for case in cases {
+            let request = serde_json::to_vec(&case["request"]).expect("request JSON");
+            let (Verdict::Accept(record), consumed) = verify_verdict(&request) else {
+                panic!("verify surface must return a structured record");
+            };
+            let actual: Value = serde_json::from_str(&record).expect("verify record");
+            assert_eq!(consumed, request.len());
+            assert_eq!(
+                actual["verdict"], case["expected"]["verdict"],
+                "{}: {actual}",
+                case["name"]
+            );
+        }
+        eprintln!(
+            "deserialize verify corpus: selected={} executed={} skipped=0 failed=0",
+            cases.len(),
+            cases.len()
+        );
     }
 }

@@ -10,7 +10,7 @@ use ergo_ser::opcode::{Expr, IrNode, Payload};
 use ergo_ser::sigma_type::SigmaType;
 use ergo_ser::sigma_value::SigmaValue;
 
-use super::ast_walk::{expr_has_deserialize, inline_placeholders};
+use super::ast_walk::{expr_has_deserialize, inline_placeholders, substitute_deserialize};
 use super::pre_checks::pre_reduction_checks;
 use super::TraceEntry;
 use crate::evaluator::cost::*;
@@ -41,12 +41,9 @@ pub(in crate::evaluator) fn eval_expr(
     // DeserializeContext_over_absent_wrong_typed_var dead-branch
     // entries, +4 per segregated constant).
     //
-    // Root-gated at depth 0, which holds at every public entry
-    // (`reduce_expr_with_cost`, test-only `eval_to_value`, the
-    // conformance hook) and never mid-evaluation (the counter is
-    // incremented before any child dispatch). The recursive call passes
-    // empty constants — mirroring Scala's `EmptyConstants` and making
-    // the gate non-reentrant.
+    // Root-gated at depth 0 at every evaluator entry. Substitution uses empty
+    // constants and preserves evaluation depth; inserted deserialize nodes are
+    // not revisited by the bottom-up pass.
     if *depth == 0 {
         // Whole-tree checks Scala performs at context/deserialize time, BEFORE
         // any bytecode runs — so they fire even when the live path never reaches
@@ -59,10 +56,17 @@ pub(in crate::evaluator) fn eval_expr(
         // non-verifier entries covered.
         pre_reduction_checks(ctx, constants, expr)?;
     }
-    if *depth == 0 && !constants.is_empty() && expr_has_deserialize(expr) {
-        let inlined = inline_placeholders(expr, constants);
-        return eval_expr(&inlined, ctx, &[], env, depth, cost, trace);
-    }
+    let substituted = if *depth == 0 && expr_has_deserialize(expr) {
+        let mut inlined = inline_placeholders(expr, constants);
+        substitute_deserialize(&mut inlined, ctx, cost)?;
+        Some(inlined)
+    } else {
+        None
+    };
+    let (expr, constants) = match &substituted {
+        Some(expr) => (expr, &[][..]),
+        None => (expr, constants),
+    };
     *depth += 1;
     if *depth > MAX_EVAL_DEPTH {
         return Err(EvalError::DepthLimitExceeded(*depth));
