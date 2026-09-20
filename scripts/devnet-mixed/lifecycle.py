@@ -116,9 +116,12 @@ def start():
         deadline = time.monotonic() + 180
         while True:
             connected = []
-            for port in (19553, 19554):
-                with urllib.request.urlopen(f'http://127.0.0.1:{port}/peers/connected', timeout=2) as response:
-                    connected.append(len(json.load(response)) >= 1)
+            try:
+                for port in (19553, 19554):
+                    with urllib.request.urlopen(f'http://127.0.0.1:{port}/peers/connected', timeout=2) as response:
+                        connected.append(len(json.load(response)) >= 1)
+            except (OSError, ValueError):
+                connected.append(False)
             if all(connected):
                 break
             if time.monotonic() >= deadline:
