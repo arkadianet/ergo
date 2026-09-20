@@ -588,7 +588,7 @@ fn replay(fixture: Fixture) {
                 .map(|(_, costs)| costs.iter().map(|(_, c)| c).sum::<u64>()),
             transition.stale_cost
         );
-        ProtocolParams::from_active(&computed)
+        ProtocolParams::for_block(&previous, Some(&computed))
     });
     let observed_view = ObservedView {
         state: &state,
@@ -979,4 +979,14 @@ fn block_epoch_voting_threshold_matches_jvm() {
         assert_eq!(case.parent_blocks.len(), 383);
         replay(case);
     }
+}
+
+// ledger: BLOCK-updated-context-before-validation-B006
+#[test]
+fn block_epoch_updated_context_matches_jvm() {
+    let case = fixture("j-context-updated");
+    assert_eq!(case.transition.as_ref().unwrap().stale_verdict, "Accept");
+    assert_eq!(case.expected.verdict, "Reject");
+    assert_eq!(case.parent_blocks.len(), 383);
+    replay(case);
 }

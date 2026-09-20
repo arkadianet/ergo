@@ -122,13 +122,6 @@ pub(super) fn process_block_utxo(
     perf: Option<&BlockPerfCounters>,
     wallet_hook: Option<&dyn ergo_state::wallet::WalletApplyHook>,
 ) -> Result<ProcessedBlock, BlockProcessError> {
-    // Build ProtocolParams from the store's in-memory cache. The
-    // cache reflects the PREVIOUS epoch's params per the
-    // effective-height rule: this block is validated under those
-    // params; the new params from this block's extension only take
-    // effect for H+1 onward.
-    let active_for_this_block = ProtocolParams::from_active(store.active_params());
-    let params = &active_for_this_block;
     let t_total = Instant::now();
 
     // 1. Load and parse header
@@ -474,6 +467,10 @@ pub(super) fn process_block_utxo(
         store.validation_settings().is_rule_disabled(212),
     )
     .map_err(ergo_validation::block::BlockValidationError::Header)?;
+    // The target epoch extension is validated before its parameters price transactions.
+    let active_for_this_block =
+        ProtocolParams::for_block(store.active_params(), voted_params_row.as_ref());
+    let params = &active_for_this_block;
     let ctx = BlockValidationContext {
         parent: &parent_checked,
         utxo: store,
