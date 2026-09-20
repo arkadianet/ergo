@@ -262,7 +262,9 @@ mod tests {
     /// function of the best header's timestamp).
     fn seeded_store() -> (ergo_state::StateBackendKind, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut store = StateStore::open(&dir.path().join("state.redb")).expect("open store");
+        let mut store = StateStore::open(&dir.path().join("state.redb"))
+            .expect("open store")
+            .with_non_durable_commits_for_test();
         store.initialize_genesis(&[]).expect("init genesis");
         let base = now_ms() - u64::from(HEADER_TIP) * 120_000;
         let mut parent = store.chain_state_meta().best_header_id;

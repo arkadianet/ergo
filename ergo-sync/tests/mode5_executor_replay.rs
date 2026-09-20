@@ -240,7 +240,8 @@ fn build_seeded_store(dir: &std::path::Path) -> (DigestStateStore, BTreeMap<u32,
         voting,
         ergo_chain_spec::GenesisParams::mainnet().state_digest,
     )
-    .expect("open digest store");
+    .expect("open digest store")
+    .with_non_durable_commits_for_test();
 
     // Seed the epoch-start params row so active_params() / validation_settings()
     // reflect the real pre-window state (cost limits + disabled rules 215/409).

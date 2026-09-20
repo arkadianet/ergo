@@ -21,7 +21,7 @@ thiserror       = { workspace = true }
 tracing         = { workspace = true }
 
 [dev-dependencies]
-ergo-state      = { workspace = true, features = ["test-helpers"] }
+ergo-state      = { workspace = true, features = ["test-helpers", "test-utils"] }
 ergo-p2p        = { workspace = true, features = ["test-helpers"] }
 ergo-validation = { workspace = true, features = ["test-helpers"] }
 ergo-chain-spec = { workspace = true }

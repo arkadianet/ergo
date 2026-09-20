@@ -770,7 +770,9 @@ fn process_header_across_epoch_boundary_1025() {
     use ergo_sync::header_proc::process_header;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path())
+        .unwrap()
+        .with_non_durable_commits_for_test();
     init_genesis(&mut store);
 
     let headers = load_headers_file("headers_1_2000.json");

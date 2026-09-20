@@ -134,7 +134,9 @@ fn load_header_info(path: &str) -> std::collections::HashMap<u32, ([u8; 32], [u8
 #[test]
 fn chain_validate_blocks_2_1000_with_state_store() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path())
+        .unwrap()
+        .with_non_durable_commits_for_test();
     init_genesis(&mut store);
 
     let tx_data =

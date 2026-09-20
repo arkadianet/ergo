@@ -813,6 +813,8 @@ impl PersistPipeline {
         } else {
             redb::Durability::None
         };
+        #[cfg(any(test, feature = "test-utils"))]
+        let durability = crate::redb_util::test_durability(db, durability);
         write_txn.set_durability(durability);
 
         // 1. AVL_NODES — apply in job order so later blocks overwrite

@@ -33,7 +33,41 @@ use tracing::info;
 pub fn begin_write_qr(db: &Database) -> Result<WriteTransaction, TransactionError> {
     let mut txn = db.begin_write()?;
     txn.set_quick_repair(true);
+    #[cfg(any(test, feature = "test-utils"))]
+    txn.set_durability(test_durability(db, redb::Durability::Immediate));
     Ok(txn)
+}
+
+// Weak references bind the opt-in to a live database instance, including its
+// header tables and background worker. They neither keep a database open nor
+// carry the opt-in across a reopen, and cannot alias a reused allocation.
+#[cfg(any(test, feature = "test-utils"))]
+static NON_DURABLE_TEST_DATABASES: std::sync::Mutex<Vec<std::sync::Weak<Database>>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn disable_test_durability(db: &Arc<Database>) {
+    let mut databases = NON_DURABLE_TEST_DATABASES.lock().unwrap();
+    databases.retain(|entry| entry.strong_count() > 0);
+    if !databases
+        .iter()
+        .any(|entry| std::ptr::eq(entry.as_ptr(), Arc::as_ptr(db)))
+    {
+        databases.push(Arc::downgrade(db));
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn test_durability(db: &Database, requested: redb::Durability) -> redb::Durability {
+    let databases = NON_DURABLE_TEST_DATABASES.lock().unwrap();
+    if databases
+        .iter()
+        .any(|entry| std::ptr::eq(entry.as_ptr(), db))
+    {
+        redb::Durability::None
+    } else {
+        requested
+    }
 }
 
 /// Open (or create) a redb database at `path`, emitting structured
@@ -127,7 +161,23 @@ mod tests {
     fn begin_write_qr_returns_usable_txn_and_commits() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("qr_smoke.redb");
-        let db = Database::create(&path).unwrap();
+        let db = Arc::new(Database::create(&path).unwrap());
+        let control = Database::create(dir.path().join("durable.redb")).unwrap();
+        assert!(matches!(
+            test_durability(&db, redb::Durability::Immediate),
+            redb::Durability::Immediate
+        ));
+        disable_test_durability(&db);
+        for requested in [redb::Durability::Immediate, redb::Durability::Eventual] {
+            assert!(matches!(
+                test_durability(&db, requested),
+                redb::Durability::None
+            ));
+        }
+        assert!(matches!(
+            test_durability(&control, redb::Durability::Eventual),
+            redb::Durability::Eventual
+        ));
 
         let table: TableDefinition<&str, &[u8]> = TableDefinition::new("t");
         let txn = begin_write_qr(&db).unwrap();

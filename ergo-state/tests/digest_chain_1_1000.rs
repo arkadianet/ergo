@@ -164,7 +164,9 @@ impl TestFixtures {
 #[test]
 fn digest_chain_1_through_1000() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path())
+        .unwrap()
+        .with_non_durable_commits_for_test();
     init_genesis(&mut store);
     let fixtures = TestFixtures::load();
 
@@ -182,7 +184,9 @@ fn digest_chain_1_through_1000() {
 #[test]
 fn pruning_beyond_rollback_window() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path())
+        .unwrap()
+        .with_non_durable_commits_for_test();
     init_genesis(&mut store);
     let fixtures = TestFixtures::load();
 
@@ -251,7 +255,9 @@ fn crash_recovery_at_height_1000() {
 #[test]
 fn rollback_from_1000_to_800_then_reapply() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path())
+        .unwrap()
+        .with_non_durable_commits_for_test();
     init_genesis(&mut store);
     let fixtures = TestFixtures::load();
 
@@ -288,8 +294,9 @@ fn digest_chain_1_1000_pipelined_under_cache_pressure_matches_oracle() {
     let dir = tempfile::tempdir().unwrap();
     // ~28 nodes of headroom: the clean cache cannot hold one block's
     // structural writes, let alone 64 blocks' worth.
-    let mut store =
-        StateStore::open_with_cache(dir.path().join("state.redb").as_path(), 4096).unwrap();
+    let mut store = StateStore::open_with_cache(dir.path().join("state.redb").as_path(), 4096)
+        .unwrap()
+        .with_non_durable_commits_for_test();
     init_genesis(&mut store);
     // Genesis first: the pipeline worker must not race the genesis write.
     store.enable_persist_pipeline(64);
@@ -306,8 +313,9 @@ fn digest_chain_1_1000_pipelined_under_cache_pressure_matches_oracle() {
 #[test]
 fn ctrl_tiny_cache_no_pipeline() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store =
-        StateStore::open_with_cache(dir.path().join("state.redb").as_path(), 4096).unwrap();
+    let mut store = StateStore::open_with_cache(dir.path().join("state.redb").as_path(), 4096)
+        .unwrap()
+        .with_non_durable_commits_for_test();
     init_genesis(&mut store);
     let fixtures = TestFixtures::load();
     for height in 1u32..=1000 {
@@ -319,7 +327,9 @@ fn ctrl_tiny_cache_no_pipeline() {
 #[test]
 fn ctrl_default_cache_with_pipeline() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path())
+        .unwrap()
+        .with_non_durable_commits_for_test();
     init_genesis(&mut store);
     store.enable_persist_pipeline(64);
     let fixtures = TestFixtures::load();
@@ -333,8 +343,9 @@ fn ctrl_default_cache_with_pipeline() {
 #[test]
 fn ctrl_tiny_cache_pipeline_depth_1() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store =
-        StateStore::open_with_cache(dir.path().join("state.redb").as_path(), 4096).unwrap();
+    let mut store = StateStore::open_with_cache(dir.path().join("state.redb").as_path(), 4096)
+        .unwrap()
+        .with_non_durable_commits_for_test();
     init_genesis(&mut store);
     store.enable_persist_pipeline(1);
     let fixtures = TestFixtures::load();
@@ -350,7 +361,8 @@ fn ctrl_medium_cache_16mib_with_pipeline() {
     let dir = tempfile::tempdir().unwrap();
     let mut store =
         StateStore::open_with_cache(dir.path().join("state.redb").as_path(), 16 * 1024 * 1024)
-            .unwrap();
+            .unwrap()
+            .with_non_durable_commits_for_test();
     init_genesis(&mut store);
     store.enable_persist_pipeline(64);
     let fixtures = TestFixtures::load();
@@ -368,8 +380,9 @@ fn ctrl_medium_cache_16mib_with_pipeline() {
 #[test]
 fn rollback_with_in_flight_persist_jobs_under_cache_pressure_matches_oracle() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store =
-        StateStore::open_with_cache(dir.path().join("state.redb").as_path(), 4096).unwrap();
+    let mut store = StateStore::open_with_cache(dir.path().join("state.redb").as_path(), 4096)
+        .unwrap()
+        .with_non_durable_commits_for_test();
     init_genesis(&mut store);
     store.enable_persist_pipeline(64);
     let fixtures = TestFixtures::load();

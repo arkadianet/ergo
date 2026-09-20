@@ -89,7 +89,9 @@ fn forward_apply_advances_cached_validation_settings_in_session() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("state.redb");
 
-    let mut store = StateStore::open(&path).unwrap();
+    let mut store = StateStore::open(&path)
+        .unwrap()
+        .with_non_durable_commits_for_test();
     seed_genesis(&mut store);
 
     // Pre-apply: cache reflects the empty initial cumulative.
