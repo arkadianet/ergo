@@ -192,6 +192,7 @@ impl Drop for WorkerWatchGuard {
 /// All serialization happens before send — the persist thread
 /// only does redb writes.
 pub(crate) struct PersistJob {
+    pub emission: crate::store::emission::EmissionTransition,
     /// Height of the block being persisted.
     pub height: u32,
     /// Identifier of the block's header.
@@ -842,6 +843,23 @@ impl PersistPipeline {
                 .open_table(UNDO_LOG)
                 .observe_persist_error(failure_context, "background_persist_batch")?;
             for job in &jobs {
+                crate::store::emission::prune_identity(&write_txn, job.prune_below).map_err(
+                    |e| {
+                        PersistBatchError::unobserved_with_source(
+                            "emission_identity",
+                            e.to_string(),
+                            e,
+                        )
+                    },
+                )?;
+                crate::store::emission::persist_transition(
+                    &write_txn,
+                    &job.header_id,
+                    &job.emission,
+                )
+                .map_err(|e| {
+                    PersistBatchError::unobserved_with_source("emission_identity", e.to_string(), e)
+                })?;
                 undo_table
                     .insert(job.undo_key.as_slice(), job.undo_bytes.as_slice())
                     .observe_persist_error(failure_context, "background_persist_batch")?;
@@ -1264,6 +1282,7 @@ mod tests {
         let mut undo_key = (height).to_be_bytes().to_vec();
         undo_key.extend_from_slice(&[height as u8; 32]);
         PersistJob {
+            emission: crate::store::emission::EmissionTransition::default(),
             height,
             header_id: [height as u8; 32],
             avl_writes: Vec::new(),

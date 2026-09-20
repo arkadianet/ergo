@@ -273,6 +273,11 @@ impl StateStore {
         // within the same block are excluded from both sets.
         let t_build_start = std::time::Instant::now();
         let (to_remove, to_insert) = Self::build_utxo_changes_checked(checked)?;
+        let emission = super::emission::EmissionTransition::prepare(
+            self.chain_state.best_full_block_id,
+            height,
+            checked.iter().map(|tx| tx.transaction()),
+        )?;
         let t_build = t_build_start.elapsed();
         // Track build_utxo_changes time so the apply-phase breakdown
         // accounts for the gap between outer `apply` (in [perf-blk])
@@ -292,8 +297,7 @@ impl StateStore {
             height,
             header_id,
             expected_state_root,
-            to_remove,
-            to_insert,
+            (to_remove, to_insert, emission),
             voted_params_row,
             wallet_payload,
         )
@@ -332,6 +336,11 @@ impl StateStore {
 
         let txs: Vec<&Transaction> = transactions.iter().collect();
         let (to_remove, to_insert) = Self::build_utxo_changes_raw(&txs)?;
+        let emission = super::emission::EmissionTransition::prepare(
+            self.chain_state.best_full_block_id,
+            height,
+            transactions.iter(),
+        )?;
 
         // Genesis (height 1) is not an epoch start; raw-tx test paths do
         // not exercise voted-params logic. For tests that need to write a
@@ -344,8 +353,7 @@ impl StateStore {
             height,
             header_id,
             expected_state_root,
-            to_remove,
-            to_insert,
+            (to_remove, to_insert, emission),
             None,
             None,
         )
@@ -372,12 +380,16 @@ impl StateStore {
         }
         let txs: Vec<&Transaction> = transactions.iter().collect();
         let (to_remove, to_insert) = Self::build_utxo_changes_raw(&txs)?;
+        let emission = super::emission::EmissionTransition::prepare(
+            self.chain_state.best_full_block_id,
+            height,
+            transactions.iter(),
+        )?;
         self.apply_utxo_changes(
             height,
             header_id,
             expected_state_root,
-            to_remove,
-            to_insert,
+            (to_remove, to_insert, emission),
             voted_params_row,
             None,
         )
@@ -542,21 +554,25 @@ impl StateStore {
     /// (height, best_full_block, validation-settings cache) on success.
     /// On error, rebuilds in-memory state from disk via
     /// `rebuild_from_committed`.
-    #[allow(clippy::too_many_arguments)]
     fn apply_utxo_changes(
         &mut self,
         height: u32,
         header_id: &[u8; 32],
         expected_state_root: &ADDigest,
-        to_remove: UtxoRemoveMap,
-        to_insert: UtxoInsertMap,
+        changes: (
+            UtxoRemoveMap,
+            UtxoInsertMap,
+            super::emission::EmissionTransition,
+        ),
         voted_params_row: Option<ergo_validation::ActiveProtocolParameters>,
         wallet_payload: Option<&crate::store::WalletApplyPayload>,
     ) -> Result<(), StateError> {
+        let (to_remove, to_insert, emission) = changes;
         let digest_before = self.tree.root_digest();
         let cache_advance = voted_params_row.clone();
 
         let result = self.apply_mutations(UtxoMutation {
+            emission,
             height,
             header_id,
             expected_state_root,
@@ -650,6 +666,7 @@ impl StateStore {
         mutation: UtxoMutation<'_>,
     ) -> Result<crate::avl::arena::CommitDurability, StateError> {
         let UtxoMutation {
+            emission,
             height,
             header_id,
             expected_state_root,
@@ -734,7 +751,7 @@ impl StateStore {
             height,
             header_id,
             &new_digest,
-            &undo,
+            (&undo, &emission),
             voted_params_row,
             wallet_payload,
         );

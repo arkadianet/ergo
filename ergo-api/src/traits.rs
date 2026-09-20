@@ -106,6 +106,11 @@ pub trait NodeReadState: Send + Sync {
 /// transaction methods, a header id for `submit_full_block`.
 #[async_trait]
 pub trait NodeSubmit: Send + Sync {
+    /// Direct block submission requires explicit devnet authorization.
+    fn direct_block_submit_enabled(&self) -> bool {
+        false
+    }
+
     async fn submit_transaction(
         &self,
         bytes: Vec<u8>,

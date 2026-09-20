@@ -26,6 +26,10 @@ def api(node, path, data=None):
         return json.loads(payload) if payload else None
 
 
+class PollTimeout(RuntimeError):
+    """The polling deadline expired without a successful observation."""
+
+
 def wait_for(callback, description, timeout=180):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -36,7 +40,7 @@ def wait_for(callback, description, timeout=180):
         except (OSError, ValueError):
             pass
         time.sleep(0.25)
-    raise RuntimeError('timeout: ' + description)
+    raise PollTimeout('timeout: ' + description)
 
 
 def tips(height):
@@ -57,6 +61,10 @@ def main():
     parser.add_argument('--first', choices=('rust', 'scala'), default='rust')
     parser.add_argument('--blocks', type=int, default=100)
     args = parser.parse_args()
+    git_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+    git_status = subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT, text=True)
+    if git_status:
+        raise RuntimeError('smoke requires a clean committed tree: ' + git_status)
     rust_pid = (WORK / 'rust.pid').read_text().strip()
     binary = Path('/proc') / rust_pid / 'exe'
     binary_hash = hashlib.file_digest(binary.open('rb'), 'sha256').hexdigest()
@@ -67,7 +75,7 @@ def main():
     manifest = {
         'status': 'RUNNING', 'scala': {'ergo_version': '6.0.5', 'sigmastate_version': '6.0.6',
             'source_sha': '5528ef569a41ebccbc8658212e6ee3c97d990b96'},
-        'rust': {'git_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+        'rust': {'git_sha': git_sha, 'git_status_porcelain': git_status,
                  'toolchain': subprocess.check_output(['rustc', '--version'], text=True).strip(),
                  'features': 'default', 'binary_sha256': binary_hash, 'source_sha256': source_hashes},
         'command': f'python3 scripts/devnet-mixed/smoke.py --first {args.first} --blocks {args.blocks}',
@@ -109,12 +117,26 @@ def main():
             manifest['blocks'].append({'height': height, 'miner': node,
                 'block_id': info[node]['bestFullHeaderId'], 'state_root': info[node]['stateRoot'],
                 'header_version': api(node, '/blocks/'+info[node]['bestFullHeaderId'])['header']['version'],
-                'candidate': candidate, 'solution': solution})
+                'candidate': candidate, 'solution': solution,
+                'observations': {n: {'height': i['fullHeight'],
+                    'block_id': i['bestFullHeaderId'], 'state_root': i['stateRoot']}
+                    for n, i in info.items()}})
+            output.write_text(json.dumps(manifest, indent=2)+'\n')
+            persisted = json.loads(output.read_text())['blocks'][-1]
+            assert persisted['observations']['rust'] == persisted['observations']['scala']
+            assert persisted['observations']['rust'] == {k: persisted[k]
+                for k in ('height', 'block_id', 'state_root')}
             manifest['executed'] += 1
             manifest['mined'][node] += 1
             manifest['final'] = info
             output.write_text(json.dumps(manifest, indent=2)+'\n')
             print(f'{height}: {node} {info[node]["bestFullHeaderId"]}', flush=True)
+        final_status = subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT, text=True)
+        final_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+        manifest['rust']['git_status_porcelain_after'] = final_status
+        manifest['rust']['git_sha_after'] = final_sha
+        if final_status or final_sha != git_sha:
+            raise RuntimeError('source tree changed during smoke')
         manifest['status'] = 'PASS'
     except BaseException as error:
         manifest['status'] = 'FAIL'

@@ -49,6 +49,14 @@ impl NodeConfig {
             .or(toml_cfg.network)
             .unwrap_or_else(|| "mainnet".into());
         let network = network_str.parse::<Network>()?;
+        let devnet_max_block_cost = toml_cfg.chain.devnet_max_block_cost;
+        if let Some(cap) = devnet_max_block_cost {
+            if network != Network::Devnet || cap == 0 || cap > i32::MAX as u32 {
+                return Err(
+                    "[chain] devnet_max_block_cost requires devnet and a positive Scala Int".into(),
+                );
+            }
+        }
         let chain_spec = Arc::new(ChainSpec::for_network(network));
         validate_supported(&chain_spec)?;
 
@@ -1117,6 +1125,8 @@ impl NodeConfig {
             api_bind,
             api_key_hash,
             api_allowed_hosts,
+            allow_direct_block_submit: toml_cfg.api.allow_direct_block_submit.unwrap_or(false),
+            devnet_max_block_cost,
             mempool_config,
             mempool_sort_policy,
             indexer_config,
@@ -1147,5 +1157,39 @@ mod tests {
         assert!(config.genesis_id.is_none());
         assert_eq!(config.chain_spec.difficulty.epoch_length, 33_554_432);
         assert!(config.chain_spec.bootstrap.seed_peers.is_empty());
+    }
+    #[test]
+    fn devnet_cost_cap_private_network_preserves_override() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n[chain]\ndevnet_max_block_cost = 37509\n").unwrap();
+        let cli =
+            Cli::try_parse_from(["ergo-node", "--config", file.path().to_str().unwrap()]).unwrap();
+        assert_eq!(
+            NodeConfig::load(cli).unwrap().devnet_max_block_cost,
+            Some(37509)
+        );
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn devnet_cost_cap_public_networks_and_invalid_values_reject() {
+        for (network, cap) in [
+            ("mainnet", 37509_u64),
+            ("testnet", 37509),
+            ("devnet", 0),
+            ("devnet", 2147483648),
+        ] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(
+                file.path(),
+                format!("network = \"{network}\"\n[chain]\ndevnet_max_block_cost = {cap}\n"),
+            )
+            .unwrap();
+            let cli = Cli::try_parse_from(["ergo-node", "--config", file.path().to_str().unwrap()])
+                .unwrap();
+            let error = NodeConfig::load(cli).unwrap_err();
+            assert!(error.to_string().contains("devnet_max_block_cost"));
+        }
     }
 }

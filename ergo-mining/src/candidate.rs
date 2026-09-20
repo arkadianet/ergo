@@ -66,7 +66,7 @@ use crate::extension_builder::build_candidate_extension_fields;
 use crate::reemission::{build_post_eip27_emission_tx, ReemissionSettings};
 use crate::state_view::CandidateStateView;
 use crate::storage_rent_claim::build_budget_bounded_rent_claim;
-use crate::tx_selection::DEFAULT_COST_SAFETY_GAP;
+use crate::tx_selection::block_cost_safety_gap;
 use crate::work_message::WorkMessage;
 use ergo_validation::pre_header::{
     build_last_block_utxo_root, CandidatePreHeader, CandidateValidationContext,
@@ -404,16 +404,25 @@ pub fn generate_candidate<V: CandidateStateView>(
     //     public testnet); always pre-EIP-27 emission tx.
     let phase_start = std::time::Instant::now();
     let emission_box = if genesis {
-        crate::genesis::emission_box(view)?
+        Some(crate::genesis::emission_box(view)?)
     } else {
-        lookup_emission_box_from_parent(view, &parent_id, &parent_header)?
+        lookup_emission_box_from_parent(view, &parent_id, &parent_header, network, reemission)?
     };
-    let emission_tx = match reemission {
-        Some(reem) if candidate_height > reem.activation_height => {
-            build_post_eip27_emission_tx(&emission_box, miner_pk, candidate_height, monetary, reem)?
-        }
-        _ => build_pre_eip27_emission_tx(&emission_box, miner_pk, candidate_height, monetary)?,
-    };
+    let emission_tx = emission_box
+        .as_ref()
+        .map(|emission_box| match reemission {
+            Some(reem) if candidate_height > reem.activation_height => {
+                build_post_eip27_emission_tx(
+                    emission_box,
+                    miner_pk,
+                    candidate_height,
+                    monetary,
+                    reem,
+                )
+            }
+            _ => build_pre_eip27_emission_tx(emission_box, miner_pk, candidate_height, monetary),
+        })
+        .transpose()?;
 
     // 9. Validate the emission (coinbase) tx → CheckedTransaction, using the
     //    live voted params (from_active) so cost / min-value / storage
@@ -436,32 +445,38 @@ pub fn generate_candidate<V: CandidateStateView>(
         pre_header_votes: candidate_votes,
     };
 
-    let emission_bytes = serialize_tx(&emission_tx, "serialize_emission_tx")?;
-    let emission_size = emission_bytes.len() as u64;
-    let mut emission_cost_acc = CostAccumulator::new(block_cap);
-    let checked_emission = {
-        let mut tx_ctx = TxValidationCtx {
-            ctx: &ctx,
-            params: &params,
-            cost: &mut emission_cost_acc,
-            last_headers: last_headers.as_slice(),
-            rules: TxValidationRules {
-                reemission: reemission_rules,
-            },
+    let (checked_emission, emission_size, emission_cost_acc) =
+        if let (Some(emission_tx), Some(emission_box)) = (&emission_tx, &emission_box) {
+            let emission_bytes = serialize_tx(emission_tx, "serialize_emission_tx")?;
+            let emission_size = emission_bytes.len() as u64;
+            let mut emission_cost_acc = CostAccumulator::new(block_cap);
+            let checked_emission = {
+                let mut tx_ctx = TxValidationCtx {
+                    ctx: &ctx,
+                    params: &params,
+                    cost: &mut emission_cost_acc,
+                    last_headers: last_headers.as_slice(),
+                    rules: TxValidationRules {
+                        reemission: reemission_rules,
+                    },
+                };
+                validate_transaction_parsed(
+                    emission_tx.clone(),
+                    &emission_bytes,
+                    vec![emission_box.clone()],
+                    Vec::new(),
+                    false,
+                    &mut tx_ctx,
+                )
+                .map_err(|e| MiningError::IdComputation {
+                    op: "validate_emission_tx",
+                    reason: format!("{e:?}"),
+                })?
+            };
+            (Some(checked_emission), emission_size, emission_cost_acc)
+        } else {
+            (None, 0, CostAccumulator::new(block_cap))
         };
-        validate_transaction_parsed(
-            emission_tx.clone(),
-            &emission_bytes,
-            vec![emission_box.clone()],
-            Vec::new(),
-            false,
-            &mut tx_ctx,
-        )
-        .map_err(|e| MiningError::IdComputation {
-            op: "validate_emission_tx",
-            reason: format!("{e:?}"),
-        })?
-    };
     let emission_cost = emission_cost_acc.total_block_cost();
     timings.emission = phase_start.elapsed();
 
@@ -476,7 +491,9 @@ pub fn generate_candidate<V: CandidateStateView>(
         //     base view the submit-time validator uses) with the emission tx.
         let base: &dyn UtxoView = view;
         let mut overlay = CandidateOverlay::new(base);
-        overlay.apply_tx(&emission_tx)?;
+        if let Some(tx) = &emission_tx {
+            overlay.apply_tx(tx)?;
+        }
 
         // 9c. Pinned storage-rent self-claim, sized to FILL the block budget.
         //     Sweep the oldest eligible boxes into a claim bounded by the block
@@ -489,10 +506,11 @@ pub fn generate_candidate<V: CandidateStateView>(
         //     claim on the same box is excluded. Zero fee; proceeds to the
         //     miner P2PK.
         let max_block_cost = active_params.max_block_cost as u64;
+        let safety_gap = block_cost_safety_gap(max_block_cost);
         let max_block_size = active_params.max_block_size as u64;
         let phase_start = std::time::Instant::now();
         let rent_cost_ceiling = max_block_cost
-            .saturating_sub(DEFAULT_COST_SAFETY_GAP)
+            .saturating_sub(safety_gap)
             .saturating_sub(emission_cost)
             .saturating_sub(max_block_cost / 16);
         let rent_size_ceiling = max_block_size
@@ -525,7 +543,7 @@ pub fn generate_candidate<V: CandidateStateView>(
         //     checks neither).
         let phase_start = std::time::Instant::now();
         let cost_budget = max_block_cost
-            .saturating_sub(DEFAULT_COST_SAFETY_GAP)
+            .saturating_sub(safety_gap)
             .saturating_sub(emission_cost)
             .saturating_sub(rent_cost);
         let size_budget = max_block_size
@@ -560,7 +578,7 @@ pub fn generate_candidate<V: CandidateStateView>(
         //     rebuilt from the kept set, so a trimmed tx never leaves a stale
         //     spend behind.
         let mut user_checked = selected.checked; // Vec<(CheckedTransaction, cost)>
-        let cost_ceiling = max_block_cost.saturating_sub(DEFAULT_COST_SAFETY_GAP);
+        let cost_ceiling = max_block_cost.saturating_sub(safety_gap);
         let checked_fee = loop {
             let user_raw: Vec<Transaction> = user_checked
                 .iter()
@@ -571,7 +589,9 @@ pub fn generate_candidate<V: CandidateStateView>(
             // Fresh overlay over [emission, rent, kept user txs] so the fee tx's
             // inputs resolve against exactly the block's contents.
             let mut fee_overlay = CandidateOverlay::new(base);
-            fee_overlay.apply_tx(&emission_tx)?;
+            if let Some(tx) = &emission_tx {
+                fee_overlay.apply_tx(tx)?;
+            }
             if let Some(cr) = &checked_rent {
                 fee_overlay.apply_tx(cr.transaction())?;
             }
@@ -627,7 +647,7 @@ pub fn generate_candidate<V: CandidateStateView>(
                 .saturating_add(fee_cost);
 
             let mut probe: Vec<Transaction> = Vec::with_capacity(3 + user_raw.len());
-            probe.push(emission_tx.clone());
+            probe.extend(emission_tx.iter().cloned());
             if let Some(cr) = &checked_rent {
                 probe.push(cr.transaction().clone());
             }
@@ -652,7 +672,7 @@ pub fn generate_candidate<V: CandidateStateView>(
     // 9f. Assemble the final tx list in block order:
     //     emission, rent, user txs, fee.
     let mut checked: Vec<CheckedTransaction> = Vec::with_capacity(3 + user_checked.len());
-    checked.push(checked_emission);
+    checked.extend(checked_emission);
     if let Some(cr) = checked_rent {
         checked.push(cr);
     }
@@ -1063,6 +1083,7 @@ mod tests {
     use super::*;
     use ergo_primitives::digest::ModifierId;
     use ergo_ser::extension::{write_extension, Extension, ExtensionField};
+    use ergo_state::store::StateError;
     use ergo_validation::popow::algos::pack_interlinks;
     use serde::Deserialize;
 
@@ -1110,6 +1131,107 @@ mod tests {
         let mut w = VlqWriter::new();
         write_extension(&mut w, &ext).expect("write extension");
         w.result()
+    }
+
+    struct ExhaustedView {
+        header: Header,
+    }
+
+    impl UtxoView for ExhaustedView {
+        fn get_box(&self, _: &Digest32) -> Option<ErgoBox> {
+            None
+        }
+    }
+
+    impl CandidateStateView for ExhaustedView {
+        fn emission_identity(&self, _: &[u8; 32]) -> Result<Option<Option<Digest32>>, StateError> {
+            Ok(Some(None))
+        }
+        fn best_full_block_id(&self) -> [u8; 32] {
+            [0x12; 32]
+        }
+        fn best_full_block_height(&self) -> u32 {
+            self.header.height
+        }
+        fn get_header_bytes(&self, _: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
+            Ok(Some(
+                ergo_ser::header::serialize_header(&self.header).unwrap().0,
+            ))
+        }
+        fn header_id_at_height(&self, _: u32) -> Result<Option<[u8; 32]>, StateError> {
+            Ok(Some(self.best_full_block_id()))
+        }
+        fn block_section(&self, _: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
+            Ok(Some(canonical_extension_bytes(
+                self.best_full_block_id(),
+                &[ModifierId::from_bytes([1; 32])],
+            )))
+        }
+        fn last_applied_chain_window_10(&self) -> Result<[Header; 10], StateError> {
+            Ok(std::array::from_fn(|i| {
+                let mut h = self.header.clone();
+                h.height -= i as u32;
+                h
+            }))
+        }
+        fn tip_snapshot_params(
+            &self,
+        ) -> Result<
+            (
+                ActiveProtocolParameters,
+                ergo_validation::ErgoValidationSettings,
+            ),
+            StateError,
+        > {
+            Ok((
+                ergo_validation::scala_launch(),
+                ergo_validation::ErgoValidationSettings::default(),
+            ))
+        }
+        fn candidate_dry_run(
+            &self,
+            checked: &[CheckedTransaction],
+        ) -> Result<(ergo_primitives::digest::ADDigest, Vec<u8>, [u8; 32]), StateError> {
+            assert!(
+                checked.is_empty(),
+                "exhausted emission must not create a transaction"
+            );
+            Ok((self.header.state_root, vec![], self.best_full_block_id()))
+        }
+        fn mode2_trust_first_epoch_armed(&self) -> Result<bool, StateError> {
+            Ok(false)
+        }
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn candidate_exhausted_emission_builds_without_emission_transaction() {
+        let mut header = crate::genesis::parent_header();
+        header.height = 14;
+        header.n_bits = 16_842_752;
+        let view = ExhaustedView { header };
+        for mode in [BuildMode::Minimal, BuildMode::Full] {
+            let (candidate, _, _) = generate_candidate(
+                &view,
+                ergo_chain_spec::Network::Mainnet,
+                mode,
+                MempoolReadSnapshot::empty(),
+                &[0x02; 33],
+                &MonetarySettings::mainnet(),
+                None,
+                None,
+                &DifficultyParams::mainnet(),
+                &[],
+                &BTreeMap::new(),
+                &VotingSettings::mainnet(),
+                &[],
+                &mut vec![],
+            )
+            .unwrap()
+            .unwrap();
+            assert!(candidate.transactions.is_empty());
+        }
     }
 
     // ----- round-trips -----

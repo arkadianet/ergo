@@ -651,16 +651,33 @@ pub struct SubmitRequest {
 ///   ride on, since locally-mined blocks are processed through
 ///   `PeerEvent::LocalFullBlock`.
 pub struct SubmitBridge {
+    allow_direct_block_submit: bool,
     tx: tokio::sync::mpsc::Sender<SubmitRequest>,
     event_tx: tokio::sync::mpsc::Sender<crate::peer_loop::PeerEvent>,
 }
+
+mod direct_submit;
 
 impl SubmitBridge {
     pub fn new(
         tx: tokio::sync::mpsc::Sender<SubmitRequest>,
         event_tx: tokio::sync::mpsc::Sender<crate::peer_loop::PeerEvent>,
     ) -> Self {
-        Self { tx, event_tx }
+        Self {
+            tx,
+            event_tx,
+            allow_direct_block_submit: false,
+        }
+    }
+
+    /// Authorize the API using the chain network, never its address prefix.
+    pub fn with_direct_block_submit(
+        mut self,
+        network: ergo_chain_spec::Network,
+        enabled: bool,
+    ) -> Self {
+        self.allow_direct_block_submit = direct_submit::enabled(network, enabled);
+        self
     }
 
     pub fn into_dyn(self) -> Arc<dyn NodeSubmit> {
@@ -670,6 +687,10 @@ impl SubmitBridge {
 
 #[async_trait::async_trait]
 impl NodeSubmit for SubmitBridge {
+    fn direct_block_submit_enabled(&self) -> bool {
+        self.allow_direct_block_submit
+    }
+
     async fn submit_transaction_json(
         &self,
         input: ScalaTransactionInput,
@@ -699,6 +720,12 @@ impl NodeSubmit for SubmitBridge {
     /// 4. Await reply with the same `SUBMIT_TIMEOUT` budget the tx
     ///    path uses.
     async fn submit_full_block(&self, block: ScalaFullBlock) -> Result<String, SubmitError> {
+        if !self.direct_block_submit_enabled() {
+            return Err(SubmitError {
+                reason: "direct_block_submit_disabled".to_string(),
+                detail: None,
+            });
+        }
         // (1) JSON → canonical wire bytes.
         let decoded =
             ergo_rest_json::decode_scala_full_block(&block).map_err(|(reason, detail)| {

@@ -1,3 +1,5 @@
+//! Oracle: test-vectors/ergo-sigma/cost-ledger/mining-safety-gap.json
+//!
 //! Transaction selection: priority-order pruning under cost + size budgets.
 //!
 //! Mirrors the budget-tracking loop inside Scala
@@ -20,14 +22,16 @@
 use ergo_mempool::pool::Entry;
 use ergo_mempool::MempoolReadSnapshot;
 
-/// Conservative gap between `max_block_cost` and the cost budget we
-/// actually use during selection. Scala uses a `safe_cost_gap` ~150k
-/// nanoERG (`CandidateGenerator.scala:584-590`) to absorb estimator
-/// variance — a tx that passed admission at cost C may execute at
-/// up to C + gap during block validation. Mining stops `gap` below
-/// the real ceiling so a candidate it builds never trips the
-/// post-validation cost-overrun reject.
-pub const DEFAULT_COST_SAFETY_GAP: u64 = 150_000;
+/// Scala's candidate reserve, in block-cost units, selected by the voted cap.
+pub fn block_cost_safety_gap(max_block_cost: u64) -> u64 {
+    if max_block_cost < 1_000_000 {
+        0
+    } else if max_block_cost < 5_000_000 {
+        150_000
+    } else {
+        500_000
+    }
+}
 
 /// Selection outcome — owned entries plus the running totals.
 #[derive(Debug, Clone, Default)]
@@ -57,7 +61,7 @@ impl Selection {
 ///
 /// `cost_budget` is treated as `max_block_cost - safety_gap`; the
 /// caller is responsible for subtracting the gap. Mining
-/// orchestration uses [`DEFAULT_COST_SAFETY_GAP`].
+/// orchestration uses [`block_cost_safety_gap`].
 ///
 /// `size_budget` is the raw `max_block_size`. Block-level
 /// serialization overhead is small; we don't reserve a separate gap.
@@ -86,6 +90,8 @@ mod tests {
     use ergo_mempool::pool::Entry;
     use ergo_mempool::types::TxSource;
     use ergo_primitives::digest::Digest32;
+
+    // ----- helpers -----
 
     fn synth(weight: u64, cost: u64, size: u32, tx_id_seed: u8) -> Entry {
         let mut tx_id_bytes = [0u8; 32];
@@ -177,5 +183,25 @@ mod tests {
         let sel = select_by_budget(&snap, 100, 100);
         let ids: Vec<u8> = sel.entries.iter().map(|e| e.tx_id.as_bytes()[0]).collect();
         assert_eq!(ids, vec![7, 5, 3]);
+    }
+
+    // ----- oracle parity -----
+
+    // ledger: BLOCK-L6-mining-safety-gap
+    #[test]
+    fn block_cost_safety_gap_scala_tiers_matches_boundaries() {
+        // Literal expectations from Scala v6.0.2 CandidateGenerator safeGap.
+        for (cap, expected) in [
+            (0, 0),
+            (37_509, 0),
+            (999_999, 0),
+            (1_000_000, 150_000),
+            (4_769_136, 150_000),
+            (4_999_999, 150_000),
+            (5_000_000, 500_000),
+            (u64::MAX, 500_000),
+        ] {
+            assert_eq!(block_cost_safety_gap(cap), expected, "cap={cap}");
+        }
     }
 }

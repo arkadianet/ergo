@@ -1,0 +1,118 @@
+{
+  "status": "PASS",
+  "selected": 2,
+  "executed": 2,
+  "skipped": 0,
+  "failed": 0,
+  "scala": {
+    "ergo_version": "6.0.5",
+    "sigmastate_version": "6.0.6",
+    "node_app_version": "6.0.5",
+    "source_shas": {
+      "ergo": "5528ef569a41ebccbc8658212e6ee3c97d990b96",
+      "sigmastate": "ab0b15ceb9d34f2ccd6e68e3e2a8aa27cd16a042"
+    }
+  },
+  "rust": {
+    "git_sha": "608e49fcc3faf0e6bd139a4d4498339246a3af32",
+    "features": "default",
+    "toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "binary_sha256": "6dce47c95770602bd008148d725accb270447176858a933db677a3a4e8a08a7b",
+    "working_diff_sha256": "e3ade910e43b271bdabf4a3e47c89e32fd30813258d789eb30e644005010019c"
+  },
+  "tool": {
+    "script": "scripts/devnet-mixed/direct-submit.py",
+    "git_sha": "608e49fcc3faf0e6bd139a4d4498339246a3af32",
+    "scala_cli_version": "1.12.1",
+    "jvm": "openjdk version \"17.0.17\" 2025-10-21 LTS\nOpenJDK Runtime Environment Corretto-17.0.17.10.1 (build 17.0.17+10-LTS)\nOpenJDK 64-Bit Server VM Corretto-17.0.17.10.1 (build 17.0.17+10-LTS, mixed mode, sharing)"
+  },
+  "context": {
+    "network": "private devnet / Scala devnet60",
+    "height_range": [
+      101,
+      102
+    ],
+    "chain_id": "cb63aa99a3060f341781d8662b58bf18b9ad258db4fe88d09f8f71cb668cad4502",
+    "activated_script_version": 3,
+    "block_version": 4,
+    "voted_params": {
+      "outputCost": 100,
+      "tokenAccessCost": 100,
+      "maxBlockCost": 1000000,
+      "height": 0,
+      "maxBlockSize": 524288,
+      "dataInputCost": 100,
+      "blockVersion": 4,
+      "inputCost": 2000,
+      "storageFeeFactor": 1250000,
+      "subblocksPerBlock": null,
+      "minValuePerByte": 360
+    }
+  },
+  "run": {
+    "command": "python3 scripts/devnet-mixed/direct-submit.py",
+    "seeds": null,
+    "timestamp": "2026-09-16T00:59:23.273750+00:00"
+  },
+  "evidence": {
+    "scripts/devnet-mixed/BuildBlock.scala": "9ebb482a8572660a071c7f32abecde6ef4a5588f19b687ca3e2ed805cf0a5af3",
+    "scripts/devnet-mixed/build-block.py": "84fa2705574209581974cbed2b8c37043b9906dea99e557fa0acca8b1af6f0f8",
+    "scripts/devnet-mixed/direct-submit.py": "df9def6a8324f666553cd8370819860326b91001703564b60c30f50f2c43ac14",
+    "scripts/devnet-mixed/rust-node.toml": "1c64cdec6c2b54f489df17aaf129a6aa5e243395f8b725f7aca0c6dc37e3b851",
+    "scripts/devnet-mixed/scala-node.conf": "4276517bfd3a5b2b15454625cb549e2abcb6beb5a1d291d0a69a591e7bf11f0b",
+    "scripts/devnet-mixed/genesis.conf": "d74120d8f73d4b6fe22c3cf3564df34cbdd82d96713ff2d519d45179cd208f0d"
+  },
+  "blocks": [
+    {
+      "recipient": "rust",
+      "height": 101,
+      "http_status": 200,
+      "response": "9d6b7e362764bb1b357d1e693fe34a288420acfaa2b5dc8eedc70bcf11788355",
+      "block_id": "9d6b7e362764bb1b357d1e693fe34a288420acfaa2b5dc8eedc70bcf11788355",
+      "before": {
+        "scala": "dc71492d5dd58b583dca84e4642e17dc91f904535ced226a49a2e92071225953",
+        "rust": "dc71492d5dd58b583dca84e4642e17dc91f904535ced226a49a2e92071225953"
+      },
+      "block_sha256": "75f66e2e36df0498da26b73c0f9921b1255c1b65513c5a6a097178a62bd50bff",
+      "request_sha256": "a9ad1d8e785c96ff9fdbc1fe60226f3ae4ceb87ec9332c3bddd332e7bb37a93a",
+      "observations": {
+        "scala": {
+          "height": 101,
+          "block_id": "9d6b7e362764bb1b357d1e693fe34a288420acfaa2b5dc8eedc70bcf11788355",
+          "state_root": "ab3df9de80709609db2360e72a7497728f7886e21d7673a1e3d263fcd5e802ec08"
+        },
+        "rust": {
+          "height": 101,
+          "block_id": "9d6b7e362764bb1b357d1e693fe34a288420acfaa2b5dc8eedc70bcf11788355",
+          "state_root": "ab3df9de80709609db2360e72a7497728f7886e21d7673a1e3d263fcd5e802ec08"
+        }
+      }
+    },
+    {
+      "recipient": "scala",
+      "height": 102,
+      "http_status": 200,
+      "response": "OK",
+      "block_id": "71c44eba17b6a435221894316260c4b8dd057ecd61ed08bb5189a42bede09707",
+      "before": {
+        "scala": "9d6b7e362764bb1b357d1e693fe34a288420acfaa2b5dc8eedc70bcf11788355",
+        "rust": "9d6b7e362764bb1b357d1e693fe34a288420acfaa2b5dc8eedc70bcf11788355"
+      },
+      "block_sha256": "c9c0855513de37ddaf6979f1f0247be84ef513f49428f03585e446e1dc75e48d",
+      "request_sha256": "10a7dce12b8f4b5875974d8a274a4a2bdab077112b0a801b06e15c8a228e610e",
+      "observations": {
+        "scala": {
+          "height": 102,
+          "block_id": "71c44eba17b6a435221894316260c4b8dd057ecd61ed08bb5189a42bede09707",
+          "state_root": "53688d8f004a76bcd5b7ffd8853763730897bfab15a9053c942e25b926bb6f6b08"
+        },
+        "rust": {
+          "height": 102,
+          "block_id": "71c44eba17b6a435221894316260c4b8dd057ecd61ed08bb5189a42bede09707",
+          "state_root": "53688d8f004a76bcd5b7ffd8853763730897bfab15a9053c942e25b926bb6f6b08"
+        }
+      }
+    }
+  ],
+  "payload_sha256_excluding_this_field": "4bbf0351840c49d4784495203a888eaec631409f01f593b33cda31066fab5ba1"
+}

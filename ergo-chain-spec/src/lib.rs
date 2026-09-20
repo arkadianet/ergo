@@ -824,31 +824,210 @@ mod tests {
         );
     }
 
+    // Baseline public-network fields at 36b3aa9643dcb0a499c66c0c419eb4e311049473.
+    // Genesis JSON bytes are pinned by literal Blake2b-256 digests.
     #[test]
     fn public_networks_devnet_construction_unaffected() {
-        let before = [ChainSpec::mainnet(), ChainSpec::testnet()];
         let _devnet = ChainSpec::devnet();
-        for (old, new) in before
-            .iter()
-            .zip([ChainSpec::mainnet(), ChainSpec::testnet()])
-        {
-            assert_eq!(old.network_params, new.network_params);
-            assert_eq!(old.difficulty, new.difficulty);
-            assert_eq!(old.voting, new.voting);
-            assert_eq!(old.monetary, new.monetary);
-            assert_eq!(old.reemission, new.reemission);
-            assert_eq!(old.genesis.state_digest, new.genesis.state_digest);
-            assert_eq!(old.genesis.header_id, new.genesis.header_id);
-            assert_eq!(old.genesis.boxes_json, new.genesis.boxes_json);
-            assert_eq!(old.block_timing, new.block_timing);
-            assert_eq!(old.bootstrap, new.bootstrap);
-        }
-        assert_eq!(before[0].difficulty.epoch_length, 1024);
-        assert_eq!(before[1].difficulty.epoch_length, 128);
-        assert_eq!(before[0].voting.voting_length, 1024);
-        assert_eq!(before[1].voting.voting_length, 128);
-        assert_eq!(before[0].difficulty.desired_interval_ms, 120_000);
-        assert_eq!(before[1].difficulty.desired_interval_ms, 45_000);
+        let spec = ChainSpec::mainnet();
+        assert_eq!(spec.network, Network::Mainnet);
+        assert_eq!(
+            spec.network_params,
+            NetworkParams {
+                magic: [1, 0, 2, 4],
+                address_prefix: NetworkPrefix::Mainnet
+            }
+        );
+        assert_eq!(
+            spec.difficulty,
+            DifficultyParams {
+                epoch_length: 1024,
+                eip37_epoch_length: Some(128),
+                eip37_activation_height: Some(844_673),
+                v2_activation: Some(V2Activation {
+                    height: 417_792,
+                    initial_difficulty: vec![0x6f, 0x98, 0xd5, 0x00, 0x00, 0x00],
+                }),
+                initial_difficulty: vec![0x01, 0x17, 0x65, 0x00, 0x00, 0x00],
+                desired_interval_ms: 120_000,
+                use_last_epochs: 8,
+            }
+        );
+        assert_eq!(
+            spec.voting,
+            VotingParams {
+                voting_length: 1024,
+                soft_fork_epochs: 32,
+                activation_epochs: 32,
+                version2_activation: Some(417_792),
+            }
+        );
+        assert_eq!(
+            spec.monetary,
+            MonetaryParams {
+                fixed_rate: 75_000_000_000,
+                fixed_rate_period: 525_600,
+                epoch_length: 64_800,
+                one_epoch_reduction: 3_000_000_000,
+                founders_initial_reward: 7_500_000_000,
+                miner_reward_delay: 720,
+            }
+        );
+        assert_eq!(
+            spec.block_timing,
+            BlockTimingParams {
+                desired_interval_ms: 120_000,
+                header_chain_diff: 100,
+            }
+        );
+        assert_eq!(spec.bootstrap, {
+            let seed_strs = [
+                "213.239.193.208:9030",
+                "159.65.11.55:9030",
+                "165.227.26.175:9030",
+                "159.89.116.15:9030",
+                "136.244.110.145:9030",
+                "94.130.108.35:9030",
+                "51.75.147.1:9020",
+                "221.165.214.185:9030",
+                "217.182.197.196:9030",
+                "173.212.220.9:9030",
+                "176.9.65.58:9130",
+                "213.152.106.56:9030",
+                "[2001:41d0:700:6662::]:29031",
+            ];
+            BootstrapParams {
+                seed_peers: seed_strs
+                    .iter()
+                    .map(|s| s.parse::<SocketAddr>().expect("pinned peer address"))
+                    .collect(),
+                checkpoint: Some((
+                    1_231_454,
+                    parse_bytes32_hex(
+                        "ca5aa96a2d560f49cd5652eae4b9e16bbf410ee32365313dc16544ee5fda1e6d",
+                    ),
+                )),
+            }
+        });
+        assert_eq!(
+            spec.reemission,
+            Some(ReemissionParams {
+                activation_height: 777_217,
+                reemission_start_height: 2_080_800,
+                emission_nft_id: parse_id_hex(
+                    "20fa2bf23962cdf51b07722d6237c0c7b8a44f78856c0f7ec308dc1ef1a92a51",
+                ),
+                reemission_nft_id: parse_id_hex(
+                    "d3feeffa87f2df63a7a15b4905e618ae3ce4c69a7975f171bd314d0b877927b8",
+                ),
+                reemission_token_id: parse_id_hex(
+                    "d9a2cc8a09abfaed87afacfbb7daee79a6b26f10c6613fc13d3f3953e5521d1a",
+                ),
+            })
+        );
+        assert_eq!(
+            hex::encode(spec.genesis.state_digest),
+            "a5df145d41ab15a01e0cd3ffbab046f0d029e5412293072ad0f5827428589b9302"
+        );
+        assert_eq!(
+            spec.genesis.header_id.map(hex::encode).as_deref(),
+            Some("b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b")
+        );
+        assert_eq!(
+            hex::encode(
+                ergo_primitives::digest::blake2b256(
+                    spec.genesis
+                        .boxes_json
+                        .expect("public genesis boxes")
+                        .as_bytes()
+                )
+                .as_bytes()
+            ),
+            "c8ba3da68a41f448b80d8b70c9a98986819842ef87fad30cf5f1d9ab3a4cefd5"
+        );
+        let spec = ChainSpec::testnet();
+        assert_eq!(spec.network, Network::Testnet);
+        assert_eq!(
+            spec.network_params,
+            NetworkParams {
+                magic: [2, 3, 2, 3],
+                address_prefix: NetworkPrefix::Testnet
+            }
+        );
+        assert_eq!(
+            spec.difficulty,
+            DifficultyParams {
+                epoch_length: 128,
+                eip37_epoch_length: None,
+                eip37_activation_height: None,
+                v2_activation: None,
+                initial_difficulty: vec![0x01],
+                desired_interval_ms: 45_000,
+                use_last_epochs: 8,
+            }
+        );
+        assert_eq!(
+            spec.voting,
+            VotingParams {
+                voting_length: 128,
+                soft_fork_epochs: 32,
+                activation_epochs: 32,
+                version2_activation: None,
+            }
+        );
+        assert_eq!(
+            spec.monetary,
+            MonetaryParams {
+                fixed_rate: 75_000_000_000,
+                fixed_rate_period: 525_600,
+                epoch_length: 64_800,
+                one_epoch_reduction: 3_000_000_000,
+                founders_initial_reward: 7_500_000_000,
+                miner_reward_delay: 720,
+            }
+        );
+        assert_eq!(
+            spec.block_timing,
+            BlockTimingParams {
+                desired_interval_ms: 45_000,
+                header_chain_diff: 800,
+            }
+        );
+        assert_eq!(spec.bootstrap, {
+            let seed_strs = [
+                "178.104.182.94:9040",
+                "128.253.41.110:9020",
+                "176.9.15.237:9021",
+            ];
+            BootstrapParams {
+                seed_peers: seed_strs
+                    .iter()
+                    .map(|s| s.parse::<SocketAddr>().expect("pinned peer address"))
+                    .collect(),
+                checkpoint: None,
+            }
+        });
+        assert_eq!(spec.reemission, None);
+        assert_eq!(
+            hex::encode(spec.genesis.state_digest),
+            "cb63aa99a3060f341781d8662b58bf18b9ad258db4fe88d09f8f71cb668cad4502"
+        );
+        assert_eq!(
+            spec.genesis.header_id.map(hex::encode).as_deref(),
+            Some("5b1827ca092b599eafbaf339d2acf2445bc5216ec2e022d9c001a6fff660cad9")
+        );
+        assert_eq!(
+            hex::encode(
+                ergo_primitives::digest::blake2b256(
+                    spec.genesis
+                        .boxes_json
+                        .expect("public genesis boxes")
+                        .as_bytes()
+                )
+                .as_bytes()
+            ),
+            "0bf2b188c796e25755e3ac2801f71254a4058de7099a2b881b306a7f82af1c14"
+        );
     }
 
     #[test]

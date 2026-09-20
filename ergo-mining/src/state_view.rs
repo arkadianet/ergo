@@ -44,6 +44,8 @@ use ergo_validation::{
 /// snapshot's `get_box` must read from the same held transaction as the
 /// rest of the build.
 pub trait CandidateStateView: UtxoView {
+    /// Persisted parent emission identity; outer None means unavailable history.
+    fn emission_identity(&self, tip: &[u8; 32]) -> Result<Option<Option<Digest32>>, StateError>;
     /// Best fully-applied block id — the candidate's parent.
     fn best_full_block_id(&self) -> [u8; 32];
     /// Height of the best fully-applied block.
@@ -80,6 +82,9 @@ pub trait CandidateStateView: UtxoView {
 // fully-qualified to the inherent method to rule out any trait-vs-inherent
 // resolution ambiguity (and accidental self-recursion).
 impl CandidateStateView for StateStore {
+    fn emission_identity(&self, tip: &[u8; 32]) -> Result<Option<Option<Digest32>>, StateError> {
+        StateStore::emission_identity(self, tip)
+    }
     fn best_full_block_id(&self) -> [u8; 32] {
         StateStore::chain_state(self).best_full_block_id
     }
@@ -116,6 +121,9 @@ impl CandidateStateView for StateStore {
 
 // Off-loop: every read served from the snapshot's one held transaction.
 impl CandidateStateView for CommittedSnapshot {
+    fn emission_identity(&self, tip: &[u8; 32]) -> Result<Option<Option<Digest32>>, StateError> {
+        CommittedSnapshot::emission_identity(self, tip)
+    }
     fn best_full_block_id(&self) -> [u8; 32] {
         CommittedSnapshot::best_full_block_id(self)
     }
@@ -211,6 +219,9 @@ impl UtxoView for CachedSnapshotView<'_> {
 }
 
 impl CandidateStateView for CachedSnapshotView<'_> {
+    fn emission_identity(&self, tip: &[u8; 32]) -> Result<Option<Option<Digest32>>, StateError> {
+        CommittedSnapshot::emission_identity(self.snap, tip)
+    }
     fn best_full_block_id(&self) -> [u8; 32] {
         CommittedSnapshot::best_full_block_id(self.snap)
     }

@@ -196,6 +196,9 @@ impl StubBlockSubmit {
 
 #[async_trait]
 impl NodeSubmit for StubBlockSubmit {
+    fn direct_block_submit_enabled(&self) -> bool {
+        true
+    }
     async fn submit_transaction(&self, _: Vec<u8>, _: SubmitMode) -> Result<String, SubmitError> {
         // Not exercised by the /blocks route tests.
         Err(SubmitError {
@@ -224,6 +227,9 @@ struct StubDefaultSubmit;
 
 #[async_trait]
 impl NodeSubmit for StubDefaultSubmit {
+    fn direct_block_submit_enabled(&self) -> bool {
+        true
+    }
     async fn submit_transaction(&self, _: Vec<u8>, _: SubmitMode) -> Result<String, SubmitError> {
         Err(SubmitError {
             reason: "internal_error".to_string(),

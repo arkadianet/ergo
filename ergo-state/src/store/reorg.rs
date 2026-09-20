@@ -379,6 +379,9 @@ impl StateStore {
                 chain_table.remove(h as u64)?;
                 let key = undo_log_key(h, hid);
                 undo_table.remove(key.as_slice())?;
+                write_txn
+                    .open_table(super::emission::EMISSION_IDENTITIES)?
+                    .remove(hid.as_slice())?;
             }
 
             // Update state meta
@@ -411,6 +414,10 @@ impl StateStore {
             cs_table.insert("chain_state", cs.serialize().as_slice())?;
             tip_id
         };
+
+        // Legacy databases may lack the restored tip row even after startup
+        // recovered the newer tip. Recover before publishing the rollback.
+        super::emission::recover_identity(&write_txn, &new_tip_id, 4096)?;
 
         // Voted parameters: drop every row whose key is strictly above
         // the rollback target. Genesis row at key 0 is preserved.

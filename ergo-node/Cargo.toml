@@ -56,6 +56,7 @@ zeroize            = { workspace = true }
 ergo-sigma         = { workspace = true }
 
 [dev-dependencies]
+axum = { workspace = true }
 tempfile           = { workspace = true }
 ergo-api           = { workspace = true }
 ergo-mempool       = { workspace = true, features = ["test-support"] }
