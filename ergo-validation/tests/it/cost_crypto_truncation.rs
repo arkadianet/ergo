@@ -34,10 +34,16 @@ struct SweepPoint {
 }
 
 #[derive(serde::Deserialize)]
-pub(super) struct Case {
+pub(super) struct TransactionCase {
     name: String,
     tx_bytes: String,
     input_boxes: Vec<InputBox>,
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct Case {
+    #[serde(flatten)]
+    transaction: TransactionCase,
     block_cost: u64,
     verdict: Verdict,
     sweep: Vec<SweepPoint>,
@@ -66,8 +72,8 @@ fn load_vector() -> Vector {
     ))
     .expect("JVM vector JSON");
     assert_eq!(vector.cases.len(), 2);
-    assert_eq!(vector.cases[0].input_boxes.len(), 2);
-    assert_eq!(vector.cases[1].input_boxes.len(), 4);
+    assert_eq!(vector.cases[0].transaction.input_boxes.len(), 2);
+    assert_eq!(vector.cases[1].transaction.input_boxes.len(), 4);
     vector
 }
 
@@ -85,6 +91,15 @@ fn validate_with_limit(case: &Case, context: &Context, limit: u64) -> (Verdict, 
 
 pub(super) fn validate_with_accumulated(
     case: &Case,
+    context: &Context,
+    limit: u64,
+    accumulated: u64,
+) -> (Verdict, u64) {
+    validate_transaction_case(&case.transaction, context, limit, accumulated)
+}
+
+pub(super) fn validate_transaction_case(
+    case: &TransactionCase,
     context: &Context,
     limit: u64,
     accumulated: u64,
@@ -163,7 +178,9 @@ pub(super) fn validate_with_accumulated(
         {
             Verdict::RejectCost
         }
-        Err(ValidationError::ProofFailed { .. }) => Verdict::RejectScript,
+        Err(ValidationError::ProofFailed { .. } | ValidationError::ScriptError { .. }) => {
+            Verdict::RejectScript
+        }
         Err(error) => panic!("{} @ limit {limit}: {error}", case.name),
     };
     (verdict, cost.total_block_cost())
@@ -178,11 +195,11 @@ fn conjunction_two_inputs_block_cost_matches_scala() {
     let mut mismatches = Vec::new();
     for case in &v.cases {
         let (verdict, cost) = validate_with_limit(case, &v.context, 1_000_000);
-        assert_eq!(verdict, case.verdict, "{}", case.name);
+        assert_eq!(verdict, case.verdict, "{}", case.transaction.name);
         if cost != case.block_cost {
             mismatches.push(format!(
                 "{}: Rust {cost}, JVM {}",
-                case.name, case.block_cost
+                case.transaction.name, case.block_cost
             ));
         }
     }
@@ -207,7 +224,7 @@ fn conjunction_tx_at_exact_scala_limit_accepts() {
             if verdict != point.verdict {
                 mismatches.push(format!(
                     "{} @ limit {}: Rust {verdict:?}, JVM {:?}",
-                    case.name, point.limit, point.verdict
+                    case.transaction.name, point.limit, point.verdict
                 ));
             }
         }

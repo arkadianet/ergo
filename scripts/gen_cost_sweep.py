@@ -134,8 +134,50 @@ def imported_points():
         return {case['name']: case['points'] for case in json.loads(output.read_text())}
 
 
+def verifier_throws():
+    script = 'scripts/jvm_cost_sweep_oracle/VerifierFailureOracle.scala'
+    with tempfile.TemporaryDirectory(dir=ROOT, prefix='.sweep-throws-') as tmp:
+        output = Path(tmp) / 'observed.json'
+        scala(script, ['verifier_throws_self_test', ERGO_RESOURCES, str(output)])
+        observed = json.loads(output.read_text())
+    manifest = copy.deepcopy(json.loads((ROOT / SOURCE).read_text())['manifest'])
+    revision = command('git', 'rev-parse', 'HEAD')
+    manifest['scala']['artifacts'] = observed.pop('artifacts')
+    manifest['rust'] = dict(git_sha=revision, toolchain=command('rustc', '--version'), features=[])
+    manifest['tool'] = dict(script=script, git_sha=revision,
+        scala_cli_version=command('scala-cli', 'version', '--cli-version'),
+        jvm_version=command('java', '-version'),
+        script_sha256={p: sha((ROOT / p).read_bytes()) for p in [script, 'scripts/gen_cost_sweep.py']})
+    manifest['context'] = dict(network='synthetic offline mainnet settings', **observed['context'],
+        ergo_tree_version=0, headers=[], previous_state_digest='mainnet genesisStateDigest',
+        accumulated_block_cost='points[].accumulated_block_cost', limit_override='points[].limit')
+    manifest['run'] = dict(command='scripts/gen-cost-sweep.sh --verifier-throws-only',
+        seeds='deterministic DLog public key from scalar 1; missing context variable 1',
+        timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        selected=6, executed=6, skipped=0, failed=0)
+    name = 'verifier-throws.json.gz'
+    manifest['evidence'] = dict(
+        input_sha256=sha(json.dumps(observed['case'], sort_keys=True).encode()),
+        points_sha256=sha(json.dumps(observed['points'], sort_keys=True).encode()),
+        config_sha256={p: sha((Path(ERGO_RESOURCES) / p).read_bytes())
+                       for p in ['application.conf', 'mainnet.conf']},
+        output_sha256=name + '.sha256 (uncompressed JSON)')
+    result = dict(manifest=manifest, ledger=['TX-verifier-failure-sentinel-T009'],
+        base_fixture=script, surface='transaction-verifier-failure', accumulated_block_cost=1000,
+        diagnostic='Only the diagnostic runs disable transaction rules 119 and 307; '
+                   'unchecked total minus zero-script control observes the transaction-local sentinel. '
+                   'All verdicts and unavailable totals come from normal validation.', **observed)
+    rendered = json.dumps(result, indent=2) + '\n'
+    write_fixture_text(OUT / name, rendered)
+    (OUT / (name + '.sha256')).write_text(sha(rendered.encode()) + '  ' + name + '\n')
+    print('verifier-throws: selected=6 executed=6 skipped=0 failed=0')
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
+    if "--verifier-throws-only" in sys.argv[1:]:
+        verifier_throws()
+        return
     original = json.loads((ROOT / SOURCE).read_text())
     manifest = copy.deepcopy(original['manifest'])
     manifest['rust'] = {'git_sha': command('git', 'rev-parse', 'HEAD'),
@@ -147,7 +189,8 @@ def main():
                           [VERIFY, TX, 'scripts/gen_cost_sweep.py', 'scripts/gen-cost-sweep.sh']}}
     manifest['run'] = {'command': 'scripts/gen-cost-sweep.sh', 'seeds': 'TX-A/TX-B replay captured bytes; synthetic transactions use fresh keys',
                        'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat()}
-    classes = {}
+    verifier_throws()
+    classes = {'verifier-throws': ['verifier-throws.json.gz']}
 
     def save(name, classes_for_file, source, ledger, accumulated, points, **fields):
         m = copy.deepcopy(manifest)
