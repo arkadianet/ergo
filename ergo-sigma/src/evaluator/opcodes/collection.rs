@@ -635,6 +635,12 @@ fn pair_columns(value: Value, cx: &EvalCtx<'_>) -> Result<(Value, Value), EvalEr
             got: format!("{value:?}"),
         });
     };
+    if types.len() != 2 {
+        return Err(EvalError::TypeError {
+            expected: "pair collection for append",
+            got: format!("tuple arity {}", types.len()),
+        });
+    }
     let (_, items) = collection_to_values(value, cx.ctx)?;
     let mut a = Vec::with_capacity(items.len());
     let mut b = Vec::with_capacity(items.len());
@@ -718,4 +724,49 @@ pub(in crate::evaluator) fn eval_slice(
         Vec::new()
     };
     values_to_collection(kind, sliced, elem_type)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::evaluator::types::{Env, ReductionContext};
+    use ergo_primitives::cost::CostAccumulator;
+    use ergo_ser::opcode::{IrNode, Payload};
+
+    // ----- error paths -----
+
+    #[test]
+    fn append_empty_non_pair_right_pre_jit_returns_type_error() {
+        for arity in [0, 1, 3] {
+            let collection = |arity| {
+                Expr::Op(IrNode {
+                    opcode: 0x83,
+                    payload: Payload::ConcreteCollection {
+                        elem_type: SigmaType::STuple(vec![SigmaType::SInt; arity]),
+                        items: vec![],
+                    },
+                })
+            };
+            let ctx = ReductionContext {
+                activated_script_version: 1,
+                ..ReductionContext::minimal(500_000, 0)
+            };
+            let mut cost = CostAccumulator::recording_only();
+            let mut env = Env::new();
+            let mut depth = 0;
+            let mut trace = None;
+            let mut cx = EvalCtx {
+                ctx: &ctx,
+                constants: &[],
+                env: &mut env,
+                depth: &mut depth,
+                cost: &mut cost,
+                trace: &mut trace,
+            };
+            assert!(matches!(
+                eval_append(&collection(2), &collection(arity), &mut cx),
+                Err(EvalError::TypeError { .. })
+            ));
+        }
+    }
 }

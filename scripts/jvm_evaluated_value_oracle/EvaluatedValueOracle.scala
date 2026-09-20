@@ -910,7 +910,7 @@ object EvaluatedValueOracle {
     } else if (args.sameElements(Array("verify_self_test"))) {
       verify_self_test()
     } else {
-      require(args.isEmpty, "Usage: EvaluatedValueOracle [verify|jitcost_probe|accumulator_probe|raw_coll_equals|serialize_expr] (or <command>_self_test)")
+      require(args.isEmpty, "Usage: EvaluatedValueOracle [verify|jitcost_probe|accumulator_probe|validation_rules_probe|raw_coll_equals|serialize_expr] (or <command>_self_test)")
       dumpVectors()
     }
   }
