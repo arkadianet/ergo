@@ -61,6 +61,7 @@ pub(super) fn build_subsystem(
         config.chain_spec.difficulty.clone(),
         config.chain_spec.voting,
     )
+    .with_network(config.network)
     .with_rent_config(
         config.mining_config.claim_storage_rent,
         config.mining_config.max_storage_rent_claims,

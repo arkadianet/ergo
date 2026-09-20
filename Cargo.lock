@@ -1048,6 +1048,7 @@ dependencies = [
  "ergo-rest-json",
  "ergo-ser",
  "ergo-sigma",
+ "ergo-state",
  "ergo-validation",
  "flate2",
  "hex",

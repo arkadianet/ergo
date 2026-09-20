@@ -25,6 +25,7 @@ import sigma.ast.{ErgoTree, SigmaPropConstant}
 import sigma.serialization.SigmaSerializer
 import scala.collection.JavaConverters._
 import scala.util.Try
+import scala.sys.process._
 
 /** Oracle: production UtxoState.applyModifier, with an identity return-value observer. */
 object BlockOracle {
@@ -40,6 +41,48 @@ object BlockOracle {
   }
   def write(path: String, json: Json): Unit = Files.write(Paths.get(path), (json.spaces2 + "\n").getBytes("UTF-8")) match { case _ => () }
   def field[A: io.circe.Decoder](c: HCursor, name: String): A = c.get[A](name).right.get
+  def sha256(raw: Array[Byte]): String = hex(java.security.MessageDigest.getInstance("SHA-256").digest(raw))
+  def manifest(fixture: Json, command: String, input: Option[String]): Json = {
+    def output(args: String*): String = Process(args).!!.trim
+    val revision = output("git", "rev-parse", "HEAD")
+    val script = "scripts/jvm_block_oracle/BlockOracle.scala"
+    val payload = fixture.mapObject(_.remove("manifest"))
+    val c = fixture.hcursor
+    val version = field[Int](c.downField("parameters").success.get, "123")
+    Json.obj(
+      "scala" -> Json.obj("ergo_version" -> Json.fromString("6.0.5"),
+        "sigmastate_version" -> Json.fromString("6.0.6"), "node_app_version" -> Json.Null,
+        "source_shas" -> Json.obj("sigmastate_v6.0.6" -> Json.fromString("ab0b15ceb9d34f2ccd6e68e3e2a8aa27cd16a042"),
+          "ergo_v6.0.5" -> Json.fromString("5528ef569a41ebccbc8658212e6ee3c97d990b96"),
+          "sigmastate_v6.0.2" -> Json.fromString("23dd29f612249c169d09fae9bca76d7cc02e144c"),
+          "ergo_v6.0.2" -> Json.fromString("2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1"))),
+      "rust" -> Json.obj("git_sha" -> Json.fromString(revision),
+        "toolchain" -> Json.fromString(output("rustc", "--version")),
+        "features" -> Json.arr(Json.fromString("ergo-validation/test-helpers"),
+          Json.fromString("ergo-validation/cost-trace"))),
+      "tool" -> Json.obj("script" -> Json.fromString(script), "git_sha" -> Json.fromString(revision),
+        "script_sha256" -> Json.fromString(sha256(Files.readAllBytes(Paths.get(script)))),
+        "scala_cli" -> Json.fromString(output("scala-cli", "version", "--cli-version")),
+        "jvm" -> Json.fromString(System.getProperty("java.runtime.version"))),
+      "context" -> Json.obj("network" -> Json.fromString("synthetic devnet"),
+        "chain_id" -> c.downField("genesis_state_root").focus.get,
+        "height_range" -> Json.arr(Json.fromInt(1),
+          Json.fromInt(decodeBlock(field[Json](c, "block")).height)),
+        "ergo_tree_versions" -> Json.arr(field[Vector[String]](c, "parent_boxes_hex").map(b => Json.fromInt(box(b).ergoTree.version)): _*),
+        "activated_script_version" -> Json.fromInt(version - 1), "block_version" -> Json.fromInt(version),
+        "voted_params" -> field[Json](c, "parameters")),
+      "run" -> Json.obj("command" -> Json.fromString(command), "seeds" -> Json.Null,
+        "timestamp" -> Json.fromString(java.time.Instant.now.toString)),
+      "evidence" -> Json.obj(
+        "input_sha256" -> input.map(p => Json.fromString(sha256(Files.readAllBytes(Paths.get(p))))).getOrElse(Json.Null),
+        "output_payload_sha256" -> Json.fromString(sha256(payload.noSpaces.getBytes("UTF-8"))),
+        "hash_scope" -> Json.fromString("UTF-8 compact output JSON excluding manifest; input hash covers exact file bytes")))
+  }
+  def withManifest(fixture: Json, command: String, input: Option[String]): Json = {
+    val tagged = fixture.deepMerge(Json.obj("ledger" -> fixture.hcursor.downField("ledger").focus
+      .getOrElse(Json.arr(Json.fromString("BLOCK-parallel-equiv")))))
+    tagged.deepMerge(Json.obj("manifest" -> manifest(tagged, command, input)))
+  }
   def box(value: String): ErgoBox = ErgoBox.sigmaSerializer.parse(SigmaSerializer.startReader(bytes(value)))
   def tx(value: String): ErgoTransaction = ErgoTransactionSerializer.parseBytes(bytes(value))
   def extension(c: HCursor): ExtensionCandidate = ExtensionCandidate(
@@ -102,7 +145,7 @@ object BlockOracle {
   def bootstrapTransaction(input: ErgoBox, height: Int): ErgoTransaction =
     ErgoTransaction(IndexedSeq(Input(input.id, sigma.interpreter.ProverResult(Array.emptyByteArray,
       sigma.interpreter.ContextExtension.empty))), IndexedSeq.empty,
-      IndexedSeq(new ErgoBoxCandidate(input.value, input.ergoTree, height)))
+      IndexedSeq(new ErgoBoxCandidate(input.value, input.ergoTree, height, input.additionalTokens)))
   def proof(state: UtxoState, transactions: Seq[ErgoTransaction]) = {
     val operations = ErgoState.stateChanges(transactions).get.operations
     state.persistentProver.avlProver.generateProofForOperations(operations).get
@@ -210,7 +253,7 @@ object BlockOracle {
   def signP2pk(input: ErgoBox, height: Int): ErgoTransaction = {
     val secret = sigmastate.crypto.DLogProtocol.DLogProverInput(java.math.BigInteger.ONE)
     val unsigned = new UnsignedErgoLikeTransaction(IndexedSeq(new UnsignedInput(input.id)), IndexedSeq.empty,
-      IndexedSeq(new ErgoBoxCandidate(input.value, input.ergoTree, height)))
+      IndexedSeq(new ErgoBoxCandidate(input.value, input.ergoTree, height, input.additionalTokens)))
     val prover = new ErgoLikeInterpreter with sigmastate.interpreter.ProverInterpreter {
       override type CTX = ErgoLikeContext
       override val secrets = IndexedSeq(secret)
@@ -229,6 +272,87 @@ object BlockOracle {
       "parameters" -> Json.obj(DevnetLaunchParameters.parametersTable.toSeq.map { case (k, v) => k.toString -> Json.fromInt(v) }: _*),
       "parent_boxes_hex" -> Json.arr(Json.fromString(hex(input.bytes))),
       "transactions_hex" -> Json.arr(Json.fromString(hex(signed.bytes))))
+  }
+  /** Each boundary is derived from a successful production JVM block application. */
+  lazy val familyInputs: Seq[ErgoBox] = {
+    val tree = ErgoTree.fromProposition(SigmaPropConstant(
+      sigmastate.crypto.DLogProtocol.DLogProverInput(java.math.BigInteger.ONE).publicImage))
+    val inputs = (10 to 12).map(i => new ErgoBox(1000000000L, tree, sigma.Colls.emptyColl,
+      Map.empty, scorex.util.bytesToId(Array.fill(32)(i.toByte)), 0.toShort, 0))
+    inputs
+  }
+  lazy val familyTransactions: Seq[ErgoTransaction] = familyInputs.map(signP2pk(_, 128))
+  def family(name: String, output: String): Json = {
+    val inputs = familyInputs
+    val signed = familyTransactions
+    val tree = inputs.head.ergoTree
+    def request(boxes: Seq[ErgoBox], transactions: Seq[ErgoTransaction], cap: Int, version: Int = 3): Json =
+      Json.obj("schema_version" -> Json.fromInt(1),
+        "parameters" -> Json.obj(DevnetLaunchParameters.parametersTable.toSeq.map {
+          case (k, v) => k.toString -> Json.fromInt(if (k == 4) cap else if (k == 123) version else v)
+        }: _*),
+        "parent_boxes_hex" -> Json.arr(boxes.map(b => Json.fromString(hex(b.bytes))): _*),
+        "transactions_hex" -> Json.arr(transactions.map(t => Json.fromString(hex(t.bytes))): _*))
+    def measure(boxes: Seq[ErgoBox], transactions: Seq[ErgoTransaction], version: Int = 3): Json = {
+      val observed = evaluate(build(request(boxes, transactions, 1000000, version)))
+      require(field[String](observed.hcursor, "verdict") == "Accept", observed.noSpaces)
+      observed
+    }
+    val single = measure(inputs.take(1), signed.take(1))
+    val unit = field[Int](single.hcursor, "sum_block_cost")
+    val (seed, basis, rows) = name match {
+      case "a-exact-sum" | "b-sum-plus-one" =>
+        val total = measure(inputs, signed)
+        val cap = field[Int](total.hcursor, "sum_block_cost") - (if (name.startsWith("b")) 1 else 0)
+        (request(inputs, signed, cap), total, Seq("BLOCK-sum-op", "LIMIT-block-sum"))
+      case "c-single-cap" =>
+        (request(inputs.take(1), signed.take(1), unit), single, Seq("BLOCK-per-tx-cap"))
+      case "d-mid-block" | "d-mid-block-reversed" =>
+        val ordered = if (name.endsWith("reversed")) signed.reverse else signed
+        val prefix = measure(inputs, ordered.take(2))
+        (request(inputs, ordered, field[Int](prefix.hcursor, "sum_block_cost") - 1), prefix,
+          Seq("BLOCK-accum-equiv", "BLOCK-per-tx-cap", "BLOCK-sum-op", "LIMIT-block-sum"))
+      case "e-token-order" =>
+        val tokens = sigma.Colls.fromArray(Array((sigma.data.Digest32Coll @@
+          sigma.Colls.fromArray(Array.fill(32)(42.toByte)), 1L)))
+        val tokenBox = new ErgoBox(1000000000L, tree, tokens, Map.empty,
+          scorex.util.bytesToId(Array.fill(32)(20.toByte)), 0.toShort, 0)
+        val tokenTx = signP2pk(tokenBox, 128)
+        val tokenTotal = measure(Seq(tokenBox), Seq(tokenTx))
+        // The production initialCost expression is 10000 + inputCost + outputCost.
+        // Remaining 12200 passes structural init (12100), but not token access (400).
+        (request(Seq(inputs.head, tokenBox), Seq(signed.head, tokenTx), unit + 12200),
+          tokenTotal, Seq("ORDER-init-token"))
+      case "rejection-script-control" =>
+        val first = signed.head
+        val invalid = ErgoTransaction(first.inputs.map(i => Input(i.boxId,
+          sigma.interpreter.ProverResult(Array.fill(56)(0.toByte), sigma.interpreter.ContextExtension.empty))),
+          first.dataInputs, first.outputCandidates)
+        (request(inputs.take(1), Seq(invalid), 1000000), single, Seq.empty[String])
+      case "f-v6-devnet" | "f-v5-control" =>
+        // Serialized BlockValue eagerly evaluates a 201-byte collection reverse before True.
+        // Collection method 30 is available only in v6; no compiler can fold it away.
+        val v6Tree = sigma.VersionContext.withVersions(3.toByte, 3.toByte) {
+          sigma.serialization.ErgoTreeSerializer.DefaultSerializer.deserializeErgoTree(
+            bytes("0bd501d801d60adb0c1e0ec90100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008d3"))
+        }
+        val input = new ErgoBox(1000000000L, v6Tree, sigma.Colls.emptyColl, Map.empty,
+          scorex.util.bytesToId(Array.fill(32)(30.toByte)), 0.toShort, 0)
+        val transaction = bootstrapTransaction(input, 128)
+        val total = measure(Seq(input), Seq(transaction), 4)
+        (request(Seq(input), Seq(transaction), 1000000,
+          if (name == "f-v5-control") 3 else 4),
+          total, Seq.empty[String])
+      case _ => throw new IllegalArgumentException("unknown family " + name)
+    }
+    val fixture = build(seed)
+    val observed = evaluate(fixture)
+    val captured = fixture.deepMerge(Json.obj("expected" -> observed,
+      "ledger" -> Json.arr((Seq("BLOCK-parallel-equiv") ++ rows).map(Json.fromString): _*),
+      "boundary_basis" -> Json.obj("single_p2pk" -> single, "unlimited_target_or_prefix" -> basis)))
+    write(output, withManifest(captured,
+      "python3 scripts/jvm_block_oracle/run.py family " + name + " " + output, None))
+    observed
   }
   def selfTest(fixture: Json): Json = {
     var count = 0
@@ -315,10 +439,21 @@ object BlockOracle {
     val sigmaJar = classOf[sigma.VersionContext].getProtectionDomain.getCodeSource.getLocation.toString
     require(sigmaJar.endsWith("sigma-state_2.12-6.0.6.jar"), "expected sigma-state 6.0.6: " + sigmaJar)
     val result = args.toList match {
+      case "families" :: directory :: Nil =>
+        val names = Seq("a-exact-sum", "b-sum-plus-one", "c-single-cap", "d-mid-block",
+          "d-mid-block-reversed", "e-token-order", "f-v6-devnet", "f-v5-control", "rejection-script-control")
+        Json.obj(names.map(name => name -> family(name, directory + "/" + name + ".json")): _*)
+      case "family" :: name :: output :: Nil => family(name, output)
       case "build" :: input :: output :: Nil =>
-        val fixture = build(read(input)); write(output, fixture)
+        val fixture = withManifest(build(read(input)), "python3 scripts/jvm_block_oracle/run.py " + args.mkString(" "), Some(input)); write(output, fixture)
         Json.obj("built" -> Json.fromString(output))
       case "evaluate" :: input :: Nil => evaluate(read(input))
+      case "capture" :: input :: output :: Nil =>
+        val fixture = read(input)
+        val observed = evaluate(fixture)
+        write(output, withManifest(fixture.deepMerge(Json.obj("expected" -> observed)),
+          "python3 scripts/jvm_block_oracle/run.py " + args.mkString(" "), Some(input)))
+        observed
       case "self-test" :: input :: Nil => selfTest(read(input))
       case "smoke" :: output :: Nil =>
         val fixture = build(smokeRequest())
@@ -327,9 +462,10 @@ object BlockOracle {
         // JVM transaction initialization is 10000 + 2000 input + 100 output.
         require(field[String](result.hcursor, "verdict") == "Accept", result.noSpaces)
         require(field[Long](result.hcursor, "sum_block_cost") == 12503L, result.noSpaces)
-        write(output, fixture.deepMerge(Json.obj("expected" -> result)))
+        write(output, withManifest(fixture.deepMerge(Json.obj("expected" -> result)),
+          "python3 scripts/jvm_block_oracle/run.py " + args.mkString(" "), None))
         result
-      case _ => throw new IllegalArgumentException("build REQUEST OUTPUT | evaluate FIXTURE | smoke OUTPUT | self-test FIXTURE")
+      case _ => throw new IllegalArgumentException("build REQUEST OUTPUT | evaluate FIXTURE | capture FIXTURE OUTPUT | smoke OUTPUT | self-test FIXTURE")
     }
     stdout.println(result.noSpaces)
   }

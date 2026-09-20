@@ -368,13 +368,18 @@ pub(super) fn signal_mining_engine(
             now_unix_ms(),
             wiring.block_interval_ms,
         );
-    let synced = mining_started_latch(
-        already_started,
-        now,
-        full_block_applied,
-        fresh,
-        wiring.offline_generation,
-    );
+    let devnet_genesis = handle.network() == ergo_chain_spec::Network::Devnet
+        && now.best_full_height == 0
+        && now.best_header_height == 0
+        && now.best_full_id == now.best_header_id;
+    let synced = devnet_genesis
+        || mining_started_latch(
+            already_started,
+            now,
+            full_block_applied,
+            fresh,
+            wiring.offline_generation,
+        );
     handle.set_best_tip(BestTip {
         parent_id: now.best_full_id,
         chain_seq: *chain_seq,
@@ -408,6 +413,26 @@ pub(super) fn signal_mining_engine(
     // engine task receiver is gone (benign during shutdown).
     let _ = intent_tx.send(Some(intent));
     now
+}
+
+/// Announce accepted devnet blocks immediately, including height one.
+/// An empty Scala peer cannot consume a genesis header via its SyncV2
+/// continuation shortcut, which requires an already-stored parent.
+fn devnet_header_inventory(network: ergo_chain_spec::Network, id: [u8; 32]) -> Option<Vec<u8>> {
+    if network != ergo_chain_spec::Network::Devnet {
+        return None;
+    }
+    let inventory = ergo_p2p::types::InvData {
+        type_id: ergo_p2p::types::ModifierTypeId::Header.as_byte(),
+        ids: vec![id],
+    };
+    match ergo_p2p::message::serialize_inv(&inventory) {
+        Ok(payload) => Some(payload),
+        Err(error) => {
+            warn!(%error, "devnet: failed to serialize mined header inventory");
+            None
+        }
+    }
 }
 
 /// Skips everything (and replies `Unavailable`) when `mining_handle`
@@ -707,6 +732,20 @@ pub(super) fn handle_mining_request(
             //    advanced and we surface a generic Internal error.
             let new_tip = state.store.chain_state_meta().best_full_block_id;
             if new_tip == header_id {
+                if let Some(payload) = devnet_header_inventory(handle.network(), header_id) {
+                    let actions = state
+                        .registry
+                        .peers
+                        .keys()
+                        .copied()
+                        .map(|peer| Action::SendToPeer {
+                            peer,
+                            code: ergo_p2p::message::CODE_INV,
+                            payload: payload.clone(),
+                        })
+                        .collect();
+                    flush_actions(state, actions);
+                }
                 let _ = reply.send(Ok(()));
             } else {
                 warn!(
@@ -731,6 +770,24 @@ mod tests {
     use super::*;
 
     // ----- happy path -----
+
+    #[test]
+    fn devnet_mined_header_inventory_announces_header() {
+        let payload = devnet_header_inventory(ergo_chain_spec::Network::Devnet, [7; 32]).unwrap();
+        let inv = ergo_p2p::message::deserialize_inv(&payload).unwrap();
+        assert_eq!(inv.type_id, 101);
+        assert_eq!(inv.ids, vec![[7; 32]]);
+    }
+
+    #[test]
+    fn public_networks_devnet_inventory_is_absent() {
+        for network in [
+            ergo_chain_spec::Network::Mainnet,
+            ergo_chain_spec::Network::Testnet,
+        ] {
+            assert!(devnet_header_inventory(network, [7; 32]).is_none());
+        }
+    }
 
     #[test]
     fn mempool_refresh_due_when_never_fired() {

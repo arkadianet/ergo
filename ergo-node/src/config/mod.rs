@@ -121,8 +121,9 @@ pub(crate) fn mempool_force_off_for_mode(
 /// Returns `Ok(())` if the supplied [`ChainSpec`] carries everything
 /// the node needs to start end-to-end on that network. Otherwise
 /// returns a message naming the missing artifact. Currently the
-/// readiness criterion is "genesis header id and embedded boxes JSON
-/// must both be `Some(_)`"; this is the data the genesis-loading and
+/// public-network readiness criterion requires a pinned height-one header
+/// and embedded boxes. Devnet has no predetermined height-one header; its
+/// boxes must still be present. This is the data the genesis-loading and
 /// NiPoPoW verifier paths require at startup. The runtime path
 /// `NodeConfig::load` calls this gate immediately after building the
 /// spec, so any network whose artifacts aren't yet extracted fails
@@ -130,7 +131,7 @@ pub(crate) fn mempool_force_off_for_mode(
 /// partial config.
 pub fn validate_supported(spec: &ChainSpec) -> Result<(), String> {
     let net = spec.network.as_str();
-    if spec.genesis.header_id.is_none() {
+    if spec.network != Network::Devnet && spec.genesis.header_id.is_none() {
         return Err(format!(
             "{net} genesis header_id not embedded — \
              extract via test-vectors/{net}/PROVISIONING.md and \

@@ -35,3 +35,5 @@ pub use emission_rules::{
 };
 pub use error::MiningError;
 pub use reward_script::{reward_output_script, reward_output_script_from_hex, REWARD_SCRIPT_LEN};
+
+mod genesis;

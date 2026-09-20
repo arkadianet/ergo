@@ -1129,3 +1129,23 @@ impl NodeConfig {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    // ----- happy path -----
+
+    #[test]
+    fn devnet_recipe_config_loads_without_public_peers() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../scripts/devnet-mixed/rust-node.toml");
+        let cli = Cli::try_parse_from(["ergo-node", "--config", path.to_str().unwrap()]).unwrap();
+        let config = NodeConfig::load(cli).unwrap();
+        assert_eq!(config.network, Network::Devnet);
+        assert!(config.genesis_id.is_none());
+        assert_eq!(config.chain_spec.difficulty.epoch_length, 33_554_432);
+        assert!(config.chain_spec.bootstrap.seed_peers.is_empty());
+    }
+}

@@ -15,7 +15,7 @@ pub struct Cli {
     #[arg(long, short = 'c')]
     pub config: Option<PathBuf>,
 
-    /// Network: mainnet or testnet
+    /// Network: mainnet, testnet, or devnet
     #[arg(long)]
     pub network: Option<String>,
 

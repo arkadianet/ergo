@@ -91,6 +91,19 @@ pub fn validate_full_block(
     extension: &Extension,
     ctx: &BlockValidationContext<'_>,
 ) -> Result<CheckedBlock, BlockValidationError> {
+    validate_full_block_with_costs(checked_header, block_transactions, extension, ctx)
+        .map(|(block, _)| block)
+}
+
+/// Sequential validation with observed per-transaction block costs for conformance tests.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn validate_full_block_with_costs(
+    checked_header: CheckedHeader,
+    block_transactions: &BlockTransactions,
+    extension: &Extension,
+    ctx: &BlockValidationContext<'_>,
+) -> Result<(CheckedBlock, Vec<(usize, u64)>), BlockValidationError> {
+    let mut costs = Vec::new();
     let header = checked_header.header();
     let header_id = checked_header.header_id();
 
@@ -331,6 +344,7 @@ pub fn validate_full_block(
         )
         .map_err(|e| BlockValidationError::Transaction { index: i, error: e })?;
 
+        costs.push((i, cost.total_block_cost()));
         total_block_cost += cost.total_block_cost();
         overlay.apply_tx(checked.transaction());
         checked_txs.push(checked);
@@ -343,10 +357,13 @@ pub fn validate_full_block(
         });
     }
 
-    Ok(CheckedBlock {
-        checked_header,
-        checked_transactions: checked_txs,
-    })
+    Ok((
+        CheckedBlock {
+            checked_header,
+            checked_transactions: checked_txs,
+        },
+        costs,
+    ))
 }
 
 /// Parallel equivalent of [`validate_full_block`]: topologically layers the

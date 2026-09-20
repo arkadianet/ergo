@@ -35,10 +35,10 @@ pub use extension::{
 };
 pub use fork_vote::{check_fork_vote_votes_collected_present, validate_fork_vote};
 pub use interlinks::validate_interlinks;
-#[cfg(any(test, feature = "test-helpers"))]
-pub use validate::validate_full_block;
 #[cfg(feature = "test-helpers")]
 pub use validate::validate_full_block_parallel_with_costs;
+#[cfg(any(test, feature = "test-helpers"))]
+pub use validate::{validate_full_block, validate_full_block_with_costs};
 pub use validate::{
     validate_full_block_parallel, validate_full_block_parallel_with_group_elements,
 };

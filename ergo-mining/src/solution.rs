@@ -185,7 +185,7 @@ mod tests {
         let validation_ctx = CandidateValidationContext {
             pre_header: pre_header.clone(),
             activated_script_version: 2,
-            last_headers,
+            last_headers: last_headers.to_vec(),
             last_block_utxo_root,
         };
         Candidate {

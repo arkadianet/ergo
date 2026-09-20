@@ -334,6 +334,7 @@ pub fn build_and_publish(
             let view = CachedSnapshotView::new(&snapshot, slot);
             let result = generate_candidate(
                 &view,
+                handle.network(),
                 mode,
                 mempool,
                 &intent.miner_pk,
@@ -355,6 +356,7 @@ pub fn build_and_publish(
         }
         None => generate_candidate(
             &snapshot,
+            handle.network(),
             mode,
             mempool,
             &intent.miner_pk,
