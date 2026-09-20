@@ -383,12 +383,12 @@ fn jvm_failure(
             expected: "Bool",
             ..
         }) => Ok(("RejectScript", "java.lang.ClassCastException")),
-        // version/parser-data-gates: v3 ByIndex retains its Byte operand,
+        // version/parser-data-gates: v3 ByIndex retains its Byte/Short operand,
         // then the evaluator's Int cast throws after charging the input.
         VerifySpendingError::Eval(EvalError::TypeError {
             expected: "Int index",
             got,
-        }) if got == "Byte(0)" => Ok(("RejectScript", "java.lang.ClassCastException")),
+        }) if matches!(got.as_str(), "Byte(0)" | "Short(0)") => Ok(("RejectScript", "java.lang.ClassCastException")),
         VerifySpendingError::Eval(EvalError::TypeError {
             expected: "matching numeric types for Plus",
             ..

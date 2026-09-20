@@ -91,7 +91,7 @@ Mining emission discovery now tracks lineage instead of `transactions[0].outputs
 
 ### Parser type-store residual
 
-The parser has no ValDefTypeStore, so parse-time typing through ValUse/ConstPlaceholder is unavailable. OP-0x8C over-arity SelectField on a non-literal tuple input rejects only at evaluation; a well-formed JVM ValUse/BlockValue vector remains missing. A ByIndex Byte/Short index reached through a binding does not receive the pre-v3 Upcast. Threading a type store through `parse_expr` is the follow-up design item. ConstantPlaceholder bounds checking does not supply that type store. Task 9.3's bounds fix reduced the recorded 2,000-case parser campaign from 40 divergences / 7 classes to 38 / 6; the remaining parser discrepancies are separate from the ledger's zero DIVERGENT count.
+Resolved in b6d0fc577403eb649806e45fa41c1c6fb56d4699.
 
 ## OPEN rows, exact notes and closing layers
 

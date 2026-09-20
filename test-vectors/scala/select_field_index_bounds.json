@@ -7,12 +7,175 @@
     "(data/shared/src/main/scala/sigma/ast/transformers.scala:291-294) at deserialization,",
     "so an index of 0 or above the tuple arity throws IndexOutOfBoundsException and the",
     "tree fails to deserialize (a plain exception, not a ValidationException: no soft-fork",
-    "wrapping). Body of every tree: BoolToSigmaProp(EQ(SelectField(Tuple(1, 2), idx), c))."
+    "wrapping). Body of every tree: BoolToSigmaProp(EQ(SelectField(Tuple(1, 2), idx), c)).",
+    "Binding, placeholder, block-result, lambda-argument and rebinding cases regenerated with the same pinned parser oracle for task 10.1; sized trees demonstrate hard rejection."
   ],
   "cases": [
-    { "name": "index_zero_rejected",        "tree_hex": "00d1938c860204020404000402", "jvm": "Reject", "jvm_detail": "IndexOutOfBoundsException" },
-    { "name": "index_above_arity_rejected", "tree_hex": "00d1938c860204020404030402", "jvm": "Reject", "jvm_detail": "IndexOutOfBoundsException" },
-    { "name": "index_one_accepted",         "tree_hex": "00d1938c860204020404010402", "jvm": "Accept", "jvm_detail": null },
-    { "name": "index_two_accepted",         "tree_hex": "00d1938c860204020404020404", "jvm": "Accept", "jvm_detail": null }
-  ]
+    {
+      "name": "index_zero_rejected",
+      "tree_hex": "00d1938c860204020404000402",
+      "jvm": "Reject",
+      "jvm_detail": "IndexOutOfBoundsException"
+    },
+    {
+      "name": "index_above_arity_rejected",
+      "tree_hex": "00d1938c860204020404030402",
+      "jvm": "Reject",
+      "jvm_detail": "IndexOutOfBoundsException"
+    },
+    {
+      "name": "index_one_accepted",
+      "tree_hex": "00d1938c860204020404010402",
+      "jvm": "Accept",
+      "jvm_detail": null
+    },
+    {
+      "name": "index_two_accepted",
+      "tree_hex": "00d1938c860204020404020404",
+      "jvm": "Accept",
+      "jvm_detail": null
+    },
+    {
+      "name": "binding-index0",
+      "tree_hex": "0812d801d60a860204020404d1938c720a000402",
+      "jvm": "Reject",
+      "jvm_detail": "IndexOutOfBoundsException"
+    },
+    {
+      "name": "binding-index1",
+      "tree_hex": "0812d801d60a860204020404d1938c720a010402",
+      "jvm": "Accept",
+      "jvm_detail": null
+    },
+    {
+      "name": "binding-index2",
+      "tree_hex": "0812d801d60a860204020404d1938c720a020404",
+      "jvm": "Accept",
+      "jvm_detail": null
+    },
+    {
+      "name": "binding-index3",
+      "tree_hex": "0812d801d60a860204020404d1938c720a030402",
+      "jvm": "Reject",
+      "jvm_detail": "IndexOutOfBoundsException"
+    },
+    {
+      "name": "placeholder-index0",
+      "tree_hex": "180e013c04040204d1938c7300000402",
+      "jvm": "Reject",
+      "jvm_detail": "ArrayIndexOutOfBoundsException"
+    },
+    {
+      "name": "placeholder-index1",
+      "tree_hex": "180e013c04040204d1938c7300010402",
+      "jvm": "Accept",
+      "jvm_detail": null
+    },
+    {
+      "name": "placeholder-index2",
+      "tree_hex": "180e013c04040204d1938c7300020404",
+      "jvm": "Accept",
+      "jvm_detail": null
+    },
+    {
+      "name": "placeholder-index3",
+      "tree_hex": "180e013c04040204d1938c7300030402",
+      "jvm": "Reject",
+      "jvm_detail": "ArrayIndexOutOfBoundsException"
+    },
+    {
+      "name": "block-result-index0",
+      "tree_hex": "0812d1938cd801d60a860204020404720a000402",
+      "jvm": "Reject",
+      "jvm_detail": "IndexOutOfBoundsException"
+    },
+    {
+      "name": "block-result-index1",
+      "tree_hex": "0812d1938cd801d60a860204020404720a010402",
+      "jvm": "Accept",
+      "jvm_detail": null
+    },
+    {
+      "name": "block-result-index2",
+      "tree_hex": "0812d1938cd801d60a860204020404720a020404",
+      "jvm": "Accept",
+      "jvm_detail": null
+    },
+    {
+      "name": "block-result-index3",
+      "tree_hex": "0812d1938cd801d60a860204020404720a030402",
+      "jvm": "Reject",
+      "jvm_detail": "IndexOutOfBoundsException"
+    },
+    {
+      "name": "lambda-arg-index0",
+      "tree_hex": "0814d801d60ad9010a3c0404d1938c720a00040208d3",
+      "jvm": "Reject",
+      "jvm_detail": "ArrayIndexOutOfBoundsException"
+    },
+    {
+      "name": "lambda-arg-index1",
+      "tree_hex": "0814d801d60ad9010a3c0404d1938c720a01040208d3",
+      "jvm": "Accept",
+      "jvm_detail": null
+    },
+    {
+      "name": "lambda-arg-index2",
+      "tree_hex": "0814d801d60ad9010a3c0404d1938c720a02040408d3",
+      "jvm": "Accept",
+      "jvm_detail": null
+    },
+    {
+      "name": "lambda-arg-index3",
+      "tree_hex": "0814d801d60ad9010a3c0404d1938c720a03040208d3",
+      "jvm": "Reject",
+      "jvm_detail": "ArrayIndexOutOfBoundsException"
+    },
+    {
+      "name": "rebind-index0",
+      "tree_hex": "0816d802d60a0402d60a860204020404d1938c720a000402",
+      "jvm": "Reject",
+      "jvm_detail": "IndexOutOfBoundsException"
+    },
+    {
+      "name": "rebind-index1",
+      "tree_hex": "0816d802d60a0402d60a860204020404d1938c720a010402",
+      "jvm": "Accept",
+      "jvm_detail": null
+    },
+    {
+      "name": "rebind-index2",
+      "tree_hex": "0816d802d60a0402d60a860204020404d1938c720a020404",
+      "jvm": "Accept",
+      "jvm_detail": null
+    },
+    {
+      "name": "rebind-index3",
+      "tree_hex": "0816d802d60a0402d60a860204020404d1938c720a030402",
+      "jvm": "Reject",
+      "jvm_detail": "IndexOutOfBoundsException"
+    }
+  ],
+  "manifest": {
+    "scala": {
+      "sigmastate_version": "6.0.2",
+      "ergo_version": "6.0.2"
+    },
+    "tool": {
+      "generator": "ergo-difftest/src/gen/parser_type_store.py",
+      "oracle_script": "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala",
+      "oracle_sha256": "e656cc2045c8ff6c95e4f64224d987e353a4da85be5c4ac8fcaaceec015eec77"
+    },
+    "run": {
+      "command": "PYTHONDONTWRITEBYTECODE=1 python3 ergo-difftest/src/gen/parser_type_store.py",
+      "timestamp": "2026-09-20T02:03:40.686587+00:00",
+      "selected": 24,
+      "executed": 24,
+      "skipped": 0
+    },
+    "evidence": {
+      "requests_sha256": "1a042afe57dd5bee21c03fc0adfcc40e9ea7e5e57bd70848c0b1698b23fa1384",
+      "responses_sha256": "d815b799a9702087688a99e3f981c1e8e09849645863f8db8e7a5cbd3fb4c66a"
+    }
+  }
 }
