@@ -335,6 +335,14 @@ fn type_is_precise(t: &crate::sigma_type::SigmaType) -> bool {
     use crate::sigma_type::SigmaType;
     match t {
         SigmaType::SAny => false,
+        // An unresolved type variable is not a concrete type. `unify_type_lists`
+        // succeeds without binding `T` for methods whose range is
+        // `SOption(STypeVar("T"))` with an empty explicit type-argument list
+        // ((99, 9)-(99, 18), (101, 11)), so the specialized range can still carry
+        // it. Treating that as precise would let it satisfy the exact-type check
+        // in `substitute_deserialize`, whose declared type is read by `read_type`
+        // and may itself be an `STypeVar`.
+        SigmaType::STypeVar(_) => false,
         SigmaType::SColl(e) | SigmaType::SOption(e) => type_is_precise(e),
         SigmaType::STuple(items) => items.iter().all(type_is_precise),
         SigmaType::SFunc {
@@ -501,12 +509,19 @@ fn zero_arg_type(opcode: u8) -> crate::sigma_type::SigmaType {
         0x82 => SGroupElement,                // GroupGenerator
         0xA3 => SInt,                         // Height
         0xA4 | 0xA5 => SColl(Box::new(SBox)), // Inputs / Outputs
-        0xA6 | 0xB6 => SAvlTree,              // LastBlockUtxoRootHash
-        0xA7 => SBox,                         // Self
-        0xAC => SColl(Box::new(SByte)),       // MinerPubkey
-        0xDD => SGlobal,                      // Global
-        0xFE => SContext,                     // Context
-        _ => SAny,                            // deprecated/unknown leaf — still non-SigmaProp
+        // 0xA6 LastBlockUtxoRootHash. 0xB6 is Scala's `AvlTreeCode`
+        // (`CreateAvlTree`, `tpe = SAvlTree`, four arguments); this parser routes
+        // it as a deprecated zero-argument leaf (`opcode_pattern`), so the arm is
+        // reached here rather than from `op_result_type`. Either way the type is
+        // `SAvlTree`, never `SigmaProp`, so the rule-1001 root judgement agrees
+        // with Scala (oracle-checked: `00b602010e0004402800` and `00b6` both
+        // reconcile on the `ergo_tree` surface).
+        0xA6 | 0xB6 => SAvlTree,
+        0xA7 => SBox,                   // Self
+        0xAC => SColl(Box::new(SByte)), // MinerPubkey
+        0xDD => SGlobal,                // Global
+        0xFE => SContext,               // Context
+        _ => SAny,                      // deprecated/unknown leaf — still non-SigmaProp
     }
 }
 

@@ -577,6 +577,9 @@ mod ranges {
                 p.input_cost,
                 p.data_input_cost,
                 p.output_cost,
+                // Replay charges storage rent from this factor, so an epoch that
+                // changes only it must still select its range.
+                p.storage_fee_factor,
             );
             if previous.is_some_and(|prev| prev != costs)
                 && !ranges
