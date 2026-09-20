@@ -920,8 +920,50 @@ mod ranges {
         if !missing.is_empty() {
             return Err(format!("required ranges not executed: {missing:?}"));
         }
-        std::fs::write(path, serde_json::to_string_pretty(manifest).unwrap())
-            .map_err(|e| e.to_string())
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let path = std::path::absolute(path).map_err(|e| e.to_string())?;
+        let log_path = path.with_extension("log");
+        let log: String = manifest["ranges"]
+            .as_array()
+            .ok_or("missing replay ranges")?
+            .iter()
+            .map(|range| format!("L4_RANGE {range}\n"))
+            .collect();
+        // This closed log contains every range observation, including failures.
+        // It is independent of the test runner's still-open stdout/stderr log.
+        std::fs::write(&log_path, log).map_err(|e| e.to_string())?;
+        let command = std::env::var("L4_RUN_COMMAND").map_err(|_| {
+            "set L4_RUN_COMMAND to the exact replay invocation when writing L4_RESULTS"
+        })?;
+        let mut child = Command::new("python3")
+            .current_dir(root)
+            .arg("scripts/l4-results-manifest.py")
+            .arg("--log")
+            .arg(&log_path)
+            .arg("--run-command")
+            .arg(command)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("start L4 provenance writer: {e}"))?;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(serde_json::to_string_pretty(manifest).unwrap().as_bytes())
+            .map_err(|e| format!("send L4 results to provenance writer: {e}"))?;
+        let output = child.wait_with_output().map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err(format!(
+                "L4 provenance writer failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        std::fs::write(path, output.stdout).map_err(|e| e.to_string())
     }
 
     // ----- error paths -----

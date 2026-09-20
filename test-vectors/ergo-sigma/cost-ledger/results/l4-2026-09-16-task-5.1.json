@@ -1,4 +1,976 @@
 {
+  "manifest": {
+  "scala": {
+    "ergo_version": "6.0.5",
+    "sigmastate_version": "6.0.6",
+    "node_app_version": "6.0.5",
+    "source_shas": {
+      "ergo_v6.0.2": "2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1",
+      "sigmastate_v6.0.2": "23dd29f612249c169d09fae9bca76d7cc02e144c",
+      "ergo_v6.0.5": "5528ef569a41ebccbc8658212e6ee3c97d990b96",
+      "sigmastate_v6.0.6": "ab0b15ceb9d34f2ccd6e68e3e2a8aa27cd16a042"
+    },
+    "resolved_dependencies": [
+      "ch.qos.logback:logback-classic:1.2.13:default",
+      "ch.qos.logback:logback-core:1.2.13:default",
+      "com.chuusai:shapeless_2.12:2.3.13:default",
+      "com.google.code.findbugs:jsr305:3.0.2:default",
+      "com.google.errorprone:error_prone_annotations:2.0.18:default",
+      "com.google.guava:guava:23.0:default",
+      "com.google.j2objc:j2objc-annotations:1.1:default",
+      "com.iheart:ficus_2.12:1.4.7:default",
+      "com.lihaoyi:fastparse_2.12:2.3.3:default",
+      "com.lihaoyi:geny_2.12:0.6.10:default",
+      "com.lihaoyi:sourcecode_2.12:0.2.3:default",
+      "com.typesafe:config:1.3.4:default",
+      "com.typesafe.scala-logging:scala-logging_2.12:3.9.5:default",
+      "io.circe:circe-core_2.12:0.14.15:default",
+      "io.circe:circe-generic_2.12:0.14.15:default",
+      "io.circe:circe-jawn_2.12:0.14.15:default",
+      "io.circe:circe-numbers_2.12:0.14.15:default",
+      "io.circe:circe-parser_2.12:0.14.15:default",
+      "org.bouncycastle:bcprov-jdk15to18:1.85.1:default",
+      "org.codehaus.mojo:animal-sniffer-annotations:1.14:default",
+      "org.ergoplatform:avldb_2.12:6.0.5:compile",
+      "org.ergoplatform:ergo-core_2.12:6.0.5:runtime",
+      "org.ergoplatform:ergo-wallet_2.12:6.0.5:compile;runtime",
+      "org.ethereum:leveldbjni-all:1.18.3:default",
+      "org.iq80.leveldb:leveldb:0.12:default",
+      "org.iq80.leveldb:leveldb-api:0.12:default",
+      "org.rudogma:supertagged_2.12:2.0-RC2:default",
+      "org.scala-lang:scala-library:2.12.21:default",
+      "org.scala-lang:scala-reflect:2.12.21:default",
+      "org.scala-lang.modules:scala-collection-compat_2.12:2.7.0:default",
+      "org.scodec:scodec-bits_2.12:1.1.34:default",
+      "org.scorexfoundation:debox_2.12:0.10.0:default",
+      "org.scorexfoundation:scorex-util_2.12:0.2.2:default",
+      "org.scorexfoundation:scrypto_2.12:3.1.1:default",
+      "org.scorexfoundation:sigma-state_2.12:6.0.6:default",
+      "org.slf4j:slf4j-api:1.7.36:default",
+      "org.typelevel:algebra_2.12:2.0.0-M2:default",
+      "org.typelevel:cats-core_2.12:2.13.0:default",
+      "org.typelevel:cats-kernel_2.12:2.13.0:default",
+      "org.typelevel:jawn-parser_2.12:1.6.0:default",
+      "org.typelevel:machinist_2.12:0.6.8:default",
+      "org.typelevel:macro-compat_2.12:1.1.1:default",
+      "org.typelevel:spire-macros_2.12:0.17.0-M1:default",
+      "org.typelevel:spire-platform_2.12:0.16.2:default",
+      "org.typelevel:spire-util_2.12:0.16.2:default",
+      "org.typelevel:spire_2.12:0.16.2:default"
+    ],
+    "resolved_artifact_sha256": [
+      {
+        "name": "ergo-core_2.12.jar",
+        "sha256": "2376ab4a6a83721b666e1d53cdc861ba0bc56beb267cbeb66002e37b7ac0f7e0"
+      },
+      {
+        "name": "ergo-wallet_2.12.jar",
+        "sha256": "5d7b71b14bbca1db20ee0610ea8ba729fa113a1d6cce7823f0a9f746eae9fa88"
+      },
+      {
+        "name": "sigma-state_2.12-6.0.6.jar",
+        "sha256": "91423ee0dc5857ee53568e655fcc77abdc36f67f735897eefee576a4e37f1898"
+      },
+      {
+        "name": "circe-parser_2.12-0.14.15.jar",
+        "sha256": "2d3542ebb5cc6a30518a11e54c3055c588ce19e8e10813134064ac6761cc590f"
+      },
+      {
+        "name": "avldb_2.12.jar",
+        "sha256": "3fd79ad8ed2bbe0169801b1d7ce7bce24fd4961691dcc79ea19f1fcd040c8881"
+      },
+      {
+        "name": "scala-library-2.12.21.jar",
+        "sha256": "e2f4040c95cc4dd1cfeaae38bdde596e4b36933632451efa7d8564c6a359510c"
+      },
+      {
+        "name": "ficus_2.12-1.4.7.jar",
+        "sha256": "ae0834b6d7ed386c0c8aa3c4eeca33d1b4932b6562f0ce047a5a52eb0343ca22"
+      },
+      {
+        "name": "circe-core_2.12-0.14.15.jar",
+        "sha256": "1bb842f33a9f9e6540669a2926468500c7d8f782f417c15c76ca77eca26125b1"
+      },
+      {
+        "name": "circe-generic_2.12-0.14.15.jar",
+        "sha256": "08da76041a9f216ef91e8d2fc2973672d45471e3127aea81fb9c971002714596"
+      },
+      {
+        "name": "scodec-bits_2.12-1.1.34.jar",
+        "sha256": "3754e6ed81d25c872dee8383e27830eac474f77251af0bf5d06ec5bc78bcfb3d"
+      },
+      {
+        "name": "scala-reflect-2.12.21.jar",
+        "sha256": "8b91a08ba69a0564689793e732f06768d0914ec9e90fa8c3d1b55c5bf4600c14"
+      },
+      {
+        "name": "debox_2.12-0.10.0.jar",
+        "sha256": "7e1a47b430e6ad9bb7943b384805f99140554e4fe53aa787721dc4e49a7932e9"
+      },
+      {
+        "name": "scala-collection-compat_2.12-2.7.0.jar",
+        "sha256": "fb68864a0248af0979d45921869eb1230b5926aa61e5c0a8737c3f73ae582e92"
+      },
+      {
+        "name": "scorex-util_2.12-0.2.2.jar",
+        "sha256": "4e3b0422a747b02fc83a7fd7659fc4453abc813c7b95ab858d13f63832bdd80e"
+      },
+      {
+        "name": "bcprov-jdk15to18-1.85.1.jar",
+        "sha256": "ffd4186dab3cb1663572f493814c4ecdfdc6c950783b566072907c6d32dc10bc"
+      },
+      {
+        "name": "fastparse_2.12-2.3.3.jar",
+        "sha256": "99ebdabb902a79b9fedd90d6f2b459eff6982849ecd0a80f958218bad9175120"
+      },
+      {
+        "name": "scrypto_2.12-3.1.1.jar",
+        "sha256": "a9b44951038cd4049b997cebfb24c64b3b664a2427ac550be09030ad4119830a"
+      },
+      {
+        "name": "circe-jawn_2.12-0.14.15.jar",
+        "sha256": "82744fca9206db561a81090715d79efaeb6c720d1bea753cc579f34eb1a82cc3"
+      },
+      {
+        "name": "leveldbjni-all-1.18.3.jar",
+        "sha256": "18da00444c77080d4422b16c9d4750c4addabda350b702b4a6d628b86658e585"
+      },
+      {
+        "name": "leveldb-0.12.jar",
+        "sha256": "3c12eafb8bff359f97aec4d7574480cfc06e83f44704de020a1c0627651ba4b6"
+      },
+      {
+        "name": "logback-classic-1.2.13.jar",
+        "sha256": "937afb220b91d8a394d78befdbf587c71aeed289d582e2a91e72a7d92172371d"
+      },
+      {
+        "name": "guava-23.0.jar",
+        "sha256": "7baa80df284117e5b945b19b98d367a85ea7b7801bd358ff657946c3bd1b6596"
+      },
+      {
+        "name": "spire_2.12-0.16.2.jar",
+        "sha256": "113ad947fcdb0c387e96384be9193f624d8513b6e554441b8b86dcc9bbf189a5"
+      },
+      {
+        "name": "config-1.3.4.jar",
+        "sha256": "8aa8931d8143154f86d393d4a85cfa207a884f16469cdf314dc8d6abba3f1438"
+      },
+      {
+        "name": "macro-compat_2.12-1.1.1.jar",
+        "sha256": "8b1514ec99ac9c7eded284367b6c9f8f17a097198a44e6f24488706d66bbd2b8"
+      },
+      {
+        "name": "circe-numbers_2.12-0.14.15.jar",
+        "sha256": "a7bd4db65baa06d3f50b7488ec572cf1f49beab06e850b4012885b730e5a93c8"
+      },
+      {
+        "name": "cats-core_2.12-2.13.0.jar",
+        "sha256": "4b92d574b01cf448018707de8bf20a2c37d0f6c6bd657a0f3c1be762761a310e"
+      },
+      {
+        "name": "shapeless_2.12-2.3.13.jar",
+        "sha256": "b5e71ed111548ebff93272d710402a6c40fbcc6b50c2d2d6f164b0e3c315c001"
+      },
+      {
+        "name": "spire-macros_2.12-0.17.0-M1.jar",
+        "sha256": "8d687fc799a295a7c99751062bca24d8ce857bedaadbf7d0bdc98a819cce3316"
+      },
+      {
+        "name": "scala-logging_2.12-3.9.5.jar",
+        "sha256": "392979e5525856737a6f2398e25789d0b2057c8e3c55045a6e8d9704c21de7a6"
+      },
+      {
+        "name": "supertagged_2.12-2.0-RC2.jar",
+        "sha256": "a14e9782f09d747323dacac7adcdefa9aa105012c5c42017971868c5c663a7b7"
+      },
+      {
+        "name": "sourcecode_2.12-0.2.3.jar",
+        "sha256": "f686fc27121eace778250557d391cbbfe46843ab91fe107a8600564a492c83d2"
+      },
+      {
+        "name": "geny_2.12-0.6.10.jar",
+        "sha256": "07be2815eae87b0f0397f4ea628c4002d744b7be43a04b73fc62429e67ff6915"
+      },
+      {
+        "name": "jawn-parser_2.12-1.6.0.jar",
+        "sha256": "3ac478a24fd55caed61c2ccb10dda337549409684decc1279a2e71b45da3ea2f"
+      },
+      {
+        "name": "leveldb-api-0.12.jar",
+        "sha256": "3af7f350ab81cba9a35cbf874e64c9086fdbc5464643fdac00a908bbf6f5bfed"
+      },
+      {
+        "name": "logback-core-1.2.13.jar",
+        "sha256": "07b1586faf220c05821d0f3ed8e2e417e214c83f40641f76e8a90b134c31ff6b"
+      },
+      {
+        "name": "slf4j-api-1.7.36.jar",
+        "sha256": "d3ef575e3e4979678dc01bf1dcce51021493b4d11fb7f1be8ad982877c16a1c0"
+      },
+      {
+        "name": "jsr305-3.0.2.jar",
+        "sha256": "766ad2a0783f2687962c8ad74ceecc38a28b9f72a2d085ee438b7813e928d0c7"
+      },
+      {
+        "name": "error_prone_annotations-2.0.18.jar",
+        "sha256": "cb4cfad870bf563a07199f3ebea5763f0dec440fcda0b318640b1feaa788656b"
+      },
+      {
+        "name": "j2objc-annotations-1.1.jar",
+        "sha256": "2994a7eb78f2710bd3d3bfb639b2c94e219cedac0d4d084d516e78c16dddecf6"
+      },
+      {
+        "name": "animal-sniffer-annotations-1.14.jar",
+        "sha256": "2068320bd6bad744c3673ab048f67e30bef8f518996fa380033556600669905d"
+      },
+      {
+        "name": "spire-platform_2.12-0.16.2.jar",
+        "sha256": "38fb668da6b6e3f1c71347868c2360f934352e656acc7c92489e444f28434e97"
+      },
+      {
+        "name": "spire-util_2.12-0.16.2.jar",
+        "sha256": "0a6cbe2ce91ba32f699fbc96188af1f9583091e2dda00b98f5e088a9dc2eeb1d"
+      },
+      {
+        "name": "machinist_2.12-0.6.8.jar",
+        "sha256": "570aede4e5e88f4f881aa6a49d958b76af3457aa3662bd590d254eb7d64c08e0"
+      },
+      {
+        "name": "algebra_2.12-2.0.0-M2.jar",
+        "sha256": "461acb40d654f78288908cfb298600b9ee60f77c9e74f9e883c7b2f9a21fe0a5"
+      },
+      {
+        "name": "cats-kernel_2.12-2.13.0.jar",
+        "sha256": "daeb592b533bd9d6400aac1397d780ff22ca672e98f4dc69c08fd0ceba3fa0ed"
+      }
+    ],
+    "runtime_classpath_sha256": [
+      {
+        "name": "scala-library-2.12.21.jar",
+        "sha256": "e2f4040c95cc4dd1cfeaae38bdde596e4b36933632451efa7d8564c6a359510c"
+      },
+      {
+        "name": "ergo-core_2.12.jar",
+        "sha256": "2376ab4a6a83721b666e1d53cdc861ba0bc56beb267cbeb66002e37b7ac0f7e0"
+      },
+      {
+        "name": "ergo-wallet_2.12.jar",
+        "sha256": "5d7b71b14bbca1db20ee0610ea8ba729fa113a1d6cce7823f0a9f746eae9fa88"
+      },
+      {
+        "name": "sigma-state_2.12-6.0.6.jar",
+        "sha256": "91423ee0dc5857ee53568e655fcc77abdc36f67f735897eefee576a4e37f1898"
+      },
+      {
+        "name": "circe-parser_2.12-0.14.15.jar",
+        "sha256": "2d3542ebb5cc6a30518a11e54c3055c588ce19e8e10813134064ac6761cc590f"
+      },
+      {
+        "name": "avldb_2.12.jar",
+        "sha256": "3fd79ad8ed2bbe0169801b1d7ce7bce24fd4961691dcc79ea19f1fcd040c8881"
+      },
+      {
+        "name": "ficus_2.12-1.4.7.jar",
+        "sha256": "ae0834b6d7ed386c0c8aa3c4eeca33d1b4932b6562f0ce047a5a52eb0343ca22"
+      },
+      {
+        "name": "circe-core_2.12-0.14.15.jar",
+        "sha256": "1bb842f33a9f9e6540669a2926468500c7d8f782f417c15c76ca77eca26125b1"
+      },
+      {
+        "name": "circe-generic_2.12-0.14.15.jar",
+        "sha256": "08da76041a9f216ef91e8d2fc2973672d45471e3127aea81fb9c971002714596"
+      },
+      {
+        "name": "scodec-bits_2.12-1.1.34.jar",
+        "sha256": "3754e6ed81d25c872dee8383e27830eac474f77251af0bf5d06ec5bc78bcfb3d"
+      },
+      {
+        "name": "scala-reflect-2.12.21.jar",
+        "sha256": "8b91a08ba69a0564689793e732f06768d0914ec9e90fa8c3d1b55c5bf4600c14"
+      },
+      {
+        "name": "debox_2.12-0.10.0.jar",
+        "sha256": "7e1a47b430e6ad9bb7943b384805f99140554e4fe53aa787721dc4e49a7932e9"
+      },
+      {
+        "name": "scala-collection-compat_2.12-2.7.0.jar",
+        "sha256": "fb68864a0248af0979d45921869eb1230b5926aa61e5c0a8737c3f73ae582e92"
+      },
+      {
+        "name": "scorex-util_2.12-0.2.2.jar",
+        "sha256": "4e3b0422a747b02fc83a7fd7659fc4453abc813c7b95ab858d13f63832bdd80e"
+      },
+      {
+        "name": "bcprov-jdk15to18-1.85.1.jar",
+        "sha256": "ffd4186dab3cb1663572f493814c4ecdfdc6c950783b566072907c6d32dc10bc"
+      },
+      {
+        "name": "fastparse_2.12-2.3.3.jar",
+        "sha256": "99ebdabb902a79b9fedd90d6f2b459eff6982849ecd0a80f958218bad9175120"
+      },
+      {
+        "name": "scrypto_2.12-3.1.1.jar",
+        "sha256": "a9b44951038cd4049b997cebfb24c64b3b664a2427ac550be09030ad4119830a"
+      },
+      {
+        "name": "circe-jawn_2.12-0.14.15.jar",
+        "sha256": "82744fca9206db561a81090715d79efaeb6c720d1bea753cc579f34eb1a82cc3"
+      },
+      {
+        "name": "leveldbjni-all-1.18.3.jar",
+        "sha256": "18da00444c77080d4422b16c9d4750c4addabda350b702b4a6d628b86658e585"
+      },
+      {
+        "name": "leveldb-0.12.jar",
+        "sha256": "3c12eafb8bff359f97aec4d7574480cfc06e83f44704de020a1c0627651ba4b6"
+      },
+      {
+        "name": "logback-classic-1.2.13.jar",
+        "sha256": "937afb220b91d8a394d78befdbf587c71aeed289d582e2a91e72a7d92172371d"
+      },
+      {
+        "name": "guava-23.0.jar",
+        "sha256": "7baa80df284117e5b945b19b98d367a85ea7b7801bd358ff657946c3bd1b6596"
+      },
+      {
+        "name": "spire_2.12-0.16.2.jar",
+        "sha256": "113ad947fcdb0c387e96384be9193f624d8513b6e554441b8b86dcc9bbf189a5"
+      },
+      {
+        "name": "config-1.3.4.jar",
+        "sha256": "8aa8931d8143154f86d393d4a85cfa207a884f16469cdf314dc8d6abba3f1438"
+      },
+      {
+        "name": "macro-compat_2.12-1.1.1.jar",
+        "sha256": "8b1514ec99ac9c7eded284367b6c9f8f17a097198a44e6f24488706d66bbd2b8"
+      },
+      {
+        "name": "circe-numbers_2.12-0.14.15.jar",
+        "sha256": "a7bd4db65baa06d3f50b7488ec572cf1f49beab06e850b4012885b730e5a93c8"
+      },
+      {
+        "name": "cats-core_2.12-2.13.0.jar",
+        "sha256": "4b92d574b01cf448018707de8bf20a2c37d0f6c6bd657a0f3c1be762761a310e"
+      },
+      {
+        "name": "shapeless_2.12-2.3.13.jar",
+        "sha256": "b5e71ed111548ebff93272d710402a6c40fbcc6b50c2d2d6f164b0e3c315c001"
+      },
+      {
+        "name": "spire-macros_2.12-0.17.0-M1.jar",
+        "sha256": "8d687fc799a295a7c99751062bca24d8ce857bedaadbf7d0bdc98a819cce3316"
+      },
+      {
+        "name": "scala-logging_2.12-3.9.5.jar",
+        "sha256": "392979e5525856737a6f2398e25789d0b2057c8e3c55045a6e8d9704c21de7a6"
+      },
+      {
+        "name": "supertagged_2.12-2.0-RC2.jar",
+        "sha256": "a14e9782f09d747323dacac7adcdefa9aa105012c5c42017971868c5c663a7b7"
+      },
+      {
+        "name": "sourcecode_2.12-0.2.3.jar",
+        "sha256": "f686fc27121eace778250557d391cbbfe46843ab91fe107a8600564a492c83d2"
+      },
+      {
+        "name": "geny_2.12-0.6.10.jar",
+        "sha256": "07be2815eae87b0f0397f4ea628c4002d744b7be43a04b73fc62429e67ff6915"
+      },
+      {
+        "name": "jawn-parser_2.12-1.6.0.jar",
+        "sha256": "3ac478a24fd55caed61c2ccb10dda337549409684decc1279a2e71b45da3ea2f"
+      },
+      {
+        "name": "leveldb-api-0.12.jar",
+        "sha256": "3af7f350ab81cba9a35cbf874e64c9086fdbc5464643fdac00a908bbf6f5bfed"
+      },
+      {
+        "name": "logback-core-1.2.13.jar",
+        "sha256": "07b1586faf220c05821d0f3ed8e2e417e214c83f40641f76e8a90b134c31ff6b"
+      },
+      {
+        "name": "slf4j-api-1.7.36.jar",
+        "sha256": "d3ef575e3e4979678dc01bf1dcce51021493b4d11fb7f1be8ad982877c16a1c0"
+      },
+      {
+        "name": "jsr305-3.0.2.jar",
+        "sha256": "766ad2a0783f2687962c8ad74ceecc38a28b9f72a2d085ee438b7813e928d0c7"
+      },
+      {
+        "name": "error_prone_annotations-2.0.18.jar",
+        "sha256": "cb4cfad870bf563a07199f3ebea5763f0dec440fcda0b318640b1feaa788656b"
+      },
+      {
+        "name": "j2objc-annotations-1.1.jar",
+        "sha256": "2994a7eb78f2710bd3d3bfb639b2c94e219cedac0d4d084d516e78c16dddecf6"
+      },
+      {
+        "name": "animal-sniffer-annotations-1.14.jar",
+        "sha256": "2068320bd6bad744c3673ab048f67e30bef8f518996fa380033556600669905d"
+      },
+      {
+        "name": "spire-platform_2.12-0.16.2.jar",
+        "sha256": "38fb668da6b6e3f1c71347868c2360f934352e656acc7c92489e444f28434e97"
+      },
+      {
+        "name": "spire-util_2.12-0.16.2.jar",
+        "sha256": "0a6cbe2ce91ba32f699fbc96188af1f9583091e2dda00b98f5e088a9dc2eeb1d"
+      },
+      {
+        "name": "machinist_2.12-0.6.8.jar",
+        "sha256": "570aede4e5e88f4f881aa6a49d958b76af3457aa3662bd590d254eb7d64c08e0"
+      },
+      {
+        "name": "algebra_2.12-2.0.0-M2.jar",
+        "sha256": "461acb40d654f78288908cfb298600b9ee60f77c9e74f9e883c7b2f9a21fe0a5"
+      },
+      {
+        "name": "cats-kernel_2.12-2.13.0.jar",
+        "sha256": "daeb592b533bd9d6400aac1397d780ff22ca672e98f4dc69c08fd0ceba3fa0ed"
+      }
+    ],
+    "ergo_wallet_version": "6.0.5"
+  },
+  "rust": {
+    "git_sha": "b3d508c8eff7db2f333a1051fb00b8343b415da6",
+    "toolchain": "rustc 1.95.0 (59807616e 2026-04-14)\nbinary: rustc\ncommit-hash: 59807616e1fa2540724bfbac14d7976d7e4a3860\ncommit-date: 2026-04-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.95.0\nLLVM version: 22.1.2",
+    "features": [
+      "diagnostics"
+    ],
+    "observation_patch_applied": true
+  },
+  "tool": {
+    "script": "test-vectors/scripts/scala/ComputeTransactionCosts.scala",
+    "git_sha": "e3f06d89b0da8698df97b0f3c4a00bd312f3bdc2",
+    "scala_cli_version": "Scala CLI version: 1.12.1",
+    "jvm_version": "openjdk version \"17.0.17\" 2025-10-21 LTS\nOpenJDK Runtime Environment Corretto-17.0.17.10.1 (build 17.0.17+10-LTS)\nOpenJDK 64-Bit Server VM Corretto-17.0.17.10.1 (build 17.0.17+10-LTS, mixed mode, sharing)",
+    "observation_patch": "diff --git a/ergo-validation/tests/it/cost_parity.rs b/ergo-validation/tests/it/cost_parity.rs\nindex 1448f156..2b3b7dba 100644\n--- a/ergo-validation/tests/it/cost_parity.rs\n+++ b/ergo-validation/tests/it/cost_parity.rs\n@@ -530,6 +530,21 @@ mod ranges {\n             ergo_sigma::cost_trace::enable();\n             let result = validate_transaction(&tx_bytes, &utxo, policy, &mut tx_cx);\n             let trace = ergo_sigma::cost_trace::take().unwrap();\n+            eprintln!(\n+                \"L4_OBSERVATION {}\",\n+                serde_json::json!({\n+                    \"range\": range.label,\n+                    \"tx_id\": v.id,\n+                    \"height\": v.height,\n+                    \"rust_total_block_cost\": cost.total_block_cost(),\n+                    \"error\": result.as_ref().err().map(ToString::to_string),\n+                    \"missing_utxo\": matches!(result, Err(ValidationError::InputBoxNotFound { .. } | ValidationError::DataInputBoxNotFound { .. })),\n+                    \"trace\": trace.entries.iter().filter(|e| {\n+                        [\"InputStart:\", \"InputEnd:\", \"Crypto:\", \"Rent:\", \"TxInit\", \"TxToken\"]\n+                            .iter().any(|prefix| e.label.starts_with(prefix))\n+                    }).map(|e| serde_json::json!({\"label\": e.label, \"delta\": e.delta, \"total\": e.total})).collect::<Vec<_>>(),\n+                })\n+            );\n             match result {\n                 Ok(checked) => {\n                     let rust_cost = cost.total_block_cost();\n",
+    "extraction_patch": "diff --git a/test-vectors/scripts/extract_transactions_batch.sh b/test-vectors/scripts/extract_transactions_batch.sh\nindex 83cee9f0..2f47fa0c 100755\n--- a/test-vectors/scripts/extract_transactions_batch.sh\n+++ b/test-vectors/scripts/extract_transactions_batch.sh\n@@ -20,7 +20,7 @@ START_HEIGHT=$1\n END_HEIGHT=$2\n OUTPUT_FILE=$3\n TMPDIR=$(mktemp -d)\n-trap 'rm -rf \"$TMPDIR\"' EXIT\n+trap 'echo \"Retained transaction scratch: $TMPDIR\" >&2' EXIT\n \n echo \"Phase 1: Fetching transactions from API ($START_HEIGHT to $END_HEIGHT)...\" >&2\n \ndiff --git a/test-vectors/scripts/extract_tx_costs.sh b/test-vectors/scripts/extract_tx_costs.sh\nindex 21fe6634..9ebbf6ec 100755\n--- a/test-vectors/scripts/extract_tx_costs.sh\n+++ b/test-vectors/scripts/extract_tx_costs.sh\n@@ -23,9 +23,9 @@ echo \"Extracting costs for heights $START_HEIGHT to $END_HEIGHT...\" >&2\n echo \"Node: ${NODE_URL:-http://localhost:9053}\" >&2\n echo \"\" >&2\n \n-$SCALA_CLI run \"$SCALA_SCRIPT\" -- \"$START_HEIGHT\" \"$END_HEIGHT\" > \"$OUTPUT_FILE\" 2>/tmp/cost_extract_stderr.txt\n+$SCALA_CLI run \"$SCALA_SCRIPT\" -- \"$START_HEIGHT\" \"$END_HEIGHT\" > \"$OUTPUT_FILE\" 2>${TMPDIR}/cost_extract_stderr.txt\n \n-cat /tmp/cost_extract_stderr.txt >&2\n+cat ${TMPDIR}/cost_extract_stderr.txt >&2\n \n TX_COUNT=$(python3 -c \"import json; print(len(json.load(open('$OUTPUT_FILE'))))\" 2>/dev/null || echo \"?\")\n \n",
+    "source_sha256": {
+      "test-vectors/scripts/scala/ComputeTransactionCosts.scala": "ac33833e100537425c28432d8b58647ff152eef6f67add2f2942c90fb7c4b3e5",
+      "test-vectors/scripts/scala/BatchPrintTransactionBytes.scala": "8b8b72f9263630f0dd66843d138325bb82618ef3d5874df18590543d7e1bf25f",
+      "test-vectors/scripts/scala/BatchPrintHeaderBytes.scala": "2e2e6b506fea3c49637153074e1a1738c991d56254e610a0847c405842290d10",
+      "test-vectors/scripts/extract_all_cost_vectors.sh": "6ce3f64254b8c4a9d1960425bf1ca1cb12e67879726f34ada364a5415794093d"
+    },
+    "script_sha": "e3f06d89b0da8698df97b0f3c4a00bd312f3bdc2",
+    "scala_cli": "Scala CLI version: 1.12.1",
+    "jvm": "openjdk version \"17.0.17\" 2025-10-21 LTS\nOpenJDK Runtime Environment Corretto-17.0.17.10.1 (build 17.0.17+10-LTS)\nOpenJDK 64-Bit Server VM Corretto-17.0.17.10.1 (build 17.0.17+10-LTS, mixed mode, sharing)"
+  },
+  "run": {
+    "command": "cargo test -p ergo-validation --features diagnostics --test it cost_parity::ranges -- --nocapture --test-threads=1 --skip cost_parity_all_ranges_match_jvm --skip cost_parity_700000_700200_matches_jvm",
+    "seeds": null,
+    "timestamp": "2026-09-15T21:18:07.842131+00:00"
+  },
+  "collection": {
+    "mode": "manifest-only; no replay",
+    "scala": {
+      "ergo_version": "6.0.5",
+      "sigmastate_version": "6.0.6",
+      "node_app_version": "6.0.5",
+      "source_shas": {
+        "sigmastate_v6.0.2": "23dd29f612249c169d09fae9bca76d7cc02e144c",
+        "ergo_v6.0.2": "2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1",
+        "ergo_v6.0.5": "5528ef569a41ebccbc8658212e6ee3c97d990b96",
+        "sigmastate_v6.0.6": "ab0b15ceb9d34f2ccd6e68e3e2a8aa27cd16a042"
+      }
+    },
+    "rust": {
+      "git_sha": "5d398b0cc6d97659fa70b884b03f0dce2d453f9e",
+      "toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
+      "features": [
+        "diagnostics",
+        "cost-trace",
+        "test-helpers"
+      ],
+      "working_diff_sha256": "93554b711be05b0af2bbc68d690d1eff9ea6f52e391afb1cf5f40a50f5cd2c57"
+    },
+    "tool": {
+      "script": "test-vectors/scripts/scala/ComputeTransactionCosts.scala",
+      "script_sha": "8c1ed4744e652e0b6ed3ada83be5ea0c7e3d3730",
+      "script_sha256": "c168b360346895c980286458917b4e99e53d59cfcd7eb06402b65701279529e5",
+      "scala_cli": "Scala CLI version: 1.12.1\nScala version (default): 3.8.1\nYour Scala CLI version is outdated. The newest version is 1.17.1\nIt is recommended that you update Scala CLI through the same tool or method you used for its initial installation for avoiding the creation of outdated duplicates.",
+      "jvm": "openjdk version \"17.0.17\" 2025-10-21 LTS\nOpenJDK Runtime Environment Corretto-17.0.17.10.1 (build 17.0.17+10-LTS)\nOpenJDK 64-Bit Server VM Corretto-17.0.17.10.1 (build 17.0.17+10-LTS, mixed mode, sharing)",
+      "writer": "scripts/l4-results-manifest.py",
+      "writer_sha256": "75999ccfe0de8055998c6643f52ffcb045e56c118095ad758a09b4645485c7e8"
+    },
+    "run": {
+      "command": "python3 scripts/l4-results-manifest.py --manifest-only test-vectors/ergo-sigma/cost-ledger/results/l4-2026-09-16-task-5.1.json --log .superpowers/sdd/2026-09-15-jit-cost-conformance-plan/l4-logs/replay.log",
+      "seeds": [],
+      "timestamp": "2026-09-20T01:22:02.044915+00:00"
+    }
+  },
+  "recorded_evidence": {
+    "sha256": {
+      "test-vectors/mainnet/tx_costs_500000_501000.json": "9fe1b5aa23eefe71a68b6bef7386d442688f005d6399a4cd4d993da30f2ae7f7",
+      "test-vectors/mainnet/transactions_500000_501000.json": "abafb1396ceede8c503cb3b0a2fc2e4fa846683c9114e1a50603eafd5caed2fa",
+      "test-vectors/mainnet/headers_499991_501300.json": "9eee5b3d24e70eaf5ea09e4897cfafe984bbdc181fed3097e0fe8e04b0ad1941",
+      "test-vectors/mainnet/tx_costs_700000_701000.json": "19554f5053ad5ac4554f1d410530d657fa45296d38e0e501d969ba14a8c9ca6d",
+      "test-vectors/mainnet/transactions_700000_701000.json": "993bccfeffccd3c4a4f9b425c420ffbcac2f68d1688a52673ec7664716f5b97e",
+      "test-vectors/mainnet/headers_699991_701300.json": "9687e17ee4bb775805b8ca1acd10b5a0edbd023badc9131103a84d6de178b27e",
+      "test-vectors/mainnet/tx_costs_750000_751000.json": "655100ef867f0381c5fc54a684e3197752fe2867949979ed365476bf79b0acaf",
+      "test-vectors/mainnet/transactions_750000_751000.json": "7d57438410ab7399efcfdbabc6fce991a975dd60be16a17efca9b90c8d46a3fe",
+      "test-vectors/mainnet/headers_749991_751300.json": "3a93b85d8e65c77c17a09f05ec333158b4abcc102412a266e1c465c37617a393",
+      "test-vectors/mainnet/tx_costs_889000_890000.json": "2e9aab17aaeef06cd1c2c75d3c6be1fdb59c2dfff58c4af9ad10249ed2038b11",
+      "test-vectors/mainnet/transactions_889000_890000.json": "b4702766fd8730b38703e48d4b34252b8231726a955574cdce4e479a6bba2776",
+      "test-vectors/mainnet/headers_888991_890300.json": "e598d807f8393d4642a95c65755605318d836518005ad4f73194913c4d1a92ad",
+      "test-vectors/mainnet/tx_costs_900000_901000.json": "a3fc61396a7b7865b95fd9f132ced1b35f92da1a309f3e3c9a3373edb20b0cc9",
+      "test-vectors/mainnet/transactions_900000_901000.json": "2daed16a8e79aafa1e7112008d78a2169f84a8a5d0b0d51e2ecbed8c3c032430",
+      "test-vectors/mainnet/headers_899991_901300.json": "c195491dbafcfaadbac4b8f4dfde686d687c49966dcef52622c67844a0713c68",
+      "test-vectors/mainnet/tx_costs_1000000_1001000.json": "9c29e77747bcacbce2b7e98d27ee2ff588cdce31011b56c3ac2f7fc33f77cc87",
+      "test-vectors/mainnet/transactions_1000000_1001000.json": "106098a3547c8a6b12536dbc3ea979099cc22f4111775feb6c290e9cd96fc8bc",
+      "test-vectors/mainnet/headers_999991_1001300.json": "fa40db7e55b53269325d09f0fa35511616013a692c4cc950e9623cec955191ec",
+      "test-vectors/mainnet/tx_costs_1100000_1101000.json": "29ef1cbc997da915abdaf8ce75bec1467d962815ce5c225eed767704c274771e",
+      "test-vectors/mainnet/transactions_1100000_1101000.json": "20af25da2af9878adfac82ad75fd3ccdaaf9020388afd2251aef95e98283870d",
+      "test-vectors/mainnet/headers_1099991_1101300.json": "86e11368a38daa2e2ab34644f491eb3ea7331cc526dd2be82f8f819beb815126",
+      "test-vectors/mainnet/tx_costs_1300000_1301000.json": "ba78024b8c6ef5319678233138c9fcf61a3d3a5f9a12bc340686102a0a9e2f0c",
+      "test-vectors/mainnet/transactions_1300000_1301000.json": "d26165984ebaf352148b73f0d09ba054234bb611dd6f7285357fd6bf18572eef",
+      "test-vectors/mainnet/headers_1299991_1301300.json": "75894b16f714865c15a76ddd82c5bef400bebd479fd7f232f3b4e79283d3409f",
+      "test-vectors/mainnet/tx_costs_1500000_1501000.json": "a9e9facd01857dac5041994dc34c76c90dedf097bcc67c1b54a35f199d2c9ee1",
+      "test-vectors/mainnet/transactions_1500000_1501000.json": "e856f77fad8d1e716205cba5067f84ca752418c9fa64b489ba1a99b4123c34bd",
+      "test-vectors/mainnet/headers_1499991_1501300.json": "469b12d44d984db1d884049fee4f5fb28c5c87e8cd8fcda4264bb32a749354e5",
+      "test-vectors/mainnet/tx_costs_1750000_1751000.json": "46dda4af256b33297b36c7e0b5568b9f7d208ce4ea857ca3258bf8619b36774b",
+      "test-vectors/mainnet/transactions_1750000_1751000.json": "569688082426fa4d5474b71f8ed3d74c1a5beac4fa5a97fd0bbd592e8de6ec58",
+      "test-vectors/mainnet/headers_1749991_1751300.json": "08af32cd37254d1dea3eb92ebffb418a552a9cf15fca864c9a4ad07f208f65bb",
+      ".superpowers/sdd/2026-09-15-jit-cost-conformance-plan/l4-logs/replay.log": "0ca07a30f74a063fccc1e9816670a5a0952f0eb3339c4829f986845fd6f99ec4",
+      ".superpowers/sdd/2026-09-15-jit-cost-conformance-plan/l4-logs/extraction.log": "eb791c98987a0bba763716ea09e174585c95125e94a37ca34f885fe01dfd2c29",
+      ".superpowers/sdd/2026-09-15-jit-cost-conformance-plan/l4-logs/cs-resolve.txt": "4eabc7bb5d438514d3f289cb02c0f5ece90f2a52bbf990fd319272e71ec84991",
+      ".superpowers/sdd/2026-09-15-jit-cost-conformance-plan/l4-logs/cs-artifacts.txt": "2c4ec1b452654a12bb5a0c39c8b1636a3782fc27a6db744c6ccbf6640a667ad3",
+      ".superpowers/sdd/2026-09-15-jit-cost-conformance-plan/l4-logs/historical-parameters.json": "3d7c01fc864f5245d400ed0d01a9d03f70dcff95f8b40d968c940e5f89d95536",
+      "test-vectors/scripts/scala/ComputeTransactionCosts.scala": "ac33833e100537425c28432d8b58647ff152eef6f67add2f2942c90fb7c4b3e5",
+      ".superpowers/sdd/2026-09-15-jit-cost-conformance-plan/l4-logs/replay-unmodified.log": "7bd1a7f9a5c7a864b1e6270d443ad309880014ec44febd09b169685034bd8b40",
+      ".superpowers/sdd/2026-09-15-jit-cost-conformance-plan/l4-logs/vector-audit.log": "950e8fac34ba2b25e826d2760ea5960b69bcb41d59f23d93c314ba9faf3163b9",
+      ".superpowers/sdd/2026-09-15-jit-cost-conformance-plan/l4-logs/summarize.py": "6a69c39d61310879d3317d2ed98f4c00fa8767b071cca03d0acba790d263be5e",
+      ".superpowers/sdd/2026-09-15-jit-cost-conformance-plan/l4-logs/audit_vectors.py": "8d51e351010c55b2448125aec6a3751846405611b1af35af2673e5838686f143",
+      ".superpowers/sdd/2026-09-15-jit-cost-conformance-plan/l4-logs/node-info.json": "958ade0dee235b256558e737d7aa68a924ed9a9f592d1520f04ebc0c298dde92",
+      "test-vectors/mainnet/transactions_700000_700200.json": "3f7d5764abd8f611c473844e7a23b0fc26531821469e752b5f9a5a4b081f5bac",
+      "test-vectors/mainnet/tx_costs_700000_700200.json": "267b3cee7257b8beb3f5b2c8d0078986a68164a0667355fd761f5c5e28dc5bee",
+      ".superpowers/sdd/2026-09-15-jit-cost-conformance-plan/l4-logs/fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".superpowers/sdd/2026-09-15-jit-cost-conformance-plan/l4-logs/fmt-check.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".superpowers/sdd/2026-09-15-jit-cost-conformance-plan/l4-logs/clippy.log": "0789e58bd7a09396b786fa38027740234b189377fefd75bf70ac8e2278e581f3",
+      ".superpowers/sdd/2026-09-15-jit-cost-conformance-plan/l4-logs/nextest.log": "4a3b20df1a8304e07af92033d53652667dc8029c14342451acc62690cd1cb2d9",
+      ".superpowers/sdd/2026-09-15-jit-cost-conformance-plan/l4-logs/workspace-test.log": "72a4b58b25c7fc6722328974ce8c3f017233ca9dfad708684b57b89831b02546",
+      ".superpowers/sdd/2026-09-15-jit-cost-conformance-plan/l4-logs/test-results.jsonl": "b63891b95e7d3d9c05406e7ea133c6fab174a1b575959fd169b6a69f5b39d1fe",
+      ".superpowers/sdd/2026-09-15-jit-cost-conformance-plan/l4-logs/ledger-final.log": "75f664b3ef3b848dacf956bdd0b3fb0ecf14c67a64433292c06cc6004951cda3",
+      ".superpowers/sdd/2026-09-15-jit-cost-conformance-plan/l4-logs/record_results.py": "478b2dbb014c67b0ab3f330162d8f319ce4504af791524f3cd2c710d29043fa5"
+    }
+  },
+  "context": {
+    "network": "mainnet",
+    "heights": [
+      500000,
+      1751000
+    ],
+    "mapping": "Inclusive per-range segments from mainnet epoch extension bytes; these describe chain parameters, not any historical runner approximation.",
+    "ranges": [
+      {
+        "heights": [
+          500000,
+          501000
+        ],
+        "segments": [
+          {
+            "heights": [
+              500000,
+              500735
+            ],
+            "epoch_height": 499712,
+            "activated_script_version": 1,
+            "block_version": 2,
+            "params": {
+              "4": 7030268,
+              "5": 100,
+              "6": 2000,
+              "7": 100,
+              "8": 100
+            }
+          },
+          {
+            "heights": [
+              500736,
+              501000
+            ],
+            "epoch_height": 500736,
+            "activated_script_version": 1,
+            "block_version": 2,
+            "params": {
+              "4": 7030268,
+              "5": 100,
+              "6": 2000,
+              "7": 100,
+              "8": 100
+            }
+          }
+        ]
+      },
+      {
+        "heights": [
+          700000,
+          701000
+        ],
+        "segments": [
+          {
+            "heights": [
+              700000,
+              700415
+            ],
+            "epoch_height": 699392,
+            "activated_script_version": 1,
+            "block_version": 2,
+            "params": {
+              "4": 8001091,
+              "5": 100,
+              "6": 2000,
+              "7": 100,
+              "8": 100
+            }
+          },
+          {
+            "heights": [
+              700416,
+              701000
+            ],
+            "epoch_height": 700416,
+            "activated_script_version": 1,
+            "block_version": 2,
+            "params": {
+              "4": 8001091,
+              "5": 100,
+              "6": 2000,
+              "7": 100,
+              "8": 100
+            }
+          }
+        ]
+      },
+      {
+        "heights": [
+          750000,
+          751000
+        ],
+        "segments": [
+          {
+            "heights": [
+              750000,
+              750591
+            ],
+            "epoch_height": 749568,
+            "activated_script_version": 1,
+            "block_version": 2,
+            "params": {
+              "4": 8001091,
+              "5": 100,
+              "6": 2000,
+              "7": 100,
+              "8": 103
+            }
+          },
+          {
+            "heights": [
+              750592,
+              751000
+            ],
+            "epoch_height": 750592,
+            "activated_script_version": 1,
+            "block_version": 2,
+            "params": {
+              "4": 8001091,
+              "5": 100,
+              "6": 2000,
+              "7": 100,
+              "8": 103
+            }
+          }
+        ]
+      },
+      {
+        "heights": [
+          889000,
+          890000
+        ],
+        "segments": [
+          {
+            "heights": [
+              889000,
+              889855
+            ],
+            "epoch_height": 888832,
+            "activated_script_version": 1,
+            "block_version": 2,
+            "params": {
+              "4": 8001091,
+              "5": 100,
+              "6": 2407,
+              "7": 100,
+              "8": 184
+            }
+          },
+          {
+            "heights": [
+              889856,
+              890000
+            ],
+            "epoch_height": 889856,
+            "activated_script_version": 2,
+            "block_version": 3,
+            "params": {
+              "4": 8001091,
+              "5": 100,
+              "6": 2407,
+              "7": 100,
+              "8": 184
+            }
+          }
+        ]
+      },
+      {
+        "heights": [
+          900000,
+          901000
+        ],
+        "segments": [
+          {
+            "heights": [
+              900000,
+              900095
+            ],
+            "epoch_height": 899072,
+            "activated_script_version": 2,
+            "block_version": 3,
+            "params": {
+              "4": 8001091,
+              "5": 100,
+              "6": 2407,
+              "7": 100,
+              "8": 184
+            }
+          },
+          {
+            "heights": [
+              900096,
+              901000
+            ],
+            "epoch_height": 900096,
+            "activated_script_version": 2,
+            "block_version": 3,
+            "params": {
+              "4": 8001091,
+              "5": 100,
+              "6": 2407,
+              "7": 100,
+              "8": 184
+            }
+          }
+        ]
+      },
+      {
+        "heights": [
+          1000000,
+          1001000
+        ],
+        "segments": [
+          {
+            "heights": [
+              1000000,
+              1000447
+            ],
+            "epoch_height": 999424,
+            "activated_script_version": 2,
+            "block_version": 3,
+            "params": {
+              "4": 8001091,
+              "5": 100,
+              "6": 2407,
+              "7": 100,
+              "8": 184
+            }
+          },
+          {
+            "heights": [
+              1000448,
+              1001000
+            ],
+            "epoch_height": 1000448,
+            "activated_script_version": 2,
+            "block_version": 3,
+            "params": {
+              "4": 8001091,
+              "5": 100,
+              "6": 2407,
+              "7": 100,
+              "8": 184
+            }
+          }
+        ]
+      },
+      {
+        "heights": [
+          1100000,
+          1101000
+        ],
+        "segments": [
+          {
+            "heights": [
+              1100000,
+              1100799
+            ],
+            "epoch_height": 1099776,
+            "activated_script_version": 2,
+            "block_version": 3,
+            "params": {
+              "4": 8001091,
+              "5": 100,
+              "6": 2407,
+              "7": 100,
+              "8": 184
+            }
+          },
+          {
+            "heights": [
+              1100800,
+              1101000
+            ],
+            "epoch_height": 1100800,
+            "activated_script_version": 2,
+            "block_version": 3,
+            "params": {
+              "4": 8001091,
+              "5": 100,
+              "6": 2407,
+              "7": 100,
+              "8": 184
+            }
+          }
+        ]
+      },
+      {
+        "heights": [
+          1300000,
+          1301000
+        ],
+        "segments": [
+          {
+            "heights": [
+              1300000,
+              1300479
+            ],
+            "epoch_height": 1299456,
+            "activated_script_version": 2,
+            "block_version": 3,
+            "params": {
+              "4": 8001091,
+              "5": 100,
+              "6": 2407,
+              "7": 100,
+              "8": 198
+            }
+          },
+          {
+            "heights": [
+              1300480,
+              1301000
+            ],
+            "epoch_height": 1300480,
+            "activated_script_version": 2,
+            "block_version": 3,
+            "params": {
+              "4": 8001091,
+              "5": 100,
+              "6": 2407,
+              "7": 100,
+              "8": 198
+            }
+          }
+        ]
+      },
+      {
+        "heights": [
+          1500000,
+          1501000
+        ],
+        "segments": [
+          {
+            "heights": [
+              1500000,
+              1500159
+            ],
+            "epoch_height": 1499136,
+            "activated_script_version": 2,
+            "block_version": 3,
+            "params": {
+              "4": 8001091,
+              "5": 100,
+              "6": 2407,
+              "7": 100,
+              "8": 298
+            }
+          },
+          {
+            "heights": [
+              1500160,
+              1501000
+            ],
+            "epoch_height": 1500160,
+            "activated_script_version": 2,
+            "block_version": 3,
+            "params": {
+              "4": 8001091,
+              "5": 100,
+              "6": 2407,
+              "7": 100,
+              "8": 298
+            }
+          }
+        ]
+      },
+      {
+        "heights": [
+          1750000,
+          1751000
+        ],
+        "segments": [
+          {
+            "heights": [
+              1750000,
+              1750015
+            ],
+            "epoch_height": 1748992,
+            "activated_script_version": 3,
+            "block_version": 4,
+            "params": {
+              "4": 8001091,
+              "5": 100,
+              "6": 2407,
+              "7": 100,
+              "8": 298
+            }
+          },
+          {
+            "heights": [
+              1750016,
+              1751000
+            ],
+            "epoch_height": 1750016,
+            "activated_script_version": 3,
+            "block_version": 4,
+            "params": {
+              "4": 8001091,
+              "5": 100,
+              "6": 2407,
+              "7": 100,
+              "8": 298
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "evidence": {
+    "test-vectors/ergo-sigma/cost-total/mainnet-epochs.json.gz": "a327d08fe3b8416eed8ac7c60f96d4aa90ce56f0a91854e931490236550843df",
+    ".superpowers/sdd/2026-09-15-jit-cost-conformance-plan/l4-logs/replay.log": "0ca07a30f74a063fccc1e9816670a5a0952f0eb3339c4829f986845fd6f99ec4",
+    "recorded_results_bytes_without_manifest": "1e6edb5aefa77ec47e9bc59eac4f5dd4423c3efe0ef146c36bdf93f96a11f8b6"
+  }
+},
   "scala": {
     "ergo_version": "6.0.5",
     "sigmastate_version": "6.0.6",
