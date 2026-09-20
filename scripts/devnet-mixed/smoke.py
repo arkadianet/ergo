@@ -26,6 +26,10 @@ def api(node, path, data=None):
         return json.loads(payload) if payload else None
 
 
+class PollTimeout(RuntimeError):
+    """The polling deadline expired without a successful observation."""
+
+
 def wait_for(callback, description, timeout=180):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -36,7 +40,7 @@ def wait_for(callback, description, timeout=180):
         except (OSError, ValueError):
             pass
         time.sleep(0.25)
-    raise RuntimeError('timeout: ' + description)
+    raise PollTimeout('timeout: ' + description)
 
 
 def tips(height):

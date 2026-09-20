@@ -14,7 +14,7 @@ import time
 import urllib.error
 
 from artifacts import read_members, write_archive
-from smoke import ROOT, HERE, WORK, URLS, PK, api, tips, wait_for as poll_until
+from smoke import ROOT, HERE, WORK, URLS, PK, api, tips, PollTimeout, wait_for as poll_until
 
 RESULTS = ROOT / 'test-vectors/ergo-sigma/cost-ledger/results'
 VECTORS = RESULTS.parent
@@ -226,7 +226,7 @@ def main():
         if expected == 'Accept':
             try:
                 after = wait_for(lambda: tips(block['header']['height']), label, timeout=30)
-            except RuntimeError:
+            except PollTimeout:
                 after = observations()
         else:
             deadline = time.monotonic() + 5
@@ -250,6 +250,7 @@ def main():
         if label == 'funding' and 'EmissionInvariant' in record['validation_logs']['rust']:
             raise RuntimeError('DIVERGENCE: Rust emission discovery failed after the accepted funding block')
         return record
+    primary_error = None
     try:
         subprocess.run([str(HERE / 'stop.sh')], check=True)
         for node in URLS:
@@ -376,6 +377,7 @@ def main():
         run['final'] = observations()
         run['status'] = 'PASS'
     except BaseException as error:
+        primary_error = error
         run['status'] = 'DIVERGENT' if 'DIVERGENCE' in str(error) else 'BLOCKED'
         run['failed'] = 1
         run['error'] = str(error)
@@ -393,8 +395,16 @@ def main():
             pass
         raise
     finally:
+        shutdown_error = None
         try:
             subprocess.run([str(HERE / 'stop.sh')], check=True)
+        except (OSError, subprocess.SubprocessError) as error:
+            shutdown_error = error
+            run['shutdown_error'] = str(error)
+            if primary_error is None:
+                run['status'] = 'BLOCKED'
+                run['failed'] = 1
+                run['error'] = str(error)
         finally:
             run['stopped'] = not any((WORK / (n + '.pid')).exists() for n in URLS)
             attempted = {item['selection']['case'] for item in run['workload']}
@@ -405,6 +415,8 @@ def main():
             if 'context' in run['manifest']:
                 run['manifest']['context']['height_range'][1] = run.get('final', {}).get('scala', {}).get('fullHeight')
             save()
+        if shutdown_error is not None and primary_error is None:
+            raise shutdown_error
 
 
 if __name__ == '__main__':
