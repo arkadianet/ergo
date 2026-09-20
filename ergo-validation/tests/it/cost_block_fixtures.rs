@@ -953,3 +953,13 @@ fn block_invalid_second_skips_third_matches_jvm() {
     replay(rejected);
     replay(control);
 }
+
+// ledger: BLOCK-digest-state-accounting-B005
+#[test]
+fn block_digest_delegated_accounting_matches_jvm() {
+    for name in ["h-digest-accept", "h-digest-reject"] {
+        let case = fixture(name);
+        assert!(case.digest_expected.is_some());
+        replay(case);
+    }
+}
