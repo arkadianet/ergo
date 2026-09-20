@@ -383,6 +383,6 @@ mod tests {
             },
         );
         assert_eq!(substitution_type_of(&imprecise), None);
-        assert_eq!(substitution_type_of(&Expr::Unparsed(vec![])), None);
+        assert_eq!(substitution_type_of(&Expr::Unparsed(vec![].into())), None);
     }
 }

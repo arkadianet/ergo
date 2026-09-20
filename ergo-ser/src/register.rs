@@ -135,10 +135,13 @@ pub fn read_registers(r: &mut VlqReader) -> Result<AdditionalRegisters, ReadErro
         // STuple/SColl). Version-INDEPENDENT (the JVM rejects at all ErgoTree
         // versions; the check is unconditional, not gated on isV6).
         if type_has_v6_only_type(&tpe) {
-            return Err(ReadError::InvalidData(format!(
-                "register type {tpe:?} contains a v6 type (Option / Header / \
-                 UnsignedBigInt) — rule 1019 CheckV6Type"
-            )));
+            return Err(ReadError::SigmaValidation {
+                rule_id: 1019,
+                // Scala carries one SType here, never the method-pair shape
+                // required by CheckV6Type's ChangedRule override.
+                args: vec![],
+                message: format!("register type {tpe:?} contains a v6 type (Option / Header / UnsignedBigInt) — rule 1019 CheckV6Type"),
+            });
         }
         registers.push(RegisterValue { tpe, value });
     }
@@ -739,7 +742,7 @@ mod tests {
         let mut r = VlqReader::new(&bytes);
         let err = read_registers(&mut r).expect_err("Option register must be rejected (rule 1019)");
         assert!(
-            matches!(&err, ReadError::InvalidData(m) if m.contains("1019")),
+            matches!(&err, ReadError::SigmaValidation { rule_id: 1019, .. }),
             "expected rule-1019 error, got {err:?}",
         );
     }

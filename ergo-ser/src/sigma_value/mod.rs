@@ -475,9 +475,11 @@ pub(crate) fn read_value_at_depth(
         SigmaType::SHeader => crate::header::read_header(r)
             .map(|h| SigmaValue::Header(Box::new(h)))
             .map_err(|e| ReadError::HardReject(format!("SHeader value: {e}"))),
-        SigmaType::SFunc { .. } => Err(ReadError::InvalidData(
-            "SFunc value deserialization is not supported".into(),
-        )),
+        SigmaType::SFunc { .. } => Err(ReadError::SigmaValidation {
+            rule_id: 1009,
+            args: vec![112],
+            message: "SFunc value deserialization is not supported".into(),
+        }),
         SigmaType::SReserved10 | SigmaType::SReserved11 => Err(ReadError::InvalidData(format!(
             "reserved type value deserialization not supported: {tpe:?}"
         ))),
@@ -485,9 +487,18 @@ pub(crate) fn read_value_at_depth(
         | SigmaType::SContext
         | SigmaType::SPreHeader
         | SigmaType::SGlobal
-        | SigmaType::STypeVar(_) => Err(ReadError::InvalidData(format!(
-            "value deserialization not supported for {tpe:?}"
-        ))),
+        | SigmaType::STypeVar(_) => Err(ReadError::SigmaValidation {
+            rule_id: 1009,
+            args: vec![match tpe {
+                SigmaType::SAny => 97,
+                SigmaType::SContext => 101,
+                SigmaType::STypeVar(_) => 103,
+                SigmaType::SPreHeader => 105,
+                SigmaType::SGlobal => 106,
+                _ => unreachable!(),
+            }],
+            message: format!("value deserialization not supported for {tpe:?}"),
+        }),
     }
 }
 

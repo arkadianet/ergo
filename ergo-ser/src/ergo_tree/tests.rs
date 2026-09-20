@@ -429,7 +429,7 @@ fn negative_declared_size_wraps_with_scala_numbytes() {
             .unwrap_or_else(|e| panic!("{hex} must wrap (Scala UNPARSED), got {e:?}"));
         match &tree.body {
             crate::opcode::Expr::Unparsed(raw) => assert_eq!(
-                raw.len(),
+                raw.bytes.len(),
                 expected_len,
                 "{hex}: UnparsedErgoTree byte count must match Scala numBytes"
             ),
@@ -577,7 +577,7 @@ fn size_flagged_non_sigmaprop_root_wraps_as_unparsed() {
     // succeeding as an always-true proposition.
     match &tree.body {
         Expr::Unparsed(raw) => assert_eq!(
-            raw, &bytes,
+            &raw.bytes, &bytes,
             "unparsed soft-fork body must preserve the full tree bytes"
         ),
         other => panic!("expected Unparsed soft-fork body, got {other:?}"),
@@ -614,7 +614,7 @@ fn size_flagged_const_placeholder_non_sigmaprop_root_wraps_as_unparsed() {
     let decoded = read_ergo_tree(&mut VlqReader::new(&bytes)).unwrap();
     match &decoded.body {
         Expr::Unparsed(raw) => assert_eq!(
-            raw, &bytes,
+            &raw.bytes, &bytes,
             "non-SigmaProp placeholder root must wrap, preserving bytes"
         ),
         other => panic!("expected Unparsed soft-fork body, got {other:?}"),

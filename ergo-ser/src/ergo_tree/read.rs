@@ -124,7 +124,7 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         if version > MAX_SUPPORTED_TREE_VERSION {
             let full = take_unparsed_size_region(r, tree_start, body_start, declared_size)?;
             return Ok((
-                unparsed_soft_fork_tree(version, has_size, constant_segregation, full),
+                unparsed_soft_fork_tree(version, has_size, constant_segregation, full, None),
                 true,
             ));
         }
@@ -193,7 +193,7 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         // ONLY the prefix Scala reached before it threw at the method; points after
         // it are never deserialized, hence never curve-checked.
         let forward_upto = if unresolved_method_wrap {
-            unresolved_checkpoint.unwrap().min(inner_ges.len())
+            unresolved_checkpoint.unwrap().0.min(inner_ges.len())
         } else {
             inner_ges.len()
         };
@@ -212,7 +212,17 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         if unresolved_method_wrap {
             let full = take_unparsed_size_region(r, tree_start, body_start, declared_size)?;
             return Ok((
-                unparsed_soft_fork_tree(version, has_size, constant_segregation, full),
+                unparsed_soft_fork_tree(
+                    version,
+                    has_size,
+                    constant_segregation,
+                    full,
+                    Some(method_validation_rule(
+                        unresolved_checkpoint.unwrap(),
+                        version,
+                        r.activated_script_version().unwrap_or(1),
+                    )),
+                ),
                 true,
             ));
         }
@@ -231,7 +241,13 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
                 {
                     let full = take_unparsed_size_region(r, tree_start, body_start, declared_size)?;
                     return Ok((
-                        unparsed_soft_fork_tree(version, has_size, constant_segregation, full),
+                        unparsed_soft_fork_tree(
+                            version,
+                            has_size,
+                            constant_segregation,
+                            full,
+                            Some((1001, vec![])),
+                        ),
                         true,
                     ));
                 }
@@ -270,13 +286,26 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
                 | ReadError::HardReject(_)
                 | ReadError::ValueTooLarge { .. }),
             ) => Err(e),
-            Err(_) => {
+            Err(error) => {
+                let validation_error = match error {
+                    ReadError::SigmaValidation { rule_id, args, .. } => Some((
+                        validation_rule_version(rule_id, r.activated_script_version().unwrap_or(1)),
+                        args,
+                    )),
+                    _ => None,
+                };
                 // Other parse failures (unknown opcode, invalid type tag, body
                 // truncated at the MaxPropositionSize view) map to Scala's
                 // ValidationException, wrapped as UnparsedErgoTree under has_size.
                 let full = take_unparsed_size_region(r, tree_start, body_start, declared_size)?;
                 Ok((
-                    unparsed_soft_fork_tree(version, has_size, constant_segregation, full),
+                    unparsed_soft_fork_tree(
+                        version,
+                        has_size,
+                        constant_segregation,
+                        full,
+                        validation_error,
+                    ),
                     true,
                 ))
             }
@@ -311,13 +340,44 @@ fn unparsed_soft_fork_tree(
     has_size: bool,
     constant_segregation: bool,
     full_tree_bytes: Vec<u8>,
+    validation_error: Option<(u16, Vec<u8>)>,
 ) -> ErgoTree {
     ErgoTree {
         version,
         has_size,
         constant_segregation,
         constants: vec![],
-        body: crate::opcode::Expr::Unparsed(full_tree_bytes),
+        body: crate::opcode::Expr::Unparsed(crate::opcode::UnparsedErgoTree {
+            bytes: full_tree_bytes,
+            validation_error,
+        }),
+    }
+}
+
+// Rule identity follows activation, independent of the tree's method registry.
+fn validation_rule_version(rule_id: u16, activated_version: u8) -> u16 {
+    match (rule_id, activated_version >= 3) {
+        (1007, true) => 1017,
+        (1008, true) => 1018,
+        (1011, true) => 1016,
+        _ => rule_id,
+    }
+}
+
+// MethodsContainer.methodsV5/V6 and CheckAndGetMethodTemplate distinguish
+// unknown containers from unknown methods after reading the receiver and args.
+fn method_validation_rule(
+    (_, type_id, method_id): (usize, u8, u8),
+    version: u8,
+    activated_version: u8,
+) -> (u16, Vec<u8>) {
+    if matches!(type_id, 1..=8 | 12 | 36 | 96..=102 | 104..=106) || type_id == 9 && version >= 3 {
+        (
+            validation_rule_version(1011, activated_version),
+            vec![type_id, method_id],
+        )
+    } else {
+        (1010, vec![type_id])
     }
 }
 
@@ -356,9 +416,13 @@ fn parse_body(
             // (CheckSerializableTypeCode rejects SOption pre-v3, Some AND None);
             // a segregated Option constant in a pre-v3 tree is rejected.
             if version < 3 && val.contains_option() {
-                return Err(ReadError::InvalidData(format!(
-                    "SOption value requires ErgoTree version >= 3 (got {version})"
-                )));
+                return Err(ReadError::SigmaValidation {
+                    rule_id: 1009,
+                    args: vec![36],
+                    message: format!(
+                        "SOption value requires ErgoTree version >= 3 (got {version})"
+                    ),
+                });
             }
             consts.push((tpe, val));
         }

@@ -58,7 +58,7 @@ pub(crate) enum Node {
     /// (constants never hoist).
     Const(SigmaType, SigmaValue),
     /// A whole-tree `Unparsed` body kept verbatim.
-    Unparsed(Vec<u8>),
+    Unparsed(ergo_ser::opcode::UnparsedErgoTree),
     /// A generic opcode node. The stored `Payload`'s CHILD slots are stale
     /// (they hold the original pre-interning `Expr`s); rebuild reads only its
     /// SCALAR fields and substitutes fresh children from [`ExprKey::children`].

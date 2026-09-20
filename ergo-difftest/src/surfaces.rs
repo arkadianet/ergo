@@ -94,7 +94,12 @@ where
     if b1 != b2 {
         return Outcome::bug("serialize is not a fixed point (b1 != b2)".into(), input);
     }
-    if v1 != v2 {
+    // A wrapped tree preserves only its declared byte region, even when the
+    // parser reached beyond that region before throwing. Re-reading that
+    // region can therefore retain a different validation error. Both opaque
+    // values must still satisfy the byte fixed point above; parsed values also
+    // require structural equality. Error provenance is not serialized data.
+    if v1 != v2 && !(is_soft_fork_opaque(&v1) && is_soft_fork_opaque(&v2)) {
         return Outcome::bug("structure changed across re-encode".into(), input);
     }
     Outcome::Accepted

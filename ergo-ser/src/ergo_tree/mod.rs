@@ -99,12 +99,12 @@ pub fn write_ergo_tree(w: &mut VlqWriter, tree: &ErgoTree) -> Result<(), WriteEr
     // Box writers do NOT go through this path for Unparsed trees — they emit
     // preserved `ergo_tree_bytes` verbatim for Scala id-parity.
     if let crate::opcode::Expr::Unparsed(raw) = &tree.body {
-        if !unparsed_proposition_bytes_self_delimiting(raw) {
+        if !unparsed_proposition_bytes_self_delimiting(&raw.bytes) {
             return Err(WriteError::InvalidData(
                 "UnparsedErgoTree propositionBytes are not self-delimiting on re-parse".into(),
             ));
         }
-        w.put_bytes(raw);
+        w.put_bytes(&raw.bytes);
         return Ok(());
     }
     let header = (tree.version & VERSION_MASK)

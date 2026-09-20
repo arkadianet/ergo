@@ -148,15 +148,22 @@ fn parse_node(
         // `read_constant`); those are gated at materialization instead. An empty
         // Coll[Option] materializes no Option and is accepted here.
         if _tree_version < 3 && val.contains_option() {
-            return Err(ReadError::InvalidData(format!(
-                "SOption value requires ErgoTree version >= 3 (got {_tree_version})"
-            )));
+            return Err(ReadError::SigmaValidation {
+                rule_id: 1009,
+                args: vec![36],
+                message: format!(
+                    "SOption value requires ErgoTree version >= 3 (got {_tree_version})"
+                ),
+            });
         }
         return Ok(Expr::Const { tpe, val });
     }
 
-    let pattern = opcode_pattern(first)
-        .ok_or_else(|| ReadError::InvalidData(format!("unknown opcode: 0x{first:02X}")))?;
+    let pattern = opcode_pattern(first).ok_or_else(|| ReadError::SigmaValidation {
+        rule_id: 1002,
+        args: vec![first],
+        message: format!("unknown opcode: 0x{first:02X}"),
+    })?;
 
     let next = depth + 1;
     let payload = match pattern {
@@ -355,7 +362,7 @@ fn parse_node(
                         message: format!("unknown method {type_id}:{method_id}"),
                     });
                 }
-                r.mark_unresolved_method_checkpoint();
+                r.mark_unresolved_method_checkpoint(type_id, method_id);
             }
             // PropertyCall (0xDB) is the zero-args form, but a v6
             // property-call SMethod can still declare
@@ -424,7 +431,7 @@ fn parse_node(
                         message: format!("unknown method {type_id}:{method_id}"),
                     });
                 }
-                r.mark_unresolved_method_checkpoint();
+                r.mark_unresolved_method_checkpoint(type_id, method_id);
             }
             // v6 / EIP-50: methods whose Scala `SMethod` sets
             // `hasExplicitTypeArgs = true` write N type bytes after
@@ -713,7 +720,7 @@ mod tests {
             let mut r = VlqReader::new(INLINE_SOME_INT);
             let err = parse_expr(&mut r, 0, version).expect_err("pre-v3 inline Option must reject");
             assert!(
-                matches!(&err, ReadError::InvalidData(m) if m.contains("SOption")),
+                matches!(&err, ReadError::SigmaValidation { rule_id: 1009, message: m, .. } if m.contains("SOption")),
                 "version {version}: unexpected error {err:?}"
             );
         }
@@ -779,7 +786,9 @@ mod tests {
         // and are gated at materialization by `sigma_to_value_versioned`.
         let mut r = VlqReader::new(INLINE_SOME_INT);
         let err = parse_expr(&mut r, 0, 0).expect_err("headerless Option must reject");
-        assert!(matches!(&err, ReadError::InvalidData(m) if m.contains("SOption")));
+        assert!(
+            matches!(&err, ReadError::SigmaValidation { rule_id: 1009, message: m, .. } if m.contains("SOption"))
+        );
     }
 
     // ----- oracle parity -----
