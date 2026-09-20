@@ -28,3 +28,7 @@ ergo-state      = { workspace = true, features = ["test-helpers"] }
 serde_json      = { workspace = true }
 tempfile        = { workspace = true }
 toml            = { workspace = true }
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

@@ -49,3 +49,42 @@ sha2            = { workspace = true }
 flate2          = { workspace = true }
 toml            = { workspace = true }
 tar             = "0.4"
+
+# Separate target preserves the binary name excluded by the cost-ledger CI filter.
+[[test]]
+name = "diagnose_block_303967"
+path = "tests/diagnose_block_303967.rs"
+
+# Separate target preserves the binary name excluded by the cost-ledger CI filter.
+[[test]]
+name = "diagnose_block_555672"
+path = "tests/diagnose_block_555672.rs"
+
+# Separate target preserves the binary name excluded by the cost-ledger CI filter.
+[[test]]
+name = "diagnose_block_836113"
+path = "tests/diagnose_block_836113.rs"
+
+# Separate target preserves the binary name excluded by the cost-ledger CI filter.
+[[test]]
+name = "eval_error_triage"
+path = "tests/eval_error_triage.rs"
+
+# Separate target preserves the binary name excluded by the cost-ledger CI filter.
+[[test]]
+name = "parity_triage"
+path = "tests/parity_triage.rs"
+
+# Separate target preserves the binary name excluded by the cost-ledger CI filter.
+[[test]]
+name = "trace_emission_700000"
+path = "tests/trace_emission_700000.rs"
+
+# Separate target preserves the binary name excluded by the cost-ledger CI filter.
+[[test]]
+name = "trace_mismatch_889k"
+path = "tests/trace_mismatch_889k.rs"
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

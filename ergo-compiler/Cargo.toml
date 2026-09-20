@@ -22,3 +22,7 @@ hex        = { workspace = true }
 # Semantic-smoke oracle for emitted IR (evaluator-side; no dependency cycle —
 # ergo-sigma depends on ergo-ser only).
 ergo-sigma = { workspace = true }
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

@@ -33,3 +33,7 @@ serde_json = { workspace = true }
 tempfile   = { workspace = true }
 redb       = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

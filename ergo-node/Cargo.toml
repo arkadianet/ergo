@@ -67,3 +67,7 @@ ergo-sync          = { workspace = true }
 ergo-chain-spec    = { workspace = true }
 arc-swap           = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

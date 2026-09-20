@@ -34,3 +34,7 @@ indexmap           = { workspace = true }
 serde              = { workspace = true, features = ["derive"] }
 serde_json         = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
