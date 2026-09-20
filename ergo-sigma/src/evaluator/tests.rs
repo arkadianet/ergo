@@ -96,6 +96,7 @@ fn box_equality_self_vs_inputs_0() {
         register_bytes: Vec::new(),
     };
     let ctx = ReductionContext {
+        validation_settings: Default::default(),
         height: 200,
         self_box: Some(&box0),
         self_creation_height: 100,
@@ -143,6 +144,7 @@ fn box_equality_in_tuple() {
         register_bytes: Vec::new(),
     };
     let ctx = ReductionContext {
+        validation_settings: Default::default(),
         height: 200,
         self_box: Some(&box0),
         self_creation_height: 100,
@@ -189,6 +191,7 @@ fn box_equality_in_option() {
         register_bytes: Vec::new(),
     };
     let ctx = ReductionContext {
+        validation_settings: Default::default(),
         height: 200,
         self_box: Some(&box0),
         self_creation_height: 100,
@@ -249,6 +252,7 @@ fn box_collection_vs_derived_tuple() {
         register_bytes: Vec::new(),
     };
     let ctx = ReductionContext {
+        validation_settings: Default::default(),
         height: 200,
         self_box: Some(&box0),
         self_creation_height: 100,
@@ -327,6 +331,7 @@ fn coll_box_eq_cost_uses_per_item() {
         register_bytes: Vec::new(),
     };
     let ctx = ReductionContext {
+        validation_settings: Default::default(),
         height: 200,
         self_box: Some(&box0),
         self_creation_height: 100,
@@ -1598,6 +1603,7 @@ fn make_test_box() -> EvalBox {
 
 fn ctx_with_self_box(b: &EvalBox) -> ReductionContext<'_> {
     ReductionContext {
+        validation_settings: Default::default(),
         height: 600_000,
         self_box: Some(b),
         self_creation_height: b.creation_height,
@@ -2009,7 +2015,7 @@ fn unparsed_ergo_tree_body_eval_errors_not_true() {
     // Scala throws on an `UnparsedErgoTree` (no active soft-fork), so such a box
     // is unspendable, NOT trivially `true` (the prior `Const(true)` substitution
     // made it spendable — an accept-invalid / fork hazard).
-    let body = Expr::Unparsed(hex::decode("0b01fd").unwrap());
+    let body = Expr::Unparsed(hex::decode("0b01fd").unwrap().into());
     let err = run_eval_ctx_err(&body, &ReductionContext::minimal(500_000, 0));
     assert!(matches!(err, EvalError::UnparsedErgoTree), "got {err:?}");
 }
@@ -9485,6 +9491,7 @@ fn coll_updated_inputs_updated_self_succeeds_via_eval() {
     let test_box = make_test_box();
     let other_box = make_test_box();
     let ctx = ReductionContext {
+        validation_settings: Default::default(),
         height: 600_000,
         self_box: Some(&test_box),
         self_creation_height: test_box.creation_height,
@@ -9536,6 +9543,7 @@ fn coll_updated_inputs_rejects_int_element_via_eval() {
     // box-typed elements).
     let test_box = make_test_box();
     let ctx = ReductionContext {
+        validation_settings: Default::default(),
         height: 600_000,
         self_box: Some(&test_box),
         self_creation_height: test_box.creation_height,

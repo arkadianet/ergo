@@ -17,6 +17,23 @@ pub(super) const MAX_EXPR_DEPTH: usize = 110;
 /// the body of a tree is just a single root [`Expr`].
 pub type Body = Expr;
 
+/// Preserved wire bytes and the validation failure caught by the tree reader.
+/// Unclassified parser failures never acquire soft-fork authorization.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnparsedErgoTree {
+    pub bytes: Vec<u8>,
+    pub validation_error: Option<(u16, Vec<u8>)>,
+}
+
+impl From<Vec<u8>> for UnparsedErgoTree {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            validation_error: None,
+        }
+    }
+}
+
 /// A parsed expression node in an ErgoTree body — either an inline
 /// constant or an opcode node with a typed payload.
 #[derive(Debug, Clone, PartialEq)]
@@ -34,10 +51,8 @@ pub enum Expr {
     /// re-serialization is byte-identical, matching Scala's preserved
     /// `propositionBytes`. It is never a sub-expression and never produced by
     /// the body parser; it evaluates to a hard error (Scala throws on an
-    /// unparsed tree unless its error is an *active* soft-fork — which this node
-    /// does not currently model, consistent with not tracking soft-forked
-    /// validation-rule activation).
-    Unparsed(Vec<u8>),
+    /// unparsed tree unless its error is an active soft-fork).
+    Unparsed(UnparsedErgoTree),
 }
 
 /// One opcode-tagged IR node: the dispatch byte plus the typed payload

@@ -24,7 +24,7 @@ use crate::sigma_value::{write_constant, SigmaValue};
 mod gates;
 mod hash;
 mod read;
-mod root_type;
+pub(crate) mod root_type;
 #[cfg(test)]
 mod tests;
 mod type_infer;
@@ -99,12 +99,12 @@ pub fn write_ergo_tree(w: &mut VlqWriter, tree: &ErgoTree) -> Result<(), WriteEr
     // Box writers do NOT go through this path for Unparsed trees — they emit
     // preserved `ergo_tree_bytes` verbatim for Scala id-parity.
     if let crate::opcode::Expr::Unparsed(raw) = &tree.body {
-        if !unparsed_proposition_bytes_self_delimiting(raw) {
+        if !unparsed_proposition_bytes_self_delimiting(&raw.bytes) {
             return Err(WriteError::InvalidData(
                 "UnparsedErgoTree propositionBytes are not self-delimiting on re-parse".into(),
             ));
         }
-        w.put_bytes(raw);
+        w.put_bytes(&raw.bytes);
         return Ok(());
     }
     let header = (tree.version & VERSION_MASK)
@@ -148,7 +148,7 @@ fn write_ergo_tree_body(w: &mut VlqWriter, tree: &ErgoTree) -> Result<(), WriteE
             write_constant(w, tpe, val)?;
         }
     }
-    opcode::write_body(w, &tree.body, tree.constant_segregation)?;
+    opcode::write_expr_versioned(w, &tree.body, tree.version)?;
     Ok(())
 }
 

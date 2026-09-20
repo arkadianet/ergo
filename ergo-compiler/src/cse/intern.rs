@@ -22,12 +22,23 @@ impl Interner {
                     Node::Const(tpe.clone(), val.clone()),
                 )
             }
-            Expr::Unparsed(bytes) => self.finish(
-                KeyTag::Unparsed,
-                Vec::new(),
-                bytes.clone(),
-                Node::Unparsed(bytes.clone()),
-            ),
+            Expr::Unparsed(tree) => {
+                let mut literal = tree.bytes.clone();
+                if let Some((rule, args)) = &tree.validation_error {
+                    literal.extend_from_slice(args);
+                    literal.extend_from_slice(&rule.to_le_bytes());
+                    literal.extend_from_slice(&(args.len() as u64).to_le_bytes());
+                    literal.push(1);
+                } else {
+                    literal.push(0);
+                }
+                self.finish(
+                    KeyTag::Unparsed,
+                    Vec::new(),
+                    literal,
+                    Node::Unparsed(tree.clone()),
+                )
+            }
             Expr::Op(node) => self.intern_op(node),
         }
     }

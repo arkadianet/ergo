@@ -1,3 +1,5 @@
+//! Oracle: test-vectors/scala/accumulator_initial_scope.json
+//! Oracle: test-vectors/scala/jitcost_bounds.json
 use thiserror::Error;
 
 /// Cost in JIT granularity (10x finer than block cost units).
@@ -669,5 +671,97 @@ mod tests {
             matches!(err, CostError::LimitExceeded { .. }),
             "expected LimitExceeded (honest path), got {err:?}",
         );
+    }
+    // ----- oracle parity -----
+
+    // ledger: INTERP-jitcost-bounds
+    #[test]
+    fn jitcost_boundary_arithmetic_matches_jvm() {
+        #[derive(serde::Deserialize)]
+        struct Outcome {
+            value: Option<u64>,
+            exception: Option<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Case {
+            operation: String,
+            a: u64,
+            b: u64,
+            result: Outcome,
+        }
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            cases: Vec<Case>,
+        }
+        let fixture: Fixture =
+            serde_json::from_str(include_str!("../../test-vectors/scala/jitcost_bounds.json"))
+                .unwrap();
+        assert_eq!(fixture.cases.len(), 4);
+        for case in fixture.cases {
+            let result = match case.operation.as_str() {
+                "add" => JitCost::try_from_jit(case.a)
+                    .unwrap()
+                    .checked_add(JitCost::try_from_jit(case.b).unwrap()),
+                "from_block_cost" => JitCost::from_block_cost(case.a),
+                other => panic!("unknown JVM operation {other}"),
+            };
+            match (case.result.value, case.result.exception.as_deref()) {
+                (Some(value), None) => assert_eq!(result.unwrap().value(), value),
+                (None, Some("java.lang.ArithmeticException")) => {
+                    assert!(matches!(result, Err(JitCostError::Overflow { .. })));
+                }
+                other => panic!("unexpected JVM outcome {other:?}"),
+            }
+        }
+    }
+    // ledger: INTERP-accumulator-initial-scope-I020
+    #[test]
+    fn accumulator_initial_scope_matches_jvm() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            initial: u64,
+            limit: u64,
+            delta: u64,
+            before: u64,
+            after: u64,
+            exception: Option<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            cases: Vec<Case>,
+        }
+        let fixture: Fixture = serde_json::from_str(include_str!(
+            "../../test-vectors/scala/accumulator_initial_scope.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture.cases.len(), 6);
+        for case in fixture.cases {
+            let mut accumulator = CostAccumulator::new(JitCost::from_jit(case.limit));
+            // Rust's initialization charge checks the limit immediately but retains
+            // the charged total, providing the same state for subsequent adds.
+            let initialization = accumulator.add(JitCost::from_jit(case.initial));
+            if case.initial > case.limit {
+                assert!(matches!(
+                    initialization,
+                    Err(CostError::LimitExceeded { .. })
+                ));
+            } else {
+                initialization.unwrap();
+            }
+            assert_eq!(accumulator.total().value(), case.before);
+            let result = accumulator.add(JitCost::from_jit(case.delta));
+            match case.exception.as_deref() {
+                None => result.unwrap(),
+                Some("sigma.exceptions.CostLimitException") => match result {
+                    Err(CostError::LimitExceeded { current, limit }) => {
+                        assert_eq!(current, case.after);
+                        assert_eq!(limit, case.limit);
+                    }
+                    other => panic!("expected limit rejection, got {other:?}"),
+                },
+                other => panic!("unexpected JVM exception {other:?}"),
+            }
+            assert_eq!(accumulator.total().value(), case.after);
+        }
     }
 }

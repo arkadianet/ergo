@@ -55,6 +55,7 @@ fn emission_contract_all_895_verified() {
             .collect();
 
         let ctx = ReductionContext {
+            validation_settings: Default::default(),
             height: v.height,
             self_box: None,
             self_creation_height: 0,
@@ -131,6 +132,7 @@ fn emission_contract_negative_wrong_miner() {
         .into();
 
     let ctx = ReductionContext {
+        validation_settings: Default::default(),
         height: v.height,
         self_box: None,
         self_creation_height: 0,

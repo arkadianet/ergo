@@ -698,13 +698,18 @@ fn parse_rejects_none_value_0xdf() {
     let mut r = VlqReader::new(&bytes);
     let err = parse_expr(&mut r, 0, 0).unwrap_err();
     match err {
-        ReadError::InvalidData(msg) => {
+        ReadError::SigmaValidation {
+            rule_id: 1002,
+            args,
+            message: msg,
+        } => {
+            assert_eq!(args, bytes);
             assert!(
                 msg.contains("0xDF"),
                 "expected unknown-opcode message, got {msg:?}"
             );
         }
-        other => panic!("expected InvalidData, got {other:?}"),
+        other => panic!("expected opcode validation error, got {other:?}"),
     }
 }
 
@@ -853,7 +858,9 @@ fn error_unknown_opcode() {
     let data = [0x75]; // reserved opcode
     let mut r = VlqReader::new(&data);
     let err = parse_body(&mut r, 0).unwrap_err();
-    assert!(matches!(err, ReadError::InvalidData(_)));
+    assert!(
+        matches!(err, ReadError::SigmaValidation { rule_id: 1002, args, .. } if args == [0x75])
+    );
 }
 
 #[test]
@@ -916,13 +923,18 @@ fn parse_rejects_some_value_0xde() {
     let mut r = VlqReader::new(&bytes);
     let err = parse_expr(&mut r, 0, 0).unwrap_err();
     match err {
-        ReadError::InvalidData(msg) => {
+        ReadError::SigmaValidation {
+            rule_id: 1002,
+            args,
+            message: msg,
+        } => {
+            assert_eq!(args, bytes);
             assert!(
                 msg.contains("0xDE"),
                 "expected unknown-opcode message, got {msg:?}"
             );
         }
-        other => panic!("expected InvalidData, got {other:?}"),
+        other => panic!("expected opcode validation error, got {other:?}"),
     }
 }
 
@@ -933,13 +945,18 @@ fn parse_rejects_flat_map_0xb8() {
     let mut r = VlqReader::new(&bytes);
     let err = parse_expr(&mut r, 0, 0).unwrap_err();
     match err {
-        ReadError::InvalidData(msg) => {
+        ReadError::SigmaValidation {
+            rule_id: 1002,
+            args,
+            message: msg,
+        } => {
+            assert_eq!(args, bytes);
             assert!(
                 msg.contains("0xB8"),
                 "expected unknown-opcode message, got {msg:?}"
             );
         }
-        other => panic!("expected InvalidData, got {other:?}"),
+        other => panic!("expected opcode validation error, got {other:?}"),
     }
 }
 
@@ -953,14 +970,19 @@ fn parse_rejects_closed_accept_more_opcodes() {
         let mut r = VlqReader::new(&bytes);
         let err = parse_expr(&mut r, 0, 0).unwrap_err();
         match err {
-            ReadError::InvalidData(msg) => {
+            ReadError::SigmaValidation {
+                rule_id: 1002,
+                args,
+                message: msg,
+            } => {
+                assert_eq!(args, bytes);
                 let tag = format!("0x{opcode:02X}");
                 assert!(
                     msg.contains(&tag),
                     "0x{opcode:02X}: expected rejection with opcode tag, got {msg:?}"
                 );
             }
-            other => panic!("0x{opcode:02X} expected InvalidData, got {other:?}"),
+            other => panic!("0x{opcode:02X} expected opcode validation error, got {other:?}"),
         }
     }
 }

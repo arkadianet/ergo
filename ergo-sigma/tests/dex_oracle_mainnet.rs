@@ -149,6 +149,7 @@ fn dex_oracle_all_134_verified() {
             .collect();
 
         let ctx = ReductionContext {
+            validation_settings: Default::default(),
             height: v.height,
             self_box: Some(&self_box),
             self_creation_height: v.self_creation_height,

@@ -125,7 +125,7 @@ pub fn write_body(
     constant_segregation: bool,
 ) -> Result<(), WriteError> {
     let _ = constant_segregation;
-    write_expr_inner(w, body, None)
+    write_expr_inner(w, body, None, 3)
 }
 
 /// Serialize a single expression to the byte stream (no constant extraction).
@@ -135,7 +135,7 @@ pub fn write_body(
 /// holds its constants inline or as placeholders.
 pub fn write_expr(w: &mut VlqWriter, expr: &Expr, cseg: bool) -> Result<(), WriteError> {
     let _ = cseg;
-    write_expr_inner(w, expr, None)
+    write_expr_inner(w, expr, None, 3)
 }
 
 /// Serialize `expr`, extracting every `Expr::Const` into `sink` and writing a
@@ -155,7 +155,17 @@ pub fn write_expr_segregating(
     expr: &Expr,
     sink: &mut ConstantSink,
 ) -> Result<(), WriteError> {
-    write_expr_inner(w, expr, Some(sink))
+    write_expr_inner(w, expr, Some(sink), 3)
+}
+
+/// Serialize an expression with Scala's version-dependent constant Upcast rewrite.
+/// The unversioned writer preserves explicit casts, as tree version 3 does.
+pub fn write_expr_versioned(
+    w: &mut VlqWriter,
+    expr: &Expr,
+    tree_version: u8,
+) -> Result<(), WriteError> {
+    write_expr_inner(w, expr, None, tree_version)
 }
 
 /// The single recursive writer shared by [`write_expr`] (no sink) and
@@ -166,7 +176,21 @@ fn write_expr_inner(
     w: &mut VlqWriter,
     expr: &Expr,
     sink: Option<&mut ConstantSink>,
+    tree_version: u8,
 ) -> Result<(), WriteError> {
+    // ValueSerializer.serializable feeds the constant match only: a cast whose
+    // input is nonconstant still uses the original opcode and serializer.
+    let expr = if tree_version < 3 {
+        match expr {
+            Expr::Op(IrNode {
+                opcode: 0x7e,
+                payload: Payload::NumericCast { input, .. },
+            }) if matches!(input.as_ref(), Expr::Const { .. }) => input.as_ref(),
+            _ => expr,
+        }
+    } else {
+        expr
+    };
     match expr {
         Expr::Const { tpe, val } => match sink {
             // Segregation: append to the store, emit ConstPlaceholder (opcode
@@ -192,10 +216,16 @@ fn write_expr_inner(
                 // never segregated — exactly like the Relation2 bool-pair above,
                 // and matching the oracle's single-entry constant table.
                 w.put_u8(0x85);
-                write_payload(w, 0x85, &Payload::BoolCollection { bits }, sink)?;
+                write_payload(
+                    w,
+                    0x85,
+                    &Payload::BoolCollection { bits },
+                    sink,
+                    tree_version,
+                )?;
             } else {
                 w.put_u8(node.opcode);
-                write_payload(w, node.opcode, &node.payload, sink)?;
+                write_payload(w, node.opcode, &node.payload, sink, tree_version)?;
             }
         }
         // `Expr::Unparsed` is a whole-tree body (the full original bytes,
@@ -221,14 +251,15 @@ fn write_relation2_operand(
     w: &mut VlqWriter,
     expr: &Expr,
     sink: Option<&mut ConstantSink>,
+    tree_version: u8,
 ) -> Result<(), WriteError> {
     if let Expr::Op(node) = expr {
         if node.opcode == 0x83 && concrete_bool_collection(node).is_some() {
             w.put_u8(0x83);
-            return write_payload(w, 0x83, &node.payload, sink);
+            return write_payload(w, 0x83, &node.payload, sink, tree_version);
         }
     }
-    write_expr_inner(w, expr, sink)
+    write_expr_inner(w, expr, sink, tree_version)
 }
 
 fn write_payload(
@@ -236,12 +267,13 @@ fn write_payload(
     opcode: u8,
     payload: &Payload,
     mut sink: Option<&mut ConstantSink>,
+    tree_version: u8,
 ) -> Result<(), WriteError> {
     match payload {
         Payload::Zero => {}
 
         Payload::One(a) => {
-            write_expr_inner(w, a, sink.as_deref_mut())?;
+            write_expr_inner(w, a, sink.as_deref_mut(), tree_version)?;
         }
 
         Payload::Two(a, b) => {
@@ -262,25 +294,25 @@ fn write_payload(
                 // a Relation2 sees it — `Coll(true,false) == Coll(true,false)`
                 // folds to `true`); our fold doesn't lift it yet (a D-C7 residual),
                 // so we keep the self-readable generic `0x83` form here.
-                write_relation2_operand(w, a, sink.as_deref_mut())?;
-                write_relation2_operand(w, b, sink.as_deref_mut())?;
+                write_relation2_operand(w, a, sink.as_deref_mut(), tree_version)?;
+                write_relation2_operand(w, b, sink.as_deref_mut(), tree_version)?;
             } else {
-                write_expr_inner(w, a, sink.as_deref_mut())?;
-                write_expr_inner(w, b, sink.as_deref_mut())?;
+                write_expr_inner(w, a, sink.as_deref_mut(), tree_version)?;
+                write_expr_inner(w, b, sink.as_deref_mut(), tree_version)?;
             }
         }
 
         Payload::Three(a, b, c) => {
-            write_expr_inner(w, a, sink.as_deref_mut())?;
-            write_expr_inner(w, b, sink.as_deref_mut())?;
-            write_expr_inner(w, c, sink.as_deref_mut())?;
+            write_expr_inner(w, a, sink.as_deref_mut(), tree_version)?;
+            write_expr_inner(w, b, sink.as_deref_mut(), tree_version)?;
+            write_expr_inner(w, c, sink.as_deref_mut(), tree_version)?;
         }
 
         Payload::Four(a, b, c, d) => {
-            write_expr_inner(w, a, sink.as_deref_mut())?;
-            write_expr_inner(w, b, sink.as_deref_mut())?;
-            write_expr_inner(w, c, sink.as_deref_mut())?;
-            write_expr_inner(w, d, sink.as_deref_mut())?;
+            write_expr_inner(w, a, sink.as_deref_mut(), tree_version)?;
+            write_expr_inner(w, b, sink.as_deref_mut(), tree_version)?;
+            write_expr_inner(w, c, sink.as_deref_mut(), tree_version)?;
+            write_expr_inner(w, d, sink.as_deref_mut(), tree_version)?;
         }
 
         Payload::ValUse { id } => {
@@ -312,7 +344,7 @@ fn write_payload(
         Payload::ValDef { id, rhs, .. } => {
             w.put_u32(*id);
             // Type is never written (see parse comment above).
-            write_expr_inner(w, rhs, sink.as_deref_mut())?;
+            write_expr_inner(w, rhs, sink.as_deref_mut(), tree_version)?;
         }
 
         Payload::FunDef {
@@ -333,15 +365,15 @@ fn write_payload(
             for t in tpe_args {
                 crate::sigma_type::write_type(w, t)?;
             }
-            write_expr_inner(w, rhs, sink.as_deref_mut())?;
+            write_expr_inner(w, rhs, sink.as_deref_mut(), tree_version)?;
         }
 
         Payload::BlockValue { items, result } => {
             w.put_u32(items.len() as u32);
             for item in items {
-                write_expr_inner(w, item, sink.as_deref_mut())?;
+                write_expr_inner(w, item, sink.as_deref_mut(), tree_version)?;
             }
-            write_expr_inner(w, result, sink.as_deref_mut())?;
+            write_expr_inner(w, result, sink.as_deref_mut(), tree_version)?;
         }
 
         Payload::FuncValue { args, body } => {
@@ -351,7 +383,7 @@ fn write_payload(
                 let t = tpe.as_ref().expect("FuncValue arg always has type");
                 write_type(w, t)?;
             }
-            write_expr_inner(w, body, sink.as_deref_mut())?;
+            write_expr_inner(w, body, sink.as_deref_mut(), tree_version)?;
         }
 
         Payload::MethodCall {
@@ -363,7 +395,7 @@ fn write_payload(
         } => {
             w.put_u8(*type_id);
             w.put_u8(*method_id);
-            write_expr_inner(w, obj, sink.as_deref_mut())?;
+            write_expr_inner(w, obj, sink.as_deref_mut(), tree_version)?;
             // MethodCall (0xDC) writes arg count + args; PropertyCall
             // (0xDB) writes neither. BOTH then write the v6 explicit
             // type-args block for methods whose
@@ -374,7 +406,7 @@ fn write_payload(
             if opcode != 0xDB {
                 w.put_u32(args.len() as u32);
                 for arg in args {
-                    write_expr_inner(w, arg, sink.as_deref_mut())?;
+                    write_expr_inner(w, arg, sink.as_deref_mut(), tree_version)?;
                 }
             }
             // Round-trip the explicit type args the parser captured.
@@ -390,7 +422,7 @@ fn write_payload(
             w.put_u16(items.len() as u16);
             write_type(w, elem_type)?;
             for item in items {
-                write_expr_inner(w, item, sink.as_deref_mut())?;
+                write_expr_inner(w, item, sink.as_deref_mut(), tree_version)?;
             }
         }
 
@@ -421,17 +453,17 @@ fn write_payload(
             );
             w.put_u8(items.len() as u8);
             for item in items {
-                write_expr_inner(w, item, sink.as_deref_mut())?;
+                write_expr_inner(w, item, sink.as_deref_mut(), tree_version)?;
             }
         }
 
         Payload::SelectField { input, field_idx } => {
-            write_expr_inner(w, input, sink.as_deref_mut())?;
+            write_expr_inner(w, input, sink.as_deref_mut(), tree_version)?;
             w.put_u8(*field_idx);
         }
 
         Payload::ExtractRegisterAs { input, reg_id, tpe } => {
-            write_expr_inner(w, input, sink.as_deref_mut())?;
+            write_expr_inner(w, input, sink.as_deref_mut(), tree_version)?;
             w.put_u8(*reg_id);
             write_type(w, tpe)?;
         }
@@ -456,7 +488,7 @@ fn write_payload(
             write_type(w, tpe)?;
             if let Some(d) = default {
                 w.put_u8(1);
-                write_expr_inner(w, d, sink.as_deref_mut())?;
+                write_expr_inner(w, d, sink.as_deref_mut(), tree_version)?;
             } else {
                 w.put_u8(0);
             }
@@ -468,7 +500,7 @@ fn write_payload(
             // VLQ is identical, so this preserves byte parity for real trees.
             w.put_u32(items.len() as u32);
             for item in items {
-                write_expr_inner(w, item, sink.as_deref_mut())?;
+                write_expr_inner(w, item, sink.as_deref_mut(), tree_version)?;
             }
         }
 
@@ -481,26 +513,26 @@ fn write_payload(
             index,
             default,
         } => {
-            write_expr_inner(w, input, sink.as_deref_mut())?;
-            write_expr_inner(w, index, sink.as_deref_mut())?;
+            write_expr_inner(w, input, sink.as_deref_mut(), tree_version)?;
+            write_expr_inner(w, index, sink.as_deref_mut(), tree_version)?;
             if let Some(d) = default {
                 w.put_u8(1);
-                write_expr_inner(w, d, sink.as_deref_mut())?;
+                write_expr_inner(w, d, sink.as_deref_mut(), tree_version)?;
             } else {
                 w.put_u8(0);
             }
         }
 
         Payload::NumericCast { input, tpe } => {
-            write_expr_inner(w, input, sink.as_deref_mut())?;
+            write_expr_inner(w, input, sink.as_deref_mut(), tree_version)?;
             write_type(w, tpe)?;
         }
 
         Payload::FuncApply { func, args } => {
-            write_expr_inner(w, func, sink.as_deref_mut())?;
+            write_expr_inner(w, func, sink.as_deref_mut(), tree_version)?;
             w.put_u32(args.len() as u32);
             for arg in args {
-                write_expr_inner(w, arg, sink.as_deref_mut())?;
+                write_expr_inner(w, arg, sink.as_deref_mut(), tree_version)?;
             }
         }
     }

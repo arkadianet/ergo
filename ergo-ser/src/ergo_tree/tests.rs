@@ -1,7 +1,7 @@
 //! Tests for the ErgoTree codec: round-trips, oracle-parity verdicts,
 //! mainnet JSON fixtures, and soft-fork / depth / overflow edge cases.
 
-use super::type_infer::value_contains_box;
+use super::root_type::value_contains_box;
 use ergo_primitives::digest::blake2b256;
 use ergo_primitives::reader::{ReadError, VlqReader};
 
@@ -429,7 +429,7 @@ fn negative_declared_size_wraps_with_scala_numbytes() {
             .unwrap_or_else(|e| panic!("{hex} must wrap (Scala UNPARSED), got {e:?}"));
         match &tree.body {
             crate::opcode::Expr::Unparsed(raw) => assert_eq!(
-                raw.len(),
+                raw.bytes.len(),
                 expected_len,
                 "{hex}: UnparsedErgoTree byte count must match Scala numBytes"
             ),
@@ -577,7 +577,7 @@ fn size_flagged_non_sigmaprop_root_wraps_as_unparsed() {
     // succeeding as an always-true proposition.
     match &tree.body {
         Expr::Unparsed(raw) => assert_eq!(
-            raw, &bytes,
+            &raw.bytes, &bytes,
             "unparsed soft-fork body must preserve the full tree bytes"
         ),
         other => panic!("expected Unparsed soft-fork body, got {other:?}"),
@@ -614,7 +614,7 @@ fn size_flagged_const_placeholder_non_sigmaprop_root_wraps_as_unparsed() {
     let decoded = read_ergo_tree(&mut VlqReader::new(&bytes)).unwrap();
     match &decoded.body {
         Expr::Unparsed(raw) => assert_eq!(
-            raw, &bytes,
+            &raw.bytes, &bytes,
             "non-SigmaProp placeholder root must wrap, preserving bytes"
         ),
         other => panic!("expected Unparsed soft-fork body, got {other:?}"),
@@ -1511,7 +1511,10 @@ fn sizeless_v0_v6_embeddable_type_accepts_only_under_activated_v6() {
     // Default reader: header-version (0) gate rejects code 9.
     let err = read_ergo_tree(&mut VlqReader::new(&bytes))
         .expect_err("header-v0 reader must reject the v6 embeddable code");
-    assert!(matches!(err, ReadError::InvalidData(_)), "{err:?}");
+    assert!(
+        matches!(&err, ReadError::SigmaValidation { rule_id: 1007, args, .. } if args == &[9]),
+        "{err:?}"
+    );
     // Activated-version reader at v3: accepts, round-trips byte-identically.
     let mut r = VlqReader::new(&bytes);
     let tree = read_ergo_tree_with_activated_version(&mut r, 3)

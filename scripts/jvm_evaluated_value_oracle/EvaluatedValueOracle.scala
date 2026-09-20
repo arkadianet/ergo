@@ -31,6 +31,10 @@
 // returns HTTP 404 from Maven Central and the pinned GitLab repository.
 // Usage: scala-cli run <this file> --server=false -- verify < requests.jsonl
 // Self-test: scala-cli run <this file> --server=false -- verify_self_test
+// Direct probes: jitcost_probe, accumulator_probe, raw_coll_equals, serialize_expr.
+// Each has a corresponding <command>_self_test. serialize_expr reads one JSON AST:
+// {"op":"Upcast","input_type":"Int","target_type":"Long","value":1}.
+// scripts/gen-evaluated-probe.py captures direct output with a reproducibility manifest.
 // One JSON request and response per line; no-argument vector output is unchanged.
 // Required request keys: tree_hex, ctx_ext_hex, proof_hex, cost_limit_block,
 // init_cost_block, activated_version, tree_version_expected, self_box_hex,
@@ -323,6 +327,8 @@ object EvaluatedValueOracle {
   }
 
   def verifyLine(line: String): Json = {
+    var wrappedRule = Json.Null
+    var wrappedArgs = Json.Null
     var rent = false
     var verifying = false
     var eval = unavailable
@@ -331,7 +337,7 @@ object EvaluatedValueOracle {
     var legacy = unavailable
     var evaluatorFailureCost = unavailable
     def record(verdict: String, total: Json, error: Option[Throwable], detail: String): Json =
-      Json.obj("verdict" -> Json.fromString(verdict), "eval_block_cost" -> eval,
+      Json.obj("wrapped_rule_id" -> wrappedRule, "wrapped_rule_args" -> wrappedArgs, "verdict" -> Json.fromString(verdict), "eval_block_cost" -> eval,
         "crypto_block_cost" -> crypto, "rent_block_cost" -> rentCost, "rent_path" -> Json.fromBoolean(rent),
         "total_block_cost" -> total,
         "failure_class" -> error.map(e => Json.fromString(e.getClass.getName)).getOrElse(Json.Null),
@@ -357,8 +363,15 @@ object EvaluatedValueOracle {
       require((treeBytes(0) & 7) == expected, "tree_version_expected differs from serialized tree")
       val parseOnly = cursor.get[Boolean]("parse_only").getOrElse(false)
       if (parseOnly) verifying = true
-      val tree = VersionContext.withVersions(1.toByte, 1.toByte) {
+      val parseVersion = cursor.get[Byte]("parse_activated_version").getOrElse(1.toByte)
+      val tree = VersionContext.withVersions(parseVersion, parseVersion) {
         treeSer.deserializeErgoTree(treeBytes)
+      }
+      tree.root match {
+        case Left(unparsed) =>
+          wrappedRule = Json.fromInt(unparsed.error.rule.id.toInt)
+          wrappedArgs = Json.fromString(unparsed.error.args.mkString(","))
+        case _ =>
       }
       if (parseOnly) {
         // A size-delimited parser retains its ValidationException in Left.
@@ -389,7 +402,22 @@ object EvaluatedValueOracle {
       // (core/.../ValidationRules.scala:248, Interpreter.scala:249).
       val replacements = cursor.get[Option[Map[String, Short]]]("validation_settings_replaced_rules")
         .fold(throw _, identity).getOrElse(Map.empty)
-      val validationSettings = replacements.foldLeft(ValidationRules.currentSettings) {
+      val disabled = cursor.get[Option[Vector[Short]]]("validation_settings_disabled_rules")
+        .fold(throw _, identity).getOrElse(Vector.empty)
+      val settingsVersion = cursor.get[Byte]("validation_settings_version").getOrElse(1.toByte)
+      val initialSettings = VersionContext.withVersions(settingsVersion, settingsVersion) {
+        ValidationRules.currentSettings
+      }
+      val withDisabled = disabled.foldLeft(initialSettings) {
+        case (settings, id) => settings.updated(id, sigma.validation.DisabledRule)
+      }
+      val changes = cursor.get[Option[Map[String, String]]]("validation_settings_changed_rules")
+        .fold(throw _, identity).getOrElse(Map.empty)
+      val withChanges = changes.foldLeft(withDisabled) {
+        case (settings, (id, codes)) =>
+          settings.updated(id.toShort, sigma.validation.ChangedRule(Base16.decode(codes).get))
+      }
+      val validationSettings = replacements.foldLeft(withChanges) {
         case (settings, (id, replacement)) =>
           settings.updated(id.toShort, sigma.validation.ReplacedRule(replacement))
       }
@@ -503,7 +531,7 @@ object EvaluatedValueOracle {
       val actual = verifyLine(req.noSpaces)
       require(actual.asObject.get.keys.toSet == Set("verdict", "eval_block_cost",
         "crypto_block_cost", "rent_block_cost", "rent_path", "total_block_cost", "failure_class",
-        "rejection_detail", "legacy", "evaluator_failure_block_cost"), name + ": response schema")
+        "rejection_detail", "legacy", "evaluator_failure_block_cost", "wrapped_rule_id", "wrapped_rule_args"), name + ": response schema")
       expected.foreach { case (key, value) =>
         require(actual.hcursor.downField(key).focus.contains(value),
           name + ": " + key + " expected " + value + ", got " + actual.noSpaces)
@@ -639,11 +667,197 @@ object EvaluatedValueOracle {
         "eval_block_cost" -> (if (limit < 32) unavailable else num(14)),
         "crypto_block_cost" -> (if (limit < 32) unavailable else num(0)))
     }
+    val wrappedTree = patch(expression, "tree_hex" -> str("0801fd"),
+      "tree_version_expected" -> num(0), "init_cost_block" -> num(17))
+    check("wrappedTree_opcode_default_rejects", wrappedTree, "verdict" -> str("RejectScript"),
+      "wrapped_rule_id" -> num(1002), "total_block_cost" -> num(17))
+    check("wrappedTree_opcode_replaced_accepts", patch(wrappedTree,
+      "validation_settings_replaced_rules" -> Json.obj("1002" -> num(2000))),
+      "verdict" -> str("Accept"), "eval_block_cost" -> num(5), "total_block_cost" -> num(22))
+    check("wrappedTree_opcode_changed_accepts", patch(wrappedTree,
+      "validation_settings_changed_rules" -> Json.obj("1002" -> str("fd"))),
+      "verdict" -> str("Accept"), "total_block_cost" -> num(22))
+    val mismatch = patch(deserialize, "ctx_ext_hex" -> str("01010e020101"))
+    check("validation_settings_replaced_rule_accepts", patch(mismatch,
+      "validation_settings_replaced_rules" -> Json.obj("1000" -> num(1001))),
+      "verdict" -> str("Accept"), "total_block_cost" -> num(27))
+    check("validation_settings_disabled_rule_rejects", patch(mismatch,
+      "validation_settings_disabled_rules" -> Json.arr(num(1000))),
+      "verdict" -> str("RejectScript"), "failure_class" -> str("sigma.validation.ValidationException"))
+    val primitiveFailure = patch(deserialize, "activated_version" -> num(2),
+      "ctx_ext_hex" -> str("01010e03d40a00"))
+    for (matching <- Seq(false, true)) {
+      check("validation_settings_changed_type_" + matching, patch(primitiveFailure,
+        "validation_settings_changed_rules" -> Json.obj("1007" -> str(if (matching) "0a" else "ff"))),
+        "verdict" -> str(if (matching) "Accept" else "RejectScript"))
+    }
     println("verify self-test: " + count + " passed, 0 failed")
   }
 
+  private def rawCollEquals(): Json = {
+    import sigma.data.RType._
+    val cases = for (version <- Seq(2, 3); reverse <- Seq(false, true)) yield {
+      VersionContext.withVersions(3.toByte, version.toByte) {
+        val pair = Colls.fromItems(1).zip(Colls.fromItems(2))
+        val array = pair.map(p => p)
+        require(pair.isInstanceOf[sigma.PairColl[_, _]])
+        require(array.isInstanceOf[sigma.data.CollOverArray[_]])
+        val result = if (reverse) array.equals(pair) else pair.equals(array)
+        Json.obj("version" -> Json.fromInt(version), "reverse" -> Json.fromBoolean(reverse),
+          "pair_class" -> Json.fromString(pair.getClass.getName),
+          "array_class" -> Json.fromString(array.getClass.getName),
+          "left" -> Json.arr(Json.arr(Json.fromInt(1), Json.fromInt(2))),
+          "right" -> Json.arr(Json.arr(Json.fromInt(1), Json.fromInt(2))),
+          "equals" -> Json.fromBoolean(result),
+          "same_representation_equals" -> Json.fromBoolean(pair.equals(pair) && array.equals(array)))
+      }
+    }
+    Json.obj("oracle" -> Json.fromString("sigma-state:6.0.2 / raw_coll_equals"),
+      "cases" -> Json.arr(cases: _*))
+  }
+
+  private def serializeExpr(line: String): Json = {
+    val ast = parse(line).right.get
+    val h = ast.hcursor
+    require(h.get[String]("op").right.get == "Upcast")
+    require(h.get[String]("input_type").right.get == "Int")
+    require(h.get[String]("target_type").right.get == "Long")
+    val n = h.get[Int]("value").right.get
+    val root = BoolToSigmaProp(EQ(Upcast(IntConstant(n), SLong), LongConstant(n.toLong)))
+    val cases = Seq(2, 3).map { version =>
+      VersionContext.withVersions(3.toByte, version.toByte) {
+        val bytes = ValueSerializer.serialize(root)
+        val tree = Array((version | 8).toByte, bytes.length.toByte) ++ bytes
+        Json.obj("name" -> Json.fromString("upcast-int-long-v" + version),
+          "version" -> Json.fromInt(version), "expression_hex" -> Json.fromString(hex(bytes)),
+          "tree_hex" -> Json.fromString(hex(tree)))
+      }
+    }
+    Json.obj("ast" -> ast, "cases" -> Json.arr(cases: _*),
+      "jvm_bytes_v2" -> cases(0).hcursor.downField("expression_hex").focus.get,
+      "jvm_bytes_v3" -> cases(1).hcursor.downField("expression_hex").focus.get)
+  }
+
+  private def accumulatorProbe(): Json = {
+    val cases = for (initial <- Seq(9, 10, 11); delta <- Seq(0, 1)) yield {
+      val accumulator = new CostAccumulator(JitCost(initial), Some(JitCost(10)))
+      val before = accumulator.totalCost.value
+      val exception = try {
+        accumulator.add(JitCost(delta))
+        Json.Null
+      } catch { case NonFatal(e) => Json.fromString(e.getClass.getName) }
+      Json.obj("initial" -> Json.fromInt(initial), "limit" -> Json.fromInt(10),
+        "delta" -> Json.fromInt(delta), "before" -> Json.fromInt(before),
+        "after" -> Json.fromInt(accumulator.totalCost.value), "exception" -> exception)
+    }
+    Json.obj("oracle" -> Json.fromString("sigma-state:6.0.2 / accumulator_probe"),
+      "cases" -> Json.arr(cases: _*))
+  }
+
+  private def jitcostProbe(): Json = {
+    val cases = Seq(("add", 2147483646, 1), ("add", 2147483647, 1),
+      ("from_block_cost", 214748364, 0), ("from_block_cost", 214748365, 0)).map {
+      case (op, a, b) =>
+        val result = try {
+          val cost = if (op == "add") JitCost(a) + JitCost(b) else JitCost.fromBlockCost(a)
+          Json.obj("value" -> Json.fromInt(cost.value), "exception" -> Json.Null)
+        } catch { case NonFatal(e) =>
+          Json.obj("value" -> Json.Null, "exception" -> Json.fromString(e.getClass.getName))
+        }
+        Json.obj("operation" -> Json.fromString(op), "a" -> Json.fromInt(a),
+          "b" -> Json.fromInt(b), "result" -> result)
+    }
+    Json.obj("oracle" -> Json.fromString("sigma-state:6.0.2 / jitcost_probe"),
+      "cases" -> Json.arr(cases: _*))
+  }
+
+  private def validationRulesProbe(): Json = {
+    import sigma.validation._
+    val cases = for {
+      version <- Seq(2.toByte, 3.toByte)
+      ruleId <- 1000 to 1019
+      statusName <- Seq("enabled", "disabled", "replaced", "changed_match", "changed_miss")
+    } yield VersionContext.withVersions(version, version) {
+      val settings = org.ergoplatform.validation.ValidationRules.currentSettings
+      val status: RuleStatus = statusName match {
+        case "enabled" => EnabledRule
+        case "disabled" => DisabledRule
+        case "replaced" => ReplacedRule(2000.toShort)
+        case "changed_match" => ChangedRule(Array(4.toByte, 255.toByte))
+        case _ => ChangedRule(Array(3.toByte, 254.toByte))
+      }
+      val args: Seq[Any] = ruleId match {
+        case 1011 | 1016 => Seq(SIntMethods, 255.toByte)
+        // CheckV6Type throws ONE SType, although its Changed override matches
+        // a MethodsContainer/method pair. That branch is unreachable for its errors.
+        case 1019 => Seq(SOption(SInt))
+        case _ => Seq(4.toByte)
+      }
+      val result = settings.get(ruleId.toShort).exists { case (rule, _) =>
+        settings.updated(ruleId.toShort, status).isSoftFork(
+          ValidationException("probe", rule, args))
+      }
+      Json.obj("activated_version" -> Json.fromInt(version), "rule_id" -> Json.fromInt(ruleId),
+        "registered" -> Json.fromBoolean(settings.get(ruleId.toShort).isDefined),
+        "status" -> Json.fromString(statusName), "soft_fork" -> Json.fromBoolean(result))
+    }
+    Json.obj("cases" -> Json.arr(cases: _*))
+  }
+
   def main(args: Array[String]): Unit = {
-    if (args.sameElements(Array("verify"))) {
+    if (args.sameElements(Array("validation_rules_probe"))) {
+      println(validationRulesProbe().spaces2)
+    } else if (args.sameElements(Array("validation_rules_probe_self_test"))) {
+      val cases = validationRulesProbe().hcursor.downField("cases").focus.get.asArray.get
+      require(cases.size == 200)
+      require(cases.exists(c => c.hcursor.get[Boolean]("soft_fork").right.get))
+      require(cases.filter(c => c.hcursor.get[String]("status").right.get == "disabled")
+        .forall(c => !c.hcursor.get[Boolean]("soft_fork").right.get))
+      println("validation_rules_probe_self_test: 200 cases passed")
+    } else if (args.sameElements(Array("raw_coll_equals"))) {
+      println(rawCollEquals().spaces2)
+    } else if (args.sameElements(Array("raw_coll_equals_self_test"))) {
+      val cases = rawCollEquals().hcursor.downField("cases").focus.get.asArray.get
+      require(cases.size == 4)
+      cases.foreach { c =>
+        require(c.hcursor.get[Boolean]("equals").right.get ==
+          (c.hcursor.get[Int]("version").right.get >= 3))
+        require(c.hcursor.get[Boolean]("same_representation_equals").right.get)
+      }
+      println("raw_coll_equals self-test: 4 passed, 0 failed")
+    } else if (args.sameElements(Array("serialize_expr"))) {
+      println(serializeExpr(scala.io.Source.stdin.mkString).spaces2)
+    } else if (args.sameElements(Array("serialize_expr_self_test"))) {
+      val result = serializeExpr("""{"op":"Upcast","input_type":"Int","target_type":"Long","value":1}""")
+      require(result.hcursor.get[String]("jvm_bytes_v2").right.get == "d19304020502")
+      require(result.hcursor.get[String]("jvm_bytes_v3").right.get == "d1937e0402050502")
+      println("serialize_expr self-test: 2 passed, 0 failed")
+    } else if (args.sameElements(Array("accumulator_probe"))) {
+      println(accumulatorProbe().spaces2)
+    } else if (args.sameElements(Array("accumulator_probe_self_test"))) {
+      val cases = accumulatorProbe().hcursor.downField("cases").focus.get.asArray.get
+      require(cases.size == 6)
+      cases.foreach { c =>
+        val h = c.hcursor
+        val initial = h.get[Int]("initial").right.get
+        val after = initial + h.get[Int]("delta").right.get
+        require(h.get[Int]("before").right.get == initial)
+        require(h.get[Int]("after").right.get == after)
+        require(h.get[Option[String]]("exception").right.get ==
+          (if (after > 10) Some("sigma.exceptions.CostLimitException") else None))
+      }
+      println("accumulator_probe self-test: 6 passed, 0 failed")
+    } else if (args.sameElements(Array("jitcost_probe"))) {
+      println(jitcostProbe().spaces2)
+    } else if (args.sameElements(Array("jitcost_probe_self_test"))) {
+      val cases = jitcostProbe().hcursor.downField("cases").focus.get.asArray.get
+      require(cases.size == 4)
+      require(cases(0).hcursor.downField("result").get[Int]("value").right.get == Int.MaxValue)
+      require(cases(2).hcursor.downField("result").get[Int]("value").right.get == 2147483640)
+      Seq(1, 3).foreach(i => require(cases(i).hcursor.downField("result")
+        .get[String]("exception").right.get == "java.lang.ArithmeticException"))
+      println("jitcost_probe self-test: 4 passed, 0 failed")
+    } else if (args.sameElements(Array("verify"))) {
       scala.io.Source.stdin.getLines().foreach { line =>
         // Parser diagnostics belong on stderr; stdout is one JSON record per request.
         val result = Console.withOut(System.err) { verifyLine(line) }
@@ -652,7 +866,7 @@ object EvaluatedValueOracle {
     } else if (args.sameElements(Array("verify_self_test"))) {
       verify_self_test()
     } else {
-      require(args.isEmpty, "Usage: EvaluatedValueOracle [verify|verify_self_test]")
+      require(args.isEmpty, "Usage: EvaluatedValueOracle [verify|jitcost_probe|accumulator_probe|validation_rules_probe|raw_coll_equals|serialize_expr] (or <command>_self_test)")
       dumpVectors()
     }
   }

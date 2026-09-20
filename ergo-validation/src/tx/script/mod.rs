@@ -242,6 +242,7 @@ pub(crate) fn validate_scripts_at_index(
         let ergo_tree = only.map_or_else(|| resolved.candidate.ergo_tree(), |(_, tree)| tree);
 
         let reduction_ctx = ReductionContext {
+            validation_settings: cx.params.validation_settings.clone(),
             height: cx.ctx.height,
             self_box: Some(&eval_inputs[i]),
             self_creation_height: resolved.candidate.creation_height,

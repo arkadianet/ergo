@@ -1,4 +1,5 @@
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/version/
+//! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/version/soft-fork-wrapped.json.gz
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/interpreter/
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/op-fixed/
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/op-per-item/
@@ -28,6 +29,14 @@ use std::path::{Path, PathBuf};
 
 #[derive(Deserialize)]
 struct Request {
+    #[serde(default)]
+    validation_settings_replaced_rules: std::collections::BTreeMap<u16, u16>,
+    #[serde(default)]
+    validation_settings_disabled_rules: Vec<u16>,
+    #[serde(default)]
+    validation_settings_changed_rules: std::collections::BTreeMap<u16, String>,
+    #[serde(default)]
+    parse_activated_version: Option<u8>,
     tree_hex: String,
     ctx_ext_hex: String,
     proof_hex: String,
@@ -75,10 +84,6 @@ fn record(rent: bool) -> Value {
 fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
     use ergo_validation::test_helpers::{candidate_to_eval_box, ergo_box_to_eval_box};
     let value: Value = serde_json::from_slice(bytes).context("verify request JSON")?;
-    ensure!(
-        value.get("validation_settings_replaced_rules").is_none(),
-        "validation-settings overrides require JVM-only evidence until L4/L5 plumbing exists"
-    );
     let rent = value.get("rent").and_then(Value::as_bool).unwrap_or(false);
     *output = record(rent);
     let req: Request = serde_json::from_value(value).context("verify request fields")?;
@@ -87,7 +92,20 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
         req.activated_version <= 127 && req.tree_version_expected <= 127,
         "script version range"
     );
-    let tree = match decode(&req.tree_hex, ergo_tree::read_ergo_tree) {
+    let read_tree = || -> Result<ergo_tree::ErgoTree> {
+        if let Some(version) = req.parse_activated_version {
+            let bytes = hex::decode(&req.tree_hex)?;
+            let mut reader = VlqReader::new(&bytes).with_activated_script_version(version);
+            reader.set_position_limit(Some(4096));
+            Ok(ergo_tree::read_ergo_tree_with_activated_version(
+                &mut reader,
+                version,
+            )?)
+        } else {
+            decode(&req.tree_hex, ergo_tree::read_ergo_tree)
+        }
+    };
+    let tree = match read_tree() {
         Ok(tree) => tree,
         Err(error)
             if matches!(
@@ -112,11 +130,40 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
             output["failure_class"] = json!("java.lang.AssertionError");
             return Ok(());
         }
+        Err(_) if req.parse_activated_version.is_some() => {
+            output["failure_class"] = json!("sigma.serialization.SerializerException");
+            return Ok(());
+        }
         Err(error) => return Err(error),
     };
-    ergo_tree::check_header_size_bit(&tree)?;
-    ergo_tree::check_resolvable_methods(&tree)?;
-    ergo_tree::check_sigma_prop_root(&tree)?;
+    if req.parse_activated_version.is_some() {
+        if ergo_tree::check_header_size_bit(&tree).is_err() {
+            output["failure_class"] = json!("sigma.validation.ValidationException");
+            return Ok(());
+        }
+        if ergo_tree::check_resolvable_methods(&tree).is_err()
+            || ergo_tree::check_sigma_prop_root(&tree).is_err()
+        {
+            output["failure_class"] = json!("sigma.serialization.SerializerException");
+            return Ok(());
+        }
+        // The JVM currentSettings map has no 1017/1018 entries in 6.0.2;
+        // updated() throws before verify, independently of status payload.
+        if req
+            .validation_settings_replaced_rules
+            .keys()
+            .chain(req.validation_settings_changed_rules.keys())
+            .chain(req.validation_settings_disabled_rules.iter())
+            .any(|id| matches!(id, 1017 | 1018))
+        {
+            output["failure_class"] = json!("java.util.NoSuchElementException");
+            return Ok(());
+        }
+    } else {
+        ergo_tree::check_header_size_bit(&tree)?;
+        ergo_tree::check_resolvable_methods(&tree)?;
+        ergo_tree::check_sigma_prop_root(&tree)?;
+    }
     ensure!(
         tree.version == req.tree_version_expected,
         "tree_version_expected differs from serialized tree"
@@ -242,7 +289,28 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
     let input_extensions = vec![extension.values.clone(); inputs.len()];
+    let mut validation_settings = ergo_sigma::evaluator::SigmaValidationSettings::default();
+    for id in &req.validation_settings_disabled_rules {
+        validation_settings
+            .0
+            .insert(*id, ergo_sigma::evaluator::RuleStatus::Disabled);
+    }
+    for (id, codes) in &req.validation_settings_changed_rules {
+        validation_settings.0.insert(
+            *id,
+            ergo_sigma::evaluator::RuleStatus::Changed(
+                hex::decode(codes).context("changed-rule codes")?,
+            ),
+        );
+    }
+    for (id, replacement) in &req.validation_settings_replaced_rules {
+        validation_settings.0.insert(
+            *id,
+            ergo_sigma::evaluator::RuleStatus::Replaced(*replacement),
+        );
+    }
     let ctx = ReductionContext {
+        validation_settings,
         height: pre_context.height,
         self_box: Some(&eval_inputs[index]),
         self_creation_height: self_box.candidate.creation_height,
@@ -358,6 +426,7 @@ fn jvm_failure(
     use ergo_sigma::evaluator::EvalError;
     use ergo_sigma::reduce::VerifySpendingError;
     match error {
+        VerifySpendingError::Eval(EvalError::SigmaValidation { .. }) => Ok(("RejectScript", "sigma.validation.ValidationException")),
         // eval/order-throwing: serialized Int division by zero throws on the JVM.
         VerifySpendingError::Eval(EvalError::RuntimeException("Int./ divide by zero")) => {
             Ok(("RejectScript", "java.lang.ArithmeticException"))
@@ -383,12 +452,12 @@ fn jvm_failure(
             expected: "Bool",
             ..
         }) => Ok(("RejectScript", "java.lang.ClassCastException")),
-        // version/parser-data-gates: v3 ByIndex retains its Byte operand,
+        // version/parser-data-gates: v3 ByIndex retains its Byte/Short operand,
         // then the evaluator's Int cast throws after charging the input.
         VerifySpendingError::Eval(EvalError::TypeError {
             expected: "Int index",
             got,
-        }) if got == "Byte(0)" => Ok(("RejectScript", "java.lang.ClassCastException")),
+        }) if matches!(got.as_str(), "Byte(0)" | "Short(0)") => Ok(("RejectScript", "java.lang.ClassCastException")),
         VerifySpendingError::Eval(EvalError::TypeError {
             expected: "matching numeric types for Plus",
             ..
@@ -961,7 +1030,7 @@ fn profiling_timing_pairs_jvm_costs_unchanged() -> Result<()> {
     Ok(())
 }
 
-// ledger: VERSION-pre-v3-upcast, VERSION-v3-bool-root, VERSION-v6-method-gate, VERSION-selfboxindex-bug, VERSION-tree-version-gate, VERSION-v6-lazy-defaults, INTERP-crypto-conjunction, INTERP-crypto-threshold, INTERP-crypto-trivial-I013, INTERP-costlimit-op, INTERP-embedded-script-deser, INTERP-deser-subst, ORDER-propertycall-receiver, ORDER-methodcall-arguments, ORDER-powHit-validation, ORDER-serialize-incremental, ORDER-fixed-method-invocation, ORDER-avl-verifier-lookup, ORDER-if-condition, ORDER-optionget-input, METHOD-header-props, METHOD-global-encodeNbits, METHOD-coll-flatMap, METHOD-coll-indexOf, METHOD-coll-indices, METHOD-coll-patch, METHOD-coll-reverse, METHOD-coll-startsEndsWith, METHOD-coll-updateMany, METHOD-coll-updated, METHOD-coll-zip, METHOD-global-deserializeTo, METHOD-global-powHit, METHOD-global-xor, EVAL-avl-cost-height, METHOD-avl-contains, METHOD-avl-get, METHOD-avl-getMany, METHOD-avl-insert, METHOD-avl-insertOrUpdate, METHOD-avl-remove, METHOD-avl-update, METHOD-global-serialize, METHOD-global-serialize-E042, METHOD-global-serialize-E043, METHOD-global-serialize-E044, METHOD-global-serialize-E045, METHOD-global-serialize-E046, METHOD-global-serialize-E047, METHOD-option-map, METHOD-option-filter, EVAL-sstring-rejected, OP-0x96, OP-0xB3, OP-0x98, OP-0xCB, OP-0xD8, ROUND-perItem-chunking, OP-0xAE, OP-0xB5, OP-0xB0, OP-0xAF, OP-0xAD, OP-0x97, OP-0xCC, OP-0xEA, OP-0xEB, OP-0xD0, OP-0xB4, OP-0x74, OP-0xFF, OP-0x9B, INTERP-eval-sigmaprop-constant, OP-0x95, OP-0xDA, OP-0xE7-0xE9, OP-0xEC, OP-0xED, OP-0xF2, OP-0xF3, OP-0xF5, OP-0xF6, OP-0xF7, OP-0xF8, OP-TaggedVariable-A003, ORDER-bitop-charge-then-reject, EVAL-const-inline, EVAL-hasdeserialize-fork, EVAL-addtoenv, EVAL-numeric-cast, EVAL-arith-bigint, EVAL-eq-prim, EVAL-eq-matchtype, EVAL-eq-tuple, EVAL-eq-groupelement, EVAL-eq-bigint, EVAL-eq-avltree, EVAL-eq-box, EVAL-eq-option, EVAL-eq-preheader, EVAL-eq-header, EVAL-eq-coll-sigmaprop-descriptor, EVAL-eq-coll-fallback, EVAL-eq-tokens, EVAL-eq-sigmaboolean, EVAL-deferred-charge-on-exception, EVAL-eq-boxcollection, EVAL-eq-coll-descriptor, EVAL-eq-mismatch-and-unit-E032, OP-0x7D, OP-0x7E, OP-0x8F, OP-0x90, OP-0x91, OP-0x92, OP-0x93, OP-0x94, OP-0x99, OP-0x9A, OP-0x9C, OP-0x9D, OP-0x9E, OP-0xA1, OP-0xA2, OP-0xB6, OP-0xB7, OP-0xCF, OP-0xD7, OP-0xF1, METHOD-groupelement-exp, METHOD-box-registers-R0-R3, METHOD-box-registers-R4-R9, VERSION-header-checkPow-G023, INTERP-toblockcost, VERSION-downcast-gate, VERSION-subst-retention, VERSION-G007, VERSION-G008, VERSION-G009, VERSION-G010, VERSION-G011, VERSION-G012, VERSION-G013, VERSION-G014, VERSION-G016, VERSION-G017, VERSION-G018, ORDER-hof-charge, ORDER-blockvalue-valdef, OP-0xD6, ORDER-comparison-charge, INTERP-profiling-cost-isolation-I023
+// ledger: VERSION-pre-v3-upcast, VERSION-v3-bool-root, VERSION-v6-method-gate, VERSION-selfboxindex-bug, VERSION-tree-version-gate, VERSION-v6-lazy-defaults, INTERP-crypto-conjunction, INTERP-crypto-threshold, INTERP-crypto-trivial-I013, INTERP-costlimit-op, INTERP-embedded-script-deser, INTERP-deser-subst, ORDER-propertycall-receiver, ORDER-methodcall-arguments, ORDER-powHit-validation, ORDER-serialize-incremental, ORDER-fixed-method-invocation, ORDER-avl-verifier-lookup, ORDER-if-condition, ORDER-optionget-input, METHOD-header-props, METHOD-global-encodeNbits, METHOD-coll-flatMap, METHOD-coll-indexOf, METHOD-coll-indices, METHOD-coll-patch, METHOD-coll-reverse, METHOD-coll-startsEndsWith, METHOD-coll-updateMany, METHOD-coll-updated, METHOD-coll-zip, METHOD-global-deserializeTo, METHOD-global-powHit, METHOD-global-xor, EVAL-avl-cost-height, METHOD-avl-contains, METHOD-avl-get, METHOD-avl-getMany, METHOD-avl-insert, METHOD-avl-insertOrUpdate, METHOD-avl-remove, METHOD-avl-update, METHOD-global-serialize, METHOD-global-serialize-E042, METHOD-global-serialize-E043, METHOD-global-serialize-E044, METHOD-global-serialize-E045, METHOD-global-serialize-E046, METHOD-global-serialize-E047, METHOD-option-map, METHOD-option-filter, EVAL-sstring-rejected, OP-0x96, OP-0xB3, OP-0x98, OP-0xCB, OP-0xD8, ROUND-perItem-chunking, OP-0xAE, OP-0xB5, OP-0xB0, OP-0xAF, OP-0xAD, OP-0x97, OP-0xCC, OP-0xEA, OP-0xEB, OP-0xD0, OP-0xB4, OP-0x74, OP-0xFF, OP-0x9B, INTERP-eval-sigmaprop-constant, OP-0x95, OP-0xDA, OP-0xE7-0xE9, OP-0xEC, OP-0xED, OP-0xF2, OP-0xF3, OP-0xF5, OP-0xF6, OP-0xF7, OP-0xF8, OP-TaggedVariable-A003, ORDER-bitop-charge-then-reject, EVAL-const-inline, EVAL-hasdeserialize-fork, EVAL-addtoenv, EVAL-numeric-cast, EVAL-arith-bigint, EVAL-eq-prim, EVAL-eq-matchtype, EVAL-eq-tuple, EVAL-eq-groupelement, EVAL-eq-bigint, EVAL-eq-avltree, EVAL-eq-box, EVAL-eq-option, EVAL-eq-preheader, EVAL-eq-header, EVAL-eq-coll-sigmaprop-descriptor, EVAL-eq-coll-fallback, EVAL-eq-tokens, EVAL-eq-sigmaboolean, EVAL-deferred-charge-on-exception, EVAL-eq-boxcollection, EVAL-eq-coll-descriptor, EVAL-eq-mismatch-and-unit-E032, OP-0x7D, OP-0x7E, OP-0x8F, OP-0x90, OP-0x91, OP-0x92, OP-0x93, OP-0x94, OP-0x99, OP-0x9A, OP-0x9C, OP-0x9D, OP-0x9E, OP-0xA1, OP-0xA2, OP-0xB6, OP-0xB7, OP-0xCF, OP-0xD7, OP-0xF1, METHOD-groupelement-exp, METHOD-box-registers-R0-R3, METHOD-box-registers-R4-R9, VERSION-header-checkPow-G023, INTERP-toblockcost, VERSION-downcast-gate, VERSION-subst-retention, VERSION-G007, VERSION-G008, VERSION-G009, VERSION-G010, VERSION-G011, VERSION-G012, VERSION-G013, VERSION-G014, VERSION-G016, VERSION-G017, VERSION-G018, VERSION-G019, VERSION-G020, ORDER-hof-charge, ORDER-blockvalue-valdef, OP-0xD6, ORDER-comparison-charge, INTERP-profiling-cost-isolation-I023
 #[test]
 fn cost_ledger_fixtures_jvm_verify_fields_match() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-vectors/ergo-sigma/cost-ledger");
@@ -1073,6 +1142,247 @@ fn last_block_utxo_root_real_headers_matches_jvm() -> Result<()> {
             serde_json::from_value(fixture)?,
             &ledger
         )?);
+    }
+    Ok(())
+}
+
+// ledger: VERSION-G015
+#[test]
+fn serializer_upcast_versions_match_jvm() -> Result<()> {
+    use ergo_primitives::writer::VlqWriter;
+    use ergo_ser::opcode::{write_expr_versioned, Expr, IrNode, Payload};
+    use ergo_ser::sigma_type::SigmaType;
+    use ergo_ser::sigma_value::SigmaValue;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../test-vectors/ergo-sigma/cost-ledger/fixtures/version/serializer-upcast.json.gz");
+    let fixture: Value = serde_json::from_slice(&read_fixture(&path)?)?;
+    ensure!(fixture["ast"]["op"] == "Upcast");
+    ensure!(fixture["ast"]["input_type"] == "Int");
+    ensure!(fixture["ast"]["target_type"] == "Long");
+    let n = i32::try_from(fixture["ast"]["value"].as_i64().context("AST constant")?)?;
+    let root = Expr::Op(IrNode {
+        opcode: 0xd1,
+        payload: Payload::One(Box::new(Expr::Op(IrNode {
+            opcode: 0x93,
+            payload: Payload::Two(
+                Box::new(Expr::Op(IrNode {
+                    opcode: 0x7e,
+                    payload: Payload::NumericCast {
+                        input: Box::new(Expr::Const {
+                            tpe: SigmaType::SInt,
+                            val: SigmaValue::Int(n),
+                        }),
+                        tpe: SigmaType::SLong,
+                    },
+                })),
+                Box::new(Expr::Const {
+                    tpe: SigmaType::SLong,
+                    val: SigmaValue::Long(i64::from(n)),
+                }),
+            ),
+        }))),
+    });
+    let cases = fixture["cases"].as_array().context("serializer cases")?;
+    ensure!(cases.len() == 2);
+    for case in cases {
+        let version = u8::try_from(case["version"].as_u64().context("version")?)?;
+        let mut writer = VlqWriter::new();
+        write_expr_versioned(&mut writer, &root, version)?;
+        let bytes = hex::encode(writer.result());
+        ensure!(bytes == case["expression_hex"]);
+        ensure!(bytes == fixture[format!("jvm_bytes_v{version}")]);
+        let tree = ergo_tree::ErgoTree {
+            version,
+            has_size: true,
+            constant_segregation: false,
+            constants: vec![],
+            body: root.clone(),
+        };
+        let mut writer = VlqWriter::new();
+        ergo_tree::write_ergo_tree(&mut writer, &tree)?;
+        ensure!(hex::encode(writer.result()) == case["request"]["tree_hex"]);
+        let mut actual = record(false);
+        verify(&serde_json::to_vec(&case["request"])?, &mut actual)?;
+        for field in [
+            "verdict",
+            "eval_block_cost",
+            "crypto_block_cost",
+            "total_block_cost",
+        ] {
+            ensure!(
+                actual[field] == case["expected"][field],
+                "version {version}: {field}"
+            );
+        }
+    }
+    Ok(())
+}
+
+// ledger: VERSION-G013
+#[test]
+fn raw_collection_equality_consumers_match_jvm() -> Result<()> {
+    use ergo_sigma::evaluator::Value as RuntimeValue;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../test-vectors/ergo-sigma/cost-ledger/fixtures/version/raw-coll-equals.json.gz");
+    let fixture: Value = serde_json::from_slice(&read_fixture(&path)?)?;
+    let direct = &fixture["raw_probe"];
+    let direct_cases = direct["cases"].as_array().context("raw equality cases")?;
+    ensure!(direct_cases.len() == 4);
+    for case in direct_cases {
+        let convert = |value: &Value| -> Result<RuntimeValue> {
+            let pairs: Vec<(i32, i32)> = serde_json::from_value(value.clone())?;
+            Ok(RuntimeValue::CollGeneric(
+                pairs
+                    .into_iter()
+                    .map(|(a, b)| {
+                        RuntimeValue::Tuple(vec![RuntimeValue::Int(a), RuntimeValue::Int(b)])
+                    })
+                    .collect(),
+                Box::new(ergo_ser::sigma_type::SigmaType::STuple(vec![
+                    ergo_ser::sigma_type::SigmaType::SInt,
+                    ergo_ser::sigma_type::SigmaType::SInt,
+                ])),
+            ))
+        };
+        let left = convert(&case["left"])?;
+        let right = convert(&case["right"])?;
+        // At activated version 3, Rust uses CollGeneric for both results. Its content
+        // equality matches raw JVM equality at v3; pre-v3 representation-only
+        // inequality is excluded by the serialized consumer's method gate.
+        ensure!(left == right);
+        ensure!(case["same_representation_equals"] == true);
+        ensure!(case["equals"] == (case["version"] == 3));
+        if case["version"] == 3 {
+            ensure!(Value::Bool(left == right) == case["equals"]);
+        }
+    }
+    let cases = fixture["cases"].as_array().context("consumer cases")?;
+    ensure!(cases.len() == 12);
+    for case in cases {
+        let mut actual = record(false);
+        verify(&serde_json::to_vec(&case["request"])?, &mut actual)?;
+        for field in [
+            "verdict",
+            "eval_block_cost",
+            "crypto_block_cost",
+            "total_block_cost",
+        ] {
+            if field != "verdict"
+                && (actual[field] == "unavailable" || case["expected"][field] == "unavailable")
+            {
+                continue;
+            }
+            ensure!(
+                actual[field] == case["expected"][field],
+                "{}: {field}: Rust={} JVM={}",
+                case["name"],
+                actual[field],
+                case["expected"][field]
+            );
+        }
+        if case["version"] == 2 && case["method"] != "EQ" {
+            ensure!(
+                actual["verdict"] != "Accept",
+                "pre-v3 raw consumer must be gated"
+            );
+        } else {
+            ensure!(actual["verdict"] == "Accept");
+        }
+    }
+    Ok(())
+}
+
+// ledger: VERSION-soft-fork-wrapped-rules
+#[test]
+fn wrapped_tree_validation_rules_match_jvm() -> Result<()> {
+    use ergo_sigma::evaluator::{RuleStatus, SigmaValidationSettings};
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../test-vectors/ergo-sigma/cost-ledger/fixtures/version/soft-fork-wrapped.json.gz");
+    let fixture: Value = serde_json::from_slice(&read_fixture(&path)?)?;
+    let cases = fixture["cases"].as_array().context("wrapped cases")?;
+    ensure!(cases.len() == 293);
+    let mut wrapped_rules = std::collections::BTreeSet::new();
+    for case in cases {
+        let req = &case["request"];
+        let bytes = hex::decode(req["tree_hex"].as_str().context("tree bytes")?)?;
+        let version = req["parse_activated_version"].as_u64().unwrap_or(1) as u8;
+        let mut reader = VlqReader::new(&bytes).with_activated_script_version(version);
+        if let Some(rule) = case["expected"]["wrapped_rule_id"].as_u64() {
+            let tree = ergo_tree::read_ergo_tree_with_activated_version(&mut reader, version)?;
+            let ergo_ser::opcode::Expr::Unparsed(unparsed) = &tree.body else {
+                anyhow::bail!("{}: expected retained validation failure", case["name"]);
+            };
+            ensure!(
+                unparsed.validation_error.as_ref().map(|e| u64::from(e.0)) == Some(rule),
+                "{}: retained rule {:?} != JVM {rule}",
+                case["name"],
+                unparsed.validation_error
+            );
+            ensure!(unparsed.bytes == bytes, "preserved wire bytes");
+            let mut writer = ergo_primitives::writer::VlqWriter::new();
+            ergo_tree::write_ergo_tree(&mut writer, &tree)?;
+            ensure!(writer.result() == bytes, "wrapped round trip");
+            wrapped_rules.insert(rule);
+        }
+        let mut actual = record(false);
+        verify(&serde_json::to_vec(req)?, &mut actual)?;
+        for field in [
+            "verdict",
+            "eval_block_cost",
+            "crypto_block_cost",
+            "total_block_cost",
+            "failure_class",
+        ] {
+            if actual[field] == "unavailable" || case["expected"][field] == "unavailable" {
+                continue;
+            }
+            ensure!(
+                actual[field] == case["expected"][field],
+                "{}: {field}: Rust={} JVM={}",
+                case["name"],
+                actual[field],
+                case["expected"][field]
+            );
+        }
+    }
+    ensure!(
+        wrapped_rules
+            == std::collections::BTreeSet::from([
+                1001, 1002, 1007, 1008, 1009, 1010, 1011, 1014, 1016, 1017, 1018, 1019,
+            ])
+    );
+    let probes = fixture["rule_status_probe"]["cases"]
+        .as_array()
+        .context("status probe")?;
+    ensure!(probes.len() == 200);
+    for case in probes {
+        let rule = case["rule_id"].as_u64().context("rule id")? as u16;
+        let version = case["activated_version"].as_u64().context("activation")? as u8;
+        let status = match case["status"].as_str().context("status")? {
+            "enabled" => RuleStatus::Enabled,
+            "disabled" => RuleStatus::Disabled,
+            "replaced" => RuleStatus::Replaced(2000),
+            "changed_match" => RuleStatus::Changed(vec![4, 255]),
+            "changed_miss" => RuleStatus::Changed(vec![3, 254]),
+            other => anyhow::bail!("unknown status {other}"),
+        };
+        let mut settings = SigmaValidationSettings::default();
+        // Scala's settings object is a versioned map. Its absent entries cannot
+        // be updated; retain that map shape when comparing isSoftFork itself.
+        if case["registered"] == true {
+            settings.0.insert(rule, status);
+        }
+        let args: &[u8] = if matches!(rule, 1011 | 1016) {
+            &[4, 255]
+        } else {
+            &[4]
+        };
+        ensure!(
+            json!(settings.is_soft_fork(rule, args, version)) == case["soft_fork"],
+            "status probe {case}"
+        );
     }
     Ok(())
 }

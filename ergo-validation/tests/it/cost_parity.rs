@@ -1,5 +1,6 @@
 //! Oracle: test-vectors/scripts/scala/ComputeTransactionCosts.scala
 //! Oracle: scripts/jvm_checkpoint_oracle/CheckpointOracle.scala
+//! Oracle: test-vectors/ergo-sigma/cost-total/mainnet-epochs.json.gz
 //! Oracle: test-vectors/ergo-sigma/cost-total/l4-v6-reject-valid.json
 //! Field-by-field block-unit comparisons against one JVM validateStateful run.
 
@@ -555,10 +556,15 @@ mod ranges {
                     })
                     .collect(),
             };
-            parameters.insert(
-                epoch.height,
-                parse_active_params(&extension, epoch.height).unwrap(),
-            );
+            let mut active = parse_active_params(&extension, epoch.height).unwrap();
+            // Mainnet extension prefix 0x02 carries the cumulative activated
+            // settings, independently of the pending update in parameter 124.
+            active.activated_update =
+                ergo_validation::voting::validation_settings::parse_validation_settings_update(
+                    &extension,
+                )
+                .unwrap();
+            parameters.insert(epoch.height, active);
         }
         assert_eq!(
             parameters.last_key_value().unwrap().0 / 1024,
@@ -928,6 +934,9 @@ mod ranges {
         if let Ok(path) = std::env::var("L4_DIAGNOSTICS") {
             std::fs::write(path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
         }
+        if requested.is_none() {
+            assert_eq!(selected, 101_187, "required mainnet selection changed");
+        }
         eprintln!("L4 selected={selected} executed={executed} failed={failed}");
         assert_eq!(
             selected, executed,
@@ -1009,6 +1018,26 @@ mod ranges {
 
     // ----- oracle parity -----
 
+    // ledger: VERSION-tree-version-gate, VERSION-G019, VERSION-G020
+    #[test]
+    fn cost_parity_activated_statuses_match_mainnet_bytes() {
+        use ergo_sigma::evaluator::RuleStatus;
+        let (_, parameters) = historical_parameters();
+        let before = ProtocolParams::from_active(&parameters[&1_627_136]);
+        assert!(before.validation_settings.0.is_empty());
+        let after = ProtocolParams::from_active(&parameters[&1_628_160]);
+        assert_eq!(
+            after.validation_settings.0,
+            [
+                (1007, RuleStatus::Replaced(1017)),
+                (1008, RuleStatus::Replaced(1018)),
+                (1011, RuleStatus::Replaced(1016)),
+            ]
+            .into_iter()
+            .collect()
+        );
+    }
+
     #[test]
     fn cost_parity_required_matrix_records_mainnet_selection() {
         let (tip_height, parameters) = historical_parameters();
@@ -1049,6 +1078,7 @@ mod ranges {
             .unwrap();
     }
 
+    // ledger: VERSION-tree-version-gate, VERSION-G019, VERSION-G020
     #[test]
     fn cost_parity_required_selection_matches_jvm() {
         std::thread::Builder::new()

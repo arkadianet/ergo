@@ -42,6 +42,7 @@ fn trace_captures_opcode_costs() {
     let miner_pk: [u8; 33] = hex::decode(&v.miner_pk).unwrap().try_into().unwrap();
 
     let ctx = ReductionContext {
+        validation_settings: Default::default(),
         height: v.height,
         self_box: None,
         self_creation_height: 0,
@@ -145,6 +146,7 @@ fn trace_pins_method_indexof_cumulative_total() {
     });
 
     let ctx = ReductionContext {
+        validation_settings: Default::default(),
         height: 1,
         self_box: None,
         self_creation_height: 0,

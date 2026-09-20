@@ -238,6 +238,7 @@ fn trace_inner() {
                             .collect();
 
                         let rctx = ReductionContext {
+                            validation_settings: Default::default(),
                             height: v.height,
                             self_box: Some(&eval_box),
                             self_creation_height: box_data.candidate.creation_height,
@@ -311,7 +312,7 @@ fn summarize_expr(expr: &ergo_ser::opcode::Expr, depth: usize) -> String {
     }
     match expr {
         Expr::Const { tpe, .. } => format!("Const({tpe:?})"),
-        Expr::Unparsed(b) => format!("Unparsed({} bytes)", b.len()),
+        Expr::Unparsed(b) => format!("Unparsed({} bytes)", b.bytes.len()),
         Expr::Op(node) => {
             let name = ergo_ser::opcode::opcode_name(node.opcode);
             match &node.payload {
@@ -393,7 +394,7 @@ fn print_expr_tree(expr: &ergo_ser::opcode::Expr, indent: usize) {
             };
             eprintln!("{pad}Const({tpe:?}) = {display}");
         }
-        Expr::Unparsed(raw) => eprintln!("{pad}Unparsed({} bytes)", raw.len()),
+        Expr::Unparsed(raw) => eprintln!("{pad}Unparsed({} bytes)", raw.bytes.len()),
         Expr::Op(node) => {
             let name = ergo_ser::opcode::opcode_name(node.opcode);
             match &node.payload {

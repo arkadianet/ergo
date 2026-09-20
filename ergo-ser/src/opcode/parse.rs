@@ -1,3 +1,5 @@
+//! Oracle: test-vectors/scala/select_field_index_bounds.json
+
 use ergo_primitives::reader::{ReadError, VlqReader};
 
 use crate::sigma_type::{decode_type, read_type, SigmaType};
@@ -36,6 +38,66 @@ pub fn parse_body(r: &mut VlqReader, tree_version: u8) -> Result<Body, ReadError
 /// Public so that register values — which are serialized as arbitrary
 /// evaluated expressions, not just plain constants — can be parsed.
 pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<Expr, ReadError> {
+    parse_typed_expr(
+        r,
+        depth,
+        _tree_version,
+        &mut ParseTypes::default(),
+        &mut Vec::new(),
+    )
+}
+
+#[derive(Default)]
+struct ParseTypes<'a> {
+    bindings: crate::ergo_tree::root_type::ValDefTypeStore,
+    constants: &'a [(SigmaType, SigmaValue)],
+}
+
+pub(crate) fn parse_body_with_constants(
+    r: &mut VlqReader,
+    version: u8,
+    constants: &[(SigmaType, SigmaValue)],
+) -> Result<Body, ReadError> {
+    let mut types = ParseTypes {
+        constants,
+        ..Default::default()
+    };
+    parse_typed_expr(r, 0, version, &mut types, &mut Vec::new())
+}
+
+fn parse_typed_expr(
+    r: &mut VlqReader,
+    depth: usize,
+    version: u8,
+    types: &mut ParseTypes<'_>,
+    parent_types: &mut Vec<Option<SigmaType>>,
+) -> Result<Expr, ReadError> {
+    let mut children = Vec::new();
+    let expr = parse_node(r, depth, version, types, &mut children)?;
+    let mut children = children.into_iter();
+    let tpe = crate::ergo_tree::root_type::infer_node_type(
+        &expr,
+        &mut types.bindings,
+        types.constants,
+        true,
+        true,
+        &mut |child, _, _| match child {
+            // Relation2's packed constants have no recursive parser call.
+            Expr::Const { tpe, .. } => children.next().unwrap_or_else(|| Some(tpe.clone())),
+            _ => children.next().flatten(),
+        },
+    );
+    parent_types.push(tpe.filter(crate::ergo_tree::root_type::type_is_precise));
+    Ok(expr)
+}
+
+fn parse_node(
+    r: &mut VlqReader,
+    depth: usize,
+    _tree_version: u8,
+    types: &mut ParseTypes<'_>,
+    children: &mut Vec<Option<SigmaType>>,
+) -> Result<Expr, ReadError> {
     // `>=`: depth is 0-based here (root enters at 0), while Scala's shared
     // reader level is incremented BEFORE parsing each nested value, so Rust
     // `depth` == Scala `level - 1`. Rejecting at `depth >= MAX_EXPR_DEPTH`
@@ -86,43 +148,50 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
         // `read_constant`); those are gated at materialization instead. An empty
         // Coll[Option] materializes no Option and is accepted here.
         if _tree_version < 3 && val.contains_option() {
-            return Err(ReadError::InvalidData(format!(
-                "SOption value requires ErgoTree version >= 3 (got {_tree_version})"
-            )));
+            return Err(ReadError::SigmaValidation {
+                rule_id: 1009,
+                args: vec![36],
+                message: format!(
+                    "SOption value requires ErgoTree version >= 3 (got {_tree_version})"
+                ),
+            });
         }
         return Ok(Expr::Const { tpe, val });
     }
 
-    let pattern = opcode_pattern(first)
-        .ok_or_else(|| ReadError::InvalidData(format!("unknown opcode: 0x{first:02X}")))?;
+    let pattern = opcode_pattern(first).ok_or_else(|| ReadError::SigmaValidation {
+        rule_id: 1002,
+        args: vec![first],
+        message: format!("unknown opcode: 0x{first:02X}"),
+    })?;
 
     let next = depth + 1;
     let payload = match pattern {
         ArgPattern::Zero => Payload::Zero,
 
         ArgPattern::One => {
-            let a = parse_expr(r, next, _tree_version)?;
+            let a = parse_typed_expr(r, next, _tree_version, types, children)?;
             Payload::One(Box::new(a))
         }
 
         ArgPattern::Two => {
-            let a = parse_expr(r, next, _tree_version)?;
-            let b = parse_expr(r, next, _tree_version)?;
+            let a = parse_typed_expr(r, next, _tree_version, types, children)?;
+            let b = parse_typed_expr(r, next, _tree_version, types, children)?;
             Payload::Two(Box::new(a), Box::new(b))
         }
 
         ArgPattern::Three => {
-            let a = parse_expr(r, next, _tree_version)?;
-            let b = parse_expr(r, next, _tree_version)?;
-            let c = parse_expr(r, next, _tree_version)?;
+            let a = parse_typed_expr(r, next, _tree_version, types, children)?;
+            let b = parse_typed_expr(r, next, _tree_version, types, children)?;
+            let c = parse_typed_expr(r, next, _tree_version, types, children)?;
             Payload::Three(Box::new(a), Box::new(b), Box::new(c))
         }
 
         ArgPattern::Four => {
-            let a = parse_expr(r, next, _tree_version)?;
-            let b = parse_expr(r, next, _tree_version)?;
-            let c = parse_expr(r, next, _tree_version)?;
-            let d = parse_expr(r, next, _tree_version)?;
+            let a = parse_typed_expr(r, next, _tree_version, types, children)?;
+            let b = parse_typed_expr(r, next, _tree_version, types, children)?;
+            let c = parse_typed_expr(r, next, _tree_version, types, children)?;
+            let d = parse_typed_expr(r, next, _tree_version, types, children)?;
             Payload::Four(Box::new(a), Box::new(b), Box::new(c), Box::new(d))
         }
 
@@ -169,7 +238,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
             // Type is never serialized: Scala's reader always has a non-null
             // constantStore (ConstantStore.empty for non-cseg trees), so the
             // `if (r.constantStore == null) r.getType()` branch is never taken.
-            let rhs = parse_expr(r, next, _tree_version)?;
+            let rhs = parse_typed_expr(r, next, _tree_version, types, children)?;
             Payload::ValDef {
                 id,
                 tpe: None,
@@ -209,7 +278,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
                 }
                 tpe_args.push(t);
             }
-            let rhs = parse_expr(r, next, _tree_version)?;
+            let rhs = parse_typed_expr(r, next, _tree_version, types, children)?;
             Payload::FunDef {
                 id,
                 tpe: None,
@@ -227,9 +296,9 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
             }
             let mut items = Vec::with_capacity(count);
             for _ in 0..count {
-                items.push(parse_expr(r, next, _tree_version)?);
+                items.push(parse_typed_expr(r, next, _tree_version, types, children)?);
             }
-            let result = parse_expr(r, next, _tree_version)?;
+            let result = parse_typed_expr(r, next, _tree_version, types, children)?;
             Payload::BlockValue {
                 items,
                 result: Box::new(result),
@@ -253,9 +322,10 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
                 let id = r.get_uint_to_i32()? as u32;
                 // FuncValue always writes arg types (they define the function signature).
                 let tpe = Some(read_type(r)?);
+                types.bindings.insert(id, tpe.clone());
                 args.push((id, tpe));
             }
-            let body = parse_expr(r, next, _tree_version)?;
+            let body = parse_typed_expr(r, next, _tree_version, types, children)?;
             Payload::FuncValue {
                 args,
                 body: Box::new(body),
@@ -265,7 +335,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
         ArgPattern::PropertyCall => {
             let type_id = r.get_u8()?;
             let method_id = r.get_u8()?;
-            let obj = parse_expr(r, next, _tree_version)?;
+            let obj = parse_typed_expr(r, next, _tree_version, types, children)?;
             // Unresolved-method checkpoint: Scala's `PropertyCallSerializer.parse`
             // resolves the method (and throws a `ValidationException` when it is not
             // in this tree-version's registry) right after `obj`. Mark the
@@ -274,7 +344,25 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
             // tree-header version (v5 for pre-v3, v6 for v3+), so this catches both a
             // v6-only method in a pre-v3 tree and a genuinely unknown id at any version.
             if !is_known_method(type_id, method_id, _tree_version) {
-                r.mark_unresolved_method_checkpoint();
+                if r.strict_method_resolution() {
+                    // MethodsContainer.methodsV5/V6 (methods.scala:146-172).
+                    // An unknown container raises rule 1010, not method rule 1011.
+                    if !(matches!(type_id, 1..=8 | 12 | 36 | 96..=102 | 104..=106)
+                        || type_id == 9 && _tree_version >= 3)
+                    {
+                        return Err(ReadError::SigmaValidation {
+                            rule_id: 1010,
+                            args: vec![type_id],
+                            message: format!("unknown method container {type_id}"),
+                        });
+                    }
+                    return Err(ReadError::SigmaValidation {
+                        rule_id: 1011,
+                        args: vec![type_id, method_id],
+                        message: format!("unknown method {type_id}:{method_id}"),
+                    });
+                }
+                r.mark_unresolved_method_checkpoint(type_id, method_id);
             }
             // PropertyCall (0xDB) is the zero-args form, but a v6
             // property-call SMethod can still declare
@@ -300,7 +388,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
         ArgPattern::MethodCall => {
             let type_id = r.get_u8()?;
             let method_id = r.get_u8()?;
-            let obj = parse_expr(r, next, _tree_version)?;
+            let obj = parse_typed_expr(r, next, _tree_version, types, children)?;
             let n_args = r.get_u32_exact()? as usize;
             if n_args > 10_000 {
                 return Err(ReadError::InvalidData(format!(
@@ -309,7 +397,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
             }
             let mut args = Vec::with_capacity(n_args);
             for _ in 0..n_args {
-                args.push(parse_expr(r, next, _tree_version)?);
+                args.push(parse_typed_expr(r, next, _tree_version, types, children)?);
             }
             if _tree_version >= 3 && args.is_empty() {
                 return Err(ReadError::HardReject(
@@ -325,7 +413,25 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
             // pre-v3 tree AND a genuinely unknown/future `(type_id, method_id)` pair
             // at any version — both wrap under has_size with the same GE-ordering shape.
             if !is_known_method(type_id, method_id, _tree_version) {
-                r.mark_unresolved_method_checkpoint();
+                if r.strict_method_resolution() {
+                    // MethodsContainer.methodsV5/V6 (methods.scala:146-172).
+                    // An unknown container raises rule 1010, not method rule 1011.
+                    if !(matches!(type_id, 1..=8 | 12 | 36 | 96..=102 | 104..=106)
+                        || type_id == 9 && _tree_version >= 3)
+                    {
+                        return Err(ReadError::SigmaValidation {
+                            rule_id: 1010,
+                            args: vec![type_id],
+                            message: format!("unknown method container {type_id}"),
+                        });
+                    }
+                    return Err(ReadError::SigmaValidation {
+                        rule_id: 1011,
+                        args: vec![type_id, method_id],
+                        message: format!("unknown method {type_id}:{method_id}"),
+                    });
+                }
+                r.mark_unresolved_method_checkpoint(type_id, method_id);
             }
             // v6 / EIP-50: methods whose Scala `SMethod` sets
             // `hasExplicitTypeArgs = true` write N type bytes after
@@ -352,7 +458,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
             let elem_type = read_type(r)?;
             let mut items = Vec::with_capacity(count);
             for _ in 0..count {
-                items.push(parse_expr(r, next, _tree_version)?);
+                items.push(parse_typed_expr(r, next, _tree_version, types, children)?);
             }
             Payload::ConcreteCollection { elem_type, items }
         }
@@ -387,37 +493,35 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
             let count = count_byte as usize;
             let mut items = Vec::with_capacity(count);
             for _ in 0..count {
-                items.push(parse_expr(r, next, _tree_version)?);
+                items.push(parse_typed_expr(r, next, _tree_version, types, children)?);
             }
             Payload::Tuple { items }
         }
 
         ArgPattern::SelectField => {
-            let input = parse_expr(r, next, _tree_version)?;
+            let input = parse_typed_expr(r, next, _tree_version, types, children)?;
             let field_idx = r.get_u8()?;
             // Scala builds `SelectField(input, fieldIndex)` at deserialization and
             // its `tpe = input.tpe.items(fieldIndex - 1)` (transformers.scala:294)
             // throws IndexOutOfBoundsException for index 0 and for an index above
             // the tuple arity. `deserializeErgoTree` does not catch it, so the tree
             // hard-rejects even under a size-delimited header (no soft-fork wrap).
-            // Oracle: test-vectors/scala/select_field_index_bounds.json. The arity
-            // half is enforced here for a literal tuple or a tuple constant input;
-            // other tuple shapes reject at evaluation (see `eval_select_field`).
+            // Types are captured at each child's parse position, before later
+            // bindings can overwrite the flat store.
             if field_idx == 0 {
                 return Err(ReadError::HardReject(
                     "SelectField index 0 (indexes are 1-based)".into(),
                 ));
             }
-            let literal_arity = match &input {
-                Expr::Op(IrNode {
-                    payload: Payload::Tuple { items },
-                    ..
-                }) => Some(items.len()),
-                Expr::Const {
-                    tpe: SigmaType::STuple(types),
-                    ..
-                } => Some(types.len()),
-                _ => None,
+            let literal_arity = match children.last().and_then(Option::as_ref) {
+                Some(SigmaType::STuple(items)) => Some(items.len()),
+                _ => match &input {
+                    Expr::Op(IrNode {
+                        payload: Payload::Tuple { items },
+                        ..
+                    }) => Some(items.len()),
+                    _ => None,
+                },
             };
             if let Some(arity) = literal_arity {
                 if field_idx as usize > arity {
@@ -433,7 +537,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
         }
 
         ArgPattern::ExtractRegisterAs => {
-            let input = parse_expr(r, next, _tree_version)?;
+            let input = parse_typed_expr(r, next, _tree_version, types, children)?;
             let reg_id = r.get_u8()?;
             let tpe = read_type(r)?;
             Payload::ExtractRegisterAs {
@@ -461,7 +565,13 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
             let tpe = read_type(r)?;
             let has_default = r.get_u8()?;
             let default = if has_default != 0 {
-                Some(Box::new(parse_expr(r, next, _tree_version)?))
+                Some(Box::new(parse_typed_expr(
+                    r,
+                    next,
+                    _tree_version,
+                    types,
+                    children,
+                )?))
             } else {
                 None
             };
@@ -482,7 +592,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
             let count = r.get_u32_exact()? as usize;
             let mut items = Vec::with_capacity(count.min(4096));
             for _ in 0..count {
-                items.push(parse_expr(r, next, _tree_version)?);
+                items.push(parse_typed_expr(r, next, _tree_version, types, children)?);
             }
             Payload::SigmaCollection { items }
         }
@@ -493,12 +603,12 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
         }
 
         ArgPattern::ByIndex => {
-            let input = parse_expr(r, next, _tree_version)?;
-            let mut index = parse_expr(r, next, _tree_version)?;
+            let input = parse_typed_expr(r, next, _tree_version, types, children)?;
+            let mut index = parse_typed_expr(r, next, _tree_version, types, children)?;
             // Scala ByIndexSerializer inserts a charged Upcast before v3.
             if _tree_version < 3
                 && matches!(
-                    crate::ergo_tree::substitution_type_of(&index),
+                    children.last().and_then(Option::as_ref),
                     Some(SigmaType::SByte | SigmaType::SShort)
                 )
             {
@@ -512,7 +622,13 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
             }
             let has_default = r.get_u8()?;
             let default = if has_default != 0 {
-                Some(Box::new(parse_expr(r, next, _tree_version)?))
+                Some(Box::new(parse_typed_expr(
+                    r,
+                    next,
+                    _tree_version,
+                    types,
+                    children,
+                )?))
             } else {
                 None
             };
@@ -524,7 +640,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
         }
 
         ArgPattern::NumericCast => {
-            let input = parse_expr(r, next, _tree_version)?;
+            let input = parse_typed_expr(r, next, _tree_version, types, children)?;
             let tpe = read_type(r)?;
             Payload::NumericCast {
                 input: Box::new(input),
@@ -533,7 +649,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
         }
 
         ArgPattern::FuncApply => {
-            let func = parse_expr(r, next, _tree_version)?;
+            let func = parse_typed_expr(r, next, _tree_version, types, children)?;
             let n_args = r.get_u32_exact()? as usize;
             if n_args > 10_000 {
                 return Err(ReadError::InvalidData(format!(
@@ -542,7 +658,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
             }
             let mut args = Vec::with_capacity(n_args);
             for _ in 0..n_args {
-                args.push(parse_expr(r, next, _tree_version)?);
+                args.push(parse_typed_expr(r, next, _tree_version, types, children)?);
             }
             Payload::FuncApply {
                 func: Box::new(func),
@@ -570,8 +686,8 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
                 });
                 Payload::Two(a, b)
             } else {
-                let a = Box::new(parse_expr(r, next, _tree_version)?);
-                let b = Box::new(parse_expr(r, next, _tree_version)?);
+                let a = Box::new(parse_typed_expr(r, next, _tree_version, types, children)?);
+                let b = Box::new(parse_typed_expr(r, next, _tree_version, types, children)?);
                 Payload::Two(a, b)
             }
         }
@@ -604,7 +720,7 @@ mod tests {
             let mut r = VlqReader::new(INLINE_SOME_INT);
             let err = parse_expr(&mut r, 0, version).expect_err("pre-v3 inline Option must reject");
             assert!(
-                matches!(&err, ReadError::InvalidData(m) if m.contains("SOption")),
+                matches!(&err, ReadError::SigmaValidation { rule_id: 1009, message: m, .. } if m.contains("SOption")),
                 "version {version}: unexpected error {err:?}"
             );
         }
@@ -670,7 +786,9 @@ mod tests {
         // and are gated at materialization by `sigma_to_value_versioned`.
         let mut r = VlqReader::new(INLINE_SOME_INT);
         let err = parse_expr(&mut r, 0, 0).expect_err("headerless Option must reject");
-        assert!(matches!(&err, ReadError::InvalidData(m) if m.contains("SOption")));
+        assert!(
+            matches!(&err, ReadError::SigmaValidation { rule_id: 1009, message: m, .. } if m.contains("SOption"))
+        );
     }
 
     // ----- oracle parity -----
@@ -776,32 +894,26 @@ mod tests {
 
     // ----- oracle parity -----
 
-    /// Vector: `test-vectors/scala/select_field_index_bounds.json` (JVM parse
-    /// verdicts from `ErgoSerdeOracle.scala`, sigma-state 6.0.2). Scala computes
-    /// `input.tpe.items(fieldIndex - 1)` while deserializing `SelectField`, so
-    /// index 0 and an index above the tuple arity throw IndexOutOfBoundsException
-    /// and the tree fails to deserialize; indexes 1 and 2 on a pair parse.
+    // ledger: OP-0x8C
     #[test]
-    fn select_field_index_zero_and_above_arity_hard_reject_like_scala() {
+    fn select_field_index_bounds_match_jvm_verdicts() {
         use crate::ergo_tree::read_ergo_tree;
-        for (hex, name) in [
-            ("00d1938c860204020404000402", "index_zero_rejected"),
-            ("00d1938c860204020404030402", "index_above_arity_rejected"),
-        ] {
-            let bytes = hex::decode(hex).unwrap();
-            let mut r = VlqReader::new(&bytes);
-            let err = read_ergo_tree(&mut r)
-                .err()
-                .unwrap_or_else(|| panic!("{name} parsed"));
-            assert!(matches!(err, ReadError::HardReject(_)), "{name}: {err:?}");
-        }
-        for (hex, name) in [
-            ("00d1938c860204020404010402", "index_one_accepted"),
-            ("00d1938c860204020404020404", "index_two_accepted"),
-        ] {
-            let bytes = hex::decode(hex).unwrap();
-            let mut r = VlqReader::new(&bytes);
-            read_ergo_tree(&mut r).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/scala/select_field_index_bounds.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let bytes = hex::decode(case["tree_hex"].as_str().unwrap()).unwrap();
+            let result = read_ergo_tree(&mut VlqReader::new(&bytes));
+            match case["jvm"].as_str().unwrap() {
+                "Accept" => assert!(result.is_ok(), "{}: {result:?}", case["name"]),
+                "Reject" => assert!(
+                    matches!(result, Err(ReadError::HardReject(_))),
+                    "{}: {result:?}",
+                    case["name"]
+                ),
+                other => panic!("unexpected JVM verdict {other}"),
+            }
         }
     }
 }

@@ -4350,7 +4350,8 @@
     },
     "G022": {
       "ledger": [
-        "VERSION-tree-version-gate"
+        "VERSION-tree-version-gate",
+        "VERSION-soft-fork-wrapped-rules"
       ],
       "cells": [
         "7",
@@ -4398,6 +4399,7 @@
     }
   },
   "ledger": {
+    "VERSION-soft-fork-wrapped-rules": {"fields": {"scala": "data/shared/src/main/scala/org/ergoplatform/validation/ValidationRules.scala; core/shared/src/main/scala/sigma/validation/ValidationRules.scala; Interpreter.scala:131-141,210-218,249"}},
     "OP-0x72": {
       "fields": {
         "scala": "data/shared/src/main/scala/sigma/ast/values.scala:971; ValUse.costKind FixedCost(5)"

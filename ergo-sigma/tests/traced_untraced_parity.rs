@@ -54,6 +54,7 @@ fn traced_and_untraced_produce_identical_result_and_cost() {
             .collect();
 
         let ctx = ReductionContext {
+            validation_settings: Default::default(),
             height: v.height,
             self_box: None,
             self_creation_height: 0,
