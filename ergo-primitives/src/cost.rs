@@ -1,3 +1,4 @@
+//! Oracle: test-vectors/scala/accumulator_initial_scope.json
 //! Oracle: test-vectors/scala/jitcost_bounds.json
 use thiserror::Error;
 
@@ -711,6 +712,56 @@ mod tests {
                 }
                 other => panic!("unexpected JVM outcome {other:?}"),
             }
+        }
+    }
+    // ledger: INTERP-accumulator-initial-scope-I020
+    #[test]
+    fn accumulator_initial_scope_matches_jvm() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            initial: u64,
+            limit: u64,
+            delta: u64,
+            before: u64,
+            after: u64,
+            exception: Option<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            cases: Vec<Case>,
+        }
+        let fixture: Fixture = serde_json::from_str(include_str!(
+            "../../test-vectors/scala/accumulator_initial_scope.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture.cases.len(), 6);
+        for case in fixture.cases {
+            let mut accumulator = CostAccumulator::new(JitCost::from_jit(case.limit));
+            // Rust's initialization charge checks the limit immediately but retains
+            // the charged total, providing the same state for subsequent adds.
+            let initialization = accumulator.add(JitCost::from_jit(case.initial));
+            if case.initial > case.limit {
+                assert!(matches!(
+                    initialization,
+                    Err(CostError::LimitExceeded { .. })
+                ));
+            } else {
+                initialization.unwrap();
+            }
+            assert_eq!(accumulator.total().value(), case.before);
+            let result = accumulator.add(JitCost::from_jit(case.delta));
+            match case.exception.as_deref() {
+                None => result.unwrap(),
+                Some("sigma.exceptions.CostLimitException") => match result {
+                    Err(CostError::LimitExceeded { current, limit }) => {
+                        assert_eq!(current, case.after);
+                        assert_eq!(limit, case.limit);
+                    }
+                    other => panic!("expected limit rejection, got {other:?}"),
+                },
+                other => panic!("unexpected JVM exception {other:?}"),
+            }
+            assert_eq!(accumulator.total().value(), case.after);
         }
     }
 }

@@ -667,6 +667,22 @@ object EvaluatedValueOracle {
     println("verify self-test: " + count + " passed, 0 failed")
   }
 
+  private def accumulatorProbe(): Json = {
+    val cases = for (initial <- Seq(9, 10, 11); delta <- Seq(0, 1)) yield {
+      val accumulator = new CostAccumulator(JitCost(initial), Some(JitCost(10)))
+      val before = accumulator.totalCost.value
+      val exception = try {
+        accumulator.add(JitCost(delta))
+        Json.Null
+      } catch { case NonFatal(e) => Json.fromString(e.getClass.getName) }
+      Json.obj("initial" -> Json.fromInt(initial), "limit" -> Json.fromInt(10),
+        "delta" -> Json.fromInt(delta), "before" -> Json.fromInt(before),
+        "after" -> Json.fromInt(accumulator.totalCost.value), "exception" -> exception)
+    }
+    Json.obj("oracle" -> Json.fromString("sigma-state:6.0.2 / accumulator_probe"),
+      "cases" -> Json.arr(cases: _*))
+  }
+
   private def jitcostProbe(): Json = {
     val cases = Seq(("add", 2147483646, 1), ("add", 2147483647, 1),
       ("from_block_cost", 214748364, 0), ("from_block_cost", 214748365, 0)).map {
@@ -685,7 +701,22 @@ object EvaluatedValueOracle {
   }
 
   def main(args: Array[String]): Unit = {
-    if (args.sameElements(Array("jitcost_probe"))) {
+    if (args.sameElements(Array("accumulator_probe"))) {
+      println(accumulatorProbe().spaces2)
+    } else if (args.sameElements(Array("accumulator_probe_self_test"))) {
+      val cases = accumulatorProbe().hcursor.downField("cases").focus.get.asArray.get
+      require(cases.size == 6)
+      cases.foreach { c =>
+        val h = c.hcursor
+        val initial = h.get[Int]("initial").right.get
+        val after = initial + h.get[Int]("delta").right.get
+        require(h.get[Int]("before").right.get == initial)
+        require(h.get[Int]("after").right.get == after)
+        require(h.get[Option[String]]("exception").right.get ==
+          (if (after > 10) Some("sigma.exceptions.CostLimitException") else None))
+      }
+      println("accumulator_probe self-test: 6 passed, 0 failed")
+    } else if (args.sameElements(Array("jitcost_probe"))) {
       println(jitcostProbe().spaces2)
     } else if (args.sameElements(Array("jitcost_probe_self_test"))) {
       val cases = jitcostProbe().hcursor.downField("cases").focus.get.asArray.get
