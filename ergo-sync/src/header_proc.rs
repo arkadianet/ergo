@@ -233,6 +233,20 @@ pub fn pre_validate_header(header_bytes: &[u8]) -> Result<PreValidatedHeader, He
     let mut reader = VlqReader::new(header_bytes);
     let header =
         read_header(&mut reader).map_err(|e| HeaderProcessError::Deserialize(format!("{e:?}")))?;
+    // Enforce end-of-input at receive, matching the reload path
+    // (`ergo-validation/src/header/mod.rs`) and the sibling receive sinks
+    // (transaction, block-section, NiPoPoW-proof deserializers all reject
+    // trailing bytes). Without this, a header delivered as
+    // `canonical_bytes ++ trailing_junk` is accepted, and because
+    // `header_id` is `blake2b256(header_bytes)` over the raw bytes, the same
+    // block content enters under a non-canonical id.
+    if reader.position() != header_bytes.len() {
+        return Err(HeaderProcessError::Deserialize(format!(
+            "trailing bytes after header: parsed {} of {} bytes",
+            reader.position(),
+            header_bytes.len()
+        )));
+    }
     let span = tracing::Span::current();
     span.record("block", hex::encode(header_id));
     span.record("height", header.height);
