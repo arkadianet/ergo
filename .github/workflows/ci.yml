@@ -93,10 +93,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Shards share a cache key; each still compiles its test binaries.
-          # Step-level RUSTFLAGS are not visible to rust-cache, so mirror the
-          # Windows linker experiment in its key to invalidate old artifacts.
-          key: ${{ matrix.os }}${{ runner.os == 'Windows' && '-rust-lld' || '' }}
+          # Shards share dependency artifacts; each links its own crate group.
+          key: ${{ matrix.os }}
 
       # Cross-run compilation cache on top of rust-cache: rust-cache restores
       # dependency artifacts, sccache also caches *workspace* crates whose
@@ -114,38 +112,39 @@ jobs:
       # --all-features materially grows the dependency graph per leg).
       # Shard 1 still covers cfg(windows)-specific lints; macOS also lints
       # once, on shard 1. Ubuntu remains a single unsharded leg.
-      # Windows linker experiment: RUSTFLAGS=-Clinker=rust-lld uses the
-      # toolchain's bundled linker. Changing RUSTFLAGS busts the rust-cache
-      # key: the FIRST run is a cold rebuild; only the second is comparable.
-      # Keep the same step-level flags on every Windows compile/test step.
       - name: cargo clippy
         if: (runner.os != 'Windows' || matrix.shard == 1) && (runner.os != 'macOS' || matrix.shard == 1)
-        env:
-          RUSTFLAGS: ${{ runner.os == 'Windows' && '-Clinker=rust-lld' || '' }}
         run: cargo clippy --all-targets -- -D warnings
 
       - uses: taiki-e/install-action@nextest
+
+      # The guard and nextest read the same crate groups. A new workspace
+      # member fails every shard until assigned; duplicates also fail.
+      - name: Validate crate-group membership
+        if: runner.os != 'Linux'
+        id: shard
+        run: python scripts/ci-shards.py --os "${{ runner.os }}" --shard ${{ matrix.shard }} --shards ${{ matrix.shards }}
 
       # nextest: per-test processes with better parallelism; skips doctests,
       # which the ubuntu leg below covers explicitly so coverage is retained.
       - name: cargo nextest run
         if: runner.os == 'Linux'
-        run: cargo nextest run --all
+        run: cargo nextest run --workspace
 
       - name: cargo nextest run (macOS shard)
         if: runner.os == 'macOS'
-        run: cargo nextest run --all --partition hash:${{ matrix.shard }}/${{ matrix.shards }}
+        run: cargo nextest run ${{ steps.shard.outputs.packages }}
 
       # The slow redb tests are 15–27x slower on Windows than Ubuntu due
       # to disk waits. Eight threads (2x the runner's four cores) overlap
-      # those waits; hash partitions cover every test exactly once.
+      # those waits. Crate groups avoid linking other shards' test binaries.
+      # Expected aggregate test-minutes: 18.9 / 16.9 / 15.4; macOS groups
+      # balance at 25.3 / 25.9 using Windows timings as a proxy (see script).
       - name: cargo nextest run (Windows shard)
         if: runner.os == 'Windows'
-        env:
-          RUSTFLAGS: -Clinker=rust-lld
-        run: cargo nextest run --all --partition hash:${{ matrix.shard }}/${{ matrix.shards }} --test-threads 8
+        run: cargo nextest run ${{ steps.shard.outputs.packages }} --test-threads 8
 
-      # `cargo test --all` above does not build with --features cost-trace,
+      # `cargo nextest run` above does not build with --features cost-trace,
       # so the feature-gated recording sites in `ergo-sigma` do not get
       # exercised. This step compiles and runs the two integration tests
       # that DO exercise the feature (`cost_trace_smoke` covers OP/Method
@@ -155,8 +154,6 @@ jobs:
       # — a feature-gated `cost_trace::record(...)` site referencing the
       # wrong identifier and breaking the build under the feature.
       - name: cargo test (cost-trace feature)
-        env:
-          RUSTFLAGS: ${{ runner.os == 'Windows' && '-Clinker=rust-lld' || '' }}
         run: cargo test -p ergo-sigma --features cost-trace --test it -- cost_trace_smoke traced_untraced_parity
 
       # Doctest coverage lives on the fastest runner only — every other leg
