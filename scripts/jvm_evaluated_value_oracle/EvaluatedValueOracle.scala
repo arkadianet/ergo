@@ -389,7 +389,18 @@ object EvaluatedValueOracle {
       // (core/.../ValidationRules.scala:248, Interpreter.scala:249).
       val replacements = cursor.get[Option[Map[String, Short]]]("validation_settings_replaced_rules")
         .fold(throw _, identity).getOrElse(Map.empty)
-      val validationSettings = replacements.foldLeft(ValidationRules.currentSettings) {
+      val disabled = cursor.get[Option[Vector[Short]]]("validation_settings_disabled_rules")
+        .fold(throw _, identity).getOrElse(Vector.empty)
+      val withDisabled = disabled.foldLeft(ValidationRules.currentSettings) {
+        case (settings, id) => settings.updated(id, sigma.validation.DisabledRule)
+      }
+      val changes = cursor.get[Option[Map[String, String]]]("validation_settings_changed_rules")
+        .fold(throw _, identity).getOrElse(Map.empty)
+      val withChanges = changes.foldLeft(withDisabled) {
+        case (settings, (id, codes)) =>
+          settings.updated(id.toShort, sigma.validation.ChangedRule(Base16.decode(codes).get))
+      }
+      val validationSettings = replacements.foldLeft(withChanges) {
         case (settings, (id, replacement)) =>
           settings.updated(id.toShort, sigma.validation.ReplacedRule(replacement))
       }
@@ -638,6 +649,20 @@ object EvaluatedValueOracle {
         "total_block_cost" -> num(31), "rent_block_cost" -> num(0),
         "eval_block_cost" -> (if (limit < 32) unavailable else num(14)),
         "crypto_block_cost" -> (if (limit < 32) unavailable else num(0)))
+    }
+    val mismatch = patch(deserialize, "ctx_ext_hex" -> str("01010e020101"))
+    check("validation_settings_replaced_rule_accepts", patch(mismatch,
+      "validation_settings_replaced_rules" -> Json.obj("1000" -> num(1001))),
+      "verdict" -> str("Accept"), "total_block_cost" -> num(27))
+    check("validation_settings_disabled_rule_rejects", patch(mismatch,
+      "validation_settings_disabled_rules" -> Json.arr(num(1000))),
+      "verdict" -> str("RejectScript"), "failure_class" -> str("sigma.validation.ValidationException"))
+    val primitiveFailure = patch(deserialize, "activated_version" -> num(2),
+      "ctx_ext_hex" -> str("01010e03d40a00"))
+    for (matching <- Seq(false, true)) {
+      check("validation_settings_changed_type_" + matching, patch(primitiveFailure,
+        "validation_settings_changed_rules" -> Json.obj("1007" -> str(if (matching) "0a" else "ff"))),
+        "verdict" -> str(if (matching) "Accept" else "RejectScript"))
     }
     println("verify self-test: " + count + " passed, 0 failed")
   }

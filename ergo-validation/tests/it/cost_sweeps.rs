@@ -1,4 +1,6 @@
 //! Oracle: test-vectors/ergo-sigma/cost-ledger/sweeps/ (JVM verify and validateStateful).
+//! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/version/validation-settings.json.gz
+//! Oracle: test-vectors/ergo-sigma/cost-ledger/fixtures/version/gate-soft-fork.json.gz
 
 use ergo_primitives::cost::{CostAccumulator, JitCost};
 use ergo_primitives::reader::{ReadError, VlqReader};
@@ -67,13 +69,56 @@ fn verify_case(req: &Value) -> (&'static str, u64) {
         pre_header_n_bits: u64::from_be_bytes(pre[41..49].try_into().unwrap()),
         pre_header_votes: pre[86..89].try_into().unwrap(),
     };
+    let mut active = ergo_validation::active_params::scala_launch_mainnet();
+    if let Some(rules) = req["validation_settings_replaced_rules"].as_object() {
+        active.activated_update.status_updates = rules
+            .iter()
+            .map(|(id, replacement)| {
+                (
+                    id.parse().unwrap(),
+                    ergo_validation::voting::validation_settings::RuleStatus::Replaced(
+                        replacement.as_u64().unwrap().try_into().unwrap(),
+                    ),
+                )
+            })
+            .collect();
+    }
+    if let Some(rules) = req["validation_settings_disabled_rules"].as_array() {
+        active
+            .activated_update
+            .status_updates
+            .extend(rules.iter().map(|id| {
+                (
+                    id.as_u64().unwrap().try_into().unwrap(),
+                    ergo_validation::voting::validation_settings::RuleStatus::Disabled,
+                )
+            }));
+    }
+    if let Some(rules) = req["validation_settings_changed_rules"].as_object() {
+        active
+            .activated_update
+            .status_updates
+            .extend(rules.iter().map(|(id, codes)| {
+                (
+                    id.parse().unwrap(),
+                    ergo_validation::voting::validation_settings::RuleStatus::Changed(
+                        hex::decode(codes.as_str().unwrap()).unwrap(),
+                    ),
+                )
+            }));
+    }
+    // A pending vote must never grant acceptance before activation.
+    active.proposed_update.status_updates.push((
+        1000,
+        ergo_validation::voting::validation_settings::RuleStatus::Replaced(1001),
+    ));
     let params = ProtocolParams {
         storage_fee_factor: req["storage_fee_factor"]
             .as_i64()
             .unwrap_or(1_250_000)
             .try_into()
             .unwrap(),
-        ..ProtocolParams::mainnet_default()
+        ..ProtocolParams::from_active(&active)
     };
     let mut cost = CostAccumulator::new(
         JitCost::from_block_cost(req["cost_limit_block"].as_u64().unwrap()).unwrap(),
@@ -103,6 +148,7 @@ fn verify_case(req: &Value) -> (&'static str, u64) {
         {
             "RejectCost"
         }
+        Err(ValidationError::ScriptError { .. }) => "RejectScript",
         Err(error) => panic!("{error}"),
     };
     (verdict, cost.total_block_cost())
@@ -125,6 +171,26 @@ fn read_json(path: &std::path::Path) -> Value {
 }
 
 // ----- oracle parity -----
+
+// ledger: VERSION-tree-version-gate, VERSION-G019, VERSION-G020
+#[test]
+fn validation_settings_activated_script_inputs_match_jvm() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../test-vectors/ergo-sigma/cost-ledger/fixtures/version");
+    let mut count = 0;
+    for name in ["validation-settings", "gate-soft-fork"] {
+        let fixture = read_json(&root.join(format!("{name}.json.gz")));
+        for case in fixture["cases"].as_array().unwrap() {
+            let (verdict, cost) = verify_case(&case["request"]);
+            assert_eq!(verdict, case["expected"]["verdict"], "{}", case["name"]);
+            if let Some(expected) = case["expected"]["total_block_cost"].as_u64() {
+                assert_eq!(cost, expected, "{}", case["name"]);
+            }
+            count += 1;
+        }
+    }
+    assert_eq!(count, 104);
+}
 
 // ledger: ROUND-snap-per-input, ORDER-init-token, ORDER-pre-v3-upcast, ORDER-crypto-before-verify, LIMIT-tx-start, LIMIT-per-input, TX-accumulator-shared, INTERP-costlimit-op, TX-storage-rent
 #[test]

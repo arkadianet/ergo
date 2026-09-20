@@ -80,9 +80,9 @@ def fix_probes():
     probe.pop('expected', None)
     probe['request'].pop('observe_deserialization_failure', None)
     probe['request']['validation_settings_replaced_rules'] = {'1000': 1001}
-    # .jvm is deliberate: this is JVM-only evidence for an OPEN L4/L5 row.
+    # Both verification adapters consume the regenerated settings-aware fixture.
     fixture = {'ledger': ['VERSION-tree-version-gate'], 'cases': [probe]}
-    write_fixture_text(wire.OUT / 'gate-soft-fork.jvm', json.dumps(fixture, indent=2) + '\n')
+    write_fixture_text(wire.OUT / 'gate-soft-fork.json.gz', json.dumps(fixture, indent=2) + '\n')
 
 
 def failure_limits():
