@@ -8,10 +8,10 @@
 //! The higher-order arms (ForAll / Filter / Fold / Map / Exists)
 //! recurse into `eval_expr` per element and charge an `AddToEnv`
 //! (5 jit) per closure invocation. Cost-charge sequencing is preserved
-//! exactly: the collection is evaluated, then
-//! `add_cost_per_item(opcode, n)` is charged from the materialized
-//! length, then the predicate is evaluated, then per-element AddToEnv
-//! charges land before each closure body call.
+//! exactly: collection and function construction precede the known-length
+//! overhead charge; per-element AddToEnv charges precede each closure body.
+//! Scala transformers.scala:40-45,123-127,160-164,187-191,224-230
+//! uses addSeqCostNoOp for these operations.
 
 use crate::evaluator::helpers::reject_sstring;
 use ergo_primitives::cost::JitCost;
@@ -276,8 +276,8 @@ pub(in crate::evaluator) fn eval_forall(
 ) -> Result<Value, EvalError> {
     let coll = cx.eval_expr(coll_expr)?;
     let n = collection_len(&coll, cx.ctx);
-    add_cost_per_item(cx.cost, 0xAF, n as u32)?;
     let pred = cx.eval_expr(pred_expr)?;
+    add_cost_per_item(cx.cost, 0xAF, n as u32)?;
     let (_coll_kind, items) = collection_to_values(coll, cx.ctx)?;
     match pred {
         Value::Func {
@@ -335,8 +335,8 @@ pub(in crate::evaluator) fn eval_filter(
 ) -> Result<Value, EvalError> {
     let coll = cx.eval_expr(coll_expr)?;
     let n = collection_len(&coll, cx.ctx);
-    add_cost_per_item(cx.cost, 0xB5, n as u32)?;
     let pred = cx.eval_expr(pred_expr)?;
+    add_cost_per_item(cx.cost, 0xB5, n as u32)?;
     // Filter preserves the input's element type; capture before
     // `collection_to_values` consumes the carrier so the rebuild
     // step can re-tag the `CollGeneric` fallback with the right T.
@@ -449,8 +449,8 @@ pub(in crate::evaluator) fn eval_map_collection(
 ) -> Result<Value, EvalError> {
     let coll = cx.eval_expr(coll_expr)?;
     let n = collection_len(&coll, cx.ctx);
-    add_cost_per_item(cx.cost, 0xAD, n as u32)?;
     let mapper = cx.eval_expr(mapper_expr)?;
+    add_cost_per_item(cx.cost, 0xAD, n as u32)?;
     map_values(coll, mapper, cx)
 }
 
@@ -539,8 +539,8 @@ pub(in crate::evaluator) fn eval_exists(
 ) -> Result<Value, EvalError> {
     let coll = cx.eval_expr(coll_expr)?;
     let n = collection_len(&coll, cx.ctx);
-    add_cost_per_item(cx.cost, 0xAE, n as u32)?;
     let pred = cx.eval_expr(pred_expr)?;
+    add_cost_per_item(cx.cost, 0xAE, n as u32)?;
     let (_coll_kind, items) = collection_to_values(coll, cx.ctx)?;
     match pred {
         Value::Func {
