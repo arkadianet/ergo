@@ -55,14 +55,20 @@ fn check_soft_fork_condition(
     ergo_tree: &ErgoTree,
     activated_script_version: u8,
 ) -> Result<Option<bool>, VerifySpendingError> {
+    // ErgoTreeSerializer.scala:202 constructs caught validation failures with
+    // DefaultHeader (version zero), retaining the wire header only in bytes.
+    let tree_version = match &ergo_tree.body {
+        Expr::Unparsed(tree) if tree.validation_error.is_some() => 0,
+        _ => ergo_tree.version,
+    };
     if activated_script_version > MAX_SUPPORTED_SCRIPT_VERSION {
-        if ergo_tree.version > MAX_SUPPORTED_SCRIPT_VERSION {
+        if tree_version > MAX_SUPPORTED_SCRIPT_VERSION {
             return Ok(Some(true));
         }
-    } else if ergo_tree.version > activated_script_version {
+    } else if tree_version > activated_script_version {
         return Err(VerifySpendingError::Eval(
             super::evaluator::EvalError::TreeVersionAboveActivated {
-                tree_version: ergo_tree.version,
+                tree_version,
                 activated_script_version,
             },
         ));
@@ -284,7 +290,27 @@ pub fn verify_spending_proof_with_context_and_cost(
     // the `SigmaPropConstant(p)` pattern; other body shapes go through
     // the full evaluator. Statically determinable non-SigmaProp roots fail
     // parser rule 1001 for every version; size-delimited trees are soft-fork wrapped.
-    let proposition = match trivial_reduce(ergo_tree) {
+    // Interpreter.scala:131-141 substitutes TrueSigmaProp for a recognized
+    // retained parser error, then fullReduction:210-218 charges the same
+    // constant fast path as any other SigmaPropConstant (5 block units).
+    let reduction = match &ergo_tree.body {
+        ergo_ser::opcode::Expr::Unparsed(unparsed)
+            if unparsed
+                .validation_error
+                .as_ref()
+                .is_some_and(|(rule_id, args)| {
+                    ctx.validation_settings.is_soft_fork(
+                        *rule_id,
+                        args,
+                        ctx.activated_script_version,
+                    )
+                }) =>
+        {
+            Ok(SigmaBoolean::TrivialProp(true))
+        }
+        _ => trivial_reduce(ergo_tree),
+    };
+    let proposition = match reduction {
         Ok(prop) => {
             // Scala charges Eval_SigmaPropConstant(50) for trivially-reducible scripts
             // (Interpreter.scala:211). Without this, P2PK inputs are underpriced.

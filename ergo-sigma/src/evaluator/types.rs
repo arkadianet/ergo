@@ -204,11 +204,15 @@ pub enum RuleStatus {
 pub struct SigmaValidationSettings(pub std::collections::BTreeMap<u16, RuleStatus>);
 
 impl SigmaValidationSettings {
-    /// SigmaValidationSettings.scala:55-66: replacements recognize a soft fork,
-    /// except the replaced V5 type/method rules after A6. Disabled status alone
-    /// does not recognize these rules (SoftForkChecker.scala:12).
+    /// SigmaValidationSettings.scala:55-66 recognizes replacements except V5
+    /// type/method rules after A6. currentSettings registers 1000..=1016 and
+    /// 1019 across its two versions, but never 1017/1018 (org/.../ValidationRules
+    /// .scala:223-252). Disabled alone is false (SoftForkChecker.scala:12).
+    /// Changed code sets follow SoftForkChecker.scala:35; method pairs follow
+    /// org/.../ValidationRules.scala:122-131. Rule 1019 throws a single SType,
+    /// which cannot match its MethodsContainer/method-pair Changed override.
     pub fn is_soft_fork(&self, rule_id: u16, args: &[u8], activated_version: u8) -> bool {
-        matches!(rule_id, 1000 | 1007 | 1008 | 1011 | 1016 | 1017 | 1018)
+        matches!(rule_id, 1000..=1016 | 1019)
             && match self.0.get(&rule_id) {
                 Some(RuleStatus::Replaced(_)) => {
                     !(activated_version >= 3 && matches!(rule_id, 1007 | 1008 | 1011))
@@ -216,11 +220,11 @@ impl SigmaValidationSettings {
                 // SoftForkChecker.scala:35: the exact failed type byte
                 // must occur in the activated ChangedRule payload.
                 Some(RuleStatus::Changed(codes))
-                    if matches!(rule_id, 1007 | 1008 | 1017 | 1018) =>
+                    if matches!(rule_id, 1002 | 1007 | 1008 | 1010) =>
                 {
                     matches!(args, [code] if codes.contains(code))
                 }
-                Some(RuleStatus::Changed(codes)) if matches!(rule_id, 1011 | 1016) => {
+                Some(RuleStatus::Changed(codes)) if matches!(rule_id, 1011 | 1016 | 1019) => {
                     args.len() == 2 && codes.chunks(2).any(|key| key == args)
                 }
                 _ => false,
