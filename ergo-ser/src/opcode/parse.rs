@@ -138,6 +138,15 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
 
         ArgPattern::ConstPlaceholder => {
             let index = r.get_u32_exact()?;
+            // ConstantPlaceholderSerializer.scala:20 looks up the type immediately.
+            // ArrayIndexOutOfBoundsException escapes the size-delimited soft-fork wrap.
+            if r.constant_pool_len()
+                .is_some_and(|len| index as usize >= len)
+            {
+                return Err(ReadError::HardReject(format!(
+                    "ConstantPlaceholder index {index} is outside the constant pool"
+                )));
+            }
             Payload::ConstPlaceholder { index }
         }
 

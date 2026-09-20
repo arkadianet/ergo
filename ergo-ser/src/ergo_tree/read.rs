@@ -1,6 +1,7 @@
 //! ErgoTree deserialization: the lenient consensus reader with Scala's
 //! soft-fork wrap semantics (`UnparsedErgoTree`), declared-size handling,
 //! version scoping, and the shared depth/position budgets.
+//! Oracle: test-vectors/scala/const_placeholder_bounds.json
 
 use ergo_primitives::reader::{ReadError, VlqReader};
 
@@ -366,7 +367,11 @@ fn parse_body(
         vec![]
     };
 
-    let body = opcode::parse_body(r, version)?;
+    let saved_pool_len = r.constant_pool_len();
+    r.set_constant_pool_len(Some(constants.len()));
+    let body = opcode::parse_body(r, version);
+    r.set_constant_pool_len(saved_pool_len);
+    let body = body?;
 
     Ok(ErgoTree {
         version,
@@ -375,4 +380,43 @@ fn parse_body(
         constants,
         body,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ----- oracle parity -----
+
+    // ledger: ORDER-constplaceholder
+    #[test]
+    fn constant_placeholder_bounds_jvm_verdicts_match() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/scala/const_placeholder_bounds.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let bytes = hex::decode(case["tree_hex"].as_str().unwrap()).unwrap();
+            let mut reader = VlqReader::new(&bytes);
+            let result = read_ergo_tree(&mut reader);
+            match case["jvm"].as_str().unwrap() {
+                "Reject" => assert!(
+                    matches!(result, Err(ReadError::HardReject(_))),
+                    "{}: {result:?}",
+                    case["name"]
+                ),
+                "Accept" => {
+                    let tree = result.unwrap();
+                    assert!(
+                        !matches!(tree.body, opcode::Expr::Unparsed(_)),
+                        "{}",
+                        case["name"]
+                    );
+                    assert_eq!(reader.position(), bytes.len(), "{}", case["name"]);
+                }
+                verdict => panic!("unexpected JVM verdict {verdict}"),
+            }
+            assert_eq!(reader.constant_pool_len(), None);
+        }
+    }
 }

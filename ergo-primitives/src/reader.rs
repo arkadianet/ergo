@@ -41,6 +41,8 @@ pub struct VlqReader<'a> {
     /// by `isV3OrLaterErgoTreeVersion`. Set by the ErgoTree body parser around the
     /// body (and segregated constants); `None` defaults to the v6/activated set.
     ergo_tree_version: Option<u8>,
+    /// Constant pool bound while parsing an ErgoTree body.
+    constant_pool_len: Option<usize>,
     /// Optional override for the version that gates V6-EMBEDDABLE TYPE CODES
     /// (`SUnsignedBigInt` = code 9, …) — the ACTIVATED version, per Scala
     /// `TypeSerializer.getEmbeddableType` selecting `embeddableV5`/`embeddableV6`
@@ -149,6 +151,7 @@ impl<'a> VlqReader<'a> {
             group_elements: Vec::new(),
             unresolved_method_checkpoint: None,
             ergo_tree_version: None,
+            constant_pool_len: None,
             embeddable_activated_version: None,
             trusted: false,
             activated_script_version: None,
@@ -250,6 +253,16 @@ impl<'a> VlqReader<'a> {
     /// body, restore after.
     pub fn restore_unresolved_method_checkpoint(&mut self, saved: Option<usize>) {
         self.unresolved_method_checkpoint = saved;
+    }
+
+    /// Constant pool bound for the current ErgoTree body, absent for raw expressions.
+    pub fn constant_pool_len(&self) -> Option<usize> {
+        self.constant_pool_len
+    }
+
+    /// Scope the segregated constant pool bound to its tree body.
+    pub fn set_constant_pool_len(&mut self, len: Option<usize>) {
+        self.constant_pool_len = len;
     }
 
     /// The ErgoTree header version of the body being parsed (`None` = headerless
