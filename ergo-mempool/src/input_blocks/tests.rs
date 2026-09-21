@@ -8,7 +8,9 @@ use ergo_ser::ergo_box::ErgoBoxCandidate;
 use ergo_ser::ergo_tree::read_ergo_tree;
 use ergo_ser::input::{ContextExtension, Input, SpendingProof};
 use ergo_ser::register::AdditionalRegisters;
+use ergo_ser::transaction::read_transaction;
 use ergo_ser::transaction::write_transaction;
+use ergo_ser::weak_id::weak_id_of;
 use std::collections::HashMap;
 
 // ----- helpers -----
@@ -856,4 +858,63 @@ fn restore_credits_only_the_reconnected_parent_not_a_surviving_co_parent() {
         );
     }
     pool.check_invariants();
+}
+
+// ----- weak-id index -----
+
+/// The index must answer exactly what a full scan would, and must stay
+/// correct across removals — otherwise the O(1) lookup is a silent
+/// behaviour change rather than a speed-up.
+///
+/// This is the throughput fix for the M2 devnet smoke: the node used to
+/// rebuild a `WeakId -> bodies` map by parsing EVERY pooled transaction
+/// on EVERY input-block frame, with roughly one input block per second
+/// arriving from the miner.
+#[test]
+fn weak_id_index_answers_exactly_what_a_scan_would() {
+    let (tx_a, bytes_a) = decode_hex_tx(WEAK_COLLISION_TX_A_HEX);
+    let (tx_b, bytes_b) = decode_hex_tx(WEAK_COLLISION_TX_B_HEX);
+    let weak = weak_id_of(&tx_a).unwrap();
+    assert_eq!(weak, weak_id_of(&tx_b).unwrap(), "fixture must collide");
+    let tx_id_a = *transaction_id(&tx_a).unwrap().as_digest();
+    let tx_id_b = *transaction_id(&tx_b).unwrap().as_digest();
+    let (tx_c, bytes_c, tx_id_c) = build_tx(&[d(0x51)], 100);
+    let weak_c = weak_id_of(&tx_c).unwrap();
+    assert_ne!(weak_c, weak);
+
+    let mut pool = OrderedPool::with_capacity(8);
+    pool.insert(entry_from_tx(tx_id_a, &tx_a, bytes_a, 100, 50_000))
+        .unwrap();
+    pool.insert(entry_from_tx(tx_id_b, &tx_b, bytes_b, 200, 50_000))
+        .unwrap();
+    pool.insert(entry_from_tx(tx_id_c, &tx_c, bytes_c, 300, 50_000))
+        .unwrap();
+
+    let indexed: Vec<TxId> = pool.tx_ids_by_weak_id(&weak).to_vec();
+    assert_eq!(indexed.len(), 2, "both colliding entries, never collapsed");
+    assert!(indexed.contains(&tx_id_a) && indexed.contains(&tx_id_b));
+    assert_eq!(pool.tx_ids_by_weak_id(&weak_c), &[tx_id_c]);
+    assert!(pool.tx_ids_by_weak_id(&[0xFF; 6]).is_empty());
+
+    // The index is what `find_by_weak_id` answers from, so the two must
+    // agree entry for entry.
+    let found: Vec<TxId> = find_by_weak_id(&pool, &weak)
+        .iter()
+        .map(|e| e.tx_id)
+        .collect();
+    assert_eq!(found.len(), 2);
+    assert!(found.contains(&tx_id_a) && found.contains(&tx_id_b));
+
+    // Removing one collider leaves the other reachable; removing both
+    // drops the bucket entirely rather than leaving a stale id behind.
+    pool.remove(&tx_id_a).expect("pooled");
+    assert_eq!(pool.tx_ids_by_weak_id(&weak), &[tx_id_b]);
+    assert_eq!(find_by_weak_id(&pool, &weak).len(), 1);
+    pool.remove(&tx_id_b).expect("pooled");
+    assert!(
+        pool.tx_ids_by_weak_id(&weak).is_empty(),
+        "an emptied bucket must not linger"
+    );
+    assert!(find_by_weak_id(&pool, &weak).is_empty());
+    assert_eq!(pool.tx_ids_by_weak_id(&weak_c), &[tx_id_c]);
 }

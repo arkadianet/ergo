@@ -19,28 +19,19 @@ use ergo_primitives::reader::VlqReader;
 use ergo_ser::header::{read_header, Header};
 use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
 use ergo_ser::transaction::read_transaction;
-use ergo_ser::weak_id::{weak_id_of, witness_id, WeakId};
+use ergo_ser::weak_id::{witness_id, WeakId};
 use ergo_state::{ChainStateRead, HeaderSectionStore, StateBackendKind};
 
 use super::super::NodeState;
 
 /// Weak-id → bodies snapshot of the mempool, taken once per event.
 ///
-/// A snapshot rather than a live `&Mempool` borrow: the effect executor
-/// holds `&mut NodeState` while it drives the processor, and the
-/// processor's `mempool_lookup` closure must not alias it. Cost is one
-/// pass over the pool (parse + weak id per entry) per event; acceptable
-/// at M2's devnet-only scale, and the obvious thing to make incremental
-/// later (a weak-id index maintained by admission).
-pub(in crate::node) type WeakIndex = HashMap<WeakId, Vec<Body>>;
-
 /// Owned per-event inputs for a [`ProcessorCtx`], plus a borrow of the
 /// store for the lookups that cannot be precomputed.
 pub(in crate::node) struct CtxData<'a> {
     multiplier: Option<i32>,
     full_block_height: u32,
     utxo_mode: bool,
-    weak_index: WeakIndex,
     /// Expected `nBits` per announced parent, precomputed for the parent
     /// ids the caller knew about. A miss falls through to
     /// [`expected_n_bits_after_store`] against `store`.
@@ -60,7 +51,14 @@ impl CtxData<'_> {
     /// only borrow-safe form, and is what the processor's own test harness
     /// uses.
     pub(in crate::node) fn with<R>(&self, f: impl FnOnce(&ProcessorCtx<'_>) -> R) -> R {
-        let mempool_lookup = |w: &WeakId| self.weak_index.get(w).cloned().unwrap_or_default();
+        // Resolved on demand against the mempool's own weak-id index:
+        // O(1) plus a parse of only the entries that actually carry `w`.
+        // This used to be a precomputed snapshot rebuilt by parsing EVERY
+        // pooled transaction on every input-block event — with the miner
+        // publishing roughly one input block per second that scan was the
+        // subsystem's dominant cost. `&NodeState` is shared here (the
+        // executor took the runtime out of it), so the borrow is sound.
+        let mempool_lookup = |w: &WeakId| bodies_for_weak_id(self.state, w);
         let expected_n_bits = |parent: &[u8; 32]| match self.expected.get(parent) {
             Some(v) => *v,
             None => expected_n_bits_after(self.state, parent),
@@ -101,46 +99,45 @@ pub(in crate::node) fn build_ctx_data<'a>(
         multiplier: state.last_seen_active_params.subblocks_per_block,
         full_block_height: state.store.chain_state_meta().best_full_block_height,
         utxo_mode: state.store.as_utxo().is_some(),
-        weak_index: build_weak_index(state),
         expected,
         state,
     }
 }
 
-/// One pass over the pool, indexing every entry by its weak id.
-fn build_weak_index(state: &NodeState) -> WeakIndex {
-    let mut index: WeakIndex = HashMap::new();
-    for entry in state.mempool.iter_transactions() {
-        let mut r = VlqReader::new(&entry.bytes);
-        let tx = match read_transaction(&mut r) {
-            Ok(tx) => tx,
-            Err(err) => {
-                // The bytes came from a successful admission, so a parse
-                // failure here means the row no longer decodes — worth a
-                // diagnostic, but the lookup contract is "skip".
-                tracing::warn!(tx_id = ?entry.tx_id, error = ?err, "input_blocks: pooled entry does not decode, skipping");
-                continue;
-            }
-        };
-        let weak = match weak_id_of(&tx) {
-            Ok(w) => w,
-            Err(err) => {
-                tracing::warn!(tx_id = ?entry.tx_id, error = ?err, "input_blocks: pooled entry has no weak id, skipping");
-                continue;
-            }
-        };
-        let wid = witness_id(&tx);
-        index.entry(weak).or_default().push(Body {
-            tx_ref: TxRef {
-                tx_id: *entry.tx_id.as_bytes(),
-                witness_id: wid,
-            },
-            weak_id: weak,
-            bytes: entry.bytes.clone(),
-            tx,
-        });
-    }
-    index
+/// The pooled transactions carrying `weak`, as processor [`Body`]s.
+///
+/// A weak id is 6 bytes, so distinct pooled transactions legitimately
+/// collide (spec §7.5); every collider is returned and the caller
+/// resolves the ambiguity through the full-id request path. An entry
+/// whose stored bytes no longer decode is skipped, never fatal — the
+/// same contract the removed full-pool scan had.
+fn bodies_for_weak_id(state: &NodeState, weak: &WeakId) -> Vec<Body> {
+    state
+        .mempool
+        .find_by_weak_id(weak)
+        .into_iter()
+        .filter_map(|entry| {
+            let mut r = VlqReader::new(&entry.bytes);
+            let tx = read_transaction(&mut r)
+                .inspect_err(|err| {
+                    tracing::warn!(
+                        tx_id = ?entry.tx_id, error = ?err,
+                        "input_blocks: pooled entry does not decode, skipping"
+                    );
+                })
+                .ok()?;
+            let wid = witness_id(&tx);
+            Some(Body {
+                tx_ref: TxRef {
+                    tx_id: *entry.tx_id.as_bytes(),
+                    witness_id: wid,
+                },
+                weak_id: *weak,
+                bytes: entry.bytes.clone(),
+                tx,
+            })
+        })
+        .collect()
 }
 
 /// Spec 6.2: `encode_compact(required_difficulty_after(parent))`, or

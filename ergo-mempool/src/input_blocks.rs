@@ -23,10 +23,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ergo_primitives::digest::Digest32;
-use ergo_primitives::reader::VlqReader;
 use ergo_ser::ergo_box::ErgoBox;
-use ergo_ser::transaction::{read_transaction, transaction_id, Transaction};
-use ergo_ser::weak_id::{weak_id_of, WeakId};
+use ergo_ser::transaction::{transaction_id, Transaction};
+use ergo_ser::weak_id::WeakId;
 use ergo_ser::WriteError;
 use ergo_validation::UtxoView;
 
@@ -397,37 +396,19 @@ pub fn restore_input_block_txs(
 /// legitimately collide (spec §7.5); every collision must be resolvable
 /// through the full-id transaction request/response.
 pub fn find_by_weak_id<'p>(pool: &'p OrderedPool, weak: &WeakId) -> Vec<&'p Entry> {
-    pool.iter_prioritized()
-        .filter(|e| {
-            let mut r = VlqReader::new(&e.bytes);
-            match read_transaction(&mut r) {
-                Ok(tx) => match weak_id_of(&tx) {
-                    Ok(w) => w == *weak,
-                    Err(err) => {
-                        // `bytes` came from a prior successful admission or
-                        // restore, so a failure here means the entry's own
-                        // id can no longer be derived from its stored bytes
-                        // — worth a diagnostic even though the lookup
-                        // contract (skip, don't panic or propagate) doesn't
-                        // change.
-                        tracing::warn!(
-                            tx_id = ?e.tx_id,
-                            error = ?err,
-                            "find_by_weak_id: pooled entry's weak id could not be computed, skipping"
-                        );
-                        false
-                    }
-                },
-                Err(err) => {
-                    tracing::warn!(
-                        tx_id = ?e.tx_id,
-                        error = ?err,
-                        "find_by_weak_id: pooled entry's bytes did not deserialize, skipping"
-                    );
-                    false
-                }
-            }
-        })
+    // O(1) through the pool's weak-id index. The previous implementation
+    // scanned and re-parsed every pooled transaction on every call, and
+    // the node called it once per announced weak id — with the miner
+    // publishing roughly one input block a second that was the dominant
+    // per-frame cost of the whole subsystem.
+    //
+    // The index is built from each entry's own bytes at insert time, so
+    // it answers exactly what the scan answered, including collisions
+    // (a weak id is 6 bytes; distinct pooled txs legitimately collide,
+    // spec §7.5) and including the skip-on-undecodable contract.
+    pool.tx_ids_by_weak_id(weak)
+        .iter()
+        .filter_map(|id| pool.get(id))
         .collect()
 }
 

@@ -13,6 +13,7 @@ use ergo_ser::ergo_box::ErgoBox;
 use thiserror::Error;
 
 use crate::types::{TxId, TxSource};
+use ergo_ser::weak_id::WeakId;
 
 /// A pool entry. Holds the pool-relevant projection of a validated
 /// transaction. The full `CheckedTransaction` is not retained because
@@ -188,6 +189,15 @@ pub struct OrderedPool {
     /// spends an output currently in `by_output`. Edges are removed
     /// when either endpoint leaves the pool.
     children_of: HashMap<TxId, Vec<TxId>>,
+    /// Weak id (`tx_id[0..3] ++ witness_id[0..3]`) → the pooled
+    /// transactions carrying it. Maintained on insert and remove so an
+    /// input-block announcement resolves its weak ids in O(1) instead of
+    /// re-parsing the whole pool per frame — at roughly one input block
+    /// per second that scan was the node's dominant per-frame cost.
+    ///
+    /// A weak id is 6 bytes, so distinct transactions legitimately
+    /// collide (spec §7.5): the bucket is a `Vec` and is never collapsed.
+    by_weak_id: HashMap<WeakId, Vec<TxId>>,
     total_bytes: usize,
     /// Monotonic counter bumped on every candidate-visible pool mutation:
     /// `insert`, `remove`, and the family-weight walk's `rekey_weight` (which
@@ -211,10 +221,17 @@ impl OrderedPool {
             by_tx_id: HashMap::with_capacity(cap),
             by_input: HashMap::with_capacity(cap * 2),
             by_output: HashMap::with_capacity(cap * 2),
+            by_weak_id: HashMap::with_capacity(cap),
             children_of: HashMap::new(),
             total_bytes: 0,
             revision: 0,
         }
+    }
+
+    /// The pooled transactions whose weak id is `weak`, in insertion
+    /// order. Empty when nothing carries it. O(1).
+    pub fn tx_ids_by_weak_id(&self, weak: &WeakId) -> &[TxId] {
+        self.by_weak_id.get(weak).map_or(&[], |v| v.as_slice())
     }
 
     /// Deep copy for transactional admission staging: a commit that may evict
@@ -228,6 +245,7 @@ impl OrderedPool {
             by_tx_id: self.by_tx_id.clone(),
             by_input: self.by_input.clone(),
             by_output: self.by_output.clone(),
+            by_weak_id: self.by_weak_id.clone(),
             children_of: self.children_of.clone(),
             total_bytes: self.total_bytes,
             revision: self.revision,
@@ -326,6 +344,9 @@ impl OrderedPool {
         for b in &entry.outputs {
             self.by_output.insert(*b, tx_id);
         }
+        if let Some(weak) = weak_id_of_bytes(&entry.bytes, &tx_id) {
+            self.by_weak_id.entry(weak).or_default().push(tx_id);
+        }
         self.total_bytes = self.total_bytes.saturating_add(entry.bytes.len());
         self.by_tx_id.insert(tx_id, key);
         self.ordered.insert(key, entry);
@@ -344,6 +365,17 @@ impl OrderedPool {
         }
         for b in &entry.outputs {
             self.by_output.remove(b);
+        }
+        if let Some(weak) = weak_id_of_bytes(&entry.bytes, tx_id) {
+            if let Some(bucket) = self.by_weak_id.get_mut(&weak) {
+                bucket.retain(|id| id != tx_id);
+                // An emptied bucket is removed: a lingering empty Vec
+                // would keep a weak id "known" forever and grow the map
+                // without bound across a long run.
+                if bucket.is_empty() {
+                    self.by_weak_id.remove(&weak);
+                }
+            }
         }
         // Drop this tx's own `children_of` bucket (its children remain
         // in the pool but their parent reference is now dangling —
@@ -719,6 +751,31 @@ impl OrderedPool {
                     "children_of has edge to non-pool child {child:?}"
                 );
             }
+        }
+    }
+}
+
+/// The weak id of a pooled entry, from the bytes it was admitted with.
+///
+/// `None` (with a diagnostic) when those bytes no longer decode: the
+/// entry stays pooled and simply is not reachable by weak id, which is
+/// the same "skip, never panic" contract the previous full-pool scan
+/// had. Both insert and remove derive the key the same way, so an entry
+/// that cannot be indexed also cannot leave a stale key behind.
+fn weak_id_of_bytes(bytes: &[u8], tx_id: &TxId) -> Option<WeakId> {
+    let mut r = ergo_primitives::reader::VlqReader::new(bytes);
+    let tx = match ergo_ser::transaction::read_transaction(&mut r) {
+        Ok(tx) => tx,
+        Err(err) => {
+            tracing::warn!(?tx_id, error = ?err, "weak-id index: pooled bytes do not decode");
+            return None;
+        }
+    };
+    match ergo_ser::weak_id::weak_id_of(&tx) {
+        Ok(weak) => Some(weak),
+        Err(err) => {
+            tracing::warn!(?tx_id, error = ?err, "weak-id index: pooled entry has no weak id");
+            None
         }
     }
 }
