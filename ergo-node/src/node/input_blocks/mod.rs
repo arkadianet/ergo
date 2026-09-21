@@ -42,4 +42,4 @@ pub(in crate::node) use hooks::{
     advertised_version, on_ordering_block_applied, on_ordering_reorg, on_tick, seed_best_ordering,
 };
 pub(in crate::node) use runtime::InputBlocksRuntime;
-pub(in crate::node) use validate::{build_input_block_context, run_validation};
+pub(in crate::node) use validate::{build_input_block_context, run_validation, ValidateJob};

@@ -1484,3 +1484,252 @@ fn ordering_turnover_releases_retained_entries_without_restoring_them() {
          abandoned input chain's transactions (spec 7.6 / F6)"
     );
 }
+
+// ----- successful inline validation (finding 5) -----
+
+/// `sigmaProp(true)` — `BoolToSigmaProp(Const(SBoolean, true))`.
+///
+/// A bare `Const(SBoolean, true)` root is NOT usable: rule 1001
+/// (`CheckDeserializedScriptIsSigmaProp`) rejects a sizeless tree whose
+/// root is not `SigmaProp`, and under `has_size` the same failure is
+/// wrapped as an unparsed soft-fork tree that cannot be evaluated at all.
+fn true_tree() -> ergo_ser::ergo_tree::ErgoTree {
+    use ergo_ser::opcode::{Expr, IrNode, Payload};
+    ergo_ser::ergo_tree::ErgoTree {
+        version: 0,
+        has_size: false,
+        constant_segregation: false,
+        constants: vec![],
+        body: Expr::Op(IrNode {
+            opcode: 0xD1,
+            payload: Payload::One(Box::new(Expr::Const {
+                tpe: ergo_ser::sigma_type::SigmaType::SBoolean,
+                val: ergo_ser::sigma_value::SigmaValue::Boolean(true),
+            })),
+        }),
+    }
+}
+
+/// Seed one spendable box paying to a trivially-true script, and return
+/// its id. `creation_height` must not exceed the context height or the
+/// spending transaction is rejected on the output-height rule.
+fn seed_spendable_box(
+    state: &mut NodeState,
+    seed: u8,
+    value: u64,
+    creation_height: u32,
+) -> ergo_primitives::digest::Digest32 {
+    use ergo_ser::ergo_box::{write_ergo_box, ErgoBox, ErgoBoxCandidate};
+    use ergo_ser::register::AdditionalRegisters;
+    let candidate = ErgoBoxCandidate::new(
+        value,
+        true_tree(),
+        creation_height,
+        vec![],
+        AdditionalRegisters::empty(),
+    )
+    .unwrap();
+    let ergo_box = ErgoBox {
+        candidate,
+        transaction_id: ergo_primitives::digest::ModifierId::from_bytes([seed; 32]),
+        index: 0,
+    };
+    let id = ergo_box.box_id().unwrap();
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    write_ergo_box(&mut w, &ergo_box).unwrap();
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .tree_insert_for_test(*id.as_bytes(), w.result());
+    id
+}
+
+/// A state with 11 chain-linked headers applied, the best full block
+/// hydrated into the executor's context window, and the input-block
+/// subsystem live. Returns `(state, best_header_id, best_height)`.
+fn live_state_with_applied_tip(dir: &std::path::Path) -> (NodeState, [u8; 32], u32) {
+    let mut state = live_state(dir);
+    let headers = seed_header_chain(&mut state, 11);
+    let best = headers.last().unwrap().clone();
+    let best_id = header_id_of(&best);
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .advance_best_full_block(best_id, best.height)
+        .unwrap();
+    state.executor.hydrate_block_context(&state.store).unwrap();
+    seed_best_ordering(&mut state);
+    (state, best_id, best.height)
+}
+
+/// Finding 5: the inline-validation path needs a test that actually
+/// VALIDATES. This drives a processor-issued job with real cached bodies
+/// spending a real box, and asserts the whole chain: validation passes,
+/// the generation is unchanged (nothing invalidated the job), the block
+/// is applied to the input chain, and the mempool half ran.
+#[test]
+fn inline_validation_success_applies_the_block_and_updates_the_mempool() {
+    use ergo_ser::ergo_box::ErgoBoxCandidate;
+    use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+    use ergo_ser::register::AdditionalRegisters;
+    use ergo_ser::transaction::Transaction;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut state, best_id, best_height) = live_state_with_applied_tip(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19640,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    // One box in, one box out, value conserved.
+    let funded = seed_spendable_box(&mut state, 0xd1, 1_000_000, best_height);
+    let tx = Transaction {
+        inputs: vec![Input {
+            box_id: funded,
+            spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+        }],
+        data_inputs: vec![],
+        output_candidates: vec![ErgoBoxCandidate::new(
+            1_000_000,
+            true_tree(),
+            best_height,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap()],
+    };
+    let body = ts::body_of(tx);
+    let pooled_id = ergo_primitives::digest::Digest32::from_bytes(body.tx_ref.tx_id);
+    // Seat the same transaction in the mempool, so the apply half of
+    // ChainChanged has something to evict and the effect is observable.
+    state
+        .mempool
+        .restore_input_block_txs(&[(pooled_id, body.bytes.clone(), None)], Instant::now());
+    assert!(state.mempool.contains(&pooled_id), "fixture seats the tx");
+
+    // Announce at best_height + 1 (the only actionable slot) under the
+    // applied tip, so the block lands in that ordering block's tree.
+    let ann = ts::announcement_for(
+        best_id,
+        best_height + 1,
+        21,
+        None,
+        std::slice::from_ref(&body),
+    );
+    let ann_id = ts::ann_id(&ann);
+    let generation_before = state
+        .input_blocks
+        .as_ref()
+        .unwrap()
+        .processor()
+        .generation();
+
+    // The body is already pooled, so spec 7.5 step 1 resolves every
+    // announced weak id from the mempool: the block completes on the
+    // announcement alone, the processor emits Validate, and the effect
+    // executor answers it inline against the committed UTXO set.
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &ergo_p2p::message::serialize_input_block(&ann).unwrap(),
+    );
+    assert!(
+        !actions.iter().any(|a| matches!(a, Action::Penalize { .. })),
+        "a valid announcement is not misbehaviour"
+    );
+    assert!(
+        sent_frames(&actions, ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST).is_empty(),
+        "nothing to request: every weak id resolved from the pool"
+    );
+
+    let rt = state.input_blocks.as_ref().unwrap();
+    assert_eq!(
+        rt.counters.get("ValidationFailed"),
+        0,
+        "validation must not have been rejected"
+    );
+    assert_eq!(
+        rt.counters.get("CacheEvicted"),
+        0,
+        "the bodies were cached for the job"
+    );
+    assert_eq!(
+        rt.counters.get("StaleValidation"),
+        0,
+        "the job was not superseded: its result was APPLIED, not dropped"
+    );
+    // The generation bumps exactly once, and only because the chain
+    // changed — spec 7.6 makes every ChainChanged a generation bump. A
+    // second bump would mean something else invalidated the view while
+    // the job was in flight.
+    assert_eq!(
+        rt.processor().generation(),
+        generation_before + 1,
+        "exactly one generation bump, from the successful application"
+    );
+    assert_eq!(
+        rt.processor().best_input_chain(),
+        vec![ann_id],
+        "the validated block is the best input chain (drops: {:?})",
+        rt.counters.iter().collect::<Vec<_>>()
+    );
+    assert!(
+        rt.processor()
+            .best_input_block()
+            .is_some_and(|a| ts::ann_id(a) == ann_id),
+        "and is the best input block"
+    );
+    assert_eq!(
+        rt.retained.get(&ann_id).map(|v| v.len()),
+        Some(1),
+        "the mempool half ran: the applied block's eviction is retained \
+         so a later fork switch can put it back"
+    );
+    assert!(
+        !state.mempool.contains(&pooled_id),
+        "an applied input-block transaction leaves the pool"
+    );
+}
+
+/// The error-path counterpart, retained from the first round: a job the
+/// processor never issued is answered and dropped as stale, proving the
+/// ValidationResult really is fed back through `Processor::handle`.
+#[test]
+fn inline_validation_of_an_unissued_job_is_dropped_as_stale() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    let rt = runtime();
+    let generation = rt.processor().generation();
+    state.input_blocks = Some(rt);
+
+    let actions = execute_effects(
+        &mut state,
+        vec![Effect::Validate {
+            job: 4242,
+            generation,
+            input_block_id: [0x33u8; 32],
+            txs: vec![TxRef {
+                tx_id: [1u8; 32],
+                witness_id: [2u8; 31],
+            }],
+            previous: Vec::new(),
+        }],
+        Instant::now(),
+    );
+    assert!(actions.is_empty());
+    assert_eq!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .counters
+            .get(DropReason::StaleValidation { generation: 0 }.name()),
+        1
+    );
+}
