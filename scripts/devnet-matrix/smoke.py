@@ -47,6 +47,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import queue
 import re
 import subprocess
 import threading
@@ -198,7 +199,37 @@ def rust_log_window(unix_seconds, before=10.0, after=5.0, limit=400):
     return out
 
 
-def write_mismatch_artifact(assertion, message, evidence, at=None, context=None):
+def announcement_hex_for(ids, window):
+    """The announcement bytes for `ids`, from the debug-log `window`.
+
+    Greps the window for each id and keeps any long hex run on a line
+    that mentions it — that is where an announcement's payload appears
+    when the node logs one. Returns `None` with an explicit reason when
+    the window holds nothing for the id, so an artifact never implies it
+    looked and found emptiness when it simply had nothing to look at.
+    """
+    out = {}
+    for block_id in [i for i in ids if i]:
+        lines = [line for line in window if block_id in line]
+        if not lines:
+            out[block_id] = {'announcement_hex': None,
+                             'reason': 'not_in_log_window'}
+            continue
+        hexes = []
+        for line in lines:
+            # Long hex runs only: ids are 64 chars, payloads longer.
+            hexes += [h for h in re.findall(r'\b[0-9a-f]{64,}\b', line)
+                      if h != block_id]
+        out[block_id] = ({'announcement_hex': hexes, 'lines': lines[:5]}
+                         if hexes else
+                         {'announcement_hex': None,
+                          'reason': 'no_payload_bytes_logged_for_this_id',
+                          'lines': lines[:5]})
+    return out
+
+
+def write_mismatch_artifact(assertion, message, evidence, at=None, context=None,
+                            ids=None):
     """Write a divergence artifact NOW, while the observation is fresh.
 
     Deferring these to the end of the run meant the `/info` bodies were
@@ -210,6 +241,8 @@ def write_mismatch_artifact(assertion, message, evidence, at=None, context=None)
         observed = {node: api(node, '/info') for node in URLS}
     except Unavailable as error:
         observed = {'error': str(error)}
+    window = (rust_log_window(at) if at
+              else rust_log_lines('input_blocks', limit=80))
     body = {
         'id': path.stem,
         'title': f'devnet-matrix smoke: {assertion} mismatch',
@@ -221,8 +254,8 @@ def write_mismatch_artifact(assertion, message, evidence, at=None, context=None)
         'observed_at_unix': at,
         'evidence': evidence,
         'both_nodes_info_at_mismatch': observed,
-        'rust_debug_log_window': (
-            rust_log_window(at) if at else rust_log_lines('input_blocks', limit=80)),
+        'rust_debug_log_window': window,
+        'announcement_bytes': announcement_hex_for(ids or [], window),
     }
     if context:
         body.update(context)
@@ -255,8 +288,17 @@ class Run:
         self._stop = threading.Event()
         self._thread = None
         self._latest = None
+        self._pause = threading.Event()
+        self._pause.set()
         self.series_path = WORK / 'agreement-series.jsonl'
         self._series_file = None
+        self.sampler_error = None
+        self.last_sample_at = None
+        self.sampling_ended_at = None
+        # Mismatches the sampler spots are QUEUED, never written from the
+        # sampler thread: an artifact costs several blocking REST calls
+        # and a log scan, and monitoring must not stop to write evidence.
+        self.mismatch_queue = queue.Queue()
         self.failures = []
         self.findings = []
         self.samples = 0
@@ -294,34 +336,117 @@ class Run:
         self._thread.start()
 
     def _sample_loop(self, interval):
-        while not self._stop.is_set() and time.monotonic() < self.deadline:
-            self.sweep()
-            self._stop.wait(interval)
+        """The sampler. Any exception here is FATAL for the run.
+
+        A thread that dies quietly leaves finalization computing verdicts
+        from the samples it managed to take before it died — which is how
+        assertion 5 could still report PASS after the sampler was gone.
+        The reason is recorded and `check_sampler_health` turns it into a
+        failure.
+        """
+        try:
+            while not self._stop.is_set() and time.monotonic() < self.deadline:
+                self._pause.wait()
+                if self._stop.is_set():
+                    break
+                self.sweep()
+                with self._lock:
+                    self.last_sample_at = time.monotonic()
+                self._stop.wait(interval)
+        except BaseException as error:  # noqa: BLE001 — recorded, then fatal
+            with self._lock:
+                self.sampler_error = f'{type(error).__name__}: {error}'
+
+    def check_sampler_health(self, max_silence=10.0):
+        """Why the run may NOT trust its own samples.
+
+        Returns a list of reasons: the sampler raised, or it stopped
+        producing samples more than `max_silence` seconds before the end
+        of sampling. Either way the series is incomplete and every
+        verdict drawn from it is unsafe.
+        """
+        reasons = []
+        with self._lock:
+            error = self.sampler_error
+            last = self.last_sample_at
+            ended = self.sampling_ended_at or time.monotonic()
+        if error:
+            reasons.append(f'sampler_failed: {error}')
+        if last is None:
+            reasons.append('sampler_failed: the sampler never produced a sample')
+        else:
+            silence = ended - last
+            if silence > max_silence:
+                reasons.append(
+                    f'sampler_failed: no sample in the last {silence:.1f}s of the run '
+                    f'(limit {max_silence:.0f}s)')
+        return reasons
 
     def stop_sampling(self):
+        self._pause.set()
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=15)
+            self._thread = None
+        with self._lock:
+            if self.sampling_ended_at is None:
+                self.sampling_ended_at = time.monotonic()
         if self._series_file:
             self._series_file.close()
             self._series_file = None
+
+    def pause_sampling(self):
+        """Hold the sampler between samples.
+
+        Used around the deliberate restart: the counter snapshot has to
+        be the LAST word from the dying process, and a sampler that
+        finishes an old-process observation after the carry-forward would
+        add that lifetime's counts a second time.
+        """
+        self._pause.clear()
+        # The sampler clears its own in-flight work before waiting again;
+        # a short settle keeps a sweep already underway from landing
+        # after the snapshot.
+        time.sleep(1.0)
+
+    def resume_sampling(self):
+        self._pause.set()
 
     def latest_reading(self):
         with self._lock:
             return self._latest
 
-    def carry_counters_forward(self):
-        """Fold the live process's counters into the carried totals.
+    def snapshot_counters_before_kill(self):
+        """Take a FRESH counter reading from the node that is about to
+        die, fold it forward, and zero the live column.
 
-        Called immediately BEFORE a node is killed. Inferring a reset from
-        a decreasing counter loses every count a restarted process
-        reaches or exceeds before the next sample, so the restart says so
-        explicitly instead of leaving it to be guessed.
+        Folding the last CACHED sample forward loses everything the node
+        counted between that sample and the kill. The snapshot is its own
+        REST call, made on the main thread with the sampler paused.
         """
+        try:
+            status = api('rust', '/api/v1/status')
+        except Unavailable as error:
+            # The node is already gone or unreachable; the cached column
+            # is the best record of it that exists.
+            status = None
+            snapshot_error = str(error)
+        else:
+            snapshot_error = None
         with self._lock:
+            if status is not None:
+                ib = status.get('input_blocks') or {}
+                for entry in ib.get('drops', []):
+                    value = self.drop_counters.setdefault(
+                        entry['reason'], {'current': 0, 'carried': 0})
+                    # The snapshot supersedes the cached column: it is
+                    # strictly later in the same process's lifetime.
+                    value['current'] = max(value['current'], entry['count'])
             for value in self.drop_counters.values():
                 value['carried'] += value['current']
                 value['current'] = 0
+            totals = {k: v['carried'] for k, v in self.drop_counters.items()}
+        return {'totals': totals, 'snapshot_error': snapshot_error}
 
     # ----- helpers -----
 
@@ -449,17 +574,21 @@ class Run:
         if self._series_file:
             self._series_file.write(json.dumps(entry) + '\n')
             self._series_file.flush()
-        self._maybe_write_live_mismatch(entry, reading)
+        self._maybe_queue_live_mismatch(entry, reading)
 
-    def _maybe_write_live_mismatch(self, entry, reading):
-        """Write an artifact for a prefix mismatch AS IT IS OBSERVED.
+    def _maybe_queue_live_mismatch(self, entry, reading):
+        """QUEUE a prefix mismatch for the main thread to write up.
 
         Only the chain-prefix check is decidable from a single sample;
         the tip and lag verdicts need the whole series and are filed at
-        finalization. Bounded, so a persistent mismatch does not fill the
-        findings directory.
+        finalization. Nothing is written here: an artifact costs several
+        blocking REST calls and a scan of the debug log, and the sampler
+        stopping to do that is exactly the monitoring gap round 4 set out
+        to remove. Uncapped — the queue is bounded by the run's own
+        length, and a mismatch that is not recorded did not happen as far
+        as the evidence is concerned.
         """
-        if entry['ordering'] is None or self.live_artifacts >= 3:
+        if entry['ordering'] is None:
             return
         scala_old = list(reversed(entry['scala_chain']))
         rust_old = list(reversed(entry['rust_chain']))
@@ -467,21 +596,38 @@ class Run:
             return
         if len(rust_old) <= len(scala_old) and scala_old[:len(rust_old)] == rust_old:
             return
-        self.live_artifacts += 1
-        try:
-            path = write_mismatch_artifact(
-                '3_best_input_chain',
-                "Rust's bestInputChain is not a prefix of Scala's",
-                {'sample': entry, 'ordering': entry['ordering']},
-                at=entry['at'],
-                context={'rust_best_input_block': reading['rust']['best'],
-                         'scala_best_input_block': reading['scala']['best'],
-                         'rust_info': reading['rust']['info'],
-                         'scala_info': reading['scala']['info']})
-            self.live_artifact_paths.append(path)
-        except OSError:
-            # Evidence collection must never take the run down.
-            pass
+        self.mismatch_queue.put({
+            'assertion': '3_best_input_chain',
+            'message': "Rust's bestInputChain is not a prefix of Scala's",
+            'at': entry['at'],
+            'evidence': {'sample': entry, 'ordering': entry['ordering']},
+            'ids': [entry['ordering']] + entry['rust_chain'][:2]
+                   + entry['scala_chain'][:2],
+            'context': {'rust_best_input_block': reading['rust']['best'],
+                        'scala_best_input_block': reading['scala']['best'],
+                        'rust_info': reading['rust']['info'],
+                        'scala_info': reading['scala']['info']},
+        })
+
+    def drain_mismatch_queue(self, budget=None):
+        """Write every queued mismatch artifact. Main thread only."""
+        written = 0
+        while True:
+            try:
+                item = self.mismatch_queue.get_nowait()
+            except queue.Empty:
+                return written
+            try:
+                self.live_artifact_paths.append(write_mismatch_artifact(
+                    item['assertion'], item['message'], item['evidence'],
+                    at=item['at'], ids=item['ids'], context=item['context']))
+                self.live_artifacts += 1
+                written += 1
+            except OSError:
+                # Evidence collection must never take the run down.
+                pass
+            if budget is not None and written >= budget:
+                return written
 
     def note_input_block_txids(self, reading):
         """Record which transactions Rust saw inside each input block."""
@@ -883,7 +1029,115 @@ def _self_test():
         ordering_block_txids={'included'}, d1_refusals=set())
     assert attributed['unexplained'] == ['included'], attributed
 
-    print('self-test OK: evaluators behave as the round-4 definitions require')
+    # ----- round 5, item 1: pool removal is credited only under the
+    # ordering tip the transaction was located under -----
+
+    # Credited: absent from the pool while the tip has not moved.
+    t = PoolTransitionTracker()
+    t.locate('tx', 'ib1', 'H1')
+    t.observe('H1', {'tx'})          # still pooled
+    t.observe('H1', set())           # gone, same tip
+    assert t.credited == {'tx': 'ib1'}, t.credited
+    assert t.confirmed_by_ordering == {}, t.confirmed_by_ordering
+
+    # NOT credited: it was still pooled under H1 and only disappeared
+    # after the ordering tip moved — ordinary confirmation explains it.
+    t = PoolTransitionTracker()
+    t.locate('tx', 'ib1', 'H1')
+    t.observe('H1', {'tx'})
+    t.observe('H2', set())
+    assert t.credited == {}, t.credited
+    assert 'tx' in t.confirmed_by_ordering, t.confirmed_by_ordering
+
+    # A later same-tip observation must NOT erase that verdict — this is
+    # the round-4 hole: a transaction confirmed by an ordering block
+    # could be re-credited to the input block on a subsequent sample.
+    t.observe('H2', set())
+    assert t.credited == {}, t.credited
+    assert 'tx' in t.confirmed_by_ordering, t.confirmed_by_ordering
+
+    # Never observed absent at all: neither credited nor excused.
+    t = PoolTransitionTracker()
+    t.locate('tx', 'ib1', 'H1')
+    t.observe('H1', {'tx'})
+    assert t.still_pooled() == ['tx'], t.still_pooled()
+    assert t.resolved() == set(), t.resolved()
+
+    # An unknown tip cannot credit anything.
+    t = PoolTransitionTracker()
+    t.locate('tx', 'ib1', 'H1')
+    t.observe(None, set())
+    assert t.credited == {}, t.credited
+    assert 'tx' in t.confirmed_by_ordering, t.confirmed_by_ordering
+
+    # ----- round 5, item 2: the sampler queues mismatches, never writes
+    # them inline -----
+
+    run = Run.__new__(Run)
+    run.mismatch_queue = queue.Queue()
+    entry = {'ordering': 'O', 'at': 1.0,
+             'scala_chain': ['c', 'b', 'a'], 'rust_chain': ['c', 'x', 'a']}
+    reading = {'rust': {'best': {}, 'info': {}}, 'scala': {'best': {}, 'info': {}}}
+    Run._maybe_queue_live_mismatch(run, entry, reading)
+    assert run.mismatch_queue.qsize() == 1, 'a mismatch must be queued'
+    queued = run.mismatch_queue.get_nowait()
+    assert queued['ids'][0] == 'O', queued
+    assert queued['at'] == 1.0, queued
+    # A consistent sample queues nothing, and neither does one where the
+    # two nodes name different ordering blocks.
+    Run._maybe_queue_live_mismatch(
+        run, {'ordering': 'O', 'at': 2.0,
+              'scala_chain': ['c', 'b', 'a'], 'rust_chain': ['b', 'a']}, reading)
+    Run._maybe_queue_live_mismatch(
+        run, {'ordering': None, 'at': 3.0,
+              'scala_chain': ['c'], 'rust_chain': ['z']}, reading)
+    assert run.mismatch_queue.qsize() == 0, 'no false positives'
+    # And there is no cap: a hundred mismatches queue a hundred times.
+    for n in range(100):
+        Run._maybe_queue_live_mismatch(
+            run, {'ordering': 'O', 'at': float(n),
+                  'scala_chain': ['c', 'b', 'a'], 'rust_chain': ['c', 'x', 'a']},
+            reading)
+    assert run.mismatch_queue.qsize() == 100, run.mismatch_queue.qsize()
+
+    # ----- round 5, item 3: a dead sampler fails the run -----
+
+    def health(error=None, last=None, ended=100.0, max_silence=10.0):
+        r = Run.__new__(Run)
+        r._lock = threading.Lock()
+        r.sampler_error = error
+        r.last_sample_at = last
+        r.sampling_ended_at = ended
+        return Run.check_sampler_health(r, max_silence)
+
+    assert health(last=95.0) == [], 'a healthy sampler reports nothing'
+    assert any('sampler_failed' in h for h in health(error='OSError: disk full')), \
+        'an exception must be fatal'
+    assert any('never produced a sample' in h for h in health(last=None)), \
+        'a sampler that never sampled must be fatal'
+    assert any('no sample in the last' in h for h in health(last=80.0)), \
+        'a sampler silent for 20s of a 10s budget must be fatal'
+    assert health(last=91.0) == [], 'silence inside the budget is fine'
+
+    # ----- round 5, item 4: artifacts carry announcement bytes or say
+    # why they do not -----
+
+    block_id = 'ab' * 32
+    payload = 'cd' * 60
+    window = [f'2026-09-22T00:00:00.1Z DEBUG announcement id={block_id} bytes={payload}']
+    out = announcement_hex_for([block_id], window)
+    assert out[block_id]['announcement_hex'] == [payload], out
+    # The id itself is not mistaken for its payload.
+    only_id = [f'2026-09-22T00:00:00.1Z DEBUG dropped id={block_id} reason=X']
+    out = announcement_hex_for([block_id], only_id)
+    assert out[block_id]['announcement_hex'] is None, out
+    assert out[block_id]['reason'] == 'no_payload_bytes_logged_for_this_id', out
+    # Nothing in the window at all is stated explicitly, never implied.
+    out = announcement_hex_for([block_id], [])
+    assert out[block_id] == {'announcement_hex': None,
+                             'reason': 'not_in_log_window'}, out
+
+    print('self-test OK: evaluators behave as the round-5 definitions require')
 
 
 # ----- assertion drivers -----
@@ -938,6 +1192,26 @@ def observe_for_ordering_blocks(run, blocks, what):
             pass
         time.sleep(0.5)
     return start
+
+
+def check_sampler(run, evidence):
+    """The run may only trust its own samples if the sampler survived.
+
+    A sampler that raised — a JSONL write failure, a bug in the
+    accumulators — used to end the thread quietly and leave every
+    assertion drawing verdicts from a truncated series. Assertion 5 in
+    particular could still report PASS. Any sampler fault is a failure of
+    the run, recorded as `sampler_failed`.
+    """
+    reasons = run.check_sampler_health()
+    evidence['sampler'] = {
+        'samples': run.samples,
+        'unavailable_samples': run.unavailable_samples,
+        'error': run.sampler_error,
+        'health': reasons or ['ok'],
+    }
+    for reason in reasons:
+        run.fail('sampler', reason)
 
 
 def finalize_agreement(run, evidence):
@@ -1014,6 +1288,57 @@ def wait_for_height(run, target, what):
             pass
         time.sleep(0.5)
     raise Unavailable(f'{what}: Scala did not reach ordering block {target} in budget')
+
+
+class PoolTransitionTracker:
+    """Which pool removals may be credited to an INPUT BLOCK.
+
+    A transaction counts as evicted by the input block that carried it
+    only if it is observed absent from Rust's pool while the ordering
+    tip is still the one that was current when it was located. If it
+    disappears after the tip moved, ordinary block confirmation explains
+    it just as well, so it is recorded as `confirmed_by_ordering` and
+    never credited. The first observation of a transaction's absence is
+    its verdict — a later disappearance cannot erase an earlier
+    `confirmed_by_ordering`, which is how round 4 still let ordinary
+    confirmation pass for an input-block eviction.
+
+    Pure: no I/O, so `--self-test` drives it directly.
+    """
+
+    def __init__(self):
+        self.located = {}            # txid -> input block id
+        self.located_under = {}      # txid -> ordering tip when located
+        self.credited = {}           # txid -> input block id
+        self.confirmed_by_ordering = {}
+
+    def locate(self, txid, input_block_id, header_now):
+        self.located.setdefault(txid, input_block_id)
+        self.located_under.setdefault(txid, header_now)
+
+    def observe(self, header_now, pool):
+        """One observation of Rust's unconfirmed pool at ordering tip
+        `header_now`. `pool` is the set of ids it holds."""
+        for txid, bid in self.located.items():
+            if txid in self.credited or txid in self.confirmed_by_ordering:
+                continue
+            if txid in pool:
+                continue
+            if header_now is not None and header_now == self.located_under[txid]:
+                self.credited[txid] = bid
+            else:
+                self.confirmed_by_ordering[txid] = {
+                    'input_block': bid,
+                    'located_under': self.located_under[txid],
+                    'observed_under': header_now,
+                }
+
+    def still_pooled(self):
+        return sorted(set(self.located)
+                      - set(self.credited) - set(self.confirmed_by_ordering))
+
+    def resolved(self):
+        return set(self.credited) | set(self.confirmed_by_ordering)
 
 
 def attribute_scala_residue(only_in_scala, applied_input_block_txids,
@@ -1108,30 +1433,24 @@ def assertion_6_mempool(run, evidence, count):
     # block and BEFORE the ordering block that would confirm it anyway —
     # otherwise ordinary block confirmation conceals a missing
     # input-block eviction.
-    in_input_block = {}
-    removed_before_ordering = {}
-    still_pooled_after_input_block = {}
+    tracker = PoolTransitionTracker()
     ever_in_rust_pool = set()
     track_deadline = min(run.deadline, time.monotonic() + 300)
     while time.monotonic() < track_deadline:
-        run.note_input_block_txids(run.latest_reading())
+        reading = run.latest_reading()
+        run.note_input_block_txids(reading)
+        header_now = (reading or {}).get('rust', {}).get('info', {}).get(
+            'bestFullHeaderId') if reading else None
         for bid, ids in run.input_block_txids.items():
             for txid in set(ids) & submitted:
-                in_input_block.setdefault(txid, bid)
+                tracker.locate(txid, bid, header_now)
         try:
             pool = {t['id'] for t in api('rust', '/transactions/unconfirmed')}
         except Unavailable:
             pool = None
         if pool is not None:
             ever_in_rust_pool |= pool
-            for txid in in_input_block:
-                if txid in removed_before_ordering:
-                    continue
-                if txid in pool:
-                    still_pooled_after_input_block[txid] = in_input_block[txid]
-                else:
-                    removed_before_ordering[txid] = in_input_block[txid]
-                    still_pooled_after_input_block.pop(txid, None)
+            tracker.observe(header_now, pool)
         try:
             if scala_height(run) > start_height:
                 # The next ordering block has landed; anything not
@@ -1139,14 +1458,20 @@ def assertion_6_mempool(run, evidence, count):
                 break
         except Unavailable:
             pass
-        if submitted and set(removed_before_ordering) >= submitted:
+        if submitted and tracker.resolved() >= submitted:
             break
         time.sleep(0.3)
+    in_input_block = tracker.located
+    credited = tracker.credited
+    confirmed_by_ordering = tracker.confirmed_by_ordering
+    still_pooled = tracker.still_pooled()
     result['in_rust_input_block'] = in_input_block
     result['located_count'] = len(in_input_block)
     result['min_located'] = MEMPOOL_MIN_LOCATED
-    result['removed_before_next_ordering_block'] = removed_before_ordering
-    result['still_pooled_after_its_input_block'] = still_pooled_after_input_block
+    result['located_under_header'] = tracker.located_under
+    result['removed_before_next_ordering_block'] = credited
+    result['confirmed_by_ordering'] = confirmed_by_ordering
+    result['still_pooled_after_its_input_block'] = still_pooled
     result['rust_pool_ever_held'] = sorted(ever_in_rust_pool & submitted)
 
     if len(in_input_block) < MEMPOOL_MIN_LOCATED:
@@ -1157,14 +1482,18 @@ def assertion_6_mempool(run, evidence, count):
                   'input_blocks_seen': len(run.input_block_txids),
                   'rust_pool_ever_held': result['rust_pool_ever_held'],
                   'rust_log': rust_log_lines('input_blocks')})
-    missing_removal = sorted(set(in_input_block) - set(removed_before_ordering))
+    missing_removal = sorted(set(in_input_block) - set(credited))
     result['never_removed_before_ordering'] = missing_removal
     if missing_removal:
         run.fail('6_mempool',
-                 f'{len(missing_removal)} transactions were still unconfirmed on the '
-                 'Rust node after the input block that carried them applied, up to '
-                 'the next ordering block',
+                 f'{len(missing_removal)} transactions in an applied Rust input block '
+                 'were not observed leaving the pool while that ordering block was '
+                 f'still the tip ({len(confirmed_by_ordering)} of them only '
+                 f'disappeared after the next ordering block, {len(still_pooled)} '
+                 'never disappeared at all)',
                  {'txids': missing_removal,
+                  'confirmed_by_ordering': confirmed_by_ordering,
+                  'still_pooled': still_pooled,
                   'input_blocks': {t: in_input_block[t] for t in missing_removal}})
 
     # Pool agreement after the next ordering block, with every Scala-only
@@ -1234,15 +1563,17 @@ def assertion_4_reconstruction(run, evidence, ordering_blocks):
         result['result'] = 'FAIL'
         return
     result['restarted_at_scala_height'] = restart_height
-    # The node's own drop counters reset with the process. Fold the live
-    # totals into the carried ones BEFORE the kill rather than inferring
-    # the reset later from a decreasing counter — a restarted counter
-    # that races past its previous value would otherwise lose the whole
-    # first lifetime.
-    run.carry_counters_forward()
-    result['counters_carried_at_restart'] = run.totals()
+    # The node's own drop counters reset with the process. Pause the
+    # sampler, take a FRESH reading from the node that is about to die,
+    # fold it forward, then kill. Folding the last cached sample forward
+    # would lose everything counted since that sample, and a sampler
+    # finishing an old-process observation after the fold would add that
+    # lifetime twice.
+    run.pause_sampling()
+    result['counters_carried_at_restart'] = run.snapshot_counters_before_kill()
     lifecycle.stop(('rust',))
     lifecycle.spawn('rust')
+    run.resume_sampling()
     run.started('rust')
     lifecycle.wait_peered()
 
@@ -1495,6 +1826,8 @@ def main():
         # Last, so they see every counter and every sample the whole run
         # produced.
         run.stop_sampling()
+        run.drain_mismatch_queue()
+        check_sampler(run, evidence)
         finalize_agreement(run, evidence['assertions'])
         assertion_5_follow(run, evidence['assertions'])
     except BaseException as error:  # noqa: BLE001 - recorded, then re-raised
