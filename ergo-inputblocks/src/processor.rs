@@ -1849,6 +1849,18 @@ impl Processor {
         self.pending_triggers.len()
     }
 
+    /// How many witness variants are retained for each announced
+    /// position of a resolved block (spec 7.4's
+    /// `candidates_per_position` bound). Empty until the block's digest
+    /// has passed.
+    pub fn variants_per_position(&self, id: &InputBlockId) -> Vec<usize> {
+        self.staging
+            .get(id)
+            .and_then(|s| s.variants.as_ref())
+            .map(|v| v.iter().map(|p| p.len()).collect())
+            .unwrap_or_default()
+    }
+
     /// Ordered-digest combinations tried for `id` so far. Monotone over
     /// the block's whole life and capped at
     /// [`crate::bounds::Bounds::digest_attempts_per_block`] (spec 7.5).
@@ -3008,6 +3020,160 @@ mod tests {
                 "redelivery must not buy a fresh search budget"
             );
         }
+
+        // Fix round 2, finding r2-1: a *non-empty* redelivery after
+        // exhaustion. The peer now sends exactly the right bodies, which
+        // makes every position unambiguous — but there is no budget left
+        // to confirm them, so the slot is dropped as a digest mismatch.
+        // The budget must outlive that slot: recreating staging on the
+        // next delivery must not hand the block a fresh sixteen attempts.
+        let correct = vec![x.clone(), y.clone()];
+        let first = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: correct.clone(),
+                from: Some(ts::PEER),
+                now: Tick(20),
+            },
+        );
+        assert!(!has_validate(&first), "{first:?}");
+        assert_eq!(p.staged_digest_attempts(&id), budget);
+
+        let second = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: correct,
+                from: Some(ts::PEER),
+                now: Tick(21),
+            },
+        );
+        assert!(
+            !has_validate(&second),
+            "an exhausted block must stay exhausted: {second:?}"
+        );
+        assert_eq!(
+            p.staged_digest_attempts(&id),
+            budget,
+            "the budget must survive staging-slot deletion"
+        );
+    }
+
+    // ----- fix round 2 -----
+
+    /// Finding r2-2. When a delivery invalidates an outstanding job, the
+    /// trigger that job's selection was made on must survive: a fork
+    /// switch chosen on a deep trigger has to be re-run as a fork switch,
+    /// not collapsed into the linear branch.
+    #[test]
+    fn job_invalidation_preserves_the_fork_switch_trigger() {
+        let mut p = processor();
+        let ctx = ts::TestCtx::at(FULL);
+        let v1 = ts::body(5, 1);
+        let v2 = ts::body(5, 2);
+        assert_eq!(v1.tx_ref.tx_id, v2.tx_ref.tx_id);
+
+        // Fork A: ib1 -> ib2a, both applied.
+        let ib1 = ts::announcement(ORD, FULL + 1, 1, None);
+        announce(&mut p, &ctx, &ib1, ts::PEER);
+        let eff = deliver_empty(&mut p, &ctx, &ib1, 2);
+        ts::validate_ok(&mut p, &ctx, &eff, 1);
+        let ib2a = ts::announcement(ORD, FULL + 1, 2, Some(ts::ann_id(&ib1)));
+        announce(&mut p, &ctx, &ib2a, ts::PEER);
+        let eff = deliver_empty(&mut p, &ctx, &ib2a, 3);
+        ts::validate_ok(&mut p, &ctx, &eff, 1);
+
+        // Fork B: ib1 -> ib2b -> ib3b. ib2b announces no weak ids, so the
+        // delivered order is authoritative and a later delivery really
+        // does replace its body.
+        let ib2b = ts::announcement_with(
+            ORD,
+            FULL + 1,
+            3,
+            Some(ts::ann_id(&ib1)),
+            ts::tx_digest(&[v1.tx_ref.tx_id]),
+            None,
+        );
+        let ib2b_id = ts::ann_id(&ib2b);
+        announce(&mut p, &ctx, &ib2b, ts::PEER);
+        let quiet = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: ib2b_id,
+                bodies: vec![v1.clone()],
+                from: Some(ts::PEER),
+                now: Tick(4),
+            },
+        );
+        assert!(!has_validate(&quiet), "fork B is not yet longer");
+
+        let ib3b = ts::announcement(ORD, FULL + 1, 4, Some(ib2b_id));
+        announce(&mut p, &ctx, &ib3b, ts::PEER);
+        let switch = deliver_empty(&mut p, &ctx, &ib3b, 5);
+        let (_, _, vid, txs, _) = ts::one_validate(&switch);
+        assert_eq!(vid, ib2b_id, "the deep trigger selected a fork switch");
+        assert_eq!(txs, vec![v1.tx_ref]);
+
+        // Replacing ib2b's witness invalidates that job; the reissue must
+        // be the same fork switch, for the same block, with the new body.
+        let replaced = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: ib2b_id,
+                bodies: vec![v2.clone()],
+                from: Some(ts::PEER),
+                now: Tick(6),
+            },
+        );
+        assert!(
+            drops(&replaced).contains(&DropReason::StaleValidation),
+            "{replaced:?}"
+        );
+        let (_, _, vid, txs, _) = ts::one_validate(&replaced);
+        assert_eq!(vid, ib2b_id, "the fork switch must be re-run");
+        assert_eq!(txs, vec![v2.tx_ref]);
+    }
+
+    /// Finding r2-3. A resolved block's per-position witness list is still
+    /// bounded by `candidates_per_position`; a peer cannot grow it by
+    /// spraying witnesses of a committed transaction.
+    #[test]
+    fn resolved_variant_list_respects_the_candidate_cap() {
+        let mut p = processor();
+        let base = ts::body(7, 1);
+        let mut ctx = ts::TestCtx::at(FULL);
+        ctx.mempool.add(&base);
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&base));
+        let id = ts::ann_id(&ann);
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        assert!(has_validate(&eff));
+        assert_eq!(p.variants_per_position(&id), vec![1]);
+
+        let cap = Bounds::default().candidates_per_position;
+        let mut rejected = 0;
+        for witness in 2..12u8 {
+            let out = ctx.handle(
+                &mut p,
+                Event::TransactionsDelivered {
+                    input_block_id: id,
+                    bodies: vec![ts::body(7, witness)],
+                    from: Some(ts::PEER),
+                    now: Tick(10 + u64::from(witness)),
+                },
+            );
+            if drops(&out).contains(&DropReason::CandidatesExhausted) {
+                rejected += 1;
+            }
+            assert!(
+                p.variants_per_position(&id).iter().all(|n| *n <= cap),
+                "witness list grew past the cap: {:?}",
+                p.variants_per_position(&id)
+            );
+        }
+        assert_eq!(p.variants_per_position(&id), vec![cap]);
+        assert!(rejected > 0, "over-cap witnesses must be reported");
+        assert_eq!(p.staged_bytes(), 0, "resolved slots hold no bytes");
     }
 
     #[test]
