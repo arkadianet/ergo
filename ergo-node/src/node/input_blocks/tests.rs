@@ -2481,3 +2481,94 @@ fn serving_a_105_is_progress_only_while_a_request_of_ours_is_outstanding() {
          for bodies is not the peer answering us"
     );
 }
+
+// ----- fix round 3 -----
+
+/// Round 3, finding 1: `tracked_request_modifier` asks only for the ids
+/// the delivery tracker actually registered, but the Inv path recorded a
+/// phase for every id it *wanted*. So a second peer advertising a set
+/// that overlaps an outstanding request stole the record for the
+/// overlapping id — and the first peer's legitimate reply could then
+/// acknowledge nothing.
+#[test]
+fn a_batch_inv_does_not_steal_another_peer_s_outstanding_expectation() {
+    use ergo_p2p::delivery::ModifierStatus;
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer_a, _ra) = handshake_peer_with_mode(
+        &mut state,
+        19690,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        Some(utxo_mode()),
+        now,
+    );
+    let (peer_b, _rb) = handshake_peer_with_mode(
+        &mut state,
+        19691,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        Some(utxo_mode()),
+        now,
+    );
+
+    let oa = ts::ordering_announcement([0u8; 32], 1, 61, Vec::new());
+    let x = ts::header_id(&oa.header);
+    let y = [0x7fu8; 32];
+
+    // A asks for X first, and owns the outstanding request.
+    let a_actions = send_to(
+        &mut state,
+        peer_a,
+        ergo_p2p::message::CODE_INV,
+        &request_modifier_payload(
+            ergo_p2p::types::ModifierTypeId::OrderingBlockAnnouncement.as_byte(),
+            &[x],
+        ),
+    );
+    assert_eq!(
+        sent_frames(&a_actions, ergo_p2p::message::CODE_REQUEST_MODIFIER).len(),
+        1,
+        "A's request goes out"
+    );
+    assert_eq!(
+        state.coordinator.delivery().status(&x),
+        ModifierStatus::Requested
+    );
+
+    // B advertises [X, Y]. X is already in flight from A, so the tracker
+    // registers only Y — and only Y may take a phase record.
+    let b_actions = send_to(
+        &mut state,
+        peer_b,
+        ergo_p2p::message::CODE_INV,
+        &request_modifier_payload(
+            ergo_p2p::types::ModifierTypeId::OrderingBlockAnnouncement.as_byte(),
+            &[x, y],
+        ),
+    );
+    let b_reqs = sent_frames(&b_actions, ergo_p2p::message::CODE_REQUEST_MODIFIER);
+    assert_eq!(b_reqs.len(), 1);
+    assert_eq!(
+        ergo_p2p::message::deserialize_inv(&b_reqs[0]).unwrap().ids,
+        vec![y],
+        "B is only asked for the id the tracker registered to it"
+    );
+
+    // A's reply must still be recognised as the answer to A's request.
+    let before = state.peer_manager.get(&peer_a).unwrap().last_progress;
+    let _ = send_to(
+        &mut state,
+        peer_a,
+        ergo_p2p::message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+        &ergo_p2p::message::serialize_ordering_block_announcement_msg(&oa).unwrap(),
+    );
+    assert_eq!(
+        state.coordinator.delivery().status(&x),
+        ModifierStatus::Received,
+        "A's 106 acknowledges A's own outstanding request"
+    );
+    assert!(
+        state.peer_manager.get(&peer_a).unwrap().last_progress > before,
+        "and A is credited for serving us"
+    );
+}

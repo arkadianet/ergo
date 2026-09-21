@@ -372,12 +372,19 @@ fn request_modifier(
         debug!(%peer, "input_blocks: request dropped, peer is no longer connected");
         return;
     }
-    let actions = tracked_request_modifier(state, peer, type_id.as_byte(), &[id], now);
-    if actions.is_empty() {
+    let crate::node::TrackedRequest {
+        actions,
+        registered,
+    } = tracked_request_modifier(state, peer, type_id.as_byte(), &[id], now);
+    if registered.is_empty() {
         return;
     }
+    // Same rule as the Inv path: a phase is recorded only for an id this
+    // peer was actually asked for.
     if let Some(phase) = phase {
-        rt.expect(peer, id, phase);
+        for id in &registered {
+            rt.expect(peer, *id, phase);
+        }
     }
     if ModifierTypeId::is_input_block_family(type_id.as_byte()) {
         out.extend(actions);

@@ -237,15 +237,20 @@ pub(super) fn maybe_exit_ibd(store: &mut StateBackendKind, fb_before: u32, fb: u
 /// lifecycle: `on_received` can recognise the answering frame (so the
 /// byte-cap exemption applies to a solicited reply), duplicate requests
 /// for an id already in flight are suppressed, and an unanswered request
-/// is swept by `check_timeouts`. Returns no action when the tracker
-/// registered nothing — that is a duplicate request, not a failure.
+/// is swept by `check_timeouts`.
+///
+/// Returns the actions to flush AND the ids the tracker actually
+/// registered — which is a SUBSET of `ids` whenever one is already in
+/// flight (from this peer or another). Callers that record their own
+/// per-request state must key it off the returned subset: an id we did
+/// not ask this peer for is an id this peer owes us nothing on.
 pub(in crate::node) fn tracked_request_modifier(
     state: &mut NodeState,
     peer: PeerId,
     type_id: u8,
     ids: &[[u8; 32]],
     now: Instant,
-) -> Vec<Action> {
+) -> TrackedRequest {
     // The input-block family walks one id through several phases
     // (announcement -> weak-id list -> bodies). Each phase is a fresh
     // request for the SAME id, and the previous phase left it in the
@@ -258,23 +263,44 @@ pub(in crate::node) fn tracked_request_modifier(
     }
     let registered = register_expectation(state, peer, type_id, ids, now);
     if registered.is_empty() {
-        return Vec::new();
+        return TrackedRequest::default();
     }
     let inv = ergo_p2p::types::InvData {
         type_id,
-        ids: registered,
+        ids: registered.clone(),
     };
     match message::serialize_inv(&inv) {
-        Ok(payload) => vec![Action::SendToPeer {
-            peer,
-            code: message::CODE_REQUEST_MODIFIER,
-            payload,
-        }],
+        Ok(payload) => TrackedRequest {
+            actions: vec![Action::SendToPeer {
+                peer,
+                code: message::CODE_REQUEST_MODIFIER,
+                payload,
+            }],
+            registered,
+        },
         Err(e) => {
             tracing::warn!(type_id, error = %e, "tracked RequestModifier does not serialize");
-            Vec::new()
+            // The expectation is registered but no frame went out, so
+            // nothing will ever answer it. Release it (out of inflight
+            // via `mark_received`, then out of the received set so a
+            // later request for the same id is not skipped) rather than
+            // letting it hold a slot until the timeout sweep.
+            for id in &registered {
+                state.coordinator.delivery_mut().mark_received(id);
+                state.coordinator.delivery_mut().forget_received(id);
+            }
+            TrackedRequest::default()
         }
     }
+}
+
+/// What [`tracked_request_modifier`] did: the frames to flush, and the
+/// ids the delivery tracker took responsibility for. `registered` is
+/// empty exactly when nothing went out.
+#[derive(Default)]
+pub(in crate::node) struct TrackedRequest {
+    pub(in crate::node) actions: Vec<Action>,
+    pub(in crate::node) registered: Vec<[u8; 32]>,
 }
 
 /// Register a delivery expectation WITHOUT emitting a `RequestModifier`.

@@ -254,18 +254,23 @@ pub(in crate::node) fn handle_ordering_inv(
     if wanted.is_empty() {
         return Vec::new();
     }
-    let actions = super::super::tracked_request_modifier(
+    let super::super::TrackedRequest {
+        actions,
+        registered,
+    } = super::super::tracked_request_modifier(
         state,
         peer,
         ModifierTypeId::OrderingBlockAnnouncement.as_byte(),
         &wanted,
         now,
     );
-    if !actions.is_empty() {
-        if let Some(rt) = state.input_blocks.as_mut() {
-            for id in &wanted {
-                rt.expect(peer, *id, ExpectedPhase::OrderingAnnouncement);
-            }
+    // Only the ids the tracker actually registered were ASKED of this
+    // peer. Recording a phase for the rest would overwrite whichever
+    // peer already owns the outstanding request for them, and that
+    // peer's legitimate reply would then acknowledge nothing.
+    if let Some(rt) = state.input_blocks.as_mut() {
+        for id in &registered {
+            rt.expect(peer, *id, ExpectedPhase::OrderingAnnouncement);
         }
     }
     actions
