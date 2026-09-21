@@ -3910,6 +3910,77 @@ mod tests {
         );
     }
 
+    // ----- final fix wave, round 3 -----
+
+    #[test]
+    fn variants_expanded_during_validation_restart_the_next_retry() {
+        // The delivery-driven restart is refused while a job is
+        // outstanding — the selection is settled, so nothing may be
+        // swapped under it. But the expansion still happened, and the
+        // failure path advances forward: with counts [1,2] it fails
+        // [0,0], dispatches [0,1], then the delivery widens position 0 to
+        // [2,2] and the failure of [0,1] steps to [1,1], skipping the
+        // [1,0] the new witness made reachable. The pending restart has
+        // to survive the outstanding job.
+        let mut p = processor();
+        let a1 = ts::body(1, 1);
+        let b1 = ts::body(2, 1);
+        let b2 = ts::body(2, 2);
+        let mut ctx = ts::TestCtx::at(FULL);
+        ctx.mempool.add(&a1);
+        ctx.mempool.add_under(b1.weak_id, &b1);
+        ctx.mempool.add_under(b1.weak_id, &b2);
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, &[a1.clone(), b1.clone()]);
+        let id = ts::ann_id(&ann);
+
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        assert_eq!(p.variants_per_position(&id), vec![1, 2]);
+        let (_, _, _, first, _) = ts::one_validate(&eff);
+        assert_eq!(first, vec![a1.tx_ref, b1.tx_ref]);
+
+        // [0,0] fails, [0,1] is dispatched and left outstanding.
+        let outstanding = ts::validate_err(&mut p, &ctx, &eff);
+        let (_, _, _, second, _) = ts::one_validate(&outstanding);
+        assert_eq!(second, vec![a1.tx_ref, b2.tx_ref]);
+
+        // The witness for position 0 arrives mid-validation.
+        let a2 = ts::body(1, 2);
+        let during = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![a2.clone()],
+                from: Some(ts::PEER),
+                now: Tick(20),
+            },
+        );
+        assert!(
+            !has_validate(&during),
+            "an outstanding selection must not be swapped: {during:?}"
+        );
+        assert!(drops(&during).contains(&DropReason::SelectionSettled));
+        assert_eq!(p.variants_per_position(&id), vec![2, 2]);
+
+        // Now the outstanding combination fails. The retry must cover the
+        // space the delivery widened, not step past it.
+        let revived = ts::validate_err(&mut p, &ctx, &outstanding);
+        let (_, _, block, txs, _) = ts::one_validate(&revived);
+        assert_eq!(block, id);
+        assert_eq!(
+            txs,
+            vec![a2.tx_ref, b1.tx_ref],
+            "the retry must reach the combination unlocked while the job ran"
+        );
+        let applied = ts::validate_ok(&mut p, &ctx, &revived, 1);
+        assert!(
+            applied.iter().any(|e| matches!(
+                e,
+                Effect::ChainChanged { applied, .. } if applied == &vec![id]
+            )),
+            "the block must apply once the valid combination is reached: {applied:?}"
+        );
+    }
+
     // ----- oracle parity -----
 
     #[test]
