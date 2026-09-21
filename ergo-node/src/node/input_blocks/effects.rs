@@ -216,6 +216,26 @@ fn execute_one(
                 &rolled_back_bodies,
                 now,
             ));
+            // Release retained entries for blocks that are no longer on
+            // the best input chain. An applied ordering block emits an
+            // EMPTY ChainChanged (spec 7.6) and deliberately does NOT
+            // restore the abandoned chain's transactions — parity with
+            // Scala, where input-block transactions the ordering block
+            // did not include are simply gone from the mempool (finding
+            // F6). Dropping the entries here is what keeps that a
+            // bounded decision rather than a leak: `retained` is the
+            // node's own map and no processor bound covers it.
+            let live: std::collections::HashSet<InputBlockId> =
+                rt.processor().best_input_chain().into_iter().collect();
+            let before = rt.retained.len();
+            rt.retained.retain(|id, _| live.contains(id));
+            let released = before - rt.retained.len();
+            if released > 0 {
+                debug!(
+                    released,
+                    "input_blocks: released retained pool entries for abandoned blocks"
+                );
+            }
             // Task 7 publishes `/info.bestInputBlock` from
             // `rt.processor().best_input_block()` through the identity slot.
         }

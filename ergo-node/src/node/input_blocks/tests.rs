@@ -1448,3 +1448,39 @@ fn relay_requires_affirmative_utxo_mode_version_and_in_window_height() {
     );
     let _ = (no_mode, digest, old, far, unknown_height);
 }
+
+/// Finding 4: `retained` is released only by an explicit rollback, but
+/// spec 7.6 says an applied ordering block emits an EMPTY ChainChanged —
+/// the abandoned input chain's transactions are deliberately not restored
+/// (F6 parity). Without a prune those entries, and the transaction bytes
+/// they pin, live until the process restarts.
+#[test]
+fn ordering_turnover_releases_retained_entries_without_restoring_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let stranded = ts::body(0xc3, 1);
+    let tx_id = ergo_primitives::digest::Digest32::from_bytes(stranded.tx_ref.tx_id);
+
+    state.input_blocks.as_mut().unwrap().retained.insert(
+        [0x41u8; 32],
+        vec![RemovedEntry {
+            tx_id,
+            bytes: stranded.bytes.clone(),
+            fee: 0,
+            size_bytes: stranded.bytes.len() as u32,
+            cost: 1000,
+        }],
+    );
+
+    let _ = on_ordering_block_applied(&mut state, [0x42; 32], 1, Instant::now());
+
+    assert!(
+        state.input_blocks.as_ref().unwrap().retained.is_empty(),
+        "entries for blocks no longer on the best input chain are released"
+    );
+    assert!(
+        !state.mempool.contains(&tx_id),
+        "released is NOT restored: an applied ordering block drops the \
+         abandoned input chain's transactions (spec 7.6 / F6)"
+    );
+}
