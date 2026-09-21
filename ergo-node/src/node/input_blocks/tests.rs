@@ -544,6 +544,98 @@ fn read_slot_serves_a_losing_forks_block_after_a_fork_switch() {
     );
 }
 
+/// Fix-round-1, finding 3: `transaction_ids` survive body-cache eviction
+/// (`Processor::transaction_refs`), while `transactions` honestly shrinks
+/// (`Processor::bodies` skips evicted entries, mirroring Scala's
+/// `getIfPresent` loop) — the ids route must not depend on the bodies
+/// still being cached.
+#[test]
+fn read_slot_keeps_transaction_ids_after_body_cache_eviction() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    let bounds = ergo_inputblocks::bounds::Bounds {
+        tx_cache_entries: 1,
+        ..ergo_inputblocks::bounds::Bounds::default()
+    };
+    let ib_cfg = crate::config::InputBlocksConfig {
+        enabled: true,
+        strict_field_binding: true,
+        relay_remote: false,
+        bounds,
+    };
+    state.input_blocks = Some(InputBlocksRuntime::new(&ib_cfg, Instant::now()));
+    let slot: crate::api_bridge::InputBlocksSlot = std::sync::Arc::new(
+        arc_swap::ArcSwap::from_pointee(ergo_api::compat::ApiInputBlocks::default()),
+    );
+    state.input_blocks_read_slot = Some(slot.clone());
+
+    let mut ts_ctx = ts::TestCtx::at(0);
+    let b1 = ts::body(1, 1);
+    let b2 = ts::body(2, 1);
+    ts_ctx.mempool.add(&b1);
+    ts_ctx.mempool.add(&b2);
+    let a1 = ts::announcement_for([0u8; 32], 1, 1, None, std::slice::from_ref(&b1));
+    let id1 = ts::ann_id(&a1);
+    let a2 = ts::announcement_for([0u8; 32], 1, 2, Some(id1), std::slice::from_ref(&b2));
+
+    {
+        let mut rt = state.input_blocks.take().expect("runtime");
+        rt.processor_mut().set_best_ordering(Some([0u8; 32]), 1);
+        let eff = ts_ctx.handle(
+            rt.processor_mut(),
+            ergo_inputblocks::processor::Event::AnnouncementAccepted {
+                ann: a1.clone(),
+                from: ts::PEER,
+                now: ergo_inputblocks::types::Tick(0),
+            },
+        );
+        ts::validate_ok(rt.processor_mut(), &ts_ctx, &eff, 1);
+        assert!(
+            rt.processor().bodies(&id1).is_some_and(|b| b.len() == 1),
+            "b1's body is cached before b2 arrives"
+        );
+
+        // b2 shares the single tx-cache slot: caching it evicts b1's body.
+        ts_ctx.handle(
+            rt.processor_mut(),
+            ergo_inputblocks::processor::Event::AnnouncementAccepted {
+                ann: a2.clone(),
+                from: ts::PEER,
+                now: ergo_inputblocks::types::Tick(0),
+            },
+        );
+        assert!(
+            rt.processor().bodies(&id1).is_some_and(|b| b.is_empty()),
+            "b1's body must be evicted (not merely absent as an id)"
+        );
+        state.input_blocks = Some(rt);
+    }
+
+    execute_effects(
+        &mut state,
+        vec![Effect::Dropped {
+            id: [0u8; 32],
+            reason: DropReason::AlreadyKnown,
+        }],
+        Instant::now(),
+    );
+
+    let snapshot = slot.load_full();
+    let entry = snapshot
+        .blocks
+        .get(&hex::encode(id1))
+        .expect("id1's record is still retained");
+    assert_eq!(
+        entry.transaction_ids.len(),
+        1,
+        "the tx id survives body eviction"
+    );
+    assert!(
+        entry.transactions.is_empty(),
+        "the body itself is honestly reported as gone, not fabricated"
+    );
+}
+
 /// A runtime that has never dropped anything reports an empty (not
 /// absent) breakdown — `ApiStatus.input_blocks` itself is what goes
 /// `None` when the subsystem is off (see

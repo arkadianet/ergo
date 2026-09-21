@@ -111,14 +111,36 @@ fn refresh_read_slot(state: &NodeState, rt: &InputBlocksRuntime) {
     let known = processor.known_input_block_ids();
     let mut blocks = std::collections::HashMap::with_capacity(known.len());
     for id in &known {
-        let Some(bodies) = processor.bodies(id) else {
-            continue;
-        };
-        let txs: Vec<_> = bodies
+        // Fix-round-1, finding 3: `transaction_ids`/`weak_ids` come from
+        // `transaction_refs`/`weak_ids`, NOT from `bodies` — the former
+        // survive for as long as the record is retained, the latter
+        // silently skips any body the shared cache has since evicted.
+        // Deriving ids from encoded bodies would make the ids route lose
+        // entries purely from cache pressure.
+        let transaction_ids: Vec<String> = processor
+            .transaction_refs(id)
+            .unwrap_or(&[])
+            .iter()
+            .map(|r| hex::encode(r.tx_id))
+            .collect();
+        let weak_ids: Vec<String> = processor
+            .weak_ids(id)
+            .map(|ws| ws.iter().map(hex::encode).collect())
+            .unwrap_or_default();
+        let transactions: Vec<_> = processor
+            .bodies(id)
             .into_iter()
+            .flatten()
             .filter_map(|b| crate::api_bridge::compat::encode_transaction(&b.tx).ok())
             .collect();
-        blocks.insert(hex::encode(id), txs);
+        blocks.insert(
+            hex::encode(id),
+            ergo_api::compat::ApiInputBlockEntry {
+                transaction_ids,
+                weak_ids,
+                transactions,
+            },
+        );
     }
     slot.store(std::sync::Arc::new(ergo_api::compat::ApiInputBlocks {
         best_input_block_id,

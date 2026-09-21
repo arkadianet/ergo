@@ -15,6 +15,6 @@ pub mod traits;
 pub mod transactions;
 pub mod types;
 
-pub use input_blocks::ApiInputBlocks;
+pub use input_blocks::{ApiInputBlockEntry, ApiInputBlocks};
 pub use traits::NodeChainQuery;
 pub use types::{Parameters, ScalaInfo};

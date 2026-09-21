@@ -47,10 +47,39 @@ pub struct ApiInputBlocks {
     /// Best input-block chain under the best ordering block, tip first
     /// (Scala `bestInputBlocksChain()`).
     pub best_chain: Vec<String>,
-    /// Per-input-block transaction bodies the node currently holds,
+    /// Per-input-block entries the node currently holds a RECORD for,
     /// keyed by lowercase hex input-block id. An id absent from this map
-    /// means the node has no record of it — the id-keyed routes 404.
-    pub blocks: HashMap<String, Vec<ScalaTransaction>>,
+    /// means the node has no record of it at all — the id-keyed routes
+    /// 404. A PRESENT entry's `transactions` may still be a strict
+    /// subset of (or entirely absent relative to) `transaction_ids` —
+    /// see [`ApiInputBlockEntry`].
+    pub blocks: HashMap<String, ApiInputBlockEntry>,
+}
+
+/// One input block's read-side entry (fix-round-1, finding 3):
+/// transaction identity (`transaction_ids` / `weak_ids`) is snapshotted
+/// SEPARATELY from `transactions` (the bodies), because
+/// `Processor::transaction_refs`/`weak_ids` survive for as long as the
+/// block's RECORD is retained while `Processor::bodies` silently skips
+/// any body the shared cache has since evicted (mirroring Scala's own
+/// `getIfPresent` loop). Depending on `transactions` to derive ids would
+/// make the ids route lose entries purely because of cache pressure,
+/// with nothing wrong about the record itself.
+#[derive(Clone, Debug, Default)]
+pub struct ApiInputBlockEntry {
+    /// Every transaction id announced for this block (Scala
+    /// `getInputBlockTransactionIds`), hex, in announced order. Present
+    /// for as long as the block's record is retained — independent of
+    /// body-cache eviction.
+    pub transaction_ids: Vec<String>,
+    /// The matching weak ids (6-byte wire references), hex, same order
+    /// and same lifetime as `transaction_ids`.
+    pub weak_ids: Vec<String>,
+    /// Full transaction bodies still held in the shared cache (Scala
+    /// `getInputBlockTransactions`) — may be shorter than
+    /// `transaction_ids`/`weak_ids` once eviction starts, or empty while
+    /// the ids are still known.
+    pub transactions: Vec<ScalaTransaction>,
 }
 
 /// `GET /blocks/bestInputBlock` — ids of the best ordering and input
@@ -93,24 +122,27 @@ pub async fn input_block_transactions_handler(
     Path(id): Path<String>,
 ) -> Response {
     match resolve_block(&read, &id) {
-        Some(txs) => Json(txs).into_response(),
+        Some(entry) => Json(entry.transactions).into_response(),
         None => input_block_not_found(),
     }
 }
 
 /// `GET /blocks/{id}/inputBlockTransactionIds` — the transaction ids of
-/// one input block. 404 when the node has no record of `id`.
+/// one input block. 404 when the node has no record of `id`. Sourced
+/// from `transaction_ids`, NOT derived from `transactions` — see
+/// [`ApiInputBlockEntry`]'s doc for why that distinction matters (body
+/// eviction must not silently shrink this list).
 pub async fn input_block_transaction_ids_handler(
     State(read): State<Arc<dyn NodeReadState>>,
     Path(id): Path<String>,
 ) -> Response {
     match resolve_block(&read, &id) {
-        Some(txs) => Json(txs.into_iter().map(|t| t.id).collect::<Vec<_>>()).into_response(),
+        Some(entry) => Json(entry.transaction_ids).into_response(),
         None => input_block_not_found(),
     }
 }
 
-fn resolve_block(read: &Arc<dyn NodeReadState>, id: &str) -> Option<Vec<ScalaTransaction>> {
+fn resolve_block(read: &Arc<dyn NodeReadState>, id: &str) -> Option<ApiInputBlockEntry> {
     read.input_blocks()
         .and_then(|ib| ib.blocks.get(&id.to_ascii_lowercase()).cloned())
 }

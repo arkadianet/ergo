@@ -16,7 +16,7 @@ use std::sync::Arc;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use ergo_api::compat::types::ScalaTransaction;
-use ergo_api::compat::ApiInputBlocks;
+use ergo_api::compat::{ApiInputBlockEntry, ApiInputBlocks};
 use ergo_api::server::router;
 use ergo_api::traits::NodeReadState;
 use ergo_api::types::{
@@ -143,7 +143,14 @@ fn build_app(input_blocks: Option<ApiInputBlocks>) -> axum::Router {
 
 fn wired_input_blocks() -> ApiInputBlocks {
     let mut blocks = HashMap::new();
-    blocks.insert(ID_A.to_string(), vec![stub_tx("t1"), stub_tx("t2")]);
+    blocks.insert(
+        ID_A.to_string(),
+        ApiInputBlockEntry {
+            transaction_ids: vec!["t1".to_string(), "t2".to_string()],
+            weak_ids: vec!["aabbcc".to_string(), "ddeeff".to_string()],
+            transactions: vec![stub_tx("t1"), stub_tx("t2")],
+        },
+    );
     ApiInputBlocks {
         best_input_block_id: Some(ID_A.to_string()),
         best_chain: vec![ID_A.to_string(), ID_B.to_string()],
@@ -207,6 +214,38 @@ async fn input_block_transaction_ids_serves_just_the_ids() {
     let (status, body) = get(app, &format!("/blocks/{ID_A}/inputBlockTransactionIds")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, serde_json::json!(["t1", "t2"]));
+}
+
+/// Fix-round-1, finding 3: the ids route reads `transaction_ids`, not
+/// derived transactions, so it still serves every id even when NO body
+/// is cached for the block (eviction, or bodies never arrived).
+#[tokio::test]
+async fn input_block_transaction_ids_served_even_with_no_cached_bodies() {
+    let mut blocks = HashMap::new();
+    blocks.insert(
+        ID_A.to_string(),
+        ApiInputBlockEntry {
+            transaction_ids: vec!["t1".to_string(), "t2".to_string()],
+            weak_ids: vec!["aabbcc".to_string(), "ddeeff".to_string()],
+            transactions: Vec::new(),
+        },
+    );
+    let ib = ApiInputBlocks {
+        best_input_block_id: Some(ID_A.to_string()),
+        best_chain: vec![ID_A.to_string()],
+        blocks,
+    };
+    let app = build_app(Some(ib.clone()));
+    let (status, body) = get(app, &format!("/blocks/{ID_A}/inputBlockTransactionIds")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, serde_json::json!(["t1", "t2"]));
+
+    // The bodies route, by contrast, honestly reports zero bodies (not a
+    // 404 — the record is known, just cache-empty).
+    let app = build_app(Some(ib));
+    let (status, body) = get(app, &format!("/blocks/{ID_A}/inputBlockTransactions")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, serde_json::json!([]));
 }
 
 // ----- error paths -----
