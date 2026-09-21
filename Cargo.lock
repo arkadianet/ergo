@@ -819,6 +819,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ergo-inputblocks"
+version = "0.8.0"
+dependencies = [
+ "ergo-crypto",
+ "ergo-primitives",
+ "ergo-ser",
+ "ergo-validation",
+ "hex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ergo-mempool"
 version = "0.8.0"
 dependencies = [

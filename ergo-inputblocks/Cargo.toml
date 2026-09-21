@@ -1,0 +1,24 @@
+[package]
+name        = "ergo-inputblocks"
+description = "Input-block (sub-block) processor and policy for the Ergo Rust node: announcement validity, per-ordering-block input chains and forks, transaction staging, and the single-writer state machine the node drives. Pure and I/O-free; wire codecs live in ergo-ser/ergo-p2p."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish    = false
+
+[dependencies]
+ergo-primitives = { workspace = true }
+ergo-ser        = { workspace = true }
+ergo-crypto     = { workspace = true }
+ergo-validation = { workspace = true }
+thiserror       = { workspace = true }
+
+[dev-dependencies]
+hex        = { workspace = true }
+serde      = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

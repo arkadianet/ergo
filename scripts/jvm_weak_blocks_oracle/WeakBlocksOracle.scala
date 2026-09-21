@@ -207,6 +207,64 @@ object WeakBlocksOracle {
     }.asJson)
   }
 
+  // ── extension_proof: extension-proof/field-binding vectors for F4/F4b ──
+  // Documents that Scala's `InputBlockFields.inputBlockFieldsProof.valid(header.extensionRoot)`
+  // only checks that the proof *reduces* to the header's extension root — a
+  // proof whose leaves don't match the announced fields is still accepted
+  // as long as it reduces to that root (F4b; `fields_unbound` below).
+  // A prior hypothesis (F4) held that Scala's `valid` also accepts an
+  // *empty* proof against any root; measuring it here shows that is NOT
+  // the case (scrypto 3.0.0's `BatchMerkleProof.valid` reduces an empty
+  // proof to an empty sequence, which never satisfies its `size == 1`
+  // check, so `empty_proof` below is Scala-`false`). The real F4-shaped
+  // divergence is in the Rust `ergo-validation::popow::merkle::verify_batch_merkle_proof`
+  // (from M0), which *does* special-case empty-indices/empty-proofs as
+  // trivially valid against any root — the opposite direction from the
+  // original hypothesis; see `ergo-inputblocks/tests/it/announcement_oracle.rs`.
+  // `ergo-inputblocks::announcement::verify_field_binding` closes F4b (and
+  // is why an empty proof is rejected regardless of what the Rust reducer
+  // says) under `AnnouncementPolicy::default()` (`strict_field_binding = true`).
+  def extensionProofCases(): Json = {
+    val zero = Digest32 @@ fill(32, 0)
+    def ann(prev: Option[Array[Byte]], txs: Seq[ErgoTransaction], proofOverride: Option[scorex.crypto.authds.merkle.BatchMerkleProof[Digest32]] = None, hdr: Header = fixedHeader): InputBlockAnnouncement = {
+      val f = fields(prev, txs, zero)
+      val ext = InputBlockFields.toExtensionFields(prev, f.transactionsDigest, f.prevTransactionsDigest)
+      val h = hdr.copy(extensionRoot = ext.digest) // header commits to exactly these fields
+      InputBlockAnnouncement(1, h, new InputBlockFields(prev, f.transactionsDigest, f.prevTransactionsDigest, proofOverride.getOrElse(f.inputBlockFieldsProof)), None)
+    }
+    val good = ann(Some(fill(32, 0x88)), Seq(tx1, tx2))
+    val goodNoPrev = ann(None, Seq(tx1))
+    val empty = ann(Some(fill(32, 0x88)), Seq(tx1), Some(scorex.crypto.authds.merkle.BatchMerkleProof(Seq.empty, Seq.empty)(Algos.hash)))
+    // proof built over a different digest but announced fields unchanged -> reduces to a different root
+    val wrongRoot = { val a = ann(Some(fill(32, 0x88)), Seq(tx1)); a.copy(header = a.header.copy(extensionRoot = Digest32 @@ fill(32, 0x01))) }
+    // proof for the fields of txs (tx1) but announced digest for (tx1, tx2): Scala accepts (F4), binding rejects
+    val unbound = { val real = ann(Some(fill(32, 0x88)), Seq(tx1)); val other = fields(Some(fill(32, 0x88)), Seq(tx1, tx2), zero)
+      real.copy(inputBlockFields = new InputBlockFields(Some(fill(32, 0x88)), other.transactionsDigest, other.prevTransactionsDigest, real.merkleProof)) }
+    // expected_binding_verdict: the *field-binding* check alone (proof
+    // leaves vs the announced InputBlockFields), independent of the
+    // header's extension root — that root/reduction check is
+    // `scala_ext_valid` above, checked separately. A binding-consistent
+    // proof/fields pair (e.g. `wrong_root`, which corrupts only the
+    // header) is still expected `true` here even though the header's
+    // root check fails; only `empty_proof` (no leaves) and
+    // `fields_unbound` (leaves for different fields than announced) are
+    // expected `false`.
+    def expectedBindingVerdict(a: InputBlockAnnouncement): Boolean = {
+      import scorex.crypto.authds.LeafData
+      import scorex.crypto.authds.merkle.Leaf
+      val want = InputBlockFields.toExtensionFields(a.inputBlockFields.prevInputBlockId, a.inputBlockFields.transactionsDigest, a.inputBlockFields.prevTransactionsDigest)
+        .fields.map { case (k, v) => hex(Leaf[Digest32](LeafData @@ Extension.kvToLeaf((k, v)))(Algos.hash).hash) }.sorted
+      val proved = a.merkleProof.indices.map(kv => hex(kv._2)).sorted
+      proved.nonEmpty && proved == want
+    }
+    val cases = Seq(("good_with_prev", good), ("good_no_prev", goodNoPrev), ("empty_proof", empty), ("wrong_root", wrongRoot), ("fields_unbound", unbound)).map { case (name, a) =>
+      Json.obj("name" -> name.asJson, "bytes_hex" -> hex(InputBlockAnnouncement.serializer.toBytes(a)).asJson,
+        "scala_ext_valid" -> a.merkleProof.valid(a.header.extensionRoot).asJson,
+        "expected_binding_verdict" -> expectedBindingVerdict(a).asJson)
+    }
+    Json.obj("cases" -> cases.asJson)
+  }
+
   // ── soft_fields: Scala `softFieldsAllowed` parity for the Rust evaluator gate ──
   // Task 6 (ergo-sigma) added ReductionContext.soft_fields_allowed + the typed
   // EvalError::SoftFieldAccess. This function is the oracle evidence Task 7
@@ -334,6 +392,7 @@ object WeakBlocksOracle {
       case "weak_ids" => weakIdCases()
       case "pow" => powCases()
       case "extension_leaf" => extensionLeafCases()
+      case "extension_proof" => extensionProofCases()
       case "soft_fields" => softFieldCases()
       case other => sys.error(s"unknown vector $other")
     }
