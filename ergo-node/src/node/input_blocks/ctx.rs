@@ -17,6 +17,7 @@ use ergo_inputblocks::processor::{Body, ProcessorCtx};
 use ergo_inputblocks::types::{OrderingId, TxRef};
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::header::{read_header, Header};
+use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
 use ergo_ser::transaction::read_transaction;
 use ergo_ser::weak_id::{weak_id_of, witness_id, WeakId};
 use ergo_state::{ChainStateRead, HeaderSectionStore, StateBackendKind};
@@ -61,7 +62,8 @@ impl CtxData<'_> {
             Some(v) => *v,
             None => expected_n_bits_after_store(self.store, parent),
         };
-        let block_transactions_known = |id: &OrderingId| block_transactions_known(self.store, id);
+        let block_transactions_known =
+            |id: &OrderingId| block_transactions_known_in(self.store, id);
         let ctx = ProcessorCtx {
             multiplier: self.multiplier,
             expected_n_bits: &expected_n_bits,
@@ -182,14 +184,45 @@ fn expected_n_bits_after_store(store: &StateBackendKind, parent_id: &[u8; 32]) -
     next_n_bits(child_height, &headers, &params).ok()
 }
 
+/// The modifier id of an ordering block's transactions section.
+///
+/// NOT the header's `transactions_root`: a non-header section is
+/// identified by `blake2b256(type_id || header_id || root)` (Scala
+/// `NonHeaderBlockSection.computeIdBytes`). Naming the bare root would
+/// request a modifier no peer holds and make every stored section look
+/// absent.
+pub(in crate::node) fn transactions_section_id(
+    state: &NodeState,
+    header_id: &OrderingId,
+) -> Option<[u8; 32]> {
+    transactions_section_id_in(&state.store, header_id)
+}
+
+fn transactions_section_id_in(
+    store: &StateBackendKind,
+    header_id: &OrderingId,
+) -> Option<[u8; 32]> {
+    let header = read_stored_header(store, header_id)?;
+    Some(compute_section_id(
+        TYPE_BLOCK_TRANSACTIONS,
+        header_id,
+        header.transactions_root.as_bytes(),
+    ))
+}
+
 /// Scala `historyReader.contains(header.transactionsId)`: does the node
-/// already hold this ordering block's transaction section? Resolved
-/// through the stored header, whose `transactions_root` IS the section's
-/// modifier id.
-fn block_transactions_known(store: &StateBackendKind, ordering_id: &OrderingId) -> bool {
-    match read_stored_header(store, ordering_id) {
-        Some(h) => store
-            .get_block_section(h.transactions_root.as_bytes())
+/// already hold this ordering block's transaction section?
+pub(in crate::node) fn block_transactions_known(
+    state: &NodeState,
+    ordering_id: &OrderingId,
+) -> bool {
+    block_transactions_known_in(&state.store, ordering_id)
+}
+
+fn block_transactions_known_in(store: &StateBackendKind, ordering_id: &OrderingId) -> bool {
+    match transactions_section_id_in(store, ordering_id) {
+        Some(section_id) => store
+            .get_block_section(&section_id)
             .ok()
             .flatten()
             .is_some(),

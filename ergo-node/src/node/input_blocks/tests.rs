@@ -398,3 +398,54 @@ fn stored_header_round_trips_through_expected_n_bits_lookup() {
     let got = read_header(&mut r).unwrap();
     assert_eq!(&got, want);
 }
+
+// ----- regressions (fix round 1) -----
+
+/// Finding 1: a block section's modifier id is
+/// `blake2b256(type || header_id || root)`, NOT the root itself. Using
+/// the bare root made `RequestBlockTransactions` name a modifier nobody
+/// has, and made every stored section look absent.
+#[test]
+fn block_transactions_section_id_is_hashed_not_the_bare_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    let headers = seed_header_chain(&mut state, 1);
+    let header = &headers[0];
+    let header_id = header_id_of(header);
+
+    // The id the block pipeline itself computes for this header's
+    // transactions section.
+    let expected = ergo_ser::modifier_id::ExpectedSections::from_header(
+        &header_id,
+        header.transactions_root.as_bytes(),
+        header.extension_root.as_bytes(),
+        header.ad_proofs_root.as_bytes(),
+    )
+    .transactions_id;
+    assert_ne!(
+        expected,
+        *header.transactions_root.as_bytes(),
+        "fixture would not discriminate if the two coincided"
+    );
+
+    assert_eq!(
+        transactions_section_id(&state, &header_id),
+        Some(expected),
+        "the requested modifier id must be the section id"
+    );
+
+    // And the "do we already have it?" probe must find a section stored
+    // under that same id.
+    assert!(
+        !block_transactions_known(&state, &header_id),
+        "nothing stored yet"
+    );
+    state
+        .store
+        .store_block_section_typed(&expected, &[0xab, 0xcd], 102)
+        .unwrap();
+    assert!(
+        block_transactions_known(&state, &header_id),
+        "a stored section must not look absent"
+    );
+}

@@ -33,7 +33,7 @@ use tracing::{debug, warn};
 
 use super::super::admission::route_mempool_actions;
 use super::super::NodeState;
-use super::ctx::build_ctx_data;
+use super::ctx::{build_ctx_data, transactions_section_id};
 use super::runtime::InputBlocksRuntime;
 use super::validate::{run_validation, ValidateJob};
 
@@ -306,13 +306,6 @@ fn resolve(rt: &InputBlocksRuntime, tag: PeerTag, what: &'static str) -> Option<
             None
         }
     }
-}
-
-fn transactions_section_id(state: &NodeState, header_id: &OrderingId) -> Option<[u8; 32]> {
-    let bytes = state.store.get_header(header_id).ok().flatten()?;
-    let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
-    let header = ergo_ser::header::read_header(&mut r).ok()?;
-    Some(*header.transactions_root.as_bytes())
 }
 
 /// The bodies each named block holds, as far as the processor's cache

@@ -27,7 +27,9 @@ mod validate;
 #[cfg(test)]
 mod tests;
 
-pub(in crate::node) use ctx::{build_ctx_data, expected_n_bits_after};
+pub(in crate::node) use ctx::{
+    block_transactions_known, build_ctx_data, expected_n_bits_after, transactions_section_id,
+};
 pub(in crate::node) use effects::{apply_chain_change, execute_effects};
 pub(in crate::node) use runtime::InputBlocksRuntime;
 pub(in crate::node) use validate::{build_input_block_context, run_validation};
