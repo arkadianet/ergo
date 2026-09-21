@@ -10,6 +10,7 @@ import org.ergoplatform.modifiers.history.header.{Header, HeaderSerializer}
 import org.ergoplatform.modifiers.mempool.{ErgoTransaction, ErgoTransactionSerializer}
 import org.ergoplatform.network.message.inputblocks._
 import org.ergoplatform.subblocks.InputBlockAnnouncement
+import org.ergoplatform.settings.Algos
 import org.ergoplatform.{AutolykosSolution, ErgoBoxCandidate, Input}
 import scorex.crypto.hash.Digest32
 import scorex.util.encode.Base16
@@ -172,6 +173,20 @@ object WeakBlocksOracle {
     Json.obj("pure_cases" -> pure.flatten.asJson, "header_cases" -> real.toSeq.asJson)
   }
 
+  def extensionLeafCases(): Json = {
+    import scorex.crypto.authds.LeafData
+    import scorex.crypto.authds.merkle.Leaf
+    val cases = Seq(
+      ("two_byte_key_32_byte_value", Array[Byte](0x03, 0x00), fill(32, 0)),
+      ("prev_input_block_id_key", Extension.PrevInputBlockIdKey, fill(32, 0x88)),
+      ("interlinks_style_key", Array[Byte](0x01, 0x00), Array[Byte](1, 2, 3)))
+    Json.obj("cases" -> cases.map { case (name, key, value) =>
+      val leafDigest = Leaf[Digest32](LeafData @@ Extension.kvToLeaf((key, value)))(Algos.hash).hash
+      Json.obj("name" -> name.asJson, "key_hex" -> hex(key).asJson, "value_hex" -> hex(value).asJson,
+        "leaf_digest_hex" -> hex(leafDigest).asJson)
+    }.asJson)
+  }
+
   def main(args: Array[String]): Unit = {
     val out = args(0) match {
       case "announcement" => announcementCases()
@@ -179,6 +194,7 @@ object WeakBlocksOracle {
       case "messages" => messageCases()
       case "weak_ids" => weakIdCases()
       case "pow" => powCases()
+      case "extension_leaf" => extensionLeafCases()
       case other => sys.error(s"unknown vector $other")
     }
     println(out.spaces2)
