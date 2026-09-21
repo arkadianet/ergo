@@ -156,10 +156,19 @@ pub(in crate::node) fn handle(
         message::CODE_INPUT_BLOCK_TXS_REQUEST => {
             match message::deserialize_input_block_txs_request(payload) {
                 Ok(req) => {
+                    // Spec 9.1: 102 / 104 / 105 count as progress only
+                    // when the frame answers a request of OURS that is
+                    // still outstanding. Serving a 105 is not enough on
+                    // its own — a peer that only ever asks us for data
+                    // we happen to hold tells us nothing about whether
+                    // it is useful to us, and crediting it would let
+                    // that peer hold its slot on our own inventory.
+                    //
+                    // Read-only: the peer ASKING us for bodies does not
+                    // fulfil our request for them, so the expectation
+                    // must survive the frame.
+                    let progress = outstanding_from(state, &peer, &req.input_block_id);
                     let actions = serve::serve_transactions(state, peer, &req);
-                    // Asking costs nothing; being served does. Same rule
-                    // the generic `RequestModifier` arm applies.
-                    let progress = !actions.is_empty();
                     Dispatched { actions, progress }
                 }
                 Err(e) => {
@@ -295,6 +304,13 @@ fn answered(state: &mut NodeState, peer: &PeerId, id: &[u8; 32], phase: Expected
     } else {
         false
     }
+}
+
+/// Is a request of ours for `id` still outstanding with `peer`? Read
+/// only — unlike [`answered`], this consumes nothing.
+fn outstanding_from(state: &NodeState, peer: &PeerId, id: &[u8; 32]) -> bool {
+    use ergo_p2p::delivery::DeliveryAction;
+    state.coordinator.delivery().on_received(id, peer) == DeliveryAction::Accept
 }
 
 /// Build the event, hand it to the processor, execute the effects.

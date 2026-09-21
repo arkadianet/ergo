@@ -1246,6 +1246,10 @@ fn progress_classification_counts_100_and_106_only_and_102_104_105_when_answerin
         "an unservable 105 is not progress"
     );
 
+    // Serving a 105 is NOT progress on its own (round 2, finding 6):
+    // spec 9.1 credits 105 only when it answers a request of OURS that
+    // is still outstanding. A peer asking us for data tells us nothing
+    // about whether that peer is useful to us.
     let _ = send_to(
         &mut state,
         peer,
@@ -1257,7 +1261,11 @@ fn progress_classification_counts_100_and_106_only_and_102_104_105_when_answerin
             },
         ),
     );
-    assert!(progress_of(&state) > before, "a served 105 is progress");
+    assert_eq!(
+        progress_of(&state),
+        before,
+        "serving a 105 with nothing outstanding is not progress"
+    );
 
     // 106 is always progress.
     let before = progress_of(&state);
@@ -2386,5 +2394,90 @@ fn ordering_tip_classifies_a_fork_switch_as_a_reorg() {
     assert!(
         rt.processor().generation() > generation,
         "a switch is an event too"
+    );
+}
+
+/// Round 2, finding 6: spec 9.1 credits 102 / 104 / 105 only when the
+/// frame answers a request of ours that is still outstanding. The
+/// dispatcher credited 105 whenever serving happened to succeed, which
+/// let a peer hold its slot by asking us for data we have — the exact
+/// trickle the progress rule exists to refuse.
+#[test]
+fn serving_a_105_is_progress_only_while_a_request_of_ours_is_outstanding() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19680,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    // Seat an announcement plus its bodies so the 105 below is servable.
+    let bodies = [ts::body(0x71, 1)];
+    let id = seed_announcement(&mut state, peer, 51, &bodies);
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS,
+        &ergo_p2p::message::serialize_input_block_txs(&ergo_p2p::message::InputBlockTxs {
+            input_block_id: id,
+            transactions: bodies.iter().map(|b| b.tx.clone()).collect(),
+        })
+        .unwrap(),
+    );
+
+    let req = ergo_p2p::message::serialize_input_block_txs_request(
+        &ergo_p2p::message::InputBlockTxsRequest {
+            input_block_id: id,
+            weak_ids: vec![bodies[0].weak_id],
+        },
+    );
+
+    // Nothing of ours is outstanding for this block any more.
+    let before = state.peer_manager.get(&peer).unwrap().last_progress;
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST,
+        &req,
+    );
+    assert_eq!(
+        sent_frames(&actions, ergo_p2p::message::CODE_INPUT_BLOCK_TXS).len(),
+        1,
+        "we do serve it"
+    );
+    assert_eq!(
+        state.peer_manager.get(&peer).unwrap().last_progress,
+        before,
+        "but serving alone is not progress"
+    );
+
+    // With a request of ours outstanding for the same block, the frame
+    // coincides with something we are waiting on and does count.
+    crate::node::register_expectation(
+        &mut state,
+        peer,
+        ergo_p2p::types::ModifierTypeId::InputBlockTransactionIds.as_byte(),
+        &[id],
+        now,
+    );
+    let before = state.peer_manager.get(&peer).unwrap().last_progress;
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST,
+        &req,
+    );
+    assert!(
+        state.peer_manager.get(&peer).unwrap().last_progress > before,
+        "a 105 that coincides with an outstanding request of ours counts"
+    );
+    assert_eq!(
+        state.coordinator.delivery().status(&id),
+        ergo_p2p::delivery::ModifierStatus::Requested,
+        "and it does NOT consume that expectation — the peer asking us \
+         for bodies is not the peer answering us"
     );
 }
