@@ -217,6 +217,50 @@ fn decode_hex_tx(hex_str: &str) -> (Transaction, Arc<[u8]>) {
     (read_transaction(&mut r).unwrap(), bytes)
 }
 
+/// Build a pool `Entry` for a real, parsed transaction, deriving every
+/// tx-shaped field (inputs, output ids, fee, size) from `tx`/`bytes`
+/// itself rather than fabricating them — required so a fixture built this
+/// way actually stands in for a genuinely admitted transaction (see
+/// findings-2-r2 #2 / findings-2-r3, `find_by_weak_id_returns_all_colliding_entries`'s
+/// non-matching fixture).
+fn entry_from_tx(tx_id: TxId, tx: &Transaction, bytes: Arc<[u8]>, weight: u64, cost: u64) -> Entry {
+    let inputs: Vec<Digest32> = tx.inputs.iter().map(|i| i.box_id).collect();
+    let tx_id_modifier = transaction_id(tx).unwrap();
+    let outputs: Vec<Digest32> = tx
+        .output_candidates
+        .iter()
+        .enumerate()
+        .map(|(idx, candidate)| {
+            ErgoBox {
+                candidate: candidate.clone(),
+                transaction_id: tx_id_modifier,
+                index: idx as u16,
+            }
+            .box_id()
+            .unwrap()
+        })
+        .collect();
+    let fee: u64 = tx
+        .output_candidates
+        .iter()
+        .filter(|c| c.ergo_tree_bytes() == MAINNET_FEE_PROPOSITION_BYTES)
+        .map(|c| c.value)
+        .sum();
+    let size_bytes = bytes.len() as u32;
+    Entry::new(
+        tx_id,
+        bytes,
+        inputs,
+        outputs,
+        vec![],
+        fee,
+        weight,
+        size_bytes,
+        cost,
+        TxSource::Api,
+    )
+}
+
 #[test]
 fn find_by_weak_id_returns_all_colliding_entries() {
     // Two DISTINCT real transactions whose weak id genuinely collides (see
@@ -249,45 +293,12 @@ fn find_by_weak_id_returns_all_colliding_entries() {
     );
 
     let mut pool = OrderedPool::with_capacity(8);
-    pool.insert(Entry::new(
-        tx_id_a,
-        bytes_a,
-        tx_a.inputs.iter().map(|i| i.box_id).collect(),
-        vec![d(0x11)],
-        vec![],
-        1_000_000,
-        100,
-        8,
-        50_000,
-        TxSource::Api,
-    ))
-    .unwrap();
-    pool.insert(Entry::new(
-        tx_id_b,
-        bytes_b,
-        tx_b.inputs.iter().map(|i| i.box_id).collect(),
-        vec![d(0x21)],
-        vec![],
-        1_000_000,
-        200,
-        8,
-        50_000,
-        TxSource::Api,
-    ))
-    .unwrap();
-    pool.insert(Entry::new(
-        tx_id_c,
-        bytes_c,
-        tx_c.inputs.iter().map(|i| i.box_id).collect(),
-        vec![d(0x9A)],
-        vec![],
-        1_000_000,
-        300,
-        8,
-        50_000,
-        TxSource::Api,
-    ))
-    .unwrap();
+    pool.insert(entry_from_tx(tx_id_a, &tx_a, bytes_a, 100, 50_000))
+        .unwrap();
+    pool.insert(entry_from_tx(tx_id_b, &tx_b, bytes_b, 200, 50_000))
+        .unwrap();
+    pool.insert(entry_from_tx(tx_id_c, &tx_c, bytes_c, 300, 50_000))
+        .unwrap();
 
     let found = find_by_weak_id(&pool, &weak_a);
     let ids: HashSet<TxId> = found.iter().map(|e| e.tx_id).collect();
