@@ -35,7 +35,7 @@ use super::super::admission::route_mempool_actions;
 use super::super::NodeState;
 use super::super::{hedge_request_modifiers, register_expectation, tracked_request_modifier};
 use super::ctx::{build_ctx_data, transactions_section_id};
-use super::runtime::InputBlocksRuntime;
+use super::runtime::{ExpectedPhase, InputBlocksRuntime};
 use super::validate::{run_validation, ValidateJob};
 
 /// Peers whose reported height may differ from ours by at most this much
@@ -80,7 +80,18 @@ fn execute_one(
 ) {
     match effect {
         Effect::RequestInputBlock { id, from } => {
-            request_modifier(state, rt, from, ModifierTypeId::InputBlock, id, now, out);
+            request_modifier(
+                state,
+                rt,
+                from,
+                ModifierRequest {
+                    type_id: ModifierTypeId::InputBlock,
+                    id,
+                    phase: Some(ExpectedPhase::Announcement),
+                },
+                now,
+                out,
+            );
         }
         Effect::RequestTransactionIds {
             input_block_id,
@@ -90,8 +101,11 @@ fn execute_one(
                 state,
                 rt,
                 from,
-                ModifierTypeId::InputBlockTransactionIds,
-                input_block_id,
+                ModifierRequest {
+                    type_id: ModifierTypeId::InputBlockTransactionIds,
+                    id: input_block_id,
+                    phase: Some(ExpectedPhase::TransactionIds),
+                },
                 now,
                 out,
             );
@@ -124,6 +138,7 @@ fn execute_one(
                 );
                 return;
             }
+            rt.expect(peer, input_block_id, ExpectedPhase::Bodies);
             let payload =
                 message::serialize_input_block_txs_request(&message::InputBlockTxsRequest {
                     input_block_id,
@@ -136,7 +151,18 @@ fn execute_one(
             });
         }
         Effect::RequestOrderingHeader { header_id, from } => {
-            request_modifier(state, rt, from, ModifierTypeId::Header, header_id, now, out);
+            request_modifier(
+                state,
+                rt,
+                from,
+                ModifierRequest {
+                    type_id: ModifierTypeId::Header,
+                    id: header_id,
+                    phase: None,
+                },
+                now,
+                out,
+            );
         }
         Effect::RequestBlockTransactions { header_id, from } => {
             // The section's modifier id is the header's transactions root,
@@ -152,8 +178,11 @@ fn execute_one(
                 state,
                 rt,
                 from,
-                ModifierTypeId::BlockTransactions,
-                section_id,
+                ModifierRequest {
+                    type_id: ModifierTypeId::BlockTransactions,
+                    id: section_id,
+                    phase: None,
+                },
                 now,
                 out,
             );
@@ -318,15 +347,24 @@ fn execute_one(
 /// processor charged THAT peer one of its `requests_per_peer` slots, and
 /// a hedge peer's reply would be a delivery the processor never asked
 /// for.
-fn request_modifier(
-    state: &mut NodeState,
-    rt: &InputBlocksRuntime,
-    from: PeerTag,
+/// One modifier to ask for: its wire type, its id, and the response
+/// phase to record (`None` for the ordinary block modifiers, which the
+/// delivery tracker alone accounts for).
+struct ModifierRequest {
     type_id: ModifierTypeId,
     id: [u8; 32],
+    phase: Option<ExpectedPhase>,
+}
+
+fn request_modifier(
+    state: &mut NodeState,
+    rt: &mut InputBlocksRuntime,
+    from: PeerTag,
+    req: ModifierRequest,
     now: Instant,
     out: &mut Vec<Action>,
 ) {
+    let ModifierRequest { type_id, id, phase } = req;
     let Some(peer) = resolve(rt, from, "RequestModifier") else {
         return;
     };
@@ -337,6 +375,9 @@ fn request_modifier(
     let actions = tracked_request_modifier(state, peer, type_id.as_byte(), &[id], now);
     if actions.is_empty() {
         return;
+    }
+    if let Some(phase) = phase {
+        rt.expect(peer, id, phase);
     }
     if ModifierTypeId::is_input_block_family(type_id.as_byte()) {
         out.extend(actions);

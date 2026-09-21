@@ -73,6 +73,25 @@ impl PeerTagMap {
     }
 }
 
+/// What we are waiting for a peer to send us about one input block.
+///
+/// A block walks announcement -> weak-id list -> bodies, and every phase
+/// re-registers the SAME id with the delivery tracker (which is keyed by
+/// id alone). Without the phase, a replayed frame from an earlier phase
+/// would acknowledge the CURRENT phase's expectation, and the reply that
+/// actually answers it would then look unsolicited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::node) enum ExpectedPhase {
+    /// `RequestModifier` -123, answered by code 100.
+    Announcement,
+    /// `RequestModifier` -122, answered by code 102.
+    TransactionIds,
+    /// Message 105, answered by code 104.
+    Bodies,
+    /// `RequestModifier` -121, answered by code 106.
+    OrderingAnnouncement,
+}
+
 /// Per-[`DropReason`] counters. Keyed by the variant NAME (see
 /// [`DropReason::name`]) rather than the value, so payload-carrying
 /// variants cannot make the map unbounded.
@@ -115,6 +134,13 @@ pub(in crate::node) struct InputBlocksRuntime {
     /// log a breakdown only when something new was actually dropped
     /// rather than once a second forever.
     last_drop_report: u64,
+    /// The phase each outstanding request is waiting on, and who it was
+    /// addressed to. Keyed by modifier id ALONE, mirroring the delivery
+    /// tracker: `register_expectation` refuses a second request for an
+    /// id already in flight, so at most one phase is outstanding per id
+    /// at a time. Pruned on the tick against the tracker, and on peer
+    /// disconnect.
+    expectations: HashMap<[u8; 32], (PeerId, ExpectedPhase)>,
 }
 
 impl InputBlocksRuntime {
@@ -138,6 +164,7 @@ impl InputBlocksRuntime {
             started: now,
             counters: DropCounters::default(),
             last_drop_report: 0,
+            expectations: HashMap::new(),
         }
     }
 
@@ -158,6 +185,45 @@ impl InputBlocksRuntime {
 
     pub(in crate::node) fn forget_peer(&mut self, peer: &PeerId) {
         self.peer_tags.forget(peer);
+        self.expectations.retain(|_, (p, _)| p != peer);
+    }
+
+    /// Record that `peer` was asked for `phase` of `id`.
+    pub(in crate::node) fn expect(&mut self, peer: PeerId, id: [u8; 32], phase: ExpectedPhase) {
+        self.expectations.insert(id, (peer, phase));
+    }
+
+    /// Consume the expectation `peer`'s `phase` frame for `id` answers,
+    /// reporting whether there was one. A frame from a phase we are not
+    /// waiting on — a replayed announcement while bodies are
+    /// outstanding — answers nothing and leaves the record intact.
+    pub(in crate::node) fn take_expectation(
+        &mut self,
+        peer: &PeerId,
+        id: &[u8; 32],
+        phase: ExpectedPhase,
+    ) -> bool {
+        if self.expectations.get(id) == Some(&(*peer, phase)) {
+            self.expectations.remove(id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The ids we currently hold a phase record for.
+    pub(in crate::node) fn expected_ids(&self) -> impl Iterator<Item = [u8; 32]> + '_ {
+        self.expectations.keys().copied()
+    }
+
+    /// Drop expectation records for ids `still_outstanding` says the
+    /// delivery tracker no longer holds, so the map stays bounded by
+    /// genuinely in-flight requests.
+    pub(in crate::node) fn prune_expectations(
+        &mut self,
+        still_outstanding: impl Fn(&[u8; 32]) -> bool,
+    ) {
+        self.expectations.retain(|id, _| still_outstanding(id));
     }
 
     /// The per-reason drop breakdown, but only when it has grown since

@@ -28,6 +28,7 @@ use tracing::{debug, warn};
 use super::super::NodeState;
 use super::ctx::build_ctx_data;
 use super::effects::execute_effects;
+use super::runtime::ExpectedPhase;
 use super::serve;
 
 /// What dispatch produced: actions to flush, plus whether the frame
@@ -88,7 +89,7 @@ pub(in crate::node) fn handle(
                 };
                 let block_id = *id.as_bytes();
                 let parent = *ann.header.parent_id.as_bytes();
-                answered(state, &peer, &block_id);
+                answered(state, &peer, &block_id, ExpectedPhase::Announcement);
                 let actions = feed(state, peer, now, &[parent], |from, tick| {
                     Event::AnnouncementAccepted {
                         ann,
@@ -111,7 +112,12 @@ pub(in crate::node) fn handle(
         message::CODE_INPUT_BLOCK_TX_IDS => {
             match message::deserialize_input_block_tx_ids(payload) {
                 Ok(d) => {
-                    let progress = answered(state, &peer, &d.input_block_id);
+                    let progress = answered(
+                        state,
+                        &peer,
+                        &d.input_block_id,
+                        ExpectedPhase::TransactionIds,
+                    );
                     let actions = feed(state, peer, now, &[], |from, tick| {
                         Event::TransactionIdsDelivered {
                             input_block_id: d.input_block_id,
@@ -130,7 +136,7 @@ pub(in crate::node) fn handle(
         }
         message::CODE_INPUT_BLOCK_TXS => match message::deserialize_input_block_txs(payload) {
             Ok(d) => {
-                let progress = answered(state, &peer, &d.input_block_id);
+                let progress = answered(state, &peer, &d.input_block_id, ExpectedPhase::Bodies);
                 let bodies: Vec<Body> = d.transactions.into_iter().filter_map(body_of).collect();
                 let actions = feed(state, peer, now, &[], |from, tick| {
                     Event::TransactionsDelivered {
@@ -170,7 +176,12 @@ pub(in crate::node) fn handle(
                     // the request does not stay outstanding forever and
                     // `register_expectation`'s duplicate suppression
                     // does not refuse to ask anyone else for it.
-                    answered(state, &peer, &ts_header_id(&ann.header));
+                    answered(
+                        state,
+                        &peer,
+                        &ts_header_id(&ann.header),
+                        ExpectedPhase::OrderingAnnouncement,
+                    );
                     let actions = feed(state, peer, now, &[parent], |from, tick| {
                         Event::OrderingAnnouncementAccepted {
                             ann,
@@ -234,13 +245,21 @@ pub(in crate::node) fn handle_ordering_inv(
     if wanted.is_empty() {
         return Vec::new();
     }
-    super::super::tracked_request_modifier(
+    let actions = super::super::tracked_request_modifier(
         state,
         peer,
         ModifierTypeId::OrderingBlockAnnouncement.as_byte(),
         &wanted,
         now,
-    )
+    );
+    if !actions.is_empty() {
+        if let Some(rt) = state.input_blocks.as_mut() {
+            for id in &wanted {
+                rt.expect(peer, *id, ExpectedPhase::OrderingAnnouncement);
+            }
+        }
+    }
+    actions
 }
 
 fn peer_speaks_input_blocks(state: &NodeState, peer: &PeerId) -> bool {
@@ -251,23 +270,31 @@ fn peer_speaks_input_blocks(state: &NodeState, peer: &PeerId) -> bool {
         .is_some_and(|spec| spec.version >= Version::SUBBLOCKS)
 }
 
-/// Release the delivery-tracker expectation this frame answers, and
-/// report whether it answered one at all (spec 9.1's progress rule for
-/// 102 / 104).
-fn answered(state: &mut NodeState, peer: &PeerId, input_block_id: &[u8; 32]) -> bool {
+/// Release the expectation this frame answers, and report whether it
+/// answered one at all (spec 9.1's progress rule for 102 / 104 / 106).
+///
+/// PHASE-AWARE: a block walks announcement -> weak-id list -> bodies,
+/// and every phase re-registers the SAME id, so the delivery tracker
+/// (keyed by id alone) cannot tell them apart. Matching the phase is
+/// what stops a replayed announcement from clearing an outstanding body
+/// expectation and leaving the real code-104 reply looking unsolicited.
+fn answered(state: &mut NodeState, peer: &PeerId, id: &[u8; 32], phase: ExpectedPhase) -> bool {
     use ergo_p2p::delivery::DeliveryAction;
-    let accept = state
-        .coordinator
-        .delivery()
-        .on_received(input_block_id, peer)
-        == DeliveryAction::Accept;
-    if accept {
-        state
-            .coordinator
-            .delivery_mut()
-            .mark_received(input_block_id);
+    let Some(rt) = state.input_blocks.as_mut() else {
+        return false;
+    };
+    if !rt.take_expectation(peer, id, phase) {
+        return false;
     }
-    accept
+    // The phase matched, so this frame IS the answer we were waiting
+    // for; the tracker still has the final say on whether the id is
+    // genuinely in flight from this peer.
+    if state.coordinator.delivery().on_received(id, peer) == DeliveryAction::Accept {
+        state.coordinator.delivery_mut().mark_received(id);
+        true
+    } else {
+        false
+    }
 }
 
 /// Build the event, hand it to the processor, execute the effects.

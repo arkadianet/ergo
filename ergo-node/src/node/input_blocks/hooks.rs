@@ -26,6 +26,29 @@ use super::runtime::InputBlocksRuntime;
 /// heartbeat, which is the node's existing "time passed" edge.
 pub(in crate::node) fn on_tick(state: &mut NodeState, now: Instant) -> Vec<Action> {
     let actions = drive(state, now, |tick| Event::Tick { now: tick });
+    // Keep the phase map bounded by genuinely in-flight requests: the
+    // tracker's own timeout sweep releases ids we never got an answer
+    // for, and the record for those must go with them.
+    if state.input_blocks.is_some() {
+        // `ModifierStatus::Requested` is exactly "the tracker still
+        // holds this in flight"; anything else (received, failed,
+        // swept) means the record is stale.
+        let stale: Vec<[u8; 32]> = state
+            .input_blocks
+            .as_ref()
+            .map(|rt| {
+                rt.expected_ids()
+                    .filter(|id| {
+                        state.coordinator.delivery().status(id)
+                            != ergo_p2p::delivery::ModifierStatus::Requested
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(rt) = state.input_blocks.as_mut() {
+            rt.prune_expectations(|id| !stale.contains(id));
+        }
+    }
     // Operator surface for the bounds: every overflow the processor
     // reports is a `Dropped` effect, and a bound that is being hit
     // continuously is the signal that a cap is mis-sized or a peer is

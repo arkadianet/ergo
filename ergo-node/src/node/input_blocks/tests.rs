@@ -2146,3 +2146,142 @@ fn solicited_input_block_replies_are_exempt_from_the_byte_cap() {
         "an inbound 105 is never exempt"
     );
 }
+
+/// Round 2, finding 4: acknowledgement must match the PHASE that was
+/// requested, not just the block id and peer.
+///
+/// A block walks announcement → weak-id list → bodies, and every phase
+/// re-registers the SAME id. Acknowledging on id alone lets a replayed
+/// code 100 clear an outstanding body expectation: the real code-104
+/// reply then looks unsolicited, loses its byte-cap exemption and its
+/// progress credit, and the peer serving us is charged for a request it
+/// did answer.
+#[test]
+fn replayed_announcement_does_not_clear_an_outstanding_body_expectation() {
+    use ergo_p2p::delivery::{DeliveryAction, ModifierStatus};
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19670,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    // Announce a block whose bodies we do not have: the node asks for
+    // them with message 105, leaving a BODY expectation outstanding.
+    let bodies = [ts::body(0x51, 1)];
+    let ann = ts::announcement_for([0u8; 32], 1, 41, None, &bodies);
+    let ann_id = ts::ann_id(&ann);
+    let ann_payload = ergo_p2p::message::serialize_input_block(&ann).unwrap();
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &ann_payload,
+    );
+    assert_eq!(
+        sent_frames(&actions, ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST).len(),
+        1,
+        "fixture leaves a body request outstanding"
+    );
+    assert_eq!(
+        state.coordinator.delivery().status(&ann_id),
+        ModifierStatus::Requested
+    );
+
+    // The peer replays the announcement. That answers nothing we are
+    // waiting for — we are waiting for BODIES.
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &ann_payload,
+    );
+    assert_eq!(
+        state.coordinator.delivery().status(&ann_id),
+        ModifierStatus::Requested,
+        "a replayed announcement must not clear the body expectation"
+    );
+
+    // So the real body delivery still counts as solicited.
+    assert_eq!(
+        state.coordinator.delivery().on_received(&ann_id, &peer),
+        DeliveryAction::Accept,
+        "the code-104 reply keeps its solicited status"
+    );
+    let before = state.peer_manager.get(&peer).unwrap().last_progress;
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS,
+        &ergo_p2p::message::serialize_input_block_txs(&ergo_p2p::message::InputBlockTxs {
+            input_block_id: ann_id,
+            transactions: bodies.iter().map(|b| b.tx.clone()).collect(),
+        })
+        .unwrap(),
+    );
+    assert!(
+        state.peer_manager.get(&peer).unwrap().last_progress > before,
+        "the solicited 104 is progress"
+    );
+    assert_eq!(
+        state.coordinator.delivery().status(&ann_id),
+        ModifierStatus::Received,
+        "and it is the frame that clears the expectation"
+    );
+}
+
+/// The phase map must not outlive the requests it describes: the
+/// delivery tracker's own timeout sweep releases ids we never got an
+/// answer for, and the tick prunes the records that went with them.
+#[test]
+fn expectation_records_are_pruned_when_their_request_leaves_the_tracker() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let start = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19671,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        start,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let block = [0x61u8; 32];
+    let _ = execute_effects(
+        &mut state,
+        vec![Effect::RequestInputBlock {
+            id: block,
+            from: tag,
+        }],
+        start,
+    );
+    assert_eq!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .expected_ids()
+            .collect::<Vec<_>>(),
+        vec![block],
+        "the request records its phase"
+    );
+
+    // Past the tracker's delivery timeout: the sweep releases the id,
+    // and the tick must drop the record with it.
+    let later = start + ergo_p2p::delivery::DELIVERY_TIMEOUT + std::time::Duration::from_secs(1);
+    let _ = state.coordinator.check_timeouts(later, &[]);
+    let _ = on_tick(&mut state, later);
+    assert!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .expected_ids()
+            .next()
+            .is_none(),
+        "a request the tracker no longer holds leaves no record behind"
+    );
+}
