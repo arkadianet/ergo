@@ -393,21 +393,123 @@ fn stored_header_round_trips_through_expected_n_bits_lookup() {
 
 // ----- regressions (fix round 1) -----
 
-/// Finding 1: a block section's modifier id is
-/// `blake2b256(type || header_id || root)`, NOT the root itself. Using
-/// the bare root made `RequestBlockTransactions` name a modifier nobody
-/// has, and made every stored section look absent.
-#[test]
-fn block_transactions_section_id_is_hashed_not_the_bare_root() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut state = make_state(&dir.path().join("state.redb"));
-    let headers = seed_header_chain(&mut state, 1);
-    let header = &headers[0];
-    let header_id = header_id_of(header);
+/// A real mainnet block from the committed fixtures: its header bytes
+/// (`headers_1_10.json`) and its transactions (`blocks_1_5.json`),
+/// serialized into the canonical `BlockTransactions` section. Returns
+/// `(header, header_id, section_bytes)`.
+///
+/// Anchored to mainnet independently of any id arithmetic: the header is
+/// verified to be a real header (`id == blake2b256(bytes)`) and the
+/// transactions are verified to reproduce that header's own
+/// `transactions_root`, so the pair really is block `height`'s body.
+fn real_block_with_transactions(height: u32) -> (Header, [u8; 32], Vec<u8>) {
+    #[derive(serde::Deserialize)]
+    struct BlockVector {
+        #[serde(rename = "headerId")]
+        header_id: String,
+        height: u32,
+        transactions: Vec<TxVector>,
+    }
+    #[derive(serde::Deserialize)]
+    struct TxVector {
+        bytes: String,
+    }
 
-    // The id the block pipeline itself computes for this header's
-    // transactions section.
-    let expected = ergo_ser::modifier_id::ExpectedSections::from_header(
+    let (_, header_id, _, header) =
+        load_mainnet_headers("../test-vectors/mainnet/headers_1_10.json")
+            .into_iter()
+            .find(|(h, ..)| *h == height)
+            .expect("header fixture covers this height");
+
+    let raw = std::fs::read_to_string("../test-vectors/mainnet/blocks_1_5.json").unwrap();
+    let blocks: Vec<BlockVector> = serde_json::from_str(&raw).unwrap();
+    let block = blocks
+        .into_iter()
+        .find(|b| b.height == height)
+        .expect("block fixture covers this height");
+    assert_eq!(
+        block.header_id,
+        hex::encode(header_id),
+        "the block fixture and the header fixture must name the same block"
+    );
+
+    let txs: Vec<ergo_ser::transaction::Transaction> = block
+        .transactions
+        .iter()
+        .map(|t| {
+            let bytes = hex::decode(&t.bytes).unwrap();
+            let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
+            ergo_ser::transaction::read_transaction(&mut r).unwrap()
+        })
+        .collect();
+
+    // Mainnet anchor: these transactions must reproduce the real
+    // header's transactionsRoot, or the fixture is not this block's body.
+    let tx_ids: Vec<[u8; 32]> = txs
+        .iter()
+        .map(|t| *ergo_ser::transaction::transaction_id(t).unwrap().as_bytes())
+        .collect();
+    let id_refs: Vec<&[u8]> = tx_ids.iter().map(|i| &i[..]).collect();
+    assert_eq!(
+        ergo_crypto::merkle::transactions_root(&id_refs, None),
+        *header.transactions_root.as_bytes(),
+        "fixture transactions do not reproduce the real header's transactionsRoot"
+    );
+
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    ergo_ser::block_transactions::write_block_transactions(
+        &mut w,
+        &ergo_ser::block_transactions::BlockTransactions {
+            header_id: ergo_primitives::digest::ModifierId::from_bytes(header_id),
+            transactions: txs,
+        },
+    )
+    .unwrap();
+    (header, header_id, w.result())
+}
+
+/// Finding 1 (round 1 + round 2): a block section's modifier id is
+/// `blake2b256(type ‖ header_id ‖ root)`, NOT the header's bare
+/// `transactions_root`. Using the root made `RequestBlockTransactions`
+/// name a modifier nobody has, and made every stored section look
+/// absent.
+///
+/// Driven through the real effect executor against a real mainnet block
+/// applied into the store: the id the `SendToPeer` payload actually
+/// carries must be the id the store holds that block's
+/// `BlockTransactions` section under.
+#[test]
+fn request_block_transactions_names_the_stored_section_id_of_a_real_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19650,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let (header, header_id, section_bytes) = real_block_with_transactions(1);
+    seed_mainnet_headers(
+        &mut state,
+        &[(
+            header.height,
+            header_id,
+            {
+                let (bytes, _) = serialize_header(&header).unwrap();
+                bytes
+            },
+            header.clone(),
+        )],
+        true,
+    );
+
+    // Persist the section the way the block pipeline does: under the id
+    // `ExpectedSections` derives for this header. That id — not the test
+    // — is the authority the assertions below compare against.
+    let stored_section_id = ergo_ser::modifier_id::ExpectedSections::from_header(
         &header_id,
         header.transactions_root.as_bytes(),
         header.extension_root.as_bytes(),
@@ -415,27 +517,52 @@ fn block_transactions_section_id_is_hashed_not_the_bare_root() {
     )
     .transactions_id;
     assert_ne!(
-        expected,
+        stored_section_id,
         *header.transactions_root.as_bytes(),
-        "fixture would not discriminate if the two coincided"
+        "the fixture would not discriminate if the two coincided"
     );
 
-    assert_eq!(
-        transactions_section_id(&state, &header_id),
-        Some(expected),
-        "the requested modifier id must be the section id"
-    );
-
-    // And the "do we already have it?" probe must find a section stored
-    // under that same id.
+    // Before the section exists the probe must say so, and the request
+    // must still name the right id.
     assert!(
         !block_transactions_known(&state, &header_id),
         "nothing stored yet"
     );
+    let actions = execute_effects(
+        &mut state,
+        vec![Effect::RequestBlockTransactions {
+            header_id,
+            from: tag,
+        }],
+        now,
+    );
+    let reqs = sent_frames(&actions, ergo_p2p::message::CODE_REQUEST_MODIFIER);
+    assert_eq!(reqs.len(), 1, "the section request goes out");
+    let inv = ergo_p2p::message::deserialize_inv(&reqs[0]).unwrap();
+    assert_eq!(
+        inv.type_id,
+        ergo_p2p::types::ModifierTypeId::BlockTransactions.as_byte()
+    );
+    assert_eq!(
+        inv.ids,
+        vec![stored_section_id],
+        "the requested modifier id must be the section id, not the bare root"
+    );
+
     state
         .store
-        .store_block_section_typed(&expected, &[0xab, 0xcd], 102)
+        .store_block_section_typed(&stored_section_id, &section_bytes, 102)
         .unwrap();
+    assert_eq!(
+        state
+            .store
+            .get_block_section(&inv.ids[0])
+            .unwrap()
+            .as_deref(),
+        Some(&section_bytes[..]),
+        "the id the request named is exactly the id the store holds the \
+         real block's BlockTransactions section under"
+    );
     assert!(
         block_transactions_known(&state, &header_id),
         "a stored section must not look absent"
