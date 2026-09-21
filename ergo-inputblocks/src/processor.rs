@@ -299,6 +299,12 @@ pub enum DropReason {
     TxDigestMismatch,
     /// Validation failed and the block had no alternative variants.
     ValidationFailed,
+    /// The announcement's extension proof reduces to the header's root
+    /// (so it is valid to the Scala reference) but its leaves do not
+    /// match the announced fields, and `strict_field_binding` is on.
+    /// A policy drop, never a peer penalty — see
+    /// [`AnnouncementError::is_policy_only`](crate::announcement::AnnouncementError::is_policy_only).
+    FieldsUnbound,
     /// The node could not run the validation job at all — no applied full
     /// block to build a context from, or no UTXO set. Node-local and
     /// transient, NOT a verdict on the block: the combination is left
@@ -350,6 +356,7 @@ impl DropReason {
             Self::DigestMismatch => "DigestMismatch",
             Self::TxDigestMismatch => "TxDigestMismatch",
             Self::ValidationFailed => "ValidationFailed",
+            Self::FieldsUnbound => "FieldsUnbound",
             Self::ValidationUnavailable => "ValidationUnavailable",
             Self::MultiplierUnavailable => "MultiplierUnavailable",
             Self::OrderingAnnouncementsFull => "OrderingAnnouncementsFull",
@@ -378,6 +385,7 @@ impl DropReason {
         "DigestMismatch",
         "TxDigestMismatch",
         "ValidationFailed",
+        "FieldsUnbound",
         "ValidationUnavailable",
         "MultiplierUnavailable",
         "OrderingAnnouncementsFull",
@@ -1207,6 +1215,21 @@ impl Processor {
                 out.push(Effect::Dropped {
                     id,
                     reason: DropReason::MultiplierUnavailable,
+                });
+                return;
+            }
+            Err(e) if e.is_policy_only() => {
+                // Valid by the Scala reference's own check; rejected only
+                // because this node runs `strict_field_binding`. Dropping
+                // it is the operator's choice; banning the peer for it is
+                // not — the pinned Scala miner produces these itself.
+                tracing::debug!(
+                    error = %e,
+                    "input-block announcement rejected by strict field binding"
+                );
+                out.push(Effect::Dropped {
+                    id,
+                    reason: DropReason::FieldsUnbound,
                 });
                 return;
             }
@@ -3949,6 +3972,37 @@ mod tests {
         let eff = announce(&mut p, &ctx, &ann, ts::PEER);
         assert_eq!(drops(&eff), vec![DropReason::MultiplierUnavailable]);
         assert!(!eff.iter().any(|e| matches!(e, Effect::Penalize { .. })));
+    }
+
+    /// A binding failure is a policy verdict, not a peer fault: the
+    /// pinned Scala miner publishes announcements whose extension carries
+    /// the NEW transactions digest in the `prevTransactionsDigest` slot
+    /// while the announcement carries the PREVIOUS one (finding
+    /// 2026-09-22-2). The announcement is dropped; the peer is not
+    /// penalised, or a strict node would ban every honest miner the
+    /// moment an input block carried a transaction.
+    #[test]
+    fn strict_binding_failure_drops_without_penalty() {
+        let mut p = Processor::new(
+            Bounds::default(),
+            AnnouncementPolicy {
+                strict_field_binding: true,
+            },
+        );
+        p.set_best_ordering(Some(ORD), FULL);
+        let ctx = ts::TestCtx::at(FULL);
+        let mut ann = ts::announcement(ORD, FULL + 1, 1, None);
+        // Keep the proof reducing to the header's root (the Scala-parity
+        // check still passes) but make one announced field disagree with
+        // the leaf the proof commits to.
+        ann.fields.prev_transactions_digest = [0x5a; 32];
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        assert_eq!(drops(&eff), vec![DropReason::FieldsUnbound]);
+        assert!(
+            !eff.iter().any(|e| matches!(e, Effect::Penalize { .. })),
+            "a strict-policy drop must not penalise the peer: {eff:?}"
+        );
+        assert!(p.announcement(&ts::ann_id(&ann)).is_none());
     }
 
     #[test]

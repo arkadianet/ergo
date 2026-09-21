@@ -1,0 +1,34 @@
+{
+  "id": "2026-09-22-2",
+  "title": "weak-blocks miner announces a prevTransactionsDigest its own extension does not commit to",
+  "severity": "divergence",
+  "component": "scala (upstream) \u2014 ergoplatform/ergo weak-blocks @ 31a8de804f7328704f2753a1cf151dda8f64689f",
+  "status": "open",
+  "source": "scripts/devnet-matrix smoke, funded run 2026-09-22",
+  "summary": "CandidateGenerator builds the input-block extension fields with the NEW transactions digest in BOTH the transactionsDigest and the prevTransactionsDigest slot, then constructs the announced InputBlockFields with the PREVIOUS input blocks' digest in the second slot. The batch-Merkle proof therefore commits to a leaf the announcement does not carry. While an input block holds no transactions the two digests coincide (both are the Merkle root of an empty sequence) and nothing shows; the moment a transaction lands in an input block they diverge.",
+  "scala_code": {
+    "file": "src/main/scala/org/ergoplatform/mining/CandidateGenerator.scala",
+    "extension_built_with": "val inputBlockExtCandidate = InputBlockFields.toExtensionFields(parentInputBlockIdOpt, inputBlockTransactionsDigestValue, inputBlockTransactionsDigestValue)",
+    "announcement_built_with": "new InputBlockFields(parentInputBlockIdOpt, inputBlockTransactionsDigestValue, previousInputBlocksTransactionsDigest, inputBlockFieldsProof)",
+    "note": "the third argument of toExtensionFields is prevTransactionsDigest; it is passed inputBlockTransactionsDigestValue, while the InputBlockFields two lines below is given previousInputBlocksTransactionsDigest"
+  },
+  "observed_on_the_rust_node": {
+    "check": "ergo-inputblocks::announcement::verify_field_binding (spec 6.3 item 2, strict_field_binding)",
+    "verdict": "FieldsUnbound \u2014 the proof reduces to the header's extension root (Scala-parity check passes) but its leaves are not the announced fields",
+    "log_excerpts": [
+      "2026-09-21T16:04:58.239028Z DEBUG ergo_inputblocks::processor: invalid input-block announcement error=proof leaves do not bind the announced fields: 3 proved leaves vs 3 announced fields",
+      "2026-09-21T16:04:58.239046Z  WARN ergo_node::node::input_blocks::effects: input_blocks: penalizing peer for an invalid announcement peer=127.0.0.1:19560 reason=\"invalid input-block announcement\"",
+      "2026-09-21T16:04:58.823542Z DEBUG ergo_inputblocks::processor: invalid input-block announcement error=proof leaves do not bind the announced fields: 3 proved leaves vs 3 announced fields",
+      "2026-09-21T16:04:58.823558Z  WARN ergo_node::node::input_blocks::effects: input_blocks: penalizing peer for an invalid announcement peer=127.0.0.1:19560 reason=\"invalid input-block announcement\"",
+      "2026-09-21T16:06:01.649432Z DEBUG ergo_inputblocks::processor: invalid input-block announcement error=proof leaves do not bind the announced fields: 3 proved leaves vs 3 announced fields",
+      "2026-09-21T16:06:01.649447Z  WARN ergo_node::node::input_blocks::effects: input_blocks: penalizing peer for an invalid announcement peer=127.0.0.1:19560 reason=\"invalid input-block announcement\""
+    ],
+    "consequence_before_this_round": "the announcement was treated as a peer fault and the Scala miner was penalised three times in one run; every input block carrying a transaction was rejected, so no ordering block with transactions was ever reconstructed"
+  },
+  "port_response": {
+    "code": "AnnouncementError::is_policy_only \u2014 a strict-binding verdict now drops the announcement under DropReason::FieldsUnbound WITHOUT penalising the peer. Penalising would ban every honest Scala miner. The FieldsUnbound message now names the announced fields and both leaf sets so this artifact can be written straight from the log.",
+    "recipe": "scripts/devnet-matrix/rust-node.toml sets [input_blocks] strict_field_binding = false, so the smoke measures the port against the reference's own validity rule. The port default stays strict."
+  },
+  "relation_to_spec": "extends \u00a712 F4/F4c: F4c already records that prevTransactionsDigest is never verified by a receiver. This is the other half \u2014 the miner does not even produce a self-consistent value for it, so a receiver that DID verify it would reject the reference implementation.",
+  "upstream_action": "pass previousInputBlocksTransactionsDigest to toExtensionFields, or announce inputBlockTransactionsDigestValue in the second slot \u2014 the two must be the same value."
+}
