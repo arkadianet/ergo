@@ -318,21 +318,14 @@ impl InputBlocksTree {
             let (updated_new_fork, r_applied) = application_step(new_fork, &next_id, apply);
 
             if !r_applied.is_empty() {
-                let mut forks = self.forks.clone();
-                forks[li] = updated_new_fork;
-                // Scala lines 513–524: sibling-completion sweep.
-                for fork in forks.iter_mut() {
-                    if fork.first_to_complete() == Some(next_id) {
-                        if let Ok(ibc) = fork.register_completion(&next_id, 0) {
-                            *fork = ibc;
-                        }
-                    }
-                }
-                ProcessOutcome {
-                    applied: r_applied,
-                    rolled_back: rollback_input_blocks,
-                    tree: InputBlocksTree { forks },
-                }
+                finalize_progress(
+                    &self.forks,
+                    li,
+                    updated_new_fork,
+                    next_id,
+                    r_applied,
+                    rollback_input_blocks,
+                )
             } else {
                 empty
             }
@@ -341,26 +334,57 @@ impl InputBlocksTree {
             let (updated_fork, r_applied) = application_step(f, id, apply);
 
             if !r_applied.is_empty() {
-                let mut forks = self.forks.clone();
-                forks[best_index] = updated_fork;
-                for fork in forks.iter_mut() {
-                    if fork.first_to_complete() == Some(*id) {
-                        if let Ok(ibc) = fork.register_completion(id, 0) {
-                            *fork = ibc;
-                        }
-                    }
-                }
-                ProcessOutcome {
-                    applied: r_applied,
-                    rolled_back: Vec::new(),
-                    tree: InputBlocksTree { forks },
-                }
+                finalize_progress(
+                    &self.forks,
+                    best_index,
+                    updated_fork,
+                    *id,
+                    r_applied,
+                    Vec::new(),
+                )
             } else {
                 empty
             }
         } else {
             empty
         }
+    }
+}
+
+/// Scala lines 513–524 (fork-switch branch) and 545–556 (linear branch):
+/// both branches, after a non-empty `applicationStep`, (1) install the
+/// updated fork at `index`, then (2) sweep every fork — including the one
+/// just updated, which is now a no-op there since it already consumed
+/// `completed_id` — and register a zero-cost completion (the acknowledged
+/// `// todo: pass real cost of input block instead of costDelta = 0`) on
+/// any other fork whose `first_to_complete()` is also `completed_id`.
+/// Extracted once since the two call sites were identical apart from
+/// which index/id/rollback list they pass in.
+fn finalize_progress(
+    forks_before: &[InputBlocksChain],
+    index: usize,
+    updated_fork: InputBlocksChain,
+    completed_id: InputBlockId,
+    applied: Vec<InputBlockId>,
+    rolled_back: Vec<InputBlockId>,
+) -> ProcessOutcome {
+    let mut forks = forks_before.to_vec();
+    forks[index] = updated_fork;
+    for fork in forks.iter_mut() {
+        if fork.first_to_complete() == Some(completed_id) {
+            // Safe: `register_completion` only fails when `first_to_complete()
+            // != completed_id`, which the guard above just excluded — Scala's
+            // `Failure` branch here (line 522/554) is unreachable by
+            // construction, not swallowed.
+            *fork = fork
+                .register_completion(&completed_id, 0)
+                .expect("register_completion invariant: guarded by first_to_complete() == Some(completed_id) above");
+        }
+    }
+    ProcessOutcome {
+        applied,
+        rolled_back,
+        tree: InputBlocksTree { forks },
     }
 }
 
@@ -488,6 +512,15 @@ mod tests {
 
     #[test]
     fn process_no_switch_when_longer_fork_lacks_txs() {
+        // Regression for codex review finding (Task 10 fix round 1):
+        // processing id(4) here has depth 1 in the longer fork, which
+        // equals best_depth (1) — `switch_needed`'s `d <= best_depth`
+        // short-circuit already rejects the switch before ever reaching
+        // the tx-availability scan, so that guard wasn't exercised.
+        // Process id(5) instead (depth 2, strictly greater than
+        // best_depth) while id(4) — a block strictly between the
+        // processed prefix and id(5) — has no transactions, so only the
+        // availability guard can reject the switch.
         let tree = InputBlocksTree {
             forks: vec![
                 InputBlocksChain {
@@ -502,10 +535,19 @@ mod tests {
         };
         let with_txs: HashSet<InputBlockId> = [id(3), id(5)].into_iter().collect(); // id(4) missing
         let has_txs = |x: &InputBlockId| with_txs.contains(x);
-        let mut apply = |_id: &InputBlockId, _prev: &[InputBlockId]| Ok::<u64, ()>(1);
-        let out = tree.process(&id(4), &has_txs, &mut apply);
+        let apply_calls = std::cell::RefCell::new(Vec::new());
+        let mut apply = |id: &InputBlockId, _prev: &[InputBlockId]| {
+            apply_calls.borrow_mut().push(*id);
+            Ok::<u64, ()>(1)
+        };
+        let out = tree.process(&id(5), &has_txs, &mut apply);
         assert!(out.applied.is_empty());
         assert!(out.rolled_back.is_empty());
+        assert!(
+            apply_calls.borrow().is_empty(),
+            "apply must not be called when the availability guard rejects the switch"
+        );
+        assert_eq!(out.tree, tree);
     }
 
     #[test]
