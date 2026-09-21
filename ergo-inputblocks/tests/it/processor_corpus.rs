@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 
 use ergo_inputblocks::announcement::AnnouncementPolicy;
 use ergo_inputblocks::bounds::Bounds;
-use ergo_inputblocks::processor::{Body, Effect, Event, Processor};
+use ergo_inputblocks::processor::{Body, Effect, Event, Processor, ValidationOutcome};
 use ergo_inputblocks::test_support as ts;
 use ergo_inputblocks::types::{InputBlockId, OrderingId, Tick, TxRef};
 use ergo_ser::input_block::InputBlockAnnouncement;
@@ -193,16 +193,16 @@ impl Harness {
 
     /// Scala `UtxoState.applyInputBlock` in miniature (spec 2.5): fail on
     /// any box spent twice across `previous ++ txs`.
-    fn simulate(&self, txs: &[TxRef], previous: &[TxRef]) -> Result<u64, String> {
+    fn simulate(&self, txs: &[TxRef], previous: &[TxRef]) -> ValidationOutcome {
         let mut seen: HashSet<[u8; 32]> = HashSet::new();
         for r in previous.iter().chain(txs.iter()) {
             if let Some(box_id) = self.spends.get(r) {
                 if !seen.insert(*box_id) {
-                    return Err("double spend".to_string());
+                    return ValidationOutcome::Invalid("double spend".to_string());
                 }
             }
         }
-        Ok(txs.len() as u64 + 1)
+        ValidationOutcome::Valid(txs.len() as u64 + 1)
     }
 
     /// Scala `updateStateWithOrderingBlock(h)` for a committed block.

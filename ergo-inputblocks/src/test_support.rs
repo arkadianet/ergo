@@ -397,7 +397,7 @@ pub fn validate_ok(p: &mut Processor, ctx: &TestCtx, effects: &[Effect], cost: u
         Event::ValidationResult {
             job,
             generation,
-            outcome: Ok(cost),
+            outcome: crate::processor::ValidationOutcome::Valid(cost),
         },
     )
 }
@@ -410,7 +410,21 @@ pub fn validate_err(p: &mut Processor, ctx: &TestCtx, effects: &[Effect]) -> Vec
         Event::ValidationResult {
             job,
             generation,
-            outcome: Err("simulated".to_string()),
+            outcome: crate::processor::ValidationOutcome::Invalid("simulated".to_string()),
+        },
+    )
+}
+
+/// Answer the single `Validate` in `effects` with a node-local
+/// "cannot run this job" outcome (no applied tip, no UTXO set).
+pub fn validate_unavailable(p: &mut Processor, ctx: &TestCtx, effects: &[Effect]) -> Vec<Effect> {
+    let (job, generation, _, _, _) = one_validate(effects);
+    ctx.handle(
+        p,
+        Event::ValidationResult {
+            job,
+            generation,
+            outcome: crate::processor::ValidationOutcome::Unavailable("TipUnready".to_string()),
         },
     )
 }

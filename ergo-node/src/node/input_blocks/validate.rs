@@ -13,7 +13,7 @@
 //! pre-header fields come from `B`, and `last_headers` is Scala's
 //! `lastHeaders.drop(1)` — the 9 headers BEFORE `B`.
 
-use ergo_inputblocks::processor::JobId;
+use ergo_inputblocks::processor::{JobId, ValidationOutcome};
 use ergo_inputblocks::types::{InputBlockId, TxRef};
 use ergo_ser::header::Header;
 use ergo_ser::transaction::Transaction;
@@ -79,26 +79,35 @@ pub(in crate::node) fn build_input_block_context(state: &NodeState) -> Option<In
     })
 }
 
-/// Run one validation job. Returns the block's summed cost, or a reason
-/// string the processor feeds back as `Event::ValidationResult`.
+/// Run one validation job and report what the node concluded, for the
+/// processor to feed back as `Event::ValidationResult`.
 ///
-/// Every failure is a STRING, not an error type: the processor treats the
-/// outcome as opaque telemetry and only distinguishes `Ok` from `Err`.
+/// Reasons are STRINGS, not error types: the processor treats them as
+/// opaque telemetry. What it does NOT treat as opaque is the arm — an
+/// [`ValidationOutcome::Invalid`] verdict retires the combination and
+/// charges the block's retry budget, an [`ValidationOutcome::Unavailable`]
+/// node-local condition does neither. Anything this node cannot answer —
+/// no UTXO set, no applied full block, a body that left the cache — is
+/// `Unavailable`, so a later event can re-offer the same combination.
 pub(in crate::node) fn run_validation(
     state: &NodeState,
     rt: &InputBlocksRuntime,
     job: &ValidateJob,
-) -> Result<u64, String> {
+) -> ValidationOutcome {
     // Input blocks need a UTXO set (Scala `processInputBlock` refuses in
     // digest mode). The config gate already forbids it, but the runtime
     // must not assume a gate it does not own.
-    let utxo = state
-        .store
-        .as_utxo()
-        .ok_or_else(|| "DigestMode: no UTXO set to validate against".to_string())?;
+    let Some(utxo) = state.store.as_utxo() else {
+        return ValidationOutcome::Unavailable(
+            "DigestMode: no UTXO set to validate against".to_string(),
+        );
+    };
 
-    let previous: Vec<Transaction> = collect(rt, &job.previous, "previous")?;
-    let own: Vec<(Transaction, std::sync::Arc<[u8]>)> = job
+    let previous: Vec<Transaction> = match collect(rt, &job.previous, "previous") {
+        Ok(v) => v,
+        Err(reason) => return ValidationOutcome::Unavailable(reason),
+    };
+    let own: Vec<(Transaction, std::sync::Arc<[u8]>)> = match job
         .txs
         .iter()
         .map(|r| {
@@ -107,10 +116,21 @@ pub(in crate::node) fn run_validation(
                 .map(|b| (b.tx.clone(), b.bytes.clone()))
                 .ok_or_else(|| format!("CacheEvicted: body {} missing", hex::encode(r.tx_id)))
         })
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<_, _>>()
+    {
+        Ok(v) => v,
+        Err(reason) => return ValidationOutcome::Unavailable(reason),
+    };
 
-    let ctx = build_input_block_context(state)
-        .ok_or_else(|| "TipUnready: no applied full block to validate against".to_string())?;
+    // Node-local and transient: the node has not applied a full block
+    // yet, so there is no context to evaluate scripts against. This says
+    // nothing about the block, so it must NOT reach the processor as a
+    // verdict — see `ValidationOutcome::Unavailable`.
+    let Some(ctx) = build_input_block_context(state) else {
+        return ValidationOutcome::Unavailable(
+            "TipUnready: no applied full block to validate against".to_string(),
+        );
+    };
 
     let txs: Vec<InputBlockTxBytes<'_>> = own
         .iter()
@@ -118,7 +138,7 @@ pub(in crate::node) fn run_validation(
         .collect();
     let previous_refs: Vec<&Transaction> = previous.iter().collect();
 
-    validate_input_block_transactions(
+    match validate_input_block_transactions(
         &txs,
         &previous_refs,
         utxo,
@@ -132,8 +152,10 @@ pub(in crate::node) fn run_validation(
             // miner never seats it in an input block.
             soft_fields_allowed: false,
         },
-    )
-    .map_err(|e| format!("{}: {e}", job_label(&job.input_block_id)))
+    ) {
+        Ok(cost) => ValidationOutcome::Valid(cost),
+        Err(e) => ValidationOutcome::Invalid(format!("{}: {e}", job_label(&job.input_block_id))),
+    }
 }
 
 fn collect(

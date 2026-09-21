@@ -19,7 +19,7 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use ergo_inputblocks::processor::{Body, Effect, Event};
+use ergo_inputblocks::processor::{Body, Effect, Event, ValidationOutcome};
 use ergo_inputblocks::types::{InputBlockId, PeerTag};
 use ergo_mempool::input_blocks::{RestoreBody, RestoreOutcome};
 use ergo_p2p::handshake::{PeerFeature, Version};
@@ -331,13 +331,17 @@ fn execute_one(
             };
             let outcome = run_validation(state, rt, &job);
             match &outcome {
-                Ok(cost) => debug!(
+                ValidationOutcome::Valid(cost) => debug!(
                     block = %hex::encode(job.input_block_id),
                     cost, "input_blocks: validation passed"
                 ),
-                Err(reason) => debug!(
+                ValidationOutcome::Invalid(reason) => debug!(
                     block = %hex::encode(job.input_block_id),
                     %reason, "input_blocks: validation failed"
+                ),
+                ValidationOutcome::Unavailable(reason) => debug!(
+                    block = %hex::encode(job.input_block_id),
+                    %reason, "input_blocks: validation unavailable, will retry"
                 ),
             }
             let data = build_ctx_data(state, &[]);

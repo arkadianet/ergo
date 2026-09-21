@@ -49,6 +49,23 @@ pub struct Body {
     pub tx: Transaction,
 }
 
+/// What a node's [`Effect::Validate`] run concluded.
+///
+/// The third arm is the reason this is not a `Result`: "this block is
+/// invalid" and "this node cannot check it right now" have opposite
+/// consequences. A verdict retires the combination and charges the
+/// block's retry budget; a node-local condition must do neither, or one
+/// transient miss permanently blacklists the block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValidationOutcome {
+    /// The transactions validated; carries their summed cost.
+    Valid(u64),
+    /// A consensus verdict on this combination of bodies.
+    Invalid(String),
+    /// The node could not run the job at all. Transient and node-local.
+    Unavailable(String),
+}
+
 /// Events the node feeds the processor (spec 7.1).
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -92,8 +109,8 @@ pub enum Event {
         job: JobId,
         /// The generation the job was issued in.
         generation: u64,
-        /// Total cost on success, a reason string on failure.
-        outcome: Result<u64, String>,
+        /// What the node's validator concluded.
+        outcome: ValidationOutcome,
     },
     /// An ordering-block announcement (message 106).
     OrderingAnnouncementAccepted {
@@ -282,6 +299,11 @@ pub enum DropReason {
     TxDigestMismatch,
     /// Validation failed and the block had no alternative variants.
     ValidationFailed,
+    /// The node could not run the validation job at all — no applied full
+    /// block to build a context from, or no UTXO set. Node-local and
+    /// transient, NOT a verdict on the block: the combination is left
+    /// untried and the attempt is refunded, so a later event re-offers it.
+    ValidationUnavailable,
     /// `subblocks_per_block` is unavailable: input blocks are not active,
     /// so the announcement is dropped **without** penalising the peer.
     MultiplierUnavailable,
@@ -328,6 +350,7 @@ impl DropReason {
             Self::DigestMismatch => "DigestMismatch",
             Self::TxDigestMismatch => "TxDigestMismatch",
             Self::ValidationFailed => "ValidationFailed",
+            Self::ValidationUnavailable => "ValidationUnavailable",
             Self::MultiplierUnavailable => "MultiplierUnavailable",
             Self::OrderingAnnouncementsFull => "OrderingAnnouncementsFull",
             Self::UnknownBlock => "UnknownBlock",
@@ -355,6 +378,7 @@ impl DropReason {
         "DigestMismatch",
         "TxDigestMismatch",
         "ValidationFailed",
+        "ValidationUnavailable",
         "MultiplierUnavailable",
         "OrderingAnnouncementsFull",
         "UnknownBlock",
@@ -2741,7 +2765,7 @@ impl Processor {
         &mut self,
         job: JobId,
         generation: u64,
-        outcome: Result<u64, String>,
+        outcome: ValidationOutcome,
         out: &mut Vec<Effect>,
     ) {
         let Some(inf) = self.in_flight.clone() else {
@@ -2767,12 +2791,35 @@ impl Processor {
         }
         self.in_flight = None;
         match outcome {
-            Ok(cost) => self.on_validation_ok(inf, cost, out),
-            Err(reason) => {
+            ValidationOutcome::Valid(cost) => self.on_validation_ok(inf, cost, out),
+            ValidationOutcome::Invalid(reason) => {
                 tracing::debug!(%reason, "input block validation failed");
                 self.on_validation_failed(inf, out)
             }
+            ValidationOutcome::Unavailable(reason) => {
+                tracing::debug!(%reason, "input block validation unavailable");
+                self.on_validation_unavailable(inf, out)
+            }
         }
+    }
+
+    /// The node could not run the job. The block is untouched: the
+    /// combination stays untried (recording it would blacklist a
+    /// perfectly valid chain head for good — a node that receives input
+    /// blocks before it has applied its first full block would never
+    /// validate that ordering block's chain again), and the attempt the
+    /// dispatch charged is refunded. No retry is armed here: re-selection
+    /// reaches this block on the next event, by which time the node may
+    /// be able to run the job. Arming one would spin inside a single
+    /// effect batch while the condition holds.
+    fn on_validation_unavailable(&mut self, inf: InFlight, out: &mut Vec<Effect>) {
+        if let Some(n) = self.validation_attempts.get_mut(&inf.id) {
+            *n = n.saturating_sub(1);
+        }
+        out.push(Effect::Dropped {
+            id: inf.id,
+            reason: DropReason::ValidationUnavailable,
+        });
     }
 
     fn on_validation_ok(&mut self, inf: InFlight, cost: u64, out: &mut Vec<Effect>) {
@@ -3927,7 +3974,7 @@ mod tests {
             Event::ValidationResult {
                 job,
                 generation,
-                outcome: Ok(1),
+                outcome: ValidationOutcome::Valid(1),
             },
         );
         assert_eq!(
@@ -4393,7 +4440,7 @@ mod tests {
             Event::ValidationResult {
                 job: old_job,
                 generation: old_gen,
-                outcome: Ok(1),
+                outcome: ValidationOutcome::Valid(1),
             },
         );
         assert_eq!(
@@ -4773,6 +4820,47 @@ mod tests {
         assert_eq!(p.variants_per_position(&id), vec![cap]);
         assert!(rejected > 0, "over-cap witnesses must be reported");
         assert_eq!(p.staged_bytes(), 0, "resolved slots hold no bytes");
+    }
+
+    #[test]
+    fn unavailable_validation_leaves_the_combination_untried() {
+        // A node that receives input blocks before it has applied a full
+        // block cannot build a validation context. That is node-local and
+        // transient — recording the combination as failed would blacklist
+        // a perfectly valid chain head for the life of the ordering
+        // block, which is exactly what stalled the mixed devnet smoke.
+        let mut p = processor();
+        let b1 = ts::body(1, 1);
+        let mut ctx = ts::TestCtx::at(FULL);
+        ctx.mempool.add(&b1);
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&b1));
+        let id = ts::ann_id(&ann);
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        let out = ts::validate_unavailable(&mut p, &ctx, &eff);
+        assert_eq!(drops(&out), vec![DropReason::ValidationUnavailable]);
+        assert!(
+            !p.has_failed_combination(&id, &[b1.tx_ref]),
+            "a node-local miss must not retire the combination"
+        );
+
+        // The attempt is refunded too, so a node that is briefly unable
+        // to validate does not burn the block's retry budget: the very
+        // next delivery re-offers the same bodies.
+        let again = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![b1.clone()],
+                from: Some(ts::PEER),
+                now: Tick(9),
+            },
+        );
+        assert!(has_validate(&again), "{again:?}");
+        let ok = ts::validate_ok(&mut p, &ctx, &again, 1);
+        assert!(
+            drops(&ok).is_empty(),
+            "the retry must apply cleanly: {ok:?}"
+        );
     }
 
     #[test]
@@ -5362,7 +5450,7 @@ mod tests {
             Event::ValidationResult {
                 job: stale_job,
                 generation: stale_gen,
-                outcome: Ok(1),
+                outcome: ValidationOutcome::Valid(1),
             },
         );
         assert_eq!(
@@ -5383,7 +5471,7 @@ mod tests {
             Event::ValidationResult {
                 job: current_job,
                 generation: current_gen,
-                outcome: Ok(1),
+                outcome: ValidationOutcome::Valid(1),
             },
         );
         assert!(applied.iter().any(

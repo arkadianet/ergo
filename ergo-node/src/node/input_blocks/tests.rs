@@ -22,7 +22,7 @@ use super::hooks::{
     seed_best_ordering, TipChange, MAX_LINEAR_CATCHUP,
 };
 use super::runtime::InputBlocksRuntime;
-use super::validate::build_input_block_context;
+use super::validate::{build_input_block_context, run_validation, ValidateJob};
 use crate::node::state::NodeState;
 use crate::node::tests::make_state;
 
@@ -493,6 +493,38 @@ fn read_slot_is_untouched_by_an_empty_effect_batch() {
         std::sync::Arc::ptr_eq(&before, &after),
         "an empty effect batch must not republish the read slot"
     );
+}
+
+/// A node with no applied full block cannot build a validation context.
+/// That must reach the processor as `Unavailable`, not as a verdict —
+/// `Invalid` would retire the combination, and since every input block
+/// under an ordering block chains through the first one, one transient
+/// miss would blacklist the whole chain for good. Observed on the mixed
+/// devnet smoke: the Rust node joined at genesis, dropped the first
+/// input block with `TipUnready`, and then never linked another.
+#[test]
+fn run_validation_without_an_applied_block_is_unavailable_not_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    state.input_blocks = Some(runtime());
+    assert!(
+        build_input_block_context(&state).is_none(),
+        "fixture must have no applied full block"
+    );
+    let rt = state.input_blocks.take().expect("runtime");
+    let job = ValidateJob {
+        job: 1,
+        generation: 0,
+        input_block_id: [3u8; 32],
+        txs: Vec::new(),
+        previous: Vec::new(),
+    };
+    match run_validation(&state, &rt, &job) {
+        ergo_inputblocks::processor::ValidationOutcome::Unavailable(reason) => {
+            assert!(reason.contains("TipUnready"), "{reason}");
+        }
+        other => panic!("expected Unavailable, got {other:?}"),
+    }
 }
 
 /// Fix-round-1, finding 2: a losing fork's input block is still
