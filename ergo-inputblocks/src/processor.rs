@@ -1631,6 +1631,12 @@ impl Processor {
         }
         let job = self.next_job;
         self.next_job += 1;
+        // The budget buys *dispatched* work. A job that a later delivery
+        // invalidates through `set_tx_refs` still cost the node a full
+        // block validation, so charging only accepted failure results
+        // would let a peer spray witnesses and keep reissuing jobs with
+        // the counter stuck at one.
+        *self.validation_attempts.entry(target).or_insert(0) += 1;
         self.in_flight = Some(InFlight {
             job,
             generation: self.generation,
@@ -1779,9 +1785,8 @@ impl Processor {
         let budget = self.bounds.validation_retries_per_block;
         self.failed_trigger
             .insert(id, (inf.ordering_id, inf.trigger));
-        let spent = self.validation_attempts.entry(id).or_insert(0);
-        *spent += 1;
-        let exhausted = *spent >= budget;
+        // The attempt itself was charged when the job was dispatched.
+        let exhausted = self.validation_exhausted(&id);
         // Bounded by the budget: once no further combination will be
         // offered there is nothing left to compare against.
         let rejected = self.failed.entry(id).or_default();
