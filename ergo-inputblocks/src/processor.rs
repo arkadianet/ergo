@@ -339,6 +339,12 @@ pub struct Processor {
     /// without this the same `CacheEvicted` is emitted over and over;
     /// the entry is cleared the moment the bodies are back.
     reported_evicted: std::collections::HashSet<InputBlockId>,
+    /// Ordered-digest attempts spent per input block. Deliberately keyed
+    /// by block rather than held in the staging slot, which is deleted on
+    /// a digest mismatch — the budget must not be refundable by making
+    /// the slot unresolvable and then recreating it (fix round 2,
+    /// finding r2-1). Released when the record is pruned.
+    digest_attempts: HashMap<InputBlockId, usize>,
 }
 
 #[derive(Debug, Default)]
@@ -545,6 +551,100 @@ enum Resolution {
     DigestMismatch,
 }
 
+/// The digest search itself, over one staging slot. Split out of
+/// [`Processor::search`] so the per-block attempt counter can be seeded
+/// from — and written back to — [`Processor::digest_attempts`] around it
+/// on every exit path.
+fn search_staging(
+    st: &mut Staging,
+    bypass: bool,
+    announced: Option<[u8; 32]>,
+    cap: usize,
+    budget: usize,
+) -> Resolution {
+    if let Some(sel) = st.selected() {
+        return Resolution::Complete(sel);
+    }
+
+    let n = st.weak_ids.len();
+    let effective: Vec<Vec<TxRef>> = (0..n).map(|i| st.effective_refs(i)).collect();
+    let needed: Vec<WeakId> = (0..n)
+        .filter(|i| effective[*i].is_empty() || effective[*i].len() > cap)
+        .map(|i| st.weak_ids[i])
+        .collect();
+    if !needed.is_empty() {
+        return Resolution::Request(needed);
+    }
+
+    if bypass {
+        // Finding F4b: an announcement with an empty proof commits to no
+        // digest at all, so there is nothing to search — take the first
+        // effective candidate at each position, as Scala does.
+        return Resolution::Complete(effective.iter().map(|e| e[0]).collect());
+    }
+    let Some(expected) = announced else {
+        return Resolution::Request(Vec::new());
+    };
+
+    if st.dirty || st.cursor.len() != n {
+        st.cursor = vec![0; n];
+        st.dirty = false;
+    }
+    while st.attempts < budget {
+        if st
+            .cursor
+            .iter()
+            .zip(effective.iter())
+            .any(|(c, e)| *c >= e.len())
+        {
+            break;
+        }
+        let ids: Vec<[u8; 32]> = effective
+            .iter()
+            .zip(st.cursor.iter())
+            .map(|(e, c)| e[*c].tx_id)
+            .collect();
+        let refs: Vec<&[u8]> = ids.iter().map(|i| &i[..]).collect();
+        st.attempts += 1;
+        if ergo_crypto::merkle::merkle_tree_root(&refs) == expected {
+            return Resolution::Complete(
+                effective
+                    .iter()
+                    .zip(st.cursor.iter())
+                    .map(|(e, c)| e[*c])
+                    .collect(),
+            );
+        }
+        let mut stepped = false;
+        for (i, e) in effective.iter().enumerate() {
+            if st.cursor[i] + 1 < e.len() {
+                st.cursor[i] += 1;
+                for c in st.cursor.iter_mut().take(i) {
+                    *c = 0;
+                }
+                stepped = true;
+                break;
+            }
+        }
+        if !stepped {
+            break;
+        }
+    }
+
+    // No combination matched, or the budget is spent. If some position is
+    // still ambiguous the announcer's own body settles it (spec 7.5 item
+    // 4); otherwise the bodies simply disagree with the announcement.
+    let ambiguous: Vec<WeakId> = (0..n)
+        .filter(|i| effective[*i].len() > 1)
+        .map(|i| st.weak_ids[i])
+        .collect();
+    if ambiguous.is_empty() {
+        Resolution::DigestMismatch
+    } else {
+        Resolution::Request(ambiguous)
+    }
+}
+
 impl Processor {
     /// A fresh processor with no state.
     pub fn new(bounds: Bounds, policy: AnnouncementPolicy) -> Self {
@@ -567,6 +667,7 @@ impl Processor {
             failed: HashMap::new(),
             pending_triggers: VecDeque::new(),
             reported_evicted: std::collections::HashSet::new(),
+            digest_attempts: HashMap::new(),
         }
     }
 
@@ -908,102 +1009,27 @@ impl Processor {
 
     /// Spec 7.5 steps 1–4: drive the ordered-digest search for one block.
     ///
-    /// Takes `&mut self` because the search state is *persisted*: the
-    /// cursor survives across deliveries so a peer re-delivering bodies
-    /// does not redo combinations already tried, and `attempts` is a
-    /// monotone per-block total, never a per-delivery allowance (fix round
-    /// 1, finding 7). A changed effective candidate set restarts the
-    /// cursor but never refunds the budget.
+    /// The search budget is per **input block**, not per staging slot: it
+    /// lives in [`Processor::digest_attempts`] and outlives the slot,
+    /// which `complete_or_request` deletes on a digest mismatch. Without
+    /// that, a peer could spend the sixteen attempts, send bodies that
+    /// make the slot unresolvable, and have the next delivery recreate it
+    /// with a fresh allowance (fix round 2, finding r2-1). The entry is
+    /// released only when the record is pruned.
     fn search(&mut self, id: InputBlockId) -> Resolution {
         let bypass = self.digest_bypassed(&id);
         let announced = self.announced_digest(&id);
         let cap = self.bounds.candidates_per_position;
         let budget = self.bounds.digest_attempts_per_block;
+        let carried = self.digest_attempts.get(&id).copied().unwrap_or(0);
         let Some(st) = self.staging.get_mut(&id) else {
             return Resolution::Request(Vec::new());
         };
-        if let Some(sel) = st.selected() {
-            return Resolution::Complete(sel);
-        }
-
-        let n = st.weak_ids.len();
-        let effective: Vec<Vec<TxRef>> = (0..n).map(|i| st.effective_refs(i)).collect();
-        let needed: Vec<WeakId> = (0..n)
-            .filter(|i| effective[*i].is_empty() || effective[*i].len() > cap)
-            .map(|i| st.weak_ids[i])
-            .collect();
-        if !needed.is_empty() {
-            return Resolution::Request(needed);
-        }
-
-        if bypass {
-            // Finding F4b: an announcement with an empty proof commits to
-            // no digest at all, so there is nothing to search — take the
-            // first effective candidate at each position, as Scala does.
-            return Resolution::Complete(effective.iter().map(|e| e[0]).collect());
-        }
-        let Some(expected) = announced else {
-            return Resolution::Request(Vec::new());
-        };
-
-        if st.dirty || st.cursor.len() != n {
-            st.cursor = vec![0; n];
-            st.dirty = false;
-        }
-        while st.attempts < budget {
-            if st
-                .cursor
-                .iter()
-                .zip(effective.iter())
-                .any(|(c, e)| *c >= e.len())
-            {
-                break;
-            }
-            let ids: Vec<[u8; 32]> = effective
-                .iter()
-                .zip(st.cursor.iter())
-                .map(|(e, c)| e[*c].tx_id)
-                .collect();
-            let refs: Vec<&[u8]> = ids.iter().map(|i| &i[..]).collect();
-            st.attempts += 1;
-            if ergo_crypto::merkle::merkle_tree_root(&refs) == expected {
-                return Resolution::Complete(
-                    effective
-                        .iter()
-                        .zip(st.cursor.iter())
-                        .map(|(e, c)| e[*c])
-                        .collect(),
-                );
-            }
-            let mut stepped = false;
-            for (i, e) in effective.iter().enumerate() {
-                if st.cursor[i] + 1 < e.len() {
-                    st.cursor[i] += 1;
-                    for c in st.cursor.iter_mut().take(i) {
-                        *c = 0;
-                    }
-                    stepped = true;
-                    break;
-                }
-            }
-            if !stepped {
-                break;
-            }
-        }
-
-        // No combination matched, or the budget is spent. If some position
-        // is still ambiguous the announcer's own body settles it (spec 7.5
-        // item 4); otherwise the bodies simply disagree with the
-        // announcement.
-        let ambiguous: Vec<WeakId> = (0..n)
-            .filter(|i| effective[*i].len() > 1)
-            .map(|i| st.weak_ids[i])
-            .collect();
-        if ambiguous.is_empty() {
-            Resolution::DigestMismatch
-        } else {
-            Resolution::Request(ambiguous)
-        }
+        st.attempts = st.attempts.max(carried);
+        let resolution = search_staging(st, bypass, announced, cap, budget);
+        let spent = st.attempts;
+        self.digest_attempts.insert(id, spent);
+        resolution
     }
 
     fn complete_or_request(&mut self, id: InputBlockId, out: &mut Vec<Effect>) {
@@ -1102,8 +1128,16 @@ impl Processor {
     /// (fix round 1, finding 6). Without this, a body lost to TTL expiry
     /// or eviction would strand the chain on `CacheEvicted` forever,
     /// because a resolved staging slot ignores every further candidate.
-    fn refill_verified(&mut self, id: InputBlockId, bodies: &[Body], now: Tick) {
+    fn refill_verified(
+        &mut self,
+        id: InputBlockId,
+        bodies: &[Body],
+        now: Tick,
+        out: &mut Vec<Effect>,
+    ) {
+        let cap = self.bounds.candidates_per_position;
         let mut to_cache: Vec<Body> = Vec::new();
+        let mut over_cap = false;
         if let Some(st) = self.staging.get_mut(&id) {
             let Some(variants) = st.variants.as_mut() else {
                 return;
@@ -1113,17 +1147,36 @@ impl Processor {
                     let Some(committed) = variant.first().map(|r| r.tx_id) else {
                         continue;
                     };
-                    if committed == b.tx_ref.tx_id {
-                        if !variant.contains(&b.tx_ref) {
-                            variant.push(b.tx_ref);
-                        }
+                    if committed != b.tx_ref.tx_id {
+                        continue;
+                    }
+                    if variant.contains(&b.tx_ref) {
+                        // A reference we already track: this is the refill
+                        // case, and it is always allowed.
                         to_cache.push(b.clone());
+                    } else if variant.len() < cap {
+                        variant.push(b.tx_ref);
+                        to_cache.push(b.clone());
+                    } else {
+                        // Spec 7.4's per-position bound applies after
+                        // resolution too: a peer must not be able to grow
+                        // a block's witness list — and, through it, the
+                        // shared cache — by spraying witnesses of a
+                        // committed transaction (fix round 2, finding
+                        // r2-3).
+                        over_cap = true;
                     }
                 }
             }
         }
         for b in to_cache {
             self.cache.insert(b, now, &self.bounds);
+        }
+        if over_cap {
+            out.push(Effect::Dropped {
+                id,
+                reason: DropReason::CandidatesExhausted,
+            });
         }
     }
 
@@ -1192,6 +1245,13 @@ impl Processor {
                     id: inf.id,
                     reason: DropReason::StaleValidation,
                 });
+                // The invalidated job's *selection* must be re-run, not
+                // just its block: a fork switch chosen on a deep trigger
+                // collapses into the linear branch if it is re-driven
+                // with the block's own id. Queue the original trigger at
+                // the front so `resume` picks it up first (fix round 2,
+                // finding r2-2).
+                self.defer_trigger(inf.ordering_id, inf.trigger, true);
             }
         }
     }
@@ -1225,7 +1285,7 @@ impl Processor {
                 if self.staging.get(&id).is_some_and(|s| s.variants.is_some()) {
                     // The block's digest already passed; a delivery now
                     // can only refill bodies the cache lost.
-                    self.refill_verified(id, &bodies, now);
+                    self.refill_verified(id, &bodies, now, out);
                 } else {
                     self.staging.entry(id).or_insert_with(|| {
                         Staging::new(weak.clone(), now, from.or(Some(announcer)))
@@ -1294,12 +1354,7 @@ impl Processor {
     /// asked about. The real application happens in [`Self::on_validation`].
     fn pump(&mut self, ordering_id: OrderingId, trigger: InputBlockId, out: &mut Vec<Effect>) {
         if self.in_flight.is_some() {
-            if !self.pending_triggers.contains(&(ordering_id, trigger)) {
-                if self.pending_triggers.len() >= self.bounds.pending_triggers {
-                    self.pending_triggers.pop_front();
-                }
-                self.pending_triggers.push_back((ordering_id, trigger));
-            }
+            self.defer_trigger(ordering_id, trigger, false);
             return;
         }
         // Scala `applyInputBlockTransactions`: nothing is processed for an
@@ -1393,6 +1448,24 @@ impl Processor {
             txs,
             previous,
         });
+    }
+
+    /// Queue an application trigger for `resume` to pick up. `front`
+    /// places it ahead of the queue — used for a job that was
+    /// invalidated mid-flight, whose selection should be the first thing
+    /// retried.
+    fn defer_trigger(&mut self, ordering_id: OrderingId, trigger: InputBlockId, front: bool) {
+        if self.pending_triggers.contains(&(ordering_id, trigger)) {
+            return;
+        }
+        if self.pending_triggers.len() >= self.bounds.pending_triggers {
+            self.pending_triggers.pop_front();
+        }
+        if front {
+            self.pending_triggers.push_front((ordering_id, trigger));
+        } else {
+            self.pending_triggers.push_back((ordering_id, trigger));
+        }
     }
 
     fn on_validation(
@@ -1680,6 +1753,7 @@ impl Processor {
             self.waitlist.retain(|(w, _)| *w != id);
             self.failed.remove(&id);
             self.reported_evicted.remove(&id);
+            self.digest_attempts.remove(&id);
         }
 
         self.ordering.prune(
@@ -1865,7 +1939,7 @@ impl Processor {
     /// the block's whole life and capped at
     /// [`crate::bounds::Bounds::digest_attempts_per_block`] (spec 7.5).
     pub fn staged_digest_attempts(&self, id: &InputBlockId) -> usize {
-        self.staging.get(id).map_or(0, |s| s.attempts)
+        self.digest_attempts.get(id).copied().unwrap_or(0)
     }
 
     /// Scala `saveOrderingBlockTransactions`.
