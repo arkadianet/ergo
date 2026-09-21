@@ -439,19 +439,48 @@ object WeakBlocksOracle {
         IndexedSeq(new ErgoBoxCandidate(outValue, trueTree, 0)))
 
     // Advance the state by three real full blocks (each spends one filler box).
+    // The LAST of them also creates the spec-6.4 context-sensitive boxes: their
+    // scripts have to name the height and the preceding header id of the block
+    // B that ends up as the state's tip, and both are known at the moment B is
+    // built (B.height = parent.height + 1, and B's parent becomes
+    // `lastHeaders(1)` once B is applied). Splicing the fixture's own values in
+    // keeps the vector self-consistent instead of assuming a height.
     var parentOpt: Option[ErgoFullBlock] = None
     var blockTxs: Seq[ErgoTransaction] = Seq.empty
     var utxo: Seq[ErgoBox] = bh.boxes.values.toSeq
-    fillers.foreach { f =>
-      val tx = spend(f, f.value)
+    var sensitiveOutputs: IndexedSeq[ErgoBox] = IndexedSeq.empty
+    fillers.zipWithIndex.foreach { case (f, i) =>
+      val tx =
+        if (i < fillers.size - 1) spend(f, f.value)
+        else {
+          val bHeight = parentOpt.map(_.header.height).getOrElse(0) + 1
+          val prevHeaderId = parentOpt.get.header.id.toString
+          val share = f.value / 4
+          val sensitive = Seq(
+            compileSourceV5(s"HEIGHT == $bHeight", 0),
+            compileSourceV5(s"""CONTEXT.headers(0).id == fromBase16("$prevHeaderId")""", 0),
+            compileSourceV5(s"CONTEXT.preHeader.height == $bHeight", 0))
+          ErgoTransaction(
+            IndexedSeq(Input(f.id, emptyProof)),
+            IndexedSeq.empty,
+            sensitive.map(t => new ErgoBoxCandidate(share, t, 0)).toIndexedSeq :+
+              new ErgoBoxCandidate(f.value - 3 * share, trueTree, 0))
+        }
       val fb = ValidBlocksGenerators.validFullBlock(parentOpt, us, Seq(tx))
       us = us.applyModifier(fb, None)(_ => ()).get
       parentOpt = Some(fb)
       blockTxs = blockTxs ++ Seq(tx)
-      utxo = utxo.filterNot(b => tx.inputs.exists(i => java.util.Arrays.equals(i.boxId, b.id))) ++ tx.outputs
+      utxo = utxo.filterNot(b => tx.inputs.exists(i2 => java.util.Arrays.equals(i2.boxId, b.id))) ++ tx.outputs
+      if (i == fillers.size - 1) sensitiveOutputs = tx.outputs.take(3)
     }
     val tipHeader = parentOpt.get.header
     utxo.foreach(b => require(us.boxById(b.id).isDefined, s"tracked box ${hex(b.id)} not in state"))
+    // The splice above is only correct if the state context really is the one
+    // spec 6.4 describes; assert it rather than trusting the arithmetic.
+    require(us.stateContext.lastHeaders.head.height == tipHeader.height,
+      "lastHeaders.head is not the tip header")
+    require(us.stateContext.lastHeaders(1).id == tipHeader.parentId,
+      "lastHeaders(1) is not the header before the tip")
 
     // Scenario transactions.
     val txA = spend(eb1, eb1.value)                        // spends eb1
@@ -487,6 +516,11 @@ object WeakBlocksOracle {
       }
     }
 
+    def spendSensitive(idx: Int): ErgoTransaction = {
+      val b = sensitiveOutputs(idx)
+      spend(b, b.value)
+    }
+
     val scenarios: Seq[(String, Seq[ErgoTransaction], Seq[ErgoTransaction], UtxoState)] = Seq(
       ("normal_tx_ok", Seq(txA), Seq.empty, us),
       ("class2_tx_rejected", Seq(txC), Seq.empty, us),
@@ -502,7 +536,15 @@ object WeakBlocksOracle {
       // individually while their sum (24210) does not: this is the only
       // scenario that reaches the *cumulative* block-budget check rather than
       // the per-transaction one.
-      ("cumulative_cost_limit_rejected", Seq(txA, txE), Seq.empty, withBlockCost(us, 20000)))
+      ("cumulative_cost_limit_rejected", Seq(txA, txE), Seq.empty, withBlockCost(us, 20000)),
+      // Spec 6.4 context pins: each box script reads one field of the state
+      // context that the port has to map exactly. `HEIGHT` and
+      // `CONTEXT.preHeader.height` must be B.height (not B.height + 1), and
+      // `CONTEXT.headers(0)` must be `lastHeaders.drop(1).head`, i.e. the
+      // header before B. A wrong mapping makes these reject.
+      ("height_sensitive_ok", Seq(spendSensitive(0)), Seq.empty, us),
+      ("headers_sensitive_ok", Seq(spendSensitive(1)), Seq.empty, us),
+      ("preheader_height_sensitive_ok", Seq(spendSensitive(2)), Seq.empty, us))
 
     // Scala wraps a SoftFieldAccessException thrown inside script evaluation into
     // a generic `MalformedModifierError("Scripts ... should pass verification")`,

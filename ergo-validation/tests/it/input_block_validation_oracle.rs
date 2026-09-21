@@ -8,7 +8,9 @@
 //!
 //! The harness builds a real UTXO state, advances it by three real full
 //! blocks, then records the verdict and block cost of `applyInputBlock` for
-//! ten scenarios. This test rebuilds the same inputs in memory — the UTXO set
+//! fourteen scenarios — including three whose box scripts read `HEIGHT`,
+//! `CONTEXT.headers(0).id` and `CONTEXT.preHeader.height`, so spec 6.4's
+//! context mapping is pinned by Scala rather than assumed. This test rebuilds the same inputs in memory — the UTXO set
 //! from `utxo_boxes_hex`, the spec-6.4 validation context from
 //! `last_headers_hex` (tip first) and `current_parameters` — and asserts the
 //! Rust verdict, the rejection class, and (for accepted blocks) the summed
@@ -185,17 +187,25 @@ fn input_block_validation_matches_scala_apply_input_block() {
     .expect("read input_block_validation.json");
     let vector: InputBlockVector =
         serde_json::from_str(&raw).expect("parse input_block_validation.json");
-    assert_eq!(vector.cases.len(), 11, "expected the full scenario table");
-    // The cumulative-budget check (`input_block.rs`'s running `total` against
-    // `max_block_cost`) is only reachable when two transactions each fit the
-    // limit on their own but their sum does not, so it needs its own vector.
-    assert!(
-        vector
-            .cases
-            .iter()
-            .any(|c| c.name == "cumulative_cost_limit_rejected"),
-        "vector must cover the cumulative block-cost budget"
-    );
+    assert_eq!(vector.cases.len(), 14, "expected the full scenario table");
+    // Coverage that cannot be inferred from the outcome column alone, so it
+    // must be named: the cumulative-budget check (`input_block.rs`'s running
+    // `total` against `max_block_cost`) is only reachable when two
+    // transactions each fit the limit on their own but their sum does not, and
+    // spec 6.4's context mapping is only pinned by scripts that read the
+    // height and the headers of the state context (a wrong mapping would make
+    // these three reject where Scala accepts).
+    for required in [
+        "cumulative_cost_limit_rejected",
+        "height_sensitive_ok",
+        "headers_sensitive_ok",
+        "preheader_height_sensitive_ok",
+    ] {
+        assert!(
+            vector.cases.iter().any(|c| c.name == required),
+            "vector must cover {required}"
+        );
+    }
 
     for case in &vector.cases {
         let result = run_case(case);
