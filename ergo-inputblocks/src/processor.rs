@@ -359,6 +359,13 @@ pub struct Processor {
     /// the slot unresolvable and then recreating it (fix round 2,
     /// finding r2-1). Released when the record is pruned.
     digest_attempts: HashMap<InputBlockId, usize>,
+    /// Validation attempts spent per input block. Spec 7.5's
+    /// witness-variant retry is otherwise bounded only by the number of
+    /// digest-consistent combinations, which is
+    /// `candidates_per_position ^ positions` — a remotely chosen amount
+    /// of full block validations, and a rejected-combination list that
+    /// grows with it. Released when the record is pruned.
+    validation_attempts: HashMap<InputBlockId, usize>,
 }
 
 #[derive(Debug, Default)]
@@ -682,6 +689,7 @@ impl Processor {
             pending_triggers: VecDeque::new(),
             reported_evicted: std::collections::HashSet::new(),
             digest_attempts: HashMap::new(),
+            validation_attempts: HashMap::new(),
         }
     }
 
@@ -1094,7 +1102,9 @@ impl Processor {
     /// per-position variants for spec 7.5's retry.
     fn commit_resolution(&mut self, id: InputBlockId, refs: Vec<TxRef>, out: &mut Vec<Effect>) {
         let now = self.staging.get(&id).map(|s| s.created).unwrap_or(Tick(0));
+        let cap = self.bounds.candidates_per_position;
         let mut to_cache: Vec<Body> = Vec::new();
+        let mut over_cap = false;
         if let Some(st) = self.staging.get_mut(&id) {
             if st.variants.is_none() {
                 let empty: Vec<Candidate> = Vec::new();
@@ -1110,13 +1120,26 @@ impl Processor {
                     // so it is discarded here and never reaches the shared
                     // cache, and never becomes a retry (fix round 1,
                     // finding 1).
+                    //
+                    // Spec 7.4's `candidates_per_position` applies here
+                    // too. Staging caps the two provenances separately —
+                    // `cap` peer answers and `cap + 1` local guesses —
+                    // so without this a single position could be
+                    // promoted into `2 * cap + 1` retry variants, each
+                    // one a body admitted to the shared cache and a
+                    // combination the retry loop would validate.
                     let mut variant = vec![*selected];
                     for c in st.candidates.get(i).unwrap_or(&empty) {
-                        if c.body.tx_ref.tx_id == selected.tx_id {
-                            if c.body.tx_ref != *selected {
-                                variant.push(c.body.tx_ref);
-                            }
+                        if c.body.tx_ref.tx_id != selected.tx_id {
+                            continue;
+                        }
+                        if c.body.tx_ref == *selected {
                             to_cache.push(c.body.clone());
+                        } else if variant.len() < cap {
+                            variant.push(c.body.tx_ref);
+                            to_cache.push(c.body.clone());
+                        } else {
+                            over_cap = true;
                         }
                     }
                     variants.push(variant);
@@ -1130,6 +1153,12 @@ impl Processor {
         }
         for b in to_cache {
             self.cache.insert(b, now, &self.bounds);
+        }
+        if over_cap {
+            out.push(Effect::Dropped {
+                id,
+                reason: DropReason::CandidatesExhausted,
+            });
         }
         self.set_tx_refs(id, refs, out);
         let Some(ordering_id) = self.records.get(&id).map(|r| r.ordering_id) else {
@@ -1484,6 +1513,14 @@ impl Processor {
             tracing::debug!("skipping a transaction combination that already failed");
             return;
         }
+        // The block has spent its validation budget; no combination of
+        // its bodies is offered again. Silent for the same reason as the
+        // guard above: re-selection reaches this point on every later
+        // event, and the give-up was already reported once.
+        if self.validation_exhausted(&target) {
+            tracing::debug!("skipping a block that has spent its validation budget");
+            return;
+        }
         let mut previous: Vec<TxRef> = Vec::new();
         for pid in &prev_chain {
             match self.tx_refs.get(pid) {
@@ -1536,6 +1573,14 @@ impl Processor {
             txs,
             previous,
         });
+    }
+
+    /// Whether `id` has spent its per-block validation budget (spec 7.4's
+    /// `validation_retries_per_block`).
+    fn validation_exhausted(&self, id: &InputBlockId) -> bool {
+        self.validation_attempts
+            .get(id)
+            .is_some_and(|n| *n >= self.bounds.validation_retries_per_block)
     }
 
     /// Queue an application trigger for `resume` to pick up. `front`
@@ -1649,7 +1694,26 @@ impl Processor {
     /// (Scala: application failure).
     fn on_validation_failed(&mut self, inf: InFlight, out: &mut Vec<Effect>) {
         let id = inf.id;
-        self.failed.entry(id).or_default().push(inf.txs.clone());
+        let budget = self.bounds.validation_retries_per_block;
+        let spent = self.validation_attempts.entry(id).or_insert(0);
+        *spent += 1;
+        let exhausted = *spent >= budget;
+        // Bounded by the budget: once no further combination will be
+        // offered there is nothing left to compare against.
+        let rejected = self.failed.entry(id).or_default();
+        if rejected.len() < budget {
+            rejected.push(inf.txs.clone());
+        }
+        if exhausted {
+            out.push(Effect::Dropped {
+                id,
+                reason: DropReason::CandidatesExhausted,
+            });
+            if self.in_flight.is_none() {
+                self.resume(inf.ordering_id, out);
+            }
+            return;
+        }
         match self.next_untried_combination(id) {
             Some(refs) => {
                 self.set_tx_refs(id, refs, out);
@@ -1842,6 +1906,7 @@ impl Processor {
             self.failed.remove(&id);
             self.reported_evicted.remove(&id);
             self.digest_attempts.remove(&id);
+            self.validation_attempts.remove(&id);
         }
 
         self.ordering.prune(
