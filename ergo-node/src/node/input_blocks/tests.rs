@@ -15,9 +15,7 @@ use ergo_state::chain::HeaderMeta;
 use ergo_state::{ChainStateRead, HeaderSectionStore};
 use ergo_sync::coordinator::Action;
 
-use super::ctx::{
-    block_transactions_known, build_ctx_data, expected_n_bits_after, transactions_section_id,
-};
+use super::ctx::{block_transactions_known, build_ctx_data, expected_n_bits_after};
 use super::effects::{apply_chain_change, execute_effects, relay_peers};
 use super::hooks::{
     advertised_version, on_ordering_block_applied, on_ordering_reorg, on_tick, seed_best_ordering,
@@ -2023,5 +2021,128 @@ fn expected_n_bits_after_fails_closed_when_the_lookback_window_is_unindexed() {
         expected_n_bits_after(&state, parent_id),
         None,
         "an unassemblable window must yield no expectation, not a guess"
+    );
+}
+
+/// Round 2, finding 3: a code-106 reply must acknowledge the tracked
+/// −121 expectation it answers. Without it the request stays outstanding
+/// forever, the peer gets no progress credit for serving us, and the
+/// duplicate-suppression in `register_expectation` refuses to ask anyone
+/// else for the same announcement.
+#[test]
+fn code_106_acknowledges_the_tracked_ordering_request() {
+    use ergo_p2p::delivery::ModifierStatus;
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19660,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let oa = ts::ordering_announcement([0u8; 32], 1, 31, Vec::new());
+    let oa_id = ts::header_id(&oa.header);
+
+    // Ask for it the way an Inv −121 does.
+    let inv = ergo_p2p::message::serialize_inv(&ergo_p2p::types::InvData {
+        type_id: ergo_p2p::types::ModifierTypeId::OrderingBlockAnnouncement.as_byte(),
+        ids: vec![oa_id],
+    })
+    .unwrap();
+    let _ = send_to(&mut state, peer, ergo_p2p::message::CODE_INV, &inv);
+    assert_eq!(
+        state.coordinator.delivery().status(&oa_id),
+        ModifierStatus::Requested,
+        "fixture leaves a −121 expectation outstanding"
+    );
+
+    let before = state.peer_manager.get(&peer).unwrap().last_progress;
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+        &ergo_p2p::message::serialize_ordering_block_announcement_msg(&oa).unwrap(),
+    );
+
+    assert_eq!(
+        state.coordinator.delivery().status(&oa_id),
+        ModifierStatus::Received,
+        "the reply clears the expectation it answered"
+    );
+    assert!(
+        state.peer_manager.get(&peer).unwrap().last_progress > before,
+        "106 is progress"
+    );
+}
+
+/// Round 2, finding 3 (second half): the byte-cap exemption must cover
+/// every solicited input-block reply, 106 included. A solicited reply
+/// dropped on the byte axis would time out our own request and
+/// NonDelivery-penalize the peer that was serving us — the exact
+/// self-inflicted starvation the `CODE_MODIFIER` exemption exists to
+/// prevent.
+#[test]
+fn solicited_input_block_replies_are_exempt_from_the_byte_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19661,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let oa = ts::ordering_announcement([0u8; 32], 1, 32, Vec::new());
+    let oa_id = ts::header_id(&oa.header);
+    let oa_payload = ergo_p2p::message::serialize_ordering_block_announcement_msg(&oa).unwrap();
+
+    // Unsolicited: no exemption.
+    assert!(
+        !crate::node::messaging::input_block_frame_answers_our_request(
+            &state,
+            &peer,
+            ergo_p2p::message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+            &oa_payload,
+        ),
+        "an unsolicited 106 keeps the ordinary byte cap"
+    );
+
+    // Register the expectation the Inv −121 path would.
+    crate::node::register_expectation(
+        &mut state,
+        peer,
+        ergo_p2p::types::ModifierTypeId::OrderingBlockAnnouncement.as_byte(),
+        &[oa_id],
+        now,
+    );
+    assert!(
+        crate::node::messaging::input_block_frame_answers_our_request(
+            &state,
+            &peer,
+            ergo_p2p::message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+            &oa_payload,
+        ),
+        "a solicited 106 is exempt"
+    );
+
+    // 105 is a request FROM the peer: serving it is our choice, so it
+    // never earns the exemption.
+    let req = ergo_p2p::message::serialize_input_block_txs_request(
+        &ergo_p2p::message::InputBlockTxsRequest {
+            input_block_id: oa_id,
+            weak_ids: vec![[1u8; 6]],
+        },
+    );
+    assert!(
+        !crate::node::messaging::input_block_frame_answers_our_request(
+            &state,
+            &peer,
+            ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST,
+            &req,
+        ),
+        "an inbound 105 is never exempt"
     );
 }

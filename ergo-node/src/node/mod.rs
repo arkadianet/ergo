@@ -36,7 +36,7 @@ mod heartbeat;
 pub mod identity;
 pub(in crate::node) mod input_blocks;
 mod memory_sampler;
-mod messaging;
+pub(in crate::node) mod messaging;
 mod mining_dispatch;
 mod mining_engine;
 mod peer_actions;

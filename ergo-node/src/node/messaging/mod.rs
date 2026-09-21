@@ -17,3 +17,5 @@ mod popow;
 mod utxo_chunk;
 
 pub(in crate::node) use dispatch::handle_message;
+#[cfg(test)]
+pub(in crate::node) use dispatch::input_block_frame_answers_our_request;

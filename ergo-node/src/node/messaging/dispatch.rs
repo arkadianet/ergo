@@ -1078,10 +1078,10 @@ fn frame_answers_our_request(state: &NodeState, peer: &PeerId, payload: &[u8]) -
 
 /// Byte-cap exemption for the input-block family: does this frame answer
 /// a `RequestModifier` (−123 / −122 / −121) we registered with the
-/// delivery tracker? Only codes that carry a solicited payload qualify —
-/// 105 is a REQUEST from the peer, and serving it is our choice, so it
-/// keeps the ordinary cap.
-fn input_block_frame_answers_our_request(
+/// delivery tracker? Codes 100 / 102 / 104 / 106 all carry a solicited
+/// payload and qualify; 105 is a REQUEST from the peer, and serving it
+/// is our choice, so it keeps the ordinary cap.
+pub(in crate::node) fn input_block_frame_answers_our_request(
     state: &NodeState,
     peer: &PeerId,
     code: u8,
@@ -1102,6 +1102,12 @@ fn input_block_frame_answers_our_request(
         message::CODE_INPUT_BLOCK_TXS => message::deserialize_input_block_txs(payload)
             .ok()
             .map(|d| d.input_block_id),
+        message::CODE_ORDERING_BLOCK_ANNOUNCEMENT => {
+            message::deserialize_ordering_block_announcement_msg(payload)
+                .ok()
+                .and_then(|a| ergo_ser::header::serialize_header(&a.header).ok())
+                .map(|(_, id)| *id.as_bytes())
+        }
         _ => None,
     };
     id.is_some_and(|id| {

@@ -166,6 +166,11 @@ pub(in crate::node) fn handle(
             match message::deserialize_ordering_block_announcement_msg(payload) {
                 Ok(ann) => {
                     let parent = *ann.header.parent_id.as_bytes();
+                    // Acknowledge the −121 expectation this answers, so
+                    // the request does not stay outstanding forever and
+                    // `register_expectation`'s duplicate suppression
+                    // does not refuse to ask anyone else for it.
+                    answered(state, &peer, &ts_header_id(&ann.header));
                     let actions = feed(state, peer, now, &[parent], |from, tick| {
                         Event::OrderingAnnouncementAccepted {
                             ann,
@@ -282,6 +287,14 @@ fn feed(
     drop(data);
     state.input_blocks = Some(rt);
     execute_effects(state, effects, now)
+}
+
+/// A header's modifier id. An ordering-block announcement is tracked by
+/// its header id — that is the id a `RequestModifier` −121 carries.
+fn ts_header_id(header: &ergo_ser::header::Header) -> [u8; 32] {
+    ergo_ser::header::serialize_header(header)
+        .map(|(_, id)| *id.as_bytes())
+        .unwrap_or([0u8; 32])
 }
 
 /// A delivered transaction as a processor [`Body`]. `None` when the
