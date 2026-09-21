@@ -33,6 +33,7 @@ mod events;
 mod first_deliverer;
 mod handle;
 mod heartbeat;
+mod input_blocks;
 pub mod identity;
 mod memory_sampler;
 mod messaging;
