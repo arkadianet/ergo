@@ -366,6 +366,12 @@ pub struct Processor {
     /// of full block validations, and a rejected-combination list that
     /// grows with it. Released when the record is pruned.
     validation_attempts: HashMap<InputBlockId, usize>,
+    /// The selection a block's last failed job came from. A retry has to
+    /// re-run the same *selection*, not the block's own id, or a deep
+    /// fork-switch trigger collapses into the linear branch; when the
+    /// reviving body arrives long after the failure, the failed job is
+    /// gone and this is the only place the trigger survives.
+    failed_trigger: HashMap<InputBlockId, (OrderingId, InputBlockId)>,
 }
 
 #[derive(Debug, Default)]
@@ -690,6 +696,7 @@ impl Processor {
             reported_evicted: std::collections::HashSet::new(),
             digest_attempts: HashMap::new(),
             validation_attempts: HashMap::new(),
+            failed_trigger: HashMap::new(),
         }
     }
 
@@ -1177,19 +1184,24 @@ impl Processor {
     /// (fix round 1, finding 6). Without this, a body lost to TTL expiry
     /// or eviction would strand the chain on `CacheEvicted` forever,
     /// because a resolved staging slot ignores every further candidate.
+    ///
+    /// Returns whether a genuinely new witness joined the variant list —
+    /// the caller uses that to restart a selection the previous
+    /// combination's failure left stalled.
     fn refill_verified(
         &mut self,
         id: InputBlockId,
         bodies: &[Body],
         now: Tick,
         out: &mut Vec<Effect>,
-    ) {
+    ) -> bool {
         let cap = self.bounds.candidates_per_position;
         let mut to_cache: Vec<Body> = Vec::new();
         let mut over_cap = false;
+        let mut admitted = false;
         if let Some(st) = self.staging.get_mut(&id) {
             let Some(variants) = st.variants.as_mut() else {
-                return;
+                return false;
             };
             for b in bodies {
                 for variant in variants.iter_mut() {
@@ -1206,6 +1218,7 @@ impl Processor {
                     } else if variant.len() < cap {
                         variant.push(b.tx_ref);
                         to_cache.push(b.clone());
+                        admitted = true;
                     } else {
                         // Spec 7.4's per-position bound applies after
                         // resolution too: a peer must not be able to grow
@@ -1226,6 +1239,38 @@ impl Processor {
                 id,
                 reason: DropReason::CandidatesExhausted,
             });
+        }
+        admitted
+    }
+
+    /// A witness delivered after the block's current selection was
+    /// rejected has to move the cursor: the odometer still points at the
+    /// rejected combination, which [`Self::pump`] refuses to re-offer, so
+    /// appending the body to the variant list alone restarts nothing
+    /// (spec 7.5's retry, driven by a delivery rather than by a failure).
+    ///
+    /// The selection is re-driven with the trigger the failed job carried,
+    /// for the same reason the failure-path retry is: a fork switch has to
+    /// stay a fork switch.
+    fn retry_after_delivery(&mut self, id: InputBlockId, out: &mut Vec<Effect>) {
+        if !self.failed.contains_key(&id) || self.validation_exhausted(&id) {
+            return;
+        }
+        let Some(refs) = self.next_untried_combination(id) else {
+            return;
+        };
+        let Some((ordering_id, trigger)) = self
+            .failed_trigger
+            .get(&id)
+            .copied()
+            .or_else(|| self.records.get(&id).map(|r| (r.ordering_id, id)))
+        else {
+            return;
+        };
+        self.set_tx_refs(id, refs, out);
+        self.pump(ordering_id, trigger, out);
+        if self.in_flight.is_none() {
+            self.resume(ordering_id, out);
         }
     }
 
@@ -1399,10 +1444,12 @@ impl Processor {
             .or_else(|| self.staging.get(&id).map(|s| s.weak_ids.clone()));
         match known_weak_ids {
             Some(weak) => {
+                let mut refilled = false;
                 if self.staging.get(&id).is_some_and(|s| s.variants.is_some()) {
                     // The block's digest already passed; a delivery now
-                    // can only refill bodies the cache lost.
-                    self.refill_verified(id, &bodies, now, out);
+                    // can only refill bodies the cache lost — or offer a
+                    // witness the rejected selection did not have.
+                    refilled = self.refill_verified(id, &bodies, now, out);
                 } else {
                     self.staging.entry(id).or_insert_with(|| {
                         Staging::new(weak.clone(), now, from.or(Some(announcer)))
@@ -1426,6 +1473,9 @@ impl Processor {
                     self.enforce_staging_bytes(id, out);
                 }
                 self.complete_or_request(id, out);
+                if refilled {
+                    self.retry_after_delivery(id, out);
+                }
             }
             None => {
                 // Scala `applyInputBlockTransactions(id, txs, state)`: with
@@ -1695,6 +1745,8 @@ impl Processor {
     fn on_validation_failed(&mut self, inf: InFlight, out: &mut Vec<Effect>) {
         let id = inf.id;
         let budget = self.bounds.validation_retries_per_block;
+        self.failed_trigger
+            .insert(id, (inf.ordering_id, inf.trigger));
         let spent = self.validation_attempts.entry(id).or_insert(0);
         *spent += 1;
         let exhausted = *spent >= budget;
@@ -1907,6 +1959,7 @@ impl Processor {
             self.reported_evicted.remove(&id);
             self.digest_attempts.remove(&id);
             self.validation_attempts.remove(&id);
+            self.failed_trigger.remove(&id);
         }
 
         self.ordering.prune(
