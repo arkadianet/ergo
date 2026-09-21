@@ -497,17 +497,27 @@ pub struct Processor {
     /// the slot unresolvable and then recreating it (fix round 2,
     /// finding r2-1). Released when the record is pruned.
     digest_attempts: HashMap<InputBlockId, usize>,
-    /// Per block, one selection proposed while its current selection was
-    /// outstanding, taken by the failure of that job. Bounded by one
-    /// entry per record, each holding a transaction list no longer than
-    /// the block's own; released on use, on application and at prune.
-    held: HashMap<InputBlockId, HeldSelection>,
-    /// Blocks the announcer has already been invited to rescue. The
-    /// invitation is the body request a spent budget issues: without one
-    /// outstanding, no later delivery can be solicited, and "solicited"
-    /// is what the recovery allowance requires (residual fix round 2,
-    /// ruling B). One per record.
+    /// Per block, the selections proposed while its current selection was
+    /// outstanding, newest last, taken one at a time by the failures that
+    /// follow. A single slot lost every alternative but the last: with A
+    /// outstanding and B then C delivered, A's failure reached C and B
+    /// was unreachable without another delivery (residual fix round 3).
+    /// Bounded by [`crate::bounds::Bounds::candidates_per_position`] per
+    /// record — the same bound that caps witness variants — and released
+    /// on use, on application and at prune.
+    held: HashMap<InputBlockId, Vec<HeldSelection>>,
+    /// Blocks whose announcer has been invited to rescue them — and the
+    /// invitation was *emitted*. The invitation is the body request a
+    /// spent budget issues: without one outstanding, no later delivery
+    /// can be solicited, and "solicited" is what the recovery allowance
+    /// requires (residual fix round 2, ruling B). One per record.
     invited: std::collections::HashSet<InputBlockId>,
+    /// Blocks whose invitation the per-peer request cap refused. Marking
+    /// them invited anyway disabled recovery for good — the slots that
+    /// were full at that moment free up later, but nothing ever asked
+    /// again (residual fix round 3). Retried when a slot frees and on
+    /// every [`Event::Tick`]; released at prune.
+    pending_invitations: std::collections::HashSet<InputBlockId>,
     /// Recovery allowances already granted to a record, as
     /// `(digest, validation)`. Bounded by
     /// [`crate::bounds::Bounds::digest_recovery_per_block`] and
@@ -912,6 +922,7 @@ impl Processor {
             digest_attempts: HashMap::new(),
             held: HashMap::new(),
             invited: std::collections::HashSet::new(),
+            pending_invitations: std::collections::HashSet::new(),
             recovery_granted: HashMap::new(),
             validation_attempts: HashMap::new(),
             failed_trigger: HashMap::new(),
@@ -982,7 +993,7 @@ impl Processor {
                 new_best_height,
                 ..
             } => self.on_ordering(new_best_header_id, new_best_height, true, ctx, &mut out),
-            Event::Tick { now } => self.on_tick(now),
+            Event::Tick { now } => self.on_tick(now, &mut out),
         }
         out
     }
@@ -1749,7 +1760,9 @@ impl Processor {
         ctx: &ProcessorCtx<'_>,
         out: &mut Vec<Effect>,
     ) {
-        self.request_answered(from, RequestKey::TransactionIds(id));
+        if self.request_answered(from, RequestKey::TransactionIds(id)) {
+            self.retry_invitations(Some(from), out);
+        }
         let Some(rec) = self.records.get(&id) else {
             out.push(Effect::Dropped {
                 id,
@@ -1866,8 +1879,7 @@ impl Processor {
             Some(w) if !w.is_empty() => w,
             _ => return,
         };
-        self.invited.insert(id);
-        self.request(
+        let emitted = self.request(
             out,
             Effect::RequestTransactions {
                 input_block_id: id,
@@ -1877,6 +1889,49 @@ impl Processor {
             peer,
             id,
         );
+        if emitted {
+            self.invited.insert(id);
+            self.pending_invitations.remove(&id);
+        } else {
+            // The peer is at its request cap right now. Recovery is not
+            // lost: the invitation is retried the moment a slot frees.
+            self.pending_invitations.insert(id);
+        }
+    }
+
+    /// Re-issue invitations the request cap refused. `peer` limits the
+    /// retry to the announcer whose slot just freed; `None` retries every
+    /// deferred invitation (the deadline sweep, where any slot may have
+    /// expired).
+    ///
+    /// An invitation that still has no capacity stays deferred silently:
+    /// it was reported once, when it was first refused.
+    fn retry_invitations(&mut self, peer: Option<PeerTag>, out: &mut Vec<Effect>) {
+        if self.pending_invitations.is_empty() {
+            return;
+        }
+        let due: Vec<InputBlockId> = self
+            .pending_invitations
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.records.get(id).is_some_and(|r| {
+                    peer.is_none_or(|p| r.from == p) && self.has_request_capacity(r.from)
+                })
+            })
+            .collect();
+        for id in due {
+            self.invite_recovery(id, out);
+        }
+    }
+
+    /// Whether `peer` has room for another request right now.
+    fn has_request_capacity(&self, peer: PeerTag) -> bool {
+        let now = self.now;
+        let held = self.outstanding.get(&peer).map_or(0, |slots| {
+            slots.iter().filter(|(_, at)| at.0 > now.0).count()
+        });
+        held < self.bounds.requests_per_peer
     }
 
     /// Consume one digest-recovery allowance for `id`. Consumed *before*
@@ -2055,6 +2110,13 @@ impl Processor {
 
     /// Keep `refs` until the outstanding job fails, caching the bodies it
     /// names so taking it later costs only the dispatch.
+    ///
+    /// Alternatives accumulate up to `candidates_per_position`: a peer
+    /// that keeps offering witnesses while a job runs cannot grow this
+    /// list without bound, and — the point of the list — an alternative
+    /// is not lost because a later one arrived. At the cap the oldest
+    /// goes, and a selection already held is refreshed rather than
+    /// duplicated.
     fn hold_selection(
         &mut self,
         id: InputBlockId,
@@ -2068,7 +2130,22 @@ impl Processor {
                 self.cache.insert(b.clone(), now, &self.bounds);
             }
         }
-        self.held.insert(id, HeldSelection { refs, recovery });
+        let cap = self.bounds.candidates_per_position;
+        let slot = self.held.entry(id).or_default();
+        slot.retain(|h| h.refs != refs);
+        if slot.len() >= cap {
+            slot.remove(0);
+        }
+        slot.push(HeldSelection { refs, recovery });
+        // A staged block enumerates its own variants on the next retry;
+        // the expansion this delivery represents has to restart that
+        // enumeration rather than step forward from the cursor (spec
+        // 7.5's retry, ruling C/D).
+        if let Some(st) = self.staging.get_mut(&id) {
+            if st.variants.is_some() {
+                st.pending_restart = true;
+            }
+        }
     }
 
     /// Take the selection held for `id` now that its job has failed.
@@ -2141,7 +2218,12 @@ impl Processor {
         ctx: &ProcessorCtx<'_>,
         out: &mut Vec<Effect>,
     ) {
-        let solicited = from.is_some_and(|p| self.bodies_answered(p, id));
+        let solicited = from.is_some_and(|p| self.bodies_answered(p, id, &bodies));
+        if solicited {
+            // That slot is free now: an invitation the cap refused gets
+            // its chance (residual fix round 3).
+            self.retry_invitations(from, out);
+        }
         let Some(rec) = self.records.get(&id) else {
             out.push(Effect::Dropped {
                 id,
@@ -2661,10 +2743,16 @@ impl Processor {
         if rejected.len() < budget {
             rejected.push(inf.txs.clone());
         }
-        // A selection proposed while this job was outstanding was held
-        // rather than swapped under it; the failure is what it was
-        // waiting for (residual fix round 2, items B and C/D).
-        if let Some(held) = self.held.remove(&id) {
+        // Selections proposed while this job was outstanding were held
+        // rather than swapped under it; the failure is what they were
+        // waiting for (residual fix round 2, items B and C/D). The
+        // newest is tried first, and one that no longer works — already
+        // rejected, or an allowance that is gone — leaves the rest in
+        // place for the failures after this one (residual fix round 3).
+        while let Some(held) = self.held.get_mut(&id).and_then(|h| h.pop()) {
+            if self.held.get(&id).is_some_and(|h| h.is_empty()) {
+                self.held.remove(&id);
+            }
             if self.take_held(id, held, inf.ordering_id, inf.trigger, out) {
                 if self.in_flight.is_none() {
                     self.resume(inf.ordering_id, out);
@@ -2881,6 +2969,7 @@ impl Processor {
             self.digest_attempts.remove(&id);
             self.held.remove(&id);
             self.invited.remove(&id);
+            self.pending_invitations.remove(&id);
             self.recovery_granted.remove(&id);
             self.validation_attempts.remove(&id);
             self.failed_trigger.remove(&id);
@@ -2893,7 +2982,7 @@ impl Processor {
         );
     }
 
-    fn on_tick(&mut self, now: Tick) {
+    fn on_tick(&mut self, now: Tick, out: &mut Vec<Effect>) {
         self.cache.expire(now, self.bounds.tx_cache_ttl_ms);
         let ttl = self.bounds.staging_ttl_ms;
         let expired: Vec<InputBlockId> = self
@@ -2913,6 +3002,8 @@ impl Processor {
             slots.retain(|(_, at)| at.0 > now.0);
             !slots.is_empty()
         });
+        // Slots the sweep freed may be what a deferred invitation needs.
+        self.retry_invitations(None, out);
     }
 
     /// Issue `effect` to `peer` unless that peer is already at the
@@ -2930,7 +3021,13 @@ impl Processor {
     /// answers arrived (residual fix round 2, D). The peer already has
     /// the question; it is dropped silently, and the deadline sweep is
     /// what eventually asks again.
-    fn request(&mut self, out: &mut Vec<Effect>, effect: Effect, peer: PeerTag, subject: [u8; 32]) {
+    fn request(
+        &mut self,
+        out: &mut Vec<Effect>,
+        effect: Effect,
+        peer: PeerTag,
+        subject: [u8; 32],
+    ) -> bool {
         let deadline = Tick(self.now.0.saturating_add(self.bounds.request_timeout_ms));
         let key = RequestKey::of(&effect);
         let now = self.now;
@@ -2939,7 +3036,7 @@ impl Processor {
         slots.retain(|(_, at)| at.0 > now.0);
         if let Some(k) = key {
             if slots.iter().any(|(existing, _)| *existing == k) {
-                return;
+                return false;
             }
         }
         if slots.len() >= cap {
@@ -2947,27 +3044,36 @@ impl Processor {
                 id: subject,
                 reason: DropReason::RequestsFull,
             });
-            return;
+            return false;
         }
         // An effect that is not a request holds no slot; nothing to track.
         if let Some(k) = key {
             slots.push((k, deadline));
         }
         out.push(effect);
+        true
     }
 
     /// Release the slot a delivery answers. Returns whether the delivery
     /// was in fact solicited from that peer — the announcer-recovery
     /// allowance of the residual fix round (B) needs that distinction.
-    /// Release a body request for `id`, whatever weak-id set it asked
-    /// for: a delivery answers the question about the block, and a peer
-    /// that answers partially has still answered.
-    fn bodies_answered(&mut self, peer: PeerTag, id: InputBlockId) -> bool {
+    /// Release the body request `delivered` answers: the one for this
+    /// block that asked for exactly this weak-id set.
+    ///
+    /// Matching on the block alone let an answer to one set free the
+    /// slots still owed for every other set — and a body delivery that
+    /// answered nothing at all free them too, because completion is
+    /// decided before the bodies are looked at (residual fix round 3).
+    /// A set that was only partly answered keeps its slot until its
+    /// deadline: the question has not been answered.
+    fn bodies_answered(&mut self, peer: PeerTag, id: InputBlockId, delivered: &[Body]) -> bool {
+        let weak: Vec<WeakId> = delivered.iter().map(|b| b.weak_id).collect();
+        let answered_key = RequestKey::Transactions(id, weak_set_hash(&weak));
         let Some(slots) = self.outstanding.get_mut(&peer) else {
             return false;
         };
         let before = slots.len();
-        slots.retain(|(k, _)| !matches!(k, RequestKey::Transactions(b, _) if *b == id));
+        slots.retain(|(k, _)| *k != answered_key);
         let answered = slots.len() < before;
         if slots.is_empty() {
             self.outstanding.remove(&peer);
@@ -5905,6 +6011,206 @@ mod tests {
             txs,
             vec![v2.tx_ref],
             "the retained alternative must be dispatched"
+        );
+    }
+
+    // ----- residuals fix round 3 -----
+
+    #[test]
+    fn listless_alternatives_are_kept_until_one_validates() {
+        // One held slot per block meant the second alternative evicted
+        // the first: with A outstanding, B and then C delivered, the
+        // failure of A reached C — and B was unreachable without another
+        // delivery. Alternatives are retained up to the per-position cap.
+        let mut p = processor();
+        let ctx = ts::TestCtx::at(FULL);
+        let a = ts::body(1, 1);
+        let b = ts::body(1, 2);
+        let c = ts::body(1, 3);
+        let ann = listless(1, a.tx_ref.tx_id, None);
+        let id = ts::ann_id(&ann);
+        announce(&mut p, &ctx, &ann, ts::PEER);
+        let running = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![a.clone()],
+                from: Some(ts::PEER),
+                now: Tick(2),
+            },
+        );
+        assert!(has_validate(&running));
+
+        for (tick, body) in [(3u64, &b), (4, &c)] {
+            let refused = ctx.handle(
+                &mut p,
+                Event::TransactionsDelivered {
+                    input_block_id: id,
+                    bodies: vec![body.clone()],
+                    from: Some(ts::PEER),
+                    now: Tick(tick),
+                },
+            );
+            assert!(!has_validate(&refused), "{refused:?}");
+            assert!(drops(&refused).contains(&DropReason::SelectionSettled {
+                state: SelectionState::Pending
+            }));
+        }
+        assert_eq!(p.transaction_refs(&id), Some(&[a.tx_ref][..]));
+
+        // A fails: the most recent alternative runs.
+        let second = ts::validate_err(&mut p, &ctx, &running);
+        let (_, _, _, txs, _) = ts::one_validate(&second);
+        assert_eq!(txs, vec![c.tx_ref], "the newest alternative runs first");
+
+        // C fails too: the older one must still be there, with no
+        // further delivery.
+        let third = ts::validate_err(&mut p, &ctx, &second);
+        let (_, _, block, txs, _) = ts::one_validate(&third);
+        assert_eq!(block, id);
+        assert_eq!(
+            txs,
+            vec![b.tx_ref],
+            "the alternative delivered first must not have been evicted"
+        );
+    }
+
+    #[test]
+    fn answering_one_body_request_leaves_the_other_counted() {
+        // Completion removed *every* body request for the block, so an
+        // answer to one weak-id set — or a body delivery answering
+        // nothing at all — freed slots that were still owed.
+        let bounds = Bounds {
+            requests_per_peer: 2,
+            ..Bounds::default()
+        };
+        let mut p = processor_with(bounds);
+        let x0 = ts::body(1, 1);
+        let x1 = ts::body(2, 1);
+        let mut ctx = ts::TestCtx::at(FULL);
+        // Position 0 is over the per-position cap, position 1 is empty:
+        // both are asked for in one request.
+        for w in 1..=Bounds::default().candidates_per_position as u8 + 1 {
+            ctx.mempool.add_under(x0.weak_id, &ts::body(1, w));
+        }
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, &[x0.clone(), x1.clone()]);
+        let id = ts::ann_id(&ann);
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        assert_eq!(body_requests_to(&eff, ts::PEER), 1, "{eff:?}");
+
+        // The announcer settles position 0. That answers neither set —
+        // the request asked for both weak ids — and asking for the one
+        // still missing is a second, different request.
+        let narrowed = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![x0.clone()],
+                from: Some(ts::PEER),
+                now: Tick(2),
+            },
+        );
+        assert_eq!(
+            body_requests_to(&narrowed, ts::PEER),
+            1,
+            "the narrower set is a new request: {narrowed:?}"
+        );
+
+        // Both slots are now owed. A body delivery that answers neither
+        // must not free one.
+        let unrelated = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![ts::body(200, 1)],
+                from: Some(ts::PEER),
+                now: Tick(3),
+            },
+        );
+        assert!(!drops(&unrelated).contains(&DropReason::RequestsFull));
+        let blocked = ts::announcement(ORD, FULL + 1, 2, None);
+        let eff = announce(&mut p, &ctx, &blocked, ts::PEER);
+        assert!(
+            drops(&eff).contains(&DropReason::RequestsFull),
+            "an unrelated delivery must not free a slot: {eff:?}"
+        );
+
+        // Answering the outstanding set frees exactly that one slot.
+        ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![x1.clone()],
+                from: Some(ts::PEER),
+                now: Tick(4),
+            },
+        );
+        let freed = ts::announcement(ORD, FULL + 1, 3, None);
+        let eff = announce(&mut p, &ctx, &freed, ts::PEER);
+        assert!(
+            eff.iter()
+                .any(|e| matches!(e, Effect::RequestTransactionIds { .. })),
+            "the answered request must free its slot: {eff:?}"
+        );
+    }
+
+    #[test]
+    fn a_suppressed_invitation_is_emitted_when_a_slot_frees() {
+        // The block was marked invited before the request was emitted,
+        // so an invitation the request cap refused was never retried —
+        // and the recovery allowance became unreachable for good.
+        let bounds = Bounds {
+            requests_per_peer: 1,
+            validation_retries_per_block: 1,
+            ..Bounds::default()
+        };
+        let mut p = processor_with(bounds);
+        let b1 = ts::body(1, 1);
+        let mut ctx = ts::TestCtx::at(FULL);
+        ctx.mempool.add(&b1);
+
+        // This one takes the peer's only request slot and never answers.
+        // It hangs off a different ordering block, so it cannot compete
+        // for the tree the validation below runs in.
+        const OTHER: OrderingId = [0xEE; 32];
+        let holder = ts::announcement(OTHER, FULL + 1, 1, None);
+        let holder_id = ts::ann_id(&holder);
+        let eff = announce(&mut p, &ctx, &holder, ts::PEER);
+        assert!(eff
+            .iter()
+            .any(|e| matches!(e, Effect::RequestTransactionIds { .. })));
+
+        // The block below resolves from the mempool and its single
+        // validation dispatches at once, spending the budget: the
+        // invitation is due, and the cap refuses it.
+        let ann = ts::announcement_for(ORD, FULL + 1, 2, None, std::slice::from_ref(&b1));
+        let id = ts::ann_id(&ann);
+        let dispatched = announce(&mut p, &ctx, &ann, ts::PEER);
+        assert!(has_validate(&dispatched));
+        assert_eq!(
+            body_requests_to(&dispatched, ts::PEER),
+            0,
+            "the cap must refuse the invitation: {dispatched:?}"
+        );
+
+        // The holder answers, freeing the slot: the deferred invitation
+        // must go out now.
+        let freed = ctx.handle(
+            &mut p,
+            Event::TransactionIdsDelivered {
+                input_block_id: holder_id,
+                weak_ids: Vec::new(),
+                from: ts::PEER,
+                now: Tick(5),
+            },
+        );
+        assert!(
+            freed.iter().any(|e| matches!(
+                e,
+                Effect::RequestTransactions { input_block_id, from, .. }
+                    if *input_block_id == id && *from == ts::PEER
+            )),
+            "the deferred invitation must be emitted once a slot frees: {freed:?}"
         );
     }
 
