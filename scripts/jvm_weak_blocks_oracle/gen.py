@@ -13,7 +13,7 @@ OUT = ROOT / 'test-vectors/weak-blocks'
 # Every name here must have a dispatch case in WeakBlocksOracle.main: an
 # unknown name makes the oracle exit non-zero, and `check=True` then aborts
 # the whole run, so a stale name silently starves every later vector.
-VECTORS = ['announcement', 'ordering_announcement', 'messages', 'weak_ids', 'pow', 'extension_leaf', 'extension_proof', 'soft_fields', 'input_block_validation']
+VECTORS = ['announcement', 'ordering_announcement', 'messages', 'weak_ids', 'pow', 'extension_leaf', 'extension_proof', 'soft_fields', 'input_block_validation', 'block_sections']
 
 
 def main():
@@ -35,8 +35,12 @@ def main():
         # working directory has to be the pinned ergo checkout for the vectors
         # that touch them.
         cwd = str(HERE / '.work/source') if name == 'input_block_validation' else None
+        # `block_sections` reads this repo's mainnet fixtures, so it is handed
+        # the worktree root explicitly rather than inheriting a working
+        # directory (which the line above may override per vector).
+        extra = [str(ROOT)] if name == 'block_sections' else []
         result = subprocess.run(['scala-cli', '--skip-cli-updates', 'run', str(oracle), '--server=false',
-                                 '--scala', '2.12.20', '--classpath', classpath, '--', name],
+                                 '--scala', '2.12.20', '--classpath', classpath, '--', name, *extra],
                                 text=True, stdout=subprocess.PIPE, check=True, cwd=cwd).stdout
         # logback initialization banner (and scala-cli's outdated-version nag) land on
         # stdout ahead of the JSON payload, and can themselves contain '{' (log pattern
