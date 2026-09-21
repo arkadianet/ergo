@@ -264,6 +264,11 @@ pub enum DropReason {
     /// (`applyInputBlockTransactions`'s `case None`), and the node needs
     /// to see it to spot a peer spraying bodies.
     UnknownBlock,
+    /// A delivered witness cannot replace the block's transaction
+    /// selection: that selection is not in a rejected state — it is
+    /// either outstanding or already applied — so swapping it would put
+    /// an unvalidated body into a processed block.
+    SelectionSettled,
     /// The node is running in digest (stateless) mode, where input
     /// blocks cannot be validated at all (Scala `processInputBlock`).
     DigestMode,
@@ -2160,6 +2165,14 @@ impl Processor {
         self.failed.get(id).map_or(0, |c| c.len())
     }
 
+    /// Validation jobs dispatched for `id` so far, capped by
+    /// [`crate::bounds::Bounds::validation_retries_per_block`]. Counts
+    /// dispatched work, so a job later invalidated by a delivery is
+    /// charged like any other.
+    pub fn validation_attempts(&self, id: &InputBlockId) -> usize {
+        self.validation_attempts.get(id).copied().unwrap_or(0)
+    }
+
     /// Whether a body is currently in the shared cache — what the node
     /// can actually serve for a `105` request.
     pub fn is_cached(&self, tx_ref: &TxRef) -> bool {
@@ -3657,6 +3670,193 @@ mod tests {
             txs,
             vec![other.tx_ref],
             "the retry must run the newly delivered witness"
+        );
+    }
+
+    // ----- final fix wave, round 2 -----
+
+    fn validates(effects: &[Effect]) -> usize {
+        effects
+            .iter()
+            .filter(|e| matches!(e, Effect::Validate { .. }))
+            .count()
+    }
+
+    #[test]
+    fn validation_budget_counts_invalidated_dispatches() {
+        // The budget has to cost *dispatched* work, not accepted failure
+        // results. A peer that keeps delivering fresh witnesses drives
+        // `retry_after_delivery`, invalidates whatever job is
+        // outstanding through `set_tx_refs` and gets another validation
+        // issued — without a single `ValidationResult` being accepted,
+        // so a counter charged only on failure never moves.
+        let budget = Bounds::default().validation_retries_per_block;
+        let mut p = processor();
+        let b1 = ts::body(1, 1);
+        let b2 = ts::body(2, 1);
+        let b3 = ts::body(3, 1);
+        let mut ctx = ts::TestCtx::at(FULL);
+        ctx.mempool.add(&b1);
+        ctx.mempool.add(&b2);
+        ctx.mempool.add(&b3);
+        let ann = ts::announcement_for(
+            ORD,
+            FULL + 1,
+            1,
+            None,
+            &[b1.clone(), b2.clone(), b3.clone()],
+        );
+        let id = ts::ann_id(&ann);
+
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        let mut dispatched = validates(&eff);
+        // One accepted failure, so the block is in a rejected state and a
+        // delivery may drive a retry at all.
+        dispatched += validates(&ts::validate_err(&mut p, &ctx, &eff));
+
+        // Now spray fresh witnesses of the three committed transactions
+        // and never answer the jobs they start.
+        for (i, (seed, witness)) in [
+            (1u8, 2u8),
+            (2, 2),
+            (3, 2),
+            (1, 3),
+            (2, 3),
+            (3, 3),
+            (1, 4),
+            (2, 4),
+            (3, 4),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let out = ctx.handle(
+                &mut p,
+                Event::TransactionsDelivered {
+                    input_block_id: id,
+                    bodies: vec![ts::body(seed, witness)],
+                    from: Some(ts::PEER),
+                    now: Tick(10 + i as u64),
+                },
+            );
+            dispatched += validates(&out);
+        }
+
+        assert!(
+            dispatched <= budget,
+            "a block dispatched {dispatched} validations against a budget of {budget}"
+        );
+        assert_eq!(
+            p.validation_attempts(&id),
+            dispatched,
+            "every dispatched job must be charged to the block's budget"
+        );
+    }
+
+    #[test]
+    fn expanded_variants_restart_combination_enumeration() {
+        // Variant counts [1, 2]: both combinations are tried and fail,
+        // leaving the cursor at [0, 1]. A witness then arrives for
+        // position 0. Advancing forward from [0, 1] reaches [1, 1] and
+        // then runs out, so [1, 0] — the combination the new witness
+        // actually made reachable — is never offered and the block stays
+        // stranded. The enumeration has to restart over the expanded
+        // space, skipping the combinations already recorded as failed.
+        let mut p = processor();
+        let a1 = ts::body(1, 1);
+        let b1 = ts::body(2, 1);
+        let b2 = ts::body(2, 2);
+        let mut ctx = ts::TestCtx::at(FULL);
+        ctx.mempool.add(&a1);
+        ctx.mempool.add_under(b1.weak_id, &b1);
+        ctx.mempool.add_under(b1.weak_id, &b2);
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, &[a1.clone(), b1.clone()]);
+        let id = ts::ann_id(&ann);
+
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        assert_eq!(p.variants_per_position(&id), vec![1, 2]);
+        let (_, _, _, first, _) = ts::one_validate(&eff);
+        assert_eq!(first, vec![a1.tx_ref, b1.tx_ref]);
+        let eff = ts::validate_err(&mut p, &ctx, &eff);
+        let (_, _, _, second, _) = ts::one_validate(&eff);
+        assert_eq!(second, vec![a1.tx_ref, b2.tx_ref]);
+        let eff = ts::validate_err(&mut p, &ctx, &eff);
+        assert!(!has_validate(&eff), "both combinations are exhausted");
+
+        let a2 = ts::body(1, 2);
+        let revived = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![a2.clone()],
+                from: Some(ts::PEER),
+                now: Tick(20),
+            },
+        );
+        let (_, _, block, txs, _) = ts::one_validate(&revived);
+        assert_eq!(block, id);
+        assert_eq!(
+            txs,
+            vec![a2.tx_ref, b1.tx_ref],
+            "the retry must reach the combination the new witness unlocked"
+        );
+        let applied = ts::validate_ok(&mut p, &ctx, &revived, 1);
+        assert!(
+            applied.iter().any(|e| matches!(
+                e,
+                Effect::ChainChanged { applied, .. } if applied == &vec![id]
+            )),
+            "the block must apply once a valid combination is found: {applied:?}"
+        );
+    }
+
+    #[test]
+    fn applied_block_keeps_its_validated_witnesses() {
+        // Witness A fails, witness B is validated and the block applies.
+        // A witness C delivered afterwards must not replace B: the block
+        // is already processed, so no validation would ever run for C
+        // and the applied block would be left exposing an unvalidated
+        // body. Only a selection that is *currently* rejected may be
+        // swapped.
+        let mut p = processor();
+        let a1 = ts::body(1, 1);
+        let a2 = ts::body(1, 2);
+        let mut ctx = ts::TestCtx::at(FULL);
+        ctx.mempool.add(&a1);
+        ctx.mempool.add_under(a1.weak_id, &a2);
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&a1));
+        let id = ts::ann_id(&ann);
+
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        let eff = ts::validate_err(&mut p, &ctx, &eff);
+        let (_, _, _, retried, _) = ts::one_validate(&eff);
+        assert_eq!(retried, vec![a2.tx_ref], "the retry must run the sibling");
+        ts::validate_ok(&mut p, &ctx, &eff, 1);
+        assert_eq!(p.transaction_refs(&id), Some(&[a2.tx_ref][..]));
+        assert_eq!(p.best_input_chain(), vec![id]);
+
+        let a3 = ts::body(1, 3);
+        let late = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![a3.clone()],
+                from: Some(ts::PEER),
+                now: Tick(30),
+            },
+        );
+        assert!(
+            !has_validate(&late),
+            "an applied block must not start a new validation: {late:?}"
+        );
+        assert_eq!(
+            p.transaction_refs(&id),
+            Some(&[a2.tx_ref][..]),
+            "an applied block's transaction references must stay frozen"
+        );
+        assert!(
+            drops(&late).contains(&DropReason::SelectionSettled),
+            "the unusable witness must be reported: {late:?}"
         );
     }
 
