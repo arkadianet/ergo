@@ -434,6 +434,16 @@ struct Staging {
     /// The effective candidate set changed since the last search, so the
     /// cursor restarts — the attempt budget does not.
     dirty: bool,
+    /// A delivery widened the resolved variant lists, so the next retry
+    /// has to re-enumerate from the start of the expanded space rather
+    /// than step forward from the cursor.
+    ///
+    /// The expansion cannot always be acted on when it happens: while a
+    /// job is outstanding the current selection is settled and must not
+    /// be swapped under it, so the restart is *recorded* and consumed by
+    /// whichever retry runs next — the delivery's own, or the outstanding
+    /// job's failure.
+    pending_restart: bool,
     bytes: usize,
     created: Tick,
     from: Option<PeerTag>,
@@ -493,6 +503,7 @@ impl Staging {
             cursor: vec![0; n],
             attempts: 0,
             dirty: false,
+            pending_restart: false,
             bytes: 0,
             created,
             from,
@@ -1223,6 +1234,7 @@ impl Processor {
         let mut to_cache: Vec<Body> = Vec::new();
         let mut over_cap = false;
         let mut admitted = false;
+        let mut expanded = false;
         if let Some(st) = self.staging.get_mut(&id) {
             let Some(variants) = st.variants.as_mut() else {
                 return false;
@@ -1243,6 +1255,7 @@ impl Processor {
                         variant.push(b.tx_ref);
                         to_cache.push(b.clone());
                         admitted = true;
+                        expanded = true;
                     } else {
                         // Spec 7.4's per-position bound applies after
                         // resolution too: a peer must not be able to grow
@@ -1253,6 +1266,9 @@ impl Processor {
                         over_cap = true;
                     }
                 }
+            }
+            if expanded {
+                st.pending_restart = true;
             }
         }
         for b in to_cache {
@@ -1265,6 +1281,13 @@ impl Processor {
             });
         }
         admitted
+    }
+
+    /// Consume `id`'s pending enumeration restart, if it has one.
+    fn take_pending_restart(&mut self, id: &InputBlockId) -> bool {
+        self.staging
+            .get_mut(id)
+            .is_some_and(|st| std::mem::take(&mut st.pending_restart))
     }
 
     /// A witness delivered after the block's current selection was
@@ -1301,6 +1324,8 @@ impl Processor {
         if self.validation_exhausted(&id) {
             return;
         }
+        // This retry *is* the restart the delivery asked for.
+        self.take_pending_restart(&id);
         let Some(refs) = self.next_untried_combination(id, true) else {
             return;
         };
@@ -1848,7 +1873,12 @@ impl Processor {
             }
             return;
         }
-        match self.next_untried_combination(id, false) {
+        // A delivery that widened the variant lists while this job was
+        // outstanding could not act on the expansion — the selection was
+        // settled. Its restart is consumed here instead, so combinations
+        // that became reachable behind the cursor are not stepped past.
+        let restart = self.take_pending_restart(&id);
+        match self.next_untried_combination(id, restart) {
             Some(refs) => {
                 self.set_tx_refs(id, refs, out);
                 // Fix round 1, finding 5c: the retry re-runs the same
