@@ -18,7 +18,7 @@
 //! blocks inside one call, this port walks them one `Validate` at a time
 //! (see [`Processor::pump`]).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use ergo_ser::input_block::{InputBlockAnnouncement, OrderingBlockAnnouncement};
@@ -325,7 +325,7 @@ pub struct Processor {
     ordering: OrderingStore,
     outstanding: HashMap<PeerTag, usize>,
     in_flight: Option<InFlight>,
-    failed: HashSet<(InputBlockId, TxRef)>,
+    failed: HashMap<InputBlockId, Vec<Vec<TxRef>>>,
     pending_triggers: VecDeque<(OrderingId, InputBlockId)>,
 }
 
@@ -341,6 +341,9 @@ struct Staging {
     candidates: Vec<Vec<Body>>,
     variants: Option<Vec<Vec<TxRef>>>,
     cursor: Vec<usize>,
+    /// Ordered-digest combinations tried so far, accumulated across every
+    /// delivery for this block (spec 7.5's per-block limit).
+    attempts: usize,
     bytes: usize,
     created: Tick,
     from: Option<PeerTag>,
@@ -398,6 +401,7 @@ impl Staging {
             candidates: vec![Vec::new(); n],
             variants: None,
             cursor: vec![0; n],
+            attempts: 0,
             bytes: 0,
             created,
             from,
@@ -481,7 +485,7 @@ impl Processor {
             ordering: OrderingStore::default(),
             outstanding: HashMap::new(),
             in_flight: None,
-            failed: HashSet::new(),
+            failed: HashMap::new(),
             pending_triggers: VecDeque::new(),
         }
     }
@@ -1106,7 +1110,7 @@ impl Processor {
         // same rejected bodies to make the node re-run the job forever;
         // the witness-variant retry swaps in an untried body instead, so
         // a legitimate retry is unaffected.
-        if txs.iter().any(|r| self.failed.contains(&(target, *r))) {
+        if self.has_failed_combination(&target, &txs) {
             out.push(Effect::Dropped {
                 id: target,
                 reason: DropReason::ValidationFailed,
@@ -1235,10 +1239,8 @@ impl Processor {
     /// failure).
     fn on_validation_failed(&mut self, inf: InFlight, out: &mut Vec<Effect>) {
         let id = inf.id;
-        if let Some(refs) = self.tx_refs.get(&id) {
-            for r in refs.clone() {
-                self.failed.insert((id, r));
-            }
+        if let Some(refs) = self.tx_refs.get(&id).cloned() {
+            self.failed.entry(id).or_default().push(refs);
         }
         let next =
             self.staging.get_mut(&id).and_then(
@@ -1423,7 +1425,7 @@ impl Processor {
             self.tx_refs.remove(&id);
             self.staging.shift_remove(&id);
             self.waitlist.retain(|(w, _)| *w != id);
-            self.failed.retain(|(b, _)| *b != id);
+            self.failed.remove(&id);
         }
 
         self.ordering.prune(
@@ -1571,9 +1573,33 @@ impl Processor {
         self.waitlist.len()
     }
 
-    /// Whether `(block, variant)` has already failed validation (spec 7.5).
-    pub fn has_failed(&self, id: &InputBlockId, variant: &TxRef) -> bool {
-        self.failed.contains(&(*id, *variant))
+    /// Whether this exact transaction *combination* has already failed
+    /// validation for `id` (spec 7.5). Combination-level, not per-body: a
+    /// block whose first witness choice failed must still be able to
+    /// retry with a different witness for the offending position without
+    /// the other, innocent, transactions being treated as failed too.
+    pub fn has_failed_combination(&self, id: &InputBlockId, txs: &[TxRef]) -> bool {
+        self.failed
+            .get(id)
+            .is_some_and(|combos| combos.iter().any(|c| c.as_slice() == txs))
+    }
+
+    /// Whether a body is currently in the shared cache — what the node
+    /// can actually serve for a `105` request.
+    pub fn is_cached(&self, tx_ref: &TxRef) -> bool {
+        self.cache.contains(tx_ref)
+    }
+
+    /// Application triggers deferred while a validation job is in flight.
+    pub fn deferred_triggers(&self) -> usize {
+        self.pending_triggers.len()
+    }
+
+    /// Ordered-digest combinations tried for `id` so far. Monotone over
+    /// the block's whole life and capped at
+    /// [`crate::bounds::Bounds::digest_attempts_per_block`] (spec 7.5).
+    pub fn staged_digest_attempts(&self, id: &InputBlockId) -> usize {
+        self.staging.get(id).map_or(0, |s| s.attempts)
     }
 
     /// Scala `saveOrderingBlockTransactions`.
@@ -1646,6 +1672,25 @@ mod tests {
 
     fn has_validate(effects: &[Effect]) -> bool {
         effects.iter().any(|e| matches!(e, Effect::Validate { .. }))
+    }
+
+    /// Deliver an empty transaction set for `ann` — the shape an
+    /// announcement that commits to no transactions takes.
+    fn deliver_empty(
+        p: &mut Processor,
+        ctx: &ts::TestCtx,
+        ann: &InputBlockAnnouncement,
+        now: u64,
+    ) -> Vec<Effect> {
+        ctx.handle(
+            p,
+            Event::TransactionsDelivered {
+                input_block_id: ts::ann_id(ann),
+                bodies: Vec::new(),
+                from: Some(ts::PEER),
+                now: Tick(now),
+            },
+        )
     }
 
     // ----- happy path -----
@@ -2324,6 +2369,393 @@ mod tests {
         assert!(p.ordering_announcement(&id2).is_some());
     }
 
+    // ----- fix round 1: staging, resolution and job lifecycle -----
+
+    /// Finding 1. A weak-id collision candidate that is *not* what the
+    /// announcement committed to must never be cached and must never be
+    /// offered as a retry: the digest fixes the tx id at every position,
+    /// so only witness siblings of the selected body can legitimately
+    /// follow it.
+    #[test]
+    fn collision_candidate_rejected_by_validation_is_never_applied() {
+        let mut p = processor();
+        let real = ts::body(1, 1);
+        let decoy = ts::body(9, 1);
+        let mut ctx = ts::TestCtx::at(FULL);
+        ctx.mempool.add_under(real.weak_id, &decoy);
+        ctx.mempool.add_under(real.weak_id, &real);
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&real));
+        let id = ts::ann_id(&ann);
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        let (_, _, _, txs, _) = ts::one_validate(&eff);
+        assert_eq!(txs, vec![real.tx_ref]);
+        assert!(
+            !p.is_cached(&decoy.tx_ref),
+            "an unverified collision candidate must not reach the cache"
+        );
+
+        let out = ts::validate_err(&mut p, &ctx, &eff);
+        assert!(
+            !has_validate(&out),
+            "the colliding transaction is not a legitimate retry: {out:?}"
+        );
+        assert_eq!(drops(&out), vec![DropReason::ValidationFailed]);
+        assert_eq!(p.transaction_refs(&id), Some(&[real.tx_ref][..]));
+        assert!(!p.is_cached(&decoy.tx_ref));
+        assert!(p.best_input_block().is_none());
+    }
+
+    /// Finding 2. `[A_bad, B_valid]` failing must not blacklist
+    /// `B_valid`: the retry is `[A_good, B_valid]`.
+    #[test]
+    fn failed_witness_does_not_poison_other_transactions_in_the_block() {
+        let mut p = processor();
+        let a1 = ts::body(1, 1);
+        let a2 = ts::body(1, 2);
+        let b = ts::body(2, 1);
+        assert_eq!(a1.tx_ref.tx_id, a2.tx_ref.tx_id);
+        let mut ctx = ts::TestCtx::at(FULL);
+        ctx.mempool.add_under(a1.weak_id, &a1);
+        ctx.mempool.add_under(a1.weak_id, &a2);
+        ctx.mempool.add(&b);
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, &[a1.clone(), b.clone()]);
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        let (_, _, _, txs, _) = ts::one_validate(&eff);
+        assert_eq!(txs, vec![a1.tx_ref, b.tx_ref]);
+
+        let retry = ts::validate_err(&mut p, &ctx, &eff);
+        let (_, _, _, txs, _) = ts::one_validate(&retry);
+        assert_eq!(
+            txs,
+            vec![a2.tx_ref, b.tx_ref],
+            "only the offending position may change"
+        );
+    }
+
+    /// Finding 3. Five local guesses at one position are over the
+    /// per-position cap; the announcer's own body must settle it.
+    #[test]
+    fn peer_delivery_resolves_over_cap_candidate_set() {
+        let mut p = processor();
+        let real = ts::body(1, 1);
+        let mut ctx = ts::TestCtx::at(FULL);
+        for seed in 20..25u8 {
+            ctx.mempool.add_under(real.weak_id, &ts::body(seed, 1));
+        }
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&real));
+        let id = ts::ann_id(&ann);
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        assert!(eff.contains(&Effect::RequestTransactions {
+            input_block_id: id,
+            weak_ids: vec![real.weak_id],
+            from: ts::PEER,
+        }));
+        assert!(!has_validate(&eff));
+
+        let out = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![real.clone()],
+                from: Some(ts::PEER),
+                now: Tick(2),
+            },
+        );
+        let (_, _, vid, txs, _) = ts::one_validate(&out);
+        assert_eq!(vid, id);
+        assert_eq!(
+            txs,
+            vec![real.tx_ref],
+            "the peer's body replaces the local guesses"
+        );
+        let done = ts::validate_ok(&mut p, &ctx, &out, 1);
+        assert!(done
+            .iter()
+            .any(|e| matches!(e, Effect::ChainChanged { .. })));
+        assert_eq!(p.best_input_chain(), vec![id]);
+    }
+
+    /// Finding 4. A delivery that swaps the body under an outstanding job
+    /// invalidates that job; the late result must not be applied.
+    #[test]
+    fn interleaved_delivery_invalidates_the_outstanding_job() {
+        let mut p = processor();
+        let v1 = ts::body(1, 1);
+        let v2 = ts::body(1, 2);
+        let ctx = ts::TestCtx::at(FULL);
+        // No weak ids announced, so the delivered order is authoritative;
+        // both witnesses share a tx id, so both satisfy the digest.
+        let ann = ts::announcement_with(
+            ORD,
+            FULL + 1,
+            1,
+            None,
+            ts::tx_digest(&[v1.tx_ref.tx_id]),
+            None,
+        );
+        let id = ts::ann_id(&ann);
+        announce(&mut p, &ctx, &ann, ts::PEER);
+        let first = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![v1.clone()],
+                from: Some(ts::PEER),
+                now: Tick(2),
+            },
+        );
+        let (old_job, old_gen, _, txs, _) = ts::one_validate(&first);
+        assert_eq!(txs, vec![v1.tx_ref]);
+
+        let second = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![v2.clone()],
+                from: Some(ts::PEER),
+                now: Tick(3),
+            },
+        );
+        assert!(
+            drops(&second).contains(&DropReason::StaleValidation),
+            "the outstanding job's bodies changed underneath it: {second:?}"
+        );
+        let (_, _, _, txs, _) = ts::one_validate(&second);
+        assert_eq!(txs, vec![v2.tx_ref], "the job is reissued for the new body");
+
+        let late = ctx.handle(
+            &mut p,
+            Event::ValidationResult {
+                job: old_job,
+                generation: old_gen,
+                outcome: Ok(1),
+            },
+        );
+        assert_eq!(drops(&late), vec![DropReason::StaleValidation]);
+        assert!(!late
+            .iter()
+            .any(|e| matches!(e, Effect::ChainChanged { .. })));
+    }
+
+    /// Finding 5a. Starting one job from the deferred queue must leave
+    /// the rest of the queue intact. Three forks deliver bodies while a
+    /// job is outstanding; servicing the queue starts exactly one job and
+    /// the triggers behind it must survive.
+    #[test]
+    fn deferred_triggers_survive_a_started_job() {
+        let mut p = processor();
+        let ctx = ts::TestCtx::at(FULL);
+        let mut nonce = 0u64;
+        let mut ann = |prev: Option<InputBlockId>| {
+            nonce += 1;
+            ts::announcement(ORD, FULL + 1, nonce, prev)
+        };
+        let ib1 = ann(None);
+        // Fork A (stays the best fork but never gets a3's bodies).
+        let a2 = ann(Some(ts::ann_id(&ib1)));
+        let a3 = ann(Some(ts::ann_id(&a2)));
+        // Fork B, one block longer than A.
+        let b2 = ann(Some(ts::ann_id(&ib1)));
+        let b3 = ann(Some(ts::ann_id(&b2)));
+        let b4 = ann(Some(ts::ann_id(&b3)));
+        // Fork C, same length as A.
+        let c2 = ann(Some(ts::ann_id(&ib1)));
+        let c3 = ann(Some(ts::ann_id(&c2)));
+        for a in [&ib1, &a2, &a3, &b2, &b3, &b4, &c2, &c3] {
+            announce(&mut p, &ctx, a, ts::PEER);
+        }
+
+        let root = deliver_empty(&mut p, &ctx, &ib1, 2);
+        ts::validate_ok(&mut p, &ctx, &root, 1);
+        let first = deliver_empty(&mut p, &ctx, &a2, 3);
+        assert!(has_validate(&first), "fork A's first child is applied");
+
+        // Everything below arrives while that job is outstanding.
+        for (a, t) in [(&b2, 4), (&b3, 5), (&b4, 6), (&c3, 7)] {
+            assert!(!has_validate(&deliver_empty(&mut p, &ctx, a, t)));
+        }
+        assert_eq!(p.deferred_triggers(), 4);
+
+        let out = ts::validate_ok(&mut p, &ctx, &first, 1);
+        let (_, _, vid, _, _) = ts::one_validate(&out);
+        assert_eq!(
+            vid,
+            ts::ann_id(&b2),
+            "the queue's fork-switch trigger starts the next job"
+        );
+        assert_eq!(
+            p.deferred_triggers(),
+            2,
+            "triggers behind the one that started a job must survive"
+        );
+    }
+
+    /// Finding 5b. A terminal validation failure must still service the
+    /// deferred queue.
+    #[test]
+    fn terminal_validation_failure_resumes_queued_work() {
+        let mut p = processor();
+        let ctx = ts::TestCtx::at(FULL);
+        let ib1 = ts::announcement(ORD, FULL + 1, 1, None);
+        let ib2 = ts::announcement(ORD, FULL + 1, 2, Some(ts::ann_id(&ib1)));
+        for a in [&ib1, &ib2] {
+            announce(&mut p, &ctx, a, ts::PEER);
+        }
+        let first = deliver_empty(&mut p, &ctx, &ib1, 2);
+        assert!(has_validate(&first));
+        deliver_empty(&mut p, &ctx, &ib2, 3);
+        assert_eq!(p.deferred_triggers(), 1);
+
+        let out = ts::validate_err(&mut p, &ctx, &first);
+        assert_eq!(drops(&out), vec![DropReason::ValidationFailed]);
+        assert_eq!(
+            p.deferred_triggers(),
+            0,
+            "the queue must be serviced after a terminal failure"
+        );
+    }
+
+    /// Finding 5c. A witness retry during a fork switch must keep the
+    /// trigger the switch was selected on; retrying with the block's own
+    /// id collapses the selection to the linear branch and stalls.
+    #[test]
+    fn witness_retry_keeps_the_original_fork_switch_trigger() {
+        let mut p = processor();
+        let v1 = ts::body(5, 1);
+        let v2 = ts::body(5, 2);
+        let mut ctx = ts::TestCtx::at(FULL);
+        ctx.mempool.add_under(v1.weak_id, &v1);
+        ctx.mempool.add_under(v1.weak_id, &v2);
+
+        let ib1 = ts::announcement(ORD, FULL + 1, 1, None);
+        announce(&mut p, &ctx, &ib1, ts::PEER);
+        let eff = deliver_empty(&mut p, &ctx, &ib1, 2);
+        ts::validate_ok(&mut p, &ctx, &eff, 1);
+
+        let ib2a = ts::announcement(ORD, FULL + 1, 2, Some(ts::ann_id(&ib1)));
+        announce(&mut p, &ctx, &ib2a, ts::PEER);
+        let eff = deliver_empty(&mut p, &ctx, &ib2a, 3);
+        ts::validate_ok(&mut p, &ctx, &eff, 1);
+        assert_eq!(
+            p.best_input_chain(),
+            vec![ts::ann_id(&ib2a), ts::ann_id(&ib1)]
+        );
+
+        // Fork B, longer, whose first block has two witness variants.
+        let ib2b = ts::announcement_for(
+            ORD,
+            FULL + 1,
+            3,
+            Some(ts::ann_id(&ib1)),
+            std::slice::from_ref(&v1),
+        );
+        let quiet = announce(&mut p, &ctx, &ib2b, ts::PEER);
+        assert!(!has_validate(&quiet), "fork B is not yet longer");
+        let ib3b = ts::announcement(ORD, FULL + 1, 4, Some(ts::ann_id(&ib2b)));
+        announce(&mut p, &ctx, &ib3b, ts::PEER);
+        let switch = deliver_empty(&mut p, &ctx, &ib3b, 4);
+        let (_, _, vid, txs, _) = ts::one_validate(&switch);
+        assert_eq!(vid, ts::ann_id(&ib2b));
+        assert_eq!(txs, vec![v1.tx_ref]);
+
+        let retry = ts::validate_err(&mut p, &ctx, &switch);
+        let (_, _, vid, txs, _) = ts::one_validate(&retry);
+        assert_eq!(vid, ts::ann_id(&ib2b));
+        assert_eq!(
+            txs,
+            vec![v2.tx_ref],
+            "the retry must re-run the same fork switch, not the linear branch"
+        );
+    }
+
+    /// Finding 6. After the cache expires, redelivering a digest-verified
+    /// body must refill it and let the chain move again.
+    #[test]
+    fn redelivery_refills_evicted_bodies_and_progress_resumes() {
+        let mut p = processor();
+        let b1 = ts::body(1, 1);
+        let b2 = ts::body(2, 1);
+        let mut ctx = ts::TestCtx::at(FULL);
+        ctx.mempool.add(&b1);
+        ctx.mempool.add(&b2);
+
+        let a1 = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&b1));
+        let id1 = ts::ann_id(&a1);
+        let eff = announce(&mut p, &ctx, &a1, ts::PEER);
+        ts::validate_ok(&mut p, &ctx, &eff, 1);
+        assert!(p.is_cached(&b1.tx_ref));
+
+        // Two hours pass: Scala's `expireAfterWrite` clears the cache.
+        ctx.handle(
+            &mut p,
+            Event::Tick {
+                now: Tick(10_000_000),
+            },
+        );
+        assert!(!p.is_cached(&b1.tx_ref));
+
+        let a2 = ts::announcement_for(ORD, FULL + 1, 2, Some(id1), std::slice::from_ref(&b2));
+        let id2 = ts::ann_id(&a2);
+        let stuck = announce(&mut p, &ctx, &a2, ts::PEER);
+        assert!(!has_validate(&stuck));
+        assert_eq!(drops(&stuck), vec![DropReason::CacheEvicted]);
+
+        let refilled = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id1,
+                bodies: vec![b1.clone()],
+                from: Some(ts::PEER),
+                now: Tick(10_000_001),
+            },
+        );
+        assert!(p.is_cached(&b1.tx_ref), "redelivery must refill the cache");
+        let (_, _, vid, _, previous) = ts::one_validate(&refilled);
+        assert_eq!(vid, id2, "the chain resumes once the body is back");
+        assert_eq!(previous, vec![b1.tx_ref]);
+    }
+
+    /// Finding 7. The per-block digest budget is a total, not a
+    /// per-delivery allowance.
+    #[test]
+    fn digest_attempt_budget_is_not_reset_by_redelivery() {
+        let mut p = processor();
+        let x = ts::body(1, 1);
+        let y = ts::body(2, 1);
+        let mut ctx = ts::TestCtx::at(FULL);
+        // Four non-matching candidates at each of two positions: 16
+        // combinations, exactly the budget, none of them correct.
+        for seed in 30..34u8 {
+            ctx.mempool.add_under(x.weak_id, &ts::body(seed, 1));
+        }
+        for seed in 40..44u8 {
+            ctx.mempool.add_under(y.weak_id, &ts::body(seed, 1));
+        }
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, &[x.clone(), y.clone()]);
+        let id = ts::ann_id(&ann);
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        assert!(!has_validate(&eff));
+        let budget = Bounds::default().digest_attempts_per_block;
+        assert_eq!(p.staged_digest_attempts(&id), budget);
+
+        for tick in 0..3u64 {
+            ctx.handle(
+                &mut p,
+                Event::TransactionsDelivered {
+                    input_block_id: id,
+                    bodies: Vec::new(),
+                    from: Some(ts::PEER),
+                    now: Tick(10 + tick),
+                },
+            );
+            assert_eq!(
+                p.staged_digest_attempts(&id),
+                budget,
+                "redelivery must not buy a fresh search budget"
+            );
+        }
+    }
+
     #[test]
     fn failed_variant_is_not_revalidated_on_redelivery() {
         // Spec 7.5: once a body has failed validation for a block, the
@@ -2349,8 +2781,8 @@ mod tests {
             },
         );
         assert!(!has_validate(&again), "{again:?}");
-        assert_eq!(drops(&again), vec![DropReason::ValidationFailed]);
-        assert!(p.has_failed(&id, &b1.tx_ref));
+        assert!(p.has_failed_combination(&id, &[b1.tx_ref]));
+        assert!(p.best_input_block().is_none());
     }
 
     // ----- oracle parity -----
