@@ -1,0 +1,28 @@
+{
+  "id": "2026-09-22-4",
+  "title": "the follower never holds the same input chain as the miner at the same instant",
+  "severity": "divergence",
+  "component": "rust \u2014 ergo-inputblocks processor throughput",
+  "status": "open",
+  "source": "scripts/devnet-matrix smoke, funded run 2026-09-22 (release build)",
+  "summary": "Over 2029 paired samples, with 635+ of them taken while both nodes were on the same ordering tip, the two nodes NEVER reported the same `bestInputBlock`, so `bestInputChain` was never identical either. The blocks the follower does hold agree byte for byte and are always a suffix of the miner's chain - the nodes never disagree about history - but the follower runs several input blocks behind and holds only a couple of a chain that is tens long.",
+  "measurement": {
+    "samples": 669,
+    "same_tip_samples": 223,
+    "exact_tip_matches": 0,
+    "max_propagation_lag_seconds": 4.152,
+    "accumulated_drops": {
+      "AlreadyKnown": 1159,
+      "ValidationUnavailable": 45,
+      "OutsideHeightWindow": 33
+    },
+    "previous_run_pipeline_counts": {
+      "scala_input_blocks_mined": 1172,
+      "rust_validation_jobs_dispatched": 36,
+      "note": "measured on the run before waitlist_entries was raised; the waitlist overflow is fixed (WaitlistFull no longer appears) but the dispatch rate was not re-measured"
+    }
+  },
+  "not_a_consensus_divergence_because": "every input block the follower applied matches the miner's byte for byte, the chains never disagreed about history (the smoke fails the run if they do and recorded zero mismatches), no DigestMismatch or TxDigestMismatch fired, and the peer was never penalised.",
+  "where_to_look": "the processor keeps ONE validation job in flight (spec 7.4) and the node runs it inline on the action loop. At 64 input blocks per ordering block that is the obvious ceiling; measure dispatch rate against announcement rate before assuming it.",
+  "gate": "assertions 2 and 3 of the devnet-matrix smoke FAIL on this."
+}

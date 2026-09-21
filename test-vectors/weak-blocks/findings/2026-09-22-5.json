@@ -1,0 +1,127 @@
+{
+  "id": "2026-09-22-5",
+  "title": "the follower falls 4 ordering blocks behind under a transaction workload",
+  "severity": "observation",
+  "component": "rust \u2014 ergo-node follower throughput",
+  "status": "open",
+  "source": "scripts/devnet-matrix smoke, funded run 2026-09-22 (release build)",
+  "summary": "With a steady payment workload the Rust node exceeded the +-2 ordering block window 24 times, peaking 4 blocks behind. Without a workload the same build stayed within 1. Startup is excluded (60 s per process); the post-restart catch-up is NOT, deliberately.",
+  "measurement": {
+    "max_height_gap": 4,
+    "height_window": 2,
+    "violation_count": 24,
+    "accumulated_drops": {
+      "AlreadyKnown": 1159,
+      "ValidationUnavailable": 45,
+      "OutsideHeightWindow": 33
+    },
+    "samples": 2029,
+    "peer_states_seen": [
+      "active"
+    ]
+  },
+  "violations": [
+    {
+      "at": 1790008372.1821158,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008373.187013,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008374.1937816,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008375.2000356,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008376.2047775,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008377.2105668,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008378.2154827,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008379.2211425,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008380.2259824,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008381.231804,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008382.2365654,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008383.242621,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008384.258574,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008385.2738557,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008386.3075655,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008387.318775,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008388.343199,
+      "scala_height": 8,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008389.348337,
+      "scala_height": 8,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008390.3538125,
+      "scala_height": 8,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008391.359466,
+      "scala_height": 8,
+      "rust_height": 4
+    }
+  ],
+  "likely_related_to": "2026-09-22-3: every ordering block with transactions falls back to a full BlockTransactions download, so under load the follower pays the download it was supposed to avoid, on top of validating input blocks.",
+  "gate": "assertion 5 of the devnet-matrix smoke FAILS on this."
+}

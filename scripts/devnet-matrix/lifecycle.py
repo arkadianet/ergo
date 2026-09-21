@@ -24,13 +24,30 @@ P2P = {'scala': 19560, 'rust': 19561}
 REST = {'scala': 19580, 'rust': 19581}
 
 # The weak-blocks branch builds without a git tag, so `/info.appVersion`
-# is a branch-and-hash SNAPSHOT string rather than a release number.
-# Pinning the literal would break on every rebuild, so the readiness
-# check pins the two properties that actually matter: the build is NOT a
-# stock release (which has no input blocks at all), and its `/info`
-# carries the `bestInputBlock` key that only `ErgoStatsCollector` on the
-# weak-blocks branch emits.
-STOCK_VERSIONS = ('6.0.5', '6.0.4', '6.0.3')
+# is a branch-and-hash SNAPSHOT string. It is pinned EXACTLY: the hash in
+# it is the provisioned ergo commit
+# (31a8de804f7328704f2753a1cf151dda8f64689f, see
+# scripts/jvm_weak_blocks_oracle/README.md), and "some build that also
+# has input blocks" is not a reference — every vector and every ruling in
+# this port is against that one commit. A rebuild at a different commit
+# must fail loudly here rather than silently reinterpret the results.
+# Override only to re-pin deliberately.
+SCALA_APP_VERSION = os.environ.get(
+    'MATRIX_SCALA_APP_VERSION', '6.0.4-492-31a8de80-SNAPSHOT')
+
+# Height-0 state root both nodes must report. `minerRewardDelay` feeds
+# the emission box's proposition, so the Scala `genesisStateDigestHex`
+# and the Rust `[chain] devnet_miner_reward_delay` genesis box set have
+# to line up; a mismatch forks the two nodes at genesis and every later
+# assertion becomes meaningless.
+GENESIS_STATE_ROOT = os.environ.get(
+    'MATRIX_GENESIS_STATE_ROOT',
+    'c01a142d004a917b4af35385265748e37f7c77ab8a4e8b2080b9c193516b845602')
+
+# Announcement bytes land in the Rust node's debug log, and a divergence
+# findings artifact is required to carry them. The recipe therefore sets
+# the filter itself rather than relying on the operator's environment.
+DEFAULT_RUST_LOG = 'info,ergo_node::node::input_blocks=debug,ergo_inputblocks=debug'
 
 
 def classpath_file() -> Path:
@@ -84,13 +101,22 @@ def _workspace_node_binary() -> str:
         cwd=ROOT, capture_output=True, text=True, check=True,
     )
     target = json.loads(metadata.stdout)['target_directory']
-    candidate = Path(target) / 'debug' / 'ergo-node'
-    if not candidate.exists():
-        raise SystemExit(
-            f'ergo-node not built at {candidate}; run `cargo build -p ergo-node` '
-            'or set RUST_NODE to the binary path'
-        )
-    return str(candidate)
+    # Release first: the input-block processor's throughput is what the
+    # +-2 height window and the reconstruction rate are measured against,
+    # and a debug build is not a measurement of the shipped node.
+    for profile in ('release', 'debug'):
+        candidate = Path(target) / profile / 'ergo-node'
+        if candidate.exists():
+            return str(candidate)
+    raise SystemExit(
+        f'ergo-node not built under {target}; run '
+        '`cargo build --release -p ergo-node` or set RUST_NODE to the binary path'
+    )
+
+
+def node_binary() -> str:
+    """The Rust binary this recipe will launch (release preferred)."""
+    return os.environ.get('RUST_NODE') or _workspace_node_binary()
 
 
 def _command(name):
@@ -102,8 +128,8 @@ def _command(name):
         return ['java', '-Xmx2g', '-Dlogback.configurationFile=' + str(HERE / 'logback.xml'),
                 '-cp', cp.read_text().strip(), 'org.ergoplatform.ErgoApp',
                 '--config', os.environ.get('SCALA_CONFIG', str(HERE / 'scala-node.conf'))]
-    binary = os.environ.get('RUST_NODE') or _workspace_node_binary()
-    return [binary, '--config', os.environ.get('RUST_CONFIG', str(HERE / 'rust-node.toml'))]
+    return [node_binary(), '--config',
+            os.environ.get('RUST_CONFIG', str(HERE / 'rust-node.toml'))]
 
 
 def _config_path(name):
@@ -115,9 +141,12 @@ def spawn(name):
     """Launch one node and wait for its REST `/info` to report a live state."""
     WORK.mkdir(exist_ok=True)
     (WORK / name).mkdir(exist_ok=True)
+    env = dict(os.environ)
+    env.setdefault('RUST_LOG', DEFAULT_RUST_LOG)
     with (WORK / (name + '.log')).open('a') as log:
         process = subprocess.Popen(_command(name), cwd=ROOT, stdout=log,
-                                   stderr=subprocess.STDOUT, start_new_session=True)
+                                   stderr=subprocess.STDOUT, start_new_session=True,
+                                   env=env)
     (WORK / (name + '.pid')).write_text(str(process.pid))
     (WORK / (name + '.config')).write_text(_config_path(name))
     deadline = time.monotonic() + 120
@@ -130,12 +159,20 @@ def spawn(name):
                 raise ValueError('node state is not initialized yet')
             if name == 'scala':
                 version = info.get('appVersion')
-                if version in STOCK_VERSIONS or 'bestInputBlock' not in info:
+                if version != SCALA_APP_VERSION:
                     raise RuntimeError(
-                        f'Scala node at {REST[name]} is not a weak-blocks build '
-                        f'(appVersion={version!r}, bestInputBlock key '
-                        f'{"present" if "bestInputBlock" in info else "absent"}); '
-                        'point MATRIX_CLASSPATH at the weak-blocks classpath')
+                        f'Scala node at {REST[name]} reports appVersion '
+                        f'{version!r}, not the pinned {SCALA_APP_VERSION!r}; point '
+                        'MATRIX_CLASSPATH at the provisioned weak-blocks build')
+                if 'bestInputBlock' not in info:
+                    raise RuntimeError(
+                        f'Scala node at {REST[name]} has no bestInputBlock key in '
+                        '/info — that build has no input blocks')
+            if info['stateRoot'] != GENESIS_STATE_ROOT and (info.get('fullHeight') or 0) == 0:
+                raise RuntimeError(
+                    f'{name} genesis state root {info["stateRoot"]} != the shared '
+                    f'{GENESIS_STATE_ROOT}: the two nodes would fork at height 0. '
+                    "Check monetary.minerRewardDelay / devnet_miner_reward_delay.")
             (WORK / (name + '.appVersion')).write_text(str(info.get('appVersion')))
             return info
         except (OSError, ValueError):

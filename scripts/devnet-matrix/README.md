@@ -70,16 +70,28 @@ process name.
   classifies a solution as an ordering block when `d <= b` and as an
   input block when `b < d <= b * subblocksPerBlock`. At difficulty 1,
   `b = q` and *every* solution is an ordering block — the recipe would
-  never see a single input block. The value here is tuned so the JVM CPU
-  miner finds an ordering block every ~30 s and, with
-  `subblocksPerBlock = 64`, an input block roughly every half second.
-  Raise it if the Rust node cannot keep inside assertion 5's ±2 window;
-  raising `blockInterval` does not help, because nothing throttles the
-  miner to it on a chain whose epoch never ends.
+  never see a single input block. `4e20` (20 000) is hand-tuned to this
+  host: **measured block rate 1172 input blocks and ~22 ordering blocks
+  over a 20-minute run** — an ordering block every ~30 s and, with
+  `subblocksPerBlock = 64`, an input block roughly every second. A
+  slower or faster machine wants a different value, and **the Scala
+  `initialDifficultyHex` and the Rust `devnet_initial_difficulty_hex`
+  must be changed together**. Raising `blockInterval` does not help:
+  nothing throttles the miner to it on a chain whose epoch never ends,
+  so the target is the only lever on the rate.
 
-The Rust side needs two devnet-only overrides to match:
-`[chain] devnet_initial_difficulty_hex` (same value as the Scala config)
-and `[input_blocks] enabled = true`. The latter also seeds launch
+- **`[input_blocks] strict_field_binding = false`.** The pinned miner
+  announces a `prevTransactionsDigest` its own extension does not commit
+  to (`CandidateGenerator.scala:752` vs `:758`), so the strict binding
+  check rejects every input block that carries a transaction. The recipe
+  runs in Scala-parity mode; the port default stays strict. See
+  `test-vectors/weak-blocks/findings/2026-09-22-2.json`.
+- **`[input_blocks.bounds] waitlist_entries = 8192`.** The stock 256
+  overflowed 280 times in a 20-minute run at this input-block rate.
+
+The Rust side needs three devnet-only overrides to match the Scala
+config: `[chain] devnet_initial_difficulty_hex`,
+`[chain] devnet_miner_reward_delay`, and `[input_blocks] enabled = true`. The latter also seeds launch
 parameter id 9 (`subblocksPerBlock = 64`), which the `weak-blocks`
 branch carries in `Parameters.DefaultParameters` from genesis; without
 it the Rust node has no multiplier and drops every announcement with
@@ -87,77 +99,80 @@ it the Rust node has no multiplier and drops every announcement with
 
 ## The six assertions
 
+All six are REQUIRED. There is no "not exercised" outcome: an assertion
+that cannot be observed fails the run.
+
 1. **Peering.** Both nodes have a connected peer, and Rust's
    `/api/v1/peers` shows the Scala node at protocol `6.5.0`.
-2. **`bestInputBlock` agreement**, at a moment when both nodes report
-   the same `bestFullHeaderId`.
-3. **`bestInputChain` agreement**, at such a moment.
-4. **Reconstruction.** Over ≥ 10 ordering blocks Rust records
-   `ordering_reconstructed` events, including at least one *after* a
-   mid-run restart (its processor is in-memory, so it must rebuild an
-   input chain from scratch first).
-5. **Following.** Rust's `fullHeight` stays within 2 of Scala's, no
-   `DigestMismatch` / `TxDigestMismatch` drop fires, and the Scala peer
-   is never penalised or dropped.
-6. **Mempool consistency.** The two `/transactions/unconfirmed` sets
-   agree.
+2. **`bestInputBlock` equality.** Within 3 ordering blocks there is a
+   sample where both nodes report the same `bestFullHeaderId` **and the
+   same `bestInputBlock`**. Id-for-id, no suffix acceptance.
+3. **`bestInputChain` equality** at such a sample — the two lists
+   identical.
+4. **Reconstruction, both outcomes.** The first ordering block after a
+   cold mid-run restart must be an `ordering_reconstruct_fallback` with
+   reason `missing_input_body` (the processor is in-memory, so its input
+   chain is gone), and a later one must be an `ordering_reconstructed`
+   carrying **more than one transaction** — a coinbase-only block proves
+   nothing, because the ordering announcement carries its coinbase
+   itself. The restart happens under load (see below).
+5. **Following.** Rust's `fullHeight` stays within 2 of Scala's for the
+   whole run, only the first 60 s after each process start excluded (the
+   post-restart catch-up is deliberately included); no `DigestMismatch`,
+   `TxDigestMismatch` or `Penalize` counter ever moves; the Scala peer is
+   never penalised, dropped, or seen with a negative score.
+6. **Mempool.** 20 payments submitted through the Scala wallet must each
+   return HTTP 200; each must be observed inside a Rust input block via
+   `/blocks/{id}/inputBlockTransactionIds`; each must then be gone from
+   Rust's `/transactions/unconfirmed`; and after the next ordering block
+   the two pools must agree, with explicit D1/F6 accounting — residue is
+   permitted in Scala's pool only, never in Rust's.
 
-### What assertions 2 and 3 actually compare
+### The funded workload
 
-Not id-for-id equality of the two tips. The miner publishes an input
-block roughly every `blockInterval / subblocksPerBlock` — sub-second
-here — while one takes a few seconds to reach the follower and validate,
-so the two tips are essentially never the same id at the same instant.
-Demanding that would test the sampling clock, not the protocol.
+Assertions 4 and 6 need real transactions, which need spendable coin.
+`monetary.minerRewardDelay = 10` (Scala) and `[chain]
+devnet_miner_reward_delay = 10` (Rust) shorten reward maturity from 720
+blocks to 10, so the miner's wallet is spendable around height 11.
 
-What the smoke requires instead is that the follower is on the **same
-chain**: Rust's `bestInputBlock` is an entry of Scala's
-`bestInputChain`, and Rust's whole chain is exactly Scala's list with
-the newest *k* entries removed (`/blocks/bestInputChain` lists newest
-first). Any other shape — a shared tip with a different history — is a
-real divergence and fails the run with both raw bodies recorded. The
-evidence file carries `rust_blocks_behind`, `exact_tip_matches` and
-every observed propagation lag, so the lag is measured rather than
-assumed.
+The delay is compiled into the emission box's proposition, so it changes
+the genesis boxes and the height-0 state root. That is why the Rust side
+needs a captured box set per delay
+(`GenesisParams::devnet_for_reward_delay`, from `GET /utxo/genesis` on
+the pinned Scala node) and why `lifecycle.py` refuses to start a node
+whose height-0 `stateRoot` is not the shared one. Get this wrong and the
+nodes fork at genesis while every later assertion still appears to run.
 
-### Two things this recipe cannot exercise
+A background thread keeps submitting payments during assertion 4, so the
+miner is sealing transactions into input blocks across the restart. The
+wallet spends its single change box, so most submissions in that thread
+fail with "no boxes" — that is expected and is not an observation about
+either node; only the accepted ones matter.
 
-Both come from one root cause: **there is no spendable coin on this
-devnet**, so no transaction can ever be submitted and every ordering
-block contains nothing but its coinbase.
+### Harness rules
 
-Miner rewards mature after `monetary.minerRewardDelay = 720` ordering
-blocks — hours at this block rate. Shortening it is not an option: the
-delay is compiled into the emission box's script, so it changes the
-genesis boxes and therefore the `genesisStateDigestHex` both nodes must
-share, and the Rust node's devnet genesis boxes are a pinned fixture.
-The genesis founders box is behind the founders' keys, and the
-no-premine box is `FalseTree`.
-
-Consequently:
-
-- **Assertion 6's transactions** are never submitted. The smoke still
-  compares the two unconfirmed sets (they must agree, and do — both
-  empty) and reports `not_exercised` with the wallet balance.
-- **Assertion 4's fallback half** is unreachable. `plan_reconstruction`
-  only needs input-block bodies for transactions that *came from* input
-  blocks; a coinbase-only ordering block is carried by the ordering
-  announcement itself, so reconstruction always succeeds and none of
-  `missing_input_body` / `missing_broadcasted_tx` / `root_mismatch` can
-  fire — with or without the restart. The restart is still performed,
-  and the smoke does require the restarted node to reconstruct again.
-
-Neither is silently dropped: both are listed under `not_exercised` in
-`smoke-evidence.json` and printed on the result line. Closing them needs
-a funded devnet (a genesis with a spendable box, which is a
-consensus-visible fixture of its own) — not a change to this harness.
+* **A failed REST call is never an observation.** It is retried within
+  budget and then fails the assertion that needed it. An empty list from
+  a dead endpoint must not compare equal to an empty list from a live one.
+* **Failures accumulate.** One failed assertion does not abort the rest;
+  the run reports all of them, and the counters in assertion 5 are
+  accumulated across both node processes (a restart resets the node's own
+  counters, so the harness carries the pre-restart totals forward).
+* **Every mismatch writes an artifact** under
+  `test-vectors/weak-blocks/findings/<date>-<n>.json` with both nodes'
+  REST bodies, the Rust ordering-event tail and the matching Rust
+  debug-log lines. The recipe sets `RUST_LOG` itself so those lines exist.
 
 ## Evidence
 
 `smoke.py` writes `.work/smoke-evidence.json` on every exit path,
-successful or not, carrying: the Rust git sha, toolchain and working-tree
-status; the Scala classpath and `appVersion`; a sha256 of every file in
-this directory; and, per assertion, the raw REST bodies behind the
-verdict. On a failure it also records both nodes' `/info` at the moment
-of the failure. A Rust-vs-Scala disagreement additionally belongs in
-`test-vectors/weak-blocks/findings/<date>-<n>.json` with the raw bodies.
+successful or not, carrying: the Rust git sha, toolchain, binary path and
+working-tree status; the Scala classpath, pinned and observed
+`appVersion`; the shared genesis state root; a sha256 of every file in
+this directory; per assertion the raw REST bodies behind the verdict; and
+the full failure list.
+
+Build the node in **release** before running: the follower's throughput
+is what assertions 2, 3 and 5 measure, and a debug build is not a
+measurement of the shipped node. `lifecycle.py` prefers
+`target/release/ergo-node` and falls back to debug.

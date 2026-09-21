@@ -4,6 +4,10 @@ data_dir = "scripts/devnet-matrix/.work/rust"
 [chain]
 # Must match scala-node.conf / genesis.conf exactly.
 devnet_initial_difficulty_hex = "4e20"
+# Must match `monetary.minerRewardDelay` in genesis.conf: the delay is
+# compiled into the emission box, so it selects the genesis box set and
+# therefore the height-0 state root both nodes must share.
+devnet_miner_reward_delay = 10
 
 [peers]
 known = ["127.0.0.1:19560"]
@@ -26,6 +30,22 @@ enabled = false
 
 [input_blocks]
 enabled = true
+# Scala-parity mode. The pinned `weak-blocks` miner writes the extension
+# with the NEW transactions digest in the `prevTransactionsDigest` slot
+# (CandidateGenerator.scala:752) while the announcement carries the
+# PREVIOUS one, so the two disagree the moment an input block holds a
+# transaction and the strict binding check rejects every such
+# announcement. See test-vectors/weak-blocks/findings/2026-09-22-2.json.
+# The port's default stays strict; this recipe follows the reference.
+strict_field_binding = false
+
+[input_blocks.bounds]
+# The Scala miner publishes ~64 input blocks per ordering block, far
+# above anything the default bound was sized for: the stock 256-entry
+# disconnected waitlist overflowed 280 times in one 20-minute run, so a
+# block whose parent was still in flight was discarded rather than
+# linked. Raised for this recipe only; the crate default is unchanged.
+waitlist_entries = 8192
 
 [sync]
 sync_interval_secs = 1

@@ -1,0 +1,92 @@
+{
+  "id": "2026-09-22-3",
+  "title": "ordering reconstruction never reproduces the transactions root once a block carries transactions",
+  "severity": "divergence",
+  "component": "rust \u2014 ergo-node::node::input_blocks::reconstruct",
+  "status": "open",
+  "source": "scripts/devnet-matrix smoke, funded run 2026-09-22 (release build)",
+  "summary": "With a transaction workload running, EVERY ordering block the Rust node tried to reconstruct fell back with `root_mismatch`: 9 of 9 after the cold restart, 10 of 10 across the run. Not one ingredient was missing - `reconstruction is missing a transaction` never logged - so the planner collected the complete transaction set and still computed a different Merkle root than the header announces. That points at ORDER (or an extra/duplicated member), not at availability. The same node reconstructs coinbase-only blocks successfully (6 times in the same run, and 11 in the unfunded run of the previous round), which is why the defect was invisible until the devnet could fund transactions.",
+  "measurement": {
+    "note": "this is the fallback-rate measurement spec \u00a712 F5 asks for",
+    "fallback_rate_with_transactions": "100% (10/10 attempts, reason root_mismatch)",
+    "fallback_rate_coinbase_only": "0% (6/6 reconstructed, txs=1)",
+    "ordering_events_after_restart": [
+      {
+        "kind": "ordering_reconstruct_fallback",
+        "height": 13,
+        "txs": null,
+        "detail": "root_mismatch"
+      },
+      {
+        "kind": "ordering_reconstruct_fallback",
+        "height": 14,
+        "txs": null,
+        "detail": "root_mismatch"
+      },
+      {
+        "kind": "ordering_reconstruct_fallback",
+        "height": 15,
+        "txs": null,
+        "detail": "root_mismatch"
+      },
+      {
+        "kind": "ordering_reconstruct_fallback",
+        "height": 16,
+        "txs": null,
+        "detail": "root_mismatch"
+      },
+      {
+        "kind": "ordering_reconstruct_fallback",
+        "height": 17,
+        "txs": null,
+        "detail": "root_mismatch"
+      },
+      {
+        "kind": "ordering_reconstruct_fallback",
+        "height": 18,
+        "txs": null,
+        "detail": "root_mismatch"
+      },
+      {
+        "kind": "ordering_reconstruct_fallback",
+        "height": 20,
+        "txs": null,
+        "detail": "root_mismatch"
+      },
+      {
+        "kind": "ordering_reconstruct_fallback",
+        "height": 21,
+        "txs": null,
+        "detail": "root_mismatch"
+      },
+      {
+        "kind": "ordering_reconstruct_fallback",
+        "height": 22,
+        "txs": null,
+        "detail": "root_mismatch"
+      }
+    ],
+    "planner_counters_from_the_rust_log": {
+      "reconstruction is missing a transaction": 0,
+      "does not reproduce the transactions root": 10,
+      "rebuilt from the input chain": 6
+    }
+  },
+  "raw": {
+    "root_mismatch_log_lines": [
+      "2026-09-21T16:36:22.166008Z DEBUG ergo_node::node::input_blocks::reconstruct: input_blocks: reconstruction does not reproduce the transactions root ordering=7d87ff2142d919d396b18fc16afcb4d226a44f4d4ddf4f8b45d9b1b83409d4e5 computed=4471100d0ebef6989502a9e636f3bf27480c85039daa1496d00cc445cfe185e6 announced=18f98a68100e1b737b8f7366e31a00479c6c035ac98cac43ac9dfa1aca6cb120",
+      "2026-09-21T16:37:01.136754Z DEBUG ergo_node::node::input_blocks::reconstruct: input_blocks: reconstruction does not reproduce the transactions root ordering=195db715703a491b2a755300e7812ccdc0c62cc62901e6409ac32ac9b1c07ec2 computed=487059b5cfe3f8535564eec420927329244b55faf225180a5d7afd6c3b62db0d announced=8fd2d31dfd201923a0c48814d5809b9850b506114de0e4086ab74262e47f497c",
+      "2026-09-21T16:37:13.230672Z DEBUG ergo_node::node::input_blocks::reconstruct: input_blocks: reconstruction does not reproduce the transactions root ordering=fb104aa992b223ea70ecdf7f609c954dfaab5182473ab802b662786bd777d215 computed=72ef491103d8d48c6063cc8e647f7a0fa8b34f613e27bbd2cf14547881117d2e announced=ed625d0e68132dada0f0335f1afcfcc624bf7b75e249375295463821668df5dd",
+      "2026-09-21T16:39:53.021375Z DEBUG ergo_node::node::input_blocks::reconstruct: input_blocks: reconstruction does not reproduce the transactions root ordering=21e83cef4d00a7965906958c9081c056d522be3039b8f3ffe48eabc89a11698b computed=e47c383d78f08a6b871f3db96481812cf13f7faa7c87352b9341916e2d94d115 announced=14a4fc4aa8676beffd1240bb3cf5ba47df2de4d5ce82ee0b2855f704efe64ab8",
+      "2026-09-21T16:40:23.572066Z DEBUG ergo_node::node::input_blocks::reconstruct: input_blocks: reconstruction does not reproduce the transactions root ordering=6466975a505ea0f58ba2a65778c97647895f601305b83ac58c33b7de1b4b24db computed=8746ecb261161c4d5fa3bb35b4b2b62b8ca37e35b607124ef455cb62903f55c1 announced=21958200dfa2c13ea333c25c2cddd7546e32cdecd9084356e21dd510252ffc2f",
+      "2026-09-21T16:41:26.386797Z DEBUG ergo_node::node::input_blocks::reconstruct: input_blocks: reconstruction does not reproduce the transactions root ordering=1dba13d634d653b369d23eebb2b880d2a1bebd450106b2bdf12f89216e744ed8 computed=f3086d568892d62c01cab328819929322b80857394835fd9ea4f5be0f9c4a61b announced=c9c3005a98d1677de70acf11ac98913ead82c6b010c9e329a1aca7521f0ff96e",
+      "2026-09-21T16:42:49.902146Z DEBUG ergo_node::node::input_blocks::reconstruct: input_blocks: reconstruction does not reproduce the transactions root ordering=aa23853d9ef0784aebb9e163e64238ed258f881d3aeda9b319a1aa44dd980665 computed=e7587cb69d41bd7cb10c416a48d6bb1abb75812af370e455a931bf718e8e114e announced=6557bb831b56242cda92e2b4275c20318b2bb7d67edad84c5abd2ec7599a3c8f",
+      "2026-09-21T16:44:08.768420Z DEBUG ergo_node::node::input_blocks::reconstruct: input_blocks: reconstruction does not reproduce the transactions root ordering=3514b0b7ee7bac83d5e7c7e1eefa4cbd349fb26a4ab94c35e09d76ff32850411 computed=b4564f5e090e18530abb1148f537404e5746ee87a0cd899820716d62bc37eda1 announced=aeadb1e7c4175d7df36fa45447de0c66c168d523db3195eab2b5a34cfa78868d",
+      "2026-09-21T16:45:13.427618Z DEBUG ergo_node::node::input_blocks::reconstruct: input_blocks: reconstruction does not reproduce the transactions root ordering=40b181ba3ab53771f5daaaadac4a0505a3d285d028ca80545dc39f6d93a5782b computed=227f21820a4e2b84405f08317da89476cf7bdc8e8d86fe89c3613c4235c42ae9 announced=cbc15c4a669699bcce391322213530540d97f9e8bc977d4128d9c9406b0d8242",
+      "2026-09-21T16:45:27.810610Z DEBUG ergo_node::node::input_blocks::reconstruct: input_blocks: reconstruction does not reproduce the transactions root ordering=3d841e0a08a78f27e253d9957e47794de36d7bd7981056a9bf69517eff433a15 computed=879b8e89b2f3baaf6b0a1dc88f982dcc761505094be57fe4bebaf914ecf55c2b announced=6b9bdfb48564772a7b67d569ba8b961765e5c6100fae88d5f115a49c46cda94d"
+    ]
+  },
+  "where_to_look": "ergo-node/src/node/input_blocks/reconstruct.rs::collect_transactions assembles `plan.non_broadcasted ++ mempool(broadcasted_ids) ++ plan.input_chain_txs`. The Scala miner's ordering block is built by CandidateGenerator's collectTxs, whose order is not that concatenation; compute_root is order-sensitive (transactionsRoot over the id list, with witness ids as the second leaf half from header version 2). Compare a failing block's /blocks/{id} transaction id order against the order the planner produces before changing anything.",
+  "impact": "M2's headline claim - an ordering block assembled from input blocks instead of a BlockTransactions download - does not hold for any block that carries a transaction. The node stays CORRECT (it falls back and downloads, heights and state roots agree throughout), so this is a feature gap, not a consensus break.",
+  "gate": "assertion 4 of the devnet-matrix smoke FAILS on this."
+}
