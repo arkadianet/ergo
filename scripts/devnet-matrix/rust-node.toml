@@ -1,0 +1,32 @@
+network = "devnet"
+data_dir = "scripts/devnet-matrix/.work/rust"
+
+[chain]
+# Must match scala-node.conf / genesis.conf exactly.
+devnet_initial_difficulty_hex = "4e20"
+
+[peers]
+known = ["127.0.0.1:19560"]
+bind_addr = "127.0.0.1:19561"
+allow_local = true
+target_outbound = 1
+
+[api]
+bind = "127.0.0.1:19581"
+
+[api.security]
+api_key_hash = "324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf"
+
+[indexer]
+enabled = true
+
+# The Rust node only follows here: the Scala node is the sole miner.
+[mining]
+enabled = false
+
+[input_blocks]
+enabled = true
+
+[sync]
+sync_interval_secs = 1
+sync_interval_stable_secs = 1
