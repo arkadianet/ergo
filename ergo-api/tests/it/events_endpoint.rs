@@ -40,6 +40,7 @@ fn event(seq: u64, kind: &str) -> ApiNodeEvent {
         size_bytes: (kind == "blockApplied").then_some(4_096),
         addr: (kind == "peerConnected").then(|| "10.0.0.9:9030".to_string()),
         detail: None,
+        reconstructed_order: None,
     }
 }
 

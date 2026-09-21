@@ -35,6 +35,7 @@ pub(super) fn build_events_projection(
                 size_bytes: None,
                 addr: None,
                 detail: None,
+                reconstructed_order: None,
             };
             match e.kind {
                 K::BlockApplied {
@@ -112,11 +113,13 @@ pub(super) fn build_events_projection(
                     height,
                     header_id,
                     txs,
+                    order,
                 } => {
                     ev.kind = "ordering_reconstructed".into();
                     ev.height = Some(height);
                     ev.header_id = Some(header_id);
                     ev.txs = Some(txs);
+                    ev.reconstructed_order = Some(order.to_string());
                 }
                 K::OrderingReconstructFallback {
                     height,

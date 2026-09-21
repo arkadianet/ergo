@@ -3810,6 +3810,200 @@ fn reconstruct_with_a_failing_store_read_aborts_as_storage_error_not_missing_dat
     );
 }
 
+// ----- D4: which assembly order reproduces the root -----
+
+/// Seat `tx` in the processor's body cache under `input_block` so a
+/// plan's `input_chain_txs` can reference it.
+fn seat_in_input_chain(
+    state: &mut NodeState,
+    txs: &[ergo_ser::transaction::Transaction],
+) -> Vec<ergo_inputblocks::types::TxRef> {
+    let bodies: Vec<ergo_inputblocks::processor::Body> =
+        txs.iter().cloned().map(ts::body_of).collect();
+    let refs = bodies.iter().map(|b| b.tx_ref).collect();
+    let mut rt = state.input_blocks.take().expect("runtime");
+    rt.processor_mut().seat_bodies_for_test(bodies);
+    state.input_blocks = Some(rt);
+    refs
+}
+
+/// Divergence D4 / upstream finding F12. Scala's follower assembles
+/// `orderingBlockTransactions ++ inputBlocksTransactions`
+/// (`ErgoNodeViewHolder.processOrderingBlock`, which carries its own
+/// `todo: check if ordering block transactions should come first`) while
+/// Scala's miner builds `previousOrderingBlockTransactions ++
+/// orderingTxs` (`CandidateGenerator`). Real mined blocks therefore hash
+/// to the CANDIDATE order, and a follower that only tries the Scala one
+/// falls back on every ordering block carrying a transaction — which is
+/// exactly what the devnet smoke measured (100% `root_mismatch` under a
+/// transaction workload, 0% when blocks held only their coinbase).
+///
+/// The planner tries both and reports which matched.
+#[test]
+fn reconstruction_tries_both_orders_and_reports_the_one_that_matched() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    state.input_blocks = Some(runtime());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19731,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let ordering_tx = ts::tx(0xc1, 1);
+    let chain_tx = ts::tx(0xc2, 1);
+    let input_block = [0x9e; 32];
+    let chain_refs = seat_in_input_chain(&mut state, std::slice::from_ref(&chain_tx));
+
+    // A real mined block: the input chain comes FIRST.
+    let candidate_root = transactions_root_of(&[chain_tx.clone(), ordering_tx.clone()]);
+    let scala_root = transactions_root_of(&[ordering_tx.clone(), chain_tx.clone()]);
+    assert_ne!(
+        candidate_root, scala_root,
+        "the fixture must actually distinguish the two orders"
+    );
+
+    let plan_for = |header_id| ergo_inputblocks::ordering::ReconstructionPlan {
+        header_id,
+        non_broadcasted: vec![ordering_tx.clone()],
+        broadcasted_ids: Vec::new(),
+        input_chain_txs: chain_refs.clone(),
+        prev_input_block_id: Some(input_block),
+    };
+
+    for (root, expected) in [
+        (candidate_root, super::reconstruct::TxOrder::Candidate),
+        (scala_root, super::reconstruct::TxOrder::Scala),
+    ] {
+        let ann = reconstructable_announcement(
+            vec![ordering_tx.clone()],
+            &[],
+            root,
+            vec![([0x03, 0x02], input_block.to_vec())],
+        );
+        let header_id = store_header(&mut state, &ann.header);
+        store_ordering_announcement(&mut state, ann, tag);
+        let rt = state.input_blocks.as_ref().unwrap();
+        let rec = super::reconstruct::plan_reconstruction(
+            &state.store,
+            &state.mempool,
+            rt,
+            &plan_for(header_id),
+            Some(peer),
+        )
+        .expect("no storage failure")
+        .expect("the announcement is stored");
+        assert_eq!(
+            rec.outcome,
+            super::reconstruct::Outcome::Assemble {
+                txs: 2,
+                order: expected,
+            },
+            "a header rooted over the {} order must reconstruct under it",
+            expected.name()
+        );
+    }
+}
+
+/// Oracle parity for D4: a REAL ordering block mined by the pinned Scala
+/// `weak-blocks` node seats the collected input chain FIRST, which is
+/// what its `CandidateGenerator` builds and NOT what its own
+/// `processOrderingBlock` reassembles (upstream finding F12). Captured
+/// over REST from the devnet-matrix recipe.
+// oracle: test-vectors/weak-blocks/findings/2026-09-22-3/captured-block.json
+#[test]
+fn a_real_mined_ordering_block_uses_the_candidate_order() {
+    let captured: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../test-vectors/weak-blocks/findings/2026-09-22-3/captured-block.json"
+    ))
+    .unwrap();
+    let ids = |key: &str| -> Vec<String> {
+        captured[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{key} is an array"))
+            .iter()
+            .map(|v| v.as_str().expect("tx id").to_string())
+            .collect()
+    };
+    let block = ids("block_transaction_ids_in_order");
+    let chain = ids("input_chain_tx_ids");
+    let ordering = ids("ordering_tx_ids");
+    assert!(
+        !chain.is_empty() && !ordering.is_empty(),
+        "the fixture must have both halves non-empty, or the two orders \
+         coincide and it proves nothing"
+    );
+    assert_eq!(
+        block,
+        [chain.clone(), ordering.clone()].concat(),
+        "a mined block is input chain ++ ordering transactions"
+    );
+    assert_ne!(
+        block,
+        [ordering, chain].concat(),
+        "and NOT the order Scala's own processOrderingBlock rebuilds"
+    );
+}
+
+/// A header that matches NEITHER order still falls back — trying two
+/// orders must not become "accept anything".
+#[test]
+fn reconstruction_falls_back_when_no_order_reproduces_the_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    state.input_blocks = Some(runtime());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19732,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let ordering_tx = ts::tx(0xd1, 1);
+    let chain_tx = ts::tx(0xd2, 1);
+    let input_block = [0x8e; 32];
+    let chain_refs = seat_in_input_chain(&mut state, std::slice::from_ref(&chain_tx));
+
+    let ann = reconstructable_announcement(
+        vec![ordering_tx.clone()],
+        &[],
+        [0x5c; 32],
+        vec![([0x03, 0x02], input_block.to_vec())],
+    );
+    let header_id = store_header(&mut state, &ann.header);
+    store_ordering_announcement(&mut state, ann, tag);
+    let rt = state.input_blocks.as_ref().unwrap();
+    let rec = super::reconstruct::plan_reconstruction(
+        &state.store,
+        &state.mempool,
+        rt,
+        &ergo_inputblocks::ordering::ReconstructionPlan {
+            header_id,
+            non_broadcasted: vec![ordering_tx],
+            broadcasted_ids: Vec::new(),
+            input_chain_txs: chain_refs,
+            prev_input_block_id: Some(input_block),
+        },
+        Some(peer),
+    )
+    .expect("no storage failure")
+    .expect("the announcement is stored");
+    assert!(
+        matches!(
+            rec.outcome,
+            super::reconstruct::Outcome::Fallback { reason }
+                if reason == "root_mismatch"
+        ),
+        "{:?}",
+        rec.outcome
+    );
+}
+
 // ----- mainnet reconstruction oracle (round 1, findings 1 + 2) -----
 
 /// One mainnet block from `blocks_1_5.json`, with its real header.

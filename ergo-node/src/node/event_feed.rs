@@ -82,6 +82,10 @@ pub(crate) enum FeedEventKind {
         height: u32,
         header_id: String,
         txs: u32,
+        /// Which assembly order reproduced the header's transactions
+        /// root: `"scala"` or `"candidate"` (divergence D4, upstream
+        /// finding F12). Reported so the split stays measurable.
+        order: &'static str,
     },
     /// Reconstruction did not reproduce the header's transactions root
     /// (or an ingredient was missing), so the section is being downloaded
@@ -566,8 +570,8 @@ mod tests {
                 FeedEventKind::ShadowDivergence { kind, height, .. } => {
                     format!("shadow:{kind}:{height}")
                 }
-                FeedEventKind::OrderingReconstructed { height, .. } => {
-                    format!("reconstructed:{height}")
+                FeedEventKind::OrderingReconstructed { height, order, .. } => {
+                    format!("reconstructed:{order}:{height}")
                 }
                 FeedEventKind::OrderingReconstructFallback { reason, .. } => {
                     format!("reconstruct_fallback:{reason}")

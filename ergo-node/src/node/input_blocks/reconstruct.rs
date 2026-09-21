@@ -111,11 +111,47 @@ pub(in crate::node) struct Reconstruction {
 #[derive(Debug, PartialEq, Eq)]
 pub(in crate::node) enum Outcome {
     /// The rebuilt transactions reproduce the header's root; the section
-    /// is being handed to the ordinary pipeline. Carries the tx count.
-    Assemble { txs: u32 },
+    /// is being handed to the ordinary pipeline. Carries the tx count and
+    /// which candidate order matched (D4).
+    Assemble { txs: u32, order: TxOrder },
     /// Reconstruction is impossible or wrong; the caller falls back to a
     /// full `BlockTransactions` download.
     Fallback { reason: &'static str },
+}
+
+/// Which assembly order reproduced the header's transactions root.
+///
+/// Divergence **D4**. The Scala follower and the Scala miner disagree
+/// about this (upstream finding F12): `ErgoNodeViewHolder`'s
+/// `processOrderingBlock` builds `orderingBlockTransactions ++
+/// inputBlocksTransactions` — carrying its own `todo: check if ordering
+/// block transactions should come first` — while `CandidateGenerator`
+/// mines `previousOrderingBlockTransactions ++ orderingTxs`. A follower
+/// that only implements the first order falls back on every ordering
+/// block that carries a transaction, which is exactly what the devnet
+/// smoke measured (100% `root_mismatch` under load).
+///
+/// So both are tried, Scala's documented order first, and the one that
+/// matched is reported — on the event feed and in the debug log — so the
+/// split stays visible instead of being silently absorbed. When upstream
+/// settles F12 the loser can be deleted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::node) enum TxOrder {
+    /// `ordering ++ input_chain` — Scala's `processOrderingBlock`.
+    Scala,
+    /// `input_chain ++ ordering` — what `CandidateGenerator` actually
+    /// mines, and therefore what real blocks hash to.
+    Candidate,
+}
+
+impl TxOrder {
+    /// The name the event feed and telemetry use.
+    pub(in crate::node) fn name(self) -> &'static str {
+        match self {
+            Self::Scala => "scala",
+            Self::Candidate => "candidate",
+        }
+    }
 }
 
 /// Missing-ingredient / mismatch reasons, as the event feed reports them.
@@ -218,8 +254,8 @@ pub(in crate::node) fn plan_reconstruction(
     };
 
     // ----- 3. the transaction section -----
-    let txs = match collect_transactions(mempool, rt, plan) {
-        Ok(txs) => txs,
+    let (ordering_txs, input_chain_txs) = match collect_transactions(mempool, rt, plan) {
+        Ok(parts) => parts,
         Err(reason) => {
             debug!(
                 ordering = %hex::encode(header_id),
@@ -228,17 +264,46 @@ pub(in crate::node) fn plan_reconstruction(
             return fallback(reason, actions);
         }
     };
-    let Some(root) = compute_root(&txs, header.version) else {
-        return fallback(ROOT_MISMATCH, actions);
-    };
-    if root != *header.transactions_root.as_bytes() {
+    // D4: Scala's follower order first, then the order its miner
+    // actually builds. See `TxOrder`.
+    let announced = *header.transactions_root.as_bytes();
+    let mut attempts: Vec<(TxOrder, [u8; 32])> = Vec::with_capacity(2);
+    let mut matched: Option<(TxOrder, Vec<Transaction>, [u8; 32])> = None;
+    for order in [TxOrder::Scala, TxOrder::Candidate] {
+        let txs = match order {
+            TxOrder::Scala => [ordering_txs.clone(), input_chain_txs.clone()].concat(),
+            TxOrder::Candidate => [input_chain_txs.clone(), ordering_txs.clone()].concat(),
+        };
+        let Some(root) = compute_root(&txs, header.version) else {
+            continue;
+        };
+        attempts.push((order, root));
+        if root == announced {
+            matched = Some((order, txs, root));
+            break;
+        }
+    }
+    let Some((order, txs, root)) = matched else {
         debug!(
             ordering = %hex::encode(header_id),
-            computed = %hex::encode(root),
-            announced = %hex::encode(header.transactions_root.as_bytes()),
-            "input_blocks: reconstruction does not reproduce the transactions root"
+            announced = %hex::encode(announced),
+            tried = ?attempts
+                .iter()
+                .map(|(o, r)| (o.name(), hex::encode(r)))
+                .collect::<Vec<_>>(),
+            ordering_txs = ordering_txs.len(),
+            input_chain_txs = input_chain_txs.len(),
+            "input_blocks: no assembly order reproduces the transactions root"
         );
         return fallback(ROOT_MISMATCH, actions);
+    };
+    if order == TxOrder::Candidate {
+        // Worth a line at INFO the first time an operator sees it: the
+        // node is following the miner, not the reference follower.
+        debug!(
+            ordering = %hex::encode(header_id),
+            "input_blocks: reconstructed under the candidate order (D4 / upstream F12)"
+        );
     }
 
     let section = BlockTransactions {
@@ -264,6 +329,7 @@ pub(in crate::node) fn plan_reconstruction(
         actions,
         outcome: Outcome::Assemble {
             txs: section_tx_count(&section),
+            order,
         },
         height,
     }))
@@ -277,12 +343,19 @@ fn section_tx_count(section: &BlockTransactions) -> u32 {
 /// collected input-chain transactions`. `Err` when any broadcasted id is
 /// not in the pool or any input-chain body has been evicted — both are
 /// fallback conditions, never a partial section.
+/// The two halves of an ordering block's transaction section, each in
+/// its own order: the ordering block's own transactions (announced in
+/// full, then resolved by id from the mempool) and the collected input
+/// chain's. The caller concatenates them — see [`TxOrder`] — because the
+/// two Scala sides disagree about which half comes first.
+type SectionParts = (Vec<Transaction>, Vec<Transaction>);
+
 fn collect_transactions(
     mempool: &Mempool,
     rt: &InputBlocksRuntime,
     plan: &ReconstructionPlan,
-) -> Result<Vec<Transaction>, &'static str> {
-    let mut txs = plan.non_broadcasted.clone();
+) -> Result<SectionParts, &'static str> {
+    let mut ordering_txs = plan.non_broadcasted.clone();
     for id in &plan.broadcasted_ids {
         let bytes = mempool
             .get_bytes(&TxId::from_bytes(*id))
@@ -290,13 +363,14 @@ fn collect_transactions(
         let mut r = VlqReader::new(&bytes);
         // A pooled entry that no longer decodes is as unusable as one
         // that is gone, and it is the same fallback either way.
-        txs.push(read_transaction(&mut r).map_err(|_| MISSING_BROADCASTED_TX)?);
+        ordering_txs.push(read_transaction(&mut r).map_err(|_| MISSING_BROADCASTED_TX)?);
     }
+    let mut input_chain_txs = Vec::with_capacity(plan.input_chain_txs.len());
     for tx_ref in &plan.input_chain_txs {
         let body = rt.processor().body(tx_ref).ok_or(MISSING_INPUT_BODY)?;
-        txs.push(body.tx.clone());
+        input_chain_txs.push(body.tx.clone());
     }
-    Ok(txs)
+    Ok((ordering_txs, input_chain_txs))
 }
 
 /// The header's `transactions_root` over `txs`: the Merkle root of the

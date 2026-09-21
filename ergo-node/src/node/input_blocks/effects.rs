@@ -487,10 +487,12 @@ fn execute_one(
             out.extend(run_pipeline(state, actions, now));
             let header_id = hex::encode(plan.header_id);
             match outcome {
-                Outcome::Assemble { txs } => {
+                Outcome::Assemble { txs, order } => {
                     debug!(
                         ordering = %header_id,
-                        txs, "input_blocks: ordering block rebuilt from the input chain"
+                        txs,
+                        order = order.name(),
+                        "input_blocks: ordering block rebuilt from the input chain"
                     );
                     push_feed_event(
                         state,
@@ -498,6 +500,7 @@ fn execute_one(
                             height,
                             header_id,
                             txs,
+                            order: order.name(),
                         },
                     );
                 }

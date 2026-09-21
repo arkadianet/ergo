@@ -3369,6 +3369,20 @@ impl Processor {
         self.cache.get(tx_ref)
     }
 
+    /// Put `bodies` straight into the transaction cache, bypassing the
+    /// announce/deliver/validate path.
+    ///
+    /// Test support only: it exists so a reconstruction test can name
+    /// input-chain transactions in a `ReconstructionPlan` without
+    /// driving a whole input chain through the processor first. Nothing
+    /// in production reaches the cache this way.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seat_bodies_for_test(&mut self, bodies: Vec<Body>) {
+        for body in bodies {
+            self.cache.insert(body, Tick(0), &self.bounds);
+        }
+    }
+
     /// Scala `getInputBlockTransactions` — silently skips bodies the
     /// cache has evicted, exactly as Scala's `getIfPresent` loop does.
     pub fn bodies(&self, id: &InputBlockId) -> Option<Vec<&Body>> {
