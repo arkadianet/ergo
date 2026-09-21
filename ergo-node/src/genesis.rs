@@ -32,15 +32,30 @@ pub fn testnet_genesis_boxes() -> Vec<([u8; 32], Vec<u8>)> {
     parse_genesis_boxes(json)
 }
 
-/// Network-aware genesis seeding. Sole entry point for runtime
-/// initialization — keeps the `match Network` arm contained to one
-/// place so callers stay network-agnostic.
+/// Genesis seeding from the resolved chain spec.
+///
+/// Reads the spec's own `boxes_json` rather than re-deriving a box set
+/// from the network name: on devnet the box set is selected by
+/// `monetary.minerRewardDelay` (the delay is compiled into the emission
+/// box's proposition), so a network-keyed lookup would seed the 720-delay
+/// boxes into a chain whose peers agreed on a different genesis root —
+/// a fork at height 0 that only shows up much later.
+pub fn genesis_boxes_for_spec(
+    genesis: &ergo_chain_spec::GenesisParams,
+) -> Vec<([u8; 32], Vec<u8>)> {
+    parse_genesis_boxes(
+        genesis
+            .boxes_json
+            .expect("chain spec carries genesis boxes (checked at config load)"),
+    )
+}
+
+/// Network-aware genesis seeding for callers that hold only a
+/// `Network`. Equivalent to [`genesis_boxes_for_spec`] over that
+/// network's pinned spec; runtime boot uses the spec form, because a
+/// devnet spec can carry a different box set.
 pub fn genesis_boxes_for(network: Network) -> Vec<([u8; 32], Vec<u8>)> {
-    match network {
-        Network::Mainnet => mainnet_genesis_boxes(),
-        Network::Testnet => testnet_genesis_boxes(),
-        Network::Devnet => testnet_genesis_boxes(),
-    }
+    genesis_boxes_for_spec(&ergo_chain_spec::GenesisParams::for_network(network))
 }
 
 fn parse_genesis_boxes(json: &str) -> Vec<([u8; 32], Vec<u8>)> {
@@ -97,5 +112,41 @@ fn parse_one_box(json: &GenesisBoxJson) -> ErgoBox {
         candidate,
         transaction_id: ModifierId::from_bytes(tx_id),
         index: json.index,
+    }
+}
+
+#[cfg(test)]
+mod spec_tests {
+    use super::*;
+
+    // ----- happy path -----
+
+    /// The devnet box set follows `monetary.minerRewardDelay`, not the
+    /// network name. Seeding by network would put the 720-delay emission
+    /// box into a chain whose peers agreed on the 10-delay genesis root.
+    #[test]
+    fn devnet_reward_delay_10_seeds_a_different_box_set() {
+        let stock = genesis_boxes_for_spec(&ergo_chain_spec::GenesisParams::devnet());
+        let shortened = genesis_boxes_for_spec(
+            &ergo_chain_spec::GenesisParams::devnet_for_reward_delay(10).expect("captured"),
+        );
+        assert_eq!(stock.len(), shortened.len(), "same three genesis boxes");
+        assert_ne!(stock[0], shortened[0], "the emission box differs");
+        assert_eq!(
+            &stock[1..],
+            &shortened[1..],
+            "only the emission box differs"
+        );
+    }
+
+    #[test]
+    fn genesis_boxes_for_network_matches_the_pinned_spec() {
+        for net in [Network::Mainnet, Network::Testnet, Network::Devnet] {
+            assert_eq!(
+                genesis_boxes_for(net),
+                genesis_boxes_for_spec(&ergo_chain_spec::GenesisParams::for_network(net)),
+                "{net:?}"
+            );
+        }
     }
 }

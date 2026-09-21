@@ -122,7 +122,19 @@ impl NodeConfig {
             if network != Network::Devnet {
                 return Err("[chain] devnet_miner_reward_delay requires devnet".into());
             }
+            // The delay is compiled into the emission box's proposition,
+            // so it moves the genesis state root. Swapping it without
+            // swapping the genesis boxes would fork the node from its
+            // peer at height 0, which is why only delays with a captured
+            // box set are accepted.
+            let genesis = ergo_chain_spec::GenesisParams::devnet_for_reward_delay(delay)
+                .ok_or_else(|| {
+                    format!(
+                        "[chain] devnet_miner_reward_delay = {delay} has no captured genesis box set; supported: 10, 720"
+                    )
+                })?;
             spec.monetary.miner_reward_delay = delay;
+            spec.genesis = genesis;
         }
         let chain_spec = Arc::new(spec);
         validate_supported(&chain_spec)?;
@@ -1313,14 +1325,47 @@ mod tests {
     #[test]
     fn devnet_chain_overrides_apply_to_the_spec() {
         let cfg = load_toml(
-            "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n             [chain]\ndevnet_initial_difficulty_hex = \"7d00\"\ndevnet_miner_reward_delay = 3\n",
+            "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n             [chain]\ndevnet_initial_difficulty_hex = \"7d00\"\ndevnet_miner_reward_delay = 10\n",
         )
         .unwrap();
         assert_eq!(
             cfg.chain_spec.difficulty.initial_difficulty,
             vec![0x7d, 0x00]
         );
-        assert_eq!(cfg.chain_spec.monetary.miner_reward_delay, 3);
+        assert_eq!(cfg.chain_spec.monetary.miner_reward_delay, 10);
+        // The genesis moved with the delay: a node that kept the 720
+        // box set would fork from its peer at height 0.
+        assert_eq!(
+            hex::encode(cfg.chain_spec.genesis.state_digest),
+            "c01a142d004a917b4af35385265748e37f7c77ab8a4e8b2080b9c193516b845602"
+        );
+        assert_ne!(
+            cfg.chain_spec.genesis.state_digest,
+            ergo_chain_spec::GenesisParams::devnet().state_digest
+        );
+    }
+
+    #[test]
+    fn devnet_miner_reward_delay_without_a_captured_genesis_rejected() {
+        let err = load_toml(
+            "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n[chain]\ndevnet_miner_reward_delay = 3\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("no captured genesis box set"), "{err}");
+    }
+
+    #[test]
+    fn devnet_miner_reward_delay_720_keeps_the_stock_genesis() {
+        let cfg = load_toml(
+            "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n[chain]\ndevnet_miner_reward_delay = 720\n",
+        )
+        .unwrap();
+        let pinned = ergo_chain_spec::ChainSpec::devnet();
+        assert_eq!(
+            cfg.chain_spec.genesis.state_digest,
+            pinned.genesis.state_digest
+        );
+        assert_eq!(cfg.chain_spec.genesis.boxes_json, pinned.genesis.boxes_json);
     }
 
     #[test]

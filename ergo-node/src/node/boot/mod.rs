@@ -489,7 +489,7 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
     // 2. Initialize genesis if needed (use genesis_committed flag, not height)
     if !store.genesis_committed() {
         info!("initializing genesis state");
-        let boxes = genesis::genesis_boxes_for(config.chain_spec.network);
+        let boxes = genesis::genesis_boxes_for_spec(&config.chain_spec.genesis);
         store.initialize_genesis(&boxes)?;
 
         info!(boxes = boxes.len(), "genesis initialized");
