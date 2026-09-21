@@ -17,6 +17,7 @@ import sigma.crypto.CryptoConstants
 import sigma.ast.ErgoTree
 import sigma.data.TrivialProp.TrueProp
 import sigma.interpreter.{ContextExtension, ProverResult}
+import scala.util.control.NonFatal
 
 /**
   * Oracle harness for the `weak-blocks` (input blocks) port. Prints one JSON
@@ -42,7 +43,7 @@ object WeakBlocksOracle {
   val tx2: ErgoTransaction = tx(0x77, Array.emptyByteArray)
 
   def parseVerdict[T](p: Array[Byte] => T, bytes: Array[Byte]): (String, String) =
-    try { p(bytes); ("Accept", "") } catch { case t: Throwable => ("Reject", t.getClass.getSimpleName) }
+    try { p(bytes); ("Accept", "") } catch { case NonFatal(t) => ("Reject", t.getClass.getSimpleName) }
 
   def fields(prev: Option[Array[Byte]], txs: Seq[ErgoTransaction], prevDigest: Digest32): InputBlockFields = {
     val digest = org.ergoplatform.settings.Algos.merkleTreeRoot(txs.map(t => scorex.crypto.authds.LeafData @@ t.serializedId))
