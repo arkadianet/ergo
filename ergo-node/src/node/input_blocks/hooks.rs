@@ -91,24 +91,91 @@ fn sync_ordering_tip(state: &mut NodeState, now: Instant) -> Vec<Action> {
     if previous == Some(tip) {
         return Vec::new();
     }
-    // A tip whose parent is the tip we last reported is a linear apply;
-    // anything else (including the first tip we ever see) is a switch.
-    let extends_previous = previous.is_some_and(|prev| {
-        state
-            .store
-            .get_header_meta(&tip)
-            .ok()
-            .flatten()
-            .is_some_and(|m| m.parent_id == prev)
-    });
+    let height = meta.best_full_block_height;
+    // The first tip we ever see has no predecessor to descend from, so
+    // it is a switch by definition.
+    let change = match previous {
+        Some(prev) => classify_tip_change(state, prev, tip, height),
+        None => TipChange::Reorg,
+    };
     if let Some(rt) = state.input_blocks.as_mut() {
         rt.last_ordering_tip = Some(tip);
     }
-    if extends_previous {
-        on_ordering_block_applied(state, tip, meta.best_full_block_height, now)
-    } else {
-        on_ordering_reorg(state, tip, meta.best_full_block_height, now)
+    match change {
+        TipChange::Applied => on_ordering_block_applied(state, tip, height, now),
+        TipChange::Reorg => on_ordering_reorg(state, tip, height, now),
     }
+}
+
+/// How the committed tip got from one id to another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::node) enum TipChange {
+    /// The new tip descends from the previous one: the chain moved
+    /// forward, by one block or by several.
+    Applied,
+    /// The new tip is not a descendant — a fork switch, a rollback, or a
+    /// jump we cannot prove is linear.
+    Reorg,
+}
+
+/// How far back the ancestry walk will look before giving up and calling
+/// a tip change a switch.
+///
+/// The tick runs once a second and blocks are minutes apart, so a
+/// multi-block gap means the node was busy or has just caught up. Past
+/// this many blocks the processor's own state is stale anyway (its
+/// records live within `Bounds::prune_threshold` of the best height), so
+/// reporting a switch — which drops the trees — is both cheap and
+/// correct, and it bounds the parent-pointer reads this does per tick.
+pub(in crate::node) const MAX_LINEAR_CATCHUP: u32 = 64;
+
+/// Does `tip` descend from `previous`?
+///
+/// Walks parent pointers back from `tip`, bounded by the height delta
+/// (and by [`MAX_LINEAR_CATCHUP`]). Anything else — a sibling branch, a
+/// rollback to an ancestor, an unknown header, a gap too large to walk —
+/// is a switch.
+///
+/// Classifying on the IMMEDIATE child alone, as this used to, reported
+/// every two-blocks-between-ticks advance as a reorg; the reorg handler
+/// then retains only the new tip's tree, discarding state a linear
+/// advance would have kept.
+pub(in crate::node) fn classify_tip_change(
+    state: &NodeState,
+    previous: [u8; 32],
+    tip: [u8; 32],
+    tip_height: u32,
+) -> TipChange {
+    let Some(prev_height) = state
+        .store
+        .get_header_meta(&previous)
+        .ok()
+        .flatten()
+        .map(|m| m.height)
+    else {
+        // We cannot show ancestry against a header we no longer hold.
+        return TipChange::Reorg;
+    };
+    // A tip at or below the previous height cannot descend from it —
+    // that is a rollback or a same-height sibling.
+    if tip_height <= prev_height {
+        return TipChange::Reorg;
+    }
+    let steps = tip_height - prev_height;
+    if steps > MAX_LINEAR_CATCHUP {
+        return TipChange::Reorg;
+    }
+    let mut cursor = tip;
+    for _ in 0..steps {
+        let Some(meta) = state.store.get_header_meta(&cursor).ok().flatten() else {
+            return TipChange::Reorg;
+        };
+        cursor = meta.parent_id;
+        if cursor == previous {
+            return TipChange::Applied;
+        }
+    }
+    TipChange::Reorg
 }
 
 /// A full block was committed at a new best height (spec 7.6).

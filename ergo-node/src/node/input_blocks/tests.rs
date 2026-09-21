@@ -18,7 +18,8 @@ use ergo_sync::coordinator::Action;
 use super::ctx::{block_transactions_known, build_ctx_data, expected_n_bits_after};
 use super::effects::{apply_chain_change, execute_effects, relay_peers};
 use super::hooks::{
-    advertised_version, on_ordering_block_applied, on_ordering_reorg, on_tick, seed_best_ordering,
+    advertised_version, classify_tip_change, on_ordering_block_applied, on_ordering_reorg, on_tick,
+    seed_best_ordering, TipChange, MAX_LINEAR_CATCHUP,
 };
 use super::runtime::InputBlocksRuntime;
 use super::validate::build_input_block_context;
@@ -2570,5 +2571,184 @@ fn a_batch_inv_does_not_steal_another_peer_s_outstanding_expectation() {
     assert!(
         state.peer_manager.get(&peer_a).unwrap().last_progress > before,
         "and A is credited for serving us"
+    );
+}
+
+/// Round 3, finding 2: the tip classifier only recognised the previous
+/// tip's IMMEDIATE child as a linear apply, so two committed blocks
+/// between heartbeat ticks — a one-second window, entirely ordinary on a
+/// fast chain — were reported as `OrderingReorg`. That is the wrong
+/// event, and its handler destructively retains only the new tip's tree.
+///
+/// Classification is by ancestry: walk parent pointers back from the new
+/// tip, bounded by the height delta.
+#[test]
+fn a_multi_block_linear_advance_is_an_apply_not_a_reorg() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let headers = seed_header_chain(&mut state, 6);
+
+    // Start at h1, then commit h2 AND h3 before the next tick fires.
+    let h1 = header_id_of(&headers[0]);
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .advance_best_full_block(h1, headers[0].height)
+        .unwrap();
+    seed_best_ordering(&mut state);
+
+    for h in &headers[1..3] {
+        state
+            .store
+            .as_utxo_mut()
+            .unwrap()
+            .advance_best_full_block(header_id_of(h), h.height)
+            .unwrap();
+    }
+
+    assert_eq!(
+        classify_tip_change(&state, h1, header_id_of(&headers[2]), headers[2].height),
+        TipChange::Applied,
+        "h3 descends from h1 through h2 — a linear advance, not a switch"
+    );
+
+    let _ = on_tick(&mut state, Instant::now());
+    assert_eq!(
+        state.input_blocks.as_ref().unwrap().last_ordering_tip,
+        Some(header_id_of(&headers[2]))
+    );
+}
+
+/// The classifier's whole truth table, against a real forked header
+/// store: descendants at several distances are applies; a sibling, an
+/// ancestor (rollback), an unrelated id and a walk longer than the cap
+/// are switches.
+#[test]
+fn tip_change_classification_truth_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let main = seed_header_chain(&mut state, 5);
+
+    // A sibling of h3: same height, different parent-chain position.
+    let fork = ts::header(header_id_of(&main[0]), 3, 9_999, [0u8; 32]);
+    let fork_id = header_id_of(&fork);
+    seed_mainnet_headers(
+        &mut state,
+        &[(
+            fork.height,
+            fork_id,
+            {
+                let (bytes, _) = serialize_header(&fork).unwrap();
+                bytes
+            },
+            fork.clone(),
+        )],
+        false,
+    );
+
+    let id = |i: usize| header_id_of(&main[i]);
+
+    // Descendants, at one and at three removes.
+    assert_eq!(
+        classify_tip_change(&state, id(0), id(1), main[1].height),
+        TipChange::Applied,
+        "immediate child"
+    );
+    assert_eq!(
+        classify_tip_change(&state, id(0), id(3), main[3].height),
+        TipChange::Applied,
+        "three blocks on"
+    );
+
+    // Not descendants.
+    assert_eq!(
+        classify_tip_change(&state, id(1), fork_id, fork.height),
+        TipChange::Reorg,
+        "a sibling branch is a switch"
+    );
+    assert_eq!(
+        classify_tip_change(&state, id(3), id(1), main[1].height),
+        TipChange::Reorg,
+        "moving BACK to an ancestor is a switch, not an apply"
+    );
+    assert_eq!(
+        classify_tip_change(&state, id(3), id(3), main[3].height),
+        TipChange::Reorg,
+        "equal height, and the same id is filtered by the caller"
+    );
+    assert_eq!(
+        classify_tip_change(&state, [0xcc; 32], id(3), main[3].height),
+        TipChange::Reorg,
+        "an unknown previous tip cannot be shown to be an ancestor"
+    );
+    assert_eq!(
+        classify_tip_change(
+            &state,
+            id(0),
+            id(3),
+            main[3].height + MAX_LINEAR_CATCHUP + 1
+        ),
+        TipChange::Reorg,
+        "a jump beyond the walk cap is treated as a switch"
+    );
+}
+
+/// A real fork switch still reaches the processor as a reorg, and a
+/// reorg still discards the trees a linear apply would keep.
+#[test]
+fn a_fork_switch_still_reaches_the_processor_as_a_reorg() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let main = seed_header_chain(&mut state, 3);
+
+    let h2 = header_id_of(&main[1]);
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .advance_best_full_block(h2, main[1].height)
+        .unwrap();
+    seed_best_ordering(&mut state);
+
+    // Switch to a sibling of h2 at the same height.
+    let fork = ts::header(header_id_of(&main[0]), 2, 8_888, [0u8; 32]);
+    let fork_id = header_id_of(&fork);
+    seed_mainnet_headers(
+        &mut state,
+        &[(
+            fork.height,
+            fork_id,
+            {
+                let (bytes, _) = serialize_header(&fork).unwrap();
+                bytes
+            },
+            fork.clone(),
+        )],
+        false,
+    );
+    assert_eq!(
+        classify_tip_change(&state, h2, fork_id, fork.height),
+        TipChange::Reorg
+    );
+
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .advance_best_full_block(fork_id, fork.height)
+        .unwrap();
+    let generation = state
+        .input_blocks
+        .as_ref()
+        .unwrap()
+        .processor()
+        .generation();
+    let _ = on_tick(&mut state, Instant::now());
+    let rt = state.input_blocks.as_ref().unwrap();
+    assert_eq!(rt.last_ordering_tip, Some(fork_id));
+    assert!(
+        rt.processor().generation() > generation,
+        "the switch reached the processor"
     );
 }
