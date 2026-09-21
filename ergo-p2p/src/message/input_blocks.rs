@@ -83,7 +83,7 @@ fn read_weak_ids(
         return Err(MessageError::PayloadTooShort {
             kind,
             got: r.remaining(),
-            min: count * WEAK_ID_LENGTH,
+            min: count.saturating_mul(WEAK_ID_LENGTH),
         });
     }
     let mut ids = Vec::with_capacity(count);
@@ -153,7 +153,13 @@ pub fn deserialize_input_block_txs(payload: &[u8]) -> Result<InputBlockTxs, Mess
             min: count,
         });
     }
-    let mut transactions = Vec::with_capacity(count);
+    // `count` is untrusted (bounded above only by `count <= r.remaining()`,
+    // i.e. up to the whole payload) and each `Transaction` allocates
+    // several inner `Vec`s, so reserving `count` slots up front could
+    // over-allocate well beyond the payload before the first (possibly
+    // malformed) transaction is even read. Cap the up-front reservation;
+    // the loop below still reads exactly `count` transactions.
+    let mut transactions = Vec::with_capacity(count.min(1024));
     for _ in 0..count {
         transactions.push(read_transaction(&mut r)?);
     }
@@ -241,5 +247,27 @@ mod tests {
             err,
             MessageError::PayloadTooLarge(INPUT_BLOCK_MESSAGE_MAX_SIZE)
         ));
+    }
+
+    #[test]
+    fn txs_count_equals_remaining_with_malformed_tx_errors_without_full_allocation() {
+        // `count` is set equal to the exact remaining byte count, so the
+        // `count > r.remaining()` guard in `deserialize_input_block_txs`
+        // passes — but the bytes are not a valid transaction, so
+        // `read_transaction` must fail on the very first entry rather
+        // than succeeding after over-allocating. `deserialize_input_block_txs`
+        // caps its up-front `Vec::with_capacity` at `count.min(1024)` (see
+        // its doc comment) — reading that code proves this test's
+        // count-1000 payload never reserves room for 1000 `Transaction`s;
+        // asserting the resulting error variant here is the runtime half
+        // of that guarantee.
+        let mut w = VlqWriter::new();
+        w.put_bytes(&sample_id(0x55));
+        let garbage = vec![0xFFu8; 1000];
+        w.put_u32(garbage.len() as u32); // count == remaining, all garbage
+        w.put_bytes(&garbage);
+        let bytes = w.result();
+        let err = deserialize_input_block_txs(&bytes).unwrap_err();
+        assert!(matches!(err, MessageError::Read(_)), "got {err:?}");
     }
 }
