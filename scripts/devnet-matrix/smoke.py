@@ -109,11 +109,19 @@ LAG_MAX = 16
 # empty series.
 MIN_QUALIFYING_SAMPLES = 50
 
-# Assertion 6 allows this many of the 20 submissions to go missing from
-# every observed Rust input block. The Scala miner's `cachedCandidate`
-# race loses input blocks outright, so a hard 20/20 would gate on the
-# reference node's bug; every miss is recorded.
-MEMPOOL_MIN_LOCATED = 18
+# Assertion 6, round 2: the STRICT path has to be exercised, but how
+# many payments take it is the miner's choice, not the follower's. The
+# `cachedCandidate` race (F11) rejects most of the miner's own input
+# solutions, so a payment can be confirmed by an ordering block having
+# never been sealed into one. One located payment proves the follower
+# evicts on an input block; the rest are routed and counted.
+MEMPOOL_MIN_LOCATED = 1
+
+# How long assertion 6 follows its payments before calling them
+# unresolved. Keyed to input-block production rather than to the next
+# ordering block: an ordering-height window closes on the miner's
+# schedule, and a follower cannot be failed for that.
+MEMPOOL_ROUTE_SECONDS = 420.0
 
 # Assertion 5 fails when more than this fraction of monitoring sweeps
 # could not be taken. A run that could not watch the nodes has not
@@ -1287,41 +1295,43 @@ def _self_test():
     # ----- round 5, item 1: pool removal is credited only under the
     # ordering tip the transaction was located under -----
 
+    # The strict path keeps this rule verbatim; it is asserted against
+    # the tracker production actually runs.
+    def strict(txid='tx'):
+        t = PaymentOutcomeTracker({txid})
+        t.saw_in_input_block(txid, 'ib1', 'H1')
+        return t
+
     # Credited: absent from the pool while the tip has not moved.
-    t = PoolTransitionTracker()
-    t.locate('tx', 'ib1', 'H1')
-    t.observe('H1', {'tx'})          # still pooled
-    t.observe('H1', set())           # gone, same tip
+    t = strict()
+    t.observe_pool('H1', {'tx'})     # still pooled
+    t.observe_pool('H1', set())      # gone, same tip
     assert t.credited == {'tx': 'ib1'}, t.credited
     assert t.confirmed_by_ordering == {}, t.confirmed_by_ordering
 
     # NOT credited: it was still pooled under H1 and only disappeared
     # after the ordering tip moved — ordinary confirmation explains it.
-    t = PoolTransitionTracker()
-    t.locate('tx', 'ib1', 'H1')
-    t.observe('H1', {'tx'})
-    t.observe('H2', set())
+    t = strict()
+    t.observe_pool('H1', {'tx'})
+    t.observe_pool('H2', set())
     assert t.credited == {}, t.credited
     assert 'tx' in t.confirmed_by_ordering, t.confirmed_by_ordering
 
     # A later same-tip observation must NOT erase that verdict — this is
     # the round-4 hole: a transaction confirmed by an ordering block
     # could be re-credited to the input block on a subsequent sample.
-    t.observe('H2', set())
+    t.observe_pool('H2', set())
     assert t.credited == {}, t.credited
     assert 'tx' in t.confirmed_by_ordering, t.confirmed_by_ordering
 
     # Never observed absent at all: neither credited nor excused.
-    t = PoolTransitionTracker()
-    t.locate('tx', 'ib1', 'H1')
-    t.observe('H1', {'tx'})
-    assert t.still_pooled() == ['tx'], t.still_pooled()
-    assert t.resolved() == set(), t.resolved()
+    t = strict()
+    t.observe_pool('H1', {'tx'})
+    assert t.strict_not_evicted() == ['tx'], t.strict_not_evicted()
 
     # An unknown tip cannot credit anything.
-    t = PoolTransitionTracker()
-    t.locate('tx', 'ib1', 'H1')
-    t.observe(None, set())
+    t = strict()
+    t.observe_pool(None, set())
     assert t.credited == {}, t.credited
     assert 'tx' in t.confirmed_by_ordering, t.confirmed_by_ordering
 
@@ -1555,6 +1565,70 @@ def _self_test():
     assert not ok, 'a sweep that overruns the budget must NOT report quiescence'
     assert overran.sweep_join_timeouts == 1, overran.sweep_join_timeouts
 
+    # ----- fix round 2: assertion 6's two routes -----
+
+    # (1) sealed then evicted under its own tip: the strict path, PASS.
+    t = PaymentOutcomeTracker({'a'})
+    t.saw_in_input_block('a', 'ib1', 'H1')
+    t.observe_pool('H1', {'a'})
+    t.observe_pool('H1', set())
+    t.cross_check_scala(set())
+    assert t.located == {'a': 'ib1'}, t.located
+    assert t.credited == {'a': 'ib1'}, t.credited
+    assert t.unresolved() == [] and t.strict_not_evicted() == []
+    assert t.never_sealed == {}, t.never_sealed
+    assert t.missing_on_rust == {}, t.missing_on_rust
+
+    # (2) never sealed, then confirmed by an ordering block: COUNTED as
+    # F11 telemetry, not failed, and only required to leave the pool.
+    t = PaymentOutcomeTracker({'b'})
+    t.saw_in_ordering_block('b', 'O9')
+    t.observe_pool('O9', {'b'})
+    t.observe_pool('O9', set())
+    t.cross_check_scala(set())
+    assert t.never_sealed == {'b': {'ordering_block': 'O9'}}, t.never_sealed
+    assert t.unresolved() == [], t.unresolved()
+    assert t.never_sealed_still_pooled() == [], t.never_sealed_still_pooled()
+    assert t.located == {}, t.located
+    # A never-sealed payment that never leaves the pool IS a failure.
+    t2 = PaymentOutcomeTracker({'b'})
+    t2.saw_in_ordering_block('b', 'O9')
+    t2.observe_pool('O9', {'b'})
+    assert t2.never_sealed_still_pooled() == ['b'], t2.never_sealed_still_pooled()
+
+    # (3) neither route inside the budget: unresolved, and that FAILS.
+    t = PaymentOutcomeTracker({'c'})
+    t.observe_pool('H1', {'c'})
+    t.cross_check_scala(set())
+    assert t.unresolved() == ['c'], t.unresolved()
+    assert not t.all_routed()
+
+    # (4) located = 0 fails even when everything else is clean: a run in
+    # which the strict path was never exercised proved nothing.
+    t = PaymentOutcomeTracker({'d'})
+    t.saw_in_ordering_block('d', 'O9')
+    t.observe_pool('O9', set())
+    t.cross_check_scala(set())
+    assert t.unresolved() == [] and not t.located, t.located
+
+    # The cross-check: Scala sealed it, Rust never served it. That is a
+    # FOLLOWER defect and must not hide in the telemetry bucket.
+    t = PaymentOutcomeTracker({'e'})
+    t.saw_in_ordering_block('e', 'O9')
+    t.observe_pool('O9', set())
+    t.cross_check_scala({'e'})
+    assert t.missing_on_rust == {'e': {'ordering_block': 'O9'}}, t.missing_on_rust
+    assert t.never_sealed == {}, 'it is pulled out of never_sealed'
+    assert t.unresolved() == [], t.unresolved()
+
+    # The route is decided by FIRST sighting: an input-block payment that
+    # is later confirmed stays on the strict path.
+    t = PaymentOutcomeTracker({'f'})
+    t.saw_in_input_block('f', 'ib1', 'H1')
+    t.saw_in_ordering_block('f', 'O9')
+    assert t.route['f'] == 'input_block', t.route
+    assert t.never_sealed == {}, t.never_sealed
+
     print('self-test OK: evaluators behave as the round-5 definitions require')
 
 
@@ -1708,55 +1782,136 @@ def wait_for_height(run, target, what):
     raise Unavailable(f'{what}: Scala did not reach ordering block {target} in budget')
 
 
-class PoolTransitionTracker:
-    """Which pool removals may be credited to an INPUT BLOCK.
+class PaymentOutcomeTracker:
+    """Assertion 6, as amended by the controller in round 2.
 
-    A transaction counts as evicted by the input block that carried it
-    only if it is observed absent from Rust's pool while the ordering
-    tip is still the one that was current when it was located. If it
-    disappears after the tip moved, ordinary block confirmation explains
-    it just as well, so it is recorded as `confirmed_by_ordering` and
-    never credited. The first observation of a transaction's absence is
-    its verdict — a later disappearance cannot erase an earlier
-    `confirmed_by_ordering`, which is how round 4 still let ordinary
-    confirmation pass for an input-block eviction.
+    Each submitted payment takes ONE of two routes, decided by where it
+    is first seen:
+
+    * **(a) a Rust-served input block** — the strict path, unchanged: it
+      must be located in a Rust input block AND observed leaving Rust's
+      pool while that block's own ordering tip is still current. This is
+      what the assertion exists to test.
+    * **(b) an ordering block, without ever having been seen in an input
+      block on Rust** — the miner never sealed it. That is upstream F11
+      (`CandidateGenerator` clears `cachedCandidate` after every accepted
+      input block, so most of its own input solutions are rejected), not
+      a follower defect. Counted as `never_sealed_by_miner` telemetry;
+      the only requirement is that it leaves Rust's pool once its
+      ordering block is applied.
+
+    A payment that reaches neither inside the budget is `unresolved` and
+    FAILS the run: an observation that did not happen is not a pass.
+
+    The route is decided by FIRST sighting and never revisited — a tx
+    seen in an input block and then confirmed is still a strict-path tx.
+
+    The guard against route (b) absorbing a real defect is
+    [`Self::cross_check_scala`]: if SCALA's input chain carried the
+    transaction and Rust's never did, the miner plainly sealed it and
+    the follower failed to serve it. That is `missing_on_rust`, and it
+    is a failure.
 
     Pure: no I/O, so `--self-test` drives it directly.
     """
 
-    def __init__(self):
-        self.located = {}            # txid -> input block id
-        self.located_under = {}      # txid -> ordering tip when located
-        self.credited = {}           # txid -> input block id
+    def __init__(self, submitted):
+        self.submitted = set(submitted)
+        self.route = {}               # txid -> 'input_block' | 'ordering'
+        self.located = {}             # txid -> Rust input block id
+        self.located_under = {}       # txid -> ordering tip when located
+        self.never_sealed = {}        # txid -> {'ordering_block': id}
+        self.credited = {}            # strict path: evicted under its own tip
         self.confirmed_by_ordering = {}
+        self.removed_after_ordering = {}   # route (b): gone once confirmed
+        self.missing_on_rust = {}
 
-    def locate(self, txid, input_block_id, header_now):
-        self.located.setdefault(txid, input_block_id)
-        self.located_under.setdefault(txid, header_now)
+    # ----- sightings -----
 
-    def observe(self, header_now, pool):
-        """One observation of Rust's unconfirmed pool at ordering tip
-        `header_now`. `pool` is the set of ids it holds."""
-        for txid, bid in self.located.items():
-            if txid in self.credited or txid in self.confirmed_by_ordering:
-                continue
+    def saw_in_input_block(self, txid, input_block_id, ordering_tip):
+        """`txid` appears in a Rust-served input block."""
+        if txid not in self.submitted or txid in self.route:
+            return
+        self.route[txid] = 'input_block'
+        self.located[txid] = input_block_id
+        self.located_under[txid] = ordering_tip
+
+    def saw_in_ordering_block(self, txid, ordering_block_id):
+        """`txid` appears in an ordering block."""
+        if txid not in self.submitted or txid in self.route:
+            return
+        self.route[txid] = 'ordering'
+        self.never_sealed[txid] = {'ordering_block': ordering_block_id}
+
+    def observe_pool(self, ordering_tip, pool):
+        """One observation of Rust's unconfirmed pool at `ordering_tip`.
+
+        Strict-path transactions keep the round-5 credit rule. Route (b)
+        transactions only have to be gone; their ordering block is what
+        removed them, which is the whole point of the route.
+        """
+        for txid, route in self.route.items():
             if txid in pool:
                 continue
-            if header_now is not None and header_now == self.located_under[txid]:
-                self.credited[txid] = bid
+            if route == 'input_block':
+                if txid in self.credited or txid in self.confirmed_by_ordering:
+                    continue
+                if (ordering_tip is not None
+                        and ordering_tip == self.located_under[txid]):
+                    self.credited[txid] = self.located[txid]
+                else:
+                    self.confirmed_by_ordering[txid] = {
+                        'input_block': self.located[txid],
+                        'located_under': self.located_under[txid],
+                        'observed_under': ordering_tip,
+                    }
             else:
-                self.confirmed_by_ordering[txid] = {
-                    'input_block': bid,
-                    'located_under': self.located_under[txid],
-                    'observed_under': header_now,
-                }
+                self.removed_after_ordering.setdefault(txid, ordering_tip)
 
-    def still_pooled(self):
-        return sorted(set(self.located)
-                      - set(self.credited) - set(self.confirmed_by_ordering))
+    def cross_check_scala(self, scala_input_chain_txids):
+        """Route (b) is only honest if the MINER never sealed it.
 
-    def resolved(self):
-        return set(self.credited) | set(self.confirmed_by_ordering)
+        `scala_input_chain_txids` is every transaction id Scala's own
+        input chain was observed to carry. A payment Scala sealed into an
+        input block but Rust never served is a follower defect wearing
+        the miner's clothes, so it is pulled back out of the telemetry
+        bucket and named.
+        """
+        for txid in sorted(self.never_sealed):
+            if txid in scala_input_chain_txids:
+                self.missing_on_rust[txid] = self.never_sealed.pop(txid)
+                self.route[txid] = 'missing_on_rust'
+
+    # ----- verdict inputs -----
+
+    def unresolved(self):
+        """Payments that reached neither route inside the budget."""
+        return sorted(self.submitted - set(self.route))
+
+    def all_routed(self):
+        return not self.unresolved()
+
+    def strict_not_evicted(self):
+        """Strict-path payments never seen leaving the pool under their
+        own ordering tip."""
+        strict = {t for t, r in self.route.items() if r == 'input_block'}
+        return sorted(strict - set(self.credited))
+
+    def never_sealed_still_pooled(self):
+        """Route (b) payments never seen leaving the pool at all."""
+        return sorted(set(self.never_sealed) - set(self.removed_after_ordering))
+
+    def summary(self):
+        return {
+            'located_in_rust_input_block': len(self.located),
+            'never_sealed_by_miner': len(self.never_sealed),
+            'missing_on_rust': sorted(self.missing_on_rust),
+            'unresolved': self.unresolved(),
+            'credited_under_own_tip': self.credited,
+            'confirmed_by_ordering': self.confirmed_by_ordering,
+            'never_sealed_detail': self.never_sealed,
+            'never_sealed_removed_after_ordering': self.removed_after_ordering,
+        }
 
 
 def attribute_scala_residue(only_in_scala, applied_input_block_txids,
@@ -1846,14 +2001,19 @@ def assertion_6_mempool(run, evidence, count):
                  f'{len(submitted)} of {count} submissions returned HTTP 200',
                  {'failures': result['submit_failures']})
 
-    # Locate each one inside a Rust input block, and check removal from
-    # Rust's pool at the first observation AFTER it was seen in an input
-    # block and BEFORE the ordering block that would confirm it anyway —
-    # otherwise ordinary block confirmation conceals a missing
-    # input-block eviction.
-    tracker = PoolTransitionTracker()
+    # Route each payment. The window is keyed to INPUT-BLOCK
+    # PRODUCTION, not to ordering height: the old loop stopped at the
+    # next ordering block, so when the miner's `cachedCandidate` race
+    # (F11) delayed sealing, the run reported "0 of 20 located" for a
+    # follower that had done nothing wrong. Now each payment is followed
+    # until it appears in a Rust input block (the strict path) or in an
+    # ordering block (never sealed — telemetry), or the ceiling is hit.
+    tracker = PaymentOutcomeTracker(submitted)
     ever_in_rust_pool = set()
-    track_deadline = min(run.deadline, time.monotonic() + 300)
+    scala_input_chain_txids = set()
+    scala_ids_cache = {}
+    ordering_scanned = set()
+    track_deadline = min(run.deadline, time.monotonic() + MEMPOOL_ROUTE_SECONDS)
     # Every input below comes from ONE sampler sweep: the ordering tip,
     # the chain the transaction ids are read against, and the pool. The
     # old loop took a CACHED tip and then made its own pool call, so an
@@ -1862,6 +2022,7 @@ def assertion_6_mempool(run, evidence, count):
     # tip moved across its own pool read is recorded and skipped.
     seen_sweeps = set()
     unstable_sweeps = 0
+    scanned_height = start_height
     while time.monotonic() < track_deadline:
         reading = run.latest_reading()
         # Sweeps are told apart by the sampler's own monotonic counter.
@@ -1881,57 +2042,125 @@ def assertion_6_mempool(run, evidence, count):
                     if located_under is None:
                         continue
                     for txid in set(ids) & submitted:
-                        tracker.locate(txid, bid, located_under)
+                        tracker.saw_in_input_block(txid, bid, located_under)
                 pool = reading['rust']['pool']
                 ever_in_rust_pool |= pool
-                tracker.observe(header_now, pool)
+                tracker.observe_pool(header_now, pool)
             else:
                 unstable_sweeps += 1
+            # The miner's OWN input chain, for the cross-check: a payment
+            # Scala sealed but Rust never served is a follower defect,
+            # not a miner one, and must not hide in the telemetry bucket.
+            for bid in reading['scala']['chain'].get('bestInputBlocks') or []:
+                if bid in scala_ids_cache:
+                    continue
+                try:
+                    ids = api('scala', f'/blocks/{bid}/inputBlockTransactionIds') or []
+                except Unavailable:
+                    continue
+                if ids:
+                    scala_ids_cache[bid] = ids
+                    scala_input_chain_txids |= set(ids)
+        # Ordering blocks are the OTHER route. Every block from the
+        # submission height onwards is scanned once.
         try:
-            if scala_height(run) > start_height:
-                # The next ordering block has landed; anything not
-                # resolved by now cannot be attributed to the input block.
-                break
+            height_now = scala_height(run)
         except Unavailable:
-            pass
-        if submitted and tracker.resolved() >= submitted:
+            height_now = scanned_height
+        while scanned_height < height_now:
+            scanned_height += 1
+            if scanned_height in ordering_scanned:
+                continue
+            ordering_scanned.add(scanned_height)
+            try:
+                for hid in api('scala', f'/blocks/at/{scanned_height}') or []:
+                    block = api('scala', f'/blocks/{hid}')
+                    for t in block['blockTransactions']['transactions']:
+                        tracker.saw_in_ordering_block(t['id'], hid)
+            except (Unavailable, KeyError, TypeError):
+                # A block we could not read is not an observation; the
+                # height stays scanned so the loop makes progress, and
+                # anything it carried stays unresolved, which FAILS.
+                pass
+        if tracker.all_routed() and not tracker.strict_not_evicted() \
+                and not tracker.never_sealed_still_pooled():
             break
         run.idle(0.3)
+    tracker.cross_check_scala(scala_input_chain_txids)
     result['sweeps_skipped_tip_moved'] = unstable_sweeps
+    result['route_window_seconds'] = MEMPOOL_ROUTE_SECONDS
+    result['scala_input_chain_txids_seen'] = len(scala_input_chain_txids)
     in_input_block = tracker.located
     credited = tracker.credited
     confirmed_by_ordering = tracker.confirmed_by_ordering
-    still_pooled = tracker.still_pooled()
+    unresolved = tracker.unresolved()
+    strict_not_evicted = tracker.strict_not_evicted()
+    never_sealed_pooled = tracker.never_sealed_still_pooled()
+    result.update(tracker.summary())
     result['in_rust_input_block'] = in_input_block
     result['located_count'] = len(in_input_block)
     result['min_located'] = MEMPOOL_MIN_LOCATED
     result['located_under_header'] = tracker.located_under
     result['removed_before_next_ordering_block'] = credited
     result['confirmed_by_ordering'] = confirmed_by_ordering
-    result['still_pooled_after_its_input_block'] = still_pooled
+    result['never_removed_before_ordering'] = strict_not_evicted
     result['rust_pool_ever_held'] = sorted(ever_in_rust_pool & submitted)
+    result['definition_amended'] = (
+        'round 2: the window follows input-block production. A payment first seen '
+        'in a Rust input block takes the strict path (located + evicted under its '
+        'own ordering tip); one first seen in an ordering block is '
+        'never_sealed_by_miner (upstream F11) and need only leave the pool. '
+        'PASS needs located >= 1, unresolved = 0, and no missing_on_rust.'
+    )
 
-    if len(in_input_block) < MEMPOOL_MIN_LOCATED:
+    # A payment Scala sealed into an input block that Rust never served
+    # is a FOLLOWER defect, and the whole reason route (b) is allowed to
+    # be telemetry rather than a failure.
+    if tracker.missing_on_rust:
         run.fail('6_mempool',
-                 f'only {len(in_input_block)} of {count} submissions were located '
-                 f'inside a Rust input block, need {MEMPOOL_MIN_LOCATED}',
-                 {'located': sorted(in_input_block),
-                  'input_blocks_seen': len(run.input_block_txids),
-                  'rust_pool_ever_held': result['rust_pool_ever_held'],
+                 f'{len(tracker.missing_on_rust)} payments were in SCALA\'s input '
+                 'chain but never in a Rust input block',
+                 {'missing_on_rust': sorted(tracker.missing_on_rust),
+                  'scala_input_chain_txids_seen': len(scala_input_chain_txids),
                   'rust_log': rust_log_lines('input_blocks')})
-    missing_removal = sorted(set(in_input_block) - set(credited))
-    result['never_removed_before_ordering'] = missing_removal
-    if missing_removal:
+
+    # An observation that did not happen is not a pass.
+    if unresolved:
         run.fail('6_mempool',
-                 f'{len(missing_removal)} transactions in an applied Rust input block '
-                 'were not observed leaving the pool while that ordering block was '
-                 f'still the tip ({len(confirmed_by_ordering)} of them only '
-                 f'disappeared after the next ordering block, {len(still_pooled)} '
-                 'never disappeared at all)',
-                 {'txids': missing_removal,
+                 f'{len(unresolved)} payments reached neither a Rust input block nor '
+                 f'an ordering block within {MEMPOOL_ROUTE_SECONDS:.0f}s',
+                 {'unresolved': unresolved,
+                  'input_blocks_seen': len(run.input_block_txids),
+                  'rust_log': rust_log_lines('input_blocks')})
+
+    # The strict path has to be EXERCISED. A run in which the miner
+    # sealed nothing proves nothing about input-block eviction, so it is
+    # a failure to be rerun, not a pass.
+    if not in_input_block:
+        run.fail('6_mempool',
+                 'no payment was ever located inside a Rust input block, so the '
+                 'input-block eviction path was never exercised',
+                 {'never_sealed_by_miner': len(tracker.never_sealed),
+                  'input_blocks_seen': len(run.input_block_txids),
+                  'scala_input_chain_txids_seen': len(scala_input_chain_txids),
+                  'rust_log': rust_log_lines('input_blocks')})
+
+    if strict_not_evicted:
+        run.fail('6_mempool',
+                 f'{len(strict_not_evicted)} transactions in an applied Rust input '
+                 'block were not observed leaving the pool while that ordering block '
+                 f'was still the tip ({len(confirmed_by_ordering)} of them only '
+                 'disappeared after the next ordering block)',
+                 {'txids': strict_not_evicted,
                   'confirmed_by_ordering': confirmed_by_ordering,
-                  'still_pooled': still_pooled,
-                  'input_blocks': {t: in_input_block[t] for t in missing_removal}})
+                  'input_blocks': {t: in_input_block[t] for t in strict_not_evicted}})
+
+    if never_sealed_pooled:
+        run.fail('6_mempool',
+                 f'{len(never_sealed_pooled)} payments confirmed by an ordering block '
+                 "never left Rust's pool",
+                 {'txids': never_sealed_pooled,
+                  'never_sealed': tracker.never_sealed})
 
     # Pool agreement after the next ordering block, with every Scala-only
     # residue attributed.
@@ -2340,6 +2569,7 @@ def main():
         recon = evidence['assertions'].get('4_reconstruction', {})
         tipm = evidence['assertions'].get('2_best_input_block', {})
         chainm = evidence['assertions'].get('3_best_input_chain', {})
+        poolm = evidence['assertions'].get('6_mempool', {})
         orders = recon.get('orders', {})
         print(f'{evidence["status"]}: '
               f'reconstructed={recon.get("reconstructed_total", 0)} '
@@ -2353,6 +2583,10 @@ def main():
               f'prefix_by_one_allowed={chainm.get("allowed_prefix_by_one_count", 0)} '
               f'prefix_violations={chainm.get("prefix_violation_count", 0)} '
               f'requests_full={run.totals().get("RequestsFull", 0)} '
+              f'located={poolm.get("located_count", 0)} '
+              f'never_sealed={poolm.get("never_sealed_by_miner", 0)} '
+              f'missing_on_rust={len(poolm.get("missing_on_rust", []))} '
+              f'unresolved={len(poolm.get("unresolved", []))} '
               f'max_height_gap={run.max_height_gap} '
               f'failures={len(run.failures)} '
               f'evidence={output.relative_to(ROOT)}', flush=True)
