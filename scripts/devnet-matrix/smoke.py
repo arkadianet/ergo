@@ -264,6 +264,7 @@ class Run:
         self.unavailable_reasons = []
         self.live_artifacts = 0
         self.live_artifact_paths = []
+        self.peer_absent_in_grace = 0
 
         # Assertion 5, accumulated across the whole run.
         self.max_height_gap = 0
@@ -386,7 +387,16 @@ class Run:
             (p for p in (peers or [])
              if p.get('addr', '').endswith(str(lifecycle.P2P['scala']))), None)
         if scala_peer is None:
-            self.peer_states.add('absent')
+            # Now that the sampler never stops, it sees the deliberate
+            # restart: a node that has just come back has an empty peer
+            # list until the handshake completes. That is the restart,
+            # not a dropped peer. The same start grace the height window
+            # uses applies here, and the observations it covers are
+            # counted so the exclusion is visible rather than assumed.
+            if self.in_grace('rust'):
+                self.peer_absent_in_grace += 1
+            else:
+                self.peer_states.add('absent')
             return
         self.peer_states.add(scala_peer.get('state', 'unknown'))
         if (scala_peer.get('score') or 0) < 0:
@@ -1341,6 +1351,7 @@ def assertion_5_follow(run, evidence):
         'accumulated_drops': totals,
         'counters_carried_across_restart': True,
         'peer_states_seen': sorted(run.peer_states),
+        'peer_absent_within_start_grace': run.peer_absent_in_grace,
         'penalty_observations': run.penalty_observations,
         'samples': run.samples,
         'attempted_samples': attempted,
