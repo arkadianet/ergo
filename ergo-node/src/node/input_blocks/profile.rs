@@ -364,31 +364,6 @@ mod tests {
         );
     }
 
-    // ----- error paths -----
-
-    #[test]
-    fn an_empty_histogram_reports_zero_rather_than_panicking() {
-        let h = Hist::default();
-        assert_eq!(h.quantile_us(0.5), 0);
-        assert_eq!(h.quantile_us(0.95), 0);
-        assert_eq!(h.mean_us(), 0);
-    }
-
-    #[test]
-    fn report_is_silent_before_the_interval_elapses() {
-        let t0 = Instant::now();
-        let mut p = Profile::new(t0);
-        p.observe(Phase::ValidateRun, Duration::from_millis(5));
-        assert!(p.report(t0 + Duration::from_secs(1)).is_none());
-    }
-
-    #[test]
-    fn report_is_silent_when_nothing_was_measured() {
-        let t0 = Instant::now();
-        let mut p = Profile::new(t0);
-        assert!(p.report(t0 + REPORT_INTERVAL).is_none());
-    }
-
     // ----- round-trips -----
 
     #[test]
@@ -465,5 +440,30 @@ mod tests {
             assert_eq!(p.index(), i, "{} is out of pipeline order", p.name());
             assert!(seen.insert(p.name()), "duplicate name {}", p.name());
         }
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn an_empty_histogram_reports_zero_rather_than_panicking() {
+        let h = Hist::default();
+        assert_eq!(h.quantile_us(0.5), 0);
+        assert_eq!(h.quantile_us(0.95), 0);
+        assert_eq!(h.mean_us(), 0);
+    }
+
+    #[test]
+    fn report_is_silent_before_the_interval_elapses() {
+        let t0 = Instant::now();
+        let mut p = Profile::new(t0);
+        p.observe(Phase::ValidateRun, Duration::from_millis(5));
+        assert!(p.report(t0 + Duration::from_secs(1)).is_none());
+    }
+
+    #[test]
+    fn report_is_silent_when_nothing_was_measured() {
+        let t0 = Instant::now();
+        let mut p = Profile::new(t0);
+        assert!(p.report(t0 + REPORT_INTERVAL).is_none());
     }
 }
