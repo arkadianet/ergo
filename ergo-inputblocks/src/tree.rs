@@ -8,6 +8,8 @@
 //! records what it was told. Task 11's processor owns validation and
 //! decides, per milestone, what `apply` returns.
 
+use std::collections::{HashMap, HashSet};
+
 use crate::chain::InputBlocksChain;
 use crate::types::InputBlockId;
 
@@ -159,19 +161,64 @@ impl InputBlocksTree {
         ann: AnnouncementRef<'_>,
         waitlist: &[(InputBlockId, Option<InputBlockId>)],
     ) -> Option<InputBlocksTree> {
+        // Scala's `applyDisconnected`, made TRANSITIVE.
+        //
+        // Scala folds over `disconnectedWaitlist` ONCE and attaches an
+        // entry only if some chain's current tip is already its parent.
+        // A waitlist filled by walking a chain BACKWARDS — which is
+        // exactly what a node that has lost its tree does, one
+        // `RequestInputBlock` per round trip — is in reverse order, so a
+        // single pass attaches exactly one entry per call. Measured on
+        // the mixed devnet after a cold restart: `RequestInputBlock` at
+        // 1.8/s, `Dropped { AlreadyKnown }` at 1.8/s, and the chain
+        // reconnecting one block per announcement against a miner
+        // publishing one a second. The node never caught up inside an
+        // ordering block.
+        //
+        // Attaching an entry makes its own children attachable, so the
+        // work is a graph walk rather than a scan: index the waitlist by
+        // parent, and whenever a chain grows, look for children of its
+        // new tip. Each waitlisted entry is consumed at most once, as in
+        // Scala's single fold, so this attaches a superset of what Scala
+        // attaches and never a different history.
         fn apply_disconnected(
             mut acc: Vec<InputBlocksChain>,
             waitlist: &[(InputBlockId, Option<InputBlockId>)],
         ) -> Vec<InputBlocksChain> {
+            let mut children: HashMap<InputBlockId, Vec<InputBlockId>> = HashMap::new();
             for (wb_id, wb_prev) in waitlist {
-                let idx = acc.iter().position(|c| c.chain.last() == wb_prev.as_ref());
-                if let Some(idx) = idx {
+                // A waitlisted entry with no parent cannot attach to a
+                // chain tip (a tip is always Some), which is what the
+                // scanning form did too.
+                if let Some(prev) = wb_prev {
+                    children.entry(*prev).or_default().push(*wb_id);
+                }
+            }
+            if children.is_empty() {
+                return acc;
+            }
+            let mut used: HashSet<InputBlockId> = HashSet::new();
+            let mut frontier: Vec<usize> = (0..acc.len()).collect();
+            while let Some(idx) = frontier.pop() {
+                let Some(tip) = acc[idx].chain.last().copied() else {
+                    continue;
+                };
+                let Some(attachable) = children.get(&tip).cloned() else {
+                    continue;
+                };
+                for wb_id in attachable {
+                    if !used.insert(wb_id) {
+                        continue;
+                    }
                     let c = acc[idx].clone();
-                    let new_chains = c.fork(*wb_id, wb_prev.as_ref());
-                    let mut rest = new_chains;
+                    let mut rest = c.fork(wb_id, Some(&tip));
                     let head = rest.remove(0);
                     acc[idx] = head;
-                    acc.extend(rest);
+                    frontier.push(idx);
+                    for extra in rest {
+                        acc.push(extra);
+                        frontier.push(acc.len() - 1);
+                    }
                 }
             }
             acc
@@ -481,6 +528,99 @@ mod tests {
             .unwrap();
         assert_eq!(out.forks.len(), 1);
         assert_eq!(out.forks[0].chain, vec![id(1), id(2)]);
+    }
+
+    /// A waitlist filled by walking a chain BACKWARDS reconnects in ONE
+    /// insert, not one block per insert.
+    ///
+    /// This is the shape a node that has lost its tree produces: it asks
+    /// for the parent of each disconnected announcement, so the entries
+    /// arrive newest-first. Scala's single fold attaches only the entry
+    /// whose parent is already a chain tip — here `2` — and leaves `3`,
+    /// `4`, `5` for later passes, one per pass. On the mixed devnet
+    /// that meant reconnecting one block per announcement against a
+    /// miner publishing one a second: the follower never caught up
+    /// inside an ordering block.
+    #[test]
+    fn a_backwards_filled_waitlist_reconnects_in_one_insert() {
+        let tree = InputBlocksTree::default();
+        // Newest first, exactly as the backward walk delivers them.
+        let waitlist = vec![
+            (id(5), Some(id(4))),
+            (id(4), Some(id(3))),
+            (id(3), Some(id(2))),
+            (id(2), Some(id(1))),
+        ];
+        let out = tree
+            .insert(
+                AnnouncementRef {
+                    id: id(1),
+                    prev: None,
+                },
+                &waitlist,
+            )
+            .unwrap();
+        assert_eq!(out.forks.len(), 1);
+        assert_eq!(
+            out.forks[0].chain,
+            vec![id(1), id(2), id(3), id(4), id(5)],
+            "the whole run attaches at once"
+        );
+    }
+
+    /// The transitive splice must not invent a fork: a waitlisted block
+    /// whose parent is nowhere in the accumulated chains stays where it
+    /// is.
+    #[test]
+    fn an_unreachable_waitlist_entry_is_left_alone() {
+        let tree = InputBlocksTree::default();
+        let waitlist = vec![
+            (id(2), Some(id(1))),
+            // Parent id(9) is unknown to this tree and to the waitlist.
+            (id(8), Some(id(9))),
+        ];
+        let out = tree
+            .insert(
+                AnnouncementRef {
+                    id: id(1),
+                    prev: None,
+                },
+                &waitlist,
+            )
+            .unwrap();
+        assert_eq!(out.forks.len(), 1);
+        assert_eq!(out.forks[0].chain, vec![id(1), id(2)]);
+    }
+
+    /// Two waitlisted children of the same block still make two forks,
+    /// and each of them keeps extending.
+    #[test]
+    fn competing_waitlisted_children_each_extend_their_own_fork() {
+        let tree = InputBlocksTree::default();
+        let waitlist = vec![
+            (id(4), Some(id(3))),
+            (id(3), Some(id(1))),
+            (id(2), Some(id(1))),
+        ];
+        let out = tree
+            .insert(
+                AnnouncementRef {
+                    id: id(1),
+                    prev: None,
+                },
+                &waitlist,
+            )
+            .unwrap();
+        let chains: HashSet<Vec<InputBlockId>> =
+            out.forks.iter().map(|f| f.chain.clone()).collect();
+        assert!(
+            chains.contains(&vec![id(1), id(3), id(4)]),
+            "the deeper branch is followed through: {chains:?}"
+        );
+        assert!(
+            chains.contains(&vec![id(1), id(2)]),
+            "and the sibling is kept: {chains:?}"
+        );
     }
 
     #[test]
