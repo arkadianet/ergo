@@ -416,69 +416,12 @@ mod tests {
 
     // ----- oracle parity -----
 
-    /// Pins the leaf preimage `extension_root` builds internally:
-    /// for a single field, the root must equal the root of a
-    /// one-leaf tree built directly over `[len] ++ key ++ value`
-    /// (the same bytes [`extension_leaf_digest`] hashes). This ties
-    /// the two independent call sites — `extension_root`'s inline
-    /// leaf construction and the standalone digest function — to one
-    /// preimage rule so they cannot silently drift apart.
-    #[test]
-    fn extension_leaf_digest_matches_extension_root_single_field() {
-        let key = b"prevInputBlockId";
-        let value = &[0x88u8; 32];
-
-        let root = extension_root(&[(key.as_slice(), value.as_slice())]);
-
-        let mut kv_bytes = Vec::with_capacity(1 + key.len() + value.len());
-        kv_bytes.push(key.len() as u8);
-        kv_bytes.extend_from_slice(key);
-        kv_bytes.extend_from_slice(value);
-        let expected_root = merkle_tree_root(&[kv_bytes.as_slice()]);
-
-        assert_eq!(root, Some(expected_root));
-
-        // And extension_leaf_digest itself must be the leaf hash
-        // merkle_tree_root computes over those same bytes.
-        assert_eq!(
-            extension_leaf_digest(key, value),
-            Some(leaf_hash(&kv_bytes))
-        );
-    }
-
-    // ----- error paths -----
-
-    /// A key that does not fit the single-byte length prefix has no
-    /// canonical leaf preimage, so the helper must refuse it instead of
-    /// wrapping the prefix.
-    #[test]
-    fn extension_leaf_digest_key_over_255_bytes_returns_none() {
-        assert!(extension_leaf_digest(&[0x01; 256], &[0x02; 4]).is_none());
-        // 255 is still representable and must keep working.
-        assert!(extension_leaf_digest(&[0x01; 255], &[0x02; 4]).is_some());
-    }
-
-    /// `extension_root` builds the same leaf preimage inline, so it has
-    /// to refuse the same keys — otherwise the two helpers disagree on
-    /// which inputs have a canonical encoding.
-    #[test]
-    fn extension_root_key_over_255_bytes_returns_none() {
-        let long = [0x01u8; 256];
-        let value = [0x02u8; 4];
-        assert!(extension_root(&[(long.as_slice(), value.as_slice())]).is_none());
-
-        // One oversized key anywhere in the bag poisons the whole root.
-        let ok_key = [0x03u8, 0x00];
-        assert!(extension_root(&[
-            (ok_key.as_slice(), value.as_slice()),
-            (long.as_slice(), value.as_slice()),
-        ])
-        .is_none());
-
-        // 255 is still representable and must keep working.
-        let max = [0x01u8; 255];
-        assert!(extension_root(&[(max.as_slice(), value.as_slice())]).is_some());
-    }
+    // The extension leaf preimage is NOT checked here: a Rust-computed
+    // expectation would only prove `extension_root` and
+    // `extension_leaf_digest` agree with each other. The real coverage is
+    // Scala-vectored — `ergo-crypto/tests/it/extension_leaf_oracle.rs`
+    // (`Extension.kvToLeaf` digests) and `merkle_mainnet.rs`'s
+    // `extension_root_blocks_*` (mainnet extension roots).
 
     #[test]
     fn merkle_root_empty_input_pinned_to_blake2b_of_empty_bytes() {
@@ -646,6 +589,38 @@ mod tests {
     }
 
     // ----- error paths -----
+
+    /// A key that does not fit the single-byte length prefix has no
+    /// canonical leaf preimage, so the helper must refuse it instead of
+    /// wrapping the prefix. A rejection, not a digest — no oracle needed.
+    #[test]
+    fn extension_leaf_digest_key_over_255_bytes_returns_none() {
+        assert!(extension_leaf_digest(&[0x01; 256], &[0x02; 4]).is_none());
+        // 255 is still representable and must keep working.
+        assert!(extension_leaf_digest(&[0x01; 255], &[0x02; 4]).is_some());
+    }
+
+    /// `extension_root` builds the same leaf preimage inline, so it has
+    /// to refuse the same keys — otherwise the two helpers disagree on
+    /// which inputs have a canonical encoding.
+    #[test]
+    fn extension_root_key_over_255_bytes_returns_none() {
+        let long = [0x01u8; 256];
+        let value = [0x02u8; 4];
+        assert!(extension_root(&[(long.as_slice(), value.as_slice())]).is_none());
+
+        // One oversized key anywhere in the bag poisons the whole root.
+        let ok_key = [0x03u8, 0x00];
+        assert!(extension_root(&[
+            (ok_key.as_slice(), value.as_slice()),
+            (long.as_slice(), value.as_slice()),
+        ])
+        .is_none());
+
+        // 255 is still representable and must keep working.
+        let max = [0x01u8; 255];
+        assert!(extension_root(&[(max.as_slice(), value.as_slice())]).is_some());
+    }
 
     #[test]
     fn proof_out_of_range_returns_none() {
