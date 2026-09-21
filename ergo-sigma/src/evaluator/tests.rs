@@ -115,6 +115,7 @@ fn box_equality_self_vs_inputs_0() {
         pre_header_n_bits: 0,
         pre_header_votes: [0u8; 3],
         input_extensions: &[],
+        soft_fields_allowed: true,
     };
     // SELF == INPUTS(0) — same underlying box
     let self_val = Value::SelfBox;
@@ -163,6 +164,7 @@ fn box_equality_in_tuple() {
         pre_header_n_bits: 0,
         pre_header_votes: [0u8; 3],
         input_extensions: &[],
+        soft_fields_allowed: true,
     };
     // (SELF, 42) == (INPUTS(0), 42) — nested box in tuple
     let l = Value::Tuple(vec![Value::SelfBox, Value::Int(42)]);
@@ -210,6 +212,7 @@ fn box_equality_in_option() {
         pre_header_n_bits: 0,
         pre_header_votes: [0u8; 3],
         input_extensions: &[],
+        soft_fields_allowed: true,
     };
     // Some(SELF) == Some(INPUTS(0))
     let l = Value::Opt(Some(Box::new(Value::SelfBox)));
@@ -271,6 +274,7 @@ fn box_collection_vs_derived_tuple() {
         pre_header_n_bits: 0,
         pre_header_votes: [0u8; 3],
         input_extensions: &[],
+        soft_fields_allowed: true,
     };
     // Left: BoxCollection(Inputs) — the raw INPUTS carrier
     let inputs_coll = Value::BoxCollection(BoxSource::Inputs);
@@ -350,6 +354,7 @@ fn coll_box_eq_cost_uses_per_item() {
         pre_header_n_bits: 0,
         pre_header_votes: [0u8; 3],
         input_extensions: &[],
+        soft_fields_allowed: true,
     };
     // BoxCollection(Inputs) with 2 boxes
     // Expected cost: MatchType(1) + PerItem(base=15, perChunk=5, chunk=1, n=2)
@@ -1625,6 +1630,7 @@ fn ctx_with_self_box(b: &EvalBox) -> ReductionContext<'_> {
         pre_header_n_bits: 0,
         pre_header_votes: [0u8; 3],
         input_extensions: &[],
+        soft_fields_allowed: true,
     }
 }
 
@@ -9510,6 +9516,7 @@ fn coll_updated_inputs_updated_self_succeeds_via_eval() {
         pre_header_n_bits: 0,
         pre_header_votes: [0u8; 3],
         input_extensions: &[],
+        soft_fields_allowed: true,
     };
     let expr = coll_updated_via_method_call(op_inputs(), const_int(0), op_self());
     let v = eval_to_value(&expr, &ctx, &[])
@@ -9562,6 +9569,7 @@ fn coll_updated_inputs_rejects_int_element_via_eval() {
         pre_header_n_bits: 0,
         pre_header_votes: [0u8; 3],
         input_extensions: &[],
+        soft_fields_allowed: true,
     };
     let expr = coll_updated_via_method_call(op_inputs(), const_int(0), const_int(99));
     let err = match eval_to_value(&expr, &ctx, &[]) {
@@ -13019,4 +13027,118 @@ fn value_trace_records_every_evaluated_node_by_preorder_id() {
     // Nothing is recorded once taken.
     assert_eq!(run_eval(&expr), Value::Int(3));
     assert!(crate::value_trace::take().is_none());
+}
+
+// ----- soft-field access gate (error paths) -----
+
+/// Builds a zero-arg `0xDB PropertyCall` on the CONTEXT receiver, the
+/// wire form the compiler emits for `CONTEXT.preHeader.<field>`.
+fn context_property_call(type_id: u8, method_id: u8) -> Expr {
+    op(
+        0xDB,
+        Payload::MethodCall {
+            type_id,
+            method_id,
+            obj: Box::new(op(0xFE, Payload::Zero)),
+            args: vec![],
+            type_args: vec![],
+        },
+    )
+}
+
+#[test]
+fn miner_pubkey_opcode_with_soft_fields_disallowed_errors() {
+    let mut ctx = ReductionContext::minimal(100, 0);
+    ctx.soft_fields_allowed = false;
+    let expr = op(0xAC, Payload::Zero); // MinerPubkey
+    let err = eval_to_value(&expr, &ctx, &[]).unwrap_err();
+    assert!(
+        matches!(err, EvalError::SoftFieldAccess("minerPubKey")),
+        "{err}"
+    );
+}
+
+#[test]
+fn miner_pubkey_opcode_with_soft_fields_allowed_returns_bytes() {
+    let ctx = ReductionContext::minimal(100, 0);
+    let expr = op(0xAC, Payload::Zero);
+    assert!(
+        matches!(eval_to_value(&expr, &ctx, &[]).unwrap(), Value::CollBytes(b) if b.len() == 33)
+    );
+}
+
+#[test]
+fn context_miner_pubkey_method_with_soft_fields_disallowed_errors() {
+    let mut ctx = ReductionContext::minimal(100, 0);
+    ctx.soft_fields_allowed = false;
+    let err = eval_to_value(&context_property_call(101, 10), &ctx, &[]).unwrap_err();
+    assert!(
+        matches!(err, EvalError::SoftFieldAccess("minerPubKey")),
+        "{err}"
+    );
+}
+
+#[test]
+fn pre_header_timestamp_with_soft_fields_disallowed_errors() {
+    let mut ctx = ReductionContext::minimal(100, 0);
+    ctx.soft_fields_allowed = false;
+    let err = eval_to_value(&context_property_call(105, 3), &ctx, &[]).unwrap_err();
+    assert!(
+        matches!(err, EvalError::SoftFieldAccess("timestamp")),
+        "{err}"
+    );
+}
+
+#[test]
+fn pre_header_miner_pk_with_soft_fields_disallowed_errors() {
+    let mut ctx = ReductionContext::minimal(100, 0);
+    ctx.soft_fields_allowed = false;
+    let err = eval_to_value(&context_property_call(105, 6), &ctx, &[]).unwrap_err();
+    assert!(
+        matches!(err, EvalError::SoftFieldAccess("minerPk")),
+        "{err}"
+    );
+}
+
+#[test]
+fn pre_header_votes_with_soft_fields_disallowed_errors() {
+    let mut ctx = ReductionContext::minimal(100, 0);
+    ctx.soft_fields_allowed = false;
+    let err = eval_to_value(&context_property_call(105, 7), &ctx, &[]).unwrap_err();
+    assert!(matches!(err, EvalError::SoftFieldAccess("votes")), "{err}");
+}
+
+/// `SPreHeader.height` is not a soft field: it stays readable with the
+/// gate closed (Scala `softMethodIds` = {3, 6, 7} only).
+#[test]
+fn pre_header_height_with_soft_fields_disallowed_is_ok() {
+    let mut ctx = ReductionContext::minimal(100, 0);
+    ctx.soft_fields_allowed = false;
+    assert_eq!(
+        eval_to_value(&context_property_call(105, 5), &ctx, &[]).unwrap(),
+        Value::Int(100)
+    );
+}
+
+/// The v6 `0xDC MethodCall` wire form routes through the same shared
+/// no-arg table, so the gate must fire there too.
+#[test]
+fn pre_header_timestamp_via_method_call_with_soft_fields_disallowed_errors() {
+    let mut ctx = ReductionContext::minimal(100, 0);
+    ctx.soft_fields_allowed = false;
+    let expr = op(
+        0xDC,
+        Payload::MethodCall {
+            type_id: 105,
+            method_id: 3,
+            obj: Box::new(op(0xFE, Payload::Zero)),
+            args: vec![],
+            type_args: vec![],
+        },
+    );
+    let err = eval_to_value(&expr, &ctx, &[]).unwrap_err();
+    assert!(
+        matches!(err, EvalError::SoftFieldAccess("timestamp")),
+        "{err}"
+    );
 }

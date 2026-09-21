@@ -257,6 +257,7 @@ fn trace_inner() {
                             pre_header_n_bits: 0,
                             pre_header_votes: [0u8; 3],
                             input_extensions: &[],
+                            soft_fields_allowed: true,
                         };
 
                         let (result, trace_entries) =

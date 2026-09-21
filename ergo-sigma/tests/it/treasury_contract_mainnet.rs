@@ -109,6 +109,7 @@ fn treasury_contract_inner() {
             pre_header_n_bits: 0,
             pre_header_votes: [0u8; 3],
             input_extensions: &[],
+            soft_fields_allowed: true,
         };
 
         match verify_spending_proof_with_context(&ergo_tree, &proof, &bts, &ctx) {

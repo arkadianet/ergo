@@ -316,6 +316,12 @@ pub struct ReductionContext<'a> {
     /// (version < 3) tree can be spent in a block whose activated version is
     /// already >= 3, and those two versions then disagree.
     pub ergo_tree_version: u8,
+    /// Scala `ErgoLikeContext.softFieldsAllowed`; `false` only for
+    /// input-block transaction validation and mining classification.
+    /// When `false`, reads of the miner-controlled pre-header fields
+    /// (`timestamp`, `minerPk`, `votes`) and of `minerPubKey` fail with
+    /// [`EvalError::SoftFieldAccess`] instead of returning a value.
+    pub soft_fields_allowed: bool,
 }
 
 impl<'a> ReductionContext<'a> {
@@ -350,6 +356,9 @@ impl<'a> ReductionContext<'a> {
             // per-test ceremony; tests pinning legacy behavior set it
             // explicitly.
             ergo_tree_version: 3,
+            // Today's behaviour everywhere: soft fields are readable
+            // unless a caller (input-block validation) closes the gate.
+            soft_fields_allowed: true,
         }
     }
 
@@ -674,6 +683,13 @@ pub enum EvalError {
     /// header window before invoking opcodes that depend on it.
     #[error("header window is empty; LastBlockUtxoRootHash unavailable")]
     EmptyHeaderWindow,
+    /// A miner-controlled pre-header field (timestamp, minerPk, votes,
+    /// or the MinerPubkey opcode) was read while `soft_fields_allowed`
+    /// is false. Scala `SoftFieldAccessException`. Held typed so the
+    /// validation boundary can route it to
+    /// `ValidationError::SoftFieldAccess` and mining can retry on it.
+    #[error("soft field {0} accessed when disallowed")]
+    SoftFieldAccess(&'static str),
     /// A soft-fork-gated method was invoked at an `activatedScriptVersion`
     /// below its activation threshold. EIP-50 / Sigma 6.0 methods
     /// require `activatedScriptVersion >= 3` (block-header version 4).

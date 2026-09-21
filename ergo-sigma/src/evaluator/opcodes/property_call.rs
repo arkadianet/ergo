@@ -517,6 +517,9 @@ pub(super) fn eval_no_arg_method(
         // SContext(101).minerPubKey(10) -> Coll[Byte]         cost: 20
         (101, 10) => {
             add_method_cost(cost, COST_CONTEXT_MINER_PUB_KEY)?;
+            if !ctx.soft_fields_allowed {
+                return Err(EvalError::SoftFieldAccess("minerPubKey"));
+            }
             Ok(Some(Value::CollBytes(ctx.miner_pubkey.to_vec())))
         }
         // SHeader(104) property methods 1-15                  cost: 10
@@ -615,6 +618,9 @@ pub(super) fn eval_no_arg_method(
         }
         (105, 3) => {
             add_method_cost(cost, COST_PRE_HEADER_TIMESTAMP)?;
+            if !ctx.soft_fields_allowed {
+                return Err(EvalError::SoftFieldAccess("timestamp"));
+            }
             Ok(Some(Value::Long(ctx.pre_header_timestamp as i64)))
         }
         (105, 4) => {
@@ -627,10 +633,16 @@ pub(super) fn eval_no_arg_method(
         }
         (105, 6) => {
             add_method_cost(cost, COST_PRE_HEADER_MINER_PK)?;
+            if !ctx.soft_fields_allowed {
+                return Err(EvalError::SoftFieldAccess("minerPk"));
+            }
             Ok(Some(Value::GroupElement(ctx.miner_pubkey)))
         }
         (105, 7) => {
             add_method_cost(cost, COST_PRE_HEADER_VOTES)?;
+            if !ctx.soft_fields_allowed {
+                return Err(EvalError::SoftFieldAccess("votes"));
+            }
             Ok(Some(Value::CollBytes(ctx.pre_header_votes.to_vec())))
         }
         // SGlobal(106).groupGenerator(1) -> GroupElement      cost: 10

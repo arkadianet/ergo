@@ -265,6 +265,7 @@ pub(crate) fn validate_scripts_at_index(
             // isV3OrLaterErgoTreeVersion on this for the v6 SHeader data
             // serialization gate.
             ergo_tree_version: ergo_tree.version,
+            soft_fields_allowed: true,
         };
 
         let verified = verify_spending_proof_with_context_and_cost(
