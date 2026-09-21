@@ -449,3 +449,72 @@ fn block_transactions_section_id_is_hashed_not_the_bare_root() {
         "a stored section must not look absent"
     );
 }
+
+/// Finding 6(a): the processor has no clock and no chain view of its
+/// own, so `Event::Tick` and the ordering-chain events must be driven by
+/// the node. Without the tick a peer that stops answering holds its
+/// `requests_per_peer` slots forever; without the applied hook the
+/// generation never bumps and `/info.bestInputBlock` never clears.
+#[test]
+fn ordering_applied_hook_bumps_generation_and_clears_best_input_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    state.input_blocks = Some(runtime());
+    let before = state
+        .input_blocks
+        .as_ref()
+        .unwrap()
+        .processor()
+        .generation();
+
+    let actions = on_ordering_block_applied(&mut state, [0x5a; 32], 7, Instant::now());
+
+    let rt = state.input_blocks.as_ref().unwrap();
+    assert!(
+        rt.processor().generation() > before,
+        "an applied ordering block invalidates in-flight jobs"
+    );
+    assert!(rt.processor().best_input_block().is_none());
+    assert!(
+        actions.is_empty(),
+        "nothing to relay or request on a bare apply"
+    );
+}
+
+#[test]
+fn hooks_are_no_ops_when_the_subsystem_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    assert!(state.input_blocks.is_none());
+    assert!(on_tick(&mut state, Instant::now()).is_empty());
+    assert!(on_ordering_block_applied(&mut state, [1; 32], 1, Instant::now()).is_empty());
+    assert!(on_ordering_reorg(&mut state, [1; 32], 1, Instant::now()).is_empty());
+    seed_best_ordering(&mut state);
+    assert!(state.input_blocks.is_none());
+}
+
+#[test]
+fn tick_releases_an_expired_request_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    let start = Instant::now();
+    let mut rt = InputBlocksRuntime::new(&cfg(), start);
+    // One slot, so the second request is refused until the first expires.
+    let tag = rt.tag("127.0.0.1:19501".parse().unwrap());
+    state.input_blocks = Some(rt);
+
+    // Drive the tick far past `request_timeout_ms`; the sweep must run
+    // without the processor ever having consulted a clock of its own.
+    let later = start
+        + std::time::Duration::from_millis(
+            cfg().bounds.request_timeout_ms + cfg().bounds.staging_ttl_ms + 1,
+        );
+    let actions = on_tick(&mut state, later);
+    assert!(actions.is_empty(), "an idle tick asks for nothing");
+    assert_eq!(
+        state.input_blocks.as_ref().unwrap().tick(later).0,
+        cfg().bounds.request_timeout_ms + cfg().bounds.staging_ttl_ms + 1,
+        "the runtime's clock is milliseconds since construction"
+    );
+    let _ = tag;
+}

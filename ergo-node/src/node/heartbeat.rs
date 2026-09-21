@@ -46,6 +46,13 @@ fn should_emit_beat(
 }
 
 pub(super) fn emit_heartbeat(state: &mut NodeState, now: Instant) {
+    // Input blocks: the processor has no clock of its own, so the
+    // node's own once-a-second edge is what sweeps its TTLs and
+    // releases request slots whose deadline passed (spec 7.4). A no-op
+    // when the subsystem is off.
+    let actions = super::input_blocks::on_tick(state, now);
+    super::flush_actions(state, actions);
+
     let elapsed = now.duration_since(state.last_beat);
     let secs = elapsed.as_secs_f64().max(0.001);
     let cs = state.store.chain_state_meta();

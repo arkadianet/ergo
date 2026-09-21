@@ -1031,6 +1031,12 @@ async fn run_inner_with_backend(
         reorg_history_projection: None,
     };
 
+    // Seed the input-block processor's view of the best full block.
+    // The processor restarts empty (spec 9.5) but must not believe the
+    // chain is at height 0 — every announcement would then land outside
+    // its +/-2 actionable window and be dropped.
+    super::input_blocks::seed_best_ordering(&mut state);
+
     // Spawn the Step B anchor-map builder. Background task that
     // periodically snapshots `rest_peer_urls` and queries
     // `/blocks/at/{h}`. JoinHandle is stored in `RunHandle` and
