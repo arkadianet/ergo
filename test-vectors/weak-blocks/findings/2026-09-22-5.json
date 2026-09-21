@@ -163,5 +163,40 @@
       }
     ],
     "note": "the profiled run competed with perf for CPU and produced no multi-tx reconstruction; the numbers are indicative, not a clean measurement"
+  },
+  "round_3_remeasurement": {
+    "note": "assertions 2 and 3 were restated as consistency-under-lag with hard bounds (p95 <= 8, max <= 16 input blocks). The lag bound is what this finding is now measured against, and it fails by an order of magnitude.",
+    "run_a": {
+      "lag_p95": 81,
+      "lag_max": 85,
+      "lag_mean": 38.78,
+      "lag_samples": 294,
+      "exact_tip_matches": 0,
+      "assertion_6": "PASS (20/20 observed in a Rust input block)",
+      "assertion_5": "FAIL (max gap 4, 22 violations)",
+      "multi_tx_reconstructions": 6
+    },
+    "run_b": {
+      "lag_p95": 160,
+      "lag_max": 179,
+      "lag_mean": 69.04,
+      "lag_samples": 1100,
+      "exact_tip_matches": 0,
+      "assertion_6": "FAIL (0/20 observed in a Rust input block)",
+      "assertion_5": "FAIL (max gap 3, 70 violations)",
+      "multi_tx_reconstructions": 1
+    },
+    "run_to_run_variance": "the two runs differ by 2x in lag because the Scala miner's ordering-block acceptance is racy (CandidateGenerator clears cachedCandidate after every accepted input block, so ordering solutions are often rejected). When an ordering block takes minutes instead of ~55 s the input chain under it grows to 180 blocks and a follower with fixed throughput falls proportionally further behind. Lag in INPUT BLOCKS is therefore partly a measure of the miner's stall, not only of the follower.",
+    "escalation": "round-3 ruling item 4 parks the single-in-flight validation ceiling (spec 7.4) 'to revisit only if the p95 lag bound fails'. It failed, in both runs, by 10-20x. This is now the blocking item for assertions 2 and 3 and, indirectly, for 5 and 6 under load."
+  },
+  "assertion_3_residual": {
+    "prefix_violations_after_the_settled_rule": 10,
+    "shape": "every one is the same: Rust's listed chain still belongs to the PREVIOUS ordering block while `bestOrdering` already names the new one. Not one violation has a Rust block sitting at a different position in Scala's chain - Rust's ids are simply absent from the new chain.",
+    "why_the_harness_cannot_key_it_out": "on BOTH nodes /blocks/bestInputChain pairs `bestOrdering` (the best HEADER id) with a chain read from the input-block processor - Scala's route does the same (bestHeaderOpt + bestInputBlocksChain()). The two sources are not atomically consistent, and the width of the window is a throughput symptom. Dropping mid-transition pairs (same ordering id as the previous sample, non-empty Scala chain) removes most but not all: the Rust node stays on the old tree for several consecutive samples.",
+    "options_for_the_controller": [
+      "expose the ordering id a chain belongs to on the Rust endpoint, which would make the assertion decidable without guessing",
+      "define assertion 3 only over samples where every Rust id is in Scala's chain - which collapses it into assertion 2",
+      "accept it as a known artifact and gate on assertion 2's lag bound alone"
+    ]
   }
 }
