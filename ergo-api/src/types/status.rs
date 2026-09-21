@@ -192,6 +192,45 @@ pub struct ApiStatus {
     /// (`ergo_node_last_apply_age_ms`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_apply_age_ms: Option<u64>,
+    /// Matrix (input blocks) subsystem status. `None` when
+    /// `[input_blocks] enabled = false` — the subsystem is off and no
+    /// processor exists to report on. `Some(_)` once wired, even before
+    /// any input block has been seen (all-zero counters).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_blocks: Option<ApiInputBlocksStatus>,
+}
+
+/// Matrix (input blocks) subsystem status snapshot: the operator-facing
+/// view of `ergo_inputblocks::processor::Processor` state plus the
+/// per-[`DropReason`](https://docs.rs/ergo-inputblocks) drop counters
+/// (spec 7.6 operator surface). Sourced from `InputBlocksRuntime` at
+/// snapshot-publish time on the action loop — see
+/// `ergo-node/src/node/input_blocks/runtime.rs`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, ToSchema)]
+pub struct ApiInputBlocksStatus {
+    /// Hex id of the tip of the best input-block chain under the best
+    /// ordering block. `None` when no input block currently leads.
+    pub best_input_block: Option<String>,
+    /// Competing forks retained under the best ordering block.
+    pub forks: u32,
+    /// Bytes currently held in staging slots (spec 7.4).
+    pub staged_bytes: u64,
+    /// Disconnected-waitlist size (Scala `disconnectedWaitlist.size`).
+    pub waitlist: u32,
+    /// Application triggers deferred while a validation job is in flight.
+    pub deferred_triggers: u32,
+    /// Per-reason drop counters, keyed by `DropReason::name()`, name-
+    /// ordered. Only reasons that have fired at least once appear.
+    pub drops: Vec<ApiDropCount>,
+}
+
+/// One `(reason, count)` entry of [`ApiInputBlocksStatus::drops`].
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, ToSchema)]
+pub struct ApiDropCount {
+    /// The `DropReason` variant name (no payload).
+    pub reason: String,
+    /// Times this reason has fired since node start.
+    pub count: u64,
 }
 
 /// A block this node rejected during apply, surfaced to operators. Distinct

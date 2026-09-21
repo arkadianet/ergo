@@ -918,6 +918,7 @@ async fn run_inner_with_backend(
         } else {
             None
         },
+        input_blocks_read_slot: scaffold.input_blocks_slot,
         mempool_notifier,
         mempool_gate_broken: false,
         throttle,

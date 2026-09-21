@@ -27,8 +27,12 @@ use crate::compat::handlers::{
     nipopow_proof_handler, peers_all_handler, peers_connected_handler, pool_contains_handler,
     pool_tx_ids_handler, proof_for_tx_handler,
 };
+use crate::compat::input_blocks::{
+    best_input_block_handler, best_input_chain_handler, input_block_transaction_ids_handler,
+    input_block_transactions_handler,
+};
 use crate::compat::NodeChainQuery;
-use crate::traits::{NodeAdmin, NodeSubmit};
+use crate::traits::{NodeAdmin, NodeReadState, NodeSubmit};
 
 use super::handlers::{peers_connect_handler, shutdown_handler};
 use super::route_registry::FamilyRouter;
@@ -485,6 +489,51 @@ pub(super) fn compat_read_router(
                 && !excluded.contains(operation)
         });
     FamilyRouter::new(ApiFamily::Scala).merge_documented(router, operations)
+}
+
+/// Matrix (input blocks) Scala-compat routes (Task 7):
+/// `/blocks/bestInputBlock`, `/blocks/bestInputChain`,
+/// `/blocks/{id}/inputBlockTransactions`,
+/// `/blocks/{id}/inputBlockTransactionIds`.
+///
+/// Mounted only when `read.input_blocks()` answers `Some(_)` — checked
+/// ONCE here, at router-build time. This mirrors `[input_blocks]
+/// enabled`, a boot-time-only decision (devnet-only, refused elsewhere
+/// at config load; never flips after boot), so a single check at mount
+/// time is representative for the router's whole lifetime. With the
+/// subsystem off the four routes are entirely absent — 404 AND missing
+/// from the router layout, not merely empty-bodied — matching the
+/// M2 acceptance bar.
+pub(super) fn input_blocks_router(read: Arc<dyn NodeReadState>) -> FamilyRouter {
+    if read.input_blocks().is_none() {
+        return FamilyRouter::new(ApiFamily::Scala);
+    }
+    FamilyRouter::new(ApiFamily::Scala)
+        .route(
+            "/blocks/bestInputBlock",
+            "/blocks/bestInputBlock",
+            &["get"],
+            get(best_input_block_handler),
+        )
+        .route(
+            "/blocks/bestInputChain",
+            "/blocks/bestInputChain",
+            &["get"],
+            get(best_input_chain_handler),
+        )
+        .route(
+            "/blocks/:id/inputBlockTransactions",
+            "/blocks/{id}/inputBlockTransactions",
+            &["get"],
+            get(input_block_transactions_handler),
+        )
+        .route(
+            "/blocks/:id/inputBlockTransactionIds",
+            "/blocks/{id}/inputBlockTransactionIds",
+            &["get"],
+            get(input_block_transaction_ids_handler),
+        )
+        .with_state(read)
 }
 
 pub(super) fn compat_write_router(submit: Arc<dyn NodeSubmit>) -> FamilyRouter {

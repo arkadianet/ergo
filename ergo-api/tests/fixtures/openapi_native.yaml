@@ -1295,6 +1295,21 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ApiDifficultyPoint'
+    ApiDropCount:
+      type: object
+      description: One `(reason, count)` entry of [`ApiInputBlocksStatus::drops`].
+      required:
+      - reason
+      - count
+      properties:
+        count:
+          type: integer
+          format: int64
+          description: Times this reason has fired since node start.
+          minimum: 0
+        reason:
+          type: string
+          description: The `DropReason` variant name (no payload).
     ApiFullBlockRef:
       type: object
       required:
@@ -1736,6 +1751,56 @@ components:
           minimum: 0
         version:
           type: string
+    ApiInputBlocksStatus:
+      type: object
+      description: |-
+        Matrix (input blocks) subsystem status snapshot: the operator-facing
+        view of `ergo_inputblocks::processor::Processor` state plus the
+        per-[`DropReason`](https://docs.rs/ergo-inputblocks) drop counters
+        (spec 7.6 operator surface). Sourced from `InputBlocksRuntime` at
+        snapshot-publish time on the action loop — see
+        `ergo-node/src/node/input_blocks/runtime.rs`.
+      required:
+      - forks
+      - staged_bytes
+      - waitlist
+      - deferred_triggers
+      - drops
+      properties:
+        best_input_block:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Hex id of the tip of the best input-block chain under the best
+            ordering block. `None` when no input block currently leads.
+        deferred_triggers:
+          type: integer
+          format: int32
+          description: Application triggers deferred while a validation job is in flight.
+          minimum: 0
+        drops:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiDropCount'
+          description: |-
+            Per-reason drop counters, keyed by `DropReason::name()`, name-
+            ordered. Only reasons that have fired at least once appear.
+        forks:
+          type: integer
+          format: int32
+          description: Competing forks retained under the best ordering block.
+          minimum: 0
+        staged_bytes:
+          type: integer
+          format: int64
+          description: Bytes currently held in staging slots (spec 7.4).
+          minimum: 0
+        waitlist:
+          type: integer
+          format: int32
+          description: Disconnected-waitlist size (Scala `disconnectedWaitlist.size`).
+          minimum: 0
     ApiMempoolSummary:
       type: object
       required:
@@ -2430,6 +2495,15 @@ components:
             read. `None` when `[indexer] enabled = false` or the file is
             absent. The `ergo_index_db_bytes` Prometheus gauge source.
           minimum: 0
+        input_blocks:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ApiInputBlocksStatus'
+            description: |-
+              Matrix (input blocks) subsystem status. `None` when
+              `[input_blocks] enabled = false` — the subsystem is off and no
+              processor exists to report on. `Some(_)` once wired, even before
+              any input block has been seen (all-zero counters).
         last_applied_height:
           type: integer
           format: int32

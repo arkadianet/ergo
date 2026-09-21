@@ -1116,6 +1116,7 @@ fn read_state_with_slot_and_apply(
         voting_targets,
         apply_phase,
         std::sync::Arc::new(crate::node::telemetry::LiveTelemetry::default()),
+        None,
     )
 }
 
@@ -1192,6 +1193,7 @@ fn status_overlays_live_telemetry_values() {
         std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         std::sync::Arc::new(ergo_sync::ApplyPhaseMetrics::default()),
         telemetry.clone(),
+        None,
     );
 
     // Before the first telemetry sample: live fields stay None so

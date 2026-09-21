@@ -818,6 +818,16 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         }
         None => operator,
     };
+    // Matrix (input blocks) Scala-compat routes (Task 7): mounted only
+    // when the read bridge reports the subsystem on (`[input_blocks]
+    // enabled = true`), independent of whether `compat` (NodeChainQuery)
+    // is wired at all — these four routes read `NodeReadState`, not the
+    // chain-query bridge.
+    let assembled = route_registry::merge_family_router(
+        assembled,
+        &mut inventory,
+        scala_api::input_blocks_router(read.clone()),
+    );
     let assembled = route_registry::merge_family_router(
         assembled,
         &mut inventory,

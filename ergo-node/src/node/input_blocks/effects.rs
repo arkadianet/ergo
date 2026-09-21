@@ -59,6 +59,11 @@ pub(in crate::node) fn execute_effects(
     let Some(mut rt) = state.input_blocks.take() else {
         return Vec::new();
     };
+    // Only a genuinely non-empty batch can have moved the read side
+    // (announcement accepted, bodies delivered, ordering applied/reorg,
+    // ...); a quiet `Tick` with no effects skips the rebuild, keeping the
+    // 1 Hz heartbeat from paying for a republish that changes nothing.
+    let had_effects = !effects.is_empty();
     let mut out = Vec::new();
     let mut queue: VecDeque<Effect> = effects.into();
     // `Validate` pushes the effects of the `ValidationResult` it feeds
@@ -68,8 +73,53 @@ pub(in crate::node) fn execute_effects(
     while let Some(effect) = queue.pop_front() {
         execute_one(state, &mut rt, effect, now, &mut out, &mut queue);
     }
+    if had_effects {
+        refresh_read_slot(state, &rt);
+    }
     state.input_blocks = Some(rt);
     out
+}
+
+/// Rebuild and publish the Matrix (input blocks) REST read-side snapshot
+/// (Task 7) onto `state.input_blocks_read_slot`. No-op when the slot is
+/// absent (`[input_blocks] enabled = false`).
+///
+/// Scoped to the best input-block chain: the four REST routes this
+/// backs (`/blocks/bestInputBlock`, `/blocks/bestInputChain`,
+/// `/blocks/{id}/inputBlockTransactions`,
+/// `/blocks/{id}/inputBlockTransactionIds`) are documented as reading
+/// the WINNING chain under the best ordering block. A losing fork's
+/// input block is NOT served here even though the processor still holds
+/// its record — the processor has no "every known id" accessor (by
+/// design: an unbounded id-keyed dump is exactly the kind of surface
+/// spec 7.4's bounds exist to prevent), and Scala's own `getInputBlock`
+/// family is likewise keyed off ids the caller already has from another
+/// source (a P2P announcement), not off an enumeration this bridge could
+/// replicate cheaply.
+fn refresh_read_slot(state: &NodeState, rt: &InputBlocksRuntime) {
+    let Some(slot) = state.input_blocks_read_slot.as_ref() else {
+        return;
+    };
+    let processor = rt.processor();
+    let chain = processor.best_input_chain();
+    let best_chain: Vec<String> = chain.iter().map(hex::encode).collect();
+    let best_input_block_id = best_chain.first().cloned();
+    let mut blocks = std::collections::HashMap::with_capacity(chain.len());
+    for id in &chain {
+        let Some(bodies) = processor.bodies(id) else {
+            continue;
+        };
+        let txs: Vec<_> = bodies
+            .into_iter()
+            .filter_map(|b| crate::api_bridge::compat::encode_transaction(&b.tx).ok())
+            .collect();
+        blocks.insert(hex::encode(id), txs);
+    }
+    slot.store(std::sync::Arc::new(ergo_api::compat::ApiInputBlocks {
+        best_input_block_id,
+        best_chain,
+        blocks,
+    }));
 }
 
 fn execute_one(

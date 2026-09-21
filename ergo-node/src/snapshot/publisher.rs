@@ -236,6 +236,7 @@ mod tests {
             mempool_tx_requested_total: 0,
             mempool_peer_tx_admitted_total: 0,
             mempool_peer_tx_rejected_total: 0,
+            input_blocks: None,
         }
     }
 
@@ -590,6 +591,63 @@ mod tests {
         assert_eq!(snap.status.mempool_tx_requested_total, 11);
         assert_eq!(snap.status.mempool_peer_tx_admitted_total, 7);
         assert_eq!(snap.status.mempool_peer_tx_rejected_total, 4);
+    }
+
+    /// Task 6/7: `SnapshotParts.input_blocks` travels through
+    /// `build_snapshot` onto `ApiStatus.input_blocks` unchanged. The
+    /// per-`DropReason` breakdown itself is pinned by
+    /// `input_blocks::tests::drop_counters_exposed_in_api_v1_status`
+    /// (the `InputBlocksRuntime::api_status()` leg of the same wire);
+    /// this test only guards the threading, same shape as
+    /// `build_snapshot_carries_mempool_tx_gossip_counters`.
+    #[test]
+    fn build_snapshot_carries_input_blocks_status() {
+        let mut publisher =
+            SnapshotPublisher::new(fake_info(), Instant::now(), ApiWeightFunction::Cost);
+        let mut parts = make_parts(500, 500, &[]);
+        parts.input_blocks = Some(ergo_api::types::ApiInputBlocksStatus {
+            best_input_block: Some("ab".repeat(32)),
+            forks: 2,
+            staged_bytes: 4096,
+            waitlist: 3,
+            deferred_triggers: 1,
+            drops: vec![ergo_api::types::ApiDropCount {
+                reason: "AlreadyKnown".to_string(),
+                count: 5,
+            }],
+        });
+
+        publisher.publish(parts);
+        let snap = publisher.handle().load_full();
+
+        let ib = snap
+            .status
+            .input_blocks
+            .as_ref()
+            .expect("input_blocks status carried through");
+        assert_eq!(ib.best_input_block, Some("ab".repeat(32)));
+        assert_eq!(ib.forks, 2);
+        assert_eq!(ib.staged_bytes, 4096);
+        assert_eq!(ib.waitlist, 3);
+        assert_eq!(ib.deferred_triggers, 1);
+        assert_eq!(ib.drops.len(), 1);
+        assert_eq!(ib.drops[0].reason, "AlreadyKnown");
+        assert_eq!(ib.drops[0].count, 5);
+    }
+
+    /// `None` (subsystem off) travels through unchanged — no synthetic
+    /// `Some(_)` gets fabricated on the way.
+    #[test]
+    fn build_snapshot_carries_input_blocks_status_none_when_disabled() {
+        let mut publisher =
+            SnapshotPublisher::new(fake_info(), Instant::now(), ApiWeightFunction::Cost);
+        let parts = make_parts(500, 500, &[]);
+        assert!(parts.input_blocks.is_none());
+
+        publisher.publish(parts);
+        let snap = publisher.handle().load_full();
+
+        assert!(snap.status.input_blocks.is_none());
     }
 
     /// `max_peer_height` and `mining_enabled` travel from `SnapshotParts`

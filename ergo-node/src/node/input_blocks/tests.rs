@@ -370,6 +370,134 @@ fn dropped_effects_increment_counters_without_actions() {
     assert_eq!(drops(rt, "ForksFull"), 0);
 }
 
+/// Task 6: the per-`DropReason` counters reach `ApiStatus.input_blocks`
+/// through `InputBlocksRuntime::api_status()` — the exact DTO
+/// `snapshot_emit::publish_snapshot` reads at publish time (see
+/// `snapshot::build_snapshot_carries_input_blocks_status` for the
+/// `SnapshotParts` -> `ApiStatus` leg of the same wire). Keyed by
+/// `DropReason::name()`, name-ordered, only reasons that fired at least
+/// once.
+#[test]
+fn drop_counters_exposed_in_api_v1_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    state.input_blocks = Some(runtime());
+
+    execute_effects(
+        &mut state,
+        vec![
+            Effect::Dropped {
+                id: [1u8; 32],
+                reason: DropReason::AlreadyKnown,
+            },
+            Effect::Dropped {
+                id: [2u8; 32],
+                reason: DropReason::AlreadyKnown,
+            },
+            Effect::Dropped {
+                id: [3u8; 32],
+                reason: DropReason::WaitlistFull,
+            },
+        ],
+        Instant::now(),
+    );
+
+    let status = state.input_blocks.as_ref().unwrap().api_status();
+    assert_eq!(
+        status.drops,
+        vec![
+            ergo_api::types::ApiDropCount {
+                reason: "AlreadyKnown".to_string(),
+                count: 2,
+            },
+            ergo_api::types::ApiDropCount {
+                reason: "WaitlistFull".to_string(),
+                count: 1,
+            },
+        ],
+        "name-ordered, only fired reasons"
+    );
+}
+
+/// Task 7: a non-empty effect batch republishes
+/// `NodeState::input_blocks_read_slot` — the seam
+/// `input_blocks::effects::refresh_read_slot` writes and
+/// `SnapshotReadState::input_blocks()` reads (see
+/// `ergo-api/tests/it/input_block_routes.rs` for the read side against a
+/// stub). Detected by ARC IDENTITY: the slot always holds *a* value
+/// (default at construction), so content equality can't tell "still the
+/// boot default" from "refreshed to the same values" — only a changed
+/// pointer proves `.store()` ran.
+#[test]
+fn read_slot_republishes_after_a_nonempty_effect_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    state.input_blocks = Some(runtime());
+    let slot: crate::api_bridge::InputBlocksSlot = std::sync::Arc::new(
+        arc_swap::ArcSwap::from_pointee(ergo_api::compat::ApiInputBlocks::default()),
+    );
+    state.input_blocks_read_slot = Some(slot.clone());
+    let before = slot.load_full();
+
+    execute_effects(
+        &mut state,
+        vec![Effect::Dropped {
+            id: [1u8; 32],
+            reason: DropReason::AlreadyKnown,
+        }],
+        Instant::now(),
+    );
+
+    let after = slot.load_full();
+    assert!(
+        !std::sync::Arc::ptr_eq(&before, &after),
+        "a non-empty effect batch must republish the read slot"
+    );
+    assert!(after.best_chain.is_empty(), "no ordering block seeded yet");
+    assert!(after.best_input_block_id.is_none());
+}
+
+/// A `Tick` that produces no effects (the overwhelmingly common case —
+/// 1 Hz, most seconds nothing happened) must NOT touch the slot: a
+/// no-op republish every second would mean the API bridge's read-side
+/// `Arc` churns constantly for no observable change.
+#[test]
+fn read_slot_is_untouched_by_an_empty_effect_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    state.input_blocks = Some(runtime());
+    let slot: crate::api_bridge::InputBlocksSlot = std::sync::Arc::new(
+        arc_swap::ArcSwap::from_pointee(ergo_api::compat::ApiInputBlocks::default()),
+    );
+    state.input_blocks_read_slot = Some(slot.clone());
+    let before = slot.load_full();
+
+    execute_effects(&mut state, Vec::new(), Instant::now());
+
+    let after = slot.load_full();
+    assert!(
+        std::sync::Arc::ptr_eq(&before, &after),
+        "an empty effect batch must not republish the read slot"
+    );
+}
+
+/// A runtime that has never dropped anything reports an empty (not
+/// absent) breakdown — `ApiStatus.input_blocks` itself is what goes
+/// `None` when the subsystem is off (see
+/// `hooks_are_no_ops_when_the_subsystem_is_off`); a wired-but-quiet
+/// subsystem still reports `Some(_)` with all-zero/empty fields.
+#[test]
+fn drop_counters_empty_when_nothing_has_dropped() {
+    let rt = runtime();
+    let status = rt.api_status();
+    assert!(status.drops.is_empty());
+    assert_eq!(status.forks, 0);
+    assert_eq!(status.staged_bytes, 0);
+    assert_eq!(status.waitlist, 0);
+    assert_eq!(status.deferred_triggers, 0);
+    assert!(status.best_input_block.is_none());
+}
+
 // ----- round-trips -----
 
 #[test]

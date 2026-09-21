@@ -29,6 +29,12 @@ use super::super::NodeError;
 pub(super) struct Scaffold {
     pub api_info: ergo_api::types::ApiInfo,
     pub identity_slot: crate::api_bridge::IdentitySlot,
+    /// Matrix (input blocks) read-side slot (Task 7). `Some` iff
+    /// `[input_blocks] enabled = true` — built here, before the mining
+    /// subsystem or `NodeState`, so the SAME `Arc` reaches both the read
+    /// bridge (below) and `NodeState::input_blocks_read_slot` (the write
+    /// side, wired in `boot::run`).
+    pub input_blocks_slot: Option<crate::api_bridge::InputBlocksSlot>,
     pub snapshot_publisher: SnapshotPublisher,
     pub voting_targets_slot: Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
     pub read_state: Arc<dyn ergo_api::NodeReadState>,
@@ -70,6 +76,16 @@ pub(super) fn build_scaffold(
         super::super::identity::build_api_identity(config, boot_sentinel, bootstrap_kind)?;
     let identity_slot: crate::api_bridge::IdentitySlot =
         Arc::new(arc_swap::ArcSwap::from_pointee(api_identity.clone()));
+    // Devnet-only, default-off — config load already refused `enabled =
+    // true` on any other network (same gate `NodeState::input_blocks`
+    // uses), so the flag alone decides whether either side of the slot
+    // is ever constructed.
+    let input_blocks_slot: Option<crate::api_bridge::InputBlocksSlot> =
+        config.input_blocks.enabled.then(|| {
+            Arc::new(arc_swap::ArcSwap::from_pointee(
+                ergo_api::compat::ApiInputBlocks::default(),
+            ))
+        });
     let snapshot_publisher =
         SnapshotPublisher::new(api_info.clone(), started_at, api_weight_function);
     // Read state is constructed unconditionally so [`RunHandle`] can
@@ -104,6 +120,7 @@ pub(super) fn build_scaffold(
         voting_targets_slot.clone(),
         executor.apply_phase_metrics(),
         live_telemetry,
+        input_blocks_slot.clone(),
     )
     .into_dyn();
     let submit_bridge: Arc<dyn ergo_api::NodeSubmit> =
@@ -114,6 +131,7 @@ pub(super) fn build_scaffold(
     Ok(Scaffold {
         api_info,
         identity_slot,
+        input_blocks_slot,
         snapshot_publisher,
         voting_targets_slot,
         read_state,

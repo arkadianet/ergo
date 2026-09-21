@@ -156,7 +156,7 @@ pub(super) fn encode_block_transactions(
     })
 }
 
-pub(super) fn encode_transaction(
+pub(crate) fn encode_transaction(
     tx: &ergo_ser::transaction::Transaction,
 ) -> Result<ScalaTransaction, BridgeError> {
     let tx_id = transaction_id(tx).map_err(|source| BridgeError::Encode {

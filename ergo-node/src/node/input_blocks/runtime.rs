@@ -245,6 +245,40 @@ impl InputBlocksRuntime {
         Some((new_drops, self.counters.iter().collect()))
     }
 
+    /// The operator-facing status snapshot published on `ApiStatus.input_blocks`
+    /// (Task 6). Read at `publish_snapshot` time, once per `sync_tick`, from
+    /// the processor's read side plus the runtime's own drop counters — no
+    /// live cross-thread reads, mirroring how the peer store's counters are
+    /// snapshot-sourced (see `ApiStatus::storage_errors_peers_total`).
+    pub(in crate::node) fn api_status(&self) -> ergo_api::types::ApiInputBlocksStatus {
+        // `last_ordering_tip` mirrors `processor.best.ordering_id`: every
+        // caller that advances the processor's ordering view (`drive` in
+        // `hooks.rs`) sets this field in the same step, immediately before
+        // handing the event to `processor_mut().handle(..)`, which is what
+        // actually updates `best.ordering_id`. There is no public getter
+        // for the processor's private field, so this is the node-side
+        // mirror the read side uses instead of adding one.
+        let forks = self
+            .last_ordering_tip
+            .map(|oid| self.processor.forks(&oid) as u32)
+            .unwrap_or(0);
+        ergo_api::types::ApiInputBlocksStatus {
+            best_input_block: self.processor.best_input_chain().first().map(hex::encode),
+            forks,
+            staged_bytes: self.processor.staged_bytes() as u64,
+            waitlist: self.processor.waitlist_len() as u32,
+            deferred_triggers: self.processor.deferred_triggers() as u32,
+            drops: self
+                .counters
+                .iter()
+                .map(|(reason, count)| ergo_api::types::ApiDropCount {
+                    reason: reason.to_string(),
+                    count,
+                })
+                .collect(),
+        }
+    }
+
     pub(in crate::node) fn processor(&self) -> &Processor {
         &self.processor
     }

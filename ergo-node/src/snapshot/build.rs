@@ -108,6 +108,7 @@ pub(super) fn build_snapshot(
         index_db_bytes: None,
         disk_free_bytes: None,
         disk_total_bytes: None,
+        input_blocks: p.input_blocks.clone(),
     };
 
     let tip = ApiTip {

@@ -138,6 +138,7 @@ fn make_state_with_backend(
         },
         mempool,
         input_blocks: None,
+        input_blocks_read_slot: None,
         mempool_notifier: MempoolNotifier::new(),
         mempool_gate_broken: false,
         throttle: ThroughputLimiter::with_defaults(),
