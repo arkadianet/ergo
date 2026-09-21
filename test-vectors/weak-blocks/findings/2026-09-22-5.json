@@ -198,5 +198,32 @@
       "define assertion 3 only over samples where every Rust id is in Scala's chain - which collapses it into assertion 2",
       "accept it as a known artifact and gate on assertion 2's lag bound alone"
     ]
+  },
+  "round_4_remeasurement": {
+    "note": "harness hardening round: the evaluators now require coverage, drop only samples where the two nodes name different ordering blocks, and run over EVERY sample of the run from a dedicated sampler thread. The lag measurement is therefore on far more samples than round 3, and it got worse, not better.",
+    "run_a": {
+      "lag_p95": 159,
+      "lag_max": 203,
+      "lag_mean": 54.06,
+      "lag_samples": 1547,
+      "qualifying_samples": 1830,
+      "prefix_violations": 230,
+      "exact_tip_matches": 0,
+      "assertion_6": "PASS (20/20 located, 20/20 removed before the next ordering block, no unattributed residue)",
+      "multi_tx_reconstructions": 6
+    },
+    "run_b": {
+      "lag_p95": 390,
+      "lag_max": 442,
+      "lag_mean": 116.96,
+      "lag_samples": 1973,
+      "qualifying_samples": 2242,
+      "prefix_violations": 162,
+      "exact_tip_matches": 0,
+      "assertion_6": "FAIL (0/20 located \u2014 the follower never held the input blocks carrying them within the tracking window)",
+      "multi_tx_reconstructions": 7
+    },
+    "prefix_violations_are_the_same_lag": "with the round-3 boundary exclusions removed, the prefix violations are no longer a sampling artifact to argue about: they are the lag. Rust's chain is hundreds of blocks behind the chain Scala reports, so it is not a truncation of it. The count (230 and 162 of ~2100 compared samples) tracks the lag, and not one violation has a Rust block at a DIFFERENT position in Scala's chain.",
+    "escalation": "unchanged and now better evidenced: the p95 bound fails by 20-50x over 1500-2000 lag samples. Task 8b."
   }
 }
