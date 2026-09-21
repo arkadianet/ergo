@@ -453,7 +453,12 @@ def assertion_6_mempool(run, evidence, count):
     block and the next ordering block."""
     result = {'requested': count, 'submitted': [], 'submit_failures': []}
     evidence['6_mempool'] = result
-    deadline = min(run.deadline, time.monotonic() + 300)
+    # A miner reward matures at ordering block 11, and the recipe's
+    # target is ~55 s per ordering block, so the wait is minutes — the
+    # old 300 s cap expired before the chain got there and reported "no
+    # spendable coin" for what was simply a chain that had not run long
+    # enough.
+    deadline = min(run.deadline, time.monotonic() + 900)
 
     # Wait for a matured miner reward. `devnet_miner_reward_delay = 10`
     # on both nodes makes this height 11-ish rather than 721.

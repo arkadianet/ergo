@@ -1,6 +1,6 @@
 {
   "id": "2026-09-22-5",
-  "title": "the follower falls 4 ordering blocks behind under a transaction workload",
+  "title": "the follower never holds the miner's input chain at the same instant (exact tip equality unreachable)",
   "severity": "observation",
   "component": "rust \u2014 ergo-node follower throughput",
   "status": "open",
@@ -123,5 +123,45 @@
     }
   ],
   "likely_related_to": "2026-09-22-3: every ordering block with transactions falls back to a full BlockTransactions download, so under load the follower pays the download it was supposed to avoid, on top of validating input blocks.",
-  "gate": "assertion 5 of the devnet-matrix smoke FAILS on this."
+  "gate": "assertions 2 and 3 of the devnet-matrix smoke FAIL on this; 1, 4, 5 and 6 pass.",
+  "round_2_remeasurement": {
+    "build": "release",
+    "changes_since_round_1": [
+      "incremental weak-id index in ergo-mempool (the per-frame full-pool parse is gone)",
+      "waitlist_entries raised to 8192 (WaitlistFull no longer fires)",
+      "D4 + D5, so reconstruction now succeeds on multi-transaction blocks"
+    ],
+    "samples": 1183,
+    "same_tip_samples": 746,
+    "exact_tip_matches": 0,
+    "max_propagation_lag_seconds": 3.692,
+    "chain_history_mismatches": 0,
+    "accumulated_drops": {
+      "AlreadyKnown": 935,
+      "ValidationUnavailable": 67
+    },
+    "verdict": "unchanged: 0 exact matches in 746 same-tip samples. The follower is never WRONG - zero history mismatches, zero digest mismatches, no penalties, heights within 2 - it is simply several input blocks behind a miner publishing roughly one per second."
+  },
+  "profile_60s_under_load": {
+    "tool": "perf record -F 199 -g on the release node for 60 s during a funded run",
+    "artifact": ".superpowers/sdd/2026-09-21-input-blocks-port-plan-2/perf-top.txt",
+    "top_costs": [
+      {
+        "symbol": "__memmove_avx512_unaligned_erms (libc)",
+        "pct": 8.8,
+        "reading": "bulk copying - body/section buffers and snapshot rebuilds"
+      },
+      {
+        "symbol": "blake2::Blake2bVarCore::compress",
+        "pct": 7.96,
+        "reading": "hashing: transaction ids, weak ids, Merkle roots. Intrinsic to the protocol"
+      },
+      {
+        "symbol": "allocator churn (hashbrown RawTable::drop 4.40 + _int_free_chunk 4.28 + cfree 3.49)",
+        "pct": 12.17,
+        "reading": "the actionable one. drop_in_place<ApiInputBlockEntry> alone is 2.67%, which says the input-blocks REST read-slot snapshot is rebuilt and thrown away far more often than anything reads it. Rebuilding it on change rather than per effect batch is the next thing to try."
+      }
+    ],
+    "note": "the profiled run competed with perf for CPU and produced no multi-tx reconstruction; the numbers are indicative, not a clean measurement"
+  }
 }

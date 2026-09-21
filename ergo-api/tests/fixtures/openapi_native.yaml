@@ -2059,6 +2059,19 @@ components:
           minimum: 0
         kind:
           type: string
+        reconstructedOrder:
+          type:
+          - string
+          - 'null'
+          description: |-
+            `ordering_reconstructed` only: which assembly order reproduced
+            the header's transactions root — `"scala"`
+            (`orderingBlockTransactions ++ inputBlocksTransactions`, what the
+            reference follower builds) or `"candidate"`
+            (`previousOrderingBlockTransactions ++ orderingTxs`, what the
+            reference miner actually mines). Divergence D4 / upstream finding
+            F12: the two Scala sides disagree, so the node tries both and
+            reports which won rather than hiding the split.
         returnedTxIds:
           type:
           - array
