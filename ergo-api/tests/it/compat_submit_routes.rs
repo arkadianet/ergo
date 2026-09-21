@@ -51,6 +51,7 @@ impl NodeReadState for StubReadState {
             started_at_unix_ms: 0,
             uptime_seconds: 0,
             target_block_interval_ms: 120_000,
+            best_input_block_id: None,
         }
     }
     fn status(&self) -> ApiStatus {
@@ -170,6 +171,7 @@ impl NodeChainQuery for StubCompat {
                 min_value_per_byte: 0,
             },
             is_mining: false,
+            best_input_block: None,
         }
     }
     fn header_ids_at_height(&self, _: u32) -> Vec<String> {

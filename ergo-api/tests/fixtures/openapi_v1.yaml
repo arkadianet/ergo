@@ -5357,6 +5357,17 @@ components:
       properties:
         agent_name:
           type: string
+        best_input_block_id:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Matrix (input blocks) fix-round-1: hex id of the current best
+            input block. `None` when `[input_blocks] enabled = false` OR the
+            subsystem is on but no input block currently leads — the native
+            surface has no `null`-vs-absent distinction (unlike the
+            Scala-compat `ScalaInfo::best_input_block`); both collapse to
+            "key omitted".
         network:
           type: string
         node_name:

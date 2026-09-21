@@ -156,6 +156,7 @@ mod tests {
             started_at_unix_ms: 0,
             uptime_seconds: 0,
             target_block_interval_ms: 120_000,
+            best_input_block_id: None,
         }
     }
 
@@ -633,6 +634,43 @@ mod tests {
         assert_eq!(ib.drops.len(), 1);
         assert_eq!(ib.drops[0].reason, "AlreadyKnown");
         assert_eq!(ib.drops[0].count, 5);
+        // Fix-round-1: ApiInfo.best_input_block_id mirrors the same
+        // status.input_blocks.best_input_block value (build_snapshot).
+        assert_eq!(snap.info.best_input_block_id, Some("ab".repeat(32)));
+    }
+
+    /// Fix-round-1: subsystem on but nothing currently leads ->
+    /// `ApiInfo.best_input_block_id` is `None` (the native surface has
+    /// no null-vs-absent distinction, unlike `ScalaInfo`).
+    #[test]
+    fn build_snapshot_info_best_input_block_id_none_when_subsystem_on_but_empty() {
+        let mut publisher =
+            SnapshotPublisher::new(fake_info(), Instant::now(), ApiWeightFunction::Cost);
+        let mut parts = make_parts(500, 500, &[]);
+        parts.input_blocks = Some(ergo_api::types::ApiInputBlocksStatus::default());
+
+        publisher.publish(parts);
+        let snap = publisher.handle().load_full();
+
+        assert!(snap.status.input_blocks.is_some(), "subsystem is on");
+        assert!(snap.info.best_input_block_id.is_none());
+    }
+
+    /// Fix-round-1: subsystem off -> `ApiInfo.best_input_block_id` stays
+    /// `None` (same as the empty-but-on case; the native surface can't
+    /// tell them apart, unlike `ScalaInfo`'s null vs. omitted key).
+    #[test]
+    fn build_snapshot_info_best_input_block_id_none_when_subsystem_off() {
+        let mut publisher =
+            SnapshotPublisher::new(fake_info(), Instant::now(), ApiWeightFunction::Cost);
+        let parts = make_parts(500, 500, &[]);
+        assert!(parts.input_blocks.is_none());
+
+        publisher.publish(parts);
+        let snap = publisher.handle().load_full();
+
+        assert!(snap.status.input_blocks.is_none());
+        assert!(snap.info.best_input_block_id.is_none());
     }
 
     /// `None` (subsystem off) travels through unchanged — no synthetic

@@ -71,6 +71,7 @@ pub(super) fn build_scaffold(
         // hardcoded mainnet value that misreads as broken on
         // testnet.
         target_block_interval_ms: config.chain_spec.difficulty.desired_interval_ms,
+        best_input_block_id: None,
     };
     let api_identity =
         super::super::identity::build_api_identity(config, boot_sentinel, bootstrap_kind)?;

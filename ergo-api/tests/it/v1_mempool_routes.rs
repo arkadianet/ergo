@@ -122,6 +122,7 @@ impl NodeReadState for StubRead {
             started_at_unix_ms: 0,
             uptime_seconds: 0,
             target_block_interval_ms: 120_000,
+            best_input_block_id: None,
         }
     }
     fn status(&self) -> ApiStatus {
