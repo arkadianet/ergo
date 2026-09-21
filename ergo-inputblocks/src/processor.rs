@@ -435,6 +435,21 @@ impl RequestKey {
     }
 }
 
+/// A transaction selection a delivery proposed while the block's own
+/// selection was still outstanding (residual fix round 2, items B and
+/// C/D). Refusing the swap is what keeps the outstanding job valid;
+/// discarding the proposal is what used to make the block need *another*
+/// delivery to move again. It is verified and its bodies are cached when
+/// it is held, so taking it after the failure costs nothing but the
+/// dispatch.
+#[derive(Debug, Clone)]
+struct HeldSelection {
+    refs: Vec<TxRef>,
+    /// Whether taking it must spend the announcer's recovery allowance:
+    /// the block's validation budget was already gone when it arrived.
+    recovery: bool,
+}
+
 /// The single-writer state machine (spec 7.1–7.6).
 pub struct Processor {
     bounds: Bounds,
@@ -482,6 +497,11 @@ pub struct Processor {
     /// the slot unresolvable and then recreating it (fix round 2,
     /// finding r2-1). Released when the record is pruned.
     digest_attempts: HashMap<InputBlockId, usize>,
+    /// Per block, one selection proposed while its current selection was
+    /// outstanding, taken by the failure of that job. Bounded by one
+    /// entry per record, each holding a transaction list no longer than
+    /// the block's own; released on use, on application and at prune.
+    held: HashMap<InputBlockId, HeldSelection>,
     /// Blocks the announcer has already been invited to rescue. The
     /// invitation is the body request a spent budget issues: without one
     /// outstanding, no later delivery can be solicited, and "solicited"
@@ -890,6 +910,7 @@ impl Processor {
             reported_digest_exhausted: std::collections::HashSet::new(),
             reported_validation_exhausted: std::collections::HashSet::new(),
             digest_attempts: HashMap::new(),
+            held: HashMap::new(),
             invited: std::collections::HashSet::new(),
             recovery_granted: HashMap::new(),
             validation_attempts: HashMap::new(),
@@ -1956,6 +1977,124 @@ impl Processor {
         true
     }
 
+    /// Spend the digest-recovery allowance on the announcer's proposal —
+    /// checking *that* selection, not whatever the ordinary search
+    /// reaches first (residual fix round 2, B). Returns whether the
+    /// recovery was taken.
+    ///
+    /// The ordinary search enumerates every effective candidate, so a
+    /// stranger that dropped one wrong body into the block could spend
+    /// the sole extra attempt on a combination nobody proposed — and a
+    /// position already full of speculative candidates could reject the
+    /// proposed body outright. The proposal is therefore checked
+    /// directly and, if it holds, installed as the block's only
+    /// candidate set, which pins it.
+    fn recover_digest(
+        &mut self,
+        id: InputBlockId,
+        weak: &[WeakId],
+        proposed: &[TxRef],
+        bodies: &[Body],
+        now: Tick,
+        out: &mut Vec<Effect>,
+    ) -> bool {
+        // Consumed before the check it pays for.
+        if !self.grant_digest_recovery(id) {
+            return false;
+        }
+        *self.digest_attempts.entry(id).or_insert(0) += 1;
+        let matches = if self.digest_bypassed(&id) {
+            // Finding F4b: an empty proof commits to no digest at all.
+            true
+        } else {
+            let ids: Vec<[u8; 32]> = proposed.iter().map(|r| r.tx_id).collect();
+            let refs: Vec<&[u8]> = ids.iter().map(|i| &i[..]).collect();
+            Some(ergo_crypto::merkle::merkle_tree_root(&refs)) == self.announced_digest(&id)
+        };
+        if !matches {
+            self.staging.shift_remove(&id);
+            out.push(Effect::Dropped {
+                id,
+                reason: DropReason::TxDigestMismatch,
+            });
+            return true;
+        }
+        let Some(announcer) = self.records.get(&id).map(|r| r.from) else {
+            return true;
+        };
+        // A slot holding nothing but the proposal: every position has
+        // exactly one candidate, so the variant lists `commit_resolution`
+        // builds are the proposal itself.
+        let cap = self.bounds.candidates_per_position;
+        let mut slot = Staging::new(weak.to_vec(), now, Some(announcer));
+        for (i, w) in weak.iter().enumerate() {
+            if let Some(b) = bodies.iter().find(|b| b.weak_id == *w) {
+                slot.add(i, b.clone(), Some(announcer), cap);
+            }
+        }
+        self.staging.insert(id, slot);
+        self.commit_resolution(id, proposed.to_vec(), out);
+        true
+    }
+
+    /// Whether `proposed` is a witness-for-witness swap of what the
+    /// announced digest already committed to at every position — the
+    /// only kind of proposal a resolved block may hold.
+    fn proposal_matches_commitments(&self, id: &InputBlockId, proposed: &[TxRef]) -> bool {
+        self.staging
+            .get(id)
+            .and_then(|st| st.variants.as_ref())
+            .is_some_and(|variants| {
+                variants.len() == proposed.len()
+                    && variants
+                        .iter()
+                        .zip(proposed.iter())
+                        .all(|(v, want)| v.first().is_some_and(|c| c.tx_id == want.tx_id))
+            })
+    }
+
+    /// Keep `refs` until the outstanding job fails, caching the bodies it
+    /// names so taking it later costs only the dispatch.
+    fn hold_selection(
+        &mut self,
+        id: InputBlockId,
+        refs: Vec<TxRef>,
+        recovery: bool,
+        bodies: &[Body],
+        now: Tick,
+    ) {
+        for b in bodies {
+            if refs.contains(&b.tx_ref) {
+                self.cache.insert(b.clone(), now, &self.bounds);
+            }
+        }
+        self.held.insert(id, HeldSelection { refs, recovery });
+    }
+
+    /// Take the selection held for `id` now that its job has failed.
+    /// Returns whether it started something.
+    fn take_held(
+        &mut self,
+        id: InputBlockId,
+        held: HeldSelection,
+        ordering_id: OrderingId,
+        trigger: InputBlockId,
+        out: &mut Vec<Effect>,
+    ) -> bool {
+        if self.is_applied(&id) || self.has_failed_combination(&id, &held.refs) {
+            return false;
+        }
+        if held.recovery {
+            return self.recover_validation(id, held.refs, &[], Tick(0), out);
+        }
+        if self.validation_exhausted(&id) {
+            return false;
+        }
+        self.set_tx_refs(id, held.refs, out);
+        self.pump(ordering_id, trigger, out);
+        true
+    }
+
     /// Spend the validation-recovery allowance on `proposed`: pin that
     /// selection and dispatch one more job for it. Returns whether the
     /// recovery was taken.
@@ -2033,17 +2172,48 @@ impl Processor {
                     // budget is spent, once (residual fix round, B).
                     if self.validation_exhausted(&id) {
                         if let Some(proposed) = recovery {
-                            if self.recover_validation(id, proposed, &bodies, now, out) {
-                                return;
+                            match self.settled_state(&id) {
+                                // Applied references are frozen, allowance
+                                // or not.
+                                Some(SelectionState::Applied) => {}
+                                // A job is outstanding, and the budget was
+                                // already spent when it was dispatched:
+                                // replacing its references now would
+                                // invalidate a job that might still
+                                // succeed, and spend the recovery dispatch
+                                // on top. Hold the proposal for its
+                                // failure instead (residual fix round 2).
+                                Some(SelectionState::Pending) => {
+                                    if self.proposal_matches_commitments(&id, &proposed) {
+                                        self.hold_selection(id, proposed, true, &bodies, now);
+                                    }
+                                    out.push(Effect::Dropped {
+                                        id,
+                                        reason: DropReason::SelectionSettled {
+                                            state: SelectionState::Pending,
+                                        },
+                                    });
+                                    return;
+                                }
+                                None => {
+                                    if self.recover_validation(id, proposed, &bodies, now, out) {
+                                        return;
+                                    }
+                                }
                             }
                         }
                     }
                 } else {
                     // ... and a block whose ordered-digest budget is
                     // spent, for one more check of the exact selection it
-                    // proposes.
-                    if self.digest_exhausted(&id) && recovery.is_some() {
-                        self.grant_digest_recovery(id);
+                    // proposes — checked directly, never through the
+                    // ordinary search (residual fix round 2, B).
+                    if self.digest_exhausted(&id) {
+                        if let Some(proposed) = recovery.clone() {
+                            if self.recover_digest(id, &weak, &proposed, &bodies, now, out) {
+                                return;
+                            }
+                        }
                     }
                     self.staging.entry(id).or_insert_with(|| {
                         Staging::new(weak.clone(), now, from.or(Some(announcer)))
@@ -2088,11 +2258,18 @@ impl Processor {
                 // would run for them.
                 let refs: Vec<TxRef> = bodies.iter().map(|b| b.tx_ref).collect();
                 let unchanged = self.tx_refs.get(&id).map(|v| v.as_slice()) == Some(&refs[..]);
+                let settled = if unchanged {
+                    None
+                } else {
+                    self.settled_state(&id)
+                };
                 if !unchanged {
-                    if let Some(state) = self.settled_state(&id) {
+                    if settled == Some(SelectionState::Applied) {
                         out.push(Effect::Dropped {
                             id,
-                            reason: DropReason::SelectionSettled { state },
+                            reason: DropReason::SelectionSettled {
+                                state: SelectionState::Applied,
+                            },
                         });
                         return;
                     }
@@ -2122,6 +2299,22 @@ impl Processor {
                         });
                         return;
                     }
+                }
+                if settled == Some(SelectionState::Pending) {
+                    // The outstanding job keeps its references, but this
+                    // alternative is digest-verified and its bodies are
+                    // cached, so the failure of that job can reach it
+                    // without another delivery (residual fix round 2,
+                    // C/D). Without the hold, a witness offered
+                    // mid-validation was simply lost.
+                    self.hold_selection(id, refs, false, &bodies, now);
+                    out.push(Effect::Dropped {
+                        id,
+                        reason: DropReason::SelectionSettled {
+                            state: SelectionState::Pending,
+                        },
+                    });
+                    return;
                 }
                 for b in bodies {
                     self.cache.insert(b, now, &self.bounds);
@@ -2421,6 +2614,9 @@ impl Processor {
             tree.process(&inf.trigger, &has_txs, &mut apply)
         };
         self.trees.insert(inf.ordering_id, outcome.tree);
+        // Applied: its references are frozen for good, so nothing held
+        // for it can ever be taken.
+        self.held.remove(&inf.id);
         let key = (inf.ordering_id, inf.trigger);
         if self.continuation.as_ref().map(|(k, _)| *k) != Some(key) {
             self.continuation = Some((key, std::collections::HashSet::new()));
@@ -2464,6 +2660,17 @@ impl Processor {
         let rejected = self.failed.entry(id).or_default();
         if rejected.len() < budget {
             rejected.push(inf.txs.clone());
+        }
+        // A selection proposed while this job was outstanding was held
+        // rather than swapped under it; the failure is what it was
+        // waiting for (residual fix round 2, items B and C/D).
+        if let Some(held) = self.held.remove(&id) {
+            if self.take_held(id, held, inf.ordering_id, inf.trigger, out) {
+                if self.in_flight.is_none() {
+                    self.resume(inf.ordering_id, out);
+                }
+                return;
+            }
         }
         if exhausted {
             self.report_validation_exhausted(id, out);
@@ -2672,6 +2879,7 @@ impl Processor {
             self.reported_digest_exhausted.remove(&id);
             self.reported_validation_exhausted.remove(&id);
             self.digest_attempts.remove(&id);
+            self.held.remove(&id);
             self.invited.remove(&id);
             self.recovery_granted.remove(&id);
             self.validation_attempts.remove(&id);
@@ -4258,20 +4466,11 @@ mod tests {
             state: SelectionState::Pending
         }));
 
-        // Once the job fails the selection is rejected, and re-delivering
-        // the witness may replace it. The reissue must be the same fork
-        // switch, for the same block, with the new body.
-        let failed = ts::validate_err(&mut p, &ctx, &switch);
-        assert!(!has_validate(&failed), "{failed:?}");
-        let replaced = ctx.handle(
-            &mut p,
-            Event::TransactionsDelivered {
-                input_block_id: ib2b_id,
-                bodies: vec![v2.clone()],
-                from: Some(ts::PEER),
-                now: Tick(7),
-            },
-        );
+        // Once the job fails, the witness that was held for it is taken
+        // without another delivery (residual fix round 2, C/D). The
+        // reissue must be the same fork switch, for the same block, with
+        // the new body.
+        let replaced = ts::validate_err(&mut p, &ctx, &switch);
         let (_, _, vid, txs, _) = ts::one_validate(&replaced);
         assert_eq!(vid, ib2b_id, "the fork switch must be re-run");
         assert_eq!(txs, vec![v2.tx_ref]);
@@ -5525,6 +5724,187 @@ mod tests {
             body_requests_to(&after, ts::PEER),
             1,
             "a timed-out request must be asked again: {after:?}"
+        );
+    }
+
+    #[test]
+    fn announcer_proposal_waits_for_the_outstanding_job() {
+        // The budget is already spent when the *last* ordinary job is
+        // dispatched, so an announcer delivery arriving before that job
+        // answers must not replace its references: that invalidates a
+        // job whose result might have been a success, and spends the
+        // recovery dispatch on top. The proposal is held instead, and
+        // used the moment the job fails.
+        let budget = 2usize;
+        let bounds = Bounds {
+            validation_retries_per_block: budget,
+            ..Bounds::default()
+        };
+        let mut p = processor_with(bounds);
+        let ctx = ts::TestCtx::at(FULL);
+        let first = ts::body(1, 1);
+        let weak = first.weak_id;
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&first));
+        let id = ts::ann_id(&ann);
+        announce(&mut p, &ctx, &ann, ts::PEER);
+
+        let mut eff = Vec::new();
+        for w in 1..=budget as u8 {
+            eff = ctx.handle(
+                &mut p,
+                Event::TransactionsDelivered {
+                    input_block_id: id,
+                    bodies: vec![ts::body_under(weak, 1, w)],
+                    from: Some(ts::PEER),
+                    now: Tick(u64::from(w)),
+                },
+            );
+            assert!(has_validate(&eff), "witness {w} must run: {eff:?}");
+            if w < budget as u8 {
+                ts::validate_err(&mut p, &ctx, &eff);
+            }
+        }
+        // The last ordinary job is outstanding and the budget is spent.
+        assert_eq!(p.validation_attempts(&id), budget);
+        let outstanding = ts::body_under(weak, 1, budget as u8);
+
+        let proposal = ts::body_under(weak, 1, budget as u8 + 1);
+        let held = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![proposal.clone()],
+                from: Some(ts::PEER),
+                now: Tick(20),
+            },
+        );
+        assert!(!has_validate(&held), "{held:?}");
+        assert!(
+            !drops(&held)
+                .iter()
+                .any(|r| matches!(r, DropReason::StaleValidation { .. })),
+            "the outstanding job must not be invalidated: {held:?}"
+        );
+        assert_eq!(
+            p.transaction_refs(&id),
+            Some(&[outstanding.tx_ref][..]),
+            "the outstanding job's references must stay frozen"
+        );
+        assert!(drops(&held).contains(&DropReason::SelectionSettled {
+            state: SelectionState::Pending
+        }));
+        assert_eq!(p.validation_attempts(&id), budget, "nothing new dispatched");
+
+        // Now that job fails — and the held proposal is taken without
+        // another delivery.
+        let revived = ts::validate_err(&mut p, &ctx, &eff);
+        let (_, _, block, txs, _) = ts::one_validate(&revived);
+        assert_eq!(block, id);
+        assert_eq!(
+            txs,
+            vec![proposal.tx_ref],
+            "the held proposal must be the retry"
+        );
+        assert_eq!(p.validation_attempts(&id), budget + 1);
+    }
+
+    #[test]
+    fn a_stranger_candidate_cannot_divert_the_recovery_check() {
+        // The sole extra digest attempt must check the announcer's own
+        // proposal, not whatever the ordinary search reaches first: a
+        // stranger that drops one wrong candidate into the block could
+        // otherwise spend the allowance on a combination nobody
+        // proposed.
+        let budget = Bounds::default().digest_attempts_per_block;
+        let (mut p, mut ctx, id, x, y) = digest_budget_spent();
+        // The guesses that spent the budget have left the mempool, so the
+        // second position has no candidate at all: the staging slot the
+        // stranger creates survives, waiting for the announcer, with the
+        // stranger's candidate in it.
+        ctx.mempool = ts::Mempool::default();
+
+        let decoy = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![ts::body_under(x.weak_id, 60, 1)],
+                from: Some(PeerTag(99)),
+                now: Tick(20),
+            },
+        );
+        assert!(!has_validate(&decoy), "{decoy:?}");
+        assert_eq!(
+            p.staged_digest_attempts(&id),
+            budget,
+            "a stranger buys no attempts"
+        );
+
+        let eff = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![x.clone(), y.clone()],
+                from: Some(ts::PEER),
+                now: Tick(21),
+            },
+        );
+        let (_, _, block, txs, _) = ts::one_validate(&eff);
+        assert_eq!(block, id);
+        assert_eq!(txs, vec![x.tx_ref, y.tx_ref]);
+        assert_eq!(
+            p.staged_digest_attempts(&id),
+            budget + 1,
+            "exactly one extra check, spent on the proposal itself"
+        );
+    }
+
+    #[test]
+    fn listless_alternative_is_retried_after_the_outstanding_job_fails() {
+        // A witness refused because a job was outstanding used to be
+        // discarded: the failure that followed had nothing to retry with
+        // and the block needed another delivery to make progress.
+        let mut p = processor();
+        let ctx = ts::TestCtx::at(FULL);
+        let v1 = ts::body(1, 1);
+        let v2 = ts::body(1, 2);
+        let ann = listless(1, v1.tx_ref.tx_id, None);
+        let id = ts::ann_id(&ann);
+        announce(&mut p, &ctx, &ann, ts::PEER);
+        let first = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![v1.clone()],
+                from: Some(ts::PEER),
+                now: Tick(2),
+            },
+        );
+        assert!(has_validate(&first));
+
+        let refused = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![v2.clone()],
+                from: Some(ts::PEER),
+                now: Tick(3),
+            },
+        );
+        assert!(!has_validate(&refused), "{refused:?}");
+        assert_eq!(p.transaction_refs(&id), Some(&[v1.tx_ref][..]));
+        assert!(drops(&refused).contains(&DropReason::SelectionSettled {
+            state: SelectionState::Pending
+        }));
+
+        // No further delivery: the failure alone must reach the witness
+        // that was waiting.
+        let retried = ts::validate_err(&mut p, &ctx, &first);
+        let (_, _, block, txs, _) = ts::one_validate(&retried);
+        assert_eq!(block, id);
+        assert_eq!(
+            txs,
+            vec![v2.tx_ref],
+            "the retained alternative must be dispatched"
         );
     }
 
