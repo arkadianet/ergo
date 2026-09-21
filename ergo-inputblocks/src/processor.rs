@@ -72,6 +72,20 @@ pub enum Event {
         /// Node-supplied clock.
         now: Tick,
     },
+    /// The weak-id list of an input block, delivered by a peer
+    /// (message 102). Only meaningful for a block whose announcement
+    /// omitted the list — the node asks for it with
+    /// [`Effect::RequestTransactionIds`] and answers with this.
+    TransactionIdsDelivered {
+        /// The block the ids belong to.
+        input_block_id: InputBlockId,
+        /// The announced transaction order, as 6-byte weak ids.
+        weak_ids: Vec<WeakId>,
+        /// The delivering peer.
+        from: PeerTag,
+        /// Node-supplied clock.
+        now: Tick,
+    },
     /// Result of a [`Effect::Validate`].
     ValidationResult {
         /// The job this answers.
@@ -699,6 +713,12 @@ impl Processor {
                 from,
                 now,
             } => self.on_bodies(input_block_id, bodies, from, now, ctx, &mut out),
+            Event::TransactionIdsDelivered {
+                input_block_id,
+                weak_ids,
+                from,
+                now,
+            } => self.on_tx_ids(input_block_id, weak_ids, from, now, ctx, &mut out),
             Event::ValidationResult {
                 job,
                 generation,
@@ -1258,6 +1278,65 @@ impl Processor {
 
     // ----- delivered bodies (message 104) -----
 
+    /// Message 102: the weak-id list the announcement omitted.
+    ///
+    /// Scala has no separate step here — its `InputBlockAnnouncement`
+    /// always carries the list in the cases the reference node produces,
+    /// and the wire message exists for the announcement that does not.
+    /// The list is *not* covered by the announcement's extension proof,
+    /// so it is trusted only as an ordering hint: the ordered Merkle
+    /// digest over the bodies it resolves still has to reproduce
+    /// `transactionsDigest` before anything is cached or validated. The
+    /// per-block digest budget is deliberately not refunded when a
+    /// second, different list arrives (fix round 2, finding r2-1).
+    fn on_tx_ids(
+        &mut self,
+        id: InputBlockId,
+        weak_ids: Vec<WeakId>,
+        from: PeerTag,
+        now: Tick,
+        ctx: &ProcessorCtx<'_>,
+        out: &mut Vec<Effect>,
+    ) {
+        if let Some(c) = self.outstanding.get_mut(&from) {
+            *c = c.saturating_sub(1);
+        }
+        let Some(rec) = self.records.get(&id) else {
+            out.push(Effect::Dropped {
+                id,
+                reason: DropReason::UnknownBlock,
+            });
+            return;
+        };
+        // The announcement's own list is authoritative, and a block whose
+        // digest already passed has a fixed transaction order: in both
+        // cases an id list adds nothing.
+        if rec.ann.weak_tx_ids.is_some()
+            || self.tx_refs.contains_key(&id)
+            || self.staging.get(&id).is_some_and(|s| s.variants.is_some())
+        {
+            out.push(Effect::Dropped {
+                id,
+                reason: DropReason::AlreadyKnown,
+            });
+            return;
+        }
+        let same = self
+            .staging
+            .get(&id)
+            .is_some_and(|s| s.weak_ids == weak_ids);
+        if !same {
+            // A different list replaces the slot's unverified candidates;
+            // nothing verified is lost, because `variants` is `None` here.
+            self.staging.shift_remove(&id);
+            self.staging
+                .insert(id, Staging::new(weak_ids, now, Some(from)));
+        }
+        self.refresh_from_mempool(id, ctx);
+        self.enforce_staging_bytes(id, out);
+        self.complete_or_request(id, out);
+    }
+
     fn on_bodies(
         &mut self,
         id: InputBlockId,
@@ -1280,7 +1359,16 @@ impl Processor {
             return;
         };
         let announcer = rec.from;
-        match rec.ann.weak_tx_ids.clone() {
+        // The list may have come from the announcement or from a
+        // message-102 delivery; either way it fixes the block's
+        // transaction order, so bodies are resolved through staging
+        // rather than taken in delivery order.
+        let known_weak_ids = rec
+            .ann
+            .weak_tx_ids
+            .clone()
+            .or_else(|| self.staging.get(&id).map(|s| s.weak_ids.clone()));
+        match known_weak_ids {
             Some(weak) => {
                 if self.staging.get(&id).is_some_and(|s| s.variants.is_some()) {
                     // The block's digest already passed; a delivery now
@@ -1846,6 +1934,13 @@ impl Processor {
         self.tx_refs
             .get(id)
             .map(|v| v.iter().map(|r| r.weak_id()).collect())
+    }
+
+    /// One body by its `TxRef`, for the node to resolve a
+    /// [`Effect::Validate`]'s `txs` / `previous` lists without keeping a
+    /// second copy of the cache. `None` once the body has been evicted.
+    pub fn body(&self, tx_ref: &TxRef) -> Option<&Body> {
+        self.cache.get(tx_ref)
     }
 
     /// Scala `getInputBlockTransactions` — silently skips bodies the

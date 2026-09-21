@@ -1018,3 +1018,100 @@ fn forks_per_ordering_bound_holds_under_fork_spam() {
     assert!(rejected > 0, "the fork cap never fired");
     assert!(h.p.forks(&ORD) <= 4);
 }
+
+/// Plan 2's node wiring drives the full four-message exchange for an
+/// announcement that omits its weak-id list: `100` (announcement) →
+/// `102` (ids) → `105` (body request) → `104` (bodies) → `Validate`.
+/// Every step is an event or effect of the crate's public API, with no
+/// resolution or body cache owned by the node — `Processor::body`
+/// resolves the `Validate`'s `TxRef`s back to transactions.
+#[test]
+fn announcement_without_weak_ids_resolves_through_ids_and_bodies_to_validate() {
+    let mut h = Harness::new();
+    let b1 = h.body(0x51);
+    let b2 = h.body(0x52);
+    // Message 100: commits to both bodies, announces no weak ids.
+    let ann = h.ann(ORD, None, &[b1.clone(), b2.clone()]);
+    let block = ts::ann_id(&ann);
+    let now = h.tick();
+    let effects = h.ctx.handle(
+        &mut h.p,
+        Event::AnnouncementAccepted {
+            ann: ann.clone(),
+            from: ts::PEER,
+            now,
+        },
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::RequestTransactionIds { input_block_id, .. } if *input_block_id == block
+        )),
+        "expected a message-102 request, got {effects:?}"
+    );
+
+    // Message 102: the peer answers with the announced transaction order.
+    // The mempool holds neither body, so every position is unresolved and
+    // the processor must ask for the bodies themselves.
+    let now = h.tick();
+    let effects = h.ctx.handle(
+        &mut h.p,
+        Event::TransactionIdsDelivered {
+            input_block_id: block,
+            weak_ids: vec![b1.weak_id, b2.weak_id],
+            from: ts::PEER,
+            now,
+        },
+    );
+    let requested = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::RequestTransactions {
+                input_block_id,
+                weak_ids,
+                ..
+            } if *input_block_id == block => Some(weak_ids.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected a message-105 request, got {effects:?}"));
+    assert_eq!(requested, vec![b1.weak_id, b2.weak_id]);
+    assert!(
+        h.p.transaction_refs(&block).is_none(),
+        "nothing is resolved before the bodies arrive"
+    );
+
+    // Message 104: the bodies. The ordered digest now reproduces the
+    // announcement's `transactionsDigest`, so the block is resolved and
+    // the tree asks for it to be validated.
+    let now = h.tick();
+    let effects = h.ctx.handle(
+        &mut h.p,
+        Event::TransactionsDelivered {
+            input_block_id: block,
+            bodies: vec![b1.clone(), b2.clone()],
+            from: Some(ts::PEER),
+            now,
+        },
+    );
+    let txs = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::Validate {
+                input_block_id,
+                txs,
+                ..
+            } if *input_block_id == block => Some(txs.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected a Validate, got {effects:?}"));
+    assert_eq!(txs, vec![b1.tx_ref, b2.tx_ref]);
+    assert_eq!(h.p.transaction_refs(&block), Some(&txs[..]));
+
+    // `Validate::previous` and `txs` are resolvable through the crate, so
+    // the node needs no second copy of the body cache.
+    for r in &txs {
+        let got = h.p.body(r).unwrap_or_else(|| panic!("body {r:?} missing"));
+        assert_eq!(got.tx_ref, *r);
+    }
+    assert!(h.p.body(&ts::body(0x53, 1).tx_ref).is_none());
+}
