@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 env:
-  # CI speed levers (biggest win on the 2-core Windows runner):
+  # CI speed levers (biggest win on the 4-core Windows runner):
   # - line-tables-only backtraces instead of full debuginfo: MSVC codegen
   #   and linking shrink dramatically; panic messages still carry locations.
   # - incremental off: cargo's own guidance for shared-cache CI —
@@ -27,7 +27,7 @@ env:
 
 jobs:
   check:
-    name: Check, clippy, test (${{ matrix.os }})
+    name: Check, clippy, test (${{ matrix.os }})${{ matrix.shard && format(' shard {0}/{1}', matrix.shard, matrix.shards) || '' }}
     runs-on: ${{ matrix.os }}
     # Job-scoped so audit/deny/machete legs never see RUSTC_WRAPPER without
     # a sccache binary installed. Declared here rather than appended to
@@ -39,10 +39,54 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+          - os: macos-latest
+            shard: 1
+            shards: 2
+          - os: macos-latest
+            shard: 2
+            shards: 2
+          - os: windows-latest
+            shard: 1
+            shards: 4
+          - os: windows-latest
+            shard: 2
+            shards: 4
+          - os: windows-latest
+            shard: 3
+            shards: 4
+          - os: windows-latest
+            shard: 4
+            shards: 4
 
     steps:
       - uses: actions/checkout@v4
+
+      # Run 35522674758: Windows nextest spent ~34 minutes testing after
+      # 11.5 minutes building. The 25 tests above 60s sum to 95 minutes on
+      # Windows versus 5.2 on Ubuntu: sequential redb commits are disk-bound.
+      # Defender exclusions and TMP/TEMP on RUNNER_TEMP reduced the prior
+      # Windows test phase by 1.55x. Defender failures remain non-fatal.
+      - name: Windows I/O tuning (Defender exclusions, temp on workspace volume)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          try {
+            Add-MpPreference -ExclusionPath `
+              "$env:GITHUB_WORKSPACE", "$env:RUNNER_TEMP", `
+              "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup" -ErrorAction Stop
+            Add-MpPreference -ExclusionProcess `
+              "cargo.exe", "rustc.exe", "link.exe", "sccache.exe", "cargo-nextest.exe" -ErrorAction Stop
+            Write-Host "Defender exclusions registered."
+          } catch {
+            Write-Host "::warning::Defender exclusions unavailable: $($_.Exception.Message)"
+          }
+          # Redirect the temp dir onto the same volume as the workspace so
+          # `tempfile::tempdir()` stops paying C:-disk latency per redb commit.
+          "TMP=$env:RUNNER_TEMP"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TEMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "TMP/TEMP -> $env:RUNNER_TEMP"
 
       # Toolchain is pinned via rust-toolchain.toml at the repo root.
       - uses: dtolnay/rust-toolchain@master
@@ -52,6 +96,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          # Shards share dependency artifacts; each links its own crate group.
           key: ${{ matrix.os }}
 
       # Cross-run compilation cache on top of rust-cache: rust-cache restores
@@ -68,17 +113,40 @@ jobs:
       # Default-feature linting here; the full --all-features lint runs once
       # on ubuntu below (feature combos don't vary meaningfully per-OS, and
       # --all-features materially grows the dependency graph per leg).
+      # Shard 1 still covers cfg(windows)-specific lints; macOS also lints
+      # once, on the last (lightest) shard. Ubuntu remains a single unsharded leg.
       - name: cargo clippy
+        if: (runner.os != 'Windows' || matrix.shard == matrix.shards) && (runner.os != 'macOS' || matrix.shard == matrix.shards)
         run: cargo clippy --all-targets -- -D warnings
 
       - uses: taiki-e/install-action@nextest
 
+      # The guard and nextest read the same crate groups. A new workspace
+      # member or split test target fails every shard until assigned; duplicates fail.
+      - name: Validate crate-group membership
+        if: runner.os != 'Linux'
+        run: python scripts/ci-shards.py --os "${{ runner.os }}" --shard ${{ matrix.shard }} --shards ${{ matrix.shards }}
+
       # nextest: per-test processes with better parallelism; skips doctests,
       # which the ubuntu leg below covers explicitly so coverage is retained.
       - name: cargo nextest run
-        run: cargo nextest run --all
+        if: runner.os == 'Linux'
+        run: cargo nextest run --workspace
 
-      # `cargo test --all` above does not build with --features cost-trace,
+      - name: cargo nextest run (macOS shard)
+        if: runner.os == 'macOS'
+        run: python scripts/ci-shards.py --os macOS --shard ${{ matrix.shard }} --shards ${{ matrix.shards }} --run
+
+      # The slow redb tests are 15–27x slower on Windows than Ubuntu due
+      # to disk waits. Eight threads (2x the runner's four cores) overlap
+      # those waits. Crate groups avoid linking other shards' test binaries.
+      # Four Windows groups predict 8.25–8.6 min including job overhead;
+      # node lib/it build separately. See scripts/ci-shards.py for assumptions.
+      - name: cargo nextest run (Windows shard)
+        if: runner.os == 'Windows'
+        run: python scripts/ci-shards.py --os Windows --shard ${{ matrix.shard }} --shards ${{ matrix.shards }} --run
+
+      # `cargo nextest run` above does not build with --features cost-trace,
       # so the feature-gated recording sites in `ergo-sigma` do not get
       # exercised. This step compiles and runs the two integration tests
       # that DO exercise the feature (`cost_trace_smoke` covers OP/Method
@@ -88,13 +156,29 @@ jobs:
       # — a feature-gated `cost_trace::record(...)` site referencing the
       # wrong identifier and breaking the build under the feature.
       - name: cargo test (cost-trace feature)
-        run: cargo test -p ergo-sigma --features cost-trace --test cost_trace_smoke --test traced_untraced_parity
+        run: cargo test -p ergo-sigma --features cost-trace --test it -- cost_trace_smoke traced_untraced_parity
 
       # Doctest coverage lives on the fastest runner only — every other leg
       # already exercises the same crates via nextest above.
       - name: doc tests (ubuntu only)
         if: runner.os == 'Linux'
         run: cargo test --all --doc
+
+  check-required:
+    # Preserve the existing branch-protection context. A failed, cancelled,
+    # or skipped matrix must never turn this required check green.
+    name: Check, clippy, test (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    needs: check
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all check legs to succeed
+        env:
+          CHECK_RESULT: ${{ needs.check.result }}
+        run: test "$CHECK_RESULT" = success
 
   clippy-all-features:
     name: clippy (--all-features)

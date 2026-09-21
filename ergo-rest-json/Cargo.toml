@@ -20,3 +20,7 @@ num-bigint      = { workspace = true }
 # PoW oracle for the live-testnet header-JSON parity tests: every
 # committed real header must satisfy its own Autolykos equation.
 ergo-crypto = { workspace = true }
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

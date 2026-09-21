@@ -3141,7 +3141,8 @@ fn peers_to_sync_with_prefers_outdated() {
     // Scala peersToSyncWith: when any peer is outdated (> SyncThreshold),
     // sync with those only — Equal/Younger/etc. that are fresh are skipped.
     let mut coord = SyncCoordinator::new(0);
-    let now = Instant::now();
+    let base = Instant::now();
+    let now = base + ergo_p2p::sync::SYNC_THRESHOLD + Duration::from_secs(1);
     let outdated = peer(9030);
     let fresh_equal = peer(9031);
     seed_peer_status(
@@ -3157,11 +3158,7 @@ fn peers_to_sync_with_prefers_outdated() {
         now,
     );
     // Outdated = last send older than SYNC_THRESHOLD.
-    coord.sync_state_mut().mark_sync_sent(
-        outdated,
-        now.checked_sub(ergo_p2p::sync::SYNC_THRESHOLD + Duration::from_secs(1))
-            .expect("test clock far enough from boot"),
-    );
+    coord.sync_state_mut().mark_sync_sent(outdated, base);
     coord.sync_state_mut().mark_sync_sent(fresh_equal, now);
 
     let selected = coord.peers_to_sync_with(&[outdated, fresh_equal], now, 0);

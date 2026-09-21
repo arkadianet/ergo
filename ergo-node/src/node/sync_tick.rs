@@ -65,7 +65,11 @@ fn handle_recovery_error(e: ergo_sync::executor::HydrationError) {
 const GAUGE_INTERVAL: Duration = Duration::from_secs(60);
 
 pub(super) fn handle_sync_tick(state: &mut NodeState) {
-    let now = Instant::now();
+    handle_sync_tick_at(state, Instant::now());
+}
+
+/// Drive one sync cycle using a single supplied monotonic timestamp.
+pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
     maybe_emit_gauges(state, now);
 
     // 0-pre. NiPoPoW bootstrap. Runs BEFORE Mode 2 discovery so the
@@ -1431,6 +1435,28 @@ mod tests {
     const PROOF_DENSE_FROM_HEIGHT: u32 = 2;
 
     // ----- happy path -----
+
+    #[test]
+    fn sync_tick_future_now_evicts_inactive_peer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
+        let peer = "127.0.0.1:9999".parse().unwrap();
+        let base = std::time::Instant::now();
+        state.peer_manager.register_outbound(peer, base).unwrap();
+        state.peer_manager.mark_tcp_connected(&peer);
+        state
+            .peer_manager
+            .complete_handshake(&peer, state.our_handshake.peer_spec.clone(), None, base)
+            .unwrap();
+        assert_eq!(state.peer_manager.peer_count(), 1);
+
+        super::handle_sync_tick_at(&mut state, base + ergo_p2p::peer::INACTIVE_TIMEOUT);
+        assert_eq!(state.peer_manager.peer_count(), 1);
+
+        let now = base + ergo_p2p::peer::INACTIVE_TIMEOUT + std::time::Duration::from_secs(100);
+        super::handle_sync_tick_at(&mut state, now);
+        assert_eq!(state.peer_manager.peer_count(), 0);
+    }
 
     #[test]
     fn resolve_install_anchor_dense_suffix_height_is_ready() {

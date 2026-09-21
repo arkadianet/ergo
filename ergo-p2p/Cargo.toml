@@ -24,3 +24,7 @@ test-helpers = []
 hex      = { workspace = true }
 tempfile = { workspace = true }
 tokio    = { workspace = true, features = ["net", "io-util", "time", "macros", "rt-multi-thread"] }
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

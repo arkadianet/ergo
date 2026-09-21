@@ -23,6 +23,18 @@ use super::{
 };
 
 impl DigestStateStore {
+    /// Disable commit durability for this database instance in logic tests.
+    ///
+    /// Call before initializing fixtures or starting a persist worker. Every
+    /// write still commits through redb, with the same quick-repair setting,
+    /// but uses `Durability::None`. Never use for crash or restart tests.
+    /// Reopening the database restores normal durability.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_non_durable_commits_for_test(self) -> Self {
+        crate::redb_util::disable_test_durability(&self.db);
+        self
+    }
+
     /// Open or initialize a Mode 5 store at `path`. Verifies the
     /// `data_dir_state_type` stamp is `"digest-verifier"` (or stamps
     /// it on a fresh dir); refuses any dir previously initialized for

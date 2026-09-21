@@ -40,3 +40,7 @@ path = "src/bin/difftest.rs"
 [[bin]]
 name = "replay"
 path = "src/bin/replay.rs"
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

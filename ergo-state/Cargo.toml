@@ -8,6 +8,9 @@ repository.workspace = true
 publish    = false
 
 [features]
+# Per-database non-durable commits for tests that do not exercise recovery.
+# Never enable in production builds.
+test-utils = []
 # Re-export crate-internal helpers (`apply_block_unchecked_for_test`,
 # `apply_block_checked_for_test`) to integration tests. Production
 # code never sets this.
@@ -42,7 +45,7 @@ tracing           = { workspace = true }
 tracing-subscriber = { workspace = true, optional = true }
 
 [dev-dependencies]
-ergo-state        = { path = ".", features = ["test-helpers", "recompute-oracle"] }
+ergo-state        = { path = ".", features = ["test-helpers", "recompute-oracle", "test-utils"] }
 ergo-validation   = { workspace = true, features = ["test-helpers"] }
 ergo-wallet       = { workspace = true }
 hex               = { workspace = true }
@@ -51,3 +54,7 @@ rand              = { workspace = true }
 serde             = { workspace = true, features = ["derive"] }
 serde_json        = { workspace = true }
 tempfile          = { workspace = true }
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
