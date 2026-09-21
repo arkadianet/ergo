@@ -253,8 +253,25 @@ pub enum DropReason {
     StagingFull,
     /// The per-peer outstanding-request cap is reached; no request issued.
     RequestsFull,
-    /// Every witness variant of a staged position failed validation.
-    CandidatesExhausted,
+    /// Validation rejected every witness combination the announced
+    /// digest allows: the block's own bodies are the problem.
+    WitnessCombinationsExhausted,
+    /// A delivery offered more witnesses for one announced position than
+    /// [`crate::bounds::Bounds::candidates_per_position`] allows. The
+    /// extra witnesses are discarded; the block is unaffected.
+    VariantCapExceeded {
+        /// The announced position the extra witnesses were offered for.
+        position: usize,
+    },
+    /// The block spent [`crate::bounds::Bounds::digest_attempts_per_block`]
+    /// ordered-digest attempts without reproducing the announcement's
+    /// `transactionsDigest`. A local budget, not evidence against a peer.
+    DigestBudgetExhausted,
+    /// The block spent
+    /// [`crate::bounds::Bounds::validation_retries_per_block`] validation
+    /// dispatches; no further combination is offered. A local budget, not
+    /// evidence against a peer.
+    ValidationBudgetExhausted,
     /// No candidate combination reproduced the announced digest.
     DigestMismatch,
     /// Delivered bodies do not match the announced `transactionsDigest`.
@@ -489,7 +506,20 @@ struct TxCache {
 #[derive(Debug, Clone)]
 struct Candidate {
     body: Body,
-    delivered: bool,
+    /// The peer that delivered this body for *this* block
+    /// ([`PeerTag::LOCAL`] for a locally resolved delivery), or `None`
+    /// when it is a local mempool guess. Provenance, not just a flag: a
+    /// cap hit names the peer that caused it in the structured log
+    /// (residual fix round, A).
+    delivered_by: Option<PeerTag>,
+}
+
+impl Candidate {
+    /// Whether a peer answered with this body for this block, rather
+    /// than it being guessed from the local mempool.
+    fn delivered(&self) -> bool {
+        self.delivered_by.is_some()
+    }
 }
 
 #[derive(Debug)]
@@ -597,16 +627,17 @@ impl Staging {
     /// weak id is misbehaving, and the extras would only re-trigger the
     /// ambiguity request), and `cap + 1` local guesses — one more than the
     /// cap, which is exactly enough to detect that the position is over it.
-    fn add(&mut self, i: usize, body: Body, delivered: bool, cap: usize) -> bool {
+    fn add(&mut self, i: usize, body: Body, delivered_by: Option<PeerTag>, cap: usize) -> bool {
         if self.variants.is_some() || i >= self.candidates.len() {
             return false;
         }
+        let delivered = delivered_by.is_some();
         if let Some(existing) = self.candidates[i]
             .iter_mut()
             .find(|c| c.body.tx_ref == body.tx_ref)
         {
-            if delivered && !existing.delivered {
-                existing.delivered = true;
+            if delivered && !existing.delivered() {
+                existing.delivered_by = delivered_by;
                 self.dirty = true;
             }
             return false;
@@ -614,14 +645,14 @@ impl Staging {
         let limit = if delivered { cap } else { cap + 1 };
         if self.candidates[i]
             .iter()
-            .filter(|c| c.delivered == delivered)
+            .filter(|c| c.delivered() == delivered)
             .count()
             >= limit
         {
             return false;
         }
         self.bytes += body.bytes.len();
-        self.candidates[i].push(Candidate { body, delivered });
+        self.candidates[i].push(Candidate { body, delivered_by });
         self.dirty = true;
         true
     }
@@ -631,8 +662,8 @@ impl Staging {
     /// item 4, "the peer's own body wins over local guesses").
     fn effective(&self, i: usize) -> Vec<&Candidate> {
         let slot = &self.candidates[i];
-        if slot.iter().any(|c| c.delivered) {
-            slot.iter().filter(|c| c.delivered).collect()
+        if slot.iter().any(|c| c.delivered()) {
+            slot.iter().filter(|c| c.delivered()).collect()
         } else {
             slot.iter().collect()
         }
@@ -688,6 +719,16 @@ enum Resolution {
     Request(Vec<WeakId>),
     /// Exactly one candidate per position, and the digest disagreed.
     DigestMismatch,
+    /// The per-block ordered-digest budget is spent, so the search
+    /// stopped without a verdict. Resolved *before* the mismatch
+    /// classification: a spent budget is a local limit, and reporting it
+    /// as `TxDigestMismatch` would blame the bodies for it (residual fix
+    /// round, A). `ambiguous` names the positions the announcer could
+    /// still settle.
+    DigestBudgetExhausted {
+        /// Announced weak ids whose position is still ambiguous.
+        ambiguous: Vec<WeakId>,
+    },
 }
 
 /// The digest search itself, over one staging slot. Split out of
@@ -777,6 +818,9 @@ fn search_staging(
         .filter(|i| effective[*i].len() > 1)
         .map(|i| st.weak_ids[i])
         .collect();
+    if st.attempts >= budget {
+        return Resolution::DigestBudgetExhausted { ambiguous };
+    }
     if ambiguous.is_empty() {
         Resolution::DigestMismatch
     } else {
@@ -1128,7 +1172,7 @@ impl Processor {
                     // Local guesses, not peer answers: `Staging::effective`
                     // ignores them entirely once the announcer has replied
                     // for that position.
-                    st.add(i, b, false, cap);
+                    st.add(i, b, None, cap);
                 }
             }
         }
@@ -1234,6 +1278,30 @@ impl Processor {
                     reason: DropReason::TxDigestMismatch,
                 });
             }
+            Resolution::DigestBudgetExhausted { ambiguous } => {
+                // The budget, not the bodies, ended the search. Drop the
+                // unverified candidates — nothing here is provable any
+                // more — and report it once. The announcer is still asked
+                // for the positions it could settle: that request is the
+                // only route left to the block, and it is what a recovery
+                // delivery (residual fix round, B) answers.
+                self.staging.shift_remove(&id);
+                self.report_digest_exhausted(id, out);
+                if !ambiguous.is_empty() {
+                    if let Some(peer) = from {
+                        self.request(
+                            out,
+                            Effect::RequestTransactions {
+                                input_block_id: id,
+                                weak_ids: ambiguous,
+                                from: peer,
+                            },
+                            peer,
+                            id,
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -1244,7 +1312,7 @@ impl Processor {
         let now = self.staging.get(&id).map(|s| s.created).unwrap_or(Tick(0));
         let cap = self.bounds.candidates_per_position;
         let mut to_cache: Vec<Body> = Vec::new();
-        let mut over_cap = false;
+        let mut over_cap: Vec<(usize, Option<PeerTag>)> = Vec::new();
         if let Some(st) = self.staging.get_mut(&id) {
             if st.variants.is_none() {
                 let empty: Vec<Candidate> = Vec::new();
@@ -1279,7 +1347,7 @@ impl Processor {
                             variant.push(c.body.tx_ref);
                             to_cache.push(c.body.clone());
                         } else {
-                            over_cap = true;
+                            over_cap.push((i, c.delivered_by));
                         }
                     }
                     variants.push(variant);
@@ -1294,12 +1362,7 @@ impl Processor {
         for b in to_cache {
             self.cache.insert(b, now, &self.bounds);
         }
-        if over_cap {
-            out.push(Effect::Dropped {
-                id,
-                reason: DropReason::CandidatesExhausted,
-            });
-        }
+        self.report_cap_hits(id, &over_cap, out);
         self.set_tx_refs(id, refs, out);
         let Some(ordering_id) = self.records.get(&id).map(|r| r.ordering_id) else {
             return;
@@ -1325,12 +1388,13 @@ impl Processor {
         &mut self,
         id: InputBlockId,
         bodies: &[Body],
+        from: Option<PeerTag>,
         now: Tick,
         out: &mut Vec<Effect>,
     ) -> bool {
         let cap = self.bounds.candidates_per_position;
         let mut to_cache: Vec<Body> = Vec::new();
-        let mut over_cap = false;
+        let mut over_cap: Vec<(usize, Option<PeerTag>)> = Vec::new();
         let mut admitted = false;
         let mut expanded = false;
         if let Some(st) = self.staging.get_mut(&id) {
@@ -1338,7 +1402,7 @@ impl Processor {
                 return false;
             };
             for b in bodies {
-                for variant in variants.iter_mut() {
+                for (position, variant) in variants.iter_mut().enumerate() {
                     let Some(committed) = variant.first().map(|r| r.tx_id) else {
                         continue;
                     };
@@ -1361,7 +1425,7 @@ impl Processor {
                         // shared cache — by spraying witnesses of a
                         // committed transaction (fix round 2, finding
                         // r2-3).
-                        over_cap = true;
+                        over_cap.push((position, from));
                     }
                 }
             }
@@ -1372,13 +1436,41 @@ impl Processor {
         for b in to_cache {
             self.cache.insert(b, now, &self.bounds);
         }
-        if over_cap {
+        self.report_cap_hits(id, &over_cap, out);
+        admitted
+    }
+
+    /// Report the per-position witness cap being hit, once per position.
+    /// The reason is telemetry only: a cap hit says nothing about who is
+    /// at fault — the pile can be local mempool guesses — so no peer is
+    /// penalized for it. The peer that offered the extra witness, when
+    /// there is one, is named in the structured log rather than in the
+    /// bounded effect (residual fix round, A).
+    fn report_cap_hits(
+        &mut self,
+        id: InputBlockId,
+        hits: &[(usize, Option<PeerTag>)],
+        out: &mut Vec<Effect>,
+    ) {
+        let mut reported: Vec<usize> = Vec::new();
+        for (position, by) in hits {
+            if reported.contains(position) {
+                continue;
+            }
+            reported.push(*position);
+            tracing::debug!(
+                block = ?id,
+                position,
+                delivered_by = ?by,
+                "witness variants for an announced position are at the cap"
+            );
             out.push(Effect::Dropped {
                 id,
-                reason: DropReason::CandidatesExhausted,
+                reason: DropReason::VariantCapExceeded {
+                    position: *position,
+                },
             });
         }
-        admitted
     }
 
     /// Consume `id`'s pending enumeration restart, if it has one.
@@ -1666,7 +1758,7 @@ impl Processor {
                     // The block's digest already passed; a delivery now
                     // can only refill bodies the cache lost — or offer a
                     // witness the rejected selection did not have.
-                    refilled = self.refill_verified(id, &bodies, now, out);
+                    refilled = self.refill_verified(id, &bodies, from, now, out);
                 } else {
                     self.staging.entry(id).or_insert_with(|| {
                         Staging::new(weak.clone(), now, from.or(Some(announcer)))
@@ -1682,7 +1774,9 @@ impl Processor {
                                 .map(|(i, _)| i)
                                 .collect();
                             for i in positions {
-                                st.add(i, b.clone(), true, cap);
+                                // A locally resolved delivery is still a
+                                // delivery, not a guess.
+                                st.add(i, b.clone(), Some(from.unwrap_or(PeerTag::LOCAL)), cap);
                             }
                         }
                     }
@@ -1824,11 +1918,14 @@ impl Processor {
             return;
         }
         // The block has spent its validation budget; no combination of
-        // its bodies is offered again. Silent for the same reason as the
-        // guard above: re-selection reaches this point on every later
-        // event, and the give-up was already reported once.
+        // its bodies is offered again. Reported here — at the dispatch
+        // guard — and not only after a failure, so the give-up is visible
+        // however the block reaches it; `report_validation_exhausted`
+        // keeps it to once per block, because re-selection reaches this
+        // point on every later event.
         if self.validation_exhausted(&target) {
             tracing::debug!("skipping a block that has spent its validation budget");
+            self.report_validation_exhausted(target, out);
             return;
         }
         let mut previous: Vec<TxRef> = Vec::new();
@@ -1918,7 +2015,7 @@ impl Processor {
         if self.reported_digest_exhausted.insert(id) {
             out.push(Effect::Dropped {
                 id,
-                reason: DropReason::CandidatesExhausted,
+                reason: DropReason::DigestBudgetExhausted,
             });
         }
     }
@@ -1929,7 +2026,7 @@ impl Processor {
         if self.reported_validation_exhausted.insert(id) {
             out.push(Effect::Dropped {
                 id,
-                reason: DropReason::CandidatesExhausted,
+                reason: DropReason::ValidationBudgetExhausted,
             });
         }
     }
@@ -2072,10 +2169,7 @@ impl Processor {
             rejected.push(inf.txs.clone());
         }
         if exhausted {
-            out.push(Effect::Dropped {
-                id,
-                reason: DropReason::CandidatesExhausted,
-            });
+            self.report_validation_exhausted(id, out);
             if self.in_flight.is_none() {
                 self.resume(inf.ordering_id, out);
             }
@@ -2102,7 +2196,7 @@ impl Processor {
                     .get(&id)
                     .is_some_and(|st| st.had_alternatives())
                 {
-                    DropReason::CandidatesExhausted
+                    DropReason::WitnessCombinationsExhausted
                 } else {
                     DropReason::ValidationFailed
                 };
@@ -3134,7 +3228,11 @@ mod tests {
         assert_eq!(txs, vec![v2.tx_ref], "the other witness variant is tried");
 
         let done = ts::validate_err(&mut p, &ctx, &retry);
-        assert_eq!(drops(&done), vec![DropReason::CandidatesExhausted]);
+        assert_eq!(
+            drops(&done),
+            vec![DropReason::WitnessCombinationsExhausted],
+            "validation rejected every combination the digest allows"
+        );
         assert!(!has_validate(&done));
         assert!(p.best_input_block().is_none());
     }
@@ -3889,7 +3987,10 @@ mod tests {
                     now: Tick(10 + u64::from(witness)),
                 },
             );
-            if drops(&out).contains(&DropReason::CandidatesExhausted) {
+            if drops(&out)
+                .iter()
+                .any(|r| matches!(r, DropReason::VariantCapExceeded { position: 0 }))
+            {
                 rejected += 1;
             }
             assert!(
@@ -4020,8 +4121,8 @@ mod tests {
             "a block must not cost more than its validation budget"
         );
         assert!(
-            last.contains(&DropReason::CandidatesExhausted),
-            "an exhausted budget must report CandidatesExhausted, got {last:?}"
+            last.contains(&DropReason::ValidationBudgetExhausted),
+            "an exhausted budget must report ValidationBudgetExhausted, got {last:?}"
         );
         assert!(
             p.failed_combinations(&id) <= budget,
@@ -4407,6 +4508,7 @@ mod tests {
         announce(&mut p, &ctx, &ann, ts::PEER);
 
         let mut last = ts::body(1, 1);
+        let mut spent: Vec<DropReason> = Vec::new();
         for w in 1..=budget as u8 {
             let b = ts::body(1, w);
             let eff = ctx.handle(
@@ -4419,10 +4521,15 @@ mod tests {
                 },
             );
             assert!(has_validate(&eff), "witness {w} must be validated: {eff:?}");
-            ts::validate_err(&mut p, &ctx, &eff);
+            let failed = ts::validate_err(&mut p, &ctx, &eff);
+            spent = drops(&failed);
             last = b;
         }
         assert_eq!(p.validation_attempts(&id), budget);
+        assert!(
+            spent.contains(&DropReason::ValidationBudgetExhausted),
+            "the give-up must be reported when the budget runs out: {spent:?}"
+        );
 
         let extra = ts::body(1, budget as u8 + 1);
         let refused = ctx.handle(
@@ -4442,8 +4549,8 @@ mod tests {
             "an exhausted block must not take another selection"
         );
         assert!(
-            drops(&refused).contains(&DropReason::CandidatesExhausted),
-            "{refused:?}"
+            !drops(&refused).contains(&DropReason::ValidationFailed),
+            "a refused delivery must not look like a validation failure: {refused:?}"
         );
     }
 
@@ -4629,6 +4736,116 @@ mod tests {
             eff.iter()
                 .any(|e| matches!(e, Effect::RequestTransactionIds { .. })),
             "a timed-out request must release its slot: {eff:?}"
+        );
+    }
+
+    // ----- residuals fix round: A (drop reasons a node can act on) -----
+
+    #[test]
+    fn spent_digest_budget_is_reported_as_a_budget_not_a_mismatch() {
+        // `CandidatesExhausted` used to stand for four different things
+        // and a spent digest budget was reported as a *mismatch* — the
+        // bodies blamed for a local limit. A node alarming on the reason
+        // has to be able to tell the two apart.
+        let mut p = processor();
+        let x = ts::body(1, 1);
+        let y = ts::body(2, 1);
+        let mut ctx = ts::TestCtx::at(FULL);
+        let cap = Bounds::default().candidates_per_position as u8;
+        for seed in 30..30 + cap {
+            ctx.mempool.add_under(x.weak_id, &ts::body(seed, 1));
+        }
+        for seed in 40..40 + cap {
+            ctx.mempool.add_under(y.weak_id, &ts::body(seed, 1));
+        }
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, &[x.clone(), y.clone()]);
+        let id = ts::ann_id(&ann);
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+
+        assert_eq!(
+            p.staged_digest_attempts(&id),
+            Bounds::default().digest_attempts_per_block
+        );
+        assert!(
+            drops(&eff).contains(&DropReason::DigestBudgetExhausted),
+            "{eff:?}"
+        );
+        assert!(
+            !drops(&eff).contains(&DropReason::TxDigestMismatch),
+            "a spent budget is not the bodies' fault: {eff:?}"
+        );
+        // The announcer is still asked for the positions it could settle.
+        assert!(
+            eff.iter()
+                .any(|e| matches!(e, Effect::RequestTransactions { .. })),
+            "{eff:?}"
+        );
+        // Reported once per block, however often re-selection reaches it.
+        let again = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: Vec::new(),
+                from: Some(ts::PEER),
+                now: Tick(6),
+            },
+        );
+        assert!(
+            !drops(&again).contains(&DropReason::DigestBudgetExhausted),
+            "the give-up must not repeat: {again:?}"
+        );
+    }
+
+    #[test]
+    fn variant_cap_hit_names_the_position() {
+        let cap = Bounds::default().candidates_per_position;
+        let (_p, _ctx, _id, eff) = over_stuffed_position(cap as u8 + 1, cap as u8);
+        assert!(
+            drops(&eff).contains(&DropReason::VariantCapExceeded { position: 0 }),
+            "the cap hit must name the announced position: {eff:?}"
+        );
+        assert!(
+            !eff.iter().any(|e| matches!(e, Effect::Penalize { .. })),
+            "a cap hit blames nobody: {eff:?}"
+        );
+    }
+
+    #[test]
+    fn dispatch_guard_reports_the_spent_validation_budget() {
+        // The give-up used to be reported only after a failure, so a
+        // block that reached the guard by any other route was silently
+        // stuck. Here a generation bump retires the only dispatch the
+        // budget allowed, and re-selection meets the guard.
+        let bounds = Bounds {
+            validation_retries_per_block: 1,
+            ..Bounds::default()
+        };
+        let mut p = processor_with(bounds);
+        let b1 = ts::body(1, 1);
+        let mut ctx = ts::TestCtx::at(FULL);
+        ctx.mempool.add(&b1);
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&b1));
+        let id = ts::ann_id(&ann);
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        assert!(has_validate(&eff));
+        assert_eq!(p.validation_attempts(&id), 1);
+
+        let bumped = ctx.handle(
+            &mut p,
+            Event::OrderingBlockApplied {
+                header_id: ORD,
+                height: FULL,
+                now: Tick(4),
+            },
+        );
+        assert!(!has_validate(&bumped), "the budget is spent: {bumped:?}");
+        assert!(
+            drops(&bumped).contains(&DropReason::ValidationBudgetExhausted),
+            "the dispatch guard must report the give-up: {bumped:?}"
+        );
+        assert!(
+            !bumped.iter().any(|e| matches!(e, Effect::Penalize { .. })),
+            "a spent local budget blames nobody: {bumped:?}"
         );
     }
 

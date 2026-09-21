@@ -73,7 +73,10 @@ pub struct Bounds {
     /// bodies are requested from the announcer.
     pub candidates_per_position: usize,
     /// Ordered-digest combinations tried across all positions of one
-    /// block before giving up and requesting bodies (spec 7.5).
+    /// block before giving up and requesting bodies (spec 7.5). A spent
+    /// budget is reported as
+    /// [`crate::processor::DropReason::DigestBudgetExhausted`] — never as
+    /// a digest mismatch, which would blame the bodies for a local limit.
     pub digest_attempts_per_block: usize,
     /// Scala `InputBlocksProcessor.PruningThreshold`: records more than
     /// this many ordering blocks behind the best height are pruned.
@@ -92,7 +95,7 @@ pub struct Bounds {
     /// `candidates_per_position ^ positions` combinations, each a full
     /// block validation, and the set of rejected combinations it
     /// remembers grows with it. At the cap the block is reported
-    /// [`crate::processor::DropReason::CandidatesExhausted`] and no
+    /// [`crate::processor::DropReason::ValidationBudgetExhausted`] and no
     /// further combination is offered.
     pub validation_retries_per_block: usize,
     /// Deferred application triggers retained while a validation job is
