@@ -2918,6 +2918,16 @@ fn seat_in_mempool(state: &mut NodeState, tx: &ergo_ser::transaction::Transactio
     assert!(state.mempool.contains(&id), "fixture seats the transaction");
 }
 
+/// SUPPLEMENTAL wiring check, NOT an oracle: the fixture's root and
+/// section come from the same Rust primitives the code under test uses,
+/// so this proves only that a transaction resolved FROM THE MEMPOOL
+/// reaches the rebuilt section — the half mainnet blocks 1-5 cannot
+/// exercise, since each carries a single non-broadcasted transaction.
+///
+/// The consensus oracle is
+/// `reconstruct_of_a_mainnet_block_matches_the_scala_section_and_advances_the_committed_tip`,
+/// whose expected bytes, section id and applied tip are the reference
+/// node's.
 #[test]
 fn reconstruct_with_all_broadcasted_in_mempool_persists_block_transactions_and_assembles() {
     let dir = tempfile::tempdir().unwrap();
@@ -2969,17 +2979,15 @@ fn reconstruct_with_all_broadcasted_in_mempool_persists_block_transactions_and_a
         .get_block_section(&section_id)
         .unwrap()
         .expect("the rebuilt BlockTransactions section is persisted");
-    let mut w = ergo_primitives::writer::VlqWriter::new();
-    ergo_ser::block_transactions::write_block_transactions_with_version(
-        &mut w,
-        &ergo_ser::block_transactions::BlockTransactions {
-            header_id: ergo_primitives::digest::ModifierId::from_bytes(header_id),
-            transactions: vec![carried, pooled],
-        },
-        2,
-    )
-    .unwrap();
-    assert_eq!(&stored[..], &w.result()[..], "canonical v2 section bytes");
+    // Both transactions are in it, in plan order — asserted by re-reading
+    // the section, never by re-serializing it with the writer under test.
+    let mut r = ergo_primitives::reader::VlqReader::new(&stored);
+    let parsed = ergo_ser::block_transactions::read_block_transactions(&mut r).unwrap();
+    assert_eq!(
+        parsed.transactions,
+        vec![carried, pooled],
+        "non-broadcasted first, then the body resolved from the mempool"
+    );
 
     assert!(
         sent_frames(&actions, ergo_p2p::message::CODE_REQUEST_MODIFIER).is_empty(),
@@ -3315,4 +3323,306 @@ fn reconstruct_with_a_failing_store_read_aborts_as_storage_error_not_missing_dat
         failure.as_fallback().actions.is_empty(),
         "nothing planned from a failed read is executed"
     );
+}
+
+// ----- mainnet reconstruction oracle (round 1, findings 1 + 2) -----
+
+/// One mainnet block from `blocks_1_5.json`, with its real header.
+struct MainnetBlock {
+    height: u32,
+    header: Header,
+    header_id: [u8; 32],
+    header_bytes: Vec<u8>,
+    transactions: Vec<ergo_ser::transaction::Transaction>,
+    /// The Scala-produced `BlockTransactions` bytes for this block.
+    section_bytes: Vec<u8>,
+    extension_bytes: Vec<u8>,
+}
+
+/// Load mainnet blocks 1..=`upto` (Scala-produced header bytes, transaction
+/// bytes and extension fields), pairing each with its real header.
+fn mainnet_blocks(upto: u32) -> Vec<MainnetBlock> {
+    #[derive(serde::Deserialize)]
+    struct BlockVector {
+        #[serde(rename = "headerId")]
+        header_id: String,
+        height: u32,
+        transactions: Vec<TxVector>,
+        extension: ExtVector,
+    }
+    #[derive(serde::Deserialize)]
+    struct TxVector {
+        bytes: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct ExtVector {
+        fields: Vec<(String, String)>,
+    }
+
+    let headers = load_mainnet_headers("../test-vectors/mainnet/headers_1_10.json");
+    let raw = std::fs::read_to_string("../test-vectors/mainnet/blocks_1_5.json").unwrap();
+    let blocks: Vec<BlockVector> = serde_json::from_str(&raw).unwrap();
+
+    blocks
+        .into_iter()
+        .filter(|b| b.height <= upto)
+        .map(|b| {
+            let (_, header_id, header_bytes, header) = headers
+                .iter()
+                .find(|(h, ..)| *h == b.height)
+                .expect("header fixture covers this height")
+                .clone();
+            assert_eq!(
+                b.header_id,
+                hex::encode(header_id),
+                "the block and header fixtures must name the same block"
+            );
+            let transactions: Vec<ergo_ser::transaction::Transaction> = b
+                .transactions
+                .iter()
+                .map(|t| {
+                    let bytes = hex::decode(&t.bytes).unwrap();
+                    let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
+                    ergo_ser::transaction::read_transaction(&mut r).unwrap()
+                })
+                .collect();
+
+            // MAINNET ANCHOR: the fixture's transactions must reproduce
+            // the real header's `transactionsRoot`, or these are not this
+            // block's transactions. This is the Scala-produced expectation
+            // the reconstruction's own root computation is checked against.
+            assert_eq!(
+                header.version, 1,
+                "blocks 1-5 are v1 headers: no witness ids in the root"
+            );
+            let tx_ids: Vec<[u8; 32]> = transactions
+                .iter()
+                .map(|t| *ergo_ser::transaction::transaction_id(t).unwrap().as_bytes())
+                .collect();
+            let id_refs: Vec<&[u8]> = tx_ids.iter().map(|i| &i[..]).collect();
+            assert_eq!(
+                ergo_crypto::merkle::transactions_root(&id_refs, None),
+                *header.transactions_root.as_bytes(),
+                "fixture transactions do not reproduce block {}'s real \
+                 transactionsRoot",
+                b.height
+            );
+
+            // The reference node's v1 `BlockTransactions` wire form:
+            // header id ‖ VLQ count ‖ the Scala-produced transaction bytes
+            // in order. Assembled here from the fixture rather than from
+            // the production writer, so the assertion is not the writer
+            // checking itself; the count is written by hand (single-byte
+            // VLQ) for the same reason.
+            assert!(transactions.len() < 128, "count is a one-byte VLQ");
+            let mut section = header_id.to_vec();
+            section.push(transactions.len() as u8);
+            for t in &b.transactions {
+                section.extend_from_slice(&hex::decode(&t.bytes).unwrap());
+            }
+
+            let mut w = ergo_primitives::writer::VlqWriter::new();
+            ergo_ser::extension::write_extension(
+                &mut w,
+                &ergo_ser::extension::Extension {
+                    header_id: ergo_primitives::digest::ModifierId::from_bytes(header_id),
+                    fields: b
+                        .extension
+                        .fields
+                        .iter()
+                        .map(|(k, v)| ergo_ser::extension::ExtensionField {
+                            key: hex::decode(k).unwrap().try_into().unwrap(),
+                            value: hex::decode(v).unwrap(),
+                        })
+                        .collect(),
+                },
+            )
+            .unwrap();
+
+            MainnetBlock {
+                height: b.height,
+                header_id,
+                header_bytes,
+                transactions,
+                section_bytes: section,
+                extension_bytes: w.result(),
+                header,
+            }
+        })
+        .collect()
+}
+
+/// A node whose committed tip is mainnet block `upto - 1`, reached by
+/// applying real blocks through the ordinary pipeline, with block `upto`'s
+/// header already validated and on the best chain.
+fn mainnet_state_before(dir: &std::path::Path, upto: u32) -> (NodeState, Vec<MainnetBlock>) {
+    let mut state = live_state(dir);
+    let blocks = mainnet_blocks(upto);
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .initialize_genesis(&crate::genesis::mainnet_genesis_boxes())
+        .expect("genesis");
+
+    let rows: Vec<(u32, [u8; 32], Vec<u8>, Header)> = blocks
+        .iter()
+        .map(|b| {
+            (
+                b.height,
+                b.header_id,
+                b.header_bytes.clone(),
+                b.header.clone(),
+            )
+        })
+        .collect();
+    seed_mainnet_headers(&mut state, &rows, true);
+    state.executor.hydrate_block_context(&state.store).unwrap();
+
+    // Every block BELOW the target gets its real sections and is applied
+    // through the executor, so the committed tip really walks the chain.
+    for b in blocks.iter().filter(|b| b.height < upto) {
+        persist_sections(&mut state, b);
+    }
+    let first = &blocks[0];
+    let follow_ups = state.executor.execute(
+        Action::AssembleBlock {
+            header_id: first.header_id,
+        },
+        &mut state.store,
+        &mut state.coordinator,
+        Instant::now(),
+        None,
+    );
+    assert!(follow_ups.is_empty(), "no network follow-ups expected");
+    assert_eq!(
+        state.store.chain_state_meta().best_full_block_height,
+        upto - 1,
+        "the fixture must really apply mainnet blocks 1..{}",
+        upto - 1
+    );
+    (state, blocks)
+}
+
+/// Persist a mainnet block's transactions and extension sections under the
+/// ids the block pipeline names them by.
+fn persist_sections(state: &mut NodeState, b: &MainnetBlock) {
+    for (root, bytes, type_id) in [
+        (
+            b.header.transactions_root.as_bytes(),
+            &b.section_bytes,
+            ergo_ser::modifier_id::TYPE_BLOCK_TRANSACTIONS,
+        ),
+        (
+            b.header.extension_root.as_bytes(),
+            &b.extension_bytes,
+            ergo_ser::modifier_id::TYPE_EXTENSION,
+        ),
+    ] {
+        let id = ergo_ser::modifier_id::compute_section_id(type_id, &b.header_id, root);
+        state
+            .store
+            .store_block_section_typed(&id, bytes, type_id)
+            .unwrap();
+    }
+}
+
+/// Round 1, findings 1 and 2: the success path, against Scala-produced
+/// mainnet blocks and through a real application.
+///
+/// Blocks 1-4 are applied through the ordinary pipeline; block 5 is then
+/// announced as an ordering block carrying its real transactions, and the
+/// reconstruction must (a) produce exactly the section bytes and section
+/// id the reference node produced for block 5, (b) drive that block to the
+/// COMMITTED tip through full validation, and (c) record the feed entry.
+#[test]
+fn reconstruct_of_a_mainnet_block_matches_the_scala_section_and_advances_the_committed_tip() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut state, blocks) = mainnet_state_before(dir.path(), 5);
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19706,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+    let target = blocks.last().unwrap();
+    assert_eq!(target.height, 5);
+
+    // The announcement is the real block 5: its real header, its real
+    // extension fields, and its transactions carried in full.
+    let mut ann = ts::ordering_announcement([0u8; 32], target.height, 1, Vec::new());
+    ann.header = target.header.clone();
+    ann.non_broadcasted_transactions = target.transactions.clone();
+    ann.extension_fields = mainnet_extension_fields(target);
+    store_ordering_announcement(&mut state, ann, tag);
+
+    let before = state.store.chain_state_meta().best_full_block_height;
+    assert_eq!(before, 4);
+
+    let actions = execute_effects(
+        &mut state,
+        vec![Effect::OrderingReconstruct {
+            from: tag,
+            plan: ergo_inputblocks::ordering::ReconstructionPlan {
+                header_id: target.header_id,
+                non_broadcasted: target.transactions.clone(),
+                broadcasted_ids: Vec::new(),
+                input_chain_txs: Vec::new(),
+                prev_input_block_id: None,
+            },
+        }],
+        now,
+    );
+
+    // (a) Scala's bytes, under Scala's section id.
+    let section_id = ergo_ser::modifier_id::compute_section_id(
+        ergo_ser::modifier_id::TYPE_BLOCK_TRANSACTIONS,
+        &target.header_id,
+        target.header.transactions_root.as_bytes(),
+    );
+    assert_eq!(
+        state
+            .store
+            .get_block_section(&section_id)
+            .unwrap()
+            .as_deref(),
+        Some(&target.section_bytes[..]),
+        "the rebuilt section must be byte-identical to the reference node's"
+    );
+
+    // (b) the block really applied, through full validation.
+    assert_eq!(
+        state.store.chain_state_meta().best_full_block_height,
+        target.height,
+        "reconstruction advanced the COMMITTED tip to mainnet block 5"
+    );
+    assert!(
+        sent_frames(&actions, ergo_p2p::message::CODE_REQUEST_MODIFIER).is_empty(),
+        "a reconstructed block downloads nothing"
+    );
+
+    // (c) the feed entry the M2 smoke asserts.
+    assert!(
+        matches!(
+            feed_kinds(&state).last(),
+            Some(
+                crate::node::event_feed::FeedEventKind::OrderingReconstructed {
+                    height: 5,
+                    txs: 1,
+                    ..
+                }
+            )
+        ),
+        "the feed records the reconstruction: {:?}",
+        feed_kinds(&state)
+    );
+}
+
+/// A mainnet block's extension fields, as an announcement carries them.
+fn mainnet_extension_fields(b: &MainnetBlock) -> Vec<([u8; 2], Vec<u8>)> {
+    let mut r = ergo_primitives::reader::VlqReader::new(&b.extension_bytes);
+    let ext = ergo_ser::extension::read_extension(&mut r).unwrap();
+    ext.fields.into_iter().map(|f| (f.key, f.value)).collect()
 }
