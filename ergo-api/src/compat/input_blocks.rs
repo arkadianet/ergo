@@ -44,6 +44,16 @@ pub struct ApiInputBlocks {
     /// Hex id of the tip of [`Self::best_chain`]. `None` when no input
     /// block currently leads under the best ordering block.
     pub best_input_block_id: Option<String>,
+    /// Hex id of the ordering block [`Self::best_chain`] sits under, as
+    /// the processor itself keys it. `None` when the processor has no
+    /// best ordering block yet.
+    ///
+    /// Published so the two `best*` routes can report a pair taken from
+    /// ONE snapshot. The chain store's tip and the input-block
+    /// processor's view move independently, and pairing them made the
+    /// endpoint serve the previous ordering block's chain under the new
+    /// block's id for about a second after every ordering block.
+    pub best_ordering_id: Option<String>,
     /// Best input-block chain under the best ordering block, tip first
     /// (Scala `bestInputBlocksChain()`).
     pub best_chain: Vec<String>,
@@ -82,15 +92,30 @@ pub struct ApiInputBlockEntry {
     pub transactions: Vec<ScalaTransaction>,
 }
 
+/// The ordering block id to report beside an input-block answer.
+///
+/// The processor's own key when it has one, so the id and the chain
+/// come from the same snapshot; otherwise the best-header id, which is
+/// what these routes reported before and what a node with the subsystem
+/// off must still answer.
+fn coherent_ordering_id(
+    read: &Arc<dyn NodeReadState>,
+    input_blocks: Option<&ApiInputBlocks>,
+) -> String {
+    input_blocks
+        .and_then(|ib| ib.best_ordering_id.clone())
+        .unwrap_or_else(|| read.tip().best_header.header_id)
+}
+
 /// `GET /blocks/bestInputBlock` — ids of the best ordering and input
 /// blocks. `bestOrdering` is the best-HEADER id (Scala `bestHeaderOpt`,
 /// not merely the best full block) since in the Matrix design ordering
 /// blocks ARE headers; `bestInputBlock` is the tip of the best input
 /// chain under it. Both default to `""` when absent.
 pub async fn best_input_block_handler(State(read): State<Arc<dyn NodeReadState>>) -> Response {
-    let best_ordering = read.tip().best_header.header_id;
-    let best_input_block = read
-        .input_blocks()
+    let input_blocks = read.input_blocks();
+    let best_ordering = coherent_ordering_id(&read, input_blocks.as_ref());
+    let best_input_block = input_blocks
         .and_then(|ib| ib.best_input_block_id)
         .unwrap_or_default();
     Json(serde_json::json!({
@@ -103,11 +128,9 @@ pub async fn best_input_block_handler(State(read): State<Arc<dyn NodeReadState>>
 /// `GET /blocks/bestInputChain` — the best ordering block id plus the
 /// best input-blocks chain under it, tip first.
 pub async fn best_input_chain_handler(State(read): State<Arc<dyn NodeReadState>>) -> Response {
-    let best_ordering = read.tip().best_header.header_id;
-    let best_chain = read
-        .input_blocks()
-        .map(|ib| ib.best_chain)
-        .unwrap_or_default();
+    let input_blocks = read.input_blocks();
+    let best_ordering = coherent_ordering_id(&read, input_blocks.as_ref());
+    let best_chain = input_blocks.map(|ib| ib.best_chain).unwrap_or_default();
     Json(serde_json::json!({
         "bestOrdering": best_ordering,
         "bestInputBlocks": best_chain,

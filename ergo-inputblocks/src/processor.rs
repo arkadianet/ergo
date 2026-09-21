@@ -3475,6 +3475,21 @@ impl Processor {
 
     // ----- read side (API and p2p serving, Plan 2) -----
 
+    /// The ordering block [`Self::best_input_chain`] and
+    /// [`Self::best_input_block`] are read against.
+    ///
+    /// The REST routes need this to publish a COHERENT pair. Reading the
+    /// ordering id from the chain store instead — which is what
+    /// `/blocks/bestInputChain` did, and what Scala's own route does —
+    /// pairs a freshly-applied ordering block with a chain the processor
+    /// has not yet moved to, so for a second after every ordering block
+    /// the endpoint reports the PREVIOUS block's input chain under the
+    /// NEW block's id. Nothing downstream can tell that apart from a
+    /// history disagreement.
+    pub fn best_ordering_id(&self) -> Option<OrderingId> {
+        self.best.ordering_id
+    }
+
     /// Scala `bestInputBlock()`.
     pub fn best_input_block(&self) -> Option<&InputBlockAnnouncement> {
         let oid = self.best.ordering_id?;

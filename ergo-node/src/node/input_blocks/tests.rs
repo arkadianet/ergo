@@ -471,6 +471,59 @@ fn read_slot_republishes_after_a_handle_call_even_with_zero_effects() {
     assert!(after.best_input_block_id.is_none());
 }
 
+/// The read slot publishes the ordering block the PROCESSOR is keyed
+/// by, not the chain store's tip.
+///
+/// The two move independently, and the REST routes report them as a
+/// pair: for about a second after every ordering block the store
+/// already names the new block while the processor's chain is still the
+/// previous one's, so `/blocks/bestInputChain` served the previous
+/// block's chain under the new block's id. Downstream that is
+/// indistinguishable from the follower holding a different history, and
+/// it is what the mixed-devnet smoke's assertion 3 kept reporting once
+/// the follower stopped lagging.
+#[test]
+fn the_read_slot_carries_the_processors_own_ordering_block_id() {
+    const ORDERING: [u8; 32] = [0x5a; 32];
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    state.input_blocks = Some(runtime());
+    let slot: crate::api_bridge::InputBlocksSlot = std::sync::Arc::new(
+        arc_swap::ArcSwap::from_pointee(ergo_api::compat::ApiInputBlocks::default()),
+    );
+    state.input_blocks_read_slot = Some(slot.clone());
+
+    // The store's tip is whatever `make_state` seeded; the processor is
+    // pointed somewhere else on purpose.
+    let mut rt = state.input_blocks.take().expect("runtime");
+    rt.processor_mut().set_best_ordering(Some(ORDERING), 1);
+    let effects = {
+        let data = build_ctx_data(&state, &[]);
+        data.with(|ctx| {
+            rt.processor_mut().handle(
+                ergo_inputblocks::processor::Event::Tick {
+                    now: ergo_inputblocks::types::Tick(0),
+                },
+                ctx,
+            )
+        })
+    };
+    state.input_blocks = Some(rt);
+    execute_effects(&mut state, effects, Instant::now());
+
+    let published = slot.load_full();
+    assert_eq!(
+        published.best_ordering_id.as_deref(),
+        Some(hex::encode(ORDERING).as_str()),
+        "the slot names the processor's ordering block, not the store's tip"
+    );
+    assert_ne!(
+        published.best_ordering_id.as_deref(),
+        Some(hex::encode(state.store.chain_state_meta().best_full_block_id).as_str()),
+        "the fixture's two ids must differ, or this proves nothing"
+    );
+}
+
 /// A `Tick` that produces no effects (the overwhelmingly common case —
 /// 1 Hz, most seconds nothing happened) must NOT touch the slot: a
 /// no-op republish every second would mean the API bridge's read-side

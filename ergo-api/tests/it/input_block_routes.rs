@@ -32,6 +32,10 @@ use tower::ServiceExt;
 const ID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const ID_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const BEST_HEADER: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+/// The ordering block the input-block snapshot itself is keyed by —
+/// deliberately NOT `BEST_HEADER`, so a route that reads the chain
+/// store's tip instead of the snapshot's own key is visible.
+const SNAPSHOT_ORDERING: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
 fn stub_tx(id: &str) -> ScalaTransaction {
     ScalaTransaction {
@@ -152,6 +156,7 @@ fn wired_input_blocks() -> ApiInputBlocks {
         },
     );
     ApiInputBlocks {
+        best_ordering_id: None,
         best_input_block_id: Some(ID_A.to_string()),
         best_chain: vec![ID_A.to_string(), ID_B.to_string()],
         blocks,
@@ -182,6 +187,31 @@ async fn best_input_block_reports_best_ordering_and_best_input_block() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["bestOrdering"], BEST_HEADER);
     assert_eq!(body["bestInputBlock"], ID_A);
+}
+
+/// The two `best*` routes must report the ordering id the input-block
+/// snapshot is keyed by, not the chain store's tip.
+///
+/// The two move independently: for about a second after every ordering
+/// block the store already names the new block while the processor's
+/// chain is still the previous block's. Pairing them made the endpoint
+/// serve the previous ordering block's input chain under the new
+/// block's id, which is indistinguishable downstream from the follower
+/// holding a different history.
+#[tokio::test]
+async fn the_best_routes_report_the_snapshots_own_ordering_block() {
+    let snapshot = ApiInputBlocks {
+        best_ordering_id: Some(SNAPSHOT_ORDERING.to_string()),
+        ..wired_input_blocks()
+    };
+    let (status, body) = get(build_app(Some(snapshot.clone())), "/blocks/bestInputBlock").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["bestOrdering"], SNAPSHOT_ORDERING);
+
+    let (status, body) = get(build_app(Some(snapshot)), "/blocks/bestInputChain").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["bestOrdering"], SNAPSHOT_ORDERING);
+    assert_eq!(body["bestInputBlocks"], serde_json::json!([ID_A, ID_B]));
 }
 
 #[tokio::test]
@@ -231,6 +261,7 @@ async fn input_block_transaction_ids_served_even_with_no_cached_bodies() {
         },
     );
     let ib = ApiInputBlocks {
+        best_ordering_id: None,
         best_input_block_id: Some(ID_A.to_string()),
         best_chain: vec![ID_A.to_string()],
         blocks,

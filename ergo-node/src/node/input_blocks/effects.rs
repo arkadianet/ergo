@@ -139,6 +139,10 @@ fn refresh_read_slot(state: &NodeState, rt: &mut InputBlocksRuntime) {
     }
     rt.read_slot_revision = revision;
     let processor = rt.processor();
+    // Read with the same borrow as the chain itself, so the pair the
+    // REST routes publish comes from one snapshot (see the field doc on
+    // `ApiInputBlocks::best_ordering_id`).
+    let best_ordering_id = processor.best_ordering_id().map(hex::encode);
     let chain = processor.best_input_chain();
     let best_chain: Vec<String> = chain.iter().map(hex::encode).collect();
     let best_input_block_id = best_chain.first().cloned();
@@ -204,6 +208,7 @@ fn refresh_read_slot(state: &NodeState, rt: &mut InputBlocksRuntime) {
     }
     slot.store(std::sync::Arc::new(ergo_api::compat::ApiInputBlocks {
         best_input_block_id,
+        best_ordering_id,
         best_chain,
         blocks,
     }));
