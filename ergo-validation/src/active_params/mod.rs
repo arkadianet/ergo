@@ -22,7 +22,8 @@ mod persist_codec;
 
 pub use extension_codec::{active_params_to_extension_fields, parse_active_params};
 pub use launch::{
-    scala_launch, scala_launch_for_network, scala_launch_mainnet, scala_launch_testnet,
+    scala_launch, scala_launch_for_network, scala_launch_for_network_with_input_blocks,
+    scala_launch_mainnet, scala_launch_testnet, SUBBLOCKS_PER_BLOCK_DEFAULT,
 };
 
 use crate::voting::validation_settings::{

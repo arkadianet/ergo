@@ -44,18 +44,49 @@ pub fn scala_launch_testnet() -> ActiveProtocolParameters {
     scala_launch_mainnet()
 }
 
+/// `Parameters.SubsPerBlockDefault` on the `weak-blocks` branch: the
+/// number of input (sub-) blocks per ordering block that the branch's
+/// `Parameters.DefaultParameters` carries under id 9 from genesis.
+pub const SUBBLOCKS_PER_BLOCK_DEFAULT: i32 = 64;
+
 /// Launch parameters for the given network. Production callers that
 /// hold a `Network` should use this; consumers without network
 /// context (most tests) can keep calling [`scala_launch`].
 pub fn scala_launch_for_network(net: Network) -> ActiveProtocolParameters {
-    match net {
+    scala_launch_for_network_with_input_blocks(net, false)
+}
+
+/// Launch parameters for the given network, optionally seeding the
+/// input-block multiplier (id 9).
+///
+/// Stock Scala 6.0.x has no id 9 in `Parameters.DefaultParameters`, so
+/// with `input_blocks = false` this is byte-identical to
+/// [`scala_launch_for_network`] on every network. The pinned
+/// `weak-blocks` branch DOES carry id 9 = `SubsPerBlockDefault` (64)
+/// from genesis, so a devnet node that follows that branch must seed
+/// the same row — otherwise its multiplier is `None` and every
+/// input-block announcement drops with `MultiplierUnavailable`.
+///
+/// This is consensus-visible (the parameters table is hashed into the
+/// extension at epoch boundaries), which is why it is gated on the
+/// devnet-only `[input_blocks] enabled` switch and refused elsewhere:
+/// see spec §12 finding F10.
+pub fn scala_launch_for_network_with_input_blocks(
+    net: Network,
+    input_blocks: bool,
+) -> ActiveProtocolParameters {
+    let mut params = match net {
         Network::Mainnet => scala_launch_mainnet(),
         Network::Testnet => scala_launch_testnet(),
         Network::Devnet => ActiveProtocolParameters {
             block_version: 4,
             ..scala_launch_mainnet()
         },
+    };
+    if input_blocks && net == Network::Devnet {
+        params.subblocks_per_block = Some(SUBBLOCKS_PER_BLOCK_DEFAULT);
     }
+    params
 }
 
 /// Backwards-compatible alias for [`scala_launch_mainnet`]. Kept so
@@ -107,6 +138,43 @@ mod tests {
         assert!(m.proposed_update.status_updates.is_empty());
         assert_eq!(m.activated_update.rules_to_disable, Vec::<u16>::new());
         assert!(m.activated_update.status_updates.is_empty());
+    }
+
+    #[test]
+    fn launch_with_input_blocks_seeds_id_9_on_devnet_only() {
+        // The `weak-blocks` branch's `Parameters.DefaultParameters`
+        // carries id 9 = 64 from genesis; the Rust devnet node must
+        // match it or every announcement drops with
+        // `MultiplierUnavailable`.
+        let devnet = scala_launch_for_network_with_input_blocks(Network::Devnet, true);
+        assert_eq!(devnet.subblocks_per_block, Some(64));
+        assert_eq!(
+            ActiveProtocolParameters {
+                subblocks_per_block: None,
+                ..devnet
+            },
+            scala_launch_for_network(Network::Devnet),
+            "seeding id 9 must change nothing else in the devnet row"
+        );
+
+        // The switch is devnet-only; even a caller that passes `true`
+        // for a public network gets the stock row.
+        for net in [Network::Mainnet, Network::Testnet] {
+            assert_eq!(
+                scala_launch_for_network_with_input_blocks(net, true),
+                scala_launch_for_network(net),
+                "{net:?} launch row must be untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn launch_without_input_blocks_is_unchanged_on_every_network() {
+        for net in [Network::Mainnet, Network::Testnet, Network::Devnet] {
+            let row = scala_launch_for_network_with_input_blocks(net, false);
+            assert_eq!(row, scala_launch_for_network(net));
+            assert_eq!(row.subblocks_per_block, None, "{net:?} carries no id 9");
+        }
     }
 
     // ----- oracle parity -----

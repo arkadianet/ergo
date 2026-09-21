@@ -304,8 +304,13 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
     // against the self-stamped sentinel), genesis init (no box arena),
     // the index back-fills, the prune-sentinel activation gate, and
     // `enable_persist_pipeline` — is UTXO-specific and is skipped.
-    let mut launch_parameters =
-        ergo_validation::scala_launch_for_network(config.chain_spec.network);
+    // `[input_blocks] enabled` (devnet-only) seeds id 9 = 64 so the
+    // multiplier matches the Scala `weak-blocks` branch from genesis;
+    // without it every announcement drops with `MultiplierUnavailable`.
+    let mut launch_parameters = ergo_validation::scala_launch_for_network_with_input_blocks(
+        config.chain_spec.network,
+        config.input_blocks.enabled,
+    );
     if let Some(cap) = config.devnet_max_block_cost {
         // Runtime mirror of the `NodeConfig::load` gate: tests and library
         // embedders construct `NodeConfig` directly, so without this check a

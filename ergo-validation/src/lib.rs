@@ -44,8 +44,9 @@ pub mod tx;
 pub mod voting;
 
 pub use active_params::{
-    parse_active_params, scala_launch, scala_launch_for_network, scala_launch_mainnet,
-    scala_launch_testnet, ActiveParamsError, ActiveProtocolParameters,
+    parse_active_params, scala_launch, scala_launch_for_network,
+    scala_launch_for_network_with_input_blocks, scala_launch_mainnet, scala_launch_testnet,
+    ActiveParamsError, ActiveProtocolParameters, SUBBLOCKS_PER_BLOCK_DEFAULT,
 };
 pub use context::{LocalPolicy, ProtocolParams, TransactionContext, UtxoView};
 pub use cost::{CostAccumulator, CostError, JitCost};
