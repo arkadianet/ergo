@@ -32,7 +32,6 @@ struct SoftFieldCase {
     tree_hex: String,
     soft_fields_allowed: bool,
     outcome: String,
-    #[allow(dead_code)]
     error_class: String,
     cost: Option<u64>,
 }
@@ -180,6 +179,12 @@ fn soft_fields_oracle_parity() {
                     "{} (soft_fields_allowed={}): expected SoftFieldAccess, got {err:?}",
                     case.name,
                     case.soft_fields_allowed
+                );
+                assert_eq!(
+                    case.error_class, "SoftFieldAccessException",
+                    "{} (soft_fields_allowed={}): vector's error_class should be \
+                     SoftFieldAccessException for a SoftFieldAccess outcome",
+                    case.name, case.soft_fields_allowed
                 );
             }
             other => panic!("unexpected outcome {other} in soft_fields.json"),

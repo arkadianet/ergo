@@ -208,9 +208,19 @@ object WeakBlocksOracle {
   // Scala semantics (sigmastate/eval/CContext.scala:53, sigma/ast/values.scala:1382):
   // preHeader.timestamp/minerPk/votes and CONTEXT.minerPubKey/MinerPubkey throw
   // SoftFieldAccessException when disallowed; height/HEIGHT/headers do not.
+  //
+  // Fix round 1 (findings-7-r1.md): `preheader_minerpk`'s self-comparison
+  // (`CONTEXT.preHeader.minerPk == CONTEXT.preHeader.minerPk`) is accepted by
+  // Scala under BOTH policies — it apparently never actually reaches the
+  // soft-field gate inside `SPreHeader.minerPk`'s `MethodCall.eval` (kept as
+  // generated; reported as a finding, not edited). `preheader_minerpk_read`
+  // is a real field read (`.getEncoded.size`) added alongside it so the
+  // vector set still has class-II (`minerPk`) coverage that actually
+  // exercises the gate.
   private val softFieldScripts: Seq[(String, String)] = Seq(
     "minerpk_size" -> "CONTEXT.minerPubKey.size >= 0",
     "preheader_minerpk" -> "CONTEXT.preHeader.minerPk == CONTEXT.preHeader.minerPk",
+    "preheader_minerpk_read" -> "CONTEXT.preHeader.minerPk.getEncoded.size == 33",
     "preheader_timestamp" -> "CONTEXT.preHeader.timestamp >= 0L",
     "preheader_votes" -> "CONTEXT.preHeader.votes.size == 3",
     "preheader_height" -> "CONTEXT.preHeader.height >= 0",

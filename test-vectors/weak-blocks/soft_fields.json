@@ -33,6 +33,22 @@
       "cost": 16
     },
     {
+      "name": "preheader_minerpk_read",
+      "tree_hex": "1b12010442d193b1db0702db6906db6503fe7300",
+      "soft_fields_allowed": true,
+      "outcome": "Ok",
+      "error_class": "",
+      "cost": 321
+    },
+    {
+      "name": "preheader_minerpk_read",
+      "tree_hex": "1b12010442d193b1db0702db6906db6503fe7300",
+      "soft_fields_allowed": false,
+      "outcome": "SoftFieldAccess",
+      "error_class": "SoftFieldAccessException",
+      "cost": null
+    },
+    {
       "name": "preheader_timestamp",
       "tree_hex": "1b0e010500d192db6903db6503fe7300",
       "soft_fields_allowed": true,
@@ -118,7 +134,7 @@
     "sigma_commit": "368a860be033af94aa14895381f42099b3646db6",
     "sigma_version": "6.0.5-22-368a860b-SNAPSHOT",
     "generator": "scripts/jvm_weak_blocks_oracle/WeakBlocksOracle.scala",
-    "generator_sha256": "810b0f49ec0481b99a833e3e8616fcf51934ae588da798c9d11c8dbd531c0ffc",
-    "timestamp": "2026-09-21T07:10:48.524352+00:00"
+    "generator_sha256": "78f540673a2c86016a55b9b668d5d48206d9fc51063f829d38f1af2374f7e082",
+    "timestamp": "2026-09-21T07:22:31.632505+00:00"
   }
 }
