@@ -360,6 +360,18 @@ class Workload:
 # Only samples where both nodes name the SAME ordering block are compared;
 # comparing input chains under different ordering blocks compares
 # different things.
+#
+# One more sampling rule, and it is not a loophole. On BOTH nodes
+# `/blocks/bestInputChain` pairs `bestOrdering` — the best HEADER id —
+# with a chain read from the input-block processor, and Scala's route
+# does exactly the same (`bestHeaderOpt` + `bestInputBlocksChain()`).
+# Those two sources move independently at an ordering-block boundary, so
+# for a moment a node can name the NEW ordering block beside the chain it
+# still holds for the OLD one — on either side, independently. A pair
+# caught mid-transition is not an observation of one tree, so
+# `settled_samples` drops it: a sample counts only when its ordering id
+# also held at the previous sample, and when Scala's chain is non-empty
+# (an empty chain makes no claim about history to contradict).
 
 
 def percentile(values, pct):
@@ -369,6 +381,20 @@ def percentile(values, pct):
     ordered = sorted(values)
     rank = max(1, math.ceil(pct / 100 * len(ordered)))
     return ordered[min(rank, len(ordered)) - 1]
+
+
+def settled_samples(samples):
+    """The samples that are an observation of one input-block tree: same
+    ordering id as the sample before, and a non-empty Scala chain."""
+    out = []
+    previous = object()
+    for i, s in enumerate(samples):
+        ordering = s.get('ordering')
+        settled = ordering is not None and ordering == previous
+        previous = ordering
+        if settled and (s.get('scala_chain') or []):
+            out.append((i, s))
+    return out
 
 
 def evaluate_tip_consistency(samples):
@@ -386,9 +412,9 @@ def evaluate_tip_consistency(samples):
         scala_seen_order.setdefault(s['ordering'], []).append((i, ids))
 
     lags, unconfirmed, exact, compared = [], [], 0, 0
-    for i, s in enumerate(samples):
+    for i, s in settled_samples(samples):
         ordering, rust_tip = s.get('ordering'), s.get('rust_tip')
-        if not ordering or not rust_tip:
+        if not rust_tip:
             continue
         compared += 1
         if rust_tip == s.get('scala_tip'):
@@ -444,9 +470,7 @@ def evaluate_chain_consistency(samples):
     newest k entries removed. Rust trailing is fine; a different HISTORY
     is not."""
     compared, violations, depths = 0, [], []
-    for i, s in enumerate(samples):
-        if not s.get('ordering'):
-            continue
+    for i, s in settled_samples(samples):
         scala_chain = s.get('scala_chain') or []
         rust_chain = s.get('rust_chain') or []
         if not rust_chain:
@@ -492,18 +516,19 @@ def _self_test():
 
     # In lockstep: still consistent, lag 0, and the exact-match metric
     # counts every sample.
-    lockstep = [sample(['c', 'b', 'a'], ['c', 'b', 'a'])] * 5
+    lockstep = [sample(['c', 'b', 'a'], ['c', 'b', 'a'])] * 6
     tip = evaluate_tip_consistency(lockstep)
     assert tip['lag_max'] == 0 and tip['exact_tip_matches'] == 5, tip
 
     # A tip Scala never had on its best chain: a real divergence.
-    rogue = [sample(['c', 'b', 'a'], ['X', 'b', 'a'])]
+    rogue = [sample(['c', 'b', 'a'], ['X', 'b', 'a'])] * 2
     tip = evaluate_tip_consistency(rogue)
     assert tip['unconfirmed_count'] == 1, tip
     assert any('never on Scala' in v for v in tip['violations']), tip
 
     # Confirmed by a LATER sample: Rust saw it before Scala's REST did.
     ahead = [sample(['b', 'a'], ['c', 'b', 'a']),
+             sample(['b', 'a'], ['c', 'b', 'a']),
              sample(['c', 'b', 'a'], ['c', 'b', 'a'])]
     assert evaluate_tip_consistency(ahead)['unconfirmed_count'] == 0
 
@@ -516,13 +541,38 @@ def _self_test():
     assert any('max' in v for v in tip['violations']), tip
 
     # A different HISTORY at the same length is a prefix violation.
-    forked = [sample(['c', 'b', 'a'], ['c', 'x', 'a'])]
+    forked = [sample(['c', 'b', 'a'], ['c', 'x', 'a'])] * 2
     chain = evaluate_chain_consistency(forked)
     assert chain['prefix_violation_count'] == 1, chain
 
     # Rust longer than Scala is a violation too: it cannot be a prefix.
-    longer = [sample(['b', 'a'], ['c', 'b', 'a'])]
+    longer = [sample(['b', 'a'], ['c', 'b', 'a'])] * 2
     assert evaluate_chain_consistency(longer)['prefix_violation_count'] == 1
+
+    # The ordering-block boundary: Scala's tree has reset while Rust
+    # still holds the previous chain. Both nodes name the same (new)
+    # ordering block because both routes pair the best HEADER id with a
+    # processor-read chain. That is a transition, not a disagreement.
+    boundary = [
+        {'ordering': 'O1', 'scala_chain': ['b', 'a'], 'rust_chain': ['b', 'a'],
+         'scala_tip': 'b', 'rust_tip': 'b'},
+        {'ordering': 'O2', 'scala_chain': [], 'rust_chain': ['b', 'a'],
+         'scala_tip': None, 'rust_tip': 'b'},
+        {'ordering': 'O2', 'scala_chain': [], 'rust_chain': ['b', 'a'],
+         'scala_tip': None, 'rust_tip': 'b'},
+    ]
+    assert evaluate_chain_consistency(boundary)['prefix_violation_count'] == 0
+    assert evaluate_tip_consistency(boundary)['unconfirmed_count'] == 0
+
+    # But a settled sample with a non-empty Scala chain that Rust's chain
+    # contradicts IS a violation — the rule above must not swallow it.
+    settled_fork = [
+        {'ordering': 'O3', 'scala_chain': ['c', 'b', 'a'], 'rust_chain': ['c', 'x', 'a'],
+         'scala_tip': 'c', 'rust_tip': 'c'},
+        {'ordering': 'O3', 'scala_chain': ['c', 'b', 'a'], 'rust_chain': ['c', 'x', 'a'],
+         'scala_tip': 'c', 'rust_tip': 'c'},
+    ]
+    assert evaluate_chain_consistency(settled_fork)['prefix_violation_count'] == 1
 
     # Samples under different ordering blocks are never compared.
     unrelated = [{'ordering': None, 'scala_chain': ['a'], 'rust_chain': ['z'],
