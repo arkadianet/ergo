@@ -1,28 +1,26 @@
 {
   "id": "2026-09-22-4",
-  "title": "the follower never holds the same input chain as the miner at the same instant",
+  "title": "F5 measured - the follower looks the collected input chain up under a key that never has one",
   "severity": "divergence",
-  "component": "rust \u2014 ergo-inputblocks processor throughput",
+  "component": "scala (upstream) - ergoplatform/ergo weak-blocks @ 31a8de804f7328704f2753a1cf151dda8f64689f",
   "status": "open",
-  "source": "scripts/devnet-matrix smoke, funded run 2026-09-22 (release build)",
-  "summary": "Over 2029 paired samples, with 635+ of them taken while both nodes were on the same ordering tip, the two nodes NEVER reported the same `bestInputBlock`, so `bestInputChain` was never identical either. The blocks the follower does hold agree byte for byte and are always a suffix of the miner's chain - the nodes never disagree about history - but the follower runs several input blocks behind and holds only a couple of a chain that is tens long.",
-  "measurement": {
-    "samples": 669,
-    "same_tip_samples": 223,
-    "exact_tip_matches": 0,
-    "max_propagation_lag_seconds": 4.152,
-    "accumulated_drops": {
-      "AlreadyKnown": 1159,
-      "ValidationUnavailable": 45,
-      "OutsideHeightWindow": 33
-    },
-    "previous_run_pipeline_counts": {
-      "scala_input_blocks_mined": 1172,
-      "rust_validation_jobs_dispatched": 36,
-      "note": "measured on the run before waitlist_entries was raised; the waitlist overflow is fixed (WaitlistFull no longer appears) but the dispatch rate was not re-measured"
-    }
+  "spec_finding": "F5",
+  "source": "scripts/devnet-matrix smoke, funded run 2026-09-22 (round 2)",
+  "summary": "InputBlocksProcessor.inputBlockTrees is keyed by the ordering block the input chain sits ON. The miner reads it that way (getBestOrderingCollectedInputBlocksTransactions -> bestOrderingBlock().id, i.e. the PARENT of the block it is mining). The follower reads it by the ANNOUNCED header's own id (getCollectedInputBlocksTransactions(headerId) in ErgoNodeViewHolder.processOrderingBlock) - a block that has no tree yet. The lookup therefore returns nothing and every reconstruction runs with an EMPTY input chain.",
+  "measured": {
+    "after_the_D4_order_fix": "9 of 9 post-restart ordering blocks still fell back under root_mismatch, and the planner's own diagnostic showed why: ordering_txs=1 input_chain_txs=0 on every attempt - both orders were the same list because one half was empty",
+    "log_line": "input_blocks: no assembly order reproduces the transactions root ... tried=[(scala, X), (candidate, X)] ordering_txs=1 input_chain_txs=0",
+    "note": "F5 and F12 are independent, and F12 was only visible once the chain was non-empty; both had to be addressed before a block carrying transactions could be reconstructed at all"
   },
-  "not_a_consensus_divergence_because": "every input block the follower applied matches the miner's byte for byte, the chains never disagreed about history (the smoke fails the run if they do and recorded zero mismatches), no DigestMismatch or TxDigestMismatch fired, and the peer was never penalised.",
-  "where_to_look": "the processor keeps ONE validation job in flight (spec 7.4) and the node runs it inline on the action loop. At 64 input blocks per ordering block that is the obvious ceiling; measure dispatch rate against announcement rate before assuming it.",
-  "gate": "assertions 2 and 3 of the devnet-matrix smoke FAIL on this."
+  "port_response": {
+    "divergence": "D5",
+    "behaviour": "collected_input_txs_for_announced tries Scala's key (the announced header's id) first and falls back to the parent's - the block the chain actually sits on, and what the miner seated. A chain genuinely recorded under the announced id still wins, so settling F5 upstream needs only the fallback deleted.",
+    "code": "ergo-inputblocks/src/processor.rs::collected_input_txs_for_announced",
+    "tests": [
+      "ordering_announcement_with_stored_prev_input_block_emits_reconstruct",
+      "announced_ordering_id_with_its_own_tree_is_preferred_over_the_parent"
+    ]
+  },
+  "upstream_action": "processOrderingBlock should look the chain up under the announced block's PARENT, matching getBestOrderingCollectedInputBlocksTransactions.",
+  "controller_note": "D5 goes beyond the round-2 ruling, which named only D4. It is the same shape (Scala's behaviour first, the miner's as fallback, both reportable) and the gate cannot pass without it: with an empty input chain the D4 order choice is vacuous. Flagged for confirmation."
 }
