@@ -1101,6 +1101,18 @@ impl Processor {
         let Some(txs) = self.tx_refs.get(&target).cloned() else {
             return;
         };
+        // Spec 7.5: a body that already failed validation for this block
+        // is not offered again. Without this a peer could re-deliver the
+        // same rejected bodies to make the node re-run the job forever;
+        // the witness-variant retry swaps in an untried body instead, so
+        // a legitimate retry is unaffected.
+        if txs.iter().any(|r| self.failed.contains(&(target, *r))) {
+            out.push(Effect::Dropped {
+                id: target,
+                reason: DropReason::ValidationFailed,
+            });
+            return;
+        }
         let mut previous: Vec<TxRef> = Vec::new();
         for pid in &prev_chain {
             match self.tx_refs.get(pid) {
@@ -2310,6 +2322,35 @@ mod tests {
         }));
         assert!(p.ordering_announcement(&id1).is_none());
         assert!(p.ordering_announcement(&id2).is_some());
+    }
+
+    #[test]
+    fn failed_variant_is_not_revalidated_on_redelivery() {
+        // Spec 7.5: once a body has failed validation for a block, the
+        // same body is never offered again — otherwise a peer could
+        // re-deliver it to keep the node re-running the job.
+        let mut p = processor();
+        let b1 = ts::body(1, 1);
+        let mut ctx = ts::TestCtx::at(FULL);
+        ctx.mempool.add(&b1);
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&b1));
+        let id = ts::ann_id(&ann);
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        let out = ts::validate_err(&mut p, &ctx, &eff);
+        assert_eq!(drops(&out), vec![DropReason::ValidationFailed]);
+
+        let again = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![b1.clone()],
+                from: Some(ts::PEER),
+                now: Tick(9),
+            },
+        );
+        assert!(!has_validate(&again), "{again:?}");
+        assert_eq!(drops(&again), vec![DropReason::ValidationFailed]);
+        assert!(p.has_failed(&id, &b1.tx_ref));
     }
 
     // ----- oracle parity -----

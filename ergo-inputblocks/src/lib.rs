@@ -3,9 +3,11 @@
 //! announcement validity rules (PoW against the multiplied target, the
 //! extension proof reducing to and binding the header's extension root,
 //! nBits agreement) as pure functions over the wire types `ergo-ser`
-//! already codecs, plus — as later tasks land — per-ordering-block input
-//! chains and forks, transaction staging, and the single-writer state
-//! machine the node drives from p2p and mining events.
+//! already codecs, plus per-ordering-block input chains and forks
+//! ([`chain`], [`tree`]), transaction staging and weak-id resolution,
+//! explicit resource [`bounds`], the ordering-announcement store
+//! ([`ordering`]) and the single-writer state machine the node drives
+//! from p2p and mining events ([`processor`]).
 //!
 //! Deliberately outside this crate: wire (de)serialization (`ergo-ser`),
 //! p2p message dispatch and peer bookkeeping (`ergo-p2p`), wall-clock
