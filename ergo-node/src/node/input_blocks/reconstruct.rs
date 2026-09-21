@@ -23,7 +23,7 @@
 //! rebuilt transactions reproducing the header's `transactions_root`.
 
 use ergo_crypto::merkle::transactions_root;
-use ergo_inputblocks::ordering::ReconstructionPlan;
+use ergo_inputblocks::ordering::{ReconstructionKey, ReconstructionPlan};
 use ergo_mempool::types::TxId;
 use ergo_mempool::Mempool;
 use ergo_p2p::peer::PeerId;
@@ -111,9 +111,14 @@ pub(in crate::node) struct Reconstruction {
 #[derive(Debug, PartialEq, Eq)]
 pub(in crate::node) enum Outcome {
     /// The rebuilt transactions reproduce the header's root; the section
-    /// is being handed to the ordinary pipeline. Carries the tx count and
-    /// which candidate order matched (D4).
-    Assemble { txs: u32, order: TxOrder },
+    /// is being handed to the ordinary pipeline. Carries the tx count,
+    /// which candidate order matched (D4) and which ordering id the
+    /// input chain was read under (D5).
+    Assemble {
+        txs: u32,
+        order: TxOrder,
+        key: ReconstructionKey,
+    },
     /// Reconstruction is impossible or wrong; the caller falls back to a
     /// full `BlockTransactions` download.
     Fallback { reason: &'static str },
@@ -330,6 +335,7 @@ pub(in crate::node) fn plan_reconstruction(
         outcome: Outcome::Assemble {
             txs: section_tx_count(&section),
             order,
+            key: plan.reconstruction_key,
         },
         height,
     }))

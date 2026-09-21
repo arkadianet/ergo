@@ -41,6 +41,7 @@ fn event(seq: u64, kind: &str) -> ApiNodeEvent {
         addr: (kind == "peerConnected").then(|| "10.0.0.9:9030".to_string()),
         detail: None,
         reconstructed_order: None,
+        reconstruction_key: None,
     }
 }
 

@@ -3450,6 +3450,7 @@ fn reconstruct_with_all_broadcasted_in_mempool_persists_block_transactions_and_a
                     .unwrap()
                     .as_bytes()],
                 input_chain_txs: Vec::new(),
+                reconstruction_key: Default::default(),
                 prev_input_block_id: None,
             },
         }],
@@ -3517,6 +3518,7 @@ fn reconstruct_with_root_mismatch_requests_block_transactions_from_announcer() {
                 non_broadcasted: vec![carried],
                 broadcasted_ids: Vec::new(),
                 input_chain_txs: Vec::new(),
+                reconstruction_key: Default::default(),
                 prev_input_block_id: None,
             },
         }],
@@ -3590,6 +3592,7 @@ fn reconstruct_with_missing_broadcasted_tx_requests_block_transactions() {
                     .unwrap()
                     .as_bytes()],
                 input_chain_txs: Vec::new(),
+                reconstruction_key: Default::default(),
                 prev_input_block_id: None,
             },
         }],
@@ -3660,6 +3663,7 @@ fn reconstruct_persists_header_and_extension_through_normal_path_first() {
         non_broadcasted: vec![carried],
         broadcasted_ids: Vec::new(),
         input_chain_txs: Vec::new(),
+        reconstruction_key: Default::default(),
         prev_input_block_id: None,
     };
     let rec = super::reconstruct::plan_reconstruction(
@@ -3781,6 +3785,7 @@ fn reconstruct_with_a_failing_store_read_aborts_as_storage_error_not_missing_dat
             .unwrap()
             .as_bytes()],
         input_chain_txs: Vec::new(),
+        reconstruction_key: Default::default(),
         prev_input_block_id: None,
     };
     let failure = super::reconstruct::plan_reconstruction(
@@ -3871,6 +3876,7 @@ fn reconstruction_tries_both_orders_and_reports_the_one_that_matched() {
         non_broadcasted: vec![ordering_tx.clone()],
         broadcasted_ids: Vec::new(),
         input_chain_txs: chain_refs.clone(),
+        reconstruction_key: Default::default(),
         prev_input_block_id: Some(input_block),
     };
 
@@ -3901,6 +3907,10 @@ fn reconstruction_tries_both_orders_and_reports_the_one_that_matched() {
             super::reconstruct::Outcome::Assemble {
                 txs: 2,
                 order: expected,
+                // The plan is built by hand here, so it carries the
+                // default key; D5's own telemetry is covered in
+                // `ergo-inputblocks`.
+                key: Default::default(),
             },
             "a header rooted over the {} order must reconstruct under it",
             expected.name()
@@ -3987,6 +3997,7 @@ fn reconstruction_falls_back_when_no_order_reproduces_the_root() {
             non_broadcasted: vec![ordering_tx],
             broadcasted_ids: Vec::new(),
             input_chain_txs: chain_refs,
+            reconstruction_key: Default::default(),
             prev_input_block_id: Some(input_block),
         },
         Some(peer),
@@ -4305,6 +4316,7 @@ fn reconstruct_of_a_mainnet_block_matches_the_scala_section_and_advances_the_com
                 non_broadcasted: target.transactions.clone(),
                 broadcasted_ids: Vec::new(),
                 input_chain_txs: Vec::new(),
+                reconstruction_key: Default::default(),
                 prev_input_block_id: None,
             },
         }],

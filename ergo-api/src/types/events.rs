@@ -53,6 +53,13 @@ pub struct ApiNodeEvent {
     /// reports which won rather than hiding the split.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub reconstructed_order: Option<String>,
+    /// `ordering_reconstructed` only: which ordering id the collected
+    /// input chain was read under — `"self"` (the announced header's own
+    /// id, which is Scala's key) or `"parent"` (the previous ordering
+    /// block, which is what the miner's candidate committed). Divergence
+    /// D5 / upstream finding F5.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reconstruction_key: Option<String>,
 }
 
 /// Event-feed page for `GET /api/v1/events`: the retained tail (bounded by
@@ -119,6 +126,7 @@ mod tests {
             addr: None,
             detail: None,
             reconstructed_order: None,
+            reconstruction_key: None,
         };
 
         let v = serde_json::to_value(event).unwrap();
@@ -155,6 +163,7 @@ mod tests {
             addr: Some("127.0.0.1:9030".to_string()),
             detail: None,
             reconstructed_order: None,
+            reconstruction_key: None,
         };
 
         let v = serde_json::to_value(event).unwrap();

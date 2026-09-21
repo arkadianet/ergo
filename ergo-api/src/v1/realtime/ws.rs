@@ -453,6 +453,7 @@ mod tests {
             addr: None,
             detail: None,
             reconstructed_order: None,
+            reconstruction_key: None,
         }
     }
 
@@ -473,6 +474,7 @@ mod tests {
             addr: None,
             detail: None,
             reconstructed_order: None,
+            reconstruction_key: None,
         }
     }
 
@@ -622,6 +624,7 @@ mod tests {
                         addr: Some("1.2.3.4:9030".into()),
                         detail: None,
                         reconstructed_order: None,
+                        reconstruction_key: None,
                     },
                     ApiNodeEvent {
                         seq: 2,
@@ -639,6 +642,7 @@ mod tests {
                         addr: Some("1.2.3.4:9030".into()),
                         detail: None,
                         reconstructed_order: None,
+                        reconstruction_key: None,
                     },
                 ],
             },

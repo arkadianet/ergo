@@ -3065,6 +3065,7 @@ impl Processor {
         }
         out.push(Effect::RelayOrderingInv { header_id });
 
+        let (chain_txs, chain_key) = self.collected_input_txs_for_announced(&header_id, &parent_id);
         match prev {
             Some(p) if self.tx_refs.contains_key(&p) => {
                 out.push(Effect::OrderingReconstruct {
@@ -3093,8 +3094,8 @@ impl Processor {
                         // fallback, so a chain genuinely recorded under
                         // the announced id still wins. Delete the fallback
                         // when upstream settles F5.
-                        input_chain_txs: self
-                            .collected_input_txs_for_announced(&header_id, &parent_id),
+                        input_chain_txs: chain_txs,
+                        reconstruction_key: chain_key,
                         prev_input_block_id: Some(p),
                     },
                 });
@@ -3448,11 +3449,18 @@ impl Processor {
         &self,
         header_id: &OrderingId,
         parent_id: &OrderingId,
-    ) -> Vec<TxRef> {
+    ) -> (Vec<TxRef>, crate::ordering::ReconstructionKey) {
+        use crate::ordering::ReconstructionKey;
         if self.trees.contains_key(header_id) {
-            return self.collected_input_txs(header_id);
+            return (
+                self.collected_input_txs(header_id),
+                ReconstructionKey::SelfId,
+            );
         }
-        self.collected_input_txs(parent_id)
+        (
+            self.collected_input_txs(parent_id),
+            ReconstructionKey::Parent,
+        )
     }
 
     /// Number of competing forks retained for `ordering_id`.
@@ -3934,6 +3942,11 @@ mod tests {
             vec![b1.tx_ref],
             "so the plan falls back to the parent's chain"
         );
+        assert_eq!(
+            plan.reconstruction_key,
+            crate::ordering::ReconstructionKey::Parent,
+            "and the telemetry records which key answered (D5)"
+        );
     }
 
     /// The fallback is a FALLBACK: a chain genuinely recorded under the
@@ -3952,21 +3965,23 @@ mod tests {
 
         let no_tree: OrderingId = [0x4f; 32];
         assert!(p.collected_input_txs(&no_tree).is_empty());
+        use crate::ordering::ReconstructionKey;
         // Announced id HAS a tree: Scala's key answers, the parent is
-        // never consulted.
+        // never consulted, and the telemetry says so.
         assert_eq!(
             p.collected_input_txs_for_announced(&ORD, &no_tree),
-            vec![b1.tx_ref]
+            (vec![b1.tx_ref], ReconstructionKey::SelfId)
         );
         // Announced id has none: the parent's chain answers.
         assert_eq!(
             p.collected_input_txs_for_announced(&no_tree, &ORD),
-            vec![b1.tx_ref]
+            (vec![b1.tx_ref], ReconstructionKey::Parent)
         );
         // Neither has one: nothing, never a panic.
-        assert!(p
-            .collected_input_txs_for_announced(&no_tree, &[0x50; 32])
-            .is_empty());
+        assert_eq!(
+            p.collected_input_txs_for_announced(&no_tree, &[0x50; 32]),
+            (Vec::new(), ReconstructionKey::Parent)
+        );
     }
 
     #[test]

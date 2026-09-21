@@ -86,6 +86,11 @@ pub(crate) enum FeedEventKind {
         /// root: `"scala"` or `"candidate"` (divergence D4, upstream
         /// finding F12). Reported so the split stays measurable.
         order: &'static str,
+        /// Which ordering id the input chain was read under: `"self"`
+        /// (the announced header's own id, Scala's key) or `"parent"`
+        /// (what the miner's candidate committed) — divergence D5,
+        /// upstream finding F5.
+        key: &'static str,
     },
     /// Reconstruction did not reproduce the header's transactions root
     /// (or an ingredient was missing), so the section is being downloaded
@@ -570,9 +575,9 @@ mod tests {
                 FeedEventKind::ShadowDivergence { kind, height, .. } => {
                     format!("shadow:{kind}:{height}")
                 }
-                FeedEventKind::OrderingReconstructed { height, order, .. } => {
-                    format!("reconstructed:{order}:{height}")
-                }
+                FeedEventKind::OrderingReconstructed {
+                    height, order, key, ..
+                } => format!("reconstructed:{order}:{key}:{height}"),
                 FeedEventKind::OrderingReconstructFallback { reason, .. } => {
                     format!("reconstruct_fallback:{reason}")
                 }
