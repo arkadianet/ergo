@@ -114,9 +114,9 @@ jobs:
       # on ubuntu below (feature combos don't vary meaningfully per-OS, and
       # --all-features materially grows the dependency graph per leg).
       # Shard 1 still covers cfg(windows)-specific lints; macOS also lints
-      # once, on shard 1. Ubuntu remains a single unsharded leg.
+      # once, on the last (lightest) shard. Ubuntu remains a single unsharded leg.
       - name: cargo clippy
-        if: (runner.os != 'Windows' || matrix.shard == 1) && (runner.os != 'macOS' || matrix.shard == 1)
+        if: (runner.os != 'Windows' || matrix.shard == matrix.shards) && (runner.os != 'macOS' || matrix.shard == matrix.shards)
         run: cargo clippy --all-targets -- -D warnings
 
       - uses: taiki-e/install-action@nextest

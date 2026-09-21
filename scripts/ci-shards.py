@@ -28,7 +28,7 @@ GROUPS = {
         # 4.3 / 5.7 / 7.3 / 11.5 min because ergo-api, ergo-indexer and
         # ergo-sync carry large `it` binaries. They move onto the two
         # node shards, which had the headroom.
-        ("ergo-node --lib", "ergo-node --bin ergo-node", "ergo-mining", "ergo-p2p", "ergo-api"),
+        ("ergo-node --lib", "ergo-node --bin ergo-node", "ergo-api"),
         (
             "ergo-node --test it", "ergo-wallet", "ergo-difftest", "ergo-rest-json",
             "ergo-indexer", "ergo-sync",
@@ -37,7 +37,8 @@ GROUPS = {
             "ergo-state", "ergo-chain-spec", "ergo-primitives", "ergo-indexer-types",
             "ergo-compiler", "ergo-sigma",
         ),
-        ("ergo-validation", "ergo-ser", "ergo-mempool", "ergo-crypto"),
+        # The last shard is the lightest and also runs the platform clippy.
+        ("ergo-validation", "ergo-ser", "ergo-mempool", "ergo-crypto", "ergo-mining", "ergo-p2p"),
     ),
     "macOS": (
         (
