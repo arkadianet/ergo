@@ -20,7 +20,10 @@
 //! case) *does* treat an empty proof as trivially valid against any root.
 //! [`verify_extension_proof`] closes that gap at the announcement boundary
 //! — rejecting an empty proof before ever calling the shared reducer —
-//! rather than changing the shared reducer itself.
+//! rather than changing the shared reducer itself. That rejection reports
+//! `ProofInvalid` (the same verdict scrypto's `valid == false` reports),
+//! not `ProofEmpty` — `ProofEmpty` is reserved for
+//! [`verify_field_binding`]'s strict-binding check.
 
 use ergo_crypto::merkle::extension_leaf_digest;
 use ergo_crypto::pow::verify_input_block_pow;
@@ -56,11 +59,10 @@ pub enum AnnouncementError {
     NBitsMismatch { got: u32, expected: u32 },
     #[error("extension proof does not reduce to the header's extension root")]
     ProofInvalid,
-    /// Also raised by [`verify_extension_proof`] itself (before the
-    /// strict-binding policy even applies) — the shared popow reducer
-    /// treats an empty proof as valid against any root, which Scala's own
-    /// `BatchMerkleProof.valid` does not; see the crate doc for the F4
-    /// boundary fix this guards.
+    /// Strict binding only (spec 6.3 item 2) — see [`verify_field_binding`].
+    /// Not raised by the Scala-parity path ([`verify_extension_proof`]),
+    /// which reports an empty proof as [`AnnouncementError::ProofInvalid`]
+    /// instead, matching scrypto's plain `valid == false` verdict.
     #[error("extension proof is empty")]
     ProofEmpty,
     /// Strict binding only (spec 6.3 item 2) — the proof reduces to the
@@ -89,13 +91,17 @@ fn check_expected_n_bits(n_bits: u32, expected: Option<u32>) -> Result<(), Annou
 /// to `extension_root`. Rejects an empty proof before ever calling the
 /// shared reducer — see the crate doc for why: `ergo_validation`'s reducer
 /// treats an empty proof as valid against any root, which Scala's own
-/// `BatchMerkleProof.valid` does not (finding F4).
+/// `BatchMerkleProof.valid` does not (finding F4). Returns `ProofInvalid`
+/// for the empty case (not `ProofEmpty`, which is `verify_field_binding`'s
+/// strict-binding error): this is the Scala-parity path, and scrypto's
+/// `valid == false` is a plain invalid-proof verdict, not a distinct
+/// "empty" classification — see findings-8-r2.md.
 pub fn verify_extension_proof(
     fields: &InputBlockFields,
     extension_root: &[u8; 32],
 ) -> Result<(), AnnouncementError> {
     if fields.proof.indices.is_empty() && fields.proof.proofs.is_empty() {
-        return Err(AnnouncementError::ProofEmpty);
+        return Err(AnnouncementError::ProofInvalid);
     }
     if !verify_batch_merkle_proof(&fields.proof, extension_root) {
         return Err(AnnouncementError::ProofInvalid);
@@ -240,13 +246,20 @@ mod tests {
         // treats an empty proof as valid against any root; Scala's real
         // `BatchMerkleProof.valid` does not. `verify_extension_proof` must
         // reject the empty proof itself, before ever calling the reducer.
+        //
+        // fix round 2 (findings-8-r2.md): the rejection reports
+        // `ProofInvalid`, not `ProofEmpty` — this is the Scala-parity
+        // path, and scrypto's `valid == false` is a plain invalid-proof
+        // verdict, not a distinct "empty" classification. `ProofEmpty`
+        // stays reserved for `verify_field_binding`'s strict-binding
+        // check (see `binding_rejects_empty_proof` below).
         let fields = fields_with_proof(BatchMerkleProof {
             indices: Vec::new(),
             proofs: Vec::new(),
         });
         assert_eq!(
             verify_extension_proof(&fields, &[0x42; 32]),
-            Err(AnnouncementError::ProofEmpty)
+            Err(AnnouncementError::ProofInvalid)
         );
     }
 
