@@ -458,6 +458,7 @@ pub fn generate_candidate<V: CandidateStateView>(
                     last_headers: last_headers.as_slice(),
                     rules: TxValidationRules {
                         reemission: reemission_rules,
+                        soft_fields_allowed: true,
                     },
                 };
                 validate_transaction_parsed(
@@ -620,6 +621,7 @@ pub fn generate_candidate<V: CandidateStateView>(
                             last_headers: last_headers.as_slice(),
                             rules: TxValidationRules {
                                 reemission: reemission_rules,
+                                soft_fields_allowed: true,
                             },
                         };
                         validate_transaction_parsed(

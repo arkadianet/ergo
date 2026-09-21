@@ -325,6 +325,7 @@ pub fn validate_full_block_with_costs(
             // `validateStateful`), so it covers every caller uniformly.
             rules: crate::tx::TxValidationRules {
                 reemission: ctx.reemission,
+                soft_fields_allowed: true,
             },
         };
         let checked = validate_transaction_parsed(
@@ -624,7 +625,10 @@ fn validate_full_block_parallel_impl(
                     params,
                     cost: &mut cost,
                     last_headers: raw_headers_ref,
-                    rules: crate::tx::TxValidationRules { reemission },
+                    rules: crate::tx::TxValidationRules {
+                        reemission,
+                        soft_fields_allowed: true,
+                    },
                 };
                 // Pre-collected points (from the block deserialize) skip the
                 // per-tx re-parse; borrowed (not cloned) and indexed here.

@@ -228,6 +228,7 @@ pub fn select_user_txs(
                 last_headers,
                 rules: TxValidationRules {
                     reemission: reemission_rules,
+                    soft_fields_allowed: true,
                 },
             };
             match validate_transaction_parsed(

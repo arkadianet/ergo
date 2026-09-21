@@ -250,6 +250,17 @@ pub enum ValidationError {
         /// Failing input index.
         index: usize,
     },
+    /// Scala `SoftFieldsAccessError` (non-fatal): script read a
+    /// miner-controlled pre-header field while disallowed. See
+    /// [`ergo_sigma::evaluator::EvalError::SoftFieldAccess`] and
+    /// `TxValidationRules::soft_fields_allowed`.
+    #[error("input {index}: soft field {field} accessed when disallowed")]
+    SoftFieldAccess {
+        /// Failing input index.
+        index: usize,
+        /// Scala field name (`minerPubKey`, `timestamp`, `minerPk`, `votes`).
+        field: &'static str,
+    },
 
     // --- Cost (only when enforce == true) ---
     /// Cumulative JIT cost exceeded the per-block / per-transaction limit.

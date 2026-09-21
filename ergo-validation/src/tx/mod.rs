@@ -28,12 +28,25 @@ use crate::tx::reemission::{verify_reemission_spending, ReemissionRuleInputs};
 /// that both mempool admission and block application call. New
 /// network-constant rules belong here so every caller — block apply,
 /// mempool admission, mining candidate assembly — gets them by construction.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct TxValidationRules<'a> {
     /// EIP-27 re-emission rule inputs for the network, or `None` where
     /// EIP-27 is not enabled (testnet) — in which case the re-emission
     /// burning check is skipped. See [`ReemissionRuleInputs`].
     pub reemission: Option<&'a ReemissionRuleInputs>,
+    /// Scala `softFieldsAllowed`. `true` for blocks and mempool admission;
+    /// `false` only for input-block transaction validation (Plan 1 Task 9)
+    /// and mining classification (Plan 2).
+    pub soft_fields_allowed: bool,
+}
+
+impl Default for TxValidationRules<'_> {
+    fn default() -> Self {
+        Self {
+            reemission: None,
+            soft_fields_allowed: true,
+        }
+    }
 }
 
 /// Bundle of per-tx validation borrows threaded through

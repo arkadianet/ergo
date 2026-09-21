@@ -165,6 +165,7 @@ fn validate(
         last_headers: &[],
         rules: TxValidationRules {
             reemission: Some(rules),
+            soft_fields_allowed: true,
         },
     };
     validate_transaction_parsed(tx.clone(), &bytes, resolved, Vec::new(), false, &mut cx)

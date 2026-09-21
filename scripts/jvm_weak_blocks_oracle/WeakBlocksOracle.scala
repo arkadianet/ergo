@@ -11,15 +11,27 @@ import org.ergoplatform.modifiers.mempool.{ErgoTransaction, ErgoTransactionSeria
 import org.ergoplatform.network.message.inputblocks._
 import org.ergoplatform.subblocks.InputBlockAnnouncement
 import org.ergoplatform.settings.Algos
-import org.ergoplatform.{AutolykosSolution, ErgoBoxCandidate, Input}
+import org.ergoplatform.validation.ValidationRules
+import org.ergoplatform.{AutolykosSolution, ErgoBox, ErgoBoxCandidate, ErgoLikeContext, ErgoLikeTransaction, Input}
 import scorex.crypto.hash.Digest32
 import scorex.util.encode.Base16
 import scorex.util.{bytesToId, idToBytes, ByteArrayBuilder}
 import scorex.util.serialization.VLQByteBufferWriter
 import sigma.crypto.CryptoConstants
-import sigma.ast.ErgoTree
+import sigma.ast.{ErgoTree, JitCost, SBoolean, SSigmaProp, Value}
+import sigma.compiler.{CompilerResult, SigmaCompiler}
+import sigma.compiler.ir.CompiletimeIRContext
+import sigma.data.AvlTreeData
 import sigma.data.TrivialProp.TrueProp
+import sigma.exceptions.SoftFieldAccessException
 import sigma.interpreter.{ContextExtension, ProverResult}
+import sigma.serialization.GroupElementSerializer
+import sigma.serialization.SigmaSerializer
+import sigma.util.Extensions.EcpOps
+import sigma.{Colls, VersionContext}
+import sigmastate.eval.CPreHeader
+import sigmastate.interpreter.{CErgoTreeEvaluator, CostAccumulator}
+import sigmastate.interpreter.CErgoTreeEvaluator.DefaultEvalSettings
 import scala.util.control.NonFatal
 
 /**
@@ -187,6 +199,115 @@ object WeakBlocksOracle {
     }.asJson)
   }
 
+  // ── soft_fields: Scala `softFieldsAllowed` parity for the Rust evaluator gate ──
+  // Task 6 (ergo-sigma) added ReductionContext.soft_fields_allowed + the typed
+  // EvalError::SoftFieldAccess. This function is the oracle evidence Task 7
+  // asserts at ergo-validation's boundary: for each script below, compiled at
+  // ErgoTree version 3 under `VersionContext.withVersions(3, 3)` (v6 activated),
+  // record the reduction outcome under both `softFieldsAllowed` settings.
+  // Scala semantics (sigmastate/eval/CContext.scala:53, sigma/ast/values.scala:1382):
+  // preHeader.timestamp/minerPk/votes and CONTEXT.minerPubKey/MinerPubkey throw
+  // SoftFieldAccessException when disallowed; height/HEIGHT/headers do not.
+  private val softFieldScripts: Seq[(String, String)] = Seq(
+    "minerpk_size" -> "CONTEXT.minerPubKey.size >= 0",
+    "preheader_minerpk" -> "CONTEXT.preHeader.minerPk == CONTEXT.preHeader.minerPk",
+    "preheader_timestamp" -> "CONTEXT.preHeader.timestamp >= 0L",
+    "preheader_votes" -> "CONTEXT.preHeader.votes.size == 3",
+    "preheader_height" -> "CONTEXT.preHeader.height >= 0",
+    "height_only" -> "HEIGHT >= 0",
+    "headers_id" -> "CONTEXT.headers.size >= 0")
+
+  // Compiles `source` with ErgoScript v6 (scriptVersion 3) activated, generating
+  // a treeVersion-3 ErgoTree — the same compilation surface as ergo's own
+  // `ErgoCompilerHelpers.compileSourceV6` (test-scope in the ergo source tree;
+  // reimplemented here directly against the runtime-classpath `SigmaCompiler`
+  // so this harness needs only `.work/classpath`, not the test classpath).
+  private def compileSourceV6(source: String, treeVersion: Byte): ErgoTree =
+    VersionContext.withVersions(3.toByte, treeVersion) {
+      val compiler = new SigmaCompiler(16.toByte)
+      val header = ErgoTree.defaultHeaderWithVersion(treeVersion)
+      compiler.compile(Map.empty, source)(new CompiletimeIRContext) match {
+        case CompilerResult(_, _, _, script: Value[SSigmaProp.type @unchecked]) if script.tpe == SSigmaProp =>
+          ErgoTree.fromProposition(header, script)
+        case CompilerResult(_, _, _, script: Value[SBoolean.type @unchecked]) if script.tpe == SBoolean =>
+          ErgoTree.fromProposition(header, script.toSigmaProp)
+        case other =>
+          sys.error(s"soft_fields compile: expected SBoolean/SSigmaProp, got ${other.buildTree.tpe}")
+      }
+    }
+
+  private val softFieldsPubkey: Array[Byte] =
+    GroupElementSerializer.toBytes(CryptoConstants.dlogGroup.generator)
+
+  private def softFieldsPreHeader(activated: Byte): sigma.PreHeader = CPreHeader(
+    version = (activated + 1).toByte,
+    parentId = Colls.fromArray(fill(32, 0)),
+    timestamp = 3L,
+    nBits = 0L,
+    height = 0,
+    minerPk = GroupElementSerializer.parse(SigmaSerializer.startReader(softFieldsPubkey)).toGroupElement,
+    votes = Colls.fromArray(fill(3, 0)))
+
+  private def softFieldsContext(selfBox: ErgoBox, activatedVersion: Byte, softFieldsAllowed: Boolean): ErgoLikeContext =
+    new ErgoLikeContext(
+      lastBlockUtxoRoot = AvlTreeData.dummy,
+      headers = Colls.emptyColl[sigma.Header],
+      preHeader = softFieldsPreHeader(activatedVersion),
+      dataBoxes = IndexedSeq.empty,
+      boxesToSpend = IndexedSeq(selfBox),
+      spendingTransaction = ErgoLikeTransaction(IndexedSeq(), IndexedSeq()),
+      selfIndex = 0,
+      extension = ContextExtension.empty,
+      validationSettings = ValidationRules.currentSettings,
+      costLimit = DefaultEvalSettings.scriptCostLimitInEvaluator,
+      initCost = 0L,
+      activatedScriptVersion = activatedVersion,
+      softFieldsAllowed = softFieldsAllowed
+    ).withErgoTreeVersion(selfBox.ergoTree.version)
+
+  def softFieldCases(): Json = {
+    val cases = for {
+      (name, source) <- softFieldScripts
+      softFieldsAllowed <- Seq(true, false)
+    } yield {
+      val t = compileSourceV6(source, 3.toByte)
+      val treeHex = hex(t.bytes)
+      val selfBox = new ErgoBox(value = 1000000L, ergoTree = t,
+        transactionId = bytesToId(fill(32, 0)), index = 0.toShort, creationHeight = 0)
+      val ctx = softFieldsContext(selfBox, 3.toByte, softFieldsAllowed)
+      val (outcome, errorClass, cost) =
+        try {
+          VersionContext.withVersions(3.toByte, 3.toByte) {
+            val accu = new CostAccumulator(
+              JitCost.fromBlockCost(0),
+              Some(JitCost.fromBlockCost(Math.toIntExact(ctx.costLimit))))
+            CErgoTreeEvaluator.eval(
+              ctx.toSigmaContext, accu, t.constants,
+              t.toProposition(t.isConstantSegregation && t.hasDeserialize), DefaultEvalSettings)
+            ("Ok", "", Some(accu.totalCost.value))
+          }
+        } catch {
+          // The IR-graph evaluator (CompiletimeIRContext-staged code path)
+          // wraps the thrown SoftFieldAccessException in a reflective
+          // InvocationTargetException; unwrap to the root cause before
+          // classifying, mirroring sigma-state's own test helper
+          // (`NegativeTesting.rootCause`).
+          case e: Throwable =>
+            var cause = e
+            while (cause.getCause != null) cause = cause.getCause
+            cause match {
+              case sfa: SoftFieldAccessException => ("SoftFieldAccess", sfa.getClass.getSimpleName, None)
+              case NonFatal(other) => ("Error", other.getClass.getSimpleName, None)
+              case fatal => throw fatal
+            }
+        }
+      Json.obj("name" -> name.asJson, "tree_hex" -> treeHex.asJson,
+        "soft_fields_allowed" -> softFieldsAllowed.asJson, "outcome" -> outcome.asJson,
+        "error_class" -> errorClass.asJson, "cost" -> cost.asJson)
+    }
+    Json.obj("cases" -> cases.asJson)
+  }
+
   def main(args: Array[String]): Unit = {
     val out = args(0) match {
       case "announcement" => announcementCases()
@@ -195,6 +316,7 @@ object WeakBlocksOracle {
       case "weak_ids" => weakIdCases()
       case "pow" => powCases()
       case "extension_leaf" => extensionLeafCases()
+      case "soft_fields" => softFieldCases()
       case other => sys.error(s"unknown vector $other")
     }
     println(out.spaces2)

@@ -215,7 +215,9 @@ fn scala_sourced_rejection_parity() {
             | ValidationError::OutputFromFuture { .. }
             | ValidationError::OutputCreationHeightBelowInputs { .. }
             | ValidationError::ReemissionRulesViolated(_) => "MONETARY",
-            ValidationError::ScriptError { .. } => "SCRIPT",
+            ValidationError::ScriptError { .. } | ValidationError::SoftFieldAccess { .. } => {
+                "SCRIPT"
+            }
             ValidationError::ProofFailed { .. } => "PROOF",
             ValidationError::CostExceeded { .. } | ValidationError::JitCostOverflow(_) => "COST",
             ValidationError::Deserialization(_) | ValidationError::NonCanonical => "CANONICAL",

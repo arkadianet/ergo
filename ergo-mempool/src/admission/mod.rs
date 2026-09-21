@@ -336,6 +336,7 @@ pub(crate) fn check_capturing_held<V: Validator>(
         last_headers: cx.tip_ctx.last_headers,
         rules: TxValidationRules {
             reemission: cx.tip_ctx.reemission,
+            soft_fields_allowed: true,
         },
     };
     let validated = match validator.validate(tx_bytes, &overlay_view, &committed_view, &mut tx_cx) {
