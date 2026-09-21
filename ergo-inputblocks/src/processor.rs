@@ -301,6 +301,64 @@ pub enum DropReason {
     DigestMode,
 }
 
+impl DropReason {
+    /// The variant's name, stable across payload changes, for keying
+    /// telemetry counters. Payload-carrying variants (`StaleValidation`,
+    /// `VariantCapExceeded`, `SelectionSettled`) collapse to the variant
+    /// name: a counter keyed by generation or position would be unbounded.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::AlreadyKnown => "AlreadyKnown",
+            Self::OutsideHeightWindow => "OutsideHeightWindow",
+            Self::StaleValidation { .. } => "StaleValidation",
+            Self::CacheEvicted => "CacheEvicted",
+            Self::WaitlistFull => "WaitlistFull",
+            Self::ForksFull => "ForksFull",
+            Self::RecordsFull => "RecordsFull",
+            Self::StagingFull => "StagingFull",
+            Self::RequestsFull => "RequestsFull",
+            Self::WitnessCombinationsExhausted => "WitnessCombinationsExhausted",
+            Self::VariantCapExceeded { .. } => "VariantCapExceeded",
+            Self::DigestBudgetExhausted => "DigestBudgetExhausted",
+            Self::ValidationBudgetExhausted => "ValidationBudgetExhausted",
+            Self::DigestMismatch => "DigestMismatch",
+            Self::TxDigestMismatch => "TxDigestMismatch",
+            Self::ValidationFailed => "ValidationFailed",
+            Self::MultiplierUnavailable => "MultiplierUnavailable",
+            Self::OrderingAnnouncementsFull => "OrderingAnnouncementsFull",
+            Self::UnknownBlock => "UnknownBlock",
+            Self::SelectionSettled { .. } => "SelectionSettled",
+            Self::DigestMode => "DigestMode",
+        }
+    }
+
+    /// Every variant name [`Self::name`] can return, so a telemetry
+    /// surface can publish a zero for reasons that have not fired.
+    pub const ALL_NAMES: &'static [&'static str] = &[
+        "AlreadyKnown",
+        "OutsideHeightWindow",
+        "StaleValidation",
+        "CacheEvicted",
+        "WaitlistFull",
+        "ForksFull",
+        "RecordsFull",
+        "StagingFull",
+        "RequestsFull",
+        "WitnessCombinationsExhausted",
+        "VariantCapExceeded",
+        "DigestBudgetExhausted",
+        "ValidationBudgetExhausted",
+        "DigestMismatch",
+        "TxDigestMismatch",
+        "ValidationFailed",
+        "MultiplierUnavailable",
+        "OrderingAnnouncementsFull",
+        "UnknownBlock",
+        "SelectionSettled",
+        "DigestMode",
+    ];
+}
+
 /// The state a block's transaction selection is in when a delivery tries
 /// to replace it (residual fix round, A).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
