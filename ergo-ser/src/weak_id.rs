@@ -67,14 +67,14 @@ mod tests {
     }
 
     // ----- happy path -----
-
-    #[test]
-    fn witness_id_is_31_bytes_dropping_first_digest_byte() {
-        let tx = tx_with_proofs(&[&[0xCA, 0xFE]]);
-        let all = [0xCAu8, 0xFE];
-        let expected = blake2b256(&all);
-        assert_eq!(witness_id(&tx), expected.as_bytes()[1..]);
-    }
+    //
+    // No shape/length assertion on `witness_id` lives here: computing the
+    // expectation with the same `blake2b256` helper the production code
+    // calls would be a self-oracle (CLAUDE.md's oracle-parity rule) that
+    // proves internal consistency, not correctness. The Scala-anchored
+    // expectation lives in `weak_ids_match_scala_for_witness_variants`
+    // (`ergo-ser/tests/it/input_block_scala_oracle.rs`), sourced from
+    // `test-vectors/weak-blocks/weak_ids.json`.
 
     #[test]
     fn weak_tx_id_concatenates_first_three_bytes_of_each_half() {
