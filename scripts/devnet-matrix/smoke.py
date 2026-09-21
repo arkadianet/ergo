@@ -93,6 +93,23 @@ AGREEMENT_ORDERING_BLOCKS = 5
 LAG_P95_MAX = 8
 LAG_MAX = 16
 
+# Assertions 2 and 3 are statistical, so they need coverage before a
+# verdict means anything. Fewer qualifying samples than this — or a lag
+# that could not be measured at all — is a FAIL, never a quiet PASS on an
+# empty series.
+MIN_QUALIFYING_SAMPLES = 50
+
+# Assertion 6 allows this many of the 20 submissions to go missing from
+# every observed Rust input block. The Scala miner's `cachedCandidate`
+# race loses input blocks outright, so a hard 20/20 would gate on the
+# reference node's bug; every miss is recorded.
+MEMPOOL_MIN_LOCATED = 18
+
+# Assertion 5 fails when more than this fraction of monitoring sweeps
+# could not be taken. A run that could not watch the nodes has not
+# watched them, however few violations it saw.
+MAX_UNAVAILABLE_FRACTION = 0.05
+
 
 class Unavailable(RuntimeError):
     """A REST observation could not be made. Never a value."""
@@ -149,6 +166,70 @@ def rust_log_lines(match, limit=40):
     return [line for line in text.splitlines() if match in line][-limit:]
 
 
+def rust_log_window(unix_seconds, before=10.0, after=5.0, limit=400):
+    """Every debug-log line the Rust node emitted around `unix_seconds`.
+
+    The artifact has to carry the announcement bytes for the observation
+    that actually mismatched, not the last 80 lines of an unrelated tail.
+    Lines are timestamped RFC3339 by `tracing`, so the window is exact.
+    """
+    try:
+        text = strip_ansi((WORK / 'rust.log').read_text(errors='replace'))
+    except OSError:
+        return []
+    lo = datetime.datetime.fromtimestamp(
+        unix_seconds - before, datetime.timezone.utc)
+    hi = datetime.datetime.fromtimestamp(
+        unix_seconds + after, datetime.timezone.utc)
+    out = []
+    for line in text.splitlines():
+        stamp = re.match(r'^(\d{4}-\d{2}-\d{2}T[\d:.]+Z)', line)
+        if not stamp:
+            continue
+        try:
+            when = datetime.datetime.fromisoformat(
+                stamp.group(1).replace('Z', '+00:00'))
+        except ValueError:
+            continue
+        if lo <= when <= hi:
+            out.append(line)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def write_mismatch_artifact(assertion, message, evidence, at=None, context=None):
+    """Write a divergence artifact NOW, while the observation is fresh.
+
+    Deferring these to the end of the run meant the `/info` bodies were
+    the final ones and the log tail was whatever had scrolled past since
+    — neither describing the mismatch they were filed for.
+    """
+    path = next_finding_path()
+    try:
+        observed = {node: api(node, '/info') for node in URLS}
+    except Unavailable as error:
+        observed = {'error': str(error)}
+    body = {
+        'id': path.stem,
+        'title': f'devnet-matrix smoke: {assertion} mismatch',
+        'severity': 'divergence',
+        'source': 'scripts/devnet-matrix/smoke.py',
+        'written': 'at mismatch time',
+        'assertion': assertion,
+        'message': message,
+        'observed_at_unix': at,
+        'evidence': evidence,
+        'both_nodes_info_at_mismatch': observed,
+        'rust_debug_log_window': (
+            rust_log_window(at) if at else rust_log_lines('input_blocks', limit=80)),
+    }
+    if context:
+        body.update(context)
+    path.write_text(json.dumps(body, indent=2) + '\n')
+    return str(path.relative_to(ROOT))
+
+
 def next_finding_path():
     FINDINGS.mkdir(parents=True, exist_ok=True)
     day = datetime.date.today().isoformat()
@@ -159,14 +240,30 @@ def next_finding_path():
 
 
 class Run:
-    """The whole observation: samples, accumulated counters, failures."""
+    """The whole observation: samples, accumulated counters, failures.
+
+    Sampling happens on its OWN thread for the whole run. Every previous
+    round drove it from the assertion drivers, so monitoring stopped
+    while the harness was submitting payments, waiting on a blocking REST
+    call, or restarting the node — exactly the windows where a height
+    violation is most likely and least likely to be seen.
+    """
 
     def __init__(self, deadline):
         self.deadline = deadline
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = None
+        self._latest = None
+        self.series_path = WORK / 'agreement-series.jsonl'
+        self._series_file = None
         self.failures = []
         self.findings = []
         self.samples = 0
         self.unavailable_samples = 0
+        self.unavailable_reasons = []
+        self.live_artifacts = 0
+        self.live_artifact_paths = []
 
         # Assertion 5, accumulated across the whole run.
         self.max_height_gap = 0
@@ -185,6 +282,45 @@ class Run:
 
         # Assertion 6.
         self.input_block_txids = {}
+
+    # ----- the sampler thread -----
+
+    def start_sampling(self, interval=0.3):
+        WORK.mkdir(exist_ok=True)
+        self._series_file = self.series_path.open('w')
+        self._thread = threading.Thread(target=self._sample_loop, args=(interval,),
+                                        daemon=True)
+        self._thread.start()
+
+    def _sample_loop(self, interval):
+        while not self._stop.is_set() and time.monotonic() < self.deadline:
+            self.sweep()
+            self._stop.wait(interval)
+
+    def stop_sampling(self):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=15)
+        if self._series_file:
+            self._series_file.close()
+            self._series_file = None
+
+    def latest_reading(self):
+        with self._lock:
+            return self._latest
+
+    def carry_counters_forward(self):
+        """Fold the live process's counters into the carried totals.
+
+        Called immediately BEFORE a node is killed. Inferring a reset from
+        a decreasing counter loses every count a restarted process
+        reaches or exceeds before the next sample, so the restart says so
+        explicitly instead of leaving it to be guessed.
+        """
+        with self._lock:
+            for value in self.drop_counters.values():
+                value['carried'] += value['current']
+                value['current'] = 0
 
     # ----- helpers -----
 
@@ -217,14 +353,18 @@ class Run:
                 }
             status = api('rust', '/api/v1/status')
             peers = api('rust', '/api/v1/peers')
-        except Unavailable:
-            self.unavailable_samples += 1
+        except Unavailable as error:
+            with self._lock:
+                self.unavailable_samples += 1
+                if len(self.unavailable_reasons) < 20:
+                    self.unavailable_reasons.append(str(error))
             return None
-        self.samples += 1
-
-        self._accumulate_counters(status, peers)
-        self._accumulate_heights(reading, now)
-        self._accumulate_agreement(reading, now)
+        with self._lock:
+            self.samples += 1
+            self._accumulate_counters(status, peers)
+            self._accumulate_heights(reading, now)
+            self._accumulate_agreement(reading, now)
+            self._latest = reading
         return reading
 
     def _accumulate_counters(self, status, peers):
@@ -236,6 +376,9 @@ class Run:
             key = entry['reason']
             previous = self.drop_counters.get(key, {'current': 0, 'carried': 0})
             if entry['count'] < previous['current']:
+                # Belt to `carry_counters_forward`'s braces: a reset the
+                # restart path did not announce (a node that died on its
+                # own) still folds forward.
                 previous['carried'] += previous['current']
             previous['current'] = entry['count']
             self.drop_counters[key] = previous
@@ -279,14 +422,56 @@ class Run:
         # comes from the same call as the chain, so the pair is coherent.
         scala_ordering = reading['scala']['chain'].get('bestOrdering') or None
         rust_ordering = reading['rust']['chain'].get('bestOrdering') or None
-        self.series.append({
+        entry = {
             'at': now,
             'ordering': scala_ordering if scala_ordering == rust_ordering else None,
+            'scala_ordering': scala_ordering,
+            'rust_ordering': rust_ordering,
             'scala_chain': reading['scala']['chain'].get('bestInputBlocks') or [],
             'rust_chain': reading['rust']['chain'].get('bestInputBlocks') or [],
             'scala_tip': scala_best or None,
             'rust_tip': rust_best or None,
-        })
+        }
+        # EVERY sample is retained and streamed to disk as it is taken:
+        # the evaluators run over the whole run at finalization, and a
+        # crash still leaves the series behind to re-evaluate.
+        self.series.append(entry)
+        if self._series_file:
+            self._series_file.write(json.dumps(entry) + '\n')
+            self._series_file.flush()
+        self._maybe_write_live_mismatch(entry, reading)
+
+    def _maybe_write_live_mismatch(self, entry, reading):
+        """Write an artifact for a prefix mismatch AS IT IS OBSERVED.
+
+        Only the chain-prefix check is decidable from a single sample;
+        the tip and lag verdicts need the whole series and are filed at
+        finalization. Bounded, so a persistent mismatch does not fill the
+        findings directory.
+        """
+        if entry['ordering'] is None or self.live_artifacts >= 3:
+            return
+        scala_old = list(reversed(entry['scala_chain']))
+        rust_old = list(reversed(entry['rust_chain']))
+        if not rust_old:
+            return
+        if len(rust_old) <= len(scala_old) and scala_old[:len(rust_old)] == rust_old:
+            return
+        self.live_artifacts += 1
+        try:
+            path = write_mismatch_artifact(
+                '3_best_input_chain',
+                "Rust's bestInputChain is not a prefix of Scala's",
+                {'sample': entry, 'ordering': entry['ordering']},
+                at=entry['at'],
+                context={'rust_best_input_block': reading['rust']['best'],
+                         'scala_best_input_block': reading['scala']['best'],
+                         'rust_info': reading['rust']['info'],
+                         'scala_info': reading['scala']['info']})
+            self.live_artifact_paths.append(path)
+        except OSError:
+            # Evidence collection must never take the run down.
+            pass
 
     def note_input_block_txids(self, reading):
         """Record which transactions Rust saw inside each input block."""
@@ -383,58 +568,78 @@ def percentile(values, pct):
     return ordered[min(rank, len(ordered)) - 1]
 
 
-def settled_samples(samples):
-    """The samples that are an observation of one input-block tree: same
-    ordering id as the sample before, and a non-empty Scala chain."""
-    out = []
-    previous = object()
+def qualifying_samples(samples):
+    """The samples an assertion may draw a conclusion from, plus why the
+    rest were excluded.
+
+    The ONLY exclusion is the one the comparison cannot survive: the two
+    nodes naming DIFFERENT ordering blocks, where the two input chains
+    are not chains of the same thing. Round 3 also dropped samples whose
+    ordering id differed from the previous sample's, and samples with an
+    empty Scala chain; both are gone, because "every Rust tip" and "every
+    same-ordering-block sample" cannot be weakened by the harness. What
+    survives is counted and reported per reason.
+    """
+    kept, excluded = [], {'different_ordering_block': 0}
     for i, s in enumerate(samples):
-        ordering = s.get('ordering')
-        settled = ordering is not None and ordering == previous
-        previous = ordering
-        if settled and (s.get('scala_chain') or []):
-            out.append((i, s))
+        if s.get('ordering') is None:
+            excluded['different_ordering_block'] += 1
+            continue
+        kept.append((i, s))
+    return kept, excluded
+
+
+def _coverage_violations(kept, lags, what):
+    """Shared required-coverage gate for assertions 2 and 3."""
+    out = []
+    if len(kept) < MIN_QUALIFYING_SAMPLES:
+        out.append(f'only {len(kept)} qualifying samples for {what}, '
+                   f'need {MIN_QUALIFYING_SAMPLES}')
+    if lags is not None and not lags:
+        out.append('lag was never measurable: no sample placed a Rust tip in '
+                   "Scala's chain for the same ordering block")
     return out
 
 
 def evaluate_tip_consistency(samples):
-    """Assertion 2. Rust's tip must be a block Scala had on its best chain
-    for the same ordering block (at that sample or any later one), and the
-    lag — how many input blocks Rust trails by — must stay inside the
-    bounds. Exact equality is counted, not required."""
+    """Assertion 2. Every Rust tip must be a block Scala had on its best
+    chain for the same ordering block, the lag must stay inside the
+    bounds, and there must be enough qualifying samples to say so."""
     scala_seen = {}          # ordering -> set of every id Scala ever listed
-    scala_seen_order = {}    # ordering -> [ (index, frozenset) ] for "later"
+    scala_later = {}         # ordering -> [ (index, ids) ], for "at or later"
     for i, s in enumerate(samples):
         if not s.get('ordering'):
             continue
         ids = set(s.get('scala_chain') or [])
         scala_seen.setdefault(s['ordering'], set()).update(ids)
-        scala_seen_order.setdefault(s['ordering'], []).append((i, ids))
+        scala_later.setdefault(s['ordering'], []).append((i, ids))
 
-    lags, unconfirmed, exact, compared = [], [], 0, 0
-    for i, s in settled_samples(samples):
-        ordering, rust_tip = s.get('ordering'), s.get('rust_tip')
+    kept, excluded = qualifying_samples(samples)
+    lags, unconfirmed, earlier_only, exact, compared = [], [], [], 0, 0
+    for i, s in kept:
+        ordering, rust_tip = s['ordering'], s.get('rust_tip')
         if not rust_tip:
+            # Rust has no tip yet; nothing to confirm, and it cannot be
+            # wrong. Counted as a qualifying sample all the same.
             continue
         compared += 1
         if rust_tip == s.get('scala_tip'):
             exact += 1
-        # "at some later sample": this sample counts too, so the window is
-        # every Scala observation from here on. A tip Rust reports before
-        # Scala's REST has caught up is still confirmed.
         confirmed = any(rust_tip in ids
-                        for j, ids in scala_seen_order.get(ordering, ())
+                        for j, ids in scala_later.get(ordering, ())
                         if j >= i)
         if not confirmed:
-            # Fall back to the whole-run union before calling it a
-            # divergence: a tip Scala listed only EARLIER is still a tip
-            # Scala had, and the ordering block may have moved on.
+            # Scala listed it, but only BEFORE this sample. Recorded in
+            # its own bucket rather than waved through: it is how the
+            # ordering-block boundary shows up, and the count is the
+            # measure of that boundary, not an excuse for it.
             if rust_tip in scala_seen.get(ordering, ()):
-                confirmed = True
-        if not confirmed:
-            unconfirmed.append({'sample': i, 'ordering': ordering,
-                                'rust_tip': rust_tip,
-                                'scala_chain': s.get('scala_chain') or []})
+                earlier_only.append({'sample': i, 'ordering': ordering,
+                                     'rust_tip': rust_tip})
+            else:
+                unconfirmed.append({'sample': i, 'ordering': ordering,
+                                    'rust_tip': rust_tip,
+                                    'scala_chain': s.get('scala_chain') or []})
             continue
         chain = s.get('scala_chain') or []
         if rust_tip in chain:
@@ -442,7 +647,7 @@ def evaluate_tip_consistency(samples):
             # input blocks Rust trails by at this instant.
             lags.append(chain.index(rust_tip))
     p95, mx = percentile(lags, 95), (max(lags) if lags else None)
-    violations = []
+    violations = _coverage_violations(kept, lags, 'tip consistency')
     if p95 is not None and p95 > LAG_P95_MAX:
         violations.append(f'lag p95 {p95} > {LAG_P95_MAX}')
     if mx is not None and mx > LAG_MAX:
@@ -450,31 +655,41 @@ def evaluate_tip_consistency(samples):
     if unconfirmed:
         violations.append(
             f'{len(unconfirmed)} Rust tips were never on Scala\'s best chain')
+    if earlier_only:
+        violations.append(
+            f'{len(earlier_only)} Rust tips were on a chain Scala had already '
+            'moved past')
     return {
+        'qualifying_samples': len(kept),
+        'excluded_samples': excluded,
         'compared_samples': compared,
         'lag_samples': len(lags),
         'lag_p95': p95,
         'lag_max': mx,
         'lag_mean': round(sum(lags) / len(lags), 2) if lags else None,
         'lag_bounds': {'p95_max': LAG_P95_MAX, 'max': LAG_MAX},
+        'min_qualifying_samples': MIN_QUALIFYING_SAMPLES,
         'exact_tip_matches': exact,
-        'unconfirmed_rust_tips': unconfirmed[:10],
         'unconfirmed_count': len(unconfirmed),
+        'unconfirmed_rust_tips_sample': unconfirmed[:10],
+        'confirmed_only_earlier_count': len(earlier_only),
+        'confirmed_only_earlier_sample': earlier_only[:10],
         'violations': violations,
     }
 
 
 def evaluate_chain_consistency(samples):
     """Assertion 3. At every same-ordering-block sample Rust's chain must
-    be a prefix of Scala's read oldest-first — i.e. Scala's chain with the
+    be a prefix of Scala's read oldest-first — Scala's chain with the
     newest k entries removed. Rust trailing is fine; a different HISTORY
-    is not."""
-    compared, violations, depths = 0, [], []
-    for i, s in settled_samples(samples):
+    is not. Counts are TOTALS; the recorded list is a sample of them."""
+    kept, excluded = qualifying_samples(samples)
+    compared, violation_count, violations, depths = 0, 0, [], []
+    for i, s in kept:
         scala_chain = s.get('scala_chain') or []
         rust_chain = s.get('rust_chain') or []
         if not rust_chain:
-            # Nothing to contradict. Counted, but no claim either way.
+            # Rust has no chain yet: nothing to contradict.
             continue
         compared += 1
         # Oldest-first, so "prefix" is the natural reading.
@@ -483,104 +698,182 @@ def evaluate_chain_consistency(samples):
         if len(rust_old) <= len(scala_old) and scala_old[:len(rust_old)] == rust_old:
             depths.append(len(scala_old) - len(rust_old))
             continue
+        violation_count += 1
         if len(violations) < 10:
             violations.append({'sample': i, 'ordering': s['ordering'],
                                'scala_chain': scala_chain,
                                'rust_chain': rust_chain})
-    return {
+    result = {
+        'qualifying_samples': len(kept),
+        'excluded_samples': excluded,
         'compared_samples': compared,
-        'prefix_violations': violations,
-        'prefix_violation_count': len(violations),
+        'min_qualifying_samples': MIN_QUALIFYING_SAMPLES,
+        'prefix_violation_count': violation_count,
+        'prefix_violations_sample': violations,
         'max_truncation_depth': max(depths) if depths else None,
+        'violations': _coverage_violations(kept, None, 'chain consistency'),
     }
+    if compared == 0 and kept:
+        result['violations'].append(
+            'Rust never reported a chain to compare in any qualifying sample')
+    if violation_count:
+        result['violations'].append(
+            f"Rust's chain was not a prefix of Scala's at {violation_count} samples")
+    return result
 
 
 def _self_test():
-    """Red-first coverage for the two evaluators above, on synthetic
-    series. They decide the gate, so they need to fail where the new
-    definitions say they must."""
+    """Red-first coverage for the evaluators. They decide the gate, so
+    they have to fail where the definitions say they must — and, after
+    round 4, they have to fail when there is nothing to conclude from."""
     ordering = 'O'
 
-    def sample(scala, rust):
-        return {'ordering': ordering, 'scala_chain': scala, 'rust_chain': rust,
+    def sample(scala, rust, ordering_id=ordering):
+        return {'ordering': ordering_id, 'scala_chain': scala, 'rust_chain': rust,
                 'scala_tip': scala[0] if scala else None,
                 'rust_tip': rust[0] if rust else None}
 
-    # A follower trailing by 2 of a 5-long chain: consistent, lag 2.
-    trailing = [sample(['e', 'd', 'c', 'b', 'a'], ['c', 'b', 'a'])] * 20
+    def series(scala, rust, n=MIN_QUALIFYING_SAMPLES):
+        return [sample(scala, rust) for _ in range(n)]
+
+    # ----- required coverage (round 4) -----
+
+    # An EMPTY series must FAIL both assertions. Before round 4 it passed
+    # both: no samples, so no violations, so nothing to report.
+    for evaluate in (evaluate_tip_consistency, evaluate_chain_consistency):
+        out = evaluate([])
+        assert out['violations'], f'empty series must fail: {out}'
+        assert any('qualifying samples' in v for v in out['violations']), out
+
+    # Just under the threshold fails; at the threshold passes.
+    short = series(['c', 'b', 'a'], ['b', 'a'], MIN_QUALIFYING_SAMPLES - 1)
+    assert any('qualifying samples' in v
+               for v in evaluate_tip_consistency(short)['violations'])
+    assert any('qualifying samples' in v
+               for v in evaluate_chain_consistency(short)['violations'])
+    enough = series(['c', 'b', 'a'], ['b', 'a'])
+    assert evaluate_tip_consistency(enough)['violations'] == []
+    assert evaluate_chain_consistency(enough)['violations'] == []
+
+    # Lag that is never measurable fails even with plenty of samples:
+    # every Rust tip is confirmed by a LATER Scala chain, but no sample
+    # ever lists it beside a chain that contains it, so there is no index
+    # to read a lag off.
+    never_measurable = (series(['c', 'b'], ['z'], MIN_QUALIFYING_SAMPLES)
+                        + [sample(['z', 'c', 'b'], [])])
+    out = evaluate_tip_consistency(never_measurable)
+    assert out['lag_samples'] == 0, out
+    assert out['unconfirmed_count'] == 0, out
+    assert any('never measurable' in v for v in out['violations']), out
+
+    # Rust reporting no chain at all in every qualifying sample is not a
+    # pass: there was nothing to compare.
+    no_rust_chain = series(['c', 'b', 'a'], [])
+    out = evaluate_chain_consistency(no_rust_chain)
+    assert out['compared_samples'] == 0, out
+    assert any('never reported a chain' in v for v in out['violations']), out
+
+    # ----- the FIRST sample counts (round 4) -----
+
+    # A rogue tip in sample 0 used to be excluded by the settled-sample
+    # rule. It must count.
+    rogue_first = ([sample(['c', 'b', 'a'], ['X', 'b', 'a'])]
+                   + series(['c', 'b', 'a'], ['b', 'a']))
+    out = evaluate_tip_consistency(rogue_first)
+    assert out['unconfirmed_count'] == 1, out
+    assert any('never on Scala' in v for v in out['violations']), out
+    forked_first = ([sample(['c', 'b', 'a'], ['c', 'x', 'a'])]
+                    + series(['c', 'b', 'a'], ['b', 'a']))
+    out = evaluate_chain_consistency(forked_first)
+    assert out['prefix_violation_count'] == 1, out
+
+    # An empty Scala chain beside a non-empty Rust one is no longer
+    # excluded either: it is counted as the violation it is.
+    boundary = ([sample([], ['b', 'a'])]
+                + series(['c', 'b', 'a'], ['b', 'a']))
+    assert evaluate_chain_consistency(boundary)['prefix_violation_count'] == 1
+
+    # A Rust tip Scala listed only EARLIER is its own bucket and its own
+    # violation — the ordering-block boundary is measured, not excused.
+    moved_past = (series(['b', 'a'], ['b', 'a'])
+                  + [sample(['d', 'c'], ['b', 'a'])])
+    out = evaluate_tip_consistency(moved_past)
+    assert out['confirmed_only_earlier_count'] == 1, out
+    assert out['unconfirmed_count'] == 0, out
+    assert any('already moved past' in v for v in out['violations']), out
+
+    # ----- totals, not capped lists (round 4) -----
+
+    many = series(['c', 'b', 'a'], ['c', 'x', 'a'])
+    out = evaluate_chain_consistency(many)
+    assert out['prefix_violation_count'] == MIN_QUALIFYING_SAMPLES, out
+    assert len(out['prefix_violations_sample']) == 10, out
+    assert any(str(MIN_QUALIFYING_SAMPLES) in v for v in out['violations']), out
+
+    # ----- the definitions themselves -----
+
+    # A follower trailing by 2 of a 5-long chain: consistent, lag 2, and
+    # zero exact matches — the case the pre-round-3 gate failed.
+    trailing = series(['e', 'd', 'c', 'b', 'a'], ['c', 'b', 'a'])
     tip = evaluate_tip_consistency(trailing)
     assert tip['violations'] == [], tip
     assert tip['lag_p95'] == 2 and tip['lag_max'] == 2, tip
     assert tip['exact_tip_matches'] == 0, tip
     assert evaluate_chain_consistency(trailing)['prefix_violation_count'] == 0
 
-    # In lockstep: still consistent, lag 0, and the exact-match metric
-    # counts every sample.
-    lockstep = [sample(['c', 'b', 'a'], ['c', 'b', 'a'])] * 6
+    # In lockstep: lag 0, and every sample an exact match.
+    lockstep = series(['c', 'b', 'a'], ['c', 'b', 'a'])
     tip = evaluate_tip_consistency(lockstep)
-    assert tip['lag_max'] == 0 and tip['exact_tip_matches'] == 5, tip
-
-    # A tip Scala never had on its best chain: a real divergence.
-    rogue = [sample(['c', 'b', 'a'], ['X', 'b', 'a'])] * 2
-    tip = evaluate_tip_consistency(rogue)
-    assert tip['unconfirmed_count'] == 1, tip
-    assert any('never on Scala' in v for v in tip['violations']), tip
+    assert tip['lag_max'] == 0, tip
+    assert tip['exact_tip_matches'] == MIN_QUALIFYING_SAMPLES, tip
 
     # Confirmed by a LATER sample: Rust saw it before Scala's REST did.
-    ahead = [sample(['b', 'a'], ['c', 'b', 'a']),
-             sample(['b', 'a'], ['c', 'b', 'a']),
-             sample(['c', 'b', 'a'], ['c', 'b', 'a'])]
+    ahead = ([sample(['b', 'a'], ['c', 'b', 'a'])]
+             + series(['c', 'b', 'a'], ['c', 'b', 'a']))
     assert evaluate_tip_consistency(ahead)['unconfirmed_count'] == 0
 
     # Lag past the bounds fails, even though every tip is consistent.
     deep = ['t%02d' % n for n in range(30, -1, -1)]
-    far = [sample(deep, deep[20:])] * 10
-    tip = evaluate_tip_consistency(far)
+    tip = evaluate_tip_consistency(series(deep, deep[20:]))
     assert tip['lag_p95'] == 20 and tip['lag_max'] == 20, tip
     assert any('p95' in v for v in tip['violations']), tip
     assert any('max' in v for v in tip['violations']), tip
 
-    # A different HISTORY at the same length is a prefix violation.
-    forked = [sample(['c', 'b', 'a'], ['c', 'x', 'a'])] * 2
-    chain = evaluate_chain_consistency(forked)
-    assert chain['prefix_violation_count'] == 1, chain
+    # Rust longer than Scala cannot be a prefix.
+    assert evaluate_chain_consistency(
+        series(['b', 'a'], ['c', 'b', 'a']))['prefix_violation_count'] == \
+        MIN_QUALIFYING_SAMPLES
 
-    # Rust longer than Scala is a violation too: it cannot be a prefix.
-    longer = [sample(['b', 'a'], ['c', 'b', 'a'])] * 2
-    assert evaluate_chain_consistency(longer)['prefix_violation_count'] == 1
-
-    # The ordering-block boundary: Scala's tree has reset while Rust
-    # still holds the previous chain. Both nodes name the same (new)
-    # ordering block because both routes pair the best HEADER id with a
-    # processor-read chain. That is a transition, not a disagreement.
-    boundary = [
-        {'ordering': 'O1', 'scala_chain': ['b', 'a'], 'rust_chain': ['b', 'a'],
-         'scala_tip': 'b', 'rust_tip': 'b'},
-        {'ordering': 'O2', 'scala_chain': [], 'rust_chain': ['b', 'a'],
-         'scala_tip': None, 'rust_tip': 'b'},
-        {'ordering': 'O2', 'scala_chain': [], 'rust_chain': ['b', 'a'],
-         'scala_tip': None, 'rust_tip': 'b'},
-    ]
-    assert evaluate_chain_consistency(boundary)['prefix_violation_count'] == 0
-    assert evaluate_tip_consistency(boundary)['unconfirmed_count'] == 0
-
-    # But a settled sample with a non-empty Scala chain that Rust's chain
-    # contradicts IS a violation — the rule above must not swallow it.
-    settled_fork = [
-        {'ordering': 'O3', 'scala_chain': ['c', 'b', 'a'], 'rust_chain': ['c', 'x', 'a'],
-         'scala_tip': 'c', 'rust_tip': 'c'},
-        {'ordering': 'O3', 'scala_chain': ['c', 'b', 'a'], 'rust_chain': ['c', 'x', 'a'],
-         'scala_tip': 'c', 'rust_tip': 'c'},
-    ]
-    assert evaluate_chain_consistency(settled_fork)['prefix_violation_count'] == 1
-
-    # Samples under different ordering blocks are never compared.
+    # Samples where the two nodes name DIFFERENT ordering blocks are the
+    # one exclusion, and it is counted.
     unrelated = [{'ordering': None, 'scala_chain': ['a'], 'rust_chain': ['z'],
-                  'scala_tip': 'a', 'rust_tip': 'z'}]
-    assert evaluate_tip_consistency(unrelated)['compared_samples'] == 0
+                  'scala_tip': 'a', 'rust_tip': 'z'}] * 10
+    out = evaluate_tip_consistency(unrelated)
+    assert out['qualifying_samples'] == 0, out
+    assert out['excluded_samples']['different_ordering_block'] == 10, out
     assert evaluate_chain_consistency(unrelated)['compared_samples'] == 0
 
-    print('self-test OK: evaluators behave as the round-3 definitions require')
+    # ----- assertion 6's D1/F6 attribution (round 4) -----
+
+    attributed = attribute_scala_residue(
+        ['d1tx', 'f6tx'], applied_input_block_txids={'f6tx'},
+        ordering_block_txids=set(), d1_refusals={'d1tx'})
+    assert attributed['d1'] == ['d1tx'], attributed
+    assert attributed['f6'] == ['f6tx'], attributed
+    assert attributed['unexplained'] == [], attributed
+    # Residue with no evidence for either rule is a divergence, never a
+    # shrug.
+    attributed = attribute_scala_residue(
+        ['mystery'], applied_input_block_txids=set(),
+        ordering_block_txids=set(), d1_refusals=set())
+    assert attributed['unexplained'] == ['mystery'], attributed
+    # A transaction the ordering block DID include is not F6.
+    attributed = attribute_scala_residue(
+        ['included'], applied_input_block_txids={'included'},
+        ordering_block_txids={'included'}, d1_refusals=set())
+    assert attributed['unexplained'] == ['included'], attributed
+
+    print('self-test OK: evaluators behave as the round-4 definitions require')
 
 
 # ----- assertion drivers -----
@@ -614,90 +907,153 @@ def assertion_1_peering(run, evidence):
         f['assertion'] == '1_peering' for f in run.failures) else 'PASS'
 
 
-def assertion_2_and_3_agreement(run, evidence):
-    """Consistency under lag (round-3 restatement).
+def observe_for_ordering_blocks(run, blocks, what):
+    """Let the sampler thread run for `blocks` ordering blocks.
 
-    Exact instantaneous equality is unreachable against a miner
-    publishing ~64 input blocks per ordering block, and lag is not
-    divergence. So assertion 2 requires that every tip Rust reports is a
-    block Scala had on its best chain, with the lag inside hard bounds,
-    and assertion 3 requires Rust's chain to be a prefix of Scala's read
-    oldest-first. Exact matches are counted, never required.
+    The loop itself takes NO samples: the dedicated sampler is already
+    running, and the point of round 4 is that sampling never depends on
+    which assertion happens to be driving.
     """
-    start_height = scala_height(run)
-    limit = start_height + AGREEMENT_ORDERING_BLOCKS
+    try:
+        start = scala_height(run)
+    except Unavailable as error:
+        run.fail(what, f'could not read the starting height: {error}')
+        return None
     while time.monotonic() < run.deadline:
-        reading = run.sweep()
-        run.note_input_block_txids(reading)
-        if reading and (reading['scala']['info'].get('fullHeight') or 0) > limit:
-            break
-        time.sleep(0.2)
+        run.note_input_block_txids(run.latest_reading())
+        try:
+            if scala_height(run) > start + blocks:
+                break
+        except Unavailable:
+            pass
+        time.sleep(0.5)
+    return start
 
+
+def finalize_agreement(run, evidence):
+    """Evaluate assertions 2 and 3 over EVERY retained sample.
+
+    Called at the end of the run, not when the sampling window closes:
+    samples taken during funding, the workload and the restart are
+    observations of the same two nodes and used to be discarded.
+    """
     tip = evaluate_tip_consistency(run.series)
     chain = evaluate_chain_consistency(run.series)
     lags = [round(v, 3) for v in run.propagation_lags]
     evidence['2_best_input_block'] = {
         'definition': ("every Rust bestInputBlock must be a block Scala had on its "
                        "best chain for the same ordering block; lag p95 <= "
-                       f"{LAG_P95_MAX} and max <= {LAG_MAX} input blocks"),
-        'observed_ordering_blocks': AGREEMENT_ORDERING_BLOCKS,
-        'start_height': start_height,
-        'samples': run.samples,
+                       f"{LAG_P95_MAX} and max <= {LAG_MAX} input blocks; at least "
+                       f"{MIN_QUALIFYING_SAMPLES} qualifying samples and a measurable "
+                       "lag"),
+        'evaluated_over': 'every sample taken in the run',
+        'total_samples': len(run.series),
         'unavailable_samples': run.unavailable_samples,
+        'series_file': str(run.series_path.relative_to(ROOT)),
         'max_propagation_lag_seconds': max(lags) if lags else None,
         **tip,
     }
     evidence['3_best_input_chain'] = {
         'definition': ("at every same-ordering-block sample Rust's bestInputChain must "
-                       "be a prefix of Scala's read oldest-first (tip-side truncated)"),
+                       "be a prefix of Scala's read oldest-first (tip-side truncated); "
+                       f"at least {MIN_QUALIFYING_SAMPLES} qualifying samples"),
+        'evaluated_over': 'every sample taken in the run',
+        'artifacts_written_at_mismatch_time': run.live_artifact_paths,
         **chain,
     }
     if tip['violations']:
         run.fail('2_best_input_block', '; '.join(tip['violations']),
                  {'lag_p95': tip['lag_p95'], 'lag_max': tip['lag_max'],
-                  'unconfirmed': tip['unconfirmed_rust_tips']})
-    if chain['prefix_violations']:
-        run.fail('3_best_input_chain',
-                 f"Rust's chain was not a prefix of Scala's at "
-                 f"{chain['prefix_violation_count']} samples",
-                 {'violations': chain['prefix_violations']})
+                  'qualifying_samples': tip['qualifying_samples'],
+                  'unconfirmed_count': tip['unconfirmed_count'],
+                  'unconfirmed': tip['unconfirmed_rust_tips_sample'],
+                  'confirmed_only_earlier_count': tip['confirmed_only_earlier_count']})
+    if chain['violations']:
+        run.fail('3_best_input_chain', '; '.join(chain['violations']),
+                 {'prefix_violation_count': chain['prefix_violation_count'],
+                  'qualifying_samples': chain['qualifying_samples'],
+                  'violations': chain['prefix_violations_sample']})
     for key in ('2_best_input_block', '3_best_input_chain'):
         evidence[key]['result'] = 'FAIL' if any(
             f['assertion'] == key for f in run.failures) else 'PASS'
 
 
 def scala_height(run):
-    try:
-        return api('scala', '/info').get('fullHeight') or 0
-    except Unavailable:
+    """Scala's full height. Raises `Unavailable` rather than returning 0:
+    a failed request is not a chain at genesis, and treating it as one
+    silently moved every height-relative deadline."""
+    info = api_retry('scala', '/info', min(run.deadline, time.monotonic() + 60),
+                     what='scala /info for the current height')
+    height = info.get('fullHeight')
+    if height is None:
+        # A node that has applied no block reports null, which IS height
+        # zero — distinct from a request that failed.
         return 0
+    return height
 
 
 def wait_for_height(run, target, what):
-    """Poll until Scala reaches `target`, sampling as we go."""
+    """Block until Scala reaches `target`. Takes no samples of its own —
+    the sampler thread never stops, which is the point."""
     while time.monotonic() < run.deadline:
-        reading = run.sweep()
-        run.note_input_block_txids(reading)
-        if reading and (reading['scala']['info'].get('fullHeight') or 0) >= target:
-            return reading
+        run.note_input_block_txids(run.latest_reading())
+        try:
+            if scala_height(run) >= target:
+                return
+        except Unavailable:
+            pass
         time.sleep(0.5)
     raise Unavailable(f'{what}: Scala did not reach ordering block {target} in budget')
 
 
+def attribute_scala_residue(only_in_scala, applied_input_block_txids,
+                            ordering_block_txids, d1_refusals):
+    """Explain each transaction left in Scala's pool but not Rust's.
+
+    Only two documented reasons are allowed, and each has to be shown,
+    not assumed:
+
+    * **D1** — the node LOGGED a refused conflict-checked restore for it.
+    * **F6** — it was in an input block Rust applied, and the ordering
+      block did NOT include it, so Rust dropped it and never restored it.
+
+    Anything else is a divergence finding. The old code excused every
+    Scala-only transaction categorically, which made the assertion
+    unfalsifiable in that direction.
+    """
+    d1, f6, unexplained = [], [], []
+    for txid in sorted(only_in_scala):
+        if txid in d1_refusals:
+            d1.append(txid)
+        elif txid in applied_input_block_txids and txid not in ordering_block_txids:
+            f6.append(txid)
+        else:
+            unexplained.append(txid)
+    return {'d1': d1, 'f6': f6, 'unexplained': unexplained}
+
+
+def d1_refusals_from_log():
+    """Transaction ids the node logged a refused mempool restore for."""
+    ids = set()
+    for line in rust_log_lines('restore', limit=400):
+        if 'refus' not in line.lower() and 'conflict' not in line.lower():
+            continue
+        ids.update(re.findall(r'[0-9a-f]{64}', line))
+    return ids
+
+
 def assertion_6_mempool(run, evidence, count):
-    """Funded workload: 20 accepted submissions, tracked through an input
-    block and the next ordering block."""
+    """Funded workload: `count` accepted submissions, each located inside
+    a Rust input block, each gone from Rust's pool at the first sample
+    AFTER that input block and BEFORE the next ordering block, then pool
+    agreement with every Scala-only residue attributed to D1 or F6."""
     result = {'requested': count, 'submitted': [], 'submit_failures': []}
     evidence['6_mempool'] = result
     # A miner reward matures at ordering block 11, and the recipe's
-    # target is ~55 s per ordering block, so the wait is minutes — the
-    # old 300 s cap expired before the chain got there and reported "no
-    # spendable coin" for what was simply a chain that had not run long
-    # enough.
+    # target is ~55 s per ordering block, so the wait is minutes.
     deadline = min(run.deadline, time.monotonic() + 900)
 
-    # Wait for a matured miner reward. `devnet_miner_reward_delay = 10`
-    # on both nodes makes this height 11-ish rather than 721.
+    balance = 0
     while time.monotonic() < deadline:
         try:
             balance = (api('scala', '/wallet/balances') or {}).get('balance') or 0
@@ -705,7 +1061,6 @@ def assertion_6_mempool(run, evidence, count):
             balance = 0
         if balance > 0:
             break
-        run.sweep()
         time.sleep(1)
     result['balance_nano'] = balance
     if not balance:
@@ -714,11 +1069,13 @@ def assertion_6_mempool(run, evidence, count):
         return
     try:
         address = (api('scala', '/wallet/addresses') or [None])[0]
+        start_height = scala_height(run)
     except Unavailable as error:
-        run.fail('6_mempool', f'wallet address unavailable: {error}')
+        run.fail('6_mempool', f'wallet setup unavailable: {error}')
         result['result'] = 'FAIL'
         return
     result['address'] = address
+    result['submitted_at_height'] = start_height
 
     for i in range(count):
         try:
@@ -736,75 +1093,112 @@ def assertion_6_mempool(run, evidence, count):
                  f'{len(submitted)} of {count} submissions returned HTTP 200',
                  {'failures': result['submit_failures']})
 
-    # Follow them: into a Rust input block, then out of Rust's pool.
+    # Locate each one inside a Rust input block, and check removal from
+    # Rust's pool at the first observation AFTER it was seen in an input
+    # block and BEFORE the ordering block that would confirm it anyway —
+    # otherwise ordinary block confirmation conceals a missing
+    # input-block eviction.
     in_input_block = {}
+    removed_before_ordering = {}
+    still_pooled_after_input_block = {}
     ever_in_rust_pool = set()
-    track_deadline = min(run.deadline, time.monotonic() + 240)
+    track_deadline = min(run.deadline, time.monotonic() + 300)
     while time.monotonic() < track_deadline:
-        reading = run.sweep()
-        run.note_input_block_txids(reading)
+        run.note_input_block_txids(run.latest_reading())
         for bid, ids in run.input_block_txids.items():
             for txid in set(ids) & submitted:
                 in_input_block.setdefault(txid, bid)
         try:
-            ever_in_rust_pool |= {t['id'] for t in api('rust', '/transactions/unconfirmed')}
+            pool = {t['id'] for t in api('rust', '/transactions/unconfirmed')}
+        except Unavailable:
+            pool = None
+        if pool is not None:
+            ever_in_rust_pool |= pool
+            for txid in in_input_block:
+                if txid in removed_before_ordering:
+                    continue
+                if txid in pool:
+                    still_pooled_after_input_block[txid] = in_input_block[txid]
+                else:
+                    removed_before_ordering[txid] = in_input_block[txid]
+                    still_pooled_after_input_block.pop(txid, None)
+        try:
+            if scala_height(run) > start_height:
+                # The next ordering block has landed; anything not
+                # resolved by now cannot be attributed to the input block.
+                break
         except Unavailable:
             pass
-        if submitted and set(in_input_block) >= submitted:
+        if submitted and set(removed_before_ordering) >= submitted:
             break
         time.sleep(0.3)
     result['in_rust_input_block'] = in_input_block
+    result['located_count'] = len(in_input_block)
+    result['min_located'] = MEMPOOL_MIN_LOCATED
+    result['removed_before_next_ordering_block'] = removed_before_ordering
+    result['still_pooled_after_its_input_block'] = still_pooled_after_input_block
     result['rust_pool_ever_held'] = sorted(ever_in_rust_pool & submitted)
 
-    if not in_input_block:
+    if len(in_input_block) < MEMPOOL_MIN_LOCATED:
         run.fail('6_mempool',
-                 'no submitted transaction was ever observed inside a Rust input block',
-                 {'input_blocks_seen': len(run.input_block_txids),
+                 f'only {len(in_input_block)} of {count} submissions were located '
+                 f'inside a Rust input block, need {MEMPOOL_MIN_LOCATED}',
+                 {'located': sorted(in_input_block),
+                  'input_blocks_seen': len(run.input_block_txids),
                   'rust_pool_ever_held': result['rust_pool_ever_held'],
                   'rust_log': rust_log_lines('input_blocks')})
+    missing_removal = sorted(set(in_input_block) - set(removed_before_ordering))
+    result['never_removed_before_ordering'] = missing_removal
+    if missing_removal:
+        run.fail('6_mempool',
+                 f'{len(missing_removal)} transactions were still unconfirmed on the '
+                 'Rust node after the input block that carried them applied, up to '
+                 'the next ordering block',
+                 {'txids': missing_removal,
+                  'input_blocks': {t: in_input_block[t] for t in missing_removal}})
 
-    # Removal from Rust's pool, then pool equality after the next
-    # ordering block, with explicit D1/F6 accounting.
-    height_now = scala_height(run)
+    # Pool agreement after the next ordering block, with every Scala-only
+    # residue attributed.
     try:
-        wait_for_height(run, height_now + 1, 'assertion 6 ordering block')
+        wait_for_height(run, start_height + 1, 'assertion 6 ordering block')
         time.sleep(3)
         scala_pool = {t['id'] for t in api_retry(
             'scala', '/transactions/unconfirmed', run.deadline, what='scala pool')}
         rust_pool = {t['id'] for t in api_retry(
             'rust', '/transactions/unconfirmed', run.deadline, what='rust pool')}
+        ordering_txids = set()
+        for hid in api_retry('scala', f'/blocks/at/{start_height + 1}', run.deadline,
+                             what='ordering block at the confirmation height') or []:
+            block = api_retry('scala', f'/blocks/{hid}', run.deadline,
+                              what='ordering block body')
+            ordering_txids |= {
+                t['id'] for t in block['blockTransactions']['transactions']}
     except Unavailable as error:
         run.fail('6_mempool', str(error))
         result['result'] = 'FAIL'
         return
 
-    still_pooled = sorted(set(in_input_block) & rust_pool)
-    result['applied_but_still_in_rust_pool'] = still_pooled
-    if still_pooled:
-        run.fail('6_mempool',
-                 'transactions in an applied Rust input block are still unconfirmed there',
-                 {'txids': still_pooled})
-
-    symmetric = scala_pool ^ rust_pool
     result['scala_unconfirmed'] = sorted(scala_pool)
     result['rust_unconfirmed'] = sorted(rust_pool)
-    result['symmetric_difference'] = sorted(symmetric)
-    # D1 (conflict-checked mempool restore) and F6 (input-chain
-    # transactions an ordering block omits are dropped and never
-    # restored) are the two documented reasons the pools may differ;
-    # both can only leave a transaction in SCALA's pool that Rust
-    # dropped, never the reverse.
-    result['d1_f6_accounting'] = {
-        'only_in_scala': sorted(scala_pool - rust_pool),
-        'only_in_rust': sorted(rust_pool - scala_pool),
-        'explained_by': 'D1/F6 permit scala-only residue; rust-only residue is unexplained',
-    }
-    if rust_pool - scala_pool:
+    result['symmetric_difference'] = sorted(scala_pool ^ rust_pool)
+    result['ordering_block_txids'] = sorted(ordering_txids)
+    applied = {t for ids in run.input_block_txids.values() for t in ids}
+    attribution = attribute_scala_residue(
+        scala_pool - rust_pool, applied, ordering_txids, d1_refusals_from_log())
+    attribution['only_in_rust'] = sorted(rust_pool - scala_pool)
+    result['d1_f6_accounting'] = attribution
+    if attribution['unexplained']:
+        run.fail('6_mempool',
+                 f"{len(attribution['unexplained'])} transactions are unconfirmed on "
+                 'Scala but not on Rust with neither a D1 refusal nor an F6 omission '
+                 'to explain them',
+                 {'unexplained': attribution['unexplained'],
+                  'd1': attribution['d1'], 'f6': attribution['f6']})
+    if attribution['only_in_rust']:
         run.fail('6_mempool',
                  'Rust holds unconfirmed transactions Scala does not; D1/F6 cannot '
                  'explain residue in that direction',
-                 {'only_in_rust': sorted(rust_pool - scala_pool),
-                  'only_in_scala': sorted(scala_pool - rust_pool)})
+                 {'only_in_rust': attribution['only_in_rust']})
     result['result'] = 'FAIL' if any(
         f['assertion'] == '6_mempool' for f in run.failures) else 'PASS'
 
@@ -823,8 +1217,20 @@ def assertion_4_reconstruction(run, evidence, ordering_blocks):
         return
     result['before_restart'] = ordering_event_summary(before)
 
-    restart_height = scala_height(run)
+    try:
+        restart_height = scala_height(run)
+    except Unavailable as error:
+        run.fail('4_reconstruction', f'height unavailable before the restart: {error}')
+        result['result'] = 'FAIL'
+        return
     result['restarted_at_scala_height'] = restart_height
+    # The node's own drop counters reset with the process. Fold the live
+    # totals into the carried ones BEFORE the kill rather than inferring
+    # the reset later from a decreasing counter — a restarted counter
+    # that races past its previous value would otherwise lose the whole
+    # first lifetime.
+    run.carry_counters_forward()
+    result['counters_carried_at_restart'] = run.totals()
     lifecycle.stop(('rust',))
     lifecycle.spawn('rust')
     run.started('rust')
@@ -924,20 +1330,37 @@ def ordering_event_summary(feed):
 
 def assertion_5_follow(run, evidence):
     totals = run.totals()
+    attempted = run.samples + run.unavailable_samples
+    unavailable_fraction = (run.unavailable_samples / attempted) if attempted else 1.0
     evidence['5_follow'] = {
         'max_height_gap': run.max_height_gap,
         'height_window': HEIGHT_WINDOW,
         'start_grace_seconds': START_GRACE_SECONDS,
-        'violations': run.height_violations[:20],
+        'violations_sample': run.height_violations[:20],
         'violation_count': len(run.height_violations),
         'accumulated_drops': totals,
+        'counters_carried_across_restart': True,
         'peer_states_seen': sorted(run.peer_states),
         'penalty_observations': run.penalty_observations,
         'samples': run.samples,
+        'attempted_samples': attempted,
         'unavailable_samples': run.unavailable_samples,
+        'unavailable_fraction': round(unavailable_fraction, 4),
+        'max_unavailable_fraction': MAX_UNAVAILABLE_FRACTION,
+        'unavailable_reasons_sample': run.unavailable_reasons,
+        'sampling': 'dedicated thread for the whole run, including submission, '
+                    'blocking waits and the restart',
     }
     if run.samples == 0:
         run.fail('5_follow', 'no usable sample was taken')
+    # A run that could not watch the nodes has not watched them, however
+    # few violations it happened to see.
+    if unavailable_fraction > MAX_UNAVAILABLE_FRACTION:
+        run.fail('5_follow',
+                 f'{run.unavailable_samples} of {attempted} monitoring sweeps could '
+                 f'not be taken ({unavailable_fraction:.1%} > '
+                 f'{MAX_UNAVAILABLE_FRACTION:.0%})',
+                 {'reasons': run.unavailable_reasons})
     fatal = {r: totals[r] for r in FATAL_DROPS if totals.get(r)}
     if fatal:
         run.fail('5_follow', f'byte-level disagreement with the Scala peer: {fatal}',
@@ -953,7 +1376,8 @@ def assertion_5_follow(run, evidence):
         run.fail('5_follow',
                  f'Rust fell more than {HEIGHT_WINDOW} blocks behind '
                  f'{len(run.height_violations)} times (max gap {run.max_height_gap})',
-                 {'violations': run.height_violations[:20]})
+                 {'violation_count': len(run.height_violations),
+                  'violations': run.height_violations[:20]})
     evidence['5_follow']['result'] = 'FAIL' if any(
         f['assertion'] == '5_follow' for f in run.failures) else 'PASS'
 
@@ -963,30 +1387,22 @@ def sha256(path):
 
 
 def write_findings(run, evidence):
-    """One artifact per failure that carries evidence."""
+    """Artifacts for failures that did not already write one at mismatch
+    time — the coverage and bound failures, which are properties of the
+    whole run rather than of one observation."""
     written = []
     for finding in run.findings:
-        path = next_finding_path()
-        try:
-            observed = {node: api(node, '/info') for node in URLS}
-        except Unavailable as error:
-            observed = {'error': str(error)}
-        path.write_text(json.dumps({
-            'id': path.stem,
-            'title': f'devnet-matrix smoke: {finding["assertion"]} failed',
-            'severity': 'divergence',
-            'source': 'scripts/devnet-matrix/smoke.py',
-            'assertion': finding['assertion'],
-            'message': finding['message'],
-            'evidence': finding['evidence'],
-            'both_nodes_info': observed,
-            'rust_events_tail': evidence.get('4_reconstruction', {}).get(
-                'ordering_events', [])[-20:],
-            'rust_debug_log_tail': rust_log_lines('input_blocks', limit=80),
-            'scala': evidence.get('scala'),
-            'rust': evidence.get('rust'),
-        }, indent=2) + '\n')
-        written.append(str(path.relative_to(ROOT)))
+        if finding.get('artifact'):
+            written.append(finding['artifact'])
+            continue
+        written.append(write_mismatch_artifact(
+            finding['assertion'], finding['message'], finding['evidence'],
+            context={
+                'rust_events_tail': evidence.get('assertions', {})
+                .get('4_reconstruction', {}).get('ordering_events', [])[-20:],
+                'scala': evidence.get('scala'),
+                'rust': evidence.get('rust'),
+            }))
     return written
 
 
@@ -1042,10 +1458,15 @@ def main():
     # Both nodes are already up when the smoke starts; their grace window
     # began at `start.sh`, which is earlier than this, so no grace is
     # granted here. Only the deliberate restart re-arms one.
+    run.start_sampling()
     try:
         assertion_1_peering(run, evidence['assertions'])
         save()
-        assertion_2_and_3_agreement(run, evidence['assertions'])
+        # Observe for a few ordering blocks before funding. The verdict
+        # itself is computed at the END of the run, over every sample the
+        # sampler thread took, including these.
+        observe_for_ordering_blocks(run, AGREEMENT_ORDERING_BLOCKS,
+                                    '2_best_input_block')
         save()
         assertion_6_mempool(run, evidence['assertions'], args.mempool_txs)
         save()
@@ -1060,14 +1481,21 @@ def main():
                 'submitted': 0, 'failures': 0,
                 'note': 'no wallet address; assertion 6 could not fund one'}
         save()
-        # Last, so it sees every counter the whole run produced.
+        # Last, so they see every counter and every sample the whole run
+        # produced.
+        run.stop_sampling()
+        finalize_agreement(run, evidence['assertions'])
         assertion_5_follow(run, evidence['assertions'])
     except BaseException as error:  # noqa: BLE001 - recorded, then re-raised
         run.fail('harness', f'{type(error).__name__}: {error}')
         evidence['harness_error'] = f'{type(error).__name__}: {error}'
         raise
     finally:
-        evidence['agreement_series_sample'] = run.series[:200]
+        run.stop_sampling()
+        # The full series lives in `.work/agreement-series.jsonl`; the
+        # evidence carries a readable head plus the total, and the
+        # verdict above was computed over ALL of it.
+        evidence['agreement_series_head'] = run.series[:200]
         evidence['agreement_series_total'] = len(run.series)
         evidence['failures'] = run.failures
         evidence['status'] = 'PASS' if not run.failures else 'FAIL'
