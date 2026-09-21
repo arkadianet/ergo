@@ -1,4 +1,6 @@
 //> using scala 2.12
+package org.ergoplatform.mining
+
 import io.circe.Json
 import io.circe.syntax._
 import org.ergoplatform.mining.InputBlockFields
@@ -133,12 +135,50 @@ object WeakBlocksOracle {
         "tx_id" -> t.id.toString.asJson, "witness_id" -> hex(t.witnessSerializedId).asJson, "weak_id" -> hex(t.weakId).asJson) }.asJson)
   }
 
+  def powCases(): Json = {
+    import org.ergoplatform.mining.AutolykosPowScheme
+    val scheme = new AutolykosPowScheme(32, 26)
+    val nBitsList = Seq(BigInt(1000), BigInt(1L << 20), BigInt("123456789012")).map(d => DifficultySerializer.encodeCompactBits(d))
+    val mults = Seq(2, 30, 64, 2048)
+    val pure = for (nBits <- nBitsList; n <- mults) yield {
+      val b = scheme.getB(nBits); val t = b * n
+      val hits = Seq(("target_minus_1", b - 1), ("target", b), ("input_target_minus_1", t - 1), ("input_target", t), ("input_target_plus_1", t + 1))
+      hits.map { case (label, hit) =>
+        Json.obj("name" -> s"nbits${nBits}_n${n}_$label".asJson, "n_bits" -> nBits.asJson, "multiplier" -> n.asJson,
+          "hit" -> hit.toString.asJson, "input_target" -> t.toString.asJson,
+          "verifier_accepts" -> (hit < t).asJson,           // checkInputBlockPoW comparison
+          "miner_classifies_input" -> (hit <= t && hit > b).asJson, // checkNonces: d <= b*n and not ordering
+          "miner_classifies_ordering" -> (hit <= b).asJson)
+      }
+    }
+    // real solutions: search nonces at tiny difficulty on fixedHeader for an input and an ordering solution
+    val h = fixedHeader.copy(nBits = DifficultySerializer.encodeCompactBits(BigInt(2)), version = 2)
+    val msg = scheme.msgByHeader(h); val b = scheme.getB(h.nBits); val hbs = com.google.common.primitives.Ints.toByteArray(h.height); val N = scheme.calcN(h)
+    val params = org.ergoplatform.settings.Parameters(0, org.ergoplatform.settings.Parameters.DefaultParameters, org.ergoplatform.settings.ErgoValidationSettingsUpdate.empty).withNumOfSubblocksPerBlock(30)
+    val sk = BigInt(12345); val x = BigInt(67890)
+    val found = (0L until 2000000L by 1000L).flatMap { start =>
+      scheme.checkNonces(2, hbs, msg, sk, x, b, N, start, start + 1000, params) match {
+        case org.ergoplatform.InputSolutionFound(as) => Some(("input", h.copy(powSolution = as)))
+        case org.ergoplatform.OrderingSolutionFound(as) => Some(("ordering", h.copy(powSolution = as)))
+        case _ => None
+      }
+    }
+    val real = found.groupBy(_._1).map(_._2.head).map { case (kind, hdr) =>
+      Json.obj("name" -> s"real_${kind}_solution".asJson, "header_hex" -> hex(HeaderSerializer.toBytes(hdr)).asJson,
+        "hit" -> scheme.hitForVersion2(hdr).toString.asJson, "multiplier" -> 30.asJson,
+        "input_pow_valid" -> scheme.checkInputBlockPoW(hdr, params).asJson,
+        "ordering_pow_valid" -> scheme.checkOrderingBlockPoW(hdr).asJson)
+    }
+    Json.obj("pure_cases" -> pure.flatten.asJson, "header_cases" -> real.toSeq.asJson)
+  }
+
   def main(args: Array[String]): Unit = {
     val out = args(0) match {
       case "announcement" => announcementCases()
       case "ordering_announcement" => orderingCases()
       case "messages" => messageCases()
       case "weak_ids" => weakIdCases()
+      case "pow" => powCases()
       case other => sys.error(s"unknown vector $other")
     }
     println(out.spaces2)

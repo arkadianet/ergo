@@ -25,6 +25,72 @@ pub enum PowError {
     HeaderEncode(String),
 }
 
+/// `getB(nBits) * multiplier` (Scala `checkInputBlockPoW`'s
+/// `inputTarget = orderingTarget * parameters.subBlocksPerBlock`);
+/// `multiplier` is the raw voted `subBlocksPerBlock` value, used as-is.
+/// A non-positive multiplier (never legitimately voted, but the type
+/// is a signed `i32` because Scala's `Parameters` table stores votes
+/// as `Int`) collapses the target to zero rather than panicking on the
+/// `as u32` cast.
+pub fn input_block_target(n_bits: u32, multiplier: i32) -> BigUint {
+    if multiplier <= 0 {
+        return BigUint::ZERO;
+    }
+    get_target(n_bits) * BigUint::from(multiplier as u32)
+}
+
+/// Pure comparison: `hit < input_block_target(n_bits, multiplier)`.
+/// Matches Scala `AutolykosPowScheme.checkInputBlockPoW`'s strict `<`
+/// — the verifier's boundary. Scala's miner-side `checkNonces`
+/// classifies a solution as an input block under `hit <= target`
+/// instead (see `AutolykosPowScheme.scala:429-434`); a `hit` exactly
+/// equal to the target is therefore a solution the miner believes
+/// qualifies but the verifier rejects (upstream finding F2), which is
+/// why this function stays deliberately strict rather than folding in
+/// the miner's `<=` — softening it here would silently paper over F2
+/// instead of surfacing it.
+pub fn input_block_hit_valid(hit: &BigUint, n_bits: u32, multiplier: i32) -> bool {
+    *hit < input_block_target(n_bits, multiplier)
+}
+
+/// Hit of a v2 header: `hit_for_v2(blake2b256(bytes_without_pow), nonce,
+/// height, calc_n(version, height))`. Mirrors Scala
+/// `AutolykosPowScheme.hitForVersion2` (`AutolykosPowScheme.scala:182-192`).
+///
+/// Returns `Err(PowError::InvalidSolution)` for a v1 solution — input
+/// blocks require an Autolykos v2 header, and v1's `d` isn't a hit at
+/// all (it's the EC-equation blinding factor), so there is no
+/// meaningful hit to compute.
+pub fn header_hit_v2(header: &Header) -> Result<BigUint, PowError> {
+    let nonce = match &header.solution {
+        AutolykosSolution::V2 { nonce, .. } => nonce,
+        AutolykosSolution::V1 { .. } => {
+            return Err(PowError::InvalidSolution(
+                "input blocks require an Autolykos v2 solution".into(),
+            ))
+        }
+    };
+    let bytes =
+        serialize_header_without_pow(header).map_err(|e| PowError::HeaderEncode(e.to_string()))?;
+    let msg = blake2b256(&bytes);
+    let n = crate::autolykos::common::calc_n(header.version, header.height);
+    Ok(v2::hit_for_v2(&msg, nonce, header.height, n))
+}
+
+/// Verify a header's PoW against the input-block target: Scala
+/// `AutolykosPowScheme.checkInputBlockPoW` (`AutolykosPowScheme.scala:130-136`),
+/// `hit < getB(nBits) * multiplier` (strict).
+pub fn verify_input_block_pow(header: &Header, multiplier: i32) -> Result<(), PowError> {
+    let hit = header_hit_v2(header)?;
+    if input_block_hit_valid(&hit, header.n_bits, multiplier) {
+        Ok(())
+    } else {
+        Err(PowError::InvalidSolution(
+            "v2 hit >= input-block target".into(),
+        ))
+    }
+}
+
 /// Verify the Autolykos PoW solution against the header's own nBits target.
 /// Dispatches to v1 or v2 based on the `header.solution` variant — the
 /// header serializer couples `header.version` to the solution variant at
@@ -131,7 +197,40 @@ mod tests {
         ergo_ser::header::read_header(&mut r).unwrap()
     }
 
+    // ----- happy path -----
+
+    #[test]
+    fn input_block_target_zero_or_negative_multiplier_is_zero() {
+        assert_eq!(input_block_target(0x1a_01_76_5e, 0), BigUint::ZERO);
+        assert_eq!(input_block_target(0x1a_01_76_5e, -5), BigUint::ZERO);
+    }
+
+    /// Task 11 relies on this test existing: with a target of 1 (the
+    /// widest possible `nBits`) and the maximum representable
+    /// multiplier, `input_block_target` overflows past any realistic
+    /// hit — pinning that `input_block_hit_valid` stays permissive
+    /// rather than silently saturating/wrapping at extreme votes.
+    #[test]
+    fn max_multiplier_makes_any_v2_header_pass_pow() {
+        let n_bits = ergo_ser::difficulty::encode_compact_bits(&BigUint::from(1u32));
+        assert!(input_block_hit_valid(
+            &(BigUint::from(1u8) << 255),
+            n_bits,
+            i32::MAX
+        ));
+    }
+
     // ----- error paths -----
+
+    #[test]
+    fn header_hit_v2_rejects_v1_solution() {
+        let header = load_header_at("../test-vectors/mainnet/headers_1_2000.json", 200);
+        assert_eq!(header.version, 1, "height 200 should be v1 on mainnet");
+        match header_hit_v2(&header) {
+            Err(PowError::InvalidSolution(_)) => {}
+            other => panic!("expected InvalidSolution for a v1 header, got {other:?}"),
+        }
+    }
 
     #[test]
     fn verify_header_difficulty_empty_epoch_headers_returns_missing() {

@@ -373,11 +373,55 @@ pub fn extension_root(fields: &[(&[u8], &[u8])]) -> [u8; 32] {
     merkle_tree_root(&refs)
 }
 
+/// Leaf digest of a single extension key-value pair: `Blake2b256(0x00 ‖
+/// key.len() as u8 ‖ key ‖ value)`. Matches Scala `Extension.kvToLeaf`
+/// (the length-prefixed key-value encoding) fed through the scrypto
+/// leaf-hash rule ([`leaf_hash`]).
+///
+/// Exposed alongside [`tx_leaf_digest`] so external verifiers (e.g. an
+/// input-block proof-of-inclusion check binding an extension field to
+/// a header's `extensionRoot`) share the exact leaf-preimage rule
+/// instead of re-deriving the length-prefix byte.
+pub fn extension_leaf_digest(key: &[u8], value: &[u8]) -> [u8; 32] {
+    let mut kv = Vec::with_capacity(1 + key.len() + value.len());
+    kv.push(key.len() as u8);
+    kv.extend_from_slice(key);
+    kv.extend_from_slice(value);
+    leaf_hash(&kv)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     // ----- oracle parity -----
+
+    /// Pins the leaf preimage `extension_root` builds internally:
+    /// for a single field, the root must equal the root of a
+    /// one-leaf tree built directly over `[len] ++ key ++ value`
+    /// (the same bytes [`extension_leaf_digest`] hashes). This ties
+    /// the two independent call sites — `extension_root`'s inline
+    /// leaf construction and the standalone digest function — to one
+    /// preimage rule so they cannot silently drift apart.
+    #[test]
+    fn extension_leaf_digest_matches_extension_root_single_field() {
+        let key = b"prevInputBlockId";
+        let value = &[0x88u8; 32];
+
+        let root = extension_root(&[(key.as_slice(), value.as_slice())]);
+
+        let mut kv_bytes = Vec::with_capacity(1 + key.len() + value.len());
+        kv_bytes.push(key.len() as u8);
+        kv_bytes.extend_from_slice(key);
+        kv_bytes.extend_from_slice(value);
+        let expected_root = merkle_tree_root(&[kv_bytes.as_slice()]);
+
+        assert_eq!(root, expected_root);
+
+        // And extension_leaf_digest itself must be the leaf hash
+        // merkle_tree_root computes over those same bytes.
+        assert_eq!(extension_leaf_digest(key, value), leaf_hash(&kv_bytes));
+    }
 
     #[test]
     fn merkle_root_empty_input_pinned_to_blake2b_of_empty_bytes() {
