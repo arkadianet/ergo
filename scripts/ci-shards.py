@@ -24,16 +24,20 @@ import subprocess
 # Shard 1 takes clippy to use that 0.8 min headroom.
 GROUPS = {
     "Windows": (
-        ("ergo-node --lib", "ergo-node --bin ergo-node", "ergo-mining", "ergo-p2p"),
-        ("ergo-node --test it", "ergo-wallet", "ergo-difftest", "ergo-rest-json"),
+        # Measured on run 35547586766 (windows): the previous split ran
+        # 4.3 / 5.7 / 7.3 / 11.5 min because ergo-api, ergo-indexer and
+        # ergo-sync carry large `it` binaries. They move onto the two
+        # node shards, which had the headroom.
+        ("ergo-node --lib", "ergo-node --bin ergo-node", "ergo-mining", "ergo-p2p", "ergo-api"),
+        (
+            "ergo-node --test it", "ergo-wallet", "ergo-difftest", "ergo-rest-json",
+            "ergo-indexer", "ergo-sync",
+        ),
         (
             "ergo-state", "ergo-chain-spec", "ergo-primitives", "ergo-indexer-types",
             "ergo-compiler", "ergo-sigma",
         ),
-        (
-            "ergo-indexer", "ergo-api", "ergo-sync", "ergo-validation",
-            "ergo-ser", "ergo-mempool", "ergo-crypto",
-        ),
+        ("ergo-validation", "ergo-ser", "ergo-mempool", "ergo-crypto"),
     ),
     "macOS": (
         (
