@@ -617,10 +617,12 @@ pub(super) fn eval_no_arg_method(
             Ok(Some(Value::CollBytes(ctx.pre_header_parent_id.to_vec())))
         }
         (105, 3) => {
-            add_method_cost(cost, COST_PRE_HEADER_TIMESTAMP)?;
+            // Scala `MethodCall.eval` runs the softMethodIds check BEFORE
+            // `E.addFixedCost`, so a rejection charges no method cost.
             if !ctx.soft_fields_allowed {
                 return Err(EvalError::SoftFieldAccess("timestamp"));
             }
+            add_method_cost(cost, COST_PRE_HEADER_TIMESTAMP)?;
             Ok(Some(Value::Long(ctx.pre_header_timestamp as i64)))
         }
         (105, 4) => {
@@ -632,17 +634,21 @@ pub(super) fn eval_no_arg_method(
             Ok(Some(Value::Int(ctx.height as i32)))
         }
         (105, 6) => {
-            add_method_cost(cost, COST_PRE_HEADER_MINER_PK)?;
+            // Scala `MethodCall.eval` runs the softMethodIds check BEFORE
+            // `E.addFixedCost`, so a rejection charges no method cost.
             if !ctx.soft_fields_allowed {
                 return Err(EvalError::SoftFieldAccess("minerPk"));
             }
+            add_method_cost(cost, COST_PRE_HEADER_MINER_PK)?;
             Ok(Some(Value::GroupElement(ctx.miner_pubkey)))
         }
         (105, 7) => {
-            add_method_cost(cost, COST_PRE_HEADER_VOTES)?;
+            // Scala `MethodCall.eval` runs the softMethodIds check BEFORE
+            // `E.addFixedCost`, so a rejection charges no method cost.
             if !ctx.soft_fields_allowed {
                 return Err(EvalError::SoftFieldAccess("votes"));
             }
+            add_method_cost(cost, COST_PRE_HEADER_VOTES)?;
             Ok(Some(Value::CollBytes(ctx.pre_header_votes.to_vec())))
         }
         // SGlobal(106).groupGenerator(1) -> GroupElement      cost: 10

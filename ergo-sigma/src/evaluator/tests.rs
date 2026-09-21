@@ -13142,3 +13142,69 @@ fn pre_header_timestamp_via_method_call_with_soft_fields_disallowed_errors() {
         "{err}"
     );
 }
+
+// Rejection-cost ordering vs the pinned Scala fork (sigmastate
+// `context-refactoring` @368a860b, `MethodCall.eval` in
+// data/shared/src/main/scala/sigma/ast/values.scala): the `softMethodIds`
+// check runs after `argsBuf` is built but BEFORE
+// `E.addFixedCost(fixed, method.opDesc)`, so a rejected SPreHeader soft
+// method leaves its own 10-unit method cost UNCHARGED. `minerPubKey` is
+// the opposite: Scala throws inside `CContext.minerPubKey`, i.e. after the
+// call's fixed cost is charged. Both are pinned here because they are the
+// only observable difference between an allowed and a rejected evaluation
+// besides the error itself.
+fn total_cost_of(expr: &Expr, ctx: &ReductionContext<'_>) -> (u64, Option<EvalError>) {
+    let mut env = Env::new();
+    let mut depth = 0usize;
+    let mut cost = CostAccumulator::recording_only();
+    let mut trace = None;
+    let res = eval_expr(expr, ctx, &[], &mut env, &mut depth, &mut cost, &mut trace);
+    (cost.total().value(), res.err())
+}
+
+#[test]
+fn rejected_pre_header_timestamp_leaves_its_method_cost_uncharged() {
+    let expr = context_property_call(105, 3);
+    let allowed = ReductionContext::minimal(100, 0);
+    let mut denied = ReductionContext::minimal(100, 0);
+    denied.soft_fields_allowed = false;
+
+    let (ok_total, ok_err) = total_cost_of(&expr, &allowed);
+    assert!(ok_err.is_none(), "{ok_err:?}");
+    let (err_total, err) = total_cost_of(&expr, &denied);
+    assert!(
+        matches!(err, Some(EvalError::SoftFieldAccess("timestamp"))),
+        "{err:?}"
+    );
+    assert_eq!(
+        ok_total - err_total,
+        super::opcodes::property_call::COST_PRE_HEADER_TIMESTAMP,
+        "Scala checks softMethodIds BEFORE addFixedCost: the rejected call \
+         must not charge COST_PRE_HEADER_TIMESTAMP (allowed={ok_total}, \
+         rejected={err_total})"
+    );
+}
+
+#[test]
+fn rejected_context_miner_pub_key_still_charges_its_method_cost() {
+    let expr = context_property_call(101, 10);
+    let allowed = ReductionContext::minimal(100, 0);
+    let mut denied = ReductionContext::minimal(100, 0);
+    denied.soft_fields_allowed = false;
+
+    let (ok_total, ok_err) = total_cost_of(&expr, &allowed);
+    assert!(ok_err.is_none(), "{ok_err:?}");
+    let (err_total, err) = total_cost_of(&expr, &denied);
+    assert!(
+        matches!(err, Some(EvalError::SoftFieldAccess("minerPubKey"))),
+        "{err:?}"
+    );
+    assert_eq!(
+        err_total, ok_total,
+        "Scala CContext.minerPubKey throws AFTER the call cost is charged"
+    );
+    assert!(
+        err_total >= super::opcodes::property_call::COST_CONTEXT_MINER_PUB_KEY,
+        "rejected total {err_total} must include COST_CONTEXT_MINER_PUB_KEY"
+    );
+}
