@@ -141,6 +141,11 @@ pub(in crate::node) struct InputBlocksRuntime {
     /// at a time. Pruned on the tick against the tracker, and on peer
     /// disconnect.
     expectations: HashMap<[u8; 32], (PeerId, ExpectedPhase)>,
+    /// The ordering tip the processor has been told about. Compared
+    /// against the store's own `best_full_block_id` on each tick so the
+    /// chain events are driven by the committed state itself, not by a
+    /// subsystem that may be switched off.
+    pub(in crate::node) last_ordering_tip: Option<[u8; 32]>,
 }
 
 impl InputBlocksRuntime {
@@ -165,6 +170,7 @@ impl InputBlocksRuntime {
             counters: DropCounters::default(),
             last_drop_report: 0,
             expectations: HashMap::new(),
+            last_ordering_tip: None,
         }
     }
 

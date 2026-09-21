@@ -384,29 +384,6 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
                         .map(|f| f.peer.to_string()),
                 });
             }
-            // Input blocks (spec 7.6): the committed tip moved, so the
-            // processor's generation must bump, its trees must prune,
-            // and `/info.bestInputBlock` must clear. A non-empty
-            // `demoted` means blocks were rolled back — that is the
-            // reorg event, not the linear-apply one.
-            let ib_now = Instant::now();
-            let ib_actions = if state_diff.demoted.is_empty() {
-                crate::node::input_blocks::on_ordering_block_applied(
-                    state,
-                    state_diff.new_tip.header_id,
-                    state_diff.new_tip.height,
-                    ib_now,
-                )
-            } else {
-                crate::node::input_blocks::on_ordering_reorg(
-                    state,
-                    state_diff.new_tip.header_id,
-                    state_diff.new_tip.height,
-                    ib_now,
-                )
-            };
-            flush_actions(state, ib_actions);
-
             let mempool_diff: ergo_mempool::types::TxDiff = state_diff.into();
             let mempool_actions = state.mempool.on_tip_change(&mempool_diff);
             let routed = route_mempool_actions(state, mempool_actions);

@@ -837,6 +837,24 @@ impl NodeConfig {
             staging_ttl_seconds: def.staging_ttl_seconds,
             staging_max_blocks: def.staging_max_blocks,
         };
+        // Input blocks ARE a provisional mempool chain: the processor
+        // resolves announced weak ids against the pool (spec 7.5 step 1)
+        // and applying an input block evicts from it (spec 8). With the
+        // mempool off it could do neither, and the ordering hook that
+        // keeps the processor's view of the committed tip fresh rides
+        // the mempool tick. Refusing the pair here is the only place
+        // that sees both decisions — note the mempool can also be forced
+        // off by digest mode or `verify_transactions = false`, which is
+        // why this gate lives after `mempool_config`, not beside the
+        // `[input_blocks]` block.
+        if input_blocks_enabled && !mempool_config.enabled {
+            return Err(
+                "[input_blocks] requires the mempool: enabled = true needs a live mempool \
+                 (not [mempool] disabled, state_type = \"digest\", or \
+                 verify_transactions = false)"
+                    .into(),
+            );
+        }
         if mempool_config.max_pool_size == 0 {
             return Err("[mempool] max_pool_size must be >= 1".into());
         }
@@ -1290,6 +1308,40 @@ mod tests {
                     .to_string()
                     .contains("[input_blocks] enabled requires devnet"),
                 "{network}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn input_blocks_enabled_with_the_mempool_disabled_is_rejected() {
+        // Input blocks ARE a provisional mempool chain: the processor
+        // resolves announced weak ids against the pool, and applying an
+        // input block evicts from it. With the mempool off the subsystem
+        // could do neither, and the ordering hook that keeps its view of
+        // the tip fresh rides the mempool tick.
+        for disabling in [
+            "[mempool]\ndisabled = true\n",
+            // Digest mode force-disables the mempool (box bytes are
+            // unavailable), so it reaches the same gate by another road.
+            // (`verify_transactions = false` is refused earlier, by the
+            // headers-only-needs-digest rule, so it never reaches here.)
+            "[node]\nstate_type = \"digest\"\n",
+        ] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(
+                file.path(),
+                format!(
+                    "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n\
+                     [api]\ndisabled = true\n[input_blocks]\nenabled = true\n{disabling}"
+                ),
+            )
+            .unwrap();
+            let error = NodeConfig::load(cli_with_config(file.path())).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("[input_blocks] requires the mempool"),
+                "{disabling:?}: {error}"
             );
         }
     }

@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use ergo_inputblocks::processor::Event;
 use ergo_p2p::handshake::Version;
-use ergo_state::ChainStateRead;
+use ergo_state::{ChainStateRead, HeaderSectionStore};
 use ergo_sync::coordinator::Action;
 
 use super::super::NodeState;
@@ -25,7 +25,8 @@ use super::runtime::InputBlocksRuntime;
 /// Feed one `Event::Tick`. Called once per `sync_tick` (1 s) from the
 /// heartbeat, which is the node's existing "time passed" edge.
 pub(in crate::node) fn on_tick(state: &mut NodeState, now: Instant) -> Vec<Action> {
-    let actions = drive(state, now, |tick| Event::Tick { now: tick });
+    let mut actions = sync_ordering_tip(state, now);
+    actions.extend(drive(state, now, |tick| Event::Tick { now: tick }));
     // Keep the phase map bounded by genuinely in-flight requests: the
     // tracker's own timeout sweep releases ids we never got an answer
     // for, and the record for those must go with them.
@@ -68,6 +69,48 @@ pub(in crate::node) fn on_tick(state: &mut NodeState, now: Instant) -> Vec<Actio
     actions
 }
 
+/// Drive the ordering-chain events from the committed state itself.
+///
+/// The processor's view of the best full block has to track the store's,
+/// and the store is the only thing that knows when it moved. Reading it
+/// here — rather than riding the mempool's tip-change diff — keeps the
+/// chain events independent of whether the mempool subsystem is running
+/// at all, and classifies reorg-vs-linear on the exact rule (does the
+/// new tip's parent pointer name the previous tip?) instead of on the
+/// mempool-level proxy "were any pooled transactions demoted".
+fn sync_ordering_tip(state: &mut NodeState, now: Instant) -> Vec<Action> {
+    let meta = state.store.chain_state_meta();
+    let tip = meta.best_full_block_id;
+    if tip == [0u8; 32] {
+        return Vec::new();
+    }
+    let previous = match state.input_blocks.as_ref() {
+        Some(rt) => rt.last_ordering_tip,
+        None => return Vec::new(),
+    };
+    if previous == Some(tip) {
+        return Vec::new();
+    }
+    // A tip whose parent is the tip we last reported is a linear apply;
+    // anything else (including the first tip we ever see) is a switch.
+    let extends_previous = previous.is_some_and(|prev| {
+        state
+            .store
+            .get_header_meta(&tip)
+            .ok()
+            .flatten()
+            .is_some_and(|m| m.parent_id == prev)
+    });
+    if let Some(rt) = state.input_blocks.as_mut() {
+        rt.last_ordering_tip = Some(tip);
+    }
+    if extends_previous {
+        on_ordering_block_applied(state, tip, meta.best_full_block_height, now)
+    } else {
+        on_ordering_reorg(state, tip, meta.best_full_block_height, now)
+    }
+}
+
 /// A full block was committed at a new best height (spec 7.6).
 pub(in crate::node) fn on_ordering_block_applied(
     state: &mut NodeState,
@@ -105,6 +148,9 @@ pub(in crate::node) fn seed_best_ordering(state: &mut NodeState) {
         let id = (meta.best_full_block_id != [0u8; 32]).then_some(meta.best_full_block_id);
         rt.processor_mut()
             .set_best_ordering(id, meta.best_full_block_height);
+        // The processor now agrees with the store, so the first tick
+        // must not re-announce the same tip as a chain event.
+        rt.last_ordering_tip = id;
     }
 }
 

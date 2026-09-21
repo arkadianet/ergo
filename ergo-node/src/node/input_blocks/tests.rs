@@ -2285,3 +2285,106 @@ fn expectation_records_are_pruned_when_their_request_leaves_the_tracker() {
         "a request the tracker no longer holds leaves no record behind"
     );
 }
+
+/// Round 2, finding 5: the ordering hook used to ride the mempool's
+/// tip-change diff, which sits behind `handle_mempool_tick`'s
+/// mempool-disabled early return — so a node with input blocks on and
+/// the mempool off would let the processor's ordering tip go stale while
+/// committed blocks advanced.
+///
+/// The pairing is now refused at config load, and the hook is driven
+/// from the committed state on the heartbeat tick regardless, which is
+/// what this pins: no mempool tick is involved anywhere.
+#[test]
+fn ordering_tip_reaches_the_processor_from_the_tick_not_the_mempool() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let headers = seed_header_chain(&mut state, 3);
+    seed_best_ordering(&mut state);
+    let before = state
+        .input_blocks
+        .as_ref()
+        .unwrap()
+        .processor()
+        .generation();
+
+    // Commit a block. Nothing touches the mempool notifier.
+    let tip = &headers[1];
+    let tip_id = header_id_of(tip);
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .advance_best_full_block(tip_id, tip.height)
+        .unwrap();
+
+    let _ = on_tick(&mut state, Instant::now());
+    let rt = state.input_blocks.as_ref().unwrap();
+    assert!(
+        rt.processor().generation() > before,
+        "the committed tip reached the processor"
+    );
+    assert_eq!(rt.last_ordering_tip, Some(tip_id));
+
+    // A second tick at the same tip is not a new event.
+    let generation = rt.processor().generation();
+    let _ = on_tick(&mut state, Instant::now());
+    assert_eq!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .processor()
+            .generation(),
+        generation,
+        "an unchanged tip is not re-announced"
+    );
+}
+
+/// Reorg-vs-linear is classified on the exact rule — does the new tip's
+/// parent pointer name the tip we last reported? — rather than on the
+/// mempool-level proxy "were any pooled transactions demoted", which
+/// would call a reorg with an empty pool a linear apply.
+#[test]
+fn ordering_tip_classifies_a_fork_switch_as_a_reorg() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let headers = seed_header_chain(&mut state, 3);
+    seed_best_ordering(&mut state);
+
+    let advance = |state: &mut NodeState, h: &Header| {
+        let id = header_id_of(h);
+        state
+            .store
+            .as_utxo_mut()
+            .unwrap()
+            .advance_best_full_block(id, h.height)
+            .unwrap();
+        let _ = on_tick(state, Instant::now());
+        id
+    };
+
+    // h1 then h2: h2's parent IS h1, so this is a linear apply.
+    advance(&mut state, &headers[0]);
+    let h2 = advance(&mut state, &headers[1]);
+    assert_eq!(
+        state.input_blocks.as_ref().unwrap().last_ordering_tip,
+        Some(h2)
+    );
+
+    // Now jump to h3's SIBLING position by going back to h1: h1's parent
+    // is not h2, so this is a switch, not an apply.
+    let generation = state
+        .input_blocks
+        .as_ref()
+        .unwrap()
+        .processor()
+        .generation();
+    let h1 = advance(&mut state, &headers[0]);
+    let rt = state.input_blocks.as_ref().unwrap();
+    assert_eq!(rt.last_ordering_tip, Some(h1));
+    assert!(
+        rt.processor().generation() > generation,
+        "a switch is an event too"
+    );
+}

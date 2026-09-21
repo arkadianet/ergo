@@ -31,7 +31,5 @@ pub(in crate::node) use dispatch::{
     handle as dispatch_frame, handle_ordering_inv, is_input_block_code, serve_modifier_request,
     Dispatched,
 };
-pub(in crate::node) use hooks::{
-    advertised_version, on_ordering_block_applied, on_ordering_reorg, on_tick, seed_best_ordering,
-};
+pub(in crate::node) use hooks::{advertised_version, on_tick, seed_best_ordering};
 pub(in crate::node) use runtime::InputBlocksRuntime;
