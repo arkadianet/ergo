@@ -57,6 +57,49 @@ impl NodeConfig {
                 );
             }
         }
+        let ib = &toml_cfg.input_blocks;
+        let input_blocks_enabled = ib.enabled.unwrap_or(false);
+        if input_blocks_enabled && network != Network::Devnet {
+            return Err("[input_blocks] enabled requires devnet".into());
+        }
+        let mut input_blocks_bounds = ergo_inputblocks::bounds::Bounds::default();
+        macro_rules! override_bound {
+            ($($f:ident),* $(,)?) => {
+                $( if let Some(v) = ib.bounds.$f { input_blocks_bounds.$f = v; } )*
+            };
+        }
+        override_bound!(
+            tx_cache_entries,
+            tx_cache_bytes,
+            tx_cache_ttl_ms,
+            waitlist_entries,
+            forks_per_ordering,
+            records_per_ordering,
+            records_total,
+            trees_total,
+            ordering_announcements,
+            staging_bytes_total,
+            requests_per_peer,
+            request_timeout_ms,
+            retired_jobs,
+            candidates_per_position,
+            digest_attempts_per_block,
+            prune_threshold,
+            ordering_announcement_prune_threshold,
+            height_reset_threshold,
+            staging_ttl_ms,
+            validation_retries_per_block,
+            digest_recovery_per_block,
+            validation_recovery_per_block,
+            pending_triggers,
+        );
+        let input_blocks = super::InputBlocksConfig {
+            enabled: input_blocks_enabled,
+            strict_field_binding: ib.strict_field_binding.unwrap_or(true),
+            relay_remote: ib.relay_remote.unwrap_or(false),
+            bounds: input_blocks_bounds,
+        };
+
         let chain_spec = Arc::new(ChainSpec::for_network(network));
         validate_supported(&chain_spec)?;
 
@@ -1136,6 +1179,7 @@ impl NodeConfig {
             mining_config,
             voting_targets,
             wallet_expose_private_keys: toml_cfg.wallet.expose_private_keys.unwrap_or(false),
+            input_blocks,
         })
     }
 }
@@ -1144,6 +1188,27 @@ impl NodeConfig {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    // ----- helpers -----
+
+    /// Build a `Cli` pointing `--config` at an existing TOML file.
+    fn cli_with_config(path: &std::path::Path) -> Cli {
+        Cli::try_parse_from(["ergo-node", "--config", path.to_str().unwrap()]).unwrap()
+    }
+
+    /// Write `contents` to a fresh tempfile and build a `Cli` pointing
+    /// `--config` at it. `NodeConfig::load` re-reads the path from the
+    /// returned `Cli` after this function returns, so the tempfile is
+    /// deliberately leaked (never deleted) to keep it on disk that long.
+    fn cli_with_config_text(contents: &str) -> Cli {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), contents).unwrap();
+        let cli = cli_with_config(file.path());
+        // Leak the tempfile so its path stays valid after this function
+        // returns and `NodeConfig::load` reads it back.
+        std::mem::forget(file);
+        cli
+    }
 
     // ----- happy path -----
 
@@ -1191,5 +1256,54 @@ mod tests {
             let error = NodeConfig::load(cli).unwrap_err();
             assert!(error.to_string().contains("devnet_max_block_cost"));
         }
+    }
+
+    // ----- input_blocks -----
+
+    #[test]
+    fn input_blocks_enabled_on_devnet_loads() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n[input_blocks]\nenabled = true\nstrict_field_binding = false\n[input_blocks.bounds]\nforks_per_ordering = 8\n").unwrap();
+        let cli = cli_with_config(file.path());
+        let cfg = NodeConfig::load(cli).unwrap();
+        assert!(cfg.input_blocks.enabled);
+        assert!(!cfg.input_blocks.strict_field_binding);
+        assert_eq!(cfg.input_blocks.bounds.forks_per_ordering, 8);
+        assert_eq!(
+            cfg.input_blocks.bounds.records_per_ordering,
+            ergo_inputblocks::bounds::Bounds::default().records_per_ordering
+        );
+    }
+
+    #[test]
+    fn input_blocks_enabled_on_public_networks_rejected() {
+        for network in ["mainnet", "testnet"] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(
+                file.path(),
+                format!("network = \"{network}\"\n[input_blocks]\nenabled = true\n"),
+            )
+            .unwrap();
+            let error = NodeConfig::load(cli_with_config(file.path())).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("[input_blocks] enabled requires devnet"),
+                "{network}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn input_blocks_default_is_disabled_with_default_bounds() {
+        let cfg = NodeConfig::load(cli_with_config_text(
+            "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n",
+        ))
+        .unwrap();
+        assert!(!cfg.input_blocks.enabled);
+        assert_eq!(
+            cfg.input_blocks.bounds,
+            ergo_inputblocks::bounds::Bounds::default()
+        );
     }
 }

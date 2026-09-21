@@ -1338,6 +1338,12 @@ fn cfg_with_mode(
         mining_config: ergo_mining::MiningConfig::default(),
         voting_targets: std::collections::BTreeMap::new(),
         wallet_expose_private_keys: false,
+        input_blocks: crate::config::InputBlocksConfig {
+            enabled: false,
+            strict_field_binding: true,
+            relay_remote: false,
+            bounds: ergo_inputblocks::bounds::Bounds::default(),
+        },
     }
 }
 

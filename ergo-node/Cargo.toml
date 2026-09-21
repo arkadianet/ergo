@@ -30,6 +30,7 @@ ergo-mining     = { workspace = true }
 ergo-indexer    = { workspace = true }
 ergo-api        = { workspace = true }
 ergo-rest-json  = { workspace = true }
+ergo-inputblocks = { workspace = true }
 redb            = { workspace = true, features = ["logging"] }
 bincode         = { workspace = true }
 arc-swap        = { workspace = true }

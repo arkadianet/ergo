@@ -238,6 +238,29 @@ pub struct NodeConfig {
     /// Resolved logging configuration. `default_level` always set;
     /// `file` is `Some(_)` only when `[logging.file]` is configured.
     pub logging: LoggingConfig,
+    /// `[input_blocks]` — the Matrix input-block processor. Devnet-only:
+    /// `enabled = true` on mainnet/testnet is rejected at load. Default
+    /// `enabled = false`, with `bounds` defaulted from
+    /// `ergo_inputblocks::bounds::Bounds::default()` and each field
+    /// individually overridable via `[input_blocks.bounds]`.
+    pub input_blocks: InputBlocksConfig,
+}
+
+/// Resolved `[input_blocks]` configuration (spec 6.3/7.4/7.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputBlocksConfig {
+    /// Master switch. Default `false`; devnet-only (validated at load).
+    pub enabled: bool,
+    /// Spec 6.3's strict-field-binding rule. Default `true`; switchable
+    /// off for parity measurement against a relaxed binding.
+    pub strict_field_binding: bool,
+    /// Relay of remote input blocks. Scala carries a `TODO` here — `true`
+    /// is a documented divergence from the reference node. Default `false`.
+    pub relay_remote: bool,
+    /// Resource bounds for the input-block processor. Defaults from
+    /// `Bounds::default()`; each field individually overridable via
+    /// `[input_blocks.bounds]`.
+    pub bounds: ergo_inputblocks::bounds::Bounds,
 }
 
 /// Resolved tracing subscriber configuration. Built from
