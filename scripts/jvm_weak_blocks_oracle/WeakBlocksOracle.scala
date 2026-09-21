@@ -298,8 +298,14 @@ object WeakBlocksOracle {
   // `ErgoCompilerHelpers.compileSourceV6` (test-scope in the ergo source tree;
   // reimplemented here directly against the runtime-classpath `SigmaCompiler`
   // so this harness needs only `.work/classpath`, not the test classpath).
+  private def compileSourceV5(source: String, treeVersion: Byte): ErgoTree =
+    compileSourceAt(2.toByte, source, treeVersion)
+
   private def compileSourceV6(source: String, treeVersion: Byte): ErgoTree =
-    VersionContext.withVersions(3.toByte, treeVersion) {
+    compileSourceAt(3.toByte, source, treeVersion)
+
+  private def compileSourceAt(scriptVersion: Byte, source: String, treeVersion: Byte): ErgoTree =
+    VersionContext.withVersions(scriptVersion, treeVersion) {
       val compiler = new SigmaCompiler(16.toByte)
       val header = ErgoTree.defaultHeaderWithVersion(treeVersion)
       compiler.compile(Map.empty, source)(new CompiletimeIRContext) match {
@@ -384,6 +390,157 @@ object WeakBlocksOracle {
     Json.obj("cases" -> cases.asJson)
   }
 
+
+  // ── input_block_validation: Scala `UtxoState.applyInputBlock` outcomes ──
+  // Builds a real UTXO state (three fixture boxes from
+  // `InputBlockProcessorSpecification` plus spendable filler boxes), advances it
+  // by real full blocks so `stateContext.lastHeaders` is non-empty (spec 6.4
+  // needs a real pre-header), and records the verdict + cost of
+  // `us.applyInputBlock(txs, previousTxs, header)` for each scenario.
+  //
+  // Runs against `.work/test-classpath` (ergo's Test scope) with the working
+  // directory set to `.work/source`, because `ErgoNodeTestConstants.initSettings`
+  // reads the relative path `src/test/resources/application.conf`.
+  def inputBlockValidationCases(): Json = {
+    import org.ergoplatform.DataInput
+    import org.ergoplatform.modifiers.ErgoFullBlock
+    import org.ergoplatform.nodeView.state.{BoxHolder, ErgoStateContext, UtxoState}
+    import org.ergoplatform.settings.Parameters
+    import org.ergoplatform.utils.ErgoCoreTestConstants.parameters
+    import org.ergoplatform.utils.ErgoNodeTestConstants.settings
+    import org.ergoplatform.utils.generators.ValidBlocksGenerators
+    import org.ergoplatform.wallet.boxes.ErgoBoxSerializer
+    import scorex.crypto.authds.ADKey
+    import scala.collection.JavaConverters._
+
+    val trueTree = ErgoTree.fromProposition(TrueProp)
+    val emptyProof = ProverResult(Array.emptyByteArray, ContextExtension.empty)
+
+    def box(v: Long, tree: ErgoTree, tag: String, idx: Short): ErgoBox = new ErgoBox(
+      value = v, ergoTree = tree, additionalTokens = Colls.emptyColl,
+      additionalRegisters = Map.empty, transactionId = bytesToId(Algos.hash(tag)),
+      index = idx, creationHeight = 0)
+
+    // The three fixture boxes of InputBlockProcessorSpecification, verbatim.
+    val eb1 = box(1000000000L, trueTree, "dummyTx", 0)
+    val eb2 = box(1000000000L, compileSourceV5("CONTEXT.minerPubKey.size >= 0", 0), "dummyTx2", 1)
+    val eb3 = box(1000000000L, trueTree, "dummyTx3", 2)
+    // Filler boxes: spent by the full blocks that advance the state, so eb1..eb3
+    // stay unspent and available to the input-block scenarios.
+    val fillers = (0 until 3).map(i => box(1000000000L, trueTree, s"filler$i", i.toShort))
+
+    val bh = BoxHolder(Seq(eb1, eb2, eb3) ++ fillers)
+    var us: UtxoState = ValidBlocksGenerators.createUtxoState(bh, parameters)
+
+    def spend(in: ErgoBox, outValue: Long, dataInputs: IndexedSeq[DataInput] = IndexedSeq.empty): ErgoTransaction =
+      ErgoTransaction(
+        IndexedSeq(Input(in.id, emptyProof)),
+        dataInputs,
+        IndexedSeq(new ErgoBoxCandidate(outValue, trueTree, 0)))
+
+    // Advance the state by three real full blocks (each spends one filler box).
+    var parentOpt: Option[ErgoFullBlock] = None
+    var blockTxs: Seq[ErgoTransaction] = Seq.empty
+    var utxo: Seq[ErgoBox] = bh.boxes.values.toSeq
+    fillers.foreach { f =>
+      val tx = spend(f, f.value)
+      val fb = ValidBlocksGenerators.validFullBlock(parentOpt, us, Seq(tx))
+      us = us.applyModifier(fb, None)(_ => ()).get
+      parentOpt = Some(fb)
+      blockTxs = blockTxs ++ Seq(tx)
+      utxo = utxo.filterNot(b => tx.inputs.exists(i => java.util.Arrays.equals(i.boxId, b.id))) ++ tx.outputs
+    }
+    val tipHeader = parentOpt.get.header
+    utxo.foreach(b => require(us.boxById(b.id).isDefined, s"tracked box ${hex(b.id)} not in state"))
+
+    // Scenario transactions.
+    val txA = spend(eb1, eb1.value)                        // spends eb1
+    val txB = spend(txA.outputs.head, txA.outputs.head.value) // spends txA's output
+    val txC = spend(eb2, eb2.value)                        // class II: reads CONTEXT.minerPubKey
+    val txD = ErgoTransaction(                             // spends eb3, data-input = txA's output
+      IndexedSeq(Input(eb3.id, emptyProof)),
+      IndexedSeq(DataInput(txA.outputs.head.id)),
+      IndexedSeq(new ErgoBoxCandidate(eb3.value, trueTree, 0)))
+    val txADup = spend(eb1, eb1.value - 1)                 // different tx, same input as txA
+    val missingBoxId: ADKey = ADKey @@ (Algos.hash("no such box"): Array[Byte])
+    val txMissing = ErgoTransaction(
+      IndexedSeq(Input(missingBoxId, emptyProof)),
+      IndexedSeq(new ErgoBoxCandidate(1000000L, trueTree, 0)))
+
+    // `cost_limit_rejected` needs maxBlockCost lowered on the state context. The
+    // fixture API has no public way to swap parameters on a live UtxoState
+    // (`persistentProver` is protected, `stateContext` is read from the store),
+    // so we build a sibling UtxoState over the *same* prover/store with an
+    // overridden `stateContext`. Reflection is only used to read the protected
+    // `persistentProver` accessor; nothing is mutated.
+    def withBlockCost(base: UtxoState, cost: Int): UtxoState = {
+      val m = classOf[UtxoState].getMethod("persistentProver")
+      m.setAccessible(true)
+      val pp = m.invoke(base).asInstanceOf[scorex.crypto.authds.avltree.batch.PersistentBatchAVLProver[Digest32, org.ergoplatform.settings.Algos.HF]]
+      new UtxoState(pp, base.version, base.store, settings) {
+        override def stateContext: ErgoStateContext = {
+          val sc = base.stateContext
+          new ErgoStateContext(sc.lastHeaders, sc.lastExtensionOpt, sc.genesisStateDigest,
+            sc.currentParameters.withBlockCost(cost), sc.validationSettings, sc.votingData)(sc.chainSettings)
+        }
+      }
+    }
+
+    val scenarios: Seq[(String, Seq[ErgoTransaction], Seq[ErgoTransaction], UtxoState)] = Seq(
+      ("normal_tx_ok", Seq(txA), Seq.empty, us),
+      ("class2_tx_rejected", Seq(txC), Seq.empty, us),
+      ("chained_in_block_ok", Seq(txA, txB), Seq.empty, us),
+      ("out_of_order_rejected", Seq(txB, txA), Seq.empty, us),
+      ("data_input_forward_ok", Seq(txD, txA), Seq.empty, us),
+      ("double_spend_current_rejected", Seq(txA, txADup), Seq.empty, us),
+      ("double_spend_previous_rejected", Seq(txA), Seq(txA), us),
+      ("spend_previous_output_ok", Seq(txB), Seq(txA), us),
+      ("missing_utxo_rejected", Seq(txMissing), Seq.empty, us),
+      ("cost_limit_rejected", Seq(txA), Seq.empty, withBlockCost(us, 1000)))
+
+    // Scala wraps a SoftFieldAccessException thrown inside script evaluation into
+    // a generic `MalformedModifierError("Scripts ... should pass verification")`,
+    // so `error_class` alone cannot tell a soft-field rejection from any other
+    // script failure. This discriminator is Scala-derived rather than asserted by
+    // hand: a transaction whose first input validates under `softFieldsAllowed =
+    // true` and fails under `false` was rejected *because of* a soft field.
+    def softFieldSensitive(state: UtxoState, tx: ErgoTransaction): Boolean = {
+      val sc = state.stateContext
+      def run(allowed: Boolean) =
+        try state.validateWithCost(tx, sc, sc.currentParameters.maxBlockCost, None, allowed)
+        catch { case NonFatal(t) => scala.util.Failure(t) }
+      run(true).isSuccess && run(false).isFailure
+    }
+
+    val cases = scenarios.map { case (name, txs, prev, state) =>
+      val sc = state.stateContext
+      val (outcome, errClass, errMsg, cost) =
+        try {
+          state.applyInputBlock(txs, prev, tipHeader) match {
+            case scala.util.Success(c) => ("Ok", "", "", Some(c))
+            case scala.util.Failure(t) => ("Failure", t.getClass.getSimpleName, String.valueOf(t.getMessage), None)
+          }
+        } catch {
+          case NonFatal(t) => ("Failure", t.getClass.getSimpleName, String.valueOf(t.getMessage), None)
+        }
+      Json.obj(
+        "name" -> name.asJson,
+        "state_root_before" -> hex(state.rootDigest).asJson,
+        "block_txs_hex" -> blockTxs.map(t => hex(ErgoTransactionSerializer.toBytes(t))).asJson,
+        "last_headers_hex" -> sc.lastHeaders.map(h => hex(HeaderSerializer.toBytes(h))).asJson,
+        "current_parameters" -> sc.currentParameters.parametersTable.map { case (k, v) => k.toInt.toString -> v }.asJson,
+        "utxo_boxes_hex" -> utxo.map(b => hex(ErgoBoxSerializer.toBytes(b))).asJson,
+        "previous_tx_hex" -> prev.map(t => hex(ErgoTransactionSerializer.toBytes(t))).asJson,
+        "tx_hex" -> txs.map(t => hex(ErgoTransactionSerializer.toBytes(t))).asJson,
+        "outcome" -> outcome.asJson,
+        "error_class" -> errClass.asJson,
+        "error_message" -> errMsg.asJson,
+        "soft_field_sensitive" -> txs.exists(t => softFieldSensitive(state, t)).asJson,
+        "cost" -> cost.asJson)
+    }
+    Json.obj("cases" -> cases.asJson)
+  }
+
   def main(args: Array[String]): Unit = {
     val out = args(0) match {
       case "announcement" => announcementCases()
@@ -394,6 +551,7 @@ object WeakBlocksOracle {
       case "extension_leaf" => extensionLeafCases()
       case "extension_proof" => extensionProofCases()
       case "soft_fields" => softFieldCases()
+      case "input_block_validation" => inputBlockValidationCases()
       case other => sys.error(s"unknown vector $other")
     }
     println(out.spaces2)

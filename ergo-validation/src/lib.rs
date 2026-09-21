@@ -36,6 +36,7 @@ pub mod context;
 pub mod cost;
 pub mod error;
 pub mod header;
+pub mod input_block;
 pub mod popow;
 pub mod pre_header;
 pub mod storage_rent;
