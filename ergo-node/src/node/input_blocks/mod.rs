@@ -37,7 +37,7 @@ pub(in crate::node) use dispatch::{
     handle as dispatch_frame, handle_ordering_inv, is_input_block_code, serve_modifier_request,
     Dispatched,
 };
-pub(in crate::node) use effects::{apply_chain_change, execute_effects};
+pub(in crate::node) use effects::{apply_chain_change, execute_effects, relay_peers};
 pub(in crate::node) use hooks::{
     advertised_version, on_ordering_block_applied, on_ordering_reorg, on_tick, seed_best_ordering,
 };

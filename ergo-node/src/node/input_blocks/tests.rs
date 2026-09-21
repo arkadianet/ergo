@@ -1297,3 +1297,154 @@ fn input_block_timeouts_are_forgotten_not_redistributed() {
         ModifierTypeId::Header.as_byte()
     ));
 }
+
+// ----- relay eligibility (finding 3) -----
+
+/// Teach the coordinator this peer's height by delivering a V2 SyncInfo
+/// carrying one real header at that height — the same path a live peer
+/// takes.
+fn set_peer_height(state: &mut NodeState, peer: std::net::SocketAddr, height: u32) {
+    let header = ts::header([0u8; 32], height, u64::from(height) + 900_000, [0u8; 32]);
+    let (bytes, _) = serialize_header(&header).unwrap();
+    let payload = ergo_p2p::message::serialize_sync_info(&ergo_p2p::message::SyncInfo::V2 {
+        headers: vec![bytes],
+    })
+    .unwrap();
+    let _ = send_to(state, peer, ergo_p2p::message::CODE_SYNC_INFO, &payload);
+    assert_eq!(
+        state
+            .coordinator
+            .peer_sync_snapshots()
+            .get(&peer)
+            .and_then(|s| s.peer_height),
+        Some(height),
+        "fixture must actually record a height"
+    );
+}
+
+/// Register a peer with an explicit `Mode` feature (or none at all).
+fn handshake_peer_with_mode(
+    state: &mut NodeState,
+    port: u16,
+    version: ergo_p2p::handshake::Version,
+    mode: Option<ergo_p2p::handshake::PeerFeature>,
+    now: Instant,
+) -> (
+    std::net::SocketAddr,
+    tokio::sync::mpsc::Receiver<ergo_p2p::framing::MessageFrame>,
+) {
+    // One peer per IP: the peer manager enforces a per-IP connection
+    // limit, and this fixture needs several peers at once.
+    // One peer per /16: the peer manager enforces per-IP and per-subnet
+    // connection limits, and this fixture needs several peers at once.
+    let addr: std::net::SocketAddr = format!("10.{}.0.1:9030", port % 256).parse().unwrap();
+    state.peer_manager.register_outbound(addr, now).unwrap();
+    state.peer_manager.mark_tcp_connected(&addr);
+    let mut spec = state.our_handshake.peer_spec.clone();
+    spec.version = version;
+    spec.features = mode.into_iter().collect();
+    state
+        .peer_manager
+        .complete_handshake(&addr, spec, None, now)
+        .unwrap();
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    state.registry.peers.insert(
+        addr,
+        crate::node::state::PeerRuntime {
+            sync_version: ergo_p2p::peer::SyncVersion::V2,
+            outbound_tx: tx,
+        },
+    );
+    (addr, rx)
+}
+
+fn utxo_mode() -> ergo_p2p::handshake::PeerFeature {
+    ergo_p2p::handshake::PeerFeature::Mode {
+        state_type: 0,
+        verify_tx: true,
+        nipopow: None,
+        blocks_to_keep: -1,
+    }
+}
+
+fn digest_mode() -> ergo_p2p::handshake::PeerFeature {
+    ergo_p2p::handshake::PeerFeature::Mode {
+        state_type: 1,
+        verify_tx: false,
+        nipopow: None,
+        blocks_to_keep: -1,
+    }
+}
+
+/// Finding 3: relay eligibility must be AFFIRMATIVE. Degrading open
+/// ("no Mode feature? probably fine") relays input blocks to nodes that
+/// cannot use them and to peers whose chain position we do not know.
+#[test]
+fn relay_requires_affirmative_utxo_mode_version_and_in_window_height() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let our_height = state.store.chain_state_meta().best_full_block_height;
+
+    let (good, _g) = handshake_peer_with_mode(
+        &mut state,
+        19630,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        Some(utxo_mode()),
+        now,
+    );
+    set_peer_height(&mut state, good, our_height + 1);
+
+    let (no_mode, _a) = handshake_peer_with_mode(
+        &mut state,
+        19631,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        None,
+        now,
+    );
+    set_peer_height(&mut state, no_mode, our_height);
+
+    let (digest, _b) = handshake_peer_with_mode(
+        &mut state,
+        19632,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        Some(digest_mode()),
+        now,
+    );
+    set_peer_height(&mut state, digest, our_height);
+
+    let (old, _c) = handshake_peer_with_mode(
+        &mut state,
+        19633,
+        ergo_p2p::handshake::Version::CURRENT,
+        Some(utxo_mode()),
+        now,
+    );
+    set_peer_height(&mut state, old, our_height);
+
+    // Height known but far away.
+    let (far, _d) = handshake_peer_with_mode(
+        &mut state,
+        19634,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        Some(utxo_mode()),
+        now,
+    );
+    set_peer_height(&mut state, far, our_height + 50);
+
+    // Eligible in every respect except that we have never learned a height.
+    let (unknown_height, _e) = handshake_peer_with_mode(
+        &mut state,
+        19635,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        Some(utxo_mode()),
+        now,
+    );
+
+    assert_eq!(
+        relay_peers(&state),
+        vec![good],
+        "only the affirmatively eligible peer is relayed to"
+    );
+    let _ = (no_mode, digest, old, far, unknown_height);
+}

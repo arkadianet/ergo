@@ -19,7 +19,7 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use ergo_inputblocks::processor::{Body, DropReason, Effect, Event};
+use ergo_inputblocks::processor::{Body, Effect, Event};
 use ergo_inputblocks::types::{InputBlockId, OrderingId, PeerTag};
 use ergo_mempool::input_blocks::{RestoreBody, RestoreOutcome};
 use ergo_p2p::handshake::{PeerFeature, Version};
@@ -428,16 +428,25 @@ pub(in crate::node) fn apply_chain_change(
     route_mempool_actions(state, mempool_actions)
 }
 
-/// Peers worth relaying an input block / ordering announcement to:
-/// protocol version ≥ 6.5.0, UTXO mode, and a reported height within
-/// ±[`RELAY_HEIGHT_WINDOW`] of our best full block.
+/// Peers worth relaying an input block / ordering announcement to.
 ///
-/// Both capability facts degrade OPEN: a peer that advertised no `Mode`
-/// feature, and a peer whose height we have not learned (a V2 SyncInfo
-/// peer with no overlap yet), are treated as eligible. Relaying to a peer
-/// that cannot use the message costs one small frame; silently never
-/// relaying because a fact is missing costs propagation.
-fn relay_peers(state: &NodeState) -> Vec<PeerId> {
+/// AFFIRMATIVE eligibility on all three axes — a fact we do not have is
+/// a reason NOT to relay, not a reason to guess:
+///
+/// * protocol version >= 6.5.0, so the peer speaks these messages at all;
+/// * a `PeerFeature::Mode` that says UTXO (`state_type == 0`) — an input
+///   block is only actionable against a UTXO set, so a peer that did not
+///   tell us it keeps one cannot use the frame;
+/// * a height we have actually observed, within
+///   ±[`RELAY_HEIGHT_WINDOW`] of our best full block — an input block is
+///   actionable only at `best_full_block_height + 1`, so a peer parked
+///   fifty blocks away has nothing to do with it, and a peer whose
+///   position we have never learned is indistinguishable from one.
+///
+/// The earlier degrade-open reading of this rule relayed to peers with
+/// no `Mode` feature and to peers of unknown height, which is broader
+/// than spec 9.2 allows.
+pub(in crate::node) fn relay_peers(state: &NodeState) -> Vec<PeerId> {
     let our_height = state.store.chain_state_meta().best_full_block_height;
     let snapshots = state.coordinator.peer_sync_snapshots();
     let mut peers: Vec<PeerId> = state
@@ -447,29 +456,21 @@ fn relay_peers(state: &NodeState) -> Vec<PeerId> {
         .filter(|p| match &p.peer_spec {
             Some(spec) => {
                 spec.version >= Version::SUBBLOCKS
-                    && spec.features.iter().all(|f| {
-                        // Only a Mode feature that explicitly says "digest"
-                        // disqualifies; an absent Mode feature does not.
-                        !matches!(f, PeerFeature::Mode { state_type: 1, .. })
-                    })
+                    && spec
+                        .features
+                        .iter()
+                        .any(|f| matches!(f, PeerFeature::Mode { state_type: 0, .. }))
             }
             None => false,
         })
-        .filter(
-            |p| match snapshots.get(&p.addr).and_then(|s| s.peer_height) {
-                Some(h) => h.abs_diff(our_height) <= RELAY_HEIGHT_WINDOW,
-                None => true,
-            },
-        )
+        .filter(|p| {
+            snapshots
+                .get(&p.addr)
+                .and_then(|s| s.peer_height)
+                .is_some_and(|h| h.abs_diff(our_height) <= RELAY_HEIGHT_WINDOW)
+        })
         .map(|p| p.addr)
         .collect();
     peers.sort();
     peers
-}
-
-/// Telemetry helper for the effect arms that only count. Kept so the
-/// `DropReason` import stays honest if the arms above are refactored.
-#[allow(dead_code)]
-fn count_only(rt: &mut InputBlocksRuntime, reason: DropReason) {
-    rt.counters.bump(&reason);
 }
