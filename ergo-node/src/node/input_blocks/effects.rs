@@ -33,6 +33,7 @@ use tracing::{debug, warn};
 
 use super::super::admission::route_mempool_actions;
 use super::super::NodeState;
+use super::super::{hedge_request_modifiers, register_expectation, tracked_request_modifier};
 use super::ctx::{build_ctx_data, transactions_section_id};
 use super::runtime::InputBlocksRuntime;
 use super::validate::{run_validation, ValidateJob};
@@ -79,7 +80,7 @@ fn execute_one(
 ) {
     match effect {
         Effect::RequestInputBlock { id, from } => {
-            request_modifier(state, rt, from, ModifierTypeId::InputBlock, id, out);
+            request_modifier(state, rt, from, ModifierTypeId::InputBlock, id, now, out);
         }
         Effect::RequestTransactionIds {
             input_block_id,
@@ -91,6 +92,7 @@ fn execute_one(
                 from,
                 ModifierTypeId::InputBlockTransactionIds,
                 input_block_id,
+                now,
                 out,
             );
         }
@@ -102,6 +104,26 @@ fn execute_one(
             let Some(peer) = resolve(rt, from, "RequestTransactions") else {
                 return;
             };
+            // Message 105 is its own frame, not a `RequestModifier`, and
+            // its answer arrives as code 104 — but it still needs a
+            // delivery expectation, or that reply looks unsolicited (no
+            // byte-cap exemption, no progress credit). Registering also
+            // suppresses a duplicate ask while one is outstanding.
+            if register_expectation(
+                state,
+                peer,
+                ModifierTypeId::InputBlockTransactionIds.as_byte(),
+                &[input_block_id],
+                now,
+            )
+            .is_empty()
+            {
+                debug!(
+                    block = %hex::encode(input_block_id),
+                    "input_blocks: body request already outstanding"
+                );
+                return;
+            }
             let payload =
                 message::serialize_input_block_txs_request(&message::InputBlockTxsRequest {
                     input_block_id,
@@ -114,7 +136,7 @@ fn execute_one(
             });
         }
         Effect::RequestOrderingHeader { header_id, from } => {
-            request_modifier(state, rt, from, ModifierTypeId::Header, header_id, out);
+            request_modifier(state, rt, from, ModifierTypeId::Header, header_id, now, out);
         }
         Effect::RequestBlockTransactions { header_id, from } => {
             // The section's modifier id is the header's transactions root,
@@ -132,6 +154,7 @@ fn execute_one(
                 from,
                 ModifierTypeId::BlockTransactions,
                 section_id,
+                now,
                 out,
             );
         }
@@ -265,13 +288,23 @@ fn execute_one(
     }
 }
 
-/// `RequestModifier` (code 22) for one id of one modifier type.
+/// `RequestModifier` (code 22) for one id of one modifier type, through
+/// the node's delivery tracker.
+///
+/// Hedging is applied ONLY to the ordinary block modifiers (header,
+/// block transactions): any archive peer can answer those and the first
+/// reply wins. The input-block family is never hedged — those requests
+/// are addressed to the peer that told us it has the block, the
+/// processor charged THAT peer one of its `requests_per_peer` slots, and
+/// a hedge peer's reply would be a delivery the processor never asked
+/// for.
 fn request_modifier(
-    state: &NodeState,
+    state: &mut NodeState,
     rt: &InputBlocksRuntime,
     from: PeerTag,
     type_id: ModifierTypeId,
     id: [u8; 32],
+    now: Instant,
     out: &mut Vec<Action>,
 ) {
     let Some(peer) = resolve(rt, from, "RequestModifier") else {
@@ -281,17 +314,14 @@ fn request_modifier(
         debug!(%peer, "input_blocks: request dropped, peer is no longer connected");
         return;
     }
-    let inv = InvData {
-        type_id: type_id.as_byte(),
-        ids: vec![id],
-    };
-    match message::serialize_inv(&inv) {
-        Ok(payload) => out.push(Action::SendToPeer {
-            peer,
-            code: message::CODE_REQUEST_MODIFIER,
-            payload,
-        }),
-        Err(e) => warn!(error = %e, "input_blocks: RequestModifier does not serialize"),
+    let actions = tracked_request_modifier(state, peer, type_id.as_byte(), &[id], now);
+    if actions.is_empty() {
+        return;
+    }
+    if ModifierTypeId::is_input_block_family(type_id.as_byte()) {
+        out.extend(actions);
+    } else {
+        out.extend(hedge_request_modifiers(state, actions, peer));
     }
 }
 

@@ -256,10 +256,7 @@ pub(in crate::node) fn tracked_request_modifier(
             state.coordinator.delivery_mut().forget_received(id);
         }
     }
-    let registered = state
-        .coordinator
-        .delivery_mut()
-        .request(peer, type_id, ids, now);
+    let registered = register_expectation(state, peer, type_id, ids, now);
     if registered.is_empty() {
         return Vec::new();
     }
@@ -278,4 +275,32 @@ pub(in crate::node) fn tracked_request_modifier(
             Vec::new()
         }
     }
+}
+
+/// Register a delivery expectation WITHOUT emitting a `RequestModifier`.
+///
+/// Message 105 (`RequestInputBlockTransactions`) is its own wire frame,
+/// not a `RequestModifier`, and its answer arrives as code 104 — but it
+/// still needs the expectation, so the reply is recognised as solicited
+/// (byte-cap exemption, progress credit) instead of looking unsolicited.
+/// Keyed by the input block id, like the other phases of the same block.
+///
+/// Returns the ids actually registered; empty means "already in flight",
+/// which is how a duplicate request is suppressed.
+pub(in crate::node) fn register_expectation(
+    state: &mut NodeState,
+    peer: PeerId,
+    type_id: u8,
+    ids: &[[u8; 32]],
+    now: Instant,
+) -> Vec<[u8; 32]> {
+    if ergo_p2p::types::ModifierTypeId::is_input_block_family(type_id) {
+        for id in ids {
+            state.coordinator.delivery_mut().forget_received(id);
+        }
+    }
+    state
+        .coordinator
+        .delivery_mut()
+        .request(peer, type_id, ids, now)
 }

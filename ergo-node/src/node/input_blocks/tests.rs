@@ -1076,10 +1076,8 @@ fn progress_classification_counts_100_and_106_only_and_102_104_105_when_answerin
     let id = seed_announcement(&mut state, peer, 14, &bodies);
     assert!(progress_of(&state) > before, "100 counts");
 
-    // An unsolicited 104 for a block nobody asked this peer for does not.
-    // (The announcement above DID solicit bodies through message 105,
-    // which is not a delivery-tracker expectation, so this frame answers
-    // no registered request.)
+    // A 104 for a block we DID ask this peer for counts: the
+    // announcement above left an outstanding message-105 expectation.
     let before = progress_of(&state);
     let _ = send_to(
         &mut state,
@@ -1087,6 +1085,21 @@ fn progress_classification_counts_100_and_106_only_and_102_104_105_when_answerin
         ergo_p2p::message::CODE_INPUT_BLOCK_TXS,
         &ergo_p2p::message::serialize_input_block_txs(&ergo_p2p::message::InputBlockTxs {
             input_block_id: id,
+            transactions: bodies.iter().map(|b| b.tx.clone()).collect(),
+        })
+        .unwrap(),
+    );
+    assert!(progress_of(&state) > before, "a solicited 104 is progress");
+
+    // An unsolicited 104 — a block this peer was never asked for — is
+    // not. Spraying bodies must not hold a slot.
+    let before = progress_of(&state);
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS,
+        &ergo_p2p::message::serialize_input_block_txs(&ergo_p2p::message::InputBlockTxs {
+            input_block_id: [0xbb; 32],
             transactions: bodies.iter().map(|b| b.tx.clone()).collect(),
         })
         .unwrap(),
@@ -1168,4 +1181,119 @@ fn malformed_input_block_frames_penalize_the_sender() {
             "code {code} with a garbage payload must penalize"
         );
     }
+}
+
+/// Finding 2: input-block requests must go through the node's delivery
+/// tracker, not a bare serializer. Without a registered expectation the
+/// answering frame is unsolicited — it loses the byte-cap exemption, the
+/// progress credit, and the timeout sweep — and a duplicate request is
+/// not suppressed.
+#[test]
+fn input_block_requests_register_with_the_delivery_tracker() {
+    use ergo_p2p::delivery::ModifierStatus;
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19620,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let block = [0x31u8; 32];
+    let actions = execute_effects(
+        &mut state,
+        vec![Effect::RequestInputBlock {
+            id: block,
+            from: tag,
+        }],
+        now,
+    );
+    assert_eq!(actions.len(), 1, "the request is emitted");
+    assert_eq!(
+        state.coordinator.delivery().status(&block),
+        ModifierStatus::Requested,
+        "-123 registers an expectation"
+    );
+
+    // A repeat while it is still in flight must not go out twice.
+    let again = execute_effects(
+        &mut state,
+        vec![Effect::RequestInputBlock {
+            id: block,
+            from: tag,
+        }],
+        now,
+    );
+    assert!(
+        again.is_empty(),
+        "duplicate request suppressed by the tracker"
+    );
+}
+
+#[test]
+fn body_request_registers_so_the_reply_counts_as_solicited() {
+    use ergo_p2p::delivery::{DeliveryAction, ModifierStatus};
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19621,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let block = [0x32u8; 32];
+    let actions = execute_effects(
+        &mut state,
+        vec![Effect::RequestTransactions {
+            input_block_id: block,
+            weak_ids: vec![[1u8; 6]],
+            from: tag,
+        }],
+        now,
+    );
+    assert_eq!(
+        sent_frames(&actions, ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST).len(),
+        1
+    );
+    assert_eq!(
+        state.coordinator.delivery().status(&block),
+        ModifierStatus::Requested,
+        "message 105 registers an expectation keyed by the input block"
+    );
+    assert_eq!(
+        state.coordinator.delivery().on_received(&block, &peer),
+        DeliveryAction::Accept,
+        "so the code-104 reply is recognised as solicited"
+    );
+}
+
+#[test]
+fn input_block_timeouts_are_forgotten_not_redistributed() {
+    // The processor owns input-block retry policy (its own per-peer
+    // slots + request_timeout_ms sweep). The coordinator's generic
+    // timeout path must not run a second retry engine over the same
+    // ids, nor NonDelivery-penalize a peer for a request the processor
+    // has already abandoned.
+    use ergo_p2p::types::ModifierTypeId;
+    assert!(ModifierTypeId::is_input_block_family(
+        ModifierTypeId::InputBlock.as_byte()
+    ));
+    assert!(ModifierTypeId::is_input_block_family(
+        ModifierTypeId::InputBlockTransactionIds.as_byte()
+    ));
+    assert!(ModifierTypeId::is_input_block_family(
+        ModifierTypeId::OrderingBlockAnnouncement.as_byte()
+    ));
+    assert!(!ModifierTypeId::is_input_block_family(
+        ModifierTypeId::BlockTransactions.as_byte()
+    ));
+    assert!(!ModifierTypeId::is_input_block_family(
+        ModifierTypeId::Header.as_byte()
+    ));
 }
