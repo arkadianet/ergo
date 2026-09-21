@@ -16,6 +16,13 @@ pub enum ModifierTypeId {
     Extension = 108,
     /// Mempool transaction (id 2 — auxiliary, not a block section).
     Transaction = 2,
+    /// Input-block (weak block) announcement (id -123 — auxiliary, below
+    /// the block-section threshold like `Transaction`).
+    InputBlock = -123,
+    /// Input-block weak transaction ids (id -122 — auxiliary).
+    InputBlockTransactionIds = -122,
+    /// Ordering-block announcement (id -121 — auxiliary).
+    OrderingBlockAnnouncement = -121,
 }
 
 impl ModifierTypeId {
@@ -29,6 +36,9 @@ impl ModifierTypeId {
             104 => Some(Self::ADProofs),
             108 => Some(Self::Extension),
             2 => Some(Self::Transaction),
+            -123 => Some(Self::InputBlock),
+            -122 => Some(Self::InputBlockTransactionIds),
+            -121 => Some(Self::OrderingBlockAnnouncement),
             _ => None,
         }
     }
@@ -151,6 +161,24 @@ mod tests {
         // body section.
         assert!(ModifierTypeId::is_block_section(101));
         assert!(!ModifierTypeId::is_block_body_section(101));
+    }
+
+    #[test]
+    fn modifier_type_id_from_byte_maps_negative_input_block_ids() {
+        // The three weak-block auxiliary modifier ids are negative as i8
+        // (-123, -122, -121), matching Scala `NetworkObjectTypeId`. They
+        // round-trip through as_byte and stay below the block-section
+        // threshold like `Transaction` (id 2).
+        for (byte, expected) in [
+            (-123i8 as u8, ModifierTypeId::InputBlock),
+            (-122i8 as u8, ModifierTypeId::InputBlockTransactionIds),
+            (-121i8 as u8, ModifierTypeId::OrderingBlockAnnouncement),
+        ] {
+            let parsed = ModifierTypeId::from_byte(byte).unwrap();
+            assert_eq!(parsed, expected);
+            assert_eq!(parsed.as_byte(), byte);
+            assert!(!ModifierTypeId::is_block_section(byte));
+        }
     }
 }
 

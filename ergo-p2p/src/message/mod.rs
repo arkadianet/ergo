@@ -32,6 +32,9 @@ pub const CODE_UTXO_CHUNK: u8 = 81;
 pub const CODE_GET_NIPOPOW_PROOF: u8 = 90;
 pub const CODE_NIPOPOW_PROOF: u8 = 91;
 
+pub mod input_blocks;
+pub use input_blocks::*;
+
 const MAX_INV_OBJECTS: usize = 400;
 const MODIFIER_ID_SIZE: usize = 32;
 const MAX_MODIFIER_MESSAGE_SIZE: usize = 2_048_576;

@@ -285,7 +285,16 @@ pub(in crate::node) fn handle_message(
                             })
                             .collect()
                     }
-                    None => Vec::new(),
+                    // Input-block / weak-block modifiers (id < 50, like
+                    // `Transaction`) are never served via the generic
+                    // `RequestModifier` inventory path — they have their
+                    // own dedicated messages (codes 100/102/104/105/106).
+                    Some(
+                        ModifierTypeId::InputBlock
+                        | ModifierTypeId::InputBlockTransactionIds
+                        | ModifierTypeId::OrderingBlockAnnouncement,
+                    )
+                    | None => Vec::new(),
                 };
                 if hits.is_empty() {
                     // Asking costs nothing; being served does. Only a
