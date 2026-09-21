@@ -360,6 +360,28 @@ impl InputBlocksTree {
 /// any other fork whose `first_to_complete()` is also `completed_id`.
 /// Extracted once since the two call sites were identical apart from
 /// which index/id/rollback list they pass in.
+///
+/// # Divergence D3 — sibling completions are accumulated, Scala discards
+///
+/// Scala builds `updTree` from the *original* `forks` on every sibling
+/// completion: `InputBlocksProcessor.scala:609` (fork-switch branch) and
+/// `:639` (linear branch) both run
+/// `updTree = new InputBlocksTree(forks.updated(idx, ibc))`, where
+/// `forks` is the pre-application list. The tree that is finally stored
+/// therefore keeps only the *last* sibling's completion and throws away
+/// both the `forks.updated(index, updated_fork)` this function is here
+/// to install and every earlier sibling's completion. When no sibling
+/// completes — the common case — the two implementations agree, which is
+/// why the ported corpus does not separate them.
+///
+/// This port accumulates instead: the applied fork is installed first and
+/// each sibling completion is folded into that same list. That is an
+/// intentional, reported divergence (upstream finding F8), not an
+/// accident, and it is in the safe direction — it preserves application
+/// progress Scala drops. It is documented rather than reproduced because
+/// reproducing it would mean deliberately losing a validated block's
+/// application, which the node's mempool accounting then could not
+/// explain.
 fn finalize_progress(
     forks_before: &[InputBlocksChain],
     index: usize,

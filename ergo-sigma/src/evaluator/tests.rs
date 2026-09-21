@@ -13153,6 +13153,18 @@ fn pre_header_timestamp_via_method_call_with_soft_fields_disallowed_errors() {
 // call's fixed cost is charged. Both are pinned here because they are the
 // only observable difference between an allowed and a rejected evaluation
 // besides the error itself.
+//
+// NOT ORACLE TESTS, and named so they cannot be mistaken for any. The
+// numbers they compare are both Rust's, so neither pins an absolute
+// rejection cost — the Scala vectors in `test-vectors/weak-blocks/
+// soft_fields.json` carry no cost for a rejected case, because the
+// harness cannot observe the accumulator once the exception has unwound.
+// What these assert is the *ordering invariant* read off the pinned Scala
+// source above (check-before-`addFixedCost` for the SPreHeader methods,
+// check-after for `minerPubKey`), expressed as a difference between two
+// Rust evaluations. Plan 2 follow-up: extend the harness to record the
+// accumulator at throw for the SoftFieldAccess cases, at which point
+// these become real oracle assertions.
 fn total_cost_of(expr: &Expr, ctx: &ReductionContext<'_>) -> (u64, Option<EvalError>) {
     let mut env = Env::new();
     let mut depth = 0usize;
@@ -13163,7 +13175,7 @@ fn total_cost_of(expr: &Expr, ctx: &ReductionContext<'_>) -> (u64, Option<EvalEr
 }
 
 #[test]
-fn rejected_pre_header_timestamp_leaves_its_method_cost_uncharged() {
+fn rejected_pre_header_timestamp_method_cost_ordering_invariant_from_scala_source() {
     let expr = context_property_call(105, 3);
     let allowed = ReductionContext::minimal(100, 0);
     let mut denied = ReductionContext::minimal(100, 0);
@@ -13186,7 +13198,7 @@ fn rejected_pre_header_timestamp_leaves_its_method_cost_uncharged() {
 }
 
 #[test]
-fn rejected_context_miner_pub_key_still_charges_its_method_cost() {
+fn rejected_context_miner_pub_key_method_cost_ordering_invariant_from_scala_source() {
     let expr = context_property_call(101, 10);
     let allowed = ReductionContext::minimal(100, 0);
     let mut denied = ReductionContext::minimal(100, 0);
