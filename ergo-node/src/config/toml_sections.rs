@@ -312,6 +312,15 @@ pub(super) struct TomlMempool {
 pub(super) struct TomlChain {
     /// Private devnet genesis cost cap; forbidden on public networks.
     pub(super) devnet_max_block_cost: Option<u32>,
+    /// Private devnet initial difficulty, hex (Scala
+    /// `chain.initialDifficultyHex`). The devnet spec's default is `01`,
+    /// which makes every Autolykos solution an ordering block — input
+    /// blocks need a target above 1. Forbidden on public networks.
+    pub(super) devnet_initial_difficulty_hex: Option<String>,
+    /// Private devnet miner-reward maturity delay in blocks (Scala
+    /// `monetary.minerRewardDelay`, default 720). Forbidden on public
+    /// networks.
+    pub(super) devnet_miner_reward_delay: Option<u32>,
     /// Override the network's default script-validation checkpoint
     /// height. Use 0 to disable.
     pub(super) script_validation_checkpoint_height: Option<u32>,

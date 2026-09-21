@@ -100,7 +100,31 @@ impl NodeConfig {
             bounds: input_blocks_bounds,
         };
 
-        let chain_spec = Arc::new(ChainSpec::for_network(network));
+        let mut spec = ChainSpec::for_network(network);
+        // Private-devnet chain-spec overrides. Both are consensus
+        // parameters, so they are refused anywhere but devnet: a public
+        // network keeps the pinned spec byte for byte.
+        if let Some(hex) = &toml_cfg.chain.devnet_initial_difficulty_hex {
+            if network != Network::Devnet {
+                return Err("[chain] devnet_initial_difficulty_hex requires devnet".into());
+            }
+            let bytes = hex::decode(hex)
+                .map_err(|e| format!("[chain] devnet_initial_difficulty_hex: {e}"))?;
+            if bytes.is_empty() || bytes.len() > 32 || bytes.iter().all(|b| *b == 0) {
+                return Err(
+                    "[chain] devnet_initial_difficulty_hex: 1..=32 non-zero big-endian bytes"
+                        .into(),
+                );
+            }
+            spec.difficulty.initial_difficulty = bytes;
+        }
+        if let Some(delay) = toml_cfg.chain.devnet_miner_reward_delay {
+            if network != Network::Devnet {
+                return Err("[chain] devnet_miner_reward_delay requires devnet".into());
+            }
+            spec.monetary.miner_reward_delay = delay;
+        }
+        let chain_spec = Arc::new(spec);
         validate_supported(&chain_spec)?;
 
         let data_dir = cli
@@ -1273,6 +1297,76 @@ mod tests {
                 .unwrap();
             let error = NodeConfig::load(cli).unwrap_err();
             assert!(error.to_string().contains("devnet_max_block_cost"));
+        }
+    }
+
+    // ----- devnet chain-spec overrides -----
+
+    fn load_toml(body: &str) -> Result<NodeConfig, String> {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), body).unwrap();
+        let cli =
+            Cli::try_parse_from(["ergo-node", "--config", file.path().to_str().unwrap()]).unwrap();
+        NodeConfig::load(cli).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn devnet_chain_overrides_apply_to_the_spec() {
+        let cfg = load_toml(
+            "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n             [chain]\ndevnet_initial_difficulty_hex = \"7d00\"\ndevnet_miner_reward_delay = 3\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.chain_spec.difficulty.initial_difficulty,
+            vec![0x7d, 0x00]
+        );
+        assert_eq!(cfg.chain_spec.monetary.miner_reward_delay, 3);
+    }
+
+    #[test]
+    fn devnet_chain_overrides_absent_keep_the_pinned_spec() {
+        let cfg = load_toml(
+            "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n",
+        )
+        .unwrap();
+        let pinned = ergo_chain_spec::ChainSpec::devnet();
+        assert_eq!(
+            cfg.chain_spec.difficulty.initial_difficulty,
+            pinned.difficulty.initial_difficulty
+        );
+        assert_eq!(
+            cfg.chain_spec.monetary.miner_reward_delay,
+            pinned.monetary.miner_reward_delay
+        );
+    }
+
+    #[test]
+    fn devnet_chain_overrides_on_public_networks_rejected() {
+        for network in ["mainnet", "testnet"] {
+            for key in [
+                "devnet_initial_difficulty_hex = \"7d00\"",
+                "devnet_miner_reward_delay = 3",
+            ] {
+                let err = load_toml(&format!(
+                    "network = \"{network}\"\n[api]\ndisabled = true\n[chain]\n{key}\n"
+                ))
+                .unwrap_err();
+                assert!(err.contains("requires devnet"), "{network}/{key}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn devnet_initial_difficulty_hex_rejects_degenerate_values() {
+        for value in ["", "00", "zz", &"11".repeat(33)] {
+            let err = load_toml(&format!(
+                "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n                 [chain]\ndevnet_initial_difficulty_hex = \"{value}\"\n"
+            ))
+            .unwrap_err();
+            assert!(
+                err.contains("devnet_initial_difficulty_hex"),
+                "{value:?}: {err}"
+            );
         }
     }
 
