@@ -1280,7 +1280,7 @@ impl Processor {
         if !self.failed.contains_key(&id) || self.validation_exhausted(&id) {
             return;
         }
-        let Some(refs) = self.next_untried_combination(id) else {
+        let Some(refs) = self.next_untried_combination(id, true) else {
             return;
         };
         let Some((ordering_id, trigger)) = self
@@ -1304,35 +1304,59 @@ impl Processor {
     /// failed must still be able to retry with a different witness for the
     /// offending position without its innocent block-mates being treated
     /// as failed too (fix round 1, finding 2).
-    fn next_untried_combination(&mut self, id: InputBlockId) -> Option<Vec<TxRef>> {
+    ///
+    /// `restart` re-enumerates from the beginning of the odometer space
+    /// instead of stepping forward from the current cursor. A delivery
+    /// that adds a variant *widens* the space, and combinations behind
+    /// the cursor become reachable for the first time: with counts
+    /// `[1, 2]` exhausted the cursor sits at `[0, 1]`, and a new variant
+    /// at position 0 makes both `[1, 0]` and `[1, 1]` legal — but
+    /// stepping forward only ever reaches `[1, 1]`, stranding the block
+    /// if `[1, 0]` is the combination that validates. Nothing is
+    /// re-offered twice, because every combination validation actually
+    /// rejected is in `rejected`; a combination that was dispatched but
+    /// never answered is not a rejection and may legitimately come back.
+    fn next_untried_combination(&mut self, id: InputBlockId, restart: bool) -> Option<Vec<TxRef>> {
         let rejected = self.failed.get(&id).cloned().unwrap_or_default();
         let bypass = self.digest_bypassed(&id);
         let announced = self.announced_digest(&id);
+        // The digest invariant is checked on *every* retry, not only on
+        // the first match (fix round 1, finding 1). By construction every
+        // variant at a position shares that position's committed tx id,
+        // so this never rejects a legitimate witness sibling — it is an
+        // enforced invariant, not an assumed one.
+        let acceptable = |selection: &Vec<TxRef>| -> bool {
+            if rejected.contains(selection) {
+                return false;
+            }
+            if bypass {
+                return true;
+            }
+            let Some(expected) = announced else {
+                return true;
+            };
+            let ids: Vec<[u8; 32]> = selection.iter().map(|r| r.tx_id).collect();
+            let refs: Vec<&[u8]> = ids.iter().map(|i| &i[..]).collect();
+            ergo_crypto::merkle::merkle_tree_root(&refs) == expected
+        };
         let st = self.staging.get_mut(&id)?;
-        st.variants.as_ref()?;
+        let positions = st.variants.as_ref()?.len();
+        if restart {
+            st.cursor = vec![0; positions];
+            if let Some(selection) = st.selected() {
+                if acceptable(&selection) {
+                    return Some(selection);
+                }
+            }
+        }
         loop {
             if !st.advance() {
                 return None;
             }
             let selection = st.selected()?;
-            if rejected.contains(&selection) {
-                continue;
+            if acceptable(&selection) {
+                return Some(selection);
             }
-            // The digest invariant is checked on *every* retry, not only
-            // on the first match (fix round 1, finding 1). By construction
-            // every variant at a position shares that position's committed
-            // tx id, so this never rejects a legitimate witness sibling —
-            // it is an enforced invariant, not an assumed one.
-            if !bypass {
-                if let Some(expected) = announced {
-                    let ids: Vec<[u8; 32]> = selection.iter().map(|r| r.tx_id).collect();
-                    let refs: Vec<&[u8]> = ids.iter().map(|i| &i[..]).collect();
-                    if ergo_crypto::merkle::merkle_tree_root(&refs) != expected {
-                        continue;
-                    }
-                }
-            }
-            return Some(selection);
         }
     }
 
@@ -1803,7 +1827,7 @@ impl Processor {
             }
             return;
         }
-        match self.next_untried_combination(id) {
+        match self.next_untried_combination(id, false) {
             Some(refs) => {
                 self.set_tx_refs(id, refs, out);
                 // Fix round 1, finding 5c: the retry re-runs the same
