@@ -27,4 +27,6 @@
 //! extension-proof-reduces-to-root check alone implies).
 
 pub mod announcement;
+pub mod chain;
+pub mod tree;
 pub mod types;
