@@ -10,8 +10,8 @@
 //! 1. **PoW**: `verify_input_block_pow` against `pow.json`'s
 //!    `real_input_solution` header (a real mined solution, multiplier 30).
 //! 2. **Proof / binding**: `extension_proof.json`'s cases, checked against
-//!    `ergo_validation::popow::merkle::verify_batch_merkle_proof` (the
-//!    Scala-parity proof reducer `validate_announcement_parity` calls) and
+//!    `verify_extension_proof` (`validate_announcement_parity`'s proof
+//!    component — the empty-proof-guarded, Scala-parity check) and
 //!    `verify_field_binding` (the strict-policy addition this crate makes
 //!    on top of it).
 //!
@@ -19,11 +19,10 @@
 //! (`WeakBlocksOracle.scala`'s `extensionProofCases`/`powCases`) — never
 //! computed here.
 use ergo_crypto::pow::verify_input_block_pow;
-use ergo_inputblocks::announcement::verify_field_binding;
+use ergo_inputblocks::announcement::{verify_extension_proof, verify_field_binding};
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::header::read_header;
 use ergo_ser::input_block::parse_input_block_announcement;
-use ergo_validation::popow::merkle::verify_batch_merkle_proof;
 use serde::Deserialize;
 
 fn load<T: for<'de> Deserialize<'de>>(name: &str) -> T {
@@ -99,40 +98,21 @@ fn extension_proof_vectors_match_scala_reduction_and_binding() {
         let ann = parse_input_block_announcement(&bytes)
             .unwrap_or_else(|e| panic!("{}: parse failed: {e}", case.name));
 
-        let proof_reduces =
-            verify_batch_merkle_proof(&ann.fields.proof, ann.header.extension_root.as_bytes());
-
-        if case.name == "empty_proof" {
-            // Documented divergence (see the module doc and the task-8
-            // report): the brief's working hypothesis for finding F4 was
-            // that Scala's `BatchMerkleProof.valid` accepts an *empty*
-            // proof against any root. Measuring it (scrypto 3.0.0
-            // `BatchMerkleProof.valid`, `scorex.crypto.authds.merkle`)
-            // shows the opposite for this vector: Scala's `loop` reduces
-            // an empty (indices=[], proofs=[]) input to an empty result
-            // sequence, which never satisfies `root.size == 1`, so it
-            // returns `false` — `scala_ext_valid` is `false` here.
-            // `ergo_validation::popow::merkle::verify_batch_merkle_proof`
-            // (from M0) instead special-cases empty-indices/empty-proofs
-            // as trivially valid against *any* root (`true`) — a real,
-            // pre-existing Rust/Scala divergence in the OTHER direction
-            // from the one hypothesized, out of this task's file list to
-            // fix. `verify_field_binding`'s `ProofEmpty` check is exactly
-            // what keeps this from being exploitable at the announcement
-            // level: it rejects an empty proof regardless of what the
-            // (over-permissive) reducer says.
-            assert!(!case.scala_ext_valid, "empty_proof: scala rejects");
-            assert!(
-                proof_reduces,
-                "empty_proof: Rust reducer over-accepts (documented)"
-            );
-        } else {
-            assert_eq!(
-                proof_reduces, case.scala_ext_valid,
-                "{}: verify_batch_merkle_proof vs scala_ext_valid",
-                case.name
-            );
-        }
+        // `verify_extension_proof` is `validate_announcement_parity`'s proof
+        // component, tested here in isolation (the fixed header these
+        // vectors use has no valid PoW, so a call to the full function
+        // would only ever report `Pow(..)`). Asserted uniformly across
+        // every case, including `empty_proof`: `verify_extension_proof`
+        // rejects an empty proof before ever calling the shared popow
+        // reducer (which would otherwise accept it against any root),
+        // matching scrypto's real `BatchMerkleProof.valid` — see the
+        // crate doc and findings-8-r1.md finding 1.
+        assert_eq!(
+            verify_extension_proof(&ann.fields, ann.header.extension_root.as_bytes()).is_ok(),
+            case.scala_ext_valid,
+            "{}: verify_extension_proof vs scala_ext_valid",
+            case.name
+        );
 
         assert_eq!(
             verify_field_binding(&ann.fields).is_ok(),

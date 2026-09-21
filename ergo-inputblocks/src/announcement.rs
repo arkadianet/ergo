@@ -3,11 +3,24 @@
 //! proof reducing to the header's extension root, nBits agreement with
 //! chain context, and — under the strict policy — that the proof's leaves
 //! are exactly the announced fields (spec 6.3 item 2; see the crate docs
-//! and `test-vectors/weak-blocks/extension_proof.json` for finding F4:
-//! Scala's `merkleProof.valid(root)` accepts an empty proof against *any*
-//! root, and separately accepts a proof whose leaves don't match the
-//! announced fields as long as it still reduces to the header's root —
-//! neither is caught by the Scala-parity check alone).
+//! and `test-vectors/weak-blocks/extension_proof.json` for findings F4/F4b).
+//!
+//! F4b: Scala's `merkleProof.valid(root)` accepts a proof whose leaves
+//! don't match the announced fields as long as it still reduces to the
+//! header's root — not caught by the Scala-parity check alone, only by
+//! [`verify_field_binding`].
+//!
+//! F4 (boundary fix, not a Scala behavior): scrypto's real
+//! `BatchMerkleProof.valid` — what Scala's `InputBlockAnnouncement.valid`
+//! actually calls — does NOT accept an empty proof against an arbitrary
+//! root; it returns `false` (see `test-vectors/weak-blocks/extension_proof.json`'s
+//! `empty_proof` case, `scala_ext_valid: false`). But this crate's own
+//! `ergo_validation::popow::merkle::verify_batch_merkle_proof` (a shared
+//! PoPoW reducer, tuned for a different genesis-style empty-proof special
+//! case) *does* treat an empty proof as trivially valid against any root.
+//! [`verify_extension_proof`] closes that gap at the announcement boundary
+//! — rejecting an empty proof before ever calling the shared reducer —
+//! rather than changing the shared reducer itself.
 
 use ergo_crypto::merkle::extension_leaf_digest;
 use ergo_crypto::pow::verify_input_block_pow;
@@ -43,14 +56,51 @@ pub enum AnnouncementError {
     NBitsMismatch { got: u32, expected: u32 },
     #[error("extension proof does not reduce to the header's extension root")]
     ProofInvalid,
-    /// Strict binding only (spec 6.3 item 2) — Scala's `valid(root)` treats
-    /// an empty proof against any root as valid (F4).
+    /// Also raised by [`verify_extension_proof`] itself (before the
+    /// strict-binding policy even applies) — the shared popow reducer
+    /// treats an empty proof as valid against any root, which Scala's own
+    /// `BatchMerkleProof.valid` does not; see the crate doc for the F4
+    /// boundary fix this guards.
     #[error("extension proof is empty")]
     ProofEmpty,
     /// Strict binding only (spec 6.3 item 2) — the proof reduces to the
     /// header's root but its leaves don't match the announced fields (F4b).
     #[error("proof leaves do not bind the announced fields: {0}")]
     FieldsUnbound(String),
+}
+
+/// nBits agreement with chain context, shared by [`validate_announcement_parity`]
+/// and [`validate_ordering_announcement`] (spec 6.1/2.4's identical nBits
+/// clause for both announcement kinds).
+fn check_expected_n_bits(n_bits: u32, expected: Option<u32>) -> Result<(), AnnouncementError> {
+    if let Some(expected) = expected {
+        if n_bits != expected {
+            return Err(AnnouncementError::NBitsMismatch {
+                got: n_bits,
+                expected,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The extension-proof-reduces-to-root check alone: the proof must be
+/// non-empty and must reduce (via the shared popow batch-merkle reducer)
+/// to `extension_root`. Rejects an empty proof before ever calling the
+/// shared reducer — see the crate doc for why: `ergo_validation`'s reducer
+/// treats an empty proof as valid against any root, which Scala's own
+/// `BatchMerkleProof.valid` does not (finding F4).
+pub fn verify_extension_proof(
+    fields: &InputBlockFields,
+    extension_root: &[u8; 32],
+) -> Result<(), AnnouncementError> {
+    if fields.proof.indices.is_empty() && fields.proof.proofs.is_empty() {
+        return Err(AnnouncementError::ProofEmpty);
+    }
+    if !verify_batch_merkle_proof(&fields.proof, extension_root) {
+        return Err(AnnouncementError::ProofInvalid);
+    }
+    Ok(())
 }
 
 /// The Scala-parity part of announcement validity only: PoW, the proof
@@ -66,18 +116,8 @@ pub fn validate_announcement_parity(
     let multiplier = multiplier.ok_or(AnnouncementError::MultiplierUnavailable)?;
     verify_input_block_pow(&ann.header, multiplier)
         .map_err(|e| AnnouncementError::Pow(e.to_string()))?;
-    if !verify_batch_merkle_proof(&ann.fields.proof, ann.header.extension_root.as_bytes()) {
-        return Err(AnnouncementError::ProofInvalid);
-    }
-    if let Some(expected) = expected_n_bits {
-        if ann.header.n_bits != expected {
-            return Err(AnnouncementError::NBitsMismatch {
-                got: ann.header.n_bits,
-                expected,
-            });
-        }
-    }
-    Ok(())
+    verify_extension_proof(&ann.fields, ann.header.extension_root.as_bytes())?;
+    check_expected_n_bits(ann.header.n_bits, expected_n_bits)
 }
 
 /// The binding check alone (spec 6.3 item 2): the proof's leaves must be
@@ -140,15 +180,7 @@ pub fn validate_ordering_announcement(
     }
     ergo_crypto::pow::verify_pow_solution(&ann.header)
         .map_err(|e| AnnouncementError::Pow(e.to_string()))?;
-    if let Some(expected) = expected_n_bits {
-        if ann.header.n_bits != expected {
-            return Err(AnnouncementError::NBitsMismatch {
-                got: ann.header.n_bits,
-                expected,
-            });
-        }
-    }
-    Ok(())
+    check_expected_n_bits(ann.header.n_bits, expected_n_bits)
 }
 
 #[cfg(test)]
@@ -197,6 +229,23 @@ mod tests {
         });
         assert_eq!(
             verify_field_binding(&fields),
+            Err(AnnouncementError::ProofEmpty)
+        );
+    }
+
+    #[test]
+    fn extension_proof_rejects_empty_proof_before_reducer() {
+        // fix round 1, finding 1: the shared popow reducer
+        // (`ergo_validation::popow::merkle::verify_batch_merkle_proof`)
+        // treats an empty proof as valid against any root; Scala's real
+        // `BatchMerkleProof.valid` does not. `verify_extension_proof` must
+        // reject the empty proof itself, before ever calling the reducer.
+        let fields = fields_with_proof(BatchMerkleProof {
+            indices: Vec::new(),
+            proofs: Vec::new(),
+        });
+        assert_eq!(
+            verify_extension_proof(&fields, &[0x42; 32]),
             Err(AnnouncementError::ProofEmpty)
         );
     }
