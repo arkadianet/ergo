@@ -87,8 +87,17 @@ fn connect_peer(state: &mut NodeState, port: u16) -> std::net::SocketAddr {
 
 // ----- happy path -----
 
+/// SUPPLEMENTAL loader-consistency check, NOT an oracle: the expected
+/// value here is produced by the same `next_n_bits` the code under test
+/// calls, so it proves the header LOADER (genesis skip, parent
+/// substitution, epoch-window selection) feeds the difficulty function
+/// the window it intends — and nothing about the difficulty function.
+///
+/// The consensus oracle is
+/// `expected_n_bits_after_matches_mainnet_headers_across_an_epoch_boundary`,
+/// whose expected values are real mainnet `nBits`.
 #[test]
-fn expected_n_bits_after_known_parent_matches_next_n_bits() {
+fn expected_n_bits_after_known_parent_matches_the_loaded_window() {
     let dir = tempfile::tempdir().unwrap();
     let mut state = make_state(&dir.path().join("state.redb"));
     let headers = seed_header_chain(&mut state, 3);
@@ -1731,5 +1740,180 @@ fn inline_validation_of_an_unissued_job_is_dropped_as_stale() {
             .counters
             .get(DropReason::StaleValidation { generation: 0 }.name()),
         1
+    );
+}
+
+// ----- oracle parity (finding 7) -----
+
+/// A mainnet header corpus row (`test-vectors/mainnet/headers_*.json`).
+#[derive(serde::Deserialize)]
+struct MainnetHeaderVector {
+    height: u32,
+    id: String,
+    bytes: String,
+}
+
+/// Load a mainnet header corpus, verifying each row really is a mainnet
+/// header (`id == blake2b256(bytes)`) so the oracle cannot be substituted.
+fn load_mainnet_headers(path: &str) -> Vec<(u32, [u8; 32], Vec<u8>, Header)> {
+    let raw = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let rows: Vec<MainnetHeaderVector> =
+        serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {path}: {e}"));
+    rows.into_iter()
+        .map(|v| {
+            let bytes = hex::decode(&v.bytes).unwrap();
+            let id = *ergo_primitives::digest::blake2b256(&bytes).as_bytes();
+            assert_eq!(
+                hex::encode(id),
+                v.id,
+                "corpus row at height {} is not a real mainnet header",
+                v.height
+            );
+            let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
+            let header = read_header(&mut r).unwrap();
+            assert_eq!(header.height, v.height);
+            (v.height, id, bytes, header)
+        })
+        .collect()
+}
+
+/// Seed real mainnet headers into the store at their real heights.
+fn seed_mainnet_headers(
+    state: &mut NodeState,
+    rows: &[(u32, [u8; 32], Vec<u8>, Header)],
+    index_best_chain: bool,
+) {
+    let store = state.store.as_utxo_mut().expect("utxo backend");
+    store.begin_header_batch();
+    for (height, id, bytes, header) in rows {
+        let meta = HeaderMeta {
+            parent_id: *header.parent_id.as_bytes(),
+            height: *height,
+            cumulative_score: u64::from(*height).to_be_bytes().to_vec(),
+            pow_validity: 1,
+            timestamp: header.timestamp,
+        };
+        store
+            .store_validated_header(
+                id,
+                bytes,
+                &meta,
+                index_best_chain.then(|| (*height, meta.cumulative_score.clone())),
+            )
+            .unwrap_or_else(|e| panic!("store mainnet header h={height}: {e:?}"));
+    }
+    store.flush_header_batch().unwrap();
+}
+
+/// Finding 7: the difficulty surface is consensus, so the expected value
+/// must come from Scala, not from re-running our own `next_n_bits`.
+///
+/// The oracle here is the mainnet chain itself: for a real header `C`,
+/// the Scala node's answer to "what nBits must follow `C.parent`" is
+/// exactly `C.n_bits` — that is what the network accepted. Loading a
+/// contiguous mainnet run into a header store and asserting
+/// `expected_n_bits_after(parent) == child.n_bits` therefore checks the
+/// whole node-side path (header lookup, genesis skip, parent
+/// substitution, epoch-window selection) against Scala-produced values.
+///
+/// `headers_1_2000.json` spans the epoch boundary at child height 1025
+/// (`1024 % 1024 == 0`), so both the flat and the retarget path run.
+#[test]
+fn expected_n_bits_after_matches_mainnet_headers_across_an_epoch_boundary() {
+    const TOP: u32 = 1100;
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+
+    let mut rows = load_mainnet_headers("../test-vectors/mainnet/headers_1_2000.json");
+    rows.retain(|(h, ..)| *h <= TOP);
+    assert_eq!(rows.len() as u32, TOP, "corpus must be contiguous 1..=TOP");
+    seed_mainnet_headers(&mut state, &rows, true);
+
+    // The retarget boundary must be inside the window, or this test
+    // only exercises the flat path.
+    let boundary = 1025u32;
+    assert!(
+        ergo_crypto::difficulty::is_recalculation_height(boundary, &DifficultyParams::mainnet()),
+        "1025 must be a mainnet recalculation height"
+    );
+
+    let mut checked = 0usize;
+    let mut retargets = 0usize;
+    for w in rows.windows(2) {
+        let (parent_height, parent_id, ..) = &w[0];
+        let (child_height, _, _, child) = &w[1];
+        assert_eq!(*child_height, parent_height + 1);
+        assert_eq!(
+            expected_n_bits_after(&state, parent_id),
+            Some(child.n_bits),
+            "expected nBits after mainnet height {parent_height} must be the \
+             nBits mainnet actually used at {child_height}"
+        );
+        checked += 1;
+        if ergo_crypto::difficulty::is_recalculation_height(
+            *child_height,
+            &DifficultyParams::mainnet(),
+        ) {
+            retargets += 1;
+        }
+    }
+    assert_eq!(checked, (TOP - 1) as usize, "every transition was checked");
+    assert!(
+        retargets >= 1,
+        "at least one real retarget must be covered, got {retargets}"
+    );
+}
+
+/// The EIP-37 boundary corpus is SPARSE: its 8-epoch lookback window is
+/// nine heights 128 apart, and the store's best-chain height index is
+/// built by walking parent pointers, so those heights cannot be indexed
+/// without the ~1000 intervening headers. That makes this the right
+/// place to pin the other half of the contract — the node-side lookup
+/// FAILS CLOSED.
+///
+/// `expected_n_bits_after` must return `None` when it cannot assemble
+/// the full window, never a value computed from the part of the window
+/// it could find: a partial window yields a plausible-looking wrong
+/// difficulty, and the announcement check would then reject valid input
+/// blocks (or accept invalid ones). The retarget arithmetic itself is
+/// pinned against mainnet at the EIP-37 boundary by
+/// `ergo-crypto/tests/it/difficulty_mainnet.rs`.
+#[test]
+fn expected_n_bits_after_fails_closed_when_the_lookback_window_is_unindexed() {
+    const BOUNDARY: u32 = 844_673;
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+
+    let rows = load_mainnet_headers("../test-vectors/mainnet/headers_eip37_curated.json");
+    let heights: Vec<u32> = rows.iter().map(|(h, ..)| *h).collect();
+    assert!(
+        heights.contains(&BOUNDARY) && heights.contains(&(BOUNDARY - 1)),
+        "corpus must carry the boundary and its parent, got {heights:?}"
+    );
+    // The lookback really is the sparse 8-epoch window, so the height
+    // index genuinely cannot serve it.
+    let needed = previous_heights_for_recalculation(
+        BOUNDARY,
+        epoch_length_for_height(BOUNDARY, &DifficultyParams::mainnet()),
+    );
+    assert_eq!(
+        needed.len(),
+        9,
+        "EIP-37 looks back 8 epochs, got {needed:?}"
+    );
+
+    seed_mainnet_headers(&mut state, &rows, false);
+    let (_, parent_id, ..) = rows
+        .iter()
+        .find(|(h, ..)| *h == BOUNDARY - 1)
+        .expect("parent row");
+    assert!(
+        state.store.get_header(parent_id).unwrap().is_some(),
+        "the parent header itself IS stored — only the window is missing"
+    );
+    assert_eq!(
+        expected_n_bits_after(&state, parent_id),
+        None,
+        "an unassemblable window must yield no expectation, not a guess"
     );
 }
