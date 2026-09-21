@@ -3052,6 +3052,7 @@ impl Processor {
             .and_then(|(_, v)| <[u8; 32]>::try_from(v.as_slice()).ok());
         let non_broadcasted = ann.non_broadcasted_transactions.clone();
         let broadcasted_ids = ann.broadcasted_transaction_ids.clone();
+        let parent_id: OrderingId = *ann.header.parent_id.as_bytes();
 
         if let Some(evicted) =
             self.ordering
@@ -3072,11 +3073,28 @@ impl Processor {
                         header_id,
                         non_broadcasted,
                         broadcasted_ids,
-                        // Finding F5, preserved: Scala keys the collected
-                        // input-chain transactions by the *announced*
-                        // header's own id, not by the ordering block the
-                        // input chain extends.
-                        input_chain_txs: self.collected_input_txs(&header_id),
+                        // Divergence D5, upstream finding F5. Scala's
+                        // follower keys the collected input-chain
+                        // transactions by the *announced* header's own id
+                        // (`getCollectedInputBlocksTransactions(headerId)`)
+                        // while its miner seats the chain collected under
+                        // the PARENT
+                        // (`getBestOrderingCollectedInputBlocksTransactions`,
+                        // which reads `bestOrderingBlock().id`). The trees
+                        // are keyed by the block the input chain sits ON,
+                        // so the follower's key names a block that has no
+                        // tree yet and the lookup returns nothing — which
+                        // is what the devnet smoke measured: every
+                        // reconstruction ran with an EMPTY input chain and
+                        // could not reproduce the root of any block whose
+                        // transactions came from input blocks.
+                        //
+                        // Scala's key is tried first; the parent's is the
+                        // fallback, so a chain genuinely recorded under
+                        // the announced id still wins. Delete the fallback
+                        // when upstream settles F5.
+                        input_chain_txs: self
+                            .collected_input_txs_for_announced(&header_id, &parent_id),
                         prev_input_block_id: Some(p),
                     },
                 });
@@ -3419,6 +3437,22 @@ impl Processor {
             .filter_map(|id| self.tx_refs.get(id))
             .flat_map(|v| v.iter().copied())
             .collect()
+    }
+
+    /// The collected input-chain transactions an ANNOUNCED ordering
+    /// block should be reconstructed from: Scala's key (the announced
+    /// header's own id) if it has a tree, else the parent's — the block
+    /// the input chain actually sits on, and what the miner seated.
+    /// Divergence D5 / upstream finding F5.
+    pub fn collected_input_txs_for_announced(
+        &self,
+        header_id: &OrderingId,
+        parent_id: &OrderingId,
+    ) -> Vec<TxRef> {
+        if self.trees.contains_key(header_id) {
+            return self.collected_input_txs(header_id);
+        }
+        self.collected_input_txs(parent_id)
     }
 
     /// Number of competing forks retained for `ordering_id`.
@@ -3878,13 +3912,61 @@ mod tests {
             })
             .unwrap_or_else(|| panic!("no OrderingReconstruct in {out:?}"));
         assert_eq!(plan.prev_input_block_id, Some(ib_id));
-        // Finding F5, preserved: Scala keys the collected input-chain
-        // transactions by the *announced* header's own id, not by the
-        // ordering block the input chain actually extends, so the plan
-        // carries nothing even though the chain has a transaction.
-        assert_eq!(plan.input_chain_txs, p.collected_input_txs(&oa_id));
-        assert!(plan.input_chain_txs.is_empty());
+        // Divergence D5 / upstream finding F5. Scala's follower looks the
+        // chain up under the ANNOUNCED header's own id, which has no tree
+        // — the trees are keyed by the ordering block the input chain
+        // sits ON, and that is the parent, which is what the miner seated
+        // in front of its ordering transactions. Keying it Scala's way
+        // hands the planner an EMPTY chain, so reconstruction can never
+        // reproduce the root of a block whose transactions came from
+        // input blocks; the devnet smoke measured exactly that.
+        assert!(
+            p.collected_input_txs(&oa_id).is_empty(),
+            "Scala's key still names a block with no tree"
+        );
+        assert_eq!(
+            p.collected_input_txs(&ORD),
+            vec![b1.tx_ref],
+            "the chain is recorded under the block it extends"
+        );
+        assert_eq!(
+            plan.input_chain_txs,
+            vec![b1.tx_ref],
+            "so the plan falls back to the parent's chain"
+        );
+    }
+
+    /// The fallback is a FALLBACK: a chain genuinely recorded under the
+    /// announced id still wins, so the day upstream settles F5 the
+    /// behaviour is already Scala's.
+    #[test]
+    fn announced_ordering_id_with_its_own_tree_is_preferred_over_the_parent() {
+        let mut p = processor();
+        let b1 = ts::body(1, 1);
+        let mut ctx = ts::TestCtx::at(FULL);
+        ctx.mempool.add(&b1);
+        let ib = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&b1));
+        let eff = announce(&mut p, &ctx, &ib, ts::PEER);
+        ts::validate_ok(&mut p, &ctx, &eff, 1);
         assert_eq!(p.collected_input_txs(&ORD), vec![b1.tx_ref]);
+
+        let no_tree: OrderingId = [0x4f; 32];
+        assert!(p.collected_input_txs(&no_tree).is_empty());
+        // Announced id HAS a tree: Scala's key answers, the parent is
+        // never consulted.
+        assert_eq!(
+            p.collected_input_txs_for_announced(&ORD, &no_tree),
+            vec![b1.tx_ref]
+        );
+        // Announced id has none: the parent's chain answers.
+        assert_eq!(
+            p.collected_input_txs_for_announced(&no_tree, &ORD),
+            vec![b1.tx_ref]
+        );
+        // Neither has one: nothing, never a panic.
+        assert!(p
+            .collected_input_txs_for_announced(&no_tree, &[0x50; 32])
+            .is_empty());
     }
 
     #[test]
