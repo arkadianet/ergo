@@ -895,7 +895,31 @@ fn search_staging(
 
 impl Processor {
     /// A fresh processor with no state.
+    ///
+    /// Every bound that is used as a *capacity* — one the processor
+    /// divides, indexes or evicts against — is clamped to at least one
+    /// here. The node reads its bounds from config, and a zero there is
+    /// a misconfiguration the processor must survive rather than a
+    /// request to disable the structure: a zero-capacity list has no
+    /// room for a new entry and no entry to evict to make room, which is
+    /// how a held alternative panicked (residual fix round 4). Clamping
+    /// is deliberate in preference to a `debug_assert!`: the regression
+    /// for that panic runs in debug, so an assertion would trade a
+    /// production panic for a test-time one rather than remove it.
+    ///
+    /// Bounds that are genuinely meaningful at zero are left alone: a
+    /// zero digest or validation budget means "no attempts", and a zero
+    /// recovery allowance means "no recovery" — both are honoured.
     pub fn new(bounds: Bounds, policy: AnnouncementPolicy) -> Self {
+        let bounds = Bounds {
+            candidates_per_position: bounds.candidates_per_position.max(1),
+            forks_per_ordering: bounds.forks_per_ordering.max(1),
+            records_per_ordering: bounds.records_per_ordering.max(1),
+            waitlist_entries: bounds.waitlist_entries.max(1),
+            pending_triggers: bounds.pending_triggers.max(1),
+            retired_jobs: bounds.retired_jobs.max(1),
+            ..bounds
+        };
         Self {
             bounds,
             policy,
@@ -2124,13 +2148,28 @@ impl Processor {
         recovery: bool,
         bodies: &[Body],
         now: Tick,
+        out: &mut Vec<Effect>,
     ) {
+        let cap = self.bounds.candidates_per_position;
+        if cap == 0 {
+            // A capacity of zero means "retain nothing": there is no
+            // room to hold this alternative, and nothing to evict to
+            // make room. `Processor::new` clamps the bound so this is
+            // unreachable through the public constructor, but the list
+            // operations below are only sound for a non-zero capacity,
+            // so the guard states that rather than assuming it. The
+            // position is nominal — a zero cap denies every position.
+            out.push(Effect::Dropped {
+                id,
+                reason: DropReason::VariantCapExceeded { position: 0 },
+            });
+            return;
+        }
         for b in bodies {
             if refs.contains(&b.tx_ref) {
                 self.cache.insert(b.clone(), now, &self.bounds);
             }
         }
-        let cap = self.bounds.candidates_per_position;
         let slot = self.held.entry(id).or_default();
         slot.retain(|h| h.refs != refs);
         if slot.len() >= cap {
@@ -2267,7 +2306,7 @@ impl Processor {
                                 // failure instead (residual fix round 2).
                                 Some(SelectionState::Pending) => {
                                     if self.proposal_matches_commitments(&id, &proposed) {
-                                        self.hold_selection(id, proposed, true, &bodies, now);
+                                        self.hold_selection(id, proposed, true, &bodies, now, out);
                                     }
                                     out.push(Effect::Dropped {
                                         id,
@@ -2389,7 +2428,7 @@ impl Processor {
                     // without another delivery (residual fix round 2,
                     // C/D). Without the hold, a witness offered
                     // mid-validation was simply lost.
-                    self.hold_selection(id, refs, false, &bodies, now);
+                    self.hold_selection(id, refs, false, &bodies, now, out);
                     out.push(Effect::Dropped {
                         id,
                         reason: DropReason::SelectionSettled {
@@ -6212,6 +6251,111 @@ mod tests {
             )),
             "the deferred invitation must be emitted once a slot frees: {freed:?}"
         );
+    }
+
+    #[test]
+    fn a_zero_candidate_cap_holds_nothing_instead_of_panicking() {
+        // `candidates_per_position: 0` is a nonsensical configuration,
+        // but the node reads its bounds from config and the processor
+        // must not panic on one: holding the first alternative found
+        // `slot.len() >= 0` true and removed from an empty vector.
+        let bounds = Bounds {
+            candidates_per_position: 0,
+            ..Bounds::default()
+        };
+        let mut p = processor_with(bounds);
+        let ctx = ts::TestCtx::at(FULL);
+        let a = ts::body(1, 1);
+        let b = ts::body(1, 2);
+        let ann = listless(1, a.tx_ref.tx_id, None);
+        let id = ts::ann_id(&ann);
+        announce(&mut p, &ctx, &ann, ts::PEER);
+        let running = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![a.clone()],
+                from: Some(ts::PEER),
+                now: Tick(2),
+            },
+        );
+        assert!(has_validate(&running));
+
+        // The delivery that used to panic.
+        let refused = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![b.clone()],
+                from: Some(ts::PEER),
+                now: Tick(3),
+            },
+        );
+        assert!(!has_validate(&refused), "{refused:?}");
+        assert!(drops(&refused).contains(&DropReason::SelectionSettled {
+            state: SelectionState::Pending
+        }));
+        assert_eq!(
+            p.transaction_refs(&id),
+            Some(&[a.tx_ref][..]),
+            "the outstanding job keeps its references"
+        );
+
+        // The clamp in `Processor::new` means the block still behaves
+        // like a one-deep cap rather than losing the alternative.
+        let after = ts::validate_err(&mut p, &ctx, &running);
+        let (_, _, block, txs, _) = ts::one_validate(&after);
+        assert_eq!(block, id);
+        assert_eq!(txs, vec![b.tx_ref]);
+    }
+
+    #[test]
+    fn zero_capacity_bounds_are_clamped_at_construction() {
+        // Every bound the processor indexes or evicts against survives a
+        // zero from config: the announcement is recorded, its bodies
+        // resolve and the block applies, rather than the processor
+        // dividing by an empty structure somewhere.
+        let bounds = Bounds {
+            candidates_per_position: 0,
+            forks_per_ordering: 0,
+            records_per_ordering: 0,
+            waitlist_entries: 0,
+            pending_triggers: 0,
+            retired_jobs: 0,
+            ..Bounds::default()
+        };
+        let mut p = processor_with(bounds);
+        let b1 = ts::body(1, 1);
+        let mut ctx = ts::TestCtx::at(FULL);
+        ctx.mempool.add(&b1);
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&b1));
+        let id = ts::ann_id(&ann);
+
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        assert!(
+            has_validate(&eff),
+            "a clamped cap still admits one: {eff:?}"
+        );
+        let applied = ts::validate_ok(&mut p, &ctx, &eff, 1);
+        assert!(applied.iter().any(|e| matches!(
+            e,
+            Effect::ChainChanged { applied, .. } if applied == &vec![id]
+        )));
+        assert_eq!(p.best_input_chain(), vec![id]);
+
+        // The clamped record cap is one, so the next announcement for
+        // this ordering block is refused — the bound bites, rather than
+        // the structure misbehaving.
+        let second = ts::announcement(ORD, FULL + 1, 2, Some([0x77; 32]));
+        let eff = ctx.handle(
+            &mut p,
+            Event::AnnouncementAccepted {
+                ann: second,
+                from: ts::PEER,
+                now: Tick(5),
+            },
+        );
+        assert_eq!(drops(&eff), vec![DropReason::RecordsFull], "{eff:?}");
     }
 
     // ----- oracle parity -----
