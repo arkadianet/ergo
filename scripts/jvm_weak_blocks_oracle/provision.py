@@ -27,8 +27,18 @@ def checkout(url, commit, dest, log):
         run(['git', 'clone', '--filter=blob:none', url, str(dest)], HERE, log)
     run(['git', 'fetch', 'origin', commit], dest, log)
     run(['git', 'checkout', '--detach', commit], dest, log)
+    # A reused checkout can carry local edits or untracked build artifacts from a
+    # prior run; hard-reset and clean so the pinned commit is what actually gets
+    # built, not "HEAD happens to point at it while other files differ".
+    run(['git', 'reset', '--hard', commit], dest, log)
+    run(['git', 'clean', '-fdx'], dest, log)
     head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=dest, capture_output=True, text=True, check=True).stdout.strip()
     assert head == commit, (head, commit)
+    status = subprocess.run(
+        ['git', 'status', '--porcelain', '--untracked-files=all'],
+        cwd=dest, capture_output=True, text=True, check=True,
+    ).stdout
+    assert status == '', f'{dest} not clean after reset+clean at {commit}:\n{status}'
 
 
 def export_classpath(source, config, log):

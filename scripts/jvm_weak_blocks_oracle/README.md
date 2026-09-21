@@ -30,6 +30,14 @@ checks out the pinned commits, `+publishLocal`s sigma-state under
 `~/.ivy2/local/org.scorexfoundation`, and exports the ergo build's `Runtime`
 and `Test` classpaths via `sbt export`.
 
+Reused checkouts under `.work/` are hard-reset and cleaned
+(`git reset --hard <pinned commit> && git clean -fdx`) before every build, and
+the checkout is verified clean (`git status --porcelain --untracked-files=all`
+empty) after that reset. This guards against local edits or leftover
+untracked/ignored build artifacts from a prior run silently riding along with
+the pinned commit — the manifest's `ergo_commit`/`sigma_commit` only mean
+anything if what actually got built is byte-for-byte the pinned commit's tree.
+
 If `sbt +publishLocal` fails cross-building sigma-state for Scala 2.11 (the
 ergo build only consumes 2.12 and 2.13), retry with:
 
