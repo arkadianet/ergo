@@ -39,7 +39,7 @@ pub const SYSTEM_PARAMETERS_PREFIX: u8 = 0x00;
 /// separately from the numeric parameter map.
 pub const SOFT_FORK_DISABLING_RULES_ID: u8 = 124;
 
-mod ids {
+pub(crate) mod ids {
     pub const STORAGE_FEE_FACTOR: u8 = 1;
     pub const MIN_VALUE_PER_BYTE: u8 = 2;
     pub const MAX_BLOCK_SIZE: u8 = 3;

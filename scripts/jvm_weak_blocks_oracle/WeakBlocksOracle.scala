@@ -637,6 +637,28 @@ object WeakBlocksOracle {
     Json.obj("cases" -> cases.asJson)
   }
 
+  /**
+    * `Parameters.DefaultParameters` from the pinned branch, as an ordered
+    * id -> value table. This is the table a chain that starts from the
+    * defaults carries at genesis, and the only authority for whether id 9
+    * (`SubblocksPerBlockIncrease`) is in it and what its value is. The
+    * Rust launch row is checked against this rather than against itself.
+    */
+  def launchParamsCases(): Json = {
+    val table = org.ergoplatform.settings.Parameters.DefaultParameters
+    val entries = table.toSeq.sortBy(_._1).map { case (id, value) =>
+      Json.obj("id" -> (id: Int).asJson, "value" -> value.asJson)
+    }
+    Json.obj("cases" -> Json.arr(Json.obj(
+      "name" -> "default_parameters".asJson,
+      "source" -> "org.ergoplatform.settings.Parameters.DefaultParameters".asJson,
+      "subblocks_per_block_id" ->
+        (org.ergoplatform.settings.Parameters.SubblocksPerBlockIncrease: Int).asJson,
+      "subblocks_per_block_default" ->
+        org.ergoplatform.settings.Parameters.SubsPerBlockDefault.asJson,
+      "entries" -> entries.asJson)))
+  }
+
   def main(args: Array[String]): Unit = {
     val out = args(0) match {
       case "announcement" => announcementCases()
@@ -649,6 +671,7 @@ object WeakBlocksOracle {
       case "soft_fields" => softFieldCases()
       case "input_block_validation" => inputBlockValidationCases()
       case "block_sections" => blockSectionCases(args(1))
+      case "launch_params" => launchParamsCases()
       case other => sys.error(s"unknown vector $other")
     }
     println(out.spaces2)
