@@ -13,6 +13,8 @@
 //! pre-header fields come from `B`, and `last_headers` is Scala's
 //! `lastHeaders.drop(1)` — the 9 headers BEFORE `B`.
 
+use std::time::{Duration, Instant};
+
 use ergo_inputblocks::processor::{JobId, ValidationOutcome};
 use ergo_inputblocks::types::{InputBlockId, TxRef};
 use ergo_ser::header::Header;
@@ -35,6 +37,22 @@ pub(in crate::node) struct ValidateJob {
     pub(in crate::node) txs: Vec<TxRef>,
     /// Bodies of the already-processed chain prefix.
     pub(in crate::node) previous: Vec<TxRef>,
+}
+
+/// How long each half of one validation job took (task 8b).
+///
+/// Returned rather than recorded in place because the profile lives on
+/// the runtime and [`run_validation`] holds it by shared reference (it
+/// reads cached bodies through the processor); the caller, which has
+/// `&mut InputBlocksRuntime`, folds these in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::node) struct ValidationTimings {
+    /// Gathering the `previous` chain prefix and the block's own bodies.
+    pub(in crate::node) collect: Duration,
+    /// [`build_input_block_context`].
+    pub(in crate::node) context: Duration,
+    /// [`validate_input_block_transactions`] itself.
+    pub(in crate::node) run: Duration,
 }
 
 /// The spec-6.4 validation context: everything `validate_input_block_transactions`
@@ -93,42 +111,60 @@ pub(in crate::node) fn run_validation(
     state: &NodeState,
     rt: &InputBlocksRuntime,
     job: &ValidateJob,
-) -> ValidationOutcome {
+) -> (ValidationOutcome, ValidationTimings) {
+    let mut timings = ValidationTimings::default();
     // Input blocks need a UTXO set (Scala `processInputBlock` refuses in
     // digest mode). The config gate already forbids it, but the runtime
     // must not assume a gate it does not own.
     let Some(utxo) = state.store.as_utxo() else {
-        return ValidationOutcome::Unavailable(
-            "DigestMode: no UTXO set to validate against".to_string(),
+        return (
+            ValidationOutcome::Unavailable(
+                "DigestMode: no UTXO set to validate against".to_string(),
+            ),
+            timings,
         );
     };
 
-    let previous: Vec<Transaction> = match collect(rt, &job.previous, "previous") {
+    let collect_at = Instant::now();
+    let previous: Vec<&Transaction> = match collect(rt, &job.previous, "previous") {
         Ok(v) => v,
-        Err(reason) => return ValidationOutcome::Unavailable(reason),
+        Err(reason) => {
+            timings.collect = collect_at.elapsed();
+            return (ValidationOutcome::Unavailable(reason), timings);
+        }
     };
-    let own: Vec<(Transaction, std::sync::Arc<[u8]>)> = match job
+    let own: Vec<(&Transaction, &std::sync::Arc<[u8]>)> = match job
         .txs
         .iter()
         .map(|r| {
             rt.processor()
                 .body(r)
-                .map(|b| (b.tx.clone(), b.bytes.clone()))
+                .map(|b| (&b.tx, &b.bytes))
                 .ok_or_else(|| format!("CacheEvicted: body {} missing", hex::encode(r.tx_id)))
         })
         .collect::<Result<_, _>>()
     {
         Ok(v) => v,
-        Err(reason) => return ValidationOutcome::Unavailable(reason),
+        Err(reason) => {
+            timings.collect = collect_at.elapsed();
+            return (ValidationOutcome::Unavailable(reason), timings);
+        }
     };
+    timings.collect = collect_at.elapsed();
 
     // Node-local and transient: the node has not applied a full block
     // yet, so there is no context to evaluate scripts against. This says
     // nothing about the block, so it must NOT reach the processor as a
     // verdict — see `ValidationOutcome::Unavailable`.
-    let Some(ctx) = build_input_block_context(state) else {
-        return ValidationOutcome::Unavailable(
-            "TipUnready: no applied full block to validate against".to_string(),
+    let context_at = Instant::now();
+    let ctx = build_input_block_context(state);
+    timings.context = context_at.elapsed();
+    let Some(ctx) = ctx else {
+        return (
+            ValidationOutcome::Unavailable(
+                "TipUnready: no applied full block to validate against".to_string(),
+            ),
+            timings,
         );
     };
 
@@ -136,11 +172,12 @@ pub(in crate::node) fn run_validation(
         .iter()
         .map(|(tx, bytes)| InputBlockTxBytes { bytes, tx })
         .collect();
-    let previous_refs: Vec<&Transaction> = previous.iter().collect();
+    let previous_refs: &[&Transaction] = &previous;
 
-    match validate_input_block_transactions(
+    let run_at = Instant::now();
+    let verdict = validate_input_block_transactions(
         &txs,
-        &previous_refs,
+        previous_refs,
         utxo,
         &ctx.tx_context,
         &ctx.params,
@@ -152,20 +189,30 @@ pub(in crate::node) fn run_validation(
             // miner never seats it in an input block.
             soft_fields_allowed: false,
         },
-    ) {
+    );
+    timings.run = run_at.elapsed();
+    let outcome = match verdict {
         Ok(cost) => ValidationOutcome::Valid(cost),
         Err(e) => ValidationOutcome::Invalid(format!("{}: {e}", job_label(&job.input_block_id))),
-    }
+    };
+    (outcome, timings)
 }
 
-fn collect(
-    rt: &InputBlocksRuntime,
+/// Borrow — never clone — the cached bodies `refs` names.
+///
+/// The `previous` list is the WHOLE input chain under the current
+/// ordering block, so it grows with the chain; deep-cloning each
+/// `Transaction` here made every validation cost O(chain length) in
+/// allocation alone (task 8b). The processor owns the bodies for as
+/// long as `rt` is borrowed, so a reference is enough.
+fn collect<'a>(
+    rt: &'a InputBlocksRuntime,
     refs: &[TxRef],
     which: &'static str,
-) -> Result<Vec<Transaction>, String> {
+) -> Result<Vec<&'a Transaction>, String> {
     refs.iter()
         .map(|r| {
-            rt.processor().body(r).map(|b| b.tx.clone()).ok_or_else(|| {
+            rt.processor().body(r).map(|b| &b.tx).ok_or_else(|| {
                 format!(
                     "CacheEvicted: {which} body {} missing",
                     hex::encode(r.tx_id)

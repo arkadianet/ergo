@@ -21,6 +21,7 @@ use ergo_inputblocks::types::{InputBlockId, PeerTag, Tick};
 use ergo_mempool::input_blocks::RemovedEntry;
 use ergo_p2p::peer::PeerId;
 
+use super::profile::{PhaseReport, Profile};
 use crate::config::InputBlocksConfig;
 
 /// Bijection between the node's `PeerId` and the processor's opaque
@@ -162,6 +163,10 @@ pub(in crate::node) struct InputBlocksRuntime {
     /// itself never produces this; it is purely a symptom of the
     /// node-side Scala-DTO encoder).
     pub(in crate::node) snapshot_encode_failures: u64,
+    /// Per-phase timings of the input-block hot path (task 8b). Always
+    /// on: the measurement it exists for is a live-node one, and the
+    /// cost is one `leading_zeros` plus an increment per observation.
+    pub(in crate::node) profile: Profile,
 }
 
 impl InputBlocksRuntime {
@@ -189,7 +194,17 @@ impl InputBlocksRuntime {
             last_ordering_tip: None,
             read_slot_revision: 0,
             snapshot_encode_failures: 0,
+            profile: Profile::new(now),
         }
+    }
+
+    /// The phase table for the interval just ended, when the report
+    /// interval has elapsed and anything at all was measured.
+    pub(in crate::node) fn take_profile_report(
+        &mut self,
+        now: Instant,
+    ) -> Option<Vec<PhaseReport>> {
+        self.profile.report(now)
     }
 
     /// The processor's clock: milliseconds since this runtime was built.

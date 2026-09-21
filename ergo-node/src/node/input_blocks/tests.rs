@@ -519,7 +519,7 @@ fn run_validation_without_an_applied_block_is_unavailable_not_invalid() {
         txs: Vec::new(),
         previous: Vec::new(),
     };
-    match run_validation(&state, &rt, &job) {
+    match run_validation(&state, &rt, &job).0 {
         ergo_inputblocks::processor::ValidationOutcome::Unavailable(reason) => {
             assert!(reason.contains("TipUnready"), "{reason}");
         }

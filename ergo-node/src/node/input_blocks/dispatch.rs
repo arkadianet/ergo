@@ -28,6 +28,7 @@ use tracing::{debug, warn};
 use super::super::NodeState;
 use super::ctx::build_ctx_data;
 use super::effects::execute_effects;
+use super::profile::Phase;
 use super::runtime::ExpectedPhase;
 use super::serve;
 
@@ -81,36 +82,38 @@ pub(in crate::node) fn handle(
     now: Instant,
 ) -> Dispatched {
     match code {
-        message::CODE_INPUT_BLOCK => match message::deserialize_input_block(payload) {
-            Ok(ann) => {
-                let Ok(id) = ann.id() else {
-                    debug!(peer = %peer, "input_blocks: announcement header has no id");
-                    return Dispatched::nothing();
-                };
-                let block_id = *id.as_bytes();
-                let parent = *ann.header.parent_id.as_bytes();
-                answered(state, &peer, &block_id, ExpectedPhase::Announcement);
-                let actions = feed(state, peer, now, &[parent], |from, tick| {
-                    Event::AnnouncementAccepted {
-                        ann,
-                        from,
-                        now: tick,
+        message::CODE_INPUT_BLOCK => {
+            match decode(state, || message::deserialize_input_block(payload)) {
+                Ok(ann) => {
+                    let Ok(id) = ann.id() else {
+                        debug!(peer = %peer, "input_blocks: announcement header has no id");
+                        return Dispatched::nothing();
+                    };
+                    let block_id = *id.as_bytes();
+                    let parent = *ann.header.parent_id.as_bytes();
+                    answered(state, &peer, &block_id, ExpectedPhase::Announcement);
+                    let actions = feed(state, peer, now, &[parent], |from, tick| {
+                        Event::AnnouncementAccepted {
+                            ann,
+                            from,
+                            now: tick,
+                        }
+                    });
+                    // An announcement is always progress: it is chain
+                    // information we did not have, whether or not we asked.
+                    Dispatched {
+                        actions,
+                        progress: true,
                     }
-                });
-                // An announcement is always progress: it is chain
-                // information we did not have, whether or not we asked.
-                Dispatched {
-                    actions,
-                    progress: true,
+                }
+                Err(e) => {
+                    warn!(peer = %peer, error = %e, "bad InputBlock announcement");
+                    Dispatched::penalize(peer)
                 }
             }
-            Err(e) => {
-                warn!(peer = %peer, error = %e, "bad InputBlock announcement");
-                Dispatched::penalize(peer)
-            }
-        },
+        }
         message::CODE_INPUT_BLOCK_TX_IDS => {
-            match message::deserialize_input_block_tx_ids(payload) {
+            match decode(state, || message::deserialize_input_block_tx_ids(payload)) {
                 Ok(d) => {
                     let progress = answered(
                         state,
@@ -134,7 +137,9 @@ pub(in crate::node) fn handle(
                 }
             }
         }
-        message::CODE_INPUT_BLOCK_TXS => match message::deserialize_input_block_txs(payload) {
+        message::CODE_INPUT_BLOCK_TXS => match decode(state, || {
+            message::deserialize_input_block_txs(payload)
+        }) {
             Ok(d) => {
                 let progress = answered(state, &peer, &d.input_block_id, ExpectedPhase::Bodies);
                 let bodies: Vec<Body> = d.transactions.into_iter().filter_map(body_of).collect();
@@ -154,7 +159,9 @@ pub(in crate::node) fn handle(
             }
         },
         message::CODE_INPUT_BLOCK_TXS_REQUEST => {
-            match message::deserialize_input_block_txs_request(payload) {
+            match decode(state, || {
+                message::deserialize_input_block_txs_request(payload)
+            }) {
                 Ok(req) => {
                     // Spec 9.1: 102 / 104 / 105 count as progress only
                     // when the frame answers a request of OURS that is
@@ -178,7 +185,9 @@ pub(in crate::node) fn handle(
             }
         }
         message::CODE_ORDERING_BLOCK_ANNOUNCEMENT => {
-            match message::deserialize_ordering_block_announcement_msg(payload) {
+            match decode(state, || {
+                message::deserialize_ordering_block_announcement_msg(payload)
+            }) {
                 Ok(ann) => {
                     let parent = *ann.header.parent_id.as_bytes();
                     // Acknowledge the −121 expectation this answers, so
@@ -318,6 +327,19 @@ fn outstanding_from(state: &NodeState, peer: &PeerId, id: &[u8; 32]) -> bool {
     state.coordinator.delivery().on_received(id, peer) == DeliveryAction::Accept
 }
 
+/// Time one frame decode against the subsystem's phase profile (task
+/// 8b). The runtime may be absent — dispatch is only reached with it
+/// present, but the borrow is optional either way — in which case the
+/// decode still runs and simply goes unmeasured.
+fn decode<T, E>(state: &mut NodeState, f: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
+    let at = Instant::now();
+    let out = f();
+    if let Some(rt) = state.input_blocks.as_mut() {
+        rt.profile.observe(Phase::FrameDecode, at.elapsed());
+    }
+    out
+}
+
 /// Build the event, hand it to the processor, execute the effects.
 fn feed(
     state: &mut NodeState,
@@ -330,8 +352,13 @@ fn feed(
         return Vec::new();
     };
     let event = make(rt.tag(peer), rt.tick(now));
+    let ctx_at = Instant::now();
     let data = build_ctx_data(state, parent_ids);
+    rt.profile.observe(Phase::BuildCtx, ctx_at.elapsed());
+    let handle_at = Instant::now();
     let effects = data.with(|ctx| rt.processor_mut().handle(event, ctx));
+    rt.profile
+        .observe(Phase::ProcessorHandle, handle_at.elapsed());
     drop(data);
     state.input_blocks = Some(rt);
     execute_effects(state, effects, now)

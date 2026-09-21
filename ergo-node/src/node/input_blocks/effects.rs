@@ -36,6 +36,7 @@ use super::super::event_feed::FeedEventKind;
 use super::super::NodeState;
 use super::super::{hedge_request_modifiers, register_expectation, tracked_request_modifier};
 use super::ctx::{build_ctx_data, transactions_section_id};
+use super::profile::Phase;
 use super::reconstruct::{plan_reconstruction, Outcome, Reconstruction, StorageFailure};
 use super::runtime::{ExpectedPhase, InputBlocksRuntime};
 use super::validate::{run_validation, ValidateJob};
@@ -60,6 +61,7 @@ pub(in crate::node) fn execute_effects(
         return Vec::new();
     };
     let mut out = Vec::new();
+    let batch_at = Instant::now();
     let mut queue: VecDeque<Effect> = effects.into();
     // `Validate` pushes the effects of the `ValidationResult` it feeds
     // back onto this queue. The processor keeps exactly one job in flight
@@ -76,7 +78,12 @@ pub(in crate::node) fn execute_effects(
     // unchanged, e.g. this function called directly with `effects:
     // Vec::new()` and no prior `handle()` call in between) still skips
     // the rebuild.
+    let refresh_at = Instant::now();
     refresh_read_slot(state, &mut rt);
+    let refresh_took = refresh_at.elapsed();
+    rt.profile.observe(Phase::ReadSlotRefresh, refresh_took);
+    rt.profile
+        .observe(Phase::ExecuteEffects, batch_at.elapsed());
     state.input_blocks = Some(rt);
     out
 }
@@ -329,7 +336,10 @@ fn execute_one(
                 txs,
                 previous,
             };
-            let outcome = run_validation(state, rt, &job);
+            let (outcome, timings) = run_validation(state, rt, &job);
+            rt.profile.observe(Phase::ValidateCollect, timings.collect);
+            rt.profile.observe(Phase::ValidateContext, timings.context);
+            rt.profile.observe(Phase::ValidateRun, timings.run);
             match &outcome {
                 ValidationOutcome::Valid(cost) => debug!(
                     block = %hex::encode(job.input_block_id),
@@ -344,7 +354,10 @@ fn execute_one(
                     %reason, "input_blocks: validation unavailable, will retry"
                 ),
             }
+            let ctx_at = Instant::now();
             let data = build_ctx_data(state, &[]);
+            rt.profile.observe(Phase::BuildCtx, ctx_at.elapsed());
+            let handle_at = Instant::now();
             let follow_on = data.with(|ctx| {
                 rt.processor_mut().handle(
                     Event::ValidationResult {
@@ -355,6 +368,8 @@ fn execute_one(
                     ctx,
                 )
             });
+            rt.profile
+                .observe(Phase::ProcessorHandle, handle_at.elapsed());
             queue.extend(follow_on);
         }
         Effect::ChainChanged {
@@ -370,6 +385,7 @@ fn execute_one(
                 rolled_back = rolled_back.len(),
                 "input_blocks: best input chain changed"
             );
+            let apply_at = Instant::now();
             out.extend(apply_chain_change(
                 state,
                 rt,
@@ -377,6 +393,7 @@ fn execute_one(
                 &rolled_back_bodies,
                 now,
             ));
+            rt.profile.observe(Phase::MempoolApply, apply_at.elapsed());
             // Release retained entries for blocks that are no longer on
             // the best input chain. An applied ordering block emits an
             // EMPTY ChainChanged (spec 7.6) and deliberately does NOT
@@ -455,8 +472,11 @@ fn execute_one(
             });
         }
         Effect::OrderingReconstruct { plan, from } => {
+            let plan_at = Instant::now();
             let planned =
                 plan_reconstruction(&state.store, &state.mempool, rt, &plan, rt.peer(from));
+            rt.profile
+                .observe(Phase::OrderingReconstruct, plan_at.elapsed());
             let rec = match planned {
                 Ok(Some(rec)) => rec,
                 Ok(None) => {

@@ -17,6 +17,7 @@ mod ctx;
 mod dispatch;
 mod effects;
 mod hooks;
+mod profile;
 mod reconstruct;
 mod runtime;
 mod serve;

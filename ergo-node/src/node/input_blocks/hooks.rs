@@ -21,6 +21,7 @@ use ergo_sync::coordinator::ChainView;
 use super::super::NodeState;
 use super::ctx::build_ctx_data;
 use super::effects::execute_effects;
+use super::profile::Phase;
 use super::runtime::InputBlocksRuntime;
 
 /// Feed one `Event::Tick`. Called once per `sync_tick` (1 s) from the
@@ -66,6 +67,20 @@ pub(in crate::node) fn on_tick(state: &mut NodeState, now: Instant) -> Vec<Actio
             breakdown = ?breakdown,
             "input_blocks: drop counters advanced"
         );
+    }
+    // Task 8b: the phase table for the interval just ended. One line
+    // per phase, at DEBUG, at most once per
+    // `profile::REPORT_INTERVAL` — the follower's lag is a throughput
+    // question and this is the only surface that answers it from a
+    // live node.
+    if let Some(report) = state
+        .input_blocks
+        .as_mut()
+        .and_then(|rt| rt.take_profile_report(now))
+    {
+        for line in report {
+            tracing::debug!(target: "ergo_node::node::input_blocks::profile", %line, "input_blocks: phase profile");
+        }
     }
     actions
 }
@@ -270,8 +285,13 @@ fn drive(
     let Some(mut rt) = state.input_blocks.take() else {
         return Vec::new();
     };
+    let ctx_at = Instant::now();
     let data = build_ctx_data(state, &[]);
+    rt.profile.observe(Phase::BuildCtx, ctx_at.elapsed());
+    let handle_at = Instant::now();
     let effects = data.with(|ctx| rt.processor_mut().handle(event, ctx));
+    rt.profile
+        .observe(Phase::ProcessorHandle, handle_at.elapsed());
     drop(data);
     state.input_blocks = Some(rt);
     execute_effects(state, effects, now)
