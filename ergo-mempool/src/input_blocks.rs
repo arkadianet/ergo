@@ -338,6 +338,15 @@ pub fn restore_input_block_txs(
                 // boost C's presence would have contributed had this tx
                 // never left the pool (Scala `put` re-registers outputs so
                 // families reconnect — spec §8).
+                //
+                // findings-2-r2 #1: seed the credit ONLY with the edge(s)
+                // that actually point at the just-restored tx — NOT the
+                // child's full input set. A child can have a surviving
+                // co-parent Q that this restore never touched (Q kept its
+                // `parents_in_pool` edge and its credit the whole time);
+                // walking `child.inputs` wholesale would re-discover Q via
+                // `by_output` and credit it a second time on every
+                // apply/restore cycle.
                 for child_id in pool.conflicts_for_inputs(&peeked.output_box_ids) {
                     if child_id == *tx_id {
                         continue;
@@ -345,8 +354,13 @@ pub fn restore_input_block_txs(
                     pool.attach_parent(&child_id, tx_id);
                     if let Some(child) = pool.get(&child_id) {
                         let child_weight = child.weight;
-                        let child_inputs = child.inputs.clone();
-                        pool.update_family(&child_inputs, i128::from(child_weight), bounds);
+                        let reconnected_inputs: Vec<Digest32> = child
+                            .inputs
+                            .iter()
+                            .filter(|inp| peeked.output_box_ids.contains(inp))
+                            .copied()
+                            .collect();
+                        pool.update_family(&reconnected_inputs, i128::from(child_weight), bounds);
                     }
                 }
 

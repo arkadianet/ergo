@@ -235,7 +235,13 @@ fn find_by_weak_id_returns_all_colliding_entries() {
         "fixture must be two DISTINCT transactions"
     );
 
-    let (tx_c, _bytes_c, tx_id_c) = build_tx(&[d(0x50)], 100);
+    // Third pooled entry: a REAL, valid, non-colliding transaction — not a
+    // malformed placeholder. A malformed entry is excluded via the
+    // parse-error/skip branch regardless of weak-id equality (see
+    // `find_by_weak_id_skips_unreadable_entries` below), so it would prove
+    // nothing about the `w == weak` comparison itself; this fixture must
+    // reach that comparison and lose on it (findings-2-r2 #2).
+    let (tx_c, bytes_c, tx_id_c) = build_tx(&[d(0x50)], 100);
     assert_ne!(
         weak_id_of(&tx_c).unwrap(),
         weak_a,
@@ -269,14 +275,19 @@ fn find_by_weak_id_returns_all_colliding_entries() {
         TxSource::Api,
     ))
     .unwrap();
-    seed_entry(
-        &mut pool,
+    pool.insert(Entry::new(
         tx_id_c,
-        vec![d(0x99)],
+        bytes_c,
+        tx_c.inputs.iter().map(|i| i.box_id).collect(),
         vec![d(0x9A)],
         vec![],
+        1_000_000,
         300,
-    );
+        8,
+        50_000,
+        TxSource::Api,
+    ))
+    .unwrap();
 
     let found = find_by_weak_id(&pool, &weak_a);
     let ids: HashSet<TxId> = found.iter().map(|e| e.tx_id).collect();
@@ -287,7 +298,22 @@ fn find_by_weak_id_returns_all_colliding_entries() {
     );
     assert!(
         !ids.contains(&tx_id_c),
-        "non-matching pooled entry must not be returned"
+        "a real, valid, non-colliding pooled transaction must not be returned"
+    );
+}
+
+#[test]
+fn find_by_weak_id_skips_unreadable_entries() {
+    // A pooled entry whose stored bytes do not deserialize must be skipped
+    // (logged via `tracing::warn!`, never a match, never a panic) — kept as
+    // its own test, separate from the collision fixture above, per
+    // findings-2-r2 #2.
+    let mut pool = OrderedPool::with_capacity(8);
+    seed_entry(&mut pool, d(1), vec![d(0x10)], vec![d(0x11)], vec![], 100);
+    let weak: WeakId = [0u8; 6];
+    assert!(
+        find_by_weak_id(&pool, &weak).is_empty(),
+        "an unreadable entry must never match, whatever weak id is queried"
     );
 }
 
@@ -680,5 +706,143 @@ fn apply_aborts_with_no_partial_removal_when_tx_id_uncomputable() {
         pool.contains(&ok_id),
         "no partial removal: the earlier, otherwise-valid tx must remain pooled"
     );
+    pool.check_invariants();
+}
+
+#[test]
+fn restore_credits_only_the_reconnected_parent_not_a_surviving_co_parent() {
+    // C spends outputs of BOTH P and Q. apply-P removes only P (Q survives
+    // untouched, keeping the family credit it already has). Restoring P
+    // must credit ONLY the newly reconnected P edge — Q's weight must be
+    // unchanged, even across repeated apply/restore cycles (findings-2-r2
+    // #1: reconnecting P must not re-walk ALL of C's inputs, which would
+    // re-credit Q a second time through an edge that was never broken).
+    let mut pool = OrderedPool::with_capacity(8);
+    let config = MempoolConfig::default();
+    let weight_fn = ByCost;
+    let bounds = FamilyBounds::new(
+        config.max_family_depth,
+        config.max_family_ops,
+        config.max_family_update_ms,
+    );
+
+    // P spends external X1, creates output O_p (its fee output, index 0).
+    let (p_tx, p_bytes, p_id) = build_tx(&[d(0x10)], 500_000);
+    let o_p = ErgoBox {
+        candidate: p_tx.output_candidates[0].clone(),
+        transaction_id: transaction_id(&p_tx).unwrap(),
+        index: 0,
+    }
+    .box_id()
+    .unwrap();
+
+    // Q spends external X2, creates output O_q (its fee output, index 0).
+    let (_q_tx, q_bytes, q_id) = build_tx(&[d(0x20)], 600_000);
+    let o_q = ErgoBox {
+        candidate: _q_tx.output_candidates[0].clone(),
+        transaction_id: transaction_id(&_q_tx).unwrap(),
+        index: 0,
+    }
+    .box_id()
+    .unwrap();
+
+    // C spends both O_p and O_q.
+    let (_c_tx, c_bytes, c_id) = build_tx(&[o_p, o_q], 700_000);
+
+    let p_weight_raw = weight_fn.compute(WeightInputs {
+        tx_id: &p_id,
+        fee: 500_000,
+        size_bytes: p_bytes.len() as u32,
+        cost: FAKE_COST,
+    });
+    let q_weight_raw = weight_fn.compute(WeightInputs {
+        tx_id: &q_id,
+        fee: 600_000,
+        size_bytes: q_bytes.len() as u32,
+        cost: FAKE_COST,
+    });
+    let c_weight = weight_fn.compute(WeightInputs {
+        tx_id: &c_id,
+        fee: 700_000,
+        size_bytes: c_bytes.len() as u32,
+        cost: FAKE_COST,
+    });
+
+    pool.insert(Entry::new(
+        p_id,
+        p_bytes.clone(),
+        vec![d(0x10)],
+        vec![o_p],
+        vec![],
+        500_000,
+        p_weight_raw,
+        p_bytes.len() as u32,
+        FAKE_COST,
+        TxSource::Api,
+    ))
+    .unwrap();
+    pool.insert(Entry::new(
+        q_id,
+        q_bytes,
+        vec![d(0x20)],
+        vec![o_q],
+        vec![],
+        600_000,
+        q_weight_raw,
+        8,
+        FAKE_COST,
+        TxSource::Api,
+    ))
+    .unwrap();
+    pool.insert(Entry::new(
+        c_id,
+        c_bytes,
+        vec![o_p, o_q],
+        vec![d(0x71)],
+        vec![p_id, q_id],
+        700_000,
+        c_weight,
+        8,
+        FAKE_COST,
+        TxSource::Api,
+    ))
+    .unwrap();
+    // Mirror the family credit a real admission of C would have applied:
+    // walking from ALL of C's inputs credits both P and Q by c_weight.
+    pool.update_family(&[o_p, o_q], i128::from(c_weight), bounds);
+    let q_weight_before_apply = pool.get(&q_id).unwrap().weight;
+    assert_eq!(q_weight_before_apply, q_weight_raw + c_weight);
+
+    for cycle in 1..=2 {
+        let (removed, _actions) =
+            apply_input_block_txs(&mut pool, &config, std::slice::from_ref(&p_tx)).unwrap();
+        assert_eq!(removed.len(), 1, "cycle {cycle}: only P removed");
+        assert!(pool.contains(&c_id), "cycle {cycle}: C survives");
+        assert!(
+            pool.contains(&q_id),
+            "cycle {cycle}: Q untouched by P's removal"
+        );
+
+        let outcomes = restore_input_block_txs(
+            &mut pool,
+            &config,
+            &weight_fn,
+            &[(p_id, p_bytes.clone(), None)],
+            Instant::now(),
+        );
+        assert_eq!(outcomes, vec![RestoreOutcome::Restored(p_id)]);
+
+        assert_eq!(
+            pool.get(&q_id).unwrap().weight,
+            q_weight_before_apply,
+            "cycle {cycle}: Q's family weight must not drift — restoring P must credit \
+             only the P edge, never re-credit the untouched Q edge"
+        );
+        assert_eq!(
+            pool.get(&p_id).unwrap().weight,
+            p_weight_raw + c_weight,
+            "cycle {cycle}: P is credited exactly once through the reconnected edge"
+        );
+    }
     pool.check_invariants();
 }
