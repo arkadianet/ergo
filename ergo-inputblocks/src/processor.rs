@@ -232,8 +232,15 @@ pub enum DropReason {
     /// Outside the actionable height window (Scala: ±2, and only `+1`
     /// is actually applied; `+2` requests the ordering header instead).
     OutsideHeightWindow,
-    /// A `ValidationResult` for a superseded generation or job.
-    StaleValidation,
+    /// A `ValidationResult` for a superseded generation or job, or a job
+    /// abandoned because the bodies it froze changed underneath it. The
+    /// `Dropped` id is the block the **stale** job was validating and
+    /// `generation` the generation that job was issued in — never the
+    /// current job's (residual fix round, D).
+    StaleValidation {
+        /// The generation the stale job belonged to.
+        generation: u64,
+    },
     /// A body needed for validation is no longer cached.
     CacheEvicted,
     /// The disconnected waitlist is full; the oldest entry was dropped.
@@ -268,10 +275,25 @@ pub enum DropReason {
     /// selection: that selection is not in a rejected state — it is
     /// either outstanding or already applied — so swapping it would put
     /// an unvalidated body into a processed block.
-    SelectionSettled,
+    SelectionSettled {
+        /// Which settled state refused the swap.
+        state: SelectionState,
+    },
     /// The node is running in digest (stateless) mode, where input
     /// blocks cannot be validated at all (Scala `processInputBlock`).
     DigestMode,
+}
+
+/// The state a block's transaction selection is in when a delivery tries
+/// to replace it (residual fix round, A).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionState {
+    /// Selected — queued for dispatch or with a job outstanding — but not
+    /// yet applied. The selection is frozen until that job fails.
+    Pending,
+    /// The block is applied: its transactions are part of an input chain
+    /// and its references are frozen for good.
+    Applied,
 }
 
 /// The node's view of the best full block, mirrored into the processor.
@@ -334,6 +356,45 @@ struct InFlight {
     prev_chain: Vec<InputBlockId>,
 }
 
+/// What an outstanding request asked for. A delivery only releases the
+/// peer's slot when it answers the request that was actually made
+/// (residual fix round, D).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestKey {
+    /// `RequestModifier` −123: an announcement.
+    InputBlock(InputBlockId),
+    /// `RequestModifier` −122: a weak-id list.
+    TransactionIds(InputBlockId),
+    /// Message 105: transaction bodies.
+    Transactions(InputBlockId),
+    /// An ordering block's header.
+    OrderingHeader(OrderingId),
+    /// An ordering block's transaction section.
+    BlockTransactions(OrderingId),
+}
+
+impl RequestKey {
+    /// The request an effect represents, if it is one.
+    fn of(effect: &Effect) -> Option<Self> {
+        match effect {
+            Effect::RequestInputBlock { id, .. } => Some(Self::InputBlock(*id)),
+            Effect::RequestTransactionIds { input_block_id, .. } => {
+                Some(Self::TransactionIds(*input_block_id))
+            }
+            Effect::RequestTransactions { input_block_id, .. } => {
+                Some(Self::Transactions(*input_block_id))
+            }
+            Effect::RequestOrderingHeader { header_id, .. } => {
+                Some(Self::OrderingHeader(*header_id))
+            }
+            Effect::RequestBlockTransactions { header_id, .. } => {
+                Some(Self::BlockTransactions(*header_id))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// The single-writer state machine (spec 7.1–7.6).
 pub struct Processor {
     bounds: Bounds,
@@ -349,7 +410,19 @@ pub struct Processor {
     staging: indexmap::IndexMap<InputBlockId, Staging>,
     waitlist: VecDeque<(InputBlockId, Option<InputBlockId>)>,
     ordering: OrderingStore,
-    outstanding: HashMap<PeerTag, usize>,
+    /// Requests issued to a peer and not yet answered, each with the tick
+    /// it expires at. Replaces a tick-halving counter: the cap now bounds
+    /// *genuinely outstanding* requests, released by the matching
+    /// delivery or by their deadline (residual fix round, D).
+    outstanding: HashMap<PeerTag, Vec<(RequestKey, Tick)>>,
+    /// The clock of the event being handled, so [`Self::request`] can
+    /// stamp a deadline without every call site threading it.
+    now: Tick,
+    /// The block each recently issued job was validating, so a result
+    /// that arrives after the job was abandoned names its own subject
+    /// instead of whatever is outstanding now. Bounded by
+    /// [`crate::bounds::Bounds::retired_jobs`], oldest evicted first.
+    issued: indexmap::IndexMap<JobId, InputBlockId>,
     in_flight: Option<InFlight>,
     failed: HashMap<InputBlockId, Vec<Vec<TxRef>>>,
     pending_triggers: VecDeque<(OrderingId, InputBlockId)>,
@@ -358,6 +431,11 @@ pub struct Processor {
     /// without this the same `CacheEvicted` is emitted over and over;
     /// the entry is cleared the moment the bodies are back.
     reported_evicted: std::collections::HashSet<InputBlockId>,
+    /// Blocks whose spent digest / validation budgets have already been
+    /// reported, for the same reason as `reported_evicted`. Cleared when
+    /// the record is pruned.
+    reported_digest_exhausted: std::collections::HashSet<InputBlockId>,
+    reported_validation_exhausted: std::collections::HashSet<InputBlockId>,
     /// Ordered-digest attempts spent per input block. Deliberately keyed
     /// by block rather than held in the staging slot, which is deleted on
     /// a digest mismatch — the budget must not be refundable by making
@@ -724,10 +802,14 @@ impl Processor {
             waitlist: VecDeque::new(),
             ordering: OrderingStore::default(),
             outstanding: HashMap::new(),
+            now: Tick(0),
+            issued: indexmap::IndexMap::new(),
             in_flight: None,
             failed: HashMap::new(),
             pending_triggers: VecDeque::new(),
             reported_evicted: std::collections::HashSet::new(),
+            reported_digest_exhausted: std::collections::HashSet::new(),
+            reported_validation_exhausted: std::collections::HashSet::new(),
             digest_attempts: HashMap::new(),
             validation_attempts: HashMap::new(),
             failed_trigger: HashMap::new(),
@@ -753,6 +835,19 @@ impl Processor {
     /// Feed one event; returns the effects the node must act on.
     pub fn handle(&mut self, event: Event, ctx: &ProcessorCtx<'_>) -> Vec<Effect> {
         let mut out = Vec::new();
+        // The processor owns no clock: every event but a validation
+        // result carries the node's, and request deadlines are stamped
+        // from it.
+        match &event {
+            Event::AnnouncementAccepted { now, .. }
+            | Event::TransactionsDelivered { now, .. }
+            | Event::TransactionIdsDelivered { now, .. }
+            | Event::OrderingAnnouncementAccepted { now, .. }
+            | Event::OrderingBlockApplied { now, .. }
+            | Event::OrderingReorg { now, .. }
+            | Event::Tick { now } => self.now = *now,
+            Event::ValidationResult { .. } => {}
+        }
         match event {
             Event::AnnouncementAccepted { ann, from, now } => {
                 self.on_announcement(ann, from, now, ctx, &mut out)
@@ -828,6 +923,9 @@ impl Processor {
             });
             return;
         }
+        // Whatever else happens to it, the announcement answers the
+        // `−123` request that asked for it.
+        self.request_answered(from, RequestKey::InputBlock(id));
         // Step 3: already known (Scala `applyInputBlock`'s first guard).
         if self.records.contains_key(&id) {
             out.push(Effect::Dropped {
@@ -1310,14 +1408,10 @@ impl Processor {
     /// outstanding selection is settled; the late witness is reported and
     /// the references stay put.
     fn retry_after_delivery(&mut self, id: InputBlockId, out: &mut Vec<Effect>) {
-        let settled = match self.tx_refs.get(&id) {
-            Some(current) => !self.has_failed_combination(&id, current),
-            None => true,
-        };
-        if settled {
+        if let Some(state) = self.settled_state(&id) {
             out.push(Effect::Dropped {
                 id,
-                reason: DropReason::SelectionSettled,
+                reason: DropReason::SelectionSettled { state },
             });
             return;
         }
@@ -1406,6 +1500,37 @@ impl Processor {
         }
     }
 
+    /// Whether `id` is applied: some fork's processed prefix contains it,
+    /// so its transactions are already part of an input chain.
+    fn is_applied(&self, id: &InputBlockId) -> bool {
+        self.records
+            .get(id)
+            .and_then(|r| self.trees.get(&r.ordering_id))
+            .is_some_and(|t| t.is_processed(id))
+    }
+
+    /// The gate every delivery-driven selection change goes through
+    /// (residual fix round, D): `Some(state)` when the block's current
+    /// transaction selection is settled and must not be swapped, `None`
+    /// when it is in a rejected state (or there is no selection yet) and
+    /// a delivery may legitimately replace it.
+    ///
+    /// Applied references are frozen for good: the tree already counts
+    /// the block as processed, so no job would ever run for a swapped-in
+    /// body. A selection that is merely queued or outstanding is frozen
+    /// *until that job fails* — a different witness is not demonstrably
+    /// better before validation (residual fix round, C).
+    fn settled_state(&self, id: &InputBlockId) -> Option<SelectionState> {
+        if self.is_applied(id) {
+            return Some(SelectionState::Applied);
+        }
+        let current = self.tx_refs.get(id)?;
+        if self.has_failed_combination(id, current) {
+            return None;
+        }
+        Some(SelectionState::Pending)
+    }
+
     /// Record a block's selected transaction list, invalidating any
     /// outstanding job that was handed the previous one.
     ///
@@ -1431,7 +1556,9 @@ impl Processor {
                 tracing::debug!("input-block validation job invalidated: bodies changed");
                 out.push(Effect::Dropped {
                     id: inf.id,
-                    reason: DropReason::StaleValidation,
+                    reason: DropReason::StaleValidation {
+                        generation: inf.generation,
+                    },
                 });
                 // The invalidated job's *selection* must be re-run, not
                 // just its block: a fork switch chosen on a deep trigger
@@ -1466,9 +1593,7 @@ impl Processor {
         ctx: &ProcessorCtx<'_>,
         out: &mut Vec<Effect>,
     ) {
-        if let Some(c) = self.outstanding.get_mut(&from) {
-            *c = c.saturating_sub(1);
-        }
+        self.request_answered(from, RequestKey::TransactionIds(id));
         let Some(rec) = self.records.get(&id) else {
             out.push(Effect::Dropped {
                 id,
@@ -1514,11 +1639,9 @@ impl Processor {
         ctx: &ProcessorCtx<'_>,
         out: &mut Vec<Effect>,
     ) {
-        if let Some(p) = from {
-            if let Some(c) = self.outstanding.get_mut(&p) {
-                *c = c.saturating_sub(1);
-            }
-        }
+        let solicited =
+            from.is_some_and(|p| self.request_answered(p, RequestKey::Transactions(id)));
+        let _ = solicited;
         let Some(rec) = self.records.get(&id) else {
             out.push(Effect::Dropped {
                 id,
@@ -1575,11 +1698,45 @@ impl Processor {
                 // Scala `applyInputBlockTransactions(id, txs, state)`: with
                 // no announced weak-id list, the delivered order *is* the
                 // block's transaction order.
+                //
+                // This path goes through the same bounded selection state
+                // machine as the staged one (residual fix round, D).
+                // Without that, a second delivery naming the same
+                // transaction ids with different witnesses passed the
+                // ordered digest and replaced an *applied* block's
+                // references with bodies nothing ever validated — the
+                // tree already counts the block as processed, so no job
+                // would run for them.
+                let refs: Vec<TxRef> = bodies.iter().map(|b| b.tx_ref).collect();
+                let unchanged = self.tx_refs.get(&id).map(|v| v.as_slice()) == Some(&refs[..]);
+                if !unchanged {
+                    if let Some(state) = self.settled_state(&id) {
+                        out.push(Effect::Dropped {
+                            id,
+                            reason: DropReason::SelectionSettled { state },
+                        });
+                        return;
+                    }
+                    // The per-block budgets bound this path too: the
+                    // ordered-digest check below is real hashing work, and
+                    // a swapped selection buys another block validation.
+                    if self.digest_exhausted(&id) {
+                        self.report_digest_exhausted(id, out);
+                        return;
+                    }
+                    if self.validation_exhausted(&id) {
+                        self.report_validation_exhausted(id, out);
+                        return;
+                    }
+                }
                 let ids: Vec<[u8; 32]> = bodies.iter().map(|b| b.tx_ref.tx_id).collect();
                 if !self.digest_bypassed(&id) {
-                    let refs: Vec<&[u8]> = ids.iter().map(|i| &i[..]).collect();
+                    if !unchanged {
+                        *self.digest_attempts.entry(id).or_insert(0) += 1;
+                    }
+                    let mref: Vec<&[u8]> = ids.iter().map(|i| &i[..]).collect();
                     let expected = self.announced_digest(&id).unwrap_or_default();
-                    if ergo_crypto::merkle::merkle_tree_root(&refs) != expected {
+                    if ergo_crypto::merkle::merkle_tree_root(&mref) != expected {
                         out.push(Effect::Dropped {
                             id,
                             reason: DropReason::TxDigestMismatch,
@@ -1587,7 +1744,6 @@ impl Processor {
                         return;
                     }
                 }
-                let refs: Vec<TxRef> = bodies.iter().map(|b| b.tx_ref).collect();
                 for b in bodies {
                     self.cache.insert(b, now, &self.bounds);
                 }
@@ -1595,7 +1751,17 @@ impl Processor {
                 let Some(ordering_id) = self.records.get(&id).map(|r| r.ordering_id) else {
                     return;
                 };
-                self.pump(ordering_id, id, out);
+                // A delivery that replaces a *rejected* selection re-runs
+                // the trigger that selection was made on, for the reason
+                // the staged retry does: a fork switch chosen on a deep
+                // trigger collapses into the linear branch if it is
+                // re-driven with the block's own id.
+                let trigger = self
+                    .failed_trigger
+                    .get(&id)
+                    .copied()
+                    .unwrap_or((ordering_id, id));
+                self.pump(trigger.0, trigger.1, out);
                 if self.in_flight.is_none() {
                     self.resume(ordering_id, out);
                 }
@@ -1701,6 +1867,10 @@ impl Processor {
         }
         let job = self.next_job;
         self.next_job += 1;
+        if self.issued.len() >= self.bounds.retired_jobs {
+            self.issued.shift_remove_index(0);
+        }
+        self.issued.insert(job, target);
         // The budget buys *dispatched* work. A job that a later delivery
         // invalidates through `set_tx_refs` still cost the node a full
         // block validation, so charging only accepted failure results
@@ -1733,6 +1903,37 @@ impl Processor {
             .is_some_and(|n| *n >= self.bounds.validation_retries_per_block)
     }
 
+    /// Whether `id` has spent its per-block ordered-digest budget
+    /// (spec 7.5's `digest_attempts_per_block`).
+    fn digest_exhausted(&self, id: &InputBlockId) -> bool {
+        self.digest_attempts
+            .get(id)
+            .is_some_and(|n| *n >= self.bounds.digest_attempts_per_block)
+    }
+
+    /// Report a spent digest budget once per block. Spec 7.6's
+    /// re-selection reaches an exhausted block on every later event, so
+    /// an unguarded report would repeat forever.
+    fn report_digest_exhausted(&mut self, id: InputBlockId, out: &mut Vec<Effect>) {
+        if self.reported_digest_exhausted.insert(id) {
+            out.push(Effect::Dropped {
+                id,
+                reason: DropReason::CandidatesExhausted,
+            });
+        }
+    }
+
+    /// Report a spent validation budget once per block, for the same
+    /// reason as [`Self::report_digest_exhausted`].
+    fn report_validation_exhausted(&mut self, id: InputBlockId, out: &mut Vec<Effect>) {
+        if self.reported_validation_exhausted.insert(id) {
+            out.push(Effect::Dropped {
+                id,
+                reason: DropReason::CandidatesExhausted,
+            });
+        }
+    }
+
     /// Queue an application trigger for `resume` to pick up. `front`
     /// places it ahead of the queue — used for a job that was
     /// invalidated mid-flight, whose selection should be the first thing
@@ -1760,17 +1961,22 @@ impl Processor {
     ) {
         let Some(inf) = self.in_flight.clone() else {
             // The job was invalidated by a generation bump, which clears
-            // `in_flight`; there is no id left to name.
+            // `in_flight`. The block it was validating is still named by
+            // the retired-job index, so the drop carries the *stale*
+            // job's subject rather than a zero id (residual fix round, D).
             out.push(Effect::Dropped {
-                id: [0u8; 32],
-                reason: DropReason::StaleValidation,
+                id: self.issued.get(&job).copied().unwrap_or([0u8; 32]),
+                reason: DropReason::StaleValidation { generation },
             });
             return;
         };
         if inf.job != job || inf.generation != generation {
+            // Never attribute a stale result to the job that happens to
+            // be outstanding now: report the block and generation the
+            // *stale* job was issued for (residual fix round, D).
             out.push(Effect::Dropped {
-                id: inf.id,
-                reason: DropReason::StaleValidation,
+                id: self.issued.get(&job).copied().unwrap_or([0u8; 32]),
+                reason: DropReason::StaleValidation { generation },
             });
             return;
         }
@@ -1792,7 +1998,9 @@ impl Processor {
         if self.tx_refs.get(&inf.id).map(|v| v.as_slice()) != Some(inf.txs.as_slice()) {
             out.push(Effect::Dropped {
                 id: inf.id,
-                reason: DropReason::StaleValidation,
+                reason: DropReason::StaleValidation {
+                    generation: inf.generation,
+                },
             });
             self.pump(inf.ordering_id, inf.trigger, out);
             if self.in_flight.is_none() {
@@ -2070,6 +2278,8 @@ impl Processor {
             self.waitlist.retain(|(w, _)| *w != id);
             self.failed.remove(&id);
             self.reported_evicted.remove(&id);
+            self.reported_digest_exhausted.remove(&id);
+            self.reported_validation_exhausted.remove(&id);
             self.digest_attempts.remove(&id);
             self.validation_attempts.remove(&id);
             self.failed_trigger.remove(&id);
@@ -2094,29 +2304,67 @@ impl Processor {
         for id in expired {
             self.staging.shift_remove(&id);
         }
-        // Outstanding-request counters decay geometrically: a peer that
-        // never answers recovers its budget over a few ticks rather than
-        // being blocked forever, and one that answers is credited
-        // immediately by `on_bodies`.
-        self.outstanding.retain(|_, c| {
-            *c /= 2;
-            *c > 0
+        // Outstanding requests expire at an explicit deadline: a peer
+        // that never answers recovers that slot once the request has
+        // timed out, and one that answers is credited immediately by the
+        // matching delivery (residual fix round, D).
+        self.outstanding.retain(|_, slots| {
+            slots.retain(|(_, at)| at.0 > now.0);
+            !slots.is_empty()
         });
     }
 
     /// Issue `effect` to `peer` unless that peer is already at the
     /// outstanding-request cap (spec 7.4).
+    ///
+    /// The cap counts requests that are genuinely outstanding: a slot is
+    /// released by the delivery that answers it
+    /// ([`Self::request_answered`]) or, if the peer never answers, when
+    /// its deadline passes on a [`Event::Tick`]. Re-issuing the same
+    /// request only refreshes its deadline, so a retry cannot exhaust the
+    /// peer's own budget (residual fix round, D).
     fn request(&mut self, out: &mut Vec<Effect>, effect: Effect, peer: PeerTag, subject: [u8; 32]) {
-        let counter = self.outstanding.entry(peer).or_insert(0);
-        if *counter >= self.bounds.requests_per_peer {
+        let deadline = Tick(self.now.0.saturating_add(self.bounds.request_timeout_ms));
+        let key = RequestKey::of(&effect);
+        let now = self.now;
+        let cap = self.bounds.requests_per_peer;
+        let slots = self.outstanding.entry(peer).or_default();
+        slots.retain(|(_, at)| at.0 > now.0);
+        if let Some(k) = key {
+            if let Some(slot) = slots.iter_mut().find(|(existing, _)| *existing == k) {
+                slot.1 = deadline;
+                out.push(effect);
+                return;
+            }
+        }
+        if slots.len() >= cap {
             out.push(Effect::Dropped {
                 id: subject,
                 reason: DropReason::RequestsFull,
             });
             return;
         }
-        *counter += 1;
+        // An effect that is not a request holds no slot; nothing to track.
+        if let Some(k) = key {
+            slots.push((k, deadline));
+        }
         out.push(effect);
+    }
+
+    /// Release the slot a delivery answers. Returns whether the delivery
+    /// was in fact solicited from that peer — the announcer-recovery
+    /// allowance of the residual fix round (B) needs that distinction.
+    fn request_answered(&mut self, peer: PeerTag, key: RequestKey) -> bool {
+        let Some(slots) = self.outstanding.get_mut(&peer) else {
+            return false;
+        };
+        let before = slots.len();
+        slots.retain(|(k, _)| *k != key);
+        let answered = slots.len() < before;
+        if slots.is_empty() {
+            self.outstanding.remove(&peer);
+        }
+        answered
     }
 
     // ----- read side (API and p2p serving, Plan 2) -----
@@ -2346,6 +2594,20 @@ mod tests {
             .iter()
             .filter_map(|e| match e {
                 Effect::Dropped { reason, .. } => Some(*reason),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The ids a stale-validation drop named, in order.
+    fn stale_ids(effects: &[Effect]) -> Vec<[u8; 32]> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Dropped {
+                    id,
+                    reason: DropReason::StaleValidation { .. },
+                } => Some(*id),
                 _ => None,
             })
             .collect()
@@ -2760,6 +3022,7 @@ mod tests {
         let mut ctx = ts::TestCtx::at(FULL);
         ctx.mempool.add(&b1);
         let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&b1));
+        let id = ts::ann_id(&ann);
         let eff = announce(&mut p, &ctx, &ann, ts::PEER);
         let (job, generation, _, _, _) = ts::one_validate(&eff);
         ctx.handle(
@@ -2778,7 +3041,15 @@ mod tests {
                 outcome: Ok(1),
             },
         );
-        assert_eq!(drops(&out), vec![DropReason::StaleValidation]);
+        assert_eq!(
+            drops(&out),
+            vec![DropReason::StaleValidation { generation }]
+        );
+        assert_eq!(
+            stale_ids(&out),
+            vec![id],
+            "the drop must name the block the stale job was validating"
+        );
         assert!(!out.iter().any(|e| matches!(e, Effect::ChainChanged { .. })));
     }
 
@@ -3156,10 +3427,14 @@ mod tests {
         assert_eq!(p.best_input_chain(), vec![id]);
     }
 
-    /// Finding 4. A delivery that swaps the body under an outstanding job
-    /// invalidates that job; the late result must not be applied.
+    /// Finding 4, as the residual fix round (D) redraws it: a delivery
+    /// arriving while a job is outstanding does **not** swap the
+    /// selection under it — the listless path is bound by the same
+    /// selection state machine as the staged one, so the witness waits
+    /// for that job to fail. The late result is still dropped once the
+    /// generation moves on.
     #[test]
-    fn interleaved_delivery_invalidates_the_outstanding_job() {
+    fn interleaved_delivery_leaves_the_outstanding_job_alone() {
         let mut p = processor();
         let v1 = ts::body(1, 1);
         let v2 = ts::body(1, 2);
@@ -3198,12 +3473,28 @@ mod tests {
             },
         );
         assert!(
-            drops(&second).contains(&DropReason::StaleValidation),
-            "the outstanding job's bodies changed underneath it: {second:?}"
+            drops(&second).contains(&DropReason::SelectionSettled {
+                state: SelectionState::Pending
+            }),
+            "an outstanding selection must not be swapped: {second:?}"
         );
-        let (_, _, _, txs, _) = ts::one_validate(&second);
-        assert_eq!(txs, vec![v2.tx_ref], "the job is reissued for the new body");
+        assert!(!has_validate(&second), "{second:?}");
+        assert_eq!(
+            p.transaction_refs(&id),
+            Some(&[v1.tx_ref][..]),
+            "the outstanding job's bodies must stay frozen"
+        );
 
+        // The job that was left alone still answers; a generation bump
+        // in between is what makes its result stale.
+        ctx.handle(
+            &mut p,
+            Event::OrderingBlockApplied {
+                header_id: [0xBB; 32],
+                height: FULL + 1,
+                now: Tick(4),
+            },
+        );
         let late = ctx.handle(
             &mut p,
             Event::ValidationResult {
@@ -3212,7 +3503,13 @@ mod tests {
                 outcome: Ok(1),
             },
         );
-        assert_eq!(drops(&late), vec![DropReason::StaleValidation]);
+        assert_eq!(
+            drops(&late),
+            vec![DropReason::StaleValidation {
+                generation: old_gen
+            }]
+        );
+        assert_eq!(stale_ids(&late), vec![id]);
         assert!(!late
             .iter()
             .any(|e| matches!(e, Effect::ChainChanged { .. })));
@@ -3530,9 +3827,9 @@ mod tests {
         assert_eq!(vid, ib2b_id, "the deep trigger selected a fork switch");
         assert_eq!(txs, vec![v1.tx_ref]);
 
-        // Replacing ib2b's witness invalidates that job; the reissue must
-        // be the same fork switch, for the same block, with the new body.
-        let replaced = ctx.handle(
+        // While that job is outstanding the selection is frozen (residual
+        // fix round, D): the witness is refused, not swapped in.
+        let refused = ctx.handle(
             &mut p,
             Event::TransactionsDelivered {
                 input_block_id: ib2b_id,
@@ -3541,9 +3838,24 @@ mod tests {
                 now: Tick(6),
             },
         );
-        assert!(
-            drops(&replaced).contains(&DropReason::StaleValidation),
-            "{replaced:?}"
+        assert!(!has_validate(&refused), "{refused:?}");
+        assert!(drops(&refused).contains(&DropReason::SelectionSettled {
+            state: SelectionState::Pending
+        }));
+
+        // Once the job fails the selection is rejected, and re-delivering
+        // the witness may replace it. The reissue must be the same fork
+        // switch, for the same block, with the new body.
+        let failed = ts::validate_err(&mut p, &ctx, &switch);
+        assert!(!has_validate(&failed), "{failed:?}");
+        let replaced = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: ib2b_id,
+                bodies: vec![v2.clone()],
+                from: Some(ts::PEER),
+                now: Tick(7),
+            },
         );
         let (_, _, vid, txs, _) = ts::one_validate(&replaced);
         assert_eq!(vid, ib2b_id, "the fork switch must be re-run");
@@ -3935,7 +4247,9 @@ mod tests {
             "an applied block's transaction references must stay frozen"
         );
         assert!(
-            drops(&late).contains(&DropReason::SelectionSettled),
+            drops(&late).contains(&DropReason::SelectionSettled {
+                state: SelectionState::Applied
+            }),
             "the unusable witness must be reported: {late:?}"
         );
     }
@@ -3988,7 +4302,9 @@ mod tests {
             !has_validate(&during),
             "an outstanding selection must not be swapped: {during:?}"
         );
-        assert!(drops(&during).contains(&DropReason::SelectionSettled));
+        assert!(drops(&during).contains(&DropReason::SelectionSettled {
+            state: SelectionState::Pending
+        }));
         assert_eq!(p.variants_per_position(&id), vec![2, 2]);
 
         // Now the outstanding combination fails. The retry must cover the
@@ -4008,6 +4324,311 @@ mod tests {
                 Effect::ChainChanged { applied, .. } if applied == &vec![id]
             )),
             "the block must apply once the valid combination is reached: {applied:?}"
+        );
+    }
+
+    // ----- residuals fix round: D (listless path, stale results, requests) -----
+
+    /// An announcement that never announces a weak-id list, so every
+    /// delivery takes the listless path of `on_bodies`.
+    fn listless(nonce: u64, tx_id: [u8; 32], prev: Option<InputBlockId>) -> InputBlockAnnouncement {
+        ts::announcement_with(ORD, FULL + 1, nonce, prev, ts::tx_digest(&[tx_id]), None)
+    }
+
+    #[test]
+    fn listless_delivery_after_application_keeps_applied_refs() {
+        // The defect the residual round fixes: with no announced weak-id
+        // list the delivered order *is* the order, so a second delivery
+        // naming the same transaction id with a different witness passed
+        // the ordered digest and replaced the references of an already
+        // applied block — a body no validation ever saw, in a block the
+        // tree considers processed.
+        let mut p = processor();
+        let ctx = ts::TestCtx::at(FULL);
+        let v1 = ts::body(1, 1);
+        let v2 = ts::body(1, 2);
+        assert_eq!(v1.tx_ref.tx_id, v2.tx_ref.tx_id);
+        let ann = listless(1, v1.tx_ref.tx_id, None);
+        let id = ts::ann_id(&ann);
+        announce(&mut p, &ctx, &ann, ts::PEER);
+        let first = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![v1.clone()],
+                from: Some(ts::PEER),
+                now: Tick(2),
+            },
+        );
+        ts::validate_ok(&mut p, &ctx, &first, 1);
+        assert_eq!(p.best_input_chain(), vec![id]);
+
+        let late = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![v2.clone()],
+                from: Some(ts::PEER),
+                now: Tick(3),
+            },
+        );
+        assert!(
+            !has_validate(&late),
+            "an applied block must not start a new validation: {late:?}"
+        );
+        assert_eq!(
+            p.transaction_refs(&id),
+            Some(&[v1.tx_ref][..]),
+            "an applied block's references must stay frozen"
+        );
+        assert!(
+            drops(&late).contains(&DropReason::SelectionSettled {
+                state: SelectionState::Applied
+            }),
+            "{late:?}"
+        );
+        assert!(
+            !p.is_cached(&v2.tx_ref),
+            "an unusable witness must not reach the shared cache"
+        );
+    }
+
+    #[test]
+    fn listless_delivery_after_exhausted_validation_budget_is_refused() {
+        // Every listless delivery that replaces a rejected selection buys
+        // a block validation, so the per-block budget bounds this path
+        // exactly as it bounds the staged one.
+        let mut p = processor();
+        let ctx = ts::TestCtx::at(FULL);
+        let budget = Bounds::default().validation_retries_per_block;
+        let first = ts::body(1, 1);
+        let ann = listless(1, first.tx_ref.tx_id, None);
+        let id = ts::ann_id(&ann);
+        announce(&mut p, &ctx, &ann, ts::PEER);
+
+        let mut last = ts::body(1, 1);
+        for w in 1..=budget as u8 {
+            let b = ts::body(1, w);
+            let eff = ctx.handle(
+                &mut p,
+                Event::TransactionsDelivered {
+                    input_block_id: id,
+                    bodies: vec![b.clone()],
+                    from: Some(ts::PEER),
+                    now: Tick(w as u64),
+                },
+            );
+            assert!(has_validate(&eff), "witness {w} must be validated: {eff:?}");
+            ts::validate_err(&mut p, &ctx, &eff);
+            last = b;
+        }
+        assert_eq!(p.validation_attempts(&id), budget);
+
+        let extra = ts::body(1, budget as u8 + 1);
+        let refused = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![extra.clone()],
+                from: Some(ts::PEER),
+                now: Tick(99),
+            },
+        );
+        assert!(!has_validate(&refused), "{refused:?}");
+        assert_eq!(p.validation_attempts(&id), budget);
+        assert_eq!(
+            p.transaction_refs(&id),
+            Some(&[last.tx_ref][..]),
+            "an exhausted block must not take another selection"
+        );
+        assert!(
+            drops(&refused).contains(&DropReason::CandidatesExhausted),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn stale_validation_result_never_names_the_current_job() {
+        // A result for a job the generation bump abandoned used to be
+        // reported against whatever block is being validated *now*.
+        let mut p = processor();
+        let mut ctx = ts::TestCtx::at(FULL);
+        let a = ts::body(1, 1);
+        let b = ts::body(2, 1);
+        ctx.mempool.add(&a);
+        ctx.mempool.add(&b);
+        let first = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&a));
+        let first_id = ts::ann_id(&first);
+        let eff = announce(&mut p, &ctx, &first, ts::PEER);
+        let (stale_job, stale_gen, _, _, _) = ts::one_validate(&eff);
+
+        // A new best full block retires that job and moves the tree on.
+        const ORD2: OrderingId = [0xCC; 32];
+        ctx.full_block_height = FULL + 1;
+        ctx.handle(
+            &mut p,
+            Event::OrderingBlockApplied {
+                header_id: ORD2,
+                height: FULL + 1,
+                now: Tick(3),
+            },
+        );
+        let second = ts::announcement_for(ORD2, FULL + 2, 2, None, std::slice::from_ref(&b));
+        let second_id = ts::ann_id(&second);
+        let current = announce(&mut p, &ctx, &second, ts::PEER);
+        let (current_job, _, current_block, _, _) = ts::one_validate(&current);
+        assert_eq!(current_block, second_id);
+
+        let out = ctx.handle(
+            &mut p,
+            Event::ValidationResult {
+                job: stale_job,
+                generation: stale_gen,
+                outcome: Ok(1),
+            },
+        );
+        assert_eq!(
+            drops(&out),
+            vec![DropReason::StaleValidation {
+                generation: stale_gen
+            }]
+        );
+        assert_eq!(
+            stale_ids(&out),
+            vec![first_id],
+            "the stale job's own block must be named, not the current one"
+        );
+        // The outstanding job is untouched and still answers.
+        let current_gen = p.generation();
+        let applied = ctx.handle(
+            &mut p,
+            Event::ValidationResult {
+                job: current_job,
+                generation: current_gen,
+                outcome: Ok(1),
+            },
+        );
+        assert!(applied.iter().any(
+            |e| matches!(e, Effect::ChainChanged { applied, .. } if applied == &vec![second_id])
+        ));
+    }
+
+    #[test]
+    fn request_slot_is_released_by_the_matching_delivery() {
+        let bounds = Bounds {
+            requests_per_peer: 1,
+            ..Bounds::default()
+        };
+        let mut p = processor_with(bounds);
+        let ctx = ts::TestCtx::at(FULL);
+        let a1 = ts::announcement(ORD, FULL + 1, 1, None);
+        let id1 = ts::ann_id(&a1);
+        let eff = announce(&mut p, &ctx, &a1, ts::PEER);
+        assert!(eff
+            .iter()
+            .any(|e| matches!(e, Effect::RequestTransactionIds { .. })));
+
+        // A delivery that answers a *different* request releases nothing.
+        let other = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id1,
+                bodies: Vec::new(),
+                from: Some(ts::PEER),
+                now: Tick(1),
+            },
+        );
+        assert!(drops(&other).contains(&DropReason::UnknownBlock) || !other.is_empty());
+        let a2 = ts::announcement(ORD, FULL + 1, 2, Some(id1));
+        let eff = announce(&mut p, &ctx, &a2, ts::PEER);
+        assert!(
+            drops(&eff).contains(&DropReason::RequestsFull),
+            "an unanswered request keeps holding its slot: {eff:?}"
+        );
+
+        // The weak-id list the request asked for releases it.
+        ctx.handle(
+            &mut p,
+            Event::TransactionIdsDelivered {
+                input_block_id: id1,
+                weak_ids: Vec::new(),
+                from: ts::PEER,
+                now: Tick(2),
+            },
+        );
+        let a3 = ts::announcement(ORD, FULL + 1, 3, Some(id1));
+        let eff = announce(&mut p, &ctx, &a3, ts::PEER);
+        assert!(
+            eff.iter()
+                .any(|e| matches!(e, Effect::RequestTransactionIds { .. })),
+            "the answered slot must be free again: {eff:?}"
+        );
+    }
+
+    #[test]
+    fn unanswered_request_slot_expires_only_at_its_deadline() {
+        // The counter used to halve on every Tick, so one tick freed a
+        // peer's whole budget whatever it owed. Slots now expire at an
+        // explicit deadline.
+        let bounds = Bounds {
+            requests_per_peer: 1,
+            ..Bounds::default()
+        };
+        let timeout = bounds.request_timeout_ms;
+        let mut p = processor_with(bounds);
+        let ctx = ts::TestCtx::at(FULL);
+        let a1 = ts::announcement(ORD, FULL + 1, 1, None);
+        let eff = ctx.handle(
+            &mut p,
+            Event::AnnouncementAccepted {
+                ann: a1.clone(),
+                from: ts::PEER,
+                now: Tick(0),
+            },
+        );
+        assert!(eff
+            .iter()
+            .any(|e| matches!(e, Effect::RequestTransactionIds { .. })));
+
+        ctx.handle(
+            &mut p,
+            Event::Tick {
+                now: Tick(timeout / 2),
+            },
+        );
+        let a2 = ts::announcement(ORD, FULL + 1, 2, Some(ts::ann_id(&a1)));
+        let eff = ctx.handle(
+            &mut p,
+            Event::AnnouncementAccepted {
+                ann: a2.clone(),
+                from: ts::PEER,
+                now: Tick(timeout / 2),
+            },
+        );
+        assert!(
+            drops(&eff).contains(&DropReason::RequestsFull),
+            "a tick must not refund an outstanding request: {eff:?}"
+        );
+
+        ctx.handle(
+            &mut p,
+            Event::Tick {
+                now: Tick(timeout + 1),
+            },
+        );
+        let a3 = ts::announcement(ORD, FULL + 1, 3, Some(ts::ann_id(&a1)));
+        let eff = ctx.handle(
+            &mut p,
+            Event::AnnouncementAccepted {
+                ann: a3,
+                from: ts::PEER,
+                now: Tick(timeout + 1),
+            },
+        );
+        assert!(
+            eff.iter()
+                .any(|e| matches!(e, Effect::RequestTransactionIds { .. })),
+            "a timed-out request must release its slot: {eff:?}"
         );
     }
 

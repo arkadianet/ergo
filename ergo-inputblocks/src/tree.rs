@@ -54,6 +54,16 @@ impl InputBlocksTree {
         self.forks.iter().any(|f| f.chain.contains(id))
     }
 
+    /// Whether `id` sits in some fork's *processed* prefix: its
+    /// transactions are already part of an input chain, so the block is
+    /// applied and its transaction selection may no longer be swapped.
+    pub fn is_processed(&self, id: &InputBlockId) -> bool {
+        self.forks.iter().any(|f| {
+            let take = (f.processed_index() + 1).max(0) as usize;
+            f.chain[..take].contains(id)
+        })
+    }
+
     /// Scala `private lazy val longestIndex` (lines 270–279): scans from
     /// index 0, strict `>` — so the *first* fork wins ties.
     pub fn longest_index(&self) -> Option<usize> {

@@ -52,7 +52,22 @@ pub struct Bounds {
     /// Outstanding requests issued to one peer. At the cap the processor
     /// issues no further request to that peer and reports
     /// [`crate::processor::DropReason::RequestsFull`].
+    ///
+    /// A slot is held only while the request is genuinely outstanding: it
+    /// is released by the delivery that answers it, or by
+    /// `request_timeout_ms` passing on a [`crate::processor::Event::Tick`].
     pub requests_per_peer: usize,
+    /// How long an unanswered request keeps holding its
+    /// `requests_per_peer` slot. Not a Scala bound: Scala tracks no
+    /// outstanding requests at all. Expiry is swept on
+    /// [`crate::processor::Event::Tick`], so a peer that never answers
+    /// recovers its budget once — and only once — its requests time out.
+    pub request_timeout_ms: u64,
+    /// Validation jobs remembered after they were issued, so a result
+    /// arriving for an abandoned job can still name the block that job
+    /// was validating. Only one job is outstanding at a time; the rest
+    /// are retired ids kept for telemetry. Oldest evicted first.
+    pub retired_jobs: usize,
     /// Candidate bodies tried per announced weak-id position (spec 7.5
     /// item 4). Beyond this the position is treated as ambiguous and the
     /// bodies are requested from the announcer.
@@ -100,6 +115,8 @@ impl Default for Bounds {
             ordering_announcements: 64,
             staging_bytes_total: 64 * 1024 * 1024,
             requests_per_peer: 32,
+            request_timeout_ms: 60 * 1000,
+            retired_jobs: 64,
             candidates_per_position: 4,
             digest_attempts_per_block: 16,
             prune_threshold: 2,
