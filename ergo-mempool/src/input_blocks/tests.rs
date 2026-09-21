@@ -125,7 +125,6 @@ impl UtxoView for FakeUtxo {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn seed_entry(
     pool: &mut OrderedPool,
     tx_id: TxId,
@@ -197,52 +196,144 @@ fn overlay_keeps_pool_spent_boxes_visible() {
     );
 }
 
+// Two real, DISTINCT transactions whose weak ids collide: found by a
+// birthday search over the mainnet miner-fee output value, holding each
+// tx's spending proof empty (so both share the same witness_id — a
+// single degree of freedom is enough to also collide on tx_id[0..3] in a
+// tractable search: ~2^12 candidates for 50% odds over a 24-bit space).
+// Search performed once with `cargo test --release -- --ignored`
+// (`zzz_brute_force_*`, deleted after the pair was found); these are its
+// output, hard-coded so the test itself does not re-search on every run.
+// tx_id a = dd31c4dd82d9be23fabb4fc3f86f3c180bf7f38196f541729e72d737dc6fee93
+// tx_id b = dd31c4745061ce03b532b6daedb0dff2ad83f11ca4cbfedb5ff0440f7c0fd9db
+// (equal tx_id[0..3] = dd31c4; both txs use an empty spending proof so
+// witness_id — hence weak_id[3..6] — is identical too.)
+const WEAK_COLLISION_TX_A_HEX: &str = "0177777777777777777777777777777777777777777777777777777777777777770000000002ad091005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a57304000000c0843d0008d3000000";
+const WEAK_COLLISION_TX_B_HEX: &str = "018888888888888888888888888888888888888888888888888888888888888888000000000280131005040004000e36100204a00b08cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ea02d192a39a8cc7a701730073011001020402d19683030193a38cc7b2a57300000193c2b2a57301007473027303830108cdeeac93b1a57304000000c0843d0008d3000000";
+
+fn decode_hex_tx(hex_str: &str) -> (Transaction, Arc<[u8]>) {
+    let bytes: Arc<[u8]> = Arc::from(hex::decode(hex_str).unwrap().into_boxed_slice());
+    let mut r = VlqReader::new(&bytes);
+    (read_transaction(&mut r).unwrap(), bytes)
+}
+
 #[test]
 fn find_by_weak_id_returns_all_colliding_entries() {
-    // Two pool entries whose stored bytes are the SAME real transaction
-    // (hence the same weak id) but distinct pool keys/spends — a stand-in
-    // for a genuine 48-bit weak-id collision between two DIFFERENT
-    // transactions, which is what the filter logic must handle: never
-    // collapse to a single match.
-    let (_tx, bytes, _tx_id) = build_tx(&[d(0x50)], 100);
+    // Two DISTINCT real transactions whose weak id genuinely collides (see
+    // the fixture comment above) — the filter logic must return BOTH, never
+    // collapse to a single match. A third, unrelated pooled entry with a
+    // different weak id must be excluded.
+    let (tx_a, bytes_a) = decode_hex_tx(WEAK_COLLISION_TX_A_HEX);
+    let (tx_b, bytes_b) = decode_hex_tx(WEAK_COLLISION_TX_B_HEX);
+    let weak_a = weak_id_of(&tx_a).unwrap();
+    let weak_b = weak_id_of(&tx_b).unwrap();
+    assert_eq!(weak_a, weak_b, "fixture must actually collide");
+    let tx_id_a = *transaction_id(&tx_a).unwrap().as_digest();
+    let tx_id_b = *transaction_id(&tx_b).unwrap().as_digest();
+    assert_ne!(
+        tx_id_a, tx_id_b,
+        "fixture must be two DISTINCT transactions"
+    );
+
+    let (tx_c, _bytes_c, tx_id_c) = build_tx(&[d(0x50)], 100);
+    assert_ne!(
+        weak_id_of(&tx_c).unwrap(),
+        weak_a,
+        "non-matching fixture must not accidentally collide too"
+    );
+
     let mut pool = OrderedPool::with_capacity(8);
-    let e1 = Entry::new(
-        d(1),
-        bytes.clone(),
-        vec![d(0x10)],
+    pool.insert(Entry::new(
+        tx_id_a,
+        bytes_a,
+        tx_a.inputs.iter().map(|i| i.box_id).collect(),
         vec![d(0x11)],
         vec![],
         1_000_000,
         100,
-        bytes.len() as u32,
+        8,
         50_000,
         TxSource::Api,
-    );
-    let e2 = Entry::new(
-        d(2),
-        bytes.clone(),
-        vec![d(0x20)],
+    ))
+    .unwrap();
+    pool.insert(Entry::new(
+        tx_id_b,
+        bytes_b,
+        tx_b.inputs.iter().map(|i| i.box_id).collect(),
         vec![d(0x21)],
         vec![],
         1_000_000,
         200,
-        bytes.len() as u32,
+        8,
         50_000,
         TxSource::Api,
+    ))
+    .unwrap();
+    seed_entry(
+        &mut pool,
+        tx_id_c,
+        vec![d(0x99)],
+        vec![d(0x9A)],
+        vec![],
+        300,
     );
-    pool.insert(e1).unwrap();
-    pool.insert(e2).unwrap();
 
-    let mut r = VlqReader::new(&bytes);
-    let tx = read_transaction(&mut r).unwrap();
-    let weak = weak_id_of(&tx).unwrap();
-
-    let found = find_by_weak_id(&pool, &weak);
+    let found = find_by_weak_id(&pool, &weak_a);
     let ids: HashSet<TxId> = found.iter().map(|e| e.tx_id).collect();
     assert_eq!(
         ids,
-        HashSet::from([d(1), d(2)]),
+        HashSet::from([tx_id_a, tx_id_b]),
         "both colliding entries returned, never a single-value map"
+    );
+    assert!(
+        !ids.contains(&tx_id_c),
+        "non-matching pooled entry must not be returned"
+    );
+}
+
+#[test]
+fn weak_id_scala_oracle_same_tx_id_different_witness_is_not_a_collision() {
+    // Scala-derived case from test-vectors/weak-blocks/weak_ids.json
+    // (`tx1` vs `tx1_other_witness`, ergo commit 31a8de80): the SAME tx_id
+    // with a DIFFERENT witness must NOT be reported as a weak-id match —
+    // `find_by_weak_id` (and the underlying `weak_id_of`) must resolve the
+    // full 6-byte id, not just the tx_id half.
+    const TX1_HEX: &str = "0166666666666666666666666666666666666666666666666666666666666666660309090900000001c0843d0008d3010000";
+    const TX1_OTHER_WITNESS_HEX: &str = "01666666666666666666666666666666666666666666666666666666666666666602080800000001c0843d0008d3010000";
+    const TX1_TX_ID_HEX: &str = "6fdaadfff20bc29cb3c47ffd867639132cbed67f0ca32696c1bd70ac3fe26575";
+    const TX1_WEAK_ID_HEX: &str = "6fdaadc40cf0";
+    const TX1_OTHER_WITNESS_WEAK_ID_HEX: &str = "6fdaadd18bdd";
+
+    let (tx1, _b1) = decode_hex_tx(TX1_HEX);
+    let (tx1_ow, _b2) = decode_hex_tx(TX1_OTHER_WITNESS_HEX);
+
+    let tx1_id = transaction_id(&tx1).unwrap();
+    let tx1_ow_id = transaction_id(&tx1_ow).unwrap();
+    assert_eq!(
+        hex::encode(tx1_id.as_bytes()),
+        TX1_TX_ID_HEX,
+        "tx1 id matches the Scala oracle"
+    );
+    assert_eq!(
+        tx1_id, tx1_ow_id,
+        "same tx_id by construction (fixture premise)"
+    );
+
+    let weak1 = weak_id_of(&tx1).unwrap();
+    let weak1_ow = weak_id_of(&tx1_ow).unwrap();
+    assert_eq!(
+        hex::encode(weak1),
+        TX1_WEAK_ID_HEX,
+        "tx1 weak id matches the Scala oracle"
+    );
+    assert_eq!(
+        hex::encode(weak1_ow),
+        TX1_OTHER_WITNESS_WEAK_ID_HEX,
+        "tx1_other_witness weak id matches the Scala oracle"
+    );
+    assert_ne!(
+        weak1, weak1_ow,
+        "same tx_id, different witness must NOT be the same weak id"
     );
 }
 
@@ -272,7 +363,8 @@ fn apply_input_block_txs_removes_txs_and_input_conflicts_and_returns_entries() {
     // Applied tx never seen by this pool before; conflicts on 0x20.
     let (tx_apply, _bytes_apply, _id_apply) = build_tx(&[d(0x10), d(0x20)], 222);
 
-    let (removed, actions) = apply_input_block_txs(&mut pool, &config, &[tx_apply, tx_seen]);
+    let (removed, actions) =
+        apply_input_block_txs(&mut pool, &config, &[tx_apply, tx_seen]).unwrap();
 
     let removed_ids: HashSet<TxId> = removed.iter().map(|e| e.tx_id).collect();
     assert_eq!(
@@ -317,7 +409,7 @@ fn apply_input_block_txs_does_not_touch_tip_or_revalidation_queue() {
     assert_eq!(mempool.tip(), Some(&tip));
 
     let (tx, _bytes, _id) = build_tx(&[d(0x10)], 100);
-    let _ = mempool.apply_input_block_txs(&[tx]);
+    let _ = mempool.apply_input_block_txs(&[tx]).unwrap();
     assert_eq!(
         mempool.tip(),
         Some(&tip),
@@ -421,4 +513,172 @@ fn restore_respects_capacity_eviction() {
         "lowest-weight tx evicted over capacity"
     );
     assert_eq!(pool.len(), 1);
+}
+
+#[test]
+fn restore_reconnects_pooled_children_and_reconciles_family_weight_before_eviction() {
+    // apply-P -> restore-P -> evict-P must not orphan C: restoring P
+    // reconnects the already-pooled spender of P's output as P's child
+    // again, crediting the same family-weight boost C's presence would
+    // have contributed had P never left the pool, and a later cascading
+    // eviction of the restored P must take C down with it (findings-2-r1
+    // #1: without reconnection, `children_of[P]` stays empty after
+    // restore, so a cascade would remove only P and strand C spending a
+    // box that no longer exists).
+    let mut pool = OrderedPool::with_capacity(8);
+    let config = MempoolConfig::default();
+    let weight_fn = ByCost;
+    let bounds = FamilyBounds::new(
+        config.max_family_depth,
+        config.max_family_ops,
+        config.max_family_update_ms,
+    );
+
+    // P spends external input X, creates output O.
+    let (p_tx, p_bytes, p_id) = build_tx(&[d(0x10)], 500_000);
+    let o_id = ErgoBox {
+        candidate: p_tx.output_candidates[0].clone(),
+        transaction_id: transaction_id(&p_tx).unwrap(),
+        index: 0,
+    }
+    .box_id()
+    .unwrap();
+
+    // C spends P's output O.
+    let (_c_tx, c_bytes, c_id) = build_tx(&[o_id], 700_000);
+
+    let p_weight_raw = weight_fn.compute(WeightInputs {
+        tx_id: &p_id,
+        fee: 500_000,
+        size_bytes: p_bytes.len() as u32,
+        cost: FAKE_COST,
+    });
+    let c_weight = weight_fn.compute(WeightInputs {
+        tx_id: &c_id,
+        fee: 700_000,
+        size_bytes: c_bytes.len() as u32,
+        cost: FAKE_COST,
+    });
+
+    pool.insert(Entry::new(
+        p_id,
+        p_bytes.clone(),
+        vec![d(0x10)],
+        vec![o_id],
+        vec![],
+        500_000,
+        p_weight_raw,
+        p_bytes.len() as u32,
+        FAKE_COST,
+        TxSource::Api,
+    ))
+    .unwrap();
+    pool.insert(Entry::new(
+        c_id,
+        c_bytes.clone(),
+        vec![o_id],
+        vec![d(0x60)],
+        vec![p_id],
+        700_000,
+        c_weight,
+        c_bytes.len() as u32,
+        FAKE_COST,
+        TxSource::Api,
+    ))
+    .unwrap();
+    // Mirror the family credit a real admission of C (while P was already
+    // pooled) would have applied.
+    pool.update_family(&[o_id], i128::from(c_weight), bounds);
+    assert_eq!(pool.get(&p_id).unwrap().weight, p_weight_raw + c_weight);
+
+    // apply-P: P leaves the pool (removed as an applied input-block tx); C
+    // survives with its parent edge detached (existing, unchanged behavior).
+    let (removed, _actions) =
+        apply_input_block_txs(&mut pool, &config, std::slice::from_ref(&p_tx)).unwrap();
+    assert_eq!(removed.len(), 1);
+    assert!(!pool.contains(&p_id));
+    assert!(
+        pool.contains(&c_id),
+        "child survives the parent's applied removal"
+    );
+    assert!(
+        pool.get(&c_id).unwrap().parents_in_pool.is_empty(),
+        "parent edge detached by apply step 4"
+    );
+
+    // restore-P: P comes back with a freshly-derived weight that starts
+    // from scratch (no memory of the prior C-boost)...
+    let outcomes = restore_input_block_txs(
+        &mut pool,
+        &config,
+        &weight_fn,
+        &[(p_id, p_bytes, None)],
+        Instant::now(),
+    );
+    assert_eq!(outcomes, vec![RestoreOutcome::Restored(p_id)]);
+
+    // ...but restore must reconnect C as P's child and reconcile the
+    // family credit, so P ends up exactly as boosted as before removal.
+    assert!(
+        pool.get(&c_id).unwrap().parents_in_pool.contains(&p_id),
+        "restore reconnects the already-pooled spender of P's output"
+    );
+    assert_eq!(
+        pool.get(&p_id).unwrap().weight,
+        p_weight_raw + c_weight,
+        "family weight reconciled through the reconnected edge"
+    );
+
+    // evict-P: cascading removal (the same primitive capacity/conflict
+    // eviction both use) must take C down with it — no orphan left
+    // spending a box that no longer exists.
+    let evicted = pool.remove_with_descendants_debiting(&p_id, config.max_family_depth, bounds);
+    let evicted_ids: HashSet<TxId> = evicted.iter().map(|e| e.tx_id).collect();
+    assert_eq!(evicted_ids, HashSet::from([p_id, c_id]));
+    assert!(!pool.contains(&p_id));
+    assert!(
+        !pool.contains(&c_id),
+        "reconnected child must not be left orphaned"
+    );
+    pool.check_invariants();
+}
+
+#[test]
+fn apply_aborts_with_no_partial_removal_when_tx_id_uncomputable() {
+    // Fail-closed contract (findings-2-r1 #4): if ANY tx's id cannot be
+    // computed, the whole apply call must return an error and the pool
+    // must be untouched — no partial removal from txs enumerated before
+    // the failing one.
+    let mut pool = OrderedPool::with_capacity(8);
+    let config = MempoolConfig::default();
+
+    // A separate, ordinary applied tx that WOULD succeed in isolation, and
+    // is ordered BEFORE the malformed one so a buggy skip-and-continue
+    // implementation would have already removed it.
+    let (ok_tx, _ok_bytes, ok_id) = build_tx(&[d(0x10)], 100);
+    seed_entry(&mut pool, ok_id, vec![d(0x10)], vec![d(0x11)], vec![], 500);
+
+    // A malformed tx whose `transaction_id` computation fails: more
+    // inputs than the wire format's u16 count field can express.
+    let huge_input = input_with_proof(d(0x99), &[]);
+    let bad_tx = Transaction {
+        inputs: vec![huge_input; (u16::MAX as usize) + 1],
+        data_inputs: vec![],
+        output_candidates: vec![ord_candidate(1)],
+    };
+    assert!(
+        transaction_id(&bad_tx).is_err(),
+        "test fixture must actually fail id computation"
+    );
+
+    let result = apply_input_block_txs(&mut pool, &config, &[ok_tx, bad_tx]);
+    assert!(
+        result.is_err(),
+        "apply must fail closed on an uncomputable tx id"
+    );
+    assert!(
+        pool.contains(&ok_id),
+        "no partial removal: the earlier, otherwise-valid tx must remain pooled"
+    );
+    pool.check_invariants();
 }

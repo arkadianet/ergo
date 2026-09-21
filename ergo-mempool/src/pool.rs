@@ -480,6 +480,30 @@ impl OrderedPool {
         }
     }
 
+    /// Attach `parent` to `child`'s `parents_in_pool` — the mirror of
+    /// [`Self::detach_parent`]. Used when a re-admitted tx (e.g. a restored
+    /// input-block body) reconnects to an already-pooled spender of one of
+    /// its outputs: the edge that a prior `detach_parent` (or the child's
+    /// own admission racing ahead of the parent) left missing. Also records
+    /// the `parent -> child` edge in `children_of` so a later cascading
+    /// removal of `parent` (`remove_with_descendants*`) reaches `child`
+    /// again. Idempotent (no duplicate edge on repeated calls) and a no-op
+    /// if `child` is absent.
+    pub(crate) fn attach_parent(&mut self, child: &TxId, parent: &TxId) {
+        let Some(key) = self.by_tx_id.get(child).copied() else {
+            return;
+        };
+        if let Some(entry) = self.ordered.get_mut(&key) {
+            if !entry.parents_in_pool.contains(parent) {
+                entry.parents_in_pool.push(*parent);
+            }
+        }
+        let siblings = self.children_of.entry(*parent).or_default();
+        if !siblings.contains(child) {
+            siblings.push(*child);
+        }
+    }
+
     /// Refresh a surviving tx's `last_checked_at` after a tip re-validation
     /// pass, marking it as visited this pass so the oldest-first rotation moves
     /// on. Updates ONLY the rotation clock — NOT `cost`/`weight`: the recheck is

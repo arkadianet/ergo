@@ -1917,7 +1917,8 @@ impl Mempool {
     pub fn apply_input_block_txs(
         &mut self,
         txs: &[ergo_ser::transaction::Transaction],
-    ) -> (Vec<crate::input_blocks::RemovedEntry>, Vec<MempoolAction>) {
+    ) -> Result<(Vec<crate::input_blocks::RemovedEntry>, Vec<MempoolAction>), ergo_ser::WriteError>
+    {
         crate::input_blocks::apply_input_block_txs(&mut self.pool, &self.config, txs)
     }
 

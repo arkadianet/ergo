@@ -144,28 +144,32 @@ impl From<&Entry> for RemovedEntry {
 /// cascade-evict conflicting txs since their whole subtree double-spent,
 /// then detach the stale parent edge from survivors) so the same pool
 /// invariants (`children_of` / `parents_in_pool` consistency) hold.
+///
+/// Fails closed: every `tx`'s id is computed FIRST, in a read-only pass
+/// (`transaction_id`, `pool.contains` — no mutation), before any pool
+/// removal begins. If ANY tx's id cannot be computed, the whole call
+/// returns `Err` with the pool untouched — never a partial removal from
+/// the txs enumerated before the failing one.
 pub fn apply_input_block_txs(
     pool: &mut OrderedPool,
     config: &MempoolConfig,
     txs: &[Transaction],
-) -> (Vec<RemovedEntry>, Vec<MempoolAction>) {
+) -> Result<(Vec<RemovedEntry>, Vec<MempoolAction>), WriteError> {
     let bounds = FamilyBounds::new(
         config.max_family_depth,
         config.max_family_ops,
         config.max_family_update_ms,
     );
 
+    // Read-only pass: compute every tx's id before touching the pool at
+    // all, so a failure here (`?`) aborts with zero mutation.
     let mut all_inputs: Vec<Digest32> = Vec::new();
-    let mut applied_ids: Vec<TxId> = Vec::new();
+    let mut tx_ids: Vec<TxId> = Vec::with_capacity(txs.len());
     for tx in txs {
         all_inputs.extend(tx.inputs.iter().map(|i| i.box_id));
-        if let Ok(id) = transaction_id(tx) {
-            let id = *id.as_digest();
-            if pool.contains(&id) {
-                applied_ids.push(id);
-            }
-        }
+        tx_ids.push(*transaction_id(tx)?.as_digest());
     }
+    let applied_ids: Vec<TxId> = tx_ids.into_iter().filter(|id| pool.contains(id)).collect();
 
     // Step 1 — snapshot surviving children of the about-to-be-removed
     // applied txs BEFORE removal (their `parents_in_pool` edge goes stale).
@@ -232,7 +236,7 @@ pub fn apply_input_block_txs(
         });
     }
 
-    (removed, actions)
+    Ok((removed, actions))
 }
 
 /// Outcome of restoring one cached body through [`restore_input_block_txs`].
@@ -320,6 +324,32 @@ pub fn restore_input_block_txs(
         match pool.insert(entry) {
             Ok(()) => {
                 pool.update_family(&peeked.input_box_ids, i128::from(weight), bounds);
+
+                // Reconnect already-pooled spenders of this restored tx's
+                // outputs (findings-2-r1 #1): a child C that survived this
+                // tx's earlier removal (e.g. via `apply_input_block_txs`)
+                // had its `parents_in_pool` edge detached, so restoring the
+                // parent must re-attach it — otherwise a later cascading
+                // eviction of the restored tx (via `children_of`, which
+                // `remove_with_descendants_debiting` walks) would miss C
+                // entirely and leave it pooled spending a box that no
+                // longer exists. Crediting `update_family` through the
+                // reconnected edge reproduces exactly the family-weight
+                // boost C's presence would have contributed had this tx
+                // never left the pool (Scala `put` re-registers outputs so
+                // families reconnect — spec §8).
+                for child_id in pool.conflicts_for_inputs(&peeked.output_box_ids) {
+                    if child_id == *tx_id {
+                        continue;
+                    }
+                    pool.attach_parent(&child_id, tx_id);
+                    if let Some(child) = pool.get(&child_id) {
+                        let child_weight = child.weight;
+                        let child_inputs = child.inputs.clone();
+                        pool.update_family(&child_inputs, i128::from(child_weight), bounds);
+                    }
+                }
+
                 outcomes.push(RestoreOutcome::Restored(*tx_id));
                 while pool.len() > config.max_pool_size
                     || pool.total_bytes() > config.max_pool_bytes
@@ -357,8 +387,31 @@ pub fn find_by_weak_id<'p>(pool: &'p OrderedPool, weak: &WeakId) -> Vec<&'p Entr
         .filter(|e| {
             let mut r = VlqReader::new(&e.bytes);
             match read_transaction(&mut r) {
-                Ok(tx) => weak_id_of(&tx).map(|w| w == *weak).unwrap_or(false),
-                Err(_) => false,
+                Ok(tx) => match weak_id_of(&tx) {
+                    Ok(w) => w == *weak,
+                    Err(err) => {
+                        // `bytes` came from a prior successful admission or
+                        // restore, so a failure here means the entry's own
+                        // id can no longer be derived from its stored bytes
+                        // — worth a diagnostic even though the lookup
+                        // contract (skip, don't panic or propagate) doesn't
+                        // change.
+                        tracing::warn!(
+                            tx_id = ?e.tx_id,
+                            error = ?err,
+                            "find_by_weak_id: pooled entry's weak id could not be computed, skipping"
+                        );
+                        false
+                    }
+                },
+                Err(err) => {
+                    tracing::warn!(
+                        tx_id = ?e.tx_id,
+                        error = ?err,
+                        "find_by_weak_id: pooled entry's bytes did not deserialize, skipping"
+                    );
+                    false
+                }
             }
         })
         .collect()
