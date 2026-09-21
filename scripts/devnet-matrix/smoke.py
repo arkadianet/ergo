@@ -8,13 +8,15 @@ Six assertions, all polled over REST (spec §9, plan 2 task 8):
      the same `bestFullHeaderId` AND the same `bestInputBlock`;
   3. at such a sample `bestInputChain` is identical on both nodes;
   4. over >= 10 ordering blocks: the first ordering block after a cold
-     restart is an `ordering_reconstruct_fallback` (`missing_input_body`
-     — the processor is in-memory), and a later one is an
+     restart is an `ordering_reconstruct_fallback` (any reason; the
+     reason is recorded, and `root_mismatch` is expected because a cold
+     node has no input chain to name a body in), and a later one is an
      `ordering_reconstructed` carrying MORE THAN ONE transaction, which
      is the only outcome that proves assembly from input-block bodies.
-     Each reconstruction also reports `reconstructed_order`
-     (`scala` | `candidate`, divergence D4 / upstream F12) and the run
-     records the split;
+     Each reconstruction also reports `reconstructedOrder`
+     (`scala` | `candidate`, divergence D4 / upstream F12) and
+     `reconstructionKey` (`self` | `parent`, divergence D5 / upstream
+     F5); the run records both splits;
   5. Rust's `fullHeight` stays within 2 of Scala's for the whole run
      (only the first 60 s after each node start is excluded), no
      `DigestMismatch` / `TxDigestMismatch` / `Penalize` ever fires, and
@@ -43,6 +45,7 @@ import argparse
 import datetime
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import subprocess
@@ -77,9 +80,18 @@ START_GRACE_SECONDS = 60
 # follower blamed its peer. Any of them is a failure.
 FATAL_DROPS = ('DigestMismatch', 'TxDigestMismatch', 'Penalize')
 
-# Assertion 2/3's bound: agreement has to show up within this many
-# ordering blocks, not merely eventually.
-AGREEMENT_ORDERING_BLOCKS = 3
+# Assertions 2 and 3 observe for this many ordering blocks. Longer than
+# the old bound because they are now statistical: a p95 over a handful of
+# samples means nothing.
+AGREEMENT_ORDERING_BLOCKS = 5
+
+# Assertion 2's hard lag bounds, in INPUT BLOCKS (not seconds): how far
+# Rust's input-block tip may trail Scala's for the same ordering block.
+# Exact instantaneous equality is unreachable when the miner publishes
+# ~64 input blocks per ordering block, and lag is not divergence — so the
+# gate bounds the lag and records the exact-match count as a metric.
+LAG_P95_MAX = 8
+LAG_MAX = 16
 
 
 class Unavailable(RuntimeError):
@@ -164,11 +176,10 @@ class Run:
         self.peer_states = set()
         self.node_started_at = {}
 
-        # Assertions 2 and 3.
-        self.exact_block_match = None
-        self.exact_chain_match = None
-        self.chain_mismatches = []
-        self.same_tip_samples = 0
+        # Assertions 2 and 3: the raw series the evaluators run over.
+        # Kept so a run's verdict can be recomputed from its evidence
+        # instead of trusting a number the harness printed once.
+        self.series = []
         self.propagation_lags = []
         self._scala_input_first_seen = {}
 
@@ -263,34 +274,19 @@ class Run:
             self.propagation_lags.append(
                 now - self._scala_input_first_seen.pop(rust_best))
 
-        same_tip = (reading['scala']['info'].get('bestFullHeaderId')
-                    == reading['rust']['info'].get('bestFullHeaderId')
-                    and reading['scala']['info'].get('bestFullHeaderId') is not None)
-        if not same_tip:
-            return
-        self.same_tip_samples += 1
-        scala_chain = reading['scala']['chain'].get('bestInputBlocks') or []
-        rust_chain = reading['rust']['chain'].get('bestInputBlocks') or []
-        if scala_best and scala_best == rust_best:
-            if self.exact_block_match is None:
-                self.exact_block_match = {
-                    'at': now,
-                    'best_full_header_id': reading['scala']['info']['bestFullHeaderId'],
-                    'best_input_block': scala_best,
-                }
-            if self.exact_chain_match is None and scala_chain == rust_chain:
-                self.exact_chain_match = {
-                    'at': now, 'length': len(scala_chain), 'chain': scala_chain}
-            elif scala_chain != rust_chain and len(self.chain_mismatches) < 5:
-                # Same tip AND same input-block head, different chain:
-                # the two nodes disagree about history, not about timing.
-                self.chain_mismatches.append({
-                    'at': now,
-                    'best_full_header_id': reading['scala']['info']['bestFullHeaderId'],
-                    'best_input_block': scala_best,
-                    'scala_chain': scala_chain,
-                    'rust_chain': rust_chain,
-                })
+        # The ordering block is the comparison key: two input chains under
+        # different ordering blocks are not the same thing. `bestOrdering`
+        # comes from the same call as the chain, so the pair is coherent.
+        scala_ordering = reading['scala']['chain'].get('bestOrdering') or None
+        rust_ordering = reading['rust']['chain'].get('bestOrdering') or None
+        self.series.append({
+            'at': now,
+            'ordering': scala_ordering if scala_ordering == rust_ordering else None,
+            'scala_chain': reading['scala']['chain'].get('bestInputBlocks') or [],
+            'rust_chain': reading['rust']['chain'].get('bestInputBlocks') or [],
+            'scala_tip': scala_best or None,
+            'rust_tip': rust_best or None,
+        })
 
     def note_input_block_txids(self, reading):
         """Record which transactions Rust saw inside each input block."""
@@ -354,6 +350,189 @@ class Workload:
         return {'submitted': len(self.submitted), 'failures': len(self.failures)}
 
 
+
+# ----- assertion 2 and 3 evaluators (pure, self-tested) -----
+#
+# A sample is a dict:
+#   {'ordering': <ordering block id both nodes report, or None>,
+#    'scala_chain': [ids, NEWEST FIRST], 'rust_chain': [ids, newest first],
+#    'scala_tip': <id or None>, 'rust_tip': <id or None>}
+# Only samples where both nodes name the SAME ordering block are compared;
+# comparing input chains under different ordering blocks compares
+# different things.
+
+
+def percentile(values, pct):
+    """The `pct`-th percentile by nearest-rank. `None` for no values."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    rank = max(1, math.ceil(pct / 100 * len(ordered)))
+    return ordered[min(rank, len(ordered)) - 1]
+
+
+def evaluate_tip_consistency(samples):
+    """Assertion 2. Rust's tip must be a block Scala had on its best chain
+    for the same ordering block (at that sample or any later one), and the
+    lag — how many input blocks Rust trails by — must stay inside the
+    bounds. Exact equality is counted, not required."""
+    scala_seen = {}          # ordering -> set of every id Scala ever listed
+    scala_seen_order = {}    # ordering -> [ (index, frozenset) ] for "later"
+    for i, s in enumerate(samples):
+        if not s.get('ordering'):
+            continue
+        ids = set(s.get('scala_chain') or [])
+        scala_seen.setdefault(s['ordering'], set()).update(ids)
+        scala_seen_order.setdefault(s['ordering'], []).append((i, ids))
+
+    lags, unconfirmed, exact, compared = [], [], 0, 0
+    for i, s in enumerate(samples):
+        ordering, rust_tip = s.get('ordering'), s.get('rust_tip')
+        if not ordering or not rust_tip:
+            continue
+        compared += 1
+        if rust_tip == s.get('scala_tip'):
+            exact += 1
+        # "at some later sample": this sample counts too, so the window is
+        # every Scala observation from here on. A tip Rust reports before
+        # Scala's REST has caught up is still confirmed.
+        confirmed = any(rust_tip in ids
+                        for j, ids in scala_seen_order.get(ordering, ())
+                        if j >= i)
+        if not confirmed:
+            # Fall back to the whole-run union before calling it a
+            # divergence: a tip Scala listed only EARLIER is still a tip
+            # Scala had, and the ordering block may have moved on.
+            if rust_tip in scala_seen.get(ordering, ()):
+                confirmed = True
+        if not confirmed:
+            unconfirmed.append({'sample': i, 'ordering': ordering,
+                                'rust_tip': rust_tip,
+                                'scala_chain': s.get('scala_chain') or []})
+            continue
+        chain = s.get('scala_chain') or []
+        if rust_tip in chain:
+            # Chains are newest-first, so the index IS the number of
+            # input blocks Rust trails by at this instant.
+            lags.append(chain.index(rust_tip))
+    p95, mx = percentile(lags, 95), (max(lags) if lags else None)
+    violations = []
+    if p95 is not None and p95 > LAG_P95_MAX:
+        violations.append(f'lag p95 {p95} > {LAG_P95_MAX}')
+    if mx is not None and mx > LAG_MAX:
+        violations.append(f'lag max {mx} > {LAG_MAX}')
+    if unconfirmed:
+        violations.append(
+            f'{len(unconfirmed)} Rust tips were never on Scala\'s best chain')
+    return {
+        'compared_samples': compared,
+        'lag_samples': len(lags),
+        'lag_p95': p95,
+        'lag_max': mx,
+        'lag_mean': round(sum(lags) / len(lags), 2) if lags else None,
+        'lag_bounds': {'p95_max': LAG_P95_MAX, 'max': LAG_MAX},
+        'exact_tip_matches': exact,
+        'unconfirmed_rust_tips': unconfirmed[:10],
+        'unconfirmed_count': len(unconfirmed),
+        'violations': violations,
+    }
+
+
+def evaluate_chain_consistency(samples):
+    """Assertion 3. At every same-ordering-block sample Rust's chain must
+    be a prefix of Scala's read oldest-first — i.e. Scala's chain with the
+    newest k entries removed. Rust trailing is fine; a different HISTORY
+    is not."""
+    compared, violations, depths = 0, [], []
+    for i, s in enumerate(samples):
+        if not s.get('ordering'):
+            continue
+        scala_chain = s.get('scala_chain') or []
+        rust_chain = s.get('rust_chain') or []
+        if not rust_chain:
+            # Nothing to contradict. Counted, but no claim either way.
+            continue
+        compared += 1
+        # Oldest-first, so "prefix" is the natural reading.
+        scala_old = list(reversed(scala_chain))
+        rust_old = list(reversed(rust_chain))
+        if len(rust_old) <= len(scala_old) and scala_old[:len(rust_old)] == rust_old:
+            depths.append(len(scala_old) - len(rust_old))
+            continue
+        if len(violations) < 10:
+            violations.append({'sample': i, 'ordering': s['ordering'],
+                               'scala_chain': scala_chain,
+                               'rust_chain': rust_chain})
+    return {
+        'compared_samples': compared,
+        'prefix_violations': violations,
+        'prefix_violation_count': len(violations),
+        'max_truncation_depth': max(depths) if depths else None,
+    }
+
+
+def _self_test():
+    """Red-first coverage for the two evaluators above, on synthetic
+    series. They decide the gate, so they need to fail where the new
+    definitions say they must."""
+    ordering = 'O'
+
+    def sample(scala, rust):
+        return {'ordering': ordering, 'scala_chain': scala, 'rust_chain': rust,
+                'scala_tip': scala[0] if scala else None,
+                'rust_tip': rust[0] if rust else None}
+
+    # A follower trailing by 2 of a 5-long chain: consistent, lag 2.
+    trailing = [sample(['e', 'd', 'c', 'b', 'a'], ['c', 'b', 'a'])] * 20
+    tip = evaluate_tip_consistency(trailing)
+    assert tip['violations'] == [], tip
+    assert tip['lag_p95'] == 2 and tip['lag_max'] == 2, tip
+    assert tip['exact_tip_matches'] == 0, tip
+    assert evaluate_chain_consistency(trailing)['prefix_violation_count'] == 0
+
+    # In lockstep: still consistent, lag 0, and the exact-match metric
+    # counts every sample.
+    lockstep = [sample(['c', 'b', 'a'], ['c', 'b', 'a'])] * 5
+    tip = evaluate_tip_consistency(lockstep)
+    assert tip['lag_max'] == 0 and tip['exact_tip_matches'] == 5, tip
+
+    # A tip Scala never had on its best chain: a real divergence.
+    rogue = [sample(['c', 'b', 'a'], ['X', 'b', 'a'])]
+    tip = evaluate_tip_consistency(rogue)
+    assert tip['unconfirmed_count'] == 1, tip
+    assert any('never on Scala' in v for v in tip['violations']), tip
+
+    # Confirmed by a LATER sample: Rust saw it before Scala's REST did.
+    ahead = [sample(['b', 'a'], ['c', 'b', 'a']),
+             sample(['c', 'b', 'a'], ['c', 'b', 'a'])]
+    assert evaluate_tip_consistency(ahead)['unconfirmed_count'] == 0
+
+    # Lag past the bounds fails, even though every tip is consistent.
+    deep = ['t%02d' % n for n in range(30, -1, -1)]
+    far = [sample(deep, deep[20:])] * 10
+    tip = evaluate_tip_consistency(far)
+    assert tip['lag_p95'] == 20 and tip['lag_max'] == 20, tip
+    assert any('p95' in v for v in tip['violations']), tip
+    assert any('max' in v for v in tip['violations']), tip
+
+    # A different HISTORY at the same length is a prefix violation.
+    forked = [sample(['c', 'b', 'a'], ['c', 'x', 'a'])]
+    chain = evaluate_chain_consistency(forked)
+    assert chain['prefix_violation_count'] == 1, chain
+
+    # Rust longer than Scala is a violation too: it cannot be a prefix.
+    longer = [sample(['b', 'a'], ['c', 'b', 'a'])]
+    assert evaluate_chain_consistency(longer)['prefix_violation_count'] == 1
+
+    # Samples under different ordering blocks are never compared.
+    unrelated = [{'ordering': None, 'scala_chain': ['a'], 'rust_chain': ['z'],
+                  'scala_tip': 'a', 'rust_tip': 'z'}]
+    assert evaluate_tip_consistency(unrelated)['compared_samples'] == 0
+    assert evaluate_chain_consistency(unrelated)['compared_samples'] == 0
+
+    print('self-test OK: evaluators behave as the round-3 definitions require')
+
+
 # ----- assertion drivers -----
 
 
@@ -386,48 +565,55 @@ def assertion_1_peering(run, evidence):
 
 
 def assertion_2_and_3_agreement(run, evidence):
-    """Exact agreement, bounded by ordering blocks rather than by a clock."""
+    """Consistency under lag (round-3 restatement).
+
+    Exact instantaneous equality is unreachable against a miner
+    publishing ~64 input blocks per ordering block, and lag is not
+    divergence. So assertion 2 requires that every tip Rust reports is a
+    block Scala had on its best chain, with the lag inside hard bounds,
+    and assertion 3 requires Rust's chain to be a prefix of Scala's read
+    oldest-first. Exact matches are counted, never required.
+    """
     start_height = scala_height(run)
     limit = start_height + AGREEMENT_ORDERING_BLOCKS
     while time.monotonic() < run.deadline:
         reading = run.sweep()
         run.note_input_block_txids(reading)
-        if run.exact_block_match and run.exact_chain_match:
-            break
         if reading and (reading['scala']['info'].get('fullHeight') or 0) > limit:
             break
         time.sleep(0.2)
 
+    tip = evaluate_tip_consistency(run.series)
+    chain = evaluate_chain_consistency(run.series)
     lags = [round(v, 3) for v in run.propagation_lags]
     evidence['2_best_input_block'] = {
-        'match': run.exact_block_match,
-        'bound_ordering_blocks': AGREEMENT_ORDERING_BLOCKS,
+        'definition': ("every Rust bestInputBlock must be a block Scala had on its "
+                       "best chain for the same ordering block; lag p95 <= "
+                       f"{LAG_P95_MAX} and max <= {LAG_MAX} input blocks"),
+        'observed_ordering_blocks': AGREEMENT_ORDERING_BLOCKS,
         'start_height': start_height,
         'samples': run.samples,
-        'same_tip_samples': run.same_tip_samples,
         'unavailable_samples': run.unavailable_samples,
         'max_propagation_lag_seconds': max(lags) if lags else None,
-        'observed_propagation_lags': lags[:50],
+        **tip,
     }
     evidence['3_best_input_chain'] = {
-        'match': run.exact_chain_match,
-        'mismatches': run.chain_mismatches,
+        'definition': ("at every same-ordering-block sample Rust's bestInputChain must "
+                       "be a prefix of Scala's read oldest-first (tip-side truncated)"),
+        **chain,
     }
-    if run.exact_block_match is None:
-        run.fail('2_best_input_block',
-                 'the two nodes never reported the same bestInputBlock while on the '
-                 f'same ordering tip, within {AGREEMENT_ORDERING_BLOCKS} ordering blocks',
-                 {'same_tip_samples': run.same_tip_samples,
-                  'chain_mismatches': run.chain_mismatches})
-    if run.exact_chain_match is None:
+    if tip['violations']:
+        run.fail('2_best_input_block', '; '.join(tip['violations']),
+                 {'lag_p95': tip['lag_p95'], 'lag_max': tip['lag_max'],
+                  'unconfirmed': tip['unconfirmed_rust_tips']})
+    if chain['prefix_violations']:
         run.fail('3_best_input_chain',
-                 'the two nodes never reported an identical bestInputChain while on the '
-                 'same ordering tip',
-                 {'chain_mismatches': run.chain_mismatches})
-    for key, name in (('2_best_input_block', '2_best_input_block'),
-                      ('3_best_input_chain', '3_best_input_chain')):
+                 f"Rust's chain was not a prefix of Scala's at "
+                 f"{chain['prefix_violation_count']} samples",
+                 {'violations': chain['prefix_violations']})
+    for key in ('2_best_input_block', '3_best_input_chain'):
         evidence[key]['result'] = 'FAIL' if any(
-            f['assertion'] == name for f in run.failures) else 'PASS'
+            f['assertion'] == key for f in run.failures) else 'PASS'
 
 
 def scala_height(run):
@@ -614,6 +800,10 @@ def assertion_4_reconstruction(run, evidence, ordering_blocks):
         for e in ordering if e['kind'] == 'ordering_reconstructed')
     result['fallback_reasons'] = _tally(e.get('detail') for e in ordering
                                         if e['kind'] == 'ordering_reconstruct_fallback')
+    # D5 telemetry: which ordering id the input chain was read under.
+    result['reconstruction_keys'] = _tally(
+        e.get('reconstructionKey', e.get('reconstruction_key'))
+        for e in ordering if e['kind'] == 'ordering_reconstructed')
     result['after_restart'] = ordering_event_summary(events)
     result['ordering_blocks_observed'] = ordering_blocks
 
@@ -757,7 +947,15 @@ def main():
     parser.add_argument('--timeout', type=int, default=1200,
                         help='overall polling budget, seconds')
     parser.add_argument('--mempool-txs', type=int, default=20)
+    parser.add_argument('--self-test', action='store_true',
+                        help='run the evaluator unit tests and exit (no nodes needed)')
     args = parser.parse_args()
+    if args.self_test:
+        _self_test()
+        return
+    if args.self_test:
+        _self_test()
+        return
 
     evidence = {
         'status': 'RUNNING',
@@ -819,19 +1017,25 @@ def main():
         evidence['harness_error'] = f'{type(error).__name__}: {error}'
         raise
     finally:
+        evidence['agreement_series_sample'] = run.series[:200]
+        evidence['agreement_series_total'] = len(run.series)
         evidence['failures'] = run.failures
         evidence['status'] = 'PASS' if not run.failures else 'FAIL'
         if run.findings:
             evidence['findings_written'] = write_findings(run, evidence)
         save()
         recon = evidence['assertions'].get('4_reconstruction', {})
+        tipm = evidence['assertions'].get('2_best_input_block', {})
         orders = recon.get('orders', {})
         print(f'{evidence["status"]}: '
               f'reconstructed={recon.get("reconstructed_total", 0)} '
               f'(multi-tx {len(recon.get("reconstructed_multi_tx", []))}, '
-              f'orders {orders or "none"}) '
+              f'orders {orders or "none"}, '
+              f'keys {recon.get("reconstruction_keys", {}) or "none"}) '
               f'fallback={recon.get("fallback_total", 0)} '
               f'{recon.get("fallback_reasons", {}) or ""} '
+              f'lag_p95={tipm.get("lag_p95")} lag_max={tipm.get("lag_max")} '
+              f'exact={tipm.get("exact_tip_matches")} '
               f'max_height_gap={run.max_height_gap} '
               f'failures={len(run.failures)} '
               f'evidence={output.relative_to(ROOT)}', flush=True)

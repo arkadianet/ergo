@@ -120,15 +120,24 @@ that cannot be observed fails the run.
 
 1. **Peering.** Both nodes have a connected peer, and Rust's
    `/api/v1/peers` shows the Scala node at protocol `6.5.0`.
-2. **`bestInputBlock` equality.** Within 3 ordering blocks there is a
-   sample where both nodes report the same `bestFullHeaderId` **and the
-   same `bestInputBlock`**. Id-for-id, no suffix acceptance.
-3. **`bestInputChain` equality** at such a sample — the two lists
-   identical.
+2. **Tip consistency under lag.** Every `bestInputBlock` Rust reports
+   must be a block Scala had on its best chain for the **same ordering
+   block**, and the lag — how many input blocks Rust's tip trails
+   Scala's by — must have **p95 ≤ 8 and max ≤ 16**. Exact instantaneous
+   equality is *recorded* (`exact_tip_matches`) but not required: the
+   miner publishes ~64 input blocks per ordering block, so equality at a
+   sampled instant measures the sampling clock, and lag is not
+   divergence. A tip Scala never had on its best chain IS.
+3. **Chain consistency.** At every same-ordering-block sample Rust's
+   `bestInputChain` must be a **prefix of Scala's read oldest-first**
+   (i.e. Scala's list with the newest *k* entries removed). Zero
+   violations. A different history at any depth fails the run.
 4. **Reconstruction, both outcomes.** The first ordering block after a
-   cold mid-run restart must be an `ordering_reconstruct_fallback` with
-   reason `missing_input_body` (the processor is in-memory, so its input
-   chain is gone), and a later one must be an `ordering_reconstructed`
+   cold mid-run restart must be an `ordering_reconstruct_fallback` (any
+   reason — it is recorded, and `root_mismatch` is what a cold node
+   produces: with no input chain the planner names no body, so
+   `missing_input_body` cannot fire), and a later one must be an
+   `ordering_reconstructed`
    carrying **more than one transaction** — a coinbase-only block proves
    nothing, because the ordering announcement carries its coinbase
    itself. The restart happens under load (see below).
@@ -143,6 +152,38 @@ that cannot be observed fails the run.
    Rust's `/transactions/unconfirmed`; and after the next ordering block
    the two pools must agree, with explicit D1/F6 accounting — residue is
    permitted in Scala's pool only, never in Rust's.
+
+Every reconstruction also reports `reconstructedOrder` (`scala` |
+`candidate` — divergence D4, upstream finding F12) and
+`reconstructionKey` (`self` | `parent` — divergence D5, upstream finding
+F5), and the run tallies both. Those two fields are how an operator sees
+which upstream disagreement each block had to work around.
+
+### What assertions 2 and 3 actually compare
+
+Not id-for-id equality of the two tips at one instant. The miner
+publishes an input block roughly every `blockInterval / subblocksPerBlock`
+— about a second here — while one takes a few seconds to reach the
+follower and validate, so the two tips are essentially never the same id
+at the same moment. Demanding that would test the sampling clock, and
+lag is not divergence.
+
+What the gate requires instead is **consistency**: Rust is never on a
+block Scala did not have on its best chain, Rust's chain is always a
+truncation of Scala's rather than a different history, and the lag stays
+inside hard bounds (p95 ≤ 8, max ≤ 16 input blocks). `exact_tip_matches`
+is still counted and reported as an aspirational metric.
+
+The two evaluators are pure functions over the sampled series and are
+unit-tested on synthetic series:
+
+```bash
+python3 scripts/devnet-matrix/smoke.py --self-test
+```
+
+The run keeps the raw series in `smoke-evidence.json`
+(`agreement_series_sample`), so a verdict can be recomputed from the
+evidence rather than trusted because the harness printed it.
 
 ### The funded workload
 
