@@ -1276,8 +1276,29 @@ impl Processor {
     /// The selection is re-driven with the trigger the failed job carried,
     /// for the same reason the failure-path retry is: a fork switch has to
     /// stay a fork switch.
+    ///
+    /// Only a selection validation has *currently* rejected may be
+    /// swapped. Asking whether the block ever failed is not the same
+    /// question: after witness A fails and witness B is validated and
+    /// applied, the failure entry for A is still there, so a witness C
+    /// arriving later would replace the applied block's references with a
+    /// body nothing validated — and, because the block is already
+    /// processed, `pump` would never issue a job for it. An applied or
+    /// outstanding selection is settled; the late witness is reported and
+    /// the references stay put.
     fn retry_after_delivery(&mut self, id: InputBlockId, out: &mut Vec<Effect>) {
-        if !self.failed.contains_key(&id) || self.validation_exhausted(&id) {
+        let settled = match self.tx_refs.get(&id) {
+            Some(current) => !self.has_failed_combination(&id, current),
+            None => true,
+        };
+        if settled {
+            out.push(Effect::Dropped {
+                id,
+                reason: DropReason::SelectionSettled,
+            });
+            return;
+        }
+        if self.validation_exhausted(&id) {
             return;
         }
         let Some(refs) = self.next_untried_combination(id, true) else {
