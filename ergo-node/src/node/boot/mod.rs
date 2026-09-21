@@ -39,7 +39,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ergo_mempool::Mempool;
-use ergo_p2p::handshake::{Handshake, PeerFeature, PeerSpec, Version};
+use ergo_p2p::handshake::{Handshake, PeerFeature, PeerSpec};
 use ergo_state::store::StateStore;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
@@ -716,7 +716,7 @@ async fn run_inner_with_backend(
             .as_millis() as u64,
         peer_spec: PeerSpec {
             agent_name: config.agent_name.clone(),
-            version: Version::CURRENT,
+            version: super::input_blocks::advertised_version(config.input_blocks.enabled),
             node_name: config.node_name.clone(),
             declared_address,
             features: vec![

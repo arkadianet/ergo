@@ -518,3 +518,654 @@ fn tick_releases_an_expired_request_slot() {
     );
     let _ = tag;
 }
+
+// ----- task 4: dispatch, serving, advertisement -----
+
+/// A processor-friendly config: `test_support`'s announcements carry real
+/// batch-merkle proofs over exactly the three extension entries, so both
+/// the parity and the strict-binding checks pass.
+fn live_cfg() -> crate::config::InputBlocksConfig {
+    cfg()
+}
+
+/// A state with the subsystem live and a multiplier present, so
+/// announcements are inside the actionable window and pass PoW (the
+/// `test_support` module documents why `i32::MAX` is the right
+/// permissive multiplier for unmined test headers).
+fn live_state(dir: &std::path::Path) -> NodeState {
+    let mut state = make_state(&dir.join("state.redb"));
+    state.last_seen_active_params.subblocks_per_block = Some(i32::MAX);
+    state.input_blocks = Some(InputBlocksRuntime::new(&live_cfg(), Instant::now()));
+    state
+}
+
+/// Register + handshake a peer at `version`, keeping the outbound
+/// receiver alive for the caller to inspect.
+fn handshake_peer(
+    state: &mut NodeState,
+    port: u16,
+    version: ergo_p2p::handshake::Version,
+    now: Instant,
+) -> (
+    std::net::SocketAddr,
+    tokio::sync::mpsc::Receiver<ergo_p2p::framing::MessageFrame>,
+) {
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    state.peer_manager.register_outbound(addr, now).unwrap();
+    state.peer_manager.mark_tcp_connected(&addr);
+    let mut spec = state.our_handshake.peer_spec.clone();
+    spec.version = version;
+    spec.features = vec![ergo_p2p::handshake::PeerFeature::Mode {
+        state_type: 0,
+        verify_tx: true,
+        nipopow: None,
+        blocks_to_keep: -1,
+    }];
+    state
+        .peer_manager
+        .complete_handshake(&addr, spec, None, now)
+        .unwrap();
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    state.registry.peers.insert(
+        addr,
+        crate::node::state::PeerRuntime {
+            sync_version: ergo_p2p::peer::SyncVersion::V2,
+            outbound_tx: tx,
+        },
+    );
+    (addr, rx)
+}
+
+fn send_to(
+    state: &mut NodeState,
+    peer: std::net::SocketAddr,
+    code: u8,
+    payload: &[u8],
+) -> Vec<Action> {
+    crate::node::handle_message(state, peer, code, payload, Instant::now())
+}
+
+fn sent_frames(actions: &[Action], code: u8) -> Vec<Vec<u8>> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::SendToPeer {
+                code: c, payload, ..
+            } if *c == code => Some(payload.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn handshake_advertises_6_5_0_only_when_enabled() {
+    use ergo_p2p::handshake::Version;
+    assert_eq!(advertised_version(true), Version::SUBBLOCKS);
+    assert_eq!(advertised_version(false), Version::CURRENT);
+    assert!(
+        Version::CURRENT < Version::SUBBLOCKS,
+        "a disabled node must advertise BELOW the subblocks floor"
+    );
+}
+
+#[test]
+fn code_100_with_runtime_absent_is_ignored_like_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19601,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    assert!(state.input_blocks.is_none());
+
+    let ann = ts::announcement([0u8; 32], 1, 1, None);
+    let payload = ergo_p2p::message::serialize_input_block(&ann).unwrap();
+    let before = state.peer_manager.get(&peer).unwrap().last_progress;
+
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &payload,
+    );
+    assert!(actions.is_empty(), "no reply, no penalty — just ignored");
+    assert_eq!(
+        state.peer_manager.get(&peer).unwrap().last_progress,
+        before,
+        "an ignored opcode is not progress"
+    );
+}
+
+#[test]
+fn code_100_announcement_feeds_processor_and_requests_missing_bodies() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19602,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let bodies = [ts::body(1, 1), ts::body(2, 1)];
+    let ann = ts::announcement_for([0u8; 32], 1, 7, None, &bodies);
+    let ann_id = ts::ann_id(&ann);
+    let payload = ergo_p2p::message::serialize_input_block(&ann).unwrap();
+
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &payload,
+    );
+
+    assert!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .processor()
+            .announcement(&ann_id)
+            .is_some(),
+        "the announcement reached the processor"
+    );
+    // The mempool is empty, so every announced weak id is unresolved and
+    // must be asked for from the announcer.
+    let reqs = sent_frames(&actions, ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST);
+    assert_eq!(reqs.len(), 1, "one body request to the announcer");
+    let req = ergo_p2p::message::deserialize_input_block_txs_request(&reqs[0]).unwrap();
+    assert_eq!(req.input_block_id, ann_id);
+    let mut got = req.weak_ids.clone();
+    let mut want: Vec<_> = bodies.iter().map(|b| b.weak_id).collect();
+    got.sort();
+    want.sort();
+    assert_eq!(got, want, "asks for exactly the unresolved weak ids");
+}
+
+#[test]
+fn code_104_bodies_reach_processor_from_announcer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19603,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let bodies = [ts::body(3, 1)];
+    let ann = ts::announcement_for([0u8; 32], 1, 8, None, &bodies);
+    let ann_id = ts::ann_id(&ann);
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &ergo_p2p::message::serialize_input_block(&ann).unwrap(),
+    );
+
+    let txs = ergo_p2p::message::InputBlockTxs {
+        input_block_id: ann_id,
+        transactions: bodies.iter().map(|b| b.tx.clone()).collect(),
+    };
+    let payload = ergo_p2p::message::serialize_input_block_txs(&txs).unwrap();
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS,
+        &payload,
+    );
+
+    let rt = state.input_blocks.as_ref().unwrap();
+    assert!(
+        rt.processor().body(&bodies[0].tx_ref).is_some(),
+        "the delivered body is cached"
+    );
+    assert_eq!(
+        rt.processor().transaction_refs(&ann_id),
+        Some(&bodies.iter().map(|b| b.tx_ref).collect::<Vec<_>>()[..]),
+        "and is seated in the announced order"
+    );
+}
+
+#[test]
+fn code_102_ids_reach_processor() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19604,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    // An announcement that omits the weak-id list: the processor asks
+    // for it (−122) and this is the answer.
+    let ann = ts::announcement([0u8; 32], 1, 9, None);
+    let ann_id = ts::ann_id(&ann);
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &ergo_p2p::message::serialize_input_block(&ann).unwrap(),
+    );
+
+    let payload =
+        ergo_p2p::message::serialize_input_block_tx_ids(&ergo_p2p::message::InputBlockTxIds {
+            input_block_id: ann_id,
+            weak_ids: Vec::new(),
+        });
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TX_IDS,
+        &payload,
+    );
+
+    assert_eq!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .processor()
+            .weak_ids(&ann_id),
+        Some(Vec::new()),
+        "the id list is recorded (empty is a real answer, not a miss)"
+    );
+}
+
+#[test]
+fn code_105_request_is_served_from_processor_bodies_by_weak_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19605,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let bodies = [ts::body(4, 1), ts::body(5, 1)];
+    let ann = ts::announcement_for([0u8; 32], 1, 10, None, &bodies);
+    let ann_id = ts::ann_id(&ann);
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &ergo_p2p::message::serialize_input_block(&ann).unwrap(),
+    );
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS,
+        &ergo_p2p::message::serialize_input_block_txs(&ergo_p2p::message::InputBlockTxs {
+            input_block_id: ann_id,
+            transactions: bodies.iter().map(|b| b.tx.clone()).collect(),
+        })
+        .unwrap(),
+    );
+
+    // Ask for ONE of the two.
+    let req = ergo_p2p::message::InputBlockTxsRequest {
+        input_block_id: ann_id,
+        weak_ids: vec![bodies[1].weak_id],
+    };
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST,
+        &ergo_p2p::message::serialize_input_block_txs_request(&req),
+    );
+    let replies = sent_frames(&actions, ergo_p2p::message::CODE_INPUT_BLOCK_TXS);
+    assert_eq!(replies.len(), 1);
+    let got = ergo_p2p::message::deserialize_input_block_txs(&replies[0]).unwrap();
+    assert_eq!(got.input_block_id, ann_id);
+    assert_eq!(
+        got.transactions,
+        vec![bodies[1].tx.clone()],
+        "serves only the requested weak ids"
+    );
+}
+
+/// Seed `state` with an announcement (plus bodies) from `peer`.
+fn seed_announcement(
+    state: &mut NodeState,
+    peer: std::net::SocketAddr,
+    nonce: u64,
+    bodies: &[ergo_inputblocks::processor::Body],
+) -> [u8; 32] {
+    let ann = ts::announcement_for([0u8; 32], 1, nonce, None, bodies);
+    let id = ts::ann_id(&ann);
+    let _ = send_to(
+        state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &ergo_p2p::message::serialize_input_block(&ann).unwrap(),
+    );
+    id
+}
+
+fn request_modifier_payload(type_id: u8, ids: &[[u8; 32]]) -> Vec<u8> {
+    ergo_p2p::message::serialize_inv(&ergo_p2p::types::InvData {
+        type_id,
+        ids: ids.to_vec(),
+    })
+    .unwrap()
+}
+
+#[test]
+fn request_modifier_minus_123_serves_announcement_code_100() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19606,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let id = seed_announcement(&mut state, peer, 11, &[ts::body(6, 1)]);
+
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_REQUEST_MODIFIER,
+        &request_modifier_payload(ergo_p2p::types::ModifierTypeId::InputBlock.as_byte(), &[id]),
+    );
+    let served = sent_frames(&actions, ergo_p2p::message::CODE_INPUT_BLOCK);
+    assert_eq!(served.len(), 1);
+    assert_eq!(
+        ts::ann_id(&ergo_p2p::message::deserialize_input_block(&served[0]).unwrap()),
+        id
+    );
+
+    // An id we do not hold is ignored, with no penalty (spec 9.4).
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_REQUEST_MODIFIER,
+        &request_modifier_payload(
+            ergo_p2p::types::ModifierTypeId::InputBlock.as_byte(),
+            &[[0xee; 32]],
+        ),
+    );
+    assert!(actions.is_empty(), "unknown id: no reply and no penalty");
+}
+
+#[test]
+fn request_modifier_minus_122_serves_weak_ids_code_102() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19607,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let bodies = [ts::body(7, 1)];
+    let id = seed_announcement(&mut state, peer, 12, &bodies);
+    // Scala's `getInputBlockTransactionWeakIds` reads the block's
+    // RESOLVED transaction references, so the ids become servable once
+    // the bodies land — not on the announcement alone.
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS,
+        &ergo_p2p::message::serialize_input_block_txs(&ergo_p2p::message::InputBlockTxs {
+            input_block_id: id,
+            transactions: bodies.iter().map(|b| b.tx.clone()).collect(),
+        })
+        .unwrap(),
+    );
+
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_REQUEST_MODIFIER,
+        &request_modifier_payload(
+            ergo_p2p::types::ModifierTypeId::InputBlockTransactionIds.as_byte(),
+            &[id],
+        ),
+    );
+    let served = sent_frames(&actions, ergo_p2p::message::CODE_INPUT_BLOCK_TX_IDS);
+    assert_eq!(served.len(), 1);
+    let got = ergo_p2p::message::deserialize_input_block_tx_ids(&served[0]).unwrap();
+    assert_eq!(got.input_block_id, id);
+    assert_eq!(got.weak_ids, vec![bodies[0].weak_id]);
+}
+
+#[test]
+fn request_modifier_minus_121_serves_ordering_announcement_code_106() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19608,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let oa = ts::ordering_announcement([0u8; 32], 1, 13, Vec::new());
+    let oa_id = ts::header_id(&oa.header);
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+        &ergo_p2p::message::serialize_ordering_block_announcement_msg(&oa).unwrap(),
+    );
+    assert!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .processor()
+            .ordering_announcement(&oa_id)
+            .is_some(),
+        "the ordering announcement was stored"
+    );
+
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_REQUEST_MODIFIER,
+        &request_modifier_payload(
+            ergo_p2p::types::ModifierTypeId::OrderingBlockAnnouncement.as_byte(),
+            &[oa_id],
+        ),
+    );
+    let served = sent_frames(
+        &actions,
+        ergo_p2p::message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+    );
+    assert_eq!(served.len(), 1);
+    assert_eq!(
+        ts::header_id(
+            &ergo_p2p::message::deserialize_ordering_block_announcement_msg(&served[0])
+                .unwrap()
+                .header
+        ),
+        oa_id
+    );
+}
+
+#[test]
+fn inv_minus_121_from_eligible_peer_requests_announcement() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19609,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let unknown = [0x7c; 32];
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INV,
+        &request_modifier_payload(
+            ergo_p2p::types::ModifierTypeId::OrderingBlockAnnouncement.as_byte(),
+            &[unknown],
+        ),
+    );
+    let reqs = sent_frames(&actions, ergo_p2p::message::CODE_REQUEST_MODIFIER);
+    assert_eq!(reqs.len(), 1, "we ask the advertiser for it");
+    let inv = ergo_p2p::message::deserialize_inv(&reqs[0]).unwrap();
+    assert_eq!(
+        inv.type_id,
+        ergo_p2p::types::ModifierTypeId::OrderingBlockAnnouncement.as_byte()
+    );
+    assert_eq!(inv.ids, vec![unknown]);
+    assert_eq!(
+        state.coordinator.delivery().status(&unknown),
+        ergo_p2p::delivery::ModifierStatus::Requested,
+        "the request is registered with the delivery tracker"
+    );
+}
+
+#[test]
+fn inv_minus_121_from_a_peer_below_6_5_0_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19610,
+        ergo_p2p::handshake::Version::CURRENT,
+        now,
+    );
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INV,
+        &request_modifier_payload(
+            ergo_p2p::types::ModifierTypeId::OrderingBlockAnnouncement.as_byte(),
+            &[[0x7d; 32]],
+        ),
+    );
+    assert!(actions.is_empty());
+}
+
+#[test]
+fn progress_classification_counts_100_and_106_only_and_102_104_105_when_answering() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19611,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let progress_of = |state: &NodeState| state.peer_manager.get(&peer).unwrap().last_progress;
+
+    // 100 is always progress.
+    let before = progress_of(&state);
+    let bodies = [ts::body(8, 1)];
+    let id = seed_announcement(&mut state, peer, 14, &bodies);
+    assert!(progress_of(&state) > before, "100 counts");
+
+    // An unsolicited 104 for a block nobody asked this peer for does not.
+    // (The announcement above DID solicit bodies through message 105,
+    // which is not a delivery-tracker expectation, so this frame answers
+    // no registered request.)
+    let before = progress_of(&state);
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS,
+        &ergo_p2p::message::serialize_input_block_txs(&ergo_p2p::message::InputBlockTxs {
+            input_block_id: id,
+            transactions: bodies.iter().map(|b| b.tx.clone()).collect(),
+        })
+        .unwrap(),
+    );
+    assert_eq!(
+        progress_of(&state),
+        before,
+        "104 that answers no registered request is not progress"
+    );
+
+    // A 105 we cannot serve is not progress; one we can serve is.
+    let before = progress_of(&state);
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST,
+        &ergo_p2p::message::serialize_input_block_txs_request(
+            &ergo_p2p::message::InputBlockTxsRequest {
+                input_block_id: [0xaa; 32],
+                weak_ids: vec![[9u8; 6]],
+            },
+        ),
+    );
+    assert_eq!(
+        progress_of(&state),
+        before,
+        "an unservable 105 is not progress"
+    );
+
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST,
+        &ergo_p2p::message::serialize_input_block_txs_request(
+            &ergo_p2p::message::InputBlockTxsRequest {
+                input_block_id: id,
+                weak_ids: vec![bodies[0].weak_id],
+            },
+        ),
+    );
+    assert!(progress_of(&state) > before, "a served 105 is progress");
+
+    // 106 is always progress.
+    let before = progress_of(&state);
+    let oa = ts::ordering_announcement([0u8; 32], 1, 15, Vec::new());
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+        &ergo_p2p::message::serialize_ordering_block_announcement_msg(&oa).unwrap(),
+    );
+    assert!(progress_of(&state) > before, "106 counts");
+}
+
+#[test]
+fn malformed_input_block_frames_penalize_the_sender() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19612,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    for code in [
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TX_IDS,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST,
+        ergo_p2p::message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+    ] {
+        let actions = send_to(&mut state, peer, code, &[0xff, 0xff, 0xff]);
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::Penalize { penalty, .. } if *penalty == Penalty::Misbehavior)),
+            "code {code} with a garbage payload must penalize"
+        );
+    }
+}

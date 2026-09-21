@@ -48,6 +48,24 @@ impl ModifierTypeId {
         self as i8 as u8
     }
 
+    /// `true` for the three input-block (weak-block) modifier types
+    /// (−123 / −122 / −121).
+    ///
+    /// These share the ordinary delivery tracker for their request
+    /// lifecycle but NOT its retry policy: the input-block processor owns
+    /// when and from whom to re-ask (its own per-peer request slots and
+    /// `request_timeout_ms` sweep), so the coordinator's generic
+    /// timeout-and-redistribute path must leave them alone rather than
+    /// run a second, conflicting retry engine.
+    pub fn is_input_block_family(type_id_byte: u8) -> bool {
+        matches!(
+            Self::from_byte(type_id_byte),
+            Some(
+                Self::InputBlock | Self::InputBlockTransactionIds | Self::OrderingBlockAnnouncement
+            )
+        )
+    }
+
     /// `true` if `type_id_byte` denotes a block-section modifier
     /// (id ≥ 50). Block sections are downloaded as part of full-block
     /// sync; auxiliary modifiers (transactions) are not.

@@ -34,7 +34,7 @@ mod first_deliverer;
 mod handle;
 mod heartbeat;
 pub mod identity;
-mod input_blocks;
+pub(in crate::node) mod input_blocks;
 mod memory_sampler;
 mod messaging;
 mod mining_dispatch;
@@ -65,7 +65,7 @@ pub(in crate::node) use self::peer_actions::{
 pub(crate) use self::shadow_watch::ShadowConfig;
 pub(in crate::node) use self::state::{NodeState, PeerRuntime};
 pub(in crate::node) use self::sync_helpers::{
-    hedge_request_modifiers, maybe_exit_ibd, try_send_anchor_sync_info,
+    hedge_request_modifiers, maybe_exit_ibd, tracked_request_modifier, try_send_anchor_sync_info,
 };
 
 /// Type alias used across the node runtime. `Send + Sync` is

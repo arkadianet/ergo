@@ -13,6 +13,7 @@
 use std::time::Instant;
 
 use ergo_inputblocks::processor::Event;
+use ergo_p2p::handshake::Version;
 use ergo_state::ChainStateRead;
 use ergo_sync::coordinator::Action;
 
@@ -63,6 +64,21 @@ pub(in crate::node) fn seed_best_ordering(state: &mut NodeState) {
         let id = (meta.best_full_block_id != [0u8; 32]).then_some(meta.best_full_block_id);
         rt.processor_mut()
             .set_best_ordering(id, meta.best_full_block_height);
+    }
+}
+
+/// The protocol version this node advertises in its handshake.
+///
+/// Scala `Version.SubblocksVersion = 6.5.0` is a capability claim, not a
+/// build stamp: a peer reads it to decide whether to send us the
+/// input-block messages at all. Advertising it with the subsystem off
+/// would invite frames we ignore and make us look like a relay we are
+/// not, so it is tied to the config flag rather than to the release.
+pub(in crate::node) fn advertised_version(input_blocks_enabled: bool) -> Version {
+    if input_blocks_enabled {
+        Version::SUBBLOCKS
+    } else {
+        Version::CURRENT
     }
 }
 

@@ -220,3 +220,62 @@ pub(super) fn maybe_exit_ibd(store: &mut StateBackendKind, fb_before: u32, fb: u
         }
     }
 }
+
+/// Register a `RequestModifier` with the delivery tracker and emit it to
+/// exactly one peer — the non-hedged counterpart of
+/// [`hedge_request_modifiers`].
+///
+/// Hedging duplicates a request to other peers and registers them as
+/// late-acceptable senders. That is right for block sections, where any
+/// archive peer can answer and the first reply wins. It is wrong for the
+/// input-block family: those requests are addressed to a specific peer
+/// that told us it has the block, the processor charges that peer one of
+/// its `requests_per_peer` slots, and a hedge peer's reply would be a
+/// delivery the processor never asked for.
+///
+/// Registering with the tracker is what buys the ordinary delivery
+/// lifecycle: `on_received` can recognise the answering frame (so the
+/// byte-cap exemption applies to a solicited reply), duplicate requests
+/// for an id already in flight are suppressed, and an unanswered request
+/// is swept by `check_timeouts`. Returns no action when the tracker
+/// registered nothing — that is a duplicate request, not a failure.
+pub(in crate::node) fn tracked_request_modifier(
+    state: &mut NodeState,
+    peer: PeerId,
+    type_id: u8,
+    ids: &[[u8; 32]],
+    now: Instant,
+) -> Vec<Action> {
+    // The input-block family walks one id through several phases
+    // (announcement -> weak-id list -> bodies). Each phase is a fresh
+    // request for the SAME id, and the previous phase left it in the
+    // tracker's `received` set, where `request` would skip it. Clearing
+    // that is exactly what `forget_received` is for.
+    if ergo_p2p::types::ModifierTypeId::is_input_block_family(type_id) {
+        for id in ids {
+            state.coordinator.delivery_mut().forget_received(id);
+        }
+    }
+    let registered = state
+        .coordinator
+        .delivery_mut()
+        .request(peer, type_id, ids, now);
+    if registered.is_empty() {
+        return Vec::new();
+    }
+    let inv = ergo_p2p::types::InvData {
+        type_id,
+        ids: registered,
+    };
+    match message::serialize_inv(&inv) {
+        Ok(payload) => vec![Action::SendToPeer {
+            peer,
+            code: message::CODE_REQUEST_MODIFIER,
+            payload,
+        }],
+        Err(e) => {
+            tracing::warn!(type_id, error = %e, "tracked RequestModifier does not serialize");
+            Vec::new()
+        }
+    }
+}

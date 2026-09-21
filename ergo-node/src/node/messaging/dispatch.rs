@@ -48,7 +48,8 @@ use ergo_sync::coordinator::Action;
 use tracing::{debug, info, warn};
 
 use super::super::{
-    admit_transaction, hedge_request_modifiers, send_to_peer, try_send_anchor_sync_info, NodeState,
+    admit_transaction, hedge_request_modifiers, input_blocks, send_to_peer,
+    try_send_anchor_sync_info, NodeState,
 };
 use super::{manifest, popow, utxo_chunk};
 
@@ -105,6 +106,23 @@ pub(in crate::node) fn handle_message(
         // bounded by the shared byte budget with TCP backpressure (#279/#283),
         // which parks the reader instead of discarding data. The Scala
         // reference node applies no inbound rate limit at all.
+        // Same reasoning for a solicited input-block delivery: codes
+        // 100 / 102 / 104 answer a `RequestModifier` or a 105 we sent, and
+        // dropping one on the byte axis would time out our own request
+        // and penalize the peer that was serving us.
+        LimiterVerdict::ByteRateExceeded
+            if input_block_frame_answers_our_request(state, &peer, code, payload) =>
+        {
+            state
+                .throttle
+                .record_admitted_over_cap(peer, now, frame_bytes);
+            debug!(
+                peer = %peer,
+                bytes = frame_bytes,
+                code = code,
+                "byte throttle exceeded by a solicited input-block delivery; admitting",
+            );
+        }
         LimiterVerdict::ByteRateExceeded
             if code == message::CODE_MODIFIER
                 && frame_answers_our_request(state, &peer, payload) =>
@@ -285,16 +303,26 @@ pub(in crate::node) fn handle_message(
                             })
                             .collect()
                     }
-                    // Input-block / weak-block modifiers (id < 50, like
-                    // `Transaction`) are never served via the generic
-                    // `RequestModifier` inventory path — they have their
-                    // own dedicated messages (codes 100/102/104/105/106).
+                    // Input-block / weak-block modifiers are served from
+                    // the processor's own stores, not from the block
+                    // tables, and they answer with their dedicated codes
+                    // (100 / 102 / 106) rather than a `Modifier` frame —
+                    // so this arm returns early rather than joining the
+                    // `hits` path below. Unknown ids are logged and
+                    // ignored, no penalty (spec 9.4, Scala parity).
                     Some(
                         ModifierTypeId::InputBlock
                         | ModifierTypeId::InputBlockTransactionIds
                         | ModifierTypeId::OrderingBlockAnnouncement,
-                    )
-                    | None => Vec::new(),
+                    ) => {
+                        let served =
+                            input_blocks::serve_modifier_request(state, peer, type_id, &inv.ids);
+                        if !served.is_empty() {
+                            note_progress(state, &peer, now);
+                        }
+                        return served;
+                    }
+                    None => Vec::new(),
                 };
                 if hits.is_empty() {
                     // Asking costs nothing; being served does. Only a
@@ -612,6 +640,18 @@ pub(in crate::node) fn handle_message(
                 }
             }
         }
+        // Input-block (weak-block) family, spec 9.1. Gated on the
+        // subsystem being live: with it off these codes fall through to
+        // the unknown-opcode arm below and are ignored, which is exactly
+        // how a node that does not speak 6.5.0 behaves.
+        c if state.input_blocks.is_some() && input_blocks::is_input_block_code(c) => {
+            let input_blocks::Dispatched { actions, progress } =
+                input_blocks::dispatch_frame(state, peer, c, payload, now);
+            if progress {
+                note_progress(state, &peer, now);
+            }
+            actions
+        }
         _ => {
             // Ignore unknown message codes (forward compatibility).
             // Deliberately NOT progress: an unknown opcode is free to
@@ -682,6 +722,19 @@ fn handle_inv(state: &mut NodeState, peer: PeerId, inv: InvData, now: Instant) -
             );
             actions
         }
+    } else if inv.type_id == ModifierTypeId::OrderingBlockAnnouncement.as_byte() {
+        // Ordering-block announcements are the processor's, not the
+        // coordinator's: `on_inv` would try to schedule them as block
+        // sections.
+        input_blocks::handle_ordering_inv(state, peer, &inv, now)
+    } else if ModifierTypeId::from_byte(inv.type_id)
+        .is_some_and(|t| ModifierTypeId::is_input_block_family(t.as_byte()))
+    {
+        // −123 / −122 are never advertised by `Inv` in the reference
+        // node (announcements are pushed as code 100); ignore rather
+        // than hand them to the section scheduler.
+        debug!(peer = %peer, type_id = inv.type_id, "input-block Inv type is not advertised; ignoring");
+        Vec::new()
     } else {
         let actions = state.coordinator.on_inv(peer, &inv, &state.store, now);
         // Hedge dispatch: after on_inv registers
@@ -1021,6 +1074,39 @@ fn frame_answers_our_request(state: &NodeState, peer: &PeerId, payload: &[u8]) -
     mods.modifiers
         .iter()
         .any(|(id, _)| delivery.on_received(id, peer) == DeliveryAction::Accept)
+}
+
+/// Byte-cap exemption for the input-block family: does this frame answer
+/// a `RequestModifier` (−123 / −122 / −121) we registered with the
+/// delivery tracker? Only codes that carry a solicited payload qualify —
+/// 105 is a REQUEST from the peer, and serving it is our choice, so it
+/// keeps the ordinary cap.
+fn input_block_frame_answers_our_request(
+    state: &NodeState,
+    peer: &PeerId,
+    code: u8,
+    payload: &[u8],
+) -> bool {
+    use ergo_p2p::delivery::DeliveryAction;
+    if state.input_blocks.is_none() {
+        return false;
+    }
+    let id = match code {
+        message::CODE_INPUT_BLOCK => message::deserialize_input_block(payload)
+            .ok()
+            .and_then(|a| a.id().ok())
+            .map(|id| *id.as_bytes()),
+        message::CODE_INPUT_BLOCK_TX_IDS => message::deserialize_input_block_tx_ids(payload)
+            .ok()
+            .map(|d| d.input_block_id),
+        message::CODE_INPUT_BLOCK_TXS => message::deserialize_input_block_txs(payload)
+            .ok()
+            .map(|d| d.input_block_id),
+        _ => None,
+    };
+    id.is_some_and(|id| {
+        state.coordinator.delivery().on_received(&id, peer) == DeliveryAction::Accept
+    })
 }
 
 /// Does `bytes` actually parse to a `Transaction` whose canonical

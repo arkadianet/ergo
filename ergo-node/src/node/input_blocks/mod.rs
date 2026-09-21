@@ -20,9 +20,11 @@
 #![allow(dead_code, unused_imports)]
 
 mod ctx;
+mod dispatch;
 mod effects;
 mod hooks;
 mod runtime;
+mod serve;
 mod validate;
 
 #[cfg(test)]
@@ -31,9 +33,13 @@ mod tests;
 pub(in crate::node) use ctx::{
     block_transactions_known, build_ctx_data, expected_n_bits_after, transactions_section_id,
 };
+pub(in crate::node) use dispatch::{
+    handle as dispatch_frame, handle_ordering_inv, is_input_block_code, serve_modifier_request,
+    Dispatched,
+};
 pub(in crate::node) use effects::{apply_chain_change, execute_effects};
 pub(in crate::node) use hooks::{
-    on_ordering_block_applied, on_ordering_reorg, on_tick, seed_best_ordering,
+    advertised_version, on_ordering_block_applied, on_ordering_reorg, on_tick, seed_best_ordering,
 };
 pub(in crate::node) use runtime::InputBlocksRuntime;
 pub(in crate::node) use validate::{build_input_block_context, run_validation};
