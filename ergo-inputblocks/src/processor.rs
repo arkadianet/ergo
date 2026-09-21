@@ -372,6 +372,24 @@ pub struct Processor {
     /// reviving body arrives long after the failure, the failed job is
     /// gone and this is the only place the trigger survives.
     failed_trigger: HashMap<InputBlockId, (OrderingId, InputBlockId)>,
+    /// The fork switch currently being walked, and the blocks it has
+    /// already reported as rolled back.
+    ///
+    /// Scala applies a switch in one `processInputBlockTransactions`
+    /// call: the rollback list is computed once and `applicationStep`
+    /// then walks the rest of the new fork. This port validates one
+    /// block per job and re-drives the same trigger to continue, and
+    /// `tree.process` recomputes the rollback from the (still tied)
+    /// processed depths every time. Reporting it again would make the
+    /// node restore the abandoned block's transactions *after* the new
+    /// fork's block removed them — a transaction in both blocks would
+    /// come back from the dead. The continuation is keyed by
+    /// `(ordering_id, trigger)`, so a different selection starts a fresh
+    /// one.
+    continuation: Option<(
+        (OrderingId, InputBlockId),
+        std::collections::HashSet<InputBlockId>,
+    )>,
 }
 
 #[derive(Debug, Default)]
@@ -697,6 +715,7 @@ impl Processor {
             digest_attempts: HashMap::new(),
             validation_attempts: HashMap::new(),
             failed_trigger: HashMap::new(),
+            continuation: None,
         }
     }
 
@@ -1719,11 +1738,19 @@ impl Processor {
             tree.process(&inf.trigger, &has_txs, &mut apply)
         };
         self.trees.insert(inf.ordering_id, outcome.tree);
-        if !outcome.applied.is_empty() || !outcome.rolled_back.is_empty() {
+        let key = (inf.ordering_id, inf.trigger);
+        if self.continuation.as_ref().map(|(k, _)| *k) != Some(key) {
+            self.continuation = Some((key, std::collections::HashSet::new()));
+        }
+        let mut rolled_back = outcome.rolled_back;
+        if let Some((_, reported)) = self.continuation.as_mut() {
+            rolled_back.retain(|id| reported.insert(*id));
+        }
+        if !outcome.applied.is_empty() || !rolled_back.is_empty() {
             out.push(Effect::ChainChanged {
                 ordering_id: inf.ordering_id,
                 applied: outcome.applied,
-                rolled_back: outcome.rolled_back,
+                rolled_back,
             });
             self.generation += 1;
         }
@@ -1950,6 +1977,7 @@ impl Processor {
             .filter(|(_, r)| best_height.saturating_sub(r.height) > self.bounds.prune_threshold)
             .map(|(id, _)| *id)
             .collect();
+        self.continuation = None;
         for id in stale_records {
             self.records.shift_remove(&id);
             self.tx_refs.remove(&id);

@@ -1115,3 +1115,49 @@ fn announcement_without_weak_ids_resolves_through_ids_and_bodies_to_validate() {
     }
     assert!(h.p.body(&ts::body(0x53, 1).tx_ref).is_none());
 }
+
+/// Scala applies a fork switch in a single `processInputBlockTransactions`
+/// call: the rollback list is computed once, then `applicationStep` walks
+/// the rest of the new fork. This port validates one block per job and
+/// re-drives the same trigger to continue, so the rollback must not be
+/// recomputed — and re-reported — for every block the continuation
+/// applies. With the same transaction in both the abandoned block and the
+/// first block of the new fork, a repeated rollback would restore it to
+/// the mempool *after* the new fork removed it (section 8's
+/// restore-then-apply order).
+#[test]
+fn fork_switch_continuation_rolls_back_once() {
+    let mut h = Harness::new();
+    let x = h.body(0x77);
+
+    let root = h.ann(ORD, None, &[]);
+    h.apply_empty(&root);
+
+    // Fork A: root -> a, applied, carrying x.
+    let a = h.ann(ORD, Some(id(&root)), std::slice::from_ref(&x));
+    h.apply_input_block(&a);
+    let (applied, rolled_back) = h.apply_txs(id(&a), vec![x.clone()]);
+    assert_eq!(applied, vec![id(&a)]);
+    assert!(rolled_back.is_empty());
+
+    // Fork B: root -> b -> c, with x again in b. Equal-length forks do
+    // not switch, so b alone changes nothing.
+    let b = h.ann(ORD, Some(id(&root)), std::slice::from_ref(&x));
+    h.apply_input_block(&b);
+    let (applied, rolled_back) = h.apply_txs(id(&b), vec![x.clone()]);
+    assert!(applied.is_empty(), "an equal-length fork must not switch");
+    assert!(rolled_back.is_empty());
+
+    let c = h.ann(ORD, Some(id(&b)), &[]);
+    h.apply_input_block(&c);
+    let (applied, rolled_back) = h.apply_txs(id(&c), Vec::new());
+
+    assert_eq!(applied, vec![id(&b), id(&c)], "the whole fork must apply");
+    assert_eq!(
+        rolled_back,
+        vec![id(&a)],
+        "the switch must report its rollback exactly once"
+    );
+    // `best_input_chain` is Scala's `bestInputBlocksChain()`: tip first.
+    assert_eq!(h.p.best_input_chain(), vec![id(&c), id(&b), id(&root)]);
+}
