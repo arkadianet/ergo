@@ -183,4 +183,98 @@ mod tests {
             })
         );
     }
+
+    /// The exact serialized shape `scripts/devnet-matrix/smoke.py` parses
+    /// for assertion 4 (task 8b, fix round 3).
+    ///
+    /// Round 2's "no reconstruction on a root mismatch" guard looked for
+    /// an `ordering_reconstructed` event carrying `detail ==
+    /// "root_mismatch"` — a shape this projection never produces, so the
+    /// guard could never fire. A mismatch reason rides on a FALLBACK
+    /// event; a reconstructed event carries no `detail` at all. This
+    /// pins that, and the field names the harness reads, so the guard
+    /// cannot silently go looking for a shape again.
+    #[test]
+    fn reconstruction_events_have_the_shape_the_smoke_harness_parses() {
+        use crate::node::event_feed::{EventFeedRing, FeedEventKind};
+
+        let mut ring = EventFeedRing::new();
+        ring.push(
+            1_700_000_000_000,
+            FeedEventKind::OrderingReconstructed {
+                height: 42,
+                header_id: "rebuilt".to_string(),
+                txs: 3,
+                order: "candidate",
+                key: "parent",
+            },
+        );
+        ring.push(
+            1_700_000_000_001,
+            FeedEventKind::OrderingReconstructFallback {
+                height: 43,
+                header_id: "downloaded".to_string(),
+                reason: "root_mismatch".to_string(),
+            },
+        );
+        ring.push(
+            1_700_000_000_002,
+            FeedEventKind::BlockApplied {
+                height: 43,
+                header_id: "downloaded".to_string(),
+                txs: 3,
+                size_bytes: 1234,
+            },
+        );
+
+        let events = build_events_projection(&ring);
+        let rebuilt = serde_json::to_value(&events.events[0]).unwrap();
+        let fallback = serde_json::to_value(&events.events[1]).unwrap();
+        let applied = serde_json::to_value(&events.events[2]).unwrap();
+
+        assert_eq!(
+            rebuilt,
+            serde_json::json!({
+                "seq": 1,
+                "unixMs": 1_700_000_000_000u64,
+                "kind": "ordering_reconstructed",
+                "height": 42,
+                "headerId": "rebuilt",
+                "txs": 3,
+                "reconstructedOrder": "candidate",
+                "reconstructionKey": "parent",
+            })
+        );
+        // The load-bearing absence: a reconstructed block reports no
+        // `detail`, so a mismatch reason can never appear on one.
+        assert!(
+            rebuilt.get("detail").is_none(),
+            "a reconstructed event must carry no detail: {rebuilt}"
+        );
+
+        assert_eq!(
+            fallback,
+            serde_json::json!({
+                "seq": 2,
+                "unixMs": 1_700_000_000_001u64,
+                "kind": "ordering_reconstruct_fallback",
+                "height": 43,
+                "headerId": "downloaded",
+                "detail": "root_mismatch",
+            })
+        );
+
+        assert_eq!(
+            applied,
+            serde_json::json!({
+                "seq": 3,
+                "unixMs": 1_700_000_000_002u64,
+                "kind": "blockApplied",
+                "height": 43,
+                "headerId": "downloaded",
+                "txs": 3,
+                "sizeBytes": 1234,
+            })
+        );
+    }
 }

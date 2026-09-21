@@ -123,6 +123,13 @@ MEMPOOL_MIN_LOCATED = 1
 # schedule, and a follower cannot be failed for that.
 MEMPOOL_ROUTE_SECONDS = 420.0
 
+# How many input-block id lookups one sweep will make. The lookups are
+# inside the sweep's tip bracket, so they cost the sampler latency; a
+# cold chain can list dozens of blocks at once and a sweep that fetched
+# them all would stall the monitoring it exists to do. The rest are
+# picked up by the sweeps that follow, a third of a second apart.
+INPUT_BLOCK_ID_FETCHES_PER_SWEEP = 8
+
 # Assertion 5 fails when more than this fraction of monitoring sweeps
 # could not be taken. A run that could not watch the nodes has not
 # watched them, however few violations it saw.
@@ -411,6 +418,7 @@ class Run:
         # ordinary confirmation had already removed its transactions.
         self.input_block_txids = {}
         self.input_block_seen_under = {}
+        self._fetched_this_sweep = 0
 
     # ----- the sampler thread -----
 
@@ -656,6 +664,16 @@ class Run:
             # removed a transaction. Such a sweep keeps its pool but is
             # marked unusable for crediting.
             pool = {t['id'] for t in api('rust', '/transactions/unconfirmed')}
+            # Assertion 6's transaction ids belong to the SAME bracket as
+            # the pool read. Fetching them afterwards, on the main
+            # thread, meant the ids and the pool could describe different
+            # moments: a body can become available between the sampled
+            # pool and the lookup, so a transaction could be credited
+            # against a pool snapshot taken before its block was
+            # servable. Bracketing them together is what makes "this
+            # block held this transaction while the pool looked like
+            # that" a single observation.
+            self._collect_input_block_txids(reading)
             tip_after = (api('rust', '/info') or {}).get('bestFullHeaderId')
         except Unavailable as error:
             with self._lock:
@@ -665,6 +683,9 @@ class Run:
             return None
         tip_before = reading['rust']['info'].get('bestFullHeaderId')
         reading['rust']['pool'] = pool
+        # The ids gathered in this bracket, so a consumer can tell what
+        # THIS sweep saw from what earlier sweeps had cached.
+        reading['rust']['input_block_txids_fetched'] = self._fetched_this_sweep
         reading['rust']['pool_tip'] = tip_before
         reading['rust']['pool_tip_stable'] = (
             tip_before is not None and tip_before == tip_after)
@@ -830,31 +851,33 @@ class Run:
             if budget is not None and written >= budget:
                 return written
 
-    def note_input_block_txids(self, reading):
-        """Record which transactions Rust saw inside each input block,
-        and the ordering tip of the sweep that showed it.
+    def _collect_input_block_txids(self, reading):
+        """Read this sweep's input-block transaction ids, INSIDE the
+        sweep's own tip bracket. Called from [`Self.sweep`] only.
 
-        Only a sweep whose tip held still across its own reads counts:
-        an unstable sweep cannot say which ordering block its chain
-        belonged to, so caching a tip from one would be inventing the
-        very fact the credit rule turns on. The transaction ids
-        themselves are immutable per block, so fetching them here rather
-        than inside the sweep changes nothing about which tip they are
-        attributed to.
+        The tip each block is attributed to is recorded here too: it is
+        the tip this sweep read, which the bracket then either confirms
+        held still or marks unusable. Attributing a block to whatever tip
+        happens to be current when a later lookup runs is the mistake
+        this replaces.
+
+        Bounded per sweep. A cold chain can list dozens of blocks at
+        once and a sweep that stopped to fetch all of them would stall
+        the monitoring it exists to do; the rest are picked up by the
+        sweeps that follow, a third of a second apart.
         """
-        if reading is None or not reading['rust'].get('pool_tip_stable'):
-            return
-        tip = reading['rust'].get('pool_tip')
+        self._fetched_this_sweep = 0
+        tip = reading['rust']['info'].get('bestFullHeaderId')
         for bid in reading['rust']['chain'].get('bestInputBlocks') or []:
+            if self._fetched_this_sweep >= INPUT_BLOCK_ID_FETCHES_PER_SWEEP:
+                return
             # Only a NON-EMPTY answer is cached. An input block shows up
             # in the chain before its bodies are attached, so caching the
             # first empty answer would permanently hide its transactions.
             if self.input_block_txids.get(bid):
                 continue
-            try:
-                ids = api('rust', f'/blocks/{bid}/inputBlockTransactionIds') or []
-            except Unavailable:
-                continue
+            ids = api('rust', f'/blocks/{bid}/inputBlockTransactionIds') or []
+            self._fetched_this_sweep += 1
             self.input_block_txids[bid] = ids
             if ids:
                 self.input_block_seen_under[bid] = tip
@@ -1068,13 +1091,17 @@ def evaluate_chain_consistency(samples):
     Counts are TOTALS; the recorded lists are samples of them.
     """
     kept, excluded = qualifying_samples(samples)
-    # Everything Scala ever listed per ordering id, with the sample
-    # index it was first listed at — "later" has to mean later, not
-    # "somewhere in the run".
-    scala_first_listed = {}
+    # The LAST sample index at which Scala listed each block under each
+    # ordering id. "Later" has to mean later than the sample being
+    # judged — but it must not mean "the FIRST time Scala listed it is
+    # later", which is what keeping only the first occurrence meant. A
+    # miner that lists a block, drops it from its read for a sample or
+    # two, then lists it again has confirmed it; judging against the
+    # first occurrence alone rejected exactly that sequence.
+    scala_last_listed = {}
     for i, s in kept:
         for block in s.get('scala_chain') or []:
-            scala_first_listed.setdefault((s['ordering'], block), i)
+            scala_last_listed[(s['ordering'], block)] = i
 
     compared, violation_count, violations, depths = 0, 0, [], []
     allowed_by_one, allowed_samples = 0, []
@@ -1100,7 +1127,7 @@ def evaluate_chain_consistency(samples):
         )
         if ahead_by_one:
             tip = rust_old[-1]
-            confirmed_at = scala_first_listed.get((s['ordering'], tip))
+            confirmed_at = scala_last_listed.get((s['ordering'], tip))
             if confirmed_at is not None and confirmed_at > i:
                 allowed_by_one += 1
                 if len(allowed_samples) < 10:
@@ -1120,7 +1147,9 @@ def evaluate_chain_consistency(samples):
     result = {
         'definition_amended': 'round 1: Scala a strict prefix of Rust by exactly '
                               'one block is allowed only when Scala lists that tip '
-                              'for the same ordering id at a later sample',
+                              'for the same ordering id at ANY later sample '
+                              '(round 3: any later occurrence, not only a '
+                              'first-ever one)',
         'qualifying_samples': len(kept),
         'excluded_samples': excluded,
         'compared_samples': compared,
@@ -1139,6 +1168,89 @@ def evaluate_chain_consistency(samples):
         result['violations'].append(
             f"Rust's chain was not a prefix of Scala's at {violation_count} samples")
     return result
+
+
+# Fallback reasons that mean "the transactions root did not come out
+# right", as opposed to "an ingredient was missing". Both are honest
+# fallbacks; only these say the node rebuilt something and rejected its
+# own result, which is the case where a wrong fallback would be a
+# consensus bug rather than a download.
+MERKLE_MISMATCH_REASONS = ('root_mismatch', 'tx_digest_mismatch', 'digest_mismatch')
+
+
+def evaluate_mismatch_recovery(ordering_events, scala_block_at_height):
+    """Assertion 4's "zero Merkle-mismatch-then-wrong-fallback", over the
+    events the node actually emits.
+
+    Two properties, both checked against Scala's own block at the height:
+
+    * **A Merkle/root-mismatch fallback must recover correctly.** The
+      node refused its own rebuild and downloaded instead; the block it
+      then applied at that height must be the one Scala has. A fallback
+      that lands on a different block is the wrong fallback.
+    * **A reconstructed block must not be replaced at its height.** If a
+      later event applies a DIFFERENT header at a height the node
+      reported reconstructed, the rebuild it published was wrong and was
+      silently swapped out.
+
+    `scala_block_at_height` maps height -> Scala's header id there (or
+    `None` when Scala has no block at that height yet). Pure, so
+    `--self-test` drives it with a fabricated stream.
+    """
+    applied = {}          # height -> header ids applied, in order
+    reconstructed = {}    # height -> header id the node said it rebuilt
+    mismatch_fallbacks = []
+    for e in ordering_events:
+        height, header = e.get('height'), e.get('header_id') or e.get('headerId')
+        kind = e.get('kind')
+        if kind in ('blockApplied', 'ordering_reconstructed'):
+            applied.setdefault(height, []).append(header)
+        if kind == 'ordering_reconstructed':
+            reconstructed[height] = header
+        elif kind == 'ordering_reconstruct_fallback':
+            if (e.get('detail') or '') in MERKLE_MISMATCH_REASONS:
+                mismatch_fallbacks.append(e)
+
+    bad_recoveries, replaced, unverifiable = [], [], []
+    for e in mismatch_fallbacks:
+        height = e.get('height')
+        expected = scala_block_at_height.get(height)
+        landed = [h for h in applied.get(height, []) if h]
+        if expected is None or not landed:
+            # Scala has nothing at that height yet, or the node has not
+            # applied anything there. Recorded, never silently passed.
+            unverifiable.append({'height': height, 'fallback': e,
+                                 'scala_block': expected, 'applied': landed})
+            continue
+        if expected not in landed:
+            bad_recoveries.append({'height': height, 'fallback': e,
+                                   'scala_block': expected, 'applied': landed})
+
+    for height, header in reconstructed.items():
+        later = [h for h in applied.get(height, []) if h and h != header]
+        if later:
+            replaced.append({'height': height, 'reconstructed': header,
+                             'replaced_by': later})
+
+    failures = []
+    if bad_recoveries:
+        failures.append((
+            f'{len(bad_recoveries)} Merkle-mismatch fallbacks did not recover onto '
+            "Scala's block at that height",
+            {'bad_recoveries': bad_recoveries[:10]}))
+    if replaced:
+        failures.append((
+            f'{len(replaced)} reconstructed ordering blocks were replaced at their '
+            'own height',
+            {'replaced': replaced[:10]}))
+    return {
+        'mismatch_fallbacks': len(mismatch_fallbacks),
+        'mismatch_reasons_checked': list(MERKLE_MISMATCH_REASONS),
+        'bad_recoveries': bad_recoveries,
+        'reconstructed_then_replaced': replaced,
+        'unverifiable': unverifiable,
+        'failures': failures,
+    }
 
 
 def _self_test():
@@ -1495,6 +1607,33 @@ def _self_test():
     assert trailing['violations'] == [], trailing
     assert trailing['allowed_prefix_by_one_count'] == 0, trailing
 
+    # Round 3, codex's probe: Scala lists the tip BEFORE the sample,
+    # drops it from its read, then lists it AGAIN afterwards. Keeping
+    # only the FIRST occurrence made "later" mean "first seen later",
+    # so this sequence was reported as 1 violation / 0 allowances even
+    # though the miner plainly confirmed the block. Any later listing
+    # counts.
+    confirmed_before_and_after = evaluate_chain_consistency(chain_series([
+        (['b2', 'b1'], ['b2', 'b1']),   # Scala already listed b2 here
+        (['b1'], ['b2', 'b1']),         # then reads short by one
+        (['b2', 'b1'], ['b2', 'b1']),   # and lists it again
+    ]))
+    assert confirmed_before_and_after['prefix_violation_count'] == 0, \
+        confirmed_before_and_after
+    assert confirmed_before_and_after['allowed_prefix_by_one_count'] == 1, \
+        confirmed_before_and_after
+    assert confirmed_before_and_after['violations'] == [], \
+        confirmed_before_and_after
+
+    # And the guard the probe must not loosen: listed only BEFORE, never
+    # again, is still a violation.
+    only_before = evaluate_chain_consistency(chain_series([
+        (['b2', 'b1'], ['b2', 'b1']),
+        (['b1'], ['b2', 'b1']),
+    ]))
+    assert only_before['prefix_violation_count'] == 1, only_before
+    assert only_before['allowed_prefix_by_one_count'] == 0, only_before
+
     # ----- fix round 1: the REAL sampler, not a copy of its conditional -
 
     def sampler_over(sweeps, interval=0.0):
@@ -1629,6 +1768,71 @@ def _self_test():
     assert t.route['f'] == 'input_block', t.route
     assert t.never_sealed == {}, t.never_sealed
 
+    # ----- fix round 3: assertion 4's mismatch guard, against the event
+    # shapes the producer ACTUALLY emits (pinned by ergo-node's
+    # `reconstruction_events_have_the_shape_the_smoke_harness_parses`) --
+
+    def ev(kind, height, header_id, **rest):
+        return dict(kind=kind, height=height, headerId=header_id, **rest)
+
+    # PASS: the node refused its own rebuild at h5 and downloaded the
+    # block Scala has; and its rebuild at h6 was never replaced.
+    good = evaluate_mismatch_recovery(
+        [ev('ordering_reconstruct_fallback', 5, 'S5', detail='root_mismatch'),
+         ev('blockApplied', 5, 'S5', txs=2),
+         ev('ordering_reconstructed', 6, 'S6', txs=2,
+            reconstructedOrder='candidate', reconstructionKey='parent')],
+        {5: 'S5', 6: 'S6'})
+    assert good['failures'] == [], good
+    assert good['mismatch_fallbacks'] == 1, good
+    assert good['bad_recoveries'] == [] and good['unverifiable'] == [], good
+
+    # FAIL shape 1: the mismatch fallback landed on a block that is NOT
+    # Scala's at that height — the wrong fallback.
+    wrong = evaluate_mismatch_recovery(
+        [ev('ordering_reconstruct_fallback', 5, 'X5', detail='root_mismatch'),
+         ev('blockApplied', 5, 'X5', txs=2)],
+        {5: 'S5'})
+    assert wrong['bad_recoveries'], wrong
+    assert any('did not recover' in m for m, _ in wrong['failures']), wrong
+
+    # FAIL shape 2: a block the node reported RECONSTRUCTED was replaced
+    # at its own height — the rebuild it published was wrong.
+    swapped = evaluate_mismatch_recovery(
+        [ev('ordering_reconstructed', 6, 'R6', txs=2,
+            reconstructedOrder='candidate', reconstructionKey='parent'),
+         ev('blockApplied', 6, 'S6', txs=2)],
+        {6: 'S6'})
+    assert swapped['reconstructed_then_replaced'], swapped
+    assert any('replaced at their own height' in m for m, _ in swapped['failures']), \
+        swapped
+
+    # A fallback for a MISSING INGREDIENT is not a Merkle mismatch and is
+    # not policed here — the node downloading a block it could not
+    # assemble is the feature working.
+    ingredient = evaluate_mismatch_recovery(
+        [ev('ordering_reconstruct_fallback', 5, 'S5', detail='missing_input_body'),
+         ev('blockApplied', 5, 'S5', txs=2)],
+        {5: 'S5'})
+    assert ingredient['mismatch_fallbacks'] == 0, ingredient
+    assert ingredient['failures'] == [], ingredient
+
+    # Nothing to compare against is recorded, never silently passed.
+    blind = evaluate_mismatch_recovery(
+        [ev('ordering_reconstruct_fallback', 9, 'S9', detail='root_mismatch')],
+        {9: None})
+    assert blind['unverifiable'] and blind['failures'] == [], blind
+
+    # The guard must key off the REAL shapes: a `detail` on a
+    # reconstructed event is a shape the producer never emits, and
+    # looking for it is what made round 2's guard inert.
+    inert = evaluate_mismatch_recovery(
+        [ev('ordering_reconstructed', 7, 'R7', txs=2, detail='root_mismatch')],
+        {7: 'R7'})
+    assert inert['mismatch_fallbacks'] == 0, \
+        'a reconstructed event is never a mismatch fallback'
+    assert inert['failures'] == [], inert
+
     print('self-test OK: evaluators behave as the round-5 definitions require')
 
 
@@ -1676,7 +1880,6 @@ def observe_for_ordering_blocks(run, blocks, what):
         run.fail(what, f'could not read the starting height: {error}')
         return None
     while time.monotonic() < run.deadline:
-        run.note_input_block_txids(run.latest_reading())
         try:
             if scala_height(run) > start + blocks:
                 break
@@ -1772,7 +1975,6 @@ def wait_for_height(run, target, what):
     """Block until Scala reaches `target`. Takes no samples of its own —
     the sampler thread never stops, which is the point."""
     while time.monotonic() < run.deadline:
-        run.note_input_block_txids(run.latest_reading())
         try:
             if scala_height(run) >= target:
                 return
@@ -2032,7 +2234,6 @@ def assertion_6_mempool(run, evidence, count):
         seq = reading.get('seq') if reading else None
         if seq is not None and seq not in seen_sweeps:
             seen_sweeps.add(seq)
-            run.note_input_block_txids(reading)
             if reading['rust'].get('pool_tip_stable'):
                 header_now = reading['rust']['pool_tip']
                 for bid, ids in run.input_block_txids.items():
@@ -2355,20 +2556,36 @@ def assertion_4_reconstruction(run, evidence, ordering_blocks):
                  f'{len(unreported)} reconstructed ordering blocks did not report '
                  'their assembly order and chain key',
                  {'events': unreported[:10]})
-    # A reconstruction whose root did not match is a wrong fallback: the
-    # node must fall back, not publish a block it could not rebuild. The
-    # feed records a root mismatch as a FALLBACK reason, so a
-    # `root_mismatch` sitting on a RECONSTRUCTED event is the shape to
-    # refuse.
-    mismatched = [e for e in ordering
-                  if e['kind'] == 'ordering_reconstructed'
-                  and (e.get('detail') or '') == 'root_mismatch']
-    result['reconstructed_on_root_mismatch'] = mismatched
-    if mismatched:
+    # "Zero Merkle-mismatch-then-wrong-fallback", checked against the
+    # events the node ACTUALLY emits. Round 2 looked for an
+    # `ordering_reconstructed` event carrying `detail == "root_mismatch"`
+    # — a shape the producer never emits (a mismatch reason rides on a
+    # FALLBACK; a reconstructed event has no `detail` at all), so the
+    # guard could never fire. `ergo-node`'s
+    # `reconstruction_events_have_the_shape_the_smoke_harness_parses`
+    # pins that.
+    try:
+        scala_at_height = {}
+        for e in ordering:
+            h = e.get('height')
+            if h is None or h in scala_at_height:
+                continue
+            ids = api('scala', f'/blocks/at/{h}') or []
+            scala_at_height[h] = ids[0] if ids else None
+    except Unavailable as error:
+        scala_at_height = None
+        result['mismatch_recovery_unavailable'] = str(error)
+    if scala_at_height is None:
         run.fail('4_reconstruction',
-                 f'{len(mismatched)} ordering blocks were reported as reconstructed '
-                 'while also reporting a root mismatch',
-                 {'events': mismatched[:10]})
+                 'could not read Scala\'s blocks at the reconstruction heights, so '
+                 'mismatch recovery could not be checked',
+                 {'error': result.get('mismatch_recovery_unavailable')})
+    else:
+        recovery = evaluate_mismatch_recovery(ordering, scala_at_height)
+        result['mismatch_recovery'] = recovery
+        result['reconstructed_on_root_mismatch'] = recovery['bad_recoveries']
+        for message, evidence in recovery['failures']:
+            run.fail('4_reconstruction', message, evidence)
     result['result'] = 'FAIL' if any(
         f['assertion'] == '4_reconstruction' for f in run.failures) else 'PASS'
 
