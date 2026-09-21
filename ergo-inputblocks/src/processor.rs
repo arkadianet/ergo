@@ -3233,6 +3233,18 @@ impl Processor {
         }
     }
 
+    /// Every input-block id the processor currently holds a RECORD for —
+    /// not merely the ones on [`Self::best_input_chain`]. A losing fork's
+    /// block is retained (subject to spec 7.4's `records_per_ordering`
+    /// bound) until it is superseded or TTL'd, and Scala can still answer
+    /// `getInputBlockTransactions`/`Ids` for it over that window; this is
+    /// the accessor a node-side REST bridge uses to serve the same query
+    /// (fix-round-1, finding 2). Bounded by the same cap `records`
+    /// itself is bounded by — no unbounded enumeration surface.
+    pub fn known_input_block_ids(&self) -> Vec<InputBlockId> {
+        self.records.keys().copied().collect()
+    }
+
     /// The parent input block an announcement claims, as recorded
     /// (`InputBlockAnnouncement.prevInputBlockId`). The node serves this
     /// when answering `−123` requests without re-parsing the proof.
@@ -6526,5 +6538,44 @@ mod tests {
             "the height jump's resetState() prunes the stale record"
         );
         assert!(p.announcement(&ts::ann_id(&jump)).is_some());
+    }
+
+    // ----- fix round 1 (Plan 2 M2 codex review, finding 2) -----
+
+    #[test]
+    fn known_input_block_ids_empty_on_a_fresh_processor() {
+        let p = processor();
+        assert!(p.known_input_block_ids().is_empty());
+    }
+
+    #[test]
+    fn known_input_block_ids_includes_records_outside_the_best_chain() {
+        let mut p = processor();
+        let ctx = ts::TestCtx::at(FULL);
+        // Two sibling, fully-applied (zero-tx) blocks, same height, no
+        // shared parent: two competing forks, only one of which
+        // `best_input_chain()` picks as the tree's tip.
+        let a1 = ts::announcement(ORD, FULL + 1, 1, None);
+        let a2 = ts::announcement(ORD, FULL + 1, 2, None);
+        let id1 = ts::ann_id(&a1);
+        let id2 = ts::ann_id(&a2);
+        ts::announce_and_apply(&mut p, &ctx, &a1, 0);
+        ts::announce_and_apply(&mut p, &ctx, &a2, 0);
+
+        let best_chain = p.best_input_chain();
+        assert_eq!(
+            best_chain.len(),
+            1,
+            "only one of the two competing blocks is best"
+        );
+
+        let known = p.known_input_block_ids();
+        assert_eq!(known.len(), 2, "both records are retained");
+        assert!(known.contains(&id1));
+        assert!(known.contains(&id2));
+        assert!(
+            known.iter().any(|id| !best_chain.contains(id)),
+            "the losing fork's id must be reachable even though it's not best"
+        );
     }
 }

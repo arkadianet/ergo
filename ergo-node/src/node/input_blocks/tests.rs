@@ -481,6 +481,69 @@ fn read_slot_is_untouched_by_an_empty_effect_batch() {
     );
 }
 
+/// Fix-round-1, finding 2: a losing fork's input block is still
+/// retrievable over the REST read slot after another fork wins — the
+/// snapshot must be built from every RECORDED id
+/// (`Processor::known_input_block_ids`), not merely the best chain.
+///
+/// The two competing blocks are built directly on the processor via
+/// `ergo_inputblocks::test_support::announce_and_apply` — the crate's own
+/// harness for exactly this — rather than through the node's
+/// `execute_effects` `Validate` arm, which requires a real applied full
+/// block (`TipUnready`) this bare `make_state()` fixture doesn't have.
+/// The refresh itself IS driven through the node's `execute_effects`
+/// (any non-empty effect batch), so the read-slot content-building logic
+/// under test is the real production path.
+#[test]
+fn read_slot_serves_a_losing_forks_block_after_a_fork_switch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    state.input_blocks = Some(runtime());
+    let slot: crate::api_bridge::InputBlocksSlot = std::sync::Arc::new(
+        arc_swap::ArcSwap::from_pointee(ergo_api::compat::ApiInputBlocks::default()),
+    );
+    state.input_blocks_read_slot = Some(slot.clone());
+
+    // Two sibling, zero-tx blocks at the same height, no shared parent:
+    // two competing forks under the same ordering id.
+    let ts_ctx = ts::TestCtx::at(0);
+    let a1 = ts::announcement([0u8; 32], 1, 7, None);
+    let a2 = ts::announcement([0u8; 32], 1, 9, None);
+    let id1 = ts::ann_id(&a1);
+    let id2 = ts::ann_id(&a2);
+    {
+        let mut rt = state.input_blocks.take().expect("runtime");
+        rt.processor_mut().set_best_ordering(Some([0u8; 32]), 1);
+        ts::announce_and_apply(rt.processor_mut(), &ts_ctx, &a1, 0);
+        ts::announce_and_apply(rt.processor_mut(), &ts_ctx, &a2, 0);
+        state.input_blocks = Some(rt);
+    }
+
+    let rt = state.input_blocks.as_ref().unwrap();
+    let best_chain = rt.processor().best_input_chain();
+    assert_eq!(
+        best_chain.len(),
+        1,
+        "only one of the two competing blocks is best"
+    );
+    let losing_id = if best_chain.contains(&id1) { id2 } else { id1 };
+
+    execute_effects(
+        &mut state,
+        vec![Effect::Dropped {
+            id: [0u8; 32],
+            reason: DropReason::AlreadyKnown,
+        }],
+        Instant::now(),
+    );
+
+    let snapshot = slot.load_full();
+    assert!(
+        snapshot.blocks.contains_key(&hex::encode(losing_id)),
+        "the losing fork's block must still resolve over the read slot"
+    );
+}
+
 /// A runtime that has never dropped anything reports an empty (not
 /// absent) breakdown — `ApiStatus.input_blocks` itself is what goes
 /// `None` when the subsystem is off (see

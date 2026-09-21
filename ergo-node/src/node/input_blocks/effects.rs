@@ -104,8 +104,13 @@ fn refresh_read_slot(state: &NodeState, rt: &InputBlocksRuntime) {
     let chain = processor.best_input_chain();
     let best_chain: Vec<String> = chain.iter().map(hex::encode).collect();
     let best_input_block_id = best_chain.first().cloned();
-    let mut blocks = std::collections::HashMap::with_capacity(chain.len());
-    for id in &chain {
+    // Fix-round-1, finding 2: iterate EVERY record the processor still
+    // holds, not merely the best chain — a losing fork's block stays
+    // queryable (`getInputBlockTransactions`/`Ids` in Scala) until it is
+    // superseded or TTL'd, and the REST snapshot must agree.
+    let known = processor.known_input_block_ids();
+    let mut blocks = std::collections::HashMap::with_capacity(known.len());
+    for id in &known {
         let Some(bodies) = processor.bodies(id) else {
             continue;
         };
