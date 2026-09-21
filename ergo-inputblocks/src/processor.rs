@@ -382,12 +382,33 @@ enum RequestKey {
     InputBlock(InputBlockId),
     /// `RequestModifier` −122: a weak-id list.
     TransactionIds(InputBlockId),
-    /// Message 105: transaction bodies.
-    Transactions(InputBlockId),
+    /// Message 105: transaction bodies. The second field identifies
+    /// *which* bodies were asked for — two requests for different weak-id
+    /// sets are different requests, and each one costs a slot, while a
+    /// repeat of the same set is a duplicate and is suppressed (residual
+    /// fix round 2, D).
+    Transactions(InputBlockId, u64),
     /// An ordering block's header.
     OrderingHeader(OrderingId),
     /// An ordering block's transaction section.
     BlockTransactions(OrderingId),
+}
+
+/// Order-independent digest of a requested weak-id set, so the same set
+/// asked for twice is recognised as the same request however the
+/// positions were ordered. FNV-1a over the sorted ids: this identifies a
+/// request, it defends nothing.
+fn weak_set_hash(weak_ids: &[WeakId]) -> u64 {
+    let mut sorted: Vec<WeakId> = weak_ids.to_vec();
+    sorted.sort_unstable();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for id in sorted {
+        for b in id {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    h
 }
 
 impl RequestKey {
@@ -398,9 +419,11 @@ impl RequestKey {
             Effect::RequestTransactionIds { input_block_id, .. } => {
                 Some(Self::TransactionIds(*input_block_id))
             }
-            Effect::RequestTransactions { input_block_id, .. } => {
-                Some(Self::Transactions(*input_block_id))
-            }
+            Effect::RequestTransactions {
+                input_block_id,
+                weak_ids,
+                ..
+            } => Some(Self::Transactions(*input_block_id, weak_set_hash(weak_ids))),
             Effect::RequestOrderingHeader { header_id, .. } => {
                 Some(Self::OrderingHeader(*header_id))
             }
@@ -459,11 +482,12 @@ pub struct Processor {
     /// the slot unresolvable and then recreating it (fix round 2,
     /// finding r2-1). Released when the record is pruned.
     digest_attempts: HashMap<InputBlockId, usize>,
-    /// The peer a `RequestTransactions` for this block was actually
-    /// issued to. A delivery is *solicited* only when it answers such a
-    /// request; the announcer-recovery allowance (residual fix round, B)
-    /// is granted to nothing else. Released when the record is pruned.
-    requested_bodies: HashMap<InputBlockId, PeerTag>,
+    /// Blocks the announcer has already been invited to rescue. The
+    /// invitation is the body request a spent budget issues: without one
+    /// outstanding, no later delivery can be solicited, and "solicited"
+    /// is what the recovery allowance requires (residual fix round 2,
+    /// ruling B). One per record.
+    invited: std::collections::HashSet<InputBlockId>,
     /// Recovery allowances already granted to a record, as
     /// `(digest, validation)`. Bounded by
     /// [`crate::bounds::Bounds::digest_recovery_per_block`] and
@@ -866,7 +890,7 @@ impl Processor {
             reported_digest_exhausted: std::collections::HashSet::new(),
             reported_validation_exhausted: std::collections::HashSet::new(),
             digest_attempts: HashMap::new(),
-            requested_bodies: HashMap::new(),
+            invited: std::collections::HashSet::new(),
             recovery_granted: HashMap::new(),
             validation_attempts: HashMap::new(),
             failed_trigger: HashMap::new(),
@@ -1298,8 +1322,14 @@ impl Processor {
                 // for the positions it could settle: that request is the
                 // only route left to the block, and it is what a recovery
                 // delivery (residual fix round, B) answers.
-                self.staging.shift_remove(&id);
                 self.report_digest_exhausted(id, out);
+                if ambiguous.is_empty() {
+                    // Nothing to disambiguate, so the ordinary request
+                    // below would ask for nothing: invite the announcer
+                    // to re-send the block instead.
+                    self.invite_recovery(id, out);
+                }
+                self.staging.shift_remove(&id);
                 if !ambiguous.is_empty() {
                     if let Some(peer) = from {
                         self.request(
@@ -1762,12 +1792,11 @@ impl Processor {
         if from != Some(announcer) {
             return None;
         }
-        // Solicited: either this delivery answered an outstanding request
-        // to the announcer, or the processor asked *it* for this block's
-        // bodies at some point — the request that made the delivery
-        // legitimate may have been answered long before the block ran out
-        // of budget.
-        if !solicited && self.requested_bodies.get(&id) != Some(&announcer) {
+        // Solicited: this delivery answered an outstanding body request to
+        // the announcer, or one is outstanding to it right now. A request
+        // answered long ago does not make a later unprompted delivery
+        // solicited (residual fix round 2, ruling B).
+        if !solicited && !self.bodies_requested(announcer, id) {
             return None;
         }
         if self.is_applied(&id) {
@@ -1790,6 +1819,43 @@ impl Processor {
             selection.push(body.tx_ref);
         }
         Some(selection)
+    }
+
+    /// Ask the announcer, once, for the block's bodies at the moment the
+    /// node gives up on it. Nothing else can make a later delivery
+    /// solicited, and an unsolicited delivery may not spend the recovery
+    /// allowance — so without this invitation the allowance could never
+    /// be used by the peer it belongs to.
+    fn invite_recovery(&mut self, id: InputBlockId, out: &mut Vec<Effect>) {
+        if self.invited.contains(&id) {
+            return;
+        }
+        let Some(rec) = self.records.get(&id) else {
+            return;
+        };
+        let peer = rec.from;
+        let weak_ids = match rec
+            .ann
+            .weak_tx_ids
+            .clone()
+            .or_else(|| self.staging.get(&id).map(|s| s.weak_ids.clone()))
+        {
+            // A block whose transaction order was never announced by weak
+            // id has nothing to ask for position by position.
+            Some(w) if !w.is_empty() => w,
+            _ => return,
+        };
+        self.invited.insert(id);
+        self.request(
+            out,
+            Effect::RequestTransactions {
+                input_block_id: id,
+                weak_ids,
+                from: peer,
+            },
+            peer,
+            id,
+        );
     }
 
     /// Consume one digest-recovery allowance for `id`. Consumed *before*
@@ -1936,8 +2002,7 @@ impl Processor {
         ctx: &ProcessorCtx<'_>,
         out: &mut Vec<Effect>,
     ) {
-        let solicited =
-            from.is_some_and(|p| self.request_answered(p, RequestKey::Transactions(id)));
+        let solicited = from.is_some_and(|p| self.bodies_answered(p, id));
         let Some(rec) = self.records.get(&id) else {
             out.push(Effect::Dropped {
                 id,
@@ -2194,6 +2259,12 @@ impl Processor {
         // would let a peer spray witnesses and keep reissuing jobs with
         // the counter stuck at one.
         *self.validation_attempts.entry(target).or_insert(0) += 1;
+        // This dispatch spent the block's last validation: invite the
+        // announcer now, while the job runs, so its answer can be held
+        // and used the moment the job fails (residual fix round 2, B).
+        if self.validation_exhausted(&target) {
+            self.invite_recovery(target, out);
+        }
         self.in_flight = Some(InFlight {
             job,
             generation: self.generation,
@@ -2601,7 +2672,7 @@ impl Processor {
             self.reported_digest_exhausted.remove(&id);
             self.reported_validation_exhausted.remove(&id);
             self.digest_attempts.remove(&id);
-            self.requested_bodies.remove(&id);
+            self.invited.remove(&id);
             self.recovery_granted.remove(&id);
             self.validation_attempts.remove(&id);
             self.failed_trigger.remove(&id);
@@ -2642,9 +2713,15 @@ impl Processor {
     /// The cap counts requests that are genuinely outstanding: a slot is
     /// released by the delivery that answers it
     /// ([`Self::request_answered`]) or, if the peer never answers, when
-    /// its deadline passes on a [`Event::Tick`]. Re-issuing the same
-    /// request only refreshes its deadline, so a retry cannot exhaust the
-    /// peer's own budget (residual fix round, D).
+    /// its deadline passes on a [`Event::Tick`].
+    ///
+    /// A request that is already outstanding is **not** re-emitted: spec
+    /// 7.6's re-selection reaches the same unresolved block on every
+    /// event, and re-emitting without allocating a slot let a peer be
+    /// asked the same question arbitrarily often while none of the
+    /// answers arrived (residual fix round 2, D). The peer already has
+    /// the question; it is dropped silently, and the deadline sweep is
+    /// what eventually asks again.
     fn request(&mut self, out: &mut Vec<Effect>, effect: Effect, peer: PeerTag, subject: [u8; 32]) {
         let deadline = Tick(self.now.0.saturating_add(self.bounds.request_timeout_ms));
         let key = RequestKey::of(&effect);
@@ -2653,9 +2730,7 @@ impl Processor {
         let slots = self.outstanding.entry(peer).or_default();
         slots.retain(|(_, at)| at.0 > now.0);
         if let Some(k) = key {
-            if let Some(slot) = slots.iter_mut().find(|(existing, _)| *existing == k) {
-                slot.1 = deadline;
-                out.push(effect);
+            if slots.iter().any(|(existing, _)| *existing == k) {
                 return;
             }
         }
@@ -2670,15 +2745,41 @@ impl Processor {
         if let Some(k) = key {
             slots.push((k, deadline));
         }
-        if let Some(RequestKey::Transactions(block)) = key {
-            self.requested_bodies.insert(block, peer);
-        }
         out.push(effect);
     }
 
     /// Release the slot a delivery answers. Returns whether the delivery
     /// was in fact solicited from that peer — the announcer-recovery
     /// allowance of the residual fix round (B) needs that distinction.
+    /// Release a body request for `id`, whatever weak-id set it asked
+    /// for: a delivery answers the question about the block, and a peer
+    /// that answers partially has still answered.
+    fn bodies_answered(&mut self, peer: PeerTag, id: InputBlockId) -> bool {
+        let Some(slots) = self.outstanding.get_mut(&peer) else {
+            return false;
+        };
+        let before = slots.len();
+        slots.retain(|(k, _)| !matches!(k, RequestKey::Transactions(b, _) if *b == id));
+        let answered = slots.len() < before;
+        if slots.is_empty() {
+            self.outstanding.remove(&peer);
+        }
+        answered
+    }
+
+    /// Whether a body request for `id` is currently outstanding to
+    /// `peer`. With [`Self::bodies_answered`] this is the whole of
+    /// "solicited": a request that is outstanding now, or one this very
+    /// delivery answered — never a historical one (residual fix round 2,
+    /// ruling B).
+    fn bodies_requested(&self, peer: PeerTag, id: InputBlockId) -> bool {
+        self.outstanding.get(&peer).is_some_and(|slots| {
+            slots
+                .iter()
+                .any(|(k, _)| matches!(k, RequestKey::Transactions(b, _) if *b == id))
+        })
+    }
+
     fn request_answered(&mut self, peer: PeerTag, key: RequestKey) -> bool {
         let Some(slots) = self.outstanding.get_mut(&peer) else {
             return false;
@@ -5343,6 +5444,87 @@ mod tests {
                 state: SelectionState::Applied
             }),
             "{late:?}"
+        );
+    }
+
+    // ----- residuals fix round 2 -----
+
+    /// How many `RequestTransactions` effects in `effects` are addressed
+    /// to `peer`.
+    fn body_requests_to(effects: &[Effect], peer: PeerTag) -> usize {
+        effects
+            .iter()
+            .filter(|e| matches!(e, Effect::RequestTransactions { from, .. } if *from == peer))
+            .count()
+    }
+
+    #[test]
+    fn repeated_triggering_deliveries_never_exceed_the_request_cap() {
+        // Re-selection reaches an unresolved block on every event, so the
+        // same question was re-emitted to the same peer on every event
+        // too — without allocating a slot, because the key was already
+        // there. The cap has to bound *emitted* requests, not just the
+        // slots.
+        let cap = 2usize;
+        let bounds = Bounds {
+            requests_per_peer: cap,
+            ..Bounds::default()
+        };
+        let mut p = processor_with(bounds);
+        let base = ts::body(7, 1);
+        let mut ctx = ts::TestCtx::at(FULL);
+        // One position with more local guesses than the per-position cap:
+        // the block stays unresolved and every event asks the announcer
+        // to settle it.
+        for w in 1..=Bounds::default().candidates_per_position as u8 + 1 {
+            ctx.mempool.add_under(base.weak_id, &ts::body(7, w));
+        }
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&base));
+        let id = ts::ann_id(&ann);
+        let mut emitted = body_requests_to(&announce(&mut p, &ctx, &ann, ts::PEER), ts::PEER);
+        assert_eq!(emitted, 1, "the first request must go out");
+
+        // A stranger keeps poking the block with bodies that resolve
+        // nothing; the announcer never answers.
+        for tick in 0..10u64 {
+            let eff = ctx.handle(
+                &mut p,
+                Event::TransactionsDelivered {
+                    input_block_id: id,
+                    bodies: vec![ts::body(200, 1)],
+                    from: Some(PeerTag(99)),
+                    now: Tick(tick),
+                },
+            );
+            emitted += body_requests_to(&eff, ts::PEER);
+        }
+        assert!(
+            emitted <= cap,
+            "{emitted} requests emitted to one peer, cap is {cap}"
+        );
+
+        // The suppression is not permanent: once the request times out,
+        // the announcer is asked again.
+        let timeout = Bounds::default().request_timeout_ms;
+        ctx.handle(
+            &mut p,
+            Event::Tick {
+                now: Tick(timeout + 1),
+            },
+        );
+        let after = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![ts::body(200, 2)],
+                from: Some(PeerTag(99)),
+                now: Tick(timeout + 2),
+            },
+        );
+        assert_eq!(
+            body_requests_to(&after, ts::PEER),
+            1,
+            "a timed-out request must be asked again: {after:?}"
         );
     }
 
