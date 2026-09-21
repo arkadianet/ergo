@@ -306,6 +306,13 @@ struct InFlight {
     /// collapses to the linear branch and no progress is made.
     trigger: InputBlockId,
     ordering_id: OrderingId,
+    /// The transaction list the job was handed, frozen at issue time. A
+    /// result is only applied while the block's selection still equals
+    /// this (fix round 1, finding 4).
+    txs: Vec<TxRef>,
+    /// The already-processed chain prefix whose bodies were handed to the
+    /// job as `previous`; a change to any of those also invalidates it.
+    prev_chain: Vec<InputBlockId>,
 }
 
 /// The single-writer state machine (spec 7.1–7.6).
@@ -327,6 +334,11 @@ pub struct Processor {
     in_flight: Option<InFlight>,
     failed: HashMap<InputBlockId, Vec<Vec<TxRef>>>,
     pending_triggers: VecDeque<(OrderingId, InputBlockId)>,
+    /// Blocks whose unavailable bodies have already been reported. Spec
+    /// 7.6's re-selection reaches a stalled block again on every event, so
+    /// without this the same `CacheEvicted` is emitted over and over;
+    /// the entry is cleared the moment the bodies are back.
+    reported_evicted: std::collections::HashSet<InputBlockId>,
 }
 
 #[derive(Debug, Default)]
@@ -335,15 +347,37 @@ struct TxCache {
     bytes: usize,
 }
 
+/// One candidate body for an announced weak-id position, carrying the
+/// provenance spec 7.5 item 4 turns on: a body the announcing peer
+/// delivered for *this block* outranks anything guessed from the local
+/// mempool, so an over-cap pile of local guesses is settled the moment
+/// the peer answers.
+#[derive(Debug, Clone)]
+struct Candidate {
+    body: Body,
+    delivered: bool,
+}
+
 #[derive(Debug)]
 struct Staging {
     weak_ids: Vec<WeakId>,
-    candidates: Vec<Vec<Body>>,
+    /// Unverified candidates per position. Cleared once `variants` is
+    /// set: from then on the block's bodies live in the shared cache and
+    /// only their `TxRef`s are tracked here.
+    candidates: Vec<Vec<Candidate>>,
+    /// Per-position variants, set once a combination reproduced the
+    /// announced digest. Every entry at position `i` shares that
+    /// position's committed `tx_id`, so every combination reachable from
+    /// here also satisfies the digest — that invariant is what makes the
+    /// witness-variant retry safe.
     variants: Option<Vec<Vec<TxRef>>>,
     cursor: Vec<usize>,
     /// Ordered-digest combinations tried so far, accumulated across every
-    /// delivery for this block (spec 7.5's per-block limit).
+    /// delivery for this block (spec 7.5's per-block limit). Never reset.
     attempts: usize,
+    /// The effective candidate set changed since the last search, so the
+    /// cursor restarts — the attempt budget does not.
+    dirty: bool,
     bytes: usize,
     created: Tick,
     from: Option<PeerTag>,
@@ -402,23 +436,65 @@ impl Staging {
             variants: None,
             cursor: vec![0; n],
             attempts: 0,
+            dirty: false,
             bytes: 0,
             created,
             from,
         }
     }
 
-    /// Add `body` as a candidate for position `i`, ignoring a duplicate
-    /// `TxRef` (the mempool and a peer's delivery routinely overlap).
-    fn add(&mut self, i: usize, body: Body) {
-        if self.variants.is_some() {
-            return;
+    /// Add `body` as a candidate for position `i`. Returns whether it was
+    /// stored. Duplicates are ignored, except that a re-delivery of a body
+    /// already guessed locally upgrades it to peer-delivered.
+    ///
+    /// Each provenance is capped independently: at most `cap`
+    /// peer-delivered bodies (a peer answering with more than that for one
+    /// weak id is misbehaving, and the extras would only re-trigger the
+    /// ambiguity request), and `cap + 1` local guesses — one more than the
+    /// cap, which is exactly enough to detect that the position is over it.
+    fn add(&mut self, i: usize, body: Body, delivered: bool, cap: usize) -> bool {
+        if self.variants.is_some() || i >= self.candidates.len() {
+            return false;
         }
-        if self.candidates[i].iter().any(|b| b.tx_ref == body.tx_ref) {
-            return;
+        if let Some(existing) = self.candidates[i]
+            .iter_mut()
+            .find(|c| c.body.tx_ref == body.tx_ref)
+        {
+            if delivered && !existing.delivered {
+                existing.delivered = true;
+                self.dirty = true;
+            }
+            return false;
+        }
+        let limit = if delivered { cap } else { cap + 1 };
+        if self.candidates[i]
+            .iter()
+            .filter(|c| c.delivered == delivered)
+            .count()
+            >= limit
+        {
+            return false;
         }
         self.bytes += body.bytes.len();
-        self.candidates[i].push(body);
+        self.candidates[i].push(Candidate { body, delivered });
+        self.dirty = true;
+        true
+    }
+
+    /// The candidates that actually count at position `i`: the peer's own
+    /// answers when it has given any, else the local guesses (spec 7.5
+    /// item 4, "the peer's own body wins over local guesses").
+    fn effective(&self, i: usize) -> Vec<&Candidate> {
+        let slot = &self.candidates[i];
+        if slot.iter().any(|c| c.delivered) {
+            slot.iter().filter(|c| c.delivered).collect()
+        } else {
+            slot.iter().collect()
+        }
+    }
+
+    fn effective_refs(&self, i: usize) -> Vec<TxRef> {
+        self.effective(i).iter().map(|c| c.body.tx_ref).collect()
     }
 
     /// The `TxRef`s the current cursor selects, once resolved.
@@ -430,13 +506,16 @@ impl Staging {
             .collect()
     }
 
-    /// Odometer step over the per-position candidate lists (spec 7.5's
+    /// Odometer step over the resolved per-position variants (spec 7.5's
     /// witness-variant retry). Returns `false` once every combination
     /// reachable from the current cursor has been tried.
     fn advance(&mut self) -> bool {
-        let Some(vars) = self.variants.as_ref() else {
+        let Some(vars) = self.variants.clone() else {
             return false;
         };
+        if self.cursor.len() != vars.len() {
+            self.cursor = vec![0; vars.len()];
+        }
         for (i, v) in vars.iter().enumerate() {
             if self.cursor[i] + 1 < v.len() {
                 self.cursor[i] += 1;
@@ -456,7 +535,7 @@ impl Staging {
     }
 }
 
-/// What [`Processor::resolve`] concluded about one block's staged bodies.
+/// What [`Processor::search`] concluded about one block's staged bodies.
 enum Resolution {
     /// Every position resolved and the ordered digest matched.
     Complete(Vec<TxRef>),
@@ -487,6 +566,7 @@ impl Processor {
             in_flight: None,
             failed: HashMap::new(),
             pending_triggers: VecDeque::new(),
+            reported_evicted: std::collections::HashSet::new(),
         }
     }
 
@@ -772,10 +852,14 @@ impl Processor {
             .enumerate()
             .map(|(i, w)| (i, (ctx.mempool_lookup)(w)))
             .collect();
+        let cap = self.bounds.candidates_per_position;
         if let Some(st) = self.staging.get_mut(&id) {
             for (i, bodies) in found {
                 for b in bodies {
-                    st.add(i, b);
+                    // Local guesses, not peer answers: `Staging::effective`
+                    // ignores them entirely once the announcer has replied
+                    // for that position.
+                    st.add(i, b, false, cap);
                 }
             }
         }
@@ -822,69 +906,80 @@ impl Processor {
             .map(|r| r.ann.fields.transactions_digest)
     }
 
-    /// Spec 7.5 steps 1–4: resolve every announced position to one body.
-    fn resolve(&self, id: &InputBlockId) -> Resolution {
-        let Some(st) = self.staging.get(id) else {
+    /// Spec 7.5 steps 1–4: drive the ordered-digest search for one block.
+    ///
+    /// Takes `&mut self` because the search state is *persisted*: the
+    /// cursor survives across deliveries so a peer re-delivering bodies
+    /// does not redo combinations already tried, and `attempts` is a
+    /// monotone per-block total, never a per-delivery allowance (fix round
+    /// 1, finding 7). A changed effective candidate set restarts the
+    /// cursor but never refunds the budget.
+    fn search(&mut self, id: InputBlockId) -> Resolution {
+        let bypass = self.digest_bypassed(&id);
+        let announced = self.announced_digest(&id);
+        let cap = self.bounds.candidates_per_position;
+        let budget = self.bounds.digest_attempts_per_block;
+        let Some(st) = self.staging.get_mut(&id) else {
             return Resolution::Request(Vec::new());
         };
         if let Some(sel) = st.selected() {
             return Resolution::Complete(sel);
         }
 
-        let mut needed: Vec<WeakId> = Vec::new();
-        for (i, c) in st.candidates.iter().enumerate() {
-            if c.is_empty() || c.len() > self.bounds.candidates_per_position {
-                needed.push(st.weak_ids[i]);
-            }
-        }
+        let n = st.weak_ids.len();
+        let effective: Vec<Vec<TxRef>> = (0..n).map(|i| st.effective_refs(i)).collect();
+        let needed: Vec<WeakId> = (0..n)
+            .filter(|i| effective[*i].is_empty() || effective[*i].len() > cap)
+            .map(|i| st.weak_ids[i])
+            .collect();
         if !needed.is_empty() {
             return Resolution::Request(needed);
         }
 
-        let variants: Vec<Vec<TxRef>> = st
-            .candidates
-            .iter()
-            .map(|c| c.iter().map(|b| b.tx_ref).collect())
-            .collect();
-
-        if self.digest_bypassed(id) {
-            return Resolution::Complete(
-                variants.iter().filter_map(|v| v.first().copied()).collect(),
-            );
+        if bypass {
+            // Finding F4b: an announcement with an empty proof commits to
+            // no digest at all, so there is nothing to search — take the
+            // first effective candidate at each position, as Scala does.
+            return Resolution::Complete(effective.iter().map(|e| e[0]).collect());
         }
-        let Some(expected) = self.announced_digest(id) else {
+        let Some(expected) = announced else {
             return Resolution::Request(Vec::new());
         };
 
-        // Try candidate combinations (odometer over positions) until the
-        // ordered transaction-id digest reproduces the announcement's.
-        let mut cursor = vec![0usize; variants.len()];
-        let mut attempts = 0usize;
-        loop {
-            let ids: Vec<[u8; 32]> = variants
+        if st.dirty || st.cursor.len() != n {
+            st.cursor = vec![0; n];
+            st.dirty = false;
+        }
+        while st.attempts < budget {
+            if st
+                .cursor
                 .iter()
-                .zip(cursor.iter())
-                .map(|(v, c)| v[*c].tx_id)
+                .zip(effective.iter())
+                .any(|(c, e)| *c >= e.len())
+            {
+                break;
+            }
+            let ids: Vec<[u8; 32]> = effective
+                .iter()
+                .zip(st.cursor.iter())
+                .map(|(e, c)| e[*c].tx_id)
                 .collect();
             let refs: Vec<&[u8]> = ids.iter().map(|i| &i[..]).collect();
+            st.attempts += 1;
             if ergo_crypto::merkle::merkle_tree_root(&refs) == expected {
                 return Resolution::Complete(
-                    variants
+                    effective
                         .iter()
-                        .zip(cursor.iter())
-                        .map(|(v, c)| v[*c])
+                        .zip(st.cursor.iter())
+                        .map(|(e, c)| e[*c])
                         .collect(),
                 );
             }
-            attempts += 1;
-            if attempts >= self.bounds.digest_attempts_per_block {
-                break;
-            }
             let mut stepped = false;
-            for (i, v) in variants.iter().enumerate() {
-                if cursor[i] + 1 < v.len() {
-                    cursor[i] += 1;
-                    for c in cursor.iter_mut().take(i) {
+            for (i, e) in effective.iter().enumerate() {
+                if st.cursor[i] + 1 < e.len() {
+                    st.cursor[i] += 1;
+                    for c in st.cursor.iter_mut().take(i) {
                         *c = 0;
                     }
                     stepped = true;
@@ -896,15 +991,13 @@ impl Processor {
             }
         }
 
-        // No combination matched. If some position is ambiguous the peer's
-        // own body settles it (spec 7.5 item 4); otherwise the delivered
-        // bodies simply disagree with the announcement.
-        let ambiguous: Vec<WeakId> = st
-            .weak_ids
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| variants[*i].len() > 1)
-            .map(|(_, w)| *w)
+        // No combination matched, or the budget is spent. If some position
+        // is still ambiguous the announcer's own body settles it (spec 7.5
+        // item 4); otherwise the bodies simply disagree with the
+        // announcement.
+        let ambiguous: Vec<WeakId> = (0..n)
+            .filter(|i| effective[*i].len() > 1)
+            .map(|i| st.weak_ids[i])
             .collect();
         if ambiguous.is_empty() {
             Resolution::DigestMismatch
@@ -919,7 +1012,7 @@ impl Processor {
             .get(&id)
             .and_then(|s| s.from)
             .or_else(|| self.records.get(&id).map(|r| r.from));
-        match self.resolve(&id) {
+        match self.search(id) {
             Resolution::Complete(refs) => self.commit_resolution(id, refs, out),
             Resolution::Request(weak_ids) => {
                 if weak_ids.is_empty() {
@@ -950,38 +1043,157 @@ impl Processor {
         }
     }
 
-    /// The digest matched: move the block's candidate bodies into the
-    /// shared cache, remember the per-position variants for spec 7.5's
-    /// retry, and free the staging bytes.
+    /// The digest matched: keep only the bodies that can legitimately
+    /// satisfy it, move those into the shared cache, and record the
+    /// per-position variants for spec 7.5's retry.
     fn commit_resolution(&mut self, id: InputBlockId, refs: Vec<TxRef>, out: &mut Vec<Effect>) {
         let now = self.staging.get(&id).map(|s| s.created).unwrap_or(Tick(0));
+        let mut to_cache: Vec<Body> = Vec::new();
         if let Some(st) = self.staging.get_mut(&id) {
             if st.variants.is_none() {
-                let variants: Vec<Vec<TxRef>> = st
-                    .candidates
-                    .iter()
-                    .map(|c| c.iter().map(|b| b.tx_ref).collect())
-                    .collect();
-                let cursor: Vec<usize> = variants
-                    .iter()
-                    .zip(refs.iter())
-                    .map(|(v, r)| v.iter().position(|x| x == r).unwrap_or(0))
-                    .collect();
-                let bodies: Vec<Body> = st.candidates.iter().flatten().cloned().collect();
-                st.candidates = vec![Vec::new(); variants.len()];
-                st.bytes = 0;
-                st.variants = Some(variants);
-                st.cursor = cursor;
-                for b in bodies {
-                    self.cache.insert(b, now, &self.bounds);
+                let empty: Vec<Candidate> = Vec::new();
+                let mut variants: Vec<Vec<TxRef>> = Vec::with_capacity(refs.len());
+                for (i, selected) in refs.iter().enumerate() {
+                    // The announced digest commits an *ordered list of
+                    // transaction ids*, so the moment one combination
+                    // reproduces it the id at every position is fixed.
+                    // Only the selected body and its witness siblings —
+                    // same `tx_id`, different `witness_id` — can also
+                    // satisfy it. Every other candidate at this position
+                    // is provably not what the announcement committed to,
+                    // so it is discarded here and never reaches the shared
+                    // cache, and never becomes a retry (fix round 1,
+                    // finding 1).
+                    let mut variant = vec![*selected];
+                    for c in st.candidates.get(i).unwrap_or(&empty) {
+                        if c.body.tx_ref.tx_id == selected.tx_id {
+                            if c.body.tx_ref != *selected {
+                                variant.push(c.body.tx_ref);
+                            }
+                            to_cache.push(c.body.clone());
+                        }
+                    }
+                    variants.push(variant);
                 }
+                st.candidates = vec![Vec::new(); refs.len()];
+                st.bytes = 0;
+                st.cursor = vec![0; refs.len()];
+                st.dirty = false;
+                st.variants = Some(variants);
             }
         }
-        self.tx_refs.insert(id, refs);
+        for b in to_cache {
+            self.cache.insert(b, now, &self.bounds);
+        }
+        self.set_tx_refs(id, refs, out);
         let Some(ordering_id) = self.records.get(&id).map(|r| r.ordering_id) else {
             return;
         };
         self.pump(ordering_id, id, out);
+        if self.in_flight.is_none() {
+            self.resume(ordering_id, out);
+        }
+    }
+
+    /// A block whose digest already passed can have its bodies refilled
+    /// from a later delivery: the announcement fixed the transaction id at
+    /// every position, so a delivered body carrying one of those ids is
+    /// digest-verified by construction and may go straight into the cache
+    /// (fix round 1, finding 6). Without this, a body lost to TTL expiry
+    /// or eviction would strand the chain on `CacheEvicted` forever,
+    /// because a resolved staging slot ignores every further candidate.
+    fn refill_verified(&mut self, id: InputBlockId, bodies: &[Body], now: Tick) {
+        let mut to_cache: Vec<Body> = Vec::new();
+        if let Some(st) = self.staging.get_mut(&id) {
+            let Some(variants) = st.variants.as_mut() else {
+                return;
+            };
+            for b in bodies {
+                for variant in variants.iter_mut() {
+                    let Some(committed) = variant.first().map(|r| r.tx_id) else {
+                        continue;
+                    };
+                    if committed == b.tx_ref.tx_id {
+                        if !variant.contains(&b.tx_ref) {
+                            variant.push(b.tx_ref);
+                        }
+                        to_cache.push(b.clone());
+                    }
+                }
+            }
+        }
+        for b in to_cache {
+            self.cache.insert(b, now, &self.bounds);
+        }
+    }
+
+    /// The next combination that satisfies the announced digest and has
+    /// not already been rejected by validation. Retries are tracked per
+    /// *combination*, not per body: a block whose first witness choice
+    /// failed must still be able to retry with a different witness for the
+    /// offending position without its innocent block-mates being treated
+    /// as failed too (fix round 1, finding 2).
+    fn next_untried_combination(&mut self, id: InputBlockId) -> Option<Vec<TxRef>> {
+        let rejected = self.failed.get(&id).cloned().unwrap_or_default();
+        let bypass = self.digest_bypassed(&id);
+        let announced = self.announced_digest(&id);
+        let st = self.staging.get_mut(&id)?;
+        st.variants.as_ref()?;
+        loop {
+            if !st.advance() {
+                return None;
+            }
+            let selection = st.selected()?;
+            if rejected.contains(&selection) {
+                continue;
+            }
+            // The digest invariant is checked on *every* retry, not only
+            // on the first match (fix round 1, finding 1). By construction
+            // every variant at a position shares that position's committed
+            // tx id, so this never rejects a legitimate witness sibling —
+            // it is an enforced invariant, not an assumed one.
+            if !bypass {
+                if let Some(expected) = announced {
+                    let ids: Vec<[u8; 32]> = selection.iter().map(|r| r.tx_id).collect();
+                    let refs: Vec<&[u8]> = ids.iter().map(|i| &i[..]).collect();
+                    if ergo_crypto::merkle::merkle_tree_root(&refs) != expected {
+                        continue;
+                    }
+                }
+            }
+            return Some(selection);
+        }
+    }
+
+    /// Record a block's selected transaction list, invalidating any
+    /// outstanding job that was handed the previous one.
+    ///
+    /// Fix round 1, finding 4: a `Validate` freezes the exact bodies it
+    /// was asked about. If the block it is validating — or any block whose
+    /// bodies it was given as `previous` — changes underneath it (a peer
+    /// delivering another witness of the same transaction keeps the digest
+    /// intact but swaps the body), the outstanding result can no longer be
+    /// trusted. The job is invalidated here and reissued by the caller's
+    /// `pump`.
+    fn set_tx_refs(&mut self, id: InputBlockId, refs: Vec<TxRef>, out: &mut Vec<Effect>) {
+        let changed = self.tx_refs.get(&id).map(|v| v.as_slice()) != Some(refs.as_slice());
+        self.tx_refs.insert(id, refs);
+        if !changed {
+            return;
+        }
+        let stale = self
+            .in_flight
+            .as_ref()
+            .is_some_and(|inf| inf.id == id || inf.prev_chain.contains(&id));
+        if stale {
+            if let Some(inf) = self.in_flight.take() {
+                tracing::debug!("input-block validation job invalidated: bodies changed");
+                out.push(Effect::Dropped {
+                    id: inf.id,
+                    reason: DropReason::StaleValidation,
+                });
+            }
+        }
     }
 
     // ----- delivered bodies (message 104) -----
@@ -1010,25 +1222,32 @@ impl Processor {
         let announcer = rec.from;
         match rec.ann.weak_tx_ids.clone() {
             Some(weak) => {
-                self.staging
-                    .entry(id)
-                    .or_insert_with(|| Staging::new(weak.clone(), now, from.or(Some(announcer))));
-                if let Some(st) = self.staging.get_mut(&id) {
-                    for b in bodies {
-                        let positions: Vec<usize> = st
-                            .weak_ids
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, w)| **w == b.weak_id)
-                            .map(|(i, _)| i)
-                            .collect();
-                        for i in positions {
-                            st.add(i, b.clone());
+                if self.staging.get(&id).is_some_and(|s| s.variants.is_some()) {
+                    // The block's digest already passed; a delivery now
+                    // can only refill bodies the cache lost.
+                    self.refill_verified(id, &bodies, now);
+                } else {
+                    self.staging.entry(id).or_insert_with(|| {
+                        Staging::new(weak.clone(), now, from.or(Some(announcer)))
+                    });
+                    let cap = self.bounds.candidates_per_position;
+                    if let Some(st) = self.staging.get_mut(&id) {
+                        for b in bodies {
+                            let positions: Vec<usize> = st
+                                .weak_ids
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, w)| **w == b.weak_id)
+                                .map(|(i, _)| i)
+                                .collect();
+                            for i in positions {
+                                st.add(i, b.clone(), true, cap);
+                            }
                         }
                     }
+                    self.refresh_from_mempool(id, ctx);
+                    self.enforce_staging_bytes(id, out);
                 }
-                self.refresh_from_mempool(id, ctx);
-                self.enforce_staging_bytes(id, out);
                 self.complete_or_request(id, out);
             }
             None => {
@@ -1051,11 +1270,14 @@ impl Processor {
                 for b in bodies {
                     self.cache.insert(b, now, &self.bounds);
                 }
-                self.tx_refs.insert(id, refs);
+                self.set_tx_refs(id, refs, out);
                 let Some(ordering_id) = self.records.get(&id).map(|r| r.ordering_id) else {
                     return;
                 };
                 self.pump(ordering_id, id, out);
+                if self.in_flight.is_none() {
+                    self.resume(ordering_id, out);
+                }
             }
         }
     }
@@ -1072,10 +1294,12 @@ impl Processor {
     /// asked about. The real application happens in [`Self::on_validation`].
     fn pump(&mut self, ordering_id: OrderingId, trigger: InputBlockId, out: &mut Vec<Effect>) {
         if self.in_flight.is_some() {
-            if self.pending_triggers.len() >= self.bounds.pending_triggers {
-                self.pending_triggers.pop_front();
+            if !self.pending_triggers.contains(&(ordering_id, trigger)) {
+                if self.pending_triggers.len() >= self.bounds.pending_triggers {
+                    self.pending_triggers.pop_front();
+                }
+                self.pending_triggers.push_back((ordering_id, trigger));
             }
-            self.pending_triggers.push_back((ordering_id, trigger));
             return;
         }
         // Scala `applyInputBlockTransactions`: nothing is processed for an
@@ -1105,16 +1329,16 @@ impl Processor {
         let Some(txs) = self.tx_refs.get(&target).cloned() else {
             return;
         };
-        // Spec 7.5: a body that already failed validation for this block
-        // is not offered again. Without this a peer could re-deliver the
-        // same rejected bodies to make the node re-run the job forever;
-        // the witness-variant retry swaps in an untried body instead, so
-        // a legitimate retry is unaffected.
+        // Spec 7.5: a combination that already failed validation for this
+        // block is not offered again. Without this a peer could re-deliver
+        // the same rejected bodies to make the node re-run the job
+        // forever; the witness-variant retry swaps in an untried
+        // combination instead, so a legitimate retry is unaffected. No
+        // effect is emitted — the rejection was already reported once,
+        // when the job actually failed, and re-selection reaches this
+        // point on every subsequent event.
         if self.has_failed_combination(&target, &txs) {
-            out.push(Effect::Dropped {
-                id: target,
-                reason: DropReason::ValidationFailed,
-            });
+            tracing::debug!("skipping a transaction combination that already failed");
             return;
         }
         let mut previous: Vec<TxRef> = Vec::new();
@@ -1122,10 +1346,12 @@ impl Processor {
             match self.tx_refs.get(pid) {
                 Some(v) => previous.extend(v.iter().copied()),
                 None => {
-                    out.push(Effect::Dropped {
-                        id: *pid,
-                        reason: DropReason::CacheEvicted,
-                    });
+                    if self.reported_evicted.insert(*pid) {
+                        out.push(Effect::Dropped {
+                            id: *pid,
+                            reason: DropReason::CacheEvicted,
+                        });
+                    }
                     return;
                 }
             }
@@ -1137,11 +1363,17 @@ impl Processor {
             .chain(previous.iter())
             .any(|r| !self.cache.contains(r))
         {
-            out.push(Effect::Dropped {
-                id: target,
-                reason: DropReason::CacheEvicted,
-            });
+            if self.reported_evicted.insert(target) {
+                out.push(Effect::Dropped {
+                    id: target,
+                    reason: DropReason::CacheEvicted,
+                });
+            }
             return;
+        }
+        self.reported_evicted.remove(&target);
+        for pid in &prev_chain {
+            self.reported_evicted.remove(pid);
         }
         let job = self.next_job;
         self.next_job += 1;
@@ -1151,6 +1383,8 @@ impl Processor {
             id: target,
             trigger,
             ordering_id,
+            txs: txs.clone(),
+            prev_chain,
         });
         out.push(Effect::Validate {
             job,
@@ -1195,6 +1429,21 @@ impl Processor {
     }
 
     fn on_validation_ok(&mut self, inf: InFlight, cost: u64, out: &mut Vec<Effect>) {
+        // Fix round 1, finding 4: the job froze the bodies it was handed.
+        // `set_tx_refs` normally invalidates a job the moment they change,
+        // so this is the belt to that braces — it also covers a selection
+        // that moved through any path that did not go through `pump`.
+        if self.tx_refs.get(&inf.id).map(|v| v.as_slice()) != Some(inf.txs.as_slice()) {
+            out.push(Effect::Dropped {
+                id: inf.id,
+                reason: DropReason::StaleValidation,
+            });
+            self.pump(inf.ordering_id, inf.trigger, out);
+            if self.in_flight.is_none() {
+                self.resume(inf.ordering_id, out);
+            }
+            return;
+        }
         let Some(tree) = self.trees.get(&inf.ordering_id).cloned() else {
             return;
         };
@@ -1233,46 +1482,51 @@ impl Processor {
         }
     }
 
-    /// Spec 7.5's witness-variant retry: swap in the next candidate for
-    /// the block that failed and re-run it; when the combinations are
-    /// exhausted the fork simply stops progressing (Scala: application
-    /// failure).
+    /// Spec 7.5's witness-variant retry: swap in the next digest-consistent
+    /// combination that has not already failed and re-run it; when the
+    /// combinations are exhausted the fork simply stops progressing
+    /// (Scala: application failure).
     fn on_validation_failed(&mut self, inf: InFlight, out: &mut Vec<Effect>) {
         let id = inf.id;
-        if let Some(refs) = self.tx_refs.get(&id).cloned() {
-            self.failed.entry(id).or_default().push(refs);
+        self.failed.entry(id).or_default().push(inf.txs.clone());
+        match self.next_untried_combination(id) {
+            Some(refs) => {
+                self.set_tx_refs(id, refs, out);
+                // Fix round 1, finding 5c: the retry re-runs the same
+                // *selection* the failed job came from, so a fork switch
+                // stays a fork switch. Driving it with the block's own id
+                // would collapse a deep-trigger switch into the linear
+                // branch and stall the fork.
+                self.pump(inf.ordering_id, inf.trigger, out);
+            }
+            None => {
+                let reason = if self
+                    .staging
+                    .get(&id)
+                    .is_some_and(|st| st.had_alternatives())
+                {
+                    DropReason::CandidatesExhausted
+                } else {
+                    DropReason::ValidationFailed
+                };
+                out.push(Effect::Dropped { id, reason });
+            }
         }
-        let next =
-            self.staging.get_mut(&id).and_then(
-                |st| {
-                    if st.advance() {
-                        st.selected()
-                    } else {
-                        None
-                    }
-                },
-            );
-        if let Some(refs) = next {
-            self.tx_refs.insert(id, refs);
-            self.pump(inf.ordering_id, id, out);
-            return;
+        // Fix round 1, finding 5b: a terminal failure still has to service
+        // whatever was deferred while this job held the single slot.
+        if self.in_flight.is_none() {
+            self.resume(inf.ordering_id, out);
         }
-        let reason = if self
-            .staging
-            .get(&id)
-            .is_some_and(|st| st.had_alternatives())
-        {
-            DropReason::CandidatesExhausted
-        } else {
-            DropReason::ValidationFailed
-        };
-        out.push(Effect::Dropped { id, reason });
     }
 
     /// Spec 7.6's re-selection: on the active tree, take the selected
     /// fork's `first_to_complete()` and validate it when its bodies are
-    /// available; otherwise retry whatever triggers were deferred while a
-    /// job was in flight.
+    /// available; otherwise work through the triggers deferred while a job
+    /// was in flight.
+    ///
+    /// Triggers are consumed one at a time and the loop stops the moment a
+    /// job starts, so everything behind it stays queued (fix round 1,
+    /// finding 5a).
     fn resume(&mut self, ordering_id: OrderingId, out: &mut Vec<Effect>) {
         if self.in_flight.is_some() {
             return;
@@ -1290,8 +1544,7 @@ impl Processor {
                 }
             }
         }
-        let deferred: Vec<(OrderingId, InputBlockId)> = self.pending_triggers.drain(..).collect();
-        for (oid, trigger) in deferred {
+        while let Some((oid, trigger)) = self.pending_triggers.pop_front() {
             self.pump(oid, trigger, out);
             if self.in_flight.is_some() {
                 return;
@@ -1426,6 +1679,7 @@ impl Processor {
             self.staging.shift_remove(&id);
             self.waitlist.retain(|(w, _)| *w != id);
             self.failed.remove(&id);
+            self.reported_evicted.remove(&id);
         }
 
         self.ordering.prune(
