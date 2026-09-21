@@ -22,13 +22,19 @@ def main():
     oracle = HERE / 'WeakBlocksOracle.scala'
     OUT.mkdir(parents=True, exist_ok=True)
     for name in names:
-        uses_test_scope = name == 'input_block_validation'
-        classpath_file = '.work/test-classpath' if uses_test_scope else '.work/classpath'
-        classpath = (HERE / classpath_file).read_text().strip()
+        # ONE oracle source, so ONE classpath: `WeakBlocksOracle.scala` is a
+        # single compilation unit and `input_block_validation` pulls in ergo's
+        # Test-scope helpers, which means the whole file only compiles against
+        # `.work/test-classpath`. That classpath is a superset of the Runtime
+        # one, so every subcommand runs on it. `.work/classpath` is still
+        # exported by provision.py as the Runtime-scope record and for the
+        # README's smoke test, but no vector is generated from it.
+        classpath = (HERE / '.work/test-classpath').read_text().strip()
         # The Test-scope helpers read `src/test/resources/application.conf` by a
         # RELATIVE path (`ErgoNodeTestConstants.initSettings`), so the JVM's
-        # working directory has to be the pinned ergo checkout for those vectors.
-        cwd = str(HERE / '.work/source') if uses_test_scope else None
+        # working directory has to be the pinned ergo checkout for the vectors
+        # that touch them.
+        cwd = str(HERE / '.work/source') if name == 'input_block_validation' else None
         result = subprocess.run(['scala-cli', '--skip-cli-updates', 'run', str(oracle), '--server=false',
                                  '--scala', '2.12.20', '--classpath', classpath, '--', name],
                                 text=True, stdout=subprocess.PIPE, check=True, cwd=cwd).stdout

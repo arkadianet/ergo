@@ -42,7 +42,7 @@ struct InputBlockCase {
     previous_tx_hex: Vec<String>,
     tx_hex: Vec<String>,
     outcome: String,
-    #[allow(dead_code)]
+    /// Simple name of the JVM throwable `applyInputBlock` returned.
     error_class: String,
     error_message: String,
     /// Scala-derived discriminator: the case's first transaction validates
@@ -185,7 +185,17 @@ fn input_block_validation_matches_scala_apply_input_block() {
     .expect("read input_block_validation.json");
     let vector: InputBlockVector =
         serde_json::from_str(&raw).expect("parse input_block_validation.json");
-    assert_eq!(vector.cases.len(), 10, "expected the full scenario table");
+    assert_eq!(vector.cases.len(), 11, "expected the full scenario table");
+    // The cumulative-budget check (`input_block.rs`'s running `total` against
+    // `max_block_cost`) is only reachable when two transactions each fit the
+    // limit on their own but their sum does not, so it needs its own vector.
+    assert!(
+        vector
+            .cases
+            .iter()
+            .any(|c| c.name == "cumulative_cost_limit_rejected"),
+        "vector must cover the cumulative block-cost budget"
+    );
 
     for case in &vector.cases {
         let result = run_case(case);
@@ -200,6 +210,12 @@ fn input_block_validation_matches_scala_apply_input_block() {
                     "{}: block cost mismatch vs Scala",
                     case.name
                 );
+                assert!(
+                    case.error_class.is_empty(),
+                    "{}: an accepted case must carry no error_class, got {:?}",
+                    case.name,
+                    case.error_class
+                );
             }
             "Failure" => {
                 let err = result
@@ -212,12 +228,36 @@ fn input_block_validation_matches_scala_apply_input_block() {
     }
 }
 
-/// Map Scala's rejection reason (the `applyInputBlock` failure message, plus
-/// the `soft_field_sensitive` discriminator) onto the Rust error variant that
-/// must carry it.
+/// Map Scala's rejection reason onto the Rust error variant that must carry
+/// it. Each branch pins **both** halves of the JVM verdict: the throwable class
+/// `applyInputBlock` returned (`error_class`) and the message that selects the
+/// rule, plus the `soft_field_sensitive` discriminator for the one rejection
+/// Scala reports without a distinguishing class or message.
 fn assert_rejection_class(case: &InputBlockCase, err: &InputBlockValidationError) {
     let msg = case.error_message.as_str();
+    let class = case.error_class.as_str();
+    // Scala raises the ordering / double-spend guards as a bare
+    // `new Exception(...)` inside `applyInputBlock`, while every rejection that
+    // comes out of `execTransactions` is wrapped by `ModifierValidator` into a
+    // `MalformedModifierError`. Pinning the class keeps a regenerated vector
+    // from silently re-routing a case through a different Scala code path.
+    let expect_class = |expected: &str| {
+        assert_eq!(
+            class, expected,
+            "{}: expected Scala error_class {expected}, vector has {class}",
+            case.name
+        )
+    };
+
     if case.soft_field_sensitive {
+        // F9a: Scala buries `SoftFieldAccessException` inside the generic
+        // script-verification failure, so the class alone cannot identify it.
+        expect_class("MalformedModifierError");
+        assert!(
+            msg.contains("Scripts of all transaction inputs should pass verification"),
+            "{}: a soft-field rejection must surface as a script failure, got {msg:?}",
+            case.name
+        );
         assert!(
             matches!(
                 err,
@@ -230,6 +270,7 @@ fn assert_rejection_class(case: &InputBlockCase, err: &InputBlockValidationError
             case.name
         );
     } else if msg.starts_with("Double spending") {
+        expect_class("Exception");
         assert!(
             matches!(
                 err,
@@ -240,12 +281,14 @@ fn assert_rejection_class(case: &InputBlockCase, err: &InputBlockValidationError
             case.name
         );
     } else if msg.starts_with("Out-of-order spending") {
+        expect_class("Exception");
         assert!(
             matches!(err, InputBlockValidationError::OutOfOrder { .. }),
             "{}: expected an out-of-order rejection, got {err:?}",
             case.name
         );
     } else if msg.contains("Every input of the transaction should be in UTXO") {
+        expect_class("MalformedModifierError");
         assert!(
             matches!(
                 err,
@@ -258,10 +301,15 @@ fn assert_rejection_class(case: &InputBlockCase, err: &InputBlockValidationError
             case.name
         );
     } else if msg.contains("Accumulated cost of block transactions should not exceed") {
-        // Scala trips `bsBlockTransactionsCost` on the transaction's own
-        // initial cost; Rust's per-tx accumulator, capped at `max_block_cost`,
-        // reaches the same verdict either inside the tx (`CostExceeded`) or on
-        // the running block total.
+        expect_class("MalformedModifierError");
+        // Scala trips `bsBlockTransactionsCost` on `accumulatedCost +
+        // initialCost`, so one vector (`cost_limit_rejected`) fails on the
+        // transaction's own cost and the other
+        // (`cumulative_cost_limit_rejected`, limit 20000 against two 12105-cost
+        // transactions) only on the running block total. Rust reaches the first
+        // through its per-tx accumulator cap and the second through the block
+        // budget; both are accepted here because Scala only promises "rejected
+        // on cost", and the two vectors together cover both Rust paths.
         assert!(
             matches!(
                 err,

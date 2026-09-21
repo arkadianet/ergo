@@ -461,6 +461,7 @@ object WeakBlocksOracle {
       IndexedSeq(Input(eb3.id, emptyProof)),
       IndexedSeq(DataInput(txA.outputs.head.id)),
       IndexedSeq(new ErgoBoxCandidate(eb3.value, trueTree, 0)))
+    val txE = spend(eb3, eb3.value)                        // a second independent normal tx
     val txADup = spend(eb1, eb1.value - 1)                 // different tx, same input as txA
     val missingBoxId: ADKey = ADKey @@ (Algos.hash("no such box"): Array[Byte])
     val txMissing = ErgoTransaction(
@@ -496,7 +497,12 @@ object WeakBlocksOracle {
       ("double_spend_previous_rejected", Seq(txA), Seq(txA), us),
       ("spend_previous_output_ok", Seq(txB), Seq(txA), us),
       ("missing_utxo_rejected", Seq(txMissing), Seq.empty, us),
-      ("cost_limit_rejected", Seq(txA), Seq.empty, withBlockCost(us, 1000)))
+      ("cost_limit_rejected", Seq(txA), Seq.empty, withBlockCost(us, 1000)),
+      // Each of txA/txE costs 12105 on its own, so both clear a 20000 limit
+      // individually while their sum (24210) does not: this is the only
+      // scenario that reaches the *cumulative* block-budget check rather than
+      // the per-transaction one.
+      ("cumulative_cost_limit_rejected", Seq(txA, txE), Seq.empty, withBlockCost(us, 20000)))
 
     // Scala wraps a SoftFieldAccessException thrown inside script evaluation into
     // a generic `MalformedModifierError("Scripts ... should pass verification")`,
