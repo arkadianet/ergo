@@ -3,7 +3,7 @@ data_dir = "scripts/devnet-matrix/.work/rust"
 
 [chain]
 # Must match scala-node.conf / genesis.conf exactly.
-devnet_initial_difficulty_hex = "4e20"
+devnet_initial_difficulty_hex = "004e20"
 # Must match `monetary.minerRewardDelay` in genesis.conf: the delay is
 # compiled into the emission box, so it selects the genesis box set and
 # therefore the height-0 state root both nodes must share.

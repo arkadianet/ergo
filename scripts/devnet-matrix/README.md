@@ -70,15 +70,31 @@ process name.
   classifies a solution as an ordering block when `d <= b` and as an
   input block when `b < d <= b * subblocksPerBlock`. At difficulty 1,
   `b = q` and *every* solution is an ordering block — the recipe would
-  never see a single input block. `4e20` (20 000) is hand-tuned to this
-  host: **measured block rate 1172 input blocks and ~22 ordering blocks
-  over a 20-minute run** — an ordering block every ~30 s and, with
+  never see a single input block. `004e20` (20 000) is hand-tuned to
+  this host: **measured ~22 ordering blocks and 1172 input blocks over a
+  20-minute run** — an ordering block every ~55 s and, with
   `subblocksPerBlock = 64`, an input block roughly every second. A
   slower or faster machine wants a different value, and **the Scala
   `initialDifficultyHex` and the Rust `devnet_initial_difficulty_hex`
   must be changed together**. Raising `blockInterval` does not help:
   nothing throttles the miner to it on a chain whose epoch never ends,
   so the target is the only lever on the rate.
+
+  Two traps when retuning:
+
+  * **Keep the leading byte below `0x80`.** Scala decodes
+    `initialDifficultyHex` to BYTES and reads them as a *signed* BigInt,
+    so `"9c40"` is NEGATIVE, `b = q / difficulty` goes negative, and no
+    solution ever qualifies — the miner spins on millions of nonces
+    finding nothing, with no error anywhere. Write `"009c40"`.
+  * **Do not raise it much past 20 000 on this host.** The Scala miner
+    stops at the first solution per candidate and regenerates the
+    candidate every `internalMinerPollingInterval`; since input blocks
+    are 64x likelier, ordering solutions are found but usually arrive
+    when `cachedCandidate` has already been cleared. At 40 000 a
+    7-minute run produced 1055 input solutions, 21 ordering solutions
+    and **zero** accepted ordering blocks. The chain stalls without
+    erroring.
 
 - **`[input_blocks] strict_field_binding = false`.** The pinned miner
   announces a `prevTransactionsDigest` its own extension does not commit

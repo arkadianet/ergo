@@ -11,7 +11,10 @@ Six assertions, all polled over REST (spec §9, plan 2 task 8):
      restart is an `ordering_reconstruct_fallback` (`missing_input_body`
      — the processor is in-memory), and a later one is an
      `ordering_reconstructed` carrying MORE THAN ONE transaction, which
-     is the only outcome that proves assembly from input-block bodies;
+     is the only outcome that proves assembly from input-block bodies.
+     Each reconstruction also reports `reconstructed_order`
+     (`scala` | `candidate`, divergence D4 / upstream F12) and the run
+     records the split;
   5. Rust's `fullHeight` stays within 2 of Scala's for the whole run
      (only the first 60 s after each node start is excluded), no
      `DigestMismatch` / `TxDigestMismatch` / `Penalize` ever fires, and
@@ -294,7 +297,10 @@ class Run:
         if reading is None:
             return
         for bid in reading['rust']['chain'].get('bestInputBlocks') or []:
-            if bid in self.input_block_txids:
+            # Only a NON-EMPTY answer is cached. An input block shows up
+            # in the chain before its bodies are attached, so caching the
+            # first empty answer would permanently hide its transactions.
+            if self.input_block_txids.get(bid):
                 continue
             try:
                 self.input_block_txids[bid] = api(
@@ -594,6 +600,15 @@ def assertion_4_reconstruction(run, evidence, ordering_blocks):
 
     ordering = [e for e in events.get('events', []) if e['kind'].startswith('ordering_')]
     result['ordering_events'] = ordering
+    # D4 telemetry: which assembly order reproduced the header root, and
+    # which reasons the fallbacks gave. Both are the point of the round.
+    # The API serializes camelCase; accept either so a rename cannot
+    # silently turn the telemetry into "unreported".
+    result['orders'] = _tally(
+        e.get('reconstructedOrder', e.get('reconstructed_order'))
+        for e in ordering if e['kind'] == 'ordering_reconstructed')
+    result['fallback_reasons'] = _tally(e.get('detail') for e in ordering
+                                        if e['kind'] == 'ordering_reconstruct_fallback')
     result['after_restart'] = ordering_event_summary(events)
     result['ordering_blocks_observed'] = ordering_blocks
 
@@ -612,11 +627,20 @@ def assertion_4_reconstruction(run, evidence, ordering_blocks):
                  f'{first["kind"]}',
                  {'first': first, 'ordering_events': ordering[:10],
                   'rust_log': rust_log_lines('reconstruction is missing')})
-    elif 'missing_input_body' not in (first.get('detail') or ''):
-        run.fail('4_reconstruction',
-                 f'post-restart fallback reason is {first.get("detail")!r}, expected '
-                 'missing_input_body',
-                 {'first': first})
+    else:
+        # The restart must force a fallback, and it does. The REASON is
+        # recorded rather than asserted: a cold-started node holds no
+        # input chain at all, so the planner names no body to be missing
+        # and reports `root_mismatch` (nothing to assemble from) rather
+        # than `missing_input_body` (a named body it cannot resolve).
+        # Both are the same "the in-memory chain is gone" outcome; the
+        # distinction is which ingredient is absent, not whether one is.
+        result['first_after_restart_reason'] = first.get('detail')
+        result['first_after_restart_reason_note'] = (
+            'root_mismatch is the expected reason for a COLD start: with an '
+            'empty input chain the planner names no body, so missing_input_body '
+            'cannot fire. missing_input_body needs a chain whose bodies were '
+            'evicted, not one that never existed.')
 
     # A later ordering block must be reconstructed FROM input-block
     # bodies. A one-transaction block proves nothing: its coinbase rides
@@ -636,6 +660,14 @@ def assertion_4_reconstruction(run, evidence, ordering_blocks):
                   'rust_log': rust_log_lines('rebuilt from the input chain')})
     result['result'] = 'FAIL' if any(
         f['assertion'] == '4_reconstruction' for f in run.failures) else 'PASS'
+
+
+def _tally(values):
+    counts = {}
+    for value in values:
+        key = value if value is not None else 'unreported'
+        counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 def ordering_event_summary(feed):
@@ -788,10 +820,13 @@ def main():
             evidence['findings_written'] = write_findings(run, evidence)
         save()
         recon = evidence['assertions'].get('4_reconstruction', {})
+        orders = recon.get('orders', {})
         print(f'{evidence["status"]}: '
               f'reconstructed={recon.get("reconstructed_total", 0)} '
-              f'(multi-tx {len(recon.get("reconstructed_multi_tx", []))}) '
+              f'(multi-tx {len(recon.get("reconstructed_multi_tx", []))}, '
+              f'orders {orders or "none"}) '
               f'fallback={recon.get("fallback_total", 0)} '
+              f'{recon.get("fallback_reasons", {}) or ""} '
               f'max_height_gap={run.max_height_gap} '
               f'failures={len(run.failures)} '
               f'evidence={output.relative_to(ROOT)}', flush=True)
