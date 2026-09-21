@@ -98,6 +98,23 @@ pub struct Bounds {
     /// [`crate::processor::DropReason::ValidationBudgetExhausted`] and no
     /// further combination is offered.
     pub validation_retries_per_block: usize,
+    /// Extra ordered-digest attempts a record may be granted **once**,
+    /// on top of `digest_attempts_per_block`, to let the announcing peer
+    /// rescue a block whose budget is spent (residual fix round, B).
+    ///
+    /// Granted only for a delivery that is solicited, complete, maps
+    /// unambiguously onto the announced positions and comes from the
+    /// announcer itself — the peer that committed to the digest in the
+    /// first place. The allowance is consumed before the check, is never
+    /// refunded, and is released with the record at prune time, so the
+    /// per-record ceiling is `digest_attempts_per_block + this`, not a
+    /// resettable budget.
+    pub digest_recovery_per_block: usize,
+    /// Extra validation dispatches a record may be granted **once**, on
+    /// top of `validation_retries_per_block`, under the same conditions
+    /// as `digest_recovery_per_block`. The recovered selection is pinned
+    /// through validation, and applied references are never replaced.
+    pub validation_recovery_per_block: usize,
     /// Deferred application triggers retained while a validation job is
     /// in flight. Not a spec bound — an implementation queue that must
     /// not grow without limit; overflow drops the oldest trigger.
@@ -127,6 +144,8 @@ impl Default for Bounds {
             height_reset_threshold: 2,
             staging_ttl_ms: 10 * 60 * 1000,
             validation_retries_per_block: 8,
+            digest_recovery_per_block: 1,
+            validation_recovery_per_block: 1,
             pending_triggers: 1024,
         }
     }

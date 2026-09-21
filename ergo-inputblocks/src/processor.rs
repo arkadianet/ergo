@@ -459,6 +459,17 @@ pub struct Processor {
     /// the slot unresolvable and then recreating it (fix round 2,
     /// finding r2-1). Released when the record is pruned.
     digest_attempts: HashMap<InputBlockId, usize>,
+    /// The peer a `RequestTransactions` for this block was actually
+    /// issued to. A delivery is *solicited* only when it answers such a
+    /// request; the announcer-recovery allowance (residual fix round, B)
+    /// is granted to nothing else. Released when the record is pruned.
+    requested_bodies: HashMap<InputBlockId, PeerTag>,
+    /// Recovery allowances already granted to a record, as
+    /// `(digest, validation)`. Bounded by
+    /// [`crate::bounds::Bounds::digest_recovery_per_block`] and
+    /// [`crate::bounds::Bounds::validation_recovery_per_block`], never
+    /// refunded, and released with the record at prune time.
+    recovery_granted: HashMap<InputBlockId, (usize, usize)>,
     /// Validation attempts spent per input block. Spec 7.5's
     /// witness-variant retry is otherwise bounded only by the number of
     /// digest-consistent combinations, which is
@@ -855,6 +866,8 @@ impl Processor {
             reported_digest_exhausted: std::collections::HashSet::new(),
             reported_validation_exhausted: std::collections::HashSet::new(),
             digest_attempts: HashMap::new(),
+            requested_bodies: HashMap::new(),
+            recovery_granted: HashMap::new(),
             validation_attempts: HashMap::new(),
             failed_trigger: HashMap::new(),
             continuation: None,
@@ -1232,7 +1245,7 @@ impl Processor {
         let bypass = self.digest_bypassed(&id);
         let announced = self.announced_digest(&id);
         let cap = self.bounds.candidates_per_position;
-        let budget = self.bounds.digest_attempts_per_block;
+        let budget = self.bounds.digest_attempts_per_block + self.granted(&id).0;
         let carried = self.digest_attempts.get(&id).copied().unwrap_or(0);
         let Some(st) = self.staging.get_mut(&id) else {
             return Resolution::Request(Vec::new());
@@ -1722,6 +1735,198 @@ impl Processor {
         self.complete_or_request(id, out);
     }
 
+    // ----- the announcer's recovery allowance (residual fix round, B) -----
+
+    /// The complete selection a delivery proposes, when it is the kind of
+    /// delivery a recovery allowance may be spent on: sent by the peer
+    /// that announced the block, answering a body request this processor
+    /// actually issued to it, covering every announced position exactly
+    /// once.
+    ///
+    /// "Complete" is a claim about shape, not about validity: the digest
+    /// check and the validation still have to pass, and they are what the
+    /// allowance buys. An applied block is never a candidate — its
+    /// references are frozen for good.
+    fn proposed_recovery(
+        &self,
+        id: InputBlockId,
+        weak: &[WeakId],
+        bodies: &[Body],
+        from: Option<PeerTag>,
+        solicited: bool,
+    ) -> Option<Vec<TxRef>> {
+        if weak.is_empty() || bodies.len() != weak.len() {
+            return None;
+        }
+        let announcer = self.records.get(&id)?.from;
+        if from != Some(announcer) {
+            return None;
+        }
+        // Solicited: either this delivery answered an outstanding request
+        // to the announcer, or the processor asked *it* for this block's
+        // bodies at some point — the request that made the delivery
+        // legitimate may have been answered long before the block ran out
+        // of budget.
+        if !solicited && self.requested_bodies.get(&id) != Some(&announcer) {
+            return None;
+        }
+        if self.is_applied(&id) {
+            return None;
+        }
+        // Unambiguous position mapping: one announced weak id per
+        // position, one delivered body per announced weak id. Anything
+        // else leaves a choice to make, and a recovery must not be spent
+        // on a guess.
+        let mut selection = Vec::with_capacity(weak.len());
+        for (i, w) in weak.iter().enumerate() {
+            if weak.iter().skip(i + 1).any(|other| other == w) {
+                return None;
+            }
+            let mut matching = bodies.iter().filter(|b| b.weak_id == *w);
+            let body = matching.next()?;
+            if matching.next().is_some() {
+                return None;
+            }
+            selection.push(body.tx_ref);
+        }
+        Some(selection)
+    }
+
+    /// Consume one digest-recovery allowance for `id`. Consumed *before*
+    /// the check it pays for, so a failed recovery is not refundable.
+    fn grant_digest_recovery(&mut self, id: InputBlockId) -> bool {
+        let entry = self.recovery_granted.entry(id).or_insert((0, 0));
+        if entry.0 >= self.bounds.digest_recovery_per_block {
+            return false;
+        }
+        entry.0 += 1;
+        // The block is no longer given up on, so a later give-up is worth
+        // reporting again.
+        self.reported_digest_exhausted.remove(&id);
+        true
+    }
+
+    /// Consume one validation-recovery allowance for `id`.
+    fn grant_validation_recovery(&mut self, id: InputBlockId) -> bool {
+        let entry = self.recovery_granted.entry(id).or_insert((0, 0));
+        if entry.1 >= self.bounds.validation_recovery_per_block {
+            return false;
+        }
+        entry.1 += 1;
+        self.reported_validation_exhausted.remove(&id);
+        true
+    }
+
+    /// Make `proposed` reachable in the block's variant lists and cache
+    /// its bodies. A position already at the cap may give up one
+    /// *unselected, speculative* variant — otherwise a peer could poison
+    /// every position with witnesses and make recovery impossible — but
+    /// never the reference the block is currently carrying, and never a
+    /// transaction id the announced digest did not commit to.
+    fn admit_recovery_selection(
+        &mut self,
+        id: InputBlockId,
+        proposed: &[TxRef],
+        bodies: &[Body],
+        now: Tick,
+    ) -> bool {
+        let cap = self.bounds.candidates_per_position;
+        let current = self.tx_refs.get(&id).cloned().unwrap_or_default();
+        let Some(st) = self.staging.get_mut(&id) else {
+            return false;
+        };
+        let Some(variants) = st.variants.as_mut() else {
+            return false;
+        };
+        if variants.len() != proposed.len() {
+            return false;
+        }
+        for (i, want) in proposed.iter().enumerate() {
+            let committed = match variants[i].first() {
+                Some(r) => r.tx_id,
+                None => return false,
+            };
+            // The announced digest fixed the transaction id at every
+            // position; only a witness of *that* transaction can be
+            // swapped in.
+            if committed != want.tx_id {
+                return false;
+            }
+            if variants[i].contains(want) {
+                continue;
+            }
+            if variants[i].len() >= cap {
+                let victim = variants[i]
+                    .iter()
+                    .rposition(|r| Some(r) != current.get(i) && *r != variants[i][0]);
+                match victim {
+                    Some(v) => {
+                        variants[i].remove(v);
+                    }
+                    None => return false,
+                }
+            }
+            variants[i].push(*want);
+        }
+        // Point the odometer at the recovered selection. The staging
+        // cursor *is* the block's selection: every later
+        // `complete_or_request` re-derives the transaction list from it,
+        // so leaving it behind would silently swap the pinned selection
+        // back out on the next delivery.
+        if st.cursor.len() != variants.len() {
+            st.cursor = vec![0; variants.len()];
+        }
+        for (i, want) in proposed.iter().enumerate() {
+            match variants[i].iter().position(|r| r == want) {
+                Some(at) => st.cursor[i] = at,
+                None => return false,
+            }
+        }
+        for b in bodies {
+            if proposed.contains(&b.tx_ref) {
+                self.cache.insert(b.clone(), now, &self.bounds);
+            }
+        }
+        true
+    }
+
+    /// Spend the validation-recovery allowance on `proposed`: pin that
+    /// selection and dispatch one more job for it. Returns whether the
+    /// recovery was taken.
+    fn recover_validation(
+        &mut self,
+        id: InputBlockId,
+        proposed: Vec<TxRef>,
+        bodies: &[Body],
+        now: Tick,
+        out: &mut Vec<Effect>,
+    ) -> bool {
+        // A combination validation already rejected would buy nothing.
+        if self.has_failed_combination(&id, &proposed) {
+            return false;
+        }
+        if !self.grant_validation_recovery(id) {
+            return false;
+        }
+        if !self.admit_recovery_selection(id, &proposed, bodies, now) {
+            return true;
+        }
+        let Some(ordering_id) = self.records.get(&id).map(|r| r.ordering_id) else {
+            return true;
+        };
+        let (oid, trigger) = self
+            .failed_trigger
+            .get(&id)
+            .copied()
+            .unwrap_or((ordering_id, id));
+        self.set_tx_refs(id, proposed, out);
+        self.pump(oid, trigger, out);
+        if self.in_flight.is_none() {
+            self.resume(ordering_id, out);
+        }
+        true
+    }
+
     fn on_bodies(
         &mut self,
         id: InputBlockId,
@@ -1733,7 +1938,6 @@ impl Processor {
     ) {
         let solicited =
             from.is_some_and(|p| self.request_answered(p, RequestKey::Transactions(id)));
-        let _ = solicited;
         let Some(rec) = self.records.get(&id) else {
             out.push(Effect::Dropped {
                 id,
@@ -1753,13 +1957,29 @@ impl Processor {
             .or_else(|| self.staging.get(&id).map(|s| s.weak_ids.clone()));
         match known_weak_ids {
             Some(weak) => {
+                let recovery = self.proposed_recovery(id, &weak, &bodies, from, solicited);
                 let mut refilled = false;
                 if self.staging.get(&id).is_some_and(|s| s.variants.is_some()) {
                     // The block's digest already passed; a delivery now
                     // can only refill bodies the cache lost — or offer a
                     // witness the rejected selection did not have.
                     refilled = self.refill_verified(id, &bodies, from, now, out);
+                    // The announcer may rescue a block whose validation
+                    // budget is spent, once (residual fix round, B).
+                    if self.validation_exhausted(&id) {
+                        if let Some(proposed) = recovery {
+                            if self.recover_validation(id, proposed, &bodies, now, out) {
+                                return;
+                            }
+                        }
+                    }
                 } else {
+                    // ... and a block whose ordered-digest budget is
+                    // spent, for one more check of the exact selection it
+                    // proposes.
+                    if self.digest_exhausted(&id) && recovery.is_some() {
+                        self.grant_digest_recovery(id);
+                    }
                     self.staging.entry(id).or_insert_with(|| {
                         Staging::new(weak.clone(), now, from.or(Some(announcer)))
                     });
@@ -1995,17 +2215,23 @@ impl Processor {
     /// Whether `id` has spent its per-block validation budget (spec 7.4's
     /// `validation_retries_per_block`).
     fn validation_exhausted(&self, id: &InputBlockId) -> bool {
+        let budget = self.bounds.validation_retries_per_block + self.granted(id).1;
         self.validation_attempts
             .get(id)
-            .is_some_and(|n| *n >= self.bounds.validation_retries_per_block)
+            .is_some_and(|n| *n >= budget)
+    }
+
+    /// Recovery allowances already granted to `id`, as
+    /// `(digest, validation)`.
+    fn granted(&self, id: &InputBlockId) -> (usize, usize) {
+        self.recovery_granted.get(id).copied().unwrap_or((0, 0))
     }
 
     /// Whether `id` has spent its per-block ordered-digest budget
     /// (spec 7.5's `digest_attempts_per_block`).
     fn digest_exhausted(&self, id: &InputBlockId) -> bool {
-        self.digest_attempts
-            .get(id)
-            .is_some_and(|n| *n >= self.bounds.digest_attempts_per_block)
+        let budget = self.bounds.digest_attempts_per_block + self.granted(id).0;
+        self.digest_attempts.get(id).is_some_and(|n| *n >= budget)
     }
 
     /// Report a spent digest budget once per block. Spec 7.6's
@@ -2375,6 +2601,8 @@ impl Processor {
             self.reported_digest_exhausted.remove(&id);
             self.reported_validation_exhausted.remove(&id);
             self.digest_attempts.remove(&id);
+            self.requested_bodies.remove(&id);
+            self.recovery_granted.remove(&id);
             self.validation_attempts.remove(&id);
             self.failed_trigger.remove(&id);
         }
@@ -2441,6 +2669,9 @@ impl Processor {
         // An effect that is not a request holds no slot; nothing to track.
         if let Some(k) = key {
             slots.push((k, deadline));
+        }
+        if let Some(RequestKey::Transactions(block)) = key {
+            self.requested_bodies.insert(block, peer);
         }
         out.push(effect);
     }
@@ -3832,37 +4063,22 @@ mod tests {
         }
 
         // Fix round 2, finding r2-1: a *non-empty* redelivery after
-        // exhaustion. The peer now sends exactly the right bodies, which
-        // makes every position unambiguous — but there is no budget left
-        // to confirm them, so the slot is dropped as a digest mismatch.
-        // The budget must outlive that slot: recreating staging on the
-        // next delivery must not hand the block a fresh sixteen attempts.
+        // exhaustion, this time from a peer that is not the announcer.
+        // It buys nothing — the recovery allowance of the residual fix
+        // round (B) belongs to the announcer alone — and, above all, the
+        // budget must outlive the deleted staging slot: recreating
+        // staging must not hand the block a fresh sixteen attempts.
         let correct = vec![x.clone(), y.clone()];
-        let first = ctx.handle(
+        let stranger = ctx.handle(
             &mut p,
             Event::TransactionsDelivered {
                 input_block_id: id,
                 bodies: correct.clone(),
-                from: Some(ts::PEER),
+                from: Some(PeerTag(99)),
                 now: Tick(20),
             },
         );
-        assert!(!has_validate(&first), "{first:?}");
-        assert_eq!(p.staged_digest_attempts(&id), budget);
-
-        let second = ctx.handle(
-            &mut p,
-            Event::TransactionsDelivered {
-                input_block_id: id,
-                bodies: correct,
-                from: Some(ts::PEER),
-                now: Tick(21),
-            },
-        );
-        assert!(
-            !has_validate(&second),
-            "an exhausted block must stay exhausted: {second:?}"
-        );
+        assert!(!has_validate(&stranger), "{stranger:?}");
         assert_eq!(
             p.staged_digest_attempts(&id),
             budget,
@@ -4846,6 +5062,287 @@ mod tests {
         assert!(
             !bumped.iter().any(|e| matches!(e, Effect::Penalize { .. })),
             "a spent local budget blames nobody: {bumped:?}"
+        );
+    }
+
+    // ----- residuals fix round: B (the announcer's recovery allowance) -----
+
+    /// A block whose ordered-digest budget is spent, with a body request
+    /// outstanding to the announcer: the state a recovery delivery
+    /// answers. Returns the processor, the context, the block id and the
+    /// two bodies the announcement actually committed to.
+    fn digest_budget_spent() -> (Processor, ts::TestCtx, InputBlockId, Body, Body) {
+        let mut p = processor();
+        let x = ts::body(1, 1);
+        let y = ts::body(2, 1);
+        let mut ctx = ts::TestCtx::at(FULL);
+        let cap = Bounds::default().candidates_per_position as u8;
+        for seed in 30..30 + cap {
+            ctx.mempool.add_under(x.weak_id, &ts::body(seed, 1));
+        }
+        for seed in 40..40 + cap {
+            ctx.mempool.add_under(y.weak_id, &ts::body(seed, 1));
+        }
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, &[x.clone(), y.clone()]);
+        let id = ts::ann_id(&ann);
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        assert!(
+            eff.iter()
+                .any(|e| matches!(e, Effect::RequestTransactions { .. })),
+            "the announcer must have been asked for bodies: {eff:?}"
+        );
+        assert!(!has_validate(&eff));
+        (p, ctx, id, x, y)
+    }
+
+    #[test]
+    fn announcer_recovery_confirms_an_exact_delivery_once() {
+        // "Permanent until pruned" left even the announcer's own exact
+        // answer unable to rescue a block whose budget a pile of local
+        // guesses had spent. One extra ordered-digest check — consumed
+        // before it is spent, never refunded — fixes that without
+        // reopening the budget.
+        let budget = Bounds::default().digest_attempts_per_block;
+        let (mut p, ctx, id, x, y) = digest_budget_spent();
+        assert_eq!(p.staged_digest_attempts(&id), budget);
+
+        let eff = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![x.clone(), y.clone()],
+                from: Some(ts::PEER),
+                now: Tick(20),
+            },
+        );
+        let (_, _, block, txs, _) = ts::one_validate(&eff);
+        assert_eq!(block, id);
+        assert_eq!(txs, vec![x.tx_ref, y.tx_ref]);
+        assert_eq!(
+            p.staged_digest_attempts(&id),
+            budget + 1,
+            "recovery buys exactly one more ordered-digest check"
+        );
+    }
+
+    #[test]
+    fn announcer_recovery_is_refused_the_second_time() {
+        let budget = Bounds::default().digest_attempts_per_block;
+        let (mut p, ctx, id, x, y) = digest_budget_spent();
+
+        // A well-formed but wrong answer spends the allowance: it is
+        // consumed before the check, so a failed rescue is not refundable.
+        let wrong = vec![
+            ts::body_under(x.weak_id, 50, 1),
+            ts::body_under(y.weak_id, 51, 1),
+        ];
+        let spent = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: wrong,
+                from: Some(ts::PEER),
+                now: Tick(20),
+            },
+        );
+        assert!(!has_validate(&spent), "{spent:?}");
+        assert_eq!(p.staged_digest_attempts(&id), budget + 1);
+
+        let second = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![x.clone(), y.clone()],
+                from: Some(ts::PEER),
+                now: Tick(21),
+            },
+        );
+        assert!(
+            !has_validate(&second),
+            "the allowance is single-use: {second:?}"
+        );
+        assert_eq!(
+            p.staged_digest_attempts(&id),
+            budget + 1,
+            "a second recovery must not buy another check"
+        );
+    }
+
+    /// A block that has spent its validation budget, with a body request
+    /// outstanding to the announcer.
+    fn validation_budget_spent(budget: usize) -> (Processor, ts::TestCtx, InputBlockId, WeakId) {
+        let bounds = Bounds {
+            validation_retries_per_block: budget,
+            ..Bounds::default()
+        };
+        let mut p = processor_with(bounds);
+        let ctx = ts::TestCtx::at(FULL);
+        let first = ts::body(1, 1);
+        // The mempool is empty, so the bodies are requested from the
+        // announcer and every delivery below answers that request.
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&first));
+        let id = ts::ann_id(&ann);
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        assert!(eff
+            .iter()
+            .any(|e| matches!(e, Effect::RequestTransactions { .. })));
+
+        for w in 1..=budget as u8 {
+            let eff = ctx.handle(
+                &mut p,
+                Event::TransactionsDelivered {
+                    input_block_id: id,
+                    bodies: vec![ts::body_under(first.weak_id, 1, w)],
+                    from: Some(ts::PEER),
+                    now: Tick(u64::from(w)),
+                },
+            );
+            assert!(has_validate(&eff), "witness {w} must run: {eff:?}");
+            ts::validate_err(&mut p, &ctx, &eff);
+        }
+        assert_eq!(p.validation_attempts(&id), budget);
+        (p, ctx, id, first.weak_id)
+    }
+
+    #[test]
+    fn announcer_recovery_buys_one_more_validation() {
+        let budget = 2usize;
+        let (mut p, ctx, id, weak) = validation_budget_spent(budget);
+        let fresh = ts::body_under(weak, 1, budget as u8 + 1);
+
+        let eff = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![fresh.clone()],
+                from: Some(ts::PEER),
+                now: Tick(30),
+            },
+        );
+        let (_, _, block, txs, _) = ts::one_validate(&eff);
+        assert_eq!(block, id);
+        assert_eq!(
+            txs,
+            vec![fresh.tx_ref],
+            "the recovered selection is the one the announcer proposed"
+        );
+        assert_eq!(p.validation_attempts(&id), budget + 1);
+
+        // Pinned through validation: another witness may not swap it out.
+        let during = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![ts::body_under(weak, 1, budget as u8 + 2)],
+                from: Some(ts::PEER),
+                now: Tick(31),
+            },
+        );
+        assert!(!has_validate(&during), "{during:?}");
+        assert_eq!(p.transaction_refs(&id), Some(&[fresh.tx_ref][..]));
+
+        // And the allowance is spent: once this job fails too, nothing
+        // the announcer sends starts another.
+        ts::validate_err(&mut p, &ctx, &eff);
+        let after = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![ts::body_under(weak, 1, budget as u8 + 3)],
+                from: Some(ts::PEER),
+                now: Tick(32),
+            },
+        );
+        assert!(
+            !has_validate(&after),
+            "the validation allowance is single-use: {after:?}"
+        );
+        assert_eq!(p.validation_attempts(&id), budget + 1);
+    }
+
+    #[test]
+    fn a_stranger_cannot_spend_the_announcers_recovery() {
+        let budget = 2usize;
+        let (mut p, ctx, id, weak) = validation_budget_spent(budget);
+        let fresh = ts::body_under(weak, 1, budget as u8 + 1);
+
+        let stranger = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![fresh.clone()],
+                from: Some(PeerTag(99)),
+                now: Tick(30),
+            },
+        );
+        assert!(
+            !has_validate(&stranger),
+            "only the announcer may spend the allowance: {stranger:?}"
+        );
+        assert_eq!(p.validation_attempts(&id), budget);
+
+        // The announcer's own delivery still works afterwards, so the
+        // stranger consumed nothing.
+        let eff = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![fresh.clone()],
+                from: Some(ts::PEER),
+                now: Tick(31),
+            },
+        );
+        let (_, _, _, txs, _) = ts::one_validate(&eff);
+        assert_eq!(txs, vec![fresh.tx_ref]);
+    }
+
+    #[test]
+    fn recovery_never_replaces_applied_references() {
+        // The budget can be spent by the very dispatch that applied the
+        // block; the allowance must still not reopen it.
+        let bounds = Bounds {
+            validation_retries_per_block: 1,
+            ..Bounds::default()
+        };
+        let mut p = processor_with(bounds);
+        let ctx = ts::TestCtx::at(FULL);
+        let good = ts::body(1, 1);
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&good));
+        let id = ts::ann_id(&ann);
+        announce(&mut p, &ctx, &ann, ts::PEER);
+        let eff = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![good.clone()],
+                from: Some(ts::PEER),
+                now: Tick(2),
+            },
+        );
+        ts::validate_ok(&mut p, &ctx, &eff, 1);
+        assert_eq!(p.best_input_chain(), vec![id]);
+        assert!(p.validation_attempts(&id) >= 1);
+
+        let late = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![ts::body_under(good.weak_id, 1, 2)],
+                from: Some(ts::PEER),
+                now: Tick(3),
+            },
+        );
+        assert!(!has_validate(&late), "{late:?}");
+        assert_eq!(
+            p.transaction_refs(&id),
+            Some(&[good.tx_ref][..]),
+            "applied references are frozen, allowance or not"
+        );
+        assert!(
+            drops(&late).contains(&DropReason::SelectionSettled {
+                state: SelectionState::Applied
+            }),
+            "{late:?}"
         );
     }
 
