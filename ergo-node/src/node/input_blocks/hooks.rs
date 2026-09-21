@@ -16,6 +16,7 @@ use ergo_inputblocks::processor::Event;
 use ergo_p2p::handshake::Version;
 use ergo_state::{ChainStateRead, HeaderSectionStore};
 use ergo_sync::coordinator::Action;
+use ergo_sync::coordinator::ChainView;
 
 use super::super::NodeState;
 use super::ctx::build_ctx_data;
@@ -118,28 +119,38 @@ pub(in crate::node) enum TipChange {
     Reorg,
 }
 
-/// How far back the ancestry walk will look before giving up and calling
-/// a tip change a switch.
+/// How many parent pointers the ancestry walk will follow before
+/// switching to the cheaper best-chain test.
 ///
 /// The tick runs once a second and blocks are minutes apart, so a
-/// multi-block gap means the node was busy or has just caught up. Past
-/// this many blocks the processor's own state is stale anyway (its
-/// records live within `Bounds::prune_threshold` of the best height), so
-/// reporting a switch — which drops the trees — is both cheap and
-/// correct, and it bounds the parent-pointer reads this does per tick.
+/// multi-block gap means the node was busy or has just caught up. This
+/// bounds the per-tick header reads; it is NOT a verdict — past the cap
+/// the question is answered by [`ChainView::is_on_best_chain`] instead
+/// of by walking (see [`classify_tip_change`]).
 pub(in crate::node) const MAX_LINEAR_CATCHUP: u32 = 64;
 
 /// Does `tip` descend from `previous`?
 ///
-/// Walks parent pointers back from `tip`, bounded by the height delta
-/// (and by [`MAX_LINEAR_CATCHUP`]). Anything else — a sibling branch, a
-/// rollback to an ancestor, an unknown header, a gap too large to walk —
-/// is a switch.
+/// Two ways of answering the same question, split on cost:
 ///
-/// Classifying on the IMMEDIATE child alone, as this used to, reported
-/// every two-blocks-between-ticks advance as a reorg; the reorg handler
-/// then retains only the new tip's tree, discarding state a linear
-/// advance would have kept.
+/// * **Within [`MAX_LINEAR_CATCHUP`]** — walk parent pointers back from
+///   `tip`, bounded by the height delta. Exact, and one read in the
+///   common one-block case.
+/// * **Beyond it** — ask whether `previous` is still on the best chain.
+///   `tip` is the best full block and therefore sits on that chain, so a
+///   `previous` that is also on it, at a lower height, is an ancestor.
+///   Two reads regardless of distance.
+///
+/// Anything else — a sibling branch, a rollback to an ancestor, a header
+/// we no longer hold, a previous tip the chain has abandoned — is a
+/// switch.
+///
+/// Both halves have been wrong before and the failures were the same
+/// shape: classifying on the IMMEDIATE child alone reported every
+/// two-blocks-between-ticks advance as a reorg, and capping the walk
+/// without a fallback did the same to any catch-up past 64 blocks. The
+/// reorg handler then retains only the new tip's tree, discarding state
+/// a linear advance would have kept.
 pub(in crate::node) fn classify_tip_change(
     state: &NodeState,
     previous: [u8; 32],
@@ -163,7 +174,16 @@ pub(in crate::node) fn classify_tip_change(
     }
     let steps = tip_height - prev_height;
     if steps > MAX_LINEAR_CATCHUP {
-        return TipChange::Reorg;
+        // Too far to walk cheaply. `tip` is the best full block, so it
+        // is on the best chain by construction; if `previous` is too,
+        // and lower, the chain moved forward over it rather than away
+        // from it. A previous tip the chain has abandoned fails this,
+        // which is exactly the reorg case.
+        return if state.store.is_on_best_chain(&previous) {
+            TipChange::Applied
+        } else {
+            TipChange::Reorg
+        };
     }
     let mut cursor = tip;
     for _ in 0..steps {

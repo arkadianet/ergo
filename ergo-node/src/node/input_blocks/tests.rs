@@ -2620,10 +2620,12 @@ fn a_multi_block_linear_advance_is_an_apply_not_a_reorg() {
     );
 }
 
-/// The classifier's whole truth table, against a real forked header
-/// store: descendants at several distances are applies; a sibling, an
-/// ancestor (rollback), an unrelated id and a walk longer than the cap
-/// are switches.
+/// The classifier's truth table WITHIN the walk cap, against a real
+/// forked header store: descendants at several distances are applies; a
+/// sibling, an ancestor (rollback) and an unrelated id are switches.
+/// Beyond the cap is covered by
+/// `a_linear_advance_beyond_the_walk_cap_is_still_an_apply` and
+/// `a_far_advance_that_abandons_the_previous_tip_is_a_reorg`.
 #[test]
 fn tip_change_classification_truth_table() {
     let dir = tempfile::tempdir().unwrap();
@@ -2681,16 +2683,6 @@ fn tip_change_classification_truth_table() {
         classify_tip_change(&state, [0xcc; 32], id(3), main[3].height),
         TipChange::Reorg,
         "an unknown previous tip cannot be shown to be an ancestor"
-    );
-    assert_eq!(
-        classify_tip_change(
-            &state,
-            id(0),
-            id(3),
-            main[3].height + MAX_LINEAR_CATCHUP + 1
-        ),
-        TipChange::Reorg,
-        "a jump beyond the walk cap is treated as a switch"
     );
 }
 
@@ -2750,5 +2742,78 @@ fn a_fork_switch_still_reaches_the_processor_as_a_reorg() {
     assert!(
         rt.processor().generation() > generation,
         "the switch reached the processor"
+    );
+}
+
+/// Round 4: an advance beyond the walk cap was classified as a reorg
+/// unconditionally, so a node that fell behind and caught up over a
+/// fully stored LINEAR chain reported `OrderingReorg` — the wrong event,
+/// and one whose handler discards trees.
+///
+/// Beyond the cap the question is answered without walking: is the tip
+/// we last reported still on the best chain? If it is, the chain moved
+/// forward over it.
+#[test]
+fn a_linear_advance_beyond_the_walk_cap_is_still_an_apply() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let chain = seed_header_chain(&mut state, MAX_LINEAR_CATCHUP + 6);
+
+    let prev = header_id_of(&chain[0]);
+    let far = &chain[(MAX_LINEAR_CATCHUP + 1) as usize];
+    assert_eq!(
+        far.height - chain[0].height,
+        MAX_LINEAR_CATCHUP + 1,
+        "the fixture must exceed the walk cap"
+    );
+
+    assert_eq!(
+        classify_tip_change(&state, prev, header_id_of(far), far.height),
+        TipChange::Applied,
+        "a fully stored linear catch-up is an apply, however far it ran"
+    );
+}
+
+/// The counterpart: beyond the cap, a tip that ABANDONED the previous
+/// tip is still a reorg. `is_on_best_chain` is what separates them.
+#[test]
+fn a_far_advance_that_abandons_the_previous_tip_is_a_reorg() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let chain = seed_header_chain(&mut state, MAX_LINEAR_CATCHUP + 6);
+
+    // A sibling of height 1, stored but never on the best chain.
+    let orphan = ts::header([0u8; 32], 1, 77_777, [0u8; 32]);
+    let orphan_id = header_id_of(&orphan);
+    seed_mainnet_headers(
+        &mut state,
+        &[(
+            orphan.height,
+            orphan_id,
+            {
+                let (bytes, _) = serialize_header(&orphan).unwrap();
+                bytes
+            },
+            orphan.clone(),
+        )],
+        false,
+    );
+
+    let far = &chain[(MAX_LINEAR_CATCHUP + 1) as usize];
+    assert!(
+        far.height - orphan.height > MAX_LINEAR_CATCHUP,
+        "beyond the walk cap"
+    );
+    assert_eq!(
+        classify_tip_change(&state, orphan_id, header_id_of(far), far.height),
+        TipChange::Reorg,
+        "the previous tip is not on the best chain, so it was abandoned"
+    );
+
+    // And a previous tip we no longer hold at all stays a reorg.
+    assert_eq!(
+        classify_tip_change(&state, [0xde; 32], header_id_of(far), far.height),
+        TipChange::Reorg,
+        "an unknown previous tip cannot be shown to be an ancestor"
     );
 }
