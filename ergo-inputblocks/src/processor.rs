@@ -617,6 +617,19 @@ pub struct Processor {
         (OrderingId, InputBlockId),
         std::collections::HashSet<InputBlockId>,
     )>,
+    /// Monotonic counter, bumped once per [`Self::handle`] call — i.e.
+    /// once per processor event, regardless of whether it produced any
+    /// [`Effect`]s (fix-round-1, finding 4). A superset of "every state
+    /// mutation": some events genuinely change nothing (e.g. a `Tick`
+    /// with nothing to expire), but the read side this exists for (the
+    /// node's REST snapshot refresh) needs to catch mutations that
+    /// produce NO effect at all — most notably TTL-driven body-cache
+    /// expiry inside [`Self::on_tick`], which silently drops cached
+    /// bodies without emitting anything. Comparing this across calls is
+    /// cheap and never under-reports a change; it can over-report (a
+    /// quiet tick still bumps it), which the caller accepts as the safe
+    /// direction to be wrong in.
+    revision: u64,
 }
 
 #[derive(Debug, Default)]
@@ -1013,6 +1026,7 @@ impl Processor {
             validation_attempts: HashMap::new(),
             failed_trigger: HashMap::new(),
             continuation: None,
+            revision: 0,
         }
     }
 
@@ -1033,6 +1047,7 @@ impl Processor {
 
     /// Feed one event; returns the effects the node must act on.
     pub fn handle(&mut self, event: Event, ctx: &ProcessorCtx<'_>) -> Vec<Effect> {
+        self.revision = self.revision.wrapping_add(1);
         let mut out = Vec::new();
         // The processor owns no clock: every event but a validation
         // result carries the node's, and request deadlines are stamped
@@ -3243,6 +3258,14 @@ impl Processor {
     /// itself is bounded by — no unbounded enumeration surface.
     pub fn known_input_block_ids(&self) -> Vec<InputBlockId> {
         self.records.keys().copied().collect()
+    }
+
+    /// Monotonic revision counter, bumped once per [`Self::handle`] call.
+    /// See the field doc on [`Processor::revision`] for what it does and
+    /// does not guarantee. Consumers compare this across calls to detect
+    /// a state change even when the call produced no [`Effect`] at all.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// The parent input block an announcement claims, as recorded
@@ -6541,6 +6564,38 @@ mod tests {
     }
 
     // ----- fix round 1 (Plan 2 M2 codex review, finding 2) -----
+
+    #[test]
+    fn revision_starts_at_zero() {
+        let p = processor();
+        assert_eq!(p.revision(), 0);
+    }
+
+    #[test]
+    fn revision_bumps_on_every_handle_call_including_a_no_op_tick() {
+        let mut p = processor();
+        let ctx = ts::TestCtx::at(FULL);
+        let before = p.revision();
+        // A tick with nothing to expire and nothing outstanding — no
+        // effects, yet the revision must still move (fix-round-1,
+        // finding 4: the caller can't tell "nothing happened" from "a
+        // silent mutation happened" any other way).
+        let eff = ctx.handle(&mut p, Event::Tick { now: Tick(0) });
+        assert!(eff.is_empty(), "a bare tick with nothing to sweep is quiet");
+        assert_eq!(p.revision(), before + 1);
+
+        announce(
+            &mut p,
+            &ctx,
+            &ts::announcement(ORD, FULL + 1, 1, None),
+            ts::PEER,
+        );
+        assert_eq!(
+            p.revision(),
+            before + 2,
+            "a second handle() call bumps it again"
+        );
+    }
 
     #[test]
     fn known_input_block_ids_empty_on_a_fresh_processor() {

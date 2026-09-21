@@ -59,11 +59,6 @@ pub(in crate::node) fn execute_effects(
     let Some(mut rt) = state.input_blocks.take() else {
         return Vec::new();
     };
-    // Only a genuinely non-empty batch can have moved the read side
-    // (announcement accepted, bodies delivered, ordering applied/reorg,
-    // ...); a quiet `Tick` with no effects skips the rebuild, keeping the
-    // 1 Hz heartbeat from paying for a republish that changes nothing.
-    let had_effects = !effects.is_empty();
     let mut out = Vec::new();
     let mut queue: VecDeque<Effect> = effects.into();
     // `Validate` pushes the effects of the `ValidationResult` it feeds
@@ -73,9 +68,15 @@ pub(in crate::node) fn execute_effects(
     while let Some(effect) = queue.pop_front() {
         execute_one(state, &mut rt, effect, now, &mut out, &mut queue);
     }
-    if had_effects {
-        refresh_read_slot(state, &rt);
-    }
+    // Fix-round-1, finding 4: gate on `Processor::revision()` having
+    // moved since the last refresh, NOT on this batch being non-empty.
+    // A `Tick` that silently expired cached bodies (no `Effect` emitted
+    // at all — see `Processor::on_tick`) still bumps `revision`, so it
+    // still republishes; a batch that changed nothing (revision
+    // unchanged, e.g. this function called directly with `effects:
+    // Vec::new()` and no prior `handle()` call in between) still skips
+    // the rebuild.
+    refresh_read_slot(state, &mut rt);
     state.input_blocks = Some(rt);
     out
 }
@@ -96,10 +97,15 @@ pub(in crate::node) fn execute_effects(
 /// family is likewise keyed off ids the caller already has from another
 /// source (a P2P announcement), not off an enumeration this bridge could
 /// replicate cheaply.
-fn refresh_read_slot(state: &NodeState, rt: &InputBlocksRuntime) {
+fn refresh_read_slot(state: &NodeState, rt: &mut InputBlocksRuntime) {
     let Some(slot) = state.input_blocks_read_slot.as_ref() else {
         return;
     };
+    let revision = rt.processor().revision();
+    if revision == rt.read_slot_revision {
+        return;
+    }
+    rt.read_slot_revision = revision;
     let processor = rt.processor();
     let chain = processor.best_input_chain();
     let best_chain: Vec<String> = chain.iter().map(hex::encode).collect();

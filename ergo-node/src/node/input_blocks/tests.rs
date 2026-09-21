@@ -419,8 +419,12 @@ fn drop_counters_exposed_in_api_v1_status() {
     );
 }
 
-/// Task 7: a non-empty effect batch republishes
-/// `NodeState::input_blocks_read_slot` — the seam
+/// Task 7 / fix-round-1 finding 4: a real `handle()` call — driven the
+/// same way `hooks::drive` does, `handle()` then `execute_effects` with
+/// whatever it returned — republishes
+/// `NodeState::input_blocks_read_slot`, because `handle()` always bumps
+/// `Processor::revision()` even when it returns zero effects (a bare
+/// `Tick` with nothing outstanding). This is the seam
 /// `input_blocks::effects::refresh_read_slot` writes and
 /// `SnapshotReadState::input_blocks()` reads (see
 /// `ergo-api/tests/it/input_block_routes.rs` for the read side against a
@@ -429,7 +433,7 @@ fn drop_counters_exposed_in_api_v1_status() {
 /// boot default" from "refreshed to the same values" — only a changed
 /// pointer proves `.store()` ran.
 #[test]
-fn read_slot_republishes_after_a_nonempty_effect_batch() {
+fn read_slot_republishes_after_a_handle_call_even_with_zero_effects() {
     let dir = tempfile::tempdir().unwrap();
     let mut state = make_state(&dir.path().join("state.redb"));
     state.input_blocks = Some(runtime());
@@ -439,19 +443,29 @@ fn read_slot_republishes_after_a_nonempty_effect_batch() {
     state.input_blocks_read_slot = Some(slot.clone());
     let before = slot.load_full();
 
-    execute_effects(
-        &mut state,
-        vec![Effect::Dropped {
-            id: [1u8; 32],
-            reason: DropReason::AlreadyKnown,
-        }],
-        Instant::now(),
+    let mut rt = state.input_blocks.take().expect("runtime");
+    let effects = {
+        let data = build_ctx_data(&state, &[]);
+        data.with(|ctx| {
+            rt.processor_mut().handle(
+                ergo_inputblocks::processor::Event::Tick {
+                    now: ergo_inputblocks::types::Tick(0),
+                },
+                ctx,
+            )
+        })
+    };
+    assert!(
+        effects.is_empty(),
+        "a bare tick on a fresh runtime is quiet"
     );
+    state.input_blocks = Some(rt);
+    execute_effects(&mut state, effects, Instant::now());
 
     let after = slot.load_full();
     assert!(
         !std::sync::Arc::ptr_eq(&before, &after),
-        "a non-empty effect batch must republish the read slot"
+        "handle() bumped the revision even though it returned no effects"
     );
     assert!(after.best_chain.is_empty(), "no ordering block seeded yet");
     assert!(after.best_input_block_id.is_none());
@@ -633,6 +647,96 @@ fn read_slot_keeps_transaction_ids_after_body_cache_eviction() {
     assert!(
         entry.transactions.is_empty(),
         "the body itself is honestly reported as gone, not fabricated"
+    );
+}
+
+/// Fix-round-1, finding 4: a `Tick` that silently expires a cached body
+/// via TTL (`Processor::on_tick` — no `Effect` emitted at all, unlike the
+/// overflow-eviction case above) still republishes the read slot, because
+/// the refresh gate is `Processor::revision()` changing, not the effect
+/// batch being non-empty.
+#[test]
+fn read_slot_refreshes_stale_bodies_after_silent_ttl_expiry() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    let bounds = ergo_inputblocks::bounds::Bounds {
+        tx_cache_ttl_ms: 10,
+        ..ergo_inputblocks::bounds::Bounds::default()
+    };
+    let ib_cfg = crate::config::InputBlocksConfig {
+        enabled: true,
+        strict_field_binding: true,
+        relay_remote: false,
+        bounds,
+    };
+    state.input_blocks = Some(InputBlocksRuntime::new(&ib_cfg, Instant::now()));
+    let slot: crate::api_bridge::InputBlocksSlot = std::sync::Arc::new(
+        arc_swap::ArcSwap::from_pointee(ergo_api::compat::ApiInputBlocks::default()),
+    );
+    state.input_blocks_read_slot = Some(slot.clone());
+
+    let mut ts_ctx = ts::TestCtx::at(0);
+    let b1 = ts::body(1, 1);
+    ts_ctx.mempool.add(&b1);
+    let a1 = ts::announcement_for([0u8; 32], 1, 1, None, std::slice::from_ref(&b1));
+    let id1 = ts::ann_id(&a1);
+
+    {
+        let mut rt = state.input_blocks.take().expect("runtime");
+        rt.processor_mut().set_best_ordering(Some([0u8; 32]), 1);
+        let eff = ts_ctx.handle(
+            rt.processor_mut(),
+            ergo_inputblocks::processor::Event::AnnouncementAccepted {
+                ann: a1.clone(),
+                from: ts::PEER,
+                now: ergo_inputblocks::types::Tick(0),
+            },
+        );
+        ts::validate_ok(rt.processor_mut(), &ts_ctx, &eff, 1);
+        state.input_blocks = Some(rt);
+    }
+    // The announce+validate loop above already drove `handle()` directly
+    // on the processor (bypassing the node's `execute_effects`), so this
+    // first refresh is the baseline: body present.
+    execute_effects(&mut state, Vec::new(), Instant::now());
+    let baseline = slot.load_full();
+    let entry = baseline
+        .blocks
+        .get(&hex::encode(id1))
+        .expect("id1's record is retained");
+    assert_eq!(entry.transactions.len(), 1, "body present before expiry");
+
+    // A bare Tick well past the 10ms TTL: `on_tick` expires the cached
+    // body and emits nothing.
+    let mut rt = state.input_blocks.take().expect("runtime");
+    let effects = {
+        let data = build_ctx_data(&state, &[]);
+        data.with(|ctx| {
+            rt.processor_mut().handle(
+                ergo_inputblocks::processor::Event::Tick {
+                    now: ergo_inputblocks::types::Tick(11),
+                },
+                ctx,
+            )
+        })
+    };
+    assert!(effects.is_empty(), "TTL expiry emits no effect");
+    state.input_blocks = Some(rt);
+    execute_effects(&mut state, effects, Instant::now());
+
+    let snapshot = slot.load_full();
+    let entry = snapshot
+        .blocks
+        .get(&hex::encode(id1))
+        .expect("id1's record is still retained");
+    assert_eq!(
+        entry.transaction_ids.len(),
+        1,
+        "the tx id survives TTL expiry (finding 3)"
+    );
+    assert!(
+        entry.transactions.is_empty(),
+        "the expired body must not still be served stale (finding 4)"
     );
 }
 

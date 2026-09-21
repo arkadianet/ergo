@@ -146,6 +146,13 @@ pub(in crate::node) struct InputBlocksRuntime {
     /// chain events are driven by the committed state itself, not by a
     /// subsystem that may be switched off.
     pub(in crate::node) last_ordering_tip: Option<[u8; 32]>,
+    /// `Processor::revision()` as of the last REST read-slot refresh
+    /// (fix-round-1, finding 4). Compared against the live value in
+    /// `input_blocks::effects::refresh_read_slot` so a `handle()` call
+    /// that mutated state WITHOUT emitting any `Effect` — most notably
+    /// TTL-driven body-cache expiry inside `Processor::on_tick` — still
+    /// triggers a republish instead of leaving the REST snapshot stale.
+    pub(in crate::node) read_slot_revision: u64,
 }
 
 impl InputBlocksRuntime {
@@ -171,6 +178,7 @@ impl InputBlocksRuntime {
             last_drop_report: 0,
             expectations: HashMap::new(),
             last_ordering_tip: None,
+            read_slot_revision: 0,
         }
     }
 
