@@ -19,6 +19,9 @@
 //! * [`address`] — base58 P2PK / P2SH / P2S address encoding.
 //! * [`autolykos`] — Autolykos v2 PoW solution wire form.
 //! * [`difficulty`] — `nBits` compact-bits encoding shared with Bitcoin.
+//! * [`weak_id`] / [`input_block`] — weak-blocks wire objects: BIP-152-style
+//!   weak transaction ids and the P2P input-block / ordering-block
+//!   announcement codecs.
 //!
 //! What is **not** here:
 //!
@@ -41,6 +44,7 @@ pub mod error;
 pub mod extension;
 pub mod header;
 pub mod input;
+pub mod input_block;
 pub mod jvm_utf8;
 pub mod modifier_id;
 pub mod opcode;
@@ -52,5 +56,6 @@ pub mod sigma_type;
 pub mod sigma_value;
 pub mod token;
 pub mod transaction;
+pub mod weak_id;
 
 pub use error::WriteError;

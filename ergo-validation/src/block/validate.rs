@@ -179,14 +179,7 @@ pub fn validate_full_block_with_costs(
     if header.version >= 2 {
         witness_data = txs
             .iter()
-            .map(|tx| {
-                let mut all_proofs = Vec::new();
-                for input in &tx.inputs {
-                    all_proofs.extend_from_slice(&input.spending_proof.proof);
-                }
-                let hash = ergo_crypto::autolykos::common::blake2b256(&all_proofs);
-                hash[1..].to_vec() // 31 bytes: drop first byte
-            })
+            .map(|tx| ergo_ser::weak_id::witness_id(tx).to_vec())
             .collect();
         let refs: Vec<&[u8]> = witness_data.iter().map(|w| w.as_slice()).collect();
         witness_refs = Some(refs);
