@@ -32,6 +32,15 @@ impl TxRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PeerTag(pub u64);
 
+impl PeerTag {
+    /// The reserved tag for a locally generated input block. Only blocks
+    /// announced under this tag are relayed
+    /// ([`crate::processor::Effect::RelayAnnouncement`]) — parity with
+    /// Scala, which relays only its own input blocks and leaves remote
+    /// relay as a TODO. The node must never map a real peer to `0`.
+    pub const LOCAL: PeerTag = PeerTag(0);
+}
+
 /// A monotonic tick in milliseconds, supplied by the node. This crate has
 /// no clock of its own — every time-dependent policy decision takes a
 /// `Tick` from the caller.

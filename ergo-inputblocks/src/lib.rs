@@ -27,6 +27,12 @@
 //! extension-proof-reduces-to-root check alone implies).
 
 pub mod announcement;
+pub mod bounds;
 pub mod chain;
+pub mod ordering;
+pub mod processor;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_support;
 pub mod tree;
 pub mod types;

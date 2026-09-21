@@ -10,11 +10,18 @@ publish    = false
 [dependencies]
 ergo-primitives = { workspace = true }
 ergo-ser        = { workspace = true }
+indexmap        = { workspace = true }
+tracing         = { workspace = true }
 ergo-crypto     = { workspace = true }
 ergo-validation = { workspace = true }
 thiserror       = { workspace = true }
+num-bigint      = { workspace = true, optional = true }
+
+[features]
+test-support = ["dep:num-bigint"]
 
 [dev-dependencies]
+num-bigint = { workspace = true }
 hex        = { workspace = true }
 serde      = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
