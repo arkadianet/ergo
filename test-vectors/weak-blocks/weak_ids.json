@@ -1,0 +1,33 @@
+{
+  "cases": [
+    {
+      "name": "tx1",
+      "tx_hex": "0166666666666666666666666666666666666666666666666666666666666666660309090900000001c0843d0008d3010000",
+      "tx_id": "6fdaadfff20bc29cb3c47ffd867639132cbed67f0ca32696c1bd70ac3fe26575",
+      "witness_id": "c40cf038fd783eee0cb582c3a1543fc1fa9baca3853fe3e1787139bcfe02f5",
+      "weak_id": "6fdaadc40cf0"
+    },
+    {
+      "name": "tx2_empty_proof",
+      "tx_hex": "0177777777777777777777777777777777777777777777777777777777777777770000000001c0843d0008d3010000",
+      "tx_id": "3f16c2a52f8c66cab61967d92a7de02d98377cd012d894e23d8a00e3b747cca3",
+      "witness_id": "5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8",
+      "weak_id": "3f16c25751c0"
+    },
+    {
+      "name": "tx1_other_witness",
+      "tx_hex": "01666666666666666666666666666666666666666666666666666666666666666602080800000001c0843d0008d3010000",
+      "tx_id": "6fdaadfff20bc29cb3c47ffd867639132cbed67f0ca32696c1bd70ac3fe26575",
+      "witness_id": "d18bdd97b5c1d05ba8338fe3c167556379aa988a3d5cf4e5b42795466303ae",
+      "weak_id": "6fdaadd18bdd"
+    }
+  ],
+  "manifest": {
+    "ergo_commit": "31a8de804f7328704f2753a1cf151dda8f64689f",
+    "sigma_commit": "368a860be033af94aa14895381f42099b3646db6",
+    "sigma_version": "6.0.5-22-368a860b-SNAPSHOT",
+    "generator": "scripts/jvm_weak_blocks_oracle/WeakBlocksOracle.scala",
+    "generator_sha256": "94e53d13dabefa3248463ef9c096d23a69bd2ea5faca0a3d91f9946a7b8426f3",
+    "timestamp": "2026-09-21T06:02:30.305716+00:00"
+  }
+}

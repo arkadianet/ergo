@@ -1,0 +1,145 @@
+//> using scala 2.12
+import io.circe.Json
+import io.circe.syntax._
+import org.ergoplatform.mining.InputBlockFields
+import org.ergoplatform.mining.difficulty.DifficultySerializer
+import org.ergoplatform.modifiers.history.extension.{Extension, ExtensionCandidate}
+import org.ergoplatform.modifiers.history.header.{Header, HeaderSerializer}
+import org.ergoplatform.modifiers.mempool.{ErgoTransaction, ErgoTransactionSerializer}
+import org.ergoplatform.network.message.inputblocks._
+import org.ergoplatform.subblocks.InputBlockAnnouncement
+import org.ergoplatform.{AutolykosSolution, ErgoBoxCandidate, Input}
+import scorex.crypto.hash.Digest32
+import scorex.util.encode.Base16
+import scorex.util.{bytesToId, idToBytes, ByteArrayBuilder}
+import scorex.util.serialization.VLQByteBufferWriter
+import sigma.crypto.CryptoConstants
+import sigma.ast.ErgoTree
+import sigma.data.TrivialProp.TrueProp
+import sigma.interpreter.{ContextExtension, ProverResult}
+
+/**
+  * Oracle harness for the `weak-blocks` (input blocks) port. Prints one JSON
+  * document (a `{"cases": [...], "reject_cases"?: [...]}` shape) per invocation,
+  * selected by the single CLI argument (vector name). `gen.py` drives this and
+  * stamps the manifest block onto the result before writing it to
+  * `test-vectors/weak-blocks/<name>.json`.
+  */
+object WeakBlocksOracle {
+  def hex(b: Array[Byte]): String = Base16.encode(b)
+  def fill(n: Int, v: Int): Array[Byte] = Array.fill(n)(v.toByte)
+
+  val fixedHeader: Header = Header(2, bytesToId(fill(32, 0x11)), Digest32 @@ fill(32, 0x22),
+    scorex.crypto.authds.ADDigest @@ fill(33, 0x33), Digest32 @@ fill(32, 0x44), 1700000000000L,
+    DifficultySerializer.encodeCompactBits(BigInt(1000)), 12345, Digest32 @@ fill(32, 0x55),
+    new AutolykosSolution(CryptoConstants.dlogGroup.generator, CryptoConstants.dlogGroup.generator,
+      Array[Byte](1, 2, 3, 4, 5, 6, 7, 8), BigInt(0)), Array[Byte](0, 0, 0), Array.emptyByteArray)
+
+  def tx(boxFill: Int, proof: Array[Byte]): ErgoTransaction = ErgoTransaction(
+    IndexedSeq(Input(scorex.crypto.authds.ADKey @@ fill(32, boxFill), ProverResult(proof, ContextExtension.empty))),
+    IndexedSeq(new ErgoBoxCandidate(1000000L, ErgoTree.fromProposition(TrueProp), 1)))
+  val tx1: ErgoTransaction = tx(0x66, Array[Byte](9, 9, 9))
+  val tx2: ErgoTransaction = tx(0x77, Array.emptyByteArray)
+
+  def parseVerdict[T](p: Array[Byte] => T, bytes: Array[Byte]): (String, String) =
+    try { p(bytes); ("Accept", "") } catch { case t: Throwable => ("Reject", t.getClass.getSimpleName) }
+
+  def fields(prev: Option[Array[Byte]], txs: Seq[ErgoTransaction], prevDigest: Digest32): InputBlockFields = {
+    val digest = org.ergoplatform.settings.Algos.merkleTreeRoot(txs.map(t => scorex.crypto.authds.LeafData @@ t.serializedId))
+    val ext = InputBlockFields.toExtensionFields(prev, digest, prevDigest)
+    new InputBlockFields(prev, digest, prevDigest, ext.proofForInputBlockData.get)
+  }
+
+  def announcementCases(): Json = {
+    val zero = Digest32 @@ fill(32, 0)
+    val variants = Seq(
+      ("no_prev_no_weak_ids", InputBlockAnnouncement(InputBlockAnnouncement.initialMessageVersion, fixedHeader, fields(None, Seq(tx1), zero), None)),
+      ("prev_and_weak_ids", InputBlockAnnouncement(InputBlockAnnouncement.initialMessageVersion, fixedHeader, fields(Some(fill(32, 0x88)), Seq(tx1, tx2), zero), Some(Seq(tx1.weakId, tx2.weakId)))),
+      ("empty_weak_ids", InputBlockAnnouncement(InputBlockAnnouncement.initialMessageVersion, fixedHeader, fields(None, Seq(tx1), zero), Some(Seq.empty))),
+      ("version2_unparsed", InputBlockAnnouncement(2.toByte, fixedHeader, fields(None, Seq(tx1), zero), None, Array[Byte](0xAA.toByte, 0xBB.toByte))))
+    val ser = InputBlockAnnouncement.serializer
+    val cases = variants.map { case (name, ann) =>
+      val bytes = ser.toBytes(ann)
+      val ext = InputBlockFields.toExtensionFields(ann.inputBlockFields.prevInputBlockId, ann.transactionsDigest, ann.inputBlockFields.prevTransactionsDigest)
+      Json.obj("name" -> name.asJson, "bytes_hex" -> hex(bytes).asJson, "id" -> ann.id.toString.asJson,
+        "header_hex" -> hex(HeaderSerializer.toBytes(ann.header)).asJson,
+        "prev_input_block_id" -> ann.inputBlockFields.prevInputBlockId.map(hex).asJson,
+        "transactions_digest" -> hex(ann.transactionsDigest).asJson,
+        "prev_transactions_digest" -> hex(ann.inputBlockFields.prevTransactionsDigest).asJson,
+        "weak_tx_ids" -> ann.weakTxIds.map(_.map(hex)).asJson,
+        "extension_fields_for_proof" -> ext.fields.map(kv => Json.obj("key" -> hex(kv._1).asJson, "value" -> hex(kv._2).asJson)).asJson,
+        "extension_root_of_those_fields" -> hex(ext.digest).asJson,
+        "proof_valid_against_that_root" -> ann.merkleProof.valid(ext.digest).asJson)
+    }
+    val truncated = ser.toBytes(variants.head._2).dropRight(1)
+    val rejects = Seq(("truncated_last_byte", truncated), ("empty", Array.emptyByteArray)).map { case (name, b) =>
+      val (v, d) = parseVerdict(bs => ser.parseBytes(bs), b)
+      Json.obj("name" -> name.asJson, "bytes_hex" -> hex(b).asJson, "jvm" -> v.asJson, "jvm_detail" -> d.asJson)
+    }
+    Json.obj("cases" -> cases.asJson, "reject_cases" -> rejects.asJson)
+  }
+
+  def orderingCases(): Json = {
+    val extFields = Seq((Extension.PrevInputBlockIdKey, fill(32, 0x88)), (Array[Byte](0, 1), Array[Byte](0, 0, 0, 100)))
+    val variants = Seq(
+      ("minimal", OrderingBlockAnnouncement(OrderingBlockAnnouncement.CurrentVersion, fixedHeader, Seq.empty, Seq.empty, Seq.empty)),
+      ("full", OrderingBlockAnnouncement(OrderingBlockAnnouncement.CurrentVersion, fixedHeader, Seq(tx1), Seq(tx2.id), extFields, Array[Byte](1, 2))))
+    val spec = OrderingBlockAnnouncementMessageSpec
+    val cases = variants.map { case (name, ann) =>
+      val bytes = spec.toBytes(ann)
+      Json.obj("name" -> name.asJson, "bytes_hex" -> hex(bytes).asJson, "header_id" -> ann.header.id.toString.asJson,
+        "non_broadcasted_tx_hex" -> ann.nonBroadcastedTransactions.map(t => hex(ErgoTransactionSerializer.toBytes(t))).asJson,
+        "broadcasted_ids" -> ann.broadcastedTransactionIds.map(_.toString).asJson,
+        "extension_fields" -> ann.extensionFields.map(kv => Json.obj("key" -> hex(kv._1).asJson, "value" -> hex(kv._2).asJson)).asJson,
+        "unparsed_hex" -> hex(ann.unparsedBytes).asJson,
+        "extension_digest_equals_header_root" -> ExtensionCandidate(ann.extensionFields).digest.sameElements(ann.header.extensionRoot).asJson)
+    }
+    // bound violation: rewrite the nonBroadcasted-transactions count field to 32769 (> MaxArraySize)
+    val base = spec.toBytes(variants.head._2)
+    val headerLen = HeaderSerializer.toBytes(fixedHeader).length
+    val w = new VLQByteBufferWriter(new ByteArrayBuilder()); w.putUInt(32769L)
+    val bad = base.take(1 + headerLen) ++ w.result().toBytes ++ base.drop(1 + headerLen + 1)
+    val (v, d) = parseVerdict(bs => spec.parseBytes(bs), bad)
+    Json.obj("cases" -> cases.asJson, "reject_cases" -> Seq(Json.obj("name" -> "nbt_count_over_cap".asJson, "bytes_hex" -> hex(bad).asJson, "jvm" -> v.asJson, "jvm_detail" -> d.asJson)).asJson)
+  }
+
+  def messageCases(): Json = {
+    val ibId = bytesToId(fill(32, 0x99))
+    val ids = InputBlockTransactionIdsData(ibId, Seq(tx1.weakId, tx2.weakId))
+    val txs = InputBlockTransactionsData(ibId, Seq(tx1, tx2))
+    val req = InputBlockTransactionsRequest(ibId, Seq(tx2.weakId))
+    def c(name: String, code: Int, bytes: Array[Byte], extra: (String, Json)*) =
+      Json.obj((Seq("name" -> name.asJson, "code" -> code.asJson, "bytes_hex" -> hex(bytes).asJson) ++ extra): _*)
+    val cases = Seq(
+      c("tx_ids", 102, InputBlockTransactionIdsMessageSpec.toBytes(ids), "input_block_id" -> ibId.toString.asJson, "weak_ids" -> Seq(tx1.weakId, tx2.weakId).map(hex).asJson),
+      c("txs", 104, InputBlockTransactionsMessageSpec.toBytes(txs), "input_block_id" -> ibId.toString.asJson, "tx_hex" -> Seq(tx1, tx2).map(t => hex(ErgoTransactionSerializer.toBytes(t))).asJson),
+      c("txs_request", 105, InputBlockTransactionsRequestMessageSpec.toBytes(req), "input_block_id" -> ibId.toString.asJson, "weak_ids" -> Seq(hex(tx2.weakId)).asJson))
+    // count larger than remaining bytes allow
+    val w = new VLQByteBufferWriter(new ByteArrayBuilder()); w.putBytes(idToBytes(ibId)); w.putUInt(1000L); w.putBytes(tx1.weakId)
+    val overIds = w.result().toBytes
+    val (v1, d1) = parseVerdict(bs => InputBlockTransactionIdsMessageSpec.parseBytes(bs), overIds)
+    val (v2, d2) = parseVerdict(bs => InputBlockTransactionsRequestMessageSpec.parseBytes(bs), overIds)
+    val (v3, d3) = parseVerdict(bs => InputBlockTransactionsMessageSpec.parseBytes(bs), overIds)
+    val rejects = Seq(("102_count_exceeds_remaining", 102, v1, d1), ("105_count_exceeds_remaining", 105, v2, d2), ("104_count_exceeds_remaining", 104, v3, d3)).map { case (n, code, v, d) =>
+      Json.obj("name" -> n.asJson, "code" -> code.asJson, "bytes_hex" -> hex(overIds).asJson, "jvm" -> v.asJson, "jvm_detail" -> d.asJson) }
+    Json.obj("cases" -> cases.asJson, "reject_cases" -> rejects.asJson)
+  }
+
+  def weakIdCases(): Json = {
+    val txs = Seq("tx1" -> tx1, "tx2_empty_proof" -> tx2, "tx1_other_witness" -> tx(0x66, Array[Byte](8, 8)))
+    Json.obj("cases" -> txs.map { case (name, t) =>
+      Json.obj("name" -> name.asJson, "tx_hex" -> hex(ErgoTransactionSerializer.toBytes(t)).asJson,
+        "tx_id" -> t.id.toString.asJson, "witness_id" -> hex(t.witnessSerializedId).asJson, "weak_id" -> hex(t.weakId).asJson) }.asJson)
+  }
+
+  def main(args: Array[String]): Unit = {
+    val out = args(0) match {
+      case "announcement" => announcementCases()
+      case "ordering_announcement" => orderingCases()
+      case "messages" => messageCases()
+      case "weak_ids" => weakIdCases()
+      case other => sys.error(s"unknown vector $other")
+    }
+    println(out.spaces2)
+  }
+}
