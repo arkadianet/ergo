@@ -1,8 +1,22 @@
 //! The single-writer input-block processor: events in, effects out
 //! (spec 7.1–7.6).
 //!
-//! Skeleton only — every event handler is unimplemented. The tests in
-//! this module are the contract the implementation must satisfy.
+//! One [`Processor`] owns everything Scala's `InputBlocksProcessor` trait
+//! holds — per-ordering trees, announcement records, transaction-id
+//! lists, the shared transaction cache, the disconnected waitlist and the
+//! ordering-announcement store — but reads no chain state and touches no
+//! clock: the node supplies the best full block via
+//! [`Processor::set_best_ordering`], and every other per-event input via
+//! [`ProcessorCtx`].
+//!
+//! Validation is an *effect*, not a call: the processor emits
+//! [`Effect::Validate`] and waits for [`Event::ValidationResult`]. Exactly
+//! one job is outstanding at a time, and every `ChainChanged`, applied
+//! ordering block and reorg bumps `generation`, so a result that arrives
+//! for a superseded view is dropped rather than applied. Where Scala's
+//! `InputBlocksTree.processInputBlockTransactions` would walk several
+//! blocks inside one call, this port walks them one `Validate` at a time
+//! (see [`Processor::pump`]).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -325,88 +339,1223 @@ struct Staging {
     from: Option<PeerTag>,
 }
 
+impl TxCache {
+    /// Insert `body`, evicting oldest-first until both the entry and byte
+    /// caps hold. Re-inserting an existing `TxRef` keeps its original
+    /// position: Scala's Guava cache is `expireAfterWrite`, not LRU, so
+    /// re-delivery must not extend a body's life.
+    fn insert(&mut self, body: Body, now: Tick, bounds: &Bounds) {
+        let added = body.bytes.len();
+        if let Some((old, _)) = self.entries.insert(body.tx_ref, (body, now)) {
+            self.bytes = self.bytes.saturating_sub(old.bytes.len());
+        }
+        self.bytes += added;
+        while self.entries.len() > bounds.tx_cache_entries || self.bytes > bounds.tx_cache_bytes {
+            match self.entries.shift_remove_index(0) {
+                Some((_, (b, _))) => self.bytes = self.bytes.saturating_sub(b.bytes.len()),
+                None => break,
+            }
+        }
+    }
+
+    fn contains(&self, r: &TxRef) -> bool {
+        self.entries.contains_key(r)
+    }
+
+    fn get(&self, r: &TxRef) -> Option<&Body> {
+        self.entries.get(r).map(|(b, _)| b)
+    }
+
+    /// Scala's `expireAfterWrite(120, MINUTES)`, swept explicitly because
+    /// this crate has no clock.
+    fn expire(&mut self, now: Tick, ttl_ms: u64) {
+        let stale: Vec<TxRef> = self
+            .entries
+            .iter()
+            .filter(|(_, (_, at))| now.0.saturating_sub(at.0) > ttl_ms)
+            .map(|(r, _)| *r)
+            .collect();
+        for r in stale {
+            if let Some((b, _)) = self.entries.shift_remove(&r) {
+                self.bytes = self.bytes.saturating_sub(b.bytes.len());
+            }
+        }
+    }
+}
+
+impl Staging {
+    fn new(weak_ids: Vec<WeakId>, created: Tick, from: Option<PeerTag>) -> Self {
+        let n = weak_ids.len();
+        Self {
+            weak_ids,
+            candidates: vec![Vec::new(); n],
+            variants: None,
+            cursor: vec![0; n],
+            bytes: 0,
+            created,
+            from,
+        }
+    }
+
+    /// Add `body` as a candidate for position `i`, ignoring a duplicate
+    /// `TxRef` (the mempool and a peer's delivery routinely overlap).
+    fn add(&mut self, i: usize, body: Body) {
+        if self.variants.is_some() {
+            return;
+        }
+        if self.candidates[i].iter().any(|b| b.tx_ref == body.tx_ref) {
+            return;
+        }
+        self.bytes += body.bytes.len();
+        self.candidates[i].push(body);
+    }
+
+    /// The `TxRef`s the current cursor selects, once resolved.
+    fn selected(&self) -> Option<Vec<TxRef>> {
+        let vars = self.variants.as_ref()?;
+        vars.iter()
+            .zip(self.cursor.iter())
+            .map(|(v, c)| v.get(*c).copied())
+            .collect()
+    }
+
+    /// Odometer step over the per-position candidate lists (spec 7.5's
+    /// witness-variant retry). Returns `false` once every combination
+    /// reachable from the current cursor has been tried.
+    fn advance(&mut self) -> bool {
+        let Some(vars) = self.variants.as_ref() else {
+            return false;
+        };
+        for (i, v) in vars.iter().enumerate() {
+            if self.cursor[i] + 1 < v.len() {
+                self.cursor[i] += 1;
+                for c in self.cursor.iter_mut().take(i) {
+                    *c = 0;
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    fn had_alternatives(&self) -> bool {
+        self.variants
+            .as_ref()
+            .is_some_and(|v| v.iter().any(|c| c.len() > 1))
+    }
+}
+
+/// What [`Processor::resolve`] concluded about one block's staged bodies.
+enum Resolution {
+    /// Every position resolved and the ordered digest matched.
+    Complete(Vec<TxRef>),
+    /// These announced weak ids still need bodies from the announcer.
+    Request(Vec<WeakId>),
+    /// Exactly one candidate per position, and the digest disagreed.
+    DigestMismatch,
+}
+
 impl Processor {
     /// A fresh processor with no state.
-    pub fn new(_bounds: Bounds, _policy: AnnouncementPolicy) -> Self {
-        unimplemented!("task 11 step 3")
+    pub fn new(bounds: Bounds, policy: AnnouncementPolicy) -> Self {
+        Self {
+            bounds,
+            policy,
+            generation: 0,
+            next_job: 1,
+            best: BestBlocks::default(),
+            trees: indexmap::IndexMap::new(),
+            tree_heights: HashMap::new(),
+            records: indexmap::IndexMap::new(),
+            tx_refs: HashMap::new(),
+            cache: TxCache::default(),
+            staging: indexmap::IndexMap::new(),
+            waitlist: VecDeque::new(),
+            ordering: OrderingStore::default(),
+            outstanding: HashMap::new(),
+            in_flight: None,
+            failed: HashSet::new(),
+            pending_triggers: VecDeque::new(),
+        }
     }
 
-    /// The node tells the processor the best full block on every change.
-    pub fn set_best_ordering(&mut self, _id: Option<OrderingId>, _height: u32) {
-        unimplemented!("task 11 step 3")
+    /// The node tells the processor the best full block on every change;
+    /// the processor never reads chain state itself.
+    pub fn set_best_ordering(&mut self, id: Option<OrderingId>, height: u32) {
+        self.best = BestBlocks {
+            ordering_id: id,
+            ordering_height: height,
+        };
     }
 
-    /// The current generation (spec 7.2).
+    /// The current generation (spec 7.2): every `ChainChanged`, applied
+    /// ordering block and reorg bumps it, invalidating in-flight jobs.
     pub fn generation(&self) -> u64 {
-        unimplemented!("task 11 step 3")
+        self.generation
     }
 
     /// Feed one event; returns the effects the node must act on.
-    pub fn handle(&mut self, _event: Event, _ctx: &ProcessorCtx<'_>) -> Vec<Effect> {
-        unimplemented!("task 11 step 3")
+    pub fn handle(&mut self, event: Event, ctx: &ProcessorCtx<'_>) -> Vec<Effect> {
+        let mut out = Vec::new();
+        match event {
+            Event::AnnouncementAccepted { ann, from, now } => {
+                self.on_announcement(ann, from, now, ctx, &mut out)
+            }
+            Event::TransactionsDelivered {
+                input_block_id,
+                bodies,
+                from,
+                now,
+            } => self.on_bodies(input_block_id, bodies, from, now, ctx, &mut out),
+            Event::ValidationResult {
+                job,
+                generation,
+                outcome,
+            } => self.on_validation(job, generation, outcome, &mut out),
+            Event::OrderingAnnouncementAccepted { ann, from, now: _ } => {
+                self.on_ordering_announcement(ann, from, ctx, &mut out)
+            }
+            Event::OrderingBlockApplied {
+                header_id, height, ..
+            } => self.on_ordering(header_id, height, false, ctx, &mut out),
+            Event::OrderingReorg {
+                new_best_header_id,
+                new_best_height,
+                ..
+            } => self.on_ordering(new_best_header_id, new_best_height, true, ctx, &mut out),
+            Event::Tick { now } => self.on_tick(now),
+        }
+        out
     }
+
+    // ----- announcements (spec 9.2, Scala `processInputBlock` + `applyInputBlock`) -----
+
+    fn on_announcement(
+        &mut self,
+        ann: InputBlockAnnouncement,
+        from: PeerTag,
+        now: Tick,
+        ctx: &ProcessorCtx<'_>,
+        out: &mut Vec<Effect>,
+    ) {
+        let Ok(mid) = ann.id() else {
+            // A header we cannot serialize has no id to key anything by;
+            // the wire layer already rejected it, so this is unreachable
+            // from p2p and only guards a locally constructed announcement.
+            tracing::debug!("input-block announcement header does not serialize");
+            return;
+        };
+        let id: InputBlockId = *mid.as_bytes();
+        let height = ann.header.height;
+        let full = ctx.full_block_height;
+        let ordering_id: OrderingId = *ann.header.parent_id.as_bytes();
+
+        // Scala `processInputBlock` step 1: the ±2 height window.
+        if height > full.saturating_add(2) || height.saturating_add(2) < full {
+            out.push(Effect::Dropped {
+                id,
+                reason: DropReason::OutsideHeightWindow,
+            });
+            return;
+        }
+        // Step 2: input blocks need a UTXO set.
+        if !ctx.utxo_mode {
+            out.push(Effect::Dropped {
+                id,
+                reason: DropReason::DigestMode,
+            });
+            return;
+        }
+        // Step 3: already known (Scala `applyInputBlock`'s first guard).
+        if self.records.contains_key(&id) {
+            out.push(Effect::Dropped {
+                id,
+                reason: DropReason::AlreadyKnown,
+            });
+            return;
+        }
+        // Step 4 of 2.7: `+2` downloads the ordering header instead.
+        if height == full.saturating_add(2) {
+            self.request(
+                out,
+                Effect::RequestOrderingHeader {
+                    header_id: ordering_id,
+                    from,
+                },
+                from,
+                id,
+            );
+            return;
+        }
+        // Only `+1` is applied; the rest of the window is ignored (parity).
+        if height != full.saturating_add(1) {
+            out.push(Effect::Dropped {
+                id,
+                reason: DropReason::OutsideHeightWindow,
+            });
+            return;
+        }
+
+        let expected = (ctx.expected_n_bits)(ann.header.parent_id.as_bytes());
+        match crate::announcement::validate_announcement(
+            &ann,
+            ctx.multiplier,
+            expected,
+            self.policy,
+        ) {
+            Ok(()) => {}
+            Err(crate::announcement::AnnouncementError::MultiplierUnavailable) => {
+                // Input blocks are not active: not the peer's fault.
+                out.push(Effect::Dropped {
+                    id,
+                    reason: DropReason::MultiplierUnavailable,
+                });
+                return;
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "invalid input-block announcement");
+                out.push(Effect::Penalize {
+                    from,
+                    reason: "invalid input-block announcement",
+                });
+                return;
+            }
+        }
+
+        // Scala `applyInputBlock`'s height-jump reset.
+        if height > self.best.ordering_height + self.bounds.height_reset_threshold {
+            self.prune(ctx);
+        }
+
+        // Record caps (spec 7.4; Scala has none).
+        let per_ordering = self
+            .records
+            .values()
+            .filter(|r| r.ordering_id == ordering_id)
+            .count();
+        if per_ordering >= self.bounds.records_per_ordering
+            || self.records.len() >= self.bounds.records_total
+        {
+            out.push(Effect::Dropped {
+                id,
+                reason: DropReason::RecordsFull,
+            });
+            return;
+        }
+
+        if !self.trees.contains_key(&ordering_id) {
+            if self.trees.len() >= self.bounds.trees_total {
+                if let Some((old, _)) = self.trees.shift_remove_index(0) {
+                    self.tree_heights.remove(&old);
+                }
+            }
+            self.trees.insert(ordering_id, InputBlocksTree::default());
+            self.tree_heights
+                .insert(ordering_id, height.saturating_sub(1));
+        }
+
+        let prev = ann.fields.prev_input_block_id;
+        let tree = self.trees[&ordering_id].clone();
+        let waitlist: Vec<(InputBlockId, Option<InputBlockId>)> =
+            self.waitlist.iter().copied().collect();
+        match tree.insert(
+            crate::tree::AnnouncementRef {
+                id,
+                prev: prev.as_ref(),
+            },
+            &waitlist,
+        ) {
+            Some(updated) => {
+                if updated.forks.len() > self.bounds.forks_per_ordering {
+                    out.push(Effect::Dropped {
+                        id,
+                        reason: DropReason::ForksFull,
+                    });
+                    return;
+                }
+                // Whatever the tree reconnected is no longer disconnected.
+                self.waitlist.retain(|(wid, _)| !updated.known(wid));
+                self.trees.insert(ordering_id, updated);
+            }
+            None => {
+                // Scala's `disconnectedWaitlist` branch: remember the
+                // block and ask the announcer for its parent.
+                if self.waitlist.len() >= self.bounds.waitlist_entries {
+                    if let Some((old, _)) = self.waitlist.pop_front() {
+                        out.push(Effect::Dropped {
+                            id: old,
+                            reason: DropReason::WaitlistFull,
+                        });
+                    }
+                }
+                self.waitlist.push_back((id, prev));
+                if let Some(p) = prev {
+                    self.request(out, Effect::RequestInputBlock { id: p, from }, from, id);
+                }
+            }
+        }
+
+        self.records.insert(
+            id,
+            Record {
+                ann,
+                from,
+                height,
+                ordering_id,
+                prev,
+            },
+        );
+
+        // Parity: Scala relays only its own input blocks (spec 9.2 item 7).
+        if from == PeerTag::LOCAL {
+            out.push(Effect::RelayAnnouncement { id });
+        }
+
+        self.resolve_block(id, now, ctx, out);
+    }
+
+    // ----- transaction resolution and staging (spec 7.5) -----
+
+    fn resolve_block(
+        &mut self,
+        id: InputBlockId,
+        now: Tick,
+        ctx: &ProcessorCtx<'_>,
+        out: &mut Vec<Effect>,
+    ) {
+        let Some(rec) = self.records.get(&id) else {
+            return;
+        };
+        let from = rec.from;
+        let Some(weak) = rec.ann.weak_tx_ids.clone() else {
+            // No weak-id list announced: ask for it (`RequestModifier` −122).
+            self.request(
+                out,
+                Effect::RequestTransactionIds {
+                    input_block_id: id,
+                    from,
+                },
+                from,
+                id,
+            );
+            return;
+        };
+        self.staging
+            .entry(id)
+            .or_insert_with(|| Staging::new(weak, now, Some(from)));
+        self.refresh_from_mempool(id, ctx);
+        self.enforce_staging_bytes(id, out);
+        self.complete_or_request(id, out);
+    }
+
+    fn refresh_from_mempool(&mut self, id: InputBlockId, ctx: &ProcessorCtx<'_>) {
+        let Some(st) = self.staging.get(&id) else {
+            return;
+        };
+        if st.variants.is_some() {
+            return;
+        }
+        let weak = st.weak_ids.clone();
+        let found: Vec<(usize, Vec<Body>)> = weak
+            .iter()
+            .enumerate()
+            .map(|(i, w)| (i, (ctx.mempool_lookup)(w)))
+            .collect();
+        if let Some(st) = self.staging.get_mut(&id) {
+            for (i, bodies) in found {
+                for b in bodies {
+                    st.add(i, b);
+                }
+            }
+        }
+    }
+
+    /// Spec 7.4's aggregate staging cap. The slot currently being filled
+    /// is never the one evicted unless it alone exceeds the cap — evicting
+    /// it would make progress impossible while a delivery is in flight.
+    fn enforce_staging_bytes(&mut self, current: InputBlockId, out: &mut Vec<Effect>) {
+        loop {
+            let total: usize = self.staging.values().map(|s| s.bytes).sum();
+            if total <= self.bounds.staging_bytes_total {
+                return;
+            }
+            let victim = self
+                .staging
+                .iter()
+                .find(|(id, s)| **id != current && s.bytes > 0)
+                .map(|(id, _)| *id)
+                .unwrap_or(current);
+            self.staging.shift_remove(&victim);
+            out.push(Effect::Dropped {
+                id: victim,
+                reason: DropReason::StagingFull,
+            });
+            if victim == current {
+                return;
+            }
+        }
+    }
+
+    /// Whether the record's announcement carries a proof at all. Scala's
+    /// `transactionBodiesMatchAnnouncement` short-circuits to `true` when
+    /// the proof has no indices — finding F4b, preserved.
+    fn digest_bypassed(&self, id: &InputBlockId) -> bool {
+        self.records
+            .get(id)
+            .is_some_and(|r| r.ann.fields.proof.indices.is_empty())
+    }
+
+    fn announced_digest(&self, id: &InputBlockId) -> Option<[u8; 32]> {
+        self.records
+            .get(id)
+            .map(|r| r.ann.fields.transactions_digest)
+    }
+
+    /// Spec 7.5 steps 1–4: resolve every announced position to one body.
+    fn resolve(&self, id: &InputBlockId) -> Resolution {
+        let Some(st) = self.staging.get(id) else {
+            return Resolution::Request(Vec::new());
+        };
+        if let Some(sel) = st.selected() {
+            return Resolution::Complete(sel);
+        }
+
+        let mut needed: Vec<WeakId> = Vec::new();
+        for (i, c) in st.candidates.iter().enumerate() {
+            if c.is_empty() || c.len() > self.bounds.candidates_per_position {
+                needed.push(st.weak_ids[i]);
+            }
+        }
+        if !needed.is_empty() {
+            return Resolution::Request(needed);
+        }
+
+        let variants: Vec<Vec<TxRef>> = st
+            .candidates
+            .iter()
+            .map(|c| c.iter().map(|b| b.tx_ref).collect())
+            .collect();
+
+        if self.digest_bypassed(id) {
+            return Resolution::Complete(
+                variants.iter().filter_map(|v| v.first().copied()).collect(),
+            );
+        }
+        let Some(expected) = self.announced_digest(id) else {
+            return Resolution::Request(Vec::new());
+        };
+
+        // Try candidate combinations (odometer over positions) until the
+        // ordered transaction-id digest reproduces the announcement's.
+        let mut cursor = vec![0usize; variants.len()];
+        let mut attempts = 0usize;
+        loop {
+            let ids: Vec<[u8; 32]> = variants
+                .iter()
+                .zip(cursor.iter())
+                .map(|(v, c)| v[*c].tx_id)
+                .collect();
+            let refs: Vec<&[u8]> = ids.iter().map(|i| &i[..]).collect();
+            if ergo_crypto::merkle::merkle_tree_root(&refs) == expected {
+                return Resolution::Complete(
+                    variants
+                        .iter()
+                        .zip(cursor.iter())
+                        .map(|(v, c)| v[*c])
+                        .collect(),
+                );
+            }
+            attempts += 1;
+            if attempts >= self.bounds.digest_attempts_per_block {
+                break;
+            }
+            let mut stepped = false;
+            for (i, v) in variants.iter().enumerate() {
+                if cursor[i] + 1 < v.len() {
+                    cursor[i] += 1;
+                    for c in cursor.iter_mut().take(i) {
+                        *c = 0;
+                    }
+                    stepped = true;
+                    break;
+                }
+            }
+            if !stepped {
+                break;
+            }
+        }
+
+        // No combination matched. If some position is ambiguous the peer's
+        // own body settles it (spec 7.5 item 4); otherwise the delivered
+        // bodies simply disagree with the announcement.
+        let ambiguous: Vec<WeakId> = st
+            .weak_ids
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| variants[*i].len() > 1)
+            .map(|(_, w)| *w)
+            .collect();
+        if ambiguous.is_empty() {
+            Resolution::DigestMismatch
+        } else {
+            Resolution::Request(ambiguous)
+        }
+    }
+
+    fn complete_or_request(&mut self, id: InputBlockId, out: &mut Vec<Effect>) {
+        let from = self
+            .staging
+            .get(&id)
+            .and_then(|s| s.from)
+            .or_else(|| self.records.get(&id).map(|r| r.from));
+        match self.resolve(&id) {
+            Resolution::Complete(refs) => self.commit_resolution(id, refs, out),
+            Resolution::Request(weak_ids) => {
+                if weak_ids.is_empty() {
+                    return;
+                }
+                if let Some(peer) = from {
+                    self.request(
+                        out,
+                        Effect::RequestTransactions {
+                            input_block_id: id,
+                            weak_ids,
+                            from: peer,
+                        },
+                        peer,
+                        id,
+                    );
+                }
+            }
+            Resolution::DigestMismatch => {
+                // Spec 7.4's last row: unverified bodies never reach the
+                // shared cache, so dropping the slot is the whole cleanup.
+                self.staging.shift_remove(&id);
+                out.push(Effect::Dropped {
+                    id,
+                    reason: DropReason::TxDigestMismatch,
+                });
+            }
+        }
+    }
+
+    /// The digest matched: move the block's candidate bodies into the
+    /// shared cache, remember the per-position variants for spec 7.5's
+    /// retry, and free the staging bytes.
+    fn commit_resolution(&mut self, id: InputBlockId, refs: Vec<TxRef>, out: &mut Vec<Effect>) {
+        let now = self.staging.get(&id).map(|s| s.created).unwrap_or(Tick(0));
+        if let Some(st) = self.staging.get_mut(&id) {
+            if st.variants.is_none() {
+                let variants: Vec<Vec<TxRef>> = st
+                    .candidates
+                    .iter()
+                    .map(|c| c.iter().map(|b| b.tx_ref).collect())
+                    .collect();
+                let cursor: Vec<usize> = variants
+                    .iter()
+                    .zip(refs.iter())
+                    .map(|(v, r)| v.iter().position(|x| x == r).unwrap_or(0))
+                    .collect();
+                let bodies: Vec<Body> = st.candidates.iter().flatten().cloned().collect();
+                st.candidates = vec![Vec::new(); variants.len()];
+                st.bytes = 0;
+                st.variants = Some(variants);
+                st.cursor = cursor;
+                for b in bodies {
+                    self.cache.insert(b, now, &self.bounds);
+                }
+            }
+        }
+        self.tx_refs.insert(id, refs);
+        let Some(ordering_id) = self.records.get(&id).map(|r| r.ordering_id) else {
+            return;
+        };
+        self.pump(ordering_id, id, out);
+    }
+
+    // ----- delivered bodies (message 104) -----
+
+    fn on_bodies(
+        &mut self,
+        id: InputBlockId,
+        bodies: Vec<Body>,
+        from: Option<PeerTag>,
+        now: Tick,
+        ctx: &ProcessorCtx<'_>,
+        out: &mut Vec<Effect>,
+    ) {
+        if let Some(p) = from {
+            if let Some(c) = self.outstanding.get_mut(&p) {
+                *c = c.saturating_sub(1);
+            }
+        }
+        let Some(rec) = self.records.get(&id) else {
+            out.push(Effect::Dropped {
+                id,
+                reason: DropReason::UnknownBlock,
+            });
+            return;
+        };
+        let announcer = rec.from;
+        match rec.ann.weak_tx_ids.clone() {
+            Some(weak) => {
+                self.staging
+                    .entry(id)
+                    .or_insert_with(|| Staging::new(weak.clone(), now, from.or(Some(announcer))));
+                if let Some(st) = self.staging.get_mut(&id) {
+                    for b in bodies {
+                        let positions: Vec<usize> = st
+                            .weak_ids
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, w)| **w == b.weak_id)
+                            .map(|(i, _)| i)
+                            .collect();
+                        for i in positions {
+                            st.add(i, b.clone());
+                        }
+                    }
+                }
+                self.refresh_from_mempool(id, ctx);
+                self.enforce_staging_bytes(id, out);
+                self.complete_or_request(id, out);
+            }
+            None => {
+                // Scala `applyInputBlockTransactions(id, txs, state)`: with
+                // no announced weak-id list, the delivered order *is* the
+                // block's transaction order.
+                let ids: Vec<[u8; 32]> = bodies.iter().map(|b| b.tx_ref.tx_id).collect();
+                if !self.digest_bypassed(&id) {
+                    let refs: Vec<&[u8]> = ids.iter().map(|i| &i[..]).collect();
+                    let expected = self.announced_digest(&id).unwrap_or_default();
+                    if ergo_crypto::merkle::merkle_tree_root(&refs) != expected {
+                        out.push(Effect::Dropped {
+                            id,
+                            reason: DropReason::TxDigestMismatch,
+                        });
+                        return;
+                    }
+                }
+                let refs: Vec<TxRef> = bodies.iter().map(|b| b.tx_ref).collect();
+                for b in bodies {
+                    self.cache.insert(b, now, &self.bounds);
+                }
+                self.tx_refs.insert(id, refs);
+                let Some(ordering_id) = self.records.get(&id).map(|r| r.ordering_id) else {
+                    return;
+                };
+                self.pump(ordering_id, id, out);
+            }
+        }
+    }
+
+    // ----- validation jobs (spec 7.6) -----
+
+    /// Ask the tree which block it would apply next for `trigger`, then —
+    /// if every body that job needs is cached — emit the `Validate` for it.
+    ///
+    /// The tree's own `applicationStep` would walk several blocks in one
+    /// call; the processor runs exactly one validation per job, so the
+    /// probe below drives `process` with an `apply` that always fails,
+    /// which leaves the tree untouched and only reports *which* block was
+    /// asked about. The real application happens in [`Self::on_validation`].
+    fn pump(&mut self, ordering_id: OrderingId, trigger: InputBlockId, out: &mut Vec<Effect>) {
+        if self.in_flight.is_some() {
+            if self.pending_triggers.len() >= self.bounds.pending_triggers {
+                self.pending_triggers.pop_front();
+            }
+            self.pending_triggers.push_back((ordering_id, trigger));
+            return;
+        }
+        // Scala `applyInputBlockTransactions`: nothing is processed for an
+        // ordering block that is not the best full block.
+        if self.best.ordering_id != Some(ordering_id) {
+            return;
+        }
+        let Some(tree) = self.trees.get(&ordering_id).cloned() else {
+            return;
+        };
+        let requested = {
+            let tx_refs = &self.tx_refs;
+            let has_txs = |x: &InputBlockId| tx_refs.contains_key(x);
+            let mut req: Option<(InputBlockId, Vec<InputBlockId>)> = None;
+            let mut probe = |x: &InputBlockId, prev: &[InputBlockId]| -> Result<u64, ()> {
+                if req.is_none() {
+                    req = Some((*x, prev.to_vec()));
+                }
+                Err(())
+            };
+            tree.process(&trigger, &has_txs, &mut probe);
+            req
+        };
+        let Some((target, prev_chain)) = requested else {
+            return;
+        };
+        let Some(txs) = self.tx_refs.get(&target).cloned() else {
+            return;
+        };
+        let mut previous: Vec<TxRef> = Vec::new();
+        for pid in &prev_chain {
+            match self.tx_refs.get(pid) {
+                Some(v) => previous.extend(v.iter().copied()),
+                None => {
+                    out.push(Effect::Dropped {
+                        id: *pid,
+                        reason: DropReason::CacheEvicted,
+                    });
+                    return;
+                }
+            }
+        }
+        // Spec 7.4: a job whose bodies are no longer cached cannot run,
+        // and the chain cannot progress past that block.
+        if txs
+            .iter()
+            .chain(previous.iter())
+            .any(|r| !self.cache.contains(r))
+        {
+            out.push(Effect::Dropped {
+                id: target,
+                reason: DropReason::CacheEvicted,
+            });
+            return;
+        }
+        let job = self.next_job;
+        self.next_job += 1;
+        self.in_flight = Some(InFlight {
+            job,
+            generation: self.generation,
+            id: target,
+            ordering_id,
+        });
+        out.push(Effect::Validate {
+            job,
+            generation: self.generation,
+            input_block_id: target,
+            txs,
+            previous,
+        });
+    }
+
+    fn on_validation(
+        &mut self,
+        job: JobId,
+        generation: u64,
+        outcome: Result<u64, String>,
+        out: &mut Vec<Effect>,
+    ) {
+        let Some(inf) = self.in_flight.clone() else {
+            // The job was invalidated by a generation bump, which clears
+            // `in_flight`; there is no id left to name.
+            out.push(Effect::Dropped {
+                id: [0u8; 32],
+                reason: DropReason::StaleValidation,
+            });
+            return;
+        };
+        if inf.job != job || inf.generation != generation {
+            out.push(Effect::Dropped {
+                id: inf.id,
+                reason: DropReason::StaleValidation,
+            });
+            return;
+        }
+        self.in_flight = None;
+        match outcome {
+            Ok(cost) => self.on_validation_ok(inf, cost, out),
+            Err(reason) => {
+                tracing::debug!(%reason, "input block validation failed");
+                self.on_validation_failed(inf, out)
+            }
+        }
+    }
+
+    fn on_validation_ok(&mut self, inf: InFlight, cost: u64, out: &mut Vec<Effect>) {
+        let Some(tree) = self.trees.get(&inf.ordering_id).cloned() else {
+            return;
+        };
+        let target = inf.id;
+        let outcome = {
+            let tx_refs = &self.tx_refs;
+            let has_txs = |x: &InputBlockId| tx_refs.contains_key(x);
+            // One step only: every other id the tree offers fails, which
+            // stops `applicationStep`'s internal walk after this block.
+            let mut apply = |x: &InputBlockId, _prev: &[InputBlockId]| -> Result<u64, ()> {
+                if *x == target {
+                    Ok(cost)
+                } else {
+                    Err(())
+                }
+            };
+            tree.process(&target, &has_txs, &mut apply)
+        };
+        self.trees.insert(inf.ordering_id, outcome.tree);
+        if !outcome.applied.is_empty() || !outcome.rolled_back.is_empty() {
+            out.push(Effect::ChainChanged {
+                ordering_id: inf.ordering_id,
+                applied: outcome.applied,
+                rolled_back: outcome.rolled_back,
+            });
+            self.generation += 1;
+        }
+        self.resume(inf.ordering_id, out);
+    }
+
+    /// Spec 7.5's witness-variant retry: swap in the next candidate for
+    /// the block that failed and re-run it; when the combinations are
+    /// exhausted the fork simply stops progressing (Scala: application
+    /// failure).
+    fn on_validation_failed(&mut self, inf: InFlight, out: &mut Vec<Effect>) {
+        let id = inf.id;
+        if let Some(refs) = self.tx_refs.get(&id) {
+            for r in refs.clone() {
+                self.failed.insert((id, r));
+            }
+        }
+        let next =
+            self.staging.get_mut(&id).and_then(
+                |st| {
+                    if st.advance() {
+                        st.selected()
+                    } else {
+                        None
+                    }
+                },
+            );
+        if let Some(refs) = next {
+            self.tx_refs.insert(id, refs);
+            self.pump(inf.ordering_id, id, out);
+            return;
+        }
+        let reason = if self
+            .staging
+            .get(&id)
+            .is_some_and(|st| st.had_alternatives())
+        {
+            DropReason::CandidatesExhausted
+        } else {
+            DropReason::ValidationFailed
+        };
+        out.push(Effect::Dropped { id, reason });
+    }
+
+    /// Spec 7.6's re-selection: on the active tree, take the selected
+    /// fork's `first_to_complete()` and validate it when its bodies are
+    /// available; otherwise retry whatever triggers were deferred while a
+    /// job was in flight.
+    fn resume(&mut self, ordering_id: OrderingId, out: &mut Vec<Effect>) {
+        if self.in_flight.is_some() {
+            return;
+        }
+        let next = self.trees.get(&ordering_id).and_then(|tree| {
+            tree.best_index()
+                .or_else(|| tree.longest_index())
+                .and_then(|i| tree.forks[i].first_to_complete())
+        });
+        if let Some(n) = next {
+            if self.tx_refs.contains_key(&n) {
+                self.pump(ordering_id, n, out);
+                if self.in_flight.is_some() {
+                    return;
+                }
+            }
+        }
+        let deferred: Vec<(OrderingId, InputBlockId)> = self.pending_triggers.drain(..).collect();
+        for (oid, trigger) in deferred {
+            self.pump(oid, trigger, out);
+            if self.in_flight.is_some() {
+                return;
+            }
+        }
+    }
+
+    // ----- ordering blocks (spec 7.6, 9.3) -----
+
+    fn on_ordering_announcement(
+        &mut self,
+        ann: OrderingBlockAnnouncement,
+        from: PeerTag,
+        ctx: &ProcessorCtx<'_>,
+        out: &mut Vec<Effect>,
+    ) {
+        let Ok((_, mid)) = ergo_ser::header::serialize_header(&ann.header) else {
+            tracing::debug!("ordering-block announcement header does not serialize");
+            return;
+        };
+        let header_id: OrderingId = *mid.as_bytes();
+        let expected = (ctx.expected_n_bits)(ann.header.parent_id.as_bytes());
+        if let Err(e) = crate::announcement::validate_ordering_announcement(&ann, expected) {
+            tracing::debug!(error = %e, "invalid ordering-block announcement");
+            out.push(Effect::Penalize {
+                from,
+                reason: "invalid ordering-block announcement",
+            });
+            return;
+        }
+
+        let prev = ann
+            .extension_fields
+            .iter()
+            .find(|(k, _)| *k == ergo_ser::input_block::PREV_INPUT_BLOCK_ID_KEY)
+            .and_then(|(_, v)| <[u8; 32]>::try_from(v.as_slice()).ok());
+        let non_broadcasted = ann.non_broadcasted_transactions.clone();
+        let broadcasted_ids = ann.broadcasted_transaction_ids.clone();
+
+        if let Some(evicted) =
+            self.ordering
+                .insert(header_id, ann, self.bounds.ordering_announcements)
+        {
+            out.push(Effect::Dropped {
+                id: evicted,
+                reason: DropReason::OrderingAnnouncementsFull,
+            });
+        }
+        out.push(Effect::RelayOrderingInv { header_id });
+
+        match prev {
+            Some(p) if self.tx_refs.contains_key(&p) => {
+                out.push(Effect::OrderingReconstruct {
+                    plan: ReconstructionPlan {
+                        header_id,
+                        non_broadcasted,
+                        broadcasted_ids,
+                        // Finding F5, preserved: Scala keys the collected
+                        // input-chain transactions by the *announced*
+                        // header's own id, not by the ordering block the
+                        // input chain extends.
+                        input_chain_txs: self.collected_input_txs(&header_id),
+                        prev_input_block_id: Some(p),
+                    },
+                });
+            }
+            _ => {
+                self.request(
+                    out,
+                    Effect::RequestBlockTransactions { header_id, from },
+                    from,
+                    header_id,
+                );
+            }
+        }
+    }
+
+    fn on_ordering(
+        &mut self,
+        header_id: OrderingId,
+        height: u32,
+        reorg: bool,
+        ctx: &ProcessorCtx<'_>,
+        out: &mut Vec<Effect>,
+    ) {
+        self.set_best_ordering(Some(header_id), height);
+        self.generation += 1;
+        // Spec 7.6: the bump invalidates any in-flight job.
+        self.in_flight = None;
+        self.pending_triggers.clear();
+        if reorg {
+            // Trees keyed by a header that is no longer on the best chain
+            // are unreachable; only the new best chain's tree survives.
+            self.trees.retain(|k, _| *k == header_id);
+            self.tree_heights.retain(|k, _| *k == header_id);
+        }
+        self.prune(ctx);
+        out.push(Effect::ChainChanged {
+            ordering_id: header_id,
+            applied: Vec::new(),
+            rolled_back: Vec::new(),
+        });
+        self.resume(header_id, out);
+    }
+
+    /// Scala `prune()` (spec 2.5): trees behind the best height, records
+    /// and transaction lists more than `prune_threshold` ordering blocks
+    /// behind it (also cleaned out of the waitlist), and ordering
+    /// announcements that are stale or already applied.
+    fn prune(&mut self, ctx: &ProcessorCtx<'_>) {
+        let best_height = self.best.ordering_height;
+        let stale_trees: Vec<OrderingId> = self
+            .trees
+            .keys()
+            .filter(|id| best_height > *self.tree_heights.get(*id).unwrap_or(&0))
+            .copied()
+            .collect();
+        for id in stale_trees {
+            self.trees.shift_remove(&id);
+            self.tree_heights.remove(&id);
+        }
+
+        let stale_records: Vec<InputBlockId> = self
+            .records
+            .iter()
+            .filter(|(_, r)| best_height.saturating_sub(r.height) > self.bounds.prune_threshold)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale_records {
+            self.records.shift_remove(&id);
+            self.tx_refs.remove(&id);
+            self.staging.shift_remove(&id);
+            self.waitlist.retain(|(w, _)| *w != id);
+            self.failed.retain(|(b, _)| *b != id);
+        }
+
+        self.ordering.prune(
+            best_height,
+            self.bounds.ordering_announcement_prune_threshold,
+            ctx.block_transactions_known,
+        );
+    }
+
+    fn on_tick(&mut self, now: Tick) {
+        self.cache.expire(now, self.bounds.tx_cache_ttl_ms);
+        let ttl = self.bounds.staging_ttl_ms;
+        let expired: Vec<InputBlockId> = self
+            .staging
+            .iter()
+            .filter(|(_, s)| s.variants.is_none() && now.0.saturating_sub(s.created.0) > ttl)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in expired {
+            self.staging.shift_remove(&id);
+        }
+        // Outstanding-request counters decay geometrically: a peer that
+        // never answers recovers its budget over a few ticks rather than
+        // being blocked forever, and one that answers is credited
+        // immediately by `on_bodies`.
+        self.outstanding.retain(|_, c| {
+            *c /= 2;
+            *c > 0
+        });
+    }
+
+    /// Issue `effect` to `peer` unless that peer is already at the
+    /// outstanding-request cap (spec 7.4).
+    fn request(&mut self, out: &mut Vec<Effect>, effect: Effect, peer: PeerTag, subject: [u8; 32]) {
+        let counter = self.outstanding.entry(peer).or_insert(0);
+        if *counter >= self.bounds.requests_per_peer {
+            out.push(Effect::Dropped {
+                id: subject,
+                reason: DropReason::RequestsFull,
+            });
+            return;
+        }
+        *counter += 1;
+        out.push(effect);
+    }
+
+    // ----- read side (API and p2p serving, Plan 2) -----
 
     /// Scala `bestInputBlock()`.
     pub fn best_input_block(&self) -> Option<&InputBlockAnnouncement> {
-        unimplemented!("task 11 step 3")
+        let oid = self.best.ordering_id?;
+        let tip = self.trees.get(&oid)?.best_tip()?;
+        self.records.get(&tip).map(|r| &r.ann)
     }
 
     /// Scala `bestInputBlocksChain()` — tip first.
     pub fn best_input_chain(&self) -> Vec<InputBlockId> {
-        unimplemented!("task 11 step 3")
+        let Some(oid) = self.best.ordering_id else {
+            return Vec::new();
+        };
+        match self.trees.get(&oid) {
+            Some(tree) => {
+                let mut c = tree.best_chain();
+                c.reverse();
+                c
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// The parent input block an announcement claims, as recorded
+    /// (`InputBlockAnnouncement.prevInputBlockId`). The node serves this
+    /// when answering `−123` requests without re-parsing the proof.
+    pub fn prev_input_block(&self, id: &InputBlockId) -> Option<InputBlockId> {
+        self.records.get(id).and_then(|r| r.prev)
     }
 
     /// Scala `getInputBlock`.
-    pub fn announcement(&self, _id: &InputBlockId) -> Option<&InputBlockAnnouncement> {
-        unimplemented!("task 11 step 3")
+    pub fn announcement(&self, id: &InputBlockId) -> Option<&InputBlockAnnouncement> {
+        self.records.get(id).map(|r| &r.ann)
     }
 
-    /// Scala `getInputBlockTransactionIds`.
-    pub fn transaction_refs(&self, _id: &InputBlockId) -> Option<&[TxRef]> {
-        unimplemented!("task 11 step 3")
+    /// Scala `getInputBlockTransactionIds`, in `TxRef` form.
+    pub fn transaction_refs(&self, id: &InputBlockId) -> Option<&[TxRef]> {
+        self.tx_refs.get(id).map(|v| v.as_slice())
     }
 
     /// Scala `getInputBlockTransactionWeakIds`.
-    pub fn weak_ids(&self, _id: &InputBlockId) -> Option<Vec<WeakId>> {
-        unimplemented!("task 11 step 3")
+    pub fn weak_ids(&self, id: &InputBlockId) -> Option<Vec<WeakId>> {
+        self.tx_refs
+            .get(id)
+            .map(|v| v.iter().map(|r| r.weak_id()).collect())
     }
 
-    /// Scala `getInputBlockTransactions` — skips evicted bodies.
-    pub fn bodies(&self, _id: &InputBlockId) -> Option<Vec<&Body>> {
-        unimplemented!("task 11 step 3")
+    /// Scala `getInputBlockTransactions` — silently skips bodies the
+    /// cache has evicted, exactly as Scala's `getIfPresent` loop does.
+    pub fn bodies(&self, id: &InputBlockId) -> Option<Vec<&Body>> {
+        self.tx_refs
+            .get(id)
+            .map(|v| v.iter().filter_map(|r| self.cache.get(r)).collect())
     }
 
     /// Scala `getInputBlockTransactions(id, toFilter)`.
-    pub fn bodies_by_weak_ids(&self, _id: &InputBlockId, _filter: &[WeakId]) -> Option<Vec<&Body>> {
-        unimplemented!("task 11 step 3")
+    pub fn bodies_by_weak_ids(&self, id: &InputBlockId, filter: &[WeakId]) -> Option<Vec<&Body>> {
+        self.bodies(id).map(|v| {
+            v.into_iter()
+                .filter(|b| filter.contains(&b.weak_id))
+                .collect()
+        })
     }
 
     /// Scala `getOrderingBlockAnnouncement`.
     pub fn ordering_announcement(
         &self,
-        _header_id: &OrderingId,
+        header_id: &OrderingId,
     ) -> Option<&OrderingBlockAnnouncement> {
-        unimplemented!("task 11 step 3")
+        self.ordering.get(header_id)
     }
 
-    /// Scala `getCollectedInputBlocksTransactions`.
-    pub fn collected_input_txs(&self, _ordering_id: &OrderingId) -> Vec<TxRef> {
-        unimplemented!("task 11 step 3")
+    /// Scala `getCollectedInputBlocksTransactions`: the best chain's
+    /// transactions for one ordering block, oldest block first.
+    pub fn collected_input_txs(&self, ordering_id: &OrderingId) -> Vec<TxRef> {
+        let Some(tree) = self.trees.get(ordering_id) else {
+            return Vec::new();
+        };
+        tree.best_chain()
+            .iter()
+            .filter_map(|id| self.tx_refs.get(id))
+            .flat_map(|v| v.iter().copied())
+            .collect()
     }
 
     /// Number of competing forks retained for `ordering_id`.
-    pub fn forks(&self, _ordering_id: &OrderingId) -> usize {
-        unimplemented!("task 11 step 3")
+    pub fn forks(&self, ordering_id: &OrderingId) -> usize {
+        self.trees.get(ordering_id).map_or(0, |t| t.forks.len())
     }
 
     /// Bytes currently held in staging slots (spec 7.4).
     pub fn staged_bytes(&self) -> usize {
-        unimplemented!("task 11 step 3")
+        self.staging.values().map(|s| s.bytes).sum()
     }
 
     /// Scala `disconnectedWaitlist.size`.
     pub fn waitlist_len(&self) -> usize {
-        unimplemented!("task 11 step 3")
+        self.waitlist.len()
+    }
+
+    /// Whether `(block, variant)` has already failed validation (spec 7.5).
+    pub fn has_failed(&self, id: &InputBlockId, variant: &TxRef) -> bool {
+        self.failed.contains(&(*id, *variant))
+    }
+
+    /// Scala `saveOrderingBlockTransactions`.
+    pub fn save_ordering_block_transactions(&mut self, header_id: OrderingId, txs: Vec<TxRef>) {
+        self.ordering.save_block_transactions(header_id, txs);
+    }
+
+    /// Scala `getOrderingBlockTransactions`.
+    pub fn ordering_block_transactions(&self, header_id: &OrderingId) -> Option<&[TxRef]> {
+        self.ordering.block_transactions(header_id)
     }
 }
 
@@ -557,7 +1706,7 @@ mod tests {
         let b1 = ts::body(1, 1);
         let mut ctx = ts::TestCtx::at(FULL);
         ctx.mempool.add(&b1);
-        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, &[b1.clone()]);
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&b1));
         let id = ts::ann_id(&ann);
         let eff = announce(&mut p, &ctx, &ann, ts::PEER);
         let out = ts::validate_ok(&mut p, &ctx, &eff, 42);
@@ -672,7 +1821,7 @@ mod tests {
         let b1 = ts::body(1, 1);
         let mut ctx = ts::TestCtx::at(FULL);
         ctx.mempool.add(&b1);
-        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, &[b1.clone()]);
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&b1));
         let eff = announce(&mut p, &ctx, &ann, ts::PEER);
         ts::validate_ok(&mut p, &ctx, &eff, 1);
         assert!(p.best_input_block().is_some());
@@ -705,7 +1854,7 @@ mod tests {
         let b1 = ts::body(1, 1);
         let mut ctx = ts::TestCtx::at(FULL);
         ctx.mempool.add(&b1);
-        let ib = ts::announcement_for(ORD, FULL + 1, 1, None, &[b1.clone()]);
+        let ib = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&b1));
         let ib_id = ts::ann_id(&ib);
         let eff = announce(&mut p, &ctx, &ib, ts::PEER);
         ts::validate_ok(&mut p, &ctx, &eff, 1);
@@ -816,7 +1965,7 @@ mod tests {
         let b1 = ts::body(1, 1);
         let mut ctx = ts::TestCtx::at(FULL);
         ctx.mempool.add(&b1);
-        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, &[b1.clone()]);
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&b1));
         let first = announce(&mut p, &ctx, &ann, ts::PEER);
         assert!(has_validate(&first));
         let second = announce(&mut p, &ctx, &ann, ts::PEER);
@@ -856,7 +2005,7 @@ mod tests {
         let b1 = ts::body(1, 1);
         let mut ctx = ts::TestCtx::at(FULL);
         ctx.mempool.add(&b1);
-        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, &[b1.clone()]);
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&b1));
         let eff = announce(&mut p, &ctx, &ann, ts::PEER);
         let (job, generation, _, _, _) = ts::one_validate(&eff);
         ctx.handle(
@@ -876,9 +2025,7 @@ mod tests {
             },
         );
         assert_eq!(drops(&out), vec![DropReason::StaleValidation]);
-        assert!(!out
-            .iter()
-            .any(|e| matches!(e, Effect::ChainChanged { .. })));
+        assert!(!out.iter().any(|e| matches!(e, Effect::ChainChanged { .. })));
     }
 
     #[test]
@@ -913,7 +2060,7 @@ mod tests {
         let mut ctx = ts::TestCtx::at(FULL);
         ctx.mempool.add_under(real.weak_id, &decoy);
         ctx.mempool.add_under(real.weak_id, &real);
-        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, &[real.clone()]);
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&real));
         let eff = announce(&mut p, &ctx, &ann, ts::PEER);
         let (_, _, _, txs, _) = ts::one_validate(&eff);
         assert_eq!(txs, vec![real.tx_ref]);
@@ -927,7 +2074,7 @@ mod tests {
         for seed in 20..25u8 {
             ctx.mempool.add_under(real.weak_id, &ts::body(seed, 1));
         }
-        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, &[real.clone()]);
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&real));
         let eff = announce(&mut p, &ctx, &ann, ts::PEER);
         assert!(
             eff.contains(&Effect::RequestTransactions {
@@ -952,7 +2099,7 @@ mod tests {
         let mut ctx = ts::TestCtx::at(FULL);
         ctx.mempool.add_under(v1.weak_id, &v1);
         ctx.mempool.add_under(v1.weak_id, &v2);
-        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, &[v1.clone()]);
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&v1));
         let eff = announce(&mut p, &ctx, &ann, ts::PEER);
         let (_, _, _, txs, _) = ts::one_validate(&eff);
         assert_eq!(txs, vec![v1.tx_ref]);
@@ -973,13 +2120,11 @@ mod tests {
         let b1 = ts::body(1, 1);
         let mut ctx = ts::TestCtx::at(FULL);
         ctx.mempool.add(&b1);
-        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, &[b1.clone()]);
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&b1));
         let eff = announce(&mut p, &ctx, &ann, ts::PEER);
         let out = ts::validate_err(&mut p, &ctx, &eff);
         assert_eq!(drops(&out), vec![DropReason::ValidationFailed]);
-        assert!(!out
-            .iter()
-            .any(|e| matches!(e, Effect::ChainChanged { .. })));
+        assert!(!out.iter().any(|e| matches!(e, Effect::ChainChanged { .. })));
         assert!(p.best_input_block().is_none());
         assert!(p.best_input_chain().is_empty());
     }
@@ -996,12 +2141,12 @@ mod tests {
         let mut ctx = ts::TestCtx::at(FULL);
         ctx.mempool.add(&b1);
         ctx.mempool.add(&b2);
-        let a1 = ts::announcement_for(ORD, FULL + 1, 1, None, &[b1.clone()]);
+        let a1 = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&b1));
         let id1 = ts::ann_id(&a1);
         let eff = announce(&mut p, &ctx, &a1, ts::PEER);
         ts::validate_ok(&mut p, &ctx, &eff, 1);
 
-        let a2 = ts::announcement_for(ORD, FULL + 1, 2, Some(id1), &[b2.clone()]);
+        let a2 = ts::announcement_for(ORD, FULL + 1, 2, Some(id1), std::slice::from_ref(&b2));
         let eff = announce(&mut p, &ctx, &a2, ts::PEER);
         assert!(!has_validate(&eff), "{eff:?}");
         assert_eq!(drops(&eff), vec![DropReason::CacheEvicted]);
@@ -1062,8 +2207,11 @@ mod tests {
 
     #[test]
     fn staging_full_drops_oldest_slot() {
+        // Room for exactly one slot's worth of bodies, so the second
+        // block's staging pushes the total over the cap.
+        let one_body = ts::body(1, 1).bytes.len();
         let bounds = Bounds {
-            staging_bytes_total: 8,
+            staging_bytes_total: one_body,
             ..Bounds::default()
         };
         let mut p = processor_with(bounds);
@@ -1075,13 +2223,7 @@ mod tests {
         ctx.mempool.add(&present1);
         ctx.mempool.add(&present2);
 
-        let a1 = ts::announcement_for(
-            ORD,
-            FULL + 1,
-            1,
-            None,
-            &[present1.clone(), absent1.clone()],
-        );
+        let a1 = ts::announcement_for(ORD, FULL + 1, 1, None, &[present1.clone(), absent1.clone()]);
         let id1 = ts::ann_id(&a1);
         announce(&mut p, &ctx, &a1, ts::PEER);
         assert!(p.staged_bytes() > 0);
@@ -1094,10 +2236,7 @@ mod tests {
             &[present2.clone(), absent2.clone()],
         );
         let eff = announce(&mut p, &ctx, &a2, ts::PEER);
-        assert!(
-            drops(&eff).contains(&DropReason::StagingFull),
-            "{eff:?}"
-        );
+        assert!(drops(&eff).contains(&DropReason::StagingFull), "{eff:?}");
     }
 
     #[test]
@@ -1219,41 +2358,36 @@ mod tests {
 
     #[test]
     fn height_jump_reset_at_plus_two_prunes_like_scala() {
-        // Scala applyInputBlock: `ib.header.height > bestOrderingHeight +
-        // HeightThreshold(2)` resets (prunes) before recording. The node's
-        // reported full-block height (the ±2 window) and the processor's
-        // mirrored best-ordering height are separate inputs, so a jump is
-        // reachable without tripping the window check.
+        // Scala `applyInputBlock`: `ib.header.height > bestOrderingHeight
+        // + HeightThreshold(2)` calls `resetState()` (i.e. `prune()`)
+        // before recording. The node's reported full-block height (which
+        // drives the ±2 window) and the processor's mirrored best-ordering
+        // height are separate inputs, so a jump is reachable without
+        // tripping the window check.
         let mut p = processor();
-        p.set_best_ordering(Some(ORD), FULL - 3); // best ordering height 7
         let ctx = ts::TestCtx::at(FULL);
-        let old = ts::announcement(ORD, FULL - 1, 1, None); // height 9
+        let old = ts::announcement(ORD, FULL + 1, 1, None); // height 11
         let old_id = ts::ann_id(&old);
         announce(&mut p, &ctx, &old, ts::PEER);
+
+        // No jump: best ordering height 10, announcement at 11, and
+        // 11 > 10 + 2 is false — nothing is pruned.
+        let flat = ts::announcement(ORD, FULL + 1, 2, None);
+        announce(&mut p, &ctx, &flat, ts::PEER);
         assert!(p.announcement(&old_id).is_some());
 
-        // height 11 > 7 + 2 -> reset. prune() then runs with bestHeight 7,
-        // which keeps the height-9 record (7 - 9 saturates to 0).
-        let jump = ts::announcement(ORD, FULL + 1, 2, None);
-        announce(&mut p, &ctx, &jump, ts::PEER);
-        assert!(p.announcement(&ts::ann_id(&jump)).is_some());
-
-        // With best ordering height 13, the same jump prunes the height-9
-        // record (13 - 9 == 4 > 2).
-        let mut p = processor();
-        p.set_best_ordering(Some(ORD), 13);
-        let ctx = ts::TestCtx::at(14);
-        let old = ts::announcement(ORD, 15, 3, None);
-        let old_id = ts::ann_id(&old);
-        announce(&mut p, &ctx, &old, ts::PEER);
-        assert!(p.announcement(&old_id).is_some());
-        p.set_best_ordering(Some(ORD), 18);
+        // Jump: best ordering height 14 while the node's full height is
+        // 19, so an announcement at 20 is inside the ±2 window and
+        // 20 > 14 + 2 holds. `resetState()` then prunes the height-11
+        // record (14 - 11 == 3 > PruningThreshold).
+        p.set_best_ordering(Some(ORD), 14);
         let ctx = ts::TestCtx::at(19);
-        let jump = ts::announcement(ORD, 20, 4, None);
+        let jump = ts::announcement(ORD, 20, 3, None);
         announce(&mut p, &ctx, &jump, ts::PEER);
         assert!(
             p.announcement(&old_id).is_none(),
             "the height jump's resetState() prunes the stale record"
         );
+        assert!(p.announcement(&ts::ann_id(&jump)).is_some());
     }
 }

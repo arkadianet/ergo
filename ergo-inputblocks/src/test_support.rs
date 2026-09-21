@@ -82,7 +82,10 @@ pub fn header(parent: OrderingId, height: u32, nonce: u64, extension_root: [u8; 
 
 /// The id of a header (its modifier id) as a plain 32-byte array.
 pub fn header_id(h: &Header) -> [u8; 32] {
-    *serialize_header(h).expect("test header serializes").1.as_bytes()
+    *serialize_header(h)
+        .expect("test header serializes")
+        .1
+        .as_bytes()
 }
 
 /// The id of an announcement's header.
@@ -425,9 +428,7 @@ pub fn announce_and_apply(
         },
     );
     loop {
-        let has_validate = effects
-            .iter()
-            .any(|e| matches!(e, Effect::Validate { .. }));
+        let has_validate = effects.iter().any(|e| matches!(e, Effect::Validate { .. }));
         all.extend(effects.clone());
         if !has_validate {
             break;
