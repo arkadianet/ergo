@@ -2007,6 +2007,13 @@ impl Processor {
             .is_some_and(|combos| combos.iter().any(|c| c.as_slice() == txs))
     }
 
+    /// How many transaction combinations have been rejected by
+    /// validation for `id`. Bounded by
+    /// [`crate::bounds::Bounds::validation_retries_per_block`].
+    pub fn failed_combinations(&self, id: &InputBlockId) -> usize {
+        self.failed.get(id).map_or(0, |c| c.len())
+    }
+
     /// Whether a body is currently in the shared cache — what the node
     /// can actually serve for a `105` request.
     pub fn is_cached(&self, tx_ref: &TxRef) -> bool {
@@ -3372,6 +3379,139 @@ mod tests {
         assert!(!has_validate(&again), "{again:?}");
         assert!(p.has_failed_combination(&id, &[b1.tx_ref]));
         assert!(p.best_input_block().is_none());
+    }
+
+    // ----- final fix wave -----
+
+    /// Build a block whose single announced position has `locals` local
+    /// weak-id collisions in the mempool, then let the announcer settle
+    /// it with `delivered` bodies of the same transaction. Returns the
+    /// processor, the context and the block id.
+    fn over_stuffed_position(
+        locals: u8,
+        delivered: u8,
+    ) -> (Processor, ts::TestCtx, InputBlockId, Vec<Effect>) {
+        let mut p = processor();
+        let base = ts::body(7, 1);
+        let mut ctx = ts::TestCtx::at(FULL);
+        for w in 1..=locals {
+            ctx.mempool.add_under(base.weak_id, &ts::body(7, w));
+        }
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&base));
+        let id = ts::ann_id(&ann);
+        announce(&mut p, &ctx, &ann, ts::PEER);
+        let bodies: Vec<Body> = (0..delivered)
+            .map(|i| ts::body_under(base.weak_id, 7, locals + 1 + i))
+            .collect();
+        let eff = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies,
+                from: Some(ts::PEER),
+                now: Tick(5),
+            },
+        );
+        (p, ctx, id, eff)
+    }
+
+    #[test]
+    fn initial_variant_list_respects_the_candidate_cap() {
+        // Spec 7.4's `candidates_per_position` has to bite when the
+        // variant list is first built, not only when a later delivery
+        // extends it: the two provenances are capped separately while
+        // staging, so `cap + 1` local guesses and `cap` peer answers for
+        // one position could otherwise be promoted into `2 * cap + 1`
+        // retry variants — and into the shared cache.
+        let cap = Bounds::default().candidates_per_position;
+        let (p, _ctx, id, eff) = over_stuffed_position(cap as u8 + 1, cap as u8);
+        assert!(has_validate(&eff), "the block must resolve: {eff:?}");
+        assert_eq!(
+            p.variants_per_position(&id),
+            vec![cap],
+            "the initial variant list must respect the per-position cap"
+        );
+    }
+
+    #[test]
+    fn validation_retry_budget_gives_up_on_the_block() {
+        // Two positions with `cap` witness variants each is `cap ^ 2`
+        // digest-consistent combinations — every one of them a full block
+        // validation, and every failure remembered. The per-block budget
+        // is what stops that being a remote-controlled amount of work.
+        let bounds = Bounds::default();
+        let cap = bounds.candidates_per_position;
+        let budget = bounds.validation_retries_per_block;
+        assert!(budget < cap * cap, "the budget must be the binding limit");
+
+        let mut p = processor();
+        let b1 = ts::body(1, 1);
+        let b2 = ts::body(2, 1);
+        let mut ctx = ts::TestCtx::at(FULL);
+        for w in 1..=cap as u8 {
+            ctx.mempool.add_under(b1.weak_id, &ts::body(1, w));
+            ctx.mempool.add_under(b2.weak_id, &ts::body(2, w));
+        }
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, &[b1.clone(), b2.clone()]);
+        let id = ts::ann_id(&ann);
+        let mut eff = announce(&mut p, &ctx, &ann, ts::PEER);
+
+        let mut validations = 0;
+        let mut last = Vec::new();
+        while has_validate(&eff) {
+            validations += 1;
+            assert!(validations <= cap * cap, "the retry loop never terminated");
+            eff = ts::validate_err(&mut p, &ctx, &eff);
+            last = drops(&eff);
+        }
+        assert_eq!(
+            validations, budget,
+            "a block must not cost more than its validation budget"
+        );
+        assert!(
+            last.contains(&DropReason::CandidatesExhausted),
+            "an exhausted budget must report CandidatesExhausted, got {last:?}"
+        );
+        assert!(
+            p.failed_combinations(&id) <= budget,
+            "rejected-combination memory must be bounded by the budget"
+        );
+    }
+
+    #[test]
+    fn later_witness_delivery_revives_a_failed_selection() {
+        // The announcer's own body can arrive after the local guess has
+        // already been rejected. Appending it to the variant list is not
+        // enough: the cursor still points at the failed combination,
+        // which `pump` refuses to re-offer, so nothing would ever restart.
+        let mut p = processor();
+        let b1 = ts::body(1, 1);
+        let mut ctx = ts::TestCtx::at(FULL);
+        ctx.mempool.add(&b1);
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&b1));
+        let id = ts::ann_id(&ann);
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        let out = ts::validate_err(&mut p, &ctx, &eff);
+        assert_eq!(drops(&out), vec![DropReason::ValidationFailed]);
+        assert!(!has_validate(&out));
+
+        let other = ts::body(1, 2);
+        let revived = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![other.clone()],
+                from: Some(ts::PEER),
+                now: Tick(9),
+            },
+        );
+        let (_, _, block, txs, _) = ts::one_validate(&revived);
+        assert_eq!(block, id);
+        assert_eq!(
+            txs,
+            vec![other.tx_ref],
+            "the retry must run the newly delivered witness"
+        );
     }
 
     // ----- oracle parity -----

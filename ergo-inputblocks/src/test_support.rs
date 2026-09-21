@@ -242,6 +242,20 @@ pub fn body(seed: u8, witness: u8) -> Body {
     body_of(tx(seed, witness))
 }
 
+/// A [`Body`] for [`tx`]`(seed, witness)` that *claims* weak id `weak`.
+///
+/// Weak ids are 48 bits and not collision-resistant, but a collision
+/// cannot be constructed cheaply, so the delivery side of spec 7.5's
+/// ambiguity handling is exercised by handing the processor a body
+/// filed under someone else's weak id — the delivery counterpart of
+/// [`Mempool::add_under`].
+pub fn body_under(weak: WeakId, seed: u8, witness: u8) -> Body {
+    Body {
+        weak_id: weak,
+        ..body(seed, witness)
+    }
+}
+
 /// A [`Body`] wrapping an arbitrary transaction.
 pub fn body_of(t: Transaction) -> Body {
     let mut w = VlqWriter::new();

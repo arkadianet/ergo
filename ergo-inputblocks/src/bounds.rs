@@ -71,6 +71,15 @@ pub struct Bounds {
     /// Staging-slot lifetime; Scala `LocalInputBlockChunksTTL` (10 min).
     /// Swept on [`crate::processor::Event::Tick`].
     pub staging_ttl_ms: u64,
+    /// Validation attempts spent on one input block before it is given
+    /// up on. Not a Scala bound (Scala never retries at all): spec 7.5's
+    /// witness-variant retry can otherwise walk
+    /// `candidates_per_position ^ positions` combinations, each a full
+    /// block validation, and the set of rejected combinations it
+    /// remembers grows with it. At the cap the block is reported
+    /// [`crate::processor::DropReason::CandidatesExhausted`] and no
+    /// further combination is offered.
+    pub validation_retries_per_block: usize,
     /// Deferred application triggers retained while a validation job is
     /// in flight. Not a spec bound — an implementation queue that must
     /// not grow without limit; overflow drops the oldest trigger.
@@ -97,6 +106,7 @@ impl Default for Bounds {
             ordering_announcement_prune_threshold: 6,
             height_reset_threshold: 2,
             staging_ttl_ms: 10 * 60 * 1000,
+            validation_retries_per_block: 8,
             pending_triggers: 1024,
         }
     }
