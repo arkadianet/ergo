@@ -2817,3 +2817,408 @@ fn a_far_advance_that_abandons_the_previous_tip_is_a_reorg() {
         "an unknown previous tip cannot be shown to be an ancestor"
     );
 }
+
+// ----- ordering-block reconstruction (spec 9.3, task 5) -----
+
+/// An ordering-block announcement for an unknown parent carrying
+/// `non_broadcasted` in full, `broadcasted` by id, and `fields` in its
+/// extension, with `transactions_root` forced to `root`.
+///
+/// `nBits` is difficulty 1 and the parent is unknown, so the announcement
+/// passes `validate_ordering_announcement` whatever we put in the header.
+fn reconstructable_announcement(
+    non_broadcasted: Vec<ergo_ser::transaction::Transaction>,
+    broadcasted: &[ergo_ser::transaction::Transaction],
+    root: [u8; 32],
+    fields: Vec<([u8; 2], Vec<u8>)>,
+) -> ergo_ser::input_block::OrderingBlockAnnouncement {
+    let mut ann = ts::ordering_announcement([0x77; 32], 5, 9, fields);
+    ann.non_broadcasted_transactions = non_broadcasted;
+    ann.broadcasted_transaction_ids = broadcasted
+        .iter()
+        .map(|t| {
+            *ergo_ser::transaction::transaction_id(t)
+                .expect("test transaction id")
+                .as_bytes()
+        })
+        .collect();
+    ann.header.transactions_root = ergo_primitives::digest::Digest32::from_bytes(root);
+    ann
+}
+
+/// Put `ann` in the processor's ordering store the way a received
+/// announcement does. Its `03 02` field names an input block we do not
+/// hold, so the processor stores it and asks for the section — the
+/// reconstruct effect itself is driven explicitly by each test.
+fn store_ordering_announcement(
+    state: &mut NodeState,
+    ann: ergo_ser::input_block::OrderingBlockAnnouncement,
+    from: PeerTag,
+) {
+    let mut rt = state.input_blocks.take().expect("runtime");
+    {
+        let data = build_ctx_data(state, &[]);
+        let _ = data.with(|ctx| {
+            rt.processor_mut().handle(
+                ergo_inputblocks::processor::Event::OrderingAnnouncementAccepted {
+                    ann,
+                    from,
+                    now: ergo_inputblocks::types::Tick(1),
+                },
+                ctx,
+            )
+        });
+    }
+    state.input_blocks = Some(rt);
+}
+
+/// Store `header` as a validated header, off the best chain.
+fn store_header(state: &mut NodeState, header: &Header) -> [u8; 32] {
+    let (bytes, id) = serialize_header(header).expect("serialize");
+    let id = *id.as_bytes();
+    seed_mainnet_headers(state, &[(header.height, id, bytes, header.clone())], false);
+    id
+}
+
+/// The header's `transactions_root` over `txs` at header version 2.
+fn transactions_root_of(txs: &[ergo_ser::transaction::Transaction]) -> [u8; 32] {
+    let tx_ids: Vec<Vec<u8>> = txs
+        .iter()
+        .map(|tx| {
+            let bts = ergo_ser::transaction::bytes_to_sign(tx).expect("bytes_to_sign");
+            ergo_crypto::autolykos::common::blake2b256(&bts).to_vec()
+        })
+        .collect();
+    let witness: Vec<Vec<u8>> = txs
+        .iter()
+        .map(|tx| ergo_ser::weak_id::witness_id(tx).to_vec())
+        .collect();
+    let id_refs: Vec<&[u8]> = tx_ids.iter().map(|v| v.as_slice()).collect();
+    let witness_refs: Vec<&[u8]> = witness.iter().map(|v| v.as_slice()).collect();
+    ergo_crypto::merkle::transactions_root(&id_refs, Some(&witness_refs))
+}
+
+/// The feed events this test run produced, newest last.
+fn feed_kinds(state: &NodeState) -> Vec<crate::node::event_feed::FeedEventKind> {
+    state
+        .event_feed
+        .latest(crate::node::event_feed::EventFeedRing::CAP)
+        .into_iter()
+        .map(|e| e.kind)
+        .collect()
+}
+
+/// Seat `tx` in the mempool as a restored input-block body.
+fn seat_in_mempool(state: &mut NodeState, tx: &ergo_ser::transaction::Transaction) {
+    let body = ts::body_of(tx.clone());
+    let id = ergo_primitives::digest::Digest32::from_bytes(body.tx_ref.tx_id);
+    state
+        .mempool
+        .restore_input_block_txs(&[(id, body.bytes.clone(), None)], Instant::now());
+    assert!(state.mempool.contains(&id), "fixture seats the transaction");
+}
+
+#[test]
+fn reconstruct_with_all_broadcasted_in_mempool_persists_block_transactions_and_assembles() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19701,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let carried = ts::tx(0xa1, 1);
+    let pooled = ts::tx(0xb2, 1);
+    seat_in_mempool(&mut state, &pooled);
+    let root = transactions_root_of(&[carried.clone(), pooled.clone()]);
+    let ann = reconstructable_announcement(
+        vec![carried.clone()],
+        std::slice::from_ref(&pooled),
+        root,
+        Vec::new(),
+    );
+    let header_id = store_header(&mut state, &ann.header);
+    store_ordering_announcement(&mut state, ann, tag);
+
+    let actions = execute_effects(
+        &mut state,
+        vec![Effect::OrderingReconstruct {
+            from: tag,
+            plan: ergo_inputblocks::ordering::ReconstructionPlan {
+                header_id,
+                non_broadcasted: vec![carried.clone()],
+                broadcasted_ids: vec![*ergo_ser::transaction::transaction_id(&pooled)
+                    .unwrap()
+                    .as_bytes()],
+                input_chain_txs: Vec::new(),
+                prev_input_block_id: None,
+            },
+        }],
+        now,
+    );
+
+    // The section the ordinary pipeline would have downloaded is now in
+    // the store, under the id that pipeline names it by.
+    let section_id = ergo_ser::modifier_id::compute_section_id(102, &header_id, &root);
+    let stored = state
+        .store
+        .get_block_section(&section_id)
+        .unwrap()
+        .expect("the rebuilt BlockTransactions section is persisted");
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    ergo_ser::block_transactions::write_block_transactions_with_version(
+        &mut w,
+        &ergo_ser::block_transactions::BlockTransactions {
+            header_id: ergo_primitives::digest::ModifierId::from_bytes(header_id),
+            transactions: vec![carried, pooled],
+        },
+        2,
+    )
+    .unwrap();
+    assert_eq!(&stored[..], &w.result()[..], "canonical v2 section bytes");
+
+    assert!(
+        sent_frames(&actions, ergo_p2p::message::CODE_REQUEST_MODIFIER).is_empty(),
+        "a reconstructed block downloads nothing"
+    );
+    assert!(
+        matches!(
+            feed_kinds(&state).last(),
+            Some(crate::node::event_feed::FeedEventKind::OrderingReconstructed { txs: 2, .. })
+        ),
+        "the feed records the reconstruction: {:?}",
+        feed_kinds(&state)
+    );
+}
+
+#[test]
+fn reconstruct_with_root_mismatch_requests_block_transactions_from_announcer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19702,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let carried = ts::tx(0xa1, 1);
+    // A root that does not belong to `carried`.
+    let ann = reconstructable_announcement(vec![carried.clone()], &[], [0x44; 32], Vec::new());
+    let announced_root = *ann.header.transactions_root.as_bytes();
+    let header_id = store_header(&mut state, &ann.header);
+    store_ordering_announcement(&mut state, ann, tag);
+
+    let actions = execute_effects(
+        &mut state,
+        vec![Effect::OrderingReconstruct {
+            from: tag,
+            plan: ergo_inputblocks::ordering::ReconstructionPlan {
+                header_id,
+                non_broadcasted: vec![carried],
+                broadcasted_ids: Vec::new(),
+                input_chain_txs: Vec::new(),
+                prev_input_block_id: None,
+            },
+        }],
+        now,
+    );
+
+    let reqs = sent_frames(&actions, ergo_p2p::message::CODE_REQUEST_MODIFIER);
+    assert_eq!(reqs.len(), 1, "the full section is requested instead");
+    let inv = ergo_p2p::message::deserialize_inv(&reqs[0]).unwrap();
+    assert_eq!(
+        inv.type_id,
+        ergo_p2p::types::ModifierTypeId::BlockTransactions.as_byte()
+    );
+    assert_eq!(
+        inv.ids,
+        vec![ergo_ser::modifier_id::compute_section_id(
+            102,
+            &header_id,
+            &announced_root
+        )],
+        "the announcing peer is asked for the header's own section id"
+    );
+    assert!(
+        matches!(
+            feed_kinds(&state).last(),
+            Some(crate::node::event_feed::FeedEventKind::OrderingReconstructFallback {
+                reason,
+                ..
+            }) if reason == "root_mismatch"
+        ),
+        "the feed records the fallback reason: {:?}",
+        feed_kinds(&state)
+    );
+}
+
+#[test]
+fn reconstruct_with_missing_broadcasted_tx_requests_block_transactions() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19703,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let carried = ts::tx(0xa1, 1);
+    let never_pooled = ts::tx(0xb2, 1);
+    // The root is the RIGHT one: only the missing body forces the
+    // fallback, so this cannot pass for a root mismatch.
+    let root = transactions_root_of(&[carried.clone(), never_pooled.clone()]);
+    let ann = reconstructable_announcement(
+        vec![carried.clone()],
+        std::slice::from_ref(&never_pooled),
+        root,
+        Vec::new(),
+    );
+    let header_id = store_header(&mut state, &ann.header);
+    store_ordering_announcement(&mut state, ann, tag);
+
+    let actions = execute_effects(
+        &mut state,
+        vec![Effect::OrderingReconstruct {
+            from: tag,
+            plan: ergo_inputblocks::ordering::ReconstructionPlan {
+                header_id,
+                non_broadcasted: vec![carried],
+                broadcasted_ids: vec![*ergo_ser::transaction::transaction_id(&never_pooled)
+                    .unwrap()
+                    .as_bytes()],
+                input_chain_txs: Vec::new(),
+                prev_input_block_id: None,
+            },
+        }],
+        now,
+    );
+
+    assert_eq!(
+        sent_frames(&actions, ergo_p2p::message::CODE_REQUEST_MODIFIER).len(),
+        1,
+        "an unpooled broadcasted transaction falls back to a full download"
+    );
+    assert!(
+        state
+            .store
+            .get_block_section(&ergo_ser::modifier_id::compute_section_id(
+                102, &header_id, &root
+            ))
+            .unwrap()
+            .is_none(),
+        "nothing is persisted from an incomplete reconstruction"
+    );
+    assert!(
+        matches!(
+            feed_kinds(&state).last(),
+            Some(crate::node::event_feed::FeedEventKind::OrderingReconstructFallback {
+                reason,
+                ..
+            }) if reason == "missing_broadcasted_tx"
+        ),
+        "the feed names the missing-transaction reason: {:?}",
+        feed_kinds(&state)
+    );
+}
+
+#[test]
+fn reconstruct_persists_header_and_extension_through_normal_path_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19704,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let carried = ts::tx(0xa1, 1);
+    let fields = vec![(
+        ergo_ser::input_block::PREV_INPUT_BLOCK_ID_KEY,
+        [0x5c; 32].to_vec(),
+    )];
+    let ann = reconstructable_announcement(
+        vec![carried.clone()],
+        &[],
+        transactions_root_of(std::slice::from_ref(&carried)),
+        fields.clone(),
+    );
+    // The header is deliberately NOT stored: the handoff must offer it.
+    let (header_bytes, header_id) = serialize_header(&ann.header).unwrap();
+    let header_id = *header_id.as_bytes();
+    let extension_root = *ann.header.extension_root.as_bytes();
+    store_ordering_announcement(&mut state, ann, tag);
+
+    let rt = state.input_blocks.as_ref().unwrap();
+    let plan = ergo_inputblocks::ordering::ReconstructionPlan {
+        header_id,
+        non_broadcasted: vec![carried],
+        broadcasted_ids: Vec::new(),
+        input_chain_txs: Vec::new(),
+        prev_input_block_id: None,
+    };
+    let rec = super::reconstruct::plan_reconstruction(&state, rt, &plan, Some(peer))
+        .expect("a stored announcement plans");
+
+    assert!(
+        matches!(
+            &rec.actions[0],
+            Action::ValidateHeader { peer: p, header_bytes: b }
+                if *p == peer && *b == header_bytes
+        ),
+        "the announcement's header goes through the ordinary header path \
+         first: {:?}",
+        rec.actions[0]
+    );
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    ergo_ser::extension::write_extension(
+        &mut w,
+        &ergo_ser::extension::Extension {
+            header_id: ergo_primitives::digest::ModifierId::from_bytes(header_id),
+            fields: fields
+                .iter()
+                .map(|(key, value)| ergo_ser::extension::ExtensionField {
+                    key: *key,
+                    value: value.clone(),
+                })
+                .collect(),
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            &rec.actions[1],
+            Action::PersistSection { modifier_id, section_bytes, section_type: 108 }
+                if *modifier_id
+                    == ergo_ser::modifier_id::compute_section_id(108, &header_id, &extension_root)
+                    && *section_bytes == w.result()
+        ),
+        "then the extension built from the announcement's fields: {:?}",
+        rec.actions[1]
+    );
+    assert!(
+        matches!(
+            rec.actions[2],
+            Action::PersistSection {
+                section_type: 102,
+                ..
+            }
+        ),
+        "and only then the rebuilt transaction section: {:?}",
+        rec.actions[2]
+    );
+    assert!(matches!(rec.actions[3], Action::AssembleBlock { .. }));
+    let _ = now;
+}

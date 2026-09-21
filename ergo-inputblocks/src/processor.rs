@@ -213,6 +213,10 @@ pub enum Effect {
     OrderingReconstruct {
         /// The plan.
         plan: ReconstructionPlan,
+        /// The peer that announced the ordering block — the one to ask
+        /// for the full `BlockTransactions` section when the plan does
+        /// not reproduce the header's transactions root.
+        from: PeerTag,
     },
     /// Telemetry: something was dropped, and why.
     Dropped {
@@ -2978,6 +2982,7 @@ impl Processor {
         match prev {
             Some(p) if self.tx_refs.contains_key(&p) => {
                 out.push(Effect::OrderingReconstruct {
+                    from,
                     plan: ReconstructionPlan {
                         header_id,
                         non_broadcasted,
@@ -3749,7 +3754,7 @@ mod tests {
         let plan = out
             .iter()
             .find_map(|e| match e {
-                Effect::OrderingReconstruct { plan } => Some(plan.clone()),
+                Effect::OrderingReconstruct { plan, .. } => Some(plan.clone()),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no OrderingReconstruct in {out:?}"));

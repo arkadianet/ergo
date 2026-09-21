@@ -75,6 +75,23 @@ pub(crate) enum FeedEventKind {
         height: u32,
         header_id: String,
     },
+    /// An ordering block's transaction section was rebuilt locally from
+    /// the announcement plus the collected input blocks — no
+    /// `BlockTransactions` download (spec 9.3).
+    OrderingReconstructed {
+        height: u32,
+        header_id: String,
+        txs: u32,
+    },
+    /// Reconstruction did not reproduce the header's transactions root
+    /// (or an ingredient was missing), so the section is being downloaded
+    /// in full instead. `reason` is one of `missing_broadcasted_tx`,
+    /// `missing_input_body`, `root_mismatch`.
+    OrderingReconstructFallback {
+        height: u32,
+        header_id: String,
+        reason: String,
+    },
 }
 
 /// Previous-tick observations the differ compares against. `primed=false`
@@ -548,6 +565,12 @@ mod tests {
                 FeedEventKind::SyncWedged { height, .. } => format!("wedged:{height}"),
                 FeedEventKind::ShadowDivergence { kind, height, .. } => {
                     format!("shadow:{kind}:{height}")
+                }
+                FeedEventKind::OrderingReconstructed { height, .. } => {
+                    format!("reconstructed:{height}")
+                }
+                FeedEventKind::OrderingReconstructFallback { reason, .. } => {
+                    format!("reconstruct_fallback:{reason}")
                 }
             })
             .collect()

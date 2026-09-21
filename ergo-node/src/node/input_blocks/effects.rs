@@ -13,7 +13,7 @@
 //! | `RelayAnnouncement` | `InputBlock` (100) to every relay-eligible peer |
 //! | `RelayOrderingInv` | `Inv` (55) type −121 to every relay-eligible peer |
 //! | `Penalize` | `Action::Penalize { Misbehavior }` + `warn!` |
-//! | `OrderingReconstruct` | Task 5 (counted + logged, no-op here) |
+//! | `OrderingReconstruct` | rebuild the block's sections and run them through the executor; fall back to `RequestBlockTransactions` |
 //! | `Dropped` | bump the per-reason counter, `debug!` |
 
 use std::collections::VecDeque;
@@ -32,9 +32,11 @@ use ergo_sync::coordinator::Action;
 use tracing::{debug, warn};
 
 use super::super::admission::route_mempool_actions;
+use super::super::event_feed::FeedEventKind;
 use super::super::NodeState;
 use super::super::{hedge_request_modifiers, register_expectation, tracked_request_modifier};
 use super::ctx::{build_ctx_data, transactions_section_id};
+use super::reconstruct::{plan_reconstruction, Outcome, Reconstruction};
 use super::runtime::{ExpectedPhase, InputBlocksRuntime};
 use super::validate::{run_validation, ValidateJob};
 
@@ -322,19 +324,103 @@ fn execute_one(
                 penalty: Penalty::Misbehavior,
             });
         }
-        Effect::OrderingReconstruct { plan } => {
-            // Task 5 builds the `BlockTransactions` section from the plan
-            // and hands it to the ordinary block pipeline (spec 9.3).
-            debug!(
-                ordering = %hex::encode(plan.header_id),
-                "input_blocks: ordering reconstruction not wired yet (task 5)"
-            );
+        Effect::OrderingReconstruct { plan, from } => {
+            let Some(rec) = plan_reconstruction(state, rt, &plan, rt.peer(from)) else {
+                debug!(
+                    ordering = %hex::encode(plan.header_id),
+                    "input_blocks: no stored announcement to reconstruct from"
+                );
+                return;
+            };
+            let Reconstruction {
+                actions,
+                outcome,
+                height,
+            } = rec;
+            // The header, the extension and the rebuilt section go
+            // through the ORDINARY pipeline — and they must run here
+            // rather than be returned: `flush_actions` only carries the
+            // network actions, and the executor is what applies these.
+            out.extend(run_pipeline(state, actions, now));
+            let header_id = hex::encode(plan.header_id);
+            match outcome {
+                Outcome::Assemble { txs } => {
+                    debug!(
+                        ordering = %header_id,
+                        txs, "input_blocks: ordering block rebuilt from the input chain"
+                    );
+                    push_feed_event(
+                        state,
+                        FeedEventKind::OrderingReconstructed {
+                            height,
+                            header_id,
+                            txs,
+                        },
+                    );
+                }
+                Outcome::Fallback { reason } => {
+                    debug!(
+                        ordering = %header_id,
+                        reason, "input_blocks: reconstruction fell back to a full download"
+                    );
+                    push_feed_event(
+                        state,
+                        FeedEventKind::OrderingReconstructFallback {
+                            height,
+                            header_id,
+                            reason: reason.to_string(),
+                        },
+                    );
+                    // The ordinary request path, to the announcing peer:
+                    // the header handoff above is what makes its section
+                    // id computable.
+                    queue.push_back(Effect::RequestBlockTransactions {
+                        header_id: plan.header_id,
+                        from,
+                    });
+                }
+            }
         }
         Effect::Dropped { id, reason } => {
             rt.counters.bump(&reason);
             debug!(id = %hex::encode(id), ?reason, "input_blocks: dropped");
         }
     }
+}
+
+/// Run reconstruction's actions through the block executor, returning the
+/// network actions it produced. Same wiring as the mined-block submit
+/// path: `execute_all` validates the header first, then persists the
+/// sections in order, then assembles.
+fn run_pipeline(state: &mut NodeState, actions: Vec<Action>, now: Instant) -> Vec<Action> {
+    if actions.is_empty() {
+        return Vec::new();
+    }
+    let rescan_guard = crate::wallet_boot::ProdRescanGuard;
+    let wallet_wiring = state
+        .wallet_hook
+        .as_deref()
+        .map(|h| ergo_state::wallet::WalletWiring {
+            hook: h as &dyn ergo_state::wallet::WalletApplyHook,
+            rescan_guard: &rescan_guard,
+        });
+    state.executor.execute_all(
+        actions,
+        &mut state.store,
+        &mut state.coordinator,
+        now,
+        wallet_wiring,
+    )
+}
+
+/// Append one operator-feed event. The feed is pure observability: it
+/// never feeds sync, consensus or peer scoring.
+fn push_feed_event(state: &mut NodeState, kind: FeedEventKind) {
+    let unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    state.event_feed.push(unix_ms, kind);
 }
 
 /// `RequestModifier` (code 22) for one id of one modifier type, through

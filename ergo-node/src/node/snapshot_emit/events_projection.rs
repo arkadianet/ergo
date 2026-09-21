@@ -105,6 +105,29 @@ pub(super) fn build_events_projection(
                             .into(),
                     );
                 }
+                // Snake-case kinds, deliberately: the M2 devnet smoke and
+                // the campaign's reconstruct-rate measurement key off
+                // these exact strings (plan 2 tasks 8 and 9).
+                K::OrderingReconstructed {
+                    height,
+                    header_id,
+                    txs,
+                } => {
+                    ev.kind = "ordering_reconstructed".into();
+                    ev.height = Some(height);
+                    ev.header_id = Some(header_id);
+                    ev.txs = Some(txs);
+                }
+                K::OrderingReconstructFallback {
+                    height,
+                    header_id,
+                    reason,
+                } => {
+                    ev.kind = "ordering_reconstruct_fallback".into();
+                    ev.height = Some(height);
+                    ev.header_id = Some(header_id);
+                    ev.detail = Some(reason);
+                }
             }
             ev
         })
