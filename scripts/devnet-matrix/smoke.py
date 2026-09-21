@@ -60,7 +60,11 @@ from lifecycle import HERE, REST, ROOT, WORK
 
 URLS = {name: f'http://127.0.0.1:{port}' for name, port in REST.items()}
 API_KEY = lifecycle.API_KEY
-FINDINGS = ROOT / 'test-vectors/weak-blocks/findings'
+# Artifacts are written to the run's own `.work/` (gitignored). A run
+# uncapped in its mismatch recording writes hundreds of near-identical
+# files, and committing those is noise, not evidence: only findings a
+# human PROMOTES land under `test-vectors/weak-blocks/findings/`.
+FINDINGS = WORK / 'findings'
 
 # `/api/v1/peers` reports the peer's handshake protocol version. Input
 # blocks are gated on >= 6.5.0 on the Scala side, so anything lower means
@@ -76,6 +80,11 @@ HEIGHT_WINDOW = 2
 # has just started has not finished joining. Catch-up after the
 # deliberate restart is NOT excluded — keeping up is the assertion.
 START_GRACE_SECONDS = 60
+
+# How long `pause_sampling` will wait for a sweep already underway to
+# finish. Generous: a sweep is a handful of REST calls, and a timeout is
+# recorded (`sweep_join_timeouts`) rather than silently tolerated.
+SWEEP_JOIN_SECONDS = 15.0
 
 # Drop reasons that mean the two nodes disagreed about bytes, or that the
 # follower blamed its peer. Any of them is a failure.
@@ -199,32 +208,54 @@ def rust_log_window(unix_seconds, before=10.0, after=5.0, limit=400):
     return out
 
 
-def announcement_hex_for(ids, window):
-    """The announcement bytes for `ids`, from the debug-log `window`.
+# The node logs the raw announcement frame on exactly one line, in
+# exactly this shape (`input_blocks::dispatch::log_announcement_payload`,
+# TRACE on target `ergo_node::node::input_blocks::announcements`). The
+# extractor below matches ONLY this line: scraping any long hex run off
+# any line mentioning the id used to turn a PARENT id into "announcement
+# evidence". `ergo-node`'s
+# `the_announcement_payload_line_has_the_shape_the_harness_parses` pins
+# the other end of this contract.
+ANNOUNCEMENT_LINE = re.compile(
+    r'input_blocks: raw announcement payload'
+    r'\s+block=(?P<block>[0-9a-f]{64})'
+    r'\s+payload=(?P<payload>[0-9a-f]*)')
 
-    Greps the window for each id and keeps any long hex run on a line
-    that mentions it — that is where an announcement's payload appears
-    when the node logs one. Returns `None` with an explicit reason when
-    the window holds nothing for the id, so an artifact never implies it
-    looked and found emptiness when it simply had nothing to look at.
+
+def announcement_hex_for(ids, window):
+    """The raw announcement bytes for `ids`, from the debug-log `window`.
+
+    Only the node's dedicated payload line counts. Three outcomes, all
+    explicit, so an artifact never implies it looked and found emptiness
+    when it simply had nothing to look at:
+
+    * the payload hex, when the node logged that line for the id;
+    * `no_payload_bytes_logged_for_this_id` when the window mentions the
+      id but carries no payload line for it (TRACE not enabled, or the
+      announcement arrived outside the window);
+    * `not_in_log_window` when the window does not mention the id at all.
     """
     out = {}
+    payloads = {}
+    for line in window:
+        match = ANNOUNCEMENT_LINE.search(line)
+        if match:
+            payloads.setdefault(match.group('block'), []).append(
+                (match.group('payload'), line))
     for block_id in [i for i in ids if i]:
+        found = payloads.get(block_id)
+        if found:
+            out[block_id] = {'announcement_hex': [p for p, _ in found],
+                             'lines': [line for _, line in found][:5]}
+            continue
         lines = [line for line in window if block_id in line]
         if not lines:
             out[block_id] = {'announcement_hex': None,
                              'reason': 'not_in_log_window'}
-            continue
-        hexes = []
-        for line in lines:
-            # Long hex runs only: ids are 64 chars, payloads longer.
-            hexes += [h for h in re.findall(r'\b[0-9a-f]{64,}\b', line)
-                      if h != block_id]
-        out[block_id] = ({'announcement_hex': hexes, 'lines': lines[:5]}
-                         if hexes else
-                         {'announcement_hex': None,
-                          'reason': 'no_payload_bytes_logged_for_this_id',
-                          'lines': lines[:5]})
+        else:
+            out[block_id] = {'announcement_hex': None,
+                             'reason': 'no_payload_bytes_logged_for_this_id',
+                             'lines': lines[:5]}
     return out
 
 
@@ -263,6 +294,26 @@ def write_mismatch_artifact(assertion, message, evidence, at=None, context=None,
     return str(path.relative_to(ROOT))
 
 
+def ids_in(value, limit=20):
+    """Every distinct 64-hex id an evidence blob mentions, in order.
+
+    A failure artifact is only as useful as the blocks it can fetch
+    announcement bytes for, and the callers already put those ids in the
+    evidence. Pulling them back out here is what stops each new
+    `run.fail` site from having to remember.
+    """
+    out = []
+    seen = set()
+    for match in re.finditer(r'\b[0-9a-f]{64}\b', json.dumps(value, default=str)):
+        block_id = match.group(0)
+        if block_id not in seen:
+            seen.add(block_id)
+            out.append(block_id)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def next_finding_path():
     FINDINGS.mkdir(parents=True, exist_ok=True)
     day = datetime.date.today().isoformat()
@@ -290,6 +341,10 @@ class Run:
         self._latest = None
         self._pause = threading.Event()
         self._pause.set()
+        # Set at the end of every sweep. `pause_sampling` clears it,
+        # then waits for it, which is how the main thread JOINS a sweep
+        # already underway instead of sleeping and hoping.
+        self._sweep_done = threading.Event()
         self.series_path = WORK / 'agreement-series.jsonl'
         self._series_file = None
         self.sampler_error = None
@@ -307,6 +362,10 @@ class Run:
         self.live_artifacts = 0
         self.live_artifact_paths = []
         self.peer_absent_in_grace = 0
+        self.sweep_join_timeouts = 0
+        # Sweeps whose ordering tip moved across the pool read; their
+        # pool observation is recorded but never credits an eviction.
+        self.pool_tip_moved_samples = 0
 
         # Assertion 5, accumulated across the whole run.
         self.max_height_gap = 0
@@ -349,9 +408,17 @@ class Run:
                 self._pause.wait()
                 if self._stop.is_set():
                     break
-                self.sweep()
+                reading = self.sweep()
                 with self._lock:
-                    self.last_sample_at = time.monotonic()
+                    # ONLY a sweep that produced a reading counts as a
+                    # heartbeat. Advancing it on a failed sweep let a
+                    # final interval in which every REST call failed
+                    # still satisfy `check_sampler_health`'s freshness
+                    # bound — the run would report a live sampler while
+                    # observing nothing.
+                    if reading is not None:
+                        self.last_sample_at = time.monotonic()
+                    self._sweep_done.set()
                 self._stop.wait(interval)
         except BaseException as error:  # noqa: BLE001 — recorded, then fatal
             with self._lock:
@@ -404,10 +471,16 @@ class Run:
         add that lifetime's counts a second time.
         """
         self._pause.clear()
-        # The sampler clears its own in-flight work before waiting again;
-        # a short settle keeps a sweep already underway from landing
-        # after the snapshot.
-        time.sleep(1.0)
+        # Join whatever sweep is already running: a sweep that lands
+        # AFTER the counter snapshot would add the dying process's
+        # counts a second time. A fixed sleep only made that unlikely.
+        # The sampler is not running at all before `start_sampling`, and
+        # a sweep can take as long as its REST calls do, so the wait has
+        # a ceiling and reports rather than blocks forever.
+        self._sweep_done.clear()
+        if self._thread is not None and self._thread.is_alive():
+            if not self._sweep_done.wait(timeout=SWEEP_JOIN_SECONDS):
+                self.sweep_join_timeouts += 1
 
     def resume_sampling(self):
         self._pause.set()
@@ -433,6 +506,23 @@ class Run:
             snapshot_error = str(error)
         else:
             snapshot_error = None
+        # The Scala node is not restarted and publishes no drop
+        # counters, but the restart is a seam in the evidence for BOTH
+        # nodes: what the miner had reached when the follower died is
+        # what the post-restart catch-up is measured against. Recorded
+        # here so a later reading cannot be mistaken for it.
+        peer_snapshot = {}
+        for node in URLS:
+            try:
+                info = api(node, '/info') or {}
+            except Unavailable as error:
+                peer_snapshot[node] = {'error': str(error)}
+            else:
+                peer_snapshot[node] = {
+                    'fullHeight': info.get('fullHeight'),
+                    'bestFullHeaderId': info.get('bestFullHeaderId'),
+                    'bestInputBlock': info.get('bestInputBlock'),
+                }
         with self._lock:
             if status is not None:
                 ib = status.get('input_blocks') or {}
@@ -446,15 +536,28 @@ class Run:
                 value['carried'] += value['current']
                 value['current'] = 0
             totals = {k: v['carried'] for k, v in self.drop_counters.items()}
-        return {'totals': totals, 'snapshot_error': snapshot_error}
+        return {'totals': totals, 'snapshot_error': snapshot_error,
+                'both_nodes': peer_snapshot}
 
     # ----- helpers -----
 
-    def fail(self, assertion, message, evidence=None):
-        self.failures.append({'assertion': assertion, 'message': message})
+    def fail(self, assertion, message, evidence=None, at=None, ids=None):
+        """Record a failure, and enough to write a focused artifact for it.
+
+        `at` and `ids` are what turn an artifact from "the last 80 log
+        lines and no announcement bytes" into a log window around the
+        observation with the raw frames for the blocks it names. They
+        default to now and to every block id the evidence mentions, so a
+        caller cannot forget them.
+        """
+        at = time.time() if at is None else at
+        self.failures.append({'assertion': assertion, 'message': message,
+                              'observed_at_unix': at})
         if evidence is not None:
             self.findings.append({'assertion': assertion, 'message': message,
-                                  'evidence': evidence})
+                                  'evidence': evidence, 'at': at,
+                                  'ids': ids if ids is not None
+                                  else ids_in(evidence)})
 
     def started(self, node):
         self.node_started_at[node] = time.monotonic()
@@ -479,14 +582,31 @@ class Run:
                 }
             status = api('rust', '/api/v1/status')
             peers = api('rust', '/api/v1/peers')
+            # Assertion 6's pool observation belongs to THIS sweep, not
+            # to a separate read the assertion makes later against a
+            # cached tip. The tip is re-read straight after the pool: if
+            # an ordering block landed across the pair, the pool and the
+            # tip describe different moments and the observation cannot
+            # decide whether an input block or ordinary confirmation
+            # removed a transaction. Such a sweep keeps its pool but is
+            # marked unusable for crediting.
+            pool = {t['id'] for t in api('rust', '/transactions/unconfirmed')}
+            tip_after = (api('rust', '/info') or {}).get('bestFullHeaderId')
         except Unavailable as error:
             with self._lock:
                 self.unavailable_samples += 1
                 if len(self.unavailable_reasons) < 20:
                     self.unavailable_reasons.append(str(error))
             return None
+        tip_before = reading['rust']['info'].get('bestFullHeaderId')
+        reading['rust']['pool'] = pool
+        reading['rust']['pool_tip'] = tip_before
+        reading['rust']['pool_tip_stable'] = (
+            tip_before is not None and tip_before == tip_after)
         with self._lock:
             self.samples += 1
+            if not reading['rust']['pool_tip_stable']:
+                self.pool_tip_moved_samples += 1
             self._accumulate_counters(status, peers)
             self._accumulate_heights(reading, now)
             self._accumulate_agreement(reading, now)
@@ -608,6 +728,20 @@ class Run:
                         'rust_info': reading['rust']['info'],
                         'scala_info': reading['scala']['info']},
         })
+
+    def idle(self, seconds):
+        """Wait on the MAIN thread, writing queued artifacts while it
+        waits.
+
+        Every blocking wait in the harness goes through this, so the
+        mismatch queue is drained roughly every sampler interval for the
+        whole run instead of once at the end — an artifact written at
+        the end carries the final `/info` bodies and whatever log had
+        scrolled past, neither of which describes the mismatch it was
+        filed for.
+        """
+        self.drain_mismatch_queue()
+        time.sleep(seconds)
 
     def drain_mismatch_queue(self, budget=None):
         """Write every queued mismatch artifact. Main thread only."""
@@ -1123,19 +1257,85 @@ def _self_test():
     # why they do not -----
 
     block_id = 'ab' * 32
+    parent_id = 'ef' * 32
     payload = 'cd' * 60
-    window = [f'2026-09-22T00:00:00.1Z DEBUG announcement id={block_id} bytes={payload}']
+    window = [f'2026-09-22T00:00:00.1Z TRACE '
+              f'input_blocks: raw announcement payload '
+              f'block={block_id} payload={payload}']
     out = announcement_hex_for([block_id], window)
     assert out[block_id]['announcement_hex'] == [payload], out
-    # The id itself is not mistaken for its payload.
-    only_id = [f'2026-09-22T00:00:00.1Z DEBUG dropped id={block_id} reason=X']
-    out = announcement_hex_for([block_id], only_id)
+    # A long hex run on a line that merely MENTIONS the id is not its
+    # payload — this is the fabricated-evidence breakage round 5 left
+    # open. A parent id sitting beside it must never be reported.
+    decoy = [f'2026-09-22T00:00:00.1Z DEBUG input_blocks: dropped '
+             f'id={block_id} parent={parent_id} reason=AlreadyKnown']
+    out = announcement_hex_for([block_id], decoy)
+    assert out[block_id]['announcement_hex'] is None, out
+    assert out[block_id]['reason'] == 'no_payload_bytes_logged_for_this_id', out
+    # Another block's payload line is not this block's payload either.
+    other = [f'2026-09-22T00:00:00.1Z TRACE '
+             f'input_blocks: raw announcement payload '
+             f'block={parent_id} payload={payload}',
+             f'2026-09-22T00:00:00.1Z DEBUG input_blocks: dropped id={block_id}']
+    out = announcement_hex_for([block_id], other)
     assert out[block_id]['announcement_hex'] is None, out
     assert out[block_id]['reason'] == 'no_payload_bytes_logged_for_this_id', out
     # Nothing in the window at all is stated explicitly, never implied.
     out = announcement_hex_for([block_id], [])
     assert out[block_id] == {'announcement_hex': None,
                              'reason': 'not_in_log_window'}, out
+
+    # ----- task 8b: ids and timestamps on every failure artifact -----
+
+    block_id = 'ab' * 32
+    other_id = 'ef' * 32
+    found = ids_in({'txids': [block_id], 'nested': {'parent': other_id},
+                    'noise': 'short', 'dupe': block_id})
+    assert found == [block_id, other_id], found
+    assert ids_in({'x': 'zz' * 32}) == [], 'non-hex is not an id'
+    assert len(ids_in({'ids': [f'{i:064x}' for i in range(50)]})) == 20, \
+        'the id list is capped'
+
+    class Recorder:
+        """Just `Run.fail`, so the recording rule is tested on its own."""
+
+        fail = Run.fail
+
+        def __init__(self):
+            self.failures = []
+            self.findings = []
+
+    r = Recorder()
+    r.fail('2_tip', 'boom', {'block': block_id})
+    assert r.failures[0]['observed_at_unix'] is not None, r.failures
+    assert r.findings[0]['ids'] == [block_id], r.findings
+    assert r.findings[0]['at'] == r.failures[0]['observed_at_unix']
+
+    # ----- task 8b: the heartbeat only advances on a successful sweep ---
+
+    class Heartbeat:
+        """The sampler loop body, with `sweep` stubbed to a script."""
+
+        def __init__(self, readings):
+            self._lock = threading.Lock()
+            self.last_sample_at = None
+            self._sweep_done = threading.Event()
+            self._readings = list(readings)
+
+        def step(self):
+            reading = self._readings.pop(0)
+            with self._lock:
+                if reading is not None:
+                    self.last_sample_at = 42.0
+                self._sweep_done.set()
+
+    h = Heartbeat([None])
+    h.step()
+    assert h.last_sample_at is None, 'a failed sweep is not a heartbeat'
+    assert h._sweep_done.is_set(), 'but it still releases a joining pause'
+    h = Heartbeat([{'ok': True}])
+    h.step()
+    assert h.last_sample_at == 42.0, 'a successful sweep is'
 
     print('self-test OK: evaluators behave as the round-5 definitions require')
 
@@ -1190,7 +1390,7 @@ def observe_for_ordering_blocks(run, blocks, what):
                 break
         except Unavailable:
             pass
-        time.sleep(0.5)
+        run.idle(0.5)
     return start
 
 
@@ -1286,7 +1486,7 @@ def wait_for_height(run, target, what):
                 return
         except Unavailable:
             pass
-        time.sleep(0.5)
+        run.idle(0.5)
     raise Unavailable(f'{what}: Scala did not reach ordering block {target} in budget')
 
 
@@ -1396,7 +1596,7 @@ def assertion_6_mempool(run, evidence, count):
             balance = 0
         if balance > 0:
             break
-        time.sleep(1)
+        run.idle(1)
     result['balance_nano'] = balance
     if not balance:
         run.fail('6_mempool', 'no spendable coin on the Scala wallet within budget')
@@ -1436,21 +1636,29 @@ def assertion_6_mempool(run, evidence, count):
     tracker = PoolTransitionTracker()
     ever_in_rust_pool = set()
     track_deadline = min(run.deadline, time.monotonic() + 300)
+    # Every input below comes from ONE sampler sweep: the ordering tip,
+    # the chain the transaction ids are read against, and the pool. The
+    # old loop took a CACHED tip and then made its own pool call, so an
+    # ordering block landing between the two credited ordinary
+    # confirmation to the input block under a stale tip. A sweep whose
+    # tip moved across its own pool read is recorded and skipped.
+    seen_sweeps = set()
+    unstable_sweeps = 0
     while time.monotonic() < track_deadline:
         reading = run.latest_reading()
-        run.note_input_block_txids(reading)
-        header_now = (reading or {}).get('rust', {}).get('info', {}).get(
-            'bestFullHeaderId') if reading else None
-        for bid, ids in run.input_block_txids.items():
-            for txid in set(ids) & submitted:
-                tracker.locate(txid, bid, header_now)
-        try:
-            pool = {t['id'] for t in api('rust', '/transactions/unconfirmed')}
-        except Unavailable:
-            pool = None
-        if pool is not None:
-            ever_in_rust_pool |= pool
-            tracker.observe(header_now, pool)
+        if reading is not None and id(reading) not in seen_sweeps:
+            seen_sweeps.add(id(reading))
+            run.note_input_block_txids(reading)
+            header_now = reading['rust']['info'].get('bestFullHeaderId')
+            if reading['rust'].get('pool_tip_stable'):
+                for bid, ids in run.input_block_txids.items():
+                    for txid in set(ids) & submitted:
+                        tracker.locate(txid, bid, header_now)
+                pool = reading['rust']['pool']
+                ever_in_rust_pool |= pool
+                tracker.observe(header_now, pool)
+            else:
+                unstable_sweeps += 1
         try:
             if scala_height(run) > start_height:
                 # The next ordering block has landed; anything not
@@ -1460,7 +1668,8 @@ def assertion_6_mempool(run, evidence, count):
             pass
         if submitted and tracker.resolved() >= submitted:
             break
-        time.sleep(0.3)
+        run.idle(0.3)
+    result['sweeps_skipped_tip_moved'] = unstable_sweeps
     in_input_block = tracker.located
     credited = tracker.credited
     confirmed_by_ordering = tracker.confirmed_by_ordering
@@ -1500,7 +1709,7 @@ def assertion_6_mempool(run, evidence, count):
     # residue attributed.
     try:
         wait_for_height(run, start_height + 1, 'assertion 6 ordering block')
-        time.sleep(3)
+        run.idle(3)
         scala_pool = {t['id'] for t in api_retry(
             'scala', '/transactions/unconfirmed', run.deadline, what='scala pool')}
         rust_pool = {t['id'] for t in api_retry(
@@ -1739,6 +1948,7 @@ def write_findings(run, evidence):
             continue
         written.append(write_mismatch_artifact(
             finding['assertion'], finding['message'], finding['evidence'],
+            at=finding.get('at'), ids=finding.get('ids'),
             context={
                 'rust_events_tail': evidence.get('assertions', {})
                 .get('4_reconstruction', {}).get('ordering_events', [])[-20:],

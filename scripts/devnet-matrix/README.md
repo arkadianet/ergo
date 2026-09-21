@@ -215,10 +215,28 @@ either node; only the accepted ones matter.
   the run reports all of them, and the counters in assertion 5 are
   accumulated across both node processes (a restart resets the node's own
   counters, so the harness carries the pre-restart totals forward).
-* **Every mismatch writes an artifact** under
-  `test-vectors/weak-blocks/findings/<date>-<n>.json` with both nodes'
-  REST bodies, the Rust ordering-event tail and the matching Rust
-  debug-log lines. The recipe sets `RUST_LOG` itself so those lines exist.
+* **Every mismatch writes an artifact** under `.work/findings/<date>-<n>.json`
+  with both nodes' REST bodies, the Rust ordering-event tail, the
+  debug-log window around the observation's own timestamp, and the RAW
+  announcement bytes for every block id the failure names. Artifacts are
+  uncapped and land in `.work/` (gitignored); a human promotes the ones
+  worth keeping into `test-vectors/weak-blocks/findings/`.
+* **Announcement bytes come from one dedicated node line**, not from
+  scraping hex off any line that mentions the id — a parent id on such a
+  line used to be filed as the block's own payload. The recipe's
+  `RUST_LOG` enables `ergo_node::node::input_blocks::announcements=trace`
+  for it, and `ergo-node`'s
+  `the_announcement_payload_line_has_the_shape_the_harness_parses` pins
+  the format the extractor matches.
+* **The pool observation belongs to one sweep.** Assertion 6 reads the
+  ordering tip, the input-block chain and Rust's unconfirmed pool from
+  the SAME sampler sweep, and that sweep re-reads the tip after the pool
+  — if an ordering block landed across the pair, the sample is recorded
+  and skipped rather than used to credit an eviction.
+* **The heartbeat only advances on a sweep that produced a reading**, so
+  a final interval in which every REST call failed cannot satisfy the
+  sampler-freshness check; and the restart JOINS the in-flight sweep
+  (rather than sleeping) before snapshotting BOTH nodes.
 
 ## Evidence
 

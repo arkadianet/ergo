@@ -47,7 +47,15 @@ GENESIS_STATE_ROOT = os.environ.get(
 # Announcement bytes land in the Rust node's debug log, and a divergence
 # findings artifact is required to carry them. The recipe therefore sets
 # the filter itself rather than relying on the operator's environment.
-DEFAULT_RUST_LOG = 'info,ergo_node::node::input_blocks=debug,ergo_inputblocks=debug'
+# `announcements=trace` is what puts the RAW announcement frame in the
+# log, keyed by block id, so a divergence artifact can carry the exact
+# bytes rather than "no payload bytes logged for this id". It is one
+# line per announcement — roughly one a second here — which is fine for
+# a 25-minute recipe and far too much for a real node, hence TRACE.
+DEFAULT_RUST_LOG = (
+    'info,ergo_node::node::input_blocks=debug,ergo_inputblocks=debug,'
+    'ergo_node::node::input_blocks::announcements=trace'
+)
 
 
 def classpath_file() -> Path:
