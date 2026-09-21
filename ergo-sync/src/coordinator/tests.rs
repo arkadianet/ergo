@@ -3494,3 +3494,78 @@ fn serialization_failure_does_not_stamp_sync_sent() {
     // stays true so the next inbound SyncInfo retries the reply.
     assert!(coord.sync_state_mut().not_synced_or_outdated(p, now));
 }
+
+/// Spec 2.7 parity: Scala's `checkDelivery` for the three input-block
+/// type ids only `setUnknown`s and re-requests — it never applies a
+/// `NonDelivery` penalty. So a timed-out −123 must be FORGOTTEN (the id
+/// returns to `Unknown`, so it can be asked for again) with no penalty,
+/// no delivery-streak failure, and no generic redistribute: the
+/// input-block processor's own deadline sweep owns the retry.
+#[test]
+fn timed_out_input_block_request_is_forgotten_without_a_penalty() {
+    use ergo_p2p::delivery::ModifierStatus;
+
+    let mut coord = SyncCoordinator::new(0);
+    let now = Instant::now();
+    let p = peer(9040);
+    let other = peer(9041);
+    let block = mk(7);
+
+    let registered =
+        coord
+            .delivery_mut()
+            .request(p, ModifierTypeId::InputBlock.as_byte(), &[block], now);
+    assert_eq!(registered, vec![block], "the request is registered");
+    assert_eq!(coord.delivery().status(&block), ModifierStatus::Requested);
+
+    let later = now + ergo_p2p::delivery::DELIVERY_TIMEOUT + std::time::Duration::from_secs(1);
+    let actions = coord.check_timeouts(later, &[other]);
+
+    assert!(
+        !actions.iter().any(|a| matches!(a, Action::Penalize { .. })),
+        "no penalty for an unanswered input-block request (spec 2.7)"
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::NoteDeliveryOutcome { .. })),
+        "no delivery-streak failure either"
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::SendToPeer { .. })),
+        "and no generic redistribute to another peer — the processor's \
+         own deadline sweep owns the retry"
+    );
+    assert_eq!(
+        coord.delivery().status(&block),
+        ModifierStatus::Unknown,
+        "the expectation IS forgotten, so the block can be requested again"
+    );
+}
+
+/// The same timeout on an ordinary header still penalizes, so the arm
+/// above is a targeted exemption and not a hole in delivery accounting.
+#[test]
+fn timed_out_header_request_still_penalizes_alongside_the_input_block_exemption() {
+    let mut coord = SyncCoordinator::new(0);
+    let now = Instant::now();
+    let p = peer(9042);
+
+    coord
+        .delivery_mut()
+        .request(p, ModifierTypeId::Header.as_byte(), &[mk(8)], now);
+    let later = now + ergo_p2p::delivery::DELIVERY_TIMEOUT + std::time::Duration::from_secs(1);
+    let actions = coord.check_timeouts(later, &[]);
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            Action::Penalize {
+                penalty: Penalty::NonDelivery,
+                ..
+            }
+        )),
+        "a header timeout keeps its NonDelivery penalty"
+    );
+}
