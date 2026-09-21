@@ -116,6 +116,12 @@ fn refresh_read_slot(state: &NodeState, rt: &mut InputBlocksRuntime) {
     // superseded or TTL'd, and the REST snapshot must agree.
     let known = processor.known_input_block_ids();
     let mut blocks = std::collections::HashMap::with_capacity(known.len());
+    // Fix-round-1, finding 5: an encode failure inside a block's bodies
+    // excludes the WHOLE block from this refresh rather than serving a
+    // silently-truncated `transactions` list under a 200 — tallied here,
+    // folded into `rt.snapshot_encode_failures` once the loop (and its
+    // borrow of `processor`) is done.
+    let mut new_encode_failures: u64 = 0;
     for id in &known {
         // Fix-round-1, finding 3: `transaction_ids`/`weak_ids` come from
         // `transaction_refs`/`weak_ids`, NOT from `bodies` — the former
@@ -133,12 +139,23 @@ fn refresh_read_slot(state: &NodeState, rt: &mut InputBlocksRuntime) {
             .weak_ids(id)
             .map(|ws| ws.iter().map(hex::encode).collect())
             .unwrap_or_default();
-        let transactions: Vec<_> = processor
-            .bodies(id)
-            .into_iter()
-            .flatten()
-            .filter_map(|b| crate::api_bridge::compat::encode_transaction(&b.tx).ok())
-            .collect();
+        let transactions = match processor.bodies(id) {
+            Some(bodies) => match encode_block_bodies(
+                bodies.into_iter(),
+                crate::api_bridge::compat::encode_transaction,
+            ) {
+                Ok(txs) => txs,
+                Err(()) => {
+                    tracing::error!(
+                        block = %hex::encode(id),
+                        "input_blocks: a transaction body failed to encode to the                          Scala-compat wire shape; excluding the block from this                          REST read-slot refresh rather than serving a partial list"
+                    );
+                    new_encode_failures = new_encode_failures.saturating_add(1);
+                    continue;
+                }
+            },
+            None => Vec::new(),
+        };
         blocks.insert(
             hex::encode(id),
             ergo_api::compat::ApiInputBlockEntry {
@@ -148,11 +165,37 @@ fn refresh_read_slot(state: &NodeState, rt: &mut InputBlocksRuntime) {
             },
         );
     }
+    if new_encode_failures > 0 {
+        rt.snapshot_encode_failures = rt
+            .snapshot_encode_failures
+            .saturating_add(new_encode_failures);
+    }
     slot.store(std::sync::Arc::new(ergo_api::compat::ApiInputBlocks {
         best_input_block_id,
         best_chain,
         blocks,
     }));
+}
+
+/// Encode every body in `bodies` via `encode`, refusing to publish a
+/// partial list: any single failure discards the WHOLE block's
+/// transactions for this refresh rather than a silently-truncated list
+/// under a 200 (fix-round-1, finding 5). Generic over the encoder so
+/// this is unit-testable without constructing a real failing
+/// `ergo_ser::transaction::Transaction` — production always passes
+/// `crate::api_bridge::compat::encode_transaction`.
+pub(super) fn encode_block_bodies<'a, T, E>(
+    bodies: impl Iterator<Item = &'a Body>,
+    mut encode: impl FnMut(&ergo_ser::transaction::Transaction) -> Result<T, E>,
+) -> Result<Vec<T>, ()> {
+    let mut out = Vec::new();
+    for b in bodies {
+        match encode(&b.tx) {
+            Ok(tx) => out.push(tx),
+            Err(_) => return Err(()),
+        }
+    }
+    Ok(out)
 }
 
 fn execute_one(

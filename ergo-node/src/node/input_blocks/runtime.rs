@@ -153,6 +153,15 @@ pub(in crate::node) struct InputBlocksRuntime {
     /// TTL-driven body-cache expiry inside `Processor::on_tick` — still
     /// triggers a republish instead of leaving the REST snapshot stale.
     pub(in crate::node) read_slot_revision: u64,
+    /// Count of input blocks excluded from a REST read-slot refresh
+    /// because one of their transaction bodies failed to encode to the
+    /// Scala-compat wire shape (fix-round-1, finding 5). Surfaced on
+    /// `ApiStatus.input_blocks.drops` under the synthetic reason name
+    /// `SnapshotEncodeFailed` — a node-side bookkeeping counter, NOT an
+    /// `ergo_inputblocks::processor::DropReason` variant (the processor
+    /// itself never produces this; it is purely a symptom of the
+    /// node-side Scala-DTO encoder).
+    pub(in crate::node) snapshot_encode_failures: u64,
 }
 
 impl InputBlocksRuntime {
@@ -179,6 +188,7 @@ impl InputBlocksRuntime {
             expectations: HashMap::new(),
             last_ordering_tip: None,
             read_slot_revision: 0,
+            snapshot_encode_failures: 0,
         }
     }
 
@@ -276,14 +286,29 @@ impl InputBlocksRuntime {
             staged_bytes: self.processor.staged_bytes() as u64,
             waitlist: self.processor.waitlist_len() as u32,
             deferred_triggers: self.processor.deferred_triggers() as u32,
-            drops: self
-                .counters
-                .iter()
-                .map(|(reason, count)| ergo_api::types::ApiDropCount {
-                    reason: reason.to_string(),
-                    count,
-                })
-                .collect(),
+            drops: {
+                let mut drops: Vec<ergo_api::types::ApiDropCount> = self
+                    .counters
+                    .iter()
+                    .map(|(reason, count)| ergo_api::types::ApiDropCount {
+                        reason: reason.to_string(),
+                        count,
+                    })
+                    .collect();
+                // Fix-round-1, finding 5: a node-side counter, not a
+                // `DropReason` variant (see the field doc), merged into
+                // the same name-ordered breakdown so operators see it
+                // alongside the processor's own drops rather than on a
+                // separate surface.
+                if self.snapshot_encode_failures > 0 {
+                    drops.push(ergo_api::types::ApiDropCount {
+                        reason: "SnapshotEncodeFailed".to_string(),
+                        count: self.snapshot_encode_failures,
+                    });
+                    drops.sort_by(|a, b| a.reason.cmp(&b.reason));
+                }
+                drops
+            },
         }
     }
 

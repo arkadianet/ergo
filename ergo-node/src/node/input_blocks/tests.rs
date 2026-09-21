@@ -16,7 +16,7 @@ use ergo_state::{ChainStateRead, HeaderSectionStore};
 use ergo_sync::coordinator::Action;
 
 use super::ctx::{block_transactions_known, build_ctx_data, expected_n_bits_after};
-use super::effects::{apply_chain_change, execute_effects, relay_peers};
+use super::effects::{apply_chain_change, encode_block_bodies, execute_effects, relay_peers};
 use super::hooks::{
     advertised_version, classify_tip_change, on_ordering_block_applied, on_ordering_reorg, on_tick,
     seed_best_ordering, TipChange, MAX_LINEAR_CATCHUP,
@@ -755,6 +755,72 @@ fn drop_counters_empty_when_nothing_has_dropped() {
     assert_eq!(status.waitlist, 0);
     assert_eq!(status.deferred_triggers, 0);
     assert!(status.best_input_block.is_none());
+}
+
+/// Fix-round-1, finding 5: `encode_block_bodies` refuses to publish a
+/// partial list — one failing body anywhere in the block discards
+/// everything for that refresh, never a silently-truncated `Ok(_)`.
+#[test]
+fn encode_block_bodies_all_succeed_returns_every_transaction() {
+    let bodies = [ts::body(1, 1), ts::body(2, 1), ts::body(3, 1)];
+    let mut calls = 0usize;
+    let out = encode_block_bodies(bodies.iter(), |_tx| {
+        calls += 1;
+        Ok::<u8, ()>(calls as u8)
+    });
+    assert_eq!(out, Ok(vec![1, 2, 3]));
+}
+
+#[test]
+fn encode_block_bodies_any_failure_discards_the_whole_list() {
+    let bodies = [ts::body(1, 1), ts::body(2, 1), ts::body(3, 1)];
+    let mut calls = 0usize;
+    let out = encode_block_bodies(bodies.iter(), |_tx| {
+        calls += 1;
+        if calls == 2 {
+            Err(())
+        } else {
+            Ok::<u8, ()>(calls as u8)
+        }
+    });
+    assert_eq!(
+        out,
+        Err(()),
+        "a failure anywhere must not leak the successfully-encoded prefix"
+    );
+}
+
+/// Fix-round-1, finding 5: `snapshot_encode_failures` surfaces on
+/// `ApiStatus.input_blocks.drops` under the synthetic reason
+/// `SnapshotEncodeFailed`, merged (name-ordered) alongside the
+/// processor's own `DropReason` counters.
+#[test]
+fn api_status_exposes_snapshot_encode_failed_name_ordered_with_real_drops() {
+    let mut rt = runtime();
+    // A real DropReason drop, alphabetically AFTER "SnapshotEncodeFailed".
+    rt.counters.bump(&DropReason::WaitlistFull);
+    rt.snapshot_encode_failures = 3;
+
+    let status = rt.api_status();
+    assert_eq!(
+        status.drops,
+        vec![
+            ergo_api::types::ApiDropCount {
+                reason: "SnapshotEncodeFailed".to_string(),
+                count: 3,
+            },
+            ergo_api::types::ApiDropCount {
+                reason: "WaitlistFull".to_string(),
+                count: 1,
+            },
+        ]
+    );
+}
+
+#[test]
+fn api_status_omits_snapshot_encode_failed_when_zero() {
+    let rt = runtime();
+    assert!(rt.api_status().drops.is_empty());
 }
 
 // ----- round-trips -----
