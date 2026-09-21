@@ -99,8 +99,6 @@ pub(crate) struct NodeState {
     /// load); every code path that touches it must be a no-op when it is
     /// `None`. Held here rather than beside the mempool because it owns
     /// mutable processor state driven from the same single-writer loop.
-    /// Read by the dispatch arms task 4 adds; constructed at boot today.
-    #[allow(dead_code)]
     pub(super) input_blocks: Option<super::input_blocks::InputBlocksRuntime>,
     /// Shadow-validation outcome state (`Some` only when `[shadow]`
     /// enabled): written by the watch task, projected into the snapshot

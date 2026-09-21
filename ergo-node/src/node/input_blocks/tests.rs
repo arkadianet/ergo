@@ -15,11 +15,30 @@ use ergo_state::chain::HeaderMeta;
 use ergo_state::{ChainStateRead, HeaderSectionStore};
 use ergo_sync::coordinator::Action;
 
-use super::*;
+use super::ctx::{
+    block_transactions_known, build_ctx_data, expected_n_bits_after, transactions_section_id,
+};
+use super::effects::{apply_chain_change, execute_effects, relay_peers};
+use super::hooks::{
+    advertised_version, on_ordering_block_applied, on_ordering_reorg, on_tick, seed_best_ordering,
+};
+use super::runtime::InputBlocksRuntime;
+use super::validate::build_input_block_context;
 use crate::node::state::NodeState;
 use crate::node::tests::make_state;
 
 // ----- helpers -----
+
+/// Count for one drop reason; `0` for a reason that never fired. Lives
+/// here rather than on `DropCounters` because only tests ask about one
+/// reason at a time — production reports the whole breakdown.
+fn drops(rt: &InputBlocksRuntime, reason: &str) -> u64 {
+    rt.counters
+        .iter()
+        .find(|(name, _)| *name == reason)
+        .map(|(_, n)| n)
+        .unwrap_or(0)
+}
 
 fn cfg() -> crate::config::InputBlocksConfig {
     crate::config::InputBlocksConfig {
@@ -277,42 +296,6 @@ fn effect_chain_changed_applies_then_restores_in_mempool() {
 }
 
 #[test]
-fn effect_validate_runs_inline_and_feeds_validation_result() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut state = make_state(&dir.path().join("state.redb"));
-    let rt = runtime();
-    let generation = rt.processor().generation();
-    state.input_blocks = Some(rt);
-
-    let actions = execute_effects(
-        &mut state,
-        vec![Effect::Validate {
-            job: 4242,
-            generation,
-            input_block_id: [0x33u8; 32],
-            txs: vec![TxRef {
-                tx_id: [1u8; 32],
-                witness_id: [2u8; 31],
-            }],
-            previous: Vec::new(),
-        }],
-        Instant::now(),
-    );
-
-    assert!(
-        actions.is_empty(),
-        "inline validation emits no network action"
-    );
-    let rt = state.input_blocks.as_ref().unwrap();
-    assert_eq!(
-        rt.counters
-            .get(DropReason::StaleValidation { generation: 0 }.name()),
-        1,
-        "the ValidationResult was fed back and the processor answered it"
-    );
-}
-
-#[test]
 fn peer_tag_roundtrip_and_local_reserved() {
     let mut rt = runtime();
     let a: std::net::SocketAddr = "127.0.0.1:19101".parse().unwrap();
@@ -383,9 +366,9 @@ fn dropped_effects_increment_counters_without_actions() {
     );
     assert!(actions.is_empty());
     let rt = state.input_blocks.as_ref().unwrap();
-    assert_eq!(rt.counters.get("AlreadyKnown"), 2);
-    assert_eq!(rt.counters.get("WaitlistFull"), 1);
-    assert_eq!(rt.counters.get("ForksFull"), 0);
+    assert_eq!(drops(rt, "AlreadyKnown"), 2);
+    assert_eq!(drops(rt, "WaitlistFull"), 1);
+    assert_eq!(drops(rt, "ForksFull"), 0);
 }
 
 // ----- round-trips -----
@@ -1659,17 +1642,17 @@ fn inline_validation_success_applies_the_block_and_updates_the_mempool() {
 
     let rt = state.input_blocks.as_ref().unwrap();
     assert_eq!(
-        rt.counters.get("ValidationFailed"),
+        drops(rt, "ValidationFailed"),
         0,
         "validation must not have been rejected"
     );
     assert_eq!(
-        rt.counters.get("CacheEvicted"),
+        drops(rt, "CacheEvicted"),
         0,
         "the bodies were cached for the job"
     );
     assert_eq!(
-        rt.counters.get("StaleValidation"),
+        drops(rt, "StaleValidation"),
         0,
         "the job was not superseded: its result was APPLIED, not dropped"
     );
@@ -1733,12 +1716,10 @@ fn inline_validation_of_an_unissued_job_is_dropped_as_stale() {
     );
     assert!(actions.is_empty());
     assert_eq!(
-        state
-            .input_blocks
-            .as_ref()
-            .unwrap()
-            .counters
-            .get(DropReason::StaleValidation { generation: 0 }.name()),
+        drops(
+            state.input_blocks.as_ref().unwrap(),
+            DropReason::StaleValidation { generation: 0 }.name()
+        ),
         1
     );
 }

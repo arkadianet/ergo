@@ -88,11 +88,6 @@ impl DropCounters {
         self.total = self.total.saturating_add(1);
     }
 
-    /// Count for one reason name; `0` for a reason that never fired.
-    pub(in crate::node) fn get(&self, name: &str) -> u64 {
-        self.counts.get(name).copied().unwrap_or(0)
-    }
-
     /// Every reason that has fired at least once, name-ordered.
     pub(in crate::node) fn iter(&self) -> impl Iterator<Item = (&'static str, u64)> + '_ {
         self.counts.iter().map(|(k, v)| (*k, *v))
@@ -114,12 +109,22 @@ pub(in crate::node) struct InputBlocksRuntime {
     /// §8). Released when the block is rolled back or its ordering block
     /// is superseded.
     pub(in crate::node) retained: HashMap<InputBlockId, Vec<RemovedEntry>>,
-    pub(in crate::node) config: InputBlocksConfig,
     started: Instant,
     pub(in crate::node) counters: DropCounters,
+    /// `counters.total()` at the last operator report, so the tick can
+    /// log a breakdown only when something new was actually dropped
+    /// rather than once a second forever.
+    last_drop_report: u64,
 }
 
 impl InputBlocksRuntime {
+    /// Build the runtime. The config is CONSUMED here — bounds and the
+    /// field-binding policy go into the processor, and `enabled` was
+    /// already read by boot to decide whether to build this at all — so
+    /// no copy is retained. (`relay_remote` has no effect at this layer:
+    /// the processor emits `RelayAnnouncement` only for locally mined
+    /// blocks, so honouring it is a processor-side change. See the task
+    /// report.)
     pub(in crate::node) fn new(config: &InputBlocksConfig, now: Instant) -> Self {
         Self {
             processor: Processor::new(
@@ -130,9 +135,9 @@ impl InputBlocksRuntime {
             ),
             peer_tags: PeerTagMap::new(),
             retained: HashMap::new(),
-            config: config.clone(),
             started: now,
             counters: DropCounters::default(),
+            last_drop_report: 0,
         }
     }
 
@@ -153,6 +158,19 @@ impl InputBlocksRuntime {
 
     pub(in crate::node) fn forget_peer(&mut self, peer: &PeerId) {
         self.peer_tags.forget(peer);
+    }
+
+    /// The per-reason drop breakdown, but only when it has grown since
+    /// the last call — so a periodic caller logs on change, not on a
+    /// timer. Returns `(new_drops, breakdown)`.
+    pub(in crate::node) fn take_drop_report(&mut self) -> Option<(u64, Vec<(&'static str, u64)>)> {
+        let total = self.counters.total();
+        if total == self.last_drop_report {
+            return None;
+        }
+        let new_drops = total.saturating_sub(self.last_drop_report);
+        self.last_drop_report = total;
+        Some((new_drops, self.counters.iter().collect()))
     }
 
     pub(in crate::node) fn processor(&self) -> &Processor {

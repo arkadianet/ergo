@@ -20,11 +20,29 @@ use ergo_sync::coordinator::Action;
 use super::super::NodeState;
 use super::ctx::build_ctx_data;
 use super::effects::execute_effects;
+use super::runtime::InputBlocksRuntime;
 
 /// Feed one `Event::Tick`. Called once per `sync_tick` (1 s) from the
 /// heartbeat, which is the node's existing "time passed" edge.
 pub(in crate::node) fn on_tick(state: &mut NodeState, now: Instant) -> Vec<Action> {
-    drive(state, now, |tick| Event::Tick { now: tick })
+    let actions = drive(state, now, |tick| Event::Tick { now: tick });
+    // Operator surface for the bounds: every overflow the processor
+    // reports is a `Dropped` effect, and a bound that is being hit
+    // continuously is the signal that a cap is mis-sized or a peer is
+    // abusing one. Logged on change, not on a timer. (Task 6 exposes the
+    // same counters on the API.)
+    if let Some((new_drops, breakdown)) = state
+        .input_blocks
+        .as_mut()
+        .and_then(InputBlocksRuntime::take_drop_report)
+    {
+        tracing::info!(
+            new_drops,
+            breakdown = ?breakdown,
+            "input_blocks: drop counters advanced"
+        );
+    }
+    actions
 }
 
 /// A full block was committed at a new best height (spec 7.6).

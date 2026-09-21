@@ -45,7 +45,10 @@ pub(in crate::node) struct CtxData<'a> {
     /// ids the caller knew about. A miss falls through to
     /// [`expected_n_bits_after_store`] against `store`.
     expected: HashMap<[u8; 32], Option<u32>>,
-    store: &'a StateBackendKind,
+    /// Borrowed for the lookups that cannot be precomputed: an arbitrary
+    /// ordering id's stored header and section, and the `nBits`
+    /// expectation for a parent the caller did not name.
+    state: &'a NodeState,
 }
 
 impl CtxData<'_> {
@@ -60,10 +63,9 @@ impl CtxData<'_> {
         let mempool_lookup = |w: &WeakId| self.weak_index.get(w).cloned().unwrap_or_default();
         let expected_n_bits = |parent: &[u8; 32]| match self.expected.get(parent) {
             Some(v) => *v,
-            None => expected_n_bits_after_store(self.store, parent),
+            None => expected_n_bits_after(self.state, parent),
         };
-        let block_transactions_known =
-            |id: &OrderingId| block_transactions_known_in(self.store, id);
+        let block_transactions_known = |id: &OrderingId| block_transactions_known(self.state, id);
         let ctx = ProcessorCtx {
             multiplier: self.multiplier,
             expected_n_bits: &expected_n_bits,
@@ -89,7 +91,7 @@ pub(in crate::node) fn build_ctx_data<'a>(
 ) -> CtxData<'a> {
     let mut expected = HashMap::with_capacity(parent_ids.len());
     for id in parent_ids {
-        expected.insert(*id, expected_n_bits_after_store(&state.store, id));
+        expected.insert(*id, expected_n_bits_after(state, id));
     }
     CtxData {
         // Spec 6.5: the CURRENT state's parameters, never the announced
@@ -101,7 +103,7 @@ pub(in crate::node) fn build_ctx_data<'a>(
         utxo_mode: state.store.as_utxo().is_some(),
         weak_index: build_weak_index(state),
         expected,
-        store: &state.store,
+        state,
     }
 }
 
@@ -144,20 +146,17 @@ fn build_weak_index(state: &NodeState) -> WeakIndex {
 /// Spec 6.2: `encode_compact(required_difficulty_after(parent))`, or
 /// `None` when the parent header is unknown (parity with Scala, which
 /// only checks `nBits` for a known parent).
-pub(in crate::node) fn expected_n_bits_after(
-    state: &NodeState,
-    parent_id: &[u8; 32],
-) -> Option<u32> {
-    expected_n_bits_after_store(&state.store, parent_id)
-}
-
 fn read_stored_header(store: &StateBackendKind, id: &[u8; 32]) -> Option<Header> {
     let bytes = store.get_header(id).ok().flatten()?;
     let mut r = VlqReader::new(&bytes);
     read_header(&mut r).ok()
 }
 
-fn expected_n_bits_after_store(store: &StateBackendKind, parent_id: &[u8; 32]) -> Option<u32> {
+pub(in crate::node) fn expected_n_bits_after(
+    state: &NodeState,
+    parent_id: &[u8; 32],
+) -> Option<u32> {
+    let store = &state.store;
     let parent = read_stored_header(store, parent_id)?;
     // The difficulty schedule is the network's, installed on the store at
     // boot (`set_difficulty_params`). A digest backend keeps no such
@@ -195,14 +194,7 @@ pub(in crate::node) fn transactions_section_id(
     state: &NodeState,
     header_id: &OrderingId,
 ) -> Option<[u8; 32]> {
-    transactions_section_id_in(&state.store, header_id)
-}
-
-fn transactions_section_id_in(
-    store: &StateBackendKind,
-    header_id: &OrderingId,
-) -> Option<[u8; 32]> {
-    let header = read_stored_header(store, header_id)?;
+    let header = read_stored_header(&state.store, header_id)?;
     Some(compute_section_id(
         TYPE_BLOCK_TRANSACTIONS,
         header_id,
@@ -216,12 +208,9 @@ pub(in crate::node) fn block_transactions_known(
     state: &NodeState,
     ordering_id: &OrderingId,
 ) -> bool {
-    block_transactions_known_in(&state.store, ordering_id)
-}
-
-fn block_transactions_known_in(store: &StateBackendKind, ordering_id: &OrderingId) -> bool {
-    match transactions_section_id_in(store, ordering_id) {
-        Some(section_id) => store
+    match transactions_section_id(state, ordering_id) {
+        Some(section_id) => state
+            .store
             .get_block_section(&section_id)
             .ok()
             .flatten()

@@ -396,6 +396,14 @@ pub(super) fn cleanup_disconnected_peer(state: &mut NodeState, peer: &PeerId) {
     // the slots are immediately available to other peers (rather
     // than waiting out `ANCHOR_REASSIGN_TIMEOUT`).
     state.anchor_scheduler.forget_peer(*peer);
+    // Drop the peer's input-block tag mapping. The processor keeps its
+    // own per-tag bookkeeping and prunes on its own schedule; what must
+    // not survive the disconnect is the tag -> PeerId direction, or a
+    // later effect naming a stale tag would address a reconnected peer
+    // at the same address as if it had made the request.
+    if let Some(rt) = state.input_blocks.as_mut() {
+        rt.forget_peer(peer);
+    }
 }
 
 pub(super) fn send_to_peer(state: &NodeState, peer: &PeerId, code: u8, payload: Vec<u8>) -> bool {

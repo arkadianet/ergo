@@ -20,14 +20,14 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use ergo_inputblocks::processor::{Body, Effect, Event};
-use ergo_inputblocks::types::{InputBlockId, OrderingId, PeerTag};
+use ergo_inputblocks::types::{InputBlockId, PeerTag};
 use ergo_mempool::input_blocks::{RestoreBody, RestoreOutcome};
 use ergo_p2p::handshake::{PeerFeature, Version};
 use ergo_p2p::message;
 use ergo_p2p::peer::{PeerId, Penalty};
 use ergo_p2p::types::{InvData, ModifierTypeId};
 use ergo_primitives::digest::Digest32;
-use ergo_state::{ChainStateRead, HeaderSectionStore};
+use ergo_state::ChainStateRead;
 use ergo_sync::coordinator::Action;
 use tracing::{debug, warn};
 
