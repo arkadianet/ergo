@@ -339,12 +339,24 @@ class Run:
         self._stop = threading.Event()
         self._thread = None
         self._latest = None
-        self._pause = threading.Event()
-        self._pause.set()
-        # Set at the end of every sweep. `pause_sampling` clears it,
-        # then waits for it, which is how the main thread JOINS a sweep
-        # already underway instead of sleeping and hoping.
-        self._sweep_done = threading.Event()
+        # The pause handshake. An `Event` pair could not express it:
+        # clearing a "sweep done" flag after asking for the pause can
+        # erase the signal of a sweep that has just finished, and a
+        # sampler sitting between sweeps never sets it again while
+        # paused — so the main thread waited out the whole timeout and
+        # then carried on as if the sampler were quiescent. One
+        # condition variable guarding two booleans states the thing that
+        # actually matters: the sampler is NOT inside a sweep and has
+        # acknowledged the pause.
+        self._quiet = threading.Condition()
+        self._pause_requested = False
+        self._in_sweep = False
+        self._paused_ack = False
+        # Monotonic sweep number, so a consumer can tell two readings
+        # apart without relying on object identity — CPython reuses
+        # addresses, so `id(reading)` silently deduplicated distinct
+        # sweeps.
+        self.sweep_seq = 0
         self.series_path = WORK / 'agreement-series.jsonl'
         self._series_file = None
         self.sampler_error = None
@@ -382,8 +394,15 @@ class Run:
         self.propagation_lags = []
         self._scala_input_first_seen = {}
 
-        # Assertion 6.
+        # Assertion 6. `input_block_txids` is the block's transaction
+        # ids; `input_block_seen_under` is the ordering tip of the SWEEP
+        # THAT BLOCK WAS OBSERVED IN, which is the tip a removal has to
+        # be credited against. Associating every cached block with
+        # whatever tip happens to be current lets an entry first seen
+        # under one ordering block be credited under a later one, after
+        # ordinary confirmation had already removed its transactions.
         self.input_block_txids = {}
+        self.input_block_seen_under = {}
 
     # ----- the sampler thread -----
 
@@ -405,10 +424,27 @@ class Run:
         """
         try:
             while not self._stop.is_set() and time.monotonic() < self.deadline:
-                self._pause.wait()
-                if self._stop.is_set():
-                    break
-                reading = self.sweep()
+                # Acknowledge a pause BEFORE entering a sweep, and hold
+                # here until it is lifted. `_paused_ack` is what
+                # `pause_sampling` waits for; setting it inside the
+                # condition is what makes "the sampler is idle" a fact
+                # the main thread can observe rather than infer.
+                with self._quiet:
+                    while self._pause_requested and not self._stop.is_set():
+                        self._paused_ack = True
+                        self._quiet.notify_all()
+                        self._quiet.wait(0.1)
+                    self._paused_ack = False
+                    if self._stop.is_set():
+                        self._quiet.notify_all()
+                        break
+                    self._in_sweep = True
+                try:
+                    reading = self.sweep()
+                finally:
+                    with self._quiet:
+                        self._in_sweep = False
+                        self._quiet.notify_all()
                 with self._lock:
                     # ONLY a sweep that produced a reading counts as a
                     # heartbeat. Advancing it on a failed sweep let a
@@ -418,11 +454,19 @@ class Run:
                     # observing nothing.
                     if reading is not None:
                         self.last_sample_at = time.monotonic()
-                    self._sweep_done.set()
                 self._stop.wait(interval)
         except BaseException as error:  # noqa: BLE001 — recorded, then fatal
             with self._lock:
                 self.sampler_error = f'{type(error).__name__}: {error}'
+        finally:
+            # However the loop ends — stop, deadline, or an exception —
+            # the sampler is no longer sweeping. Saying so releases a
+            # `pause_sampling` that would otherwise wait out its whole
+            # timeout for a thread that is already gone.
+            with self._quiet:
+                self._in_sweep = False
+                self._paused_ack = True
+                self._quiet.notify_all()
 
     def check_sampler_health(self, max_silence=10.0):
         """Why the run may NOT trust its own samples.
@@ -450,7 +494,9 @@ class Run:
         return reasons
 
     def stop_sampling(self):
-        self._pause.set()
+        with self._quiet:
+            self._pause_requested = False
+            self._quiet.notify_all()
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=15)
@@ -463,27 +509,38 @@ class Run:
             self._series_file = None
 
     def pause_sampling(self):
-        """Hold the sampler between samples.
+        """Bring the sampler to a stop between sweeps, and SAY whether
+        that succeeded.
 
         Used around the deliberate restart: the counter snapshot has to
-        be the LAST word from the dying process, and a sampler that
-        finishes an old-process observation after the carry-forward would
-        add that lifetime's counts a second time.
+        be the last word from the dying process, and a sampler that
+        finishes an old-process observation after the carry-forward
+        would add that lifetime's counts a second time.
+
+        Returns `True` only when the sampler has acknowledged the pause
+        while not inside a sweep, or is not running at all. On timeout
+        it returns `False` and the caller MUST NOT proceed as if
+        quiescence were established — nothing here pretends a wait that
+        ran out is the same as a sampler that stopped.
         """
-        self._pause.clear()
-        # Join whatever sweep is already running: a sweep that lands
-        # AFTER the counter snapshot would add the dying process's
-        # counts a second time. A fixed sleep only made that unlikely.
-        # The sampler is not running at all before `start_sampling`, and
-        # a sweep can take as long as its REST calls do, so the wait has
-        # a ceiling and reports rather than blocks forever.
-        self._sweep_done.clear()
-        if self._thread is not None and self._thread.is_alive():
-            if not self._sweep_done.wait(timeout=SWEEP_JOIN_SECONDS):
-                self.sweep_join_timeouts += 1
+        deadline = time.monotonic() + SWEEP_JOIN_SECONDS
+        with self._quiet:
+            self._pause_requested = True
+            self._quiet.notify_all()
+            while True:
+                alive = self._thread is not None and self._thread.is_alive()
+                if not alive or (self._paused_ack and not self._in_sweep):
+                    return True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.sweep_join_timeouts += 1
+                    return False
+                self._quiet.wait(min(remaining, 0.1))
 
     def resume_sampling(self):
-        self._pause.set()
+        with self._quiet:
+            self._pause_requested = False
+            self._quiet.notify_all()
 
     def latest_reading(self):
         with self._lock:
@@ -605,6 +662,8 @@ class Run:
             tip_before is not None and tip_before == tip_after)
         with self._lock:
             self.samples += 1
+            self.sweep_seq += 1
+            reading['seq'] = self.sweep_seq
             if not reading['rust']['pool_tip_stable']:
                 self.pool_tip_moved_samples += 1
             self._accumulate_counters(status, peers)
@@ -764,9 +823,20 @@ class Run:
                 return written
 
     def note_input_block_txids(self, reading):
-        """Record which transactions Rust saw inside each input block."""
-        if reading is None:
+        """Record which transactions Rust saw inside each input block,
+        and the ordering tip of the sweep that showed it.
+
+        Only a sweep whose tip held still across its own reads counts:
+        an unstable sweep cannot say which ordering block its chain
+        belonged to, so caching a tip from one would be inventing the
+        very fact the credit rule turns on. The transaction ids
+        themselves are immutable per block, so fetching them here rather
+        than inside the sweep changes nothing about which tip they are
+        attributed to.
+        """
+        if reading is None or not reading['rust'].get('pool_tip_stable'):
             return
+        tip = reading['rust'].get('pool_tip')
         for bid in reading['rust']['chain'].get('bestInputBlocks') or []:
             # Only a NON-EMPTY answer is cached. An input block shows up
             # in the chain before its bodies are attached, so caching the
@@ -774,10 +844,12 @@ class Run:
             if self.input_block_txids.get(bid):
                 continue
             try:
-                self.input_block_txids[bid] = api(
-                    'rust', f'/blocks/{bid}/inputBlockTransactionIds') or []
+                ids = api('rust', f'/blocks/{bid}/inputBlockTransactionIds') or []
             except Unavailable:
-                pass
+                continue
+            self.input_block_txids[bid] = ids
+            if ids:
+                self.input_block_seen_under[bid] = tip
 
 
 class Workload:
@@ -969,12 +1041,35 @@ def evaluate_tip_consistency(samples):
 
 
 def evaluate_chain_consistency(samples):
-    """Assertion 3. At every same-ordering-block sample Rust's chain must
-    be a prefix of Scala's read oldest-first — Scala's chain with the
-    newest k entries removed. Rust trailing is fine; a different HISTORY
-    is not. Counts are TOTALS; the recorded list is a sample of them."""
+    """Assertion 3, as amended by the controller after round 1.
+
+    At every same-ordering-block sample Rust's chain must be a prefix of
+    Scala's read oldest-first — Scala's chain with the newest k entries
+    removed. Rust trailing is fine; a different HISTORY is not.
+
+    ONE exception, and only one: a sample where Scala's chain is a
+    strict prefix of Rust's by EXACTLY ONE block is accepted **if that
+    Rust tip block appears in Scala's chain for the same ordering id at
+    a LATER sample**. This is the miner's own read window seen from the
+    other side — Scala announces an input block, the follower applies
+    it, and Scala's `bestChain` (its *processed* prefix) catches up a
+    moment later. Anything else fails: a different block at any
+    position, a prefix by two or more, or a tip Scala never went on to
+    confirm.
+
+    Counts are TOTALS; the recorded lists are samples of them.
+    """
     kept, excluded = qualifying_samples(samples)
+    # Everything Scala ever listed per ordering id, with the sample
+    # index it was first listed at — "later" has to mean later, not
+    # "somewhere in the run".
+    scala_first_listed = {}
+    for i, s in kept:
+        for block in s.get('scala_chain') or []:
+            scala_first_listed.setdefault((s['ordering'], block), i)
+
     compared, violation_count, violations, depths = 0, 0, [], []
+    allowed_by_one, allowed_samples = 0, []
     for i, s in kept:
         scala_chain = s.get('scala_chain') or []
         rust_chain = s.get('rust_chain') or []
@@ -988,18 +1083,44 @@ def evaluate_chain_consistency(samples):
         if len(rust_old) <= len(scala_old) and scala_old[:len(rust_old)] == rust_old:
             depths.append(len(scala_old) - len(rust_old))
             continue
+        # The amended allowance: Scala's whole chain is a prefix of
+        # Rust's, short by exactly one, and Scala goes on to list that
+        # one block under the same ordering id.
+        ahead_by_one = (
+            len(rust_old) == len(scala_old) + 1
+            and rust_old[:len(scala_old)] == scala_old
+        )
+        if ahead_by_one:
+            tip = rust_old[-1]
+            confirmed_at = scala_first_listed.get((s['ordering'], tip))
+            if confirmed_at is not None and confirmed_at > i:
+                allowed_by_one += 1
+                if len(allowed_samples) < 10:
+                    allowed_samples.append({
+                        'sample': i, 'ordering': s['ordering'],
+                        'rust_only_tip': tip,
+                        'scala_confirmed_at_sample': confirmed_at,
+                    })
+                continue
         violation_count += 1
         if len(violations) < 10:
             violations.append({'sample': i, 'ordering': s['ordering'],
                                'scala_chain': scala_chain,
-                               'rust_chain': rust_chain})
+                               'rust_chain': rust_chain,
+                               'ahead_by_one': ahead_by_one,
+                               'rust_only_tip_confirmed_later': False})
     result = {
+        'definition_amended': 'round 1: Scala a strict prefix of Rust by exactly '
+                              'one block is allowed only when Scala lists that tip '
+                              'for the same ordering id at a later sample',
         'qualifying_samples': len(kept),
         'excluded_samples': excluded,
         'compared_samples': compared,
         'min_qualifying_samples': MIN_QUALIFYING_SAMPLES,
         'prefix_violation_count': violation_count,
         'prefix_violations_sample': violations,
+        'allowed_prefix_by_one_count': allowed_by_one,
+        'allowed_prefix_by_one_sample': allowed_samples,
         'max_truncation_depth': max(depths) if depths else None,
         'violations': _coverage_violations(kept, None, 'chain consistency'),
     }
@@ -1311,31 +1432,128 @@ def _self_test():
     assert r.findings[0]['ids'] == [block_id], r.findings
     assert r.findings[0]['at'] == r.failures[0]['observed_at_unix']
 
-    # ----- task 8b: the heartbeat only advances on a successful sweep ---
+    # ----- fix round 1: assertion 3's amended prefix-by-one allowance ---
 
-    class Heartbeat:
-        """The sampler loop body, with `sweep` stubbed to a script."""
+    def chain_series(pairs):
+        """`pairs` is [(scala_chain, rust_chain)], newest-first, padded to
+        the coverage threshold with agreeing samples so only the shape
+        under test decides the verdict."""
+        pad = [sample(['b1'], ['b1'])
+               for _ in range(MIN_QUALIFYING_SAMPLES - len(pairs))]
+        return [sample(sc, rc) for sc, rc in pairs] + pad
 
-        def __init__(self, readings):
-            self._lock = threading.Lock()
-            self.last_sample_at = None
-            self._sweep_done = threading.Event()
-            self._readings = list(readings)
+    # Scala short by exactly one, and Scala lists that tip LATER: the
+    # miner's own read window, allowed and counted.
+    later_confirmed = evaluate_chain_consistency(chain_series([
+        (['b1'], ['b2', 'b1']),
+        (['b2', 'b1'], ['b2', 'b1']),
+    ]))
+    assert later_confirmed['violations'] == [], later_confirmed
+    assert later_confirmed['allowed_prefix_by_one_count'] == 1, later_confirmed
+    assert later_confirmed['allowed_prefix_by_one_sample'][0]['rust_only_tip'] == 'b2'
 
-        def step(self):
-            reading = self._readings.pop(0)
-            with self._lock:
-                if reading is not None:
-                    self.last_sample_at = 42.0
-                self._sweep_done.set()
+    # Short by one but Scala NEVER lists that tip: a block Scala does not
+    # have is a divergence, not a window.
+    never_confirmed = evaluate_chain_consistency(chain_series([
+        (['b1'], ['bX', 'b1']),
+    ]))
+    assert never_confirmed['prefix_violation_count'] == 1, never_confirmed
+    assert never_confirmed['allowed_prefix_by_one_count'] == 0, never_confirmed
+    assert never_confirmed['violations'], never_confirmed
 
-    h = Heartbeat([None])
-    h.step()
-    assert h.last_sample_at is None, 'a failed sweep is not a heartbeat'
-    assert h._sweep_done.is_set(), 'but it still releases a joining pause'
-    h = Heartbeat([{'ok': True}])
-    h.step()
-    assert h.last_sample_at == 42.0, 'a successful sweep is'
+    # Short by TWO is never allowed, even when both tips are confirmed
+    # later: the allowance is exactly one block wide.
+    by_two = evaluate_chain_consistency(chain_series([
+        (['b1'], ['b3', 'b2', 'b1']),
+        (['b3', 'b2', 'b1'], ['b3', 'b2', 'b1']),
+    ]))
+    assert by_two['prefix_violation_count'] == 1, by_two
+    assert by_two['allowed_prefix_by_one_count'] == 0, by_two
+
+    # A different block at a position is a history disagreement whatever
+    # the lengths are.
+    differing = evaluate_chain_consistency(chain_series([
+        (['b2', 'b1'], ['bY', 'b1']),
+    ]))
+    assert differing['prefix_violation_count'] == 1, differing
+    assert differing['allowed_prefix_by_one_count'] == 0, differing
+
+    # Rust trailing is still fine, and still not counted as an allowance.
+    trailing = evaluate_chain_consistency(chain_series([
+        (['b3', 'b2', 'b1'], ['b1']),
+    ]))
+    assert trailing['violations'] == [], trailing
+    assert trailing['allowed_prefix_by_one_count'] == 0, trailing
+
+    # ----- fix round 1: the REAL sampler, not a copy of its conditional -
+
+    def sampler_over(sweeps, interval=0.0):
+        """Drive `Run._sample_loop` itself with a scripted `sweep`."""
+        r = Run.__new__(Run)
+        Run.__init__(r, deadline=time.monotonic() + 30)
+        r._series_file = None
+        remaining = list(sweeps)
+
+        def scripted():
+            if not remaining:
+                r._stop.set()
+                return None
+            return remaining.pop(0)
+
+        r.sweep = scripted
+        r._sample_loop(interval)
+        return r
+
+    only_failures = sampler_over([None, None])
+    assert only_failures.last_sample_at is None, \
+        'failed sweeps must not advance the heartbeat'
+    assert only_failures.sampler_error is None, only_failures.sampler_error
+    assert only_failures.check_sampler_health(max_silence=0.0), \
+        'a sampler that never produced a reading is unhealthy'
+
+    mixed = sampler_over([None, {'ok': True}, None])
+    assert mixed.last_sample_at is not None, \
+        'a successful sweep does advance the heartbeat'
+
+    # The pause handshake: a sweep already in flight must be JOINED, and
+    # a sweep that overruns must be reported as a failure to quiesce
+    # rather than waved through.
+    def paused_against(sweep_seconds, budget):
+        r = Run.__new__(Run)
+        Run.__init__(r, deadline=time.monotonic() + 30)
+        r._series_file = None
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow():
+            entered.set()
+            release.wait(5)
+            return {'ok': True}
+
+        r.sweep = slow
+        r._thread = threading.Thread(target=r._sample_loop, args=(0.01,), daemon=True)
+        r._thread.start()
+        entered.wait(5)
+        global SWEEP_JOIN_SECONDS
+        saved, SWEEP_JOIN_SECONDS = SWEEP_JOIN_SECONDS, budget
+        try:
+            if sweep_seconds is not None:
+                threading.Timer(sweep_seconds, release.set).start()
+            quiesced = r.pause_sampling()
+        finally:
+            SWEEP_JOIN_SECONDS = saved
+            release.set()
+            r.stop_sampling()
+        return r, quiesced
+
+    joined, ok = paused_against(sweep_seconds=0.05, budget=5.0)
+    assert ok, 'a sweep that finishes inside the budget must be joined'
+    assert not joined._in_sweep, 'and the sampler must be out of its sweep'
+    assert joined.sweep_join_timeouts == 0, joined.sweep_join_timeouts
+
+    overran, ok = paused_against(sweep_seconds=None, budget=0.2)
+    assert not ok, 'a sweep that overruns the budget must NOT report quiescence'
+    assert overran.sweep_join_timeouts == 1, overran.sweep_join_timeouts
 
     print('self-test OK: evaluators behave as the round-5 definitions require')
 
@@ -1646,14 +1864,24 @@ def assertion_6_mempool(run, evidence, count):
     unstable_sweeps = 0
     while time.monotonic() < track_deadline:
         reading = run.latest_reading()
-        if reading is not None and id(reading) not in seen_sweeps:
-            seen_sweeps.add(id(reading))
+        # Sweeps are told apart by the sampler's own monotonic counter.
+        # `id(reading)` looked like a cheap identity and was not one:
+        # CPython reuses addresses, so a freed reading's address could
+        # make a later, distinct sweep look already-seen.
+        seq = reading.get('seq') if reading else None
+        if seq is not None and seq not in seen_sweeps:
+            seen_sweeps.add(seq)
             run.note_input_block_txids(reading)
-            header_now = reading['rust']['info'].get('bestFullHeaderId')
             if reading['rust'].get('pool_tip_stable'):
+                header_now = reading['rust']['pool_tip']
                 for bid, ids in run.input_block_txids.items():
+                    # The tip to credit against is the one the BLOCK was
+                    # observed under, not the one current now.
+                    located_under = run.input_block_seen_under.get(bid)
+                    if located_under is None:
+                        continue
                     for txid in set(ids) & submitted:
-                        tracker.locate(txid, bid, header_now)
+                        tracker.locate(txid, bid, located_under)
                 pool = reading['rust']['pool']
                 ever_in_rust_pool |= pool
                 tracker.observe(header_now, pool)
@@ -1752,9 +1980,26 @@ def assertion_6_mempool(run, evidence, count):
 
 
 def assertion_4_reconstruction(run, evidence, ordering_blocks):
-    """Cold restart under a multi-transaction workload: the first ordering
-    block after it must fall back, a later one must reconstruct with more
-    than one transaction."""
+    """Reconstruction, as amended by the controller after round 1.
+
+    M2 requires assembly from input-block bodies to be DEMONSTRATED:
+    at least one ordering block reconstructed with more than one
+    transaction (a coinbase-only block rides in the ordering
+    announcement itself and proves nothing), every reconstructed block
+    reporting its assembly order and chain key, and no block that
+    reconstructed on a root that did not match.
+
+    The fallback path is NOT required in M2 — it moves to M3's
+    body-eviction scenario. Round 1's runs showed why: with the input
+    chain reconnecting promptly, a cold-started node recovers fast
+    enough to reconstruct the very next ordering block, so demanding a
+    fallback demands that the node be worse at the thing the assertion
+    exists to test. The fallback count stays in the evidence as
+    telemetry.
+
+    The cold restart still happens, and everything after it is still
+    what is measured.
+    """
     result = {}
     evidence['4_reconstruction'] = result
     try:
@@ -1778,8 +2023,25 @@ def assertion_4_reconstruction(run, evidence, ordering_blocks):
     # would lose everything counted since that sample, and a sampler
     # finishing an old-process observation after the fold would add that
     # lifetime twice.
-    run.pause_sampling()
-    result['counters_carried_at_restart'] = run.snapshot_counters_before_kill()
+    quiesced = run.pause_sampling()
+    result['sampler_quiesced_for_restart'] = quiesced
+    if quiesced:
+        result['counters_carried_at_restart'] = run.snapshot_counters_before_kill()
+    else:
+        # The sampler did not confirm it was idle inside the budget, so
+        # an old-process observation may still land after the fold and
+        # count that lifetime twice. Proceeding would leave assertion
+        # 5's accumulated counters quietly wrong; the run says so
+        # instead.
+        result['counters_carried_at_restart'] = {
+            'totals': None, 'snapshot_error': None, 'both_nodes': None,
+            'skipped': 'sampler did not quiesce within '
+                       f'{SWEEP_JOIN_SECONDS:.0f}s',
+        }
+        run.fail('5_follow',
+                 'the sampler did not confirm it was idle before the restart, so '
+                 'the drop counters carried across it cannot be trusted',
+                 {'sweep_join_timeouts': run.sweep_join_timeouts})
     lifecycle.stop(('rust',))
     lifecycle.spawn('rust')
     run.resume_sampling()
@@ -1813,35 +2075,25 @@ def assertion_4_reconstruction(run, evidence, ordering_blocks):
     result['after_restart'] = ordering_event_summary(events)
     result['ordering_blocks_observed'] = ordering_blocks
 
-    # The FIRST ordering outcome after the restart: the processor is
-    # in-memory, so its input chain is gone and the block cannot be
-    # assembled from input-block bodies.
+    # The first ordering outcome after the restart is TELEMETRY under
+    # the amended gate, not a requirement: whether a cold-started node
+    # falls back or has already recovered its input chain is a fact
+    # about how fast it recovers, and M3's body-eviction scenario is
+    # where the fallback path is required.
     first = ordering[0] if ordering else None
     result['first_after_restart'] = first
+    result['first_after_restart_kind'] = first['kind'] if first else None
+    result['first_after_restart_reason'] = first.get('detail') if first else None
+    result['fallback_required'] = False
+    result['fallback_requirement_note'] = (
+        'M2: the fallback path is telemetry only; it is required in M3, under a '
+        'scenario that evicts bodies from a LIVE chain rather than cold-starting '
+        'the node. A cold start that reconstructs instead of falling back is the '
+        'node recovering faster, not the assertion being unmet.')
     if first is None:
         run.fail('4_reconstruction',
                  'the restarted node recorded no ordering reconstruction outcome at all',
                  {'events': events.get('events', [])[-20:]})
-    elif first['kind'] != 'ordering_reconstruct_fallback':
-        run.fail('4_reconstruction',
-                 'the first ordering block after a cold restart was not a fallback: '
-                 f'{first["kind"]}',
-                 {'first': first, 'ordering_events': ordering[:10],
-                  'rust_log': rust_log_lines('reconstruction is missing')})
-    else:
-        # The restart must force a fallback, and it does. The REASON is
-        # recorded rather than asserted: a cold-started node holds no
-        # input chain at all, so the planner names no body to be missing
-        # and reports `root_mismatch` (nothing to assemble from) rather
-        # than `missing_input_body` (a named body it cannot resolve).
-        # Both are the same "the in-memory chain is gone" outcome; the
-        # distinction is which ingredient is absent, not whether one is.
-        result['first_after_restart_reason'] = first.get('detail')
-        result['first_after_restart_reason_note'] = (
-            'root_mismatch is the expected reason for a COLD start: with an '
-            'empty input chain the planner names no body, so missing_input_body '
-            'cannot fire. missing_input_body needs a chain whose bodies were '
-            'evicted, not one that never existed.')
 
     # A later ordering block must be reconstructed FROM input-block
     # bodies. A one-transaction block proves nothing: its coinbase rides
@@ -1859,6 +2111,35 @@ def assertion_4_reconstruction(run, evidence, ordering_blocks):
                  'assembly from input-block bodies was never demonstrated',
                  {'ordering_events': ordering,
                   'rust_log': rust_log_lines('rebuilt from the input chain')})
+    # Every reconstructed block must SAY which order and which chain key
+    # reproduced the header root (divergences D4/F12 and D5/F5). An
+    # `unreported` here means the telemetry was renamed or dropped, and
+    # the run can no longer say how the block was assembled.
+    unreported = [e for e in ordering
+                  if e['kind'] == 'ordering_reconstructed'
+                  and (e.get('reconstructedOrder', e.get('reconstructed_order')) is None
+                       or e.get('reconstructionKey',
+                                e.get('reconstruction_key')) is None)]
+    result['reconstructed_without_telemetry'] = unreported
+    if unreported:
+        run.fail('4_reconstruction',
+                 f'{len(unreported)} reconstructed ordering blocks did not report '
+                 'their assembly order and chain key',
+                 {'events': unreported[:10]})
+    # A reconstruction whose root did not match is a wrong fallback: the
+    # node must fall back, not publish a block it could not rebuild. The
+    # feed records a root mismatch as a FALLBACK reason, so a
+    # `root_mismatch` sitting on a RECONSTRUCTED event is the shape to
+    # refuse.
+    mismatched = [e for e in ordering
+                  if e['kind'] == 'ordering_reconstructed'
+                  and (e.get('detail') or '') == 'root_mismatch']
+    result['reconstructed_on_root_mismatch'] = mismatched
+    if mismatched:
+        run.fail('4_reconstruction',
+                 f'{len(mismatched)} ordering blocks were reported as reconstructed '
+                 'while also reporting a root mismatch',
+                 {'events': mismatched[:10]})
     result['result'] = 'FAIL' if any(
         f['assertion'] == '4_reconstruction' for f in run.failures) else 'PASS'
 
@@ -2058,6 +2339,7 @@ def main():
         save()
         recon = evidence['assertions'].get('4_reconstruction', {})
         tipm = evidence['assertions'].get('2_best_input_block', {})
+        chainm = evidence['assertions'].get('3_best_input_chain', {})
         orders = recon.get('orders', {})
         print(f'{evidence["status"]}: '
               f'reconstructed={recon.get("reconstructed_total", 0)} '
@@ -2068,6 +2350,9 @@ def main():
               f'{recon.get("fallback_reasons", {}) or ""} '
               f'lag_p95={tipm.get("lag_p95")} lag_max={tipm.get("lag_max")} '
               f'exact={tipm.get("exact_tip_matches")} '
+              f'prefix_by_one_allowed={chainm.get("allowed_prefix_by_one_count", 0)} '
+              f'prefix_violations={chainm.get("prefix_violation_count", 0)} '
+              f'requests_full={run.totals().get("RequestsFull", 0)} '
               f'max_height_gap={run.max_height_gap} '
               f'failures={len(run.failures)} '
               f'evidence={output.relative_to(ROOT)}', flush=True)
