@@ -3169,8 +3169,15 @@ fn reconstruct_persists_header_and_extension_through_normal_path_first() {
         input_chain_txs: Vec::new(),
         prev_input_block_id: None,
     };
-    let rec = super::reconstruct::plan_reconstruction(&state, rt, &plan, Some(peer))
-        .expect("a stored announcement plans");
+    let rec = super::reconstruct::plan_reconstruction(
+        &state.store,
+        &state.mempool,
+        rt,
+        &plan,
+        Some(peer),
+    )
+    .expect("the store reads succeed")
+    .expect("a stored announcement plans");
 
     assert!(
         matches!(
@@ -3221,4 +3228,91 @@ fn reconstruct_persists_header_and_extension_through_normal_path_first() {
     );
     assert!(matches!(rec.actions[3], Action::AssembleBlock { .. }));
     let _ = now;
+}
+
+/// A chain store whose every read fails, so the abort path is reachable
+/// at all: there is no way to make a real `redb` read error on demand,
+/// and "a read error is silently treated as missing data" is precisely
+/// the bug this seam keeps fixed.
+struct FailingStore;
+
+impl super::reconstruct::ReconstructStore for FailingStore {
+    fn header_known(&self, _: &[u8; 32]) -> Result<bool, ergo_state::store::StateError> {
+        Err(ergo_state::store::StateError::InternalInvariant {
+            what: "injected read failure",
+        })
+    }
+
+    fn section_known(&self, _: &[u8; 32]) -> Result<bool, ergo_state::store::StateError> {
+        Err(ergo_state::store::StateError::InternalInvariant {
+            what: "injected read failure",
+        })
+    }
+}
+
+/// Round 1, finding 3: a failing chain-store read must NOT be classified
+/// as missing data. The plan below names a broadcasted transaction that
+/// is genuinely absent from the mempool — the exact input that would make
+/// a swallowed error come back as `missing_broadcasted_tx` — so the
+/// assertion distinguishes the two classifications rather than merely
+/// observing one.
+#[test]
+fn reconstruct_with_a_failing_store_read_aborts_as_storage_error_not_missing_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19705,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let never_pooled = ts::tx(0xb2, 1);
+    let ann = reconstructable_announcement(
+        Vec::new(),
+        std::slice::from_ref(&never_pooled),
+        [0x44; 32],
+        Vec::new(),
+    );
+    let height = ann.header.height;
+    let header_id = ts::header_id(&ann.header);
+    store_ordering_announcement(&mut state, ann, tag);
+
+    let rt = state.input_blocks.as_ref().unwrap();
+    let plan = ergo_inputblocks::ordering::ReconstructionPlan {
+        header_id,
+        non_broadcasted: Vec::new(),
+        broadcasted_ids: vec![*ergo_ser::transaction::transaction_id(&never_pooled)
+            .unwrap()
+            .as_bytes()],
+        input_chain_txs: Vec::new(),
+        prev_input_block_id: None,
+    };
+    let failure = super::reconstruct::plan_reconstruction(
+        &FailingStore,
+        &state.mempool,
+        rt,
+        &plan,
+        Some(peer),
+    )
+    .expect_err("a failing store read aborts the plan");
+
+    assert_eq!(failure.operation, "get_header");
+    assert_eq!(failure.height, height, "the feed entry keeps the height");
+    assert!(
+        matches!(
+            failure.as_fallback().outcome,
+            super::reconstruct::Outcome::Fallback { reason }
+                if reason == super::reconstruct::STORAGE_ERROR
+        ),
+        "a storage failure falls back under its own reason, never as \
+         missing data: {:?}",
+        failure.as_fallback().outcome
+    );
+    assert!(
+        failure.as_fallback().actions.is_empty(),
+        "nothing planned from a failed read is executed"
+    );
 }

@@ -36,7 +36,7 @@ use super::super::event_feed::FeedEventKind;
 use super::super::NodeState;
 use super::super::{hedge_request_modifiers, register_expectation, tracked_request_modifier};
 use super::ctx::{build_ctx_data, transactions_section_id};
-use super::reconstruct::{plan_reconstruction, Outcome, Reconstruction};
+use super::reconstruct::{plan_reconstruction, Outcome, Reconstruction, StorageFailure};
 use super::runtime::{ExpectedPhase, InputBlocksRuntime};
 use super::validate::{run_validation, ValidateJob};
 
@@ -325,12 +325,25 @@ fn execute_one(
             });
         }
         Effect::OrderingReconstruct { plan, from } => {
-            let Some(rec) = plan_reconstruction(state, rt, &plan, rt.peer(from)) else {
-                debug!(
-                    ordering = %hex::encode(plan.header_id),
-                    "input_blocks: no stored announcement to reconstruct from"
-                );
-                return;
+            let planned =
+                plan_reconstruction(&state.store, &state.mempool, rt, &plan, rt.peer(from));
+            let rec = match planned {
+                Ok(Some(rec)) => rec,
+                Ok(None) => {
+                    debug!(
+                        ordering = %hex::encode(plan.header_id),
+                        "input_blocks: no stored announcement to reconstruct from"
+                    );
+                    return;
+                }
+                // A failing chain store is not "the data was missing":
+                // report it through the node's storage observability
+                // (error level, counted) and abort reconstruction under
+                // its own reason, planning nothing from the bad read.
+                Err(failure) => {
+                    report_reconstruct_storage_failure(state, &plan.header_id, &failure);
+                    failure.as_fallback()
+                }
             };
             let Reconstruction {
                 actions,
@@ -411,6 +424,36 @@ fn run_pipeline(state: &mut NodeState, actions: Vec<Action>, now: Instant) -> Ve
         now,
         wallet_wiring,
     )
+}
+
+/// Report a chain-store read failure from the reconstruction path through
+/// the node's storage observability: an error-level record with the block
+/// it aborted, counted in the global storage-error totals that
+/// `/metrics` and the heartbeat's storage health read.
+fn report_reconstruct_storage_failure(
+    state: &NodeState,
+    header_id: &[u8; 32],
+    failure: &StorageFailure,
+) {
+    let chain = state.store.chain_state_meta();
+    ergo_state::storage_observability::report_storage_failure(
+        &ergo_state::storage_observability::StorageFailureContext {
+            subsystem: "input_blocks",
+            component: "ordering_reconstruction",
+            database_path: Some(state.store.database_path()),
+            operation: failure.operation,
+            best_full_block_height: Some(chain.best_full_block_height),
+            best_header_height: Some(chain.best_header_height),
+            attempted_height: Some(failure.height),
+        },
+        &failure.error,
+    );
+    warn!(
+        ordering = %hex::encode(header_id),
+        operation = failure.operation,
+        error = %failure.error,
+        "input_blocks: chain-store read failed, reconstruction aborted"
+    );
 }
 
 /// Append one operator-feed event. The feed is pure observability: it

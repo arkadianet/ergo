@@ -25,6 +25,7 @@
 use ergo_crypto::merkle::transactions_root;
 use ergo_inputblocks::ordering::ReconstructionPlan;
 use ergo_mempool::types::TxId;
+use ergo_mempool::Mempool;
 use ergo_p2p::peer::PeerId;
 use ergo_primitives::digest::ModifierId;
 use ergo_primitives::reader::VlqReader;
@@ -34,14 +35,69 @@ use ergo_ser::extension::{write_extension, Extension, ExtensionField};
 use ergo_ser::header::serialize_header;
 use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS, TYPE_EXTENSION};
 use ergo_ser::transaction::{read_transaction, Transaction};
-use ergo_state::HeaderSectionStore;
+use ergo_state::store::StateError;
+use ergo_state::{HeaderSectionStore, StateBackendKind};
 use ergo_sync::coordinator::Action;
 use tracing::{debug, warn};
 
-use super::super::NodeState;
 use super::runtime::InputBlocksRuntime;
 
+/// The two chain-store reads reconstruction needs, behind a trait so a
+/// failing store can be injected in tests — there is no other way to
+/// reach the abort path, and "a read error is treated as missing data"
+/// is exactly the bug this seam exists to keep fixed.
+pub(in crate::node) trait ReconstructStore {
+    /// Is this header already validated and stored?
+    fn header_known(&self, header_id: &[u8; 32]) -> Result<bool, StateError>;
+    /// Is this block section already stored?
+    fn section_known(&self, modifier_id: &[u8; 32]) -> Result<bool, StateError>;
+}
+
+impl ReconstructStore for StateBackendKind {
+    fn header_known(&self, header_id: &[u8; 32]) -> Result<bool, StateError> {
+        Ok(self.get_header(header_id)?.is_some())
+    }
+
+    fn section_known(&self, modifier_id: &[u8; 32]) -> Result<bool, StateError> {
+        Ok(self.get_block_section(modifier_id)?.is_some())
+    }
+}
+
+/// A chain-store read failed while planning a reconstruction.
+///
+/// Distinct from every [`Outcome::Fallback`] reason: a database error is
+/// NOT "the data was missing", and classifying it as one would hide a
+/// failing store behind a routine full download. The effect boundary
+/// reports it through the node's storage-failure observability (error
+/// level, counted in the global storage-error totals) and falls back
+/// under its own [`STORAGE_ERROR`] reason.
+#[derive(Debug)]
+pub(in crate::node) struct StorageFailure {
+    /// The store call that failed, for the failure context.
+    pub(in crate::node) operation: &'static str,
+    /// Height of the announced ordering block, for the event feed.
+    pub(in crate::node) height: u32,
+    /// The error itself, propagated verbatim.
+    pub(in crate::node) error: StateError,
+}
+
+impl StorageFailure {
+    /// How the effect boundary classifies an aborted reconstruction: a
+    /// fallback with no actions — nothing planned from a failed read is
+    /// trustworthy — under the distinct [`STORAGE_ERROR`] reason.
+    pub(in crate::node) fn as_fallback(&self) -> Reconstruction {
+        Reconstruction {
+            actions: Vec::new(),
+            outcome: Outcome::Fallback {
+                reason: STORAGE_ERROR,
+            },
+            height: self.height,
+        }
+    }
+}
+
 /// What the planner decided, and the actions that carry it out.
+#[derive(Debug)]
 pub(in crate::node) struct Reconstruction {
     /// Header / extension handoff, then — on [`Outcome::Assemble`] — the
     /// rebuilt section and `AssembleBlock`. Executed in this order.
@@ -66,6 +122,8 @@ pub(in crate::node) enum Outcome {
 const MISSING_BROADCASTED_TX: &str = "missing_broadcasted_tx";
 const MISSING_INPUT_BODY: &str = "missing_input_body";
 const ROOT_MISMATCH: &str = "root_mismatch";
+/// A chain-store read failed; never conflated with the reasons above.
+pub(in crate::node) const STORAGE_ERROR: &str = "storage_error";
 
 /// Plan the reconstruction of `plan.header_id`.
 ///
@@ -73,30 +131,42 @@ const ROOT_MISMATCH: &str = "root_mismatch";
 /// handoff; `None` (an unknown tag) only costs the header handoff, which
 /// the ordinary header path will do anyway when the peer re-announces.
 ///
-/// Returns `None` when the announcement is no longer in the processor's
+/// `Ok(None)` when the announcement is no longer in the processor's
 /// store or its header does not serialize — nothing can be planned and
-/// there is nothing to fall back to either.
+/// there is nothing to fall back to either. `Err` when a chain-store read
+/// failed; see [`StorageFailure`].
 pub(in crate::node) fn plan_reconstruction(
-    state: &NodeState,
+    store: &dyn ReconstructStore,
+    mempool: &Mempool,
     rt: &InputBlocksRuntime,
     plan: &ReconstructionPlan,
     peer: Option<PeerId>,
-) -> Option<Reconstruction> {
-    let ann = rt.processor().ordering_announcement(&plan.header_id)?;
+) -> Result<Option<Reconstruction>, StorageFailure> {
+    let Some(ann) = rt.processor().ordering_announcement(&plan.header_id) else {
+        return Ok(None);
+    };
     let header = &ann.header;
     let (header_bytes, header_id) = match serialize_header(header) {
         Ok(v) => v,
         Err(e) => {
             warn!(error = %e, "input_blocks: announced ordering header does not serialize");
-            return None;
+            return Ok(None);
         }
     };
     let header_id = *header_id.as_bytes();
+    let height = header.height;
+    let failed = |operation: &'static str, error: StateError| StorageFailure {
+        operation,
+        height,
+        error,
+    };
 
     let mut actions = Vec::new();
 
     // ----- 1. the header, through the ordinary path -----
-    let header_known = state.store.get_header(&header_id).ok().flatten().is_some();
+    let header_known = store
+        .header_known(&header_id)
+        .map_err(|e| failed("get_header", e))?;
     match (header_known, peer) {
         (true, _) => {}
         (false, Some(peer)) => actions.push(Action::ValidateHeader { peer, header_bytes }),
@@ -109,7 +179,10 @@ pub(in crate::node) fn plan_reconstruction(
     // ----- 2. the extension, from the announcement's fields -----
     let extension_id =
         compute_section_id(TYPE_EXTENSION, &header_id, header.extension_root.as_bytes());
-    if !section_known(state, &extension_id) {
+    if !store
+        .section_known(&extension_id)
+        .map_err(|e| failed("get_block_section", e))?
+    {
         let extension = Extension {
             header_id: ModifierId::from_bytes(header_id),
             fields: ann
@@ -136,17 +209,16 @@ pub(in crate::node) fn plan_reconstruction(
         }
     }
 
-    let height = header.height;
     let fallback = |reason: &'static str, actions: Vec<Action>| {
-        Some(Reconstruction {
+        Ok(Some(Reconstruction {
             actions,
             outcome: Outcome::Fallback { reason },
             height,
-        })
+        }))
     };
 
     // ----- 3. the transaction section -----
-    let txs = match collect_transactions(state, rt, plan) {
+    let txs = match collect_transactions(mempool, rt, plan) {
         Ok(txs) => txs,
         Err(reason) => {
             debug!(
@@ -188,21 +260,17 @@ pub(in crate::node) fn plan_reconstruction(
         section_type: TYPE_BLOCK_TRANSACTIONS,
     });
     actions.push(Action::AssembleBlock { header_id });
-    Some(Reconstruction {
+    Ok(Some(Reconstruction {
         actions,
         outcome: Outcome::Assemble {
             txs: section_tx_count(&section),
         },
         height,
-    })
+    }))
 }
 
 fn section_tx_count(section: &BlockTransactions) -> u32 {
     u32::try_from(section.transactions.len()).unwrap_or(u32::MAX)
-}
-
-fn section_known(state: &NodeState, id: &[u8; 32]) -> bool {
-    state.store.get_block_section(id).ok().flatten().is_some()
 }
 
 /// Spec 9.3 order: `nonBroadcasted ++ mempool.get_all(broadcastedIds) ++
@@ -210,14 +278,13 @@ fn section_known(state: &NodeState, id: &[u8; 32]) -> bool {
 /// not in the pool or any input-chain body has been evicted — both are
 /// fallback conditions, never a partial section.
 fn collect_transactions(
-    state: &NodeState,
+    mempool: &Mempool,
     rt: &InputBlocksRuntime,
     plan: &ReconstructionPlan,
 ) -> Result<Vec<Transaction>, &'static str> {
     let mut txs = plan.non_broadcasted.clone();
     for id in &plan.broadcasted_ids {
-        let bytes = state
-            .mempool
+        let bytes = mempool
             .get_bytes(&TxId::from_bytes(*id))
             .ok_or(MISSING_BROADCASTED_TX)?;
         let mut r = VlqReader::new(&bytes);
