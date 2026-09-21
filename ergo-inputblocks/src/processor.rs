@@ -25,6 +25,36 @@ use ergo_ser::input_block::{InputBlockAnnouncement, OrderingBlockAnnouncement};
 use ergo_ser::transaction::Transaction;
 use ergo_ser::weak_id::WeakId;
 
+/// One announcement held for an ordering block we have not applied yet
+/// (see [`Processor::ahead`]).
+#[derive(Debug, Clone)]
+struct AheadAnnouncement {
+    ann: InputBlockAnnouncement,
+    from: PeerTag,
+    /// The ordering block it sits under — the replay key.
+    ordering_id: OrderingId,
+    /// Its header height, so an entry that can never be `+1` again is
+    /// discarded rather than held forever.
+    height: u32,
+}
+
+/// Hex view of a 32-byte id for `tracing` fields.
+///
+/// The crate deliberately takes no `hex` dependency — its public types
+/// are byte arrays and the node does the encoding — so the diagnostic
+/// logs here carry their own two-line formatter rather than pulling a
+/// crate in for them.
+struct HexId<'a>(&'a InputBlockId);
+
+impl std::fmt::Display for HexId<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for b in self.0 {
+            write!(f, "{b:02x}")?;
+        }
+        Ok(())
+    }
+}
+
 use crate::announcement::AnnouncementPolicy;
 use crate::bounds::Bounds;
 use crate::ordering::{OrderingStore, ReconstructionPlan};
@@ -558,6 +588,34 @@ pub struct Processor {
     cache: TxCache,
     staging: indexmap::IndexMap<InputBlockId, Staging>,
     waitlist: VecDeque<(InputBlockId, Option<InputBlockId>)>,
+    /// Announcements for the ordering block ONE AHEAD of our best full
+    /// block, held until that ordering block is applied (task 8b).
+    ///
+    /// Spec 2.7 step 4 says an announcement at `best_full_height + 2`
+    /// makes the node download the ordering block instead of recording
+    /// the input block; the Scala reference does exactly that and marks
+    /// the gap with its own `// todo: save input block?`. The
+    /// consequence, measured on the mixed devnet, is that the FIRST
+    /// input block under every ordering block — the only one whose
+    /// `prev_input_block_id` is `None`, and therefore the only one that
+    /// can root the new tree — is thrown away, because it is always
+    /// published before the follower has applied the ordering block it
+    /// sits under. Every later announcement then has an unknown parent,
+    /// goes to `waitlist`, and the chain is rebuilt backwards one
+    /// request round trip at a time while the miner publishes roughly
+    /// one input block a second. The follower never catches up: the
+    /// measured lag was p95 234 input blocks with the tree at zero
+    /// forks.
+    ///
+    /// Holding the announcement costs nothing the node was not already
+    /// willing to hold — it is the same announcement it will be sent
+    /// again — and replaying it the moment the ordering block lands
+    /// hands the tree its root in arrival order, so the chain connects
+    /// linearly instead of backwards. Keyed by id, insertion-ordered,
+    /// capped by `bounds.waitlist_entries` (the same operator meaning:
+    /// announcements held because they cannot be placed yet) with
+    /// overflow reported as [`DropReason::WaitlistFull`].
+    ahead: indexmap::IndexMap<InputBlockId, AheadAnnouncement>,
     ordering: OrderingStore,
     /// Requests issued to a peer and not yet answered, each with the tick
     /// it expires at. Replaces a tick-halving counter: the cap now bounds
@@ -1040,6 +1098,7 @@ impl Processor {
             cache: TxCache::default(),
             staging: indexmap::IndexMap::new(),
             waitlist: VecDeque::new(),
+            ahead: indexmap::IndexMap::new(),
             ordering: OrderingStore::default(),
             outstanding: HashMap::new(),
             now: Tick(0),
@@ -1180,8 +1239,19 @@ impl Processor {
             });
             return;
         }
-        // Step 4 of 2.7: `+2` downloads the ordering header instead.
+        // Step 4 of 2.7: `+2` downloads the ordering header. It also
+        // HOLDS the announcement (see the `ahead` field): discarding it
+        // costs the follower the root of the next ordering block's tree
+        // and, with it, the whole ordering-block interval.
         if height == full.saturating_add(2) {
+            tracing::debug!(
+                block = %HexId(&id),
+                ordering = %HexId(&ordering_id),
+                height,
+                full,
+                prev = ?ann.fields.prev_input_block_id.as_ref().map(HexId).map(|h| h.to_string()),
+                "input_blocks: announcement one ordering block ahead, held"
+            );
             self.request(
                 out,
                 Effect::RequestOrderingHeader {
@@ -1191,6 +1261,7 @@ impl Processor {
                 from,
                 id,
             );
+            self.hold_ahead(id, ordering_id, height, ann, from, out);
             return;
         }
         // Only `+1` is applied; the rest of the window is ignored (parity).
@@ -1309,6 +1380,14 @@ impl Processor {
                         });
                     }
                 }
+                tracing::debug!(
+                    block = %HexId(&id),
+                    ordering = %HexId(&ordering_id),
+                    prev = ?prev.as_ref().map(HexId).map(|h| h.to_string()),
+                    forks = tree.forks.len(),
+                    waitlist = self.waitlist.len(),
+                    "input_blocks: announcement disconnected, waitlisted"
+                );
                 self.waitlist.push_back((id, prev));
                 if let Some(p) = prev {
                     self.request(out, Effect::RequestInputBlock { id: p, from }, from, id);
@@ -3136,7 +3215,88 @@ impl Processor {
             applied: Vec::new(),
             rolled_back: Vec::new(),
         });
+        // Before `resume`: the held announcements are what give the new
+        // tree its root, and selection has nothing to resume without
+        // them.
+        self.replay_ahead(header_id, self.now, ctx, out);
         self.resume(header_id, out);
+    }
+
+    /// Hold an announcement for the ordering block one ahead of us, so
+    /// [`Self::replay_ahead`] can offer it again the moment that block
+    /// is applied. Bounded; the oldest entry is dropped on overflow.
+    fn hold_ahead(
+        &mut self,
+        id: InputBlockId,
+        ordering_id: OrderingId,
+        height: u32,
+        ann: InputBlockAnnouncement,
+        from: PeerTag,
+        out: &mut Vec<Effect>,
+    ) {
+        if self.ahead.contains_key(&id) {
+            return;
+        }
+        while self.ahead.len() >= self.bounds.waitlist_entries {
+            let Some((old, _)) = self.ahead.shift_remove_index(0) else {
+                break;
+            };
+            out.push(Effect::Dropped {
+                id: old,
+                reason: DropReason::WaitlistFull,
+            });
+        }
+        self.ahead.insert(
+            id,
+            AheadAnnouncement {
+                ann,
+                from,
+                ordering_id,
+                height,
+            },
+        );
+    }
+
+    /// Offer every held announcement for `header_id` again, in arrival
+    /// order, now that the ordering block it belongs to is the tip.
+    ///
+    /// Arrival order matters: the miner publishes the chain forwards, so
+    /// replaying it forwards roots the tree with the `prev = None` block
+    /// and then extends it linearly. Anything at or below the new best
+    /// height can never be `+1` again and is discarded here rather than
+    /// left to age out.
+    fn replay_ahead(
+        &mut self,
+        header_id: OrderingId,
+        now: Tick,
+        ctx: &ProcessorCtx<'_>,
+        out: &mut Vec<Effect>,
+    ) {
+        if self.ahead.is_empty() {
+            return;
+        }
+        let best_height = self.best.ordering_height;
+        let mut due = Vec::new();
+        let mut keep = indexmap::IndexMap::with_capacity(self.ahead.len());
+        for (id, entry) in std::mem::take(&mut self.ahead) {
+            if entry.ordering_id == header_id {
+                due.push(entry);
+            } else if entry.height > best_height {
+                keep.insert(id, entry);
+            }
+        }
+        self.ahead = keep;
+        if due.is_empty() {
+            return;
+        }
+        tracing::debug!(
+            ordering = %HexId(&header_id),
+            held = due.len(),
+            "input_blocks: replaying announcements held for the new ordering block"
+        );
+        for entry in due {
+            self.on_announcement(entry.ann, entry.from, now, ctx, out);
+        }
     }
 
     /// Scala `prune()` (spec 2.5): trees behind the best height, records
@@ -3751,6 +3911,143 @@ mod tests {
         );
         assert_eq!(p.best_input_block().map(ts::ann_id), Some(id));
         assert_eq!(p.best_input_chain(), vec![id]);
+    }
+
+    /// Task 8b, the follower-throughput root cause.
+    ///
+    /// The first input block under an ordering block is the only one
+    /// whose `prev_input_block_id` is `None`, so it is the only one that
+    /// can root that ordering block's tree — and the miner publishes it
+    /// before any follower has applied the ordering block it sits under,
+    /// i.e. always at `best_full_height + 2`. Discarding it (spec 2.7
+    /// step 4, and what the Scala reference does) leaves the new tree
+    /// permanently rootless: every later announcement has an unknown
+    /// parent and the chain has to be rebuilt backwards, one request
+    /// round trip per block, against a miner publishing one a second.
+    ///
+    /// Red first: with the `+2` announcement discarded, `b2` below is
+    /// waitlisted, the tree has no forks, and nothing is ever validated.
+    #[test]
+    fn an_announcement_one_ordering_block_ahead_roots_the_tree_when_that_block_lands() {
+        const ORD2: OrderingId = [0xCC; 32];
+        let mut p = processor();
+        let mut ctx = ts::TestCtx::at(FULL);
+
+        // Both arrive while we are still one ordering block behind: the
+        // root of ORD2's chain and its first child.
+        let b1 = ts::body(1, 1);
+        let b2 = ts::body(2, 1);
+        ctx.mempool.add(&b1);
+        ctx.mempool.add(&b2);
+        let root = ts::announcement_for(ORD2, FULL + 2, 1, None, std::slice::from_ref(&b1));
+        let root_id = ts::ann_id(&root);
+        let child =
+            ts::announcement_for(ORD2, FULL + 2, 2, Some(root_id), std::slice::from_ref(&b2));
+        let child_id = ts::ann_id(&child);
+        let eff = announce(&mut p, &ctx, &root, ts::PEER);
+        assert!(
+            eff.iter()
+                .any(|e| matches!(e, Effect::RequestOrderingHeader { .. })),
+            "the ordering header is still requested: {eff:?}"
+        );
+        announce(&mut p, &ctx, &child, ts::PEER);
+        assert!(
+            p.best_input_chain().is_empty(),
+            "nothing is applied while the ordering block is unknown"
+        );
+
+        // ORD2 lands. The held announcements are replayed in arrival
+        // order, so the tree is rooted and the child extends it.
+        ctx.full_block_height = FULL + 1;
+        let out = ctx.handle(
+            &mut p,
+            Event::OrderingBlockApplied {
+                header_id: ORD2,
+                height: FULL + 1,
+                now: Tick(1),
+            },
+        );
+        let (_, _, target, _, _) = ts::one_validate(&out);
+        assert_eq!(
+            target, root_id,
+            "the replayed root is what the node validates first"
+        );
+        let out = ts::validate_ok(&mut p, &ctx, &out, 1);
+        assert_eq!(p.best_input_chain(), vec![root_id]);
+
+        // And the child is already in the tree, so it follows without
+        // another round trip to the peer.
+        let (_, _, next, _, _) = ts::one_validate(&out);
+        assert_eq!(next, child_id, "the child extends the rooted tree");
+        ts::validate_ok(&mut p, &ctx, &out, 1);
+        assert_eq!(p.best_input_chain(), vec![child_id, root_id]);
+    }
+
+    /// The hold is bounded and does not outlive its usefulness: an
+    /// entry for an ordering block the chain has moved past is dropped
+    /// rather than replayed or kept.
+    #[test]
+    fn held_announcements_are_discarded_once_their_height_is_behind_us() {
+        const ORD2: OrderingId = [0xCC; 32];
+        const ORD3: OrderingId = [0xDD; 32];
+        let mut p = processor();
+        let mut ctx = ts::TestCtx::at(FULL);
+        let stale = ts::announcement(ORD2, FULL + 2, 1, None);
+        announce(&mut p, &ctx, &stale, ts::PEER);
+
+        // Two ordering blocks land at once: ORD2's held announcement is
+        // now at or below the best height and can never be `+1` again.
+        ctx.full_block_height = FULL + 2;
+        let out = ctx.handle(
+            &mut p,
+            Event::OrderingBlockApplied {
+                header_id: ORD3,
+                height: FULL + 2,
+                now: Tick(1),
+            },
+        );
+        assert!(
+            !out.iter().any(|e| matches!(e, Effect::Validate { .. })),
+            "a stale held announcement is not replayed: {out:?}"
+        );
+        assert!(p.ahead.is_empty(), "and it is not kept either");
+    }
+
+    /// The hold is capped: a peer cannot make the node retain an
+    /// unbounded number of announcements for an ordering block it never
+    /// applies.
+    #[test]
+    fn held_announcements_are_capped_and_report_the_overflow() {
+        const ORD2: OrderingId = [0xCC; 32];
+        let bounds = Bounds {
+            waitlist_entries: 2,
+            ..Bounds::default()
+        };
+        let mut p = processor_with(bounds);
+        let ctx = ts::TestCtx::at(FULL);
+        let first = ts::announcement(ORD2, FULL + 2, 1, None);
+        let first_id = ts::ann_id(&first);
+        announce(&mut p, &ctx, &first, ts::PEER);
+        announce(
+            &mut p,
+            &ctx,
+            &ts::announcement(ORD2, FULL + 2, 2, None),
+            ts::PEER,
+        );
+        let out = announce(
+            &mut p,
+            &ctx,
+            &ts::announcement(ORD2, FULL + 2, 3, None),
+            ts::PEER,
+        );
+        assert!(
+            out.contains(&Effect::Dropped {
+                id: first_id,
+                reason: DropReason::WaitlistFull,
+            }),
+            "the oldest hold is dropped, and reported: {out:?}"
+        );
+        assert_eq!(p.ahead.len(), 2);
     }
 
     #[test]

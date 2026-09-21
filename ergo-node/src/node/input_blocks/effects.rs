@@ -68,6 +68,7 @@ pub(in crate::node) fn execute_effects(
     // (spec 7.4), so each round emits at most one further `Validate` and
     // the loop drains.
     while let Some(effect) = queue.pop_front() {
+        rt.profile.count_effect(effect_name(&effect));
         execute_one(state, &mut rt, effect, now, &mut out, &mut queue);
     }
     // Fix-round-1, finding 4: gate on `Processor::revision()` having
@@ -86,6 +87,30 @@ pub(in crate::node) fn execute_effects(
         .observe(Phase::ExecuteEffects, batch_at.elapsed());
     state.input_blocks = Some(rt);
     out
+}
+
+/// The variant name of an effect, for the per-interval effect mix the
+/// phase profile publishes (task 8b).
+///
+/// A node-side `match` rather than a method on `Effect`: the processor's
+/// public surface does not need a telemetry accessor, and the compiler
+/// still makes this exhaustive, so a new variant cannot silently go
+/// uncounted.
+fn effect_name(effect: &Effect) -> &'static str {
+    match effect {
+        Effect::RequestInputBlock { .. } => "RequestInputBlock",
+        Effect::RequestTransactionIds { .. } => "RequestTransactionIds",
+        Effect::RequestTransactions { .. } => "RequestTransactions",
+        Effect::RequestOrderingHeader { .. } => "RequestOrderingHeader",
+        Effect::RequestBlockTransactions { .. } => "RequestBlockTransactions",
+        Effect::Validate { .. } => "Validate",
+        Effect::ChainChanged { .. } => "ChainChanged",
+        Effect::RelayAnnouncement { .. } => "RelayAnnouncement",
+        Effect::RelayOrderingInv { .. } => "RelayOrderingInv",
+        Effect::Penalize { .. } => "Penalize",
+        Effect::OrderingReconstruct { .. } => "OrderingReconstruct",
+        Effect::Dropped { .. } => "Dropped",
+    }
 }
 
 /// Rebuild and publish the Matrix (input blocks) REST read-side snapshot

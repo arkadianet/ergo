@@ -21,6 +21,7 @@
 //! at most 2x and never an under-estimate — the direction that matters
 //! when the number is used to decide what to optimise.
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 /// How often [`Profile::report`] emits, when anything was measured.
@@ -181,6 +182,15 @@ impl Hist {
 #[derive(Debug)]
 pub(in crate::node) struct Profile {
     phases: [Hist; Phase::ALL.len()],
+    /// How many of each effect the processor emitted this interval.
+    ///
+    /// The phase histograms answer "is a step expensive"; they cannot
+    /// answer "is the step happening at all". The follower's lag turned
+    /// out to be the second question — every phase costs microseconds
+    /// and the chain still extends far slower than the miner publishes —
+    /// so the effect mix is what says which part of the pipeline is
+    /// starved.
+    effects: BTreeMap<&'static str, u64>,
     window_start: Instant,
     last_report: Instant,
 }
@@ -189,9 +199,15 @@ impl Profile {
     pub(in crate::node) fn new(now: Instant) -> Self {
         Self {
             phases: std::array::from_fn(|_| Hist::default()),
+            effects: BTreeMap::new(),
             window_start: now,
             last_report: now,
         }
+    }
+
+    /// Count one emitted effect, by variant name.
+    pub(in crate::node) fn count_effect(&mut self, name: &'static str) {
+        *self.effects.entry(name).or_insert(0) += 1;
     }
 
     /// Record one observation of `phase`.
@@ -205,7 +221,7 @@ impl Profile {
     ///
     /// The window is reset only when a report is actually produced, so
     /// an idle subsystem accumulates rather than silently discarding.
-    pub(in crate::node) fn report(&mut self, now: Instant) -> Option<Vec<PhaseReport>> {
+    pub(in crate::node) fn report(&mut self, now: Instant) -> Option<Report> {
         if now.saturating_duration_since(self.last_report) < REPORT_INTERVAL {
             return None;
         }
@@ -232,14 +248,30 @@ impl Profile {
                 }
             })
             .collect();
+        let effects = std::mem::take(&mut self.effects);
         self.phases = std::array::from_fn(|_| Hist::default());
         self.window_start = now;
         self.last_report = now;
-        if lines.is_empty() {
+        if lines.is_empty() && effects.is_empty() {
             return None;
         }
-        Some(lines)
+        Some(Report {
+            phases: lines,
+            effects: effects.into_iter().collect(),
+            window,
+        })
     }
+}
+
+/// One interval's measurement: the per-phase table plus the effect mix
+/// that produced it.
+#[derive(Debug, Clone, PartialEq)]
+pub(in crate::node) struct Report {
+    pub(in crate::node) phases: Vec<PhaseReport>,
+    /// `(effect name, count)`, name-ordered.
+    pub(in crate::node) effects: Vec<(&'static str, u64)>,
+    /// The interval these numbers cover.
+    pub(in crate::node) window: Duration,
 }
 
 /// One phase's line in a [`Profile::report`].
@@ -368,7 +400,8 @@ mod tests {
         }
         p.observe(Phase::BuildCtx, Duration::from_micros(3));
 
-        let lines = p.report(t0 + REPORT_INTERVAL).expect("a report");
+        let report = p.report(t0 + REPORT_INTERVAL).expect("a report");
+        let lines = &report.phases;
         let names: Vec<&str> = lines.iter().map(|l| l.phase).collect();
         // Pipeline order, not insertion order.
         assert_eq!(names, vec!["build_ctx", "validate_run"]);
@@ -380,9 +413,40 @@ mod tests {
         // The window reset: the next interval reports only what it saw.
         p.observe(Phase::BuildCtx, Duration::from_micros(3));
         let next = p.report(t0 + REPORT_INTERVAL * 2).expect("a second report");
-        assert_eq!(next.len(), 1);
-        assert_eq!(next[0].phase, "build_ctx");
-        assert_eq!(next[0].count, 1);
+        assert_eq!(next.phases.len(), 1);
+        assert_eq!(next.phases[0].phase, "build_ctx");
+        assert_eq!(next.phases[0].count, 1);
+    }
+
+    #[test]
+    fn the_effect_mix_is_reported_and_reset_with_its_interval() {
+        let t0 = Instant::now();
+        let mut p = Profile::new(t0);
+        p.count_effect("Validate");
+        p.count_effect("Validate");
+        p.count_effect("ChainChanged");
+        let report = p.report(t0 + REPORT_INTERVAL).expect("a report");
+        assert_eq!(
+            report.effects,
+            vec![("ChainChanged", 1u64), ("Validate", 2)],
+            "name-ordered counts for the interval"
+        );
+        assert!(
+            p.report(t0 + REPORT_INTERVAL * 2).is_none(),
+            "the mix resets with the window"
+        );
+    }
+
+    #[test]
+    fn an_interval_with_only_effects_still_reports() {
+        // A pipeline that emits requests but never validates is exactly
+        // the shape the lag turned out to have; it must not be silent.
+        let t0 = Instant::now();
+        let mut p = Profile::new(t0);
+        p.count_effect("RequestTransactions");
+        let report = p.report(t0 + REPORT_INTERVAL).expect("a report");
+        assert!(report.phases.is_empty());
+        assert_eq!(report.effects, vec![("RequestTransactions", 1u64)]);
     }
 
     #[test]

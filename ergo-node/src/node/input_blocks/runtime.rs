@@ -21,7 +21,7 @@ use ergo_inputblocks::types::{InputBlockId, PeerTag, Tick};
 use ergo_mempool::input_blocks::RemovedEntry;
 use ergo_p2p::peer::PeerId;
 
-use super::profile::{PhaseReport, Profile};
+use super::profile::{Profile, Report};
 use crate::config::InputBlocksConfig;
 
 /// Bijection between the node's `PeerId` and the processor's opaque
@@ -200,10 +200,7 @@ impl InputBlocksRuntime {
 
     /// The phase table for the interval just ended, when the report
     /// interval has elapsed and anything at all was measured.
-    pub(in crate::node) fn take_profile_report(
-        &mut self,
-        now: Instant,
-    ) -> Option<Vec<PhaseReport>> {
+    pub(in crate::node) fn take_profile_report(&mut self, now: Instant) -> Option<Report> {
         self.profile.report(now)
     }
 

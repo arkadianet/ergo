@@ -91,6 +91,7 @@ pub(in crate::node) fn handle(
                     };
                     let block_id = *id.as_bytes();
                     let parent = *ann.header.parent_id.as_bytes();
+                    log_announcement_payload(&block_id, payload);
                     answered(state, &peer, &block_id, ExpectedPhase::Announcement);
                     let actions = feed(state, peer, now, &[parent], |from, tick| {
                         Event::AnnouncementAccepted {
@@ -190,6 +191,7 @@ pub(in crate::node) fn handle(
             }) {
                 Ok(ann) => {
                     let parent = *ann.header.parent_id.as_bytes();
+                    log_announcement_payload(&ts_header_id(&ann.header), payload);
                     // Acknowledge the −121 expectation this answers, so
                     // the request does not stay outstanding forever and
                     // `register_expectation`'s duplicate suppression
@@ -362,6 +364,29 @@ fn feed(
     drop(data);
     state.input_blocks = Some(rt);
     execute_effects(state, effects, now)
+}
+
+/// The exact announcement line the smoke harness extracts payload bytes
+/// from (task 8b, carried ruling 1).
+///
+/// Everything else in this module logs only ids, which left the harness
+/// scraping any long hex run off a line that happened to mention the id
+/// — and a parent id on that line then became "the announcement bytes".
+/// This is the one line that carries the raw frame, in a shape the
+/// harness matches literally: message text, then `block=<64 hex>`, then
+/// `payload=<hex>`. Changing the wording or the field order breaks the
+/// harness's extractor, which has a `--self-test` case pinning it.
+///
+/// TRACE, and off in every default directive: a full frame per
+/// announcement is far too much for ordinary operation, and the
+/// `hex::encode` is only evaluated when the callsite is enabled.
+pub(in crate::node) fn log_announcement_payload(id: &[u8; 32], payload: &[u8]) {
+    tracing::trace!(
+        target: "ergo_node::node::input_blocks::announcements",
+        block = %hex::encode(id),
+        payload = %hex::encode(payload),
+        "input_blocks: raw announcement payload"
+    );
 }
 
 /// A header's modifier id. An ordering-block announcement is tracked by

@@ -4370,3 +4370,66 @@ fn mainnet_extension_fields(b: &MainnetBlock) -> Vec<([u8; 2], Vec<u8>)> {
     let ext = ergo_ser::extension::read_extension(&mut r).unwrap();
     ext.fields.into_iter().map(|f| (f.key, f.value)).collect()
 }
+
+// ----- the announcement-payload line the smoke harness parses -----
+
+/// Task 8b, carried ruling 1: the smoke's divergence artifacts have to
+/// carry the RAW announcement bytes for the block that mismatched.
+/// Before this line existed the harness scraped any long hex run off a
+/// line mentioning the id, so a parent id could be filed as
+/// "announcement evidence".
+///
+/// This pins the exact shape the extractor in
+/// `scripts/devnet-matrix/smoke.py` matches — message text, then
+/// `block=<64 hex>`, then `payload=<hex>`. Its counterpart there is
+/// covered by `smoke.py --self-test`; the two have to move together.
+#[test]
+fn the_announcement_payload_line_has_the_shape_the_harness_parses() {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("sink").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+        type Writer = Sink;
+        fn make_writer(&'a self) -> Sink {
+            self.clone()
+        }
+    }
+
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(Sink(buf.clone()))
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+
+    let id = [0xabu8; 32];
+    let payload = [0x01u8, 0x02, 0x03];
+    tracing::subscriber::with_default(subscriber, || {
+        super::dispatch::log_announcement_payload(&id, &payload);
+    });
+
+    let line = String::from_utf8(buf.lock().expect("sink").clone()).expect("utf8");
+    // The literal the harness's `ANNOUNCEMENT_LINE` regex matches.
+    // Spelled out here rather than shared with the production callsite
+    // through a constant, because a constant that both sides read would
+    // let the wording drift without either end noticing.
+    let expected = format!(
+        "input_blocks: raw announcement payload block={} payload={}",
+        hex::encode(id),
+        hex::encode(payload)
+    );
+    assert!(
+        line.contains(&expected),
+        "the harness matches `{expected}` literally; got `{line}`"
+    );
+}

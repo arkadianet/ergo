@@ -78,9 +78,28 @@ pub(in crate::node) fn on_tick(state: &mut NodeState, now: Instant) -> Vec<Actio
         .as_mut()
         .and_then(|rt| rt.take_profile_report(now))
     {
-        for line in report {
-            tracing::debug!(target: "ergo_node::node::input_blocks::profile", %line, "input_blocks: phase profile");
+        for line in &report.phases {
+            tracing::debug!(
+                target: "ergo_node::node::input_blocks::profile",
+                %line,
+                "input_blocks: phase profile"
+            );
         }
+        // The effect mix for the same interval. Rates, not totals: the
+        // question it answers is whether the pipeline is keeping up
+        // with a miner publishing roughly one input block a second.
+        let secs = report.window.as_secs_f64().max(f64::MIN_POSITIVE);
+        let mix: Vec<String> = report
+            .effects
+            .iter()
+            .map(|(name, n)| format!("{name}={n}({:.2}/s)", *n as f64 / secs))
+            .collect();
+        tracing::debug!(
+            target: "ergo_node::node::input_blocks::profile",
+            window_s = %format!("{:.1}", secs),
+            effects = %mix.join(" "),
+            "input_blocks: effect mix"
+        );
     }
     actions
 }
