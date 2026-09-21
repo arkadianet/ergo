@@ -906,6 +906,18 @@ async fn run_inner_with_backend(
         magic: config.chain_spec.network_params.magic,
         our_handshake,
         mempool,
+        // Input blocks are devnet-only and default-off; config load
+        // already refused `enabled = true` on any other network, so the
+        // flag alone decides whether the subsystem exists at all.
+        input_blocks: if config.input_blocks.enabled {
+            info!("input blocks enabled (devnet)");
+            Some(super::input_blocks::InputBlocksRuntime::new(
+                &config.input_blocks,
+                Instant::now(),
+            ))
+        } else {
+            None
+        },
         mempool_notifier,
         mempool_gate_broken: false,
         throttle,

@@ -1,6 +1,5 @@
 //! Unit tests for the node-side input-block runtime (Plan 2, task 3).
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use ergo_crypto::difficulty::{
@@ -54,7 +53,12 @@ fn seed_header_chain(state: &mut NodeState, count: u32) -> Vec<Header> {
             timestamp: header.timestamp,
         };
         store
-            .store_validated_header(&id, &bytes, &meta, Some((height, meta.cumulative_score.clone())))
+            .store_validated_header(
+                &id,
+                &bytes,
+                &meta,
+                Some((height, meta.cumulative_score.clone())),
+            )
             .expect("store header");
         parent = id;
         out.push(header);
@@ -68,10 +72,9 @@ fn header_id_of(h: &Header) -> [u8; 32] {
 
 fn connect_peer(state: &mut NodeState, port: u16) -> std::net::SocketAddr {
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let (tx, rx) = tokio::sync::mpsc::channel(16);
-    // Keep the receiver alive for the duration of the test by leaking it
-    // into the registry entry's sibling storage.
-    std::mem::forget(rx);
+    // The receiver is dropped immediately: these tests assert on the
+    // `Action`s the executor RETURNS, and never flush them to the wire.
+    let (tx, _rx) = tokio::sync::mpsc::channel(16);
     state.registry.peers.insert(
         addr,
         crate::node::state::PeerRuntime {
@@ -87,7 +90,7 @@ fn connect_peer(state: &mut NodeState, port: u16) -> std::net::SocketAddr {
 #[test]
 fn expected_n_bits_after_known_parent_matches_next_n_bits() {
     let dir = tempfile::tempdir().unwrap();
-    let mut state = make_state(dir.path());
+    let mut state = make_state(&dir.path().join("state.redb"));
     let headers = seed_header_chain(&mut state, 3);
     let parent = headers.last().unwrap();
     let parent_id = header_id_of(parent);
@@ -117,14 +120,14 @@ fn expected_n_bits_after_known_parent_matches_next_n_bits() {
 #[test]
 fn expected_n_bits_after_unknown_parent_is_none() {
     let dir = tempfile::tempdir().unwrap();
-    let state = make_state(dir.path());
+    let state = make_state(&dir.path().join("state.redb"));
     assert_eq!(expected_n_bits_after(&state, &[0x9a; 32]), None);
 }
 
 #[test]
 fn ctx_multiplier_comes_from_active_params_subblocks_per_block() {
     let dir = tempfile::tempdir().unwrap();
-    let mut state = make_state(dir.path());
+    let mut state = make_state(&dir.path().join("state.redb"));
 
     let data = build_ctx_data(&state, &[]);
     assert_eq!(data.with(|c| c.multiplier), None, "no id 9 => None");
@@ -137,7 +140,7 @@ fn ctx_multiplier_comes_from_active_params_subblocks_per_block() {
 #[test]
 fn validation_context_uses_best_full_block_not_next() {
     let dir = tempfile::tempdir().unwrap();
-    let mut state = make_state(dir.path());
+    let mut state = make_state(&dir.path().join("state.redb"));
     let headers = seed_header_chain(&mut state, 11);
     let best = headers.last().unwrap().clone();
     let best_id = header_id_of(&best);
@@ -157,7 +160,11 @@ fn validation_context_uses_best_full_block_not_next() {
         *best.parent_id.as_bytes()
     );
     assert_eq!(ctx.tx_context.pre_header_n_bits, u64::from(best.n_bits));
-    assert_eq!(ctx.last_headers.len(), 9, "lastHeaders.drop(1), capped at 9");
+    assert_eq!(
+        ctx.last_headers.len(),
+        9,
+        "lastHeaders.drop(1), capped at 9"
+    );
     assert_eq!(
         ctx.last_headers[0].height,
         best.height - 1,
@@ -168,7 +175,7 @@ fn validation_context_uses_best_full_block_not_next() {
 #[test]
 fn effect_request_transactions_becomes_send_to_peer_code_105() {
     let dir = tempfile::tempdir().unwrap();
-    let mut state = make_state(dir.path());
+    let mut state = make_state(&dir.path().join("state.redb"));
     let peer = connect_peer(&mut state, 19001);
     let mut rt = runtime();
     let tag = rt.tag(peer);
@@ -204,7 +211,7 @@ fn effect_request_transactions_becomes_send_to_peer_code_105() {
 #[test]
 fn effect_chain_changed_applies_then_restores_in_mempool() {
     let dir = tempfile::tempdir().unwrap();
-    let mut state = make_state(dir.path());
+    let mut state = make_state(&dir.path().join("state.redb"));
     let mut rt = runtime();
 
     // `both` is rolled back AND applied: restore-then-apply must leave it out.
@@ -223,9 +230,7 @@ fn effect_chain_changed_applies_then_restores_in_mempool() {
                 cost: 1000,
             },
             RemovedEntry {
-                tx_id: ergo_primitives::digest::Digest32::from_bytes(
-                    only_rolled_back.tx_ref.tx_id,
-                ),
+                tx_id: ergo_primitives::digest::Digest32::from_bytes(only_rolled_back.tx_ref.tx_id),
                 bytes: only_rolled_back.bytes.clone(),
                 fee: 0,
                 size_bytes: only_rolled_back.bytes.len() as u32,
@@ -265,7 +270,7 @@ fn effect_chain_changed_applies_then_restores_in_mempool() {
 #[test]
 fn effect_validate_runs_inline_and_feeds_validation_result() {
     let dir = tempfile::tempdir().unwrap();
-    let mut state = make_state(dir.path());
+    let mut state = make_state(&dir.path().join("state.redb"));
     let rt = runtime();
     let generation = rt.processor().generation();
     state.input_blocks = Some(rt);
@@ -285,10 +290,14 @@ fn effect_validate_runs_inline_and_feeds_validation_result() {
         Instant::now(),
     );
 
-    assert!(actions.is_empty(), "inline validation emits no network action");
+    assert!(
+        actions.is_empty(),
+        "inline validation emits no network action"
+    );
     let rt = state.input_blocks.as_ref().unwrap();
     assert_eq!(
-        rt.counters.get(DropReason::StaleValidation { generation: 0 }.name()),
+        rt.counters
+            .get(DropReason::StaleValidation { generation: 0 }.name()),
         1,
         "the ValidationResult was fed back and the processor answered it"
     );
@@ -315,7 +324,7 @@ fn peer_tag_roundtrip_and_local_reserved() {
 #[test]
 fn effect_penalize_maps_to_action_penalize_misbehavior() {
     let dir = tempfile::tempdir().unwrap();
-    let mut state = make_state(dir.path());
+    let mut state = make_state(&dir.path().join("state.redb"));
     let peer = connect_peer(&mut state, 19003);
     let mut rt = runtime();
     let tag = rt.tag(peer);
@@ -342,7 +351,7 @@ fn effect_penalize_maps_to_action_penalize_misbehavior() {
 #[test]
 fn dropped_effects_increment_counters_without_actions() {
     let dir = tempfile::tempdir().unwrap();
-    let mut state = make_state(dir.path());
+    let mut state = make_state(&dir.path().join("state.redb"));
     state.input_blocks = Some(runtime());
 
     let actions = execute_effects(
@@ -377,7 +386,7 @@ fn stored_header_round_trips_through_expected_n_bits_lookup() {
     // Guards the header-decode path `expected_n_bits_after` depends on:
     // a header stored by `store_validated_header` must read back byte-identical.
     let dir = tempfile::tempdir().unwrap();
-    let mut state = make_state(dir.path());
+    let mut state = make_state(&dir.path().join("state.redb"));
     let headers = seed_header_chain(&mut state, 2);
     let want = headers.last().unwrap();
     let bytes = state
@@ -389,7 +398,3 @@ fn stored_header_round_trips_through_expected_n_bits_lookup() {
     let got = read_header(&mut r).unwrap();
     assert_eq!(&got, want);
 }
-
-// Silence the unused-import warning when only some helpers are used.
-#[allow(dead_code)]
-fn _assert_arc_used(_: Arc<[u8]>) {}
