@@ -297,7 +297,14 @@ struct Record {
 struct InFlight {
     job: JobId,
     generation: u64,
+    /// The block being validated (what the tree asked for).
     id: InputBlockId,
+    /// The block whose arrival drove the selection. `tree.process` picks
+    /// its fork-switch-or-linear branch from this id, so the real
+    /// application must be driven with the *same* trigger the probe used,
+    /// not with `id` — otherwise a switch selected on a deep trigger
+    /// collapses to the linear branch and no progress is made.
+    trigger: InputBlockId,
     ordering_id: OrderingId,
 }
 
@@ -1126,6 +1133,7 @@ impl Processor {
             job,
             generation: self.generation,
             id: target,
+            trigger,
             ordering_id,
         });
         out.push(Effect::Validate {
@@ -1187,7 +1195,7 @@ impl Processor {
                     Err(())
                 }
             };
-            tree.process(&target, &has_txs, &mut apply)
+            tree.process(&inf.trigger, &has_txs, &mut apply)
         };
         self.trees.insert(inf.ordering_id, outcome.tree);
         if !outcome.applied.is_empty() || !outcome.rolled_back.is_empty() {
@@ -1198,7 +1206,15 @@ impl Processor {
             });
             self.generation += 1;
         }
-        self.resume(inf.ordering_id, out);
+        // Scala's `applicationStep` keeps walking the fork it just
+        // advanced; here each step is its own job, so the walk continues
+        // by re-driving the same trigger. When that yields nothing — the
+        // ordinary linear case, where the trigger has just been consumed
+        // — fall back to spec 7.6's re-selection.
+        self.pump(inf.ordering_id, inf.trigger, out);
+        if self.in_flight.is_none() {
+            self.resume(inf.ordering_id, out);
+        }
     }
 
     /// Spec 7.5's witness-variant retry: swap in the next candidate for
