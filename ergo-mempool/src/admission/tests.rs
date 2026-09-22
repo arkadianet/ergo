@@ -61,6 +61,7 @@ impl TipContextOwned {
             params: &self.params,
             last_headers: &[],
             reemission: None,
+            input_block_txs: &[],
         }
     }
 }

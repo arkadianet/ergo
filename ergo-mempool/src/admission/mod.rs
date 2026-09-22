@@ -18,10 +18,11 @@ use std::time::Instant;
 use ergo_primitives::cost::{CostAccumulator, JitCost};
 use ergo_primitives::digest::Digest32;
 use ergo_ser::ergo_box::ErgoBox;
-use ergo_validation::{TxValidationCtx, TxValidationRules};
+use ergo_validation::{TxValidationCtx, TxValidationRules, UtxoView};
 use tracing::warn;
 
 use crate::budget::BudgetVerdict;
+use crate::input_blocks::InputBlockOverlay;
 use crate::overlay::{CommittedOnly, PoolUtxoOverlay};
 use crate::pool::{Entry, FamilyBounds, OrderedPool, PoolError};
 use crate::types::{
@@ -303,8 +304,47 @@ pub(crate) fn check_capturing_held<V: Validator>(
     // Empty for tests that don't exercise pool-chaining; populated in
     // production once admission threads `output_boxes` onto Entry.
     let pool_outputs: HashMap<Digest32, ErgoBox> = cx.pool.output_map();
-    let overlay_view = PoolUtxoOverlay::new(cx.tip_ctx.utxo, &pool_outputs);
-    let committed_view = CommittedOnly::new(cx.tip_ctx.utxo);
+    let pool_view = PoolUtxoOverlay::new(cx.tip_ctx.utxo, &pool_outputs);
+    let committed_only = CommittedOnly::new(cx.tip_ctx.utxo);
+    // Spec §8: with a best input chain in play the validation view is
+    // committed + pool outputs + the chain's outputs, minus the boxes
+    // the chain spent. Data inputs resolve through the same chain layer
+    // over the committed view (never over pool outputs — that stays a
+    // committed-only surface). `input_block_txs` is empty on every
+    // network but a devnet running the Matrix subsystem, and empty there
+    // until an input block applies, so the ordinary path below is
+    // unchanged byte for byte.
+    let no_pool_outputs: HashMap<Digest32, ErgoBox> = HashMap::new();
+    let chain_layers = if cx.tip_ctx.input_block_txs.is_empty() {
+        None
+    } else {
+        match (
+            InputBlockOverlay::new(cx.tip_ctx.utxo, &pool_outputs, cx.tip_ctx.input_block_txs),
+            InputBlockOverlay::new(
+                cx.tip_ctx.utxo,
+                &no_pool_outputs,
+                cx.tip_ctx.input_block_txs,
+            ),
+        ) {
+            (Ok(spend), Ok(data)) => Some((spend, data)),
+            // A chain transaction that will not re-serialize cannot have
+            // been applied by this node; treat it as a node-local fault,
+            // say so, and admit against the ordinary view rather than
+            // silently validating against half an overlay.
+            _ => {
+                tracing::warn!(
+                    txs = cx.tip_ctx.input_block_txs.len(),
+                    "mempool: input-chain overlay could not be built; \
+                     admitting against the pool view only"
+                );
+                None
+            }
+        }
+    };
+    let (overlay_view, committed_view): (&dyn UtxoView, &dyn UtxoView) = match &chain_layers {
+        Some((spend, data)) => (spend, data),
+        None => (&pool_view, &committed_only),
+    };
 
     // ── Steps 4–6 and 9–12 — validator handles deserialize, tx_id,
     //    canonical check, structural, monetary, script. Cost is charged
@@ -339,7 +379,7 @@ pub(crate) fn check_capturing_held<V: Validator>(
             soft_fields_allowed: true,
         },
     };
-    let validated = match validator.validate(tx_bytes, &overlay_view, &committed_view, &mut tx_cx) {
+    let validated = match validator.validate(tx_bytes, overlay_view, committed_view, &mut tx_cx) {
         Ok(v) => v,
         Err(err) => {
             // Charge whatever cost the validator consumed (skipped for demoted

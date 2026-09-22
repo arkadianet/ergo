@@ -4869,3 +4869,164 @@ fn rollback_restores_the_blocks_own_transactions_not_the_conflicts_they_evicted(
         "a conflict the apply evicted is not a rollback body"
     );
 }
+
+// ----- the input-chain admission overlay (finding 1, spec §8) -----
+
+/// The miner-fee output every admissible transaction here carries, so it
+/// clears `min_relay_fee_nano_erg`.
+fn fee_output(value: u64, height: u32) -> ergo_ser::ergo_box::ErgoBoxCandidate {
+    let mut r = ergo_primitives::reader::VlqReader::new(
+        ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES_FOR_TEST,
+    );
+    let tree = ergo_ser::ergo_tree::read_ergo_tree(&mut r).expect("fee tree");
+    ergo_ser::ergo_box::ErgoBoxCandidate::new(
+        value,
+        tree,
+        height,
+        vec![],
+        ergo_ser::register::AdditionalRegisters::empty(),
+    )
+    .expect("fee output")
+}
+
+/// A transaction spending `input` into one true-script output plus a fee.
+fn spend_to_true(
+    input: ergo_primitives::digest::Digest32,
+    out_value: u64,
+    fee: u64,
+    height: u32,
+) -> ergo_ser::transaction::Transaction {
+    use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+    ergo_ser::transaction::Transaction {
+        inputs: vec![Input {
+            box_id: input,
+            spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+        }],
+        data_inputs: vec![],
+        output_candidates: vec![
+            ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                out_value,
+                true_tree(),
+                height,
+                vec![],
+                ergo_ser::register::AdditionalRegisters::empty(),
+            )
+            .unwrap(),
+            fee_output(fee, height),
+        ],
+    }
+}
+
+/// The box id of `tx`'s output at `index`.
+fn output_box_id(
+    tx: &ergo_ser::transaction::Transaction,
+    index: u16,
+) -> ergo_primitives::digest::Digest32 {
+    ergo_ser::ergo_box::ErgoBox {
+        candidate: tx.output_candidates[index as usize].clone(),
+        transaction_id: ergo_ser::transaction::transaction_id(tx).unwrap(),
+        index,
+    }
+    .box_id()
+    .unwrap()
+}
+
+fn tx_bytes_of(tx: &ergo_ser::transaction::Transaction) -> Vec<u8> {
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    ergo_ser::transaction::write_transaction(&mut w, tx).unwrap();
+    w.result()
+}
+
+/// Finding 1: `InputBlockOverlay` existed but had no production caller,
+/// so peer and API admission still saw committed UTXOs plus ordinary
+/// pool outputs — the processor→mempool contract of §§2.7/8 did not
+/// hold in either direction.
+///
+/// Both directions, through the node's own `admit_transaction`:
+///
+/// * input block `I` applies `T`, which leaves the pool. A child `C`
+///   spending `T`'s output has nowhere to resolve that input — neither
+///   committed state nor the pool has it — and was rejected as
+///   unresolved. It must be admitted.
+/// * `T` consumed the funded box. That box is still in the COMMITTED
+///   UTXO set (an input block is provisional), so a rival `R` spending
+///   it was admitted, double-spending the input chain. It must be
+///   rejected.
+#[test]
+fn admission_sees_the_input_chains_outputs_and_not_the_boxes_it_spent() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut state, best_id, best_height) = live_state_with_applied_tip(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19641,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let funded = seed_spendable_box(&mut state, 0xd2, 10_000_000, best_height);
+    let t = spend_to_true(funded, 8_000_000, 2_000_000, best_height);
+    let t_out = output_box_id(&t, 0);
+    let body = ts::body_of(t.clone());
+    let t_id = ergo_primitives::digest::Digest32::from_bytes(body.tx_ref.tx_id);
+
+    // Seat T so the announcement resolves its weak id from the pool and
+    // the block completes on the announcement alone.
+    state
+        .mempool
+        .restore_input_block_txs(&[(t_id, body.bytes.clone(), None)], now);
+    let ann = ts::announcement_for(
+        best_id,
+        best_height + 1,
+        41,
+        None,
+        std::slice::from_ref(&body),
+    );
+    send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &ergo_p2p::message::serialize_input_block(&ann).unwrap(),
+    );
+    assert_eq!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .processor()
+            .best_input_chain(),
+        vec![ts::ann_id(&ann)],
+        "premise: the input block applied"
+    );
+    assert!(
+        !state.mempool.contains(&t_id),
+        "premise: T left the pool when the block applied"
+    );
+
+    // Direction 1: a child of an input-block transaction resolves.
+    let child = spend_to_true(t_out, 6_000_000, 2_000_000, best_height);
+    let child_id = ergo_primitives::digest::Digest32::from_bytes(
+        *ergo_ser::transaction::transaction_id(&child)
+            .unwrap()
+            .as_bytes(),
+    );
+    let _ = crate::node::admit_transaction(&mut state, peer, &tx_bytes_of(&child), now);
+    assert!(
+        state.mempool.contains(&child_id),
+        "a child of an input-block transaction must resolve against the chain's outputs"
+    );
+
+    // Direction 2: a rival for a box the chain already consumed does not.
+    let rival = spend_to_true(funded, 7_000_000, 3_000_000, best_height);
+    let rival_id = ergo_primitives::digest::Digest32::from_bytes(
+        *ergo_ser::transaction::transaction_id(&rival)
+            .unwrap()
+            .as_bytes(),
+    );
+    assert_ne!(rival_id, t_id);
+    let _ = crate::node::admit_transaction(&mut state, peer, &tx_bytes_of(&rival), now);
+    assert!(
+        !state.mempool.contains(&rival_id),
+        "a box an input-block transaction spent is not spendable again"
+    );
+}
