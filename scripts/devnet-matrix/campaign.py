@@ -322,9 +322,32 @@ def node_pid(name):
     return int(path.read_text()) if path.exists() else None
 
 
+def _alive(pid):
+    """Does this PID still exist at all — zombie included?
+
+    `lifecycle.owned` answers a different question, and answers it wrong
+    here: a SIGKILLed process becomes a zombie whose `/proc/<pid>/cmdline`
+    is EMPTY, so `owned` reports False while the process is still in the
+    table. Restarting the node on that signal raced the old one's
+    teardown and the replacement died with "Database already open".
+    """
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
 def kill_hard(name):
     """SIGKILL one node this recipe started, by PID, after checking the
-    process is still the one we launched."""
+    process is still the one we launched.
+
+    Returns only once the PID is GONE from the process table, not merely
+    unrecognizable: the data directory's lock is held until then, and the
+    replacement node refuses to open a database that is still open.
+    """
     import lifecycle
     pid = node_pid(name)
     config = (WORK / (name + '.config'))
@@ -332,9 +355,13 @@ def kill_hard(name):
     if pid is None or not lifecycle.owned(pid, configs):
         raise Divergence(f'{name} is not running under this recipe; refusing to kill')
     os.kill(pid, signal.SIGKILL)
-    deadline = time.monotonic() + 30
-    while lifecycle.owned(pid, configs) and time.monotonic() < deadline:
+    deadline = time.monotonic() + 60
+    while _alive(pid) and time.monotonic() < deadline:
         time.sleep(0.2)
+    if _alive(pid):
+        raise Divergence(
+            f'{name} (PID {pid}) survived SIGKILL for 60s; refusing to start a '
+            'replacement over a data directory the old process still holds')
     (WORK / (name + '.pid')).unlink(missing_ok=True)
     config.unlink(missing_ok=True)
     return pid
@@ -430,11 +457,16 @@ def run_scenario(name, args):
     # reference node cannot hand it over on this host.
     started = [n for n in nodes if n in getattr(scenario, 'START_NODES', nodes)]
     evidence['started_at_launch'] = started
-    lifecycle.start(started)
-    for node in started:
-        run.started(node)
-    run.start_sampling()
+    save()
+    # INSIDE the try: a failure in `start` used to leave the nodes it did
+    # manage to launch running, with the evidence file still saying
+    # RUNNING — and the next scenario then collided with them over ports
+    # and data directories. Whatever happens, the `finally` stops them.
     try:
+        lifecycle.start(started)
+        for node in started:
+            run.started(node)
+        run.start_sampling()
         scenario.run(ctx)
     except smoke.Unavailable as error:
         ctx.fail(f'an observation the scenario needs was unavailable: {error}')

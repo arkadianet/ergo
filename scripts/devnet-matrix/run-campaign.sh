@@ -28,6 +28,19 @@ WORK="scripts/devnet-matrix/.work"
 LOG="$WORK/campaign/run.log"
 mkdir -p "$WORK/campaign"
 
+# ONE runner at a time. Two overlapping campaigns fought over the same
+# ports and data directories for half an hour and produced a run log in
+# which one scenario's start line was followed by another's finish line;
+# every scenario in that window is worthless. The lock is held for the
+# whole run and released when this process exits, however it exits.
+LOCK="$WORK/campaign/runner.lock"
+exec 9>"$LOCK"
+if ! flock -n 9; then
+  echo "[run-campaign] another runner holds $LOCK; refusing to start a second" >&2
+  exit 2
+fi
+echo $$ >&9
+
 cleanup() {
   echo "[run-campaign] stopping the devnet ($(date -Is))" >>"$LOG"
   python3 scripts/devnet-matrix/lifecycle.py stop >>"$LOG" 2>&1 || true
