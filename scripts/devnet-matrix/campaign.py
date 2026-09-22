@@ -329,6 +329,11 @@ def node_pid(name):
     return int(path.read_text()) if path.exists() else None
 
 
+# How long to wait after a killed node's PID disappears before starting
+# its replacement. See `kill_hard`.
+KILL_SETTLE_SECONDS = 3.0
+
+
 def _holds_resources(pid):
     """Is this PID still holding its files, ports and database locks?
 
@@ -384,6 +389,13 @@ def kill_hard(name):
         raise Divergence(
             f'{name} (PID {pid}) survived SIGKILL for 60s; refusing to start a '
             'replacement over a data directory the old process still holds')
+    # The PID being gone is necessary and, measurably, not sufficient:
+    # the replacement started 60 ms later still lost the race for the
+    # data directory's redb lock ("Database already open. Cannot acquire
+    # lock."). The kernel releases file locks as the process is torn
+    # down, and the teardown outlives the PID's visibility. A real
+    # operator restart has a gap too; this one is explicit and short.
+    time.sleep(KILL_SETTLE_SECONDS)
     (WORK / (name + '.pid')).unlink(missing_ok=True)
     config.unlink(missing_ok=True)
     return pid

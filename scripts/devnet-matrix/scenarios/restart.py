@@ -45,7 +45,18 @@ def run(ctx):
     killed = campaign.kill_hard('rust')
     ctx.note('killed', {'pid': killed, 'signal': 'SIGKILL',
                         'at_ordering_height': restart_height})
-    lifecycle.spawn('rust')
+    # One retry. The settle in `kill_hard` is empirical, and losing the
+    # whole scenario to a data-directory lock that was a second from
+    # being free would be a harness failure reported as a follower one.
+    # A SECOND failure is real and is allowed to propagate.
+    attempts = []
+    try:
+        lifecycle.spawn('rust')
+    except RuntimeError as error:
+        attempts.append(str(error))
+        time.sleep(campaign.KILL_SETTLE_SECONDS * 2)
+        lifecycle.spawn('rust')
+    ctx.note('respawn_attempts', attempts)
     ctx.run.started('rust')
     lifecycle.wait_peered()
     restarted_at = time.monotonic()
