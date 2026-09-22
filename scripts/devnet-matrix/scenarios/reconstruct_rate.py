@@ -166,8 +166,11 @@ def run(ctx):
     # payments in flight so the blocks carry transactions.
     start = smoke.scala_height(ctx.run)
     target, reached, sent, last = start + blocks, start, [], start
+    import campaign
+    seen = set()
     while time.monotonic() < ctx.run.deadline:
         collector.poll()
+        campaign.drain_utxo_watch(ctx, seen)
         try:
             reached = smoke.scala_height(ctx.run)
         except Unavailable:

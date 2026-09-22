@@ -290,21 +290,97 @@ class Context:
         self.evidence[key] = value
 
 
-def scan_utxo_validation_failures(ctx):
-    """Count the `input box not found in UTXO set` event seen once in M2.
+UTXO_WATCH_PHRASE = 'input box not found in UTXO set'
 
-    It is a watch item, not yet a verdict: the campaign records how often
-    it fires and against which input block, so the findings report can
-    say whether it is a race the follower recovers from or a divergence.
+
+def capture_utxo_validation_failure(ctx, line):
+    """Capture the state a `input box not found in UTXO set` needs.
+
+    Retaining the log line and the ids it mentions is not enough: the
+    condition is transient, and by finalization the box may exist and
+    the input block may have been pruned. Everything that explains it
+    has to be read WHEN IT IS OBSERVED — the announcement and
+    transaction ids of the input block, its bodies if the node serves
+    them, and whether Rust's UTXO set has the missing box right now.
     """
     import smoke
-    hits = []
-    for line in smoke.rust_log_lines('input box not found in UTXO set', limit=200):
-        ids = smoke.ids_in(line)
-        hits.append({'line': line, 'ids': ids})
-    ctx.utxo_validation_failures = hits
-    ctx.note('utxo_validation_failures', {'count': len(hits), 'sample': hits[:10]})
-    return hits
+    ids = smoke.ids_in(line)
+    captured = {'line': line, 'ids': ids,
+                'observed_at_unix': time.time(), 'input_block': None,
+                'utxo': {}, 'rust_info': None}
+    try:
+        captured['rust_info'] = smoke.api('rust', '/info')
+    except smoke.Unavailable as error:
+        captured['rust_info'] = f'unavailable: {error}'
+    for candidate in ids[:4]:
+        # Which id is the input block and which is the box is not
+        # knowable from the line, so both questions are asked of each.
+        for route, key in (('/blocks/{}/inputBlockTransactionIds', 'input_block_txids'),
+                           ('/utxo/byId/{}', 'utxo')):
+            try:
+                answer = smoke.api('rust', route.format(candidate))
+            except smoke.Unavailable as error:
+                answer = f'unavailable: {error}'
+            if key == 'utxo':
+                captured['utxo'][candidate] = answer
+            elif answer:
+                captured['input_block'] = {'id': candidate, 'txids': answer}
+                try:
+                    captured['input_block']['bodies'] = smoke.api(
+                        'rust', f'/blocks/{candidate}/inputBlockTransactions')
+                except smoke.Unavailable as error:
+                    captured['input_block']['bodies'] = f'unavailable: {error}'
+    # The raw announcement bytes for the ids, from the debug log.
+    captured['announcement_bytes'] = smoke.announcement_hex_for(
+        ids[:4], smoke.rust_log_window(captured['observed_at_unix']))
+    ctx.utxo_validation_failures.append(captured)
+    ctx.run.fail('utxo_watch',
+                 'an input block referenced a box the UTXO set does not have',
+                 captured, ids=ids[:4])
+    return captured
+
+
+def drain_utxo_watch(ctx, seen):
+    """Capture any NEW watch-item line since the last call.
+
+    Called from the scenario's own polling loops, so the state is read
+    while the condition is live rather than at finalization.
+    """
+    import smoke
+    for line in smoke.rust_log_lines(UTXO_WATCH_PHRASE, limit=2000):
+        if line in seen:
+            continue
+        seen.add(line)
+        capture_utxo_validation_failure(ctx, line)
+    return seen
+
+
+def scan_utxo_validation_failures(ctx):
+    """Final sweep, for lines no scenario loop happened to drain.
+
+    Anything captured live already carries its state; anything found only
+    here is recorded WITH the fact that its state was not captured, so
+    the evidence never implies an investigation it cannot support.
+    """
+    import smoke
+    captured_lines = {h['line'] for h in ctx.utxo_validation_failures}
+    late = []
+    for line in smoke.rust_log_lines(UTXO_WATCH_PHRASE, limit=2000):
+        if line in captured_lines:
+            continue
+        late.append({'line': line, 'ids': smoke.ids_in(line),
+                     'state_captured': False,
+                     'note': 'seen only at finalization; the box and the input '
+                             'block were not read while the condition was live'})
+    ctx.utxo_validation_failures.extend(late)
+    ctx.note('utxo_validation_failures', {
+        'count': len(ctx.utxo_validation_failures),
+        'captured_live': sum(1 for h in ctx.utxo_validation_failures
+                             if h.get('state_captured') is not False),
+        'seen_only_at_finalization': len(late),
+        'sample': ctx.utxo_validation_failures[:5],
+    })
+    return ctx.utxo_validation_failures
 
 
 def input_block_status(node='rust'):

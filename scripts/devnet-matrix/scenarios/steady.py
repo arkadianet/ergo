@@ -46,10 +46,12 @@ def _observe_window(ctx, blocks, address):
     dropped and lost at block 40 left both pools agreeing at the end,
     and F6 read as zero. This is the per-block accounting that sees it.
     """
+    import campaign
     start = smoke.scala_height(ctx.run)
     target, scanned, sent = start + blocks, start, []
-    observations = []
+    observations, seen = [], set()
     while time.monotonic() < ctx.run.deadline:
+        campaign.drain_utxo_watch(ctx, seen)
         try:
             height = smoke.scala_height(ctx.run)
         except Unavailable:

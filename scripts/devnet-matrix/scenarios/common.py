@@ -22,14 +22,20 @@ def wait_ordering_blocks(ctx, blocks, what):
     reports the shortfall instead of drawing a verdict from a window
     that never opened.
     """
+    import campaign
     start = smoke.scala_height(ctx.run)
     target = start + blocks
     reached = start
+    seen = set()
     while time.monotonic() < ctx.run.deadline:
         try:
             reached = smoke.scala_height(ctx.run)
         except Unavailable:
             pass
+        # The UTXO watch item is transient: by finalization the box may
+        # exist and the input block may be pruned, so its state is
+        # captured here, while the condition is live.
+        campaign.drain_utxo_watch(ctx, seen)
         if reached >= target:
             break
         ctx.run.idle(0.5)
