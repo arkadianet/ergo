@@ -321,13 +321,18 @@ def check_band(p2p, rest):
         raise SystemExit(
             f'refusing to bind {clash}: those ports belong to the operator\'s '
             'nodes, not to this harness')
+    # EVERY duplicate, including one node's own two listeners. The
+    # earlier `seen[port] != node` exemption let a node's REST and p2p
+    # share a port: one of the two binds, the other fails, and what is
+    # left is a REST port speaking the p2p handshake.
     seen = {}
     for node, port in both:
-        if port in seen and seen[port] != node:
+        if port in seen:
             raise SystemExit(
                 f'port {port} is claimed twice ({seen[port]} and {node}); '
-                'every node needs its own p2p and REST port')
-        seen[port] = node
+                'every listener needs its own port')
+        seen[port] = f'{node} p2p' if (node, port) in p2p.items() else \
+            f'{node} REST'
     return None
 
 
@@ -1514,6 +1519,18 @@ def _self_test():
         assert 'twice' in str(error), str(error)
     else:
         raise AssertionError('a duplicated port must be refused')
+    # Including ONE node's own two listeners (codex review-2): the
+    # `seen[port] != node` condition let a node's REST and p2p share a
+    # port, which binds once and then fails as a REST port that speaks
+    # the p2p handshake — an unreadable devnet rather than a refused
+    # configuration.
+    try:
+        check_band({'scala': 19600}, {'scala': 19600})
+    except SystemExit as error:
+        assert 'twice' in str(error) and '19600' in str(error), str(error)
+    else:
+        raise AssertionError(
+            "a node's own p2p and REST port must not be the same port")
     # Every role names a node that HAS a slot, and the node sets the
     # roles cover are exactly the ones the port tables know about.
     for role, spec in lifecycle.ROLES.items():
@@ -1997,6 +2014,21 @@ def _self_test():
     assert "'scala2'" not in _run_source and "'scala'" not in _run_source, \
         ('reconstruct_rate.run must resolve its reference nodes from the '
          'roles, not from literal node names', _run_source)
+
+    # ----- fix round 1 (codex review-2): seed, THEN assert peering ---
+    #
+    # `--reference-follower` deliberately leaves its node out of
+    # `START_NODES` and brings it up in the seed. A scenario that
+    # asserted peering first therefore asked a node that did not exist
+    # yet whether it had peers, which is an unavoidable false failure —
+    # Task 2's steady evidence carries the connection refusal.
+    for _name in REFERENCE_FOLLOWER_SCENARIOS:
+        _src = inspect.getsource(_all[_name].run)
+        if 'seed_second_miner' not in _src or 'assertion_1_peering' not in _src:
+            continue
+        assert _src.index('seed_second_miner') < \
+            _src.index('assertion_1_peering'), (
+                _name, 'peering is asserted before the follower is seeded')
 
     # ----- fix round 1, item 8: ONE workload, not two copies -----
     #

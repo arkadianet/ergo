@@ -1031,7 +1031,50 @@ def percentile(values, pct):
     return ordered[min(rank, len(ordered)) - 1]
 
 
-def lag_distribution(samples, tip_key, chain_key='scala_chain'):
+def follower_qualifying_samples(samples, ordering_key,
+                                miner_key='scala_ordering'):
+    """Samples where THIS follower and the miner name the same ordering block.
+
+    `qualifying_samples`'s `ordering` field is agreement between the
+    miner and RUST, which is the right key for the Rust port and the
+    wrong one for everybody else: a Scala follower's lag read through it
+    accepted every sample where Rust happened to agree with the miner,
+    whatever ordering block the follower itself was on. Two input chains
+    under different ordering blocks are not chains of the same thing, so
+    an index into one is not a lag in the other.
+
+    Each exclusion is counted for its own reason — the follower and the
+    miner disagreed, the follower named none, the miner named none —
+    because "unmeasurable" and "measured as zero" must never look alike.
+
+    A sample that carries neither per-node field is a synthetic or
+    pre-M4 one and falls back to the agreed `ordering` id.
+    """
+    kept = []
+    excluded = {'different_ordering_block': 0,
+                'follower_named_no_ordering_block': 0,
+                'miner_named_no_ordering_block': 0}
+    for i, s in enumerate(samples):
+        if ordering_key not in s and miner_key not in s:
+            if s.get('ordering') is None:
+                excluded['different_ordering_block'] += 1
+            else:
+                kept.append((i, s))
+            continue
+        miner, follower = s.get(miner_key), s.get(ordering_key)
+        if miner is None:
+            excluded['miner_named_no_ordering_block'] += 1
+        elif follower is None:
+            excluded['follower_named_no_ordering_block'] += 1
+        elif follower != miner:
+            excluded['different_ordering_block'] += 1
+        else:
+            kept.append((i, s))
+    return kept, excluded
+
+
+def lag_distribution(samples, tip_key, chain_key='scala_chain',
+                     ordering_key=None):
     """How far ONE follower's input tip trails the miner's chain.
 
     The definition is assertion 2's — the index of the follower's
@@ -1042,6 +1085,12 @@ def lag_distribution(samples, tip_key, chain_key='scala_chain'):
     measured before any patched number is quoted, and "stock lag in the
     hundreds" is a hypothesis until it is.
 
+    Qualified by THIS follower's own ordering id against the miner's
+    (`follower_qualifying_samples`), not by the miner-vs-Rust `ordering`
+    field: reading a Scala follower through that one accepted every
+    sample where Rust agreed with the miner, whatever ordering block the
+    follower was on.
+
     Nothing is folded in as a zero. A sample where the follower has no
     tip counts in `no_tip`, and one whose tip the miner's chain does not
     carry counts in `not_on_miner_chain`; neither contributes a lag,
@@ -1049,7 +1098,8 @@ def lag_distribution(samples, tip_key, chain_key='scala_chain'):
 
     Pure: `--self-test` drives it directly.
     """
-    kept, excluded = qualifying_samples(samples)
+    ordering_key = ordering_key or tip_key.replace('_tip', '_ordering')
+    kept, excluded = follower_qualifying_samples(samples, ordering_key)
     lags, no_tip, off_chain = [], 0, 0
     for _, s in kept:
         tip = s.get(tip_key)
@@ -1063,6 +1113,7 @@ def lag_distribution(samples, tip_key, chain_key='scala_chain'):
         lags.append(chain.index(tip))
     return {
         'tip_key': tip_key,
+        'ordering_key': ordering_key,
         'qualifying_samples': len(kept),
         'excluded_samples': excluded,
         'lag_samples': len(lags),
@@ -1595,6 +1646,56 @@ def _self_test():
     off_d = lag_distribution(off, 'scala2_tip')
     assert off_d['lag_samples'] == 0, off_d
     assert off_d['not_on_miner_chain'] == MIN_QUALIFYING_SAMPLES, off_d
+    # ----- fix round 1 (codex review-2): each follower is qualified
+    # against the miner by ITS OWN ordering block -----
+    #
+    # `qualifying_samples`'s `ordering` field is agreement between the
+    # miner and RUST. Reading a Scala follower's lag through it accepted
+    # every sample where Rust happened to agree with the miner, whatever
+    # ordering block the follower itself was on — 2,123 of 6,559
+    # "qualifying" samples in the archived steady series had a different
+    # Scala-follower ordering block. Two chains under different ordering
+    # blocks are not chains of the same thing, so an index into one is
+    # not a lag in the other.
+    _straddle = [
+        {'ordering': 'O1', 'scala_ordering': 'O1', 'rust_ordering': 'O1',
+         'scala_chain': ['c', 'b', 'a'], 'rust_tip': 'c',
+         'scala2_ordering': 'O0', 'scala2_tip': 'a'},
+    ] * MIN_QUALIFYING_SAMPLES
+    _agree = [
+        {'ordering': 'O1', 'scala_ordering': 'O1', 'rust_ordering': 'O1',
+         'scala_chain': ['c', 'b', 'a'], 'rust_tip': 'c',
+         'scala2_ordering': 'O1', 'scala2_tip': 'b'},
+    ] * MIN_QUALIFYING_SAMPLES
+    _mixed = _straddle + _agree
+    _follower = lag_distribution(_mixed, 'scala2_tip')
+    assert _follower['ordering_key'] == 'scala2_ordering', _follower
+    # Only the samples where the FOLLOWER agreed with the miner count.
+    assert _follower['qualifying_samples'] == MIN_QUALIFYING_SAMPLES, _follower
+    assert _follower['lag_samples'] == MIN_QUALIFYING_SAMPLES, _follower
+    assert (_follower['p50'], _follower['max']) == (1, 1), _follower
+    assert _follower['excluded_samples']['different_ordering_block'] == \
+        MIN_QUALIFYING_SAMPLES, _follower
+    # Rust, over the same series, is unaffected: its own ordering field
+    # is the one it was always qualified by.
+    _rust = lag_distribution(_mixed, 'rust_tip')
+    assert _rust['ordering_key'] == 'rust_ordering', _rust
+    assert _rust['qualifying_samples'] == 2 * MIN_QUALIFYING_SAMPLES, _rust
+    assert _rust['lag_samples'] == 2 * MIN_QUALIFYING_SAMPLES, _rust
+    # A follower that named NO ordering block at all is excluded for
+    # that reason, not counted as a lag and not confused with a
+    # disagreement.
+    _silent = [dict(s, scala2_ordering=None) for s in _agree]
+    _sd = lag_distribution(_silent, 'scala2_tip')
+    assert _sd['lag_samples'] == 0, _sd
+    assert _sd['excluded_samples']['follower_named_no_ordering_block'] == \
+        MIN_QUALIFYING_SAMPLES, _sd
+    # And a miner that named none excludes the sample for the miner's
+    # reason rather than blaming the follower.
+    _blind = [dict(s, scala_ordering=None) for s in _agree]
+    assert lag_distribution(_blind, 'scala2_tip')['excluded_samples'][
+        'miner_named_no_ordering_block'] == MIN_QUALIFYING_SAMPLES
+
     # A spread reports a real median rather than the mean.
     spread = ([sample(['c', 'b', 'a'], ['c', 'b', 'a'])] * 8
               + [sample(['c', 'b', 'a'], ['a'])] * 2)

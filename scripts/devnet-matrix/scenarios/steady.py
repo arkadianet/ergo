@@ -120,8 +120,6 @@ def _observe_window(ctx, blocks, address):
 
 
 def run(ctx):
-    smoke.assertion_1_peering(ctx.run, ctx.evidence)
-
     # A reference follower, if `--reference-follower` asked for one, on
     # the miner's chain BEFORE the workload starts: its whole purpose is
     # to produce the stock lag the port's is read against (spec §7a), and
@@ -130,6 +128,12 @@ def run(ctx):
     if set(SEEDED_NODES) & set(lifecycle.NODES):
         import campaign
         common.seed_second_miner(ctx, campaign, lifecycle, nodes=SEEDED_NODES)
+
+    # AFTER the seed. The follower is deliberately not in `START_NODES`,
+    # so asserting peering first asks a node that does not exist yet
+    # whether it has peers — an unavoidable false failure, which Task
+    # 2's steady evidence duly recorded as a connection refusal.
+    smoke.assertion_1_peering(ctx.run, ctx.evidence)
 
     # The mempool workload first: it needs a matured miner reward, and
     # waiting for one is time the steady window would otherwise spend

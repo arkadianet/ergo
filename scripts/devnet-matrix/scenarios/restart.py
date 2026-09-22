@@ -35,11 +35,13 @@ def run(ctx):
     import campaign
     import lifecycle
 
-    smoke.assertion_1_peering(ctx.run, ctx.evidence)
     # A reference follower, if one was asked for, on the miner's chain
-    # before anything is measured against it.
+    # before anything is measured against it — and before peering is
+    # asserted, because until the seed starts it the node is not there
+    # to have peers.
     if set(SEEDED_NODES) & set(lifecycle.NODES):
         common.seed_second_miner(ctx, campaign, lifecycle, nodes=SEEDED_NODES)
+    smoke.assertion_1_peering(ctx.run, ctx.evidence)
     common.wait_ordering_blocks(ctx, BLOCKS_BEFORE_RESTART, 'pre_restart')
 
     # Fold the drop counters forward: they are per-process, and the
