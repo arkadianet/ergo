@@ -26,7 +26,14 @@ from roles import ROLES, Role, role_node, roles_for_nodes  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = ROOT / 'scripts/devnet-matrix'
-WORK = HERE / '.work'
+# Where this run keeps its pid files, logs, series and evidence.
+# `MATRIX_WORK` moves ALL of it: a separate port band is not isolation,
+# because two runs driving one checkout still share `<name>.pid` and
+# `<name>.config` — the second `start` overwrites them and the first
+# `stop` then kills the second run's nodes — and they append to one
+# `scala.log` and one `agreement-series.jsonl`, which is the evidence
+# each of them is measured from.
+WORK = Path(os.environ.get('MATRIX_WORK', HERE / '.work'))
 
 # Which nodes this process drives, and on which ports. The smoke recipe
 # keeps the two-node defaults it has always had (Scala 19560/19580, Rust

@@ -112,7 +112,8 @@ CAMPAIGN_P2P_HOST = {'scala': '127.0.0.1', 'scala2': '127.0.0.1',
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-WORK = HERE / '.work'
+# See `lifecycle.WORK`: `MATRIX_WORK` moves the whole run.
+WORK = Path(os.environ.get('MATRIX_WORK', HERE / '.work'))
 CAMPAIGN_WORK = WORK / 'campaign'
 CONF = CAMPAIGN_WORK / 'conf'
 
@@ -1352,6 +1353,38 @@ def _self_test():
                               if not k.startswith(('MATRIX_P2P', 'MATRIX_REST'))},
                          capture_output=True, text=True, check=True).stdout
     assert out.splitlines()[0] == '19570 19592', out
+
+    import tempfile
+
+    # ----- M4: a run's WORKING DIRECTORY, not just its ports -----
+    #
+    # A separate port band is not isolation. Two agents driving this one
+    # worktree share `.work/`, so the second run's `lifecycle.start`
+    # overwrites `scala.pid` / `scala.config` and the first run's `stop`
+    # then reads them and kills the SECOND run's nodes — and both runs
+    # append to one `scala.log` and one `agreement-series.jsonl`, which
+    # is the evidence both of them are measured from. This happened on
+    # 2026-09-23 between Task 2 and a concurrent F16 smoke. `MATRIX_WORK`
+    # moves pid files, logs, series and evidence together; `smoke`
+    # imports `WORK` from `lifecycle`, so one variable settles all three
+    # modules.
+    probe = (
+        'import sys; sys.path.insert(0, %r);'
+        'import lifecycle, campaign, smoke;'
+        'print(lifecycle.WORK, smoke.WORK, campaign.WORK, campaign.CAMPAIGN_WORK)'
+    ) % str(HERE)
+    with tempfile.TemporaryDirectory() as tmp:
+        out = subprocess.run(
+            [sys.executable, '-c', probe],
+            env=dict(os.environ, MATRIX_WORK=tmp),
+            capture_output=True, text=True, check=True).stdout.split()
+        assert out[0] == out[1] == out[2] == tmp, out
+        assert out[3] == str(Path(tmp) / 'campaign'), out
+    out = subprocess.run(
+        [sys.executable, '-c', probe],
+        env={k: v for k, v in os.environ.items() if k != 'MATRIX_WORK'},
+        capture_output=True, text=True, check=True).stdout.split()
+    assert out[0] == str(HERE / '.work'), out
 
     # The port bands are the controller's, and must never collide with a
     # production node or with the smoke recipe's own defaults.
