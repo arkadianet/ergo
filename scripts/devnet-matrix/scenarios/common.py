@@ -533,6 +533,65 @@ def chain_members_scala_never_had(series):
     return orphans, off_by_ordering
 
 
+# ----- F6, per ordering block (pure, self-tested) -----
+
+def evaluate_f6(blocks):
+    """Per-ordering-block accounting for the transactions an ordering
+    block dropped from the applied input chain.
+
+    `blocks` is one entry per ordering block IN ORDER:
+
+        {'height', 'ordering_block', 'input_chain_txids', 'ordering_txids',
+         'rust_pool', 'scala_pool'}
+
+    all four id fields being sets observed at that block. For each block:
+
+    * **dropped** — in the applied input chain, not in the ordering block;
+    * **F6** — dropped and not back in RUST's pool, and never confirmed
+      by a LATER ordering block in the window. This is the reference
+      behaviour the port reproduces (spec §12 F6), so it is counted, not
+      failed;
+    * **lost_on_both** — dropped, in NEITHER pool, and never confirmed
+      later. A transaction in that state is irrecoverable on both
+      implementations, and comparing the two pools can never reveal it
+      because they agree. It FAILS.
+
+    A single end-of-run pool comparison cannot see any of this: an
+    input-chain transaction lost at block 40 leaves both pools agreeing
+    at block 60.
+    """
+    confirmed_later = {}
+    for i, block in enumerate(blocks):
+        for later in blocks[i + 1:]:
+            confirmed_later.setdefault(i, set()).update(later['ordering_txids'])
+    per_block, f6_total, lost_total = [], [], []
+    for i, block in enumerate(blocks):
+        dropped = set(block['input_chain_txids']) - set(block['ordering_txids'])
+        later = confirmed_later.get(i, set())
+        f6 = sorted(dropped - set(block['rust_pool']) - later)
+        lost = sorted(dropped - set(block['rust_pool'])
+                      - set(block['scala_pool']) - later)
+        per_block.append({
+            'height': block.get('height'),
+            'ordering_block': block.get('ordering_block'),
+            'input_chain_txs': len(block['input_chain_txids']),
+            'dropped': len(dropped),
+            'f6': f6,
+            'lost_on_both': lost,
+            'returned_to_rust_pool': len(dropped & set(block['rust_pool'])),
+            'confirmed_by_a_later_block': len(dropped & later),
+        })
+        f6_total.extend(f6)
+        lost_total.extend(lost)
+    return {
+        'blocks': per_block,
+        'f6_total': len(f6_total),
+        'f6_txids': sorted(set(f6_total)),
+        'lost_on_both_total': len(lost_total),
+        'lost_on_both_txids': sorted(set(lost_total)),
+    }
+
+
 # ----- §7.4 bounds -----
 
 def check_bounds(ctx, status, caps, what):

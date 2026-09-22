@@ -6,13 +6,84 @@ agreement inside the lag bounds, input-chain prefix agreement, mempool
 agreement with every Scala-only residue attributed to D1 or F6, and no
 penalty of the honest peer.
 """
+import time
+
 import smoke
+from smoke import Unavailable, api
 
 from . import common
 
 NODES = ('scala', 'rust')
 ORDERING_BLOCKS = 60
 MEMPOOL_TXS = 20
+# Payments kept in flight per ordering block during the window, so the
+# input chain the miner seals is never empty and there is something for
+# an ordering block to drop.
+PAYMENTS_PER_BLOCK = 3
+PAYMENT_NANOERG = 1_000_000
+
+
+def _pump(ctx, address, sent):
+    for _ in range(PAYMENTS_PER_BLOCK):
+        try:
+            status, txid = smoke.request(
+                'scala', '/wallet/payment/send',
+                [{'address': address, 'value': PAYMENT_NANOERG}])
+        except (OSError, ValueError):
+            continue
+        if status == 200 and txid:
+            sent.append(txid)
+    return sent
+
+
+def _observe_window(ctx, blocks, address):
+    """Walk the window ordering block by ordering block, recording what
+    each one did to the input chain that preceded it.
+
+    A6 runs ONCE, before the window. Copying its attribution into
+    `f6_count` afterwards reported the state of the chain at block 0 as
+    though it were the state at block 60: an input-chain transaction
+    dropped and lost at block 40 left both pools agreeing at the end,
+    and F6 read as zero. This is the per-block accounting that sees it.
+    """
+    start = smoke.scala_height(ctx.run)
+    target, scanned, sent = start + blocks, start, []
+    observations = []
+    while time.monotonic() < ctx.run.deadline:
+        try:
+            height = smoke.scala_height(ctx.run)
+        except Unavailable:
+            ctx.run.idle(1)
+            continue
+        while scanned < height:
+            scanned += 1
+            # The input chain Rust had APPLIED before this ordering
+            # block landed, from the sampler's own bracketed ids.
+            applied = {t for ids in dict(ctx.run.input_block_txids).values()
+                       for t in ids}
+            try:
+                ids = api('scala', f'/blocks/at/{scanned}') or []
+                ordering_txids = set()
+                header = ids[0] if ids else None
+                for hid in ids:
+                    block = api('scala', f'/blocks/{hid}')
+                    ordering_txids |= {
+                        t['id'] for t in block['blockTransactions']['transactions']}
+                rust_pool = {t['id'] for t in api('rust', '/transactions/unconfirmed')}
+                scala_pool = {t['id'] for t in api('scala', '/transactions/unconfirmed')}
+            except (Unavailable, KeyError, TypeError) as error:
+                observations.append({'height': scanned, 'unread': str(error)})
+                continue
+            observations.append({
+                'height': scanned, 'ordering_block': header,
+                'input_chain_txids': applied, 'ordering_txids': ordering_txids,
+                'rust_pool': rust_pool, 'scala_pool': scala_pool,
+            })
+            _pump(ctx, address, sent)
+        if scanned >= target:
+            break
+        ctx.run.idle(1)
+    return start, scanned, observations, sent
 
 
 def run(ctx):
@@ -24,7 +95,26 @@ def run(ctx):
     smoke.assertion_6_mempool(ctx.run, ctx.evidence, MEMPOOL_TXS)
 
     blocks = ctx.args.ordering_blocks or ORDERING_BLOCKS
-    common.wait_ordering_blocks(ctx, blocks, 'steady')
+    address = ((ctx.evidence.get('6_mempool') or {}).get('address')
+               or (api('scala', '/wallet/addresses') or [None])[0])
+    start, reached, observations, sent = _observe_window(ctx, blocks, address)
+    readable = [o for o in observations if 'unread' not in o]
+    unread = [o['height'] for o in observations if 'unread' in o]
+    ctx.note('steady_window', {'start_height': start, 'target': start + blocks,
+                               'reached': reached,
+                               'short_by': max(0, start + blocks - reached),
+                               'blocks_accounted': len(readable),
+                               'blocks_unread': unread,
+                               'payments_submitted': len(sent)})
+    if reached < start + blocks:
+        ctx.fail(f'the miner produced {reached - start} of the {blocks} ordering '
+                 'blocks steady needs (upstream F11 stalls the candidate '
+                 'generator); the shortfall is reported, never absorbed',
+                 {'start_height': start, 'reached': reached})
+    if unread:
+        ctx.fail(f'{len(unread)} ordering blocks in the window could not be read, '
+                 'so their F6 accounting is missing rather than zero',
+                 {'heights': unread})
 
     # The verdicts, over EVERY sample the run took.
     smoke.finalize_agreement(ctx.run, ctx.evidence)
@@ -52,12 +142,29 @@ def run(ctx):
                  f'(max gap {ctx.run.max_height_gap})',
                  {'violations': ctx.run.height_violations[:20]})
 
-    # F6 is a per-block count in this scenario, not just an end-of-run
-    # attribution: how many input-chain transactions the ordering block
-    # dropped and the mempool never got back.
+    # F6, counted PER ORDERING BLOCK across the window.
+    f6 = common.evaluate_f6(readable)
+    ctx.note('f6_per_block', {
+        'blocks': len(f6['blocks']),
+        'f6_total': f6['f6_total'],
+        'f6_txids': f6['f6_txids'][:20],
+        'lost_on_both_total': f6['lost_on_both_total'],
+        'lost_on_both_txids': f6['lost_on_both_txids'][:20],
+        'per_block': [b for b in f6['blocks'] if b['dropped']][:20],
+    })
+    ctx.note('f6_count', f6['f6_total'])
+    if f6['lost_on_both_total']:
+        ctx.fail(f"{f6['lost_on_both_total']} input-chain transactions were dropped "
+                 'by an ordering block and are in NEITHER pool and in no later '
+                 'block — a loss the two pools agree about, so comparing them '
+                 'could never have revealed it',
+                 {'txids': f6['lost_on_both_txids'][:20],
+                  'blocks': [b for b in f6['blocks'] if b['lost_on_both']][:10]},
+                 ids=f6['lost_on_both_txids'][:5])
+    # The end-of-run D1/F6 attribution from A6 is kept beside it, as the
+    # single-instant view it is.
     mempool = ctx.evidence.get('6_mempool') or {}
-    ctx.note('f6_accounting', mempool.get('d1_f6_accounting'))
-    ctx.note('f6_count', len((mempool.get('d1_f6_accounting') or {}).get('f6') or []))
+    ctx.note('a6_end_of_run_attribution', mempool.get('d1_f6_accounting'))
     ctx.note('d1_count', len((mempool.get('d1_f6_accounting') or {}).get('d1') or []))
 
     # Whole-chain D3 guard, beside the tip check assertion 2 makes.

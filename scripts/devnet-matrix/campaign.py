@@ -915,6 +915,49 @@ def _self_test():
         'a SIGKILLed child must read as released, zombie or not'
     assert not _holds_resources(999_999), 'a missing PID holds nothing'
 
+    # ----- finding 2: F6 is counted PER ORDERING BLOCK -----
+    #
+    # Codex's probe: an input-chain transaction is omitted and lost at
+    # block 40. A6 ran once before the window, so its attribution stayed
+    # clean and F6 read as zero — and because BOTH pools lost it, the
+    # pool difference could never have shown it either.
+    def blk(h, chain, ordering, rust_pool, scala_pool):
+        return {'height': h, 'ordering_block': f'O{h}',
+                'input_chain_txids': set(chain), 'ordering_txids': set(ordering),
+                'rust_pool': set(rust_pool), 'scala_pool': set(scala_pool)}
+
+    # Block 40 drops `lost` and neither pool has it, ever.
+    window = [blk(h, ['keep'], ['keep'], [], []) for h in range(38, 40)]
+    window.append(blk(40, ['keep', 'lost'], ['keep'], [], []))
+    window += [blk(h, ['keep'], ['keep'], [], []) for h in range(41, 61)]
+    f6 = common.evaluate_f6(window)
+    assert f6['lost_on_both_total'] == 1, f6
+    assert f6['lost_on_both_txids'] == ['lost'], f6
+    assert f6['f6_total'] == 1, f6
+    # The end-of-run pool DIFFERENCE is empty for the same series, which
+    # is exactly why it could not see it.
+    assert window[-1]['rust_pool'] ^ window[-1]['scala_pool'] == set()
+
+    # Dropped but back in Rust's pool: neither F6 nor a loss.
+    restored = [blk(1, ['a', 'b'], ['a'], ['b'], ['b'])]
+    f6 = common.evaluate_f6(restored)
+    assert f6['f6_total'] == 0 and f6['lost_on_both_total'] == 0, f6
+    assert f6['blocks'][0]['returned_to_rust_pool'] == 1, f6['blocks']
+
+    # Dropped, gone from Rust's pool, but confirmed by a LATER ordering
+    # block: not F6 either — it was not lost, only deferred.
+    deferred = [blk(1, ['a', 'b'], ['a'], [], []),
+                blk(2, [], ['b'], [], [])]
+    f6 = common.evaluate_f6(deferred)
+    assert f6['f6_total'] == 0, f6
+    assert f6['blocks'][0]['confirmed_by_a_later_block'] == 1, f6['blocks']
+
+    # Dropped, gone from Rust's pool, still in SCALA's: that is F6 (the
+    # port reproducing the reference behaviour), and NOT a loss.
+    port_only = [blk(1, ['a', 'b'], ['a'], [], ['b'])]
+    f6 = common.evaluate_f6(port_only)
+    assert f6['f6_total'] == 1 and f6['lost_on_both_total'] == 0, f6
+
     # ----- finding 1: codex's three fork false-pass probes -----
     #
     # All three were ACCEPTED by the union-membership evaluator: every
