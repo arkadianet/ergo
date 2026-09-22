@@ -1,32 +1,36 @@
-"""The fallback path, on purpose.
+"""The reconstruction fallback, forced by a peer that serves wrong bodies.
 
-The M2 gate could only ever observe the reconstruction half: in every
-passing run the follower had the input-block bodies it needed. This
-scenario takes them away.
+Three earlier attempts tried to starve the follower of input-block
+bodies through configuration and failed, for a reason worth keeping:
+the rebuild assembles from the node's MEMPOOL as well as its input-block
+cache, so shrinking the cache does not starve it. With D4 and D5 in
+place the port simply does not produce a Merkle mismatch against this
+miner, and no `[input_blocks.bounds]` lever changes that.
 
-Two things have to be true at once, and the first attempt had only one
-of them. **The ordering blocks must CARRY input-chain transactions**: on
-an unfunded chain every block is coinbase-only, the input chain
-contributes nothing, and the rebuild is trivially right no matter what
-the follower has forgotten — the first run reconstructed 3 of 3 with a
-four-entry transaction cache and 345 `WaitlistFull` drops, because there
-was nothing in those blocks to get wrong. So the scenario funds the
-chain and keeps a payment in flight through every ordering block.
-**And the follower must not be able to hold the tree**: it is stopped,
-its data directory is wiped while the miner runs on, and it comes back
-with the transaction cache, the staging budget and the per-ordering
-record cap squeezed to a few entries.
+  1. fresh data dir + a 4-entry transaction cache, unfunded chain
+     → 3/3 reconstructed. Correct: coinbase-only blocks carry no
+     input-chain transactions, so the rebuild cannot be wrong.
+  2. the same, funded, plus `records_per_ordering = 2`
+     → 0 reconstructions AND 0 fallbacks. The follower held no input
+     chain at all, so it never ATTEMPTED a rebuild and took the ordinary
+     download silently. (That silence is now its own telemetry event,
+     `ordering_reconstruct_skipped`, added to the node for this.)
+  3. funded, tree left to form, only the bodies starved
+     → 3/3 reconstructed again.
 
-Then the rebuild is assembled from a strict subset of what the miner
-committed, the root does not match, and the node has to download the
-block in full.
+So the lever is a PEER, not a bound. `p2p_adversary
+input_block_wrong_body` relays the follower's own input-block
+announcements back to it — which registers it as a source — and then
+answers the resulting body requests (code 105) with transactions the
+announcement does not commit to. The rebuilt transactions root then
+cannot match the header's.
 
-What has to hold: a fallback fires, and the block the node then applies
-at that height is the block Scala has. A fallback that lands anywhere
-else is the wrong fallback, and that judgement is smoke.py's
-`evaluate_mismatch_recovery`, not a local re-derivation.
+What has to hold: a fallback fires with a mismatch reason, and the block
+the node applies at that height is the block the miner has. A fallback
+that lands anywhere else is the wrong fallback, and that judgement is
+smoke.py's `evaluate_mismatch_recovery`, not a local re-derivation.
 """
-import shutil
+import subprocess
 import time
 
 import lifecycle
@@ -38,45 +42,20 @@ from . import common
 NODES = ('scala', 'rust')
 # A miner reward matures at ordering block 11 (`minerRewardDelay = 10`),
 # and the workload cannot start before there is a coin to spend.
-BLOCKS_BEFORE_EVICTION = 13
-BLOCKS_AFTER_EVICTION = 6
-# Payments kept in flight per ordering block, so the input chain the
-# miner seals is never empty.
-PAYMENTS_PER_ROUND = 4
+BLOCKS_BEFORE_ADVERSARY = 13
+BLOCKS_UNDER_ADVERSARY = 8
+PAYMENTS_PER_BLOCK = 4
 PAYMENT_NANOERG = 1_000_000
+ADVERSARY_SECONDS = 900
+ADVERSARY_SOURCE = '127.211.0.1'
 
-# The bounds that starve the reconstruction path (spec §7.4 names, as
-# `ergo-node/src/config/toml_sections.rs` spells them). Only the BODIES
-# are taken away:
-#
-# * `tx_cache_entries` is where the input-block transactions a rebuild
-#   would be assembled FROM live. At 4, the cache cannot hold a tree's
-#   worth of bodies, so they are gone before the ordering block that
-#   needs them arrives — the eviction this scenario is named for;
-# * `staging_bytes_total` bounds delivered-but-unverified bodies, so the
-#   node cannot simply re-stage what the cache dropped.
-#
-# The TREE is deliberately left alone. A previous attempt also squeezed
-# `records_per_ordering` to 2, and the node then held no input chain at
-# all for the announced block — so it never ATTEMPTED a rebuild, took
-# the ordinary download path, and emitted neither event. Zero
-# reconstructions and zero fallbacks is not the fallback path; it is the
-# scenario measuring nothing. (That the fallback event is not emitted
-# when there is no tree to rebuild from is itself worth reporting: the
-# telemetry undercounts downloads.)
-RUST_OVERRIDES = (
-    ('input_blocks.bounds', 'tx_cache_entries', '4'),
-    ('input_blocks.bounds', 'staging_bytes_total', '4096'),
-)
+# The reasons that mean "the node refused its own rebuild", as opposed to
+# an ingredient it never had. A wrong body produces the first kind: the
+# transactions arrive, assemble, and hash to the wrong root.
+MISMATCH_REASONS = tuple(smoke.MERKLE_MISMATCH_REASONS)
 
 
 def _fund(ctx):
-    """A spendable coin and the address to send it to.
-
-    Raises through `Unavailable` rather than returning a sentinel: a
-    workload that could not be funded has not been run, and an eviction
-    scenario over coinbase-only blocks measures nothing.
-    """
     deadline = min(ctx.run.deadline, time.monotonic() + 900)
     balance = 0
     while time.monotonic() < deadline:
@@ -94,8 +73,9 @@ def _fund(ctx):
 
 
 def _pump(ctx, address, sent):
-    """Submit a few payments, so the next input block is not empty."""
-    for _ in range(PAYMENTS_PER_ROUND):
+    """Keep a payment in flight, so the input chain the miner seals is
+    never empty and the ordering blocks carry transactions to get wrong."""
+    for _ in range(PAYMENTS_PER_BLOCK):
         try:
             status, txid = smoke.request(
                 'scala', '/wallet/payment/send',
@@ -107,103 +87,146 @@ def _pump(ctx, address, sent):
     return sent
 
 
+def _adversary_binary():
+    target = smoke.ROOT / 'target' / 'release' / 'examples' / 'p2p_adversary'
+    if not target.exists():
+        raise RuntimeError(
+            f'{target} not built; run `cargo build --release --example '
+            'p2p_adversary -p ergo-node`')
+    return target
+
+
 def run(ctx):
     import campaign
 
     smoke.assertion_1_peering(ctx.run, ctx.evidence)
-    common.wait_ordering_blocks(ctx, BLOCKS_BEFORE_EVICTION, 'pre_eviction')
+    common.wait_ordering_blocks(ctx, BLOCKS_BEFORE_ADVERSARY, 'pre_adversary')
 
     balance, address = _fund(ctx)
     if not balance or not address:
         ctx.fail('no spendable coin on the miner wallet, so the ordering blocks '
                  'would carry nothing but the coinbase and the rebuild would be '
-                 'trivially right whatever the follower had forgotten',
+                 'trivially right whatever bodies it was given',
                  {'balance_nano': balance, 'address': address})
         return
     sent = _pump(ctx, address, [])
 
-    evict_height = smoke.scala_height(ctx.run)
-    ctx.note('eviction_height', evict_height)
-    ctx.note('bounds_applied', {k: v for _, k, v in RUST_OVERRIDES})
+    collector = common.EventCollector(ctx)
+    collector.poll()
+    watermark = collector.highest_seen
+    start = smoke.scala_height(ctx.run)
 
-    # Stop the follower and take its input-block bodies away entirely:
-    # a fresh data directory, while the miner is already well past the
-    # root of the tree it will announce next.
-    lifecycle.stop(('rust',))
-    shutil.rmtree(ctx.data_root / 'rust', ignore_errors=True)
-    campaign.ensure_data_dirs(ctx.data_root, ['rust'])
-    lifecycle.spawn('rust')
-    ctx.run.started('rust')
-    lifecycle.wait_peered()
+    binary = _adversary_binary()
+    command = [str(binary),
+               f'{lifecycle.P2P_HOST["rust"]}:{lifecycle.P2P["rust"]}', 'devnet',
+               f'127.0.0.1:{lifecycle.REST["rust"]}',
+               'input_block_wrong_body', str(ADVERSARY_SECONDS)]
+    ctx.note('adversary_command', ' '.join(command))
+    adversary = subprocess.Popen(command, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True,
+                                 start_new_session=True)
+    ctx.note('adversary_pid', adversary.pid)
 
-    # Keep the chain funded across the whole observation window: a
-    # payment in flight at every ordering block is what puts input-chain
-    # transactions into the blocks whose rebuild is being measured.
-    target = evict_height + BLOCKS_AFTER_EVICTION
-    last_height = evict_height
-    while time.monotonic() < ctx.run.deadline:
+    target, reached, last, seen = start + BLOCKS_UNDER_ADVERSARY, start, start, set()
+    try:
+        while time.monotonic() < ctx.run.deadline:
+            collector.poll()
+            campaign.drain_utxo_watch(ctx, seen)
+            try:
+                reached = smoke.scala_height(ctx.run)
+            except Unavailable:
+                pass
+            if reached > last:
+                last = reached
+                _pump(ctx, address, sent)
+            if reached >= target:
+                break
+            ctx.run.idle(0.5)
+    finally:
+        # By PID, and only ours: the harness is a process this scenario
+        # started and nothing else may be signalled.
+        if adversary.poll() is None:
+            adversary.terminate()
         try:
-            height = smoke.scala_height(ctx.run)
-        except Unavailable:
-            ctx.run.idle(1)
-            continue
-        if height > last_height:
-            last_height = height
-            _pump(ctx, address, sent)
-        if height >= target:
-            break
-        ctx.run.idle(1)
-    ctx.note('workload', {'payments_submitted': len(sent),
-                          'ordering_blocks': last_height - evict_height,
-                          'target_blocks': BLOCKS_AFTER_EVICTION})
-    if last_height < target:
-        ctx.fail(f'the miner produced {last_height - evict_height} of the '
-                 f'{BLOCKS_AFTER_EVICTION} ordering blocks the eviction window '
-                 'needs (upstream F11); the shortfall is reported, never absorbed',
-                 {'reached': last_height, 'target': target})
+            stdout, _ = adversary.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            adversary.kill()
+            stdout, _ = adversary.communicate()
+        ctx.note('adversary', {'returncode': adversary.returncode,
+                               'stdout': (stdout or '')[-4000:]})
+    collector.poll()
 
-    events = common.rust_events(ctx)
-    # No watermark: the node is restarted on a FRESH data directory, so
-    # its event feed starts empty and everything in it is post-eviction.
-    window = [e for e in events if e['kind'].startswith('ordering_')]
-    fallbacks = [e for e in window if e['kind'] == 'ordering_reconstruct_fallback']
-    reconstructions = [e for e in window if e['kind'] == 'ordering_reconstructed']
+    ctx.note('window', {'start_height': start, 'target': target,
+                        'reached': reached, 'payments_submitted': len(sent)})
+    if reached < target:
+        ctx.fail(f'the miner produced {reached - start} of the '
+                 f'{BLOCKS_UNDER_ADVERSARY} ordering blocks the adversary window '
+                 'needs (upstream F11); the shortfall is reported, never absorbed',
+                 {'reached': reached, 'target': target})
+
+    ctx.note('event_collection', collector.summary(watermark))
+    if collector.lost_in_window(watermark):
+        ctx.fail('the event feed evicted entries between polls, so the outcomes '
+                 'of this window are incomplete',
+                 {'collection': collector.summary(watermark)})
+
+    # Did the adversary actually get asked, and answer?
+    answered = [line for line in ((ctx.evidence.get('adversary') or {})
+                                  .get('stdout') or '').splitlines()
+                if 'answered' in line]
+    ctx.note('adversary_answered', answered)
+    reached_node = [line for line in
+                    smoke.rust_log_lines(ADVERSARY_SOURCE, limit=20000)
+                    if ADVERSARY_SOURCE in line]
+    ctx.note('adversary_seen_by_the_node', {'log_lines': len(reached_node),
+                                            'sample': reached_node[:5]})
+
+    window = collector.window(watermark)
+    ordering = [e for e in window if e['kind'].startswith('ordering_')]
+    fallbacks = [e for e in ordering
+                 if e['kind'] == 'ordering_reconstruct_fallback']
+    mismatch = [e for e in fallbacks if (e.get('detail') or '') in MISMATCH_REASONS]
+    reconstructions = [e for e in ordering if e['kind'] == 'ordering_reconstructed']
+    skipped = [e for e in ordering if e['kind'] == 'ordering_reconstruct_skipped']
     ctx.note('ordering_outcomes', {
         'ordering_reconstruct_fallback': len(fallbacks),
+        'with_a_mismatch_reason': len(mismatch),
         'ordering_reconstructed': len(reconstructions),
+        'ordering_reconstruct_skipped': len(skipped),
         'fallback_reasons': smoke._tally(e.get('detail') for e in fallbacks),
-        'first_kind': window[0]['kind'] if window else None,
-        'first_detail': window[0].get('detail') if window else None,
+        'skipped_reasons': smoke._tally(e.get('detail') for e in skipped),
     })
-    if not fallbacks:
-        ctx.fail('no ordering block fell back to a full download even with the '
-                 'input-block bodies gone and the staging budget squeezed, so the '
-                 'fallback path was NOT exercised — the scenario proved nothing',
-                 {'events_in_window': len(window),
-                  'reconstructions': len(reconstructions),
-                  'payments_submitted': len(sent),
+
+    if not mismatch:
+        ctx.fail('no ordering block fell back with a Merkle-mismatch reason even '
+                 'though a peer was serving bodies the announcements do not commit '
+                 'to, so the fallback path was NOT exercised',
+                 {'fallbacks': len(fallbacks), 'reconstructions': len(reconstructions),
+                  'skipped': len(skipped),
+                  'adversary_stdout': (ctx.evidence.get('adversary') or {}).get('stdout'),
                   'rust_log': smoke.rust_log_lines('input_blocks')})
 
-    # Whatever it fell back to has to be Scala's block at that height.
-    heights = [e.get('height') for e in window if e.get('height') is not None]
+    # Whatever it fell back to has to be the miner's block at that height.
+    heights = [e.get('height') for e in ordering if e.get('height') is not None]
     if not heights:
         ctx.fail('the follower reported no ordering outcome with a height, so the '
-                 'fallback could not be checked against Scala',
-                 {'window': window[:10]})
+                 'fallback could not be checked against the miner',
+                 {'window': ordering[:10]})
         return
     at_height, unread = common.scala_blocks_by_height(ctx, min(heights), max(heights))
     ctx.note('scala_heights_unread', unread)
     if unread:
-        ctx.fail(f'Scala could not be read for {len(unread)} of the heights the '
+        ctx.fail(f'the miner could not be read for {len(unread)} of the heights the '
                  'fallback covers, so the recovery cannot be checked against it',
                  {'heights': unread})
     recovery = smoke.evaluate_mismatch_recovery(
-        common.ordering_stream(events), at_height)
+        common.ordering_stream(window), at_height)
     ctx.note('mismatch_recovery', recovery)
     for message, evidence in recovery['failures']:
         ctx.fail(message, evidence)
 
-    # And the node has to agree with the miner afterwards.
+    # And the node has to agree with the miner afterwards. The adversary
+    # is gone by now, so recovery is the only thing left to observe.
     deadline = min(ctx.run.deadline, time.monotonic() + 300)
     agreed = False
     while time.monotonic() < deadline:
@@ -225,3 +248,11 @@ def run(ctx):
                  {'rust': api_retry('rust', '/info', ctx.run.deadline, what='rust'),
                   'scala': api_retry('scala', '/info', ctx.run.deadline,
                                      what='scala')})
+
+    # The honest peer must be untouched by any of this.
+    penalties = [line for line in smoke.rust_log_lines('penalizing peer', limit=2000)
+                 if str(lifecycle.P2P['scala']) in line]
+    ctx.note('penalty_log_lines_naming_the_miner', penalties)
+    if penalties:
+        ctx.fail('the honest miner was penalised while an adversary served wrong '
+                 'bodies', {'log': penalties})

@@ -55,6 +55,15 @@
 //!   keepalive_only        unknown-code frame every 60 s; expect ~600 s
 //!                         eviction — an unrecognized code is drained but
 //!                         never counted as progress
+//!   input_block_wrong_body <secs>
+//!                         answers the follower's input-block body
+//!                         requests (code 105) with bodies the
+//!                         announcement does not commit to, forcing the
+//!                         ordering-block rebuild to compute a
+//!                         transactions root that cannot match the
+//!                         header's. Used by the campaign's `evict`
+//!                         scenario, which reads the resulting fallback
+//!                         off the event feed.
 //!   input_block_flood <a> <d>
 //!                         the Matrix (input blocks) flood, plan 2 task 9:
 //!                         `a` input-block announcements (code 100) at the
@@ -83,8 +92,8 @@ use ergo_p2p::handshake::{
     Version,
 };
 use ergo_p2p::message::input_blocks::{
-    serialize_input_block, serialize_input_block_txs, InputBlockTxs, CODE_INPUT_BLOCK,
-    CODE_INPUT_BLOCK_TXS,
+    deserialize_input_block_txs_request, serialize_input_block, serialize_input_block_txs,
+    InputBlockTxs, CODE_INPUT_BLOCK, CODE_INPUT_BLOCK_TXS, CODE_INPUT_BLOCK_TXS_REQUEST,
 };
 use ergo_p2p::message::{serialize_sync_info, SyncInfo};
 use ergo_primitives::digest::blake2b256;
@@ -316,6 +325,46 @@ impl Conn {
 
     /// Wait for a frame with `code`. Returns the elapsed time, or None on
     /// timeout / close.
+    /// Read the next whole frame, returning `(code, payload)`.
+    ///
+    /// `wait_for_code` discards payloads; the wrong-body scenario has to
+    /// READ them — it answers a request whose input-block id and weak
+    /// ids are in the frame it just received.
+    async fn next_frame(&mut self, max: Duration) -> Option<(u8, Vec<u8>)> {
+        let start = Instant::now();
+        let mut tmp = [0u8; 65536];
+        loop {
+            if let Ok(Some(h)) = parse_frame_header(&self.magic, &self.buf) {
+                let total = if h.payload_len == 0 {
+                    HEADER_LENGTH
+                } else {
+                    HEADER_LENGTH + 4 + h.payload_len
+                };
+                if self.buf.len() >= total {
+                    let frame: Vec<u8> = self.buf.drain(..total).collect();
+                    let payload = if h.payload_len == 0 {
+                        Vec::new()
+                    } else {
+                        frame[HEADER_LENGTH + 4..].to_vec()
+                    };
+                    return Some((h.code, payload));
+                }
+            } else if self.buf.len() >= HEADER_LENGTH {
+                // Unparsable head: drop the buffer rather than spin.
+                self.buf.clear();
+            }
+            let left = max.saturating_sub(start.elapsed());
+            if left.is_zero() {
+                return None;
+            }
+            match tokio::time::timeout(left, self.stream.read(&mut tmp)).await {
+                Ok(Ok(0)) | Ok(Err(_)) => return None,
+                Ok(Ok(n)) => self.buf.extend_from_slice(&tmp[..n]),
+                Err(_) => return None,
+            }
+        }
+    }
+
     async fn wait_for_code(&mut self, code: u8, max: Duration) -> Option<Duration> {
         let start = Instant::now();
         let mut tmp = [0u8; 65536];
@@ -488,6 +537,106 @@ fn bogus_announcement(seed: u64, i: u32, height: u32, parent_id: [u8; 32]) -> Ve
         unparsed_bytes: Vec::new(),
     };
     serialize_input_block(&announcement).expect("a well-formed announcement serializes")
+}
+
+/// Answer the follower's input-block body requests with the WRONG body.
+///
+/// The `evict` scenario needs the reconstruction fallback to fire, and
+/// no configuration lever produces it: the follower assembles from its
+/// mempool as well as its input-block cache, so starving the cache does
+/// not starve the rebuild. A peer that answers a body request with
+/// transactions the announcement does not commit to does, because the
+/// rebuilt transactions root then cannot match the header's.
+///
+/// The adversary makes itself a source the follower will ask: it relays
+/// every input-block announcement the follower sends it straight back,
+/// which registers it as an announcer for that id, and then answers the
+/// resulting `RequestInputBlockTransactions` (code 105) with an
+/// `InputBlockTransactions` (code 104) carrying a body list that does
+/// not correspond to the requested weak ids.
+///
+/// It reports how many requests it answered. Whether the follower then
+/// fell back is read off the event feed by the campaign — this side
+/// only has to deliver the wrong bodies and say that it did.
+async fn input_block_wrong_body(ctx: &Ctx, seconds: u64) -> bool {
+    println!("[wrong_body] answering 105 requests with mismatched bodies for {seconds}s");
+    let mut conn =
+        match Conn::open_as(src(211), ctx.target, ctx.magic, SUBBLOCKS_PEER_VERSION).await {
+            Ok(c) => c,
+            Err(e) => {
+                println!("FAIL input_block_wrong_body: connect failed: {e}");
+                return false;
+            }
+        };
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    let (mut relayed, mut answered, mut requests) = (0u32, 0u32, 0u32);
+    while Instant::now() < deadline {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let Some((code, payload)) = conn.next_frame(left).await else {
+            break;
+        };
+        match code {
+            // An announcement the follower relayed to us. Echo it back:
+            // that is what makes us a peer it will ask for the bodies.
+            CODE_INPUT_BLOCK => {
+                let frame = full_frame(&ctx.magic, CODE_INPUT_BLOCK, &payload);
+                if conn.stream.write_all(&frame).await.is_err() {
+                    break;
+                }
+                relayed += 1;
+            }
+            // The request we exist to answer badly.
+            CODE_INPUT_BLOCK_TXS_REQUEST => {
+                requests += 1;
+                let Ok(request) = deserialize_input_block_txs_request(&payload) else {
+                    continue;
+                };
+                // A body list that does NOT correspond to the requested
+                // weak ids: one syntactically valid transaction whose
+                // own weak id is nothing anybody asked for. The node's
+                // digest check over the announced ids cannot match it.
+                let Some(tx) = decoy_transaction() else {
+                    continue;
+                };
+                let Ok(body) = serialize_input_block_txs(&InputBlockTxs {
+                    input_block_id: request.input_block_id,
+                    transactions: vec![tx],
+                }) else {
+                    continue;
+                };
+                let frame = full_frame(&ctx.magic, CODE_INPUT_BLOCK_TXS, &body);
+                if conn.stream.write_all(&frame).await.is_err() {
+                    break;
+                }
+                answered += 1;
+            }
+            _ => {}
+        }
+    }
+    println!(
+        "[wrong_body] relayed {relayed} announcements, saw {requests} body requests, \
+         answered {answered} with mismatched bodies"
+    );
+    let ok = answered > 0;
+    println!(
+        "{} input_block_wrong_body: the follower asked us for bodies and got wrong ones",
+        if ok { "PASS" } else { "FAIL" }
+    );
+    ok
+}
+
+/// One syntactically valid transaction that commits to nothing the
+/// follower asked for. Built by round-tripping an empty-input, empty-
+/// output shell through the serializer, so the node parses it and then
+/// finds its weak id does not answer the request.
+fn decoy_transaction() -> Option<ergo_ser::transaction::Transaction> {
+    use ergo_ser::transaction::read_transaction;
+    // inputs = 0, data inputs = 0, outputs = 0 — the shortest frame the
+    // codec accepts. Parsed rather than constructed so the example does
+    // not have to track the struct's private shape.
+    let bytes = [0u8, 0u8, 0u8];
+    let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
+    read_transaction(&mut r).ok()
 }
 
 /// X coordinate of the secp256k1 generator.
@@ -1103,6 +1252,10 @@ async fn main() {
                 Duration::from_secs(720),
             )
             .await
+        }
+        "input_block_wrong_body" => {
+            let secs: u64 = rest.first().map_or(600, |s| s.parse().unwrap());
+            input_block_wrong_body(&ctx, secs).await
         }
         "input_block_flood" => {
             let a: u32 = rest.first().map_or(10_000, |s| s.parse().unwrap());

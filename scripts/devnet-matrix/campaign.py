@@ -824,10 +824,13 @@ def _self_test():
     # the outside, exactly like a devnet that would not start.
     import tomllib
 
-    from scenarios import evict as evict_scenario
+    # `evict` no longer overrides any bound — the fallback is forced by a
+    # peer, not by starving a cache — so the renderer is exercised with
+    # the overrides a three-node scenario does use.
+    from scenarios import fork as fork_scenario
     real = render_rust_config((HERE / 'rust-node.toml').read_text(),
                               Path('/tmp/x/rust'), ['scala', 'rust'],
-                              evict_scenario.RUST_OVERRIDES)
+                              fork_scenario.RUST_OVERRIDES)
     parsed = tomllib.loads(real)
     assert parsed['data_dir'] == '/tmp/x/rust', parsed['data_dir']
     assert parsed['peers']['bind_addr'] == '127.0.0.1:19572', parsed['peers']
@@ -835,10 +838,10 @@ def _self_test():
     assert parsed['api']['bind'] == '127.0.0.1:19592', parsed['api']
     # Every override the scenario declares landed in the bounds table,
     # and the recipe file's own settings survived alongside them.
-    bounds = parsed['input_blocks']['bounds']
-    for _, key, value in evict_scenario.RUST_OVERRIDES:
-        assert bounds.get(key) == int(value), (key, bounds)
-    assert bounds['waitlist_entries'] == 8192, bounds
+    assert parsed['peers']['per_ip_limit'] == 3, parsed['peers']
+    assert parsed['peers']['per_subnet_limit'] == 6, parsed['peers']
+    # The recipe file's own settings survive alongside the overrides.
+    assert parsed['input_blocks']['bounds']['waitlist_entries'] == 8192, parsed
     # And an override for a key the recipe ALREADY sets replaces it
     # rather than appending a second copy.
     replaced = render_rust_config(
