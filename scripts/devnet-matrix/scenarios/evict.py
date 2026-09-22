@@ -2,11 +2,24 @@
 
 The M2 gate could only ever observe the reconstruction half: in every
 passing run the follower had the input-block bodies it needed. This
-scenario takes them away. The node is stopped mid-chain, its data
-directory is wiped while the miner keeps going, and it is restarted with
-the input-block body store bounded to almost nothing — so when the next
-ordering block arrives it has no bodies for the announced tree and MUST
-download the block in full.
+scenario takes them away.
+
+Two things have to be true at once, and the first attempt had only one
+of them. **The ordering blocks must CARRY input-chain transactions**: on
+an unfunded chain every block is coinbase-only, the input chain
+contributes nothing, and the rebuild is trivially right no matter what
+the follower has forgotten — the first run reconstructed 3 of 3 with a
+four-entry transaction cache and 345 `WaitlistFull` drops, because there
+was nothing in those blocks to get wrong. So the scenario funds the
+chain and keeps a payment in flight through every ordering block.
+**And the follower must not be able to hold the tree**: it is stopped,
+its data directory is wiped while the miner runs on, and it comes back
+with the transaction cache, the staging budget and the per-ordering
+record cap squeezed to a few entries.
+
+Then the rebuild is assembled from a strict subset of what the miner
+committed, the root does not match, and the node has to download the
+block in full.
 
 What has to hold: a fallback fires, and the block the node then applies
 at that height is the block Scala has. A fallback that lands anywhere
@@ -23,8 +36,14 @@ from smoke import Unavailable, api, api_retry
 from . import common
 
 NODES = ('scala', 'rust')
-BLOCKS_BEFORE_EVICTION = 6
-BLOCKS_AFTER_EVICTION = 4
+# A miner reward matures at ordering block 11 (`minerRewardDelay = 10`),
+# and the workload cannot start before there is a coin to spend.
+BLOCKS_BEFORE_EVICTION = 13
+BLOCKS_AFTER_EVICTION = 6
+# Payments kept in flight per ordering block, so the input chain the
+# miner seals is never empty.
+PAYMENTS_PER_ROUND = 4
+PAYMENT_NANOERG = 1_000_000
 
 # The bounds that starve the reconstruction path (spec §7.4 names, as
 # `ergo-node/src/config/toml_sections.rs` spells them):
@@ -41,7 +60,49 @@ RUST_OVERRIDES = (
     ('input_blocks.bounds', 'tx_cache_entries', '4'),
     ('input_blocks.bounds', 'staging_bytes_total', '4096'),
     ('input_blocks.bounds', 'waitlist_entries', '8'),
+    # The tree itself: at 2 records per ordering block the follower can
+    # never hold more than a sliver of the ~64 input blocks the miner
+    # publishes under one ordering block, so whatever it assembles is a
+    # strict subset of what the miner committed to.
+    ('input_blocks.bounds', 'records_per_ordering', '2'),
 )
+
+
+def _fund(ctx):
+    """A spendable coin and the address to send it to.
+
+    Raises through `Unavailable` rather than returning a sentinel: a
+    workload that could not be funded has not been run, and an eviction
+    scenario over coinbase-only blocks measures nothing.
+    """
+    deadline = min(ctx.run.deadline, time.monotonic() + 900)
+    balance = 0
+    while time.monotonic() < deadline:
+        try:
+            balance = (api('scala', '/wallet/balances') or {}).get('balance') or 0
+        except Unavailable:
+            balance = 0
+        if balance:
+            break
+        ctx.run.idle(1)
+    address = (api_retry('scala', '/wallet/addresses', ctx.run.deadline,
+                         what='the miner wallet address') or [None])[0]
+    ctx.note('funding', {'balance_nano': balance, 'address': address})
+    return balance, address
+
+
+def _pump(ctx, address, sent):
+    """Submit a few payments, so the next input block is not empty."""
+    for _ in range(PAYMENTS_PER_ROUND):
+        try:
+            status, txid = smoke.request(
+                'scala', '/wallet/payment/send',
+                [{'address': address, 'value': PAYMENT_NANOERG}])
+        except (OSError, ValueError):
+            continue
+        if status == 200 and txid:
+            sent.append(txid)
+    return sent
 
 
 def run(ctx):
@@ -49,6 +110,15 @@ def run(ctx):
 
     smoke.assertion_1_peering(ctx.run, ctx.evidence)
     common.wait_ordering_blocks(ctx, BLOCKS_BEFORE_EVICTION, 'pre_eviction')
+
+    balance, address = _fund(ctx)
+    if not balance or not address:
+        ctx.fail('no spendable coin on the miner wallet, so the ordering blocks '
+                 'would carry nothing but the coinbase and the rebuild would be '
+                 'trivially right whatever the follower had forgotten',
+                 {'balance_nano': balance, 'address': address})
+        return
+    sent = _pump(ctx, address, [])
 
     evict_height = smoke.scala_height(ctx.run)
     ctx.note('eviction_height', evict_height)
@@ -64,7 +134,31 @@ def run(ctx):
     ctx.run.started('rust')
     lifecycle.wait_peered()
 
-    common.wait_ordering_blocks(ctx, BLOCKS_AFTER_EVICTION, 'post_eviction')
+    # Keep the chain funded across the whole observation window: a
+    # payment in flight at every ordering block is what puts input-chain
+    # transactions into the blocks whose rebuild is being measured.
+    target = evict_height + BLOCKS_AFTER_EVICTION
+    last_height = evict_height
+    while time.monotonic() < ctx.run.deadline:
+        try:
+            height = smoke.scala_height(ctx.run)
+        except Unavailable:
+            ctx.run.idle(1)
+            continue
+        if height > last_height:
+            last_height = height
+            _pump(ctx, address, sent)
+        if height >= target:
+            break
+        ctx.run.idle(1)
+    ctx.note('workload', {'payments_submitted': len(sent),
+                          'ordering_blocks': last_height - evict_height,
+                          'target_blocks': BLOCKS_AFTER_EVICTION})
+    if last_height < target:
+        ctx.fail(f'the miner produced {last_height - evict_height} of the '
+                 f'{BLOCKS_AFTER_EVICTION} ordering blocks the eviction window '
+                 'needs (upstream F11); the shortfall is reported, never absorbed',
+                 {'reached': last_height, 'target': target})
 
     events = common.rust_events(ctx)
     # No watermark: the node is restarted on a FRESH data directory, so
@@ -85,6 +179,7 @@ def run(ctx):
                  'fallback path was NOT exercised — the scenario proved nothing',
                  {'events_in_window': len(window),
                   'reconstructions': len(reconstructions),
+                  'payments_submitted': len(sent),
                   'rust_log': smoke.rust_log_lines('input_blocks')})
 
     # Whatever it fell back to has to be Scala's block at that height.

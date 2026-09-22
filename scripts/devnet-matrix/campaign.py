@@ -502,9 +502,12 @@ def _self_test():
     assert parsed['peers']['bind_addr'] == '127.0.0.1:19572', parsed['peers']
     assert parsed['peers']['known'] == ['127.0.0.1:19570'], parsed['peers']
     assert parsed['api']['bind'] == '127.0.0.1:19592', parsed['api']
+    # Every override the scenario declares, and nothing else, landed in
+    # the bounds table — including the one the recipe file already sets,
+    # which has to be REPLACED rather than duplicated.
     assert parsed['input_blocks']['bounds'] == {
-        'waitlist_entries': 8, 'tx_cache_entries': 4,
-        'staging_bytes_total': 4096}, parsed['input_blocks']['bounds']
+        key: int(value) for _, key, value in evict_scenario.RUST_OVERRIDES
+    }, parsed['input_blocks']['bounds']
     # Untouched settings survive the render.
     assert parsed['input_blocks']['strict_field_binding'] is False, parsed
     assert parsed['mining']['enabled'] is False, parsed
