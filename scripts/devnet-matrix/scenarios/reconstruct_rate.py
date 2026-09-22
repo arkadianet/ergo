@@ -14,6 +14,7 @@ rate is stated beside the reference's rather than on its own.
 import re
 import time
 
+import lifecycle
 import smoke
 from smoke import Unavailable, api, api_retry
 
@@ -34,6 +35,16 @@ SCALA2_EXTRA = (
     'ergo.node.mining = false\n'
     'ergo.node.offlineGeneration = false\n'
 )
+
+# The reference follower is SEEDED from the miner's data directory
+# rather than started cold with the others. Started cold it sat at
+# genesis for the whole window and logged no decision at all — two Scala
+# nodes cannot dial each other on one host (`getPeerAddress` resolves a
+# same-address peer through a UPnP gateway that does not exist), so its
+# only possible source is the Rust follower, and it does not ask. With
+# the chain already on disk it processes the ordering announcements the
+# follower relays, which is where both log lines are emitted.
+START_NODES = ('scala', 'rust')
 
 # Three nodes share 127.0.0.1, and the follower's per-IP admission limit
 # is 1 — it gates outbound dial SELECTION as well as inbound admission,
@@ -155,6 +166,10 @@ def run(ctx):
                  'vacuous', {'balance_nano': balance, 'address': address})
         return
 
+    # Bring the reference follower up on the miner's chain.
+    import campaign
+    common.seed_second_miner(ctx, campaign, lifecycle)
+
     collector = common.EventCollector(ctx)
     collector.poll()
     watermark = collector.highest_seen
@@ -166,7 +181,6 @@ def run(ctx):
     # payments in flight so the blocks carry transactions.
     start = smoke.scala_height(ctx.run)
     target, reached, sent, last = start + blocks, start, [], start
-    import campaign
     seen = set()
     while time.monotonic() < ctx.run.deadline:
         collector.poll()
