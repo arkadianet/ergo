@@ -206,6 +206,64 @@ def follower_events_since(events, watermark, restarted):
     return list(events) if restarted else events_after(events, watermark)
 
 
+# The workload every measurement window needs. ONE implementation:
+# `reconstruct_rate` and `miner_self_reject` each carried a verbatim
+# copy, so Task 2's fix for a workload whose payments were mutually
+# exclusive landed in one of them and not the other — and the two
+# measurements they feed are read against each other.
+PAYMENT_NANOERG = 1_000_000
+
+
+def fund_miner(ctx, node='scala', budget=900.0):
+    """`(balance_nano, address)` for the miner whose blocks carry the load.
+
+    An unfunded chain seals coinbase-only input blocks: the reconstruction
+    succeeds without ever exercising the lookup key, and the candidate is
+    never replaced by an arriving transaction. Either way the window
+    measures the quiet case and says nothing about the finding.
+
+    Short is RETURNED, never raised: the caller decides what an unfunded
+    window means for its own measurement.
+    """
+    deadline = min(ctx.run.deadline, time.monotonic() + budget)
+    balance = 0
+    while time.monotonic() < deadline:
+        try:
+            balance = (api(node, '/wallet/balances') or {}).get('balance') or 0
+        except Unavailable:
+            balance = 0
+        if balance:
+            break
+        ctx.run.idle(1)
+    address = (api_retry(node, '/wallet/addresses', ctx.run.deadline,
+                         what=f'the {node} miner wallet address') or [None])[0]
+    return balance, address
+
+
+def pump_payments(ctx, address, sent, node='scala', count=3,
+                  value=PAYMENT_NANOERG, rejected=None):
+    """Submit `count` self-payments, appending the accepted txids.
+
+    A submission the node refused is recorded rather than dropped: a
+    window whose workload never landed is a window that measured the
+    quiet case, and the evidence has to be able to say so.
+    """
+    for _ in range(count):
+        try:
+            status, txid = smoke.request(
+                node, '/wallet/payment/send', [{'address': address,
+                                                'value': value}])
+        except (OSError, ValueError) as error:
+            if rejected is not None:
+                rejected.append(f'{type(error).__name__}: {error}')
+            continue
+        if status == 200 and txid:
+            sent.append(txid)
+        elif rejected is not None:
+            rejected.append(f'HTTP {status}: {txid!r}')
+    return sent
+
+
 def scala_reference_nodes(role_map, role_table):
     """`(miner nodes, follower nodes)` for one resolved run.
 

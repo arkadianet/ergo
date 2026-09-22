@@ -1998,6 +1998,34 @@ def _self_test():
         ('reconstruct_rate.run must resolve its reference nodes from the '
          'roles, not from literal node names', _run_source)
 
+    # ----- fix round 1, item 8: ONE workload, not two copies -----
+    #
+    # `reconstruct_rate` and `miner_self_reject` each carried a verbatim
+    # copy of the funding and payment-pump helpers, and the two
+    # measurements they feed are read against each other — so a fix to
+    # one workload would silently not apply to the other.
+    from scenarios import miner_self_reject as _msr_mod
+    for _mod in (_rr, _msr_mod):
+        _src = inspect.getsource(_mod)
+        assert 'def _fund(' not in _src and 'def _pump(' not in _src, _mod
+        assert 'common.fund_miner(' in _src and 'common.pump_payments(' in _src, \
+            _mod
+    # And the shared pump records what the node REFUSED rather than
+    # dropping it: a window whose workload never landed measured the
+    # quiet case, and the evidence has to be able to say so.
+    _answers = [(200, 'aa'), (400, None), (200, None)]
+    _saved_request = _smoke.request
+    try:
+        _smoke.request = lambda node, route, body: _answers.pop(0)
+        _sent, _refused = [], []
+        _common.pump_payments(None, 'addr', _sent, 'scala', count=3,
+                              rejected=_refused)
+        assert _sent == ['aa'], _sent
+        assert len(_refused) == 2, _refused
+        assert all('HTTP' in r for r in _refused), _refused
+    finally:
+        _smoke.request = _saved_request
+
     # ----- M4: the miner_self_reject denominators -----
     from scenarios import miner_self_reject as _msr
     _log = [

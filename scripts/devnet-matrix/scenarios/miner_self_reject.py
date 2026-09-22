@@ -150,49 +150,18 @@ def result_line(evidence):
         f'input pow-failure rate {rate}')
 
 
-def _fund(ctx):
-    """A spendable coin and an address.
-
-    An unfunded chain seals coinbase-only input blocks; the race is
-    about candidates being REPLACED, and candidates are replaced when
-    transactions arrive, so the window has to carry a workload or it
-    measures the quiet case only.
-    """
-    deadline = min(ctx.run.deadline, time.monotonic() + 900)
-    balance = 0
-    while time.monotonic() < deadline:
-        try:
-            balance = (api('scala', '/wallet/balances') or {}).get('balance') or 0
-        except Unavailable:
-            balance = 0
-        if balance:
-            break
-        ctx.run.idle(1)
-    address = (api_retry('scala', '/wallet/addresses', ctx.run.deadline,
-                         what='the miner wallet address') or [None])[0]
-    return balance, address
-
-
-def _pump(ctx, address, sent):
-    for _ in range(PAYMENTS_PER_BLOCK):
-        try:
-            status, txid = smoke.request(
-                'scala', '/wallet/payment/send',
-                [{'address': address, 'value': PAYMENT_NANOERG}])
-        except (OSError, ValueError):
-            continue
-        if status == 200 and txid:
-            sent.append(txid)
-    return sent
-
 
 def run(ctx):
     import campaign
 
     smoke.assertion_1_peering(ctx.run, ctx.evidence)
     blocks = ctx.args.ordering_blocks or ORDERING_BLOCKS
+    miner_nodes, _followers = common.scala_reference_nodes(
+        ctx.roles, lifecycle.ROLES)
+    miner_node = miner_nodes[0]
+    rejected = []
 
-    balance, address = _fund(ctx)
+    balance, address = common.fund_miner(ctx, miner_node)
     ctx.note('funding', {'balance_nano': balance, 'address': address})
     if not balance or not address:
         ctx.fail('no spendable coin on the miner wallet, so the candidates in '
@@ -210,9 +179,6 @@ def run(ctx):
     # chain sampled from this point made input blocks applied during
     # start-up and funding read as blocks that never reached the winning
     # chain.
-    miner_nodes, _followers = common.scala_reference_nodes(
-        ctx.roles, lifecycle.ROLES)
-    miner_node = miner_nodes[0]
     collector = common.EventCollector(ctx)
     offsets = common.open_measurement_window(ctx, collector)
     ctx.note('measurement_window_opened_at', {
@@ -244,7 +210,9 @@ def run(ctx):
             pass
         if reached > last:
             last = reached
-            _pump(ctx, address, sent)
+            common.pump_payments(ctx, address, sent, miner_node,
+                                 PAYMENTS_PER_BLOCK, PAYMENT_NANOERG,
+                                 rejected=rejected)
         if reached >= target:
             break
         ctx.run.idle(0.5)
@@ -254,7 +222,8 @@ def run(ctx):
         'start_height': start, 'target': target, 'reached': reached,
         'ordering_blocks': reached - start,
         'short_by': max(0, target - reached),
-        'payments_submitted': len(sent)})
+        'payments_submitted': len(sent),
+        'payments_refused': len(rejected), 'refusals': rejected[:10]})
 
     miner = count(common.scala_window_lines(ctx, miner_node))
     ctx.note('miner', miner)

@@ -126,42 +126,6 @@ def _scala_log_counts(ctx, node='scala2', since_line=0):
     return out
 
 
-def _fund(ctx):
-    """A spendable coin and an address, so the ordering blocks in the
-    window CARRY input-chain transactions.
-
-    On an unfunded chain every block is coinbase-only, the input chain
-    contributes nothing, and a reconstruction succeeds without
-    distinguishing the lookup keys at all — a 100 % rate that says
-    nothing about F5.
-    """
-    deadline = min(ctx.run.deadline, time.monotonic() + 900)
-    balance = 0
-    while time.monotonic() < deadline:
-        try:
-            balance = (api('scala', '/wallet/balances') or {}).get('balance') or 0
-        except Unavailable:
-            balance = 0
-        if balance:
-            break
-        ctx.run.idle(1)
-    address = (api_retry('scala', '/wallet/addresses', ctx.run.deadline,
-                         what='the miner wallet address') or [None])[0]
-    return balance, address
-
-
-def _pump(ctx, address, sent):
-    for _ in range(PAYMENTS_PER_BLOCK):
-        try:
-            status, txid = smoke.request(
-                'scala', '/wallet/payment/send',
-                [{'address': address, 'value': PAYMENT_NANOERG}])
-        except (OSError, ValueError):
-            continue
-        if status == 200 and txid:
-            sent.append(txid)
-    return sent
-
 
 def _follower_peered_with_miner(ctx):
     """Assertion 1's question, for the two nodes that exist yet.
@@ -187,10 +151,19 @@ def _follower_peered_with_miner(ctx):
 def run(ctx):
     _follower_peered_with_miner(ctx)
     blocks = ctx.args.ordering_blocks or ORDERING_BLOCKS
+    # Every Scala node in THIS run, resolved from its roles: with
+    # `--reference-follower patched` the stock follower is not here at
+    # all, and with `both` there are two followers whose decisions are
+    # the ablation.
+    miner_nodes, follower_nodes = common.scala_reference_nodes(
+        ctx.roles, lifecycle.ROLES)
+    by_node = dict(ctx.roles or {})
+    miner_node = miner_nodes[0]
+    rejected = []
 
     # The window must be FUNDED, or a reconstruction succeeds on a
     # coinbase-only block without exercising the lookup key at all.
-    balance, address = _fund(ctx)
+    balance, address = common.fund_miner(ctx, miner_node)
     ctx.note('funding', {'balance_nano': balance, 'address': address})
     if not balance or not address:
         ctx.fail('no spendable coin on the miner wallet, so the ordering blocks '
@@ -199,17 +172,15 @@ def run(ctx):
                  'vacuous', {'balance_nano': balance, 'address': address})
         return
 
-    # Bring the reference follower up on the miner's chain.
+    # Bring the reference follower up on the miner's chain, and only
+    # THEN assert peering: with `--reference-follower`, the follower this
+    # scenario is about does not exist until the seed has started it, so
+    # asking before is an unavoidable false failure rather than an
+    # observation.
     import campaign
     common.seed_second_miner(ctx, campaign, lifecycle, nodes=SEEDED_NODES)
+    smoke.assertion_1_peering(ctx.run, ctx.evidence)
 
-    # Every Scala node in THIS run, resolved from its roles: with
-    # `--reference-follower patched` the stock follower is not here at
-    # all, and with `both` there are two followers whose decisions are
-    # the ablation.
-    miner_nodes, follower_nodes = common.scala_reference_nodes(
-        ctx.roles, lifecycle.ROLES)
-    by_node = dict(ctx.roles or {})
     # ONE boundary for both halves: the Rust event watermark and every
     # Scala log offset are taken here, so the ratio compares the same
     # interval on both sides. The collector is handed to the driver too,
@@ -236,7 +207,9 @@ def run(ctx):
             pass
         if reached > last:
             last = reached
-            _pump(ctx, address, sent)
+            common.pump_payments(ctx, address, sent, miner_node,
+                                 PAYMENTS_PER_BLOCK, PAYMENT_NANOERG,
+                                 rejected=rejected)
         if reached >= target:
             break
         ctx.run.idle(0.5)
@@ -258,7 +231,8 @@ def run(ctx):
     collector.poll()
     ctx.note('reconstruct_rate_window', {
         'start_height': start, 'target': target, 'reached': reached,
-        'short_by': max(0, target - reached), 'payments_submitted': len(sent)})
+        'short_by': max(0, target - reached), 'payments_submitted': len(sent),
+        'payments_refused': len(rejected), 'refusals': rejected[:10]})
     if reached < target:
         ctx.fail(f'the miner produced {reached - start} of the {blocks} ordering '
                  'blocks the F5 measurement needs (upstream F11); the shortfall '
