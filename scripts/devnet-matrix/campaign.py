@@ -1039,6 +1039,30 @@ def build_manifests(by_node):
     return out
 
 
+def admission_overrides(nodes, overrides):
+    """Raise the follower's per-IP admission limit to fit the node set.
+
+    Every Scala node shares 127.0.0.1, and the limit gates outbound dial
+    SELECTION as well as inbound admission, so a follower left at the
+    default holds exactly ONE of them and a multi-Scala scenario
+    measures nothing. It was a per-scenario constant, which is wrong the
+    moment `--reference-follower` adds a node at RUNTIME: the resolved
+    node set is what the limit has to fit.
+
+    A scenario that states its own limit keeps it — `flood` is about
+    admission, and a scenario that tests a bound may not have it widened
+    underneath it. Nothing is raised for a single Scala node.
+    """
+    stated = {(sec, key) for sec, key, _ in overrides}
+    scala_nodes = sum(1 for n in nodes if n != 'rust')
+    if scala_nodes < 2:
+        return tuple(overrides)
+    extra = [o for o in (('peers', 'per_ip_limit', str(scala_nodes)),
+                         ('peers', 'per_subnet_limit', str(scala_nodes * 2)))
+             if (o[0], o[1]) not in stated]
+    return tuple(overrides) + tuple(extra)
+
+
 def run_scenario(name, args):
     import lifecycle
     import smoke
@@ -1051,7 +1075,8 @@ def run_scenario(name, args):
     attempt = args.attempt or 1
     data_root = write_configs(
         name, nodes, roles=by_node,
-        rust_overrides=getattr(scenario, 'RUST_OVERRIDES', ()),
+        rust_overrides=admission_overrides(
+            nodes, getattr(scenario, 'RUST_OVERRIDES', ())),
         scala_extra=getattr(scenario, 'SCALA_EXTRA', ''),
         scala2_extra=getattr(scenario, 'SCALA2_EXTRA', ''))
     if args.fresh:
@@ -1275,6 +1300,22 @@ def _self_test():
             ((sec, key), value)
             for sec, key, value in getattr(_all[_name], 'RUST_OVERRIDES', ()))
         assert _overrides.get(('peers', 'per_ip_limit')) == '3', _name
+    # ...and a node set that grows at RUNTIME gets the same treatment,
+    # because `--reference-follower` is not in any scenario's constant.
+    assert admission_overrides(('scala', 'rust'), ()) == ()
+    assert dict(((s, k), v) for s, k, v in admission_overrides(
+        ('scala', 'scala2', 'rust'), ()))[('peers', 'per_ip_limit')] == '2'
+    assert dict(((s, k), v) for s, k, v in admission_overrides(
+        ('scala', 'scala2', 'scala3', 'rust'), ()))[
+            ('peers', 'per_ip_limit')] == '3'
+    # A scenario that states the bound keeps it: `flood` tests admission
+    # and may not have it widened underneath it.
+    stated = (('peers', 'per_ip_limit', '1'),)
+    assert admission_overrides(('scala', 'scala2', 'rust'), stated)[0] == \
+        stated[0]
+    assert sum(1 for s, k, _ in admission_overrides(
+        ('scala', 'scala2', 'rust'), stated)
+        if (s, k) == ('peers', 'per_ip_limit')) == 1
     assert '19571' not in overlay.split('knownPeers')[1], \
         'a node must not be listed as its own peer'
 

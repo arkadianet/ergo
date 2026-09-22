@@ -14,6 +14,13 @@ from smoke import Unavailable, api
 from . import common
 
 NODES = ('scala', 'rust')
+# `--reference-follower` may ADD a Scala follower to the base pair. It is
+# never started cold: two Scala nodes on one host cannot dial each other
+# (`getPeerAddress` resolves a same-address peer through a UPnP gateway
+# that does not exist), so one brought up cold sits at genesis for the
+# whole window and its lag is a measurement of nothing. It is seeded from
+# the miner's data directory instead, exactly as `reconstruct_rate` does.
+START_NODES = ('scala', 'rust')
 ORDERING_BLOCKS = 60
 MEMPOOL_TXS = 20
 # Payments kept in flight per ordering block during the window, so the
@@ -110,6 +117,15 @@ def _observe_window(ctx, blocks, address):
 
 def run(ctx):
     smoke.assertion_1_peering(ctx.run, ctx.evidence)
+
+    # A reference follower, if `--reference-follower` asked for one, on
+    # the miner's chain BEFORE the workload starts: its whole purpose is
+    # to produce the stock lag the port's is read against (spec §7a), and
+    # it can only do that from a chain it already holds.
+    import lifecycle
+    if 'scala2' in lifecycle.NODES:
+        import campaign
+        common.seed_second_miner(ctx, campaign, lifecycle)
 
     # The mempool workload first: it needs a matured miner reward, and
     # waiting for one is time the steady window would otherwise spend

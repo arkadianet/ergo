@@ -806,6 +806,21 @@ class Run:
                                 .get('bestOrdering') or None),
             'scala_tip': scala_best or None,
             'rust_tip': rust_best or None,
+            # A reference FOLLOWER's own tip (M4). Assertions 2 and 3 do
+            # not read it — they are defined against the Rust port — but
+            # without it the stock Scala follower's lag cannot be
+            # computed at all, and spec §7a requires that baseline
+            # before a patched number is quoted. Present as `None` when
+            # the node is not running, which `lag_distribution` counts
+            # as `no_tip` rather than as a lag of zero.
+            'scala2_tip': (reading.get('scala2', {}).get('best', {})
+                           .get('bestInputBlock') or None),
+            'scala3_tip': (reading.get('scala3', {}).get('best', {})
+                           .get('bestInputBlock') or None),
+            'scala3_chain': (reading.get('scala3', {}).get('chain', {})
+                             .get('bestInputBlocks') or []),
+            'scala3_ordering': (reading.get('scala3', {}).get('chain', {})
+                                .get('bestOrdering') or None),
         }
         # EVERY sample is retained and streamed to disk as it is taken:
         # the evaluators run over the whole run at finalization, and a
@@ -1016,6 +1031,50 @@ def percentile(values, pct):
     return ordered[min(rank, len(ordered)) - 1]
 
 
+def lag_distribution(samples, tip_key, chain_key='scala_chain'):
+    """How far ONE follower's input tip trails the miner's chain.
+
+    The definition is assertion 2's — the index of the follower's
+    `bestInputBlock` in the miner's newest-first best input chain, at a
+    sample where the two agree on the ordering block — computed for an
+    arbitrary `tip_key`, so a stock Scala reference follower's lag can
+    be stated beside the Rust port's. Spec §7a: the stock follower is
+    measured before any patched number is quoted, and "stock lag in the
+    hundreds" is a hypothesis until it is.
+
+    Nothing is folded in as a zero. A sample where the follower has no
+    tip counts in `no_tip`, and one whose tip the miner's chain does not
+    carry counts in `not_on_miner_chain`; neither contributes a lag,
+    because a measurement that did not happen is not a lag of zero.
+
+    Pure: `--self-test` drives it directly.
+    """
+    kept, excluded = qualifying_samples(samples)
+    lags, no_tip, off_chain = [], 0, 0
+    for _, s in kept:
+        tip = s.get(tip_key)
+        if not tip:
+            no_tip += 1
+            continue
+        chain = s.get(chain_key) or []
+        if tip not in chain:
+            off_chain += 1
+            continue
+        lags.append(chain.index(tip))
+    return {
+        'tip_key': tip_key,
+        'qualifying_samples': len(kept),
+        'excluded_samples': excluded,
+        'lag_samples': len(lags),
+        'no_tip': no_tip,
+        'not_on_miner_chain': off_chain,
+        'p50': percentile(lags, 50),
+        'p95': percentile(lags, 95),
+        'max': max(lags) if lags else None,
+        'mean': round(sum(lags) / len(lags), 2) if lags else None,
+    }
+
+
 def qualifying_samples(samples):
     """The samples an assertion may draw a conclusion from, plus why the
     rest were excluded.
@@ -1094,6 +1153,7 @@ def evaluate_tip_consistency(samples):
             # Chains are newest-first, so the index IS the number of
             # input blocks Rust trails by at this instant.
             lags.append(chain.index(rust_tip))
+    p50 = percentile(lags, 50)
     p95, mx = percentile(lags, 95), (max(lags) if lags else None)
     violations = _coverage_violations(kept, lags, 'tip consistency')
     if p95 is not None and p95 > LAG_P95_MAX:
@@ -1112,6 +1172,10 @@ def evaluate_tip_consistency(samples):
         'excluded_samples': excluded,
         'compared_samples': compared,
         'lag_samples': len(lags),
+        # The MEDIAN is reported beside the tail: the bound is on p95 and
+        # max, but a baseline a patch is read against needs the middle of
+        # the distribution too (spec §7a).
+        'lag_p50': p50,
         'lag_p95': p95,
         'lag_max': mx,
         'lag_mean': round(sum(lags) / len(lags), 2) if lags else None,
@@ -1504,6 +1568,38 @@ def _self_test():
     assert tip['lag_p95'] == 20 and tip['lag_max'] == 20, tip
     assert any('p95' in v for v in tip['violations']), tip
     assert any('max' in v for v in tip['violations']), tip
+
+    # ----- M4: the same lag, for ANY follower, with a median -----
+    #
+    # Spec §7a: the stock Scala FOLLOWER's lag is measured before a
+    # patched number is quoted, so the distribution has to be computable
+    # for a node that is not Rust — and the plan asks for p50, which the
+    # assertion-2 evaluator never reported.
+    assert tip['lag_p50'] is not None, tip
+    assert evaluate_tip_consistency(lockstep)['lag_p50'] == 0
+    # Rust, by the same definition assertion 2 uses.
+    d = lag_distribution(trailing, 'rust_tip')
+    assert (d['p50'], d['p95'], d['max']) == (2, 2, 2), d
+    assert d['lag_samples'] == MIN_QUALIFYING_SAMPLES, d
+    # A Scala reference follower, from its own tip field.
+    ref = [dict(s, scala2_tip=s['rust_tip']) for s in trailing]
+    assert lag_distribution(ref, 'scala2_tip')['p50'] == 2
+    # A follower with NO tip field contributes no lag and is not read as
+    # zero: a missing measurement must never look like a perfect one.
+    empty = lag_distribution(trailing, 'scala3_tip')
+    assert empty['lag_samples'] == 0 and empty['p50'] is None, empty
+    assert empty['no_tip'] == MIN_QUALIFYING_SAMPLES, empty
+    # A tip the miner's chain does not carry is counted apart, never
+    # folded in as a zero lag.
+    off = [dict(s, scala2_tip='zz') for s in trailing]
+    off_d = lag_distribution(off, 'scala2_tip')
+    assert off_d['lag_samples'] == 0, off_d
+    assert off_d['not_on_miner_chain'] == MIN_QUALIFYING_SAMPLES, off_d
+    # A spread reports a real median rather than the mean.
+    spread = ([sample(['c', 'b', 'a'], ['c', 'b', 'a'])] * 8
+              + [sample(['c', 'b', 'a'], ['a'])] * 2)
+    sd = lag_distribution(spread, 'rust_tip')
+    assert (sd['p50'], sd['max']) == (0, 2), sd
 
     # Rust longer than Scala cannot be a prefix.
     assert evaluate_chain_consistency(
@@ -2414,6 +2510,14 @@ def finalize_agreement(run, evidence):
         'artifacts_written_at_mismatch_time': run.live_artifact_paths,
         **chain,
     }
+    # The lag of EVERY follower in the run, by one definition (spec §7a).
+    # The Rust port's is assertion 2's own number; a Scala reference
+    # follower's is the baseline it has to be read against, and a node
+    # that was not running reads as `no_tip`, never as a lag of zero.
+    evidence['follower_lag'] = {
+        role: lag_distribution(run.series, key) for role, key in
+        (('rust_follower', 'rust_tip'), ('scala_follower', 'scala2_tip'),
+         ('scala_follower_patched', 'scala3_tip'))}
     if tip['violations']:
         run.fail('2_best_input_block', '; '.join(tip['violations']),
                  {'lag_p95': tip['lag_p95'], 'lag_max': tip['lag_max'],
