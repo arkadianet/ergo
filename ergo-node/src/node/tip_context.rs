@@ -56,11 +56,36 @@ impl OwnedTipContext {
 /// Empty when the subsystem is off; empty too while its chain is, so a
 /// devnet node that has not seen an input block validates against the
 /// ordinary pool view.
+///
+/// Also empty whenever the processor's ordering block is not the
+/// committed tip. An input chain is provisional state hanging off ONE
+/// ordering block, while the processor learns about a commit or a reorg
+/// only on the 1 s tick (`input_blocks::hooks::sync_ordering_tip`).
+/// Admission runs in between, and without this check it overlaid the
+/// PREVIOUS ordering block's chain onto the new committed UTXO set — an
+/// output of the superseded chain stayed spendable, and a box the
+/// committed block consumed could be resurrected by the stale layer.
+///
+/// This is a read-side gate rather than a `Event::OrderingBlockApplied`
+/// issued from here on purpose: the tick is the single writer of
+/// processor state, and driving the processor from the admission path
+/// would make admission a second one — on a `&NodeState` borrow that
+/// cannot mutate anyway. The cost of the gate is that admission uses the
+/// ordinary pool view for at most one tick after each commit, which is
+/// the conservative direction: it can reject a child of an input-block
+/// transaction that a moment later resolves, never admit a double spend.
 fn best_input_chain_txs(state: &NodeState) -> Vec<ergo_ser::transaction::Transaction> {
     let Some(rt) = state.input_blocks.as_ref() else {
         return Vec::new();
     };
     let processor = rt.processor();
+    // Both sides must name the same ordering block. `None` on either
+    // side (a processor with no ordering block yet, a node with no
+    // committed full block) is a disagreement, not a match.
+    let committed = state.store.chain_state_meta().best_full_block_id;
+    if processor.best_ordering_id() != Some(committed) || committed == [0u8; 32] {
+        return Vec::new();
+    }
     processor
         .best_input_chain()
         .into_iter()

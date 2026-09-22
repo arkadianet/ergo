@@ -5030,3 +5030,127 @@ fn admission_sees_the_input_chains_outputs_and_not_the_boxes_it_spent() {
         "a box an input-block transaction spent is not spendable again"
     );
 }
+
+/// Round-2 finding 2: the admission context read the processor's input
+/// chain without checking which ordering block that chain hangs off.
+///
+/// The processor's view of the committed tip is synchronised only on the
+/// 1 s tick (`sync_ordering_tip`). Between a full-block commit (or a
+/// reorg) and that tick, `best_input_chain()` still describes the
+/// PREVIOUS ordering block — so admission overlaid an old provisional
+/// chain onto the new committed UTXO set, and an output of that old
+/// chain stayed spendable after the chain it belonged to was gone.
+///
+/// The layer is used only while the chain's ordering id equals the
+/// committed tip; otherwise it is empty and admission falls back to the
+/// ordinary pool view until the tick catches the processor up.
+#[test]
+fn admission_drops_the_chain_layer_when_the_committed_tip_has_moved_past_it() {
+    use crate::node::tip_context::build_tip_context;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let headers = seed_header_chain(&mut state, 12);
+    let ordering = headers[10].clone();
+    let ordering_id = header_id_of(&ordering);
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .advance_best_full_block(ordering_id, ordering.height)
+        .unwrap();
+    state.executor.hydrate_block_context(&state.store).unwrap();
+    seed_best_ordering(&mut state);
+
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19642,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    // An input block under the CURRENT ordering block, carrying T.
+    let funded = seed_spendable_box(&mut state, 0xd3, 10_000_000, ordering.height);
+    let t = spend_to_true(funded, 8_000_000, 2_000_000, ordering.height);
+    let t_out = output_box_id(&t, 0);
+    let body = ts::body_of(t.clone());
+    let t_id = ergo_primitives::digest::Digest32::from_bytes(body.tx_ref.tx_id);
+    state
+        .mempool
+        .restore_input_block_txs(&[(t_id, body.bytes.clone(), None)], now);
+    let ann = ts::announcement_for(
+        ordering_id,
+        ordering.height + 1,
+        43,
+        None,
+        std::slice::from_ref(&body),
+    );
+    send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &ergo_p2p::message::serialize_input_block(&ann).unwrap(),
+    );
+    assert_eq!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .processor()
+            .best_input_chain(),
+        vec![ts::ann_id(&ann)],
+        "premise: the input block applied under the current ordering block"
+    );
+    assert!(
+        !build_tip_context(&state)
+            .unwrap()
+            .input_block_txs
+            .is_empty(),
+        "premise: while the tips agree the chain layer is in use"
+    );
+
+    // The next full block commits. The processor is NOT told yet — that
+    // happens on the 1 s tick, and admission runs in between.
+    let next = headers[11].clone();
+    let next_id = header_id_of(&next);
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .advance_best_full_block(next_id, next.height)
+        .unwrap();
+    state.executor.hydrate_block_context(&state.store).unwrap();
+    assert_eq!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .processor()
+            .best_ordering_id(),
+        Some(ordering_id),
+        "premise: the processor still names the OLD ordering block"
+    );
+
+    assert!(
+        build_tip_context(&state)
+            .unwrap()
+            .input_block_txs
+            .is_empty(),
+        "a chain hanging off a superseded ordering block must not be overlaid"
+    );
+
+    // And the observable consequence: an output of that stale chain is
+    // no longer spendable.
+    let child = spend_to_true(t_out, 6_000_000, 2_000_000, ordering.height);
+    let child_id = ergo_primitives::digest::Digest32::from_bytes(
+        *ergo_ser::transaction::transaction_id(&child)
+            .unwrap()
+            .as_bytes(),
+    );
+    let _ = crate::node::admit_transaction(&mut state, peer, &tx_bytes_of(&child), now);
+    assert!(
+        !state.mempool.contains(&child_id),
+        "an output of the superseded chain is not spendable against the new tip"
+    );
+}
