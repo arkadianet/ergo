@@ -136,6 +136,22 @@ fn parse_frame_header(magic: &[u8; 4], buf: &[u8]) -> Result<Option<FrameHead>, 
 
 /// Message code the node's dispatcher has no arm for: ignored, never
 /// penalized, and (per `dispatch.rs`) deliberately NOT progress.
+/// What these scenarios claim to speak. 6.0.2 for everything that tests
+/// framing and admission; the Matrix flood overrides it, because a node
+/// is entitled to ignore input-block traffic from a peer that never
+/// claimed to speak the protocol, and a flood the node ignored would
+/// pass the §7.4 bounds by not having happened.
+const DEFAULT_PEER_VERSION: Version = Version {
+    major: 6,
+    minor: 0,
+    patch: 2,
+};
+const SUBBLOCKS_PEER_VERSION: Version = Version {
+    major: 6,
+    minor: 5,
+    patch: 0,
+};
+
 const CODE_UNKNOWN: u8 = 200;
 const CODE_GET_PEERS: u8 = 1;
 const CODE_PEERS: u8 = 2;
@@ -198,6 +214,15 @@ struct Conn {
 impl Conn {
     /// Connect from `src`, then complete the raw handshake.
     async fn open(src: Ipv4Addr, target: SocketAddr, magic: [u8; 4]) -> std::io::Result<Self> {
+        Self::open_as(src, target, magic, DEFAULT_PEER_VERSION).await
+    }
+
+    async fn open_as(
+        src: Ipv4Addr,
+        target: SocketAddr,
+        magic: [u8; 4],
+        version: Version,
+    ) -> std::io::Result<Self> {
         let socket = TcpSocket::new_v4()?;
         // Deliberately NOT SO_REUSEADDR. These scenarios churn hundreds
         // of short-lived connections from a handful of source addresses,
@@ -214,11 +239,7 @@ impl Conn {
                 .as_millis() as u64,
             peer_spec: PeerSpec {
                 agent_name: "ergoref".into(),
-                version: Version {
-                    major: 6,
-                    minor: 0,
-                    patch: 2,
-                },
+                version,
                 node_name: format!("adv-{src}"),
                 // No declared address: we do not want the node adding
                 // these throwaway sockets to its address book.
@@ -494,13 +515,14 @@ async fn input_block_flood(ctx: &Ctx, announcements: u32, deliveries: u32) -> bo
         "[input_block_flood] {announcements} announcements at height {flood_height}, \
          {deliveries} bogus code-104 deliveries"
     );
-    let mut conn = match Conn::open(src(210), ctx.target, ctx.magic).await {
-        Ok(c) => c,
-        Err(e) => {
-            println!("FAIL input_block_flood: connect failed: {e}");
-            return false;
-        }
-    };
+    let mut conn =
+        match Conn::open_as(src(210), ctx.target, ctx.magic, SUBBLOCKS_PEER_VERSION).await {
+            Ok(c) => c,
+            Err(e) => {
+                println!("FAIL input_block_flood: connect failed: {e}");
+                return false;
+            }
+        };
     let seed = 0x4d61_7472_6978_0001; // "Matrix" + a run counter.
     let started = Instant::now();
     let mut sent = 0u32;
