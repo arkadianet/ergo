@@ -3,7 +3,7 @@
 //! `InputBlockTransactionsMessageSpec`, `RequestInputBlockTransactionsMessageSpec`,
 //! `OrderingBlockAnnouncementMessageSpec`).
 
-use ergo_primitives::reader::VlqReader;
+use ergo_primitives::reader::{ReadError, VlqReader};
 use ergo_primitives::writer::VlqWriter;
 use ergo_ser::input_block::{
     parse_input_block_announcement, parse_ordering_block_announcement,
@@ -93,6 +93,21 @@ fn read_weak_ids(
     Ok((id, ids))
 }
 
+/// Every payload in this family is a fixed grammar with no optional
+/// tail, so a decoder that stops short of the end has been handed a
+/// noncanonical message: re-serializing it would silently drop the
+/// unread bytes. Scala's `MessageSerializer` rejects unread payload
+/// bytes, so reject them here too.
+fn reject_trailing(r: &VlqReader, kind: &'static str) -> Result<(), MessageError> {
+    if r.remaining() != 0 {
+        return Err(MessageError::Read(ReadError::InvalidData(format!(
+            "{kind}: {} trailing bytes",
+            r.remaining()
+        ))));
+    }
+    Ok(())
+}
+
 // ---- InputBlockTransactionIds (code 102) ----
 
 pub fn serialize_input_block_tx_ids(d: &InputBlockTxIds) -> Vec<u8> {
@@ -104,6 +119,7 @@ pub fn serialize_input_block_tx_ids(d: &InputBlockTxIds) -> Vec<u8> {
 pub fn deserialize_input_block_tx_ids(payload: &[u8]) -> Result<InputBlockTxIds, MessageError> {
     let mut r = VlqReader::new(payload);
     let (input_block_id, weak_ids) = read_weak_ids(&mut r, "InputBlockTxIds")?;
+    reject_trailing(&r, "InputBlockTxIds")?;
     Ok(InputBlockTxIds {
         input_block_id,
         weak_ids,
@@ -123,6 +139,7 @@ pub fn deserialize_input_block_txs_request(
 ) -> Result<InputBlockTxsRequest, MessageError> {
     let mut r = VlqReader::new(payload);
     let (input_block_id, weak_ids) = read_weak_ids(&mut r, "InputBlockTxsRequest")?;
+    reject_trailing(&r, "InputBlockTxsRequest")?;
     Ok(InputBlockTxsRequest {
         input_block_id,
         weak_ids,
@@ -163,6 +180,7 @@ pub fn deserialize_input_block_txs(payload: &[u8]) -> Result<InputBlockTxs, Mess
     for _ in 0..count {
         transactions.push(read_transaction(&mut r)?);
     }
+    reject_trailing(&r, "InputBlockTxs")?;
     Ok(InputBlockTxs {
         input_block_id,
         transactions,
@@ -269,5 +287,44 @@ mod tests {
         let bytes = w.result();
         let err = deserialize_input_block_txs(&bytes).unwrap_err();
         assert!(matches!(err, MessageError::Read(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn tx_ids_trailing_bytes_rejected() {
+        let d = InputBlockTxIds {
+            input_block_id: sample_id(0x11),
+            weak_ids: vec![[0x01; 6]],
+        };
+        let mut bytes = serialize_input_block_tx_ids(&d);
+        assert!(deserialize_input_block_tx_ids(&bytes).is_ok());
+        bytes.push(0x00);
+        let err = deserialize_input_block_tx_ids(&bytes).unwrap_err();
+        assert!(err.to_string().contains("trailing bytes"), "got {err:?}");
+    }
+
+    #[test]
+    fn txs_request_trailing_bytes_rejected() {
+        let d = InputBlockTxsRequest {
+            input_block_id: sample_id(0x22),
+            weak_ids: vec![[0x03; 6]],
+        };
+        let mut bytes = serialize_input_block_txs_request(&d);
+        assert!(deserialize_input_block_txs_request(&bytes).is_ok());
+        bytes.extend_from_slice(&[0xAB, 0xCD]);
+        let err = deserialize_input_block_txs_request(&bytes).unwrap_err();
+        assert!(err.to_string().contains("trailing bytes"), "got {err:?}");
+    }
+
+    #[test]
+    fn txs_trailing_bytes_rejected() {
+        let d = InputBlockTxs {
+            input_block_id: sample_id(0x33),
+            transactions: Vec::new(),
+        };
+        let mut bytes = serialize_input_block_txs(&d).unwrap();
+        assert!(deserialize_input_block_txs(&bytes).is_ok());
+        bytes.push(0x7F);
+        let err = deserialize_input_block_txs(&bytes).unwrap_err();
+        assert!(err.to_string().contains("trailing bytes"), "got {err:?}");
     }
 }
