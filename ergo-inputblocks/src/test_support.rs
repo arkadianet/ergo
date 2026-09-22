@@ -358,7 +358,10 @@ impl TestCtx {
 }
 
 /// The peer tag tests use for "some remote peer".
-pub const PEER: PeerTag = PeerTag(7);
+pub const PEER: PeerTag = match PeerTag::remote(7) {
+    Some(p) => p,
+    None => panic!("7 is not the reserved local tag"),
+};
 
 /// Extract the single [`Effect::Validate`] from `effects`, panicking if
 /// there is not exactly one.

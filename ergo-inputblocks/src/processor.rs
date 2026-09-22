@@ -4528,7 +4528,7 @@ mod tests {
             Event::TransactionsDelivered {
                 input_block_id: id,
                 bodies: correct.clone(),
-                from: Some(PeerTag(99)),
+                from: PeerTag::remote(99),
                 now: Tick(20),
             },
         );
@@ -5716,7 +5716,7 @@ mod tests {
             Event::TransactionsDelivered {
                 input_block_id: id,
                 bodies: vec![fresh.clone()],
-                from: Some(PeerTag(99)),
+                from: PeerTag::remote(99),
                 now: Tick(30),
             },
         );
@@ -5836,7 +5836,7 @@ mod tests {
                 Event::TransactionsDelivered {
                     input_block_id: id,
                     bodies: vec![ts::body(200, 1)],
-                    from: Some(PeerTag(99)),
+                    from: PeerTag::remote(99),
                     now: Tick(tick),
                 },
             );
@@ -5861,7 +5861,7 @@ mod tests {
             Event::TransactionsDelivered {
                 input_block_id: id,
                 bodies: vec![ts::body(200, 2)],
-                from: Some(PeerTag(99)),
+                from: PeerTag::remote(99),
                 now: Tick(timeout + 2),
             },
         );
@@ -5973,7 +5973,7 @@ mod tests {
             Event::TransactionsDelivered {
                 input_block_id: id,
                 bodies: vec![ts::body_under(x.weak_id, 60, 1)],
-                from: Some(PeerTag(99)),
+                from: PeerTag::remote(99),
                 now: Tick(20),
             },
         );
