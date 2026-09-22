@@ -1232,6 +1232,106 @@ def _self_test():
     f6 = common.evaluate_f6(port_only)
     assert f6['f6_total'] == 1 and f6['lost_on_both_total'] == 0, f6
 
+    # ----- round 2: codex's reproduced false-pass probes -----
+    #
+    # Each drives the PRODUCTION evaluator. r2's note was that the
+    # previous round's self-tests duplicated implementation logic.
+
+    def rs(ordering, rust, s1=None, s2=None, o1=None, o2=None):
+        return {'ordering': ordering, 'rust_chain': list(rust),
+                'scala_chain': list(s1 or []), 'scala2_chain': list(s2 or []),
+                'scala_ordering': o1 if o1 is not None else ordering,
+                'scala2_ordering': o2 if o2 is not None else ordering}
+
+    # (r2-1) Rust rolls back to the EMPTY chain while both miners keep
+    # theirs. Inclusion accepted it vacuously; equality does not.
+    empty_rollback = common.compare_fork_switches(
+        [rs('O1', ['a'], ['a'], ['b']), rs('O1', [], ['a'], ['b'])])
+    assert len(empty_rollback['rust_switches']) == 1, empty_rollback
+    assert empty_rollback['switches_matching_no_reference'], \
+        'a rollback to the empty chain matches no reference transition'
+    # A genuine move between the two miners' exact chains still matches.
+    genuine = common.compare_fork_switches(
+        [rs('O1', ['m1b', 'm1a'], ['m1b', 'm1a'], ['m2b', 'm2a']),
+         rs('O1', ['m2b', 'm2a'], ['m1b', 'm1a'], ['m2b', 'm2a'])])
+    assert genuine['switches_matching_no_reference'] == [], genuine
+
+    # (r2-2a) The snapshot an ordering block CLOSES.
+    walker = common.WindowWalker(37)
+    closed = {}
+    walker.note_chain({'keep'})
+    for h, snap in walker.observe(39):
+        closed[h] = snap
+    walker.note_chain({'keep', 'lost'})
+    for h, snap in walker.observe(40):
+        closed[h] = snap
+    assert 'lost' in closed.get(40, set()), \
+        'block 40 closes the chain observed before it landed'
+
+    # (r2-2b) Restored one block later is not a permanent loss.
+    def blk(h, chain, ordering, rp, sp):
+        return {'height': h, 'ordering_block': f'O{h}',
+                'input_chain_txids': set(chain), 'ordering_txids': set(ordering),
+                'rust_pool': set(rp), 'scala_pool': set(sp)}
+
+    restored_next = common.evaluate_f6(
+        [blk(1, ['a', 'b'], ['a'], [], []), blk(2, [], ['x'], ['b'], ['b'])])
+    assert restored_next['f6_total'] == 0, restored_next
+    assert restored_next['lost_on_both_total'] == 0, restored_next
+    # ...and a real loss on both nodes at block 40 still counts.
+    window = [blk(h, ['keep'], ['keep'], [], []) for h in range(38, 40)]
+    window.append(blk(40, ['keep', 'lost'], ['keep'], [], []))
+    window += [blk(h, ['keep'], ['keep'], [], []) for h in range(41, 61)]
+    both = common.evaluate_f6(window)
+    assert both['lost_on_both_total'] == 1, both
+
+    # (r2-2c) Per-block pool agreement, with attribution.
+    unexplained = common.evaluate_pool_agreement([blk(40, [], [], [], ['x'])])
+    assert unexplained['unexplained_total'] == 1, unexplained
+    assert common.evaluate_pool_agreement(
+        [blk(41, ['y'], [], [], ['y'])])['unexplained_total'] == 0
+    assert common.evaluate_pool_agreement(
+        [blk(42, [], [], [], ['z'])], d1_refusals={'z'})['unexplained_total'] == 0
+    assert common.evaluate_pool_agreement(
+        [blk(43, [], [], ['r'], [])])['unexplained_total'] == 1, \
+        'residue in RUST\'s pool is explained by neither D1 nor F6'
+
+    # (r2-5) A stale chain RELABELLED with the new ordering id.
+    stale = common.evaluate_post_reorg_state(
+        chain={'bestOrdering': 'new', 'bestInputBlocks': ['staletip', 's2']},
+        info={'bestInputBlock': 'staletip', 'bestFullHeaderId': 'new'},
+        status={'forks': 3, 'waitlist': 12, 'staged_bytes': 0,
+                'deferred_triggers': 0},
+        dropped={'old1', 'old2'}, miner_chain=['freshtip'])
+    assert stale['problems'], 'a relabelled stale chain must not pass'
+    assert any(p['what'] == 'tip_not_on_any_miner_chain_for_this_block'
+               for p in stale['problems']), stale
+    clean = common.evaluate_post_reorg_state(
+        chain={'bestOrdering': 'new', 'bestInputBlocks': []},
+        info={'bestInputBlock': '', 'bestFullHeaderId': 'new'},
+        status={'forks': 0, 'waitlist': 0, 'staged_bytes': 0,
+                'deferred_triggers': 0},
+        dropped={'old1'}, miner_chain=[])
+    assert clean['problems'] == [], clean
+    unpublished = common.evaluate_post_reorg_state(
+        chain={'bestOrdering': 'new', 'bestInputBlocks': []},
+        info={'bestInputBlock': '', 'bestFullHeaderId': 'new'},
+        status={'forks': 0, 'waitlist': 0, 'deferred_triggers': 0},
+        dropped={'old1'})
+    assert any(p['what'] == 'counter_not_published'
+               for p in unpublished['problems']), unpublished
+
+    # (r2-7) 96 outcomes for 100 ordering blocks.
+    blocks = {h: f'H{h}' for h in range(1, 101)}
+    short = common.reconcile_outcomes(blocks, [
+        {'kind': 'ordering_reconstructed', 'headerId': f'H{h}', 'height': h}
+        for h in range(1, 97)])
+    assert len(short['missing']) == 4, short
+    full = common.reconcile_outcomes(blocks, [
+        {'kind': 'ordering_reconstruct_skipped', 'headerId': f'H{h}', 'height': h}
+        for h in range(1, 101)])
+    assert full['missing'] == [], full
+
     # ----- finding 1: codex's three fork false-pass probes -----
     #
     # All three were ACCEPTED by the union-membership evaluator: every
