@@ -67,10 +67,29 @@ import time
 # `scala3` (M4) is the patched reference follower's slot, extending the
 # band to 19573 / 19593. It is opt-in: only `--reference-follower
 # patched|both` starts it.
-CAMPAIGN_P2P = {'scala': 19570, 'scala2': 19571, 'rust': 19572,
-                'scala3': 19573}
-CAMPAIGN_REST = {'scala': 19590, 'scala2': 19591, 'rust': 19592,
-                 'scala3': 19593}
+#
+# The band is the DEFAULT, not the answer: `MATRIX_P2P_<NODE>` /
+# `MATRIX_REST_<NODE>` — the same variables `lifecycle` reads — move the
+# whole campaign onto another block. Two agents can already hold the
+# smoke's band and this one at the same time, and a third run needs
+# somewhere to bind; Task 2 ran on 19600-19603 / 19620-19623 beside a
+# live Plan-2 campaign. Read HERE rather than only in
+# `configure_environment`, because the config renderers close over these
+# tables: an override that reached only the environment would bind one
+# band and write the other into every node's config file.
+DEFAULT_CAMPAIGN_P2P = {'scala': 19570, 'scala2': 19571, 'rust': 19572,
+                        'scala3': 19573}
+DEFAULT_CAMPAIGN_REST = {'scala': 19590, 'scala2': 19591, 'rust': 19592,
+                         'scala3': 19593}
+
+
+def _band(kind, defaults):
+    return {name: int(os.environ.get(f'MATRIX_{kind}_{name.upper()}', port))
+            for name, port in defaults.items()}
+
+
+CAMPAIGN_P2P = _band('P2P', DEFAULT_CAMPAIGN_P2P)
+CAMPAIGN_REST = _band('REST', DEFAULT_CAMPAIGN_REST)
 
 # Every node listens on 127.0.0.1; only the ports differ.
 #
@@ -233,6 +252,32 @@ def nodes_for_roles(role_set):
     sys.path.insert(0, str(HERE))
     import roles
     return roles.nodes_for_roles(role_set)
+
+
+# Ports this harness must never bind, whatever the environment says:
+# the operator's production and devnet nodes. The band is overridable
+# (see `_band`), so the guard runs against the RESOLVED ports — a typo in
+# `MATRIX_REST_SCALA` must not put a mining node's REST port in a
+# campaign config file.
+FORBIDDEN_PORTS = (9052, 9053, 9063, 9072, 9073, 19099)
+
+
+def check_band(p2p, rest):
+    """Refuse a resolved port band that is not this harness's to bind."""
+    both = list(p2p.items()) + list(rest.items())
+    clash = sorted({port for _, port in both if port in FORBIDDEN_PORTS})
+    if clash:
+        raise SystemExit(
+            f'refusing to bind {clash}: those ports belong to the operator\'s '
+            'nodes, not to this harness')
+    seen = {}
+    for node, port in both:
+        if port in seen and seen[port] != node:
+            raise SystemExit(
+                f'port {port} is claimed twice ({seen[port]} and {node}); '
+                'every node needs its own p2p and REST port')
+        seen[port] = node
+    return None
 
 
 def configure_environment(scenario, nodes, roles=(), build='stock'):
@@ -1233,11 +1278,45 @@ def _self_test():
     assert '19571' not in overlay.split('knownPeers')[1], \
         'a node must not be listed as its own peer'
 
+    # ----- M4: a THIRD port block, for a run beside a live campaign -----
+    #
+    # Two agents can hold the two documented bands at once (the smoke's
+    # 19560-19563 / 19580-19583 and the campaign's 19570-19573 /
+    # 19590-19593), and a third run then has nowhere to bind. The
+    # environment names the band — the same `MATRIX_P2P_<NODE>` /
+    # `MATRIX_REST_<NODE>` variables `lifecycle` already reads — and the
+    # campaign's own tables are the DEFAULT rather than the answer.
+    #
+    # It has to hold in a FRESH interpreter: the tables are module-level
+    # and the rendering functions close over them, so an override that
+    # only reached `configure_environment` would render the default band
+    # into every config file while binding the overridden one.
+    probe = (
+        'import os, sys; sys.path.insert(0, %r); import campaign;'
+        'print(campaign.CAMPAIGN_P2P["scala"], campaign.CAMPAIGN_REST["rust"]);'
+        'print(campaign.scala_override("steady", "scala", ["scala", "rust"],'
+        ' __import__("pathlib").Path("/tmp/x/scala")))'
+    ) % str(HERE)
+    env = dict(os.environ, MATRIX_P2P_SCALA='19600', MATRIX_P2P_RUST='19602',
+               MATRIX_REST_SCALA='19620', MATRIX_REST_RUST='19622')
+    out = subprocess.run([sys.executable, '-c', probe], env=env,
+                         capture_output=True, text=True, check=True).stdout
+    assert out.splitlines()[0] == '19600 19622', out
+    assert 'bindAddress = "127.0.0.1:19600"' in out, out
+    assert 'restApi.bindAddress = "127.0.0.1:19620"' in out, out
+    assert '"127.0.0.1:19602"' in out, out
+    # An unset environment still reproduces the documented band exactly.
+    out = subprocess.run([sys.executable, '-c', probe],
+                         env={k: v for k, v in os.environ.items()
+                              if not k.startswith(('MATRIX_P2P', 'MATRIX_REST'))},
+                         capture_output=True, text=True, check=True).stdout
+    assert out.splitlines()[0] == '19570 19592', out
+
     # The port bands are the controller's, and must never collide with a
     # production node or with the smoke recipe's own defaults.
     import lifecycle
     forbidden = {9052, 9053, 9063, 9072, 9073, 19099}
-    used = set(CAMPAIGN_P2P.values()) | set(CAMPAIGN_REST.values())
+    used = set(DEFAULT_CAMPAIGN_P2P.values()) | set(DEFAULT_CAMPAIGN_REST.values())
     assert not (used & forbidden), used & forbidden
     assert not (used & set(lifecycle.DEFAULT_P2P.values())), used
     assert not (used & set(lifecycle.DEFAULT_REST.values())), used
@@ -1247,7 +1326,7 @@ def _self_test():
     # the campaign band, and the two bands do not overlap. A duplicate
     # here binds one node's port for another and the run fails at start
     # — or worse, two nodes share a data directory.
-    for table in (CAMPAIGN_P2P, CAMPAIGN_REST,
+    for table in (DEFAULT_CAMPAIGN_P2P, DEFAULT_CAMPAIGN_REST,
                   lifecycle.DEFAULT_P2P, lifecycle.DEFAULT_REST):
         assert len(set(table.values())) == len(table), table
     assert set(CAMPAIGN_P2P) == set(CAMPAIGN_REST) == set(
@@ -1255,9 +1334,24 @@ def _self_test():
         lifecycle.DEFAULT_P2P_HOST) == set(CAMPAIGN_P2P_HOST), \
         'every node needs an entry in every port table'
     # The M4 slot, at the band the plan states.
-    assert CAMPAIGN_P2P['scala3'] == 19573, CAMPAIGN_P2P
-    assert CAMPAIGN_REST['scala3'] == 19593, CAMPAIGN_REST
+    assert DEFAULT_CAMPAIGN_P2P['scala3'] == 19573, DEFAULT_CAMPAIGN_P2P
+    assert DEFAULT_CAMPAIGN_REST['scala3'] == 19593, DEFAULT_CAMPAIGN_REST
     assert not (set(CAMPAIGN_P2P.values()) & set(CAMPAIGN_REST.values()))
+    # Whatever band a run is moved onto, the guard that keeps it off a
+    # production node runs against the RESOLVED ports, not the defaults.
+    assert check_band(dict(CAMPAIGN_P2P), dict(CAMPAIGN_REST)) is None
+    try:
+        check_band({'scala': 9053}, {'scala': 19620})
+    except SystemExit as error:
+        assert '9053' in str(error), str(error)
+    else:
+        raise AssertionError('a production port must be refused')
+    try:
+        check_band({'scala': 19600, 'rust': 19600}, {'scala': 19620})
+    except SystemExit as error:
+        assert 'twice' in str(error), str(error)
+    else:
+        raise AssertionError('a duplicated port must be refused')
     # Every role names a node that HAS a slot, and the node sets the
     # roles cover are exactly the ones the port tables know about.
     for role, spec in lifecycle.ROLES.items():
@@ -2708,7 +2802,9 @@ def main():
     sys.path.insert(0, str(HERE))
     # Refused HERE rather than at the first spawn: an unknown build must
     # not start a devnet, and a declared-but-unprovisioned one must say
-    # what would provision it.
+    # what would provision it. The resolved port band is checked in the
+    # same breath, for the same reason.
+    check_band(CAMPAIGN_P2P, CAMPAIGN_REST)
     check_build(args.build)
     names = list(ORDER) if args.scenario == 'all' else [args.scenario]
     # The node set is fixed for the whole process: `lifecycle.REST` and

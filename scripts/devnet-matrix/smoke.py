@@ -123,6 +123,21 @@ MEMPOOL_MIN_LOCATED = 1
 # schedule, and a follower cannot be failed for that.
 MEMPOOL_ROUTE_SECONDS = 420.0
 
+# How long one payment is waited into Scala's pool before the next is
+# asked for. This is NOT a tolerance being widened: it is what makes the
+# wallet's box selection see its own previous payment, and without it
+# the workload double-spends itself (see `conflicting_submissions`). At
+# 62c10315 the miner seals an input block roughly every 0.6 s, so a
+# payment appears in the pool within a sweep or two; 15 s is a ceiling
+# for a node under load, not an expected wait.
+MEMPOOL_SETTLE_SECONDS = 15.0
+
+# ...and the ceiling on the whole submission phase's waiting. A payment
+# can also be sealed into an input block and gone from the pool between
+# two polls, and that must cost one wait rather than twenty: if the
+# pacing is not working, `conflicting_submissions` is what says so.
+MEMPOOL_SETTLE_TOTAL_SECONDS = 90.0
+
 # How many input-block id lookups one sweep will make. The lookups are
 # inside the sweep's tip bracket, so they cost the sampler latency; a
 # cold chain can list dozens of blocks at once and a sweep that fetched
@@ -1824,6 +1839,33 @@ def _self_test():
     assert not ok, 'a sweep that overruns the budget must NOT report quiescence'
     assert overran.sweep_join_timeouts == 1, overran.sweep_join_timeouts
 
+    # ----- M4: the funded workload has to be SPENDABLE -----
+    #
+    # The 62c10315 smoke reported `unresolved = 19` with every route
+    # working: 20 back-to-back `/wallet/payment/send` calls produced 20
+    # transactions that shared inputs (99 input references over 61
+    # distinct boxes, measured from the run's own `scala.log`), so 19 of
+    # them were double-spends of the one that confirmed and could NEVER
+    # reach either route. `unresolved` is "the observation did not
+    # happen"; a workload that cannot be confirmed has to say so in its
+    # own words instead of borrowing that one.
+    assert conflicting_submissions({}) == []
+    assert conflicting_submissions({'a': ['b1'], 'b': ['b2']}) == []
+    # Two transactions on one box conflict, and both are named.
+    assert conflicting_submissions(
+        {'a': ['b1', 'b2'], 'b': ['b2'], 'c': ['b3']}) == ['a', 'b']
+    # A chain of overlaps is ONE cluster, and every member is named: the
+    # measured run had clusters wider than a pair.
+    assert conflicting_submissions(
+        {'a': ['b1'], 'b': ['b1', 'b2'], 'c': ['b2']}) == ['a', 'b', 'c']
+    # A transaction whose inputs could not be read is not evidence of a
+    # conflict either way — it is simply not named.
+    assert conflicting_submissions({'a': [], 'b': []}) == []
+    # And the reverse guard: a workload that IS disjoint must never be
+    # blamed for an unresolved payment.
+    assert conflicting_submissions(
+        {str(i): [f'box{i}'] for i in range(20)}) == []
+
     # ----- fix round 2: assertion 6's two routes -----
 
     # (1) sealed then evicted under its own tip: the strict path, PASS.
@@ -2416,6 +2458,49 @@ def wait_for_height(run, target, what):
     raise Unavailable(f'{what}: Scala did not reach ordering block {target} in budget')
 
 
+def conflicting_submissions(tx_inputs):
+    """Which submitted transactions cannot all confirm.
+
+    `tx_inputs` is `{txid: [boxId, ...]}` for the payments the workload
+    submitted. Two transactions spending one box are mutually exclusive
+    by consensus, so at most one of them can ever reach an input block
+    or an ordering block — and a run that submits such a set is
+    measuring its own workload rather than the follower.
+
+    Returns every txid in a conflict cluster (union-find over the shared
+    boxes), sorted. A transaction whose inputs could not be read
+    contributes nothing: silence is not evidence of a conflict.
+
+    Pure, so `--self-test` drives it directly.
+    """
+    owner = {}
+
+    def find(x):
+        while owner.get(x, x) != x:
+            owner[x] = owner.get(owner[x], owner[x])
+            x = owner[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            owner[ra] = rb
+
+    by_box = {}
+    for txid, boxes in tx_inputs.items():
+        owner.setdefault(txid, txid)
+        for box in boxes or ():
+            if box in by_box:
+                union(txid, by_box[box])
+            else:
+                by_box[box] = txid
+    clusters = {}
+    for txid in tx_inputs:
+        clusters.setdefault(find(txid), []).append(txid)
+    return sorted(t for group in clusters.values() if len(group) > 1
+                  for t in group)
+
+
 class PaymentOutcomeTracker:
     """Assertion 6, as amended by the controller in round 2.
 
@@ -2785,21 +2870,71 @@ def assertion_6_mempool(run, evidence, count):
     result['address'] = address
     result['submitted_at_height'] = start_height
 
+    # One payment at a time, each waited into Scala's pool before the
+    # next is asked for.
+    #
+    # `/wallet/payment/send` returns as soon as the transaction is
+    # broadcast; the wallet only stops offering a box to the NEXT
+    # selection once it has scanned that transaction off the mempool
+    # update. Twenty back-to-back calls therefore re-select boxes that
+    # are already spent in flight: the 62c10315 run submitted 20
+    # payments over 61 distinct boxes with 99 input references, so 19 of
+    # them were double-spends of the one that confirmed. Waiting for the
+    # transaction to land in the pool is what makes the workload
+    # spendable, and `tx_inputs` below is what proves it was.
+    tx_inputs = {}
+    settle_budget = time.monotonic() + MEMPOOL_SETTLE_TOTAL_SECONDS
     for i in range(count):
         try:
             status, txid = request('scala', '/wallet/payment/send',
                                    [{'address': address, 'value': 1_000_000}])
             if status != 200 or not txid:
                 result['submit_failures'].append({'index': i, 'status': status})
-            else:
-                result['submitted'].append(txid)
+                continue
+            result['submitted'].append(txid)
         except (OSError, ValueError) as error:
             result['submit_failures'].append({'index': i, 'error': str(error)})
+            continue
+        settled = min(run.deadline, settle_budget,
+                      time.monotonic() + MEMPOOL_SETTLE_SECONDS)
+        while time.monotonic() < settled:
+            try:
+                pool = api('scala', '/transactions/unconfirmed') or []
+            except Unavailable:
+                pool = []
+            entry = next((t for t in pool if t.get('id') == txid), None)
+            if entry is not None:
+                tx_inputs[txid] = [b.get('boxId') for b in entry.get('inputs')
+                                   or () if b.get('boxId')]
+                break
+            run.idle(0.2)
+        else:
+            # Not seen in the pool inside the budget. Its inputs stay
+            # unknown, which the conflict check reads as "no evidence",
+            # never as "disjoint".
+            tx_inputs.setdefault(txid, [])
     submitted = set(result['submitted'])
     if len(submitted) != count:
         run.fail('6_mempool',
                  f'{len(submitted)} of {count} submissions returned HTTP 200',
                  {'failures': result['submit_failures']})
+
+    # A workload that cannot confirm is not a follower measurement.
+    conflicts = conflicting_submissions(tx_inputs)
+    result['submitted_inputs'] = tx_inputs
+    result['submitted_input_boxes'] = len(
+        {b for boxes in tx_inputs.values() for b in boxes})
+    result['submitted_input_refs'] = sum(len(b) for b in tx_inputs.values())
+    result['conflicting_submissions'] = conflicts
+    result['pool_settle_seconds'] = MEMPOOL_SETTLE_SECONDS
+    if conflicts:
+        run.fail('6_mempool',
+                 f'{len(conflicts)} of {len(submitted)} payments spend a box '
+                 'another submitted payment also spends, so at most one of each '
+                 'cluster can ever confirm — the workload, not the follower',
+                 {'conflicting': conflicts,
+                  'distinct_input_boxes': result['submitted_input_boxes'],
+                  'input_references': result['submitted_input_refs']})
 
     # Route each payment. The window is keyed to INPUT-BLOCK
     # PRODUCTION, not to ordering height: the old loop stopped at the
