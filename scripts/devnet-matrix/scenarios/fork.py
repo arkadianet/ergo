@@ -170,10 +170,17 @@ def run(ctx):
     # sampled no switch has not judged the switch property at all.
     if not comparison['rust_switches']:
         ctx.note('result_qualifier', 'NOT ESTABLISHED')
+        peak = max(fork_counts) if fork_counts else None
         ctx.fail('no input-chain fork switch was observed on Rust, so the switch '
-                 'property was never judged — NOT ESTABLISHED, not a pass '
-                 f"(forks reached {max(fork_counts) if fork_counts else None} in "
-                 f'{len(fork_samples)} samples, so the trees were there)',
+                 'property was never judged — NOT ESTABLISHED, not a pass. '
+                 + (f'A second tree WAS retained ({len(fork_samples)} samples at '
+                    f'forks={peak}), so the follower had something to switch '
+                    'between and did not.'
+                    if fork_samples else
+                    f'`forks` never exceeded 1 (peak {peak} over '
+                    f'{len(fork_counts)} readings), so the two miners never '
+                    'produced competing trees under one ordering block in this '
+                    'window at all.'),
                  {'fork_count_samples': len(fork_counts),
                   'max_forks': max(fork_counts) if fork_counts else None,
                   'scala_switches': len(comparison['scala_switches']),
