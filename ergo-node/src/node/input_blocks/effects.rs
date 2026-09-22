@@ -804,23 +804,30 @@ pub(in crate::node) fn apply_chain_change(
 
     // ---- restore ----
     for (id, cached) in rolled_back {
+        // The restore set is the rolled-back block's own cached bodies —
+        // Scala's `history.getInputBlockTransactions(id)` — whether or
+        // not they were ever pooled.
+        //
+        // NOT the retained entries. `RemovedEntry` holds two different
+        // things: the block's own transactions, removed from the pool
+        // when it applied, AND the pooled transactions
+        // `removeWithDoubleSpends` evicted for conflicting with them.
+        // Restoring all of them put the DISPLACED transaction back
+        // first, after which divergence D1 refused the block's own as a
+        // conflict — the pool came back holding what the input chain had
+        // pushed out instead of what it had carried. Retained entries
+        // are metadata here: they supply the previously computed
+        // validation cost that Scala's `put` reuses in place of the fake
+        // cost, for whichever cached bodies this node had pooled.
         let retained = rt.retained.remove(id).unwrap_or_default();
-        let mut bodies: Vec<RestoreBody> = Vec::with_capacity(retained.len() + cached.len());
+        let costs: std::collections::HashMap<Digest32, u64> =
+            retained.iter().map(|e| (e.tx_id, e.cost)).collect();
+        let mut bodies: Vec<RestoreBody> = Vec::with_capacity(cached.len());
         let mut seen: std::collections::HashSet<Digest32> = std::collections::HashSet::new();
-        // Entries this node itself evicted carry their previously computed
-        // validation cost; Scala's `put` reuses it rather than the fake cost.
-        for entry in retained {
-            if seen.insert(entry.tx_id) {
-                bodies.push((entry.tx_id, entry.bytes.clone(), Some(entry.cost)));
-            }
-        }
-        // Scala restores the rolled-back block's cached bodies whether or
-        // not they were ever pooled, so the ones we never evicted are
-        // restored too — with no retained cost.
         for body in cached {
             let tx_id = Digest32::from_bytes(body.tx_ref.tx_id);
             if seen.insert(tx_id) {
-                bodies.push((tx_id, body.bytes.clone(), None));
+                bodies.push((tx_id, body.bytes.clone(), costs.get(&tx_id).copied()));
             }
         }
         if bodies.is_empty() {

@@ -299,11 +299,13 @@ fn effect_chain_changed_applies_then_restores_in_mempool() {
         ],
     );
 
+    // The rolled-back block's own cached bodies are the restore set;
+    // the retained entries above only supply their costs.
     let _actions = apply_chain_change(
         &mut state,
         &mut rt,
         &[([0x22u8; 32], vec![both.clone()])],
-        &[(rolled_back_id, Vec::new())],
+        &[(rolled_back_id, vec![both.clone(), only_rolled_back.clone()])],
         Instant::now(),
     );
 
@@ -4802,5 +4804,68 @@ fn an_ordering_announcement_for_an_unknown_input_chain_still_fetches_the_block()
     assert!(
         asked.contains(&expected_section),
         "the announcer is asked for the block's transaction section; got {asked:?}"
+    );
+}
+
+/// Finding 6: on rollback the runtime treated every RETAINED entry as a
+/// rollback body. `RemovedEntry` carries two different things — the
+/// applied block's own transactions, and the pooled transactions
+/// `removeWithDoubleSpends` evicted because they conflicted with them —
+/// and Scala restores only the first kind (`history
+/// .getInputBlockTransactions(id)`).
+///
+/// Codex's scenario: pooled `C` conflicts with never-pooled `A`, and
+/// input block `I` applies `A`. On rollback, `C` was restored first,
+/// after which divergence D1 refused `A` as a conflict — so the pool
+/// came back holding the transaction the input chain had displaced
+/// instead of the one it had carried.
+///
+/// Retained entries are metadata now (they supply the cost Scala's `put`
+/// reuses); the restore set is the rolled-back block's cached bodies.
+#[test]
+fn rollback_restores_the_blocks_own_transactions_not_the_conflicts_they_evicted() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    let mut rt = runtime();
+    let now = Instant::now();
+    let block = [0x31u8; 32];
+
+    // Same input box, different transactions (a transaction id does not
+    // cover the spending proof, so the two are told apart by a data
+    // input): they cannot both be in the pool.
+    let a = ts::body(0x33, 1);
+    let mut c_tx = ts::tx(0x33, 1);
+    c_tx.data_inputs = vec![ergo_ser::input::DataInput {
+        box_id: ergo_primitives::digest::Digest32::from_bytes([0x44; 32]),
+    }];
+    let c = ts::body_of(c_tx);
+    let a_id = ergo_primitives::digest::Digest32::from_bytes(a.tx_ref.tx_id);
+    let c_id = ergo_primitives::digest::Digest32::from_bytes(c.tx_ref.tx_id);
+    assert_ne!(a_id, c_id);
+
+    // C is pooled; A never was.
+    state
+        .mempool
+        .restore_input_block_txs(&[(c_id, c.bytes.clone(), None)], now);
+    assert!(state.mempool.contains(&c_id), "fixture seats C");
+
+    // Input block I applies A, which evicts C as a double spend.
+    apply_chain_change(&mut state, &mut rt, &[(block, vec![a.clone()])], &[], now);
+    assert!(!state.mempool.contains(&c_id), "C is evicted by the apply");
+    assert!(
+        rt.retained.contains_key(&block),
+        "and is retained against the block that evicted it"
+    );
+
+    // I is rolled back on a switch to an unrelated winning fork.
+    apply_chain_change(&mut state, &mut rt, &[], &[(block, vec![a.clone()])], now);
+
+    assert!(
+        state.mempool.contains(&a_id),
+        "Scala restores the rolled-back block's own transactions"
+    );
+    assert!(
+        !state.mempool.contains(&c_id),
+        "a conflict the apply evicted is not a rollback body"
     );
 }
