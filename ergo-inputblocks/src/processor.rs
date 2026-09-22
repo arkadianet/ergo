@@ -2198,11 +2198,13 @@ impl Processor {
     }
 
     /// Whether `peer` has room for another request right now.
+    ///
+    /// Counts retry-pending slots (past their deadline, budget not yet
+    /// spent) as held, for the same reason [`Self::request`] does: the
+    /// tick re-arms them, so treating them as free would let the re-arm
+    /// exceed `requests_per_peer`.
     fn has_request_capacity(&self, peer: PeerTag) -> bool {
-        let now = self.now;
-        let held = self.outstanding.get(&peer).map_or(0, |slots| {
-            slots.iter().filter(|p| p.deadline.0 > now.0).count()
-        });
+        let held = self.outstanding.get(&peer).map_or(0, |slots| slots.len());
         held < self.bounds.requests_per_peer
     }
 
@@ -3468,10 +3470,18 @@ impl Processor {
     /// Issue `effect` to `peer` unless that peer is already at the
     /// outstanding-request cap (spec 7.4).
     ///
-    /// The cap counts requests that are genuinely outstanding: a slot is
-    /// released by the delivery that answers it
-    /// ([`Self::request_answered`]) or, if the peer never answers, when
-    /// its deadline passes on a [`Event::Tick`].
+    /// A slot is a question this node is still pursuing. It is released
+    /// by the delivery that answers it ([`Self::request_answered`]) or,
+    /// if the peer never answers, by the [`Event::Tick`] sweep once the
+    /// request's retry budget is spent — NOT merely by its deadline
+    /// passing. A slot past its deadline is awaiting reissue, and this
+    /// function must leave it alone: pruning expired slots here meant
+    /// any request to the same peer between a deadline and the next tick
+    /// deleted the timed-out request outright, so it was never reissued
+    /// and later announcements of its recorded child hit `AlreadyKnown`.
+    /// For the same reason the cap counts retry-pending slots: they are
+    /// re-armed on the tick, and excluding them would let that re-arming
+    /// push a peer past `requests_per_peer`.
     ///
     /// A request that is already outstanding is **not** re-emitted: spec
     /// 7.6's re-selection reaches the same unresolved block on every
@@ -3489,10 +3499,8 @@ impl Processor {
     ) -> bool {
         let deadline = Tick(self.now.0.saturating_add(self.bounds.request_timeout_ms));
         let key = RequestKey::of(&effect);
-        let now = self.now;
         let cap = self.bounds.requests_per_peer;
         let slots = self.outstanding.entry(peer).or_default();
-        slots.retain(|p| p.deadline.0 > now.0);
         if let Some(k) = key {
             if slots.iter().any(|p| p.key == k) {
                 return false;
@@ -7584,6 +7592,110 @@ mod tests {
             !out.iter()
                 .any(|e| matches!(e, Effect::RequestTransactionIds { .. })),
             "the answered id request is gone, not retried: {out:?}"
+        );
+    }
+
+    // ----- fix round 3 (M2 final re-review r2) -----
+
+    /// Round-2 finding 1: the retry sweep was not the only thing that
+    /// touched an expired slot. `request` pruned expired slots of the
+    /// peer it was about to ask, so ANY intervening request to that peer
+    /// between a deadline and the next tick deleted the timed-out
+    /// request outright — it was never reissued, and later announcements
+    /// of its recorded child hit `AlreadyKnown`. The retry contract has
+    /// to hold regardless of intervening traffic.
+    #[test]
+    fn an_expired_request_survives_another_request_to_the_same_peer_and_is_reissued() {
+        let bounds = Bounds::default();
+        let timeout = bounds.request_timeout_ms;
+        let mut p = processor_with(bounds);
+        let ctx = ts::TestCtx::at(FULL);
+
+        // Block A: announced, its weak-id list requested from PEER.
+        let a = ts::announcement(ORD, FULL + 1, 1, None);
+        let a_id = ts::ann_id(&a);
+        let asked_for = |eff: &[Effect], want: InputBlockId| {
+            eff.iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        Effect::RequestTransactionIds {
+                            input_block_id,
+                            from,
+                        } if *input_block_id == want && *from == ts::PEER
+                    )
+                })
+                .count()
+        };
+        let first = announce(&mut p, &ctx, &a, ts::PEER);
+        assert_eq!(asked_for(&first, a_id), 1, "A's id request goes out");
+
+        // A's deadline passes. Before the tick can sweep it, a SECOND
+        // block is announced by the same peer, which issues its own
+        // request to that peer.
+        let b = ts::announcement(ORD, FULL + 1, 2, None);
+        let b_id = ts::ann_id(&b);
+        let between = ctx.handle(
+            &mut p,
+            Event::AnnouncementAccepted {
+                ann: b,
+                from: ts::PEER,
+                now: Tick(timeout + 1),
+            },
+        );
+        assert_eq!(asked_for(&between, b_id), 1, "B's id request goes out too");
+        assert_eq!(
+            asked_for(&between, a_id),
+            0,
+            "and it is not A's request: {between:?}"
+        );
+
+        // The tick must still reissue A. Before the fix A's slot had
+        // been deleted by B's request and nothing asked for it again.
+        let ticked = ctx.handle(
+            &mut p,
+            Event::Tick {
+                now: Tick(timeout + 2),
+            },
+        );
+        assert_eq!(
+            asked_for(&ticked, a_id),
+            1,
+            "the expired request is reissued despite the traffic in between: {ticked:?}"
+        );
+        assert_eq!(p.requests_retried(), 1, "and it is accounted as a retry");
+    }
+
+    /// The other half of the same invariant: an expired slot that is
+    /// still awaiting retry keeps holding its `requests_per_peer` slot,
+    /// so re-arming it on the tick can never push a peer past the cap.
+    #[test]
+    fn an_expired_request_awaiting_retry_still_holds_its_slot() {
+        let bounds = Bounds {
+            requests_per_peer: 1,
+            ..Bounds::default()
+        };
+        let timeout = bounds.request_timeout_ms;
+        let mut p = processor_with(bounds);
+        let ctx = ts::TestCtx::at(FULL);
+
+        let a = ts::announcement(ORD, FULL + 1, 1, None);
+        announce(&mut p, &ctx, &a, ts::PEER);
+
+        // Past the deadline, but the retry budget is untouched: the one
+        // slot is still owed to A, so B cannot take it.
+        let b = ts::announcement(ORD, FULL + 1, 2, None);
+        let between = ctx.handle(
+            &mut p,
+            Event::AnnouncementAccepted {
+                ann: b,
+                from: ts::PEER,
+                now: Tick(timeout + 1),
+            },
+        );
+        assert!(
+            drops(&between).contains(&DropReason::RequestsFull),
+            "an expired-but-pending-retry slot is still occupied: {between:?}"
         );
     }
 }
