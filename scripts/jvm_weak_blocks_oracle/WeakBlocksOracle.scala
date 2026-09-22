@@ -176,13 +176,21 @@ object WeakBlocksOracle {
         case _ => None
       }
     }
-    val real = found.groupBy(_._1).map(_._2.head).map { case (kind, hdr) =>
+    // The nonce scan can come up with only one of the two solution classes.
+    // Emitting the partial vector would write JSON the Rust parity test
+    // rejects much later; fail here, where the cause is visible.
+    val byKind = found.groupBy(_._1).map { case (k, v) => k -> v.head._2 }
+    val missing = Seq("input", "ordering").filterNot(byKind.contains)
+    if (missing.nonEmpty)
+      sys.error(s"pow scan found no ${missing.mkString(" or ")} solution (found: ${byKind.keys.mkString(", ")})")
+    val real = Seq("input", "ordering").map { kind =>
+      val hdr = byKind(kind)
       Json.obj("name" -> s"real_${kind}_solution".asJson, "header_hex" -> hex(HeaderSerializer.toBytes(hdr)).asJson,
         "hit" -> scheme.hitForVersion2(hdr).toString.asJson, "multiplier" -> 30.asJson,
         "input_pow_valid" -> scheme.checkInputBlockPoW(hdr, params).asJson,
         "ordering_pow_valid" -> scheme.checkOrderingBlockPoW(hdr).asJson)
     }
-    Json.obj("pure_cases" -> pure.flatten.asJson, "header_cases" -> real.toSeq.asJson)
+    Json.obj("pure_cases" -> pure.flatten.asJson, "header_cases" -> real.asJson)
   }
 
   def extensionLeafCases(): Json = {
