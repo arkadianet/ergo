@@ -51,6 +51,29 @@ def rust_events(ctx):
     return feed.get('events', [])
 
 
+def latest_event_seq(ctx):
+    """The node's newest event sequence number, as a WATERMARK.
+
+    Scenarios that want "what happened after this point" must key off the
+    sequence, not off the length of the list: the feed is a ring, so once
+    it wraps a positional slice silently drops the very events the
+    scenario went to the trouble of provoking.
+    """
+    feed = api_retry('rust', '/api/v1/events', ctx.run.deadline,
+                     what='the Rust event feed watermark')
+    return feed.get('latest_seq') or 0
+
+
+def events_after(events, seq):
+    """Events newer than a watermark taken with `latest_event_seq`.
+
+    An event with no `seq` is KEPT: dropping it would silently narrow the
+    window, and a feed that stopped numbering is something the scenario
+    should see rather than something it should filter out.
+    """
+    return [e for e in events if e.get('seq') is None or e['seq'] > seq]
+
+
 def ordering_stream(events):
     """`ordering_*` plus `blockApplied`, in emission order.
 

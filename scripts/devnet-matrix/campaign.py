@@ -170,12 +170,26 @@ def render_rust_config(template, data_dir, nodes, overrides=()):
     return '\n'.join(out).rstrip() + '\n'
 
 
+def ensure_data_dirs(data_root, nodes):
+    """Create each node's data directory.
+
+    The Scala node REQUIRES `ergo.directory` to exist and be writable
+    before it will read the rest of its config — it fails in the settings
+    reader, long before any log line about input blocks. A scenario that
+    wipes a directory has to put it back for the same reason.
+    """
+    for node in nodes:
+        (data_root / node).mkdir(parents=True, exist_ok=True)
+    return data_root
+
+
 def write_configs(scenario, nodes, rust_overrides=(), scala_extra=''):
     """Render every node's config for one scenario and point `lifecycle`
     at them. Returns the scenario's data directory."""
     CONF.mkdir(parents=True, exist_ok=True)
     data_root = CAMPAIGN_WORK / scenario
     data_root.mkdir(parents=True, exist_ok=True)
+    ensure_data_dirs(data_root, nodes)
     for node in nodes:
         if node == 'rust':
             path = CONF / f'{scenario}-rust.toml'
@@ -317,6 +331,7 @@ def run_scenario(name, args):
     if args.fresh:
         for node in nodes:
             shutil.rmtree(data_root / node, ignore_errors=True)
+        ensure_data_dirs(data_root, nodes)
 
     evidence = {
         'scenario': name,

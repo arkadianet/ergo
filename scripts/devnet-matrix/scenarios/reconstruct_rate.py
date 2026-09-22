@@ -61,11 +61,11 @@ def _scala_log_counts(ctx):
 def run(ctx):
     smoke.assertion_1_peering(ctx.run, ctx.evidence)
     blocks = ctx.args.ordering_blocks or ORDERING_BLOCKS
-    events_before = len(common.rust_events(ctx))
+    events_watermark = common.latest_event_seq(ctx)
     start, reached = common.wait_ordering_blocks(ctx, blocks, 'reconstruct_rate')
 
     events = common.rust_events(ctx)
-    window = events[events_before:]
+    window = common.events_after(events, events_watermark)
     reconstructed = [e for e in window if e['kind'] == 'ordering_reconstructed']
     fallback = [e for e in window if e['kind'] == 'ordering_reconstruct_fallback']
     decided = len(reconstructed) + len(fallback)

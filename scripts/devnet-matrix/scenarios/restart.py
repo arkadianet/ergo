@@ -38,7 +38,9 @@ def run(ctx):
                        what='the follower status before the restart')
     ctx.note('status_before_restart', before.get('input_blocks'))
     restart_height = smoke.scala_height(ctx.run)
-    events_before = len(common.rust_events(ctx))
+    # A SIGKILL restarts the process, so its ring restarts at seq 1 and
+    # every event in the feed afterwards is post-restart by construction.
+    events_before_restart = common.latest_event_seq(ctx)
 
     killed = campaign.kill_hard('rust')
     ctx.note('killed', {'pid': killed, 'signal': 'SIGKILL',
@@ -98,7 +100,7 @@ def run(ctx):
         'ordering_reconstruct_fallback': fallback,
         'note': 'D7 lets a cold node recover before the next ordering block; '
                 'either outcome passes, and the split is the observation',
-        'events_before_restart': events_before,
+        'seq_before_restart': events_before_restart,
     })
 
     # The recovery itself still has to be CORRECT wherever a mismatch

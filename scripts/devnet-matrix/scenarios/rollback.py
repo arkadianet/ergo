@@ -33,6 +33,14 @@ PUBLIC_BLOCKS_AFTER_SPLIT = 2
 PRIVATE_LEAD = 2
 PRIVATE_MINING_BUDGET = 900.0
 
+# Where miner 2 binds while it is isolated. Clearing `knownPeers` only
+# stops it DIALLING — the follower has miner 2 in its own `known` list and
+# keeps an inbound connection open, which would hand it the private
+# branch in real time and there would be no reorg to observe. Moving the
+# listener is what actually parts them; the port is outside the
+# campaign's own 19570-19572 band and outside every production port.
+ISOLATED_P2P_PORT = 19573
+
 
 def _rewrite_scala2(campaign, ctx, isolated):
     """Point miner 2 at an isolated or a rejoined config.
@@ -43,8 +51,10 @@ def _rewrite_scala2(campaign, ctx, isolated):
     """
     path = campaign.CONF / ('rollback-scala2-isolated.conf' if isolated
                             else 'rollback-scala2.conf')
-    extra = ('scorex.network.knownPeers = []\n'
-             'ergo.node.offlineGeneration = true\n') if isolated else ''
+    extra = (f'scorex.network.knownPeers = []\n'
+             f'scorex.network.bindAddress = "127.0.0.1:{ISOLATED_P2P_PORT}"\n'
+             f'scorex.network.declaredAddress = "127.0.0.1:{ISOLATED_P2P_PORT}"\n'
+             f'ergo.node.offlineGeneration = true\n') if isolated else ''
     body = campaign.scala_override('rollback', 'scala2', ctx.nodes,
                                    ctx.data_root / 'scala2')
     path.write_text(body + extra)
@@ -59,6 +69,12 @@ def run(ctx):
     common.wait_ordering_blocks(ctx, COMMON_BLOCKS, 'shared_prefix')
     split_height = smoke.scala_height(ctx.run)
     ctx.note('split_height', split_height)
+    ctx.note('isolation', {
+        'method': 'miner 2 moves its P2P listener and clears knownPeers',
+        'isolated_p2p_port': ISOLATED_P2P_PORT,
+        'why': 'clearing knownPeers alone leaves the follower\'s inbound '
+               'connection up, and the private branch would never be private',
+    })
 
     # ----- the split -----
     lifecycle.stop(('scala2',))
@@ -99,7 +115,7 @@ def run(ctx):
         return
 
     # ----- rejoin -----
-    events_before = len(common.rust_events(ctx))
+    events_watermark = common.latest_event_seq(ctx)
     lifecycle.stop(('scala2',))
     _rewrite_scala2(campaign, ctx, isolated=False)
     lifecycle.spawn('scala')
@@ -131,7 +147,8 @@ def run(ctx):
 
     # ----- what the follower reported -----
     events = common.rust_events(ctx)
-    reorgs = [e for e in events[events_before:] if e['kind'] == 'reorg']
+    reorgs = [e for e in common.events_after(events, events_watermark)
+              if e['kind'] == 'reorg']
     ctx.note('reorg_events', reorgs)
     if not reorgs:
         ctx.fail('the follower switched branches without emitting a reorg, so the '

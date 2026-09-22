@@ -59,7 +59,7 @@ def run(ctx):
     # root of the tree it will announce next.
     lifecycle.stop(('rust',))
     shutil.rmtree(ctx.data_root / 'rust', ignore_errors=True)
-    events_before = 0  # a fresh node's feed starts empty
+    campaign.ensure_data_dirs(ctx.data_root, ['rust'])
     lifecycle.spawn('rust')
     ctx.run.started('rust')
     lifecycle.wait_peered()
@@ -67,7 +67,9 @@ def run(ctx):
     common.wait_ordering_blocks(ctx, BLOCKS_AFTER_EVICTION, 'post_eviction')
 
     events = common.rust_events(ctx)
-    window = [e for e in events[events_before:] if e['kind'].startswith('ordering_')]
+    # No watermark: the node is restarted on a FRESH data directory, so
+    # its event feed starts empty and everything in it is post-eviction.
+    window = [e for e in events if e['kind'].startswith('ordering_')]
     fallbacks = [e for e in window if e['kind'] == 'ordering_reconstruct_fallback']
     reconstructions = [e for e in window if e['kind'] == 'ordering_reconstructed']
     ctx.note('ordering_outcomes', {
