@@ -38,6 +38,7 @@ PRIVATE_MINING_BUDGET = 900.0
 # `common.seed_second_miner`), because the reference node cannot hand the
 # chain to a second Scala node on this host.
 START_NODES = ('scala', 'rust')
+SEEDED_NODES = ('scala2',)   # the second MINER, seeded the same way
 
 # It mines from the copied tip without waiting to decide it is synced —
 # it already holds the chain, and `offlineGeneration = false` would make

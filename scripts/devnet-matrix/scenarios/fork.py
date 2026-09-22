@@ -24,6 +24,9 @@ SHARED_BLOCKS = 4
 # `common.seed_second_miner`), because the reference node cannot hand the
 # chain to a second Scala node on this host.
 START_NODES = ('scala', 'rust')
+# The second MINER, plus `--reference-follower patched`'s own slot when
+# one is asked for; both are seeded the same way.
+SEEDED_NODES = ('scala2', 'scala3')
 
 # It mines from the copied tip without waiting to decide it is synced —
 # it already holds the chain, and `offlineGeneration = false` would make
@@ -53,7 +56,7 @@ def run(ctx):
     # sample range that covers is recorded so the reset it causes is not
     # mistaken for a fork switch — and so a reset OUTSIDE it still is.
     samples_before_seed = len(ctx.run.series)
-    common.seed_second_miner(ctx, campaign, lifecycle)
+    common.seed_second_miner(ctx, campaign, lifecycle, nodes=SEEDED_NODES)
     samples_after_seed = len(ctx.run.series)
     # NOT `assertion_1_peering`: it requires every node to hold a peer at
     # one instant, and the two miners cannot peer with each other here,

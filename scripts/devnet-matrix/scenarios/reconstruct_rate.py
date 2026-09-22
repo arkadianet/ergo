@@ -45,6 +45,10 @@ SCALA2_EXTRA = (
 # the chain already on disk it processes the ordering announcements the
 # follower relays, which is where both log lines are emitted.
 START_NODES = ('scala', 'rust')
+# Seeded from the miner's directory rather than started cold; see above.
+# `scala3` is `--reference-follower both`'s second slot and is skipped
+# when it is not in the running node set.
+SEEDED_NODES = ('scala2', 'scala3')
 
 # Three nodes share 127.0.0.1, and the follower's per-IP admission limit
 # is 1 — it gates outbound dial SELECTION as well as inbound admission,
@@ -189,7 +193,7 @@ def run(ctx):
 
     # Bring the reference follower up on the miner's chain.
     import campaign
-    common.seed_second_miner(ctx, campaign, lifecycle)
+    common.seed_second_miner(ctx, campaign, lifecycle, nodes=SEEDED_NODES)
 
     collector = common.EventCollector(ctx)
     collector.poll()

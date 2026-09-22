@@ -22,14 +22,24 @@ from smoke import Unavailable, api, api_retry
 from . import common
 
 NODES = ('scala', 'rust')
+# `--reference-follower` may add a Scala follower; it is seeded from the
+# miner's directory rather than started cold, for the reason
+# `reconstruct_rate` states.
+START_NODES = ('scala', 'rust')
+SEEDED_NODES = ('scala2', 'scala3')
 BLOCKS_BEFORE_RESTART = 6
 CONVERGENCE_ORDERING_BLOCKS = 3
 
 
 def run(ctx):
     import campaign
+    import lifecycle
 
     smoke.assertion_1_peering(ctx.run, ctx.evidence)
+    # A reference follower, if one was asked for, on the miner's chain
+    # before anything is measured against it.
+    if set(SEEDED_NODES) & set(lifecycle.NODES):
+        common.seed_second_miner(ctx, campaign, lifecycle, nodes=SEEDED_NODES)
     common.wait_ordering_blocks(ctx, BLOCKS_BEFORE_RESTART, 'pre_restart')
 
     # Fold the drop counters forward: they are per-process, and the

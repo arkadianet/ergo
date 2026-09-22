@@ -1510,6 +1510,44 @@ def _self_test():
     both = resolve_roles('steady', 'both')
     assert {'scala_follower', 'scala_follower_patched'} <= set(both), both
     assert nodes_for_roles(both) == ('scala', 'scala2', 'scala3', 'rust'), both
+    # A follower ADDED AT RUNTIME must be told not to mine and must fit
+    # the admission limit, exactly like one a scenario declares. The
+    # loop above only walks each scenario's BASE role set, so without
+    # this a `--reference-follower` node could quietly race the miner —
+    # which is the one thing that would make every reference number
+    # meaningless.
+    for _name in REFERENCE_FOLLOWER_SCENARIOS:
+        for _mode in ('stock', 'patched', 'both'):
+            try:
+                _roles = resolve_roles(_name, _mode)
+            except SystemExit:
+                continue          # refused, with its reason, above
+            _assigned = lifecycle.roles_for_nodes(_roles)
+            _module = _all[_name]
+            for _node, _role in _assigned.items():
+                if lifecycle.ROLES[_role].kind != 'scala' or \
+                        lifecycle.ROLES[_role].mines:
+                    continue
+                _extra = scala_extra_for(
+                    _node, _assigned, getattr(_module, 'SCALA_EXTRA', ''),
+                    getattr(_module, 'SCALA2_EXTRA', ''))
+                assert 'mining = false' in _extra, (_name, _mode, _node, _role)
+            _scala = [n for n in _assigned if n != 'rust']
+            _ov = dict(((sec, key), value) for sec, key, value in
+                       admission_overrides(
+                           tuple(_assigned),
+                           getattr(_module, 'RUST_OVERRIDES', ())))
+            assert int(_ov[('peers', 'per_ip_limit')]) >= len(_scala), \
+                (_name, _mode, _ov)
+            # And a node that is not started at launch has to be one a
+            # scenario actually brings up itself, or it never runs at
+            # all and its numbers read as a silent zero.
+            _late = set(_assigned) - set(
+                getattr(_module, 'START_NODES', tuple(_assigned)))
+            assert _late <= set(getattr(_module, 'SEEDED_NODES', ())), (
+                _name, _mode, _late,
+                'a node outside START_NODES that the scenario does not seed '
+                'never runs, and its numbers read as a silent zero')
     # `reconstruct_rate` already HAS a stock follower; `patched` replaces
     # it rather than adding a second one on the same slot.
     assert resolve_roles('reconstruct_rate', 'patched') == (

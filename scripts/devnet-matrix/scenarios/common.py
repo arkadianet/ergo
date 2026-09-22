@@ -72,7 +72,7 @@ def _wait_for_peer_count(ctx, node, wanted, budget=180.0):
     return count
 
 
-def seed_second_miner(ctx, campaign, lifecycle):
+def seed_second_miner(ctx, campaign, lifecycle, nodes=('scala2',)):
     """Give miner 2 the chain by COPYING miner 1's data directory.
 
     The reference node cannot hand it over. Two Scala nodes on one host
@@ -93,20 +93,34 @@ def seed_second_miner(ctx, campaign, lifecycle):
     Miner 1 is stopped for the copy. A LevelDB copied out from under a
     live writer is not a database, and a scenario built on one would fail
     for a reason that has nothing to do with input blocks.
+
+    `nodes` (M4) is every Scala node to seed this way, so the same
+    mechanism serves a reference FOLLOWER — the node's role decides
+    whether it mines, not this function — and more than one of them:
+    `--reference-follower both` runs a stock follower beside a patched
+    one, which is the §7a ablation. A name not in the running node set is
+    skipped, so a scenario may ask for `scala3` unconditionally.
     """
+    nodes = tuple(n for n in nodes if n in lifecycle.NODES)
+    if not nodes:
+        return {}
     lifecycle.stop(('scala',))
     source = ctx.data_root / 'scala'
-    target = ctx.data_root / 'scala2'
-    shutil.rmtree(target, ignore_errors=True)
-    shutil.copytree(source, target)
-    shutil.rmtree(target / 'wallet', ignore_errors=True)
-    campaign.ensure_data_dirs(ctx.data_root, ['scala2'])
+    targets = []
+    for node in nodes:
+        target = ctx.data_root / node
+        shutil.rmtree(target, ignore_errors=True)
+        shutil.copytree(source, target)
+        shutil.rmtree(target / 'wallet', ignore_errors=True)
+        targets.append(target)
+    campaign.ensure_data_dirs(ctx.data_root, list(nodes))
     lifecycle.spawn('scala')
     ctx.run.started('scala')
     lifecycle.init_wallet('scala')
-    lifecycle.spawn('scala2')
-    ctx.run.started('scala2')
-    lifecycle.init_wallet('scala2')
+    for node in nodes:
+        lifecycle.spawn(node)
+        ctx.run.started(node)
+        lifecycle.init_wallet(node)
     # The follower has been dialling miner 2 since it started, and miner
     # 2 was not there — so it is several failures into an exponential
     # dial backoff that outlasts the scenario. See `restart_follower`.
@@ -115,7 +129,7 @@ def seed_second_miner(ctx, campaign, lifecycle):
     # scenario that cannot run, and the evidence has to say which of the
     # two it was rather than dying with a stack trace that says neither.
     try:
-        lifecycle.wait_peered(names=['scala', 'scala2', 'rust'], timeout=120)
+        lifecycle.wait_peered(names=['scala', *nodes, 'rust'], timeout=120)
         peered = True
     except RuntimeError as error:
         peered = str(error)
@@ -127,24 +141,26 @@ def seed_second_miner(ctx, campaign, lifecycle):
     # switch between them. The scenario's own evidence — `forks > 1`,
     # or a two-peer sighting at any point in the window — is what
     # decides whether it ran, and the scenario checks that itself.
-    connected = _wait_for_peer_count(ctx, 'rust', 2)
+    connected = _wait_for_peer_count(ctx, 'rust', 1 + len(nodes))
     ctx.note('follower_peers_after_seed', connected)
     heights = {}
-    for node in ('scala', 'scala2'):
+    for node in ('scala', *nodes):
         try:
             heights[node] = (api(node, '/info') or {}).get('fullHeight')
         except Unavailable:
             heights[node] = None
     ctx.note('second_miner_seeded', {
-        'copied_from': str(source), 'to': str(target),
+        'copied_from': str(source), 'to': [str(t) for t in targets],
         'wallet_copied': False,
         'heights_after_seed': heights,
         'why': 'the reference node cannot hand the chain to a second Scala '
                'node on this host; see the docstring',
     })
-    if heights.get('scala2') is None:
-        ctx.fail('the second miner did not come up on the copied chain, so the '
-                 'scenario has no second miner', {'heights': heights})
+    missing = [n for n in nodes if heights.get(n) is None]
+    if missing:
+        ctx.fail(f'{", ".join(missing)} did not come up on the copied chain, so '
+                 'the scenario is missing a node it was told to run',
+                 {'heights': heights, 'seeded': list(nodes)})
     return heights
 
 

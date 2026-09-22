@@ -21,6 +21,10 @@ NODES = ('scala', 'rust')
 # whole window and its lag is a measurement of nothing. It is seeded from
 # the miner's data directory instead, exactly as `reconstruct_rate` does.
 START_NODES = ('scala', 'rust')
+# The Scala nodes this scenario brings up ITSELF, by seeding them from
+# the miner's data directory. Every node outside `START_NODES` has to be
+# named here, or it never runs and its numbers read as a silent zero.
+SEEDED_NODES = ('scala2', 'scala3')
 ORDERING_BLOCKS = 60
 MEMPOOL_TXS = 20
 # Payments kept in flight per ordering block during the window, so the
@@ -123,9 +127,9 @@ def run(ctx):
     # to produce the stock lag the port's is read against (spec §7a), and
     # it can only do that from a chain it already holds.
     import lifecycle
-    if 'scala2' in lifecycle.NODES:
+    if set(SEEDED_NODES) & set(lifecycle.NODES):
         import campaign
-        common.seed_second_miner(ctx, campaign, lifecycle)
+        common.seed_second_miner(ctx, campaign, lifecycle, nodes=SEEDED_NODES)
 
     # The mempool workload first: it needs a matured miner reward, and
     # waiting for one is time the steady window would otherwise spend
