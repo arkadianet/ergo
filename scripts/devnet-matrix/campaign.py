@@ -757,6 +757,15 @@ def _self_test():
     found, off = common.chain_members_scala_never_had(torn)
     assert found == [], found
     assert [o['block'] for o in off] == ['x'], off
+    # A sample where the two nodes name DIFFERENT ordering blocks is not
+    # comparable and is skipped. The reference serves the chain of its
+    # CURRENT best ordering block and nothing else, so a follower still
+    # on the previous one lists blocks the reference will never list
+    # again — one run's first sample had 120 of them.
+    straddling = [{'ordering': None, 'rust_chain': ['a', 'b'],
+                   'scala_chain': [], 'scala2_chain': []}]
+    assert common.chain_members_scala_never_had(straddling) == ([], []), \
+        'a sample straddling an ordering boundary decides nothing'
 
     # ----- two miners: the follower is judged against BOTH -----
     #

@@ -330,6 +330,16 @@ def chain_members_scala_never_had(series):
     An invented block appears in no reference sample at all, so the
     check still fails on the thing it exists to catch. The per-ordering
     count is returned as telemetry, because a large one is worth seeing.
+
+    Only samples where BOTH nodes name the SAME ordering block are
+    scanned — smoke.py's `qualifying_samples` rule, and it is load
+    bearing here. The reference's `bestInputBlocksChain()` returns the
+    chain of its CURRENT best ordering block and nothing else, so a
+    follower momentarily still on the PREVIOUS ordering block lists
+    blocks the reference will never list again. One run's very first
+    sample caught exactly that: the follower held a 120-block chain
+    under its own tip while both miners reported an empty one, and all
+    120 read as invented.
     """
     ever_anywhere = set()
     per_ordering = {}
@@ -342,11 +352,12 @@ def chain_members_scala_never_had(series):
     orphans, off_by_ordering = [], []
     for i, sample in enumerate(series):
         ordering = sample.get('ordering')
+        if ordering is None:
+            continue
         for block in sample.get('rust_chain') or []:
             if block not in ever_anywhere:
                 orphans.append({'index': i, 'ordering': ordering, 'block': block})
-            elif (ordering is not None
-                  and block not in per_ordering.get(ordering, set())):
+            elif block not in per_ordering.get(ordering, set()):
                 off_by_ordering.append(
                     {'index': i, 'ordering': ordering, 'block': block})
     return orphans, off_by_ordering
