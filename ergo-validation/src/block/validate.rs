@@ -201,7 +201,8 @@ pub fn validate_full_block_with_costs(
         .iter()
         .map(|f| (f.key.as_slice(), f.value.as_slice()))
         .collect();
-    let computed_ext_root = extension_root(&ext_fields);
+    let computed_ext_root = extension_root(&ext_fields)
+        .expect("ExtensionField::key is [u8; 2], inside the 255-byte leaf-prefix bound");
     if computed_ext_root != *header.extension_root.as_bytes() {
         return Err(BlockValidationError::ExtensionRootMismatch {
             expected: *header.extension_root.as_bytes(),
@@ -501,7 +502,8 @@ fn validate_full_block_parallel_impl(
         .iter()
         .map(|f| (f.key.as_slice(), f.value.as_slice()))
         .collect();
-    let computed_ext_root = extension_root(&ext_fields);
+    let computed_ext_root = extension_root(&ext_fields)
+        .expect("ExtensionField::key is [u8; 2], inside the 255-byte leaf-prefix bound");
     if computed_ext_root != *header.extension_root.as_bytes() {
         return Err(BlockValidationError::ExtensionRootMismatch {
             expected: *header.extension_root.as_bytes(),

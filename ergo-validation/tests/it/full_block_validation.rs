@@ -206,7 +206,7 @@ fn verify_block_structural(
         .iter()
         .map(|f| (f.key.as_slice(), f.value.as_slice()))
         .collect();
-    let computed_ext_root = extension_root(&ext_fields);
+    let computed_ext_root = extension_root(&ext_fields).expect("extension keys are 2 bytes");
     assert_eq!(
         computed_ext_root,
         *header.extension_root.as_bytes(),
