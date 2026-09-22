@@ -16,6 +16,19 @@ from . import common
 
 NODES = ('scala', 'scala2', 'rust')
 ORDERING_BLOCKS = 25
+# Ordering blocks of shared history before the second miner joins.
+SHARED_BLOCKS = 4
+
+# The second miner is NOT started with the others: it is seeded from
+# miner 1's data directory once there is a chain to copy (see
+# `common.seed_second_miner`), because the reference node cannot hand the
+# chain to a second Scala node on this host.
+START_NODES = ('scala', 'rust')
+
+# It mines from the copied tip without waiting to decide it is synced —
+# it already holds the chain, and `offlineGeneration = false` would make
+# it wait for a peer-driven sync that never completes here.
+SCALA2_EXTRA = 'ergo.node.offlineGeneration = true\n'
 
 # Each node listens on its own loopback address (see
 # `campaign.CAMPAIGN_P2P_HOST`), so the follower's per-IP admission limit
@@ -24,7 +37,13 @@ ORDERING_BLOCKS = 25
 
 
 def run(ctx):
+    import campaign
+    import lifecycle
+
     smoke.assertion_1_peering(ctx.run, ctx.evidence)
+    # A few blocks of shared history, then the second miner joins it.
+    common.wait_ordering_blocks(ctx, SHARED_BLOCKS, 'shared_prefix')
+    common.seed_second_miner(ctx, campaign, lifecycle)
 
     # Watch `forks` for the whole window: it is an instantaneous count of
     # competing trees retained under the best ordering block, so a

@@ -424,8 +424,14 @@ def run_scenario(name, args):
     save()
     run = smoke.Run(time.monotonic() + args.timeout)
     ctx = Context(name, run, evidence, args, nodes, data_root)
-    lifecycle.start(nodes)
-    for node in nodes:
+    # A scenario may bring a node up itself, part-way through. The
+    # two-miner scenarios do: the second miner is seeded from the
+    # first's data directory once there is a chain to copy, because the
+    # reference node cannot hand it over on this host.
+    started = [n for n in nodes if n in getattr(scenario, 'START_NODES', nodes)]
+    evidence['started_at_launch'] = started
+    lifecycle.start(started)
+    for node in started:
         run.started(node)
     run.start_sampling()
     try:
@@ -567,6 +573,10 @@ def _self_test():
         assert set(module.NODES) <= {'scala', 'scala2', 'rust'}, name
         assert 'rust' in module.NODES, name
         assert ('scala2' in module.NODES) == (name in SCALA2_ROLE), name
+        # Whatever a scenario starts itself has to be one of its own
+        # nodes, or `lifecycle.start` would bind a port nothing uses.
+        assert set(getattr(module, 'START_NODES', module.NODES)) <= set(
+            module.NODES), name
         # A second Scala node that is meant to FOLLOW has to be told not
         # to mine, or the scenario silently becomes a two-miner one.
         if SCALA2_ROLE.get(name) == 'follower':

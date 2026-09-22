@@ -289,12 +289,19 @@ def init_wallet(node='scala'):
         time.sleep(1)
 
 
-def wait_peered(timeout=180):
+def wait_peered(timeout=180, names=None):
+    """Every RUNNING node has at least one connected peer.
+
+    `names` defaults to the whole node set; a scenario that brings a node
+    up later passes the subset that is actually running, or this would
+    wait out its whole timeout on a REST port nothing is listening on.
+    """
+    ports = {n: REST[n] for n in (names or NODES) if n in REST}
     deadline = time.monotonic() + timeout
     while True:
         try:
             counts = {}
-            for name, port in REST.items():
+            for name, port in ports.items():
                 with urllib.request.urlopen(
                         f'http://127.0.0.1:{port}/peers/connected', timeout=2) as response:
                     counts[name] = len(json.load(response))
@@ -323,7 +330,7 @@ def start(names=None):
         # and peered before the first block exists.
         for name in names:
             spawn(name)
-        wait_peered()
+        wait_peered(names=names)
         for name in names:
             if name.startswith('scala'):
                 init_wallet(name)

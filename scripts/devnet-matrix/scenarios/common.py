@@ -5,6 +5,7 @@ Everything decisive here is PURE and exercised by `campaign.py
 calls could not be shown to fail when it should, and an evaluator that
 cannot fail is not an evaluator.
 """
+import shutil
 import time
 
 import smoke
@@ -42,6 +43,60 @@ def wait_ordering_blocks(ctx, blocks, what):
             {'start_height': start, 'reached': reached, 'target': target,
              'scala_log_tail': smoke.rust_log_lines('ordering', limit=20)})
     return start, reached
+
+
+def seed_second_miner(ctx, campaign, lifecycle):
+    """Give miner 2 the chain by COPYING miner 1's data directory.
+
+    The reference node cannot hand it over. Two Scala nodes on one host
+    never complete a mutual connection here — `getPeerAddress` refuses to
+    resolve a same-address peer without a UPnP gateway, and giving each
+    its own 127.x address gets the dial attempted but not established —
+    so a second miner brought up cold sits at genesis indefinitely and,
+    with `offlineGeneration = false`, never mines at all. Two runs were
+    lost to that, each reporting "no fork switch observed", which was a
+    true statement about a scenario that had not run.
+
+    Copying the directory removes the dependency entirely: miner 2 starts
+    on miner 1's exact chain and can mine from its tip immediately. The
+    WALLET is deliberately NOT copied — a fresh keystore is what gives
+    miner 2 its own mining key, and therefore coinbases (and blocks) that
+    differ from miner 1's.
+
+    Miner 1 is stopped for the copy. A LevelDB copied out from under a
+    live writer is not a database, and a scenario built on one would fail
+    for a reason that has nothing to do with input blocks.
+    """
+    lifecycle.stop(('scala',))
+    source = ctx.data_root / 'scala'
+    target = ctx.data_root / 'scala2'
+    shutil.rmtree(target, ignore_errors=True)
+    shutil.copytree(source, target)
+    shutil.rmtree(target / 'wallet', ignore_errors=True)
+    campaign.ensure_data_dirs(ctx.data_root, ['scala2'])
+    lifecycle.spawn('scala')
+    ctx.run.started('scala')
+    lifecycle.init_wallet('scala')
+    lifecycle.spawn('scala2')
+    ctx.run.started('scala2')
+    lifecycle.init_wallet('scala2')
+    heights = {}
+    for node in ('scala', 'scala2'):
+        try:
+            heights[node] = (api(node, '/info') or {}).get('fullHeight')
+        except Unavailable:
+            heights[node] = None
+    ctx.note('second_miner_seeded', {
+        'copied_from': str(source), 'to': str(target),
+        'wallet_copied': False,
+        'heights_after_seed': heights,
+        'why': 'the reference node cannot hand the chain to a second Scala '
+               'node on this host; see the docstring',
+    })
+    if heights.get('scala2') is None:
+        ctx.fail('the second miner did not come up on the copied chain, so the '
+                 'scenario has no second miner', {'heights': heights})
+    return heights
 
 
 def rust_events(ctx):

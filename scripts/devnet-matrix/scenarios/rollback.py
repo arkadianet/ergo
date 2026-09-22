@@ -33,6 +33,17 @@ PUBLIC_BLOCKS_AFTER_SPLIT = 2
 PRIVATE_LEAD = 2
 PRIVATE_MINING_BUDGET = 900.0
 
+# The second miner is NOT started with the others: it is seeded from
+# miner 1's data directory once there is a chain to copy (see
+# `common.seed_second_miner`), because the reference node cannot hand the
+# chain to a second Scala node on this host.
+START_NODES = ('scala', 'rust')
+
+# It mines from the copied tip without waiting to decide it is synced —
+# it already holds the chain, and `offlineGeneration = false` would make
+# it wait for a peer-driven sync that never completes here.
+SCALA2_EXTRA = 'ergo.node.offlineGeneration = true\n'
+
 # Each node listens on its own loopback address (see
 # `campaign.CAMPAIGN_P2P_HOST`), so the follower's per-IP admission limit
 # is not in the way and nothing about the node's production peer limits
@@ -72,6 +83,9 @@ def run(ctx):
 
     smoke.assertion_1_peering(ctx.run, ctx.evidence)
     common.wait_ordering_blocks(ctx, COMMON_BLOCKS, 'shared_prefix')
+    # The second miner joins the chain the first has built, so the branch
+    # it goes on to mine privately is a branch of the SAME chain.
+    common.seed_second_miner(ctx, campaign, lifecycle)
     split_height = smoke.scala_height(ctx.run)
     ctx.note('split_height', split_height)
     ctx.note('isolation', {
