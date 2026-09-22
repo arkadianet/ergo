@@ -155,23 +155,55 @@ def recorded_sigma_artifacts(work):
     return None, None
 
 
-def provision_sigma(work, log, reuse):
+def clear_outputs(work):
+    """Remove this build's own outputs — AFTER its manifest has been read.
+
+    Ordering, not housekeeping. `recorded_sigma_artifacts` searches every
+    sibling work directory INCLUDING this one, so deleting
+    `manifest.json` first threw away the only record of which sigma jars
+    the jars on disk were published from, and `--sigma-reuse` then
+    republished sigma for a build whose jars already matched.
+    """
+    for name in ('classpath', 'test-classpath', 'manifest.json'):
+        (work / name).unlink(missing_ok=True)
+
+
+def sigma_reuse_decision(reuse, jar_hashes, recorded, source=None):
+    """`(take_the_reuse, why)` — the whole `--sigma-reuse` rule, pure.
+
+    Reuse is taken only when the jars on disk hash EXACTLY the same as
+    the ones a recorded manifest was built against: a jar with the right
+    NAME is not evidence, and a silently different interpreter would
+    change vector bytes with nothing to say it had.
+    """
+    if not reuse:
+        return False, 'not asked for'
+    if not jar_hashes:
+        return False, 'no jars published'
+    if not recorded:
+        return False, 'no recorded manifest to compare against'
+    if jar_hashes != recorded:
+        return False, 'the published jars do not hash the same as the recorded ones'
+    return True, f'reused; hashes match {source}'
+
+
+def provision_sigma(work, log, reuse, recorded=None):
     """Publish the sigma fork snapshot locally, or prove it is already there.
 
-    Returns `(jars, how)`. `reuse` only skips the publish when the jars
-    on disk hash EXACTLY the same as the ones a recorded manifest was
-    built against — a jar with the right name is not evidence, and a
-    silently different interpreter would change vector bytes with
-    nothing to say it had.
+    Returns `(jars, how)`. `recorded` is the `(hashes, source)` pair read
+    BEFORE this build's own outputs were cleared; passing it is what
+    makes a re-provision of the build that holds the only record still
+    able to reuse its jars.
     """
     if reuse:
         jars = sigma_jars()
-        recorded, source = recorded_sigma_artifacts(work)
-        if jars and recorded and hash_jars(jars) == recorded:
-            return jars, f'reused; hashes match {source}'
-        why = ('no jars published' if not jars else
-               'no recorded manifest to compare against' if not recorded else
-               'the published jars do not hash the same as the recorded ones')
+        if recorded is None:
+            recorded = recorded_sigma_artifacts(work)
+        hashes, source = recorded
+        take, why = sigma_reuse_decision(reuse, hash_jars(jars) if jars else {},
+                                         hashes, source)
+        if take:
+            return jars, why
         print(f'--sigma-reuse not taken: {why}; publishing')
     sigma = work / 'sigma'
     clone_checkout(SIGMA_REPO, SIGMA_COMMIT, sigma, log)
@@ -198,16 +230,26 @@ def main(argv=None):
                         help='skip the sigma publishLocal when the jars in '
                              '~/.ivy2/local already hash the same as the ones '
                              'a recorded manifest was built against')
+    parser.add_argument('--self-test', action='store_true',
+                        help='check the reuse rule and the read-before-clear '
+                             'ordering, and provision nothing')
     args = parser.parse_args(argv)
+    if args.self_test:
+        _self_test()
+        return 0
 
     work = Path(os.path.expanduser(args.work_dir)).resolve()
     work.mkdir(parents=True, exist_ok=True)
-    for name in ('classpath', 'test-classpath', 'manifest.json'):
-        (work / name).unlink(missing_ok=True)
+    # READ BEFORE CLEARING. This build's own manifest is one of the
+    # records `--sigma-reuse` compares against, and when it is the only
+    # one, clearing it first made every re-provision republish sigma.
+    recorded_sigma = recorded_sigma_artifacts(work)
+    clear_outputs(work)
     log = work / 'provision.log'
     log.unlink(missing_ok=True)
 
-    jars, sigma_how = provision_sigma(work, log, args.sigma_reuse)
+    jars, sigma_how = provision_sigma(work, log, args.sigma_reuse,
+                                      recorded=recorded_sigma)
 
     ergo = work / 'source'
     commit = checkout(args.ergo_source, args.ergo_ref, ergo, log)
@@ -243,6 +285,48 @@ def main(argv=None):
     print(f'Provisioned ergo {commit[:8]} ({manifest["app_version"]}) '
           f'with sigma {SIGMA_VERSION} [{sigma_how}] in {work}')
     return 0
+
+
+def _self_test():
+    """The two decisions provisioning makes that can silently be wrong."""
+    import tempfile
+
+    # ----- the reuse rule -----
+    same = {'sigma-state_2.12.jar': 'aa'}
+    assert sigma_reuse_decision(False, same, same)[0] is False
+    take, why = sigma_reuse_decision(True, same, same, 'x/manifest.json')
+    assert take and 'hashes match x/manifest.json' in why, why
+    assert sigma_reuse_decision(True, {}, same) == (
+        False, 'no jars published')
+    assert sigma_reuse_decision(True, same, None) == (
+        False, 'no recorded manifest to compare against')
+    # A jar with the right NAME and different bytes is not the same jar.
+    assert sigma_reuse_decision(
+        True, same, {'sigma-state_2.12.jar': 'bb'})[0] is False
+
+    # ----- read before clear -----
+    #
+    # The failure this ordering exists for: a re-provision of the build
+    # that holds the ONLY record of the published jars. Clearing first
+    # loses it and sigma is republished for jars that already match.
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp) / '.work-probe'
+        work.mkdir()
+        (work / 'manifest.json').write_text(json.dumps({
+            'sigma_commit': SIGMA_COMMIT, 'sigma_version': SIGMA_VERSION,
+            'sigma_artifacts': same}) + '\n')
+        recorded = recorded_sigma_artifacts(work)
+        assert recorded[0] == same, recorded
+        clear_outputs(work)
+        assert recorded_sigma_artifacts(work) == (None, None), \
+            'the only record is gone once the outputs are cleared'
+        # Which is exactly why it is captured first: the decision made
+        # with the captured record still reuses.
+        assert sigma_reuse_decision(True, same, *recorded)[0] is True
+        # And a build that never had one is not pretended to have.
+        assert sigma_reuse_decision(
+            True, same, *recorded_sigma_artifacts(work))[0] is False
+    print('provision self-test OK: the sigma reuse rule and read-before-clear')
 
 
 if __name__ == '__main__':
