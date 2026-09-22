@@ -109,7 +109,15 @@ def seed_second_miner(ctx, campaign, lifecycle):
     lifecycle.stop(('rust',))
     lifecycle.spawn('rust')
     ctx.run.started('rust')
-    lifecycle.wait_peered(names=['scala', 'scala2', 'rust'])
+    # Reported, never raised: a seed that came up but did not peer is a
+    # scenario that cannot run, and the evidence has to say which of the
+    # two it was rather than dying with a stack trace that says neither.
+    try:
+        lifecycle.wait_peered(names=['scala', 'scala2', 'rust'], timeout=120)
+        peered = True
+    except RuntimeError as error:
+        peered = str(error)
+    ctx.note('peered_after_seed', peered)
     connected = _wait_for_peer_count(ctx, 'rust', 2)
     ctx.note('follower_peers_after_seed', connected)
     if connected < 2:

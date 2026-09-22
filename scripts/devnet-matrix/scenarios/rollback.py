@@ -44,10 +44,15 @@ START_NODES = ('scala', 'rust')
 # it wait for a peer-driven sync that never completes here.
 SCALA2_EXTRA = 'ergo.node.offlineGeneration = true\n'
 
-# Each node listens on its own loopback address (see
-# `campaign.CAMPAIGN_P2P_HOST`), so the follower's per-IP admission limit
-# is not in the way and nothing about the node's production peer limits
-# is overridden here.
+# Three nodes share 127.0.0.1, and the follower's per-IP admission limit
+# is 1 — it gates outbound dial SELECTION as well as inbound admission,
+# so without this it holds exactly one of the two Scala nodes and the
+# scenario measures nothing. Raised only here; `flood`, which does test
+# admission, keeps the default.
+RUST_OVERRIDES = (
+    ('peers', 'per_ip_limit', '3'),
+    ('peers', 'per_subnet_limit', '6'),
+)
 
 # Where miner 2 binds while it is isolated. Clearing `knownPeers` only
 # stops it DIALLING — the follower has miner 2 in its own `known` list and
@@ -81,11 +86,14 @@ def _rewrite_scala2(campaign, ctx, isolated):
 def run(ctx):
     import campaign
 
-    smoke.assertion_1_peering(ctx.run, ctx.evidence)
+    # Peering is checked AFTER the seed: the second miner does not exist
+    # before it, and asking about a node that has not been started is not
+    # an observation of anything.
     common.wait_ordering_blocks(ctx, COMMON_BLOCKS, 'shared_prefix')
     # The second miner joins the chain the first has built, so the branch
     # it goes on to mine privately is a branch of the SAME chain.
     common.seed_second_miner(ctx, campaign, lifecycle)
+    smoke.assertion_1_peering(ctx.run, ctx.evidence)
     split_height = smoke.scala_height(ctx.run)
     ctx.note('split_height', split_height)
     ctx.note('isolation', {

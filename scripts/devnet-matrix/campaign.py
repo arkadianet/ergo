@@ -54,17 +54,24 @@ import time
 CAMPAIGN_P2P = {'scala': 19570, 'scala2': 19571, 'rust': 19572}
 CAMPAIGN_REST = {'scala': 19590, 'scala2': 19591, 'rust': 19592}
 
-# Each node listens on its OWN loopback address. Not cosmetic: two Scala
-# nodes on one IP can never dial each other, because
+# Every node listens on 127.0.0.1; only the ports differ.
+#
+# A detour worth recording, because the obvious fix is wrong here. Two
+# Scala nodes on ONE address can never dial each other —
 # `NetworkController.getPeerAddress` resolves a candidate whose declared
 # address shares this node's own external address through the UPnP
-# gateway, and with no gateway returns `None`. The first three-node run
-# died on exactly that — the second Scala node never reached the miner,
-# never synced past genesis, and so (with `offlineGeneration = false`)
-# never mined a block. REST stays on 127.0.0.1 for every node, so the
-# harness is unaffected.
-CAMPAIGN_P2P_HOST = {'scala': '127.0.0.1', 'scala2': '127.0.0.2',
-                     'rust': '127.0.0.3'}
+# gateway, and with no gateway returns `None`. Giving each node its own
+# 127.x address fixes that, and breaks something worse: the Rust
+# follower then stops dialling the second miner at all, and a follower
+# that holds one of two miners is no use to a two-miner scenario.
+#
+# It does not matter, because the second miner is SEEDED from the
+# first's data directory (`common.seed_second_miner`) rather than
+# synced over the network, so Scala-to-Scala peering is not needed. The
+# follower's per-IP admission limit is raised in the scenarios that run
+# three nodes, and nowhere else.
+CAMPAIGN_P2P_HOST = {'scala': '127.0.0.1', 'scala2': '127.0.0.1',
+                     'rust': '127.0.0.1'}
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -536,9 +543,9 @@ def _self_test():
                                   ['scala', 'scala2', 'rust'])
     assert 'data_dir = "/tmp/x/rust"' in rendered, rendered
     # Each node on its own loopback address, REST on 127.0.0.1 for all.
-    assert 'bind_addr = "127.0.0.3:19572"' in rendered, rendered
+    assert 'bind_addr = "127.0.0.1:19572"' in rendered, rendered
     assert 'bind = "127.0.0.1:19592"' in rendered, rendered
-    assert ('known = ["127.0.0.1:19570", "127.0.0.2:19571"]' in rendered), rendered
+    assert ('known = ["127.0.0.1:19570", "127.0.0.1:19571"]' in rendered), rendered
     assert 'target_outbound = 2' in rendered, rendered
     # Untouched keys survive verbatim, and nothing is duplicated.
     assert 'allow_local = true' in rendered, rendered
@@ -566,17 +573,18 @@ def _self_test():
     overlay = scala_override('fork', 'scala2', ['scala', 'scala2', 'rust'],
                              Path('/tmp/x/scala2'))
     assert 'include file(' in overlay and 'scala-miner2.conf")' in overlay, overlay
-    assert 'bindAddress = "127.0.0.2:19571"' in overlay, overlay
-    # REST is NOT moved: the harness talks to 127.0.0.1 for every node.
+    assert 'bindAddress = "127.0.0.1:19571"' in overlay, overlay
     assert 'restApi.bindAddress = "127.0.0.1:19591"' in overlay, overlay
-    assert '"127.0.0.1:19570", "127.0.0.3:19572"' in overlay, overlay
-    # Every node listens on a DISTINCT address. Two Scala nodes that
-    # share one can never dial each other (scorex
-    # `NetworkController.getPeerAddress` resolves a same-address peer
-    # through a UPnP gateway that does not exist and returns None), which
-    # is what stranded the second node at genesis on the first attempt.
-    assert len(set(CAMPAIGN_P2P_HOST.values())) == len(CAMPAIGN_P2P_HOST), \
-        CAMPAIGN_P2P_HOST
+    assert '"127.0.0.1:19570", "127.0.0.1:19572"' in overlay, overlay
+    # Every scenario that runs three nodes on one address has to raise
+    # the follower's per-IP admission limit, or it holds exactly one of
+    # the two Scala nodes and the scenario measures nothing.
+    from scenarios import SCENARIOS as _all
+    for _name in SCALA2_ROLE:
+        _overrides = dict(
+            ((sec, key), value)
+            for sec, key, value in getattr(_all[_name], 'RUST_OVERRIDES', ()))
+        assert _overrides.get(('peers', 'per_ip_limit')) == '3', _name
     assert '19571' not in overlay.split('knownPeers')[1], \
         'a node must not be listed as its own peer'
 
@@ -627,7 +635,7 @@ def _self_test():
                               evict_scenario.RUST_OVERRIDES)
     parsed = tomllib.loads(real)
     assert parsed['data_dir'] == '/tmp/x/rust', parsed['data_dir']
-    assert parsed['peers']['bind_addr'] == '127.0.0.3:19572', parsed['peers']
+    assert parsed['peers']['bind_addr'] == '127.0.0.1:19572', parsed['peers']
     assert parsed['peers']['known'] == ['127.0.0.1:19570'], parsed['peers']
     assert parsed['api']['bind'] == '127.0.0.1:19592', parsed['api']
     # Every override the scenario declares, and nothing else, landed in
