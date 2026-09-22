@@ -1,0 +1,117 @@
+"""SIGKILL the follower mid-chain and watch it come back.
+
+`kill -9`, not a clean stop: the point is a node that had no chance to
+flush anything, which is the shape a crash takes.
+
+The bar is CONVERGENCE, not the fallback. The brief asked for "the first
+post-restart ordering block used the fallback"; D7 (transitive waitlist
+reconnection) makes that no longer true — a cold-started node can
+recover its input chain before the next ordering block arrives, and runs
+10 and 11 reconstructed every post-restart block. So the requirement is
+that the follower is back on the miner's tip within 3 ordering blocks,
+and the reconstruct/fallback split is recorded as telemetry: either
+outcome passes. The `evict` scenario is where the fallback path is
+required to fire.
+"""
+import time
+
+import lifecycle
+import smoke
+from smoke import Unavailable, api, api_retry
+
+from . import common
+
+NODES = ('scala', 'rust')
+BLOCKS_BEFORE_RESTART = 6
+CONVERGENCE_ORDERING_BLOCKS = 3
+
+
+def run(ctx):
+    import campaign
+
+    smoke.assertion_1_peering(ctx.run, ctx.evidence)
+    common.wait_ordering_blocks(ctx, BLOCKS_BEFORE_RESTART, 'pre_restart')
+
+    # Fold the drop counters forward: they are per-process, and the
+    # restart resets them. `Run` already carries the mechanism.
+    before = api_retry('rust', '/api/v1/status', ctx.run.deadline,
+                       what='the follower status before the restart')
+    ctx.note('status_before_restart', before.get('input_blocks'))
+    restart_height = smoke.scala_height(ctx.run)
+    events_before = len(common.rust_events(ctx))
+
+    killed = campaign.kill_hard('rust')
+    ctx.note('killed', {'pid': killed, 'signal': 'SIGKILL',
+                        'at_ordering_height': restart_height})
+    lifecycle.spawn('rust')
+    ctx.run.started('rust')
+    lifecycle.wait_peered()
+    restarted_at = time.monotonic()
+
+    # Convergence: the follower must hold the miner's tip at a moment no
+    # later than 3 ordering blocks after the restart.
+    target_height = restart_height + CONVERGENCE_ORDERING_BLOCKS
+    converged_at_height = None
+    while time.monotonic() < ctx.run.deadline:
+        try:
+            scala = api('scala', '/info') or {}
+            rust = api('rust', '/info') or {}
+        except Unavailable:
+            ctx.run.idle(0.5)
+            continue
+        if (rust.get('bestFullHeaderId')
+                and rust.get('bestFullHeaderId') == scala.get('bestFullHeaderId')):
+            converged_at_height = rust.get('fullHeight')
+            break
+        if (scala.get('fullHeight') or 0) > target_height:
+            break
+        ctx.run.idle(0.5)
+
+    ctx.note('convergence', {
+        'restart_height': restart_height,
+        'budget_ordering_blocks': CONVERGENCE_ORDERING_BLOCKS,
+        'converged_at_height': converged_at_height,
+        'seconds': round(time.monotonic() - restarted_at, 1),
+    })
+    if converged_at_height is None:
+        ctx.fail(f'the follower did not rejoin the miner\'s tip within '
+                 f'{CONVERGENCE_ORDERING_BLOCKS} ordering blocks of a SIGKILL',
+                 {'restart_height': restart_height,
+                  'scala': api('scala', '/info'), 'rust': api('rust', '/info'),
+                  'rust_log': smoke.rust_log_lines('input_blocks')})
+    elif converged_at_height > target_height:
+        ctx.fail(f'the follower converged only at height {converged_at_height}, '
+                 f'past the {CONVERGENCE_ORDERING_BLOCKS}-block budget from '
+                 f'{restart_height}', {'converged_at_height': converged_at_height})
+
+    # Telemetry, not a bar (D7).
+    events = common.rust_events(ctx)
+    window = [e for e in events if e['kind'].startswith('ordering_')]
+    first = window[0] if window else None
+    reconstructed = sum(1 for e in window if e['kind'] == 'ordering_reconstructed')
+    fallback = sum(1 for e in window
+                   if e['kind'] == 'ordering_reconstruct_fallback')
+    ctx.note('post_restart_ordering_outcomes', {
+        'first_kind': first['kind'] if first else None,
+        'first_detail': first.get('detail') if first else None,
+        'ordering_reconstructed': reconstructed,
+        'ordering_reconstruct_fallback': fallback,
+        'note': 'D7 lets a cold node recover before the next ordering block; '
+                'either outcome passes, and the split is the observation',
+        'events_before_restart': events_before,
+    })
+
+    # The recovery itself still has to be CORRECT wherever a mismatch
+    # fallback fired: smoke.py's evaluator, not a weaker local one.
+    heights = [e.get('height') for e in window if e.get('height') is not None]
+    if heights:
+        at_height, unread = common.scala_blocks_by_height(
+            ctx, min(heights), max(heights))
+        ctx.note('scala_heights_unread', unread)
+        recovery = smoke.evaluate_mismatch_recovery(
+            common.ordering_stream(events), at_height)
+        ctx.note('mismatch_recovery', recovery)
+        for message, evidence in recovery['failures']:
+            ctx.fail(message, evidence)
+
+    smoke.finalize_agreement(ctx.run, ctx.evidence)
