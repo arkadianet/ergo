@@ -571,10 +571,47 @@ async fn input_block_wrong_body(ctx: &Ctx, seconds: u64) -> bool {
     let deadline = Instant::now() + Duration::from_secs(seconds);
     let (mut relayed, mut answered, mut requests, mut pushed) = (0u32, 0u32, 0u32, 0u32);
     let mut last_report = Instant::now();
+    // Input block ids we have already pushed a wrong body for.
+    let mut served: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    let mut last_poll = Instant::now() - Duration::from_secs(60);
     while Instant::now() < deadline {
-        let left = deadline.saturating_duration_since(Instant::now());
+        // The follower does not relay input-block announcements to this
+        // peer — two runs saw zero — so waiting to be told an id never
+        // produces one. Its REST surface publishes the same ids, and a
+        // body can be pushed for them unsolicited.
+        if last_poll.elapsed() >= Duration::from_secs(1) {
+            last_poll = Instant::now();
+            if let Ok((_, body)) = api_get(&ctx.api, "/blocks/bestInputChain").await {
+                for id in json_hex_ids(&body) {
+                    if !served.insert(id) {
+                        continue;
+                    }
+                    let Some(tx) = decoy_transaction() else {
+                        continue;
+                    };
+                    let Ok(payload) = serialize_input_block_txs(&InputBlockTxs {
+                        input_block_id: id,
+                        transactions: vec![tx],
+                    }) else {
+                        continue;
+                    };
+                    let frame = full_frame(&ctx.magic, CODE_INPUT_BLOCK_TXS, &payload);
+                    if conn.stream.write_all(&frame).await.is_err() {
+                        break;
+                    }
+                    pushed += 1;
+                }
+            }
+        }
+        let left = std::cmp::min(
+            deadline.saturating_duration_since(Instant::now()),
+            Duration::from_millis(500),
+        );
         let Some((code, payload)) = conn.next_frame(left).await else {
-            break;
+            if Instant::now() >= deadline {
+                break;
+            }
+            continue;
         };
         match code {
             // An announcement the follower relayed to us. Two things:
@@ -657,6 +694,28 @@ fn report(relayed: u32, pushed: u32, requests: u32, answered: u32) {
          saw {requests} body requests, answered {answered}"
     );
     let _ = std::io::stdout().flush();
+}
+
+/// Every 64-hex id in a JSON body, in order of appearance.
+///
+/// `/blocks/bestInputChain` answers with a bare array of ids under
+/// `bestInputBlocks`, so there is no `"id":` key to key off — this takes
+/// the quoted 32-byte hex strings directly.
+fn json_hex_ids(body: &str) -> Vec<[u8; 32]> {
+    let mut out = Vec::new();
+    for piece in body.split('"') {
+        if piece.len() != 64 {
+            continue;
+        }
+        if let Ok(v) = hex::decode(piece) {
+            if v.len() == 32 {
+                let mut a = [0u8; 32];
+                a.copy_from_slice(&v);
+                out.push(a);
+            }
+        }
+    }
+    out
 }
 
 /// The input block id an announcement frame commits to — its header id.
