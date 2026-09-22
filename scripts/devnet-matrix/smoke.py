@@ -775,6 +775,13 @@ class Run:
             'rust_ordering': rust_ordering,
             'scala_chain': reading['scala']['chain'].get('bestInputBlocks') or [],
             'rust_chain': reading['rust']['chain'].get('bestInputBlocks') or [],
+            # Present only when a second reference node is running (the
+            # M3 campaign's two-miner scenarios). Assertions 2 and 3 do
+            # not read it — they are defined against ONE miner — but a
+            # two-miner scenario cannot judge the follower against one
+            # miner's chain, and needs both.
+            'scala2_chain': (reading.get('scala2', {}).get('chain', {})
+                             .get('bestInputBlocks') or []),
             'scala_tip': scala_best or None,
             'rust_tip': rust_best or None,
         }

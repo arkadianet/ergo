@@ -244,6 +244,19 @@ def fork_switches(series, side):
     return out
 
 
+def reference_chain(sample):
+    """Every input block ANY reference node listed in this sample.
+
+    With two miners the follower may legitimately be on either one's
+    input chain, so judging it against miner 1 alone reports the whole of
+    miner 2's chain as blocks "no miner ever had" — 21,546 of them in one
+    run, none of them a divergence. The union is the comparison the
+    two-miner scenarios actually mean.
+    """
+    return set(sample.get('scala_chain') or []) | set(
+        sample.get('scala2_chain') or [])
+
+
 def compare_fork_switches(series):
     """Did Rust's fork switches agree with the miner's?
 
@@ -266,7 +279,7 @@ def compare_fork_switches(series):
         ordering = sample.get('ordering')
         if ordering is None:
             continue
-        chain = set(sample.get('scala_chain') or [])
+        chain = reference_chain(sample)
         scala_ever.setdefault(ordering, set()).update(chain)
         scala_last[ordering] = chain
     rust = fork_switches(series, 'rust')
@@ -300,8 +313,7 @@ def chain_members_scala_never_had(series):
         ordering = sample.get('ordering')
         if ordering is None:
             continue
-        scala_ever.setdefault(ordering, set()).update(
-            sample.get('scala_chain') or [])
+        scala_ever.setdefault(ordering, set()).update(reference_chain(sample))
     orphans = []
     for i, sample in enumerate(series):
         ordering = sample.get('ordering')

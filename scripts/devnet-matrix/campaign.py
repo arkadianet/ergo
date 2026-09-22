@@ -684,6 +684,15 @@ def _self_test():
     assert parsed['input_blocks']['strict_field_binding'] is False, parsed
     assert parsed['mining']['enabled'] is False, parsed
 
+    def smoke_series_keys():
+        """The keys the sampler actually writes into a series sample."""
+        import inspect
+
+        import smoke as _smoke
+        source = inspect.getsource(_smoke.Run._accumulate_agreement)
+        return {line.split("'")[1] for line in source.splitlines()
+                if line.strip().startswith("'") and "':" in line}
+
     # ----- the fork evaluator, which decides the `fork` scenario -----
     from scenarios import common
 
@@ -737,6 +746,27 @@ def _self_test():
     orphan = [sample('O1', ['c', 'q', 'a'], ['c', 'b', 'a'])]
     found = common.chain_members_scala_never_had(orphan)
     assert [o['block'] for o in found] == ['q'], found
+
+    # ----- two miners: the follower is judged against BOTH -----
+    #
+    # With one reference chain, every block the follower took from the
+    # OTHER miner reads as a block no miner ever had — 21,546 of them in
+    # one run, not one of them a divergence.
+    two = [{'ordering': 'O1', 'rust_chain': ['m2b', 'm2a'],
+            'scala_chain': ['m1b', 'm1a'], 'scala2_chain': ['m2b', 'm2a']}]
+    assert common.reference_chain(two[0]) == {'m1a', 'm1b', 'm2a', 'm2b'}, \
+        common.reference_chain(two[0])
+    assert common.chain_members_scala_never_had(two) == [], \
+        'a block the SECOND miner published is not an orphan'
+    # And a block neither miner ever had still is.
+    invented_two = [{'ordering': 'O1', 'rust_chain': ['zz'],
+                     'scala_chain': ['m1a'], 'scala2_chain': ['m2a']}]
+    assert [o['block'] for o in
+            common.chain_members_scala_never_had(invented_two)] == ['zz'], \
+        'a block no miner published is still an orphan'
+    # The sampler publishes the second chain under the name the
+    # evaluators read; a rename would make the union silently empty.
+    assert 'scala2_chain' in smoke_series_keys(), smoke_series_keys()
 
     # ----- the kill-state test the `restart` scenario turns on -----
     #

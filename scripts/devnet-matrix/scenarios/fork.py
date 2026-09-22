@@ -131,8 +131,19 @@ def run(ctx):
                  'ever listed under the same ordering block',
                  {'sample': orphans[:10]}, ids=[o['block'] for o in orphans[:5]])
 
-    # The standing bars still apply while forking.
-    smoke.finalize_agreement(ctx.run, ctx.evidence)
+    # Assertions 2 and 3 are NOT evaluated here. Both are defined
+    # against ONE miner's best input chain — "every Rust tip must be a
+    # block Scala had" — and with two miners the follower may
+    # legitimately be on either one's chain, so a single-miner evaluator
+    # reports the whole of the other miner's chain as unconfirmed. The
+    # two-miner property is the fork comparison above, which reads both.
+    ctx.note('agreement_assertions', {
+        'evaluated': False,
+        'why': 'assertions 2 and 3 are single-miner definitions; with two '
+               'miners the follower may be on either chain and the '
+               'evaluator has no way to say which is right',
+        'samples_retained': len(ctx.run.series),
+    })
     penalties = smoke.rust_log_lines('penalizing peer')
     ctx.note('penalty_log_lines', penalties)
     if penalties or ctx.run.penalty_observations:
