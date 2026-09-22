@@ -112,6 +112,7 @@ fn effect_name(effect: &Effect) -> &'static str {
         Effect::RelayOrderingInv { .. } => "RelayOrderingInv",
         Effect::Penalize { .. } => "Penalize",
         Effect::OrderingReconstruct { .. } => "OrderingReconstruct",
+        Effect::OrderingReconstructSkipped { .. } => "OrderingReconstructSkipped",
         Effect::Dropped { .. } => "Dropped",
     }
 }
@@ -519,6 +520,26 @@ fn execute_one(
                 peer,
                 penalty: Penalty::Misbehavior,
             });
+        }
+        Effect::OrderingReconstructSkipped {
+            header_id,
+            height,
+            reason,
+        } => {
+            let header_id = hex::encode(header_id);
+            debug!(
+                ordering = %header_id,
+                reason,
+                "input_blocks: no input chain to rebuild from; downloading the block"
+            );
+            push_feed_event(
+                state,
+                FeedEventKind::OrderingReconstructSkipped {
+                    height,
+                    header_id,
+                    reason: reason.to_string(),
+                },
+            );
         }
         Effect::OrderingReconstruct { plan, from } => {
             let plan_at = Instant::now();

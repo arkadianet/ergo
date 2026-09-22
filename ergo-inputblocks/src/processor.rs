@@ -176,6 +176,15 @@ pub enum Event {
     },
 }
 
+/// [`Effect::OrderingReconstructSkipped`]: the announcement named no
+/// previous input block, so there is no input chain to rebuild from.
+pub const NO_PREV_INPUT_BLOCK: &str = "no_prev_input_block";
+
+/// [`Effect::OrderingReconstructSkipped`]: the announcement named a
+/// previous input block whose transactions this node does not hold, so
+/// the chain it would assemble from is not available.
+pub const NO_INPUT_CHAIN: &str = "no_chain";
+
 /// Effects the node acts on (spec 7.2).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
@@ -264,6 +273,23 @@ pub enum Effect {
         /// for the full `BlockTransactions` section when the plan does
         /// not reproduce the header's transactions root.
         from: PeerTag,
+    },
+    /// Telemetry: an announced ordering block went straight to a full
+    /// download without a reconstruction being attempted at all.
+    ///
+    /// Without this the fallback counter undercounts: a block the
+    /// follower holds no input chain for produces neither
+    /// `OrderingReconstruct` nor a fallback, so a harness tallying
+    /// rebuild outcomes sees a hole rather than a download. It is not a
+    /// fallback — no rebuild was refused — which is why it is its own
+    /// outcome rather than a third fallback reason.
+    OrderingReconstructSkipped {
+        /// The announced ordering block.
+        header_id: OrderingId,
+        /// Its height, for the event feed.
+        height: u32,
+        /// [`NO_PREV_INPUT_BLOCK`] or [`NO_INPUT_CHAIN`].
+        reason: &'static str,
     },
     /// Telemetry: something was dropped, and why.
     Dropped {
@@ -3205,6 +3231,7 @@ impl Processor {
         let non_broadcasted = ann.non_broadcasted_transactions.clone();
         let broadcasted_ids = ann.broadcasted_transaction_ids.clone();
         let parent_id: OrderingId = *ann.header.parent_id.as_bytes();
+        let height = ann.header.height;
 
         if let Some(evicted) =
             self.ordering
@@ -3252,7 +3279,18 @@ impl Processor {
                     },
                 });
             }
-            _ => {
+            other => {
+                // Say so. Requesting the section silently is what made
+                // the fallback counter undercount full downloads.
+                out.push(Effect::OrderingReconstructSkipped {
+                    header_id,
+                    height,
+                    reason: if other.is_none() {
+                        NO_PREV_INPUT_BLOCK
+                    } else {
+                        NO_INPUT_CHAIN
+                    },
+                });
                 self.request(
                     out,
                     Effect::RequestBlockTransactions { header_id, from },
@@ -4470,6 +4508,72 @@ mod tests {
             "{out:?}"
         );
         assert!(p.ordering_announcement(&oa_id).is_some());
+    }
+
+    /// The same path has to SAY it took the download. It used to request
+    /// the section and emit nothing else, so a block the follower had no
+    /// input chain for produced neither a reconstruction nor a fallback
+    /// and the fallback counter undercounted the downloads it exists to
+    /// measure — the devnet `evict` scenario saw six such blocks and
+    /// zero of either event.
+    #[test]
+    fn ordering_announcement_without_stored_prev_reports_the_skip() {
+        let mut p = processor();
+        let ctx = ts::TestCtx::at(FULL);
+        let oa = ts::ordering_announcement(
+            ORD,
+            FULL + 1,
+            9,
+            vec![(
+                ergo_ser::input_block::PREV_INPUT_BLOCK_ID_KEY,
+                [0x5C; 32].to_vec(),
+            )],
+        );
+        let oa_id = ts::header_id(&oa.header);
+        let height = oa.header.height;
+        let out = ctx.handle(
+            &mut p,
+            Event::OrderingAnnouncementAccepted {
+                ann: oa,
+                from: ts::PEER,
+                now: Tick(6),
+            },
+        );
+        assert!(
+            out.contains(&Effect::OrderingReconstructSkipped {
+                header_id: oa_id,
+                height,
+                reason: NO_INPUT_CHAIN,
+            }),
+            "the skipped download has to be reported: {out:?}"
+        );
+    }
+
+    /// An announcement carrying NO previous-input-block key at all takes
+    /// the same download, for a different reason, and says which.
+    #[test]
+    fn ordering_announcement_without_prev_key_reports_no_prev() {
+        let mut p = processor();
+        let ctx = ts::TestCtx::at(FULL);
+        let oa = ts::ordering_announcement(ORD, FULL + 1, 9, vec![]);
+        let oa_id = ts::header_id(&oa.header);
+        let height = oa.header.height;
+        let out = ctx.handle(
+            &mut p,
+            Event::OrderingAnnouncementAccepted {
+                ann: oa,
+                from: ts::PEER,
+                now: Tick(6),
+            },
+        );
+        assert!(
+            out.contains(&Effect::OrderingReconstructSkipped {
+                header_id: oa_id,
+                height,
+                reason: NO_PREV_INPUT_BLOCK,
+            }),
+            "{out:?}"
+        );
     }
 
     // ----- error paths -----
