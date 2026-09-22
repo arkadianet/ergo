@@ -242,6 +242,28 @@ pub fn write_ordering_block_announcement(
     w: &mut VlqWriter,
     a: &OrderingBlockAnnouncement,
 ) -> Result<(), WriteError> {
+    // The reader caps every one of these collections at
+    // ORDERING_ANNOUNCEMENT_MAX_ARRAY, so an announcement that exceeds a
+    // cap has no wire form any peer would accept. The fields are public,
+    // so refuse to emit one here rather than producing bytes that only
+    // fail at the far end.
+    for (name, count) in [
+        (
+            "non_broadcasted_transactions",
+            a.non_broadcasted_transactions.len(),
+        ),
+        (
+            "broadcasted_transaction_ids",
+            a.broadcasted_transaction_ids.len(),
+        ),
+        ("extension_fields", a.extension_fields.len()),
+    ] {
+        if count > ORDERING_ANNOUNCEMENT_MAX_ARRAY {
+            return Err(WriteError::InvalidData(format!(
+                "{name} count {count} > {ORDERING_ANNOUNCEMENT_MAX_ARRAY}"
+            )));
+        }
+    }
     w.put_u8(a.version);
     write_header(w, &a.header)?;
     w.put_u32(a.non_broadcasted_transactions.len() as u32);
@@ -460,6 +482,45 @@ mod tests {
         let mut bytes = serialize_input_block_announcement(&ann).unwrap();
         bytes.push(0xFF);
         assert!(parse_input_block_announcement(&bytes).is_err());
+    }
+
+    /// The writer must refuse the same counts the reader refuses:
+    /// `OrderingBlockAnnouncement`'s collections are public, so an
+    /// oversized one would otherwise serialize into bytes no peer can
+    /// parse. All three collections go through one guard loop, so
+    /// covering two of them (the cheap ones to build) plus the loop's
+    /// shared shape pins the behaviour.
+    #[test]
+    fn ordering_writer_collection_over_cap_rejected() {
+        let base = OrderingBlockAnnouncement {
+            version: ORDERING_BLOCK_ANNOUNCEMENT_CURRENT_VERSION,
+            header: sample_header(),
+            non_broadcasted_transactions: Vec::new(),
+            broadcasted_transaction_ids: Vec::new(),
+            extension_fields: Vec::new(),
+            unparsed_bytes: Vec::new(),
+        };
+        assert!(serialize_ordering_block_announcement(&base).is_ok());
+
+        let mut too_many_ids = base.clone();
+        too_many_ids.broadcasted_transaction_ids =
+            vec![[0x01; 32]; ORDERING_ANNOUNCEMENT_MAX_ARRAY + 1];
+        let err = serialize_ordering_block_announcement(&too_many_ids).unwrap_err();
+        assert!(
+            err.to_string().contains("broadcasted_transaction_ids"),
+            "got {err:?}"
+        );
+
+        let mut too_many_fields = base.clone();
+        too_many_fields.extension_fields =
+            vec![([0x03, 0x00], Vec::new()); ORDERING_ANNOUNCEMENT_MAX_ARRAY + 1];
+        let err = serialize_ordering_block_announcement(&too_many_fields).unwrap_err();
+        assert!(err.to_string().contains("extension_fields"), "got {err:?}");
+
+        // At the cap itself the writer still emits.
+        let mut at_cap = base.clone();
+        at_cap.broadcasted_transaction_ids = vec![[0x01; 32]; ORDERING_ANNOUNCEMENT_MAX_ARRAY];
+        assert!(serialize_ordering_block_announcement(&at_cap).is_ok());
     }
 
     #[test]
