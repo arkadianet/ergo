@@ -7,9 +7,12 @@ means upstream moved and nothing else. Without that, every regeneration
 rewrote the `input_block_validation` fixtures (their chain's timestamps
 came from the wall clock) and a re-pin could not be told from a re-run.
 
-The manifest block is the deliberate exception: it carries the commit,
-the generator hash and the timestamp of THIS run, which is provenance
-rather than payload.
+The COMMITTED manifest block carries only what identifies the inputs:
+the commits, the generator hash and the seed. It used to carry this
+run's wall-clock timestamp too, which meant no regeneration was ever
+byte-identical and a re-pin could not be told from a re-run by reading
+the diff. The timestamp is provenance, not payload, and now goes to an
+untracked `provenance-<name>.json` beside the generator.
 """
 import argparse
 import datetime
@@ -38,6 +41,53 @@ VECTORS = ['announcement', 'ordering_announcement', 'messages', 'weak_ids', 'pow
 # able to attribute.
 DEFAULT_SEED = 1600000000000
 
+# Where this run's wall-clock provenance goes. NOT inside the build's
+# work directory: a provisioned build is immutable while a devnet runs
+# out of it (spec §7a), and this file is written on every regeneration.
+# The `.work*` glob beside the generator is already gitignored, which is
+# what keeps the timestamp out of the committed vectors.
+PROVENANCE = HERE / '.work-provenance'
+
+
+def vector_manifest(manifest, oracle_sha256, seed):
+    """The `manifest` block a COMMITTED vector carries.
+
+    Every field identifies an INPUT — the two commits, the sigma
+    version, the generator and its hash, the seed. Nothing here varies
+    between two runs at the same pin, which is what makes regeneration
+    byte-identical and a vector diff attributable to upstream.
+    """
+    return {
+        'ergo_commit': manifest['ergo_commit'],
+        'sigma_commit': manifest['sigma_commit'],
+        'sigma_version': manifest['sigma_version'],
+        'generator': 'scripts/jvm_weak_blocks_oracle/WeakBlocksOracle.scala',
+        'generator_sha256': oracle_sha256,
+        'seed': seed,
+    }
+
+
+def provenance_record(name, manifest, oracle_sha256, seed, when=None):
+    """When THIS run generated `name`, and from which work directory.
+
+    Kept beside the generator rather than in the vector: it answers "when
+    was this last regenerated", which is a fact about the run, and
+    putting it in the payload made every regeneration a diff.
+    """
+    record = vector_manifest(manifest, oracle_sha256, seed)
+    record['vector'] = name
+    record['work_dir'] = str(WORK)
+    record['generated_at'] = (
+        when or datetime.datetime.now(datetime.timezone.utc)).isoformat()
+    return record
+
+
+def write_provenance(name, record):
+    PROVENANCE.mkdir(parents=True, exist_ok=True)
+    path = PROVENANCE / f'provenance-{name}.json'
+    path.write_text(json.dumps(record, indent=2) + '\n')
+    return path
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -47,7 +97,13 @@ def main():
                         help='base timestamp for generated fixture blocks; '
                              f'default {DEFAULT_SEED}. Changing it changes '
                              'the fixture bytes, so it is part of the vectors')
+    parser.add_argument('--self-test', action='store_true',
+                        help='check that a committed vector carries no '
+                             'wall clock, and generate nothing')
     args = parser.parse_args()
+    if args.self_test:
+        _self_test()
+        return
     names = args.vectors or VECTORS
     manifest = json.loads((WORK / 'manifest.json').read_text())
     oracle = HERE / 'WeakBlocksOracle.scala'
@@ -85,16 +141,44 @@ def main():
         # stdout ahead of the payload, whose nested braces would otherwise match.
         json_start = max(i for i, line in enumerate(lines) if line == '{')
         doc = json.loads('\n'.join(lines[json_start:]))
-        doc['manifest'] = {
-            'ergo_commit': manifest['ergo_commit'], 'sigma_commit': manifest['sigma_commit'],
-            'sigma_version': manifest['sigma_version'],
-            'generator': 'scripts/jvm_weak_blocks_oracle/WeakBlocksOracle.scala',
-            'generator_sha256': hashlib.sha256(oracle.read_bytes()).hexdigest(),
-            'seed': args.seed,
-            'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        }
+        oracle_sha = hashlib.sha256(oracle.read_bytes()).hexdigest()
+        doc['manifest'] = vector_manifest(manifest, oracle_sha, args.seed)
         (OUT / f'{name}.json').write_text(json.dumps(doc, indent=2) + '\n')
-        print(f'wrote {name}.json ({len(doc.get("cases", []))} cases)')
+        # The wall clock lives HERE, untracked, so regenerating at the
+        # same pin leaves the committed vector byte-identical.
+        where = write_provenance(name, provenance_record(
+            name, manifest, oracle_sha, args.seed))
+        print(f'wrote {name}.json ({len(doc.get("cases", []))} cases); '
+              f'provenance {where}')
+
+
+def _self_test():
+    """The committed payload may not vary between two runs at one pin."""
+    pin = {'ergo_commit': '62c10315', 'sigma_commit': '368a860b',
+           'sigma_version': '6.0.5-22-368a860b-SNAPSHOT'}
+    first = vector_manifest(pin, 'deadbeef', DEFAULT_SEED)
+    second = vector_manifest(pin, 'deadbeef', DEFAULT_SEED)
+    assert first == second, (first, second)
+    assert json.dumps(first, indent=2) == json.dumps(second, indent=2)
+    # The wall clock is the one field that cannot be in there.
+    assert 'timestamp' not in first and 'generated_at' not in first, first
+    assert not any('time' in key for key in first), first
+    # Every field names an INPUT, so a diff is attributable to upstream.
+    assert set(first) == {'ergo_commit', 'sigma_commit', 'sigma_version',
+                          'generator', 'generator_sha256', 'seed'}, first
+    # A different seed, commit or generator IS a different vector.
+    assert vector_manifest(pin, 'deadbeef', DEFAULT_SEED + 1) != first
+    assert vector_manifest(pin, 'cafe', DEFAULT_SEED) != first
+    assert vector_manifest({**pin, 'ergo_commit': 'other'},
+                           'deadbeef', DEFAULT_SEED) != first
+    # And the provenance record keeps the timestamp, so "when was this
+    # regenerated" is still answerable — just not from the payload.
+    when = datetime.datetime(2026, 9, 23, tzinfo=datetime.timezone.utc)
+    record = provenance_record('pow', pin, 'deadbeef', DEFAULT_SEED, when)
+    assert record['generated_at'] == when.isoformat(), record
+    assert record['vector'] == 'pow', record
+    assert {k: record[k] for k in first} == first, record
+    print('gen self-test OK: the committed manifest carries no wall clock')
 
 
 if __name__ == '__main__':
