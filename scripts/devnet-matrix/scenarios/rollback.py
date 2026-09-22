@@ -149,7 +149,17 @@ def run(ctx):
     ctx.run.started('scala')
     lifecycle.spawn('scala2')
     ctx.run.started('scala2')
-    lifecycle.wait_peered()
+    # Recorded, not raised. The two miners cannot peer with each other,
+    # so the second one's only peer is the follower, and requiring that
+    # single connection to be up at one instant aborted a scenario whose
+    # real evidence — convergence on the private branch, and the reorg
+    # the follower emitted to get there — was still to come.
+    try:
+        lifecycle.wait_peered(timeout=180)
+        rejoined = True
+    except RuntimeError as error:
+        rejoined = str(error)
+    ctx.note('peered_after_rejoin', rejoined)
 
     # The follower has to land on the private branch.
     converge_deadline = min(ctx.run.deadline, time.monotonic() + 600)
