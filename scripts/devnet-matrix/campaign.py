@@ -766,6 +766,20 @@ def _self_test():
                    'scala_chain': [], 'scala2_chain': []}]
     assert common.chain_members_scala_never_had(straddling) == ([], []), \
         'a sample straddling an ordering boundary decides nothing'
+    # Chains are newest-first, so index 0 is the TIP, and a follower one
+    # block ahead of the miner's published chain is assertion 2's
+    # business (it grants that allowance explicitly), not this check's.
+    ahead = [{'ordering': 'O1', 'rust_chain': ['tip', 'b', 'a'],
+              'scala_chain': ['b', 'a'], 'scala2_chain': []}]
+    assert common.chain_members_scala_never_had(ahead) == ([], []), \
+        'a tip the miner has not published yet is lag, not an invented chain'
+    # A sibling completed into the MIDDLE of the chain is exactly what
+    # this check exists to catch, and it still is.
+    middle = [{'ordering': 'O1', 'rust_chain': ['b', 'sneaked', 'a'],
+               'scala_chain': ['b', 'a'], 'scala2_chain': []}]
+    found, _ = common.chain_members_scala_never_had(middle)
+    assert [o['block'] for o in found] == ['sneaked'], found
+    assert found[0]['position'] == 1, found
 
     # ----- two miners: the follower is judged against BOTH -----
     #

@@ -357,12 +357,26 @@ def chain_members_scala_never_had(series):
         ordering = sample.get('ordering')
         if ordering is None:
             continue
-        for block in sample.get('rust_chain') or []:
+        # Chains are newest-first, so index 0 is the TIP. The tip is
+        # assertion 2's job, not this check's: a follower one block
+        # ahead of the miner's PUBLISHED chain is the documented F15/D8
+        # lag seen from the other side — the miner's processed prefix
+        # trailing its own announcements — and assertion 2 grants it an
+        # explicit allowance. One run had exactly one such sighting in
+        # 3,530 samples, at position 0, with both miners at 46 entries
+        # and the follower at 47. What THIS check exists to catch is a
+        # sibling completed into the MIDDLE of a chain, which is never a
+        # tip and so never reaches assertion 2.
+        for position, block in enumerate(sample.get('rust_chain') or []):
+            if position == 0:
+                continue
             if block not in ever_anywhere:
-                orphans.append({'index': i, 'ordering': ordering, 'block': block})
+                orphans.append({'index': i, 'ordering': ordering,
+                                'position': position, 'block': block})
             elif block not in per_ordering.get(ordering, set()):
                 off_by_ordering.append(
-                    {'index': i, 'ordering': ordering, 'block': block})
+                    {'index': i, 'ordering': ordering, 'position': position,
+                     'block': block})
     return orphans, off_by_ordering
 
 

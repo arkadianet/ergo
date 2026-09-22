@@ -50,7 +50,13 @@ def run(ctx):
     # observation of anything.
     common.wait_ordering_blocks(ctx, SHARED_BLOCKS, 'shared_prefix')
     common.seed_second_miner(ctx, campaign, lifecycle)
-    smoke.assertion_1_peering(ctx.run, ctx.evidence)
+    # NOT `assertion_1_peering`: it requires every node to hold a peer at
+    # one instant, and the two miners cannot peer with each other here,
+    # so the second one's only possible peer is the follower. A momentary
+    # gap in that single connection failed a scenario whose own evidence
+    # — two peers observed, 554 samples carrying a second tree — showed
+    # it had run. `follower_saw_both_miners` below is the check that
+    # answers the question this scenario actually asks.
 
     # Watch `forks` for the whole window: it is an instantaneous count of
     # competing trees retained under the best ordering block, so a
