@@ -39,7 +39,7 @@ fn extension_leaf_digest_matches_scala_oracle() {
         let value = hex::decode(&c.value_hex).expect("value_hex decodes");
         let expected = hex::decode(&c.leaf_digest_hex).expect("leaf_digest_hex decodes");
 
-        let digest = extension_leaf_digest(&key, &value);
+        let digest = extension_leaf_digest(&key, &value).expect("oracle keys are 2 bytes");
         assert_eq!(
             digest.to_vec(),
             expected,

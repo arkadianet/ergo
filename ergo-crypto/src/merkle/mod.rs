@@ -382,12 +382,22 @@ pub fn extension_root(fields: &[(&[u8], &[u8])]) -> [u8; 32] {
 /// input-block proof-of-inclusion check binding an extension field to
 /// a header's `extensionRoot`) share the exact leaf-preimage rule
 /// instead of re-deriving the length-prefix byte.
-pub fn extension_leaf_digest(key: &[u8], value: &[u8]) -> [u8; 32] {
+///
+/// The single-byte length prefix can only describe keys up to 255
+/// bytes. A longer key would wrap the prefix while the whole key stays
+/// in the preimage, so two different keys could share a leaf digest.
+/// Returns `None` in that case rather than emitting a noncanonical
+/// preimage; canonical extension keys are two bytes
+/// (`Extension.FieldKeySize`), so no protocol path can hit it.
+pub fn extension_leaf_digest(key: &[u8], value: &[u8]) -> Option<[u8; 32]> {
+    if key.len() > u8::MAX as usize {
+        return None;
+    }
     let mut kv = Vec::with_capacity(1 + key.len() + value.len());
     kv.push(key.len() as u8);
     kv.extend_from_slice(key);
     kv.extend_from_slice(value);
-    leaf_hash(&kv)
+    Some(leaf_hash(&kv))
 }
 
 #[cfg(test)]
@@ -420,7 +430,22 @@ mod tests {
 
         // And extension_leaf_digest itself must be the leaf hash
         // merkle_tree_root computes over those same bytes.
-        assert_eq!(extension_leaf_digest(key, value), leaf_hash(&kv_bytes));
+        assert_eq!(
+            extension_leaf_digest(key, value),
+            Some(leaf_hash(&kv_bytes))
+        );
+    }
+
+    // ----- error paths -----
+
+    /// A key that does not fit the single-byte length prefix has no
+    /// canonical leaf preimage, so the helper must refuse it instead of
+    /// wrapping the prefix.
+    #[test]
+    fn extension_leaf_digest_key_over_255_bytes_returns_none() {
+        assert!(extension_leaf_digest(&[0x01; 256], &[0x02; 4]).is_none());
+        // 255 is still representable and must keep working.
+        assert!(extension_leaf_digest(&[0x01; 255], &[0x02; 4]).is_some());
     }
 
     #[test]
