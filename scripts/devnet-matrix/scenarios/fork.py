@@ -49,7 +49,12 @@ def run(ctx):
     # the seed: asking about a node that has not been started is not an
     # observation of anything.
     common.wait_ordering_blocks(ctx, SHARED_BLOCKS, 'shared_prefix')
+    # The seed restarts the follower, which empties its input chain. The
+    # sample range that covers is recorded so the reset it causes is not
+    # mistaken for a fork switch — and so a reset OUTSIDE it still is.
+    samples_before_seed = len(ctx.run.series)
     common.seed_second_miner(ctx, campaign, lifecycle)
+    samples_after_seed = len(ctx.run.series)
     # NOT `assertion_1_peering`: it requires every node to hold a peer at
     # one instant, and the two miners cannot peer with each other here,
     # so the second one's only possible peer is the follower. A momentary
@@ -157,6 +162,25 @@ def run(ctx):
         'scala2': len(comparison['scala2_switches']),
         'rust_sample': comparison['rust_switches'][:20],
     })
+    # Resets to the empty chain: expected inside the restart this
+    # scenario performs, unexplained anywhere else.
+    restart_window = range(max(0, samples_before_seed - 5),
+                           samples_after_seed + common.LATER_CONFIRMATION_SAMPLES)
+    caused, uncaused = [], []
+    for reset in comparison['resets_to_the_empty_chain']:
+        (caused if reset['index'] in restart_window else uncaused).append(reset)
+    ctx.note('resets_to_the_empty_chain', {
+        'during_the_seed_restart': len(caused),
+        'elsewhere': len(uncaused),
+        'restart_sample_window': [restart_window.start, restart_window.stop],
+        'sample': uncaused[:5],
+    })
+    if uncaused:
+        ctx.fail(f'{len(uncaused)} times the follower emptied its input chain '
+                 'outside the restart this scenario performs — no miner publishes '
+                 'an empty chain, so that is a chain nobody has',
+                 {'sample': uncaused[:5]})
+
     if comparison['switches_matching_no_reference']:
         bad = comparison['switches_matching_no_reference']
         ctx.fail(f'{len(bad)} fork switches produced a chain matching no miner: '

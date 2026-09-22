@@ -530,6 +530,11 @@ def compare_fork_switches(series):
     * the chain it left EQUALS a chain some reference published, and
     * the chain it landed on EQUALS a chain some reference published.
 
+    A transition to the EMPTY chain is reported separately, as a reset:
+    no reference publishes an empty chain, so there is no transition to
+    match it against, and a follower that has just restarted produces
+    one legitimately. The caller says whether it caused the reset.
+
     Equality is on the ordered list, so "the follower moved from one
     miner's exact chain to another miner's exact chain" is the only
     shape that passes — which is what a two-miner fork switch IS. A
@@ -552,18 +557,27 @@ def compare_fork_switches(series):
         return None
 
     rust = fork_switches(series, 'rust')
-    unmatched, rolled_back_still_held = [], []
+    unmatched, resets, rolled_back_still_held = [], [], []
     for switch in rust:
         ordering = switch['ordering']
         before = switch.get('chain_before') or []
         after = switch.get('chain_after') or []
         left = published(ordering, before, switch['index'])
         landed = published(ordering, after, switch['index'])
-        if left is None or landed is None:
-            unmatched.append({**switch,
-                              'chain_before': before[:8], 'chain_after': after[:8],
-                              'left_a_reference_chain': left,
-                              'landed_on_a_reference_chain': landed})
+        entry = {**switch, 'chain_before': before[:8], 'chain_after': after[:8],
+                 'left_a_reference_chain': left,
+                 'landed_on_a_reference_chain': landed}
+        if not after:
+            # The chain went to NOTHING. That is not a move between two
+            # competing histories — no reference ever publishes an empty
+            # chain, so there is no transition to match it against — it
+            # is a RESET: a restart, a prune, or an ordering turnover.
+            # Reported separately so the caller can say whether it
+            # caused the reset itself; a reset it did not cause is still
+            # a chain nobody has, and still has to be explained.
+            resets.append(entry)
+        elif left is None or landed is None:
+            unmatched.append(entry)
         # Telemetry: was it still on a reference's LAST chain for this
         # ordering id? Per node, so one miner's stale earlier reading
         # cannot answer for the other's current one.
@@ -583,6 +597,8 @@ def compare_fork_switches(series):
         # THE guard: a switch whose BEFORE and AFTER chains are not both
         # chains a reference actually published.
         'switches_matching_no_reference': unmatched,
+        # Transitions to the EMPTY chain, which no reference publishes.
+        'resets_to_the_empty_chain': resets,
         # Telemetry with two miners that cannot peer with each other:
         # each keeps its own fork, so a legitimate switch necessarily
         # rolls back blocks the other is still holding.

@@ -1248,8 +1248,22 @@ def _self_test():
     empty_rollback = common.compare_fork_switches(
         [rs('O1', ['a'], ['a'], ['b']), rs('O1', [], ['a'], ['b'])])
     assert len(empty_rollback['rust_switches']) == 1, empty_rollback
-    assert empty_rollback['switches_matching_no_reference'], \
-        'a rollback to the empty chain matches no reference transition'
+    # It is reported as a RESET, not as a matched switch: no reference
+    # publishes an empty chain, so there is no transition to compare it
+    # against. `fork` fails on a reset it did not cause; the one thing
+    # that must never happen is it passing silently.
+    assert empty_rollback['resets_to_the_empty_chain'], empty_rollback
+    assert empty_rollback['switches_matching_no_reference'] == [], empty_rollback
+    reported = (empty_rollback['resets_to_the_empty_chain']
+                + empty_rollback['switches_matching_no_reference'])
+    assert len(reported) == 1, 'the rollback to nothing is reported exactly once'
+    # And a switch onto a chain nobody published is still unmatched
+    # rather than excused as a reset.
+    invented_nonempty = common.compare_fork_switches(
+        [rs('O1', ['b', 'a'], ['b', 'a'], ['z']),
+         rs('O1', ['q', 'a'], ['b', 'a'], ['z'])])
+    assert invented_nonempty['switches_matching_no_reference'], invented_nonempty
+    assert invented_nonempty['resets_to_the_empty_chain'] == [], invented_nonempty
     # A genuine move between the two miners' exact chains still matches.
     genuine = common.compare_fork_switches(
         [rs('O1', ['m1b', 'm1a'], ['m1b', 'm1a'], ['m2b', 'm2a']),
@@ -1412,8 +1426,8 @@ def _self_test():
                 ref_sample('O1', [], ['b', 'a'], ['b', 'a'])]
     v = common.compare_fork_switches(to_empty)
     assert len(v['rust_switches']) == 1, v['rust_switches']
-    assert v['switches_matching_no_reference'], \
-        'a rollback to nothing matches no reference chain'
+    assert v['resets_to_the_empty_chain'], \
+        'a rollback to nothing is reported as a reset, never silently accepted'
     # A genuine switch between the two miners' branches matches one.
     across = [ref_sample('O1', ['m1b', 'm1a'], ['m1b', 'm1a'], ['m2b', 'm2a']),
               ref_sample('O1', ['m2b', 'm2a'], ['m1b', 'm1a'], ['m2b', 'm2a'])]
