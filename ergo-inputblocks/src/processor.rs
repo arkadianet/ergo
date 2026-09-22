@@ -3311,8 +3311,20 @@ impl Processor {
     }
 
     /// Scala `saveOrderingBlockTransactions`.
-    pub fn save_ordering_block_transactions(&mut self, header_id: OrderingId, txs: Vec<TxRef>) {
-        self.ordering.save_block_transactions(header_id, txs);
+    ///
+    /// Bounded by [`crate::bounds::Bounds::ordering_announcements`], the
+    /// cap that already governs the announcement map: `prune` reaches a
+    /// stored section only through its announcement, so a section saved
+    /// for an already-evicted or never-announced ordering block needs the
+    /// cap to bound it. Returns the id of the oldest section evicted, if
+    /// any, so the caller can log or account for the loss.
+    pub fn save_ordering_block_transactions(
+        &mut self,
+        header_id: OrderingId,
+        txs: Vec<TxRef>,
+    ) -> Option<OrderingId> {
+        self.ordering
+            .save_block_transactions(header_id, txs, self.bounds.ordering_announcements)
     }
 
     /// Scala `getOrderingBlockTransactions`.

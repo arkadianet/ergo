@@ -98,7 +98,7 @@ pub fn ann_id(a: &InputBlockAnnouncement) -> InputBlockId {
 fn proof_for(fields: &InputBlockFields) -> (BatchMerkleProof, [u8; 32]) {
     let entries = fields.extension_fields();
     let kv: Vec<(&[u8], &[u8])> = entries.iter().map(|(k, v)| (&k[..], &v[..])).collect();
-    let root = extension_root(&kv);
+    let root = extension_root(&kv).expect("two-byte extension keys");
     // `extension_root` hashes `[k.len()] ++ k ++ v` as the leaf preimage;
     // `merkle_proof_by_indices` takes those same preimages.
     let leaves: Vec<Vec<u8>> = entries
@@ -210,7 +210,7 @@ pub fn ordering_announcement(
         .iter()
         .map(|(k, v)| (&k[..], &v[..]))
         .collect();
-    let root = extension_root(&kv);
+    let root = extension_root(&kv).expect("two-byte extension keys");
     OrderingBlockAnnouncement {
         version: 1,
         header: header(parent, height, nonce, root),

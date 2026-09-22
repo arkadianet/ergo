@@ -185,7 +185,10 @@ pub fn validate_ordering_announcement(
         .iter()
         .map(|(k, v)| (&k[..], &v[..]))
         .collect();
-    if ergo_crypto::merkle::extension_root(&refs) != *ann.header.extension_root.as_bytes() {
+    // Keys here are `[u8; 2]`, so `extension_root` cannot refuse them;
+    // comparing against `Some(..)` keeps a hypothetical `None` a
+    // mismatch — i.e. a rejection — rather than a panic on a wire path.
+    if ergo_crypto::merkle::extension_root(&refs) != Some(*ann.header.extension_root.as_bytes()) {
         return Err(AnnouncementError::ProofInvalid);
     }
     ergo_crypto::pow::verify_pow_solution(&ann.header)

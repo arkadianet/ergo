@@ -90,13 +90,40 @@ impl OrderingStore {
     }
 
     /// Scala `saveOrderingBlockTransactions`.
-    pub fn save_block_transactions(&mut self, header_id: OrderingId, txs: Vec<TxRef>) {
+    ///
+    /// Bounded by `cap` — the same cap [`OrderingStore::insert`] applies
+    /// to announcements — because `prune` can only reach a section
+    /// through its announcement: a section saved after its announcement
+    /// was evicted or height-pruned, or one whose announcement never
+    /// arrives at all, is otherwise retained forever. Returns the id of
+    /// the oldest section evicted to stay within `cap`, if any.
+    pub fn save_block_transactions(
+        &mut self,
+        header_id: OrderingId,
+        txs: Vec<TxRef>,
+        cap: usize,
+    ) -> Option<OrderingId> {
         self.block_transactions.insert(header_id, txs);
+        if self.block_transactions.len() > cap {
+            // `shift_remove_index(0)` keeps insertion order for the rest,
+            // which is what makes "oldest" meaningful on the next overflow.
+            return self
+                .block_transactions
+                .shift_remove_index(0)
+                .map(|(id, _)| id);
+        }
+        None
     }
 
     /// Scala `getOrderingBlockTransactions`.
     pub fn block_transactions(&self, header_id: &OrderingId) -> Option<&[TxRef]> {
         self.block_transactions.get(header_id).map(|v| v.as_slice())
+    }
+
+    /// Number of stored transaction sections. Bounded by the cap passed
+    /// to [`OrderingStore::save_block_transactions`].
+    pub fn block_transactions_len(&self) -> usize {
+        self.block_transactions.len()
     }
 
     /// Scala `prune()`'s announcement phase: drop announcements more than
@@ -209,7 +236,7 @@ mod tests {
             tx_id: [1; 32],
             witness_id: [2; 31],
         };
-        s.save_block_transactions(id(1), vec![t]);
+        s.save_block_transactions(id(1), vec![t], 64);
         assert_eq!(s.block_transactions(&id(1)), Some(&[t][..]));
     }
 
@@ -232,9 +259,9 @@ mod tests {
     fn insert_over_cap_evicts_the_matching_block_transactions() {
         let mut s = OrderingStore::default();
         s.insert(id(1), ann(1), 2);
-        s.save_block_transactions(id(1), vec![tx(1)]);
+        s.save_block_transactions(id(1), vec![tx(1)], 64);
         s.insert(id(2), ann(2), 2);
-        s.save_block_transactions(id(2), vec![tx(2)]);
+        s.save_block_transactions(id(2), vec![tx(2)], 64);
 
         assert_eq!(s.insert(id(3), ann(3), 2), Some(id(1)));
         assert!(s.block_transactions(&id(1)).is_none());
@@ -249,9 +276,9 @@ mod tests {
     fn prune_drops_block_transactions_of_height_pruned_announcements() {
         let mut s = OrderingStore::default();
         s.insert(id(1), ann(100 - 7), 64);
-        s.save_block_transactions(id(1), vec![tx(1)]);
+        s.save_block_transactions(id(1), vec![tx(1)], 64);
         s.insert(id(2), ann(100), 64);
-        s.save_block_transactions(id(2), vec![tx(2)]);
+        s.save_block_transactions(id(2), vec![tx(2)], 64);
 
         let never_known = |_: &OrderingId| false;
         let dropped = s.prune(100, 6, &never_known);
@@ -261,13 +288,44 @@ mod tests {
         assert!(s.block_transactions(&id(2)).is_some());
     }
 
+    /// The section map needs a cap of its own: repeated saves for ids
+    /// whose announcements never arrive are exactly the case `prune`
+    /// cannot reach (no announcement to carry the height rule, and
+    /// `block_transactions_known` stays false for a block history never
+    /// accepts), so without one the map grows without bound.
+    #[test]
+    fn save_block_transactions_over_cap_evicts_oldest() {
+        let mut s = OrderingStore::default();
+        for i in 0..3u8 {
+            assert_eq!(s.save_block_transactions(id(i), vec![tx(i)], 3), None);
+        }
+        // Nothing has an announcement, and nothing is in history: prune
+        // is powerless here, so only the cap can bound the map.
+        let never_known = |_: &OrderingId| false;
+
+        for i in 3..64u8 {
+            let evicted = s.save_block_transactions(id(i), vec![tx(i)], 3);
+            assert_eq!(evicted, Some(id(i - 3)), "eviction must be oldest-first");
+            assert!(s.prune(1_000, 6, &never_known).is_empty());
+        }
+
+        // Only the three most recent saves survive; 64 distinct saves
+        // did not grow the map past the cap.
+        assert_eq!(s.block_transactions_len(), 3);
+        for i in 61..64u8 {
+            assert!(s.block_transactions(&id(i)).is_some(), "id({i}) evicted");
+        }
+        assert!(s.block_transactions(&id(60)).is_none());
+        assert!(s.block_transactions(&id(0)).is_none());
+    }
+
     /// A transaction section can be saved before its announcement
     /// arrives. A missing announcement is not evidence of staleness, so
     /// the sweep must leave such an entry alone.
     #[test]
     fn prune_keeps_block_transactions_whose_announcement_has_not_arrived() {
         let mut s = OrderingStore::default();
-        s.save_block_transactions(id(9), vec![tx(9)]);
+        s.save_block_transactions(id(9), vec![tx(9)], 64);
 
         let never_known = |_: &OrderingId| false;
         assert!(s.prune(100, 6, &never_known).is_empty());
