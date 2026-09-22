@@ -811,12 +811,11 @@ def _self_test():
     assert common.fork_switches(moved_on, 'rust') == [], \
         'a new ordering block is not a fork switch'
 
-    # A switch onto a block the miner never had is a chain Scala lacks.
+    # A switch onto a chain the miner never had matches no reference.
     invented = [sample('O1', ['b', 'a'], ['b', 'a']),
                 sample('O1', ['x', 'a'], ['b', 'a'])]
     verdict = common.compare_fork_switches(invented)
-    assert verdict['applied_blocks_scala_never_had'], verdict
-    assert verdict['applied_blocks_scala_never_had'][0]['block'] == 'x', verdict
+    assert verdict['switches_matching_no_reference'], verdict
 
     # A rollback of a block Scala still holds is a switch Scala did not
     # make.
@@ -833,7 +832,7 @@ def _self_test():
     followed = [sample('O1', ['b', 'a'], ['b', 'a']),
                 sample('O1', ['c', 'a'], ['c', 'a'])]
     verdict = common.compare_fork_switches(followed)
-    assert verdict['applied_blocks_scala_never_had'] == [], verdict
+    assert verdict['switches_matching_no_reference'] == [], verdict
     assert verdict['rolled_back_blocks_still_held_by_a_miner'] == [], verdict
 
     # The whole-chain orphan check catches a block that is never a tip.
@@ -915,6 +914,80 @@ def _self_test():
     assert not _holds_resources(probe.pid), \
         'a SIGKILLed child must read as released, zombie or not'
     assert not _holds_resources(999_999), 'a missing PID holds nothing'
+
+    # ----- finding 1: codex's three fork false-pass probes -----
+    #
+    # All three were ACCEPTED by the union-membership evaluator: every
+    # block in them had been published by somebody, which is not the
+    # property. What is asserted is the HISTORY.
+
+    def ref_sample(ordering, rust, s1=None, s2=None, o1=None, o2=None):
+        return {'ordering': ordering, 'rust_chain': list(rust),
+                'scala_chain': list(s1 or []), 'scala2_chain': list(s2 or []),
+                'scala_ordering': o1 if o1 is not None else ordering,
+                'scala2_ordering': o2 if o2 is not None else ordering}
+
+    # (1a) an INVENTED, never-confirmed tip. Rust leads by one and no
+    # reference ever publishes that block.
+    invented_tip = [ref_sample('O1', ['ghost', 'b', 'a'], ['b', 'a'])] * 3
+    v = common.evaluate_fork_coherence(invented_tip)
+    assert v['unconfirmed_one_block_leads'], v
+    assert v['incoherent_samples'] == [], v
+    # The SAME shape, with the reference publishing it soon after, is the
+    # documented one-block allowance and must still pass.
+    confirmed_tip = [ref_sample('O1', ['t', 'b', 'a'], ['b', 'a']),
+                     ref_sample('O1', ['t', 'b', 'a'], ['t', 'b', 'a'])]
+    v = common.evaluate_fork_coherence(confirmed_tip)
+    assert v['unconfirmed_one_block_leads'] == [], v
+    assert v['incoherent_samples'] == [], v
+    # ...but not if the confirmation is beyond the bound.
+    far = ([ref_sample('O1', ['t', 'b', 'a'], ['b', 'a'])]
+           * (common.LATER_CONFIRMATION_SAMPLES + 2)
+           + [ref_sample('O1', ['t', 'b', 'a'], ['t', 'b', 'a'])])
+    v = common.evaluate_fork_coherence(far)
+    assert v['unconfirmed_one_block_leads'], 'later must be BOUNDED later'
+
+    # (1b) a chain MIXING two incompatible branches. Every member was
+    # published — `m1b` by miner 1, `m2a` by miner 2 — and the history
+    # is one neither of them has.
+    mixed = [ref_sample('O1', ['m1b', 'm2a'], ['m1b', 'm1a'], ['m2b', 'm2a'])]
+    v = common.evaluate_fork_coherence(mixed)
+    assert v['incoherent_samples'], 'a chain mixing two branches is not coherent'
+    assert v['judged_samples'] == 1, v
+    # Following either branch cleanly is fine.
+    for clean in (['m1b', 'm1a'], ['m2b', 'm2a'], ['m2a']):
+        v = common.evaluate_fork_coherence(
+            [ref_sample('O1', clean, ['m1b', 'm1a'], ['m2b', 'm2a'])])
+        assert v['incoherent_samples'] == [], (clean, v)
+
+    # A reference on a DIFFERENT ordering block contributes nothing: its
+    # chain must not be usable to excuse a follower chain under ours.
+    elsewhere = [ref_sample('O1', ['m2a'], ['m1a'], ['m2a'], o2='O2')]
+    v = common.evaluate_fork_coherence(elsewhere)
+    assert v['incoherent_samples'], \
+        "a reference on another ordering block cannot vouch for this chain"
+
+    # (1c) Rust rolls back to an EMPTY chain while both miners keep
+    # theirs. Nothing was applied, so "every applied block was
+    # published" holds vacuously.
+    to_empty = [ref_sample('O1', ['b', 'a'], ['b', 'a'], ['b', 'a']),
+                ref_sample('O1', [], ['b', 'a'], ['b', 'a'])]
+    v = common.compare_fork_switches(to_empty)
+    assert len(v['rust_switches']) == 1, v['rust_switches']
+    assert v['switches_matching_no_reference'], \
+        'a rollback to nothing matches no reference chain'
+    # A genuine switch between the two miners' branches matches one.
+    across = [ref_sample('O1', ['m1b', 'm1a'], ['m1b', 'm1a'], ['m2b', 'm2a']),
+              ref_sample('O1', ['m2b', 'm2a'], ['m1b', 'm1a'], ['m2b', 'm2a'])]
+    v = common.compare_fork_switches(across)
+    assert len(v['rust_switches']) == 1, v['rust_switches']
+    assert v['switches_matching_no_reference'] == [], v
+    # And a switch onto a chain nobody has does not.
+    invented_switch = [
+        ref_sample('O1', ['m1b', 'm1a'], ['m1b', 'm1a'], ['m2b', 'm2a']),
+        ref_sample('O1', ['zz', 'm1a'], ['m1b', 'm1a'], ['m2b', 'm2a'])]
+    v = common.compare_fork_switches(invented_switch)
+    assert v['switches_matching_no_reference'], v
 
     # ----- finding 10: the attempt cap is ENFORCED -----
     #

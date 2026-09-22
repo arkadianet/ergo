@@ -115,31 +115,69 @@ def run(ctx):
                  'window that did not open cannot be a pass',
                  {'start_height': start, 'reached': reached})
 
-    # The switches themselves, from the sampled chains.
+    # The series has to record each reference's OWN ordering id, or the
+    # comparison below silently falls back to the shared one and can
+    # attribute the second miner's chain to the first miner's block.
+    if not common.series_carries_reference_ordering(ctx.run.series):
+        ctx.fail('the sample series does not record the second miner\'s own '
+                 'ordering id, so its chain cannot be compared coherently',
+                 {'samples': len(ctx.run.series)})
+
+    # EVERY sampled chain must be the same HISTORY as some reference's,
+    # not merely built from blocks somebody published.
+    coherence = common.evaluate_fork_coherence(ctx.run.series)
+    ctx.note('chain_coherence', {
+        'judged_samples': coherence['judged_samples'],
+        'incoherent_samples': len(coherence['incoherent_samples']),
+        'unconfirmed_one_block_leads': len(coherence['unconfirmed_one_block_leads']),
+        'later_confirmation_samples': coherence['later_confirmation_samples'],
+        'incoherent_sample': coherence['incoherent_samples'][:5],
+        'unconfirmed_sample': coherence['unconfirmed_one_block_leads'][:5],
+    })
+    if coherence['incoherent_samples']:
+        bad = coherence['incoherent_samples']
+        ctx.fail(f"at {len(bad)} samples Rust's input chain was not the same "
+                 'history as any miner\'s chain for the same ordering block',
+                 {'sample': bad[:5]},
+                 ids=[b['rust_chain'][0] for b in bad[:5] if b['rust_chain']])
+    if coherence['unconfirmed_one_block_leads']:
+        bad = coherence['unconfirmed_one_block_leads']
+        ctx.fail(f'{len(bad)} times Rust led the miner by one input block that the '
+                 f'miner never went on to publish within '
+                 f"{coherence['later_confirmation_samples']} samples",
+                 {'sample': bad[:5]},
+                 ids=[b['unconfirmed_tip'] for b in bad[:5]])
+
+    # The switches themselves, judged as applied/rolled-back SETS against
+    # the chain of the reference the follower landed on.
     comparison = common.compare_fork_switches(ctx.run.series)
     ctx.note('fork_switches', {
         'rust': len(comparison['rust_switches']),
         'scala': len(comparison['scala_switches']),
+        'scala2': len(comparison['scala2_switches']),
         'rust_sample': comparison['rust_switches'][:20],
-        'scala_sample': comparison['scala_switches'][:20],
     })
-    if not comparison['rust_switches'] and not fork_samples:
-        # Nothing to conclude from. Two miners that never produced a
-        # competing tree did not exercise the property, and saying so is
-        # the honest outcome — a run that observed no switches has not
-        # observed that switches are correct.
-        ctx.fail('no input-chain fork switch was observed on Rust and `forks` never '
-                 'exceeded 1, so the fork-handling path was never exercised',
+    if comparison['switches_matching_no_reference']:
+        bad = comparison['switches_matching_no_reference']
+        ctx.fail(f'{len(bad)} fork switches produced a chain matching no miner: '
+                 'the blocks applied and rolled back do not correspond to any '
+                 'reference chain under the same ordering block',
+                 {'sample': bad[:5]})
+
+    # A PASS REQUIRES an observed switch. `forks > 1` proves the follower
+    # retained a competing tree, which is the precondition; it does not
+    # prove anything about switching between them, and a run that
+    # sampled no switch has not judged the switch property at all.
+    if not comparison['rust_switches']:
+        ctx.note('result_qualifier', 'NOT ESTABLISHED')
+        ctx.fail('no input-chain fork switch was observed on Rust, so the switch '
+                 'property was never judged — NOT ESTABLISHED, not a pass '
+                 f"(forks reached {max(fork_counts) if fork_counts else None} in "
+                 f'{len(fork_samples)} samples, so the trees were there)',
                  {'fork_count_samples': len(fork_counts),
                   'max_forks': max(fork_counts) if fork_counts else None,
-                  'scala_switches': len(comparison['scala_switches'])})
-
-    if comparison['applied_blocks_scala_never_had']:
-        bad = comparison['applied_blocks_scala_never_had']
-        ctx.fail(f'{len(bad)} input blocks Rust switched ONTO were never on any '
-                 "Scala best input chain for the same ordering block (D3 sibling "
-                 'completion invented a chain the miners do not have)',
-                 {'sample': bad[:10]}, ids=[b['block'] for b in bad[:5]])
+                  'scala_switches': len(comparison['scala_switches']),
+                  'scala2_switches': len(comparison['scala2_switches'])})
     # Rolled-back blocks a miner still holds are TELEMETRY here, not a
     # verdict. The two miners cannot peer with each other, so each keeps
     # its own competing fork indefinitely and every switch the follower

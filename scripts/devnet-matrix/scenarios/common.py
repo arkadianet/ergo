@@ -242,73 +242,226 @@ def fork_switches(series, side):
             if rolled_back:
                 out.append({'index': i, 'ordering': ordering,
                             'applied': sorted(chain - previous[1]),
-                            'rolled_back': sorted(rolled_back)})
+                            'rolled_back': sorted(rolled_back),
+                            # The chain it landed on, newest first: the
+                            # switch is judged on the HISTORY it produced,
+                            # not only on which members moved.
+                            'chain_after': list(
+                                sample.get(f'{side}_chain') or [])})
         previous = (ordering, chain)
     return out
 
 
-def reference_chain(sample):
-    """Every input block ANY reference node listed in this sample.
+# How many later samples may confirm a Rust tip the reference has not
+# published yet. smoke.py allows a one-block lead when the tip turns up
+# in the reference's chain for the same ordering id at a LATER sample;
+# unbounded, "later" means "at any point in a 90-minute run", which is
+# not an allowance but an absence of one. 200 samples is ~60 s at the
+# sampler's 0.3 s cadence.
+LATER_CONFIRMATION_SAMPLES = 200
 
-    With two miners the follower may legitimately be on either one's
-    input chain, so judging it against miner 1 alone reports the whole of
-    miner 2's chain as blocks "no miner ever had" — 21,546 of them in one
-    run, none of them a divergence. The union is the comparison the
-    two-miner scenarios actually mean.
+REFERENCE_NODES = ('scala', 'scala2')
+
+
+def reference_chains(sample):
+    """Each reference's chain, under ITS OWN ordering id.
+
+    Keyed by the ordering block that reference is actually on, not by the
+    first one's: attributing the second miner's chain to whatever block
+    the first happened to be on is how an evaluator ends up accepting a
+    follower chain that mixes members of two incompatible branches.
+    Returns `[(node, ordering, chain_newest_first), ...]`, skipping a
+    reference that published no chain in this sample.
     """
-    return set(sample.get('scala_chain') or []) | set(
-        sample.get('scala2_chain') or [])
+    out = []
+    for node in REFERENCE_NODES:
+        chain = sample.get(f'{node}_chain') or []
+        if not chain:
+            continue
+        key = f'{node}_ordering'
+        # A series recorded BEFORE the per-reference ordering id existed
+        # has no such key, and for those the sample's shared ordering id
+        # is the only thing available. A key that is present and None is
+        # a reference that published no ordering id, which is different
+        # and must not be papered over. `fork` requires the key, so new
+        # runs never take this path.
+        out.append((node, sample.get(key, sample.get('ordering')), list(chain)))
+    return out
+
+
+def series_carries_reference_ordering(series):
+    """Does this series record each reference's OWN ordering id?
+
+    Without it a two-miner evaluator falls back to the shared id and can
+    attribute the second miner's chain to the first miner's ordering
+    block — the mis-attribution finding 1 names.
+    """
+    return all('scala2_ordering' in sample for sample in series
+               if sample.get('scala2_chain'))
+
+
+def reference_chain(sample, ordering=None):
+    """Every input block a reference listed for `ordering`.
+
+    With `ordering` given, ONLY references that are themselves on that
+    ordering block contribute — which is what makes the union safe. With
+    it omitted, the union is over every reference, which is what the
+    whole-chain "did anyone ever publish this" test wants.
+    """
+    out = set()
+    for _, ref_ordering, chain in reference_chains(sample):
+        if ordering is None or ref_ordering == ordering:
+            out |= set(chain)
+    return out
+
+
+def _is_coherent_with(rust_chain, ref_chain):
+    """Is Rust's chain the same history as this reference's?
+
+    Chains arrive newest-first; history is read oldest-first. Coherent
+    means Rust's chain is a prefix of the reference's (Rust trailing), or
+    the reference's is a prefix of Rust's by EXACTLY ONE block (Rust one
+    ahead of the miner's published prefix — F15/D8 seen from the other
+    side). Returns `(coherent, rust_lead_tip)`; the tip is the block that
+    later confirmation has to account for, or None.
+    """
+    rust_old = list(reversed(rust_chain))
+    ref_old = list(reversed(ref_chain))
+    if len(rust_old) <= len(ref_old):
+        return (ref_old[:len(rust_old)] == rust_old, None)
+    if len(rust_old) == len(ref_old) + 1 and rust_old[:len(ref_old)] == ref_old:
+        return (True, rust_old[-1])
+    return (False, None)
+
+
+def evaluate_fork_coherence(series):
+    """Every Rust chain must be the same HISTORY as some reference's.
+
+    Membership in a union is not the property. A follower chain built
+    from blocks of two incompatible branches has every member published
+    by someone and is still a chain nobody has; so is one carrying an
+    invented tip that no reference ever confirms.
+
+    A sample is judged only when Rust and at least one reference are on
+    the SAME ordering block — two chains under different ordering blocks
+    are not chains of the same thing. Of those, Rust's chain has to be
+    coherent (prefix, or one ahead) with at least ONE such reference,
+    and a one-block lead has to be confirmed by that reference within
+    `LATER_CONFIRMATION_SAMPLES`.
+    """
+    # Where each reference published each block, per ordering id, so a
+    # lead can be confirmed against the reference it led.
+    published = {}
+    for i, sample in enumerate(series):
+        for node, ref_ordering, chain in reference_chains(sample):
+            if ref_ordering is None:
+                continue
+            for block in chain:
+                published.setdefault((node, ref_ordering, block), []).append(i)
+
+    incoherent, unconfirmed_leads, judged = [], [], 0
+    for i, sample in enumerate(series):
+        ordering = sample.get('ordering')
+        rust_chain = sample.get('rust_chain') or []
+        if ordering is None or not rust_chain:
+            continue
+        peers = [(node, chain) for node, ref_ordering, chain
+                 in reference_chains(sample) if ref_ordering == ordering]
+        if not peers:
+            continue
+        judged += 1
+        matched, lead_problem = False, None
+        for node, chain in peers:
+            coherent, lead = _is_coherent_with(rust_chain, chain)
+            if not coherent:
+                continue
+            if lead is None:
+                matched = True
+                break
+            confirmations = [j for j in published.get((node, ordering, lead), ())
+                             if i < j <= i + LATER_CONFIRMATION_SAMPLES]
+            if confirmations:
+                matched = True
+                break
+            lead_problem = {'sample': i, 'ordering': ordering, 'node': node,
+                            'unconfirmed_tip': lead,
+                            'within_samples': LATER_CONFIRMATION_SAMPLES}
+        if matched:
+            continue
+        if lead_problem is not None:
+            unconfirmed_leads.append(lead_problem)
+        else:
+            incoherent.append({
+                'sample': i, 'ordering': ordering,
+                'rust_chain': rust_chain[:8],
+                'references': {node: chain[:8] for node, chain in peers},
+            })
+    return {
+        'judged_samples': judged,
+        'incoherent_samples': incoherent,
+        'unconfirmed_one_block_leads': unconfirmed_leads,
+        'later_confirmation_samples': LATER_CONFIRMATION_SAMPLES,
+    }
 
 
 def compare_fork_switches(series):
-    """Did Rust's fork switches agree with the miner's?
+    """Did each Rust fork switch land on a chain a reference actually has?
 
-    Instant-by-instant equality is not the property — the follower learns
-    of a switch after the miner makes it — so each Rust switch is judged
-    against everything Scala was EVER seen holding for the same ordering
-    block:
-
-    * a block Rust APPLIED that Scala never listed under that ordering id
-      is a chain Scala does not have. That is the D3 sibling-completion
-      guard: completing a sibling must never manufacture a chain the
-      miner has no counterpart for.
-    * a block Rust ROLLED BACK that Scala still held on its LAST sample
-      for that ordering id is a switch Scala did not make.
-
-    Both are divergences. Everything else is lag.
+    A switch is judged as a pair of sets. The blocks it APPLIED must all
+    belong to the chain of the reference it landed on, the blocks it
+    ROLLED BACK must all be absent from that chain, and the resulting
+    chain must be coherent with it — the same history, not merely the
+    same members. A follower that rolled its chain back to nothing while
+    both miners kept theirs satisfies "every applied block was
+    published" trivially and is exactly the regression this has to
+    catch.
     """
-    scala_ever, scala_last = {}, {}
-    for sample in series:
-        ordering = sample.get('ordering')
-        if ordering is None:
-            continue
-        chain = reference_chain(sample)
-        scala_ever.setdefault(ordering, set()).update(chain)
-        scala_last[ordering] = chain
+    # The chain each reference held under each ordering id, last first.
+    seen = {}
+    for i, sample in enumerate(series):
+        for node, ref_ordering, chain in reference_chains(sample):
+            if ref_ordering is not None:
+                seen.setdefault((node, ref_ordering), []).append((i, chain))
+
     rust = fork_switches(series, 'rust')
-    unmatched_applied, rolled_back_still_held = [], []
+    unmatched, rolled_back_still_held = [], []
     for switch in rust:
         ordering = switch['ordering']
-        for block in switch['applied']:
-            if block not in scala_ever.get(ordering, set()):
-                unmatched_applied.append({**switch, 'block': block})
+        after = switch.get('chain_after') or []
+        applied, rolled_back = set(switch['applied']), set(switch['rolled_back'])
+        landed_on = None
+        for node in REFERENCE_NODES:
+            for j, chain in seen.get((node, ordering), ()):
+                if j < switch['index'] - LATER_CONFIRMATION_SAMPLES:
+                    continue
+                if j > switch['index'] + LATER_CONFIRMATION_SAMPLES:
+                    break
+                members = set(chain)
+                coherent, _ = _is_coherent_with(after, chain)
+                if coherent and applied <= members and not (rolled_back & members):
+                    landed_on = {'node': node, 'sample': j}
+                    break
+            if landed_on:
+                break
+        if landed_on is None:
+            unmatched.append({**switch, 'chain_after': after[:8]})
         for block in switch['rolled_back']:
-            if block in scala_last.get(ordering, set()):
-                rolled_back_still_held.append({**switch, 'block': block})
+            for node in REFERENCE_NODES:
+                held = seen.get((node, ordering), ())
+                if held and block in set(held[-1][1]):
+                    rolled_back_still_held.append({**switch, 'block': block,
+                                                   'node': node})
+                    break
     return {
         'rust_switches': rust,
         'scala_switches': fork_switches(series, 'scala'),
-        # THE guard: a block the follower switched onto that no miner
-        # ever published under that ordering block is a chain the
-        # miners do not have.
-        'applied_blocks_scala_never_had': unmatched_applied,
-        # TELEMETRY, not a verdict, and only meaningful with ONE miner.
-        # Two miners that cannot peer with each other each keep their own
-        # competing fork indefinitely, so every switch the follower makes
-        # necessarily rolls back blocks the OTHER miner is still holding
-        # — 27 of them in one run, none of them a divergence. What makes
-        # a rollback wrong is what replaced it, and that is the check
-        # above.
+        'scala2_switches': fork_switches(series, 'scala2'),
+        # THE guard: a switch whose applied and rolled-back sets do not
+        # match any reference's chain under the same ordering block.
+        'switches_matching_no_reference': unmatched,
+        # Telemetry with two miners that cannot peer with each other:
+        # each keeps its own fork, so a legitimate switch necessarily
+        # rolls back blocks the other is still holding.
         'rolled_back_blocks_still_held_by_a_miner': rolled_back_still_held,
         'single_miner_series': not any(s.get('scala2_chain') for s in series),
     }
