@@ -2065,19 +2065,56 @@ def _self_test():
     _changed = _msr.count([ln for ln in _log
                            if not ln.startswith('java.lang.Exception')])
     assert _changed['pow_failure_sites_disagree'] is True, _changed
-    # With no failures at all there is nothing to disagree about.
+    # With neither site logging there is nothing to disagree about.
     assert _msr.count(
         ['INFO Found solution for input block, sending it for validation',
          'INFO Solution accepted'])['pow_failure_sites_disagree'] is False
+    # But a build whose WARN has DISAPPEARED while the exception text
+    # survives is the same drift in the other direction, and gating the
+    # comparison on a nonzero WARN count reported agreement for it
+    # (codex review-2). Zero against zero already agrees; zero against
+    # two does not.
+    _warn_gone = _msr.count([
+        'INFO Found solution for input block, sending it for validation',
+        'INFO Processed solution y with the result Error(java.lang.Exception: '
+        'Invalid input block! PoW valid: false)',
+        'java.lang.Exception: Invalid input block! PoW valid: false'])
+    assert _warn_gone['pow_failures'] == 0, _warn_gone
+    assert _warn_gone['pow_failure_reply_lines'] == 2, _warn_gone
+    assert _warn_gone['pow_failure_sites_disagree'] is True, _warn_gone
     assert _counts['distinct_applied_input_blocks'] == 1, _counts
     assert _counts['applied_input_block_ids'] == ['ab' * 32], _counts
     # An empty window is UNKNOWN, not a run with no submissions.
     assert 'UNKNOWN, not zero' in _msr.count([])['unmatched']
     # The result line renders, names the build, and carries every
     # denominator §7a asks for.
+    # ----- fix round 1, Minor: the winning-chain count is a FLOOR -----
+    #
+    # The best input chain is sampled periodically and resets at every
+    # ordering block, so a block that was on the winning chain between
+    # two samples is never seen; and a read that was unavailable used to
+    # be skipped silently. The number is an observed lower bound and the
+    # evidence says so, with the sampling that produced it.
+    _chain = _msr.winning_chain_note(
+        applied={'aa', 'bb', 'cc'}, winning={'aa', 'bb', 'zz'},
+        reads=100, failures=7)
+    assert _chain['on_winning_chain'] == 2, _chain
+    assert _chain['on_winning_chain_is_lower_bound'] is True, _chain
+    assert _chain['chain_reads'] == 100, _chain
+    assert _chain['chain_read_failures'] == 7, _chain
+    assert _chain['applied_but_never_sampled_on_the_chain'] == ['cc'], _chain
+    assert 'lower bound' in _chain['source'], _chain
+    # A run in which every read failed has not observed the chain at all.
+    _blind = _msr.winning_chain_note({'aa'}, set(), reads=5, failures=5)
+    assert _blind['chain_never_observed'] is True, _blind
+    assert 'UNKNOWN' in _blind['unmatched'], _blind
+    assert _msr.winning_chain_note({'aa'}, {'aa'}, 5, 0).get(
+        'chain_never_observed') is False
+
     _line = _msr.result_line({
         'build': 'F11', 'miner': _counts,
-        'winning_chain': {'on_winning_chain': 1}})
+        'winning_chain': _msr.winning_chain_note({'ab' * 32}, {'ab' * 32},
+                                                 10, 0)})
     assert _line.startswith('miner_self_reject [F11]:'), _line
     for _fragment in ('submissions 3', 'replies 1 ok / 1 err / 1 missing',
                       'pow_failures 1', 'input_blocks_applied 1',

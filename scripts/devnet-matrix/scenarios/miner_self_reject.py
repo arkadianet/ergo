@@ -107,9 +107,13 @@ def count(lines):
     out['pow_failure_lines_per_failure'] = (
         round(out['pow_failure_reply_lines'] / out['pow_failures'], 2)
         if out['pow_failures'] else None)
-    out['pow_failure_sites_disagree'] = bool(
-        out['pow_failures']
-        and out['pow_failure_reply_lines'] != 2 * out['pow_failures'])
+    # Compared UNCONDITIONALLY. Gating this on a nonzero WARN count
+    # reported agreement for the case it exists to catch in the other
+    # direction: a build that stops logging the WARN while the exception
+    # text survives reads as 0 failures and says nothing is wrong. Zero
+    # against zero already agrees.
+    out['pow_failure_sites_disagree'] = (
+        out['pow_failure_reply_lines'] != 2 * out['pow_failures'])
     # The F11c evidence: a submission the generator never answered. Not
     # derived by subtraction anywhere else, because a negative would
     # mean the phrases no longer say what this counting assumes.
@@ -123,6 +127,43 @@ def count(lines):
             'the miner logged no solution submission in this window; the F11 '
             'denominators are UNKNOWN, not zero — check the phrases against '
             'the build before reading anything into them')
+    return out
+
+
+def winning_chain_note(applied, winning, reads, failures):
+    """How many applied input blocks were SEEN on the winning chain.
+
+    An observed LOWER BOUND, and labelled as one. The best input chain
+    is sampled periodically and resets at every ordering block, so a
+    block that joined and was replaced between two samples is never
+    seen; the count can only understate, never overstate. A read the
+    node could not answer used to be skipped in silence, which made a
+    run that observed the chain twice look like one that observed it
+    throughout — the failures are now counted, and a run in which every
+    read failed reports the chain as UNKNOWN rather than as a set of
+    blocks that never reached it.
+    """
+    applied, winning = set(applied), set(winning)
+    observed = reads - failures
+    out = {
+        'best_input_chain_members_seen': len(winning),
+        'on_winning_chain': len(applied & winning),
+        'on_winning_chain_is_lower_bound': True,
+        'applied_but_never_sampled_on_the_chain': sorted(applied - winning)[:20],
+        'chain_reads': reads,
+        'chain_read_failures': failures,
+        'chain_never_observed': observed <= 0,
+        'source': "the miner's own /blocks/bestInputChain, sampled through "
+                  'the window and unioned; a chain read once at the end '
+                  'covers one ordering block, not the window. The chain '
+                  'resets at every ordering block and is sampled, not '
+                  'followed, so this is an observed lower bound on '
+                  'winning-chain membership, never an exact count.',
+    }
+    if out['chain_never_observed']:
+        out['unmatched'] = (
+            f'all {reads} best-input-chain reads were unavailable, so '
+            'winning-chain membership for this window is UNKNOWN, not zero')
     return out
 
 
@@ -228,14 +269,9 @@ def run(ctx):
     miner = count(common.scala_window_lines(ctx, miner_node))
     ctx.note('miner', miner)
     applied = set(miner['applied_input_block_ids'])
-    ctx.note('winning_chain', {
-        'best_input_chain_members_seen': len(winning),
-        'on_winning_chain': len(applied & winning),
-        'applied_but_never_on_the_chain': sorted(applied - winning)[:20],
-        'source': "the miner's own /blocks/bestInputChain, sampled through "
-                  'the window and unioned; a chain read once at the end '
-                  'covers one ordering block, not the window',
-    })
+    chain = winning_chain_note(applied, winning, chain_reads,
+                               chain_read_failures)
+    ctx.note('winning_chain', chain)
     ctx.note('f11', {
         'measurement_only': 'this scenario has no PASS criterion; the numbers '
                             'are the evidence, and a stock run is what a '
@@ -253,8 +289,16 @@ def run(ctx):
     # MEASURED or INCOMPLETE — never PASS, which it has no criterion to
     # earn (spec §7a). A short window is not a verdict on the build; it
     # is a measurement that did not happen.
-    ctx.note('measurement_complete',
-             reached >= target and not miner.get('unmatched'))
+    ctx.note('measurement_complete', bool(
+        reached >= target
+        and not miner.get('unmatched')
+        # One of the six denominators is winning-chain membership; a
+        # window whose chain was never readable did not produce it.
+        and not chain.get('chain_never_observed')
+        # And a build whose two PoW-failure sites no longer agree is a
+        # build these phrases do not describe, so the count is not the
+        # measurement it claims to be.
+        and not miner.get('pow_failure_sites_disagree')))
 
     # The window not completing is reported; it is not absorbed, and it
     # is not a verdict on the build either.
