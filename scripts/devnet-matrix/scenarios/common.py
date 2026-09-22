@@ -118,12 +118,15 @@ def seed_second_miner(ctx, campaign, lifecycle):
     except RuntimeError as error:
         peered = str(error)
     ctx.note('peered_after_seed', peered)
+    # RECORDED, not failed. Whether the follower has reached the second
+    # miner within three minutes of the seed is a fact about dial
+    # timing, and the last run contradicted its own precondition: it
+    # held one peer here and went on to retain two competing trees and
+    # switch between them. The scenario's own evidence — `forks > 1`,
+    # or a two-peer sighting at any point in the window — is what
+    # decides whether it ran, and the scenario checks that itself.
     connected = _wait_for_peer_count(ctx, 'rust', 2)
     ctx.note('follower_peers_after_seed', connected)
-    if connected < 2:
-        ctx.fail('the follower did not connect to BOTH miners, so it cannot see '
-                 'the competing chains this scenario exists to produce',
-                 {'connected': connected})
     heights = {}
     for node in ('scala', 'scala2'):
         try:

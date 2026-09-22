@@ -56,6 +56,7 @@ def run(ctx):
     # competing trees retained under the best ordering block, so a
     # scenario that only read it at the end would usually read 1.
     fork_counts, fork_samples = [], []
+    peers_seen = ctx.evidence.get('follower_peers_after_seed') or 0
     blocks = ctx.args.ordering_blocks or ORDERING_BLOCKS
     start = smoke.scala_height(ctx.run)
     target = start + blocks
@@ -72,6 +73,8 @@ def run(ctx):
                         'at': time.time(), 'forks': forks,
                         'best_input_block': input_blocks.get('best_input_block'),
                         'waitlist': input_blocks.get('waitlist')})
+            peers_seen = max(peers_seen,
+                             len(smoke.api('rust', '/peers/connected') or []))
             reached = smoke.scala_height(ctx.run)
         except smoke.Unavailable:
             pass
@@ -81,6 +84,19 @@ def run(ctx):
 
     ctx.note('ordering_window', {'start_height': start, 'target': target,
                                  'reached': reached})
+    # Did the follower ever actually see both miners? Either a two-peer
+    # sighting anywhere in the window or a retained second tree proves
+    # it; `forks > 1` is the stronger of the two, because it is the
+    # competing tree itself rather than the connection that carried it.
+    ctx.note('follower_saw_both_miners', {
+        'max_peers_observed': peers_seen,
+        'samples_with_more_than_one_tree': len(fork_samples),
+    })
+    if peers_seen < 2 and not fork_samples:
+        ctx.fail('the follower never held two peers and never retained a second '
+                 'input-block tree, so it cannot have seen the competing chains '
+                 'this scenario exists to produce',
+                 {'max_peers_observed': peers_seen})
     ctx.note('forks_observed', {
         'samples': len(fork_counts),
         'max': max(fork_counts) if fork_counts else None,
