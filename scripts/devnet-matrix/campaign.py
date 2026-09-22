@@ -329,22 +329,37 @@ def node_pid(name):
     return int(path.read_text()) if path.exists() else None
 
 
-def _alive(pid):
-    """Does this PID still exist at all — zombie included?
+def _holds_resources(pid):
+    """Is this PID still holding its files, ports and database locks?
 
-    `lifecycle.owned` answers a different question, and answers it wrong
-    here: a SIGKILLed process becomes a zombie whose `/proc/<pid>/cmdline`
-    is EMPTY, so `owned` reports False while the process is still in the
-    table. Restarting the node on that signal raced the old one's
-    teardown and the replacement died with "Database already open".
+    Three states have to be told apart, and the first two attempts each
+    conflated a different pair:
+
+    * GONE — nothing to wait for;
+    * ZOMBIE — exited, every resource released by the kernel, and merely
+      waiting to be reaped. `os.kill(pid, 0)` still succeeds on one, so
+      treating that as "alive" made a SIGKILL look like it had failed
+      and the scenario aborted after 60 s;
+    * RUNNING — still holds the data directory, and a replacement
+      started now dies with "Database already open".
+
+    `lifecycle.owned` answers none of these: a zombie's
+    `/proc/<pid>/cmdline` is empty, so it reports False for a process
+    that may not have finished dying.
+
+    The zombie is also REAPED here when we are its parent, so it does not
+    linger for the rest of the run.
     """
     try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
+        os.waitpid(pid, os.WNOHANG)
+    except (ChildProcessError, OSError):
+        pass
+    try:
+        state = (Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1]
+                 .split(' ', 1)[0])
+    except (OSError, IndexError):
         return False
-    except PermissionError:
-        return True
+    return state != 'Z' 
 
 
 def kill_hard(name):
@@ -363,9 +378,9 @@ def kill_hard(name):
         raise Divergence(f'{name} is not running under this recipe; refusing to kill')
     os.kill(pid, signal.SIGKILL)
     deadline = time.monotonic() + 60
-    while _alive(pid) and time.monotonic() < deadline:
+    while _holds_resources(pid) and time.monotonic() < deadline:
         time.sleep(0.2)
-    if _alive(pid):
+    if _holds_resources(pid):
         raise Divergence(
             f'{name} (PID {pid}) survived SIGKILL for 60s; refusing to start a '
             'replacement over a data directory the old process still holds')
@@ -638,12 +653,21 @@ def _self_test():
     assert parsed['peers']['bind_addr'] == '127.0.0.1:19572', parsed['peers']
     assert parsed['peers']['known'] == ['127.0.0.1:19570'], parsed['peers']
     assert parsed['api']['bind'] == '127.0.0.1:19592', parsed['api']
-    # Every override the scenario declares, and nothing else, landed in
-    # the bounds table — including the one the recipe file already sets,
-    # which has to be REPLACED rather than duplicated.
-    assert parsed['input_blocks']['bounds'] == {
-        key: int(value) for _, key, value in evict_scenario.RUST_OVERRIDES
-    }, parsed['input_blocks']['bounds']
+    # Every override the scenario declares landed in the bounds table,
+    # and the recipe file's own settings survived alongside them.
+    bounds = parsed['input_blocks']['bounds']
+    for _, key, value in evict_scenario.RUST_OVERRIDES:
+        assert bounds.get(key) == int(value), (key, bounds)
+    assert bounds['waitlist_entries'] == 8192, bounds
+    # And an override for a key the recipe ALREADY sets replaces it
+    # rather than appending a second copy.
+    replaced = render_rust_config(
+        (HERE / 'rust-node.toml').read_text(), Path('/tmp/x/rust'),
+        ['scala', 'rust'],
+        overrides=[('input_blocks.bounds', 'waitlist_entries', '7')])
+    assert replaced.count('waitlist_entries') == 1, replaced
+    assert tomllib.loads(replaced)['input_blocks']['bounds'][
+        'waitlist_entries'] == 7, replaced
     # Untouched settings survive the render.
     assert parsed['input_blocks']['strict_field_binding'] is False, parsed
     assert parsed['mining']['enabled'] is False, parsed
@@ -701,6 +725,25 @@ def _self_test():
     orphan = [sample('O1', ['c', 'q', 'a'], ['c', 'b', 'a'])]
     found = common.chain_members_scala_never_had(orphan)
     assert [o['block'] for o in found] == ['q'], found
+
+    # ----- the kill-state test the `restart` scenario turns on -----
+    #
+    # Three states, and the first two attempts each conflated a different
+    # pair: a running process holds its data directory, a zombie holds
+    # nothing, and a missing PID holds nothing. Getting the middle one
+    # wrong aborted `restart` after a 60 s wait for a process that had
+    # already exited.
+    import subprocess as _sp
+    probe = _sp.Popen(['sleep', '30'])
+    assert _holds_resources(probe.pid), 'a running process holds its resources'
+    os.kill(probe.pid, signal.SIGKILL)
+    for _ in range(50):
+        if not _holds_resources(probe.pid):
+            break
+        time.sleep(0.1)
+    assert not _holds_resources(probe.pid), \
+        'a SIGKILLed child must read as released, zombie or not'
+    assert not _holds_resources(999_999), 'a missing PID holds nothing'
 
     print('campaign self-test OK: rendering, ports and the scenario set')
 

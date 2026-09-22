@@ -46,25 +46,27 @@ PAYMENTS_PER_ROUND = 4
 PAYMENT_NANOERG = 1_000_000
 
 # The bounds that starve the reconstruction path (spec §7.4 names, as
-# `ergo-node/src/config/toml_sections.rs` spells them):
+# `ergo-node/src/config/toml_sections.rs` spells them). Only the BODIES
+# are taken away:
 #
 # * `tx_cache_entries` is where the input-block transactions a rebuild
 #   would be assembled FROM live. At 4, the cache cannot hold a tree's
-#   worth of bodies, so they are evicted before the ordering block that
+#   worth of bodies, so they are gone before the ordering block that
 #   needs them arrives — the eviction this scenario is named for;
 # * `staging_bytes_total` bounds delivered-but-unverified bodies, so the
-#   node cannot simply re-stage what the cache dropped;
-# * `waitlist_entries` back at its crate default, so a disconnected
-#   announcement is dropped rather than parked until the rest arrives.
+#   node cannot simply re-stage what the cache dropped.
+#
+# The TREE is deliberately left alone. A previous attempt also squeezed
+# `records_per_ordering` to 2, and the node then held no input chain at
+# all for the announced block — so it never ATTEMPTED a rebuild, took
+# the ordinary download path, and emitted neither event. Zero
+# reconstructions and zero fallbacks is not the fallback path; it is the
+# scenario measuring nothing. (That the fallback event is not emitted
+# when there is no tree to rebuild from is itself worth reporting: the
+# telemetry undercounts downloads.)
 RUST_OVERRIDES = (
     ('input_blocks.bounds', 'tx_cache_entries', '4'),
     ('input_blocks.bounds', 'staging_bytes_total', '4096'),
-    ('input_blocks.bounds', 'waitlist_entries', '8'),
-    # The tree itself: at 2 records per ordering block the follower can
-    # never hold more than a sliver of the ~64 input blocks the miner
-    # publishes under one ordering block, so whatever it assembles is a
-    # strict subset of what the miner committed to.
-    ('input_blocks.bounds', 'records_per_ordering', '2'),
 )
 
 
