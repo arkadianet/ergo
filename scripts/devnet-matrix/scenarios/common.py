@@ -121,9 +121,19 @@ def seed_second_miner(ctx, campaign, lifecycle, nodes=('scala2',)):
         lifecycle.spawn(node)
         ctx.run.started(node)
         lifecycle.init_wallet(node)
-    # The follower has been dialling miner 2 since it started, and miner
-    # 2 was not there — so it is several failures into an exponential
-    # dial backoff that outlasts the scenario. See `restart_follower`.
+    # The follower has been dialling the seeded nodes since it started,
+    # and they were not there — so it is several failures into an
+    # exponential dial backoff (30 s, 2 min, 10 min, …) that outlasts the
+    # scenario. It is restarted to clear that, AND its address book is
+    # deleted: the backoff windows are persisted there
+    # (`ergo_node::node::util::wall_to_instant` restores them), so a
+    # restart alone brings the same backoff back. Measured on the first
+    # `--reference-follower both` validation run — the follower came back
+    # and immediately logged "peer bootstrap starved: no dial candidates
+    # (all known addresses in dial-backoff)", held the miner and neither
+    # follower, and the run produced 0 follower samples. The purge costs
+    # nothing: every node it needs is in the config's `known` list. See
+    # `restart_follower`, which purges between the stop and the respawn.
     restart_follower(ctx, campaign, lifecycle)
     # Reported, never raised: a seed that came up but did not peer is a
     # scenario that cannot run, and the evidence has to say which of the

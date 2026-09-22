@@ -2015,6 +2015,50 @@ def _self_test():
         ('reconstruct_rate.run must resolve its reference nodes from the '
          'roles, not from literal node names', _run_source)
 
+    # ----- fix round 1: the seed's rust restart must CLEAR the backoff -
+    #
+    # Measured on the first `--reference-follower both` validation run:
+    # the follower had been dialling `scala2` and `scala3` for the whole
+    # funding wait, with nothing there, so both addresses were deep in an
+    # exponential dial backoff. `seed_second_miner` restarts the follower
+    # to clear that — but the address book PERSISTS the backoff
+    # timestamps (`ergo_node::node::util::wall_to_instant` restores
+    # them), so it came back and immediately logged "peer bootstrap
+    # starved: no dial candidates (all known addresses in dial-backoff)".
+    # It held the miner and neither follower, and the run produced 0
+    # follower samples.
+    with tempfile.TemporaryDirectory() as _tmp:
+        _root = Path(_tmp)
+        for _node in ('rust', 'scala2'):
+            (_root / _node).mkdir(parents=True)
+        _book = _root / 'rust' / 'peers.redb'
+        _book.write_bytes(b'backoff state')
+        (_root / 'scala2' / 'peers.redb').write_bytes(b'not the follower')
+        _removed = purge_address_book(_root)
+        assert not _book.exists(), 'the follower\'s address book must go'
+        assert [str(_book)] == _removed, _removed
+        assert (_root / 'scala2' / 'peers.redb').exists(), \
+            'only the follower\'s book is purged'
+        # Idempotent: a run with no book is not an error.
+        assert purge_address_book(_root) == []
+    # And the seed does it, between stopping the follower and starting it
+    # again — a purge with the node running would be a no-op it then
+    # rewrites.
+    # The seed restarts the follower through `restart_follower`, which
+    # owns the purge.
+    assert 'restart_follower(ctx, campaign, lifecycle)' in inspect.getsource(
+        _common.seed_second_miner), (
+        'seed_second_miner restarts the follower to clear its dial '
+        'backoff; the backoff is persisted, so the address book has to go '
+        'with it')
+    _seed = inspect.getsource(_common.restart_follower)
+    assert 'purge_address_book' in _seed, (
+        'restart_follower must drop the persisted dial backoff')
+    assert _seed.index('purge_address_book') > _seed.index("stop(('rust',))"), \
+        'the purge belongs between the stop and the respawn'
+    assert _seed.index('purge_address_book') < _seed.index("spawn('rust')"), \
+        'the purge belongs between the stop and the respawn'
+
     # ----- fix round 1 (codex review-2): seed, THEN assert peering ---
     #
     # `--reference-follower` deliberately leaves its node out of
