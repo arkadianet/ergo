@@ -1561,6 +1561,41 @@ def _scala_log_lines(node):
         return []
 
 
+def open_measurement_window(ctx, collector):
+    """Open ONE measurement boundary for every half of the accounting.
+
+    The Rust half is a watermarked event collector; the Scala half is a
+    log file. They were opened independently, so the Rust numbers covered
+    the scenario's window while the Scala numbers covered the node's
+    whole lifetime — start-up, wallet initialisation and funding
+    included. Announcements decided before the window opened then
+    appeared in one accounting and not the other, and a scenario that
+    sampled the best chain from here on compared it against blocks
+    applied long before.
+
+    Returns the per-node line offsets, which the scenario records as
+    evidence: a window has to be quotable, not merely applied.
+    """
+    collector.poll()
+    ctx.collector = collector
+    ctx.collector_watermark = collector.highest_seen
+    ctx.scala_log_offsets = {
+        node: len(_scala_log_lines(node))
+        for node in (ctx.roles or {}) if node != 'rust'}
+    return ctx.scala_log_offsets
+
+
+def scala_window_lines(ctx, node):
+    """One Scala node's log lines SINCE the measurement window opened.
+
+    Without a window the whole log is returned — every caller then says
+    so in its own evidence rather than presenting a node's lifetime as a
+    measured interval.
+    """
+    offset = (getattr(ctx, 'scala_log_offsets', None) or {}).get(node, 0)
+    return _scala_log_lines(node)[offset:]
+
+
 def reconstruction_accounting(ctx):
     """The five numbers for every node in a run, keyed by ROLE.
 
@@ -1575,6 +1610,7 @@ def reconstruction_accounting(ctx):
     as a measurement.
     """
     out = {'fields': list(ACCOUNTING_FIELDS)}
+    offsets = getattr(ctx, 'scala_log_offsets', None) or {}
     for node, role in (ctx.roles or {}).items():
         if node == 'rust':
             collector, watermark = ctx.collector, ctx.collector_watermark
@@ -1597,7 +1633,16 @@ def reconstruction_accounting(ctx):
                               'collector, so completeness is unknown'}
                 entry['complete'] = None
         else:
-            entry = scala_accounting(_scala_log_lines(node))
+            offset = offsets.get(node, 0)
+            entry = scala_accounting(_scala_log_lines(node)[offset:])
+            entry['from_line'] = offset
+            entry['interval'] = (
+                'the measurement window the scenario opened, the same '
+                'boundary the Rust event watermark was taken at'
+                if node in offsets else
+                'the node\'s WHOLE log: this scenario opened no measurement '
+                'window, so the interval includes start-up and funding and '
+                'is not the one the Rust half covers')
         entry['node'] = node
         out[role] = entry
     return out

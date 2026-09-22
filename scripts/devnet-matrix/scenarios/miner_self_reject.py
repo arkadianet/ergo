@@ -32,6 +32,7 @@ the F11 finding quotes.
 import re
 import time
 
+import lifecycle
 import smoke
 from smoke import Unavailable, api, api_retry
 
@@ -203,9 +204,21 @@ def run(ctx):
     # The feed is polled as we go for the same reason every other
     # scenario does it: the ring evicts, and the driver's reconstruction
     # accounting is only a measurement if its window is known complete.
+    # ONE boundary for every half of this measurement: the Rust event
+    # watermark, the miner's log offset, and the best-chain sampling
+    # below all start here. Counting the miner's whole log against a
+    # chain sampled from this point made input blocks applied during
+    # start-up and funding read as blocks that never reached the winning
+    # chain.
+    miner_nodes, _followers = common.scala_reference_nodes(
+        ctx.roles, lifecycle.ROLES)
+    miner_node = miner_nodes[0]
     collector = common.EventCollector(ctx)
-    collector.poll()
-    ctx.collector, ctx.collector_watermark = collector, collector.highest_seen
+    offsets = common.open_measurement_window(ctx, collector)
+    ctx.note('measurement_window_opened_at', {
+        'scala_log_offsets': offsets,
+        'rust_event_watermark': ctx.collector_watermark,
+        'miner_node': miner_node})
 
     start = smoke.scala_height(ctx.run)
     target, reached, last, sent = start + blocks, start, start, []
@@ -214,15 +227,17 @@ def run(ctx):
     # the chain resets at each ordering block, so a single final read
     # would see one ordering block's worth of a 40-block window.
     winning = set()
+    chain_read_failures = chain_reads = 0
     seen = set()
     while time.monotonic() < ctx.run.deadline:
         collector.poll()
         campaign.drain_utxo_watch(ctx, seen)
         try:
-            chain = api('scala', '/blocks/bestInputChain') or {}
+            chain_reads += 1
+            chain = api(miner_node, '/blocks/bestInputChain') or {}
             winning.update(chain.get('bestInputBlocks') or [])
         except Unavailable:
-            pass
+            chain_read_failures += 1
         try:
             reached = smoke.scala_height(ctx.run)
         except Unavailable:
@@ -241,7 +256,7 @@ def run(ctx):
         'short_by': max(0, target - reached),
         'payments_submitted': len(sent)})
 
-    miner = count(common._scala_log_lines('scala'))
+    miner = count(common.scala_window_lines(ctx, miner_node))
     ctx.note('miner', miner)
     applied = set(miner['applied_input_block_ids'])
     ctx.note('winning_chain', {

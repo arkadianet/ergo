@@ -126,14 +126,6 @@ def _scala_log_counts(ctx, node='scala2', since_line=0):
     return out
 
 
-def _log_length(node):
-    path = smoke.WORK / f'{node}.log'
-    try:
-        return len(path.read_text(errors='replace').splitlines())
-    except OSError:
-        return 0
-
-
 def _fund(ctx):
     """A spendable coin and an address, so the ordering blocks in the
     window CARRY input-chain transactions.
@@ -211,13 +203,6 @@ def run(ctx):
     import campaign
     common.seed_second_miner(ctx, campaign, lifecycle, nodes=SEEDED_NODES)
 
-    collector = common.EventCollector(ctx)
-    collector.poll()
-    watermark = collector.highest_seen
-    # Hand the driver the collector, so the reconstruction accounting it
-    # writes for EVERY scenario uses this window — whose completeness is
-    # known — rather than a post-hoc read of a ring that has evicted.
-    ctx.collector, ctx.collector_watermark = collector, watermark
     # Every Scala node in THIS run, resolved from its roles: with
     # `--reference-follower patched` the stock follower is not here at
     # all, and with `both` there are two followers whose decisions are
@@ -225,8 +210,15 @@ def run(ctx):
     miner_nodes, follower_nodes = common.scala_reference_nodes(
         ctx.roles, lifecycle.ROLES)
     by_node = dict(ctx.roles or {})
-    scala_from = {node: _log_length(node)
-                  for node in (*miner_nodes, *follower_nodes)}
+    # ONE boundary for both halves: the Rust event watermark and every
+    # Scala log offset are taken here, so the ratio compares the same
+    # interval on both sides. The collector is handed to the driver too,
+    # so the reconstruction accounting it writes for EVERY scenario uses
+    # this window — whose completeness is known — rather than a post-hoc
+    # read of a ring that has evicted.
+    collector = common.EventCollector(ctx)
+    scala_from = common.open_measurement_window(ctx, collector)
+    watermark = ctx.collector_watermark
     ctx.note('reference_log_offsets', scala_from)
 
     # Walk the window, polling the event feed as we go so the ring

@@ -1879,6 +1879,91 @@ def _self_test():
     _silent = _common.scala_accounting(['INFO something else entirely'])
     assert 'UNKNOWN, not zero' in _silent['unmatched'], _silent
 
+    # ----- fix round 1, item 3: both halves count the SAME interval -----
+    #
+    # The Rust half was a watermarked collector over the scenario's
+    # window; the Scala half was the node's WHOLE log, which starts at
+    # spawn and covers start-up and funding as well. An input block
+    # applied before the window opened therefore appeared in one
+    # accounting and not the other, and `miner_self_reject` counted the
+    # miner's entire log against a best-chain sample that began after
+    # funding — so applied blocks outside the sampled interval read as
+    # blocks that never reached the winning chain.
+    class _StubCollector:
+        """Only what the accounting asks of a collector."""
+
+        def __init__(self, events):
+            self.events = list(events)
+            self.highest_seen = 41
+
+        def poll(self):
+            return self.events
+
+        def window(self, watermark):
+            return self.events
+
+        def summary(self, watermark):
+            return {'watermark': watermark}
+
+        def lost_in_window(self, watermark):
+            return False
+
+    class _StubCtx:
+        def __init__(self, role_map):
+            self.roles = dict(role_map)
+            self.collector = None
+            self.collector_watermark = 0
+
+    _startup = (
+        'INFO On processing ordering block aa, it is last input block Some(bb)\n'
+        'INFO Requesting all the block transactions for aa as prev input '
+        'block not found\n')
+    _in_window = (
+        'INFO Processing ordering block announcement for cc\n'
+        'INFO Applying block transactions from input-blocks for cc with '
+        'transactions: 3\n')
+    import smoke as _smoke
+    _saved_work = _smoke.WORK
+    try:
+        with tempfile.TemporaryDirectory() as _tmp:
+            _smoke.WORK = Path(_tmp)
+            (_smoke.WORK / 'scala2.log').write_text(_startup)
+            _ctx = _StubCtx({'scala2': 'scala_follower',
+                             'rust': 'rust_follower'})
+            _collector = _StubCollector([{'kind': 'ordering_reconstructed'}])
+            # ONE boundary for both halves.
+            _offsets = _common.open_measurement_window(_ctx, _collector)
+            assert _offsets == {'scala2': 2}, _offsets
+            assert _ctx.collector_watermark == 41, _ctx.collector_watermark
+            with (_smoke.WORK / 'scala2.log').open('a') as _fh:
+                _fh.write(_in_window)
+            _acct = _common.reconstruction_accounting(_ctx)
+            _half = _acct['scala_follower']
+            assert _half['from_line'] == 2, _half
+            assert _half['eligible_announcements'] == 1, _half
+            assert _half['reconstructed'] == 1, _half
+            # The two start-up lines are BEFORE the boundary and belong
+            # to neither half.
+            assert _half['download_no_prev_input_block'] == 0, _half
+            assert _acct['rust_follower']['reconstructed'] == 1, _acct
+            # Only what was written after the boundary is this window.
+            assert _common.scala_window_lines(_ctx, 'scala2') == \
+                _in_window.splitlines(), _common.scala_window_lines(_ctx, 'scala2')
+            # A scenario that never opened a window reads the whole log
+            # and SAYS so, rather than presenting it as a measurement.
+            _bare = _StubCtx({'scala2': 'scala_follower'})
+            _whole = _common.reconstruction_accounting(_bare)['scala_follower']
+            assert _whole['from_line'] == 0, _whole
+            assert 'window' in _whole.get('interval', ''), _whole
+    finally:
+        _smoke.WORK = _saved_work
+    # And the measurement scenario counts its miner over that same
+    # window rather than over the node's whole lifetime.
+    from scenarios import miner_self_reject as _msr_src
+    assert 'scala_window_lines' in inspect.getsource(_msr_src.run), \
+        ('miner_self_reject must count the window it sampled, not the '
+         'miner\'s entire log')
+
     # ----- fix round 1, item 1: the F5 counter reads EVERY follower -----
     #
     # `reconstruct_rate` counted its reference half from the literal
