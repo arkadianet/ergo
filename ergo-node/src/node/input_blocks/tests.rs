@@ -88,6 +88,19 @@ fn header_id_of(h: &Header) -> [u8; 32] {
     *serialize_header(h).expect("serialize").1.as_bytes()
 }
 
+/// Install `subblocks_per_block` in the STORE's active parameters —
+/// the source the announcement path reads (spec 6.5). Not
+/// `last_seen_active_params`, which is only the action loop's mirror.
+fn set_store_multiplier(state: &mut NodeState, multiplier: Option<i32>) {
+    let mut params = state.store.active_params().clone();
+    params.subblocks_per_block = multiplier;
+    state
+        .store
+        .as_utxo_mut()
+        .expect("utxo backend")
+        .set_active_params_for_test(params);
+}
+
 fn connect_peer(state: &mut NodeState, port: u16) -> std::net::SocketAddr {
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     // The receiver is dropped immediately: these tests assert on the
@@ -159,7 +172,13 @@ fn ctx_multiplier_comes_from_active_params_subblocks_per_block() {
     let data = build_ctx_data(&state, &[]);
     assert_eq!(data.with(|c| c.multiplier), None, "no id 9 => None");
 
-    state.last_seen_active_params.subblocks_per_block = Some(30);
+    set_store_multiplier(&mut state, Some(30));
+    let data = build_ctx_data(&state, &[]);
+    assert_eq!(data.with(|c| c.multiplier), Some(30));
+
+    // The action loop's mirror is NOT the source: a mirror that has not
+    // caught up with the committed epoch must not change the verdict.
+    state.last_seen_active_params.subblocks_per_block = Some(1);
     let data = build_ctx_data(&state, &[]);
     assert_eq!(data.with(|c| c.multiplier), Some(30));
 }
@@ -1190,7 +1209,7 @@ fn live_cfg() -> crate::config::InputBlocksConfig {
 /// permissive multiplier for unmined test headers).
 fn live_state(dir: &std::path::Path) -> NodeState {
     let mut state = make_state(&dir.join("state.redb"));
-    state.last_seen_active_params.subblocks_per_block = Some(i32::MAX);
+    set_store_multiplier(&mut state, Some(i32::MAX));
     state.input_blocks = Some(InputBlocksRuntime::new(&live_cfg(), Instant::now()));
     state
 }
@@ -4484,5 +4503,107 @@ fn the_announcement_payload_line_has_the_shape_the_harness_parses() {
     assert!(
         line.contains(&expected),
         "the harness matches `{expected}` literally; got `{line}`"
+    );
+}
+
+// ----- fix round 4 (M2 final whole-branch review) -----
+
+/// An announcement whose PoW hit sits strictly between the thresholds
+/// for multiplier 1 and multiplier 2: `target <= hit < 2 * target`.
+///
+/// `nBits` encodes a difficulty, and the target is `secp256k1_order /
+/// difficulty`; difficulty 2 therefore halves the target, putting the
+/// band within reach of an ordinary unmined test header. `nBits` is
+/// part of the hit's own preimage, so the target is fixed first and
+/// nonces are searched for a hit that lands in the band. Both ends are
+/// asserted at the callsite, so a search that drifted would fail loudly
+/// rather than silently testing nothing.
+fn announcement_with_hit_between_thresholds(
+    bodies: &[ergo_inputblocks::processor::Body],
+) -> ergo_ser::input_block::InputBlockAnnouncement {
+    use ergo_crypto::pow::{header_hit_v2, input_block_hit_valid};
+
+    let n_bits = ergo_ser::difficulty::encode_compact_bits(&num_bigint::BigUint::from(2u32));
+    for nonce in 1..4096u64 {
+        let mut ann = ts::announcement_for([0u8; 32], 1, nonce, None, bodies);
+        ann.header.n_bits = n_bits;
+        let hit = header_hit_v2(&ann.header).expect("v2 hit");
+        if !input_block_hit_valid(&hit, n_bits, 1) && input_block_hit_valid(&hit, n_bits, 2) {
+            return ann;
+        }
+    }
+    panic!("no nonce in range produced a hit between the two thresholds");
+}
+
+/// Finding 5: the announcement multiplier must come from the store, in
+/// the same read as the height.
+///
+/// `last_seen_active_params` is the action loop's mirror, refreshed by
+/// the 250 ms mempool tick, while the full-block height comes straight
+/// out of committed storage. Between an epoch block committing a raised
+/// `subBlocksPerBlock` and that tick firing the two disagree, and an
+/// announcement arriving in the gap is judged against the previous
+/// epoch's threshold. This one is a valid hit under the committed
+/// parameters and an invalid one under the mirror: it must be accepted,
+/// and its peer must not be penalised.
+#[test]
+fn announcement_pow_uses_the_stores_multiplier_not_the_stale_mirror() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    // Pre-epoch mirror: one input block per ordering block.
+    state.last_seen_active_params.subblocks_per_block = Some(1);
+    // The epoch block has committed; the store already carries the
+    // raised multiplier.
+    let mut committed = state.last_seen_active_params.clone();
+    committed.subblocks_per_block = Some(2);
+    state
+        .store
+        .as_utxo_mut()
+        .expect("utxo backend")
+        .set_active_params_for_test(committed);
+    state.input_blocks = Some(InputBlocksRuntime::new(&live_cfg(), Instant::now()));
+
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19631,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let bodies = [ts::body(1, 1)];
+    let ann = announcement_with_hit_between_thresholds(&bodies);
+    let hit = ergo_crypto::pow::header_hit_v2(&ann.header).expect("v2 hit");
+    assert!(
+        !ergo_crypto::pow::input_block_hit_valid(&hit, ann.header.n_bits, 1),
+        "premise: the stale multiplier rejects this hit"
+    );
+    assert!(
+        ergo_crypto::pow::input_block_hit_valid(&hit, ann.header.n_bits, 2),
+        "premise: the committed multiplier accepts it"
+    );
+    let ann_id = ts::ann_id(&ann);
+    let payload = ergo_p2p::message::serialize_input_block(&ann).unwrap();
+
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &payload,
+    );
+
+    assert!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .processor()
+            .announcement(&ann_id)
+            .is_some(),
+        "a hit against the committed multiplier is accepted"
+    );
+    assert!(
+        !actions.iter().any(|a| matches!(a, Action::Penalize { .. })),
+        "and its peer is not penalised: {actions:?}"
     );
 }

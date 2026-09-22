@@ -93,10 +93,15 @@ pub(in crate::node) fn build_ctx_data<'a>(
     }
     CtxData {
         // Spec 6.5: the CURRENT state's parameters, never the announced
-        // parent's epoch. `last_seen_active_params` is the action loop's
-        // mirror of `store.active_params()`, refreshed on every tip
-        // change before any input-block event is handled.
-        multiplier: state.last_seen_active_params.subblocks_per_block,
+        // parent's epoch. Read from the store, in the same read as the
+        // height below: `last_seen_active_params` is the action loop's
+        // mirror, refreshed on the 250 ms mempool tick, so between an
+        // epoch block committing and that tick firing it names the
+        // PREVIOUS epoch's multiplier while the height already names the
+        // new epoch. An announcement arriving in that gap would be
+        // judged against a threshold the network has moved off, and an
+        // honest peer penalised for a valid hit.
+        multiplier: state.store.active_params().subblocks_per_block,
         full_block_height: state.store.chain_state_meta().best_full_block_height,
         utxo_mode: state.store.as_utxo().is_some(),
         expected,

@@ -881,6 +881,22 @@ impl StateStore {
         &self.cached_active_params
     }
 
+    /// Overwrite the cached active parameters without applying a block.
+    ///
+    /// Exists so tests can put the store into the post-epoch-boundary
+    /// state (`active_params()` already updated) that block application
+    /// would otherwise have to produce, and observe readers that must
+    /// follow the store rather than a mirror refreshed on a separate
+    /// cadence. Gated behind `test-helpers`; production always reaches
+    /// this field through apply/rollback.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn set_active_params_for_test(
+        &mut self,
+        params: ergo_validation::ActiveProtocolParameters,
+    ) {
+        self.cached_active_params = params;
+    }
+
     /// Network-specific voting parameters seeded at `open` time.
     /// Stable for the store's lifetime — `voting_length` and the
     /// soft-fork thresholds are network constants, not per-epoch
