@@ -149,6 +149,16 @@ def run(ctx):
     ctx.run.started('scala')
     lifecycle.spawn('scala2')
     ctx.run.started('scala2')
+    # And restart the FOLLOWER. It spent the isolation window dialling
+    # the port miner 2 had moved off, so by the rejoin it is several
+    # failures into an exponential backoff longer than the convergence
+    # budget — attempt 2 never reconnected and never converged. Its data
+    # directory is untouched, so it resumes on the public branch it was
+    # following, which is exactly the branch that has to be unwound.
+    lifecycle.stop(('rust',))
+    lifecycle.spawn('rust')
+    ctx.run.started('rust')
+    ctx.note('follower_restarted_at_rejoin', True)
     # Recorded, not raised. The two miners cannot peer with each other,
     # so the second one's only peer is the follower, and requiring that
     # single connection to be up at one instant aborted a scenario whose
@@ -160,6 +170,8 @@ def run(ctx):
     except RuntimeError as error:
         rejoined = str(error)
     ctx.note('peered_after_rejoin', rejoined)
+    connected = common._wait_for_peer_count(ctx, 'rust', 2)
+    ctx.note('follower_peers_after_rejoin', connected)
 
     # The follower has to land on the private branch.
     converge_deadline = min(ctx.run.deadline, time.monotonic() + 600)
