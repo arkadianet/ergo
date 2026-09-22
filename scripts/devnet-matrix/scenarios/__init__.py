@@ -5,7 +5,8 @@ scenario moves (`RUST_OVERRIDES`, `SCALA_EXTRA`), and a `run(ctx)` that
 records what it observed on `ctx` and fails loudly for anything it could
 not observe. `campaign.py` owns starting, stopping and evidence.
 """
-from . import evict, flood, fork, reconstruct_rate, restart, rollback, steady
+from . import (evict, flood, fork, miner_self_reject, reconstruct_rate,
+               restart, rollback, steady)
 
 SCENARIOS = {
     'steady': steady,
@@ -15,4 +16,5 @@ SCENARIOS = {
     'restart': restart,
     'evict': evict,
     'flood': flood,
+    'miner_self_reject': miner_self_reject,
 }

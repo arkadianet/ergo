@@ -1351,3 +1351,176 @@ def check_bounds(ctx, observed_peaks, caps, what, unavailable_bounds=()):
                      {'peaks': observed_peaks})
     return {'checked': observed,
             'not_exposed_by_the_status_route': sorted(unavailable_bounds)}
+
+
+# ----- reconstruction accounting (M4, spec §7a "honest denominators") -----
+#
+# The same five numbers from every node that makes the
+# reconstruct-or-download decision, so a patched follower can be put
+# beside a stock one and the difference read off. Stated as an explicit
+# vocabulary rather than per-scenario ad-hoc tallies, because the
+# findings drafts quote these names and two scenarios counting
+# "fallbacks" differently would make the batch's numbers incomparable.
+#
+#   eligible_announcements  ordering announcements the node decided about
+#   reconstructed           rebuilt from input-block bodies, root matched
+#   download_missing_tx     fell back: an ingredient was missing
+#   download_root_mismatch  fell back: the rebuild did not reproduce the root
+#   skipped_no_chain        no rebuild attempted: no input chain to rebuild from
+#
+# `eligible_announcements` is the DENOMINATOR and is counted
+# independently (Rust: every outcome event; Scala: its own
+# "Processing ordering block announcement" line), so a node that
+# reported no outcome for an announcement shows up as `unaccounted`
+# rather than vanishing from the ratio.
+ACCOUNTING_FIELDS = ('eligible_announcements', 'reconstructed',
+                     'download_missing_tx', 'download_root_mismatch',
+                     'skipped_no_chain')
+
+# The Rust event feed's own strings (`ergo-node` `reconstruct.rs`
+# `MISSING_*`/`ROOT_MISMATCH`, `ergo-inputblocks` `NO_PREV_INPUT_BLOCK` /
+# `NO_INPUT_CHAIN`). Matched exactly: a renamed reason must read as
+# `other`, never be folded into a bucket it no longer belongs to.
+RUST_MISSING_REASONS = ('missing_broadcasted_tx', 'missing_input_body')
+RUST_ROOT_MISMATCH_REASONS = ('root_mismatch',)
+RUST_SKIP_REASONS = ('no_prev_input_block', 'no_chain')
+
+# The pinned Scala build's log lines for the same five outcomes
+# (`ErgoNodeViewHolder.processOrderingBlock`, 62c10315 lines 431, 470,
+# 476, 480, 490). Lower-cased substrings, so a wording change reads as
+# "not found" rather than as a silent zero.
+SCALA_PHRASES = {
+    'eligible_announcements': 'processing ordering block announcement for',
+    'reconstructed': 'applying block transactions from input-blocks for',
+    'download_missing_tx': 'as not all the transactions available',
+    'download_root_mismatch': 'as merkle root does not match',
+    'skipped_no_chain': 'parent header not found for ordering block',
+}
+
+
+def _empty_accounting(source, **extra):
+    out = {field: 0 for field in ACCOUNTING_FIELDS}
+    out['source'] = source
+    out.update(extra)
+    return out
+
+
+def rust_accounting(events):
+    """The five numbers from a window of the Rust node's event feed."""
+    out = _empty_accounting('rust event feed')
+    other = {}
+    for event in events:
+        kind = event.get('kind')
+        detail = event.get('detail')
+        if kind == 'ordering_reconstructed':
+            out['reconstructed'] += 1
+        elif kind == 'ordering_reconstruct_fallback':
+            if detail in RUST_MISSING_REASONS:
+                out['download_missing_tx'] += 1
+            elif detail in RUST_ROOT_MISMATCH_REASONS:
+                out['download_root_mismatch'] += 1
+            else:
+                # A storage error is a fallback, and it is NOT one of
+                # the two the comparison is about; counting it as either
+                # would misattribute it.
+                other[f'fallback:{detail}'] = other.get(
+                    f'fallback:{detail}', 0) + 1
+        elif kind == 'ordering_reconstruct_skipped':
+            if detail in RUST_SKIP_REASONS:
+                out['skipped_no_chain'] += 1
+            else:
+                other[f'skipped:{detail}'] = other.get(
+                    f'skipped:{detail}', 0) + 1
+        else:
+            continue
+        # The denominator counts every outcome, INCLUDING the ones that
+        # are none of the five: a storage-error fallback is an
+        # announcement the node decided about, and dropping it would
+        # flatter the ratio.
+        out['eligible_announcements'] += 1
+    out['other_outcomes'] = other
+    return _with_ratio(out)
+
+
+def scala_accounting(lines):
+    """The five numbers from a window of a Scala node's log."""
+    out = _empty_accounting(
+        'scala log (ErgoNodeViewHolder.processOrderingBlock, 62c10315)')
+    for line in lines:
+        low = line.lower()
+        for field, phrase in SCALA_PHRASES.items():
+            if phrase in low:
+                out[field] += 1
+    out['log_lines'] = len(lines)
+    if not out['eligible_announcements'] and not any(
+            out[f] for f in ACCOUNTING_FIELDS):
+        # A build that logs none of the five is UNKNOWN, not a run of
+        # zeroes: the reference half of a ratio has to be measured.
+        out['unmatched'] = (
+            'none of the five phrases appears in this node\'s log for the '
+            'window; its reconstruction accounting is UNKNOWN, not zero')
+    return _with_ratio(out)
+
+
+def _with_ratio(out):
+    """Add the derived ratio and the unaccounted remainder."""
+    eligible = out['eligible_announcements']
+    decided = (out['reconstructed'] + out['download_missing_tx']
+               + out['download_root_mismatch'] + out['skipped_no_chain'])
+    out['decided'] = decided
+    # Announcements the node decided about but reported no outcome for.
+    # Never silently dropped from the denominator.
+    out['unaccounted'] = max(0, eligible - decided)
+    out['reconstructed_ratio'] = (
+        round(out['reconstructed'] / eligible, 4) if eligible else None)
+    return out
+
+
+def _scala_log_lines(node):
+    path = smoke.WORK / f'{node}.log'
+    try:
+        return path.read_text(errors='replace').splitlines()
+    except OSError:
+        return []
+
+
+def reconstruction_accounting(ctx):
+    """The five numbers for every node in a run, keyed by ROLE.
+
+    Called by the driver at finalization, so every scenario's evidence
+    carries them. The node logs are already scenario-scoped (the driver
+    rotates them before the nodes start), so the whole live log IS this
+    scenario's window.
+
+    The Rust half prefers a scenario's own incremental collector, whose
+    completeness is known; without one it reads the feed once and SAYS
+    the window may be incomplete rather than presenting a post-hoc read
+    as a measurement.
+    """
+    out = {'fields': list(ACCOUNTING_FIELDS)}
+    for node, role in (ctx.roles or {}).items():
+        if node == 'rust':
+            collector, watermark = ctx.collector, ctx.collector_watermark
+            if collector is not None:
+                entry = rust_accounting(collector.window(watermark))
+                entry['collection'] = collector.summary(watermark)
+                entry['complete'] = not collector.lost_in_window(watermark)
+            else:
+                try:
+                    events = rust_events(ctx)
+                except Unavailable as error:
+                    out[role] = {'node': node,
+                                 'unavailable': f'{error}'}
+                    continue
+                entry = rust_accounting(events)
+                entry['collection'] = {
+                    'mode': 'single post-hoc read of a BOUNDED ring',
+                    'caveat': 'entries evicted before this read are not '
+                              'counted; the scenario kept no incremental '
+                              'collector, so completeness is unknown'}
+                entry['complete'] = None
+        else:
+            entry = scala_accounting(_scala_log_lines(node))
+        entry['node'] = node
+        out[role] = entry
+    return out

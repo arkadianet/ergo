@@ -194,6 +194,10 @@ def run(ctx):
     collector = common.EventCollector(ctx)
     collector.poll()
     watermark = collector.highest_seen
+    # Hand the driver the collector, so the reconstruction accounting it
+    # writes for EVERY scenario uses this window — whose completeness is
+    # known — rather than a post-hoc read of a ring that has evicted.
+    ctx.collector, ctx.collector_watermark = collector, watermark
     scala_from = {node: _log_length(node) for node in ('scala', 'scala2')}
     ctx.note('reference_log_offsets', scala_from)
 

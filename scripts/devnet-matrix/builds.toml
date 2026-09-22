@@ -1,0 +1,59 @@
+# The provisioned Scala Matrix builds a devnet role may run (spec §4, §7a).
+#
+# One work directory per build, all under `root`. They live in a SIBLING
+# worktree rather than in this one because provisioning costs a sigma
+# `publishLocal` plus a full ergo compile, and every worktree of this
+# repo wants the same stock pin. `root` is resolved against this
+# worktree's repo root; `MATRIX_BUILDS_ROOT` overrides it.
+#
+# `stock` is provisioned and IMMUTABLE. The patch builds are created by
+#
+#   python3 scripts/jvm_weak_blocks_oracle/provision.py \
+#     --ergo-source ~/coding/development/arkadianet/ergo-scala \
+#     --ergo-ref matrix/<branch> --work-dir <root>/.work-<name> --sigma-reuse
+#
+# as each patch branch lands (plan 3 tasks 3-9). A build that is not
+# provisioned yet is declared here anyway: `--build F14` then fails with
+# the command that would create it, rather than with a missing name.
+
+root = "../input-blocks/scripts/jvm_weak_blocks_oracle"
+
+[builds.stock]
+work_dir = ".work-62c10315"
+ergo_ref = "62c10315e1ebcac4480dba6bacdc2100a38119e5"
+description = "upstream ergoplatform/ergo weak-blocks @ 62c10315 — the M4 pin, and the baseline every patched number is measured against"
+
+[builds.F16]
+work_dir = ".work-F16"
+ergo_ref = "matrix/F16-input-block-routes"
+description = "F16: explicit end-of-path directive on getFullBlockByHeaderIdR so the input-block transaction routes are reachable"
+
+[builds.F12F05]
+work_dir = ".work-F12F05"
+ergo_ref = "matrix/F12-F05-reconstruction"
+description = "F12+F5: the holder reconstructs under parentId in the order the miner commits"
+
+[builds.F14]
+work_dir = ".work-F14"
+ergo_ref = "matrix/F13-F14-follower-sync"
+description = "F14: applyDisconnected becomes a graph walk that consumes attached waitlist entries"
+
+[builds.F13]
+work_dir = ".work-F13"
+ergo_ref = "matrix/F13-F14-follower-sync"
+description = "F13: a bounded untrusted pending store for the root announcement, replayed through the +1 validation path"
+
+[builds.F04]
+work_dir = ".work-F04"
+ergo_ref = "matrix/F04-announcement-binding"
+description = "F4/F4b/F4c: every announced field bound to its extension leaf, on all three generation paths"
+
+[builds.F11]
+work_dir = ".work-F11"
+ergo_ref = "matrix/F11-candidate-race"
+description = "F11: a bounded ring of recent candidates, retained work separated from active work, and a reply on every submission"
+
+[builds.all]
+work_dir = ".work-all"
+ergo_ref = "matrix-fixes-all"
+description = "the integration build: base + every patch branch merged, measured ONCE at the end and never used for a per-patch claim"

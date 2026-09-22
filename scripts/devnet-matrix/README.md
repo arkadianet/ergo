@@ -251,3 +251,95 @@ Build the node in **release** before running: the follower's throughput
 is what assertions 2, 3 and 5 measure, and a debug build is not a
 measurement of the shipped node. `lifecycle.py` prefers
 `target/release/ergo-node` and falls back to debug.
+
+## M4: builds, roles and the ablation switch
+
+M4 proves one upstream patch at a time, so the harness had to learn two
+things the M2/M3 shape did not need: which BUILD a node is running, and
+what JOB it is doing.
+
+### Builds
+
+`builds.toml` lists the provisioned Scala builds by the names
+`campaign.py --build` accepts — `stock`, `F16`, `F12F05`, `F14`, `F13`,
+`F04`, `F11`, `all` — and `builds.py` loads them. A build's identity is
+its COMPILED OUTPUT, not its source commit: `class_dir_sha256` is the
+SHA-256 over the sorted `<project>/<path>` plus content of every class
+file on the exported runtime classpath, and a node refuses to start on a
+build that no longer reproduces its manifest's hash. Two work
+directories at the same commit can still differ (a half-finished
+`sbt compile`, a stale incremental cache, an edited file), and a devnet
+number attributed to the wrong build is worse than no number.
+
+```bash
+python3 scripts/devnet-matrix/builds.py            # list
+python3 scripts/devnet-matrix/builds.py --verify   # re-hash each one
+```
+
+Every scenario's evidence file records `builds: {role: manifest}`, so a
+number in it is attributable or it is not evidence.
+
+### Roles
+
+| role | node | p2p | REST | job |
+|---|---|---|---|---|
+| `scala_miner` | scala | 19570 | 19590 | the stock reference miner |
+| `scala_miner_patched` | scala | 19570 | 19590 | the same slot on `--build` |
+| `scala_miner2` | scala2 | 19571 | 19591 | the second miner (fork, rollback) |
+| `scala_follower` | scala2 | 19571 | 19591 | the STOCK reference follower |
+| `scala_follower_patched` | scala3 | 19573 | 19593 | the patched reference follower |
+| `rust_follower` | rust | 19572 | 19592 | the port under test |
+
+(Campaign ports; the smoke's own band is 19560-19563 / 19580-19583.)
+A node is a process slot; a role is what it is doing in an experiment.
+Roles that share a slot are alternatives, and `campaign.py --self-test`
+refuses a scenario whose roles do not map one-to-one onto its nodes.
+Whether a Scala node mines is derived from its ROLE, so a follower role
+added later cannot silently become a second miner.
+
+The role table lives in `roles.py` rather than `lifecycle.py` on
+purpose: `lifecycle` reads its ports from the environment AT IMPORT, and
+the campaign resolves roles before it sets them.
+
+### `--build` and `--reference-follower`
+
+`--build <name>` (default `stock`) selects the build for every
+`*_patched` role; every other Scala role stays on `stock`. That is what
+makes a run an ablation — base + one patch against base — rather than a
+comparison of two integration builds (spec §7a). An unknown build stops
+the run; a declared but unprovisioned one stops it with the
+`provision.py` command that would create it.
+
+`--reference-follower stock|patched|both` is accepted by `steady`,
+`restart`, `fork` and `reconstruct_rate`. `fork` and `rollback` spend the
+`scala2` slot on their second miner, so `stock` and `both` are REFUSED
+there with the reason rather than silently downgraded.
+
+### Reconstruction accounting
+
+Every scenario's evidence now carries the same five numbers per role, so
+a patched follower can be read against a stock one:
+
+| field | Rust (event feed) | Scala (`ErgoNodeViewHolder`, 62c10315) |
+|---|---|---|
+| `eligible_announcements` | every outcome event | `Processing ordering block announcement for` |
+| `reconstructed` | `ordering_reconstructed` | `Applying block transactions from input-blocks for` |
+| `download_missing_tx` | fallback `missing_broadcasted_tx` / `missing_input_body` | `… as not all the transactions available` |
+| `download_root_mismatch` | fallback `root_mismatch` | `… as Merkle root does not match` |
+| `skipped_no_chain` | `ordering_reconstruct_skipped` | `Parent header not found for ordering block` |
+
+An outcome that is none of the five (a `storage_error` fallback) is
+counted in the DENOMINATOR and reported separately, never folded into a
+bucket it does not belong to. A Scala build that logs none of the five
+reads as UNKNOWN, not as a clean run of zeroes.
+
+### `miner_self_reject`
+
+A MEASUREMENT scenario with no pass criterion, for F11: it runs one
+Scala miner on `--build` for 40 ordering blocks under a funded workload
+and counts submissions, successful replies, error replies, submissions
+that got NO reply, `Invalid input block` PoW failures, applied input
+blocks, and how many of those reached the best input chain. A stock run
+is the baseline the patched run is read against; `never_sealed = 0`
+alone proves nothing, which is why all six denominators are reported
+together.
