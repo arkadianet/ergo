@@ -45,6 +45,26 @@ def wait_ordering_blocks(ctx, blocks, what):
     return start, reached
 
 
+def _wait_for_peer_count(ctx, node, wanted, budget=180.0):
+    """Block until `node` reports `wanted` connected peers.
+
+    Returns the count it ended on — short is reported by the caller, not
+    swallowed: a follower that never reached the second miner has not
+    observed anything about two miners.
+    """
+    deadline = min(ctx.run.deadline, time.monotonic() + budget)
+    count = 0
+    while time.monotonic() < deadline:
+        try:
+            count = len(api(node, '/peers/connected') or [])
+        except Unavailable:
+            count = 0
+        if count >= wanted:
+            return count
+        ctx.run.idle(1)
+    return count
+
+
 def seed_second_miner(ctx, campaign, lifecycle):
     """Give miner 2 the chain by COPYING miner 1's data directory.
 
@@ -80,6 +100,22 @@ def seed_second_miner(ctx, campaign, lifecycle):
     lifecycle.spawn('scala2')
     ctx.run.started('scala2')
     lifecycle.init_wallet('scala2')
+    # The follower has been dialling miner 2 since it started, and miner
+    # 2 was not there — so it is several failures into an exponential
+    # dial backoff (30 s, 2 min, 10 min, …) that outlasts the scenario.
+    # Restarting it clears that: it comes back with no backoff state and
+    # dials both miners at once. Its data directory is untouched, so it
+    # resumes on the chain it already had.
+    lifecycle.stop(('rust',))
+    lifecycle.spawn('rust')
+    ctx.run.started('rust')
+    lifecycle.wait_peered(names=['scala', 'scala2', 'rust'])
+    connected = _wait_for_peer_count(ctx, 'rust', 2)
+    ctx.note('follower_peers_after_seed', connected)
+    if connected < 2:
+        ctx.fail('the follower did not connect to BOTH miners, so it cannot see '
+                 'the competing chains this scenario exists to produce',
+                 {'connected': connected})
     heights = {}
     for node in ('scala', 'scala2'):
         try:
