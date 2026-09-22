@@ -486,6 +486,29 @@ def _self_test():
         assert 'rust' in module.NODES, name
         assert ('scala2' in module.NODES) == (name in TWO_MINER_SCENARIOS), name
 
+    # The REAL recipe file, rendered with the real overrides, has to parse
+    # as TOML and carry the values the scenario asked for. A renderer
+    # checked only against a toy template can still emit something the
+    # node refuses to read — and the node refusing its config looks, from
+    # the outside, exactly like a devnet that would not start.
+    import tomllib
+
+    from scenarios import evict as evict_scenario
+    real = render_rust_config((HERE / 'rust-node.toml').read_text(),
+                              Path('/tmp/x/rust'), ['scala', 'rust'],
+                              evict_scenario.RUST_OVERRIDES)
+    parsed = tomllib.loads(real)
+    assert parsed['data_dir'] == '/tmp/x/rust', parsed['data_dir']
+    assert parsed['peers']['bind_addr'] == '127.0.0.1:19572', parsed['peers']
+    assert parsed['peers']['known'] == ['127.0.0.1:19570'], parsed['peers']
+    assert parsed['api']['bind'] == '127.0.0.1:19592', parsed['api']
+    assert parsed['input_blocks']['bounds'] == {
+        'waitlist_entries': 8, 'tx_cache_entries': 4,
+        'staging_bytes_total': 4096}, parsed['input_blocks']['bounds']
+    # Untouched settings survive the render.
+    assert parsed['input_blocks']['strict_field_binding'] is False, parsed
+    assert parsed['mining']['enabled'] is False, parsed
+
     # ----- the fork evaluator, which decides the `fork` scenario -----
     from scenarios import common
 
