@@ -64,6 +64,7 @@ impl CtxData<'_> {
             None => expected_n_bits_after(self.state, parent),
         };
         let block_transactions_known = |id: &OrderingId| block_transactions_known(self.state, id);
+        let header_known = |id: &OrderingId| header_known(self.state, id);
         let ctx = ProcessorCtx {
             multiplier: self.multiplier,
             expected_n_bits: &expected_n_bits,
@@ -71,6 +72,7 @@ impl CtxData<'_> {
             utxo_mode: self.utxo_mode,
             full_block_height: self.full_block_height,
             block_transactions_known: &block_transactions_known,
+            header_known: &header_known,
         };
         f(&ctx)
     }
@@ -202,6 +204,14 @@ pub(in crate::node) fn transactions_section_id(
         header_id,
         header.transactions_root.as_bytes(),
     ))
+}
+
+/// Scala's `historyReader.contains(header.id)` in
+/// `processOrderingBlockAnnouncement`: does the node already hold this
+/// ordering block's header? A known header makes the announcement dead
+/// weight — spec 9.3 skips it before PoW, storage and relay.
+pub(in crate::node) fn header_known(state: &NodeState, ordering_id: &OrderingId) -> bool {
+    state.store.get_header(ordering_id).ok().flatten().is_some()
 }
 
 /// Scala `historyReader.contains(header.transactionsId)`: does the node

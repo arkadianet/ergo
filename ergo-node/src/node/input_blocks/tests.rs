@@ -3403,7 +3403,10 @@ fn reconstructable_announcement(
     root: [u8; 32],
     fields: Vec<([u8; 2], Vec<u8>)>,
 ) -> ergo_ser::input_block::OrderingBlockAnnouncement {
-    let mut ann = ts::ordering_announcement([0x77; 32], 5, 9, fields);
+    // Height `full + 1` for a fresh `live_state` (best full block 0):
+    // spec 9.3's receipt window is +-2, so a fixture outside it would be
+    // discarded before it ever reached the reconstruction under test.
+    let mut ann = ts::ordering_announcement([0x77; 32], 1, 9, fields);
     ann.non_broadcasted_transactions = non_broadcasted;
     ann.broadcasted_transaction_ids = broadcasted
         .iter()
@@ -3522,8 +3525,12 @@ fn reconstruct_with_all_broadcasted_in_mempool_persists_block_transactions_and_a
         root,
         Vec::new(),
     );
-    let header_id = store_header(&mut state, &ann.header);
+    // Receipt first, then the header: an announcement for a header the
+    // node already holds is discarded on receipt (spec 9.3), so seeding
+    // the header first would leave the ordering store empty.
+    let header = ann.header.clone();
     store_ordering_announcement(&mut state, ann, tag);
+    let header_id = store_header(&mut state, &header);
 
     let actions = execute_effects(
         &mut state,
@@ -3592,8 +3599,12 @@ fn reconstruct_with_root_mismatch_requests_block_transactions_from_announcer() {
     // A root that does not belong to `carried`.
     let ann = reconstructable_announcement(vec![carried.clone()], &[], [0x44; 32], Vec::new());
     let announced_root = *ann.header.transactions_root.as_bytes();
-    let header_id = store_header(&mut state, &ann.header);
+    // Receipt first, then the header: an announcement for a header the
+    // node already holds is discarded on receipt (spec 9.3), so seeding
+    // the header first would leave the ordering store empty.
+    let header = ann.header.clone();
     store_ordering_announcement(&mut state, ann, tag);
+    let header_id = store_header(&mut state, &header);
 
     let actions = execute_effects(
         &mut state,
@@ -3664,8 +3675,12 @@ fn reconstruct_with_missing_broadcasted_tx_requests_block_transactions() {
         root,
         Vec::new(),
     );
-    let header_id = store_header(&mut state, &ann.header);
+    // Receipt first, then the header: an announcement for a header the
+    // node already holds is discarded on receipt (spec 9.3), so seeding
+    // the header first would leave the ordering store empty.
+    let header = ann.header.clone();
     store_ordering_announcement(&mut state, ann, tag);
+    let header_id = store_header(&mut state, &header);
 
     let actions = execute_effects(
         &mut state,
@@ -3976,8 +3991,9 @@ fn reconstruction_tries_both_orders_and_reports_the_one_that_matched() {
             root,
             vec![([0x03, 0x02], input_block.to_vec())],
         );
-        let header_id = store_header(&mut state, &ann.header);
+        let header = ann.header.clone();
         store_ordering_announcement(&mut state, ann, tag);
+        let header_id = store_header(&mut state, &header);
         let rt = state.input_blocks.as_ref().unwrap();
         let rec = super::reconstruct::plan_reconstruction(
             &state.store,
@@ -4071,8 +4087,12 @@ fn reconstruction_falls_back_when_no_order_reproduces_the_root() {
         [0x5c; 32],
         vec![([0x03, 0x02], input_block.to_vec())],
     );
-    let header_id = store_header(&mut state, &ann.header);
+    // Receipt first, then the header: an announcement for a header the
+    // node already holds is discarded on receipt (spec 9.3), so seeding
+    // the header first would leave the ordering store empty.
+    let header = ann.header.clone();
     store_ordering_announcement(&mut state, ann, tag);
+    let header_id = store_header(&mut state, &header);
     let rt = state.input_blocks.as_ref().unwrap();
     let rec = super::reconstruct::plan_reconstruction(
         &state.store,
@@ -4279,8 +4299,10 @@ fn mainnet_blocks(upto: u32) -> Vec<MainnetBlock> {
 }
 
 /// A node whose committed tip is mainnet block `upto - 1`, reached by
-/// applying real blocks through the ordinary pipeline, with block `upto`'s
-/// header already validated and on the best chain.
+/// applying real blocks through the ordinary pipeline. Block `upto`'s
+/// header is deliberately NOT seeded: an ordering announcement for a
+/// header the node already holds is discarded on receipt (spec 9.3), and
+/// the reconstruction persists the announced header itself.
 fn mainnet_state_before(dir: &std::path::Path, upto: u32) -> (NodeState, Vec<MainnetBlock>) {
     let mut state = live_state(dir);
     let blocks = mainnet_blocks(upto);
@@ -4293,6 +4315,7 @@ fn mainnet_state_before(dir: &std::path::Path, upto: u32) -> (NodeState, Vec<Mai
 
     let rows: Vec<(u32, [u8; 32], Vec<u8>, Header)> = blocks
         .iter()
+        .filter(|b| b.height < upto)
         .map(|b| {
             (
                 b.height,

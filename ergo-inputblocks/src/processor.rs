@@ -345,6 +345,12 @@ pub enum DropReason {
     MultiplierUnavailable,
     /// The ordering-announcement store is full; the oldest was dropped.
     OrderingAnnouncementsFull,
+    /// An ordering announcement for a header the node already holds
+    /// (spec 9.3 / Scala `processOrderingBlockAnnouncement`). Discarded
+    /// before PoW, storage and relay: a peer replaying known
+    /// announcements would otherwise buy repeated PoW verification, an
+    /// `Inv` broadcast and an eviction from the announcement store.
+    OrderingHeaderKnown,
     /// Bodies were delivered for a block the processor has no record of.
     /// Not in the spec's list: Scala logs and ignores this case
     /// (`applyInputBlockTransactions`'s `case None`), and the node needs
@@ -390,6 +396,7 @@ impl DropReason {
             Self::ValidationUnavailable => "ValidationUnavailable",
             Self::MultiplierUnavailable => "MultiplierUnavailable",
             Self::OrderingAnnouncementsFull => "OrderingAnnouncementsFull",
+            Self::OrderingHeaderKnown => "OrderingHeaderKnown",
             Self::UnknownBlock => "UnknownBlock",
             Self::SelectionSettled { .. } => "SelectionSettled",
             Self::DigestMode => "DigestMode",
@@ -419,6 +426,7 @@ impl DropReason {
         "ValidationUnavailable",
         "MultiplierUnavailable",
         "OrderingAnnouncementsFull",
+        "OrderingHeaderKnown",
         "UnknownBlock",
         "SelectionSettled",
         "DigestMode",
@@ -462,6 +470,11 @@ pub struct ProcessorCtx<'a> {
     /// Whether the node already has an ordering block's transaction
     /// section (Scala `historyReader.contains(header.transactionsId)`).
     pub block_transactions_known: &'a dyn Fn(&OrderingId) -> bool,
+    /// Whether the node already holds an ordering block's HEADER (Scala
+    /// `processOrderingBlockAnnouncement`'s "skip if the header is
+    /// known", spec 9.3). Distinct from `block_transactions_known`: the
+    /// header can be stored long before its transactions are.
+    pub header_known: &'a dyn Fn(&OrderingId) -> bool,
 }
 
 /// One announcement record (Scala `inputBlockRecords`).
@@ -3114,6 +3127,29 @@ impl Processor {
             return;
         };
         let header_id: OrderingId = *mid.as_bytes();
+        // Spec 9.3 / Scala `processOrderingBlockAnnouncement`: the ±2
+        // height window and the known-header skip come FIRST, before any
+        // PoW verification, before the store and before the relay.
+        // Without them a peer can replay valid historical announcements
+        // and buy, per frame, a PoW verification, an `Inv` broadcast to
+        // every eligible peer, and the eviction of a useful entry from
+        // the bounded announcement store.
+        let height = ann.header.height;
+        let full = ctx.full_block_height;
+        if height > full.saturating_add(2) || height.saturating_add(2) < full {
+            out.push(Effect::Dropped {
+                id: header_id,
+                reason: DropReason::OutsideHeightWindow,
+            });
+            return;
+        }
+        if (ctx.header_known)(&header_id) || self.ordering.get(&header_id).is_some() {
+            out.push(Effect::Dropped {
+                id: header_id,
+                reason: DropReason::OrderingHeaderKnown,
+            });
+            return;
+        }
         let expected = (ctx.expected_n_bits)(ann.header.parent_id.as_bytes());
         if let Err(e) = crate::announcement::validate_ordering_announcement(&ann, expected) {
             tracing::debug!(error = %e, "invalid ordering-block announcement");
@@ -7196,6 +7232,134 @@ mod tests {
         assert!(
             known.iter().any(|id| !best_chain.contains(id)),
             "the losing fork's id must be reachable even though it's not best"
+        );
+    }
+
+    // ----- fix round 2 (Plan 2 M2 final whole-branch review) -----
+
+    /// Finding 7: an ordering announcement was validated, stored and
+    /// relayed before anything asked whether it was worth looking at. A
+    /// peer replaying valid HISTORICAL announcements therefore bought,
+    /// per frame, a PoW verification, an `Inv` broadcast to every
+    /// eligible peer, and the eviction of a live entry from the bounded
+    /// 64-slot announcement store.
+    ///
+    /// Spec 9.3 (and Scala `processOrderingBlockAnnouncement`) applies
+    /// the ±2 height window first.
+    #[test]
+    fn ordering_announcement_outside_the_height_window_is_dropped_before_any_work() {
+        let mut p = processor();
+        let ctx = ts::TestCtx::at(FULL);
+        // Three ordering blocks back: valid, and long since useless.
+        let oa = ts::ordering_announcement(ORD, FULL - 3, 9, Vec::new());
+        let oa_id = ts::header_id(&oa.header);
+
+        let out = ctx.handle(
+            &mut p,
+            Event::OrderingAnnouncementAccepted {
+                ann: oa,
+                from: ts::PEER,
+                now: Tick(6),
+            },
+        );
+
+        assert!(
+            out.contains(&Effect::Dropped {
+                id: oa_id,
+                reason: DropReason::OutsideHeightWindow,
+            }),
+            "{out:?}"
+        );
+        assert!(
+            !out.iter()
+                .any(|e| matches!(e, Effect::RelayOrderingInv { .. })),
+            "a replay must not be rebroadcast: {out:?}"
+        );
+        assert!(
+            p.ordering_announcement(&oa_id).is_none(),
+            "and must not take a slot in the announcement store"
+        );
+    }
+
+    /// The same guard's other half: an announcement for a header the
+    /// node already holds is dead weight, and spec 9.3 skips it before
+    /// PoW, storage and relay.
+    #[test]
+    fn ordering_announcement_for_a_known_header_is_dropped_before_any_work() {
+        let mut p = processor();
+        let mut ctx = ts::TestCtx::at(FULL);
+        let oa = ts::ordering_announcement(ORD, FULL + 1, 9, Vec::new());
+        let oa_id = ts::header_id(&oa.header);
+        ctx.known_headers.insert(oa_id);
+
+        let out = ctx.handle(
+            &mut p,
+            Event::OrderingAnnouncementAccepted {
+                ann: oa,
+                from: ts::PEER,
+                now: Tick(6),
+            },
+        );
+
+        assert!(
+            out.contains(&Effect::Dropped {
+                id: oa_id,
+                reason: DropReason::OrderingHeaderKnown,
+            }),
+            "{out:?}"
+        );
+        assert!(
+            !out.iter()
+                .any(|e| matches!(e, Effect::RelayOrderingInv { .. })),
+            "{out:?}"
+        );
+        assert!(p.ordering_announcement(&oa_id).is_none());
+    }
+
+    /// A re-announcement of one the processor has already stored is the
+    /// same replay by another route: the store is the node's own record
+    /// of "known", and re-inserting would re-relay and re-evict.
+    #[test]
+    fn a_replayed_ordering_announcement_is_dropped_without_relaying_again() {
+        let mut p = processor();
+        let ctx = ts::TestCtx::at(FULL);
+        let oa = ts::ordering_announcement(ORD, FULL + 1, 9, Vec::new());
+        let oa_id = ts::header_id(&oa.header);
+
+        let first = ctx.handle(
+            &mut p,
+            Event::OrderingAnnouncementAccepted {
+                ann: oa.clone(),
+                from: ts::PEER,
+                now: Tick(6),
+            },
+        );
+        assert!(
+            first.contains(&Effect::RelayOrderingInv { header_id: oa_id }),
+            "the first sighting is relayed: {first:?}"
+        );
+        assert!(p.ordering_announcement(&oa_id).is_some());
+
+        let again = ctx.handle(
+            &mut p,
+            Event::OrderingAnnouncementAccepted {
+                ann: oa,
+                from: ts::PEER,
+                now: Tick(7),
+            },
+        );
+        assert!(
+            again.contains(&Effect::Dropped {
+                id: oa_id,
+                reason: DropReason::OrderingHeaderKnown,
+            }),
+            "{again:?}"
+        );
+        assert!(
+            !again
+                .iter()
+                .any(|e| matches!(e, Effect::RelayOrderingInv { .. })),
+            "the second sighting buys the peer nothing: {again:?}"
         );
     }
 }
