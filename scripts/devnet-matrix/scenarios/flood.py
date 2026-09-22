@@ -27,6 +27,11 @@ from smoke import Unavailable, api, api_retry
 
 from . import common
 
+# The source address the harness binds its flood connection to
+# (`src(210)` = 127.210.0.1). Log lines naming it are how this scenario
+# proves the traffic actually reached the processor.
+ADVERSARY_SOURCE = '127.210.0.1'
+
 NODES = ('scala', 'rust')
 ANNOUNCEMENTS = 10_000
 DELIVERIES = 1_000
@@ -137,7 +142,46 @@ def run(ctx):
                              'peak_counters': peak,
                              'peak_rss_kib': peak_rss,
                              'rss_before_kib': rss_before})
+
+    # DID IT LAND? A flood the node never read would leave every bound
+    # inside its cap for the best possible reason, and this scenario
+    # would report that as the node withstanding an attack it never
+    # received. The node's own log naming the adversary's source address
+    # is the proof, and it is required.
+    reached = [line for line in smoke.rust_log_lines(ADVERSARY_SOURCE, limit=20000)
+               if ADVERSARY_SOURCE in line]
+    ctx.note('flood_reached_the_processor', {
+        'source': ADVERSARY_SOURCE,
+        'log_lines_naming_it': len(reached),
+        'sample': reached[:5],
+        'announcements_sent': ANNOUNCEMENTS,
+        'note': 'fewer lines than announcements is expected: the node bans the '
+                'source once its penalties accumulate, which is the bound '
+                'working, and the count is how far it got',
+    })
+    if not reached:
+        ctx.fail('no log line names the adversary, so the flood cannot be shown to '
+                 'have reached the node at all — every bound below would then be '
+                 'inside its cap for the wrong reason',
+                 {'source': ADVERSARY_SOURCE,
+                  'adversary_stdout': (ctx.evidence.get('adversary') or {})
+                  .get('stdout')})
+
     common.check_bounds(ctx, {**status_after, **peak}, CAPS, 'flood')
+    # WHERE the flood was stopped matters as much as that it was. A
+    # bogus announcement carries an invalid PoW solution, so it is
+    # refused at the announcement gate and never reaches a staging slot
+    # or the waitlist — which is why those counters can stay at zero
+    # through 10,000 frames. Recorded explicitly so the report does not
+    # read a zero as "the memory bounds were stressed and held".
+    ctx.note('where_the_flood_was_stopped', {
+        'announcement_gate_rejections_naming_the_adversary': len(reached),
+        'peak_waitlist': peak.get('waitlist'),
+        'peak_staged_bytes': peak.get('staged_bytes'),
+        'reading': 'announcements with an invalid PoW solution are refused '
+                   'upstream of the §7.4 memory structures, so a zero here is '
+                   'the gate holding, not the memory bounds being exercised',
+    })
 
     # Memory: the byte caps plus headroom.
     if rss_before is not None:
