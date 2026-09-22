@@ -6,6 +6,7 @@ calls could not be shown to fail when it should, and an evaluator that
 cannot fail is not an evaluator.
 """
 import shutil
+import threading
 import time
 
 import smoke
@@ -594,20 +595,102 @@ def evaluate_f6(blocks):
 
 # ----- §7.4 bounds -----
 
-def check_bounds(ctx, status, caps, what):
+class PeakSampler:
+    """Poll a node's §7.4 counters on their own thread and keep the PEAKS.
+
+    Started BEFORE the traffic it is measuring and stopped after: the
+    previous flood ran `subprocess.run` to completion and only then began
+    sampling, so a structure that overflowed during delivery and drained
+    before the adversary exited was never seen. The smoke sampler runs
+    throughout but retains none of these counters.
+
+    A counter the route never published stays `None` — UNKNOWN, not zero.
+    Seeding every key with 0 is what let a missing `staged_bytes` merge
+    into a passing measurement.
+    """
+
+    def __init__(self, keys, poll=0.2):
+        self.keys = tuple(keys)
+        self.poll = poll
+        self.peaks = {key: None for key in self.keys}
+        self.rss_peak = None
+        self.samples = 0
+        self.unavailable = 0
+        self._stop = threading.Event()
+        self._thread = None
+        self._pid = None
+
+    def _observe(self):
+        import campaign
+        try:
+            status = campaign.input_block_status()
+        except Unavailable:
+            self.unavailable += 1
+            return
+        self.samples += 1
+        for key in self.keys:
+            value = status.get(key)
+            if value is None:
+                continue
+            current = self.peaks[key]
+            self.peaks[key] = value if current is None else max(current, value)
+        if self._pid is not None:
+            rss = campaign.rss_kib(self._pid)
+            if rss is not None:
+                self.rss_peak = rss if self.rss_peak is None else max(
+                    self.rss_peak, rss)
+
+    def start(self, pid=None):
+        self._pid = pid
+        self._observe()          # one reading before any traffic
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        return self
+
+    def _loop(self):
+        while not self._stop.is_set():
+            self._observe()
+            self._stop.wait(self.poll)
+
+    def stop(self):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=10)
+            self._thread = None
+        self._observe()          # and one after
+        return self
+
+    def summary(self):
+        return {'peaks': dict(self.peaks), 'rss_peak_kib': self.rss_peak,
+                'samples': self.samples, 'unavailable_samples': self.unavailable,
+                'measured': sorted(k for k, v in self.peaks.items() if v is not None),
+                'never_published': sorted(
+                    k for k, v in self.peaks.items() if v is None)}
+
+
+def check_bounds(ctx, observed_peaks, caps, what, unavailable_bounds=()):
     """Every §7.4 counter the node publishes, against its cap.
 
-    A counter the node does NOT publish is a failure, not a pass: a
-    bound nobody measured is not a bound that held.
+    `observed_peaks` maps each counter to the PEAK observed across the
+    whole measurement window, or `None` when the route never published
+    it. `None` is a FAILURE: a bound nobody measured is not a bound that
+    held, and merging a missing counter with a zero is how one passed.
+
+    `unavailable_bounds` names the §7.4 bounds this route does not expose
+    at all. They are recorded as unmeasured rather than quietly omitted,
+    so the report can say which bounds the run actually covered.
     """
     observed = {}
     for key, cap in caps.items():
-        value = status.get(key)
-        observed[key] = {'value': value, 'cap': cap}
+        value = observed_peaks.get(key)
+        observed[key] = {'peak': value, 'cap': cap,
+                         'status': 'unknown' if value is None else 'measured'}
         if value is None:
-            ctx.fail(f'{what}: the node publishes no `{key}`, so its §7.4 bound '
-                     'could not be checked', {'status': status})
+            ctx.fail(f'{what}: the node never published `{key}`, so its §7.4 '
+                     'bound was not measured — unknown, not zero',
+                     {'peaks': observed_peaks})
         elif cap is not None and value > cap:
-            ctx.fail(f'{what}: `{key}` = {value} exceeds its §7.4 cap {cap}',
-                     {'status': status})
-    return observed
+            ctx.fail(f'{what}: `{key}` peaked at {value}, past its §7.4 cap {cap}',
+                     {'peaks': observed_peaks})
+    return {'checked': observed,
+            'not_exposed_by_the_status_route': sorted(unavailable_bounds)}

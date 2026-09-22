@@ -46,13 +46,25 @@ PURGE_ADDRESS_BOOK = True
 # reader can check against `ergo-inputblocks/src/bounds.rs`, not against
 # whatever the node happens to report.
 CAPS = {
-    'waitlist': 8192,             # [input_blocks.bounds] waitlist_entries
-    'forks': 64,                  # Bounds::forks_per_ordering
-    'staged_bytes': 64 * 1024 * 1024,   # Bounds::staging_bytes_total
+    'waitlist': 8192,                 # [input_blocks.bounds] waitlist_entries
+    'forks': 64,                      # Bounds::forks_per_ordering
+    'staged_bytes': 64 * 1024 * 1024,  # Bounds::staging_bytes_total
+    # Not a spec bound but an implementation queue that must not grow
+    # without limit, and the route publishes it, so it is measured.
+    'deferred_triggers': 4096,        # Bounds::pending_triggers headroom
 }
-# Resident-memory headroom over the byte caps: allocator slack, the
-# JVM-free Rust node's own working set growth, and the log buffers the
-# flood fills. A growth beyond this is a leak, not slack.
+
+# The §7.4 bounds `/api/v1/status.input_blocks` does NOT expose. Listed
+# so the evidence says which bounds this run covered and which it could
+# not, rather than leaving the uncovered ones unmentioned and implying
+# the flood checked all of §7.4. Each would need a new counter on the
+# status route to become measurable here.
+BOUNDS_NOT_EXPOSED = (
+    'tx_cache_entries', 'tx_cache_bytes', 'records_per_ordering',
+    'records_total', 'trees_total', 'ordering_announcements',
+    'requests_per_peer', 'retired_jobs',
+)
+
 RSS_HEADROOM_KIB = 64 * 1024
 
 
@@ -96,9 +108,13 @@ def run(ctx):
                f'127.0.0.1:{lifecycle.REST["rust"]}',
                'input_block_flood', str(ANNOUNCEMENTS), str(DELIVERIES)]
     ctx.note('adversary_command', ' '.join(command))
+
+    # Measurement STARTS BEFORE the traffic and runs through delivery.
+    # `subprocess.run` blocks until the adversary exits, so sampling
+    # afterwards could not see a structure that overflowed during
+    # delivery and drained before exit.
+    peaks = common.PeakSampler(CAPS).start(pid=pid)
     started = time.monotonic()
-    # The harness is bounded by its own frame counts; the timeout is a
-    # backstop, and a timeout is recorded rather than swallowed.
     try:
         completed = subprocess.run(command, capture_output=True, text=True,
                                    timeout=1800, check=False)
@@ -117,30 +133,21 @@ def run(ctx):
         ctx.fail('the adversary harness timed out, so the flood is not a complete '
                  'experiment', {'error': str(error)})
 
-    # Peak, not final: the caps bound what the node HOLDS, and a
-    # structure that overflowed and then drained would read as compliant
-    # from a single reading at the end.
-    peak = {key: 0 for key in CAPS}
-    peak_rss = rss_before or 0
+    # Keep watching past the adversary's exit: a structure that is still
+    # draining is still holding bytes.
     watch_deadline = min(ctx.run.deadline, time.monotonic() + 120)
     while time.monotonic() < watch_deadline:
-        try:
-            status = campaign.input_block_status()
-        except Unavailable:
-            status = {}
-        for key in CAPS:
-            value = status.get(key)
-            if value is not None:
-                peak[key] = max(peak[key], value)
-        rss = campaign.rss_kib(pid)
-        if rss is not None:
-            peak_rss = max(peak_rss, rss)
         ctx.run.idle(0.5)
+    peaks.stop()
+    ctx.note('peak_sampling', peaks.summary())
+    if not peaks.samples:
+        ctx.fail('no §7.4 counter reading was taken across the flood, so no '
+                 'bound was measured', {'sampler': peaks.summary()})
 
     status_after = campaign.input_block_status()
     ctx.note('after_flood', {'input_blocks': status_after,
-                             'peak_counters': peak,
-                             'peak_rss_kib': peak_rss,
+                             'peaks': peaks.peaks,
+                             'peak_rss_kib': peaks.rss_peak,
                              'rss_before_kib': rss_before})
 
     # DID IT LAND? A flood the node never read would leave every bound
@@ -167,25 +174,23 @@ def run(ctx):
                   'adversary_stdout': (ctx.evidence.get('adversary') or {})
                   .get('stdout')})
 
-    common.check_bounds(ctx, {**status_after, **peak}, CAPS, 'flood')
-    # WHERE the flood was stopped matters as much as that it was. A
-    # bogus announcement carries an invalid PoW solution, so it is
-    # refused at the announcement gate and never reaches a staging slot
-    # or the waitlist — which is why those counters can stay at zero
-    # through 10,000 frames. Recorded explicitly so the report does not
-    # read a zero as "the memory bounds were stressed and held".
+    # The PEAKS, never merged with a post-hoc reading: a counter the
+    # route never published stays unknown and fails.
+    ctx.note('bounds', common.check_bounds(ctx, peaks.peaks, CAPS, 'flood',
+                                           unavailable_bounds=BOUNDS_NOT_EXPOSED))
     ctx.note('where_the_flood_was_stopped', {
         'announcement_gate_rejections_naming_the_adversary': len(reached),
-        'peak_waitlist': peak.get('waitlist'),
-        'peak_staged_bytes': peak.get('staged_bytes'),
+        'peak_waitlist': peaks.peaks.get('waitlist'),
+        'peak_staged_bytes': peaks.peaks.get('staged_bytes'),
         'reading': 'announcements with an invalid PoW solution are refused '
                    'upstream of the §7.4 memory structures, so a zero here is '
                    'the gate holding, not the memory bounds being exercised',
     })
 
     # Memory: the byte caps plus headroom.
-    if rss_before is not None:
+    if rss_before is not None and peaks.rss_peak is not None:
         allowed = (CAPS['staged_bytes'] // 1024) + RSS_HEADROOM_KIB
+        peak_rss = peaks.rss_peak
         growth = peak_rss - rss_before
         ctx.note('rss_growth', {'kib': growth, 'allowed_kib': allowed})
         if growth > allowed:

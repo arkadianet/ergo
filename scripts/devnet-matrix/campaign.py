@@ -915,6 +915,69 @@ def _self_test():
         'a SIGKILLed child must read as released, zombie or not'
     assert not _holds_resources(999_999), 'a missing PID holds nothing'
 
+    # ----- findings 3/4: peaks, and a missing counter stays UNKNOWN ---
+    #
+    # Codex's probe: the status route omits `staged_bytes` throughout,
+    # the peak dict was seeded with zero for every key and merged over
+    # the post-hoc reading, and `check_bounds`' missing-counter failure
+    # was defeated. He reproduced the resulting no-failure verdict.
+    class Recorder:
+        def __init__(self):
+            self.failures = []
+            self.evidence = {}
+
+        def fail(self, message, evidence=None, ids=None):
+            self.failures.append(message)
+
+        def note(self, key, value):
+            self.evidence[key] = value
+
+    caps = {'waitlist': 10, 'forks': 4, 'staged_bytes': 1024}
+
+    missing = Recorder()
+    common.check_bounds(missing, {'waitlist': 0, 'forks': 1,
+                                  'staged_bytes': None}, caps, 'probe',
+                        unavailable_bounds=('tx_cache_entries',))
+    assert any('staged_bytes' in f and 'unknown, not zero' in f
+               for f in missing.failures), missing.failures
+
+    over = Recorder()
+    common.check_bounds(over, {'waitlist': 11, 'forks': 1, 'staged_bytes': 0},
+                        caps, 'probe')
+    assert any('peaked at 11' in f for f in over.failures), over.failures
+
+    clean = Recorder()
+    result = common.check_bounds(clean, {'waitlist': 10, 'forks': 4,
+                                         'staged_bytes': 1024}, caps, 'probe',
+                                 unavailable_bounds=('trees_total',))
+    assert clean.failures == [], clean.failures
+    assert result['not_exposed_by_the_status_route'] == ['trees_total'], result
+    assert all(v['status'] == 'measured' for v in result['checked'].values()), result
+
+    # The peak sampler keeps the MAXIMUM across its window, and a key the
+    # route never published stays None rather than becoming zero.
+    sampler = common.PeakSampler(('waitlist', 'forks', 'staged_bytes'))
+    for reading in ({'waitlist': 3, 'forks': 1},
+                    {'waitlist': 9, 'forks': 2},
+                    {'waitlist': 1, 'forks': 1}):
+        for key in sampler.keys:
+            value = reading.get(key)
+            if value is None:
+                continue
+            current = sampler.peaks[key]
+            sampler.peaks[key] = value if current is None else max(current, value)
+        sampler.samples += 1
+    assert sampler.peaks['waitlist'] == 9, sampler.peaks
+    assert sampler.peaks['staged_bytes'] is None, \
+        'a counter the route never published is UNKNOWN, not zero'
+    summary = sampler.summary()
+    assert summary['measured'] == ['forks', 'waitlist'], summary
+    assert summary['never_published'] == ['staged_bytes'], summary
+    # ...and that unknown fails, which is the whole point.
+    drained = Recorder()
+    common.check_bounds(drained, sampler.peaks, caps, 'probe')
+    assert any('staged_bytes' in f for f in drained.failures), drained.failures
+
     # ----- finding 2: F6 is counted PER ORDERING BLOCK -----
     #
     # Codex's probe: an input-chain transaction is omitted and lost at
