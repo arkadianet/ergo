@@ -60,11 +60,31 @@ WORK = HERE / '.work'
 CAMPAIGN_WORK = WORK / 'campaign'
 CONF = CAMPAIGN_WORK / 'conf'
 
-# Scenarios that need the second miner. Everything else runs the
-# two-node set, because a node that is up but idle still competes for
-# the follower's sync budget and would make `steady` a different
-# measurement from the M2 smoke it has to be comparable with.
-TWO_MINER_SCENARIOS = ('fork', 'rollback')
+# Scenarios that need a THIRD node, and what it is for. `fork` and
+# `rollback` need a second MINER; `reconstruct_rate` needs a second
+# FOLLOWER, because the reference miner never makes the
+# reconstruct-or-download decision at all — it generates its blocks
+# locally, so `processOrderingBlock` never runs on it and neither of the
+# two log lines the measurement compares against is ever emitted. Only a
+# reference FOLLOWER produces the reference half of the F5 ratio.
+#
+# Everything else runs the two-node set: a node that is up but idle
+# still competes for the follower's sync budget, and would make `steady`
+# a different measurement from the M2 smoke it has to be comparable
+# with.
+SCALA2_ROLE = {
+    'fork': 'miner',
+    'rollback': 'miner',
+    'reconstruct_rate': 'follower',
+}
+
+# A second Scala node that must NOT mine. Without this it would race the
+# first miner and `reconstruct_rate` would be a two-miner scenario by
+# accident.
+SCALA2_FOLLOWER_EXTRA = (
+    'ergo.node.mining = false\n'
+    'ergo.node.offlineGeneration = false\n'
+)
 
 # The order `--scenario all` runs them in: cheapest and most diagnostic
 # first, so a broken build is caught in minutes rather than after the
@@ -83,7 +103,7 @@ SCENARIO_NODES = {
     'steady': ('scala', 'rust'),
     'fork': ('scala', 'scala2', 'rust'),
     'rollback': ('scala', 'scala2', 'rust'),
-    'reconstruct_rate': ('scala', 'rust'),
+    'reconstruct_rate': ('scala', 'scala2', 'rust'),
     'restart': ('scala', 'rust'),
     'evict': ('scala', 'rust'),
     'flood': ('scala', 'rust'),
@@ -183,7 +203,8 @@ def ensure_data_dirs(data_root, nodes):
     return data_root
 
 
-def write_configs(scenario, nodes, rust_overrides=(), scala_extra=''):
+def write_configs(scenario, nodes, rust_overrides=(), scala_extra='',
+                  scala2_extra=''):
     """Render every node's config for one scenario and point `lifecycle`
     at them. Returns the scenario's data directory."""
     CONF.mkdir(parents=True, exist_ok=True)
@@ -201,7 +222,7 @@ def write_configs(scenario, nodes, rust_overrides=(), scala_extra=''):
             path = CONF / f'{scenario}-{node}.conf'
             path.write_text(scala_override(
                 scenario, node, nodes, data_root / node,
-                extra=scala_extra if node == 'scala' else ''))
+                extra=scala_extra if node == 'scala' else scala2_extra))
             os.environ[{'scala': 'SCALA_CONFIG',
                         'scala2': 'SCALA2_CONFIG'}[node]] = str(path)
     return data_root
@@ -352,7 +373,8 @@ def run_scenario(name, args):
     data_root = write_configs(
         name, nodes,
         rust_overrides=getattr(scenario, 'RUST_OVERRIDES', ()),
-        scala_extra=getattr(scenario, 'SCALA_EXTRA', ''))
+        scala_extra=getattr(scenario, 'SCALA_EXTRA', ''),
+        scala2_extra=getattr(scenario, 'SCALA2_EXTRA', ''))
     if args.fresh:
         for node in nodes:
             shutil.rmtree(data_root / node, ignore_errors=True)
@@ -518,7 +540,11 @@ def _self_test():
         assert tuple(module.NODES) == SCENARIO_NODES[name], name
         assert set(module.NODES) <= {'scala', 'scala2', 'rust'}, name
         assert 'rust' in module.NODES, name
-        assert ('scala2' in module.NODES) == (name in TWO_MINER_SCENARIOS), name
+        assert ('scala2' in module.NODES) == (name in SCALA2_ROLE), name
+        # A second Scala node that is meant to FOLLOW has to be told not
+        # to mine, or the scenario silently becomes a two-miner one.
+        if SCALA2_ROLE.get(name) == 'follower':
+            assert 'mining = false' in getattr(module, 'SCALA2_EXTRA', ''), name
 
     # The REAL recipe file, rendered with the real overrides, has to parse
     # as TOML and carry the values the scenario asked for. A renderer

@@ -17,8 +17,27 @@ import smoke
 
 from . import common
 
-NODES = ('scala', 'rust')
+NODES = ('scala', 'scala2', 'rust')
 ORDERING_BLOCKS = 100
+
+# The reference FOLLOWER. The reference MINER never makes this decision:
+# it generates its blocks locally (`LocallyGeneratedOrderingBlock`), so
+# `processOrderingBlock` — the only place either log line is emitted —
+# never runs on it. A first run against the miner's log found neither
+# phrase and correctly reported the reference side as UNKNOWN; this is
+# what makes it knowable.
+SCALA2_EXTRA = (
+    'ergo.node.mining = false\n'
+    'ergo.node.offlineGeneration = false\n'
+)
+
+# All three nodes share 127.0.0.1 and the follower's per-IP admission
+# limit is 1, so without this it would connect to one of the two Scala
+# nodes and the handshake wait would time out.
+RUST_OVERRIDES = (
+    ('peers', 'per_ip_limit', '2'),
+    ('peers', 'per_subnet_limit', '4'),
+)
 
 # The pinned Scala build's two log lines for the same decision. Matched
 # loosely (case-insensitive substrings) because a wording change must
@@ -27,14 +46,15 @@ SCALA_RECONSTRUCTED = 'block transactions from input-blocks'
 SCALA_FALLBACK = 'downloading block transactions fully'
 
 
-def _scala_log_counts(ctx):
-    """Count the miner's own reconstruct-vs-download lines.
+def _scala_log_counts(ctx, node='scala2'):
+    """Count a reference node's reconstruct-vs-download lines.
 
-    A log that contains NEITHER phrase is reported as unmatched rather
-    than as 0/0: the reference's rate is the comparison, and a comparison
-    against a phrase the build never logs is not one.
+    Read from the reference FOLLOWER by default. A log that contains
+    NEITHER phrase is reported as unmatched rather than as 0/0: the
+    reference's rate is the comparison, and a comparison against a phrase
+    the build never logs is not one.
     """
-    path = smoke.WORK / 'scala.log'
+    path = smoke.WORK / f'{node}.log'
     if not path.exists():
         return {'error': f'no Scala log at {path}'}
     reconstructed = fallback = 0
@@ -44,8 +64,13 @@ def _scala_log_counts(ctx):
             reconstructed += 1
         elif SCALA_FALLBACK in low:
             fallback += 1
-    out = {'reconstructed': reconstructed, 'fallback': fallback,
-           'phrases': [SCALA_RECONSTRUCTED, SCALA_FALLBACK]}
+    decided = reconstructed + fallback
+    out = {'node': node, 'reconstructed': reconstructed, 'fallback': fallback,
+           'decided': decided,
+           'reconstructed_ratio': round(reconstructed / decided, 4) if decided else None,
+           'phrases': [SCALA_RECONSTRUCTED, SCALA_FALLBACK],
+           'source': ('ErgoNodeViewHolder.processOrderingBlock:458 (reconstruct) '
+                      'and :465/:469 (download), at the pin')}
     if reconstructed == 0 and fallback == 0:
         out['unmatched'] = (
             'neither phrase appears in the pinned build\'s log; the Scala side of '
@@ -83,7 +108,10 @@ def run(ctx):
             for e in reconstructed),
         'ordering_blocks_in_window': reached - start,
     })
-    ctx.note('scala', _scala_log_counts(ctx))
+    # Both reference nodes: the follower is the one that decides, and
+    # the miner is recorded beside it to show that it decides nothing.
+    ctx.note('scala_follower', _scala_log_counts(ctx, 'scala2'))
+    ctx.note('scala_miner', _scala_log_counts(ctx, 'scala'))
 
     # The measurement is only a measurement if the window produced
     # decisions. A run in which the node decided nothing has measured
