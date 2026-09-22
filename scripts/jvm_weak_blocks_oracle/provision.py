@@ -42,10 +42,18 @@ def checkout(url, commit, dest, log):
 
 
 def export_classpath(source, config, log):
+    # `run` APPENDS, so a marker left by an earlier provision run would still
+    # hold that run's classpath line. Truncate it first: otherwise an sbt
+    # export that succeeds without emitting a classpath (a changed build, a
+    # different sbt) lets the reverse search silently return a stale path.
     marker = WORK / f'{config.lower()}-classpath.log'
+    marker.unlink(missing_ok=True)
     run(['sbt', '-batch', f'export {config} / fullClasspath'], source, marker)
     lines = marker.read_text().splitlines()
-    return next(line for line in reversed(lines) if line.startswith('/') and 'scala-library' in line)
+    matches = [line for line in lines if line.startswith('/') and 'scala-library' in line]
+    if not matches:
+        raise RuntimeError(f'{config} / fullClasspath export produced no classpath line; see {marker}')
+    return matches[-1]
 
 
 def main():
