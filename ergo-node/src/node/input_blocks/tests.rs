@@ -4710,3 +4710,97 @@ fn a_far_advance_off_a_sibling_branch_is_a_reorg_despite_the_header_index() {
         "the committed tip is on a different branch from the previous tip"
     );
 }
+
+/// Finding 3: a restarted follower must be able to recover from an
+/// ordering announcement alone.
+///
+/// The processor's state is in-memory (spec 9.5), so after a restart it
+/// holds no input blocks. The first ordering announcement it sees names
+/// an input block it does not have — or names none at all — which takes
+/// the "else" branch of spec 9.3: apply the announced header and
+/// extension, then request the transaction section from the announcer.
+///
+/// That branch emitted only `RequestBlockTransactions`, and the executor
+/// computes a section's modifier id from the STORED header, so with no
+/// header stored it logged and returned. Nothing was requested, nothing
+/// was stored, and the follower had to wait for ordinary block sync to
+/// reach the same height by itself.
+#[test]
+fn an_ordering_announcement_for_an_unknown_input_chain_still_fetches_the_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, mut rx) = handshake_peer(
+        &mut state,
+        19632,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    // A fresh node: no headers at all.
+    assert!(state.store.chain_state_meta().best_full_block_height == 0);
+    let oa = ts::ordering_announcement(
+        [0x77; 32],
+        1,
+        9,
+        vec![(
+            ergo_ser::input_block::PREV_INPUT_BLOCK_ID_KEY,
+            // An input block this node has never seen.
+            [0x5c; 32].to_vec(),
+        )],
+    );
+    let header_id = ts::header_id(&oa.header);
+    let expected_section = ergo_ser::modifier_id::compute_section_id(
+        ergo_ser::modifier_id::TYPE_BLOCK_TRANSACTIONS,
+        &header_id,
+        oa.header.transactions_root.as_bytes(),
+    );
+    let extension_id = ergo_ser::modifier_id::compute_section_id(
+        ergo_ser::modifier_id::TYPE_EXTENSION,
+        &header_id,
+        oa.header.extension_root.as_bytes(),
+    );
+
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+        &ergo_p2p::message::serialize_ordering_block_announcement_msg(&oa).unwrap(),
+    );
+
+    // The announcement's extension is applied, exactly as spec 9.3's
+    // "else" branch says. (The header goes through the ordinary
+    // `ValidateHeader` path in the same handoff; this fixture's
+    // synthetic header cannot pass real header validation, so that
+    // action — not its storage — is what
+    // `reconstruct_persists_header_and_extension_through_normal_path_first`
+    // pins.)
+    assert!(
+        state
+            .store
+            .get_block_section(&extension_id)
+            .unwrap()
+            .is_some(),
+        "the extension the announcement carried is applied"
+    );
+
+    // Drain both the returned actions and anything flushed to the peer:
+    // the request is a `RequestModifier` for the block's transactions.
+    let mut requested: Vec<Vec<u8>> =
+        sent_frames(&actions, ergo_p2p::message::CODE_REQUEST_MODIFIER);
+    while let Ok(frame) = rx.try_recv() {
+        if frame.code == ergo_p2p::message::CODE_REQUEST_MODIFIER {
+            requested.push(frame.payload.to_vec());
+        }
+    }
+    let asked: Vec<[u8; 32]> = requested
+        .iter()
+        .filter_map(|p| ergo_p2p::message::deserialize_inv(p).ok())
+        .filter(|inv| inv.type_id == ergo_p2p::types::ModifierTypeId::BlockTransactions.as_byte())
+        .flat_map(|inv| inv.ids)
+        .collect();
+    assert!(
+        asked.contains(&expected_section),
+        "the announcer is asked for the block's transaction section; got {asked:?}"
+    );
+}

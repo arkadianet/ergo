@@ -172,39 +172,43 @@ pub(in crate::node) const STORAGE_ERROR: &str = "storage_error";
 /// handoff; `None` (an unknown tag) only costs the header handoff, which
 /// the ordinary header path will do anyway when the peer re-announces.
 ///
-/// `Ok(None)` when the announcement is no longer in the processor's
-/// store or its header does not serialize — nothing can be planned and
-/// there is nothing to fall back to either. `Err` when a chain-store read
-/// failed; see [`StorageFailure`].
-pub(in crate::node) fn plan_reconstruction(
+/// Steps 1 and 2 of spec 9.3's "apply the extension" clause: hand the
+/// announced HEADER to the ordinary validate-and-store path and persist
+/// the EXTENSION the announcement carried, skipping either when the
+/// store already has it.
+///
+/// Shared by [`plan_reconstruction`] and by the plain
+/// `RequestBlockTransactions` branch, which needs it for the same
+/// reason: a section's modifier id is
+/// `blake2b(type || header_id || transactions_root)`, so a node that has
+/// not applied the header cannot name the section it is missing. A
+/// restarted follower's FIRST ordering announcement always takes that
+/// branch (its processor holds no input blocks yet), so without the
+/// handoff it could not act on the announcement at all.
+///
+/// The returned [`StorageFailure`] carries height 0; callers that know
+/// the announced height overwrite it.
+pub(in crate::node) fn header_and_extension_handoff(
     store: &dyn ReconstructStore,
-    mempool: &Mempool,
-    rt: &InputBlocksRuntime,
-    plan: &ReconstructionPlan,
+    ann: &ergo_ser::input_block::OrderingBlockAnnouncement,
     peer: Option<PeerId>,
-) -> Result<Option<Reconstruction>, StorageFailure> {
-    let Some(ann) = rt.processor().ordering_announcement(&plan.header_id) else {
-        return Ok(None);
-    };
+) -> Result<Vec<Action>, StorageFailure> {
     let header = &ann.header;
     let (header_bytes, header_id) = match serialize_header(header) {
         Ok(v) => v,
         Err(e) => {
             warn!(error = %e, "input_blocks: announced ordering header does not serialize");
-            return Ok(None);
+            return Ok(Vec::new());
         }
     };
     let header_id = *header_id.as_bytes();
-    let height = header.height;
     let failed = |operation: &'static str, error: StateError| StorageFailure {
         operation,
-        height,
+        height: 0,
         error,
     };
-
     let mut actions = Vec::new();
 
-    // ----- 1. the header, through the ordinary path -----
     let header_known = store
         .header_known(&header_id)
         .map_err(|e| failed("get_header", e))?;
@@ -217,7 +221,6 @@ pub(in crate::node) fn plan_reconstruction(
         ),
     }
 
-    // ----- 2. the extension, from the announcement's fields -----
     let extension_id =
         compute_section_id(TYPE_EXTENSION, &header_id, header.extension_root.as_bytes());
     if !store
@@ -249,6 +252,36 @@ pub(in crate::node) fn plan_reconstruction(
             ),
         }
     }
+    Ok(actions)
+}
+
+/// `Ok(None)` when the announcement is no longer in the processor's
+/// store or its header does not serialize — nothing can be planned and
+/// there is nothing to fall back to either. `Err` when a chain-store read
+/// failed; see [`StorageFailure`].
+pub(in crate::node) fn plan_reconstruction(
+    store: &dyn ReconstructStore,
+    mempool: &Mempool,
+    rt: &InputBlocksRuntime,
+    plan: &ReconstructionPlan,
+    peer: Option<PeerId>,
+) -> Result<Option<Reconstruction>, StorageFailure> {
+    let Some(ann) = rt.processor().ordering_announcement(&plan.header_id) else {
+        return Ok(None);
+    };
+    let header = &ann.header;
+    let Ok((_, header_id)) = serialize_header(header) else {
+        warn!("input_blocks: announced ordering header does not serialize");
+        return Ok(None);
+    };
+    let header_id = *header_id.as_bytes();
+    let height = header.height;
+
+    // ----- 1 + 2. the header and extension, through the ordinary path -----
+    let mut actions = header_and_extension_handoff(store, ann, peer).map_err(|mut e| {
+        e.height = height;
+        e
+    })?;
 
     let fallback = |reason: &'static str, actions: Vec<Action>| {
         Ok(Some(Reconstruction {

@@ -27,6 +27,7 @@ use ergo_p2p::message;
 use ergo_p2p::peer::{PeerId, Penalty};
 use ergo_p2p::types::{InvData, ModifierTypeId};
 use ergo_primitives::digest::Digest32;
+use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
 use ergo_state::ChainStateRead;
 use ergo_sync::coordinator::Action;
 use tracing::{debug, warn};
@@ -37,7 +38,9 @@ use super::super::NodeState;
 use super::super::{hedge_request_modifiers, register_expectation, tracked_request_modifier};
 use super::ctx::{build_ctx_data, transactions_section_id};
 use super::profile::Phase;
-use super::reconstruct::{plan_reconstruction, Outcome, Reconstruction, StorageFailure};
+use super::reconstruct::{
+    header_and_extension_handoff, plan_reconstruction, Outcome, Reconstruction, StorageFailure,
+};
 use super::runtime::{ExpectedPhase, InputBlocksRuntime};
 use super::validate::{run_validation, ValidateJob};
 
@@ -330,14 +333,30 @@ fn execute_one(
             );
         }
         Effect::RequestBlockTransactions { header_id, from } => {
-            // The section's modifier id is the header's transactions root,
-            // so the header must be stored before we can ask for its body.
-            let Some(section_id) = transactions_section_id(state, &header_id) else {
-                debug!(
-                    header = %hex::encode(header_id),
-                    "input_blocks: cannot request block transactions, header not stored"
-                );
-                return;
+            // Spec 9.3's "else" branch: apply the announced header and
+            // extension, THEN ask for the transaction section. The
+            // handoff is not optional bookkeeping — a section's modifier
+            // id is `blake2b(type || header_id || transactions_root)`,
+            // so a node that has not applied the header cannot name the
+            // section it is missing. A restarted follower's first
+            // ordering announcement always lands here (its processor
+            // holds no input blocks yet), and before the handoff ran it
+            // requested nothing at all and had to wait for ordinary
+            // block sync to reach the same height on its own.
+            let section_id = match handoff_for_announced(state, rt, &header_id, from, now, out) {
+                Some(id) => id,
+                // No stored announcement: fall back to the store, which
+                // is the only source of a section id then.
+                None => match transactions_section_id(state, &header_id) {
+                    Some(id) => id,
+                    None => {
+                        debug!(
+                            header = %hex::encode(header_id),
+                            "input_blocks: cannot request block transactions, header not stored"
+                        );
+                        return;
+                    }
+                },
             };
             request_modifier(
                 state,
@@ -584,6 +603,40 @@ fn execute_one(
             debug!(id = %hex::encode(id), ?reason, "input_blocks: dropped");
         }
     }
+}
+
+/// Spec 9.3's "apply the extension" clause for the plain
+/// `RequestBlockTransactions` branch: run the announced header and
+/// extension through the ordinary pipeline and return the id of the
+/// transaction section the announcement names.
+///
+/// `None` when the processor no longer holds the announcement — the
+/// caller then falls back to the stored header. A failing chain store
+/// is reported through the node's storage observability and also
+/// returns `None`: nothing planned from a bad read is trustworthy.
+fn handoff_for_announced(
+    state: &mut NodeState,
+    rt: &mut InputBlocksRuntime,
+    header_id: &[u8; 32],
+    from: PeerTag,
+    now: Instant,
+    out: &mut Vec<Action>,
+) -> Option<[u8; 32]> {
+    let ann = rt.processor().ordering_announcement(header_id)?;
+    let section_id = compute_section_id(
+        TYPE_BLOCK_TRANSACTIONS,
+        header_id,
+        ann.header.transactions_root.as_bytes(),
+    );
+    let actions = match header_and_extension_handoff(&state.store, ann, rt.peer(from)) {
+        Ok(actions) => actions,
+        Err(failure) => {
+            report_reconstruct_storage_failure(state, header_id, &failure);
+            return None;
+        }
+    };
+    out.extend(run_pipeline(state, actions, now));
+    Some(section_id)
 }
 
 /// Run reconstruction's actions through the block executor, returning the
