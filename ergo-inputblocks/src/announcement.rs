@@ -133,15 +133,23 @@ pub fn verify_field_binding(fields: &InputBlockFields) -> Result<(), Announcemen
     if fields.proof.indices.is_empty() {
         return Err(AnnouncementError::ProofEmpty);
     }
-    // `extension_fields()` always yields two-byte keys, so the
-    // length-prefix guard in `extension_leaf_digest` cannot trip here;
-    // `flatten` drops a `None` rather than asserting, which can only ever
-    // shorten `want` and so can only make the comparison below stricter.
-    let mut want: Vec<[u8; 32]> = fields
+    // `InputBlockFields::extension_fields()` yields `[u8; 2]` keys, so
+    // `extension_leaf_digest`'s length-prefix guard cannot return `None`
+    // here today. Collect fallibly anyway, and treat a `None` as an
+    // unbound field rather than dropping it: a dropped expectation would
+    // SHORTEN `want`, and a proof that omits the very same leaf would
+    // then compare equal — laxer, not stricter. If the key type ever
+    // becomes variable-length this stays fail-closed without revisiting.
+    let Some(mut want) = fields
         .extension_fields()
         .iter()
-        .filter_map(|(k, v)| extension_leaf_digest(k, v))
-        .collect();
+        .map(|(k, v)| extension_leaf_digest(k, v))
+        .collect::<Option<Vec<[u8; 32]>>>()
+    else {
+        return Err(AnnouncementError::FieldsUnbound(
+            "extension field key exceeds the 255-byte leaf prefix".into(),
+        ));
+    };
     let mut proved: Vec<[u8; 32]> = fields.proof.indices.iter().map(|(_, d)| *d).collect();
     want.sort_unstable();
     proved.sort_unstable();
