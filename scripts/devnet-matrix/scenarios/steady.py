@@ -61,10 +61,12 @@ def run(ctx):
     ctx.note('d1_count', len((mempool.get('d1_f6_accounting') or {}).get('d1') or []))
 
     # Whole-chain D3 guard, beside the tip check assertion 2 makes.
-    orphans = common.chain_members_scala_never_had(ctx.run.series)
-    ctx.note('chain_members_scala_never_had', orphans[:20])
+    orphans, off_by_ordering = common.chain_members_scala_never_had(ctx.run.series)
+    ctx.note('chain_members_scala_never_published', orphans[:20])
+    ctx.note('chain_members_seen_under_a_neighbouring_ordering_id',
+             len(off_by_ordering))
     if orphans:
         ctx.fail(f'{len(orphans)} blocks were on Rust\'s input chain that Scala '
-                 'never listed under the same ordering block',
+                 'never published anywhere in the run',
                  {'sample': orphans[:10]},
                  ids=[o['block'] for o in orphans[:5]])

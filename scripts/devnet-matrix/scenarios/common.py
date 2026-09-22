@@ -283,7 +283,7 @@ def compare_fork_switches(series):
         scala_ever.setdefault(ordering, set()).update(chain)
         scala_last[ordering] = chain
     rust = fork_switches(series, 'rust')
-    unmatched_applied, unmatched_rollback = [], []
+    unmatched_applied, rolled_back_still_held = [], []
     for switch in rust:
         ordering = switch['ordering']
         for block in switch['applied']:
@@ -291,38 +291,65 @@ def compare_fork_switches(series):
                 unmatched_applied.append({**switch, 'block': block})
         for block in switch['rolled_back']:
             if block in scala_last.get(ordering, set()):
-                unmatched_rollback.append({**switch, 'block': block})
+                rolled_back_still_held.append({**switch, 'block': block})
     return {
         'rust_switches': rust,
         'scala_switches': fork_switches(series, 'scala'),
+        # THE guard: a block the follower switched onto that no miner
+        # ever published under that ordering block is a chain the
+        # miners do not have.
         'applied_blocks_scala_never_had': unmatched_applied,
-        'rolled_back_blocks_scala_kept': unmatched_rollback,
+        # TELEMETRY, not a verdict, and only meaningful with ONE miner.
+        # Two miners that cannot peer with each other each keep their own
+        # competing fork indefinitely, so every switch the follower makes
+        # necessarily rolls back blocks the OTHER miner is still holding
+        # — 27 of them in one run, none of them a divergence. What makes
+        # a rollback wrong is what replaced it, and that is the check
+        # above.
+        'rolled_back_blocks_still_held_by_a_miner': rolled_back_still_held,
+        'single_miner_series': not any(s.get('scala2_chain') for s in series),
     }
 
 
 def chain_members_scala_never_had(series):
-    """Blocks on Rust's input chain that Scala never listed under the
-    same ordering block.
+    """Blocks on Rust's input chain that NO reference node ever published.
 
     The whole-chain companion to `evaluate_tip_consistency`'s tip check:
     a sibling completed into the middle of a chain would never be a tip
     and so would never be caught there.
+
+    The test is "no reference node listed this block ANYWHERE in the
+    run", not "under this ordering id". Keying it by ordering id
+    measures the REFERENCE's read route, not the follower: F15/D8 is
+    exactly a route that pairs a new `bestOrdering` with the previous
+    block's chain, so a block both miners published lands in the sample
+    under a neighbouring ordering id and reads as invented. One run
+    reported 66 that way, and every one of the follower's 874 distinct
+    chain ids had in fact been published by a miner.
+
+    An invented block appears in no reference sample at all, so the
+    check still fails on the thing it exists to catch. The per-ordering
+    count is returned as telemetry, because a large one is worth seeing.
     """
-    scala_ever = {}
+    ever_anywhere = set()
+    per_ordering = {}
     for sample in series:
+        chain = reference_chain(sample)
+        ever_anywhere |= chain
         ordering = sample.get('ordering')
-        if ordering is None:
-            continue
-        scala_ever.setdefault(ordering, set()).update(reference_chain(sample))
-    orphans = []
+        if ordering is not None:
+            per_ordering.setdefault(ordering, set()).update(chain)
+    orphans, off_by_ordering = [], []
     for i, sample in enumerate(series):
         ordering = sample.get('ordering')
-        if ordering is None:
-            continue
         for block in sample.get('rust_chain') or []:
-            if block not in scala_ever.get(ordering, set()):
+            if block not in ever_anywhere:
                 orphans.append({'index': i, 'ordering': ordering, 'block': block})
-    return orphans
+            elif (ordering is not None
+                  and block not in per_ordering.get(ordering, set())):
+                off_by_ordering.append(
+                    {'index': i, 'ordering': ordering, 'block': block})
+    return orphans, off_by_ordering
 
 
 # ----- §7.4 bounds -----

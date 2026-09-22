@@ -731,8 +731,10 @@ def _self_test():
     unilateral = [sample('O1', ['b', 'a'], ['b', 'a']),
                   sample('O1', ['a'], ['b', 'a'])]
     verdict = common.compare_fork_switches(unilateral)
-    assert verdict['rolled_back_blocks_scala_kept'], verdict
-    assert verdict['rolled_back_blocks_scala_kept'][0]['block'] == 'b', verdict
+    assert verdict['rolled_back_blocks_still_held_by_a_miner'], verdict
+    assert verdict['rolled_back_blocks_still_held_by_a_miner'][0]['block'] == 'b', \
+        verdict
+    assert verdict['single_miner_series'] is True, verdict
 
     # And a switch the miner made TOO — Scala dropped `b` by its last
     # sample — is lag, not a divergence.
@@ -740,12 +742,21 @@ def _self_test():
                 sample('O1', ['c', 'a'], ['c', 'a'])]
     verdict = common.compare_fork_switches(followed)
     assert verdict['applied_blocks_scala_never_had'] == [], verdict
-    assert verdict['rolled_back_blocks_scala_kept'] == [], verdict
+    assert verdict['rolled_back_blocks_still_held_by_a_miner'] == [], verdict
 
     # The whole-chain orphan check catches a block that is never a tip.
     orphan = [sample('O1', ['c', 'q', 'a'], ['c', 'b', 'a'])]
-    found = common.chain_members_scala_never_had(orphan)
+    found, off = common.chain_members_scala_never_had(orphan)
     assert [o['block'] for o in found] == ['q'], found
+    assert off == [], off
+    # A block the reference DID publish, recorded by its tearing read
+    # route under a neighbouring ordering id, is not invented — it is
+    # counted separately. Keying the check by ordering id reported 66 of
+    # these as invented in one run, and every one had been published.
+    torn = [sample('O1', [], ['x']), sample('O2', ['x'], [])]
+    found, off = common.chain_members_scala_never_had(torn)
+    assert found == [], found
+    assert [o['block'] for o in off] == ['x'], off
 
     # ----- two miners: the follower is judged against BOTH -----
     #
@@ -756,13 +767,13 @@ def _self_test():
             'scala_chain': ['m1b', 'm1a'], 'scala2_chain': ['m2b', 'm2a']}]
     assert common.reference_chain(two[0]) == {'m1a', 'm1b', 'm2a', 'm2b'}, \
         common.reference_chain(two[0])
-    assert common.chain_members_scala_never_had(two) == [], \
+    assert common.chain_members_scala_never_had(two)[0] == [], \
         'a block the SECOND miner published is not an orphan'
     # And a block neither miner ever had still is.
     invented_two = [{'ordering': 'O1', 'rust_chain': ['zz'],
                      'scala_chain': ['m1a'], 'scala2_chain': ['m2a']}]
     assert [o['block'] for o in
-            common.chain_members_scala_never_had(invented_two)] == ['zz'], \
+            common.chain_members_scala_never_had(invented_two)[0]] == ['zz'], \
         'a block no miner published is still an orphan'
     # The sampler publishes the second chain under the name the
     # evaluators read; a rename would make the union silently empty.
