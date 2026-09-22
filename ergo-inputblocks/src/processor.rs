@@ -3444,23 +3444,40 @@ impl Processor {
         // NonDelivery penalty), so without a reissue a lost reply was
         // terminal. Repeated announcements of the recorded block hit
         // `AlreadyKnown` and never asked again.
+        //
+        // A reissue is a request like any other, so it obeys
+        // `requests_per_peer`: expired slots are offered oldest first
+        // and only while that peer has room on the wire. One that does
+        // not fit stays queued exactly as it is — same attempts, same
+        // past deadline — and the next tick offers it again. Reissuing
+        // unconditionally would put more requests in flight than the
+        // operator allowed (with a cap of one: A expires, B takes the
+        // slot, and the tick then adds A back on top of it).
         let timeout = self.bounds.request_timeout_ms;
         let retries = self.bounds.request_retries;
+        let cap = self.bounds.requests_per_peer;
         let mut reissued = Vec::new();
         self.outstanding.retain(|_, slots| {
-            slots.retain_mut(|p| {
-                if p.deadline.0 > now.0 {
-                    return true;
+            // A slot whose retry budget is spent is finished whatever
+            // the capacity: nothing will ask for it again.
+            slots.retain(|p| p.deadline.0 > now.0 || p.attempts <= retries);
+            let mut live = slots.iter().filter(|p| p.deadline.0 > now.0).count();
+            for p in slots.iter_mut() {
+                if live >= cap {
+                    break;
                 }
-                if p.attempts > retries {
-                    return false;
+                if p.deadline.0 > now.0 {
+                    continue;
                 }
                 let shift = (p.attempts - 1).min(REQUEST_BACKOFF_SHIFT_CAP);
                 p.deadline = Tick(now.0.saturating_add(timeout.saturating_mul(1u64 << shift)));
+                // Only an ACTUAL reissue costs an attempt and counts as
+                // a retry; a request held back for capacity has not
+                // been asked again.
                 p.attempts += 1;
+                live += 1;
                 reissued.push(p.effect.clone());
-                true
-            });
+            }
             !slots.is_empty()
         });
         self.requests_retried = self.requests_retried.saturating_add(reissued.len() as u64);
@@ -7680,7 +7697,8 @@ mod tests {
 
     /// The other half of the same invariant, and the correction the
     /// devnet smoke forced: a retry-pending slot survives, but it must
-    /// NOT hold an in-flight slot.
+    /// NOT hold an in-flight slot — and the reissue that eventually
+    /// serves it must still respect the in-flight cap.
     ///
     /// The first cut of this fix counted retry-pending slots against
     /// `requests_per_peer`. A retry ladder keeps a slot for minutes, so
@@ -7689,6 +7707,12 @@ mod tests {
     /// body request was dropped `RequestsFull` — 128 of them on the
     /// smoke, with the input chain unable to keep up. The cap bounds
     /// what is on the wire; the retry queue is bounded separately.
+    ///
+    /// The second cut then let the TICK exceed the cap from the other
+    /// side: it reissued every expired request unconditionally, so with
+    /// a cap of one, A expiring and B taking the slot left both in
+    /// flight the moment the tick ran. A queued request waits for
+    /// capacity, and only an actual reissue costs an attempt.
     #[test]
     fn a_retry_pending_slot_does_not_consume_in_flight_capacity() {
         let bounds = Bounds {
@@ -7727,7 +7751,9 @@ mod tests {
             "B's request goes out: {between:?}"
         );
 
-        // And A is still there to be reissued.
+        // B now holds the one in-flight slot, so the tick must NOT
+        // reissue A on top of it: that would put two requests on a wire
+        // the operator capped at one. A stays queued, unspent.
         let ticked = ctx.handle(
             &mut p,
             Event::Tick {
@@ -7735,12 +7761,42 @@ mod tests {
             },
         );
         assert!(
-            ticked.iter().any(|e| matches!(
+            !ticked.iter().any(|e| matches!(
                 e,
                 Effect::RequestTransactionIds { input_block_id, .. } if *input_block_id == a_id
             )),
-            "A is still reissued: {ticked:?}"
+            "the cap holds A back while B is in flight: {ticked:?}"
         );
+        assert_eq!(
+            p.requests_retried(),
+            0,
+            "a request that was not reissued did not spend an attempt"
+        );
+
+        // B is answered, freeing the slot; now A gets its reissue.
+        ctx.handle(
+            &mut p,
+            Event::TransactionIdsDelivered {
+                input_block_id: b_id,
+                weak_ids: Vec::new(),
+                from: ts::PEER,
+                now: Tick(timeout + 3),
+            },
+        );
+        let after = ctx.handle(
+            &mut p,
+            Event::Tick {
+                now: Tick(timeout + 4),
+            },
+        );
+        assert!(
+            after.iter().any(|e| matches!(
+                e,
+                Effect::RequestTransactionIds { input_block_id, .. } if *input_block_id == a_id
+            )),
+            "once capacity frees, the queued request is reissued: {after:?}"
+        );
+        assert_eq!(p.requests_retried(), 1, "and only then is it counted");
     }
 
     /// The retry queue is bounded: at `requests_per_peer +
@@ -7762,6 +7818,7 @@ mod tests {
         announce(&mut p, &ctx, &a, ts::PEER);
         // A expires; B takes the one in-flight slot (total 2 = ceiling).
         let b = ts::announcement(ORD, FULL + 1, 2, None);
+        let b_id = ts::ann_id(&b);
         ctx.handle(
             &mut p,
             Event::AnnouncementAccepted {
@@ -7784,7 +7841,10 @@ mod tests {
             drops(&third).contains(&DropReason::RequestsFull),
             "the ceiling refuses the new request: {third:?}"
         );
-        // A — the oldest, retry-pending one — was not sacrificed for it.
+        // A — the oldest, retry-pending one — was not sacrificed for
+        // it. The tick cannot reissue it yet (B holds the single
+        // in-flight slot), but it is still there: once B is answered,
+        // A goes back out.
         let ticked = ctx.handle(
             &mut p,
             Event::Tick {
@@ -7792,11 +7852,33 @@ mod tests {
             },
         );
         assert!(
-            ticked.iter().any(|e| matches!(
+            !ticked.iter().any(|e| matches!(
                 e,
                 Effect::RequestTransactionIds { input_block_id, .. } if *input_block_id == a_id
             )),
-            "the queued request is still reissued: {ticked:?}"
+            "still no capacity for A: {ticked:?}"
+        );
+        ctx.handle(
+            &mut p,
+            Event::TransactionIdsDelivered {
+                input_block_id: b_id,
+                weak_ids: Vec::new(),
+                from: ts::PEER,
+                now: Tick(timeout + 4),
+            },
+        );
+        let after = ctx.handle(
+            &mut p,
+            Event::Tick {
+                now: Tick(timeout + 5),
+            },
+        );
+        assert!(
+            after.iter().any(|e| matches!(
+                e,
+                Effect::RequestTransactionIds { input_block_id, .. } if *input_block_id == a_id
+            )),
+            "the queued request survived the ceiling and is reissued: {after:?}"
         );
     }
 }
