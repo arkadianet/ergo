@@ -673,7 +673,7 @@ class Run:
             # servable. Bracketing them together is what makes "this
             # block held this transaction while the pool looked like
             # that" a single observation.
-            self._collect_input_block_txids(reading)
+            staged_ids, staged_tip = self._collect_input_block_txids(reading)
             tip_after = (api('rust', '/info') or {}).get('bestFullHeaderId')
         except Unavailable as error:
             with self._lock:
@@ -693,6 +693,9 @@ class Run:
             self.samples += 1
             self.sweep_seq += 1
             reading['seq'] = self.sweep_seq
+            # Commit and publish as ONE step, under the lock, now that
+            # the bracket has been decided.
+            self._publish_sweep_ids(reading, staged_ids, staged_tip)
             if not reading['rust']['pool_tip_stable']:
                 self.pool_tip_moved_samples += 1
             self._accumulate_counters(status, peers)
@@ -867,10 +870,11 @@ class Run:
         sweeps that follow, a third of a second apart.
         """
         self._fetched_this_sweep = 0
+        staged = {}
         tip = reading['rust']['info'].get('bestFullHeaderId')
         for bid in reading['rust']['chain'].get('bestInputBlocks') or []:
             if self._fetched_this_sweep >= INPUT_BLOCK_ID_FETCHES_PER_SWEEP:
-                return
+                break
             # Only a NON-EMPTY answer is cached. An input block shows up
             # in the chain before its bodies are attached, so caching the
             # first empty answer would permanently hide its transactions.
@@ -878,9 +882,31 @@ class Run:
                 continue
             ids = api('rust', f'/blocks/{bid}/inputBlockTransactionIds') or []
             self._fetched_this_sweep += 1
-            self.input_block_txids[bid] = ids
-            if ids:
-                self.input_block_seen_under[bid] = tip
+            staged[bid] = ids
+        return staged, tip
+
+    def _publish_sweep_ids(self, reading, staged, tip):
+        """Commit a sweep's staged ids, but ONLY if its bracket held.
+
+        Writing them as they were fetched published observations the
+        sweep had not yet validated: the main thread iterated the live
+        caches, so ids from a newer — or an unstable — sweep could be
+        credited against an older pool snapshot, and a dict growing
+        under iteration could raise outright. Staging and committing
+        once makes a sweep all-or-nothing, and the consumer reads the
+        immutable copy hung on the reading rather than the live cache.
+        """
+        if reading['rust'].get('pool_tip_stable'):
+            for bid, ids in staged.items():
+                self.input_block_txids[bid] = ids
+                if ids:
+                    self.input_block_seen_under[bid] = tip
+        # Published snapshot: what a consumer of THIS reading may use.
+        # An unstable sweep publishes the standing set, never its own
+        # unvalidated observations.
+        reading['rust']['input_block_txids'] = dict(self.input_block_txids)
+        reading['rust']['input_block_seen_under'] = dict(
+            self.input_block_seen_under)
 
 
 class Workload:
@@ -1225,45 +1251,68 @@ def evaluate_mismatch_recovery(ordering_events, scala_block_at_height):
       then applied at that height must be the one Scala has. A fallback
       that lands on a different block is the wrong fallback.
     * **A reconstructed block must not be replaced at its height.** If a
-      later event applies a DIFFERENT header at a height the node
+      LATER event applies a DIFFERENT header at a height the node
       reported reconstructed, the rebuild it published was wrong and was
       silently swapped out.
+
+    `ordering_events` is the MERGED stream — `ordering_*` events and
+    `blockApplied` together, in the order the node emitted them. Both
+    halves are needed and so is the order: the recovery of a fallback
+    can only be an application that came after it, and an application
+    that came before a reconstruction is not a replacement of it. Given
+    only the `ordering_*` events, as this was, a wrong recovery had no
+    application to compare against and silently became `unverifiable`.
+
+    An `unverifiable` mismatch fallback is a FAILURE: the node refused
+    its own rebuild and the run cannot show what it did instead.
 
     `scala_block_at_height` maps height -> Scala's header id there (or
     `None` when Scala has no block at that height yet). Pure, so
     `--self-test` drives it with a fabricated stream.
     """
-    applied = {}          # height -> header ids applied, in order
-    reconstructed = {}    # height -> header id the node said it rebuilt
-    mismatch_fallbacks = []
-    for e in ordering_events:
-        height, header = e.get('height'), e.get('header_id') or e.get('headerId')
+    # ONE pass, in event order. Chronology is the whole point: an
+    # application that came BEFORE a mismatch fallback says nothing
+    # about how that fallback recovered, and an application before a
+    # reconstruction is not a replacement of it.
+    reconstructed_at = {}   # height -> (index, header) of the last rebuild
+    mismatch_fallbacks = []  # (index, event)
+    applications = []        # (index, height, header)
+    for i, e in enumerate(ordering_events):
+        height = e.get('height')
+        header = e.get('header_id') or e.get('headerId')
         kind = e.get('kind')
         if kind in ('blockApplied', 'ordering_reconstructed'):
-            applied.setdefault(height, []).append(header)
+            applications.append((i, height, header))
         if kind == 'ordering_reconstructed':
-            reconstructed[height] = header
+            reconstructed_at[height] = (i, header)
         elif kind == 'ordering_reconstruct_fallback':
             if (e.get('detail') or '') in MERKLE_MISMATCH_REASONS:
-                mismatch_fallbacks.append(e)
+                mismatch_fallbacks.append((i, e))
 
     bad_recoveries, replaced, unverifiable = [], [], []
-    for e in mismatch_fallbacks:
+    for i, e in mismatch_fallbacks:
         height = e.get('height')
         expected = scala_block_at_height.get(height)
-        landed = [h for h in applied.get(height, []) if h]
-        if expected is None or not landed:
-            # Scala has nothing at that height yet, or the node has not
-            # applied anything there. Recorded, never silently passed.
+        # Only applications AFTER the fallback can be its recovery.
+        landed = [h for (j, hh, h) in applications
+                  if j > i and hh == height and h]
+        if not landed or expected is None:
+            # The node refused its own rebuild and we cannot show what it
+            # did next. A run that cannot verify its recovery has not
+            # verified it — this is a FAILURE, not a shrug.
             unverifiable.append({'height': height, 'fallback': e,
-                                 'scala_block': expected, 'applied': landed})
+                                 'scala_block': expected,
+                                 'applied_after_fallback': landed})
             continue
         if expected not in landed:
             bad_recoveries.append({'height': height, 'fallback': e,
-                                   'scala_block': expected, 'applied': landed})
+                                   'scala_block': expected,
+                                   'applied_after_fallback': landed})
 
-    for height, header in reconstructed.items():
-        later = [h for h in applied.get(height, []) if h and h != header]
+    for height, (ri, header) in reconstructed_at.items():
+        # Only an application AFTER the reconstruction replaces it.
+        later = [h for (j, hh, h) in applications
+                 if j > ri and hh == height and h and h != header]
         if later:
             replaced.append({'height': height, 'reconstructed': header,
                              'replaced_by': later})
@@ -1279,6 +1328,11 @@ def evaluate_mismatch_recovery(ordering_events, scala_block_at_height):
             f'{len(replaced)} reconstructed ordering blocks were replaced at their '
             'own height',
             {'replaced': replaced[:10]}))
+    if unverifiable:
+        failures.append((
+            f'{len(unverifiable)} Merkle-mismatch fallbacks had no subsequent '
+            "application to check against Scala's block at that height",
+            {'unverifiable': unverifiable[:10]}))
     return {
         'mismatch_fallbacks': len(mismatch_fallbacks),
         'mismatch_reasons_checked': list(MERKLE_MISMATCH_REASONS),
@@ -1907,11 +1961,94 @@ def _self_test():
     assert ingredient['mismatch_fallbacks'] == 0, ingredient
     assert ingredient['failures'] == [], ingredient
 
-    # Nothing to compare against is recorded, never silently passed.
+    # Round 4 addendum: nothing to compare against is now a FAILURE. The
+    # node refused its own rebuild and the run cannot show what it did
+    # next; "unverified" is not "verified".
     blind = evaluate_mismatch_recovery(
         [ev('ordering_reconstruct_fallback', 9, 'S9', detail='root_mismatch')],
         {9: None})
-    assert blind['unverifiable'] and blind['failures'] == [], blind
+    assert blind['unverifiable'], blind
+    assert any('no subsequent application' in m for m, _ in blind['failures']), \
+        blind
+
+    # ----- round 4 addendum: the merged stream and its chronology -----
+    #
+    # Codex's production-filter probe. Under the old caller the evaluator
+    # saw only `ordering_*` events, so this — a mismatch fallback
+    # followed by the WRONG full block — produced zero failures.
+    wrong_recovery = evaluate_mismatch_recovery(
+        [ev('ordering_reconstruct_fallback', 5, 'S5', detail='root_mismatch'),
+         ev('blockApplied', 5, 'X5', txs=2)],
+        {5: 'S5'})
+    assert wrong_recovery['failures'], \
+        'a mismatch fallback that applied the wrong block must FAIL'
+    assert wrong_recovery['bad_recoveries'], wrong_recovery
+    # And the same stream with only the ordering events reproduces the
+    # hole, which is why the caller must pass the merged one.
+    filtered = evaluate_mismatch_recovery(
+        [e for e in
+         [ev('ordering_reconstruct_fallback', 5, 'S5', detail='root_mismatch'),
+          ev('blockApplied', 5, 'X5', txs=2)]
+         if e['kind'].startswith('ordering_')],
+        {5: 'S5'})
+    assert filtered['bad_recoveries'] == [], \
+        'the ordering-only stream cannot see the wrong recovery at all'
+
+    # Chronology: an application BEFORE the fallback is not its recovery.
+    prior_then_wrong = evaluate_mismatch_recovery(
+        [ev('blockApplied', 5, 'S5', txs=2),
+         ev('ordering_reconstruct_fallback', 5, 'S5', detail='root_mismatch')],
+        {5: 'S5'})
+    assert prior_then_wrong['failures'], \
+        'a correct application BEFORE the fallback must not excuse it'
+    assert prior_then_wrong['unverifiable'], prior_then_wrong
+
+    # Chronology: an application BEFORE a reconstruction is not a
+    # replacement of it.
+    applied_then_rebuilt = evaluate_mismatch_recovery(
+        [ev('blockApplied', 6, 'S6', txs=2),
+         ev('ordering_reconstructed', 6, 'R6', txs=2,
+            reconstructedOrder='candidate', reconstructionKey='parent')],
+        {6: 'S6'})
+    assert applied_then_rebuilt['reconstructed_then_replaced'] == [], \
+        applied_then_rebuilt
+    assert applied_then_rebuilt['failures'] == [], applied_then_rebuilt
+    # But an application AFTER it still is.
+    rebuilt_then_swapped = evaluate_mismatch_recovery(
+        [ev('ordering_reconstructed', 6, 'R6', txs=2,
+            reconstructedOrder='candidate', reconstructionKey='parent'),
+         ev('blockApplied', 6, 'S6', txs=2)],
+        {6: 'S6'})
+    assert rebuilt_then_swapped['reconstructed_then_replaced'], \
+        rebuilt_then_swapped
+
+    # ----- round 4 addendum: a sweep publishes only after it validates -
+
+    def staged_run():
+        r = Run.__new__(Run)
+        r.input_block_txids = {}
+        r.input_block_seen_under = {}
+        return r
+
+    # Codex's mocked sweep: the bracket did NOT hold, so nothing of that
+    # sweep's own observations may be retained or published.
+    r = staged_run()
+    unstable = {'rust': {'pool_tip_stable': False}}
+    r._publish_sweep_ids(unstable, {'ibX': ['tx']}, 'H9')
+    assert r.input_block_txids == {}, r.input_block_txids
+    assert r.input_block_seen_under == {}, r.input_block_seen_under
+    assert unstable['rust']['input_block_txids'] == {}, unstable
+    # A stable sweep commits and publishes the same thing.
+    r2 = staged_run()
+    stable = {'rust': {'pool_tip_stable': True}}
+    r2._publish_sweep_ids(stable, {'ibX': ['tx']}, 'H9')
+    assert r2.input_block_txids == {'ibX': ['tx']}, r2.input_block_txids
+    assert r2.input_block_seen_under == {'ibX': 'H9'}, r2.input_block_seen_under
+    assert stable['rust']['input_block_txids'] == {'ibX': ['tx']}, stable
+    # The published snapshot is a COPY: later sampler writes do not
+    # retroactively change what an earlier reading offered.
+    r2.input_block_txids['ibY'] = ['tx2']
+    assert stable['rust']['input_block_txids'] == {'ibX': ['tx']}, stable
 
     # The guard must key off the REAL shapes: a `detail` on a
     # reconstructed event is a shape the producer never emits, and
@@ -2470,10 +2607,17 @@ def assertion_6_mempool(run, evidence, count):
             seen_sweeps.add(seq)
             if reading['rust'].get('pool_tip_stable'):
                 header_now = reading['rust']['pool_tip']
-                for bid, ids in run.input_block_txids.items():
+                # The sweep's OWN published snapshot, never the live
+                # cache: the cache is mutated by the sampler thread, so
+                # iterating it credited ids from a newer sweep against
+                # this sweep's pool — and could raise mid-iteration.
+                published_ids = reading['rust'].get('input_block_txids') or {}
+                published_seen = reading['rust'].get(
+                    'input_block_seen_under') or {}
+                for bid, ids in published_ids.items():
                     # The tip to credit against is the one the BLOCK was
                     # observed under, not the one current now.
-                    located_under = run.input_block_seen_under.get(bid)
+                    located_under = published_seen.get(bid)
                     if located_under is None:
                         continue
                     for txid in set(ids) & submitted:
@@ -2573,7 +2717,7 @@ def assertion_6_mempool(run, evidence, count):
                  f'{len(unresolved)} payments reached neither a Rust input block nor '
                  f'an ordering block within {MEMPOOL_ROUTE_SECONDS:.0f}s',
                  {'unresolved': unresolved,
-                  'input_blocks_seen': len(run.input_block_txids),
+                  'input_blocks_seen': len(dict(run.input_block_txids)),
                   'rust_log': rust_log_lines('input_blocks')})
 
     # The strict path has to be EXERCISED. A run in which the miner
@@ -2584,7 +2728,7 @@ def assertion_6_mempool(run, evidence, count):
                  'no payment was ever located inside a Rust input block, so the '
                  'input-block eviction path was never exercised',
                  {'never_sealed_by_miner': len(tracker.never_sealed),
-                  'input_blocks_seen': len(run.input_block_txids),
+                  'input_blocks_seen': len(dict(run.input_block_txids)),
                   'scala_input_chain_txids_seen': len(scala_input_chain_txids),
                   'rust_log': rust_log_lines('input_blocks')})
 
@@ -2630,7 +2774,9 @@ def assertion_6_mempool(run, evidence, count):
     result['rust_unconfirmed'] = sorted(rust_pool)
     result['symmetric_difference'] = sorted(scala_pool ^ rust_pool)
     result['ordering_block_txids'] = sorted(ordering_txids)
-    applied = {t for ids in run.input_block_txids.values() for t in ids}
+    # A COPY: the sampler thread is still writing this cache, and a dict
+    # iterated while it grows raises.
+    applied = {t for ids in dict(run.input_block_txids).values() for t in ids}
     attribution = attribute_scala_residue(
         scala_pool - rust_pool, applied, ordering_txids, d1_refusals_from_log())
     attribution['only_in_rust'] = sorted(rust_pool - scala_pool)
@@ -2731,6 +2877,14 @@ def assertion_4_reconstruction(run, evidence, ordering_blocks):
 
     ordering = [e for e in events.get('events', []) if e['kind'].startswith('ordering_')]
     result['ordering_events'] = ordering
+    # The recovery check needs `blockApplied` too, in the order the node
+    # emitted it: a fallback's recovery is whatever it applied NEXT, and
+    # without the applications every wrong recovery merely looked
+    # unverifiable. The feed is already chronological.
+    recovery_stream = [e for e in events.get('events', [])
+                       if e['kind'].startswith('ordering_')
+                       or e['kind'] == 'blockApplied']
+    result['recovery_stream_events'] = len(recovery_stream)
     # D4 telemetry: which assembly order reproduced the header root, and
     # which reasons the fallbacks gave. Both are the point of the round.
     # The API serializes camelCase; accept either so a rename cannot
@@ -2808,7 +2962,7 @@ def assertion_4_reconstruction(run, evidence, ordering_blocks):
     # pins that.
     try:
         scala_at_height = {}
-        for e in ordering:
+        for e in recovery_stream:
             h = e.get('height')
             if h is None or h in scala_at_height:
                 continue
@@ -2823,7 +2977,7 @@ def assertion_4_reconstruction(run, evidence, ordering_blocks):
                  'mismatch recovery could not be checked',
                  {'error': result.get('mismatch_recovery_unavailable')})
     else:
-        recovery = evaluate_mismatch_recovery(ordering, scala_at_height)
+        recovery = evaluate_mismatch_recovery(recovery_stream, scala_at_height)
         result['mismatch_recovery'] = recovery
         result['reconstructed_on_root_mismatch'] = recovery['bad_recoveries']
         for message, evidence in recovery['failures']:
