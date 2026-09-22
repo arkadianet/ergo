@@ -569,21 +569,40 @@ async fn input_block_wrong_body(ctx: &Ctx, seconds: u64) -> bool {
             }
         };
     let deadline = Instant::now() + Duration::from_secs(seconds);
-    let (mut relayed, mut answered, mut requests) = (0u32, 0u32, 0u32);
+    let (mut relayed, mut answered, mut requests, mut pushed) = (0u32, 0u32, 0u32, 0u32);
+    let mut last_report = Instant::now();
     while Instant::now() < deadline {
         let left = deadline.saturating_duration_since(Instant::now());
         let Some((code, payload)) = conn.next_frame(left).await else {
             break;
         };
         match code {
-            // An announcement the follower relayed to us. Echo it back:
-            // that is what makes us a peer it will ask for the bodies.
+            // An announcement the follower relayed to us. Two things:
+            // echo it back, which is what would make us a peer it asks
+            // for the bodies; and PUSH a wrong body for it unsolicited,
+            // because the follower asks the block's original announcer
+            // and the echo arrives second (`AlreadyKnown`), so waiting
+            // to be asked may never happen.
             CODE_INPUT_BLOCK => {
                 let frame = full_frame(&ctx.magic, CODE_INPUT_BLOCK, &payload);
                 if conn.stream.write_all(&frame).await.is_err() {
                     break;
                 }
                 relayed += 1;
+                if let Some(id) = announced_input_block_id(&payload) {
+                    if let Some(tx) = decoy_transaction() {
+                        if let Ok(body) = serialize_input_block_txs(&InputBlockTxs {
+                            input_block_id: id,
+                            transactions: vec![tx],
+                        }) {
+                            let frame = full_frame(&ctx.magic, CODE_INPUT_BLOCK_TXS, &body);
+                            if conn.stream.write_all(&frame).await.is_err() {
+                                break;
+                            }
+                            pushed += 1;
+                        }
+                    }
+                }
             }
             // The request we exist to answer badly.
             CODE_INPUT_BLOCK_TXS_REQUEST => {
@@ -612,17 +631,39 @@ async fn input_block_wrong_body(ctx: &Ctx, seconds: u64) -> bool {
             }
             _ => {}
         }
+        // Report as we go and FLUSH: stdout to a pipe is block-buffered,
+        // so the closing summary was lost when the scenario terminated
+        // the harness and the campaign saw only the banner.
+        if last_report.elapsed() >= Duration::from_secs(10) {
+            last_report = Instant::now();
+            report(relayed, pushed, requests, answered);
+        }
     }
+    report(relayed, pushed, requests, answered);
+    let ok = answered > 0 || pushed > 0;
     println!(
-        "[wrong_body] relayed {relayed} announcements, saw {requests} body requests, \
-         answered {answered} with mismatched bodies"
-    );
-    let ok = answered > 0;
-    println!(
-        "{} input_block_wrong_body: the follower asked us for bodies and got wrong ones",
+        "{} input_block_wrong_body: mismatched bodies were delivered to the follower",
         if ok { "PASS" } else { "FAIL" }
     );
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
     ok
+}
+
+fn report(relayed: u32, pushed: u32, requests: u32, answered: u32) {
+    use std::io::Write;
+    println!(
+        "[wrong_body] relayed {relayed}, pushed {pushed} unsolicited wrong bodies, \
+         saw {requests} body requests, answered {answered}"
+    );
+    let _ = std::io::stdout().flush();
+}
+
+/// The input block id an announcement frame commits to — its header id.
+fn announced_input_block_id(payload: &[u8]) -> Option<[u8; 32]> {
+    let ann = ergo_ser::input_block::parse_input_block_announcement(payload).ok()?;
+    let id = ann.id().ok()?;
+    Some(*id.as_bytes())
 }
 
 /// One syntactically valid transaction that commits to nothing the

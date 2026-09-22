@@ -197,12 +197,30 @@ def run(ctx):
         'skipped_reasons': smoke._tally(e.get('detail') for e in skipped),
     })
 
+    # Where the wrong bodies were stopped, if they were. A body that is
+    # rejected against the announced transactions digest before assembly
+    # can never reach the rebuild — which would mean the fallback is
+    # UNREACHABLE by this route rather than merely unobserved, and the
+    # evidence has to be able to tell those apart.
+    drops = ctx.run.totals()
+    digest_drops = {r: c for r, c in drops.items()
+                    if 'Digest' in r or 'Mismatch' in r}
+    ctx.note('where_the_wrong_bodies_went', {
+        'drop_totals': drops,
+        'digest_related_drops': digest_drops,
+        'reading': 'a wrong body refused against the announced transactions '
+                   'digest never reaches assembly, so no root mismatch can '
+                   'follow from it — that is the port checking the digest '
+                   'first, not the fallback being unobservable',
+    })
+
     if not mismatch:
         ctx.fail('no ordering block fell back with a Merkle-mismatch reason even '
                  'though a peer was serving bodies the announcements do not commit '
                  'to, so the fallback path was NOT exercised',
                  {'fallbacks': len(fallbacks), 'reconstructions': len(reconstructions),
                   'skipped': len(skipped),
+                  'digest_related_drops': digest_drops,
                   'adversary_stdout': (ctx.evidence.get('adversary') or {}).get('stdout'),
                   'rust_log': smoke.rust_log_lines('input_blocks')})
 
