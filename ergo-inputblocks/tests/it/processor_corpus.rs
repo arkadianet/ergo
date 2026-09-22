@@ -374,7 +374,13 @@ fn ordering_block_announcement_storage_and_retrieval() {
 #[test]
 fn ordering_block_announcement_pruning_stale_announcements_removed() {
     let mut h = Harness::new();
-    let oa = ts::ordering_announcement(ORD, 3, 101, Vec::new());
+    // The Scala property seeds the history store directly, so it can put
+    // an announcement 12 blocks behind the tip in one step. Here receipt
+    // and storage are the same event, and receipt applies spec 9.3's +-2
+    // window (finding 7), so the announcement is seeded in-window and the
+    // tip is then advanced the same 12 blocks past it. Same distance,
+    // same threshold, same verdict.
+    let oa = ts::ordering_announcement(ORD, FULL + 1, 101, Vec::new());
     let oa_id = ts::header_id(&oa.header);
     let now = h.tick();
     h.ctx.handle(
@@ -387,7 +393,7 @@ fn ordering_block_announcement_pruning_stale_announcements_removed() {
     );
     assert!(h.p.ordering_announcement(&oa_id).is_some());
     // Scala: best height 15, announcement at 3 — 12 behind, threshold 6.
-    h.ordering_applied([0xB9; 32], 15);
+    h.ordering_applied([0xB9; 32], FULL + 13);
     assert!(h.p.ordering_announcement(&oa_id).is_none());
 }
 
