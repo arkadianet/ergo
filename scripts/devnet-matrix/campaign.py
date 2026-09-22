@@ -1221,6 +1221,27 @@ def _self_test():
             [ref_sample('O1', clean, ['m1b', 'm1a'], ['m2b', 'm2a'])])
         assert v['incoherent_samples'] == [], (clean, v)
 
+    # A chain a reference published a moment EARLIER, and has since moved
+    # off, still vouches for a follower that has not caught up — with two
+    # miners the other one may publish nothing under this ordering id at
+    # this instant. Judging only against the same sample reported 17
+    # disagreements in one run, every one of them this.
+    lagging = [ref_sample('O1', [], [], ['m2b', 'm2a']),
+               ref_sample('O1', ['m2b', 'm2a'], ['m1b', 'm1a'], [])]
+    v = common.evaluate_fork_coherence(lagging)
+    assert v['incoherent_samples'] == [], v
+    # The window is not a loophole: a chain nobody published anywhere in
+    # it still fails.
+    never = [ref_sample('O1', [], [], ['m2b', 'm2a']),
+             ref_sample('O1', ['zz', 'm2a'], ['m1b', 'm1a'], [])]
+    v = common.evaluate_fork_coherence(never)
+    assert v['incoherent_samples'], v
+    # ...and so does a mix of two branches, wherever they were seen.
+    mixed_window = [ref_sample('O1', [], [], ['m2b', 'm2a']),
+                    ref_sample('O1', ['m1b', 'm2a'], ['m1b', 'm1a'], [])]
+    v = common.evaluate_fork_coherence(mixed_window)
+    assert v['incoherent_samples'], v
+
     # A reference on a DIFFERENT ordering block contributes nothing: its
     # chain must not be usable to excuse a follower chain under ours.
     elsewhere = [ref_sample('O1', ['m2a'], ['m1a'], ['m2a'], o2='O2')]

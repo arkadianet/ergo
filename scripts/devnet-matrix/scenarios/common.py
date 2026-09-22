@@ -417,9 +417,12 @@ def evaluate_fork_coherence(series):
     A sample is judged only when Rust and at least one reference are on
     the SAME ordering block — two chains under different ordering blocks
     are not chains of the same thing. Of those, Rust's chain has to be
-    coherent (prefix, or one ahead) with at least ONE such reference,
-    and a one-block lead has to be confirmed by that reference within
-    `LATER_CONFIRMATION_SAMPLES`.
+    coherent (prefix, or one ahead) with at least ONE chain a reference
+    published under that ordering id within `LATER_CONFIRMATION_SAMPLES`
+    of this sample, and a one-block lead has to be confirmed by that
+    reference inside the same bound. The window is not a loophole: a
+    chain mixing two branches, or one carrying a block nobody published,
+    matches nothing anywhere in it.
     """
     # Where each reference published each block, per ordering id, so a
     # lead can be confirmed against the reference it led.
@@ -431,6 +434,21 @@ def evaluate_fork_coherence(series):
             for block in chain:
                 published.setdefault((node, ref_ordering, block), []).append(i)
 
+    # Every chain each reference published under each ordering id, with
+    # the sample it was seen at. The follower legitimately lags, and a
+    # reference legitimately moves on, so the chain it is coherent with
+    # may be one a reference published a moment before or after this
+    # sample — and with two miners, the OTHER miner may be publishing
+    # nothing under this ordering id at this instant. Judging only
+    # against the same sample reported 17 disagreements in one run, all
+    # of them the follower sitting on a chain miner 2 had just moved off.
+    history = {}
+    for i, sample in enumerate(series):
+        ordering = sample.get('ordering')
+        for node, ref_ordering, chain in reference_chains(sample):
+            if ref_ordering is not None:
+                history.setdefault((node, ref_ordering), []).append((i, chain))
+
     incoherent, unconfirmed_leads, judged = [], [], 0
     for i, sample in enumerate(series):
         ordering = sample.get('ordering')
@@ -439,8 +457,14 @@ def evaluate_fork_coherence(series):
             continue
         peers = [(node, chain) for node, ref_ordering, chain
                  in reference_chains(sample) if ref_ordering == ordering]
-        if not peers:
+        nearby = []
+        for node in REFERENCE_NODES:
+            for j, chain in history.get((node, ordering), ()):
+                if abs(j - i) <= LATER_CONFIRMATION_SAMPLES:
+                    nearby.append((node, chain))
+        if not peers and not nearby:
             continue
+        peers = peers + nearby
         judged += 1
         matched, lead_problem = False, None
         for node, chain in peers:
@@ -463,10 +487,15 @@ def evaluate_fork_coherence(series):
         if lead_problem is not None:
             unconfirmed_leads.append(lead_problem)
         else:
+            at_sample = [(node, chain) for node, ref_ordering, chain
+                         in reference_chains(sample) if ref_ordering == ordering]
             incoherent.append({
                 'sample': i, 'ordering': ordering,
                 'rust_chain': rust_chain[:8],
-                'references': {node: chain[:8] for node, chain in peers},
+                'references_at_this_sample': {node: chain[:8]
+                                              for node, chain in at_sample},
+                'references_compared': len(peers),
+                'window': LATER_CONFIRMATION_SAMPLES,
             })
     return {
         'judged_samples': judged,
