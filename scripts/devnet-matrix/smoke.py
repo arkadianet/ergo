@@ -782,6 +782,13 @@ class Run:
             # miner's chain, and needs both.
             'scala2_chain': (reading.get('scala2', {}).get('chain', {})
                              .get('bestInputBlocks') or []),
+            # Its OWN ordering id, from the same call as its chain. Without
+            # it the second miner's chain could be attributed to whatever
+            # ordering block the FIRST miner happened to be on, which is
+            # how a two-miner evaluator ends up accepting a chain mixing
+            # members of two incompatible branches.
+            'scala2_ordering': (reading.get('scala2', {}).get('chain', {})
+                                .get('bestOrdering') or None),
             'scala_tip': scala_best or None,
             'rust_tip': rust_best or None,
         }

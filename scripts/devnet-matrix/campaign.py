@@ -441,6 +441,71 @@ def rotate_logs(scenario, nodes, tag=''):
     return moved
 
 
+# The controller's cap: a scenario gets three attempts. More than that
+# and the reruns are hunting for a pass rather than measuring anything.
+MAX_ATTEMPTS = 3
+
+
+def attempts_path():
+    return CAMPAIGN_WORK / 'attempts.json'
+
+
+def read_attempts():
+    """Every attempt this campaign has recorded, per scenario."""
+    try:
+        return json.loads(attempts_path().read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def record_attempt(name, evidence):
+    """Append one attempt's verdict, and KEEP its evidence file.
+
+    `--attempt` used to be unchecked metadata that the runner set to 1
+    every time, so repeated reruns quietly overwrote the canonical
+    evidence until one of them passed. Each attempt now keeps its own
+    copy beside the canonical one, and the history is what the cap is
+    enforced against.
+    """
+    CAMPAIGN_WORK.mkdir(parents=True, exist_ok=True)
+    history = read_attempts()
+    entries = history.setdefault(name, [])
+    number = len(entries) + 1
+    kept = CAMPAIGN_WORK / 'attempts' / f'{name}-{number}.json'
+    kept.parent.mkdir(parents=True, exist_ok=True)
+    kept.write_text(json.dumps(evidence, indent=2, default=str) + '\n')
+    entries.append({
+        'attempt': number,
+        'result': evidence.get('result'),
+        'aborted': evidence.get('aborted'),
+        'finished': evidence.get('finished'),
+        'failures': [f.get('message') for f in (evidence.get('failures') or [])],
+        'evidence': str(kept),
+    })
+    attempts_path().write_text(json.dumps(history, indent=2) + '\n')
+    return number
+
+
+def check_attempt_cap(name, force=False):
+    """Refuse a fourth attempt unless it is explicitly forced.
+
+    Returns the number this attempt will be. Raises `SystemExit` at the
+    cap: the point of the cap is that it stops the run, not that it is
+    mentioned in a report afterwards.
+    """
+    entries = read_attempts().get(name, [])
+    number = len(entries) + 1
+    if number > MAX_ATTEMPTS and not force:
+        previous = '; '.join(
+            f"#{e['attempt']} {e.get('result')}" for e in entries)
+        raise SystemExit(
+            f'{name} has already had {len(entries)} attempts ({previous}). '
+            f'The cap is {MAX_ATTEMPTS}. Re-run with --force-attempt only if '
+            'the controller has ruled that the earlier attempts measured a '
+            'harness defect rather than the node.')
+    return number
+
+
 def run_scenario(name, args):
     import lifecycle
     import smoke
@@ -474,6 +539,10 @@ def run_scenario(name, args):
         'scala': {'classpath': str(lifecycle.classpath_file()),
                   'pinned_app_version': lifecycle.SCALA_APP_VERSION},
         'attempt': args.attempt,
+        'attempt_cap': MAX_ATTEMPTS,
+        'previous_attempts': [
+            {k: v for k, v in e.items() if k != 'evidence'}
+            for e in read_attempts().get(name, [])],
     }
     CAMPAIGN_WORK.mkdir(parents=True, exist_ok=True)
     output = CAMPAIGN_WORK / f'{name}.json'
@@ -491,6 +560,9 @@ def run_scenario(name, args):
     # reference node cannot hand it over on this host.
     started = [n for n in nodes if n in getattr(scenario, 'START_NODES', nodes)]
     evidence['started_at_launch'] = started
+    # Set by the abort arm below; read by the `finally` when it decides
+    # the verdict. A scenario that did not finish is ABORTED, never PASS.
+    aborted = None
     save()
     # INSIDE the try: a failure in `start` used to leave the nodes it did
     # manage to launch running, with the evidence file still saying
@@ -506,32 +578,52 @@ def run_scenario(name, args):
         ctx.fail(f'an observation the scenario needs was unavailable: {error}')
     except Divergence as error:
         ctx.fail(str(error))
+    except BaseException as error:  # noqa: BLE001 — recorded, then re-raised
+        # ANY other exception aborts the scenario. Previously only the
+        # two named types became failures and everything else fell
+        # through to the `finally`, which derived the verdict from
+        # `run.failures` alone — so a lifecycle error raised after the
+        # samples were taken but before the assertions ran persisted
+        # `DONE / PASS / []`. A run that did not finish has not passed.
+        aborted = f'{type(error).__name__}: {error}'
+        raise
     finally:
         run.stop_sampling()
-        smoke.check_sampler(run, evidence)
-        scan_utxo_validation_failures(ctx)
-        evidence['divergences'] = ctx.divergences
-        evidence['failures'] = run.failures
-        evidence['artifacts'] = smoke.write_findings(run, evidence)
-        # This scenario's own node logs and sample series, kept beside
-        # its evidence rather than left to be overwritten by the next.
-        evidence['logs'] = rotate_logs(name, nodes)
-        series = run.series_path
-        if series.exists():
-            kept = CAMPAIGN_WORK / f'{name}-agreement-series.jsonl'
-            series.replace(kept)
-            evidence['series_file'] = str(kept)
-        evidence['samples'] = run.samples
-        evidence['unavailable_samples'] = run.unavailable_samples
-        evidence['drop_totals'] = run.totals()
-        evidence['peer_states'] = sorted(run.peer_states)
-        evidence['penalty_observations'] = run.penalty_observations
-        evidence['max_height_gap'] = run.max_height_gap
-        evidence['result'] = 'FAIL' if run.failures else 'PASS'
+        # Evidence collection must not be able to swallow the verdict OR
+        # leave the nodes up: whatever happens between here and the end,
+        # the `finally` below stops them.
+        try:
+            smoke.check_sampler(run, evidence)
+            scan_utxo_validation_failures(ctx)
+            evidence['divergences'] = ctx.divergences
+            evidence['failures'] = run.failures
+            evidence['artifacts'] = smoke.write_findings(run, evidence)
+            # This scenario's own node logs and sample series, kept
+            # beside its evidence rather than left to be overwritten.
+            evidence['logs'] = rotate_logs(name, nodes)
+            series = run.series_path
+            if series.exists():
+                kept = CAMPAIGN_WORK / f'{name}-agreement-series.jsonl'
+                series.replace(kept)
+                evidence['series_file'] = str(kept)
+            evidence['samples'] = run.samples
+            evidence['unavailable_samples'] = run.unavailable_samples
+            evidence['drop_totals'] = run.totals()
+            evidence['peer_states'] = sorted(run.peer_states)
+            evidence['penalty_observations'] = run.penalty_observations
+            evidence['max_height_gap'] = run.max_height_gap
+        except BaseException as error:  # noqa: BLE001 — recorded, then abort
+            evidence['evidence_collection_error'] = f'{type(error).__name__}: {error}'
+            if aborted is None:
+                aborted = evidence['evidence_collection_error']
+        evidence['aborted'] = aborted
+        evidence['result'] = ('ABORTED' if aborted
+                              else 'FAIL' if run.failures else 'PASS')
         evidence['finished'] = datetime.datetime.now(
             datetime.timezone.utc).isoformat()
         evidence['status'] = 'DONE'
         save()
+        record_attempt(name, evidence)
         try:
             lifecycle.stop()
         finally:
@@ -824,6 +916,69 @@ def _self_test():
         'a SIGKILLed child must read as released, zombie or not'
     assert not _holds_resources(999_999), 'a missing PID holds nothing'
 
+    # ----- finding 10: the attempt cap is ENFORCED -----
+    #
+    # `--attempt` was unchecked metadata the runner set to 1 every time,
+    # so reruns overwrote the canonical evidence until one passed.
+    import tempfile
+    global CAMPAIGN_WORK
+    real_work = CAMPAIGN_WORK
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            CAMPAIGN_WORK = Path(tmp)
+            assert read_attempts() == {}, 'a fresh campaign has no history'
+            for expected in (1, 2, 3):
+                assert check_attempt_cap('probe') == expected, expected
+                record_attempt('probe', {'result': 'FAIL', 'failures': [
+                    {'message': f'attempt {expected}'}]})
+            history = read_attempts()['probe']
+            assert [e['attempt'] for e in history] == [1, 2, 3], history
+            # Every attempt's evidence is KEPT, not overwritten.
+            assert len({e['evidence'] for e in history}) == 3, history
+            for entry in history:
+                assert Path(entry['evidence']).exists(), entry
+            try:
+                check_attempt_cap('probe')
+            except SystemExit as error:
+                assert 'cap is 3' in str(error), str(error)
+            else:
+                raise AssertionError('a fourth attempt must be refused')
+            # ...unless the controller forces it, and the forced one is
+            # still recorded as attempt 4 rather than silently reusing 3.
+            assert check_attempt_cap('probe', force=True) == 4
+            # A scenario with no history is unaffected by another's.
+            assert check_attempt_cap('untouched') == 1
+    finally:
+        CAMPAIGN_WORK = real_work
+
+    # ----- finding 6: an exception may not persist a PASS -----
+    #
+    # Codex's probe: raise after the samples are taken but before the
+    # assertions finish. The old `finally` derived the verdict from
+    # `run.failures` alone and saved `DONE / PASS / []`.
+    verdicts = []
+
+    def verdict_of(aborted, failures):
+        """The `finally`'s verdict rule, in one place so it is testable."""
+        return 'ABORTED' if aborted else 'FAIL' if failures else 'PASS'
+
+    for aborted, failures, expected in (
+            (None, [], 'PASS'),
+            (None, [{'message': 'x'}], 'FAIL'),
+            ('RuntimeError: rust did not become ready', [], 'ABORTED'),
+            ('RuntimeError: boom', [{'message': 'x'}], 'ABORTED')):
+        got = verdict_of(aborted, failures)
+        verdicts.append(got)
+        assert got == expected, (aborted, failures, got, expected)
+    assert 'ABORTED' in verdicts, verdicts
+    # And the rule the driver uses is the same one, not a copy that has
+    # drifted: the source has to contain it verbatim.
+    import inspect
+    driver = inspect.getsource(run_scenario)
+    assert "'ABORTED' if aborted" in driver, 'the driver must use this rule'
+    assert "record_attempt(name, evidence)" in driver, \
+        'every attempt has to be recorded, pass or fail'
+
     print('campaign self-test OK: rendering, ports and the scenario set')
 
 
@@ -836,7 +991,12 @@ def main():
                         help='override the scenario\'s own block budget')
     parser.add_argument('--fresh', action='store_true',
                         help='delete the scenario\'s data directories first')
-    parser.add_argument('--attempt', type=int, default=1)
+    parser.add_argument('--attempt', type=int, default=None,
+                        help='informational; the real number comes from the '
+                             'attempt history and the cap is enforced against it')
+    parser.add_argument('--force-attempt', action='store_true',
+                        help='run past the three-attempt cap (controller ruling '
+                             'required — say why in the report)')
     parser.add_argument('--self-test', action='store_true')
     args = parser.parse_args()
     if args.self_test:
@@ -856,8 +1016,9 @@ def main():
         for name in names:
             result = subprocess.run(
                 [sys.executable, str(HERE / 'campaign.py'), '--scenario', name,
-                 '--timeout', str(args.timeout), '--attempt', str(args.attempt)]
-                + (['--fresh'] if args.fresh else []), cwd=ROOT)
+                 '--timeout', str(args.timeout)]
+                + (['--fresh'] if args.fresh else [])
+                + (['--force-attempt'] if args.force_attempt else []), cwd=ROOT)
             if result.returncode != 0:
                 failures.append(name)
         print('campaign:', 'FAIL ' + ','.join(failures) if failures else 'PASS')
@@ -869,6 +1030,9 @@ def main():
     # BEFORE the scenario module — and therefore before `smoke` — is
     # imported: `smoke.URLS` is frozen at its import.
     configure_environment(name, SCENARIO_NODES[name])
+    # Enforced BEFORE anything is started: a refused attempt must not
+    # leave a devnet running or overwrite the canonical evidence.
+    args.attempt = check_attempt_cap(name, force=args.force_attempt)
     evidence = run_scenario(name, args)
     print(f'{name}: {evidence["result"]} '
           f'({len(evidence.get("divergences") or [])} divergences, '
