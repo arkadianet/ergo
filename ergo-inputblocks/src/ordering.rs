@@ -62,7 +62,14 @@ impl OrderingStore {
         if self.announcements.len() > cap {
             // `shift_remove_index(0)` keeps insertion order for the rest,
             // which is what makes "oldest" meaningful on the next overflow.
-            return self.announcements.shift_remove_index(0).map(|(id, _)| id);
+            let evicted = self.announcements.shift_remove_index(0).map(|(id, _)| id);
+            if let Some(id) = &evicted {
+                // The cap bounds `announcements`; without this it would not
+                // bound `block_transactions`, whose entry for an evicted
+                // announcement can otherwise never be reached by `prune`.
+                self.block_transactions.shift_remove(id);
+            }
+            return evicted;
         }
         None
     }
@@ -117,10 +124,16 @@ impl OrderingStore {
         for id in &dropped {
             self.announcements.shift_remove(id);
         }
+        // A transaction list carries no height of its own, so the height
+        // rule can only reach it through its announcement: sweep the ids
+        // this very pass dropped as well as the ones history already has.
+        // An entry whose announcement is merely MISSING is kept —
+        // `saveOrderingBlockTransactions` can land before the announcement
+        // it belongs to, and dropping it then would lose a live section.
         let tx_stale: Vec<OrderingId> = self
             .block_transactions
             .keys()
-            .filter(|id| block_transactions_known(id))
+            .filter(|id| block_transactions_known(id) || dropped.contains(id))
             .copied()
             .collect();
         for id in &tx_stale {
@@ -139,6 +152,13 @@ mod tests {
 
     fn id(b: u8) -> OrderingId {
         [b; 32]
+    }
+
+    fn tx(b: u8) -> TxRef {
+        TxRef {
+            tx_id: [b; 32],
+            witness_id: [b; 31],
+        }
     }
 
     fn ann(height: u32) -> OrderingBlockAnnouncement {
@@ -203,6 +223,55 @@ mod tests {
         assert_eq!(s.insert(id(3), ann(3), 2), Some(id(1)));
         assert!(s.get(&id(1)).is_none());
         assert_eq!(s.len(), 2);
+    }
+
+    /// The entry cap has to bound both maps: an evicted announcement is
+    /// unreachable by `prune`'s height rule, so its transaction list would
+    /// otherwise stay forever.
+    #[test]
+    fn insert_over_cap_evicts_the_matching_block_transactions() {
+        let mut s = OrderingStore::default();
+        s.insert(id(1), ann(1), 2);
+        s.save_block_transactions(id(1), vec![tx(1)]);
+        s.insert(id(2), ann(2), 2);
+        s.save_block_transactions(id(2), vec![tx(2)]);
+
+        assert_eq!(s.insert(id(3), ann(3), 2), Some(id(1)));
+        assert!(s.block_transactions(&id(1)).is_none());
+        assert!(s.block_transactions(&id(2)).is_some());
+    }
+
+    /// A losing ordering block's transaction section never reaches
+    /// history, so `block_transactions_known` stays false for it forever.
+    /// Pruning its announcement by height must take the section with it,
+    /// or repeated distinct saves grow the map without bound.
+    #[test]
+    fn prune_drops_block_transactions_of_height_pruned_announcements() {
+        let mut s = OrderingStore::default();
+        s.insert(id(1), ann(100 - 7), 64);
+        s.save_block_transactions(id(1), vec![tx(1)]);
+        s.insert(id(2), ann(100), 64);
+        s.save_block_transactions(id(2), vec![tx(2)]);
+
+        let never_known = |_: &OrderingId| false;
+        let dropped = s.prune(100, 6, &never_known);
+
+        assert_eq!(dropped, vec![id(1)]);
+        assert!(s.block_transactions(&id(1)).is_none());
+        assert!(s.block_transactions(&id(2)).is_some());
+    }
+
+    /// A transaction section can be saved before its announcement
+    /// arrives. A missing announcement is not evidence of staleness, so
+    /// the sweep must leave such an entry alone.
+    #[test]
+    fn prune_keeps_block_transactions_whose_announcement_has_not_arrived() {
+        let mut s = OrderingStore::default();
+        s.save_block_transactions(id(9), vec![tx(9)]);
+
+        let never_known = |_: &OrderingId| false;
+        assert!(s.prune(100, 6, &never_known).is_empty());
+        assert!(s.block_transactions(&id(9)).is_some());
     }
 
     // ----- oracle parity -----
