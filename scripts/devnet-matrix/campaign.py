@@ -1804,6 +1804,7 @@ def _self_test():
             'evidence may not describe a classpath the node did not run')
 
     # ----- M4: the reconstruction accounting -----
+    import inspect
     from scenarios import common as _common
     _rust = _common.rust_accounting([
         {'kind': 'ordering_reconstructed'},
@@ -1877,6 +1878,40 @@ def _self_test():
     # A build that logs none of the five is UNKNOWN, not a clean zero.
     _silent = _common.scala_accounting(['INFO something else entirely'])
     assert 'UNKNOWN, not zero' in _silent['unmatched'], _silent
+
+    # ----- fix round 1, item 1: the F5 counter reads EVERY follower -----
+    #
+    # `reconstruct_rate` counted its reference half from the literal
+    # node name `scala2`. With `--reference-follower patched` the stock
+    # follower is not in the run at all and the counter read a log that
+    # was never written; with `both` the patched follower's decisions —
+    # the entire point of the ablation — were collected by the driver's
+    # accounting but not by the scenario's own F5 counter.
+    _table = lifecycle.ROLES
+    _miners, _followers = _common.scala_reference_nodes(
+        lifecycle.roles_for_nodes(resolve_roles('reconstruct_rate', 'both')),
+        _table)
+    assert _miners == ('scala',), _miners
+    assert _followers == ('scala2', 'scala3'), _followers
+    # `patched` alone: the stock follower is NOT in the run, so nothing
+    # may read its log.
+    _m, _f = _common.scala_reference_nodes(
+        lifecycle.roles_for_nodes(resolve_roles('reconstruct_rate', 'patched')),
+        _table)
+    assert _f == ('scala3',), _f
+    # A second MINER is not a reference follower: it decides nothing,
+    # because it generates its blocks locally.
+    _m, _f = _common.scala_reference_nodes(
+        lifecycle.roles_for_nodes(SCENARIO_ROLES['fork']), _table)
+    assert _m == ('scala', 'scala2') and _f == (), (_m, _f)
+    # The Rust node is never a Scala reference.
+    assert 'rust' not in _m and 'rust' not in _f, (_m, _f)
+    # And the scenario no longer names a node literally.
+    from scenarios import reconstruct_rate as _rr
+    _run_source = inspect.getsource(_rr.run)
+    assert "'scala2'" not in _run_source and "'scala'" not in _run_source, \
+        ('reconstruct_rate.run must resolve its reference nodes from the '
+         'roles, not from literal node names', _run_source)
 
     # ----- M4: the miner_self_reject denominators -----
     from scenarios import miner_self_reject as _msr

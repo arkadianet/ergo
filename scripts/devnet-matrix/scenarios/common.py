@@ -206,6 +206,30 @@ def follower_events_since(events, watermark, restarted):
     return list(events) if restarted else events_after(events, watermark)
 
 
+def scala_reference_nodes(role_map, role_table):
+    """`(miner nodes, follower nodes)` for one resolved run.
+
+    Pure, and keyed by ROLE rather than by node name, because the same
+    slot is a second miner in `fork` and a reference follower in
+    `reconstruct_rate` — and because `--reference-follower patched`
+    leaves `scala2` out of the run entirely while `both` adds `scala3`.
+    A scenario that named `scala2` literally read a log that was never
+    written in the first case, and ignored the patched follower's
+    decisions in the second, which is the ablation itself.
+
+    Only a FOLLOWER decides: a miner generates its blocks locally, so
+    `processOrderingBlock` never runs on it and it logs neither side of
+    the reconstruct-or-download choice.
+    """
+    miners, followers = [], []
+    for node, role in sorted((role_map or {}).items()):
+        spec = role_table.get(role)
+        if spec is None or spec.kind != 'scala':
+            continue
+        (miners if spec.mines else followers).append(node)
+    return tuple(miners), tuple(followers)
+
+
 def rust_events(ctx):
     """The node's event feed, or a failure — never an empty list."""
     feed = api_retry('rust', '/api/v1/events', ctx.run.deadline,

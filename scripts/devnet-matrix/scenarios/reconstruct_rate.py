@@ -218,7 +218,15 @@ def run(ctx):
     # writes for EVERY scenario uses this window — whose completeness is
     # known — rather than a post-hoc read of a ring that has evicted.
     ctx.collector, ctx.collector_watermark = collector, watermark
-    scala_from = {node: _log_length(node) for node in ('scala', 'scala2')}
+    # Every Scala node in THIS run, resolved from its roles: with
+    # `--reference-follower patched` the stock follower is not here at
+    # all, and with `both` there are two followers whose decisions are
+    # the ablation.
+    miner_nodes, follower_nodes = common.scala_reference_nodes(
+        ctx.roles, lifecycle.ROLES)
+    by_node = dict(ctx.roles or {})
+    scala_from = {node: _log_length(node)
+                  for node in (*miner_nodes, *follower_nodes)}
     ctx.note('reference_log_offsets', scala_from)
 
     # Walk the window, polling the event feed as we go so the ring
@@ -360,13 +368,17 @@ def run(ctx):
         ctx.fail(f"{len(reconciliation['duplicated'])} ordering blocks reported more "
                  'than one outcome', {'duplicated': reconciliation['duplicated'][:10]})
 
-    # Both reference nodes over the SAME window: the follower is the one
-    # that decides, the miner is recorded beside it to show it decides
-    # nothing.
-    follower = _scala_log_counts(ctx, 'scala2', scala_from.get('scala2', 0))
-    miner = _scala_log_counts(ctx, 'scala', scala_from.get('scala', 0))
-    ctx.note('scala_follower', follower)
-    ctx.note('scala_miner', miner)
+    # Every reference node over the SAME window, keyed by ROLE: the
+    # followers are the ones that decide, the miners are recorded beside
+    # them to show they decide nothing.
+    followers = {by_node[node]: _scala_log_counts(ctx, node,
+                                                  scala_from.get(node, 0))
+                 for node in follower_nodes}
+    miners = {by_node[node]: _scala_log_counts(ctx, node,
+                                               scala_from.get(node, 0))
+              for node in miner_nodes}
+    ctx.note('scala_followers', followers)
+    ctx.note('scala_miners', miners)
 
     if decided == 0:
         ctx.fail('the follower made no reconstruct-or-download decision in the '
@@ -374,25 +386,35 @@ def run(ctx):
                  {'events_in_window': len(window),
                   'ordering_blocks': reached - start})
 
-    # The comparative claim REQUIRES the reference measurement, and on a
-    # single host it cannot be obtained: two Scala nodes cannot dial each
-    # other (`NetworkController.getPeerAddress` resolves a same-address
-    # peer through a UPnP gateway that does not exist), and the Rust
-    # follower relays nothing to a peer it has not qualified, so a
-    # reference follower here learns the chain by ordinary block
-    # download and `processOrderingBlock` — the only place either log
-    # line is emitted — never runs on it.
+    # The comparative claim REQUIRES the reference measurement, from
+    # EVERY follower role the run was asked for. Without it the scenario
+    # has one number, not a comparison, and a `--reference-follower
+    # both` run that silently measured only the stock half would read as
+    # an ablation it never performed.
     #
-    # That is a limitation of the HOST, not a defect of the node, so it
-    # is neither a pass nor a failure. The scenario records NOT MEASURED:
-    # the port's rate is measured and reported, the comparison is not.
-    if not follower.get('decided'):
+    # A run with no follower role at all is misconfigured and FAILS. A
+    # follower role that is present but logged no decision is NOT
+    # MEASURED, by name: that is a limitation of what this host could
+    # show (a reference follower that learns the chain by ordinary block
+    # download never runs `processOrderingBlock`, the only place either
+    # log line is emitted), not a defect of the node — neither a pass nor
+    # a failure. The port's rate is measured and reported; the
+    # comparison is withheld.
+    silent = [role for role, counts in followers.items()
+              if not counts.get('decided')]
+    if not followers:
+        ctx.fail('this run has no reference FOLLOWER at all, so the comparison '
+                 'F5 exists to make cannot be measured',
+                 {'roles': by_node})
+    elif silent:
         ctx.not_measured(
-            'the reference comparison F5 exists to make could not be measured on '
-            'this host: the reference follower receives blocks by ordinary sync '
-            'rather than by ordering announcement, so processOrderingBlock — the '
-            'only place either log line is emitted — never runs on it',
-            {'follower': follower, 'miner': miner,
+            f'the reference follower role(s) {", ".join(silent)} logged no '
+            'reconstruct-or-download decision in this window, so the comparison '
+            'F5 exists to make was not measured for them — the port\'s rate '
+            'stands alone. A follower that receives blocks by ordinary sync '
+            'rather than by ordering announcement never runs '
+            'processOrderingBlock, the only place either log line is emitted',
+            {'followers': followers, 'miners': miners,
              'code_path': 'scorex NetworkController.getPeerAddress:495; '
                           'ergo-node input_blocks/dispatch.rs peer eligibility'})
 
@@ -408,17 +430,22 @@ def run(ctx):
             'status': 'measured',
             'note': 'a RUST measurement of the port run with Scala\'s own lookup '
                     'key — NOT a Scala node measurement'},
-        'reference_follower': {
-            'reconstructed': follower.get('reconstructed'),
-            'fallback': follower.get('fallback'),
-            'ratio': follower.get('reconstructed_ratio'),
-            'status': 'measured' if follower.get('decided') else 'not measured',
-            'why': None if follower.get('decided') else
-                   'structurally unobtainable on one host; see not_measured'},
+        'reference_followers_scala_key': {
+            role: {'node': counts.get('node'),
+                   'reconstructed': counts.get('reconstructed'),
+                   'fallback': counts.get('fallback'),
+                   'ratio': counts.get('reconstructed_ratio'),
+                   'status': 'measured' if counts.get('decided')
+                             else 'not measured',
+                   'why': None if counts.get('decided') else
+                          'no reconstruct-or-download decision logged; see '
+                          'not_measured'}
+            for role, counts in followers.items()},
         'comparative_claim': (
-            'available' if follower.get('decided') else
-            'WITHHELD until a reference number exists — the port\'s rate stands '
-            'alone and may not be stated as a ratio against Scala'),
+            'available' if followers and not silent else
+            'WITHHELD until a reference number exists for every follower role — '
+            'the port\'s rate stands alone and may not be stated as a ratio '
+            'against Scala'),
     })
     ctx.note('f5_reconstruction_key_split', smoke._tally(
         e.get('reconstructionKey', e.get('reconstruction_key'))
