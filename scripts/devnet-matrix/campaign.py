@@ -915,6 +915,72 @@ def _self_test():
         'a SIGKILLed child must read as released, zombie or not'
     assert not _holds_resources(999_999), 'a missing PID holds nothing'
 
+    # ----- finding 7: event loss is detected, not filtered away -----
+    #
+    # Codex's probe: the feed is a bounded ring; early fallbacks evicted
+    # by later block and peer events leave only reconstructions and an
+    # apparent 100 % rate, and filtering by sequence cannot tell that
+    # from a window that genuinely had no fallbacks.
+    class FakeCollector(common.EventCollector):
+        def __init__(self, pages):
+            super().__init__(ctx=None)
+            self.pages = list(pages)
+
+        def poll(self):
+            page = self.pages.pop(0) if self.pages else []
+            self.polls += 1
+            numbered = [e for e in page if e.get('seq') is not None]
+            if numbered:
+                lowest = min(e['seq'] for e in numbered)
+                if self.highest_seen and lowest > self.highest_seen + 1:
+                    self.gaps.append({'after_seq': self.highest_seen,
+                                      'next_available_seq': lowest,
+                                      'lost': lowest - self.highest_seen - 1})
+            for event in page:
+                if event.get('seq') is None:
+                    continue
+                self.events[event['seq']] = event
+                self.highest_seen = max(self.highest_seen, event['seq'])
+            return self
+
+    def ev(seq, kind):
+        return {'seq': seq, 'kind': kind}
+
+    # The ring evicted 1-3 (two fallbacks among them) between polls.
+    lossy = FakeCollector([
+        [ev(1, 'ordering_reconstruct_fallback')],
+        [ev(4, 'ordering_reconstructed'), ev(5, 'ordering_reconstructed')],
+    ])
+    lossy.poll()
+    lossy.poll()
+    assert lossy.lost_in_window(0), 'an eviction between polls must be detected'
+    assert lossy.summary(0)['events_lost'] == 2, lossy.summary(0)
+    # The old shape — ONE read at the end, filtered by sequence — sees
+    # only the surviving page and reports a clean 100 %, with nothing to
+    # say that two fallbacks were evicted.
+    single_read = [ev(4, 'ordering_reconstructed'), ev(5, 'ordering_reconstructed')]
+    assert all(e['kind'] == 'ordering_reconstructed' for e in single_read)
+    assert lossy.summary(0)['events_lost'] == 2, \
+        'incremental collection is what turns that into a detected loss'
+    # Incremental collection also RETAINS the early fallback the single
+    # read had already lost.
+    assert any(e['kind'] == 'ordering_reconstruct_fallback'
+               for e in lossy.window(0)), lossy.window(0)
+
+    # Contiguous polling loses nothing, and keeps events the later page
+    # no longer carries.
+    whole = FakeCollector([
+        [ev(1, 'ordering_reconstruct_fallback'), ev(2, 'ordering_reconstructed')],
+        [ev(2, 'ordering_reconstructed'), ev(3, 'ordering_reconstructed')],
+    ])
+    whole.poll()
+    whole.poll()
+    assert whole.lost_in_window(0) == [], whole.gaps
+    assert len(whole.window(0)) == 3, whole.window(0)
+    assert whole.window(1)[0]['seq'] == 2, whole.window(1)
+    # A gap entirely BEFORE the window does not condemn the window.
+    assert lossy.lost_in_window(99) == [], lossy.lost_in_window(99)
+
     # ----- findings 3/4: peaks, and a missing counter stays UNKNOWN ---
     #
     # Codex's probe: the status route omits `staged_bytes` throughout,

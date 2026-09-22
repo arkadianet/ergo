@@ -196,25 +196,68 @@ def run(ctx):
         ctx.fail('the reorg carries no mempool restore count, so the restore cannot '
                  'be checked', {'reorg': deepest})
 
-    # The trees off the dropped branch must be gone: whatever
-    # `bestInputBlock` names now has to sit under the NEW best ordering
-    # block, and the dropped ordering blocks must not be its parent.
+    # ----- clearing and pruning, asserted rather than recorded -----
+    #
+    # Both previous checks hung off `chain.bestOrdering` naming a dropped
+    # header, so a route publishing the NEW ordering id beside a STALE
+    # input-block tip — with the abandoned trees still retained — passed
+    # both. Each property is now asserted on its own terms.
     dropped = set(deepest.get('droppedHeaderIds') or [])
     chain = api_retry('rust', '/blocks/bestInputChain', ctx.run.deadline,
                       what='the follower input chain after the reorg')
     best = api_retry('rust', '/blocks/bestInputBlock', ctx.run.deadline,
                      what='the follower best input block after the reorg')
-    ctx.note('after_reorg', {'best_input_chain': chain, 'best_input_block': best})
+    info = api_retry('rust', '/info', ctx.run.deadline,
+                     what='the follower info after the reorg')
+    status = (api_retry('rust', '/api/v1/status', ctx.run.deadline,
+                        what='the follower status after the reorg')
+              .get('input_blocks') or {})
+    ctx.note('after_reorg', {'best_input_chain': chain, 'best_input_block': best,
+                             'info_best_input_block': info.get('bestInputBlock')})
+    ctx.note('input_blocks_status_after_reorg', status)
+
+    # (1) the chain is keyed to the surviving branch.
     if chain.get('bestOrdering') in dropped:
         ctx.fail('after the reorg the input chain is still keyed to an ordering '
                  'block the reorg dropped: the tree was not pruned',
                  {'chain': chain, 'dropped': sorted(dropped)},
                  ids=[chain.get('bestOrdering')])
-    if best.get('bestInputBlock') and chain.get('bestOrdering') in dropped:
-        ctx.fail('`/info.bestInputBlock` still names a block under a dropped '
-                 'ordering block', {'best': best, 'chain': chain})
 
-    status = (api_retry('rust', '/api/v1/status', ctx.run.deadline,
-                        what='the follower status after the reorg')
-              .get('input_blocks') or {})
-    ctx.note('input_blocks_status_after_reorg', status)
+    # (2) `/info.bestInputBlock` CLEARS, or names a block whose ancestry
+    # is on the new best chain. Recorded either way, asserted always —
+    # "it happened to be empty in this run" is not the check.
+    tip = (info.get('bestInputBlock') or best.get('bestInputBlock') or '') or None
+    if tip is None:
+        ctx.note('best_input_block_after_reorg', 'cleared')
+    else:
+        listed = set(chain.get('bestInputBlocks') or [])
+        ctx.note('best_input_block_after_reorg',
+                 {'tip': tip, 'on_the_new_chain': tip in listed,
+                  'chain_ordering': chain.get('bestOrdering')})
+        if tip not in listed:
+            ctx.fail('after the reorg `/info.bestInputBlock` names an input block '
+                     'that is not on the input chain the node now publishes, so '
+                     'it is a stale tip from an abandoned tree',
+                     {'tip': tip, 'chain': chain}, ids=[tip])
+        if chain.get('bestOrdering') in dropped:
+            ctx.fail('`/info.bestInputBlock` still names a block under a dropped '
+                     'ordering block', {'best': best, 'chain': chain})
+
+    # (3) the abandoned trees are GONE. After a reorg the node holds at
+    # most the surviving branch's tree, so a retained competing fork or a
+    # non-empty waitlist means the dropped branch's state is still there.
+    expectations = {'forks': 1, 'waitlist': 0, 'staged_bytes': 0,
+                    'deferred_triggers': 0}
+    retained = {}
+    for key, ceiling in expectations.items():
+        value = status.get(key)
+        retained[key] = {'value': value, 'at_most': ceiling}
+        if value is None:
+            ctx.fail(f'the status route published no `{key}` after the reorg, so '
+                     'tree pruning could not be checked — unknown, not zero',
+                     {'status': status})
+        elif value > ceiling:
+            ctx.fail(f'after the reorg `{key}` is {value}, above the {ceiling} a '
+                     'node that pruned the abandoned branch should hold',
+                     {'status': status, 'dropped': sorted(dropped)})
+    ctx.note('retained_after_reorg', retained)

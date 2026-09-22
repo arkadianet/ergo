@@ -187,6 +187,71 @@ def events_after(events, seq):
     return [e for e in events if e.get('seq') is None or e['seq'] > seq]
 
 
+class EventCollector:
+    """Collect the node's event feed INCREMENTALLY, detecting loss.
+
+    The feed is a bounded ring. Taking a watermark, waiting a hundred
+    ordering blocks and reading once cannot recover entries the ring
+    evicted in between, and filtering by sequence hides that it
+    happened: early fallbacks evicted by later block and peer events
+    leave only reconstructions and an apparent 100 % rate.
+
+    So the feed is polled as the scenario runs, every event is kept by
+    its sequence number, and a gap between the highest sequence seen and
+    the lowest the feed still offers is recorded as LOSS. A scenario
+    whose measurement window lost events has not measured it.
+    """
+
+    def __init__(self, ctx, node='rust'):
+        self.ctx = ctx
+        self.node = node
+        self.events = {}
+        self.highest_seen = 0
+        self.gaps = []
+        self.polls = 0
+        self.failed_polls = 0
+
+    def poll(self):
+        try:
+            feed = api(self.node, '/api/v1/events')
+        except Unavailable:
+            self.failed_polls += 1
+            return self
+        self.polls += 1
+        page = feed.get('events') or []
+        numbered = [e for e in page if e.get('seq') is not None]
+        if numbered:
+            lowest = min(e['seq'] for e in numbered)
+            # Everything between what we had and what the feed still
+            # offers has been evicted since the last poll.
+            if self.highest_seen and lowest > self.highest_seen + 1:
+                self.gaps.append({'after_seq': self.highest_seen,
+                                  'next_available_seq': lowest,
+                                  'lost': lowest - self.highest_seen - 1})
+        for event in page:
+            seq = event.get('seq')
+            if seq is None:
+                continue
+            self.events[seq] = event
+            self.highest_seen = max(self.highest_seen, seq)
+        return self
+
+    def window(self, after_seq):
+        """Every collected event newer than `after_seq`, in order."""
+        return [self.events[s] for s in sorted(self.events) if s > after_seq]
+
+    def lost_in_window(self, after_seq):
+        return [g for g in self.gaps if g['next_available_seq'] > after_seq]
+
+    def summary(self, after_seq=0):
+        lost = self.lost_in_window(after_seq)
+        return {'polls': self.polls, 'failed_polls': self.failed_polls,
+                'events_collected': len(self.events),
+                'highest_seq': self.highest_seen,
+                'sequence_gaps': lost,
+                'events_lost': sum(g['lost'] for g in lost)}
+
+
 def ordering_stream(events):
     """`ordering_*` plus `blockApplied`, in emission order.
 
