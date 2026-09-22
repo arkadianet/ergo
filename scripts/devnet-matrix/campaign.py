@@ -2042,6 +2042,18 @@ def _self_test():
         assert 'def _fund(' not in _src and 'def _pump(' not in _src, _mod
         assert 'common.fund_miner(' in _src and 'common.pump_payments(' in _src, \
             _mod
+    # EVERY scenario that pumps payments does it through the shared
+    # helper. `evict` and `steady` kept their own copies too, and
+    # `steady` is where the stock follower's lag is measured.
+    for _name, _module in _all.items():
+        _src = inspect.getsource(_module)
+        if '/wallet/payment/send' not in _src:
+            continue
+        assert 'common.pump_payments(' in _src, (
+            _name, 'a scenario that submits payments must use the shared '
+            'workload, or a fix to it reaches some windows and not others')
+        assert "smoke.request(" not in _src, (
+            _name, 'a private copy of the payment submission')
     # And the shared pump records what the node REFUSED rather than
     # dropping it: a window whose workload never landed measured the
     # quiet case, and the evidence has to be able to say so.

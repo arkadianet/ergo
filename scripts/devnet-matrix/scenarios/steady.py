@@ -32,21 +32,21 @@ MEMPOOL_TXS = 20
 # an ordering block to drop.
 PAYMENTS_PER_BLOCK = 3
 PAYMENT_NANOERG = 1_000_000
+# The node whose wallet the workload is submitted to.
+MINER = 'scala'
 
 
 def _pump(ctx, address, sent):
-    for _ in range(PAYMENTS_PER_BLOCK):
-        try:
-            status, txid = smoke.request(
-                'scala', '/wallet/payment/send',
-                [{'address': address, 'value': PAYMENT_NANOERG}])
-        except (OSError, ValueError):
-            continue
-        if status == 200 and txid:
-            sent.append(txid)
-            # When, so a payment still relaying at the next reading can
-            # be told apart from a real pool disagreement.
-            ctx.evidence.setdefault('_submitted_at', {})[txid] = time.time()
+    """The shared workload, so a fix to it reaches this window too."""
+    before = len(sent)
+    common.pump_payments(ctx, address, sent, MINER,
+                         PAYMENTS_PER_BLOCK, PAYMENT_NANOERG)
+    # When, so a payment still relaying at the next reading can be told
+    # apart from a real pool disagreement.
+    submitted = ctx.evidence.setdefault('_submitted_at', {})
+    now = time.time()
+    for txid in sent[before:]:
+        submitted[txid] = now
     return sent
 
 
