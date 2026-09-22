@@ -745,7 +745,7 @@ def _self_test():
     assert verdict['rolled_back_blocks_still_held_by_a_miner'] == [], verdict
 
     # The whole-chain orphan check catches a block that is never a tip.
-    orphan = [sample('O1', ['c', 'q', 'a'], ['c', 'b', 'a'])]
+    orphan = [sample('O1', ['c', 'q', 'a'], ['c', 'b', 'a'])]  # q is mid-chain
     found, off = common.chain_members_scala_never_had(orphan)
     assert [o['block'] for o in found] == ['q'], found
     assert off == [], off
@@ -753,7 +753,9 @@ def _self_test():
     # route under a neighbouring ordering id, is not invented — it is
     # counted separately. Keying the check by ordering id reported 66 of
     # these as invented in one run, and every one had been published.
-    torn = [sample('O1', [], ['x']), sample('O2', ['x'], [])]
+    # `x` sits BELOW the tip, so the tip allowance does not cover it.
+    torn = [sample('O1', [], ['x', 'seen']),
+            sample('O2', ['tip', 'x'], ['tip', 'seen'])]
     found, off = common.chain_members_scala_never_had(torn)
     assert found == [], found
     assert [o['block'] for o in off] == ['x'], off
@@ -786,14 +788,15 @@ def _self_test():
     # With one reference chain, every block the follower took from the
     # OTHER miner reads as a block no miner ever had — 21,546 of them in
     # one run, not one of them a divergence.
-    two = [{'ordering': 'O1', 'rust_chain': ['m2b', 'm2a'],
-            'scala_chain': ['m1b', 'm1a'], 'scala2_chain': ['m2b', 'm2a']}]
-    assert common.reference_chain(two[0]) == {'m1a', 'm1b', 'm2a', 'm2b'}, \
-        common.reference_chain(two[0])
+    two = [{'ordering': 'O1', 'rust_chain': ['m2c', 'm2b', 'm2a'],
+            'scala_chain': ['m1b', 'm1a'],
+            'scala2_chain': ['m2c', 'm2b', 'm2a']}]
+    assert common.reference_chain(two[0]) == {
+        'm1a', 'm1b', 'm2a', 'm2b', 'm2c'}, common.reference_chain(two[0])
     assert common.chain_members_scala_never_had(two)[0] == [], \
         'a block the SECOND miner published is not an orphan'
     # And a block neither miner ever had still is.
-    invented_two = [{'ordering': 'O1', 'rust_chain': ['zz'],
+    invented_two = [{'ordering': 'O1', 'rust_chain': ['m2a', 'zz'],
                      'scala_chain': ['m1a'], 'scala2_chain': ['m2a']}]
     assert [o['block'] for o in
             common.chain_members_scala_never_had(invented_two)[0]] == ['zz'], \
