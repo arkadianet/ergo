@@ -56,6 +56,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -1014,13 +1015,62 @@ def common_module():
     return common
 
 
+def check_no_classpath_override(environ):
+    """Refuse a hand-set classpath for a MEASURED campaign.
+
+    `MATRIX_CLASSPATH[_<NODE>]` is how an operator drives the harness
+    against a one-off build; it is also the one path that skips
+    `Build.verify()` entirely. A campaign scenario's numbers are
+    attributed to a build in its evidence file, so the two cannot both
+    be true: either the registry says which build ran and checked it, or
+    the run is not a measurement. `smoke.py` and `lifecycle.py start`
+    keep the override.
+    """
+    named = sorted(k for k in environ
+                   if k == 'MATRIX_CLASSPATH'
+                   or k.startswith('MATRIX_CLASSPATH_'))
+    if named:
+        raise SystemExit(
+            f'{", ".join(named)} is set, which points the devnet at a '
+            'classpath the build registry never verified. A campaign '
+            'attributes every number to a build, so it takes its classpath '
+            'from --build alone. Unset it, or register the build in '
+            'scripts/devnet-matrix/builds.toml.')
+
+
+def check_launch_classpath(role, node, summary, launch_classpath):
+    """The evidence entry for one role, bound to the ACTUAL launch.
+
+    The manifest is read from the registry and the classpath is read
+    from `lifecycle`, which is what the JVM is started with. They were
+    recorded independently, so a per-node override could put the
+    registered build in the evidence and a different one on the
+    classpath. Here they have to be the same file.
+    """
+    entry = dict(summary)
+    entry['node'] = node
+    entry['launch_classpath'] = str(launch_classpath)
+    if entry.get('classpath') != str(launch_classpath):
+        raise SystemExit(
+            f'the {role} evidence would name build {entry.get("build")!r} '
+            f'({entry.get("classpath")}) but the {node} node was launched from '
+            f'{launch_classpath}. Evidence that describes a different '
+            'classpath from the one the JVM ran is not evidence.')
+    return entry
+
+
 def build_manifests(by_node):
     """`{role: manifest summary}` for every Scala role in a run.
 
     Read through the registry, which VERIFIES the build first, so the
     manifest recorded beside a measurement is one that was checked
-    against the compiled output the node actually ran — not a file that
-    happened to sit next to it.
+    against the compiled output the node actually ran — and bound to the
+    classpath `lifecycle` will hand the JVM, so the two cannot describe
+    different builds.
+
+    A `BuildError` ABORTS. It used to be caught and written into the
+    evidence as `unidentified`, which let a whole campaign run and be
+    reported on a build nobody could name.
     """
     import builds
     import lifecycle
@@ -1030,13 +1080,13 @@ def build_manifests(by_node):
             continue
         name = lifecycle.node_build(node)
         try:
-            out[role] = builds.load(name).summary()
+            summary = builds.load(name).summary()
         except builds.BuildError as error:
-            # Recorded, never absorbed: a run whose build could not be
-            # identified says so in its own evidence file.
-            out[role] = {'build': name, 'node': node,
-                         'unidentified': str(error)}
-        out[role]['node'] = node
+            raise SystemExit(
+                f'the {role} role on {node} cannot run build {name!r}: {error}'
+            ) from error
+        out[role] = check_launch_classpath(
+            role, node, summary, lifecycle.classpath_file(node))
     return out
 
 
@@ -1648,6 +1698,72 @@ def _self_test():
     _manifests = build_manifests({'scala': 'scala_miner', 'rust': 'rust_follower'})
     assert set(_manifests) == {'scala_miner'}, _manifests
     assert len(_manifests['scala_miner']['class_dir_sha256']) == 64, _manifests
+    # The evidence names the classpath the node was LAUNCHED from, and
+    # it is the registered build's own — not a file that happened to sit
+    # beside it.
+    assert _manifests['scala_miner']['launch_classpath'] == \
+        _manifests['scala_miner']['classpath'], _manifests
+
+    # ----- fix round 1, item 2: build verification FAILS CLOSED -----
+    #
+    # `lifecycle._build_for` used to catch every `BuildError` — a
+    # missing build, an unreadable registry, and the one that matters, a
+    # class hash that no longer matches the manifest — return `None`,
+    # and let `classpath_file` fall back to the legacy
+    # `.work/classpath`. The devnet then ran, and the evidence recorded
+    # the REGISTERED build while the JVM ran whatever was in `.work`. A
+    # number attributed to the wrong build is worse than no number, so
+    # the error propagates and the run never starts.
+    with tempfile.TemporaryDirectory() as _empty:
+        _probe = subprocess.run(
+            [sys.executable, '-c',
+             'import sys\n'
+             'sys.path.insert(0, %r)\n'
+             'import builds, lifecycle\n'
+             'try:\n'
+             '    path = lifecycle.classpath_file("scala")\n'
+             'except builds.BuildError as error:\n'
+             '    print("REFUSED", error)\n'
+             'else:\n'
+             '    print("FELL BACK TO", path)\n' % str(HERE)],
+            capture_output=True, text=True, cwd=ROOT,
+            env={**os.environ, 'MATRIX_BUILDS_ROOT': _empty})
+        assert 'REFUSED' in _probe.stdout, \
+            ('a build that cannot be verified must abort the run, not fall '
+             'back to the legacy classpath', _probe.stdout, _probe.stderr)
+
+    # An explicit classpath override bypasses verification entirely, so
+    # a measured campaign refuses one rather than measuring a build
+    # nothing checked.
+    for _var in ('MATRIX_CLASSPATH', 'MATRIX_CLASSPATH_SCALA2'):
+        try:
+            check_no_classpath_override({_var: '/tmp/some/classpath'})
+        except SystemExit as error:
+            assert _var in str(error), (str(error), _var)
+        else:
+            raise AssertionError(
+                f'{_var} must be refused for a measured campaign')
+    # An environment without one is fine, and an unrelated MATRIX_ var
+    # is not mistaken for one.
+    check_no_classpath_override({'MATRIX_NODES': 'scala,rust',
+                                 'MATRIX_BUILD_SCALA': 'F11'})
+
+    # And a build whose registered classpath is not the one the node was
+    # launched from is an attribution error, not a footnote.
+    _good = check_launch_classpath(
+        'scala_miner', 'scala', {'build': 'stock', 'classpath': '/a/classpath'},
+        '/a/classpath')
+    assert _good['launch_classpath'] == '/a/classpath', _good
+    assert _good['node'] == 'scala', _good
+    try:
+        check_launch_classpath(
+            'scala_miner', 'scala',
+            {'build': 'stock', 'classpath': '/a/classpath'}, '/b/classpath')
+    except SystemExit as error:
+        assert 'was launched from' in str(error), str(error)
+    else:
+        raise AssertionError(
+            'evidence may not describe a classpath the node did not run')
 
     # ----- M4: the reconstruction accounting -----
     from scenarios import common as _common
@@ -2967,6 +3083,9 @@ def main():
     # what would provision it. The resolved port band is checked in the
     # same breath, for the same reason.
     check_band(CAMPAIGN_P2P, CAMPAIGN_REST)
+    # A hand-set classpath would bypass `Build.verify()` for the node it
+    # names, and the run would still record `--build` in its evidence.
+    check_no_classpath_override(os.environ)
     check_build(args.build)
     names = list(ORDER) if args.scenario == 'all' else [args.scenario]
     # The node set is fixed for the whole process: `lifecycle.REST` and

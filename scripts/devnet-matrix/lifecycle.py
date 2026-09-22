@@ -172,11 +172,18 @@ DEFAULT_RUST_LOG = (
 def _build_for(node):
     """The registry entry this node was told to run, or `None`.
 
-    `None` means "no registry answer": `MATRIX_CLASSPATH` was set by
-    hand, or `builds.toml` is not readable from here. The caller then
-    falls back to the pinned constants, which is how the M2 smoke ran
-    before builds existed and how an operator points the harness at a
-    one-off classpath.
+    `None` means ONE thing: an explicit `MATRIX_CLASSPATH` override was
+    set by hand, so there is no registry answer to give. That is how an
+    operator points the harness at a one-off classpath, and
+    `campaign.py` refuses it for a measured run.
+
+    Every other failure — a build that is not provisioned, an unreadable
+    `builds.toml`, and above all a `class_dir_sha256` that no longer
+    matches the manifest — PROPAGATES. It used to be caught here and
+    answered with `None`, and `classpath_file` then selected the legacy
+    `.work/classpath`: the devnet came up on an unidentified build while
+    the evidence recorded the registered one. Verification that falls
+    back on failure is not verification.
     """
     if os.environ.get(f'MATRIX_CLASSPATH_{node.upper()}') or \
             os.environ.get('MATRIX_CLASSPATH'):
@@ -186,10 +193,7 @@ def _build_for(node):
         return _VERIFIED_BUILDS[name]
     sys.path.insert(0, str(HERE))
     import builds
-    try:
-        build = builds.load(name)
-    except builds.BuildError:
-        build = None
+    build = builds.load(name)
     # Cached because `builds.load` VERIFIES, which hashes every class
     # file on the classpath; the answer is asked for once per spawn and
     # again for every evidence record, and the build is immutable while
@@ -201,20 +205,21 @@ def _build_for(node):
 def classpath_file(node='scala') -> Path:
     """Classpath of the Scala build this NODE runs.
 
-    Three sources, most specific first: a per-node override, a global
-    override (what the M2 smoke and a hand-driven run use), and the
-    build registry — which is also what VERIFIES the build, so a node
-    started through it cannot be running compiled output that has moved
-    since its manifest was written.
+    Two sources: an explicit override (a hand-driven run, which
+    `campaign.py` refuses for a measured one), and the build registry —
+    which is also what VERIFIES the build, so a node started through it
+    cannot be running compiled output that has moved since its manifest
+    was written.
+
+    There is no third. The legacy `.work/classpath` fallback used to sit
+    here and was selected whenever verification FAILED, which is exactly
+    when it must not be.
     """
     override = (os.environ.get(f'MATRIX_CLASSPATH_{node.upper()}')
                 or os.environ.get('MATRIX_CLASSPATH'))
     if override:
         return Path(override)
-    build = _build_for(node)
-    if build is not None:
-        return build.classpath_file
-    return Path(ROOT / 'scripts/jvm_weak_blocks_oracle/.work/classpath')
+    return _build_for(node).classpath_file
 
 
 def owned(pid, configs=None):
