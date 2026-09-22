@@ -7,7 +7,10 @@ the Rust port, without depending on a live node or a shared build cache.
 
 ## Pinned commits
 
-- `ergo` (ergoplatform/ergo): `31a8de804f7328704f2753a1cf151dda8f64689f`
+- `ergo` (ergoplatform/ergo): `62c10315e1ebcac4480dba6bacdc2100a38119e5`
+  (the M4 pin, `weak-blocks` after master merged 6.0.6; it replaced
+  `31a8de804f7328704f2753a1cf151dda8f64689f`, and every vector payload except
+  `input_block_validation`'s fixture bytes was byte-identical across the move)
 - `sigma-state` fork (ScorexFoundation/sigmastate-interpreter):
   `368a860be033af94aa14895381f42099b3646db6`, published locally as
   `6.0.5-22-368a860b-SNAPSHOT`
@@ -25,18 +28,40 @@ From the Rust worktree root, with sbt, scala-cli, and Java 17:
 python3 scripts/jvm_weak_blocks_oracle/provision.py
 ```
 
-This clones both repos into `.work/` (git worktrees, not touched by hand),
-checks out the pinned commits, `+publishLocal`s sigma-state under
-`~/.ivy2/local/org.scorexfoundation`, and exports the ergo build's `Runtime`
-and `Test` classpaths via `sbt export`.
+This clones both repos into `.work/`, checks out the pinned commits,
+`+publishLocal`s sigma-state under `~/.ivy2/local/org.scorexfoundation`, and
+exports the ergo build's `Runtime` and `Test` classpaths via `sbt export`.
 
-Reused checkouts under `.work/` are hard-reset and cleaned
-(`git reset --hard <pinned commit> && git clean -fdx`) before every build, and
-the checkout is verified clean (`git status --porcelain --untracked-files=all`
-empty) after that reset. This guards against local edits or leftover
-untracked/ignored build artifacts from a prior run silently riding along with
-the pinned commit — the manifest's `ergo_commit`/`sigma_commit` only mean
-anything if what actually got built is byte-for-byte the pinned commit's tree.
+### One build per work directory (M4)
+
+M4 measures one upstream patch at a time, so several builds live side by side
+and every flag is explicit:
+
+```sh
+python3 scripts/jvm_weak_blocks_oracle/provision.py \
+  --ergo-source ~/coding/development/arkadianet/ergo-scala \
+  --ergo-ref matrix/F16-input-block-routes \
+  --work-dir <root>/.work-F16 --sigma-reuse
+```
+
+- `--ergo-source` may be a git URL (cloned) or a LOCAL checkout, in which case
+  a detached `git worktree` is added at `--ergo-ref`. A worktree because the
+  fork's patch branches all live in one checkout, and because another session
+  works in that checkout directly.
+- Nothing is ever `git clean`ed. A provisioned build's untracked content is its
+  compiled output: deleting it would throw away the incremental state a patch
+  cycle depends on, and could delete the build a running devnet is using
+  (spec §7a, "artifacts are immutable while a devnet runs"). Tracked files are
+  still asserted clean after the checkout, which is what "the pinned ref is
+  what got built" actually requires.
+- `--sigma-reuse` skips the sigma `publishLocal` only when the jars already in
+  `~/.ivy2/local` hash EXACTLY the same as the ones a recorded manifest was
+  built against. A jar with the right name is not evidence.
+
+`scripts/devnet-matrix/builds.toml` lists the work directories and the names
+(`stock`, `F16`, `F12F05`, `F14`, `F13`, `F04`, `F11`, `all`) that
+`campaign.py --build` accepts; `python3 scripts/devnet-matrix/builds.py
+--verify` checks each one against its manifest.
 
 If `sbt +publishLocal` fails cross-building sigma-state for Scala 2.11 (the
 ergo build only consumes 2.12 and 2.13), retry with:
@@ -55,10 +80,17 @@ and record that this workaround was used.
   vector is generated from it** (see below).
 - `.work/test-classpath` — one line, the ergo build's `Test / fullClasspath`.
   `gen.py` runs **every** subcommand on this one.
-- `.work/manifest.json` — `{ "ergo_commit", "sigma_commit", "sigma_version",
-  "sigma_artifacts" }`, where `sigma_artifacts` maps each published sigma-state
+- `.work/manifest.json` — `{ "ergo_source", "ergo_ref", "ergo_commit",
+  "sigma_commit", "sigma_version", "sigma_artifacts", "app_version",
+  "class_dir_sha256" }`. `sigma_artifacts` maps each published sigma-state
   jar's filename to its SHA-256, so a stale or mismatched local publish is
-  detectable.
+  detectable. `class_dir_sha256` is the build's IDENTITY: the SHA-256 over the
+  sorted `<project>/<path>` plus content of every class file on the exported
+  runtime classpath. A devnet role refuses a build that no longer reproduces
+  it, because a number attributed to the wrong build is worse than no number.
+  A manifest written before that field existed is tolerated — the hash is
+  computed on first use and cached in a `<work-dir>.computed.json` SIDECAR,
+  never written inside the immutable build directory.
 
 Smoke-test the exported classpath:
 
@@ -74,10 +106,19 @@ scala-cli --skip-cli-updates run --scala 2.12.20 --classpath "$CP" \
 Once provisioned, regenerate vectors with:
 
 ```sh
-python3 scripts/jvm_weak_blocks_oracle/gen.py
+WEAK_BLOCKS_ORACLE_WORK=<the build's work dir> \
+  python3 scripts/jvm_weak_blocks_oracle/gen.py [vector...] [--seed N]
 ```
 
-(`gen.py` is added by Task 2 of this port.)
+Generation is SEEDED (`--seed`, default 1600000000000) and therefore
+reproducible: regenerating at the same ergo commit produces byte-identical
+payloads. Without the seed, `ValidBlocksGenerators.validFullBlock` took its
+first block's timestamp from the wall clock and every `input_block_validation`
+fixture — header ids, the scripts naming them, the boxes holding those
+scripts, the state root — moved on every run, so a vector diff could not tell
+a re-pin from a re-run. Changing the seed rewrites those fixtures and nothing
+else; it is part of the vectors, and the value is recorded in each vector's
+manifest block.
 
 ### Why every vector runs on the Test classpath
 

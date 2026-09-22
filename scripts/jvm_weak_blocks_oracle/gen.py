@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
-"""Regenerate test-vectors/weak-blocks/*.json from the pinned Scala oracle."""
+"""Regenerate test-vectors/weak-blocks/*.json from the pinned Scala oracle.
+
+Generation is SEEDED and therefore reproducible: regenerating at the
+same ergo commit produces byte-identical payloads, so a vector diff
+means upstream moved and nothing else. Without that, every regeneration
+rewrote the `input_block_validation` fixtures (their chain's timestamps
+came from the wall clock) and a re-pin could not be told from a re-run.
+
+The manifest block is the deliberate exception: it carries the commit,
+the generator hash and the timestamp of THIS run, which is provenance
+rather than payload.
+"""
+import argparse
 import datetime
 import hashlib
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,8 +32,23 @@ OUT = ROOT / 'test-vectors/weak-blocks'
 VECTORS = ['announcement', 'ordering_announcement', 'messages', 'weak_ids', 'pow', 'extension_leaf', 'extension_proof', 'soft_fields', 'input_block_validation', 'block_sections', 'launch_params']
 
 
+# The fixture generator's base timestamp. FIXED, and changed only
+# deliberately: changing it rewrites every `input_block_validation`
+# fixture (and nothing else), which is a vector diff a reader has to be
+# able to attribute.
+DEFAULT_SEED = 1600000000000
+
+
 def main():
-    names = sys.argv[1:] or VECTORS
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('vectors', nargs='*', default=None,
+                        help=f'which to regenerate; default all of {VECTORS}')
+    parser.add_argument('--seed', type=int, default=DEFAULT_SEED,
+                        help='base timestamp for generated fixture blocks; '
+                             f'default {DEFAULT_SEED}. Changing it changes '
+                             'the fixture bytes, so it is part of the vectors')
+    args = parser.parse_args()
+    names = args.vectors or VECTORS
     manifest = json.loads((WORK / 'manifest.json').read_text())
     oracle = HERE / 'WeakBlocksOracle.scala'
     OUT.mkdir(parents=True, exist_ok=True)
@@ -45,7 +71,8 @@ def main():
         # directory (which the line above may override per vector).
         extra = [str(ROOT)] if name == 'block_sections' else []
         result = subprocess.run(['scala-cli', '--skip-cli-updates', 'run', str(oracle), '--server=false',
-                                 '--scala', '2.12.20', '--classpath', classpath, '--', name, *extra],
+                                 '--scala', '2.12.20', '--classpath', classpath, '--', name, *extra,
+                                 '--seed', str(args.seed)],
                                 text=True, stdout=subprocess.PIPE, check=True, cwd=cwd).stdout
         # logback initialization banner (and scala-cli's outdated-version nag) land on
         # stdout ahead of the JSON payload, and can themselves contain '{' (log pattern
@@ -63,6 +90,7 @@ def main():
             'sigma_version': manifest['sigma_version'],
             'generator': 'scripts/jvm_weak_blocks_oracle/WeakBlocksOracle.scala',
             'generator_sha256': hashlib.sha256(oracle.read_bytes()).hexdigest(),
+            'seed': args.seed,
             'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }
         (OUT / f'{name}.json').write_text(json.dumps(doc, indent=2) + '\n')
