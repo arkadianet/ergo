@@ -1684,9 +1684,42 @@ def _self_test():
         'INFO Processing ordering block announcement for dd',
         'WARN Parent header not found for ordering block dd, caching its header and requesting parent ee',
     ])
-    assert [_scala[f] for f in _common.ACCOUNTING_FIELDS] == [4, 1, 1, 1, 1], _scala
+    assert [_scala[f] for f in _common.ACCOUNTING_FIELDS] == \
+        [4, 1, 1, 1, 1, 0], _scala
     assert _scala['unaccounted'] == 0, _scala
     assert _scala['reconstructed_ratio'] == 0.25, _scala
+    # ----- M4: the GATE, which decides before `processOrderingBlock` -----
+    #
+    # `ErgoNodeViewSynchronizer.scala:1856-1866` at 62c10315 checks
+    # whether the previous input block's transactions are stored and, if
+    # they are not, requests the full block WITHOUT ever sending
+    # `ProcessOrderingBlock`. None of the five phrases above is then
+    # logged. Task 2 measured a stock follower that took that branch 80
+    # times in 81 announcements, and the accounting reported the whole
+    # reference half as UNKNOWN — a measured 0 % reconstruction rate
+    # read as "no data".
+    _gated = _common.scala_accounting([
+        'INFO On processing ordering block ff, it is last input block Some(gg)',
+        'INFO Requesting all the block transactions for ff as prev input '
+        'block not found',
+    ])
+    assert _gated['eligible_announcements'] == 1, _gated
+    assert _gated['download_no_prev_input_block'] == 1, _gated
+    assert _gated['decided'] == 1 and _gated['unaccounted'] == 0, _gated
+    assert _gated['reconstructed_ratio'] == 0.0, _gated
+    assert 'unmatched' not in _gated, _gated
+    # The gate's own line is the denominator when the entry line is
+    # absent, and the two are never double-counted.
+    _both = _common.scala_accounting([
+        'INFO On processing ordering block aa, it is last input block Some(bb)',
+        'INFO Processing ordering block announcement for aa',
+        'INFO Applying block transactions from input-blocks for aa with '
+        'transactions: 3',
+    ])
+    assert _both['eligible_announcements'] == 1, _both
+    assert _both['reconstructed'] == 1 and _both['unaccounted'] == 0, _both
+    assert _both['gate_announcements'] == 1, _both
+    assert _both['entry_announcements'] == 1, _both
     # A build that logs none of the five is UNKNOWN, not a clean zero.
     _silent = _common.scala_accounting(['INFO something else entirely'])
     assert 'UNKNOWN, not zero' in _silent['unmatched'], _silent

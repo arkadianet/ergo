@@ -64,7 +64,16 @@ RUST_OVERRIDES = (
 # loosely (case-insensitive substrings) because a wording change must
 # show up as "not found", not as a silent zero.
 SCALA_RECONSTRUCTED = 'block transactions from input-blocks'
+# TWO download sites, not one. `ErgoNodeViewHolder` logs "Downloading
+# block transactions fully …" only for a block that REACHED it; at
+# 62c10315 `ErgoNodeViewSynchronizer.scala:1865` requests the full block
+# first, whenever the previous input block's transactions are not
+# stored, and the holder never runs. Task 2 measured a stock follower
+# that took the synchronizer's branch 80 times in 81 announcements and
+# the holder's none: with only the holder's phrase the reference half of
+# the F5 ratio read as UNKNOWN when it was in fact a measured 0 %.
 SCALA_FALLBACK = 'downloading block transactions fully'
+SCALA_FALLBACK_GATE = 'as prev input block not found'
 
 
 def _scala_log_counts(ctx, node='scala2', since_line=0):
@@ -83,25 +92,32 @@ def _scala_log_counts(ctx, node='scala2', since_line=0):
     if not path.exists():
         return {'error': f'no Scala log at {path}'}
     lines = path.read_text(errors='replace').splitlines()[since_line:]
-    reconstructed = fallback = 0
+    reconstructed = fallback = fallback_gate = 0
     for line in lines:
         low = line.lower()
         if SCALA_RECONSTRUCTED in low:
             reconstructed += 1
         elif SCALA_FALLBACK in low:
             fallback += 1
+        elif SCALA_FALLBACK_GATE in low:
+            fallback_gate += 1
+    fallback += fallback_gate
     decided = reconstructed + fallback
     out = {'node': node, 'reconstructed': reconstructed, 'fallback': fallback,
            'decided': decided,
            'reconstructed_ratio': round(reconstructed / decided, 4) if decided else None,
-           'phrases': [SCALA_RECONSTRUCTED, SCALA_FALLBACK],
+           'fallback_at_gate': fallback_gate,
+           'phrases': [SCALA_RECONSTRUCTED, SCALA_FALLBACK,
+                       SCALA_FALLBACK_GATE],
            'window_lines': len(lines), 'from_line': since_line,
-           'source': ('ErgoNodeViewHolder.processOrderingBlock:458 (reconstruct) '
-                      'and :465/:469 (download), at the pin')}
-    if reconstructed == 0 and fallback == 0:
+           'source': ('ErgoNodeViewHolder.processOrderingBlock:468 '
+                      '(reconstruct) and :475/:479 (download), plus the '
+                      'ErgoNodeViewSynchronizer:1865 gate that downloads '
+                      'without ever reaching the holder, at the pin')}
+    if decided == 0:
         out['unmatched'] = (
-            'neither phrase appears in the pinned build\'s log; the Scala side of '
-            'the ratio is UNKNOWN, not zero')
+            'none of the phrases appears in the pinned build\'s log; the Scala '
+            'side of the ratio is UNKNOWN, not zero')
         # Whatever the build does log about input blocks, so the report
         # can name the real phrases.
         out['input_block_log_sample'] = [

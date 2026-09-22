@@ -1391,7 +1391,14 @@ def check_bounds(ctx, observed_peaks, caps, what, unavailable_bounds=()):
 # rather than vanishing from the ratio.
 ACCOUNTING_FIELDS = ('eligible_announcements', 'reconstructed',
                      'download_missing_tx', 'download_root_mismatch',
-                     'skipped_no_chain')
+                     'skipped_no_chain',
+                     # The GATE, which decides before the holder is ever
+                     # asked: `ErgoNodeViewSynchronizer.scala:1856-1866`
+                     # at 62c10315 requests the full block and never
+                     # sends `ProcessOrderingBlock` when the previous
+                     # input block's transactions are not stored. It is
+                     # a download, and until M4 it was invisible.
+                     'download_no_prev_input_block')
 
 # The Rust event feed's own strings (`ergo-node` `reconstruct.rs`
 # `MISSING_*`/`ROOT_MISMATCH`, `ergo-inputblocks` `NO_PREV_INPUT_BLOCK` /
@@ -1406,11 +1413,22 @@ RUST_SKIP_REASONS = ('no_prev_input_block', 'no_chain')
 # 476, 480, 490). Lower-cased substrings, so a wording change reads as
 # "not found" rather than as a silent zero.
 SCALA_PHRASES = {
-    'eligible_announcements': 'processing ordering block announcement for',
+    # `ErgoNodeViewSynchronizer.processOrderingBlockAnnouncement`
+    # (62c10315): the ENTRY line, logged for every announcement that
+    # survives the height-gap and already-known checks.
+    'entry_announcements': 'processing ordering block announcement for',
+    # `ErgoNodeViewHolder.processOrderingBlock` (62c10315):
     'reconstructed': 'applying block transactions from input-blocks for',
     'download_missing_tx': 'as not all the transactions available',
     'download_root_mismatch': 'as merkle root does not match',
     'skipped_no_chain': 'parent header not found for ordering block',
+    # The GATE, `ErgoNodeViewSynchronizer.scala:1854/:1865`. Line 1854
+    # precedes the branch; line 1865 requests the full block and the
+    # holder never runs — which is why a stock follower that downloaded
+    # 80 of 81 ordering blocks used to read as "none of the phrases
+    # appears", i.e. UNKNOWN, when it was a measured 0 %.
+    'gate_announcements': 'on processing ordering block',
+    'download_no_prev_input_block': 'as prev input block not found',
 }
 
 
@@ -1459,21 +1477,38 @@ def rust_accounting(events):
 
 
 def scala_accounting(lines):
-    """The five numbers from a window of a Scala node's log."""
+    """The six numbers from a window of a Scala node's log.
+
+    The denominator is the SYNCHRONIZER's, not the holder's. At
+    62c10315 an announcement passes three stages — the synchronizer's
+    entry line, its gate at :1854, and only then
+    `ErgoNodeViewHolder.processOrderingBlock` — and the gate at :1865
+    requests the full block without the holder ever running. Counting
+    the holder's phrases alone made a follower that downloaded 80 of 81
+    ordering blocks look like a node that logged nothing at all.
+    """
     out = _empty_accounting(
-        'scala log (ErgoNodeViewHolder.processOrderingBlock, 62c10315)')
+        'scala log (ErgoNodeViewSynchronizer gate :1854/:1865 and '
+        'ErgoNodeViewHolder.processOrderingBlock, 62c10315)')
+    for field in SCALA_PHRASES:
+        out.setdefault(field, 0)
     for line in lines:
         low = line.lower()
         for field, phrase in SCALA_PHRASES.items():
             if phrase in low:
                 out[field] += 1
+    # Entry precedes the gate, which precedes the holder, and each
+    # stage sees a subset of the one before. The largest is the honest
+    # denominator, and one announcement is never counted twice.
+    out['eligible_announcements'] = max(out['gate_announcements'],
+                                        out['entry_announcements'])
     out['log_lines'] = len(lines)
     if not out['eligible_announcements'] and not any(
             out[f] for f in ACCOUNTING_FIELDS):
-        # A build that logs none of the five is UNKNOWN, not a run of
+        # A build that logs none of them is UNKNOWN, not a run of
         # zeroes: the reference half of a ratio has to be measured.
         out['unmatched'] = (
-            'none of the five phrases appears in this node\'s log for the '
+            'none of the phrases appears in this node\'s log for the '
             'window; its reconstruction accounting is UNKNOWN, not zero')
     return _with_ratio(out)
 
@@ -1482,7 +1517,9 @@ def _with_ratio(out):
     """Add the derived ratio and the unaccounted remainder."""
     eligible = out['eligible_announcements']
     decided = (out['reconstructed'] + out['download_missing_tx']
-               + out['download_root_mismatch'] + out['skipped_no_chain'])
+               + out['download_root_mismatch'] + out['skipped_no_chain']
+               # The gate's download branch is an OUTCOME, not a gap.
+               + out.get('download_no_prev_input_block', 0))
     out['decided'] = decided
     # Announcements the node decided about but reported no outcome for.
     # Never silently dropped from the denominator.
