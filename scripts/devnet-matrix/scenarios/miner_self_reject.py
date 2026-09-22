@@ -53,18 +53,22 @@ PAYMENT_NANOERG = 1_000_000
 #   CandidateGenerator.scala:286    the generator answered a submission
 #
 # `pow_failures` counts the generator's own WARN, not the exception
-# text: `Invalid input block! PoW valid: false` also reaches the log
-# inside the `Processed solution … with the result …` line, so a
-# substring as loose as "invalid input block" counts every failure
-# twice. The exception text is counted separately, as a cross-check that
-# the two sites still agree.
+# text. At 62c10315 EACH failure puts that text on the log TWICE — once
+# in the generator's `Processed solution … with the result Error(…)`
+# echo and once in the stack trace under `ErgoMiningThread`'s ERROR — so
+# a substring as loose as "invalid input block" doubles every failure.
+# The text is counted separately as `pow_failure_reply_lines` and
+# checked against that measured 2:1, which is the cross-check: a build
+# that stops logging both sites is a build these phrases no longer
+# describe. Measured on the Task 2 trial at stock 62c10315: 83 WARNs,
+# 166 exception-text lines.
 PHRASES = {
     'submissions_input': 'found solution for input block, sending it for validation',
     'submissions_ordering': 'found solution for ordering block, sending it for validation',
     'replies_success': 'solution accepted',
     'replies_error': 'accepting solution or preparing candidate did not succeed',
     'pow_failures': 'removing candidate due to invalid input block',
-    'pow_failure_replies': 'invalid input block! pow valid',
+    'pow_failure_reply_lines': 'invalid input block! pow valid',
     'generator_processed': 'processed solution',
 }
 
@@ -94,10 +98,17 @@ def count(lines):
             applied_ids.append(match.group(1))
     out['submissions'] = out['submissions_input'] + out['submissions_ordering']
     out['replies'] = out['replies_success'] + out['replies_error']
-    # The two PoW-failure sites have to agree; if they do not, the
-    # phrases no longer mean what this counting assumes.
-    out['pow_failure_sites_disagree'] = (
-        out['pow_failures'] != out['pow_failure_replies'])
+    # Both PoW-failure sites have to keep logging: one WARN and two
+    # lines of exception text per failure, as measured at 62c10315. A
+    # different proportion means the phrases no longer mean what this
+    # counting assumes — it is NOT a second, independent count of the
+    # failures, and was never reported as one.
+    out['pow_failure_lines_per_failure'] = (
+        round(out['pow_failure_reply_lines'] / out['pow_failures'], 2)
+        if out['pow_failures'] else None)
+    out['pow_failure_sites_disagree'] = bool(
+        out['pow_failures']
+        and out['pow_failure_reply_lines'] != 2 * out['pow_failures'])
     # The F11c evidence: a submission the generator never answered. Not
     # derived by subtraction anywhere else, because a negative would
     # mean the phrases no longer say what this counting assumes.

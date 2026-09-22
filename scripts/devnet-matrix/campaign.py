@@ -1665,6 +1665,13 @@ def _self_test():
         'INFO Processed solution y with the result Error(java.lang.Exception: '
         'Invalid input block! PoW valid: false)',
         'ERROR Accepting solution or preparing candidate did not succeed',
+        # The stack trace the ERROR above carries. It is the SECOND line
+        # per failure holding the exception text, and leaving it out of
+        # this fixture is what made `pow_failure_sites_disagree` fire on
+        # every real run: the Task 2 trial at stock 62c10315 counted 83
+        # WARNs against 166 exception-text lines, exactly two per
+        # failure.
+        'java.lang.Exception: Invalid input block! PoW valid: false',
         # The F11c case: submitted, never answered.
         'INFO Found solution for ordering block, sending it for validation',
     ]
@@ -1675,10 +1682,20 @@ def _self_test():
     assert _counts['replies_error'] == 1, _counts
     assert _counts['replies_missing'] == 1, _counts
     assert _counts['pow_failures'] == 1, _counts
-    # The two PoW-failure sites agree; a loose substring would have
-    # counted this one failure twice.
-    assert _counts['pow_failure_replies'] == 1, _counts
+    # ONE failure, TWO lines carrying the exception text, and the flag
+    # stays quiet: it exists to catch a build that stops logging them in
+    # that proportion, not to fire on every stock run.
+    assert _counts['pow_failure_reply_lines'] == 2, _counts
     assert _counts['pow_failure_sites_disagree'] is False, _counts
+    # A build that logged the text once per failure HAS changed, and
+    # says so.
+    _changed = _msr.count([ln for ln in _log
+                           if not ln.startswith('java.lang.Exception')])
+    assert _changed['pow_failure_sites_disagree'] is True, _changed
+    # With no failures at all there is nothing to disagree about.
+    assert _msr.count(
+        ['INFO Found solution for input block, sending it for validation',
+         'INFO Solution accepted'])['pow_failure_sites_disagree'] is False
     assert _counts['distinct_applied_input_blocks'] == 1, _counts
     assert _counts['applied_input_block_ids'] == ['ab' * 32], _counts
     # An empty window is UNKNOWN, not a run with no submissions.
