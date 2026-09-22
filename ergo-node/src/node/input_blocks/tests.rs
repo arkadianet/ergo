@@ -56,11 +56,25 @@ fn runtime() -> InputBlocksRuntime {
 /// into the store's header tables and advance `best_header`. Returns the
 /// stored headers, oldest first.
 fn seed_header_chain(state: &mut NodeState, count: u32) -> Vec<Header> {
+    seed_header_chain_with_nonces(state, count, 0)
+}
+
+/// [`seed_header_chain`] with a nonce offset, so a second call produces
+/// a DIFFERENT chain over the same heights. The later call rewrites the
+/// best-header index at every height it covers, leaving the first
+/// chain's headers stored and linked but off the index — the shape a
+/// header-chain switch leaves behind while the committed full blocks
+/// stay where they were.
+fn seed_header_chain_with_nonces(
+    state: &mut NodeState,
+    count: u32,
+    nonce_offset: u64,
+) -> Vec<Header> {
     let store = state.store.as_utxo_mut().expect("utxo backend");
     let mut parent = [0u8; 32];
     let mut out = Vec::new();
     for height in 1..=count {
-        let header = ts::header(parent, height, u64::from(height), [0u8; 32]);
+        let header = ts::header(parent, height, u64::from(height) + nonce_offset, [0u8; 32]);
         let (bytes, id) = serialize_header(&header).expect("serialize");
         let id = *id.as_bytes();
         let meta = HeaderMeta {
@@ -4605,5 +4619,71 @@ fn announcement_pow_uses_the_stores_multiplier_not_the_stale_mirror() {
     assert!(
         !actions.iter().any(|a| matches!(a, Action::Penalize { .. })),
         "and its peer is not penalised: {actions:?}"
+    );
+}
+
+/// Finding 8: beyond the walk cap the classification asked
+/// `is_on_best_chain`, which follows the best HEADER chain
+/// (`HEADER_CHAIN_INDEX`). Header acceptance can move that index while
+/// the committed full blocks stay on another branch — the node holds
+/// headers for a heavier branch it has not downloaded bodies for yet.
+/// A full-block catch-up of more than 64 blocks along the committed
+/// branch was then reported as `OrderingReorg`, whose handler discards
+/// every retained tree but the new tip's.
+///
+/// Ancestry has to be decided against the committed tip. Here the
+/// committed branch is fully stored and linear while the header index
+/// has moved to a competing chain over the same heights.
+#[test]
+fn a_far_linear_advance_is_an_apply_even_when_the_header_index_forked_away() {
+    use ergo_sync::coordinator::ChainView;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let committed = seed_header_chain(&mut state, MAX_LINEAR_CATCHUP + 6);
+    // A competing header chain over the same heights takes the index.
+    let _competing = seed_header_chain_with_nonces(&mut state, MAX_LINEAR_CATCHUP + 6, 900_000);
+
+    let prev = header_id_of(&committed[0]);
+    let far = &committed[(MAX_LINEAR_CATCHUP + 1) as usize];
+    assert!(
+        far.height - committed[0].height > MAX_LINEAR_CATCHUP,
+        "the fixture must exceed the walk cap"
+    );
+    assert!(
+        !state.store.is_on_best_chain(&prev),
+        "premise: the header index has moved off the committed branch"
+    );
+
+    assert_eq!(
+        classify_tip_change(&state, prev, header_id_of(far), far.height),
+        TipChange::Applied,
+        "the committed branch advanced linearly; best-header membership is not the question"
+    );
+}
+
+/// The counterpart to the above: a committed tip that genuinely
+/// abandoned the previous one is still a reorg when the header index
+/// says both are on it. Best-header membership must not be able to
+/// report an apply on its own.
+#[test]
+fn a_far_advance_off_a_sibling_branch_is_a_reorg_despite_the_header_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let indexed = seed_header_chain(&mut state, MAX_LINEAR_CATCHUP + 6);
+    // A second chain, stored and linked but never on the index. Its tip
+    // is the committed one; the previous tip sits on the INDEXED chain,
+    // so the index reports membership for a header the committed tip
+    // does not descend from.
+    let sibling = seed_header_chain_with_nonces(&mut state, MAX_LINEAR_CATCHUP + 6, 700_000);
+    // Put the index back on the first chain.
+    let _ = seed_header_chain(&mut state, MAX_LINEAR_CATCHUP + 6);
+
+    let prev = header_id_of(&indexed[0]);
+    let far = &sibling[(MAX_LINEAR_CATCHUP + 1) as usize];
+    assert_eq!(
+        classify_tip_change(&state, prev, header_id_of(far), far.height),
+        TipChange::Reorg,
+        "the committed tip is on a different branch from the previous tip"
     );
 }
