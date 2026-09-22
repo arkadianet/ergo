@@ -33,6 +33,19 @@ PUBLIC_BLOCKS_AFTER_SPLIT = 2
 PRIVATE_LEAD = 2
 PRIVATE_MINING_BUDGET = 900.0
 
+# Both miners and the follower share 127.0.0.1, and the node's per-IP
+# admission limit is 1 (`ergo_p2p::peer_manager::limits::DEFAULT_PER_IP_LIMIT`)
+# — it applies to outbound dial SELECTION as well as to inbound
+# admission, so the follower would connect to exactly one of the two
+# miners and this scenario could never start. Raised to 2, and only for
+# the two-miner scenarios: it is an artifact of running a whole network
+# on loopback, and it is not what these scenarios measure. The `flood`
+# scenario, which DOES test admission, keeps the default.
+RUST_OVERRIDES = (
+    ('peers', 'per_ip_limit', '2'),
+    ('peers', 'per_subnet_limit', '4'),
+)
+
 # Where miner 2 binds while it is isolated. Clearing `knownPeers` only
 # stops it DIALLING — the follower has miner 2 in its own `known` list and
 # keeps an inbound connection open, which would hand it the private

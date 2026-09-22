@@ -317,6 +317,31 @@ def purge_address_book(data_root):
 
 # ----- the driver -----
 
+def rotate_logs(scenario, nodes, tag=''):
+    """Move the node logs aside so a scenario reads only its OWN.
+
+    `lifecycle.spawn` APPENDS, so without this every scenario reads the
+    whole campaign's log as its own — `reconstruct_rate` would count the
+    reference node's reconstruct-vs-download lines from six earlier
+    scenarios, and every `rust_log_lines` window would carry runs that
+    are not this one.
+
+    Called twice: once BEFORE the nodes start, to set aside whatever an
+    earlier run left behind (`tag='-prior'`, kept rather than deleted —
+    it may be the evidence for why that run ended), and once after they
+    stop, to keep this scenario's logs beside its evidence.
+    """
+    moved = {}
+    for node in nodes:
+        live = WORK / (node + '.log')
+        if not live.exists():
+            continue
+        kept = CAMPAIGN_WORK / f'{scenario}-{node}{tag}.log'
+        live.replace(kept)
+        moved[node] = str(kept)
+    return moved
+
+
 def run_scenario(name, args):
     import lifecycle
     import smoke
@@ -356,6 +381,7 @@ def run_scenario(name, args):
     def save():
         output.write_text(json.dumps(evidence, indent=2, default=str) + '\n')
 
+    evidence['logs_set_aside_at_start'] = rotate_logs(name, nodes, tag='-prior')
     save()
     run = smoke.Run(time.monotonic() + args.timeout)
     ctx = Context(name, run, evidence, args, nodes, data_root)
@@ -376,6 +402,14 @@ def run_scenario(name, args):
         evidence['divergences'] = ctx.divergences
         evidence['failures'] = run.failures
         evidence['artifacts'] = smoke.write_findings(run, evidence)
+        # This scenario's own node logs and sample series, kept beside
+        # its evidence rather than left to be overwritten by the next.
+        evidence['logs'] = rotate_logs(name, nodes)
+        series = run.series_path
+        if series.exists():
+            kept = CAMPAIGN_WORK / f'{name}-agreement-series.jsonl'
+            series.replace(kept)
+            evidence['series_file'] = str(kept)
         evidence['samples'] = run.samples
         evidence['unavailable_samples'] = run.unavailable_samples
         evidence['drop_totals'] = run.totals()
