@@ -13,7 +13,7 @@ OUT = ROOT / 'test-vectors/weak-blocks'
 # Every name here must have a dispatch case in WeakBlocksOracle.main: an
 # unknown name makes the oracle exit non-zero, and `check=True` then aborts
 # the whole run, so a stale name silently starves every later vector.
-VECTORS = ['announcement', 'ordering_announcement', 'messages', 'weak_ids', 'pow', 'extension_leaf', 'soft_fields']
+VECTORS = ['announcement', 'ordering_announcement', 'messages', 'weak_ids', 'pow', 'extension_leaf', 'extension_proof', 'soft_fields', 'input_block_validation']
 
 
 def main():
