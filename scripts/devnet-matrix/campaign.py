@@ -54,6 +54,18 @@ import time
 CAMPAIGN_P2P = {'scala': 19570, 'scala2': 19571, 'rust': 19572}
 CAMPAIGN_REST = {'scala': 19590, 'scala2': 19591, 'rust': 19592}
 
+# Each node listens on its OWN loopback address. Not cosmetic: two Scala
+# nodes on one IP can never dial each other, because
+# `NetworkController.getPeerAddress` resolves a candidate whose declared
+# address shares this node's own external address through the UPnP
+# gateway, and with no gateway returns `None`. The first three-node run
+# died on exactly that — the second Scala node never reached the miner,
+# never synced past genesis, and so (with `offlineGeneration = false`)
+# never mined a block. REST stays on 127.0.0.1 for every node, so the
+# harness is unaffected.
+CAMPAIGN_P2P_HOST = {'scala': '127.0.0.1', 'scala2': '127.0.0.2',
+                     'rust': '127.0.0.3'}
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 WORK = HERE / '.work'
@@ -116,6 +128,7 @@ def configure_environment(scenario, nodes):
     for name in nodes:
         os.environ[f'MATRIX_P2P_{name.upper()}'] = str(CAMPAIGN_P2P[name])
         os.environ[f'MATRIX_REST_{name.upper()}'] = str(CAMPAIGN_REST[name])
+        os.environ[f'MATRIX_P2P_HOST_{name.upper()}'] = CAMPAIGN_P2P_HOST[name]
 
 
 # ----- config rendering -----
@@ -129,13 +142,15 @@ def scala_override(scenario, node, nodes, data_dir, extra=''):
     two sees the campaign's whole deviation.
     """
     base = HERE / ('scala-node.conf' if node == 'scala' else 'scala-miner2.conf')
-    known = [f'"127.0.0.1:{CAMPAIGN_P2P[n]}"' for n in nodes if n != node]
+    known = [f'"{CAMPAIGN_P2P_HOST[n]}:{CAMPAIGN_P2P[n]}"'
+             for n in nodes if n != node]
+    listen = f'{CAMPAIGN_P2P_HOST[node]}:{CAMPAIGN_P2P[node]}'
     return (
         f'include file("{base}")\n'
         f'ergo.directory = "{data_dir}"\n'
         'ergo.wallet.secretStorage.secretDir = ${ergo.directory}"/wallet/keystore"\n'
-        f'scorex.network.bindAddress = "127.0.0.1:{CAMPAIGN_P2P[node]}"\n'
-        f'scorex.network.declaredAddress = "127.0.0.1:{CAMPAIGN_P2P[node]}"\n'
+        f'scorex.network.bindAddress = "{listen}"\n'
+        f'scorex.network.declaredAddress = "{listen}"\n'
         f'scorex.network.knownPeers = [{", ".join(known)}]\n'
         f'scorex.restApi.bindAddress = "127.0.0.1:{CAMPAIGN_REST[node]}"\n'
         f'{extra}'
@@ -153,11 +168,13 @@ def render_rust_config(template, data_dir, nodes, overrides=()):
     section so an override can never be silently dropped.
     """
     lines = template.splitlines()
-    known = [f'"127.0.0.1:{CAMPAIGN_P2P[n]}"' for n in nodes if n != 'rust']
+    known = [f'"{CAMPAIGN_P2P_HOST[n]}:{CAMPAIGN_P2P[n]}"'
+             for n in nodes if n != 'rust']
     wanted = [
         ('', 'data_dir', f'"{data_dir}"'),
         ('peers', 'known', '[' + ', '.join(known) + ']'),
-        ('peers', 'bind_addr', f'"127.0.0.1:{CAMPAIGN_P2P["rust"]}"'),
+        ('peers', 'bind_addr',
+         f'"{CAMPAIGN_P2P_HOST["rust"]}:{CAMPAIGN_P2P["rust"]}"'),
         ('peers', 'target_outbound', str(max(1, len(known)))),
         ('api', 'bind', f'"127.0.0.1:{CAMPAIGN_REST["rust"]}"'),
     ] + list(overrides)
@@ -480,9 +497,10 @@ def _self_test():
     rendered = render_rust_config(template, Path('/tmp/x/rust'),
                                   ['scala', 'scala2', 'rust'])
     assert 'data_dir = "/tmp/x/rust"' in rendered, rendered
-    assert 'bind_addr = "127.0.0.1:19572"' in rendered, rendered
+    # Each node on its own loopback address, REST on 127.0.0.1 for all.
+    assert 'bind_addr = "127.0.0.3:19572"' in rendered, rendered
     assert 'bind = "127.0.0.1:19592"' in rendered, rendered
-    assert ('known = ["127.0.0.1:19570", "127.0.0.1:19571"]' in rendered), rendered
+    assert ('known = ["127.0.0.1:19570", "127.0.0.2:19571"]' in rendered), rendered
     assert 'target_outbound = 2' in rendered, rendered
     # Untouched keys survive verbatim, and nothing is duplicated.
     assert 'allow_local = true' in rendered, rendered
@@ -510,9 +528,17 @@ def _self_test():
     overlay = scala_override('fork', 'scala2', ['scala', 'scala2', 'rust'],
                              Path('/tmp/x/scala2'))
     assert 'include file(' in overlay and 'scala-miner2.conf")' in overlay, overlay
-    assert 'bindAddress = "127.0.0.1:19571"' in overlay, overlay
+    assert 'bindAddress = "127.0.0.2:19571"' in overlay, overlay
+    # REST is NOT moved: the harness talks to 127.0.0.1 for every node.
     assert 'restApi.bindAddress = "127.0.0.1:19591"' in overlay, overlay
-    assert '"127.0.0.1:19570", "127.0.0.1:19572"' in overlay, overlay
+    assert '"127.0.0.1:19570", "127.0.0.3:19572"' in overlay, overlay
+    # Every node listens on a DISTINCT address. Two Scala nodes that
+    # share one can never dial each other (scorex
+    # `NetworkController.getPeerAddress` resolves a same-address peer
+    # through a UPnP gateway that does not exist and returns None), which
+    # is what stranded the second node at genesis on the first attempt.
+    assert len(set(CAMPAIGN_P2P_HOST.values())) == len(CAMPAIGN_P2P_HOST), \
+        CAMPAIGN_P2P_HOST
     assert '19571' not in overlay.split('knownPeers')[1], \
         'a node must not be listed as its own peer'
 
@@ -559,7 +585,7 @@ def _self_test():
                               evict_scenario.RUST_OVERRIDES)
     parsed = tomllib.loads(real)
     assert parsed['data_dir'] == '/tmp/x/rust', parsed['data_dir']
-    assert parsed['peers']['bind_addr'] == '127.0.0.1:19572', parsed['peers']
+    assert parsed['peers']['bind_addr'] == '127.0.0.3:19572', parsed['peers']
     assert parsed['peers']['known'] == ['127.0.0.1:19570'], parsed['peers']
     assert parsed['api']['bind'] == '127.0.0.1:19592', parsed['api']
     # Every override the scenario declares, and nothing else, landed in

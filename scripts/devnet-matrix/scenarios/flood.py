@@ -92,7 +92,7 @@ def run(ctx):
 
     binary = _adversary_binary()
     command = [str(binary),
-               f'127.0.0.1:{lifecycle.P2P["rust"]}', 'devnet',
+               f'{lifecycle.P2P_HOST["rust"]}:{lifecycle.P2P["rust"]}', 'devnet',
                f'127.0.0.1:{lifecycle.REST["rust"]}',
                'input_block_flood', str(ANNOUNCEMENTS), str(DELIVERIES)]
     ctx.note('adversary_command', ' '.join(command))

@@ -31,13 +31,8 @@ SCALA2_EXTRA = (
     'ergo.node.offlineGeneration = false\n'
 )
 
-# All three nodes share 127.0.0.1 and the follower's per-IP admission
-# limit is 1, so without this it would connect to one of the two Scala
-# nodes and the handshake wait would time out.
-RUST_OVERRIDES = (
-    ('peers', 'per_ip_limit', '2'),
-    ('peers', 'per_subnet_limit', '4'),
-)
+# No Rust overrides: each node listens on its own loopback address, so
+# the follower's per-IP admission limit is not in the way.
 
 # The pinned Scala build's two log lines for the same decision. Matched
 # loosely (case-insensitive substrings) because a wording change must

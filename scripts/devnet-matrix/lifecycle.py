@@ -31,6 +31,22 @@ WORK = HERE / '.work'
 DEFAULT_P2P = {'scala': 19560, 'rust': 19561, 'scala2': 19562}
 DEFAULT_REST = {'scala': 19580, 'rust': 19581, 'scala2': 19582}
 
+# P2P LISTEN ADDRESS per node, distinct from the port.
+#
+# Two Scala nodes on the SAME IP can never dial each other:
+# `NetworkController.getPeerAddress` (scorex, line 495 at the pin) treats
+# a candidate whose declared address shares this node's own external
+# address as one reachable only through the UPnP gateway, and with no
+# gateway it returns `None` — so no outbound connection is ever
+# attempted. On loopback that is every peer. The M3 campaign therefore
+# gives each node its own 127.x address; the smoke keeps 127.0.0.1
+# everywhere, which is correct for it because only the Rust node dials.
+#
+# REST is NOT moved: the harness talks to 127.0.0.1:<rest port> for every
+# node, and nothing about these bindings changes that.
+DEFAULT_P2P_HOST = {'scala': '127.0.0.1', 'rust': '127.0.0.1',
+                    'scala2': '127.0.0.1'}
+
 # `scala2` is OPT-IN. Every consumer iterates these dicts — the sampler
 # sweeps `REST`, `start()` binds `P2P` — so listing a node that is not
 # running would turn every sweep into an unavailable sample.
@@ -46,6 +62,9 @@ def _ports(kind, defaults):
 
 P2P = _ports('P2P', DEFAULT_P2P)
 REST = _ports('REST', DEFAULT_REST)
+P2P_HOST = {name: os.environ.get(f'MATRIX_P2P_HOST_{name.upper()}',
+                                 DEFAULT_P2P_HOST[name])
+            for name in NODES}
 
 # Config path per node, so a campaign can point a node at a rendered
 # copy without editing the committed recipe files.
@@ -290,10 +309,12 @@ def wait_peered(timeout=180):
 
 def start(names=None):
     names = names or [n for n in ('scala', 'scala2', 'rust') if n in NODES]
-    for port in sorted({P2P[n] for n in names} | {REST[n] for n in names}):
+    wanted = {(P2P_HOST[n], P2P[n]) for n in names}
+    wanted |= {('127.0.0.1', REST[n]) for n in names}
+    for host, port in sorted(wanted):
         with socket.socket() as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(('127.0.0.1', port))
+            sock.bind((host, port))
     try:
         # Order matters. The Scala node mines with `offlineGeneration`,
         # so it would run away from a follower that has not joined yet —
