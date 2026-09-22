@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The M3 Matrix (input blocks) devnet campaign (plan 2 task 9, spec §12).
 
-Seven scenarios drive the Rust follower against the pinned Scala
+Eight scenarios drive the Rust follower against the pinned Scala
 `weak-blocks` miner(s) and record what it did:
 
   steady            60 ordering blocks, one miner: tip equality with lag,
