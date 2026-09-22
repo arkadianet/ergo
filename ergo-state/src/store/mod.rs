@@ -1033,6 +1033,17 @@ impl StateStore {
         self.tree.insert(key, value);
     }
 
+    /// Remove a key from the AVL tree directly, without running block
+    /// validation or committing to disk — the same `tree.remove` the
+    /// apply path performs for every box a committed block spends.
+    /// Lets a test put the UTXO set into the state a committed block
+    /// would leave it in (a box consumed) without driving a full block
+    /// through the pipeline. Returns the removed value, if any.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn tree_remove_for_test(&mut self, key: &[u8; 32]) -> Option<Vec<u8>> {
+        self.tree.remove(key)
+    }
+
     /// Enable or disable IBD durability relaxation.
     ///
     /// When enabled, block commits use `Durability::None` except every

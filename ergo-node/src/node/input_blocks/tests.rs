@@ -5154,3 +5154,128 @@ fn admission_drops_the_chain_layer_when_the_committed_tip_has_moved_past_it() {
         "an output of the superseded chain is not spendable against the new tip"
     );
 }
+
+/// Round-3 finding 2: the committed-consumption half of the same guard.
+///
+/// The test above moves the committed tip by advancing chain metadata.
+/// This one puts the UTXO SET into the state a committed block leaves
+/// behind, which is where the danger actually lives: ordering block B2
+/// includes the input-block transaction `T` (consuming `funded`,
+/// creating `O`) and a second transaction that spends `O`. After B2,
+/// committed state holds neither box.
+///
+/// If admission still overlaid the chain that hung off the PREVIOUS
+/// ordering block, `T` would re-create `O` on top of that committed
+/// state and a transaction spending `O` would be admitted — a double
+/// spend of a box the chain the node committed had already consumed.
+///
+/// The UTXO half is modelled with the same `tree.remove` the apply path
+/// performs per spent box, rather than by driving a synthetic block
+/// through full validation.
+#[test]
+fn admission_does_not_resurrect_a_chain_output_the_committed_block_consumed() {
+    use crate::node::tip_context::build_tip_context;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let headers = seed_header_chain(&mut state, 12);
+    let ordering = headers[10].clone();
+    let ordering_id = header_id_of(&ordering);
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .advance_best_full_block(ordering_id, ordering.height)
+        .unwrap();
+    state.executor.hydrate_block_context(&state.store).unwrap();
+    seed_best_ordering(&mut state);
+
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19643,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let funded = seed_spendable_box(&mut state, 0xd4, 10_000_000, ordering.height);
+    let t = spend_to_true(funded, 8_000_000, 2_000_000, ordering.height);
+    let t_out = output_box_id(&t, 0);
+    let body = ts::body_of(t.clone());
+    let t_id = ergo_primitives::digest::Digest32::from_bytes(body.tx_ref.tx_id);
+    state
+        .mempool
+        .restore_input_block_txs(&[(t_id, body.bytes.clone(), None)], now);
+    let ann = ts::announcement_for(
+        ordering_id,
+        ordering.height + 1,
+        44,
+        None,
+        std::slice::from_ref(&body),
+    );
+    send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &ergo_p2p::message::serialize_input_block(&ann).unwrap(),
+    );
+    assert_eq!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .processor()
+            .best_input_chain(),
+        vec![ts::ann_id(&ann)],
+        "premise: the input block applied under the current ordering block"
+    );
+
+    // Ordering block B2 commits: it includes T (so `funded` is spent and
+    // `O` is created) and a transaction spending `O` (so `O` is spent
+    // too). Committed state ends up holding neither box.
+    let next = headers[11].clone();
+    let next_id = header_id_of(&next);
+    {
+        let store = state.store.as_utxo_mut().unwrap();
+        assert!(
+            store.tree_remove_for_test(funded.as_bytes()).is_some(),
+            "B2 spends the box the input-block transaction consumed"
+        );
+        // `O` is created and consumed inside B2, so it is never in the
+        // committed set at all.
+        store.advance_best_full_block(next_id, next.height).unwrap();
+    }
+    state.executor.hydrate_block_context(&state.store).unwrap();
+    assert_eq!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .processor()
+            .best_ordering_id(),
+        Some(ordering_id),
+        "premise: the tick has not run, so the processor still names O1"
+    );
+
+    assert!(
+        build_tip_context(&state)
+            .unwrap()
+            .input_block_txs
+            .is_empty(),
+        "the superseded chain must not be overlaid on B2's committed state"
+    );
+
+    // The observable: a transaction spending `O` is refused. Before the
+    // guard, the stale chain re-created `O` and this was admitted.
+    let spender = spend_to_true(t_out, 6_000_000, 2_000_000, ordering.height);
+    let spender_id = ergo_primitives::digest::Digest32::from_bytes(
+        *ergo_ser::transaction::transaction_id(&spender)
+            .unwrap()
+            .as_bytes(),
+    );
+    let _ = crate::node::admit_transaction(&mut state, peer, &tx_bytes_of(&spender), now);
+    assert!(
+        !state.mempool.contains(&spender_id),
+        "a box the committed block consumed is not spendable through the stale chain"
+    );
+}
