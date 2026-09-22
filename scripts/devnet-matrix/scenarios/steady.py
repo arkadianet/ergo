@@ -48,34 +48,20 @@ def _observe_window(ctx, blocks, address):
     """
     import campaign
     start = smoke.scala_height(ctx.run)
-    target, scanned, sent = start + blocks, start, []
+    target, sent = start + blocks, []
     observations, seen = [], set()
-    # The transactions of the input blocks on Rust's best input chain,
-    # refreshed every poll and captured when an ordering block lands.
-    # NOT the sampler's accumulated cache: that holds every input-block
-    # transaction the run has ever seen, so every block would appear to
-    # drop every transaction of every earlier round — 5,157 phantom
-    # losses over 60 blocks in the run that exposed it.
-    chain_now = set()
+    # The snapshot an ordering block closes is the last one taken while
+    # the height was still the previous value — `WindowWalker` owns that
+    # ordering, so it can be driven directly by a probe.
+    walker = common.WindowWalker(start)
     while time.monotonic() < ctx.run.deadline:
         campaign.drain_utxo_watch(ctx, seen)
-        try:
-            chain = api('rust', '/blocks/bestInputChain') or {}
-            cached = dict(ctx.run.input_block_txids)
-            chain_now = {t for bid in (chain.get('bestInputBlocks') or [])
-                         for t in cached.get(bid, ())}
-        except Unavailable:
-            pass
         try:
             height = smoke.scala_height(ctx.run)
         except Unavailable:
             ctx.run.idle(1)
             continue
-        while scanned < height:
-            scanned += 1
-            # The chain THIS ordering block closes, as last observed
-            # before it landed.
-            applied = set(chain_now)
+        for scanned, applied in walker.observe(height):
             try:
                 ids = api('scala', f'/blocks/at/{scanned}') or []
                 ordering_txids = set()
@@ -94,13 +80,19 @@ def _observe_window(ctx, blocks, address):
                 'input_chain_txids': applied, 'ordering_txids': ordering_txids,
                 'rust_pool': rust_pool, 'scala_pool': scala_pool,
             })
-            # The chain the next block will close starts empty: this one
-            # has just been sealed.
-            chain_now = set()
             _pump(ctx, address, sent)
-        if scanned >= target:
+        # AFTER the advance has been consumed, not before it is noticed.
+        try:
+            chain = api('rust', '/blocks/bestInputChain') or {}
+            cached = dict(ctx.run.input_block_txids)
+            walker.note_chain({t for bid in (chain.get('bestInputBlocks') or [])
+                               for t in cached.get(bid, ())})
+        except Unavailable:
+            pass
+        if walker.scanned >= target:
             break
         ctx.run.idle(1)
+    scanned = walker.scanned
     return start, scanned, observations, sent
 
 
@@ -171,6 +163,27 @@ def run(ctx):
         'per_block': [b for b in f6['blocks'] if b['dropped']][:20],
     })
     ctx.note('f6_count', f6['f6_total'])
+
+    # Per-block pool agreement, with every residue attributed. The
+    # end-of-run comparison assertion 6 makes is one instant, and a
+    # disagreement both pools have forgotten by block 60 is invisible
+    # to it.
+    agreement = common.evaluate_pool_agreement(
+        readable, smoke.d1_refusals_from_log())
+    ctx.note('pool_agreement_per_block', {
+        'blocks': len(agreement['blocks']),
+        'unexplained_total': agreement['unexplained_total'],
+        'unexplained_txids': agreement['unexplained_txids'],
+        'blocks_with_residue': [b for b in agreement['blocks']
+                                if b['only_in_scala'] or b['only_in_rust']][:20],
+    })
+    if agreement['unexplained_total']:
+        ctx.fail(f"{agreement['unexplained_total']} per-block pool differences have "
+                 'neither a D1 refusal nor an F6 omission to explain them',
+                 {'txids': agreement['unexplained_txids'],
+                  'blocks': [b for b in agreement['blocks'] if b['unexplained']
+                             or b['only_in_rust']][:10]},
+                 ids=agreement['unexplained_txids'][:5])
     if f6['lost_on_both_total']:
         ctx.fail(f"{f6['lost_on_both_total']} input-chain transactions were dropped "
                  'by an ordering block and are in NEITHER pool and in no later '

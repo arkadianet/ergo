@@ -276,6 +276,7 @@ class Context:
         self.nodes = nodes
         self.data_root = data_root
         self.divergences = []
+        self.not_measured_reasons = []
         # The watch item the controller added: an input block whose
         # inputs Rust could not find in its own UTXO set. Counted per
         # scenario, with the input block and the node's state captured.
@@ -288,6 +289,20 @@ class Context:
 
     def note(self, key, value):
         self.evidence[key] = value
+
+    def not_measured(self, message, evidence=None):
+        """A property this host cannot establish.
+
+        Neither a pass nor a failure: nothing about the node is wrong,
+        and the property the scenario exists to establish is
+        unestablished. Recorded, and it decides the verdict only when
+        there is no real failure to outrank it.
+        """
+        entry = {'scenario': self.scenario, 'message': message,
+                 'evidence': evidence}
+        self.evidence.setdefault('not_measured', []).append(entry)
+        self.not_measured_reasons.append(entry)
+        return entry
 
 
 UTXO_WATCH_PHRASE = 'input box not found in UTXO set'
@@ -323,7 +338,11 @@ def capture_utxo_validation_failure(ctx, line):
                 answer = f'unavailable: {error}'
             if key == 'utxo':
                 captured['utxo'][candidate] = answer
-            elif answer:
+            elif answer and not isinstance(answer, str):
+                # `answer` is the string `unavailable: ...` when the
+                # route could not be read. Treating that as a successful
+                # lookup let a later candidate id overwrite the block we
+                # had actually captured.
                 captured['input_block'] = {'id': candidate, 'txids': answer}
                 try:
                     captured['input_block']['bodies'] = smoke.api(
@@ -582,6 +601,24 @@ def check_attempt_cap(name, force=False):
     return number
 
 
+def verdict_for(aborted, failures, not_measured=None):
+    """The one verdict rule, in one place.
+
+    `NOT MEASURED` is its own kind: a scenario whose comparison could
+    not be made on this host has not failed — nothing about the node is
+    wrong — and it has not passed either, because the property it exists
+    to establish is unestablished. It never outranks a real failure or
+    an abort.
+    """
+    if aborted:
+        return 'ABORTED'
+    if failures:
+        return 'FAIL'
+    if not_measured:
+        return 'NOT MEASURED'
+    return 'PASS'
+
+
 def run_scenario(name, args):
     import lifecycle
     import smoke
@@ -589,6 +626,7 @@ def run_scenario(name, args):
 
     scenario = SCENARIOS[name]
     nodes = list(SCENARIO_NODES[name])
+    attempt = args.attempt or 1
     data_root = write_configs(
         name, nodes,
         rust_overrides=getattr(scenario, 'RUST_OVERRIDES', ()),
@@ -664,48 +702,66 @@ def run_scenario(name, args):
         aborted = f'{type(error).__name__}: {error}'
         raise
     finally:
-        run.stop_sampling()
-        # Evidence collection must not be able to swallow the verdict OR
-        # leave the nodes up: whatever happens between here and the end,
-        # the `finally` below stops them.
+        # THREE nested scopes, and the order matters. Evidence
+        # collection is wrapped so a failure in it cannot bypass node
+        # shutdown; node shutdown is in the inner `finally` so it runs
+        # whatever happened above; and the verdict is decided AFTERWARDS,
+        # so a shutdown that fails cannot leave a saved PASS behind.
+        shutdown_error = None
         try:
-            smoke.check_sampler(run, evidence)
-            scan_utxo_validation_failures(ctx)
-            evidence['divergences'] = ctx.divergences
-            evidence['failures'] = run.failures
-            evidence['artifacts'] = smoke.write_findings(run, evidence)
-            # This scenario's own node logs and sample series, kept
-            # beside its evidence rather than left to be overwritten.
-            evidence['logs'] = rotate_logs(name, nodes)
-            series = run.series_path
-            if series.exists():
-                kept = CAMPAIGN_WORK / f'{name}-agreement-series.jsonl'
-                series.replace(kept)
-                evidence['series_file'] = str(kept)
-            evidence['samples'] = run.samples
-            evidence['unavailable_samples'] = run.unavailable_samples
-            evidence['drop_totals'] = run.totals()
-            evidence['peer_states'] = sorted(run.peer_states)
-            evidence['penalty_observations'] = run.penalty_observations
-            evidence['max_height_gap'] = run.max_height_gap
-        except BaseException as error:  # noqa: BLE001 — recorded, then abort
-            evidence['evidence_collection_error'] = f'{type(error).__name__}: {error}'
-            if aborted is None:
-                aborted = evidence['evidence_collection_error']
+            try:
+                run.stop_sampling()
+                smoke.check_sampler(run, evidence)
+                scan_utxo_validation_failures(ctx)
+                evidence['divergences'] = ctx.divergences
+                evidence['failures'] = run.failures
+                evidence['artifacts'] = smoke.write_findings(run, evidence)
+                # Per ATTEMPT, not per scenario: an attempt's verdict
+                # file used to point at a series and logs the next
+                # attempt had already replaced.
+                evidence['logs'] = rotate_logs(name, nodes, tag=f'-{attempt}')
+                series = run.series_path
+                if series.exists():
+                    kept = (CAMPAIGN_WORK
+                            / f'{name}-{attempt}-agreement-series.jsonl')
+                    series.replace(kept)
+                    evidence['series_file'] = str(kept)
+                evidence['samples'] = run.samples
+                evidence['unavailable_samples'] = run.unavailable_samples
+                evidence['drop_totals'] = run.totals()
+                evidence['peer_states'] = sorted(run.peer_states)
+                evidence['penalty_observations'] = run.penalty_observations
+                evidence['max_height_gap'] = run.max_height_gap
+            except BaseException as error:  # noqa: BLE001 — recorded, then abort
+                evidence['evidence_collection_error'] = (
+                    f'{type(error).__name__}: {error}')
+                if aborted is None:
+                    aborted = evidence['evidence_collection_error']
+        finally:
+            # UNCONDITIONAL. Nothing above may leave the nodes running.
+            try:
+                lifecycle.stop()
+            except BaseException as error:  # noqa: BLE001 — recorded below
+                shutdown_error = f'{type(error).__name__}: {error}'
+            if getattr(scenario, 'PURGE_ADDRESS_BOOK', False):
+                try:
+                    evidence['address_book_purged'] = purge_address_book(data_root)
+                except BaseException as error:  # noqa: BLE001 — recorded below
+                    shutdown_error = (shutdown_error or '') + (
+                        f' purge failed: {type(error).__name__}: {error}')
+        # A run whose nodes would not stop has not finished cleanly, and
+        # its verdict is not a pass.
+        evidence['shutdown_error'] = shutdown_error
+        if shutdown_error and aborted is None:
+            aborted = f'node shutdown failed: {shutdown_error}'
         evidence['aborted'] = aborted
-        evidence['result'] = ('ABORTED' if aborted
-                              else 'FAIL' if run.failures else 'PASS')
+        evidence['result'] = verdict_for(aborted, run.failures,
+                                         evidence.get('not_measured'))
         evidence['finished'] = datetime.datetime.now(
             datetime.timezone.utc).isoformat()
         evidence['status'] = 'DONE'
         save()
         record_attempt(name, evidence)
-        try:
-            lifecycle.stop()
-        finally:
-            if getattr(scenario, 'PURGE_ADDRESS_BOOK', False):
-                evidence['address_book_purged'] = purge_address_book(data_root)
-                save()
     return evidence
 
 
@@ -1306,33 +1362,37 @@ def _self_test():
     finally:
         CAMPAIGN_WORK = real_work
 
+    import inspect
+
     # ----- finding 6: an exception may not persist a PASS -----
     #
-    # Codex's probe: raise after the samples are taken but before the
-    # assertions finish. The old `finally` derived the verdict from
-    # `run.failures` alone and saved `DONE / PASS / []`.
-    verdicts = []
-
-    def verdict_of(aborted, failures):
-        """The `finally`'s verdict rule, in one place so it is testable."""
-        return 'ABORTED' if aborted else 'FAIL' if failures else 'PASS'
-
-    for aborted, failures, expected in (
-            (None, [], 'PASS'),
-            (None, [{'message': 'x'}], 'FAIL'),
-            ('RuntimeError: rust did not become ready', [], 'ABORTED'),
-            ('RuntimeError: boom', [{'message': 'x'}], 'ABORTED')):
-        got = verdict_of(aborted, failures)
-        verdicts.append(got)
-        assert got == expected, (aborted, failures, got, expected)
-    assert 'ABORTED' in verdicts, verdicts
-    # And the rule the driver uses is the same one, not a copy that has
-    # drifted: the source has to contain it verbatim.
-    import inspect
+    # Through the PRODUCTION rule, not a copy of it: codex's r2 note was
+    # that the self-test duplicated the logic it claimed to check.
+    for aborted, failures, not_measured, expected in (
+            (None, [], None, 'PASS'),
+            (None, [{'message': 'x'}], None, 'FAIL'),
+            (None, [], 'no reference', 'NOT MEASURED'),
+            (None, [{'message': 'x'}], 'no reference', 'FAIL'),
+            ('RuntimeError: rust did not become ready', [], None, 'ABORTED'),
+            ('RuntimeError: boom', [{'message': 'x'}], 'y', 'ABORTED')):
+        got = verdict_for(aborted, failures, not_measured)
+        assert got == expected, (aborted, failures, not_measured, got, expected)
     driver = inspect.getsource(run_scenario)
-    assert "'ABORTED' if aborted" in driver, 'the driver must use this rule'
+    assert 'verdict_for(aborted, run.failures' in driver, \
+        'the driver must call the shared rule, not restate it'
+    # Node shutdown is UNCONDITIONAL and the verdict is decided AFTER it,
+    # so a shutdown that fails cannot leave a saved PASS behind.
+    assert driver.index('lifecycle.stop()') < driver.index("evidence['result']"), \
+        'shutdown must run before the verdict is decided'
+    assert "shutdown_error and aborted is None" in driver, \
+        'a failed shutdown has to abort the run'
+    assert driver.index('finally:\n            # UNCONDITIONAL') < driver.index(
+        "evidence['result']"), 'the shutdown finally must enclose the verdict path'
     assert "record_attempt(name, evidence)" in driver, \
         'every attempt has to be recorded, pass or fail'
+    # Item 10: an attempt's evidence must name files only IT wrote.
+    assert "f'-{attempt}'" in driver and "f'{name}-{attempt}-agreement-series" in driver, \
+        'series and logs have to be per attempt, not per scenario'
 
     print('campaign self-test OK: rendering, ports and the scenario set')
 
@@ -1394,7 +1454,13 @@ def main():
           f'{evidence.get("samples")} samples)')
     for failure in evidence.get('failures') or []:
         print(f'  - {failure["message"]}')
-    return 0 if evidence['result'] == 'PASS' else 1
+    for entry in evidence.get('not_measured') or []:
+        print(f'  ~ NOT MEASURED: {entry["message"]}')
+    # NOT MEASURED is not a pass, and it is not an error the runner
+    # should treat as a broken scenario either: it exits 0 with the
+    # verdict on the line above, so a campaign does not abort on a
+    # limitation of the host.
+    return 0 if evidence['result'] in ('PASS', 'NOT MEASURED') else 1
 
 
 if __name__ == '__main__':

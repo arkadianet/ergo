@@ -234,12 +234,29 @@ def run(ctx):
             for e in reconstructed),
         'ordering_blocks_in_window': reached - start,
     })
-    # Every ordering block in the window should have produced exactly one
-    # outcome. A shortfall means outcomes went unreported — which is the
-    # undercount `ordering_reconstruct_skipped` exists to close.
-    ctx.note('outcome_reconciliation', {
-        'ordering_blocks': reached - start, 'outcomes': decided,
-        'unaccounted': max(0, (reached - start) - decided)})
+    # Every ordering block in the window must have produced exactly one
+    # outcome, matched BY IDENTITY. Counting was not enough: 96 outcomes
+    # for 100 blocks was recorded and not failed.
+    heights = {}
+    for height in range(start + 1, reached + 1):
+        try:
+            ids = api('scala', f'/blocks/at/{height}') or []
+        except Unavailable:
+            continue
+        if ids:
+            heights[height] = ids[0]
+    reconciliation = common.reconcile_outcomes(heights, window)
+    ctx.note('outcome_reconciliation', reconciliation)
+    if reconciliation['missing']:
+        ctx.fail(f"{len(reconciliation['missing'])} of {reconciliation['blocks']} "
+                 'ordering blocks in the window produced NO reconstruct-or-download '
+                 'outcome, so the rate is computed over a window the node did not '
+                 'fully report',
+                 {'missing': reconciliation['missing'][:20]},
+                 ids=[m['header'] for m in reconciliation['missing'][:5]])
+    if reconciliation['duplicated']:
+        ctx.fail(f"{len(reconciliation['duplicated'])} ordering blocks reported more "
+                 'than one outcome', {'duplicated': reconciliation['duplicated'][:10]})
 
     # Both reference nodes over the SAME window: the follower is the one
     # that decides, the miner is recorded beside it to show it decides
@@ -255,27 +272,51 @@ def run(ctx):
                  {'events_in_window': len(window),
                   'ordering_blocks': reached - start})
 
-    # The comparative claim REQUIRES the reference measurement. Without
-    # it the scenario has one number, not a comparison, and the report
-    # may not describe Scala's rate at all.
+    # The comparative claim REQUIRES the reference measurement, and on a
+    # single host it cannot be obtained: two Scala nodes cannot dial each
+    # other (`NetworkController.getPeerAddress` resolves a same-address
+    # peer through a UPnP gateway that does not exist), and the Rust
+    # follower relays nothing to a peer it has not qualified, so a
+    # reference follower here learns the chain by ordinary block
+    # download and `processOrderingBlock` — the only place either log
+    # line is emitted — never runs on it.
+    #
+    # That is a limitation of the HOST, not a defect of the node, so it
+    # is neither a pass nor a failure. The scenario records NOT MEASURED:
+    # the port's rate is measured and reported, the comparison is not.
     if not follower.get('decided'):
-        ctx.fail('the reference FOLLOWER logged no reconstruct-or-download '
-                 'decision in this window, so the comparison F5 exists to make '
-                 'was not measured — the port\'s rate stands alone',
-                 {'follower': follower, 'miner': miner})
+        ctx.not_measured(
+            'the reference comparison F5 exists to make could not be measured on '
+            'this host: the reference follower receives blocks by ordinary sync '
+            'rather than by ordering announcement, so processOrderingBlock — the '
+            'only place either log line is emitted — never runs on it',
+            {'follower': follower, 'miner': miner,
+             'code_path': 'scorex NetworkController.getPeerAddress:495; '
+                          'ergo-node input_blocks/dispatch.rs peer eligibility'})
 
     ctx.note('f5', {
         'rust_d5_parent_key': {
             'reconstructed': len(reconstructed), 'fallback': len(fallback),
-            'ratio': round(len(reconstructed) / decided, 4) if decided else None},
-        'reference_follower_scala_key': {
+            'skipped': len(skipped),
+            'ratio': round(len(reconstructed) / decided, 4) if decided else None,
+            'status': 'measured'},
+        'rust_scala_key': {
+            'fallbacks': 9,
+            'source': 'test-vectors/weak-blocks/findings/2026-09-22-4.json',
+            'status': 'measured',
+            'note': 'a RUST measurement of the port run with Scala\'s own lookup '
+                    'key — NOT a Scala node measurement'},
+        'reference_follower': {
             'reconstructed': follower.get('reconstructed'),
             'fallback': follower.get('fallback'),
-            'ratio': follower.get('reconstructed_ratio')},
-        'note': 'the third number — the Rust port run with Scala\'s own key — is '
-                'the 9 fallbacks recorded in '
-                'test-vectors/weak-blocks/findings/2026-09-22-4.json, which is a '
-                'RUST measurement, not a Scala one',
+            'ratio': follower.get('reconstructed_ratio'),
+            'status': 'measured' if follower.get('decided') else 'not measured',
+            'why': None if follower.get('decided') else
+                   'structurally unobtainable on one host; see not_measured'},
+        'comparative_claim': (
+            'available' if follower.get('decided') else
+            'WITHHELD until a reference number exists — the port\'s rate stands '
+            'alone and may not be stated as a ratio against Scala'),
     })
     ctx.note('f5_reconstruction_key_split', smoke._tally(
         e.get('reconstructionKey', e.get('reconstruction_key'))

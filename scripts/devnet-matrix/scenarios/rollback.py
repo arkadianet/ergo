@@ -238,48 +238,25 @@ def run(ctx):
                              'info_best_input_block': info.get('bestInputBlock')})
     ctx.note('input_blocks_status_after_reorg', status)
 
-    # (1) the chain is keyed to the surviving branch.
-    if chain.get('bestOrdering') in dropped:
-        ctx.fail('after the reorg the input chain is still keyed to an ordering '
-                 'block the reorg dropped: the tree was not pruned',
-                 {'chain': chain, 'dropped': sorted(dropped)},
-                 ids=[chain.get('bestOrdering')])
+    # The miner's own chain for the same ordering block, so a chain the
+    # node has relabelled cannot vouch for its own tip.
+    miner_chain = None
+    try:
+        miner = api('scala2', '/blocks/bestInputChain') or {}
+        if miner.get('bestOrdering') == chain.get('bestOrdering'):
+            miner_chain = miner.get('bestInputBlocks') or []
+    except Unavailable:
+        miner_chain = None
+    ctx.note('miner_chain_for_comparison',
+             {'available': miner_chain is not None,
+              'length': len(miner_chain or [])})
 
-    # (2) `/info.bestInputBlock` CLEARS, or names a block whose ancestry
-    # is on the new best chain. Recorded either way, asserted always —
-    # "it happened to be empty in this run" is not the check.
-    tip = (info.get('bestInputBlock') or best.get('bestInputBlock') or '') or None
-    if tip is None:
-        ctx.note('best_input_block_after_reorg', 'cleared')
-    else:
-        listed = set(chain.get('bestInputBlocks') or [])
-        ctx.note('best_input_block_after_reorg',
-                 {'tip': tip, 'on_the_new_chain': tip in listed,
-                  'chain_ordering': chain.get('bestOrdering')})
-        if tip not in listed:
-            ctx.fail('after the reorg `/info.bestInputBlock` names an input block '
-                     'that is not on the input chain the node now publishes, so '
-                     'it is a stale tip from an abandoned tree',
-                     {'tip': tip, 'chain': chain}, ids=[tip])
-        if chain.get('bestOrdering') in dropped:
-            ctx.fail('`/info.bestInputBlock` still names a block under a dropped '
-                     'ordering block', {'best': best, 'chain': chain})
-
-    # (3) the abandoned trees are GONE. After a reorg the node holds at
-    # most the surviving branch's tree, so a retained competing fork or a
-    # non-empty waitlist means the dropped branch's state is still there.
-    expectations = {'forks': 1, 'waitlist': 0, 'staged_bytes': 0,
-                    'deferred_triggers': 0}
-    retained = {}
-    for key, ceiling in expectations.items():
-        value = status.get(key)
-        retained[key] = {'value': value, 'at_most': ceiling}
-        if value is None:
-            ctx.fail(f'the status route published no `{key}` after the reorg, so '
-                     'tree pruning could not be checked — unknown, not zero',
-                     {'status': status})
-        elif value > ceiling:
-            ctx.fail(f'after the reorg `{key}` is {value}, above the {ceiling} a '
-                     'node that pruned the abandoned branch should hold',
-                     {'status': status, 'dropped': sorted(dropped)})
-    ctx.note('retained_after_reorg', retained)
+    verdict = common.evaluate_post_reorg_state(
+        chain, info, status, dropped, miner_chain=miner_chain)
+    ctx.note('post_reorg_state', verdict['observed'])
+    ctx.note('post_reorg_problems', verdict['problems'])
+    for problem in verdict['problems']:
+        ctx.fail(f"after the reorg: {problem['what']}",
+                 {'problem': problem, 'chain': chain, 'info': info,
+                  'status': status, 'dropped': sorted(dropped)},
+                 ids=[problem.get('tip') or problem.get('bestOrdering') or ''])

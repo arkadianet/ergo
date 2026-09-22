@@ -302,12 +302,13 @@ def fork_switches(series, side):
     `side` is `'rust'` or `'scala'`. Returns a list of
     `{'index', 'ordering', 'applied', 'rolled_back'}`, newest last.
     """
-    out, previous = [], None
+    out, previous, previous_chain = [], None, []
     for i, sample in enumerate(series):
         ordering = sample.get('ordering')
         chain = set(sample.get(f'{side}_chain') or [])
         if ordering is None:
             previous = None
+            previous_chain = []
             continue
         if previous is not None and previous[0] == ordering:
             rolled_back = previous[1] - chain
@@ -319,8 +320,15 @@ def fork_switches(series, side):
                             # switch is judged on the HISTORY it produced,
                             # not only on which members moved.
                             'chain_after': list(
-                                sample.get(f'{side}_chain') or [])})
+                                sample.get(f'{side}_chain') or []),
+                            # And the chain it left, so the switch can be
+                            # judged as a transition between two chains a
+                            # reference actually published rather than by
+                            # set inclusion, which a rollback to nothing
+                            # satisfies vacuously.
+                            'chain_before': list(previous_chain)})
         previous = (ordering, chain)
+        previous_chain = list(sample.get(f'{side}_chain') or [])
     return out
 
 
@@ -508,48 +516,63 @@ def evaluate_fork_coherence(series):
 def compare_fork_switches(series):
     """Did each Rust fork switch land on a chain a reference actually has?
 
-    A switch is judged as a pair of sets. The blocks it APPLIED must all
-    belong to the chain of the reference it landed on, the blocks it
-    ROLLED BACK must all be absent from that chain, and the resulting
-    chain must be coherent with it — the same history, not merely the
-    same members. A follower that rolled its chain back to nothing while
-    both miners kept theirs satisfies "every applied block was
-    published" trivially and is exactly the regression this has to
-    catch.
+    Judged as EQUALITY, not inclusion. The previous rule asked whether
+    the applied blocks were a subset of some reference's chain and the
+    rolled-back ones disjoint from it, which a rollback to the EMPTY
+    chain satisfies vacuously — codex's probe moved the follower from
+    `['a']` to `[]` while the miners held `['a']` and `['b']`, and it
+    passed. An empty chain is also a prefix of every chain, so the
+    coherence test cannot catch it either.
+
+    A switch is matched when BOTH of these hold, against chains observed
+    within `LATER_CONFIRMATION_SAMPLES` of it:
+
+    * the chain it left EQUALS a chain some reference published, and
+    * the chain it landed on EQUALS a chain some reference published.
+
+    Equality is on the ordered list, so "the follower moved from one
+    miner's exact chain to another miner's exact chain" is the only
+    shape that passes — which is what a two-miner fork switch IS. A
+    follower that invented either end matches nothing.
     """
-    # The chain each reference held under each ordering id, last first.
+    # Every chain each reference published under each ordering id.
     seen = {}
     for i, sample in enumerate(series):
         for node, ref_ordering, chain in reference_chains(sample):
             if ref_ordering is not None:
-                seen.setdefault((node, ref_ordering), []).append((i, chain))
+                seen.setdefault(ref_ordering, []).append((i, node, list(chain)))
+
+    def published(ordering, chain, at):
+        """Which reference published exactly `chain`, near sample `at`."""
+        for j, node, ref_chain in seen.get(ordering, ()):
+            if abs(j - at) > LATER_CONFIRMATION_SAMPLES:
+                continue
+            if ref_chain == list(chain):
+                return {'node': node, 'sample': j}
+        return None
 
     rust = fork_switches(series, 'rust')
     unmatched, rolled_back_still_held = [], []
     for switch in rust:
         ordering = switch['ordering']
+        before = switch.get('chain_before') or []
         after = switch.get('chain_after') or []
-        applied, rolled_back = set(switch['applied']), set(switch['rolled_back'])
-        landed_on = None
-        for node in REFERENCE_NODES:
-            for j, chain in seen.get((node, ordering), ()):
-                if j < switch['index'] - LATER_CONFIRMATION_SAMPLES:
-                    continue
-                if j > switch['index'] + LATER_CONFIRMATION_SAMPLES:
-                    break
-                members = set(chain)
-                coherent, _ = _is_coherent_with(after, chain)
-                if coherent and applied <= members and not (rolled_back & members):
-                    landed_on = {'node': node, 'sample': j}
-                    break
-            if landed_on:
-                break
-        if landed_on is None:
-            unmatched.append({**switch, 'chain_after': after[:8]})
+        left = published(ordering, before, switch['index'])
+        landed = published(ordering, after, switch['index'])
+        if left is None or landed is None:
+            unmatched.append({**switch,
+                              'chain_before': before[:8], 'chain_after': after[:8],
+                              'left_a_reference_chain': left,
+                              'landed_on_a_reference_chain': landed})
+        # Telemetry: was it still on a reference's LAST chain for this
+        # ordering id? Per node, so one miner's stale earlier reading
+        # cannot answer for the other's current one.
+        last_per_node = {}
+        for j, node, ref_chain in seen.get(ordering, ()):
+            last_per_node[node] = ref_chain
         for block in switch['rolled_back']:
-            for node in REFERENCE_NODES:
-                held = seen.get((node, ordering), ())
-                if held and block in set(held[-1][1]):
+            for node, ref_chain in last_per_node.items():
+                if block in set(ref_chain):
                     rolled_back_still_held.append({**switch, 'block': block,
                                                    'node': node})
                     break
@@ -557,8 +580,8 @@ def compare_fork_switches(series):
         'rust_switches': rust,
         'scala_switches': fork_switches(series, 'scala'),
         'scala2_switches': fork_switches(series, 'scala2'),
-        # THE guard: a switch whose applied and rolled-back sets do not
-        # match any reference's chain under the same ordering block.
+        # THE guard: a switch whose BEFORE and AFTER chains are not both
+        # chains a reference actually published.
         'switches_matching_no_reference': unmatched,
         # Telemetry with two miners that cannot peer with each other:
         # each keeps its own fork, so a legitimate switch necessarily
@@ -634,6 +657,88 @@ def chain_members_scala_never_had(series):
     return orphans, off_by_ordering
 
 
+class WindowWalker:
+    """Which chain snapshot belongs to which ordering block.
+
+    The snapshot an ordering block CLOSES is the last one observed while
+    the height was still the previous value. The first version refreshed
+    the snapshot at the top of its loop and only then read the height,
+    so by the time it noticed block N had landed it was holding the tree
+    that came AFTER N — and a transaction dropped by N looked like one
+    that had never been in the chain. Codex's block-40 probe lost a
+    transaction from both nodes and the accounting reported zero.
+
+    Pure state machine so the ordering can be driven directly: `observe`
+    takes a height reading and returns the heights to record, each with
+    the snapshot that belongs to it.
+    """
+
+    def __init__(self, start_height):
+        self.scanned = start_height
+        self.snapshot = set()
+        self._pending = set()
+
+    def note_chain(self, txids):
+        """A chain reading taken while the height has not yet advanced."""
+        self.snapshot = set(txids)
+
+    def observe(self, height):
+        """Heights that have landed, each paired with the snapshot it
+        closes. Returns `[(height, snapshot), ...]`, oldest first."""
+        out = []
+        while self.scanned < height:
+            self.scanned += 1
+            # The FIRST block of a run of advances closes the snapshot we
+            # were holding; any further blocks in the same reading closed
+            # trees we never sampled, and get an empty one rather than a
+            # borrowed one.
+            out.append((self.scanned, set(self.snapshot)))
+            self.snapshot = set()
+        return out
+
+
+def evaluate_pool_agreement(blocks, d1_refusals=()):
+    """Per-ordering-block pool agreement, with every residue attributed.
+
+    The end-of-run comparison assertion 6 makes is one instant. A
+    disagreement at block 40 that both pools have forgotten by block 60
+    is invisible to it, which is the same blind spot the per-block F6
+    accounting exists to close.
+
+    For each block, the symmetric difference of the two pools is
+    attributed exactly as `smoke.attribute_scala_residue` does: a logged
+    D1 refusal, or an F6 omission (in the applied input chain, not in
+    the ordering block). Anything else is UNEXPLAINED and fails.
+    """
+    per_block, unexplained_total = [], []
+    for block in blocks:
+        rust_pool = set(block['rust_pool'])
+        scala_pool = set(block['scala_pool'])
+        only_scala = scala_pool - rust_pool
+        only_rust = rust_pool - scala_pool
+        applied = set(block['input_chain_txids'])
+        ordering = set(block['ordering_txids'])
+        d1, f6, unexplained = [], [], []
+        for txid in sorted(only_scala):
+            if txid in d1_refusals:
+                d1.append(txid)
+            elif txid in applied and txid not in ordering:
+                f6.append(txid)
+            else:
+                unexplained.append(txid)
+        entry = {'height': block.get('height'), 'only_in_scala': len(only_scala),
+                 'only_in_rust': sorted(only_rust), 'd1': d1, 'f6': f6,
+                 'unexplained': unexplained}
+        per_block.append(entry)
+        # Residue Rust holds and Scala does not cannot be explained by
+        # D1 or F6 at all — those only ever leave transactions in
+        # SCALA's pool.
+        unexplained_total.extend(unexplained + sorted(only_rust))
+    return {'blocks': per_block,
+            'unexplained_total': len(unexplained_total),
+            'unexplained_txids': sorted(set(unexplained_total))[:50]}
+
+
 # ----- F6, per ordering block (pure, self-tested) -----
 
 def evaluate_f6(blocks):
@@ -652,8 +757,10 @@ def evaluate_f6(blocks):
     to drop every transaction of every earlier round. For each block:
 
     * **dropped** — in the applied input chain, not in the ordering block;
-    * **F6** — dropped and not back in RUST's pool, and never confirmed
-      by ANY other ordering block in the window. This is the reference
+    * **F6** — dropped, not back in RUST's pool at this block OR ANY
+      later one, and never confirmed by another ordering block in the
+      window. Restoration one block later is still restoration. This is
+      the reference
       behaviour the port reproduces (spec §12 F6), so it is counted, not
       failed;
     * **lost_on_both** — dropped, in NEITHER pool, and confirmed by no
@@ -676,13 +783,22 @@ def evaluate_f6(blocks):
             if j != i:
                 elsewhere |= set(other['ordering_txids'])
         confirmed_elsewhere[i] = elsewhere
+    # A transaction back in a pool at ANY later block was restored, not
+    # lost. Looking only at this block's pool classified a transaction
+    # the node returned one block later as permanently gone.
+    restored_rust, restored_either = {}, {}
+    for i in range(len(blocks)):
+        rust_later, either_later = set(), set()
+        for other in blocks[i:]:
+            rust_later |= set(other['rust_pool'])
+            either_later |= set(other['rust_pool']) | set(other['scala_pool'])
+        restored_rust[i], restored_either[i] = rust_later, either_later
     per_block, f6_total, lost_total = [], [], []
     for i, block in enumerate(blocks):
         dropped = set(block['input_chain_txids']) - set(block['ordering_txids'])
         later = confirmed_elsewhere.get(i, set())
-        f6 = sorted(dropped - set(block['rust_pool']) - later)
-        lost = sorted(dropped - set(block['rust_pool'])
-                      - set(block['scala_pool']) - later)
+        f6 = sorted(dropped - restored_rust[i] - later)
+        lost = sorted(dropped - restored_either[i] - later)
         per_block.append({
             'height': block.get('height'),
             'ordering_block': block.get('ordering_block'),
@@ -690,7 +806,7 @@ def evaluate_f6(blocks):
             'dropped': len(dropped),
             'f6': f6,
             'lost_on_both': lost,
-            'returned_to_rust_pool': len(dropped & set(block['rust_pool'])),
+            'returned_to_rust_pool': len(dropped & restored_rust[i]),
             'confirmed_by_another_block': len(dropped & later),
         })
         f6_total.extend(f6)
@@ -702,6 +818,106 @@ def evaluate_f6(blocks):
         'lost_on_both_total': len(lost_total),
         'lost_on_both_txids': sorted(set(lost_total)),
     }
+
+
+def evaluate_post_reorg_state(chain, info, status, dropped, miner_chain=None,
+                              expectations=None):
+    """Did the follower actually clear and prune after a reorg?
+
+    Three separate questions, because hanging all of them off "is
+    `bestOrdering` one of the dropped headers" let a stale chain
+    RELABELLED with the new ordering id pass every one of them:
+
+    * **keyed to the surviving branch** — `bestOrdering` is not a
+      dropped header AND equals the node's own best full header, so a
+      relabelled chain is caught by the mismatch rather than by the
+      label;
+    * **the tip is cleared or current** — `/info.bestInputBlock` is
+      empty, or it is on the chain the node now publishes AND (when a
+      reference chain for the same ordering id is available) on that
+      too, so a tip from an abandoned tree cannot be excused by the
+      node's own relabelled list;
+    * **the abandoned trees are gone** — the retained-state counters are
+      at or under what a node holding only the surviving branch should
+      have, and a counter the route does not publish is unknown rather
+      than zero.
+
+    Pure: returns `{'problems': [...], 'observed': {...}}`.
+    """
+    expectations = expectations or {'forks': 1, 'waitlist': 0,
+                                    'staged_bytes': 0, 'deferred_triggers': 0}
+    dropped = set(dropped or ())
+    problems = []
+    best_ordering = chain.get('bestOrdering')
+    listed = list(chain.get('bestInputBlocks') or [])
+    tip = (info.get('bestInputBlock') or '') or None
+
+    if best_ordering in dropped:
+        problems.append({'what': 'chain_keyed_to_a_dropped_ordering_block',
+                         'bestOrdering': best_ordering})
+    node_best = info.get('bestFullHeaderId')
+    if best_ordering and node_best and best_ordering != node_best:
+        problems.append({'what': 'chain_ordering_id_is_not_the_node_best_header',
+                         'bestOrdering': best_ordering, 'bestFullHeaderId': node_best})
+
+    if tip is not None:
+        if tip not in listed:
+            problems.append({'what': 'tip_not_on_the_published_chain', 'tip': tip})
+        elif miner_chain is not None and tip not in set(miner_chain):
+            # The node's own list can be relabelled; the miner's cannot
+            # be relabelled BY the node.
+            problems.append({'what': 'tip_not_on_any_miner_chain_for_this_block',
+                             'tip': tip})
+
+    retained = {}
+    for key, ceiling in expectations.items():
+        value = status.get(key)
+        retained[key] = {'value': value, 'at_most': ceiling}
+        if value is None:
+            problems.append({'what': 'counter_not_published', 'counter': key})
+        elif value > ceiling:
+            problems.append({'what': 'abandoned_state_retained', 'counter': key,
+                             'value': value, 'at_most': ceiling})
+    return {'problems': problems,
+            'observed': {'bestOrdering': best_ordering, 'tip': tip,
+                         'chain_length': len(listed), 'retained': retained,
+                         'compared_against_a_miner_chain': miner_chain is not None}}
+
+
+def reconcile_outcomes(ordering_blocks, events):
+    """Every ordering block in the window must have exactly one outcome.
+
+    By IDENTITY, not by count. `ordering_blocks` maps height -> header
+    id; `events` is the collected `ordering_*` stream. A block with no
+    outcome is a decision the node made and did not report, which is
+    exactly the undercount `ordering_reconstruct_skipped` was added to
+    close — 96 outcomes for 100 blocks was recorded and not failed.
+    """
+    kinds = ('ordering_reconstructed', 'ordering_reconstruct_fallback',
+             'ordering_reconstruct_skipped')
+    by_header, by_height = {}, {}
+    for event in events:
+        if event.get('kind') not in kinds:
+            continue
+        header = event.get('headerId') or event.get('header_id')
+        if header:
+            by_header.setdefault(header, []).append(event['kind'])
+        if event.get('height') is not None:
+            by_height.setdefault(event['height'], []).append(event['kind'])
+    missing, duplicated = [], []
+    for height, header in sorted(ordering_blocks.items()):
+        outcomes = by_header.get(header) or by_height.get(height) or []
+        if not outcomes:
+            missing.append({'height': height, 'header': header})
+        elif len(outcomes) > 1:
+            duplicated.append({'height': height, 'header': header,
+                               'outcomes': outcomes})
+    return {'blocks': len(ordering_blocks),
+            'with_an_outcome': len(ordering_blocks) - len(missing),
+            'missing': missing, 'duplicated': duplicated,
+            'unmatched_events': sum(
+                1 for e in events if e.get('kind') in kinds
+                and (e.get('headerId') or e.get('header_id')) not in by_header)}
 
 
 # ----- §7.4 bounds -----
