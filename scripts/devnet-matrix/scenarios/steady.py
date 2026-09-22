@@ -50,8 +50,22 @@ def _observe_window(ctx, blocks, address):
     start = smoke.scala_height(ctx.run)
     target, scanned, sent = start + blocks, start, []
     observations, seen = [], set()
+    # The transactions of the input blocks on Rust's best input chain,
+    # refreshed every poll and captured when an ordering block lands.
+    # NOT the sampler's accumulated cache: that holds every input-block
+    # transaction the run has ever seen, so every block would appear to
+    # drop every transaction of every earlier round — 5,157 phantom
+    # losses over 60 blocks in the run that exposed it.
+    chain_now = set()
     while time.monotonic() < ctx.run.deadline:
         campaign.drain_utxo_watch(ctx, seen)
+        try:
+            chain = api('rust', '/blocks/bestInputChain') or {}
+            cached = dict(ctx.run.input_block_txids)
+            chain_now = {t for bid in (chain.get('bestInputBlocks') or [])
+                         for t in cached.get(bid, ())}
+        except Unavailable:
+            pass
         try:
             height = smoke.scala_height(ctx.run)
         except Unavailable:
@@ -59,10 +73,9 @@ def _observe_window(ctx, blocks, address):
             continue
         while scanned < height:
             scanned += 1
-            # The input chain Rust had APPLIED before this ordering
-            # block landed, from the sampler's own bracketed ids.
-            applied = {t for ids in dict(ctx.run.input_block_txids).values()
-                       for t in ids}
+            # The chain THIS ordering block closes, as last observed
+            # before it landed.
+            applied = set(chain_now)
             try:
                 ids = api('scala', f'/blocks/at/{scanned}') or []
                 ordering_txids = set()
@@ -81,6 +94,9 @@ def _observe_window(ctx, blocks, address):
                 'input_chain_txids': applied, 'ordering_txids': ordering_txids,
                 'rust_pool': rust_pool, 'scala_pool': scala_pool,
             })
+            # The chain the next block will close starts empty: this one
+            # has just been sealed.
+            chain_now = set()
             _pump(ctx, address, sent)
         if scanned >= target:
             break

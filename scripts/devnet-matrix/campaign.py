@@ -1158,7 +1158,17 @@ def _self_test():
                 blk(2, [], ['b'], [], [])]
     f6 = common.evaluate_f6(deferred)
     assert f6['f6_total'] == 0, f6
-    assert f6['blocks'][0]['confirmed_by_a_later_block'] == 1, f6['blocks']
+    assert f6['blocks'][0]['confirmed_by_another_block'] == 1, f6['blocks']
+
+    # ...and confirmed by an EARLIER one is equally not a loss. Counting
+    # only forward turned a chain still listing already-confirmed
+    # transactions into 5,157 phantom losses over 60 blocks.
+    already = [blk(1, [], ['a'], [], []),
+               blk(2, ['a', 'b'], ['b'], [], [])]
+    f6 = common.evaluate_f6(already)
+    assert f6['f6_total'] == 0, f6
+    assert f6['lost_on_both_total'] == 0, f6
+    assert f6['blocks'][1]['confirmed_by_another_block'] == 1, f6['blocks']
 
     # Dropped, gone from Rust's pool, still in SCALA's: that is F6 (the
     # port reproducing the reference behaviour), and NOT a loss.

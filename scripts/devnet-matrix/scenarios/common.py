@@ -616,15 +616,19 @@ def evaluate_f6(blocks):
         {'height', 'ordering_block', 'input_chain_txids', 'ordering_txids',
          'rust_pool', 'scala_pool'}
 
-    all four id fields being sets observed at that block. For each block:
+    `input_chain_txids` is the chain THIS ordering block closes — the
+    transactions of the input blocks on the follower's best input chain
+    just before it landed — NOT every input-block transaction the run
+    has ever seen. Using the accumulated cache makes every block appear
+    to drop every transaction of every earlier round. For each block:
 
     * **dropped** — in the applied input chain, not in the ordering block;
     * **F6** — dropped and not back in RUST's pool, and never confirmed
-      by a LATER ordering block in the window. This is the reference
+      by ANY other ordering block in the window. This is the reference
       behaviour the port reproduces (spec §12 F6), so it is counted, not
       failed;
-    * **lost_on_both** — dropped, in NEITHER pool, and never confirmed
-      later. A transaction in that state is irrecoverable on both
+    * **lost_on_both** — dropped, in NEITHER pool, and confirmed by no
+      block in the window. A transaction in that state is irrecoverable on both
       implementations, and comparing the two pools can never reveal it
       because they agree. It FAILS.
 
@@ -632,14 +636,21 @@ def evaluate_f6(blocks):
     input-chain transaction lost at block 40 leaves both pools agreeing
     at block 60.
     """
-    confirmed_later = {}
-    for i, block in enumerate(blocks):
-        for later in blocks[i + 1:]:
-            confirmed_later.setdefault(i, set()).update(later['ordering_txids'])
+    # Confirmation ANYWHERE in the window, not only later. A transaction
+    # the input chain still lists but an EARLIER ordering block already
+    # confirmed was not dropped by this one, and counting it as lost
+    # turned one run's 60 blocks into 5,157 phantom losses.
+    confirmed_elsewhere = {}
+    for i in range(len(blocks)):
+        elsewhere = set()
+        for j, other in enumerate(blocks):
+            if j != i:
+                elsewhere |= set(other['ordering_txids'])
+        confirmed_elsewhere[i] = elsewhere
     per_block, f6_total, lost_total = [], [], []
     for i, block in enumerate(blocks):
         dropped = set(block['input_chain_txids']) - set(block['ordering_txids'])
-        later = confirmed_later.get(i, set())
+        later = confirmed_elsewhere.get(i, set())
         f6 = sorted(dropped - set(block['rust_pool']) - later)
         lost = sorted(dropped - set(block['rust_pool'])
                       - set(block['scala_pool']) - later)
@@ -651,7 +662,7 @@ def evaluate_f6(blocks):
             'f6': f6,
             'lost_on_both': lost,
             'returned_to_rust_pool': len(dropped & set(block['rust_pool'])),
-            'confirmed_by_a_later_block': len(dropped & later),
+            'confirmed_by_another_block': len(dropped & later),
         })
         f6_total.extend(f6)
         lost_total.extend(lost)
