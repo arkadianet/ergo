@@ -1127,6 +1127,7 @@ impl Processor {
             waitlist_entries: bounds.waitlist_entries.max(1),
             pending_triggers: bounds.pending_triggers.max(1),
             retired_jobs: bounds.retired_jobs.max(1),
+            ordering_announcements: bounds.ordering_announcements.max(1),
             ..bounds
         };
         Self {
@@ -7205,6 +7206,33 @@ mod tests {
             },
         );
         assert_eq!(drops(&eff), vec![DropReason::RecordsFull], "{eff:?}");
+    }
+
+    #[test]
+    fn zero_ordering_announcement_cap_still_stores_one_section() {
+        // `ordering_announcements` is a capacity like the bounds clamped
+        // above: `OrderingStore` inserts first and only then evicts down
+        // to the cap, so at zero the entry evicted is the one just
+        // inserted. Left unclamped, a configured 0 makes both the
+        // announcement map and the section map silently forget every
+        // write instead of retaining one.
+        let mut p = processor_with(Bounds {
+            ordering_announcements: 0,
+            ..Bounds::default()
+        });
+        let header_id: OrderingId = [0xab; 32];
+        let tx = TxRef {
+            tx_id: [0xcd; 32],
+            witness_id: [0xef; 31],
+        };
+
+        let evicted = p.save_ordering_block_transactions(header_id, vec![tx]);
+        assert_eq!(evicted, None, "the only section must not evict itself");
+        assert_eq!(
+            p.ordering_block_transactions(&header_id),
+            Some(&[tx][..]),
+            "a clamped cap still retains one section"
+        );
     }
 
     // ----- oracle parity -----
