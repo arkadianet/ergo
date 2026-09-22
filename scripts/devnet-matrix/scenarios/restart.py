@@ -50,10 +50,16 @@ def run(ctx):
     lifecycle.wait_peered()
     restarted_at = time.monotonic()
 
-    # Convergence: the follower must hold the miner's tip at a moment no
-    # later than 3 ordering blocks after the restart.
+    # Convergence means the follower rejoined the miner on a block it had
+    # to PROCESS after coming back — not that its store survived the
+    # kill. The data directory is intact across a SIGKILL, so the node is
+    # already on the miner's tip the moment it finishes loading; a check
+    # that accepted that would pass in zero seconds having observed
+    # nothing. So the agreement has to be at a height ABOVE the one it
+    # died at, and still inside the 3-ordering-block budget.
     target_height = restart_height + CONVERGENCE_ORDERING_BLOCKS
     converged_at_height = None
+    resumed_at_death_height = False
     while time.monotonic() < ctx.run.deadline:
         try:
             scala = api('scala', '/info') or {}
@@ -61,9 +67,15 @@ def run(ctx):
         except Unavailable:
             ctx.run.idle(0.5)
             continue
-        if (rust.get('bestFullHeaderId')
-                and rust.get('bestFullHeaderId') == scala.get('bestFullHeaderId')):
-            converged_at_height = rust.get('fullHeight')
+        agreed = (rust.get('bestFullHeaderId')
+                  and rust.get('bestFullHeaderId') == scala.get('bestFullHeaderId'))
+        height = rust.get('fullHeight') or 0
+        if agreed and height <= restart_height:
+            # Recorded, not credited: it says the store came back, which
+            # is worth knowing and is not what this scenario measures.
+            resumed_at_death_height = True
+        if agreed and height > restart_height:
+            converged_at_height = height
             break
         if (scala.get('fullHeight') or 0) > target_height:
             break
@@ -73,11 +85,12 @@ def run(ctx):
         'restart_height': restart_height,
         'budget_ordering_blocks': CONVERGENCE_ORDERING_BLOCKS,
         'converged_at_height': converged_at_height,
+        'resumed_at_the_height_it_died_at': resumed_at_death_height,
         'seconds': round(time.monotonic() - restarted_at, 1),
     })
     if converged_at_height is None:
-        ctx.fail(f'the follower did not rejoin the miner\'s tip within '
-                 f'{CONVERGENCE_ORDERING_BLOCKS} ordering blocks of a SIGKILL',
+        ctx.fail(f'the follower did not rejoin the miner\'s tip on a NEW ordering '
+                 f'block within {CONVERGENCE_ORDERING_BLOCKS} of a SIGKILL',
                  {'restart_height': restart_height,
                   'scala': api('scala', '/info'), 'rust': api('rust', '/info'),
                   'rust_log': smoke.rust_log_lines('input_blocks')})
@@ -93,6 +106,12 @@ def run(ctx):
     reconstructed = sum(1 for e in window if e['kind'] == 'ordering_reconstructed')
     fallback = sum(1 for e in window
                    if e['kind'] == 'ordering_reconstruct_fallback')
+    if not window:
+        ctx.fail('the follower reported no ordering outcome after the restart, so '
+                 'nothing about its recovery was observed',
+                 {'events': len(events),
+                  'seq_before_restart': events_before_restart,
+                  'rust_log': smoke.rust_log_lines('input_blocks')})
     ctx.note('post_restart_ordering_outcomes', {
         'first_kind': first['kind'] if first else None,
         'first_detail': first.get('detail') if first else None,

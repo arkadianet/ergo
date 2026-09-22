@@ -61,7 +61,17 @@ def latest_event_seq(ctx):
     """
     feed = api_retry('rust', '/api/v1/events', ctx.run.deadline,
                      what='the Rust event feed watermark')
-    return feed.get('latest_seq') or 0
+    # The route serializes camelCase (`ApiNodeEvents` carries
+    # `#[serde(rename_all = "camelCase")]`). Reading the snake_case name
+    # returned 0 for a feed that was not empty, which silently widened
+    # every window keyed to it — so both spellings are accepted and a
+    # feed that offers NEITHER is a failure rather than a zero.
+    seq = feed.get('latestSeq', feed.get('latest_seq'))
+    if seq is None:
+        raise Unavailable(
+            'the Rust event feed reports no latestSeq, so a window cannot be '
+            'keyed to it')
+    return seq
 
 
 def events_after(events, seq):
