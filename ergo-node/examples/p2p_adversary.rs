@@ -573,7 +573,11 @@ async fn input_block_wrong_body(ctx: &Ctx, seconds: u64) -> bool {
     let mut last_report = Instant::now();
     // Input block ids we have already pushed a wrong body for.
     let mut served: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
-    let mut last_poll = Instant::now() - Duration::from_secs(60);
+    let mut last_poll = Instant::now()
+        .checked_sub(Duration::from_secs(60))
+        .unwrap_or_else(Instant::now);
+    let (mut polls, mut ids_seen, mut last_body_len) = (0u32, 0u32, 0usize);
+    let mut poll_error: Option<String> = None;
     while Instant::now() < deadline {
         // The follower does not relay input-block announcements to this
         // peer — two runs saw zero — so waiting to be told an id never
@@ -581,25 +585,56 @@ async fn input_block_wrong_body(ctx: &Ctx, seconds: u64) -> bool {
         // body can be pushed for them unsolicited.
         if last_poll.elapsed() >= Duration::from_secs(1) {
             last_poll = Instant::now();
-            if let Ok((_, body)) = api_get(&ctx.api, "/blocks/bestInputChain").await {
-                for id in json_hex_ids(&body) {
-                    if !served.insert(id) {
-                        continue;
+            polls += 1;
+            match api_get(&ctx.api, "/blocks/bestInputChain").await {
+                Err(e) => {
+                    if poll_error.is_none() {
+                        poll_error = Some(format!("{e}"));
                     }
-                    let Some(tx) = decoy_transaction() else {
-                        continue;
-                    };
-                    let Ok(payload) = serialize_input_block_txs(&InputBlockTxs {
-                        input_block_id: id,
-                        transactions: vec![tx],
-                    }) else {
-                        continue;
-                    };
-                    let frame = full_frame(&ctx.magic, CODE_INPUT_BLOCK_TXS, &payload);
-                    if conn.stream.write_all(&frame).await.is_err() {
-                        break;
+                }
+                Ok((_, body)) => {
+                    last_body_len = body.len();
+                    let ids = json_hex_ids(&body);
+                    ids_seen += ids.len() as u32;
+                    if ids.is_empty() && poll_error.is_none() {
+                        // Keep a snippet: "no ids" and "the request
+                        // failed" are different answers, and the first
+                        // two runs could not tell which had happened.
+                        poll_error = Some(format!(
+                            "no ids in {} bytes: {}",
+                            body.len(),
+                            body.chars()
+                                .rev()
+                                .take(160)
+                                .collect::<String>()
+                                .chars()
+                                .rev()
+                                .collect::<String>()
+                        ));
                     }
-                    pushed += 1;
+                    for id in ids {
+                        if !served.insert(id) {
+                            continue;
+                        }
+                        let Some(tx) = decoy_transaction() else {
+                            continue;
+                        };
+                        let Ok(payload) = serialize_input_block_txs(&InputBlockTxs {
+                            input_block_id: id,
+                            transactions: vec![tx],
+                        }) else {
+                            continue;
+                        };
+                        let frame = full_frame(&ctx.magic, CODE_INPUT_BLOCK_TXS, &payload);
+                        if conn.stream.write_all(&frame).await.is_err() {
+                            break;
+                        }
+                        pushed += 1;
+                        // The ids we pushed a wrong body FOR, so the
+                        // campaign can attribute a mismatch fallback to
+                        // one of them rather than to a natural mismatch.
+                        println!("[wrong_body] pushed id={}", hex::encode(id));
+                    }
                 }
             }
         }
@@ -673,10 +708,28 @@ async fn input_block_wrong_body(ctx: &Ctx, seconds: u64) -> bool {
         // the harness and the campaign saw only the banner.
         if last_report.elapsed() >= Duration::from_secs(10) {
             last_report = Instant::now();
-            report(relayed, pushed, requests, answered);
+            report(
+                relayed,
+                pushed,
+                requests,
+                answered,
+                polls,
+                ids_seen,
+                last_body_len,
+                &poll_error,
+            );
         }
     }
-    report(relayed, pushed, requests, answered);
+    report(
+        relayed,
+        pushed,
+        requests,
+        answered,
+        polls,
+        ids_seen,
+        last_body_len,
+        &poll_error,
+    );
     let ok = answered > 0 || pushed > 0;
     println!(
         "{} input_block_wrong_body: mismatched bodies were delivered to the follower",
@@ -687,11 +740,24 @@ async fn input_block_wrong_body(ctx: &Ctx, seconds: u64) -> bool {
     ok
 }
 
-fn report(relayed: u32, pushed: u32, requests: u32, answered: u32) {
+#[allow(clippy::too_many_arguments)]
+fn report(
+    relayed: u32,
+    pushed: u32,
+    requests: u32,
+    answered: u32,
+    polls: u32,
+    ids_seen: u32,
+    body_len: usize,
+    poll_error: &Option<String>,
+) {
     use std::io::Write;
     println!(
         "[wrong_body] relayed {relayed}, pushed {pushed} unsolicited wrong bodies, \
-         saw {requests} body requests, answered {answered}"
+         saw {requests} body requests, answered {answered}; \
+         rest polls={polls} ids_seen={ids_seen} last_body={body_len}B \
+         first_problem={}",
+        poll_error.as_deref().unwrap_or("none")
     );
     let _ = std::io::stdout().flush();
 }

@@ -170,11 +170,20 @@ def run(ctx):
                  'of this window are incomplete',
                  {'collection': collector.summary(watermark)})
 
-    # Did the adversary actually get asked, and answer?
-    answered = [line for line in ((ctx.evidence.get('adversary') or {})
-                                  .get('stdout') or '').splitlines()
-                if 'answered' in line]
-    ctx.note('adversary_answered', answered)
+    # DELIVERY must be PROVEN, not assumed. Recording what the adversary
+    # said about itself is not delivery, and "some mismatch fallback
+    # happened" is not causality — the campaign has observed natural
+    # `root_mismatch` fallbacks elsewhere, so an unrelated one could
+    # have satisfied the exercise requirement.
+    stdout = ((ctx.evidence.get('adversary') or {}).get('stdout') or '')
+    pushed_ids = [line.split('id=', 1)[1].strip()
+                  for line in stdout.splitlines() if 'pushed id=' in line]
+    summary = [line for line in stdout.splitlines() if 'rest polls=' in line]
+    ctx.note('adversary_delivery', {
+        'wrong_bodies_pushed': len(pushed_ids),
+        'ids': pushed_ids[:20],
+        'last_summary': summary[-1] if summary else None,
+    })
     reached_node = [line for line in
                     smoke.rust_log_lines(ADVERSARY_SOURCE, limit=20000)
                     if ADVERSARY_SOURCE in line]
@@ -214,14 +223,50 @@ def run(ctx):
                    'first, not the fallback being unobservable',
     })
 
-    if not mismatch:
-        ctx.fail('no ordering block fell back with a Merkle-mismatch reason even '
-                 'though a peer was serving bodies the announcements do not commit '
-                 'to, so the fallback path was NOT exercised',
+    # (1) DELIVERY. Did a wrong body reach the node at all?
+    delivered = [line for line in reached_node
+                 if 'input_blocks' in line or 'InputBlockTransactions' in line]
+    ctx.note('delivery_evidence', {
+        'wrong_bodies_pushed': len(pushed_ids),
+        'node_log_lines_naming_the_adversary': len(reached_node),
+        'node_log_lines_about_input_blocks_from_it': len(delivered),
+        'sample': delivered[:5],
+    })
+    if not pushed_ids:
+        ctx.fail('the adversary pushed no wrong body at all, so nothing was '
+                 'delivered and no fallback could be attributed to it — the '
+                 'eviction lever was not applied',
+                 {'adversary_summary': summary[-1] if summary else None,
+                  'adversary_stdout': stdout[-2000:]})
+
+    # (2) CAUSALITY. A mismatch fallback only counts if it names a block
+    # whose input chain we poisoned. The campaign has recorded natural
+    # `root_mismatch` fallbacks in reconstruct_rate, so "a mismatch
+    # happened" proves nothing about this adversary.
+    poisoned = set(pushed_ids)
+    attributed = [e for e in mismatch
+                  if (e.get('headerId') or e.get('header_id')) in poisoned
+                  or poisoned & set(smoke.ids_in(e))]
+    ctx.note('fallback_attribution', {
+        'mismatch_fallbacks': len(mismatch),
+        'attributable_to_a_pushed_body': len(attributed),
+        'attributed': attributed[:5],
+        'note': 'a mismatch fallback naming no poisoned id is a NATURAL one and '
+                'does not establish that the adversary forced anything',
+    })
+
+    if not attributed:
+        ctx.fail('no ordering block fell back with a Merkle-mismatch reason '
+                 'attributable to a body this adversary pushed, so the fallback '
+                 'path was not forced by it — '
+                 + (f'{len(mismatch)} unattributed mismatch fallback(s) occurred '
+                    'naturally and do not count'
+                    if mismatch else 'no mismatch fallback occurred at all'),
                  {'fallbacks': len(fallbacks), 'reconstructions': len(reconstructions),
                   'skipped': len(skipped),
+                  'wrong_bodies_pushed': len(pushed_ids),
                   'digest_related_drops': digest_drops,
-                  'adversary_stdout': (ctx.evidence.get('adversary') or {}).get('stdout'),
+                  'adversary_summary': summary[-1] if summary else None,
                   'rust_log': smoke.rust_log_lines('input_blocks')})
 
     # Whatever it fell back to has to be the miner's block at that height.
