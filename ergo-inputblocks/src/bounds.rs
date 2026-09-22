@@ -63,6 +63,17 @@ pub struct Bounds {
     /// [`crate::processor::Event::Tick`], so a peer that never answers
     /// recovers its budget once — and only once — its requests time out.
     pub request_timeout_ms: u64,
+    /// How many times an unanswered request is REISSUED to the same
+    /// peer before it is given up on. Not a Scala bound: Scala has no
+    /// request bookkeeping at all, but §9.2's retry contract needs one
+    /// end of the wire to reissue, and the coordinator deliberately
+    /// forgets input-block timeouts without re-requesting (it has no way
+    /// to know whether the block is still wanted). Each reissue doubles
+    /// the deadline from `request_timeout_ms`, capped at
+    /// `REQUEST_BACKOFF_SHIFT_CAP` doublings, so a peer that is simply
+    /// slow is not hammered. At the cap the slot is released and the
+    /// question is dropped.
+    pub request_retries: u32,
     /// Validation jobs remembered after they were issued, so a result
     /// arriving for an abandoned job can still name the block that job
     /// was validating. Only one job is outstanding at a time; the rest
@@ -136,6 +147,7 @@ impl Default for Bounds {
             staging_bytes_total: 64 * 1024 * 1024,
             requests_per_peer: 32,
             request_timeout_ms: 60 * 1000,
+            request_retries: 3,
             retired_jobs: 64,
             candidates_per_position: 4,
             digest_attempts_per_block: 16,

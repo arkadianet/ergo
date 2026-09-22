@@ -64,6 +64,7 @@ pub(super) struct TomlInputBlockBounds {
     pub(super) staging_bytes_total: Option<usize>,
     pub(super) requests_per_peer: Option<usize>,
     pub(super) request_timeout_ms: Option<u64>,
+    pub(super) request_retries: Option<u32>,
     pub(super) retired_jobs: Option<usize>,
     pub(super) candidates_per_position: Option<usize>,
     pub(super) digest_attempts_per_block: Option<usize>,

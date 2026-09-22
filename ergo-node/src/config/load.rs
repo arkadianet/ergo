@@ -81,6 +81,7 @@ impl NodeConfig {
             staging_bytes_total,
             requests_per_peer,
             request_timeout_ms,
+            request_retries,
             retired_jobs,
             candidates_per_position,
             digest_attempts_per_block,

@@ -319,6 +319,20 @@ impl InputBlocksRuntime {
                     });
                     drops.sort_by(|a, b| a.reason.cmp(&b.reason));
                 }
+                // Likewise a processor-side EVENT counter rather than a
+                // `DropReason`: spec 9.2's retry contract makes the
+                // deadline sweep reissue an unanswered request, and a
+                // rising `RequestRetried` with no deliveries is how an
+                // operator tells a peer that drops replies from one that
+                // was never asked.
+                let retried = self.processor.requests_retried();
+                if retried > 0 {
+                    drops.push(ergo_api::types::ApiDropCount {
+                        reason: "RequestRetried".to_string(),
+                        count: retried,
+                    });
+                    drops.sort_by(|a, b| a.reason.cmp(&b.reason));
+                }
                 drops
             },
         }

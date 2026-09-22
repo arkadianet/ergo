@@ -572,6 +572,32 @@ impl RequestKey {
     }
 }
 
+/// One outstanding request: what was asked, when the answer is due, the
+/// effect that would ask again, and how many times it has been issued.
+///
+/// The effect is kept so the deadline sweep can REISSUE it (spec 9.2's
+/// retry contract). Before that, a lost reply was terminal: the sweep
+/// only freed the slot, the coordinator deliberately forgets
+/// input-block timeouts without re-requesting, and every later
+/// announcement of the same block hits `AlreadyKnown` — so a block whose
+/// parent announcement or transaction-id reply went missing never
+/// progressed again.
+#[derive(Debug, Clone)]
+struct Pending {
+    key: RequestKey,
+    /// When the answer stops being expected and the sweep acts.
+    deadline: Tick,
+    /// The request to reissue, addressed to the same peer.
+    effect: Effect,
+    /// Issues so far; `1` for a request that has never been retried.
+    attempts: u32,
+}
+
+/// Ceiling on the exponential backoff between reissues, in doublings of
+/// `Bounds::request_timeout_ms`. Keeps the retry deadline bounded while
+/// still backing off from a peer that is merely slow.
+const REQUEST_BACKOFF_SHIFT_CAP: u32 = 3;
+
 /// A transaction selection a delivery proposed while the block's own
 /// selection was still outstanding (residual fix round 2, items B and
 /// C/D). Refusing the swap is what keeps the outstanding job valid;
@@ -634,7 +660,12 @@ pub struct Processor {
     /// it expires at. Replaces a tick-halving counter: the cap now bounds
     /// *genuinely outstanding* requests, released by the matching
     /// delivery or by their deadline (residual fix round, D).
-    outstanding: HashMap<PeerTag, Vec<(RequestKey, Tick)>>,
+    outstanding: HashMap<PeerTag, Vec<Pending>>,
+    /// Requests reissued by the deadline sweep since start, for the
+    /// operator surface (`RequestRetried`). A rising count with no
+    /// deliveries is what distinguishes a peer that is dropping replies
+    /// from one that was never asked.
+    requests_retried: u64,
     /// The clock of the event being handled, so [`Self::request`] can
     /// stamp a deadline without every call site threading it.
     now: Tick,
@@ -1114,6 +1145,7 @@ impl Processor {
             ahead: indexmap::IndexMap::new(),
             ordering: OrderingStore::default(),
             outstanding: HashMap::new(),
+            requests_retried: 0,
             now: Tick(0),
             issued: indexmap::IndexMap::new(),
             in_flight: None,
@@ -2169,7 +2201,7 @@ impl Processor {
     fn has_request_capacity(&self, peer: PeerTag) -> bool {
         let now = self.now;
         let held = self.outstanding.get(&peer).map_or(0, |slots| {
-            slots.iter().filter(|(_, at)| at.0 > now.0).count()
+            slots.iter().filter(|p| p.deadline.0 > now.0).count()
         });
         held < self.bounds.requests_per_peer
     }
@@ -3396,14 +3428,39 @@ impl Processor {
         for id in expired {
             self.staging.shift_remove(&id);
         }
-        // Outstanding requests expire at an explicit deadline: a peer
-        // that never answers recovers that slot once the request has
-        // timed out, and one that answers is credited immediately by the
-        // matching delivery (residual fix round, D).
+        // Outstanding requests expire at an explicit deadline. A request
+        // that timed out is REISSUED to the same peer, with the deadline
+        // doubled per attempt, until `Bounds::request_retries` is spent;
+        // only then is the slot released. One that answers is credited
+        // immediately by the matching delivery (residual fix round, D).
+        //
+        // This is spec 9.2's retry contract and it has to live here: the
+        // coordinator forgets timed-out input-block requests without
+        // re-requesting (parity — Scala's `checkDelivery` applies no
+        // NonDelivery penalty), so without a reissue a lost reply was
+        // terminal. Repeated announcements of the recorded block hit
+        // `AlreadyKnown` and never asked again.
+        let timeout = self.bounds.request_timeout_ms;
+        let retries = self.bounds.request_retries;
+        let mut reissued = Vec::new();
         self.outstanding.retain(|_, slots| {
-            slots.retain(|(_, at)| at.0 > now.0);
+            slots.retain_mut(|p| {
+                if p.deadline.0 > now.0 {
+                    return true;
+                }
+                if p.attempts > retries {
+                    return false;
+                }
+                let shift = (p.attempts - 1).min(REQUEST_BACKOFF_SHIFT_CAP);
+                p.deadline = Tick(now.0.saturating_add(timeout.saturating_mul(1u64 << shift)));
+                p.attempts += 1;
+                reissued.push(p.effect.clone());
+                true
+            });
             !slots.is_empty()
         });
+        self.requests_retried = self.requests_retried.saturating_add(reissued.len() as u64);
+        out.extend(reissued);
         // Slots the sweep freed may be what a deferred invitation needs.
         self.retry_invitations(None, out);
     }
@@ -3435,9 +3492,9 @@ impl Processor {
         let now = self.now;
         let cap = self.bounds.requests_per_peer;
         let slots = self.outstanding.entry(peer).or_default();
-        slots.retain(|(_, at)| at.0 > now.0);
+        slots.retain(|p| p.deadline.0 > now.0);
         if let Some(k) = key {
-            if slots.iter().any(|(existing, _)| *existing == k) {
+            if slots.iter().any(|p| p.key == k) {
                 return false;
             }
         }
@@ -3448,9 +3505,15 @@ impl Processor {
             });
             return false;
         }
-        // An effect that is not a request holds no slot; nothing to track.
+        // An effect that is not a request holds no slot; nothing to
+        // track — and nothing to reissue either.
         if let Some(k) = key {
-            slots.push((k, deadline));
+            slots.push(Pending {
+                key: k,
+                deadline,
+                effect: effect.clone(),
+                attempts: 1,
+            });
         }
         out.push(effect);
         true
@@ -3475,7 +3538,7 @@ impl Processor {
             return false;
         };
         let before = slots.len();
-        slots.retain(|(k, _)| *k != answered_key);
+        slots.retain(|p| p.key != answered_key);
         let answered = slots.len() < before;
         if slots.is_empty() {
             self.outstanding.remove(&peer);
@@ -3492,7 +3555,7 @@ impl Processor {
         self.outstanding.get(&peer).is_some_and(|slots| {
             slots
                 .iter()
-                .any(|(k, _)| matches!(k, RequestKey::Transactions(b, _) if *b == id))
+                .any(|p| matches!(p.key, RequestKey::Transactions(b, _) if b == id))
         })
     }
 
@@ -3501,7 +3564,7 @@ impl Processor {
             return false;
         };
         let before = slots.len();
-        slots.retain(|(k, _)| *k != key);
+        slots.retain(|p| p.key != key);
         let answered = slots.len() < before;
         if slots.is_empty() {
             self.outstanding.remove(&peer);
@@ -3558,6 +3621,13 @@ impl Processor {
     /// itself is bounded by — no unbounded enumeration surface.
     pub fn known_input_block_ids(&self) -> Vec<InputBlockId> {
         self.records.keys().copied().collect()
+    }
+
+    /// Requests the deadline sweep reissued since start (spec 9.2's
+    /// retry contract). Published on the operator status breakdown as
+    /// `RequestRetried`.
+    pub fn requests_retried(&self) -> u64 {
+        self.requests_retried
     }
 
     /// Monotonic revision counter, bumped once per [`Self::handle`] call.
@@ -6089,25 +6159,48 @@ mod tests {
             "a tick must not refund an outstanding request: {eff:?}"
         );
 
-        ctx.handle(
+        // At the deadline the request is REISSUED to the same peer
+        // (finding 4 / spec 9.2), so the slot stays held: the question
+        // has not been answered and the node is still asking it.
+        let ticked = ctx.handle(
             &mut p,
             Event::Tick {
                 now: Tick(timeout + 1),
             },
         );
+        assert!(
+            ticked
+                .iter()
+                .any(|e| matches!(e, Effect::RequestTransactionIds { .. })),
+            "the deadline reissues the request: {ticked:?}"
+        );
+        assert_eq!(p.requests_retried(), 1);
+
+        // Only once the retry budget is spent is the slot released.
+        // Each tick is well past the doubled deadline of the last.
+        let mut at = timeout + 1;
+        for _ in 0..=Bounds::default().request_retries {
+            at += timeout * 16;
+            ctx.handle(&mut p, Event::Tick { now: Tick(at) });
+        }
         let a3 = ts::announcement(ORD, FULL + 1, 3, Some(ts::ann_id(&a1)));
         let eff = ctx.handle(
             &mut p,
             Event::AnnouncementAccepted {
                 ann: a3,
                 from: ts::PEER,
-                now: Tick(timeout + 1),
+                now: Tick(at),
             },
         );
         assert!(
             eff.iter()
                 .any(|e| matches!(e, Effect::RequestTransactionIds { .. })),
-            "a timed-out request must release its slot: {eff:?}"
+            "a request that exhausted its retries releases its slot: {eff:?}"
+        );
+        assert_eq!(
+            p.requests_retried(),
+            u64::from(Bounds::default().request_retries),
+            "the retry count is capped by the budget"
         );
     }
 
@@ -6558,15 +6651,23 @@ mod tests {
             "{emitted} requests emitted to one peer, cap is {cap}"
         );
 
-        // The suppression is not permanent: once the request times out,
-        // the announcer is asked again.
+        // The suppression is not permanent: once the request times out
+        // the announcer is asked again — by the deadline sweep itself
+        // (finding 4 / spec 9.2), not by whatever event happens next.
         let timeout = Bounds::default().request_timeout_ms;
-        ctx.handle(
+        let ticked = ctx.handle(
             &mut p,
             Event::Tick {
                 now: Tick(timeout + 1),
             },
         );
+        assert_eq!(
+            body_requests_to(&ticked, ts::PEER),
+            1,
+            "the deadline reissues the body request: {ticked:?}"
+        );
+        // And the reissue holds the slot, so the stranger's pokes still
+        // cannot make the node ask again on top of it.
         let after = ctx.handle(
             &mut p,
             Event::TransactionsDelivered {
@@ -6578,8 +6679,8 @@ mod tests {
         );
         assert_eq!(
             body_requests_to(&after, ts::PEER),
-            1,
-            "a timed-out request must be asked again: {after:?}"
+            0,
+            "the reissued request is still outstanding: {after:?}"
         );
     }
 
@@ -7360,6 +7461,129 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Effect::RelayOrderingInv { .. })),
             "the second sighting buys the peer nothing: {again:?}"
+        );
+    }
+
+    /// Finding 4: neither delivery layer reissued a timed-out
+    /// input-block request. The coordinator forgets them without
+    /// re-requesting (parity: Scala's `checkDelivery` applies no
+    /// NonDelivery penalty for the three new type ids) on the
+    /// assumption that the processor retries; the processor only expired
+    /// the slot. A lost parent announcement or transaction-id reply was
+    /// therefore terminal — later announcements of the recorded child
+    /// hit `AlreadyKnown`, so the question was never asked again.
+    ///
+    /// Here the announcer never answers the `-122` request. Every
+    /// deadline must reissue it to the same peer, with the wait doubling
+    /// per attempt, until `Bounds::request_retries` is spent.
+    #[test]
+    fn a_timed_out_request_is_reissued_with_backoff_until_the_cap() {
+        let bounds = Bounds::default();
+        let timeout = bounds.request_timeout_ms;
+        let retries = bounds.request_retries;
+        let mut p = processor_with(bounds);
+        let ctx = ts::TestCtx::at(FULL);
+
+        let ann = ts::announcement(ORD, FULL + 1, 1, None);
+        let id = ts::ann_id(&ann);
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        let asked = |eff: &[Effect]| {
+            eff.iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        Effect::RequestTransactionIds {
+                            input_block_id,
+                            from,
+                        } if *input_block_id == id && *from == ts::PEER
+                    )
+                })
+                .count()
+        };
+        assert_eq!(asked(&eff), 1, "the first request goes out");
+        assert_eq!(p.requests_retried(), 0);
+
+        // A tick before the deadline changes nothing.
+        let early = ctx.handle(
+            &mut p,
+            Event::Tick {
+                now: Tick(timeout - 1),
+            },
+        );
+        assert_eq!(asked(&early), 0, "not due yet: {early:?}");
+
+        // Each deadline reissues once, and the next one is twice as far
+        // out — so a tick one plain timeout later is NOT yet due.
+        let mut now = timeout + 1;
+        for attempt in 1..=retries {
+            let out = ctx.handle(&mut p, Event::Tick { now: Tick(now) });
+            assert_eq!(asked(&out), 1, "attempt {attempt} reissues: {out:?}");
+            assert_eq!(p.requests_retried(), u64::from(attempt));
+            let shift = (attempt - 1).min(REQUEST_BACKOFF_SHIFT_CAP);
+            let wait = timeout << shift;
+            let too_early = ctx.handle(
+                &mut p,
+                Event::Tick {
+                    now: Tick(now + wait - 1),
+                },
+            );
+            assert_eq!(
+                asked(&too_early),
+                0,
+                "attempt {attempt} backs off to {wait} ms: {too_early:?}"
+            );
+            now += wait + 1;
+        }
+
+        // The budget is spent: the deadline now releases the slot
+        // instead of asking again, and the count stops rising.
+        let done = ctx.handle(&mut p, Event::Tick { now: Tick(now) });
+        assert_eq!(asked(&done), 0, "the cap is respected: {done:?}");
+        assert_eq!(p.requests_retried(), u64::from(retries));
+        let after = ctx.handle(
+            &mut p,
+            Event::Tick {
+                now: Tick(now + timeout * 16),
+            },
+        );
+        assert_eq!(asked(&after), 0, "and stays spent: {after:?}");
+        assert_eq!(p.requests_retried(), u64::from(retries));
+    }
+
+    /// The retry is not a penalty engine: an answered request is
+    /// released by its delivery and never reissued, however long the
+    /// node runs afterwards.
+    #[test]
+    fn an_answered_request_is_never_reissued() {
+        let bounds = Bounds::default();
+        let timeout = bounds.request_timeout_ms;
+        let mut p = processor_with(bounds);
+        let ctx = ts::TestCtx::at(FULL);
+
+        let b1 = ts::body(1, 1);
+        let ann = ts::announcement(ORD, FULL + 1, 1, None);
+        let id = ts::ann_id(&ann);
+        announce(&mut p, &ctx, &ann, ts::PEER);
+        ctx.handle(
+            &mut p,
+            Event::TransactionIdsDelivered {
+                input_block_id: id,
+                weak_ids: vec![b1.weak_id],
+                from: ts::PEER,
+                now: Tick(1),
+            },
+        );
+
+        let out = ctx.handle(
+            &mut p,
+            Event::Tick {
+                now: Tick(timeout * 64),
+            },
+        );
+        assert!(
+            !out.iter()
+                .any(|e| matches!(e, Effect::RequestTransactionIds { .. })),
+            "the answered id request is gone, not retried: {out:?}"
         );
     }
 }
