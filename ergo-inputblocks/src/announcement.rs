@@ -133,10 +133,14 @@ pub fn verify_field_binding(fields: &InputBlockFields) -> Result<(), Announcemen
     if fields.proof.indices.is_empty() {
         return Err(AnnouncementError::ProofEmpty);
     }
+    // `extension_fields()` always yields two-byte keys, so the
+    // length-prefix guard in `extension_leaf_digest` cannot trip here;
+    // `flatten` drops a `None` rather than asserting, which can only ever
+    // shorten `want` and so can only make the comparison below stricter.
     let mut want: Vec<[u8; 32]> = fields
         .extension_fields()
         .iter()
-        .map(|(k, v)| extension_leaf_digest(k, v))
+        .filter_map(|(k, v)| extension_leaf_digest(k, v))
         .collect();
     let mut proved: Vec<[u8; 32]> = fields.proof.indices.iter().map(|(_, d)| *d).collect();
     want.sort_unstable();
@@ -210,7 +214,12 @@ mod tests {
             .extension_fields()
             .iter()
             .enumerate()
-            .map(|(i, (k, v))| (i as u32, extension_leaf_digest(k, v)))
+            .map(|(i, (k, v))| {
+                (
+                    i as u32,
+                    extension_leaf_digest(k, v).expect("two-byte extension key"),
+                )
+            })
             .collect();
         BatchMerkleProof {
             indices,

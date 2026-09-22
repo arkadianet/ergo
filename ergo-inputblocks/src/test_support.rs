@@ -118,7 +118,7 @@ fn proof_for(fields: &InputBlockFields) -> (BatchMerkleProof, [u8; 32]) {
     debug_assert!(proved
         .iter()
         .zip(fields.extension_fields().iter())
-        .all(|((_, d), (k, v))| *d == extension_leaf_digest(k, v)));
+        .all(|((_, d), (k, v))| Some(*d) == extension_leaf_digest(k, v)));
     let proof = BatchMerkleProof {
         indices: proved,
         proofs: entries
