@@ -192,6 +192,55 @@ SCENARIO_ROLES = {
     'miner_self_reject': ('scala_miner_patched', 'rust_follower'),
 }
 
+# Scenarios with NO pass criterion (spec §7a, `task-0-brief.md:32`).
+# They exist to produce denominators a patched run is read against, so
+# "nothing failed" says nothing about them: the question is whether the
+# measurement was TAKEN, over the window it asked for, with the phrases
+# it counts actually matching the build.
+MEASUREMENT_SCENARIOS = ('miner_self_reject',)
+
+# The verdicts that exit 0: the run did what it was asked. A completed
+# measurement is one of them; an incomplete measurement is not, and
+# neither is a PASS it was never eligible for. NOT MEASURED exits 0 as
+# well — a comparison this host could not make is a limitation of the
+# host, not a broken scenario — and is reported as its own verdict.
+OK_RESULTS = ('PASS', 'MEASURED', 'NOT MEASURED')
+
+
+def verdict_of(scenario, aborted, failures, measurement_complete=None,
+               not_measured=None):
+    """One run's verdict. The driver's rule, in one testable place.
+
+    A measurement-only scenario can be MEASURED or INCOMPLETE, never
+    PASS or FAIL: it has no criterion, so it cannot meet one. It used to
+    be given PASS whenever no assertion happened to fail, which made a
+    run that covered 3 of its 40 ordering blocks indistinguishable from
+    one that covered all 40, and let a campaign summary count a
+    measurement among its passes.
+
+    `measurement_complete` is the scenario's OWN statement that its
+    window opened, ran to the end, and matched the phrases it counts. Not
+    stated is not complete: a scenario that never said so has not shown
+    it.
+
+    `NOT MEASURED` is its own kind: a scenario whose comparison could
+    not be made on this host has not failed — nothing about the node is
+    wrong — and it has not passed either, because the property it exists
+    to establish is unestablished. It never outranks a real failure or
+    an abort.
+    """
+    if aborted:
+        return 'ABORTED'
+    if scenario in MEASUREMENT_SCENARIOS:
+        return 'MEASURED' if measurement_complete and not failures \
+            else 'INCOMPLETE'
+    if failures:
+        return 'FAIL'
+    if not_measured:
+        return 'NOT MEASURED'
+    return 'PASS'
+
+
 # Which scenarios take `--reference-follower` (spec §8). The others
 # refuse it rather than accepting it and measuring nothing with it.
 REFERENCE_FOLLOWER_SCENARIOS = ('steady', 'restart', 'fork',
@@ -926,21 +975,8 @@ def check_attempt_cap(name, force=False):
 
 
 def verdict_for(aborted, failures, not_measured=None):
-    """The one verdict rule, in one place.
-
-    `NOT MEASURED` is its own kind: a scenario whose comparison could
-    not be made on this host has not failed — nothing about the node is
-    wrong — and it has not passed either, because the property it exists
-    to establish is unestablished. It never outranks a real failure or
-    an abort.
-    """
-    if aborted:
-        return 'ABORTED'
-    if failures:
-        return 'FAIL'
-    if not_measured:
-        return 'NOT MEASURED'
-    return 'PASS'
+    """`verdict_of` for a scenario that HAS a pass criterion."""
+    return verdict_of(None, aborted, failures, not_measured=not_measured)
 
 
 def persist_verdict(name, evidence, aborted, failures, save):
@@ -952,7 +988,9 @@ def persist_verdict(name, evidence, aborted, failures, save):
     attempt was recorded, and codex's r3 probe — the attempt recording
     raising after a clean run — left the persisted verdict at DONE/PASS.
     """
-    verdict = verdict_for(aborted, failures, evidence.get('not_measured'))
+    verdict = verdict_of(name, aborted, failures,
+                         evidence.get('measurement_complete'),
+                         evidence.get('not_measured'))
     finished = datetime.datetime.now(datetime.timezone.utc).isoformat()
     evidence.update({'status': 'FINALIZING', 'result': 'ABORTED',
                      'aborted': aborted or 'the verdict was not persisted',
@@ -2515,6 +2553,70 @@ def _self_test():
             ('RuntimeError: boom', [{'message': 'x'}], 'y', 'ABORTED')):
         got = verdict_for(aborted, failures, not_measured)
         assert got == expected, (aborted, failures, not_measured, got, expected)
+        # `verdict_for` is `verdict_of` for a scenario WITH a criterion.
+        assert verdict_of('steady', aborted, failures, None, not_measured) \
+            == expected, (aborted, failures, not_measured)
+    verdicts = []
+    for aborted, failures, expected in (
+            (None, [], 'PASS'),
+            (None, [{'message': 'x'}], 'FAIL'),
+            ('RuntimeError: rust did not become ready', [], 'ABORTED'),
+            ('RuntimeError: boom', [{'message': 'x'}], 'ABORTED')):
+        got = verdict_of('steady', aborted, failures)
+        verdicts.append(got)
+        assert got == expected, (aborted, failures, got, expected)
+    assert 'ABORTED' in verdicts, verdicts
+
+    # ----- fix round 1, item 4: a MEASUREMENT does not PASS -----
+    #
+    # `miner_self_reject` has no pass criterion by construction — its
+    # own docstring says so, and `task-0-brief.md:32` requires it. The
+    # driver nevertheless wrote PASS whenever nothing failed, so a run
+    # that covered 3 of its 40 ordering blocks and a run that covered
+    # all 40 read identically, and a campaign summary counted the
+    # measurement among its passes.
+    assert 'miner_self_reject' in MEASUREMENT_SCENARIOS, MEASUREMENT_SCENARIOS
+    assert verdict_of('miner_self_reject', None, [], True) == 'MEASURED'
+    # A short window, a phrase set that matched nothing, or any failure
+    # at all leaves the measurement INCOMPLETE — never PASS, and never
+    # FAIL either, because there is no criterion to fail.
+    assert verdict_of('miner_self_reject', None, [], False) == 'INCOMPLETE'
+    assert verdict_of('miner_self_reject', None, [{'message': 'x'}], True) == \
+        'INCOMPLETE'
+    # A scenario that never stated whether its window completed has not
+    # shown that it did.
+    assert verdict_of('miner_self_reject', None, [], None) == 'INCOMPLETE'
+    # An abort still outranks everything.
+    assert verdict_of('miner_self_reject', 'RuntimeError: boom', [], True) == \
+        'ABORTED'
+    # PASS is not silently widened for the scenarios that do have a
+    # criterion.
+    assert verdict_of('steady', None, [], True) == 'PASS'
+    # The exit code and the campaign summary treat a completed
+    # measurement as a run that did what it was asked, and INCOMPLETE as
+    # one that did not. NOT MEASURED exits 0 too (a limitation of the
+    # host, not a broken scenario) — it is its own verdict, never PASS.
+    assert set(OK_RESULTS) == {'PASS', 'MEASURED', 'NOT MEASURED'}, OK_RESULTS
+    for _bad in ('FAIL', 'ABORTED', 'INCOMPLETE'):
+        assert _bad not in OK_RESULTS, _bad
+
+    # And the rule the driver uses is THIS function, not a copy that has
+    # drifted: the driver persists through `persist_verdict`, and that
+    # has to call it. (That every attempt is recorded, pass or fail, is
+    # proven by driving the real `run_scenario` below.)
+    import inspect
+    assert 'persist_verdict(name, evidence' in inspect.getsource(run_scenario), \
+        'the driver must persist through persist_verdict'
+    assert 'verdict_of(name, aborted' in inspect.getsource(persist_verdict), \
+        'the driver must use this rule'
+    assert 'OK_RESULTS' in inspect.getsource(main), \
+        'the exit code has to come from the same table'
+    # And every measurement scenario STATES whether its window
+    # completed; without that the driver can only call it INCOMPLETE.
+    for _name in MEASUREMENT_SCENARIOS:
+        assert "ctx.note('measurement_complete'" in inspect.getsource(
+            _all[_name].run), (
+                _name, 'a measurement scenario has to say whether it measured')
     _self_test_driver()
     _self_test_round_2()
 
@@ -3128,11 +3230,12 @@ def main():
         print(f'  - {failure["message"]}')
     for entry in evidence.get('not_measured') or []:
         print(f'  ~ NOT MEASURED: {entry["message"]}')
-    # NOT MEASURED is not a pass, and it is not an error the runner
-    # should treat as a broken scenario either: it exits 0 with the
-    # verdict on the line above, so a campaign does not abort on a
-    # limitation of the host.
-    return 0 if evidence['result'] in ('PASS', 'NOT MEASURED') else 1
+    # A completed MEASUREMENT exits 0 like a PASS: it did what it was
+    # asked; an INCOMPLETE one does not. NOT MEASURED is not a pass, and
+    # it is not an error the runner should treat as a broken scenario
+    # either: it exits 0 with the verdict on the line above, so a
+    # campaign does not abort on a limitation of the host.
+    return 0 if evidence['result'] in OK_RESULTS else 1
 
 
 if __name__ == '__main__':

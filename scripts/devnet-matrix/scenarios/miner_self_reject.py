@@ -263,6 +263,15 @@ def run(ctx):
     })
     ctx.note('result_line', result_line(ctx.evidence))
 
+    # This scenario's own statement of whether the measurement was
+    # TAKEN: the window it asked for opened and ran to the end, and the
+    # phrases it counts matched this build. The driver turns that into
+    # MEASURED or INCOMPLETE — never PASS, which it has no criterion to
+    # earn (spec §7a). A short window is not a verdict on the build; it
+    # is a measurement that did not happen.
+    ctx.note('measurement_complete',
+             reached >= target and not miner.get('unmatched'))
+
     # The window not completing is reported; it is not absorbed, and it
     # is not a verdict on the build either.
     if reached < target:
