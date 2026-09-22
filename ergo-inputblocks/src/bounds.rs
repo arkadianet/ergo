@@ -74,6 +74,15 @@ pub struct Bounds {
     /// slow is not hammered. At the cap the slot is released and the
     /// question is dropped.
     pub request_retries: u32,
+    /// How many of a peer's slots may be awaiting reissue at once, ON
+    /// TOP of `requests_per_peer`.
+    ///
+    /// The tick drains the retry queue every second, so in practice it
+    /// holds only what expired since the last tick; this is the ceiling
+    /// that keeps it bounded if ticks stall. At the ceiling a NEW
+    /// request is refused (`RequestsFull`) — an expired one is never
+    /// deleted, which is the whole point of the queue.
+    pub retry_pending_per_peer: usize,
     /// Validation jobs remembered after they were issued, so a result
     /// arriving for an abandoned job can still name the block that job
     /// was validating. Only one job is outstanding at a time; the rest
@@ -148,6 +157,7 @@ impl Default for Bounds {
             requests_per_peer: 32,
             request_timeout_ms: 60 * 1000,
             request_retries: 3,
+            retry_pending_per_peer: 32,
             retired_jobs: 64,
             candidates_per_position: 4,
             digest_attempts_per_block: 16,

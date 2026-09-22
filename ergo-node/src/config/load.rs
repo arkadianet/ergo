@@ -82,6 +82,7 @@ impl NodeConfig {
             requests_per_peer,
             request_timeout_ms,
             request_retries,
+            retry_pending_per_peer,
             retired_jobs,
             candidates_per_position,
             digest_attempts_per_block,
