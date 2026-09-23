@@ -18,7 +18,8 @@ pub struct EvalBox {
     pub script_bytes: Vec<u8>,
     /// Box value in nanoErg.
     pub value: i64,
-    /// 32-byte box identifier (`Blake2b256` of the canonical box bytes).
+    /// 32-byte box identifier: Blake2b256 of the retained wire slice for
+    /// data-deserialized boxes, or canonical serialization for context boxes.
     pub id: [u8; 32],
     /// Transaction ID that created this box (for R3 creationInfo).
     pub transaction_id: [u8; 32],
