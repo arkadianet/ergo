@@ -334,6 +334,7 @@ impl SnapshotBootstrap {
             self.reject_manifest_and_evict_voter(*peer);
         } else if self.votes.remove(peer).is_some() {
             self.recompute_selection();
+            self.reopen_discovery_if_below_quorum();
         }
     }
 
@@ -358,6 +359,12 @@ impl SnapshotBootstrap {
     /// Pair with [`Self::should_query`] in the fan-out loop.
     pub fn mark_queried(&mut self, peer: PeerId) {
         self.discovery_queried.insert(peer);
+    }
+
+    pub fn reopen_discovery_if_below_quorum(&mut self) {
+        if self.selected.is_none() {
+            self.discovery_queried.clear();
+        }
     }
 
     /// Current selection state. Computes the public state from
@@ -554,6 +561,7 @@ impl SnapshotBootstrap {
         self.verified = None;
         self.votes.remove(&peer);
         self.recompute_selection();
+        self.reopen_discovery_if_below_quorum();
     }
 
     /// Drop a latched `verified` manifest without evicting any vote —
@@ -567,6 +575,7 @@ impl SnapshotBootstrap {
     pub fn drop_verified_manifest(&mut self) {
         self.verified = None;
         self.recompute_selection();
+        self.reopen_discovery_if_below_quorum();
     }
 
     /// Time-out check. If the pending request has been outstanding

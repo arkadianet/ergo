@@ -685,6 +685,22 @@ fn enumerate_expected_chunk_ids_matches_server_chunk_ids() {
 }
 
 #[test]
+fn expected_chunk_ids_reject_duplicates() {
+    let tree = populated_tree(8);
+    let server = SnapshotServer::build(&tree, 1, 1).unwrap();
+    let mut manifest = server.manifest_bytes.clone();
+    let left_label = 2 + 1 + 1 + KEY_SIZE;
+    let right_label = left_label + LABEL_SIZE;
+    let left = manifest[left_label..left_label + LABEL_SIZE].to_vec();
+    manifest[right_label..right_label + LABEL_SIZE].copy_from_slice(&left);
+
+    let err = enumerate_expected_chunk_ids(&manifest).unwrap_err();
+    assert!(format!("{err:?}").contains("duplicate expected chunk id"));
+    let err = reconstruct_tree(&manifest, &chunks_map_from_server(&server)).unwrap_err();
+    assert!(format!("{err:?}").contains("duplicate expected chunk id"));
+}
+
+#[test]
 fn reconstruct_rejects_missing_chunk() {
     let tree = populated_tree(8);
     let server = SnapshotServer::build(&tree, 1, 1).unwrap();

@@ -1,7 +1,7 @@
 use ergo_p2p::peer::PeerId;
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::header::read_header;
-use ergo_state::avl::snapshot_codec::manifest_tree_height;
+use ergo_state::avl::snapshot_codec::{enumerate_expected_chunk_ids, manifest_tree_height};
 use ergo_state::HeaderSectionStore;
 use ergo_sync::snapshot_bootstrap::verify_manifest_against_state_root;
 use tracing::{info, warn};
@@ -38,6 +38,19 @@ pub(super) fn handle_inbound_manifest(
         // Stale, unsolicited, or wrong peer — silent drop.
         return;
     };
+
+    if let Err(e) = enumerate_expected_chunk_ids(&bytes) {
+        warn!(
+            peer = %peer,
+            height = height,
+            error = %e,
+            "manifest parse or chunk enumeration failed; evicting voter",
+        );
+        state
+            .snapshot_bootstrap
+            .reject_manifest_and_evict_voter(peer);
+        return;
+    }
 
     let manifest_height = match manifest_tree_height(&bytes) {
         Ok(height) => height,

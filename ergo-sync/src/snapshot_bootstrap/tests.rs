@@ -304,6 +304,21 @@ fn disconnect_clears_queried_mark_so_reconnect_is_requeried() {
     );
 }
 
+#[test]
+fn disconnect_below_quorum_reopens_discovery_for_remaining_voters() {
+    let mut bs = SnapshotBootstrap::with_quorum(3);
+    for p in 1..=3u16 {
+        bs.on_snapshots_info(peer(p), &[(52_224, mid(0xAA))]);
+        bs.mark_queried(peer(p));
+    }
+
+    bs.on_peer_disconnect(&peer(1));
+
+    assert_eq!(bs.state(), BootstrapState::Querying);
+    assert!(bs.should_query(&peer(2)));
+    assert!(bs.should_query(&peer(3)));
+}
+
 // ----- 2g state machine: ManifestRequested + ManifestVerified -----
 
 fn reach_selected(quorum: usize) -> SnapshotBootstrap {

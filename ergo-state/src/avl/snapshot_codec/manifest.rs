@@ -6,6 +6,8 @@
 //!
 //! Sibling of `mod.rs`; pure impl relocation.
 
+use std::collections::HashSet;
+
 use crate::avl::digest::{internal_label, leaf_label};
 use crate::avl::node::AvlNode;
 use crate::avl::node::NodeId;
@@ -344,6 +346,15 @@ pub fn enumerate_expected_chunk_ids(manifest_bytes: &[u8]) -> Result<Vec<Digest3
             body.len() - cursor,
         )));
     }
+    let mut seen = HashSet::with_capacity(expected.len());
+    for id in &expected {
+        if !seen.insert(*id) {
+            return Err(StateError::Serialization(format!(
+                "snapshot codec: manifest declares duplicate expected chunk id {}",
+                hex::encode(id.as_bytes()),
+            )));
+        }
+    }
     Ok(expected)
 }
 
@@ -396,6 +407,15 @@ pub fn reconstruct_tree(
         return Err(StateError::Serialization(format!(
             "snapshot codec: manifest root index = {root_idx}, expected 0",
         )));
+    }
+    let mut seen = HashSet::with_capacity(pending_chunks.len());
+    for (_, subtree_id, _) in &pending_chunks {
+        if !seen.insert(*subtree_id) {
+            return Err(StateError::Serialization(format!(
+                "snapshot codec: manifest declares duplicate expected chunk id {}",
+                hex::encode(subtree_id.as_bytes()),
+            )));
+        }
     }
 
     // Second pass: for each pending chunk, parse the chunk bytes,

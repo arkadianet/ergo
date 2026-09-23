@@ -997,6 +997,89 @@ fn peer_disconnect_drops_snapshot_bootstrap_vote() {
 }
 
 #[test]
+fn inbound_manifest_rejects_malformed_bytes_before_latch() {
+    use ergo_sync::snapshot_bootstrap::BootstrapState;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let height = 52_224i32;
+    let manifest_id = mid(0xAA);
+    for port in 1..=3u16 {
+        state
+            .snapshot_bootstrap
+            .on_snapshots_info(synthetic_peer(port), &[(height, manifest_id)]);
+    }
+    let peer = synthetic_peer(1);
+    state
+        .snapshot_bootstrap
+        .mark_manifest_requested(peer, height, manifest_id, Instant::now());
+
+    let payload = message::serialize_manifest(&[0, 1]).unwrap();
+    let actions = handle_message(
+        &mut state,
+        peer,
+        message::CODE_MANIFEST,
+        &payload,
+        Instant::now(),
+    );
+
+    assert!(actions.is_empty());
+    assert!(!matches!(
+        state.snapshot_bootstrap.state(),
+        BootstrapState::ManifestVerified { .. }
+    ));
+    assert!(state.chunk_assembly.is_none());
+    assert!(state.pending_manifest_bytes.is_none());
+    assert!(state.reconstructed_tree.is_none());
+    assert!(state.snapshot_bootstrap.should_query(&synthetic_peer(2)));
+}
+
+#[test]
+fn inbound_manifest_rejects_duplicate_expected_ids_before_latch() {
+    use ergo_state::avl::snapshot_codec::{SnapshotServer, KEY_SIZE, LABEL_SIZE};
+    use ergo_state::avl::tree::AvlTree;
+    use ergo_sync::snapshot_bootstrap::BootstrapState;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let mut tree = AvlTree::new();
+    for i in 0..8u8 {
+        tree.insert([i + 0x10; 32], vec![i]);
+    }
+    let server = SnapshotServer::build(&tree, 52_224, 1).unwrap();
+    let manifest_id = *server.manifest_id.as_bytes();
+    let mut manifest = server.manifest_bytes.clone();
+    let left_label = 2 + 1 + 1 + KEY_SIZE;
+    let right_label = left_label + LABEL_SIZE;
+    let left = manifest[left_label..left_label + LABEL_SIZE].to_vec();
+    manifest[right_label..right_label + LABEL_SIZE].copy_from_slice(&left);
+
+    for port in 1..=3u16 {
+        state
+            .snapshot_bootstrap
+            .on_snapshots_info(synthetic_peer(port), &[(52_224, manifest_id)]);
+    }
+    let peer = synthetic_peer(1);
+    state
+        .snapshot_bootstrap
+        .mark_manifest_requested(peer, 52_224, manifest_id, Instant::now());
+    let payload = message::serialize_manifest(&manifest).unwrap();
+    let actions = handle_message(
+        &mut state,
+        peer,
+        message::CODE_MANIFEST,
+        &payload,
+        Instant::now(),
+    );
+
+    assert!(actions.is_empty());
+    assert!(!matches!(
+        state.snapshot_bootstrap.state(),
+        BootstrapState::ManifestVerified { .. }
+    ));
+}
+
+#[test]
 fn inbound_manifest_rejects_same_root_with_different_tree_height() {
     use ergo_primitives::digest::ADDigest;
     use ergo_state::avl::snapshot_codec::{SnapshotServer, MAINNET_MANIFEST_DEPTH};
