@@ -645,7 +645,13 @@ def record_attempt(name, evidence):
     number = len(entries) + 1
     kept = CAMPAIGN_WORK / 'attempts' / f'{name}-{number}.json'
     kept.parent.mkdir(parents=True, exist_ok=True)
-    kept.write_text(json.dumps(evidence, indent=2, default=str) + '\n')
+    # ABORTED first, the real verdict LAST. Writing the real evidence
+    # before the history meant a failing history write left this file
+    # DONE/PASS while the canonical verdict was ABORTED (codex r4).
+    placeholder = dict(evidence, status='FINALIZING', result='ABORTED',
+                       aborted=evidence.get('aborted')
+                       or 'the attempt history was not written')
+    kept.write_text(json.dumps(placeholder, indent=2, default=str) + '\n')
     entries.append({
         'attempt': number,
         'result': evidence.get('result'),
@@ -654,8 +660,15 @@ def record_attempt(name, evidence):
         'failures': [f.get('message') for f in (evidence.get('failures') or [])],
         'evidence': str(kept),
     })
-    attempts_path().write_text(json.dumps(history, indent=2) + '\n')
+    _write_history(history)
+    kept.write_text(json.dumps(evidence, indent=2, default=str) + '\n')
     return number
+
+
+def _write_history(history):
+    """The attempt HISTORY write — its own function so a probe can make it
+    fail exactly where codex's r4 probe did."""
+    attempts_path().write_text(json.dumps(history, indent=2) + '\n')
 
 
 def check_attempt_cap(name, force=False):
@@ -2044,6 +2057,32 @@ def _self_test_round_3():
     assert raised is None and (evidence['status'], evidence['result']) == ('DONE', 'PASS')
     assert 'verdict_pending' not in evidence
     assert history['steady'][-1]['result'] == 'PASS', history
+
+    # (6, r4) codex's probe: the HISTORY write fails inside
+    # `record_attempt`. Both the canonical verdict and the attempt
+    # artifact must be ABORTED — the artifact used to be written DONE/PASS
+    # before the history write was attempted.
+    real_history = globals().get('_write_history')
+
+    def failing_history(history):
+        raise OSError('attempts.json: disk full')
+
+    globals()['_write_history'] = failing_history
+    try:
+        with tempfile.TemporaryDirectory() as raw:
+            evidence, _, raised, _ = _drive('steady', lambda ctx: None, Path(raw))
+            artifacts = sorted((Path(raw) / 'campaign' / 'attempts').glob('steady-*.json'))
+            artifact = json.loads(artifacts[0].read_text()) if artifacts else None
+    finally:
+        if real_history is None:
+            globals().pop('_write_history', None)
+        else:
+            globals()['_write_history'] = real_history
+    assert isinstance(raised, OSError), raised
+    assert evidence['result'] == 'ABORTED', (evidence['status'], evidence['result'])
+    assert artifact is not None, 'the attempt artifact is written ABORTED first'
+    assert (artifact['status'], artifact['result']) != ('DONE', 'PASS'), artifact['result']
+    assert artifact['result'] == 'ABORTED', (artifact['status'], artifact['result'])
 
     # (7) codex's probe: an outcome for a DIFFERENT header at the expected
     # height is unmatched, and the block is missing.
