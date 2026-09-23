@@ -146,8 +146,11 @@ These conventions keep tests scannable and keep consensus claims honest.
 
 - Unit tests go in a `#[cfg(test)] mod tests` block inside the same `.rs` file —
   they need access to private items.
-- Integration tests go in `<crate>/tests/<name>.rs` — public API only, written
-  from the perspective of a downstream user.
+- Integration tests live in the per-crate `tests/it/` binary (`tests/it/main.rs`
+  plus modules, declared as `[[test]] name = "it"`) — public API only, written
+  from the perspective of a downstream user. Standalone `tests/<name>.rs`
+  binaries are reserved for feature-gated diagnostics/triage targets that need
+  their own harness.
 
 **Section dividers.** Inside any `mod tests` block, use these dividers in this
 fixed order so a reader can scan top-to-bottom:

@@ -150,6 +150,14 @@ relay/reorg policy, not transaction-acceptance rules.
   resolution or script execution, matching Scala `ErgoMemPool.process`
   ordering; `peek_fee` may only return `Deserialize` (`src/admission.rs:611`,
   `src/validator.rs:55`).
+- **Re-emission output policy is a relay gate, not a consensus rule.** After
+  input resolution and before script execution, admission rejects any tx whose
+  *outputs* carry the network's re-emission token
+  (`ValidationErr::ReemissionPolicy`, classified as a validation failure with
+  no peer penalty; the reject is recheck-evictable). Only outputs are scanned,
+  so reward distributions and burns that spend the token stay eligible. The
+  token id comes from `ChainSpec::reemission`, not a TOML key
+  (`src/validator.rs:172-180`, `src/admission/context.rs:98`).
 - **Data inputs never see pool state.** Regular inputs resolve through
   `PoolUtxoOverlay` (committed + pool-created); data inputs resolve through
   `CommittedOnly`, so a tx cannot observe an unconfirmed pool output via a

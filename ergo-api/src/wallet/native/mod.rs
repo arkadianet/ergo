@@ -547,8 +547,9 @@ pub(crate) async fn change_address_get(
     }))
 }
 
-/// `PUT /api/v1/wallet/change-address` — set the change address. The address
-/// must be a tracked P2PK for this network (not unlock-gated).
+/// `PUT /api/v1/wallet/change-address` — set the change address. Requires an
+/// unlocked wallet (409 `wallet_locked`) whose master key owns the recorded
+/// path for the address; the address must be a tracked P2PK for this network.
 #[utoipa::path(
     put, path = "/api/v1/wallet/change-address", tag = "wallet",
     request_body = dto::SetChangeAddressRequest,

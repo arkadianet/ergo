@@ -1,8 +1,9 @@
 //! Cache-only mutation endpoints — rescan + updateChangeAddress.
 //!
-//! Neither route requires an unlocked wallet per ErgoWalletActor.scala:
-//! 340,410. Both are always-served, matching every other `/wallet/*` route
-//! (see `crate::wallet` module docs).
+//! Rescan needs no unlocked wallet per ErgoWalletActor.scala:340 and is
+//! always served. updateChangeAddress requires an unlocked wallet and a
+//! signing-owned address (ErgoWalletActor.scala:410); it answers
+//! `wallet_locked` when the wallet is locked.
 
 use std::sync::Arc;
 

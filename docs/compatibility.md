@@ -64,9 +64,11 @@ live mainnet has been part of the development loop since.
 
 **Modes that boot today** (against the reference node's mode taxonomy):
 Mode 1 (full archive), Mode 2 (UTXO snapshot bootstrap, consume and serve),
-Mode 5 (digest verifier — boots and passes handshake/sync seams; full sync
-stalls at the UTXO-typed executor header pipeline), and Mode 6 (headers-only
-digest). NiPoPoW bootstrap (consume and serve),
+Mode 3 (pruned suffix window; activation details under Known limitations),
+Mode 4 (pruned + UTXO bootstrap — the composed lifecycle), Mode 5 (digest
+verifier — boots, passes the handshake/sync-info/API seams, and syncs headers
+from live peers; broader AD-proof block-replay coverage remains), and Mode 6
+(headers-only digest). NiPoPoW bootstrap (consume and serve),
 the extra-index `/blockchain/*` surface, the external-miner mining protocol,
 and an HD wallet (single-prover signing, BIP39 + BIP32, AES-GCM secret
 storage) also ship. In operation, a combined Mode 2 + NiPoPoW boot from an
@@ -162,7 +164,10 @@ Be aware of these before depending on the node.
   (`blocks_to_keep = 0`) never seed one. Rollbacks whose replay window
   would reach below the sentinel are refused rather than half-applied.
 - **Mode 4 (pruned + UTXO bootstrap)** — builds on Mode 3 (landed) plus
-  the Mode 2 snapshot bootstrap; not yet wired.
+  the Mode 2 snapshot bootstrap; the composed lifecycle is landed and tested
+  (a real UTXO-snapshot install through boot, plus NiPoPoW+UTXO composition
+  in both orders — `ergo-node/tests/it/mode4_acceptance.rs`), with a live
+  multi-peer soak still outstanding.
 - **Mode 5 (digest verifier)** — the storage schema, atomic-commit layer,
   and AD-proof apply seam exist; the node boots, survives the handshake,
   sync-info, and API seams, and syncs headers from live peers (the

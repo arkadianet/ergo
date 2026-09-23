@@ -16,7 +16,26 @@ infrastructure.
 
 ## [Unreleased]
 
+### Security
+
+- Retain the parse-time byte basis for `SBox` and `SHeader` values, and reject
+  non-pair tuples in `SelectField`, matching the JVM evaluator. A box or header
+  materialized from the data serializer now derives `bytes`/`id`/equality from
+  the retained input slice (Scala `ErgoBox._bytes` / `ErgoHeader.serializedId`)
+  instead of a canonical re-serialization, so two adversarially-encoded values
+  no longer collapse to one identity, and `Global.serialize(SBox)` still emits
+  the canonical bytes. `SelectField` now accepts only arity-2 tuples, as
+  Scala's `SelectField.eval` matches `Tuple2` alone (#357).
+- Reject trailing bytes after an SBox materialized from the data serializer,
+  matching the reference reader's end-of-input contract.
+
 ### Fixed
+
+- Retain locally regenerated ADProofs sections for blocks inside the
+  114,688-block suffix window (Scala `adProofsSuffixLength`), so near-tip
+  full-block API responses include proofs for UTXO nodes. Historical blocks
+  still validate without downloading or retaining them; digest nodes still
+  download and verify shipped proofs.
 
 - Bound each peer's outbound queue to 16 MiB of retained payload allocations
   and framing, with a separate 2,048-message limit. Interrupt writes on
