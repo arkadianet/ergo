@@ -273,7 +273,14 @@ pub(in crate::evaluator) fn eval_select_field(
     // Scala v6.0.2 transformers.scala:298-299 charges after receiver evaluation.
     add_cost(cx.cost, 0x8C)?;
     match tuple {
-        Value::Tuple(items) => {
+        // Scala `SelectField.eval` (transformers.scala:295-306) matches only
+        // `Tuple2`. A non-pair `STuple` value is materialized by
+        // `Evaluation.toDslTuple` as the raw `Coll` (arity != 2), so it reaches
+        // the evaluator as a collection and falls through to
+        // `Value.typeError` — it never indexes a non-pair tuple. Reject any
+        // non-pair carrier here so the node errors exactly where the reference
+        // errors (SANTA `SelectField.non_pair`).
+        Value::Tuple(items) if items.len() == 2 => {
             // 1-based like Scala's `productElement(fieldIndex - 1)`; index 0 is
             // already a parse-time hard reject, this keeps eval consistent for
             // any internally constructed tree.
@@ -288,7 +295,7 @@ pub(in crate::evaluator) fn eval_select_field(
             })
         }
         _ => Err(EvalError::TypeError {
-            expected: "Tuple",
+            expected: "pair (arity-2) tuple",
             got: format!("{tuple:?}"),
         }),
     }
