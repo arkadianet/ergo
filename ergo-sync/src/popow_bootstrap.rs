@@ -26,6 +26,7 @@ use std::time::Instant;
 
 use ergo_crypto::difficulty::DifficultyParams;
 use ergo_p2p::peer::PeerId;
+use ergo_p2p::types::{P2P_NIPOPOW_PROOF_K, P2P_NIPOPOW_PROOF_M};
 use ergo_ser::header::Header;
 use ergo_ser::popow_proof::NipopowProof;
 use ergo_validation::popow::{NipopowVerificationResult, NipopowVerifier};
@@ -44,6 +45,39 @@ pub enum PopowBootstrapState {
     Applied,
 }
 
+pub fn validate_bootstrap_response_profile(
+    proof: &NipopowProof,
+    expected_m: u32,
+    expected_k: u32,
+) -> bool {
+    if proof.m != expected_m || proof.k != expected_k || !proof.continuous {
+        return false;
+    }
+
+    let Ok(expected_k_usize) = usize::try_from(expected_k) else {
+        return false;
+    };
+    let Some(suffix_len) = proof.suffix_tail.len().checked_add(1) else {
+        return false;
+    };
+    if suffix_len != expected_k_usize {
+        return false;
+    }
+
+    let mut previous_height = proof.suffix_head.header.height;
+    for header in &proof.suffix_tail {
+        let Some(next_height) = previous_height.checked_add(1) else {
+            return false;
+        };
+        if header.height != next_height {
+            return false;
+        }
+        previous_height = header.height;
+    }
+
+    true
+}
+
 /// State machine for the NiPoPoW bootstrap consume side.
 ///
 /// All methods take `&mut self` — this reducer is owned by the
@@ -55,6 +89,8 @@ pub struct PopowBootstrap {
     /// returns `true`. Mainnet default = 2
     /// (`NipopowSettings.scala::p2p_nipopows`).
     quorum: u32,
+    expected_m: u32,
+    expected_k: u32,
     verifier: NipopowVerifier,
     /// Peers we've already sent `GetNipopowProof` to during the
     /// current bootstrap. Cleared per-peer on disconnect via
@@ -92,6 +128,8 @@ impl PopowBootstrap {
         Self {
             state: PopowBootstrapState::Idle,
             quorum,
+            expected_m: P2P_NIPOPOW_PROOF_M as u32,
+            expected_k: P2P_NIPOPOW_PROOF_K as u32,
             verifier: NipopowVerifier::new(genesis_id_opt, chain_config),
             requested_peers: BTreeSet::new(),
             seen_providers: BTreeSet::new(),
@@ -165,6 +203,9 @@ impl PopowBootstrap {
         peer: PeerId,
         proof: NipopowProof,
     ) -> Option<NipopowVerificationResult> {
+        if !validate_bootstrap_response_profile(&proof, self.expected_m, self.expected_k) {
+            return None;
+        }
         // `BTreeSet::insert` returns false when the peer was already present:
         // it has already contributed its one counted proof, so drop this one.
         if !self.seen_providers.insert(peer) {
@@ -304,9 +345,11 @@ pub fn check_proof_against_checkpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ergo_primitives::digest::ModifierId;
     use ergo_primitives::reader::VlqReader;
     use ergo_ser::header::read_header;
     use ergo_ser::popow_header::PoPowHeader;
+    use ergo_validation::popow::algos::{build_popow_header, pack_interlinks};
 
     // ----- helpers -----
 
@@ -325,24 +368,26 @@ mod tests {
     }
 
     fn popow_hdr(h: Header) -> PoPowHeader {
-        PoPowHeader {
-            header: h,
-            interlinks: vec![],
-            interlinks_proof: vec![],
+        if h.height == 1 {
+            return PoPowHeader {
+                header: h,
+                interlinks: vec![],
+                interlinks_proof: vec![0u8; 8],
+            };
         }
+        let links = vec![ModifierId::from_bytes(header_id_of(&header(GENESIS_HEX)))];
+        let fields = pack_interlinks(&links);
+        build_popow_header(h, links, &fields).unwrap()
     }
 
     fn valid_proof() -> NipopowProof {
         NipopowProof {
-            m: 6,
-            k: 10,
+            m: P2P_NIPOPOW_PROOF_M as u32,
+            k: 1,
             prefix: vec![popow_hdr(header(GENESIS_HEX))],
             suffix_head: popow_hdr(header(HEIGHT_2_HEX)),
             suffix_tail: vec![],
-            // continuous=false so the difficulty-headers check is
-            // skipped — this is a structural test, not a chain-shape
-            // validation.
-            continuous: false,
+            continuous: true,
         }
     }
 
@@ -351,7 +396,135 @@ mod tests {
     }
 
     fn fresh_bootstrap(quorum: u32) -> PopowBootstrap {
-        PopowBootstrap::new(quorum, None, DifficultyParams::mainnet())
+        let mut bootstrap = PopowBootstrap::new(quorum, None, DifficultyParams::mainnet());
+        bootstrap.expected_k = 1;
+        bootstrap
+    }
+
+    #[test]
+    fn response_profile_accepts_continuous_h1_to_h2_fixture() {
+        assert!(validate_bootstrap_response_profile(
+            &valid_proof(),
+            P2P_NIPOPOW_PROOF_M as u32,
+            1,
+        ));
+    }
+
+    #[test]
+    fn response_profile_rejects_wrong_m() {
+        let mut proof = valid_proof();
+        proof.m = 5;
+        assert!(!validate_bootstrap_response_profile(
+            &proof,
+            P2P_NIPOPOW_PROOF_M as u32,
+            1,
+        ));
+    }
+
+    #[test]
+    fn response_profile_rejects_wrong_k() {
+        let mut proof = valid_proof();
+        proof.k = 2;
+        assert!(!validate_bootstrap_response_profile(
+            &proof,
+            P2P_NIPOPOW_PROOF_M as u32,
+            1,
+        ));
+    }
+
+    #[test]
+    fn response_profile_rejects_non_continuous_proof() {
+        let mut proof = valid_proof();
+        proof.continuous = false;
+        assert!(!validate_bootstrap_response_profile(
+            &proof,
+            P2P_NIPOPOW_PROOF_M as u32,
+            1,
+        ));
+    }
+
+    #[test]
+    fn response_profile_rejects_short_suffix() {
+        assert!(!validate_bootstrap_response_profile(
+            &valid_proof(),
+            P2P_NIPOPOW_PROOF_M as u32,
+            2,
+        ));
+    }
+
+    #[test]
+    fn response_profile_rejects_oversized_suffix() {
+        let mut proof = valid_proof();
+        proof.suffix_tail.push(header(HEIGHT_2_HEX));
+        assert!(!validate_bootstrap_response_profile(
+            &proof,
+            P2P_NIPOPOW_PROOF_M as u32,
+            1,
+        ));
+    }
+
+    #[test]
+    fn response_profile_accepts_contiguous_suffix_heights() {
+        let mut proof = valid_proof();
+        proof.k = 2;
+        let mut tail = header(HEIGHT_2_HEX);
+        tail.height = 3;
+        proof.suffix_tail.push(tail);
+        assert!(validate_bootstrap_response_profile(
+            &proof,
+            P2P_NIPOPOW_PROOF_M as u32,
+            2,
+        ));
+    }
+
+    #[test]
+    fn response_profile_rejects_suffix_height_gap() {
+        let mut proof = valid_proof();
+        proof.k = 2;
+        let mut tail = header(HEIGHT_2_HEX);
+        tail.height = 4;
+        proof.suffix_tail.push(tail);
+        assert!(!validate_bootstrap_response_profile(
+            &proof,
+            P2P_NIPOPOW_PROOF_M as u32,
+            2,
+        ));
+    }
+
+    #[test]
+    fn invalid_profile_does_not_consume_provider() {
+        let mut b = fresh_bootstrap(1);
+        b.mark_requested(peer(1), Instant::now());
+        let mut proof = valid_proof();
+        proof.m = 5;
+        assert!(b.on_proof_received(peer(1), proof).is_none());
+        assert_eq!(b.provider_count(), 0);
+        assert_eq!(b.proofs_processed(), 0);
+    }
+
+    #[test]
+    fn profile_valid_retry_from_same_peer_counts() {
+        let mut b = fresh_bootstrap(1);
+        b.mark_requested(peer(1), Instant::now());
+        let mut proof = valid_proof();
+        proof.m = 5;
+        assert!(b.on_proof_received(peer(1), proof).is_none());
+        let result = b.on_proof_received(peer(1), valid_proof());
+        assert!(matches!(
+            result,
+            Some(NipopowVerificationResult::BetterChain { .. })
+        ));
+        assert_eq!(b.provider_count(), 1);
+        assert_eq!(b.proofs_processed(), 1);
+    }
+
+    #[test]
+    fn production_defaults_use_p2p_popow_profile() {
+        let b = PopowBootstrap::new(2, None, DifficultyParams::mainnet());
+        assert_eq!(b.expected_m, P2P_NIPOPOW_PROOF_M as u32);
+        assert_eq!(b.expected_k, P2P_NIPOPOW_PROOF_K as u32);
+        assert_eq!(b.expected_m, 6);
+        assert_eq!(b.expected_k, 10);
     }
 
     // ----- happy path -----
