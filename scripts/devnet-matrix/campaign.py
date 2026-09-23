@@ -618,6 +618,50 @@ def rotate_logs(scenario, nodes, tag=''):
 MAX_ATTEMPTS = 3
 
 
+def _write_bytes(handle, data, path):
+    """The one place a verdict file's bytes are written — a seam, so the
+    self-test can fail a write part-way exactly where codex's r5 probe did."""
+    handle.write(data)
+
+
+def write_json_atomically(path, obj):
+    """Replace `path` with `obj` as JSON, all-or-nothing.
+
+    A truncating `write_text` that fails part-way leaves invalid JSON in
+    place of the previous verdict. The bytes go to a temp file in the
+    SAME directory, are fsynced, and only then `os.replace`d over the
+    target (atomic on POSIX); the directory is fsynced so the rename
+    survives a crash. On any failure the temp file is removed and the
+    previous content is untouched.
+    """
+    import tempfile
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = (json.dumps(obj, indent=2, default=str) + '\n').encode()
+    fd, tmp = tempfile.mkstemp(prefix=f'.{path.name}.', suffix='.tmp', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as handle:
+            _write_bytes(handle, data, path)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    try:
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass
+    return path
+
+
 def attempts_path():
     return CAMPAIGN_WORK / 'attempts.json'
 
@@ -651,7 +695,7 @@ def record_attempt(name, evidence):
     placeholder = dict(evidence, status='FINALIZING', result='ABORTED',
                        aborted=evidence.get('aborted')
                        or 'the attempt history was not written')
-    kept.write_text(json.dumps(placeholder, indent=2, default=str) + '\n')
+    write_json_atomically(kept, placeholder)
     entries.append({
         'attempt': number,
         'result': evidence.get('result'),
@@ -661,14 +705,14 @@ def record_attempt(name, evidence):
         'evidence': str(kept),
     })
     _write_history(history)
-    kept.write_text(json.dumps(evidence, indent=2, default=str) + '\n')
+    write_json_atomically(kept, evidence)
     return number
 
 
 def _write_history(history):
     """The attempt HISTORY write — its own function so a probe can make it
     fail exactly where codex's r4 probe did."""
-    attempts_path().write_text(json.dumps(history, indent=2) + '\n')
+    write_json_atomically(attempts_path(), history)
 
 
 def check_attempt_cap(name, force=False):
@@ -785,7 +829,7 @@ def run_scenario(name, args):
     output = CAMPAIGN_WORK / f'{name}.json'
 
     def save():
-        output.write_text(json.dumps(evidence, indent=2, default=str) + '\n')
+        write_json_atomically(output, evidence)
 
     evidence['logs_set_aside_at_start'] = rotate_logs(name, nodes, tag='-prior')
     save()
@@ -2083,6 +2127,36 @@ def _self_test_round_3():
     assert artifact is not None, 'the attempt artifact is written ABORTED first'
     assert (artifact['status'], artifact['result']) != ('DONE', 'PASS'), artifact['result']
     assert artifact['result'] == 'ABORTED', (artifact['status'], artifact['result'])
+
+    # (6, r5) codex's probe: the FINAL overwrite of the attempt artifact
+    # fails PART-WAY. A truncating write left unparsable JSON while the
+    # history said PASS; the atomic replace leaves the ABORTED
+    # placeholder intact and parseable.
+    real_bytes = globals()['_write_bytes']
+    seen = {'attempt_writes': 0}
+
+    def partial_bytes(handle, data, path):
+        if path.parent.name == 'attempts' and b'"status": "DONE"' in data:
+            seen['attempt_writes'] += 1
+            handle.write(data[:len(data) // 2])
+            raise OSError('disk full mid-write')
+        return real_bytes(handle, data, path)
+
+    globals()['_write_bytes'] = partial_bytes
+    try:
+        with tempfile.TemporaryDirectory() as raw:
+            evidence, _, raised, _ = _drive('steady', lambda ctx: None, Path(raw))
+            attempts_dir = Path(raw) / 'campaign' / 'attempts'
+            artifact = json.loads(next(attempts_dir.glob('steady-*.json')).read_text())
+            leftovers = list(attempts_dir.glob('.*.tmp'))
+    finally:
+        globals()['_write_bytes'] = real_bytes
+    assert seen['attempt_writes'] == 1, 'the failure must hit the FINAL attempt write'
+    assert isinstance(raised, OSError), raised
+    assert evidence['result'] == 'ABORTED', evidence['result']
+    assert (artifact['status'], artifact['result']) == ('FINALIZING', 'ABORTED'), \
+        (artifact['status'], artifact['result'])
+    assert leftovers == [], leftovers
 
     # (7) codex's probe: an outcome for a DIFFERENT header at the expected
     # height is unmatched, and the block is missing.
