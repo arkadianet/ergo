@@ -242,7 +242,56 @@ def follower_events_since(events, watermark, restarted):
 PAYMENT_NANOERG = 1_000_000
 
 
-def fund_miner(ctx, node='scala', budget=900.0):
+# The funding wait's budget, derived from the chain rather than fixed.
+# The miner's coinbase is spendable once `minerRewardDelay` blocks have
+# passed (`genesis.conf` `monetary.minerRewardDelay = 10`, mirrored by
+# the Rust `devnet_miner_reward_delay`), and the wallet reports it a
+# block or two later. Ordering-block cadence on this host varies about
+# 5x with load, so a fixed 900 s either wastes a quiet evening or fails
+# a busy one (`.work-r1both2`: height 11, balance 0, 900 s gone).
+MINER_REWARD_DELAY = 10
+FUNDING_TARGET_HEIGHT = MINER_REWARD_DELAY + 3
+# Before the wait has seen two blocks: a conservative per-block prior
+# (the recipe measures ~40 s per ordering block on a quiet host).
+FUNDING_CADENCE_PRIOR_S = 60.0
+FUNDING_SAFETY = 3.0
+FUNDING_SLACK_S = 120.0
+# This far past the target with nothing to spend, the wallet (not the
+# cadence) is the problem, and waiting longer measures nothing.
+FUNDING_OVERRUN_BLOCKS = 10
+
+
+def funding_deadline(observations):
+    """`(deadline, rule)` for the funding wait, from the heights it saw.
+
+    `observations` is `[(monotonic_time, height), ...]`, the first entry
+    taken when the wait began and one more each time the height rose.
+    Rule: cadence = seconds per block over the observed span (the prior
+    until two heights are seen); deadline = time of the LAST height seen
+    + max(1, blocks still to the target) x cadence x SAFETY + SLACK. The
+    budget therefore restarts with every block, so a live chain is never
+    abandoned before maturity, and a stall ends the wait after SAFETY
+    times the cadence it had. Past target + OVERRUN blocks it ends at
+    once. Pure, so the self-test pins it.
+    """
+    first_t, first_h = observations[0]
+    last_t, last_h = observations[-1]
+    cadence = ((last_t - first_t) / (last_h - first_h)
+               if last_h > first_h else FUNDING_CADENCE_PRIOR_S)
+    to_go = max(0, FUNDING_TARGET_HEIGHT - last_h)
+    rule = {'cadence_s': round(cadence, 3), 'height': last_h,
+            'target_height': FUNDING_TARGET_HEIGHT, 'blocks_to_go': to_go,
+            'safety': FUNDING_SAFETY, 'slack_s': FUNDING_SLACK_S,
+            'overrun': last_h >= FUNDING_TARGET_HEIGHT + FUNDING_OVERRUN_BLOCKS,
+            'rule': 'deadline = last block seen + max(1, blocks to target) '
+                    'x measured s/block x safety + slack; ends at once '
+                    'past target + overrun blocks'}
+    if rule['overrun']:
+        return last_t, rule
+    return last_t + max(1, to_go) * cadence * FUNDING_SAFETY + FUNDING_SLACK_S, rule
+
+
+def fund_miner(ctx, node='scala'):
     """`(balance_nano, address)` for the miner whose blocks carry the load.
 
     An unfunded chain seals coinbase-only input blocks: the reconstruction
@@ -250,19 +299,41 @@ def fund_miner(ctx, node='scala', budget=900.0):
     never replaced by an arriving transaction. Either way the window
     measures the quiet case and says nothing about the finding.
 
+    The wait is budgeted by `funding_deadline` from the cadence it
+    observes, and the rule, cadence and outcome are noted as evidence.
     Short is RETURNED, never raised: the caller decides what an unfunded
     window means for its own measurement.
     """
-    deadline = min(ctx.run.deadline, time.monotonic() + budget)
+    def height():
+        try:
+            return int((api(node, '/info') or {}).get('fullHeight') or 0)
+        except (Unavailable, TypeError, ValueError):
+            return None
+
+    began = time.monotonic()
+    observations = [(began, height() or 0)]
+    deadline, rule = funding_deadline(observations)
     balance = 0
-    while time.monotonic() < deadline:
+    while time.monotonic() < min(ctx.run.deadline, deadline):
         try:
             balance = (api(node, '/wallet/balances') or {}).get('balance') or 0
         except Unavailable:
             balance = 0
         if balance:
             break
+        now_h = height()
+        if now_h is not None and now_h > observations[-1][1]:
+            observations.append((time.monotonic(), now_h))
+            deadline, rule = funding_deadline(observations)
         ctx.run.idle(1)
+    rule = dict(rule, waited_s=round(time.monotonic() - began, 1),
+                funded=bool(balance), heights_seen=len(observations),
+                start_height=observations[0][1],
+                ended_by=('balance' if balance else
+                          'overrun' if rule['overrun'] else
+                          'run deadline' if time.monotonic() >= ctx.run.deadline
+                          else 'cadence budget'))
+    ctx.note('funding_wait', rule)
     address = (api_retry(node, '/wallet/addresses', ctx.run.deadline,
                          what=f'the {node} miner wallet address') or [None])[0]
     return balance, address

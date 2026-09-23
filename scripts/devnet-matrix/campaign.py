@@ -1960,6 +1960,41 @@ def _self_test():
         if _saved_env_bin is not None:
             os.environ['RUST_NODE'] = _saved_env_bin
 
+    # ----- proofs step A (3): the funding wait follows the chain -----
+    #
+    # `fund_miner` waited a FIXED 900 s. The coinbase is spendable only
+    # after `minerRewardDelay` (10) blocks, and ordering-block cadence
+    # varies about 5x with host load: `.work-r1both2` reached height 11
+    # with 0 balance when 900 s ran out. The budget is now derived from
+    # the cadence the wait itself observes.
+    from scenarios import common as _cf
+    # Nothing observed yet: the prior cadence, over every block to go.
+    _d0, _r0 = _cf.funding_deadline([(0.0, 0)])
+    assert _r0['cadence_s'] == _cf.FUNDING_CADENCE_PRIOR_S, _r0
+    assert _r0['blocks_to_go'] == _cf.FUNDING_TARGET_HEIGHT, _r0
+    assert _d0 == (_cf.FUNDING_TARGET_HEIGHT * _cf.FUNDING_CADENCE_PRIOR_S
+                   * _cf.FUNDING_SAFETY + _cf.FUNDING_SLACK_S), (_d0, _r0)
+    # A loaded host (100 s per block, at height 5) gets MORE than the old
+    # fixed 900 s from its last block; a fast one gets less.
+    _slow = [(0.0, 1), (100.0, 2), (200.0, 3), (300.0, 4), (400.0, 5)]
+    _ds, _rs = _cf.funding_deadline(_slow)
+    assert _rs['cadence_s'] == 100.0, _rs
+    assert _ds - 400.0 > 900.0, (_ds, _rs)
+    _fast = [(0.0, 1), (10.0, 2), (20.0, 3), (30.0, 4), (40.0, 5)]
+    _df, _rf = _cf.funding_deadline(_fast)
+    assert _rf['cadence_s'] == 10.0 and _df < _ds, (_df, _rf)
+    # The budget restarts at every new block, so a live chain is never
+    # abandoned mid-maturity, while a stalled one is: the deadline is
+    # measured from the LAST block seen.
+    _dl, _ = _cf.funding_deadline(_slow + [(900.0, 6)])
+    assert _dl > _ds, (_dl, _ds)
+    # Well past maturity with nothing to spend is not a cadence problem:
+    # the wait ends at once instead of burning the run.
+    _past = [(0.0, 1), (10.0, _cf.FUNDING_TARGET_HEIGHT
+                       + _cf.FUNDING_OVERRUN_BLOCKS)]
+    _dp, _rp = _cf.funding_deadline(_past)
+    assert _dp == 10.0 and _rp['overrun'], (_dp, _rp)
+
     # ----- M4: the reconstruction accounting -----
     import inspect
     from scenarios import common as _common
