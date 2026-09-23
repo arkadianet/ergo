@@ -7,19 +7,47 @@
 let tableSeq = 0; // per-instance drawer-id namespace (see aria-controls below)
 
 export function makeTable(container, columns, opts = {}) {
+  container.classList.add('dtable-host');
   const tableId = ++tableSeq;
   let rows = [];
   let sort = opts.initialSort || { key: columns[0].key, dir: -1 };
   let expanded = null;
+  let pendingDraw = false;
 
   const table = document.createElement('div');
   table.className = 'dtable';
   table.setAttribute('role', 'table');
-  container.replaceChildren(table);
+  table.setAttribute('aria-label', opts.label || 'Results');
+  const mobileSort = document.createElement('div');
+  mobileSort.className = 'dtable__mobile-sort';
+  const sortLabel = document.createElement('label');
+  sortLabel.textContent = 'Sort by ';
+  const sortSelect = document.createElement('select');
+  sortSelect.className = 'select';
+  for (const c of columns) {
+    const option = document.createElement('option');
+    option.value = c.key;
+    option.textContent = c.label;
+    sortSelect.append(option);
+  }
+  sortLabel.append(sortSelect);
+  const sortDirection = document.createElement('button');
+  sortDirection.type = 'button';
+  sortDirection.className = 'btn btn--ghost';
+  mobileSort.append(sortLabel, sortDirection);
+  sortSelect.onchange = () => { sort.key = sortSelect.value; draw(); };
+  sortDirection.onclick = () => { sort.dir *= -1; draw(); };
+  container.replaceChildren(mobileSort, table);
+  table.addEventListener('focusout', () => {
+    setTimeout(() => {
+      if (pendingDraw && !table.contains(document.activeElement)) draw();
+    }, 0);
+  });
 
   function cell(c, row) {
     const d = document.createElement('span');
     d.className = 'dtable__c' + (c.align === 'right' ? ' dtable__c--r' : '');
+    d.setAttribute('role', 'cell');
     d.style.flex = c.width ? `0 0 ${c.width}px` : '1';
     d.dataset.label = c.label; // mobile card label
     const v = c.render ? c.render(row) : row[c.key];
@@ -33,17 +61,24 @@ export function makeTable(container, columns, opts = {}) {
     h.className = 'dtable__head';
     h.setAttribute('role', 'row');
     for (const c of columns) {
+      const column = document.createElement('span');
+      column.className = 'dtable__heading';
+      column.style.flex = c.width ? `0 0 ${c.width}px` : '1';
+      column.setAttribute('role', 'columnheader');
+      column.setAttribute('aria-sort', sort.key === c.key ? (sort.dir < 0 ? 'descending' : 'ascending') : 'none');
       const s = document.createElement('button');
+      s.type = 'button';
       s.className = 'dtable__th micro-label' + (c.align === 'right' ? ' dtable__c--r' : '');
-      s.style.flex = c.width ? `0 0 ${c.width}px` : '1';
+      s.dataset.sort = c.key;
       s.textContent = c.label + (sort.key === c.key ? (sort.dir < 0 ? ' ▾' : ' ▴') : '');
-      s.setAttribute('aria-sort', sort.key === c.key ? (sort.dir < 0 ? 'descending' : 'ascending') : 'none');
-      s.setAttribute('role', 'columnheader');
+      s.setAttribute('aria-label', `Sort by ${c.label}`);
       s.onclick = () => {
         sort = { key: c.key, dir: sort.key === c.key ? -sort.dir : -1 };
         draw();
+        table.querySelector(`[data-sort="${CSS.escape(c.key)}"]`)?.focus({ preventScroll: true });
       };
-      h.append(s);
+      column.append(s);
+      h.append(column);
     }
     if (opts.renderDetail) {
       // Spacer aligning the header with the rows' expand-toggle column.
@@ -66,18 +101,28 @@ export function makeTable(container, columns, opts = {}) {
   }
 
   function draw() {
+    pendingDraw = false;
+    sortSelect.value = sort.key;
+    sortDirection.textContent = sort.dir < 0 ? 'Descending ↓' : 'Ascending ↑';
     table.replaceChildren(header());
     const nextRows = sortedRows();
     if (!nextRows.length) {
       const empty = document.createElement('div');
       empty.className = 'dtable__empty';
-      empty.textContent = 'No rows to display.';
+      empty.setAttribute('role', 'row');
+      const content = document.createElement('span');
+      content.setAttribute('role', 'cell');
+      content.setAttribute('aria-colspan', String(columns.length + (opts.renderDetail ? 1 : 0)));
+      content.textContent = typeof opts.emptyMessage === 'function' ? opts.emptyMessage() : opts.emptyMessage || 'No results available.';
+      empty.append(content);
       table.append(empty);
       return;
     }
     for (const row of nextRows) {
       const r = document.createElement('div');
       r.className = 'dtable__row';
+      r.setAttribute('role', 'row');
+      if (opts.renderDetail) r.classList.add('dtable__row--expandable');
       const rk = opts.rowKey(row);
       if (expanded === rk) r.classList.add('dtable__row--open');
       for (const c of columns) r.append(cell(c, row));
@@ -98,7 +143,7 @@ export function makeTable(container, columns, opts = {}) {
         tg.className = 'dtable__toggle';
         tg.textContent = '▸';
         tg.title = isOpen ? 'collapse details' : 'expand details';
-        tg.setAttribute('aria-label', 'row details');
+        tg.setAttribute('aria-label', `${isOpen ? 'Hide' : 'Show'} details for ${rk}`);
         tg.setAttribute('aria-expanded', String(isOpen));
         if (isOpen) tg.setAttribute('aria-controls', drawerId);
         const toggle = () => {
@@ -111,7 +156,11 @@ export function makeTable(container, columns, opts = {}) {
         };
         tg.dataset.tg = String(rk);
         tg.onclick = toggle;
-        r.append(tg);
+        const toggleCell = document.createElement('span');
+        toggleCell.className = 'dtable__togglecell';
+        toggleCell.setAttribute('role', 'cell');
+        toggleCell.append(tg);
+        r.append(toggleCell);
         r.onclick = (e) => {
           // Pointer convenience: whitespace clicks toggle too. Interactive
           // descendants (links, copy, the toggle itself) act on their own.
@@ -125,7 +174,12 @@ export function makeTable(container, columns, opts = {}) {
         const d = document.createElement('div');
         d.className = 'dtable__drawer';
         d.id = r._drawerId;
-        d.append(opts.renderDetail(row));
+        d.setAttribute('role', 'row');
+        const content = document.createElement('div');
+        content.setAttribute('role', 'cell');
+        content.setAttribute('aria-colspan', String(columns.length + 1));
+        content.append(opts.renderDetail(row));
+        d.append(content);
         table.append(d);
       }
     }
@@ -134,6 +188,7 @@ export function makeTable(container, columns, opts = {}) {
   return {
     update(next) {
       rows = next || [];
+      if (table.contains(document.activeElement)) { pendingDraw = true; return; }
       draw();
     },
   };
@@ -148,6 +203,21 @@ export function copyBtn(text) {
   b.textContent = '⧉';
   b.title = 'copy';
   b.setAttribute('aria-label', 'copy');
-  b.onclick = () => navigator.clipboard?.writeText(text);
+  b.onclick = async () => {
+    try {
+      if (!navigator.clipboard) throw new Error('Clipboard unavailable');
+      await navigator.clipboard.writeText(text);
+      b.textContent = '✓';
+      b.setAttribute('aria-label', 'Copied');
+      b.title = 'Copied';
+    } catch {
+      b.textContent = '!';
+      b.setAttribute('aria-label', 'Copy failed; select and copy the value manually');
+      b.title = 'Copy failed; select and copy the value manually';
+    }
+    setTimeout(() => {
+      b.textContent = '⧉'; b.title = 'copy'; b.setAttribute('aria-label', 'copy');
+    }, 2000);
+  };
   return b;
 }
