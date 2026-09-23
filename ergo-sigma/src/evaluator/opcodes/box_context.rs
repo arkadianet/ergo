@@ -272,6 +272,24 @@ pub(in crate::evaluator) fn box_candidate_bytes_canonical(
     Ok(w.result())
 }
 
+/// Canonical FULL box serialization (`ErgoBox.sigmaSerializer.serialize`):
+/// the canonical candidate (see [`box_candidate_bytes_canonical`]) followed by
+/// the 32-byte transaction id and the VLQ output index.
+///
+/// This is the bytes Scala's `DataSerializer.serialize(SBox)` emits for a
+/// `Global.serialize` call — it always re-serializes from parsed structure
+/// (`ErgoBox.scala:204-211`), never from the retained `_bytes`. It is therefore
+/// deliberately independent of [`EvalBox::raw_bytes`], which is the *retained*
+/// wire slice for data-deserialized boxes (Scala `ErgoBox.bytes`) and may carry
+/// a non-canonical register encoding that must not leak into serialization.
+pub(in crate::evaluator) fn box_canonical_bytes(b: &EvalBox) -> Result<Vec<u8>, EvalError> {
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    w.put_bytes(&box_candidate_bytes_canonical(b)?);
+    w.put_bytes(&b.transaction_id);
+    w.put_u16(b.output_index);
+    Ok(w.result())
+}
+
 /// Structural register re-encode for test-only boxes that carry no
 /// `register_bytes`. Identical output to the cached block for any box built
 /// from wire bytes — `write_registers` is the same encoder that produced them.

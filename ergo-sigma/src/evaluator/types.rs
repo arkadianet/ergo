@@ -29,8 +29,14 @@ pub struct EvalBox {
     pub registers: [Option<RegisterValue>; 6],
     /// Token collection: (token_id, amount) pairs.
     pub tokens: Vec<([u8; 32], u64)>,
-    /// Full serialized box bytes for ExtractBytes (0xC3).
-    /// Populated from ErgoBox at construction; empty for test-only boxes.
+    /// The box's wire bytes for `ExtractBytes` (0xC3) — Scala `ErgoBox.bytes`.
+    /// For a box materialized from the data serializer (SBox constant /
+    /// `deserializeTo[Box]`) this is the RETAINED parse slice, so a
+    /// non-canonical encoding survives (`00 aa..aa` identity GroupElement) and
+    /// `id` hashes those bytes. For context boxes (SELF / INPUTS / OUTPUTS) it
+    /// is the canonical serialization. This is NOT what `Global.serialize(SBox)`
+    /// emits: `DataSerializer.serialize(SBox)` re-serializes from structure
+    /// (`box_canonical_bytes`), never from `bytes`. Empty for test-only boxes.
     pub raw_bytes: Vec<u8>,
     /// Verbatim register block (count byte + concatenated per-register
     /// entries) exactly as it appeared on the wire. Preserves each register's

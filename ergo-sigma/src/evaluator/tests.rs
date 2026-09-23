@@ -3341,7 +3341,7 @@ fn sheader_gate_is_value_based_not_type_based() {
             nonce: [0; 8],
         },
     };
-    let hv = SigmaValue::Header(Box::new(h));
+    let hv = SigmaValue::Header(Box::new(h), [0u8; 32]);
     assert!(
         crate::evaluator::helpers::sigma_to_value_versioned(&SigmaType::SHeader, &hv, &ctx_v2)
             .is_err(),
@@ -3875,7 +3875,10 @@ fn select_field_4_and_5() {
     // 5 goes through 0x8C SelectField with `field_idx = 4/5`, not
     // through the removed 0x8A/0x8B dispatch arms. A >2-element tuple
     // only exists as a value/constant (CreateTuple 0x86 evaluates only
-    // pairs), so the fixture is a 5-tuple constant.
+    // pairs). Scala materializes such a constant as the raw `Coll`
+    // (`Evaluation.toDslTuple`, arity != 2) and `SelectField.eval` matches
+    // only `Tuple2`, so the arm must ERROR — the opcode routing is still
+    // exercised, but a non-pair tuple never indexes.
     let tuple = int_tuple_const(&[10, 20, 30, 40, 50]);
     let s4 = op(
         0x8C,
@@ -3891,8 +3894,9 @@ fn select_field_4_and_5() {
             field_idx: 5,
         },
     );
-    assert_eq!(run_eval(&s4), Value::Int(40));
-    assert_eq!(run_eval(&s5), Value::Int(50));
+    for e in [s4, s5] {
+        assert!(matches!(run_eval_err(&e), EvalError::TypeError { .. }));
+    }
 }
 
 // ── Batch 4: Missing corpus-observed opcodes ────────────────────
@@ -4937,12 +4941,40 @@ fn reject_garbage_proof_for_provedlog() {
 // (0x8C); these tests go through SelectField directly and keep the
 // accept-set parity-reject coverage intact.
 
-/// SelectField with field_idx 1/2/3 is the Scala-emitted form of
-/// tuple field access. Exercises all three on a 5-tuple constant
-/// (>2-element tuples exist only as values, not CreateTuple nodes).
+/// SelectField on a non-pair `STuple` must error: Scala's
+/// `Evaluation.toDslTuple` (`Evaluation.scala:99-102`) materializes an arity
+/// != 2 tuple as the raw `Coll`, and `SelectField.eval`
+/// (`transformers.scala:295-306`) matches only `Tuple2` — anything else falls
+/// to `Value.typeError`. SANTA `SelectField.non_pair` pins the 1-tuple case;
+/// the 5-tuple case is the same rule (a >2 tuple never indexes).
 #[test]
-fn select_field_1_2_3_on_tuple_of_5() {
-    let tuple = int_tuple_const(&[10, 20, 30, 40, 50]);
+fn select_field_on_non_pair_tuple_errors() {
+    for tuple in [
+        int_tuple_const(&[5]),
+        int_tuple_const(&[10, 20, 30, 40, 50]),
+    ] {
+        for field_idx in [1u8, 2, 3] {
+            let e = op(
+                0x8C,
+                Payload::SelectField {
+                    input: Box::new(tuple.clone()),
+                    field_idx,
+                },
+            );
+            let err = run_eval_err(&e);
+            assert!(
+                matches!(err, EvalError::TypeError { .. }),
+                "SelectField on a non-pair tuple must error, got {err:?}"
+            );
+        }
+    }
+}
+
+/// SelectField with field_idx 1/2 on a PAIR is the Scala-emitted form of
+/// tuple field access (`Tuple2`).
+#[test]
+fn select_field_1_2_on_pair() {
+    let tuple = int_tuple_const(&[10, 20]);
     let s1 = op(
         0x8C,
         Payload::SelectField {
@@ -4953,20 +4985,12 @@ fn select_field_1_2_3_on_tuple_of_5() {
     let s2 = op(
         0x8C,
         Payload::SelectField {
-            input: Box::new(tuple.clone()),
-            field_idx: 2,
-        },
-    );
-    let s3 = op(
-        0x8C,
-        Payload::SelectField {
             input: Box::new(tuple),
-            field_idx: 3,
+            field_idx: 2,
         },
     );
     assert_eq!(run_eval(&s1), Value::Int(10));
     assert_eq!(run_eval(&s2), Value::Int(20));
-    assert_eq!(run_eval(&s3), Value::Int(30));
 }
 
 #[test]
@@ -9875,7 +9899,10 @@ fn subst_constants_pre_v3_template_header_constant_rejected() {
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let hbytes = hex::decode(v[0]["bytes"].as_str().unwrap()).unwrap();
     let header = read_header(&mut VlqReader::new(&hbytes)).expect("header parse");
-    let header_val = SigmaValue::Header(Box::new(header));
+    let header_val = SigmaValue::Header(
+        Box::new(header),
+        *ergo_primitives::digest::blake2b256(&hbytes).as_bytes(),
+    );
 
     let mut w = VlqWriter::new();
     w.put_u8(0x10); // header: segregated
@@ -11423,6 +11450,77 @@ fn test_eval_header_v2() -> EvalHeader {
     }
 }
 
+/// SANTA `Global.deserializeTo_Header_id_basis`: a header read by the data
+/// serializer keeps the Blake2b256 of the RETAINED input slice as its id
+/// (Scala `ErgoHeader.serializedId`; `ErgoHeader.scala:132-140,167-180`), so two
+/// headers that decode to the same fields but differ in a non-canonical pk
+/// encoding are NOT equal (`CHeader.equals`/`hashCode` are id-based) — hashing a
+/// canonical re-serialization would collapse them.
+#[test]
+fn sheader_constant_retains_input_slice_id() {
+    use ergo_primitives::digest::{ADDigest, Digest32, ModifierId};
+    use ergo_primitives::group_element::GroupElement;
+    use ergo_ser::autolykos::AutolykosSolution;
+    use ergo_ser::header::Header;
+    use ergo_ser::sigma_value::read_value;
+
+    let h = Header {
+        version: 2,
+        parent_id: ModifierId::from_bytes([0x01; 32]),
+        ad_proofs_root: Digest32::from_bytes([0x02; 32]),
+        transactions_root: Digest32::from_bytes([0x03; 32]),
+        state_root: ADDigest::from_bytes([0x04; 33]),
+        timestamp: 1,
+        extension_root: Digest32::from_bytes([0x05; 32]),
+        n_bits: 0x1a01_7660,
+        height: 1,
+        votes: [0, 0, 0],
+        unparsed_bytes: Vec::new(),
+        // Identity pk so the non-canonical `00 aa..aa` encoding decodes to the
+        // same point; a distinctive nonce anchors the pk offset below.
+        solution: AutolykosSolution::V2 {
+            pk: GroupElement::from_bytes([0x00; 33]),
+            nonce: [0xAB; 8],
+        },
+    };
+    let (canonical, canonical_id) = ergo_ser::header::serialize_header(&h).unwrap();
+
+    // Locate the identity pk: 33 zero bytes immediately before the nonce.
+    let nonce = [0xABu8; 8];
+    let pos = canonical
+        .windows(41)
+        .position(|w| w[..33] == [0x00u8; 33] && w[33..] == nonce)
+        .expect("identity pk + nonce must appear in the serialization");
+    let mut garbage = canonical.clone();
+    let mut ge_garbage = [0xaau8; 33];
+    ge_garbage[0] = 0x00;
+    garbage[pos..pos + 33].copy_from_slice(&ge_garbage);
+
+    let mut r = ergo_primitives::reader::VlqReader::new(&garbage);
+    let val = read_value(&mut r, &SigmaType::SHeader).expect("garbage-encoded header parses");
+    let retained_id = match &val {
+        SigmaValue::Header(_, id) => *id,
+        other => panic!("expected SigmaValue::Header, got {other:?}"),
+    };
+    assert_eq!(
+        retained_id,
+        *ergo_primitives::digest::blake2b256(&garbage).as_bytes(),
+        "id must hash the retained input slice"
+    );
+    assert_ne!(
+        retained_id,
+        *canonical_id.as_bytes(),
+        "the garbage encoding must not collapse to the canonical id"
+    );
+
+    // Materialization carries the retained id through to the evaluator value.
+    let v = sigma_to_value(&SigmaType::SHeader, &val).unwrap();
+    match v {
+        Value::Header(eh) => assert_eq!(eh.id, retained_id),
+        other => panic!("expected Value::Header, got {other:?}"),
+    }
+}
+
 #[test]
 fn serialize_put_cost_avltree_is_constant_38() {
     use ergo_ser::sigma_type::SigmaType as T;
@@ -11454,7 +11552,7 @@ fn serialize_put_cost_header_v2_is_244() {
     assert_eq!(
         crate::evaluator::opcodes::method_call::serialize_put_cost(
             &T::SHeader,
-            &Sv::Header(Box::new(h))
+            &Sv::Header(Box::new(h), [0u8; 32])
         )
         .unwrap(),
         244,
@@ -11480,7 +11578,7 @@ fn serialize_put_cost_header_v1_is_283() {
     assert_eq!(
         crate::evaluator::opcodes::method_call::serialize_put_cost(
             &T::SHeader,
-            &Sv::Header(Box::new(h))
+            &Sv::Header(Box::new(h), [0u8; 32])
         )
         .unwrap(),
         283,
@@ -11531,7 +11629,7 @@ fn serialize_avltree_and_header_eval_total_and_bytes() {
     let h = test_eval_header_v2().to_header();
     let (v, total) = eval_cost(&serialize_call(
         SigmaType::SHeader,
-        SigmaValue::Header(Box::new(h)),
+        SigmaValue::Header(Box::new(h), [0u8; 32]),
     ));
     assert_eq!(total, 268, "serialize(Header) total");
     assert!(
@@ -12710,6 +12808,87 @@ fn extract_bytes_with_no_ref_canonicalizes_register_ge() {
         expected_tail.as_slice(),
         "register tail must be canonical identity GE"
     );
+}
+
+/// SANTA `Box.bytes_byte_basis` / `Box.accessor_method_form` /
+/// `Box.eq_id_basis`: a box materialized from the data serializer retains the
+/// exact parse slice (Scala `ErgoBox._bytes`; `ErgoBox.scala:73,87-91,214-227`),
+/// so `.bytes`/`.id` keep a non-canonical identity GE encoding (`00 aa..aa`)
+/// and a garbage-encoded twin has a different id (box equality is id-based).
+/// `Global.serialize(SBox)` must still re-serialize canonically
+/// (`DataSerializer.serialize(SBox)`; `ErgoBox.scala:204-211`).
+#[test]
+fn sbox_constant_retains_wire_bytes_for_bytes_and_id() {
+    // Candidate: value 1000000, `sigmaProp(true)`, height 0, no tokens, R4 = GE
+    // with a 0x00 lead and garbage trailing bytes (the vector's box shape).
+    let mut candidate = hex::decode("c0843d10010101d1730000000107").unwrap();
+    let mut ge_garbage = [0xaau8; 33];
+    ge_garbage[0] = 0x00;
+    candidate.extend_from_slice(&ge_garbage);
+    // Full box constant = candidate + txId + output index.
+    let mut box_bytes = candidate.clone();
+    box_bytes.extend_from_slice(&[0x11u8; 32]);
+    box_bytes.push(0x00);
+
+    let v = sigma_to_value(
+        &SigmaType::SBox,
+        &SigmaValue::OpaqueBoxBytes(box_bytes.clone()),
+    )
+    .expect("Scala accepts a 0x00-lead point");
+    let eb = match v.clone() {
+        Value::InlineBox(eb) => *eb,
+        other => panic!("expected InlineBox, got {other:?}"),
+    };
+    assert!(
+        eb.raw_bytes.contains(&0xAA),
+        "`.bytes` must retain the parse slice, got {:?}",
+        eb.raw_bytes
+    );
+    assert_eq!(
+        eb.id,
+        *ergo_primitives::digest::blake2b256(&box_bytes).as_bytes(),
+        "`.id` must hash the retained slice"
+    );
+
+    // ExtractBytes (0xC3) surfaces the retained slice.
+    let ctx = ctx_with_self_box(&eb);
+    let expr = op(0xC3, Payload::One(Box::new(op(0xA7, Payload::Zero))));
+    match run_eval_ctx(&expr, &ctx) {
+        Value::CollBytes(b) => assert!(b.contains(&0xAA), "ExtractBytes must be retained"),
+        other => panic!("expected CollBytes, got {other:?}"),
+    }
+
+    // The canonical twin (same decoded value, canonical R4) has a different id
+    // — the `box1 == box2` false case.
+    let mut canon = candidate.clone();
+    canon[14..47].copy_from_slice(&[0x00; 33]);
+    canon.extend_from_slice(&[0x11u8; 32]);
+    canon.push(0x00);
+    let canon_eb = match sigma_to_value(&SigmaType::SBox, &SigmaValue::OpaqueBoxBytes(canon))
+        .expect("canonical twin parses")
+    {
+        Value::InlineBox(eb) => *eb,
+        other => panic!("expected InlineBox, got {other:?}"),
+    };
+    assert_ne!(
+        eb.id, canon_eb.id,
+        "byte-basis identity: the garbage encoding must yield a different id"
+    );
+
+    // `Global.serialize(SBox)` re-serializes from structure — no garbage.
+    let (tpe, sv) = value_to_typed_sigma(&v, None).unwrap();
+    assert_eq!(tpe, SigmaType::SBox);
+    match sv {
+        SigmaValue::OpaqueBoxBytes(canonical) => {
+            assert!(
+                !canonical.contains(&0xAA),
+                "serialize must canonicalize the register, got {canonical:?}"
+            );
+            let mut r = ergo_primitives::reader::VlqReader::new(&canonical);
+            ergo_ser::ergo_box::read_ergo_box(&mut r).expect("canonical bytes parse");
+        }
+        other => panic!("expected OpaqueBoxBytes, got {other:?}"),
+    }
 }
 
 // ---- Cluster: ExtractBytesWithNoRef preserves register node provenance ----
