@@ -13,7 +13,7 @@ use ergo_api::wallet::types::{
 };
 use ergo_api::wallet::WalletAdminError;
 
-use super::WriterContext;
+use super::{ChainStateAccessor, WriterContext};
 
 /// Failed-attempt budget for a sensitive wallet operation, enforced in the
 /// writer task so every surface (compat `/wallet/unlock`, native
@@ -210,29 +210,45 @@ pub(crate) async fn restore(
 // redb::Error is large (~160 B); the background-rescan closures
 // can't avoid surfacing it as their `Err` type, so silence the
 // `result_large_err` lint at the handler scope.
+fn rescan_chain_preflight(chain: &dyn ChainStateAccessor) -> Result<u32, WalletAdminError> {
+    if chain.is_pruned() {
+        return Err(WalletAdminError::RestorePruningUnsupported);
+    }
+    let tip = chain
+        .try_tip_height()
+        .map_err(|e| WalletAdminError::Internal(format!("chain tip read failed: {e}")))?;
+    if tip == 0 {
+        return Err(WalletAdminError::RescanUnavailable(
+            "chain block-read history is unavailable before height 1".to_string(),
+        ));
+    }
+    let first = chain
+        .try_read_block_at(1)
+        .map_err(|e| WalletAdminError::Internal(format!("chain block read failed: {e}")))?;
+    let tip_block = chain
+        .try_read_block_at(tip)
+        .map_err(|e| WalletAdminError::Internal(format!("chain block read failed: {e}")))?;
+    if first.is_none() || tip_block.is_none() {
+        return Err(WalletAdminError::RescanUnavailable(
+            "chain block-read history is unavailable before height 1".to_string(),
+        ));
+    }
+    Ok(tip)
+}
+
 #[allow(clippy::result_large_err)]
 pub(crate) async fn rescan(
     ctx: &WriterContext<'_>,
     from_height: u32,
     reply: oneshot::Sender<Result<(), WalletAdminError>>,
 ) {
-    // Block replay is not yet wired; refuse before touching any
-    // wallet state to prevent the destructive clear-then-skip
-    // sequence that would empty the wallet.
-    if !ctx.chain.read_block_at_supported() {
-        // Backend cannot replay blocks (e.g. digest/pruned). Typed so the native
-        // surface maps it to `rescan_unavailable(409)` (and the compat surface to
-        // 409 too) rather than an opaque 500.
-        let _ = reply.send(Err(WalletAdminError::RescanUnavailable(
-            "chain block-read not available on this backend".to_string(),
-        )));
-        return;
-    }
-    if ctx.chain.is_pruned() {
-        let _ = reply.send(Err(WalletAdminError::RestorePruningUnsupported));
-        return;
-    }
-    let tip_h = ctx.chain.tip_height();
+    let tip_h = match rescan_chain_preflight(ctx.chain.as_ref()) {
+        Ok(tip) => tip,
+        Err(e) => {
+            let _ = reply.send(Err(e));
+            return;
+        }
+    };
     let start_h = from_height.min(tip_h);
     // Snapshot the registered scans for the rebuild. Scan rebuild is a
     // full-rebuild operation only (start_h == 0); a partial wallet rescan
@@ -302,10 +318,18 @@ pub(crate) async fn rescan(
     tokio::spawn(async move {
         let read_block =
             |h: u32| -> Result<Option<ergo_state::wallet::scan::RescanBlock>, redb::Error> {
-                Ok(chain_bg.read_block_at(h))
+                chain_bg.try_read_block_at(h).map_err(|e| {
+                    redb::Error::Io(std::io::Error::other(format!(
+                        "chain block read at {h}: {e}"
+                    )))
+                })
             };
         let chain_tip = chain_bg.clone();
-        let read_tip = move || -> Result<u32, redb::Error> { Ok(chain_tip.tip_height()) };
+        let read_tip = move || -> Result<u32, redb::Error> {
+            chain_tip
+                .try_tip_height()
+                .map_err(|e| redb::Error::Io(std::io::Error::other(format!("chain tip read: {e}"))))
+        };
         let is_cancelled =
             || -> bool { !crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst) };
         let scan_matcher_dyn = scan_matcher
@@ -1496,5 +1520,107 @@ mod attempt_limiter_tests {
         assert!(limiter
             .gate_at(t0 + AttemptLimiter::WINDOW + Duration::from_secs(2))
             .is_ok());
+    }
+}
+
+#[cfg(test)]
+mod rescan_preflight_tests {
+    use super::rescan_chain_preflight;
+    use crate::node::wallet_bridge::ChainStateAccessor;
+    use ergo_api::wallet::WalletAdminError;
+    use ergo_state::store::StateError;
+    use ergo_state::wallet::scan::RescanBlock;
+
+    struct HeightOneChain;
+
+    impl ChainStateAccessor for HeightOneChain {
+        fn wallet_scan_height(&self) -> u32 {
+            0
+        }
+
+        fn tip_height(&self) -> u32 {
+            1
+        }
+
+        fn is_pruned(&self) -> bool {
+            false
+        }
+
+        fn read_block_at(&self, height: u32) -> Option<RescanBlock> {
+            (height == 1).then_some(RescanBlock {
+                block_id: [1; 32],
+                txs: vec![],
+            })
+        }
+    }
+
+    struct MissingHeightOneChain;
+
+    impl ChainStateAccessor for MissingHeightOneChain {
+        fn wallet_scan_height(&self) -> u32 {
+            0
+        }
+
+        fn tip_height(&self) -> u32 {
+            10
+        }
+
+        fn is_pruned(&self) -> bool {
+            false
+        }
+
+        fn read_block_at(&self, _height: u32) -> Option<RescanBlock> {
+            None
+        }
+    }
+
+    struct FailingChain;
+
+    impl ChainStateAccessor for FailingChain {
+        fn wallet_scan_height(&self) -> u32 {
+            0
+        }
+
+        fn tip_height(&self) -> u32 {
+            0
+        }
+
+        fn is_pruned(&self) -> bool {
+            false
+        }
+
+        fn read_block_at(&self, _height: u32) -> Option<RescanBlock> {
+            None
+        }
+
+        fn try_tip_height(&self) -> Result<u32, StateError> {
+            Err(StateError::NoCommittedState)
+        }
+    }
+
+    #[test]
+    fn native_rescan_capability_probes_height_one() {
+        let chain = HeightOneChain;
+        assert!(chain.read_block_at_supported());
+        assert_eq!(rescan_chain_preflight(&chain).unwrap(), 1);
+    }
+
+    #[test]
+    fn missing_height_one_is_refused_before_rebuild() {
+        let chain = MissingHeightOneChain;
+        assert!(!chain.read_block_at_supported());
+        assert!(matches!(
+            rescan_chain_preflight(&chain),
+            Err(WalletAdminError::RescanUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn chain_read_errors_are_not_treated_as_tip_zero() {
+        let chain = FailingChain;
+        assert!(matches!(
+            rescan_chain_preflight(&chain),
+            Err(WalletAdminError::Internal(message)) if message.contains("chain tip read failed")
+        ));
     }
 }

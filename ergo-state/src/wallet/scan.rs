@@ -89,6 +89,12 @@ impl WalletScanService {
         T: FnMut() -> Result<u32, redb::Error>,
         C: FnMut() -> bool,
     {
+        let mut invalidation_guard = InvalidateOnError::new(db);
+        if is_cancelled() {
+            invalidate_scan(db)?;
+            invalidation_guard.disarm();
+            return Ok(0);
+        }
         // Registered-scan rebuild only on a full rebuild (scans have no
         // range-rewind path). `None` matcher = a node with no scans.
         let scan_rebuild = scan_matcher.is_some() && start_height == 0;
@@ -288,11 +294,18 @@ impl WalletScanService {
             for h in current_start..=current_target {
                 // Per-block cancellation check.
                 if is_cancelled() {
+                    invalidate_scan(db)?;
+                    invalidation_guard.disarm();
                     return Ok(processed);
                 }
                 let block = match read_block(h)? {
                     Some(b) => b,
-                    None => continue,
+                    None if h == 0 => continue,
+                    None => {
+                        return Err(redb::Error::Io(std::io::Error::other(format!(
+                            "wallet rescan: missing block at height {h}"
+                        ))));
+                    }
                 };
                 // Precompute registered-scan matches OUTSIDE the write txn: the
                 // predicate-match pass only READS block data, so running it here
@@ -408,6 +421,8 @@ impl WalletScanService {
 
             // Cancellation check at catch-up boundary.
             if is_cancelled() {
+                invalidate_scan(db)?;
+                invalidation_guard.disarm();
                 return Ok(processed);
             }
 
@@ -425,12 +440,21 @@ impl WalletScanService {
         // state; a scan rebuild that skipped a block (matcher contract
         // violation, `scan_rebuild_complete == false`) left the scan tables
         // incomplete and must stay invalidated so the operator rescans again.
+        if is_cancelled() {
+            invalidate_scan(db)?;
+            invalidation_guard.disarm();
+            return Ok(processed);
+        }
         if start_height == 0 && scan_rebuild_complete {
             let txn = crate::begin_write_qr(db)?;
             txn.open_table(WALLET_SCAN_INVALIDATED)?.insert((), false)?;
             txn.commit()?;
         }
+        if start_height == 0 && !scan_rebuild_complete {
+            return Ok(processed);
+        }
 
+        invalidation_guard.disarm();
         Ok(processed)
     }
 
@@ -445,6 +469,38 @@ impl WalletScanService {
         };
         Ok(tbl.get(()).ok().flatten().map(|g| g.value()).unwrap_or(0))
     }
+}
+
+struct InvalidateOnError<'a> {
+    db: &'a Database,
+    armed: bool,
+}
+
+impl<'a> InvalidateOnError<'a> {
+    fn new(db: &'a Database) -> Self {
+        Self { db, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for InvalidateOnError<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Err(e) = invalidate_scan(self.db) {
+                tracing::error!(error = %e, "wallet rescan: failed to persist scan invalidation");
+            }
+        }
+    }
+}
+
+fn invalidate_scan(db: &Database) -> Result<(), redb::Error> {
+    let txn = crate::begin_write_qr(db)?;
+    txn.open_table(WALLET_SCAN_INVALIDATED)?.insert((), true)?;
+    txn.commit()?;
+    Ok(())
 }
 
 // --- internal helpers ---
