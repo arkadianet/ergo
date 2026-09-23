@@ -264,7 +264,11 @@ def verdict_of(scenario, aborted, failures, measurement_complete=None,
 # Which scenarios take `--reference-follower` (spec §8). The others
 # refuse it rather than accepting it and measuring nothing with it.
 REFERENCE_FOLLOWER_SCENARIOS = ('steady', 'restart', 'fork',
-                                'reconstruct_rate')
+                                'reconstruct_rate', 'flood')
+# `flood` aims its adversary at the ONE Scala follower the flag adds (F13's
+# pending store is attack surface on the Scala side); with two there is
+# no single target, so `both` is refused rather than guessed.
+SINGLE_FOLLOWER_SCENARIOS = ('flood',)
 
 
 def resolve_roles(scenario, reference_follower=None):
@@ -286,6 +290,10 @@ def resolve_roles(scenario, reference_follower=None):
         raise SystemExit(
             f'--reference-follower does not apply to {scenario}; it is '
             f'accepted by {", ".join(REFERENCE_FOLLOWER_SCENARIOS)}')
+    if reference_follower == 'both' and scenario in SINGLE_FOLLOWER_SCENARIOS:
+        raise SystemExit(
+            f'{scenario} takes one target follower, so --reference-follower '
+            'both is refused; run it once with stock and once with patched')
     wanted = {'stock': ['scala_follower'],
               'patched': ['scala_follower_patched'],
               'both': ['scala_follower', 'scala_follower_patched']}[
@@ -1798,11 +1806,68 @@ def _self_test():
     assert 'scala_follower_patched' in resolve_roles('fork', 'patched')
     # And a scenario the flag does not apply to says so.
     try:
-        resolve_roles('flood', 'stock')
+        resolve_roles('evict', 'stock')
     except SystemExit as error:
-        assert 'does not apply to flood' in str(error), str(error)
+        assert 'does not apply to evict' in str(error), str(error)
     else:
         raise AssertionError('--reference-follower must be scenario-checked')
+    # ----- proofs step B: the F13 flood aims at a Scala FOLLOWER -----
+    #
+    # F13's pending store is new attack surface on the SCALA follower,
+    # and `flood` could only ever aim at the Rust one: `flood --build
+    # F13` ran no patched role at all. The flag adds ONE follower as the
+    # target; `both` has two candidates and is refused with the reason.
+    assert 'scala_follower_patched' in resolve_roles('flood', 'patched')
+    assert 'scala_follower' in resolve_roles('flood', 'stock')
+    try:
+        resolve_roles('flood', 'both')
+    except SystemExit as error:
+        assert 'one target' in str(error), str(error)
+    else:
+        raise AssertionError('flood --reference-follower both must be refused')
+    from scenarios import flood as _flood_eval
+    _adv = '/127.105.0.1:5555'
+    _miner = '/127.0.0.1:19600'
+
+    def _root(block, remote):
+        return ('INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - On '
+                f'processing {block}, downloading its parent and unknown '
+                f'ordering block ff from ConnectedPeer(connection: '
+                f'ConnectionId(remote={remote}, local=/127.0.0.3:19603, '
+                'direction=Incoming) , remote version: Some(6.5.0))')
+    _lines = [
+        _root('a1', _adv), _root('a2', _adv),
+        _root('b1', _miner), _root('b2', _miner),
+        'INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Processing '
+        'valid sub-block b1 with parent sub-block None and parent block ff',
+        'INFO org.ergoplatform.network.peer.PeerManager - /127.105.0.1:5555 '
+        'penalized, penalty: NonDeliveryPenalty',
+        'INFO org.ergoplatform.network.peer.PeerManager - /127.0.0.1:19600 '
+        'penalized, penalty: NonDeliveryPenalty',
+        'INFO org.ergoplatform.network.peer.PeerManager - /127.0.0.1:19600 '
+        'penalized, penalty: MisbehaviorPenalty',
+    ]
+    # Samples: (log line count at the sample, store size, store bytes).
+    _samples = [{'lines': 0, 'size': 0, 'bytes': 0},
+                {'lines': 3, 'size': 256, 'bytes': 70000},
+                {'lines': 8, 'size': 250, 'bytes': 69000}]
+    _ev = _flood_eval.evaluate_root_flood(
+        _lines, _samples, {'maxEntries': 256, 'maxBytes': 4194304},
+        adversary_octets=range(100, 220))
+    assert _ev['adversary_root_lines'] == 2, _ev
+    assert _ev['honest_roots'] == 2 and _ev['honest_roots_landed'] == 1, _ev
+    assert _ev['honest_roots_while_saturated'] == 1, _ev
+    assert _ev['honest_roots_landed_while_saturated'] == 0, _ev
+    assert _ev['peak_size'] == 256 and _ev['caps_held'], _ev
+    assert _ev['honest_penalties'] == {'NonDeliveryPenalty': 1,
+                                       'MisbehaviorPenalty': 1}, _ev
+    assert _ev['honest_misbehaviour_penalties'] == 1, _ev
+    assert _ev['adversary_penalties'] == 1, _ev
+    _over = _flood_eval.evaluate_root_flood(
+        _lines, _samples + [{'lines': 8, 'size': 257, 'bytes': 1}],
+        {'maxEntries': 256, 'maxBytes': 4194304},
+        adversary_octets=range(100, 220))
+    assert not _over['caps_held'], _over
 
     # Resolving roles must NOT import `lifecycle`. `lifecycle.P2P` /
     # `REST` are read from the environment at import and `smoke.URLS` is

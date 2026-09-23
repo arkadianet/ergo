@@ -19,7 +19,9 @@ Afterwards the follower's `peers.redb` is purged: the harness binds each
 slot to its own `127.<k>.0.1` and those addresses poison the address
 book, starving the next run's dialer.
 """
+import re
 import subprocess
+import threading
 import time
 
 import smoke
@@ -33,6 +35,11 @@ from . import common
 ADVERSARY_SOURCE = '127.210.0.1'
 
 NODES = ('scala', 'rust')
+# `--reference-follower stock|patched` adds ONE Scala follower, seeded
+# from the miner's directory, and the adversary is aimed at IT instead of
+# the Rust follower (F13's pending store is Scala-side attack surface).
+START_NODES = ('scala', 'rust')
+SEEDED_NODES = ('scala2', 'scala3')
 ANNOUNCEMENTS = 10_000
 DELIVERIES = 1_000
 BLOCKS_BEFORE_FLOOD = 3
@@ -82,9 +89,351 @@ def _adversary_binary():
     return target
 
 
+# ----- the Scala-follower ROOT flood (plan 3 Task 7, F13) -----
+#
+# F13 holds UNVALIDATED announcements at height + 2 — the ones that root
+# the next ordering block's input-block tree — in a bounded store until
+# their ordering parent is applied. It is admitted before any PoW check
+# (`ErgoNodeViewSynchronizer.scala` +2 branch), so it is the new attack
+# surface: the flood fills it from many hosts and the scenario checks
+# that (a) its caps hold, (b) HONEST roots still land while it is
+# saturated, (c) the honest peers are not punished for the flood, and
+# (d) the follower keeps applying blocks on time.
+#
+# The store's caps are F13's `reference.conf` defaults; the harness does
+# not override them, so the numbers here are the ones a node ships with.
+ROOT_FLOOD_CAPS = {'maxEntries': 256, 'maxBytes': 4 * 1024 * 1024,
+                   'perPeer': 32, 'ttlMs': 120_000}
+# 10 fresh hosts per wave x 40 announcements: 10 x 32 admitted per wave
+# is past the 256-entry cap, so capacity eviction (and its fairness rule)
+# is exercised every wave. 12 waves 20 s apart keep it saturated for
+# about four ordering blocks; the hosts are 127.100.0.1 .. 127.219.0.1.
+ROOT_FLOOD = {'hosts': 10, 'per_host': 40, 'waves': 12, 'interval_ms': 20_000,
+              'first_octet': 100}
+BLOCKS_BEFORE_ROOT_FLOOD = 4
+BLOCKS_AFTER_ROOT_FLOOD = 3
+# A sample at or above this share of the entry cap counts as SATURATED.
+SATURATED_SHARE = 0.9
+ROOT_FLOOD_SAMPLE_SECONDS = 0.5
+
+_ROOT_LINE = re.compile(
+    r'On processing (?P<id>[0-9a-f]+), downloading its parent and unknown '
+    r'ordering block (?P<parent>[0-9a-f]+) from .*?remote=/(?P<host>[0-9.]+):')
+_VALID_LINE = re.compile(r'Processing valid sub-block (?P<id>[0-9a-f]+)')
+_PENALTY_LINE = re.compile(
+    r'/(?P<host>[0-9.]+):\d+ penalized, penalty: (?P<kind>\w+)')
+_BLACKLIST_LINE = re.compile(r'/(?P<host>[0-9.]+):\d+ blacklisted')
+
+
+def _adversary_host(host, adversary_octets):
+    parts = host.split('.')
+    return (len(parts) == 4 and parts[0] == '127' and parts[2:] == ['0', '1']
+            and int(parts[1]) in adversary_octets)
+
+
+def evaluate_root_flood(lines, samples, caps, adversary_octets):
+    """What the follower's log and `/info` samples say about the flood.
+
+    Pure, so `campaign.py --self-test` pins it. `lines` is the follower's
+    log over the flood window; `samples` are `{'lines', 'size', 'bytes'}`
+    taken during it, where `lines` is the log length at the sample, which
+    is how a log line is placed in time (the Scala log carries no
+    timestamps). A root announcement is HONEST when its sender is not one
+    of the adversary's source hosts, and it LANDED when the follower
+    later logged it as a valid sub-block — for a +2 announcement that
+    only happens through the pending store's replay.
+    """
+    def size_at(index):
+        # The newest sample taken at or before this line.
+        size = None
+        for sample in samples:
+            if sample['lines'] <= index:
+                size = sample.get('size')
+        return size
+
+    saturated_at = caps['maxEntries'] * SATURATED_SHARE
+    honest, adversary, landed = {}, 0, set()
+    penalties_honest, penalties_adversary, blacklisted_honest = {}, 0, []
+    for index, line in enumerate(lines):
+        root = _ROOT_LINE.search(line)
+        if root:
+            if _adversary_host(root['host'], adversary_octets):
+                adversary += 1
+            else:
+                honest.setdefault(root['id'], index)
+            continue
+        valid = _VALID_LINE.search(line)
+        if valid and valid['id'] in honest:
+            landed.add(valid['id'])
+            continue
+        penalty = _PENALTY_LINE.search(line)
+        if penalty:
+            if _adversary_host(penalty['host'], adversary_octets):
+                penalties_adversary += 1
+            else:
+                penalties_honest[penalty['kind']] = \
+                    penalties_honest.get(penalty['kind'], 0) + 1
+            continue
+        banned = _BLACKLIST_LINE.search(line)
+        if banned and not _adversary_host(banned['host'], adversary_octets):
+            blacklisted_honest.append(line)
+    while_saturated = {block for block, index in honest.items()
+                       if (size_at(index) or 0) >= saturated_at}
+    sizes = [s['size'] for s in samples if s.get('size') is not None]
+    byte_counts = [s['bytes'] for s in samples if s.get('bytes') is not None]
+    peak_size = max(sizes) if sizes else None
+    peak_bytes = max(byte_counts) if byte_counts else None
+    return {
+        'adversary_root_lines': adversary,
+        'honest_roots': len(honest),
+        'honest_roots_landed': len(landed),
+        'honest_roots_while_saturated': len(while_saturated),
+        'honest_roots_landed_while_saturated': len(while_saturated & landed),
+        'saturated_at_entries': saturated_at,
+        'samples': len(samples),
+        'saturated_samples': sum(1 for x in sizes if x >= saturated_at),
+        'peak_size': peak_size,
+        'peak_bytes': peak_bytes,
+        'caps': caps,
+        'caps_held': (peak_size is not None and peak_size <= caps['maxEntries']
+                      and (peak_bytes or 0) <= caps['maxBytes']),
+        'honest_penalties': penalties_honest,
+        # A NonDeliveryPenalty against the honest miner is STOCK behaviour
+        # (the peered stock follower logs it without any flood); what the
+        # flood must never cause is a misbehaviour verdict against it,
+        # which is what a failed replay of a held announcement gives its
+        # sender.
+        'honest_misbehaviour_penalties': sum(
+            v for k, v in penalties_honest.items() if k != 'NonDeliveryPenalty'),
+        'honest_blacklisted': blacklisted_honest[:10],
+        'adversary_penalties': penalties_adversary,
+    }
+
+
+def _percentiles(values):
+    if not values:
+        return {'n': 0}
+    ordered = sorted(values)
+    return {'n': len(ordered), 'p50': smoke.percentile(ordered, 50),
+            'p95': smoke.percentile(ordered, 95), 'max': ordered[-1]}
+
+
+class _FollowerSampler:
+    """`/info` of the target follower and the miner, every half second.
+
+    Records each height's FIRST sighting on both, so the follower's delay
+    in applying each block is measurable, plus the store's size and the
+    REST latency — the synchronizer and the REST route share the actor
+    system, so a follower wedged by its store answers late or not at all.
+    """
+
+    def __init__(self, target, miner):
+        self.target, self.miner = target, miner
+        self.samples, self.first_seen = [], {target: {}, miner: {}}
+        self.phase = 'before'
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join(timeout=10)
+
+    def _loop(self):
+        while not self._stop.is_set():
+            now = time.monotonic()
+            sample = {'t': now, 'phase': self.phase,
+                      'lines': len(common._scala_log_lines(self.target))}
+            for node in (self.target, self.miner):
+                began = time.monotonic()
+                try:
+                    info = api(node, '/info', timeout=10) or {}
+                except Unavailable:
+                    sample[f'{node}_unavailable'] = True
+                    continue
+                if node == self.target:
+                    sample['latency_s'] = round(time.monotonic() - began, 3)
+                    pending = info.get('pendingInputAnnouncements')
+                    sample['store_present'] = isinstance(pending, dict)
+                    if isinstance(pending, dict):
+                        sample.update(size=pending.get('size'),
+                                      bytes=pending.get('bytes'),
+                                      evictions=pending.get('evictions'),
+                                      drops=pending.get('drops'))
+                height = info.get('fullHeight')
+                sample[f'{node}_height'] = height
+                if height is not None:
+                    self.first_seen[node].setdefault(height, (now, self.phase))
+            self.samples.append(sample)
+            self._stop.wait(ROOT_FLOOD_SAMPLE_SECONDS)
+
+    def apply_delays(self):
+        """Per height: seconds from the miner's first sighting to the
+        follower's, grouped by the phase the miner produced it in."""
+        out = {}
+        for height, (t_miner, phase) in self.first_seen[self.miner].items():
+            seen = self.first_seen[self.target].get(height)
+            if seen is not None:
+                out.setdefault(phase, []).append(round(max(0.0, seen[0] - t_miner), 2))
+        return out
+
+
+def _run_against_scala_follower(ctx, target):
+    import campaign
+    import lifecycle
+
+    common.seed_second_miner(ctx, campaign, lifecycle, nodes=SEEDED_NODES)
+    smoke.assertion_1_peering(ctx.run, ctx.evidence)
+    role = (ctx.roles or {}).get(target)
+    ctx.note('flood_target', {'node': target, 'role': role,
+                              'p2p': f'{lifecycle.P2P_HOST[target]}:'
+                                     f'{lifecycle.P2P[target]}',
+                              'plan': ROOT_FLOOD, 'caps': ROOT_FLOOD_CAPS})
+
+    sampler = _FollowerSampler(target, 'scala').start()
+    common.wait_ordering_blocks(ctx, BLOCKS_BEFORE_ROOT_FLOOD, 'pre_flood')
+    height_before = api_retry(target, '/info', ctx.run.deadline,
+                              what='the target follower height').get('fullHeight')
+    log_from = len(common._scala_log_lines(target))
+
+    binary = _adversary_binary()
+    command = [str(binary),
+               f'{lifecycle.P2P_HOST[target]}:{lifecycle.P2P[target]}', 'devnet',
+               f'127.0.0.1:{lifecycle.REST[target]}', 'input_block_root_flood',
+               str(ROOT_FLOOD['hosts']), str(ROOT_FLOOD['per_host']),
+               str(ROOT_FLOOD['waves']), str(ROOT_FLOOD['interval_ms']),
+               str(ROOT_FLOOD['first_octet'])]
+    ctx.note('adversary_command', ' '.join(command))
+    sampler.phase = 'flood'
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True,
+                                   timeout=1800, check=False)
+        ctx.note('adversary', {'returncode': completed.returncode,
+                               'seconds': round(time.monotonic() - started, 1),
+                               'stdout': completed.stdout[-4000:],
+                               'stderr': completed.stderr[-2000:]})
+        if completed.returncode != 0:
+            ctx.fail('the root-flood harness did not deliver its traffic '
+                     f'(exit {completed.returncode})',
+                     {'stdout': completed.stdout[-4000:]})
+    except subprocess.TimeoutExpired as error:
+        ctx.fail('the root-flood harness timed out', {'error': str(error)})
+    # Entries outlive the flood by up to the store's TTL: watch it drain.
+    sampler.phase = 'drain'
+    drain_until = min(ctx.run.deadline,
+                      time.monotonic() + ROOT_FLOOD_CAPS['ttlMs'] / 1000 + 10)
+    while time.monotonic() < drain_until:
+        ctx.run.idle(0.5)
+    log_to = len(common._scala_log_lines(target))
+    sampler.phase = 'after'
+    common.wait_ordering_blocks(ctx, BLOCKS_AFTER_ROOT_FLOOD, 'post_flood')
+    sampler.stop()
+
+    lines = common._scala_log_lines(target)
+    window = lines[log_from:log_to]
+    flood_samples = [dict(s, lines=s['lines'] - log_from)
+                     for s in sampler.samples if s['phase'] in ('flood', 'drain')]
+    octets = range(ROOT_FLOOD['first_octet'],
+                   ROOT_FLOOD['first_octet']
+                   + ROOT_FLOOD['hosts'] * ROOT_FLOOD['waves'])
+    verdict = evaluate_root_flood(window, flood_samples, ROOT_FLOOD_CAPS, octets)
+    store_present = any(s.get('store_present') for s in sampler.samples)
+    verdict['store_present'] = store_present
+    verdict['log_window'] = {'from_line': log_from, 'to_line': log_to}
+    last = next((s for s in reversed(flood_samples) if 'evictions' in s), {})
+    first = next((s for s in sampler.samples if 'evictions' in s), {})
+    verdict['evictions_in_window'] = ((last.get('evictions') or 0)
+                                      - (first.get('evictions') or 0))
+    verdict['drops_in_window'] = ((last.get('drops') or 0)
+                                  - (first.get('drops') or 0))
+    ctx.note('root_flood', verdict)
+
+    # The same three counts BEFORE the flood, as the honest baseline the
+    # flood window is read against (no adversary line can appear there).
+    before = evaluate_root_flood(
+        lines[:log_from], [], ROOT_FLOOD_CAPS, octets)
+    ctx.note('root_flood_baseline_before', {
+        k: before[k] for k in ('honest_roots', 'honest_roots_landed',
+                               'honest_penalties')})
+
+    delays = sampler.apply_delays()
+    latencies = {}
+    for s in sampler.samples:
+        if 'latency_s' in s:
+            latencies.setdefault(s['phase'], []).append(s['latency_s'])
+    unavailable = {}
+    for s in sampler.samples:
+        if s.get(f'{target}_unavailable'):
+            unavailable[s['phase']] = unavailable.get(s['phase'], 0) + 1
+    ctx.note('responsiveness', {
+        'block_apply_delay_s': {p: _percentiles(v) for p, v in delays.items()},
+        'rest_latency_s': {p: _percentiles(v) for p, v in latencies.items()},
+        'rest_unavailable_samples': unavailable,
+        'samples': len(sampler.samples),
+    })
+
+    connected = api(target, '/peers/connected') or []
+    miner_addr = f'{lifecycle.P2P_HOST["scala"]}:{lifecycle.P2P["scala"]}'
+    miner_connected = any(miner_addr in str(p.get('address', '')) for p in connected)
+    height_after = api_retry(target, '/info', ctx.run.deadline,
+                             what='the target follower height').get('fullHeight')
+    ctx.note('honest_peers', {'miner_connected_at_end': miner_connected,
+                              'connected': [p.get('address') for p in connected]})
+    ctx.note('chain_progress', {'before': height_before, 'after': height_after})
+
+    # ----- verdicts -----
+    if not verdict['adversary_root_lines']:
+        ctx.fail('no root announcement from an adversary host reached the '
+                 'follower\'s +2 branch, so the store was never attacked',
+                 {'stdout': (ctx.evidence.get('adversary') or {}).get('stdout')})
+    if store_present:
+        if not verdict['caps_held']:
+            ctx.fail('the pending store exceeded its caps under the flood',
+                     {'peak_size': verdict['peak_size'],
+                      'peak_bytes': verdict['peak_bytes'],
+                      'caps': ROOT_FLOOD_CAPS})
+        if not verdict['saturated_samples'] and not verdict['evictions_in_window']:
+            ctx.fail('the store was never saturated, so the caps and honest '
+                     'admission under saturation were not tested',
+                     {'peak_size': verdict['peak_size']})
+        if not verdict['honest_roots_while_saturated']:
+            ctx.fail('no honest root announcement arrived while the store was '
+                     'saturated, so "honest roots still land" was not observed',
+                     {'honest_roots': verdict['honest_roots']})
+        elif not verdict['honest_roots_landed_while_saturated']:
+            ctx.fail('no honest root announcement that arrived during '
+                     'saturation was replayed into the input chain',
+                     {'while_saturated': verdict['honest_roots_while_saturated']})
+    else:
+        ctx.note('store_absent', 'this build publishes no pendingInputAnnouncements '
+                                 '(stock): caps and replay are not applicable, '
+                                 'the honest-root counts are the stock comparison')
+    if verdict['honest_misbehaviour_penalties'] or verdict['honest_blacklisted']:
+        ctx.fail('an honest peer was penalised for misbehaviour or blacklisted '
+                 'during the flood',
+                 {'penalties': verdict['honest_penalties'],
+                  'blacklisted': verdict['honest_blacklisted']})
+    if not miner_connected:
+        ctx.fail('the honest miner was not connected to the follower after the '
+                 'flood', {'connected': [p.get('address') for p in connected]})
+    if (height_after or 0) <= (height_before or 0):
+        ctx.fail('the follower did not advance across the flood',
+                 {'before': height_before, 'after': height_after})
+    smoke.finalize_agreement(ctx.run, ctx.evidence)
+
+
 def run(ctx):
     import campaign
     import lifecycle
+
+    followers = [n for n in SEEDED_NODES if n in lifecycle.NODES]
+    if followers:
+        _run_against_scala_follower(ctx, followers[0])
+        return
 
     smoke.assertion_1_peering(ctx.run, ctx.evidence)
     common.wait_ordering_blocks(ctx, BLOCKS_BEFORE_FLOOD, 'pre_flood')
