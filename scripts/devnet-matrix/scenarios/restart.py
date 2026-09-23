@@ -7,7 +7,15 @@ The bar is CONVERGENCE, not the fallback. The brief asked for "the first
 post-restart ordering block used the fallback"; D7 (transitive waitlist
 reconnection) makes that no longer true — a cold-started node can
 recover its input chain before the next ordering block arrives, and runs
-10 and 11 reconstructed every post-restart block. So the requirement is
+10 and 11 reconstructed every post-restart block.
+
+The chain carries a workload (a funded miner, payments in flight every
+ordering block, on both sides of the kill): an unfunded chain seals
+coinbase-only input blocks, and a Scala reference follower's lag over
+them measured the quiet case (the first two F13 restart runs, 6 unfunded
+blocks from genesis). `--ordering-blocks` sets the pre-kill length, and
+every follower's lag over the samples after the kill is reported beside
+the whole-run numbers (`follower_lag_after_restart`). So the requirement is
 that the follower is back on the miner's tip within 3 ordering blocks,
 and the reconstruct/fallback split is recorded as telemetry: either
 outcome passes. The `evict` scenario is where the fallback path is
@@ -29,6 +37,20 @@ START_NODES = ('scala', 'rust')
 SEEDED_NODES = ('scala2', 'scala3')
 BLOCKS_BEFORE_RESTART = 6
 CONVERGENCE_ORDERING_BLOCKS = 3
+# Funded ordering blocks observed after convergence, so the post-kill lag
+# has a window of its own rather than the convergence race alone.
+BLOCKS_AFTER_RESTART = 5
+PAYMENTS_PER_BLOCK = 3
+
+
+def lag_after(series, since_epoch_s):
+    """Every follower's lag over the samples taken at or after
+    `since_epoch_s` (the kill), by smoke's one lag definition. Pure."""
+    after = [s for s in series if (s.get('at') or 0) >= since_epoch_s]
+    out = {role: smoke.lag_distribution(after, key) for role, key in
+           (('rust_follower', 'rust_tip'), ('scala_follower', 'scala2_tip'),
+            ('scala_follower_patched', 'scala3_tip'))}
+    return dict(out, since_epoch_s=since_epoch_s, samples=len(after))
 
 
 def run(ctx):
@@ -42,7 +64,22 @@ def run(ctx):
     if set(SEEDED_NODES) & set(lifecycle.NODES):
         common.seed_second_miner(ctx, campaign, lifecycle, nodes=SEEDED_NODES)
     smoke.assertion_1_peering(ctx.run, ctx.evidence)
-    common.wait_ordering_blocks(ctx, BLOCKS_BEFORE_RESTART, 'pre_restart')
+
+    balance, address = common.fund_miner(ctx, 'scala')
+    sent, refused = [], []
+
+    def pump():
+        if balance and address:
+            common.pump_payments(ctx, address, sent, 'scala',
+                                 PAYMENTS_PER_BLOCK, rejected=refused)
+
+    if not balance:
+        ctx.fail('the miner was never funded, so the restart window carried no '
+                 'workload and the followers\' lag measured the quiet case',
+                 {'balance_nano': balance})
+    pre_blocks = ctx.args.ordering_blocks or BLOCKS_BEFORE_RESTART
+    pump()
+    common.wait_ordering_blocks(ctx, pre_blocks, 'pre_restart', on_block=pump)
 
     # Fold the drop counters forward: they are per-process, and the
     # restart resets them. `Run` already carries the mechanism.
@@ -54,9 +91,11 @@ def run(ctx):
     # every event in the feed afterwards is post-restart by construction.
     events_before_restart = common.latest_event_seq(ctx)
 
+    killed_at = time.time()
     killed = campaign.kill_hard('rust')
     ctx.note('killed', {'pid': killed, 'signal': 'SIGKILL',
-                        'at_ordering_height': restart_height})
+                        'at_ordering_height': restart_height,
+                        'at_epoch_s': killed_at})
     # One retry. The settle in `kill_hard` is empirical, and losing the
     # whole scenario to a data-directory lock that was a second from
     # being free would be a harness failure reported as a follower one.
@@ -83,6 +122,7 @@ def run(ctx):
     target_height = restart_height + CONVERGENCE_ORDERING_BLOCKS
     converged_at_height = None
     resumed_at_death_height = False
+    pumped_at = restart_height
     while time.monotonic() < ctx.run.deadline:
         try:
             scala = api('scala', '/info') or {}
@@ -90,6 +130,9 @@ def run(ctx):
         except Unavailable:
             ctx.run.idle(0.5)
             continue
+        if (scala.get('fullHeight') or 0) > pumped_at:
+            pumped_at = scala.get('fullHeight')
+            pump()
         agreed = (rust.get('bestFullHeaderId')
                   and rust.get('bestFullHeaderId') == scala.get('bestFullHeaderId'))
         height = rust.get('fullHeight') or 0
@@ -121,6 +164,15 @@ def run(ctx):
         ctx.fail(f'the follower converged only at height {converged_at_height}, '
                  f'past the {CONVERGENCE_ORDERING_BLOCKS}-block budget from '
                  f'{restart_height}', {'converged_at_height': converged_at_height})
+
+    # The post-kill window, carrying the same workload.
+    common.wait_ordering_blocks(ctx, BLOCKS_AFTER_RESTART, 'post_restart',
+                                on_block=pump)
+    ctx.note('workload', {'funded_balance_nano': balance,
+                          'pre_restart_ordering_blocks': pre_blocks,
+                          'payments_submitted': len(sent),
+                          'payments_refused': len(refused),
+                          'refusals': refused[:10]})
 
     # Telemetry, not a bar (D7).
     events = common.rust_events(ctx)
@@ -159,3 +211,4 @@ def run(ctx):
             ctx.fail(message, evidence)
 
     smoke.finalize_agreement(ctx.run, ctx.evidence)
+    ctx.note('follower_lag_after_restart', lag_after(ctx.run.series, killed_at))

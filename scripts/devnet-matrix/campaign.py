@@ -1886,6 +1886,27 @@ def _self_test():
     _src_fl = _insp_fl.getsource(_flood_eval._run_against_scala_follower)
     assert 'common.fund_miner(' in _src_fl and 'pump_payments' in \
         _insp_fl.getsource(_flood_eval), 'the root flood must carry a workload'
+    # `restart` is where F13's replay of held roots is measured, and its
+    # first two runs (`.work-m4p-f13-restart`) were 6 unfunded blocks from
+    # genesis: too short and too quiet to say whether the patched follower's
+    # lag after the kill is the patch or the recipe. It funds the miner,
+    # keeps payments in flight on both sides of the kill, lets
+    # `--ordering-blocks` set the pre-kill length, and reports every
+    # follower's lag over the samples AFTER the kill separately.
+    import scenarios.restart as _restart
+    _src_rs = _insp_fl.getsource(_restart.run)
+    assert 'common.fund_miner(' in _src_rs and 'pump_payments' in \
+        _insp_fl.getsource(_restart), 'restart must carry a workload'
+    assert 'ctx.args.ordering_blocks' in _src_rs, \
+        'restart must let --ordering-blocks set the pre-kill length'
+    _rows = [{'at': 1.0, 'scala_chain': ['a'], 'scala_ordering': 'o',
+              'scala2_ordering': 'o', 'scala2_tip': 'a'},
+             {'at': 5.0, 'scala_chain': ['c', 'b', 'a'], 'scala_ordering': 'o',
+              'scala2_ordering': 'o', 'scala2_tip': 'a'}]
+    _after = _restart.lag_after(_rows, 3.0)
+    assert _after['scala_follower']['lag_samples'] == 1, _after
+    assert _after['scala_follower']['p50'] == 2, _after
+    assert _after['since_epoch_s'] == 3.0 and _after['samples'] == 1, _after
 
     # Resolving roles must NOT import `lifecycle`. `lifecycle.P2P` /
     # `REST` are read from the environment at import and `smoke.URLS` is

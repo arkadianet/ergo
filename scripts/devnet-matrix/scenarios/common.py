@@ -14,8 +14,11 @@ import smoke
 from smoke import Unavailable, api, api_retry
 
 
-def wait_ordering_blocks(ctx, blocks, what):
+def wait_ordering_blocks(ctx, blocks, what, on_block=None):
     """Let the sampler run while Scala mines `blocks` ordering blocks.
+
+    `on_block`, if given, is called once each time the miner's height
+    rises, so a workload keeps pace with the chain inside the wait.
 
     Returns `(start_height, reached_height)`. A miner that stalls — the
     upstream F11 `cachedCandidate` race does exactly that — makes this
@@ -30,7 +33,10 @@ def wait_ordering_blocks(ctx, blocks, what):
     seen = set()
     while time.monotonic() < ctx.run.deadline:
         try:
-            reached = smoke.scala_height(ctx.run)
+            now = smoke.scala_height(ctx.run)
+            if on_block is not None and now > reached:
+                on_block()
+            reached = now
         except Unavailable:
             pass
         # The UTXO watch item is transient: by finalization the box may
