@@ -1584,7 +1584,15 @@ def _self_test():
             [sys.executable, '-c', rel_probe],
             env=dict(os.environ, MATRIX_WORK=tmp),
             capture_output=True, text=True, check=True).stdout.split()
-        assert out[3] == str(Path(tmp).resolve() / 'findings' / 'x.json'), out
+        # The gate runs with TMPDIR inside the worktree, where the tempdir
+        # IS inside the checkout and is named relative to it; outside it,
+        # the name is absolute. Either way it never raises.
+        found = Path(tmp).resolve() / 'findings' / 'x.json'
+        try:
+            want = str(found.relative_to(ROOT))
+        except ValueError:
+            want = str(found)
+        assert out[3] == want, (want, out)
     # ----- step A (5): the SAME work dir after `main`'s chdir -----
     #
     # `campaign.py` is loaded (and resolves `MATRIX_WORK`) in the launch
