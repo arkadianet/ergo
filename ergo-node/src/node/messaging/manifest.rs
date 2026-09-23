@@ -1,6 +1,7 @@
 use ergo_p2p::peer::PeerId;
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::header::read_header;
+use ergo_state::avl::snapshot_codec::manifest_tree_height;
 use ergo_state::HeaderSectionStore;
 use ergo_sync::snapshot_bootstrap::verify_manifest_against_state_root;
 use tracing::{info, warn};
@@ -20,8 +21,8 @@ use super::super::NodeState;
 ///    Any failure (chain doesn't have that height, header bytes
 ///    missing, deserialization error) is treated as "we can't
 ///    verify this manifest" → evict the voter, recompute selection.
-/// 3. Trust check — compare the manifest_id against
-///    `state_root[..32]` via `verify_manifest_against_state_root`.
+/// 3. Trust check — compare the manifest ID and declared tree height
+///    against the canonical header's full `state_root`.
 ///    On match, latch the bytes via `accept_verified_manifest`.
 ///    On mismatch, evict the voter — they advertised a manifest
 ///    inconsistent with our canonical chain.
@@ -36,6 +37,22 @@ pub(super) fn handle_inbound_manifest(
     else {
         // Stale, unsolicited, or wrong peer — silent drop.
         return;
+    };
+
+    let manifest_height = match manifest_tree_height(&bytes) {
+        Ok(height) => height,
+        Err(e) => {
+            warn!(
+                peer = %peer,
+                height = height,
+                error = %e,
+                "manifest header parse failed; evicting voter",
+            );
+            state
+                .snapshot_bootstrap
+                .reject_manifest_and_evict_voter(peer);
+            return;
+        }
     };
 
     // Canonical header lookup. In Dense mode any `None` is "not on
@@ -155,9 +172,7 @@ pub(super) fn handle_inbound_manifest(
         }
     };
 
-    // The trust boundary. `state_root.as_bytes()[..32]` must equal
-    // `manifest_id` for the peer's snapshot to be canonical.
-    match verify_manifest_against_state_root(&manifest_id, &header.state_root) {
+    match verify_manifest_against_state_root(&manifest_id, manifest_height, &header.state_root) {
         Ok(()) => {
             // Proof-anchor check: if NiPoPoW bootstrap was active,
             // compare the discovered snapshot_height to the proof's

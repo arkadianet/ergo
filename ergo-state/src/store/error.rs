@@ -170,14 +170,13 @@ pub enum StateError {
          (bootstrap requires a fresh data_dir)"
     )]
     InstallSnapshotRefused { current_height: u32 },
-    /// `install_snapshot_state` reconstructed the AVL+ root from the
-    /// snapshot chunks, but it did not equal the expected
-    /// `state_root` prefix carried by the snapshot header. Distinct
-    /// from `DigestMismatch` (steady-state apply/rollback divergence)
-    /// so operator triage can tell a Mode 2 install rejection apart
-    /// from a steady-state consensus failure.
+    /// `install_snapshot_state` reconstructed the AVL+ root and height from
+    /// the snapshot chunks, but the full 33-byte digest did not equal the
+    /// expected `state_root`. Distinct from `DigestMismatch` (steady-state
+    /// apply/rollback divergence) so operator triage can tell a Mode 2 install
+    /// rejection apart from a steady-state consensus failure.
     #[error(
-        "install_snapshot_state: reconstructed root {computed} != expected state_root prefix {expected}"
+        "install_snapshot_state: reconstructed state_root {computed} != expected state_root {expected}"
     )]
     InstallSnapshotRootMismatch { computed: String, expected: String },
     /// `install_snapshot_state` was called with a `snapshot_height`

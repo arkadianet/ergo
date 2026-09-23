@@ -744,70 +744,60 @@ fn ad_digest_with_root(root: [u8; 32], height_byte: u8) -> ADDigest {
 }
 
 #[test]
-fn verify_succeeds_when_prefix_matches() {
-    // Same 32-byte root, different tree-height byte — must pass.
+fn verify_succeeds_when_root_and_height_match() {
     let manifest_id = mid(0x42);
-    let state_root = ad_digest_with_root(mid(0x42), 14); // mainnet manifest_depth
-    assert!(verify_manifest_against_state_root(&manifest_id, &state_root).is_ok());
+    let state_root = ad_digest_with_root(mid(0x42), 14);
+    assert!(verify_manifest_against_state_root(&manifest_id, 14, &state_root).is_ok());
 }
 
 #[test]
-fn verify_succeeds_regardless_of_height_byte_value() {
-    // The trailing byte of state_root is the AVL+ tree height,
-    // not the manifest's height. It varies across snapshots
-    // and does NOT participate in the manifest_id check.
+fn verify_fails_when_height_differs() {
     let manifest_id = mid(0xAB);
-    for h in [0u8, 1, 14, 32, 255] {
-        let state_root = ad_digest_with_root(mid(0xAB), h);
-        assert!(
-            verify_manifest_against_state_root(&manifest_id, &state_root).is_ok(),
-            "height byte={h} should not affect verification",
-        );
-    }
+    let state_root = ad_digest_with_root(mid(0xAB), 14);
+    let err = verify_manifest_against_state_root(&manifest_id, 13, &state_root).unwrap_err();
+    assert_eq!(
+        err,
+        ManifestVerifyError::HeightMismatch {
+            manifest_height: 13,
+            state_root_height: 14,
+        }
+    );
 }
 
 #[test]
 fn verify_fails_when_prefix_differs() {
     let manifest_id = mid(0x42);
     let state_root = ad_digest_with_root(mid(0x99), 14);
-    let err = verify_manifest_against_state_root(&manifest_id, &state_root).unwrap_err();
-    match err {
+    let err = verify_manifest_against_state_root(&manifest_id, 14, &state_root).unwrap_err();
+    assert_eq!(
+        err,
         ManifestVerifyError::RootMismatch {
-            expected_manifest_id,
-            actual_state_root_prefix,
-        } => {
-            assert_eq!(expected_manifest_id, mid(0x42));
-            assert_eq!(actual_state_root_prefix, mid(0x99));
+            expected_manifest_id: mid(0x42),
+            actual_state_root_prefix: mid(0x99),
         }
-    }
+    );
 }
 
 #[test]
 fn verify_fails_when_one_byte_differs_in_prefix() {
-    // Subtle: only byte 31 differs. Comparison must catch it.
     let manifest_id = mid(0x42);
     let mut bytes = [0u8; 33];
     bytes[..32].copy_from_slice(&mid(0x42));
-    bytes[31] = 0xFF; // last byte of the 32-prefix corrupted
+    bytes[31] = 0xFF;
     bytes[32] = 14;
     let state_root = ADDigest::from_bytes(bytes);
-    assert!(verify_manifest_against_state_root(&manifest_id, &state_root).is_err());
+    assert!(verify_manifest_against_state_root(&manifest_id, 14, &state_root).is_err());
 }
 
 #[test]
 fn verify_zero_manifest_vs_zero_root_succeeds() {
-    // Edge case: all-zero (e.g., test fixtures). Behaves like any
-    // other equal pair — no special-casing of zero.
     let manifest_id = mid(0x00);
     let state_root = ad_digest_with_root(mid(0x00), 0);
-    assert!(verify_manifest_against_state_root(&manifest_id, &state_root).is_ok());
+    assert!(verify_manifest_against_state_root(&manifest_id, 0, &state_root).is_ok());
 }
 
 #[test]
 fn verify_does_not_panic_on_extreme_inputs() {
-    // Sanity: 0xFF-filled and 0x00-filled inputs in both
-    // positions cover the byte-range edges. No panics, no
-    // overflow paths in slice comparison.
     let cases = [
         (mid(0x00), mid(0xFF)),
         (mid(0xFF), mid(0x00)),
@@ -815,7 +805,7 @@ fn verify_does_not_panic_on_extreme_inputs() {
         (mid(0x00), mid(0x00)),
     ];
     for (m, r) in cases {
-        let _ = verify_manifest_against_state_root(&m, &ad_digest_with_root(r, 0));
+        let _ = verify_manifest_against_state_root(&m, 0, &ad_digest_with_root(r, 0));
     }
 }
 
@@ -1100,6 +1090,6 @@ fn manifest_prefix32_rule_matches_scala_manifest() {
         fixture.height, 522_239,
         "fixture height must match its name"
     );
-    verify_manifest_against_state_root(&manifest_id, &state_root)
-        .expect("Scala manifest_id must equal state_root[..32] at the snapshot height");
+    verify_manifest_against_state_root(&manifest_id, state_root.tree_height_byte(), &state_root)
+        .expect("Scala manifest_id and height must equal state_root at the snapshot height");
 }

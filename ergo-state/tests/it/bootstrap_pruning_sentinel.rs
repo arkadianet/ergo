@@ -39,7 +39,7 @@ use ergo_ser::popow_header::PoPowHeader;
 use ergo_ser::popow_proof::NipopowProof;
 use ergo_state::avl::snapshot_codec::ReconstructedTree;
 use ergo_state::chain::HeaderAvailability;
-use ergo_state::store::StateStore;
+use ergo_state::store::{StateError, StateStore};
 use tempfile::TempDir;
 
 /// Open a StateStore for Phase 1b integration tests. Mainnet
@@ -802,6 +802,48 @@ fn install_snapshot_state_rejects_when_headers_not_synced_to_anchor() {
         store.try_read_minimal_full_block_height_raw().unwrap(),
         None,
         "rejected install must not have touched the sentinel row",
+    );
+}
+
+#[test]
+fn install_snapshot_state_rejects_full_root_height_mismatch_without_mutation() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("state.redb");
+    let mut store = open_test_store(&path);
+    store
+        .apply_popow_proof(&nipopow_proof_dense_from_2())
+        .unwrap();
+    let snapshot_height = SUFFIX_TIP_HEIGHT;
+    let canonical_header_id = store
+        .get_header_id_at_height(snapshot_height)
+        .unwrap()
+        .unwrap();
+    let (reconstructed, expected_state_root) = build_reconstructed_tree(3);
+    let before_root = store.root_digest();
+    let before_sentinel = store.try_read_minimal_full_block_height_raw().unwrap();
+    let mut wrong_root_bytes = *expected_state_root.as_bytes();
+    wrong_root_bytes[32] = wrong_root_bytes[32].wrapping_add(1);
+    let wrong_root = ADDigest::from_bytes(wrong_root_bytes);
+
+    let err = store
+        .install_snapshot_state(
+            reconstructed,
+            snapshot_height,
+            canonical_header_id,
+            &wrong_root,
+        )
+        .expect_err("a full state_root height mismatch must be rejected");
+
+    assert!(matches!(
+        err,
+        StateError::InstallSnapshotRootMismatch { .. }
+    ));
+    assert_eq!(store.root_digest(), before_root);
+    assert_eq!(store.chain_state().best_full_block_height, 0);
+    assert_eq!(store.chain_state().best_full_block_id, [0u8; 32]);
+    assert_eq!(
+        store.try_read_minimal_full_block_height_raw().unwrap(),
+        before_sentinel,
     );
 }
 

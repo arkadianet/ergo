@@ -996,6 +996,106 @@ fn peer_disconnect_drops_snapshot_bootstrap_vote() {
     );
 }
 
+#[test]
+fn inbound_manifest_rejects_same_root_with_different_tree_height() {
+    use ergo_primitives::digest::ADDigest;
+    use ergo_state::avl::snapshot_codec::{SnapshotServer, MAINNET_MANIFEST_DEPTH};
+    use ergo_state::avl::tree::AvlTree;
+    use ergo_state::chain::HeaderMeta;
+    use ergo_sync::snapshot_bootstrap::BootstrapState;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let snapshot_height = 5u32;
+    let mut tree = AvlTree::new();
+    tree.insert([0x10; 32], vec![0xAA]);
+    let server = SnapshotServer::build(&tree, snapshot_height, MAINNET_MANIFEST_DEPTH).unwrap();
+    let manifest_id = *server.manifest_id.as_bytes();
+    let mut state_root_bytes = [0u8; 33];
+    state_root_bytes[..32].copy_from_slice(&manifest_id);
+    state_root_bytes[32] = server.manifest_bytes[0];
+    let state_root = ADDigest::from_bytes(state_root_bytes);
+    let (header_id, header_bytes) = synthetic_header_with_state_root(snapshot_height, state_root);
+
+    {
+        let store = state.store.as_utxo_mut().unwrap();
+        store.store_header(&header_id, &header_bytes).unwrap();
+        store
+            .store_header_meta(
+                &header_id,
+                &HeaderMeta {
+                    parent_id: [0u8; 32],
+                    height: snapshot_height,
+                    cumulative_score: vec![5],
+                    pow_validity: 1,
+                    timestamp: 1_700_000_005,
+                },
+            )
+            .unwrap();
+        store
+            .test_force_set_best_header_unsafe(header_id, snapshot_height, vec![5])
+            .unwrap();
+        store
+            .test_force_put_header_chain_index(snapshot_height, &header_id)
+            .unwrap();
+        store
+            .test_force_put_headers_by_height(snapshot_height, &header_id)
+            .unwrap();
+    }
+
+    for port in 1..=3u16 {
+        state.snapshot_bootstrap.on_snapshots_info(
+            synthetic_peer(port),
+            &[(snapshot_height as i32, manifest_id)],
+        );
+    }
+    let peer = synthetic_peer(1);
+    state.snapshot_bootstrap.mark_manifest_requested(
+        peer,
+        snapshot_height as i32,
+        manifest_id,
+        Instant::now(),
+    );
+    let mut manifest = server.manifest_bytes.clone();
+    manifest[0] = manifest[0].wrapping_add(1);
+    let payload = message::serialize_manifest(&manifest).unwrap();
+
+    let actions = handle_message(
+        &mut state,
+        peer,
+        message::CODE_MANIFEST,
+        &payload,
+        Instant::now(),
+    );
+    assert!(actions.is_empty());
+    assert!(!matches!(
+        state.snapshot_bootstrap.state(),
+        BootstrapState::ManifestVerified { .. }
+    ));
+
+    state
+        .snapshot_bootstrap
+        .on_snapshots_info(peer, &[(snapshot_height as i32, manifest_id)]);
+    state.snapshot_bootstrap.mark_manifest_requested(
+        peer,
+        snapshot_height as i32,
+        manifest_id,
+        Instant::now(),
+    );
+    let valid_payload = message::serialize_manifest(&server.manifest_bytes).unwrap();
+    handle_message(
+        &mut state,
+        peer,
+        message::CODE_MANIFEST,
+        &valid_payload,
+        Instant::now(),
+    );
+    assert!(matches!(
+        state.snapshot_bootstrap.state(),
+        BootstrapState::ManifestVerified { .. }
+    ));
+}
+
 // ----- mode 2 part 2i: install retry across a deferred checkpoint anchor -----
 
 /// Round-trip an empty `AvlTree` through the manifest codec to get a real
