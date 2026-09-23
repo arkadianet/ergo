@@ -16,6 +16,13 @@ infrastructure.
 
 ## [Unreleased]
 
+### Fixed
+
+- UTXO sync no longer waits for historical ADProofs that peers may not retain.
+  Generate and verify proofs locally using on-demand AVL reads instead of
+  rebuilding the entire prover tree per block. Script validation and header
+  commitments remain enforced; digest mode still downloads proofs.
+
 ## [0.8.0] - 2026-09-21
 
 JIT-cost conformance release. The node's script costing was proven row by row

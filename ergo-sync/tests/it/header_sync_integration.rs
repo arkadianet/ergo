@@ -822,7 +822,7 @@ fn process_header_across_epoch_boundary_1025() {
 /// Constructs BlockTransactions and Extension section bytes, feeds them
 /// through the coordinator + executor pipeline.
 #[test]
-fn executor_end_to_end_block_2() {
+fn executor_end_to_end_block_2_without_downloaded_proofs() {
     use ergo_p2p::types::InvData;
     use ergo_primitives::writer::VlqWriter;
     use ergo_ser::block_transactions::write_block_transactions;
@@ -1006,6 +1006,9 @@ fn executor_end_to_end_block_2() {
         "UTXO state should be at height 2 after block application"
     );
     assert_eq!(coordinator.sync_state().best_full_block_height(), 2);
+    assert!(!coordinator.requires_proofs());
+    let proof_id = compute_section_id(104, &h2_id, h2.ad_proofs_root.as_bytes());
+    assert!(store.get_block_section(&proof_id).unwrap().is_none());
 
     // Verify state digest matches expected
     let expected_digest: [u8; 33] = {

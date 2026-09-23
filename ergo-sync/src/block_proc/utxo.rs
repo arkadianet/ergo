@@ -190,29 +190,6 @@ pub(super) fn process_block_utxo(
     // 2c. Full proofHash parity — UTXO-mode counterpart of Scala's
     // "Regenerated proofHash is not equal to the declared one" check.
     //
-    // Policy VerifyShipped (production boot): the block's ADProofs
-    // section is verified directly at O(block size) cost —
-    //   a) blake2b256(shipped bytes) == header.ad_proofs_root;
-    //   b) replaying the block's net box changes through those bytes
-    //      must carry the parent state root exactly to
-    //      `header.state_root` (digest-mode verifier seam, bound to
-    //      this header's section id).
-    // A missing section is DATA AVAILABILITY (`AdProofsUnavailable`),
-    // never invalidity: coordinator `requires_proofs` gating means the
-    // section is requested alongside txs+extension and apply retries
-    // when it lands. This mirrors Scala, where a UTXO node cannot
-    // apply a block whose ADProofs have not arrived.
-    //
-    // A block that ships garbage proofs or a self-consistent-but-false
-    // root/proof pair is rejected. Live mainnet divergence at h1,853,301
-    // (block 437601cd…, applied here for 697s) was the no-binding
-    // version of this hole; both checks bind the shipped bytes.
-    //
-    // Issue #264: Regenerate (the legacy default) REGENERATES proofs by
-    // hydrating the ENTIRE AVL arena into a prover graph per applied
-    // block — O(tree size) time and heap — wedging archival catch-up
-    // near tip. Kept only as an explicit opt-out for deployments that
-    // cannot download ADProofs sections.
     match store.ad_proofs_apply_policy() {
         ergo_state::store::AdProofsApplyPolicy::VerifyShipped => {
             let section_bytes = store.get_block_section(&expected.ad_proofs_id)?.ok_or(
@@ -770,5 +747,68 @@ mod ad_proofs_regeneration_tests {
         assert_ne!(computed, *h2.ad_proofs_root.as_bytes());
         let _ = NetworkPrefix::Mainnet; // keep import honest if unused above
         let _ = Digest32::from_bytes([0u8; 32]);
+    }
+
+    #[test]
+    fn local_proof_validation_rejects_wrong_header_commitment() {
+        use ergo_primitives::writer::VlqWriter;
+        use ergo_ser::block_transactions::{write_block_transactions, BlockTransactions};
+        use ergo_ser::extension::{write_extension, Extension, ExtensionField};
+
+        let mut store = store_at_height_1();
+        let parent_root = store.root_digest();
+        let mut header = header_at(2);
+        header.ad_proofs_root = Digest32::from_bytes([0xAA; 32]);
+        let (header_bytes, header_id) = ergo_ser::header::serialize_header(&header).unwrap();
+        let header_id = *header_id.as_bytes();
+        store.store_header(&header_id, &header_bytes).unwrap();
+        let expected = ExpectedSections::from_header(
+            &header_id,
+            header.transactions_root.as_bytes(),
+            header.extension_root.as_bytes(),
+            header.ad_proofs_root.as_bytes(),
+        );
+        let mut writer = VlqWriter::new();
+        write_block_transactions(
+            &mut writer,
+            &BlockTransactions {
+                header_id: ModifierId::from_bytes(header_id),
+                transactions: vec![tx_at(2)],
+            },
+        )
+        .unwrap();
+        store
+            .store_block_section(&expected.transactions_id, &writer.result())
+            .unwrap();
+        let mut value = vec![1];
+        value.extend_from_slice(header.parent_id.as_bytes());
+        let mut writer = VlqWriter::new();
+        write_extension(
+            &mut writer,
+            &Extension {
+                header_id: ModifierId::from_bytes(header_id),
+                fields: vec![ExtensionField { key: [1, 0], value }],
+            },
+        )
+        .unwrap();
+        store
+            .store_block_section(&expected.extension_id, &writer.result())
+            .unwrap();
+        let result = process_block_utxo(
+            &mut store,
+            &header_id,
+            &ProtocolParams::mainnet_default(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            matches!(result, Err(BlockProcessError::AdProofsHashMismatch { .. })),
+            "{result:?}"
+        );
+        assert_eq!(store.height(), 1);
+        assert_eq!(store.root_digest(), parent_root);
     }
 }

@@ -387,6 +387,32 @@ impl AvlTree {
         self.node_get(id)
     }
 
+    /// Read a prover node with child labels, normalizing legacy v1 nodes.
+    /// The prover authenticates the returned node against its parent hash.
+    pub(crate) fn prover_node(&self, id: NodeId) -> Result<AvlNode, crate::store::StateError> {
+        let mut node = self
+            .node_get(id)
+            .ok_or(crate::store::StateError::InternalInvariant {
+                what: "prover: node missing from arena",
+            })?;
+        if let AvlNode::Internal {
+            left,
+            right,
+            left_label,
+            right_label,
+            ..
+        } = &mut node
+        {
+            if left_label.is_none() {
+                *left_label = Some(self.label_of(*left));
+            }
+            if right_label.is_none() {
+                *right_label = Some(self.label_of(*right));
+            }
+        }
+        Ok(node)
+    }
+
     // invariant: label-agnostic — drops the change log after a successful
     // commit; does not read or write labels.
     /// Clear the change log after a successful commit.
