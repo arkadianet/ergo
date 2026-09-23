@@ -2181,7 +2181,7 @@ def _self_test():
         def poll(self):
             return self.events
 
-        def window(self, watermark):
+        def window(self, watermark, until=None):
             return self.events
 
         def summary(self, watermark):
@@ -2239,6 +2239,76 @@ def _self_test():
             assert 'window' in _whole.get('interval', ''), _whole
     finally:
         _smoke.WORK = _saved_work
+    # ----- step A (4): ONE closing boundary for every half -----
+    #
+    # The window had a common OPENING but no common close: Rust event
+    # collection stopped where the scenario stopped polling, while the
+    # Scala logs were read at finalisation, after the peering and
+    # agreement checks — `.work-r1both3` shows 14 vs 15 Scala decisions
+    # from the same start offset. The close is one snapshot (the event
+    # sequence AND every Scala log's line count), and every accounting
+    # reads up to it. Exercised through the REAL collector and the
+    # production accounting, with only the feed and the logs stubbed.
+    _feed_close = {'events': []}
+    _saved_api_close = _common.api
+    _saved_work_close = _smoke.WORK
+    try:
+        with tempfile.TemporaryDirectory() as _tmp_close:
+            _smoke.WORK = Path(_tmp_close)
+            _common.api = lambda node, path, *a, **k: _feed_close
+            (_smoke.WORK / 'scala2.log').write_text('INFO start-up\n')
+            _ctx_close = _StubCtx({'scala2': 'scala_follower',
+                                   'rust': 'rust_follower'})
+            _col = _common.EventCollector(_ctx_close)
+            _common.open_measurement_window(_ctx_close, _col)
+            _feed_close['events'] = [
+                {'seq': 1, 'kind': 'ordering_reconstructed'}]
+            with (_smoke.WORK / 'scala2.log').open('a') as _fh:
+                _fh.write(
+                    'INFO On processing ordering block aa, it is last input '
+                    'block Some(11)\n'
+                    'INFO Applying block transactions from input-blocks for aa '
+                    'with transactions: 1\n')
+            _snap = _common.close_measurement_window(_ctx_close)
+            assert _snap == {'rust_event_seq': 1,
+                             'scala_log_lines': {'scala2': 3}}, _snap
+            # After the close: one more decision on EACH side.
+            _feed_close['events'] = [
+                {'seq': 1, 'kind': 'ordering_reconstructed'},
+                {'seq': 2, 'kind': 'ordering_reconstruct_fallback',
+                 'detail': 'root_mismatch'}]
+            _col.poll()
+            with (_smoke.WORK / 'scala2.log').open('a') as _fh:
+                _fh.write(
+                    'INFO On processing ordering block bb, it is last input '
+                    'block Some(22)\n'
+                    'INFO Requesting all the block transactions for bb as prev '
+                    'input block not found\n')
+            # A second close is the same snapshot, never a later one.
+            assert _common.close_measurement_window(_ctx_close) == _snap
+            _acct_close = _common.reconstruction_accounting(_ctx_close)
+            assert _acct_close['closing_boundary'] == _snap, _acct_close
+            _sc = _acct_close['scala_follower']
+            assert _sc['eligible_announcements'] == 1, _sc
+            assert _sc['download_no_prev_input_block'] == 0, _sc
+            _rc = _acct_close['rust_follower']
+            assert _rc['eligible_announcements'] == 1, _rc
+            assert _rc['download_root_mismatch'] == 0, _rc
+            assert _common.scala_window_lines(_ctx_close, 'scala2') == [
+                'INFO On processing ordering block aa, it is last input '
+                'block Some(11)',
+                'INFO Applying block transactions from input-blocks for aa '
+                'with transactions: 1']
+            # And the scenario's own per-follower table reads up to the
+            # same close.
+            from scenarios import reconstruct_rate as _rr_close
+            _counts_close = _rr_close._scala_log_counts(
+                _ctx_close, 'scala2', 1, _snap['scala_log_lines']['scala2'])
+            assert _counts_close['decided'] == 1, _counts_close
+    finally:
+        _common.api = _saved_api_close
+        _smoke.WORK = _saved_work_close
+
     # And the measurement scenario counts its miner over that same
     # window rather than over the node's whole lifetime.
     from scenarios import miner_self_reject as _msr_src

@@ -282,7 +282,8 @@ def run(ctx):
         if reached >= target:
             break
         ctx.run.idle(0.5)
-    collector.poll()
+    # ONE close for the event feed and the miner's log.
+    ctx.note('measurement_close', common.close_measurement_window(ctx))
 
     ctx.note('window', {
         'start_height': start, 'target': target, 'reached': reached,

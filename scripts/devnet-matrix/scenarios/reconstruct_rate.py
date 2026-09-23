@@ -82,7 +82,7 @@ SCALA_FALLBACK = 'downloading block transactions fully'
 SCALA_FALLBACK_GATE = 'as prev input block not found'
 
 
-def _scala_log_counts(ctx, node='scala2', since_line=0):
+def _scala_log_counts(ctx, node='scala2', since_line=0, until_line=None):
     """Count a reference node's reconstruct-vs-download lines.
 
     Read from the reference FOLLOWER by default, and only from
@@ -97,7 +97,7 @@ def _scala_log_counts(ctx, node='scala2', since_line=0):
     path = smoke.WORK / f'{node}.log'
     if not path.exists():
         return {'error': f'no Scala log at {path}'}
-    lines = path.read_text(errors='replace').splitlines()[since_line:]
+    lines = path.read_text(errors='replace').splitlines()[since_line:until_line]
     # One decision per ordering-block id: a follower peered with several
     # nodes logs the same gate download once per announcing peer, and the
     # scenario's table must agree with the accounting's de-duplicated one.
@@ -116,6 +116,7 @@ def _scala_log_counts(ctx, node='scala2', since_line=0):
            'repeat_decisions': acct['repeat_decisions'],
            'conflicting_outcomes': acct['conflicting_outcomes'],
            'window_lines': len(lines), 'from_line': since_line,
+           'to_line': until_line,
            'source': ('ErgoNodeViewHolder.processOrderingBlock:468 '
                       '(reconstruct) and :475/:479 (download), plus the '
                       'ErgoNodeViewSynchronizer:1865 gate that downloads '
@@ -234,7 +235,11 @@ def run(ctx):
         except Unavailable:
             pass
         ctx.run.idle(1)
-    collector.poll()
+    # ONE close for every half, taken once the walk and the settle above
+    # have ended: the Rust window and every Scala log stop here, not
+    # wherever finalisation happens to read them.
+    close = common.close_measurement_window(ctx)
+    ctx.note('measurement_close', close)
     ctx.note('reconstruct_rate_window', {
         'start_height': start, 'target': target, 'reached': reached,
         'short_by': max(0, target - reached), 'payments_submitted': len(sent),
@@ -253,7 +258,7 @@ def run(ctx):
                  'and the rate cannot be computed from them',
                  {'collection': collector.summary(watermark)})
 
-    window = collector.window(watermark)
+    window = collector.window(watermark, close['rust_event_seq'])
     reconstructed = [e for e in window if e['kind'] == 'ordering_reconstructed']
     fallback = [e for e in window if e['kind'] == 'ordering_reconstruct_fallback']
     skipped = [e for e in window if e['kind'] == 'ordering_reconstruct_skipped']
@@ -343,11 +348,14 @@ def run(ctx):
     # Every reference node over the SAME window, keyed by ROLE: the
     # followers are the ones that decide, the miners are recorded beside
     # them to show they decide nothing.
+    ends = close['scala_log_lines']
     followers = {by_node[node]: _scala_log_counts(ctx, node,
-                                                  scala_from.get(node, 0))
+                                                  scala_from.get(node, 0),
+                                                  ends.get(node))
                  for node in follower_nodes}
     miners = {by_node[node]: _scala_log_counts(ctx, node,
-                                               scala_from.get(node, 0))
+                                               scala_from.get(node, 0),
+                                               ends.get(node))
               for node in miner_nodes}
     ctx.note('scala_followers', followers)
     ctx.note('scala_miners', miners)

@@ -481,9 +481,14 @@ class EventCollector:
             self.highest_seen = max(self.highest_seen, seq)
         return self
 
-    def window(self, after_seq):
-        """Every collected event newer than `after_seq`, in order."""
-        return [self.events[s] for s in sorted(self.events) if s > after_seq]
+    def window(self, after_seq, until_seq=None):
+        """Every collected event in `(after_seq, until_seq]`, in order.
+
+        `until_seq` is the window's CLOSE (`close_measurement_window`);
+        without it the window runs to whatever was collected last.
+        """
+        return [self.events[s] for s in sorted(self.events)
+                if s > after_seq and (until_seq is None or s <= until_seq)]
 
     def lost_in_window(self, after_seq):
         return [g for g in self.gaps if g['next_available_seq'] > after_seq]
@@ -1813,15 +1818,52 @@ def open_measurement_window(ctx, collector):
     return ctx.scala_log_offsets
 
 
-def scala_window_lines(ctx, node):
-    """One Scala node's log lines SINCE the measurement window opened.
+def close_measurement_window(ctx):
+    """Close the window for EVERY half at one point, once.
 
-    Without a window the whole log is returned — every caller then says
-    so in its own evidence rather than presenting a node's lifetime as a
-    measured interval.
+    The opening boundary was shared, the closing one was not: the Rust
+    event collection stopped where the scenario stopped polling, while
+    the Scala logs were read at finalisation, after the peering and
+    agreement checks had run, so a Scala follower's accounting covered
+    decisions the Rust half never had a chance to make (`.work-r1both3`:
+    14 vs 15 Scala decisions from the same start offset). The snapshot
+    is the event sequence seen at the close plus every Scala log's line
+    count; every later read stops there. Idempotent: a second call
+    returns the first snapshot, never a later one.
     """
+    snapshot = getattr(ctx, 'measurement_close', None)
+    if snapshot is not None:
+        return snapshot
+    collector = getattr(ctx, 'collector', None)
+    if collector is not None:
+        collector.poll()
+    offsets = getattr(ctx, 'scala_log_offsets', None) or {}
+    snapshot = {
+        'rust_event_seq': collector.highest_seen if collector is not None
+                          else None,
+        'scala_log_lines': {node: len(_scala_log_lines(node))
+                            for node in offsets},
+    }
+    ctx.measurement_close = snapshot
+    return snapshot
+
+
+def _scala_window_bounds(ctx, node):
     offset = (getattr(ctx, 'scala_log_offsets', None) or {}).get(node, 0)
-    return _scala_log_lines(node)[offset:]
+    close = getattr(ctx, 'measurement_close', None) or {}
+    return offset, (close.get('scala_log_lines') or {}).get(node)
+
+
+def scala_window_lines(ctx, node):
+    """One Scala node's log lines INSIDE the measurement window.
+
+    From the opening offset to the closing snapshot when the window was
+    closed. Without a window the whole log is returned — every caller
+    then says so in its own evidence rather than presenting a node's
+    lifetime as a measured interval.
+    """
+    offset, end = _scala_window_bounds(ctx, node)
+    return _scala_log_lines(node)[offset:end]
 
 
 def reconstruction_accounting(ctx):
@@ -1839,11 +1881,18 @@ def reconstruction_accounting(ctx):
     """
     out = {'fields': list(ACCOUNTING_FIELDS)}
     offsets = getattr(ctx, 'scala_log_offsets', None) or {}
+    # A window that was opened is closed HERE if its scenario did not
+    # close it (an early failure), and every half reads up to the same
+    # snapshot either way.
+    close = (close_measurement_window(ctx) if offsets or
+             getattr(ctx, 'collector', None) is not None else None)
+    out['closing_boundary'] = close
     for node, role in (ctx.roles or {}).items():
         if node == 'rust':
             collector, watermark = ctx.collector, ctx.collector_watermark
             if collector is not None:
-                entry = rust_accounting(collector.window(watermark))
+                entry = rust_accounting(collector.window(
+                    watermark, (close or {}).get('rust_event_seq')))
                 entry['collection'] = collector.summary(watermark)
                 entry['complete'] = not collector.lost_in_window(watermark)
             else:
@@ -1861,9 +1910,10 @@ def reconstruction_accounting(ctx):
                               'collector, so completeness is unknown'}
                 entry['complete'] = None
         else:
-            offset = offsets.get(node, 0)
-            entry = scala_accounting(_scala_log_lines(node)[offset:])
+            offset, end = _scala_window_bounds(ctx, node)
+            entry = scala_accounting(scala_window_lines(ctx, node))
             entry['from_line'] = offset
+            entry['to_line'] = end
             entry['interval'] = (
                 'the measurement window the scenario opened, the same '
                 'boundary the Rust event watermark was taken at'
