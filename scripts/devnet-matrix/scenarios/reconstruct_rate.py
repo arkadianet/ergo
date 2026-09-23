@@ -98,16 +98,14 @@ def _scala_log_counts(ctx, node='scala2', since_line=0):
     if not path.exists():
         return {'error': f'no Scala log at {path}'}
     lines = path.read_text(errors='replace').splitlines()[since_line:]
-    reconstructed = fallback = fallback_gate = 0
-    for line in lines:
-        low = line.lower()
-        if SCALA_RECONSTRUCTED in low:
-            reconstructed += 1
-        elif SCALA_FALLBACK in low:
-            fallback += 1
-        elif SCALA_FALLBACK_GATE in low:
-            fallback_gate += 1
-    fallback += fallback_gate
+    # One decision per ordering-block id: a follower peered with several
+    # nodes logs the same gate download once per announcing peer, and the
+    # scenario's table must agree with the accounting's de-duplicated one.
+    acct = common.scala_accounting(lines)
+    reconstructed = acct['reconstructed']
+    fallback_gate = acct['download_no_prev_input_block']
+    fallback = (acct['download_missing_tx'] + acct['download_root_mismatch']
+                + acct['skipped_no_chain'] + fallback_gate)
     decided = reconstructed + fallback
     out = {'node': node, 'reconstructed': reconstructed, 'fallback': fallback,
            'decided': decided,
@@ -115,6 +113,8 @@ def _scala_log_counts(ctx, node='scala2', since_line=0):
            'fallback_at_gate': fallback_gate,
            'phrases': [SCALA_RECONSTRUCTED, SCALA_FALLBACK,
                        SCALA_FALLBACK_GATE],
+           'repeat_decisions': acct['repeat_decisions'],
+           'conflicting_outcomes': acct['conflicting_outcomes'],
            'window_lines': len(lines), 'from_line': since_line,
            'source': ('ErgoNodeViewHolder.processOrderingBlock:468 '
                       '(reconstruct) and :475/:479 (download), plus the '

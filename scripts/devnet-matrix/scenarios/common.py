@@ -5,6 +5,7 @@ Everything decisive here is PURE and exercised by `campaign.py
 calls could not be shown to fail when it should, and an evaluator that
 cannot fail is not an evaluator.
 """
+import re
 import shutil
 import threading
 import time
@@ -1585,8 +1586,63 @@ def rust_accounting(events):
     return _with_ratio(out)
 
 
+# The stages that announce an ordering block, and the outcomes that
+# decide it. Kept apart so an id is eligible once however many stages
+# (or peers) mention it, and decided once however many times it is
+# decided.
+SCALA_STAGES = ('entry_announcements', 'gate_announcements')
+SCALA_OUTCOMES = ('reconstructed', 'download_missing_tx',
+                  'download_root_mismatch', 'skipped_no_chain',
+                  'download_no_prev_input_block')
+
+# The ordering-block id every phrase above carries: after "for"
+# ("… announcement for <id>", "… fully for <id> as …", "… transactions
+# for <id> as …") or after "block" ("On processing ordering block <id>,",
+# "… for ordering block <id>, …"). The FIRST such token is the ordering
+# block; a later one ("last input block Some(<id>)", "requesting parent
+# <id>") never is.
+_SCALA_ID = re.compile(r'\b(?:for|block)\s+([0-9a-f]{2,64})\b')
+
+
+def scala_decisions(lines):
+    """Every ordering block a Scala node's log mentions, ONCE per id.
+
+    A follower peered with more than one node hears each announcement
+    from every peer, and the holder repeats the synchronizer's entry
+    phrase when the announcement reaches it: `.work-r1peer2`'s scala2
+    log carries 42 entry lines for 18 ordering blocks. Counting lines
+    made the accounting read 41 eligible and 20 unaccounted.
+
+    Returns `(ids, raw, lines_without_id)`: `ids` maps each id, in first
+    appearance order, to the stages it passed and the outcomes it was
+    given in log order; `raw` is the per-phrase LINE count, kept as
+    evidence of the duplication.
+    """
+    ids, raw, without_id = {}, {field: 0 for field in SCALA_PHRASES}, 0
+    for line in lines:
+        low = line.lower()
+        for field, phrase in SCALA_PHRASES.items():
+            if phrase not in low:
+                continue
+            raw[field] += 1
+            match = _SCALA_ID.search(low)
+            if match is None:
+                # A line that names no id cannot be merged with anything,
+                # so it stands for one announcement of its own.
+                without_id += 1
+                key = f'<no id #{without_id}>'
+            else:
+                key = match.group(1)
+            entry = ids.setdefault(key, {'stages': set(), 'outcomes': []})
+            if field in SCALA_OUTCOMES:
+                entry['outcomes'].append(field)
+            else:
+                entry['stages'].add(field)
+    return ids, raw, without_id
+
+
 def scala_accounting(lines):
-    """The six numbers from a window of a Scala node's log.
+    """The six numbers from a window of a Scala node's log, per ID.
 
     The denominator is the SYNCHRONIZER's, not the holder's. At
     62c10315 an announcement passes three stages — the synchronizer's
@@ -1595,22 +1651,38 @@ def scala_accounting(lines):
     requests the full block without the holder ever running. Counting
     the holder's phrases alone made a follower that downloaded 80 of 81
     ordering blocks look like a node that logged nothing at all.
+
+    Every count is of distinct ordering-block ids (`scala_decisions`).
+    An id's outcome is its FIRST decision; a repeat of the same decision
+    is counted in `repeat_decisions` and a different later decision is
+    named in `conflicting_outcomes`, neither added to a bucket.
     """
     out = _empty_accounting(
         'scala log (ErgoNodeViewSynchronizer gate :1854/:1865 and '
-        'ErgoNodeViewHolder.processOrderingBlock, 62c10315)')
+        'ErgoNodeViewHolder.processOrderingBlock, 62c10315), '
+        'de-duplicated by ordering-block id')
     for field in SCALA_PHRASES:
         out.setdefault(field, 0)
-    for line in lines:
-        low = line.lower()
-        for field, phrase in SCALA_PHRASES.items():
-            if phrase in low:
-                out[field] += 1
-    # Entry precedes the gate, which precedes the holder, and each
-    # stage sees a subset of the one before. The largest is the honest
-    # denominator, and one announcement is never counted twice.
-    out['eligible_announcements'] = max(out['gate_announcements'],
-                                        out['entry_announcements'])
+    ids, raw, without_id = scala_decisions(lines)
+    repeats, conflicts = 0, {}
+    for key, entry in ids.items():
+        for stage in entry['stages']:
+            out[stage] += 1
+        outcomes = entry['outcomes']
+        if outcomes:
+            out[outcomes[0]] += 1
+            repeats += len(outcomes) - 1
+            distinct = list(dict.fromkeys(outcomes))
+            if len(distinct) > 1:
+                conflicts[key] = distinct
+    # Every id any stage or outcome names is one eligible announcement:
+    # entry precedes the gate, which precedes the holder, and an id is
+    # never counted twice.
+    out['eligible_announcements'] = len(ids)
+    out['raw_line_counts'] = raw
+    out['repeat_decisions'] = repeats
+    out['conflicting_outcomes'] = conflicts
+    out['lines_without_id'] = without_id
     out['log_lines'] = len(lines)
     if not out['eligible_announcements'] and not any(
             out[f] for f in ACCOUNTING_FIELDS):

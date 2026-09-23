@@ -1988,6 +1988,96 @@ def _self_test():
     _silent = _common.scala_accounting(['INFO something else entirely'])
     assert 'UNKNOWN, not zero' in _silent['unmatched'], _silent
 
+    # ----- proofs step A (1): one announcement, one decision, per ID -----
+    #
+    # A follower peered with the miner AND the Rust node hears each
+    # announcement from every peer, and the holder logs the entry phrase
+    # again after the synchronizer. `.work-r1peer2`'s scala2 log carries
+    # 42 entry lines for 18 ordering blocks, so the accounting read 41
+    # eligible and 20 unaccounted. Every stage is counted once per
+    # ordering-block id; the first decision is the id's outcome and a
+    # later one is recorded, never added.
+    _sync = 'INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - '
+    _hold = 'INFO org.ergoplatform.nodeView.UtxoNodeViewHolder - '
+    _dup = _common.scala_accounting([
+        # aa: synchronizer entry, gate, holder entry, reconstructed, then
+        # the same announcement from a second peer.
+        _sync + 'Processing ordering block announcement for aa',
+        _sync + 'On processing ordering block aa, it is last input block Some(11)',
+        _hold + 'Processing ordering block announcement for aa',
+        _hold + 'Applying block transactions from input-blocks for aa with '
+                'transactions: 1',
+        _sync + 'Processing ordering block announcement for aa',
+        # bb: gate download from two peers.
+        _sync + 'Processing ordering block announcement for bb',
+        _sync + 'On processing ordering block bb, it is last input block Some(22)',
+        _sync + 'Requesting all the block transactions for bb as prev input '
+                'block not found',
+        _sync + 'Processing ordering block announcement for bb',
+        _sync + 'On processing ordering block bb, it is last input block Some(22)',
+        _sync + 'Requesting all the block transactions for bb as prev input '
+                'block not found',
+        # cc: root mismatch at the holder, repeated entry after it.
+        _sync + 'Processing ordering block announcement for cc',
+        _sync + 'On processing ordering block cc, it is last input block Some(33)',
+        _hold + 'Processing ordering block announcement for cc',
+        'WARN org.ergoplatform.nodeView.UtxoNodeViewHolder - Downloading block '
+        'transactions fully for cc as Merkle root does not match',
+        _sync + 'Processing ordering block announcement for cc',
+    ])
+    assert _dup['eligible_announcements'] == 3, _dup
+    assert _dup['entry_announcements'] == 3, _dup
+    assert _dup['gate_announcements'] == 3, _dup
+    assert _dup['reconstructed'] == 1, _dup
+    assert _dup['download_no_prev_input_block'] == 1, _dup
+    assert _dup['download_root_mismatch'] == 1, _dup
+    assert _dup['decided'] == 3 and _dup['unaccounted'] == 0, _dup
+    # The duplicates are still visible, as evidence rather than as counts.
+    assert _dup['raw_line_counts']['entry_announcements'] == 8, _dup
+    assert _dup['repeat_decisions'] == 1, _dup
+    assert _dup['conflicting_outcomes'] == {}, _dup
+    # Two DIFFERENT decisions about one id: the first is the outcome, the
+    # second is named, and the id is not counted twice.
+    _flip = _common.scala_accounting([
+        _sync + 'On processing ordering block dd, it is last input block Some(44)',
+        _sync + 'Requesting all the block transactions for dd as prev input '
+                'block not found',
+        _hold + 'Applying block transactions from input-blocks for dd with '
+                'transactions: 2',
+    ])
+    assert _flip['eligible_announcements'] == 1, _flip
+    assert _flip['download_no_prev_input_block'] == 1, _flip
+    assert _flip['reconstructed'] == 0, _flip
+    assert _flip['conflicting_outcomes'] == {
+        'dd': ['download_no_prev_input_block', 'reconstructed']}, _flip
+    # The scenario's own per-follower counter reads the same de-duplicated
+    # decisions, so its F5 table cannot disagree with the accounting.
+    from scenarios import reconstruct_rate as _rr_dedup
+    import smoke as _smoke_dd
+    _saved_work_dd = _smoke_dd.WORK
+    try:
+        with tempfile.TemporaryDirectory() as _tmp_dd:
+            _smoke_dd.WORK = Path(_tmp_dd)
+            (_smoke_dd.WORK / 'scala2.log').write_text('\n'.join([
+                _sync + 'On processing ordering block bb, it is last input '
+                        'block Some(22)',
+                _sync + 'Requesting all the block transactions for bb as prev '
+                        'input block not found',
+                _sync + 'Requesting all the block transactions for bb as prev '
+                        'input block not found',
+                _hold + 'Applying block transactions from input-blocks for aa '
+                        'with transactions: 1',
+                _hold + 'Applying block transactions from input-blocks for aa '
+                        'with transactions: 1',
+            ]) + '\n')
+            _counts_dd = _rr_dedup._scala_log_counts(None, 'scala2', 0)
+            assert _counts_dd['decided'] == 2, _counts_dd
+            assert _counts_dd['reconstructed'] == 1, _counts_dd
+            assert _counts_dd['fallback_at_gate'] == 1, _counts_dd
+            assert _counts_dd['reconstructed_ratio'] == 0.5, _counts_dd
+    finally:
+        _smoke_dd.WORK = _saved_work_dd
+
     # ----- fix round 1, item 3: both halves count the SAME interval -----
     #
     # The Rust half was a watermarked collector over the scenario's
