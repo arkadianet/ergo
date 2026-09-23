@@ -13,6 +13,13 @@ Scala's default `adProofsSuffixLength` is 114,688: bootstrapping nodes need not
 retain generated proofs for older blocks, even when they retain transactions
 and extensions. Requiring those proofs can stall an archival sync at block 2.
 
+Rust retains locally generated proofs when the block height is at least the
+best known header height minus 114,688 (saturating at zero). After validation,
+before state application, it stores a type-104 section framed with the header
+ID and proof length, so near-tip full-block API responses include ADProofs.
+Older historical blocks still validate without downloading or retaining proofs.
+This is an insertion window; it does not add eviction of previously stored proofs.
+
 `StateStore::regenerate_ad_proofs` uses the existing upstream AVL prover with
 on-demand expansion. The arena owner serves node reads to a scoped worker;
 the worker owns the upstream `Rc` graph and its function-pointer resolver.

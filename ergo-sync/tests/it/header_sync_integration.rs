@@ -823,6 +823,20 @@ fn process_header_across_epoch_boundary_1025() {
 /// through the coordinator + executor pipeline.
 #[test]
 fn executor_end_to_end_block_2_without_downloaded_proofs() {
+    block_2_without_downloaded_proofs(2, true);
+}
+
+#[test]
+fn regenerated_proofs_retained_at_suffix_boundary() {
+    block_2_without_downloaded_proofs(2 + 114_688, true);
+}
+
+#[test]
+fn regenerated_proofs_not_retained_below_suffix_boundary() {
+    block_2_without_downloaded_proofs(3 + 114_688, false);
+}
+
+fn block_2_without_downloaded_proofs(best_header_height: u32, retain_proofs: bool) {
     use ergo_p2p::types::InvData;
     use ergo_primitives::writer::VlqWriter;
     use ergo_ser::block_transactions::write_block_transactions;
@@ -931,6 +945,14 @@ fn executor_end_to_end_block_2_without_downloaded_proofs() {
     assert!(store.get_header(&h2_id).unwrap().is_some());
     assert_eq!(store.chain_state_meta().best_header_height, 2);
 
+    if best_header_height != 2 {
+        store
+            .as_utxo_mut()
+            .unwrap()
+            .test_force_set_best_header_unsafe(h2_id, best_header_height, vec![1])
+            .unwrap();
+    }
+
     // === Step 2: Construct and deliver block sections ===
     // Parse header 2 for section roots
     let h2 = read_header(&mut VlqReader::new(&h2_bytes)).unwrap();
@@ -1008,7 +1030,26 @@ fn executor_end_to_end_block_2_without_downloaded_proofs() {
     assert_eq!(coordinator.sync_state().best_full_block_height(), 2);
     assert!(!coordinator.requires_proofs());
     let proof_id = compute_section_id(104, &h2_id, h2.ad_proofs_root.as_bytes());
-    assert!(store.get_block_section(&proof_id).unwrap().is_none());
+    let proof_section = store.get_block_section(&proof_id).unwrap();
+    assert_eq!(proof_section.is_some(), retain_proofs);
+    assert_eq!(
+        store
+            .as_utxo_mut()
+            .unwrap()
+            .get_modifier_type(&proof_id)
+            .unwrap(),
+        retain_proofs.then_some(104)
+    );
+    if let Some(section) = &proof_section {
+        let mut reader = VlqReader::new(section);
+        let proofs = ergo_ser::ad_proofs::read_ad_proofs(&mut reader).unwrap();
+        assert!(reader.is_empty());
+        assert_eq!(proofs.header_id.as_bytes(), &h2_id);
+        assert_eq!(
+            ergo_primitives::digest::blake2b256(&proofs.proof_bytes),
+            h2.ad_proofs_root
+        );
+    }
 
     // Verify state digest matches expected
     let expected_digest: [u8; 33] = {
@@ -1027,6 +1068,15 @@ fn executor_end_to_end_block_2_without_downloaded_proofs() {
         expected_digest,
         "state digest at height 2 should match Scala node"
     );
+    if best_header_height == 2 {
+        drop(store);
+        let reopened = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        assert_eq!(
+            reopened.get_block_section(&proof_id).unwrap(),
+            proof_section
+        );
+        assert_eq!(reopened.get_modifier_type(&proof_id).unwrap(), Some(104));
+    }
 }
 
 /// Restart/resume test: process headers 2-5, drop executor, recreate,

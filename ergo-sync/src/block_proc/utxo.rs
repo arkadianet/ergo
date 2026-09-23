@@ -8,13 +8,14 @@ use std::time::Instant;
 
 use tracing::debug;
 
-use ergo_primitives::digest::blake2b256;
+use ergo_primitives::digest::{blake2b256, ModifierId};
 use ergo_primitives::reader::VlqReader;
-use ergo_ser::ad_proofs::read_ad_proofs;
+use ergo_primitives::writer::VlqWriter;
+use ergo_ser::ad_proofs::{read_ad_proofs, write_ad_proofs, ADProofs};
 use ergo_ser::block_transactions::read_block_transactions_with_group_elements;
 use ergo_ser::extension::read_extension;
 use ergo_ser::header::read_header;
-use ergo_ser::modifier_id::{compute_section_id, ExpectedSections, TYPE_EXTENSION};
+use ergo_ser::modifier_id::{compute_section_id, ExpectedSections, TYPE_AD_PROOFS, TYPE_EXTENSION};
 use ergo_state::store::StateStore;
 use ergo_validation::block::{
     validate_full_block_parallel_with_group_elements, BlockValidationContext,
@@ -27,6 +28,9 @@ use ergo_validation::{ChainHeaderReader, ChainHeaderReaderError, HeaderView};
 use crate::perf::BlockPerfCounters;
 
 use super::{BlockProcessError, ProcessedBlock};
+
+/// Scala's default `adProofsSuffixLength`, measured from the best known header.
+const AD_PROOFS_SUFFIX_LENGTH: u32 = 114_688;
 
 /// Bridge `StateStore` → `ChainHeaderReader` so the voting recompute
 /// pipeline can read `header.votes` for the previous voting epoch
@@ -190,7 +194,7 @@ pub(super) fn process_block_utxo(
     // 2c. Full proofHash parity — UTXO-mode counterpart of Scala's
     // "Regenerated proofHash is not equal to the declared one" check.
     //
-    match store.ad_proofs_apply_policy() {
+    let retained_proof = match store.ad_proofs_apply_policy() {
         ergo_state::store::AdProofsApplyPolicy::VerifyShipped => {
             let section_bytes = store.get_block_section(&expected.ad_proofs_id)?.ok_or(
                 BlockProcessError::AdProofsUnavailable {
@@ -232,6 +236,7 @@ pub(super) fn process_block_utxo(
                 &header,
                 &block_txs.transactions,
             )?;
+            None
         }
         ergo_state::store::AdProofsApplyPolicy::Regenerate => {
             let regenerated = store.regenerate_ad_proofs(&block_txs.transactions)?;
@@ -243,8 +248,14 @@ pub(super) fn process_block_utxo(
                     computed_root: regenerated_root,
                 });
             }
+            (height
+                >= store
+                    .chain_state()
+                    .best_header_height
+                    .saturating_sub(AD_PROOFS_SUFFIX_LENGTH))
+            .then_some(regenerated.1)
         }
-    }
+    };
 
     // Voted parameters: at epoch starts, run the full
     // epoch-extension validation before constructing CheckedHeader.
@@ -472,6 +483,22 @@ pub(super) fn process_block_utxo(
     )?;
     let t_validate = t0.elapsed();
     let tx_count = checked_block.transactions().len();
+
+    if let Some(proof_bytes) = retained_proof {
+        let mut writer = VlqWriter::new();
+        write_ad_proofs(
+            &mut writer,
+            &ADProofs {
+                header_id: ModifierId::from_bytes(header_id_computed),
+                proof_bytes,
+            },
+        );
+        store.store_block_section_typed(
+            &expected.ad_proofs_id,
+            &writer.result(),
+            TYPE_AD_PROOFS,
+        )?;
+    }
 
     // 9. Apply to UTXO state. apply_block now derives height/header_id/
     // expected_state_root from the embedded CheckedHeader, so we don't
@@ -810,5 +837,9 @@ mod ad_proofs_regeneration_tests {
         );
         assert_eq!(store.height(), 1);
         assert_eq!(store.root_digest(), parent_root);
+        assert!(store
+            .get_block_section(&expected.ad_proofs_id)
+            .unwrap()
+            .is_none());
     }
 }
