@@ -3454,10 +3454,24 @@ def _fake_node_modules(work, calls, stop_raises=False, findings_raise=False):
 
     import smoke as real_smoke
 
+    import lifecycle as real_lifecycle
+
     lifecycle = types.ModuleType('lifecycle')
+    # Constants and pure role resolution come from the real module; every
+    # function that would touch a process, a build or a port is faked
+    # below, so an attribute this list misses fails loudly rather than
+    # starting something.
+    for _attr in ('ROLES', 'Role', 'role_node', 'roles_for_nodes', 'NODES',
+                  'P2P', 'REST', 'WORK', 'DEFAULT_CONFIG', 'DEFAULT_P2P',
+                  'DEFAULT_P2P_HOST', 'DEFAULT_REST', 'P2P_HOST'):
+        if hasattr(real_lifecycle, _attr):
+            setattr(lifecycle, _attr, getattr(real_lifecycle, _attr))
     lifecycle.SCALA_APP_VERSION = 'fake'
     lifecycle.node_binary = lambda: '/fake/ergo-node'
-    lifecycle.classpath_file = lambda: Path('/fake/classpath')
+    lifecycle.node_binary_provenance = lambda: {'fake': True}
+    lifecycle.classpath_file = lambda node='scala': Path('/fake/classpath')
+    lifecycle.scala_app_version = lambda node='scala': 'fake'
+    lifecycle.node_build = lambda node: 'stock'
 
     def start(names):
         calls.append(('start', tuple(names)))
@@ -3509,7 +3523,25 @@ def _fake_node_modules(work, calls, stop_raises=False, findings_raise=False):
             self.failures.append({'assertion': assertion, 'message': message})
 
     smoke.Run = Run
-    return lifecycle, smoke
+
+    # The build registry would VERIFY a real provisioned build (hashing
+    # its class output); the driver only needs a summary bound to the
+    # launch classpath the fake lifecycle reports.
+    builds = types.ModuleType('builds')
+
+    class BuildError(Exception):
+        pass
+
+    class _Build:
+        def __init__(self, name):
+            self.name = name
+
+        def summary(self):
+            return {'build': self.name, 'classpath': '/fake/classpath'}
+
+    builds.BuildError = BuildError
+    builds.load = _Build
+    return lifecycle, smoke, builds
 
 
 def _drive(name, scenario_run, tmp, **faults):
@@ -3522,19 +3554,31 @@ def _drive(name, scenario_run, tmp, **faults):
     CAMPAIGN_WORK, CONF, WORK = tmp / 'campaign', tmp / 'campaign' / 'conf', tmp / 'work'
     WORK.mkdir(parents=True, exist_ok=True)
     calls = []
-    fake_lifecycle, fake_smoke = _fake_node_modules(WORK, calls, **faults)
+    fake_lifecycle, fake_smoke, fake_builds = _fake_node_modules(
+        WORK, calls, **faults)
     module = types.ModuleType(f'fake_{name}')
     module.__doc__ = 'A probe scenario.'
     module.NODES = SCENARIO_NODES[name]
     module.run = scenario_run
-    real_modules = {k: sys.modules.get(k) for k in ('lifecycle', 'smoke')}
+    real_modules = {k: sys.modules.get(k)
+                    for k in ('lifecycle', 'smoke', 'builds')}
     real_scenario = SCENARIOS[name]
+    common = common_module()
+    real_accounting = common.reconstruction_accounting
+    # The accounting reads the nodes' feeds and logs; its own rules are
+    # tested on their own. Here the driver only has to CALL it, for every
+    # scenario, before the verdict.
+    common.reconstruction_accounting = lambda ctx: (
+        calls.append(('reconstruction_accounting', tuple(ctx.roles)))
+        or {'fields': list(common.ACCOUNTING_FIELDS), 'probe': True})
     sys.modules['lifecycle'], sys.modules['smoke'] = fake_lifecycle, fake_smoke
+    sys.modules['builds'] = fake_builds
     SCENARIOS[name] = module
     raised = None
     try:
         args = types.SimpleNamespace(attempt=check_attempt_cap(name), fresh=False,
-                                     timeout=5, ordering_blocks=None)
+                                     timeout=5, ordering_blocks=None,
+                                     reference_follower=None, build='stock')
         try:
             evidence = run_scenario(name, args)
         except BaseException as error:  # noqa: BLE001 — the probe inspects it
@@ -3543,6 +3587,7 @@ def _drive(name, scenario_run, tmp, **faults):
         return evidence, calls, raised, read_attempts()
     finally:
         SCENARIOS[name] = real_scenario
+        common.reconstruction_accounting = real_accounting
         for key, value in real_modules.items():
             if value is None:
                 sys.modules.pop(key, None)
@@ -3564,6 +3609,11 @@ def _self_test_driver():
         evidence, calls, raised, _ = _drive('steady', lambda ctx: None, tmp / 'clean')
         assert raised is None and evidence['result'] == 'PASS', evidence['result']
         assert stopped(calls), calls
+        # Every scenario's evidence carries the reconstruction accounting
+        # and the build identity of each Scala role.
+        assert any(c[0] == 'reconstruction_accounting' for c in calls), calls
+        assert evidence['reconstruction_accounting'].get('probe'), evidence
+        assert evidence['builds']['scala_miner']['build'] == 'stock', evidence
 
         # Evidence collection throws AFTER the scenario body succeeded —
         # the shape codex named: it used to bypass node shutdown and

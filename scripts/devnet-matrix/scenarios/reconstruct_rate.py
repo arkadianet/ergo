@@ -289,7 +289,7 @@ def run(ctx):
     heights, unread_heights = {}, []
     for height in range(start + 1, reached + 1):
         try:
-            ids = api('scala', f'/blocks/at/{height}') or []
+            ids = api(miner_node, f'/blocks/at/{height}') or []
         except Unavailable:
             ids = []
         if ids:
@@ -312,7 +312,7 @@ def run(ctx):
     adjacent = set()
     for height in (start, reached + 1, reached + 2):
         try:
-            ids = api('scala', f'/blocks/at/{height}') or []
+            ids = api(miner_node, f'/blocks/at/{height}') or []
         except Unavailable:
             ids = []
         adjacent |= set(ids[:1])
