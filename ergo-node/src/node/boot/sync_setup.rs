@@ -39,6 +39,39 @@ fn report_sync_boot_failure(
     );
 }
 
+fn check_configured_genesis(
+    store: &ergo_state::StateBackendKind,
+    genesis_id: Option<[u8; 32]>,
+) -> Result<(), String> {
+    let Some(expected) = genesis_id else {
+        return Ok(());
+    };
+    let chain = store.chain_state_meta();
+    if chain.best_header_height < 1
+        || matches!(
+            chain.header_availability,
+            ergo_state::chain::HeaderAvailability::PoPowSparse { .. }
+        )
+    {
+        return Ok(());
+    }
+    let actual = store
+        .get_header_id_at_height(1)
+        .map_err(|e| format!("boot: failed to read canonical genesis header id: {e}"))?;
+    match actual {
+        Some(actual) if actual == expected => Ok(()),
+        Some(actual) => Err(format!(
+            "boot: configured genesis id mismatch: expected {}, got {}",
+            hex::encode(expected),
+            hex::encode(actual)
+        )),
+        None => Err(format!(
+            "boot: Dense store has no canonical header at height 1 (best_header_height = {})",
+            chain.best_header_height
+        )),
+    }
+}
+
 /// Everything [`setup`] produces, threaded into [`super::run_inner_with_backend`]'s
 /// `NodeState` construction and (for `chain_meta`/`bootstrap_kind`) the
 /// handshake + identity building that follows.
@@ -207,6 +240,10 @@ pub(super) fn setup(
         ergo_validation::context::ProtocolParams::mainnet_default(),
         config.chain_spec.difficulty.clone(),
     );
+    executor.set_genesis_id(config.genesis_id);
+    if let Err(e) = check_configured_genesis(store, config.genesis_id) {
+        return Err(e.into());
+    }
     executor.set_script_validation_checkpoint(config.script_validation_checkpoint);
     if let Some((h, id)) = config.script_validation_checkpoint {
         info!(
@@ -547,8 +584,35 @@ pub(super) fn setup(
 mod tests {
     use super::*;
     use clap::Parser;
+    use ergo_state::chain::HeaderMeta;
     use ergo_state::store::StateStore;
     use ergo_state::{DigestStateStore, StateBackendKind};
+
+    #[test]
+    fn configured_genesis_check_rejects_wrong_dense_genesis() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        store.initialize_genesis(&[]).unwrap();
+        let actual = [0x11; 32];
+        store
+            .store_validated_header(
+                &actual,
+                &[0x01],
+                &HeaderMeta {
+                    parent_id: [0u8; 32],
+                    height: 1,
+                    cumulative_score: vec![1],
+                    pow_validity: 1,
+                    timestamp: 0,
+                },
+                Some((1, vec![1])),
+            )
+            .unwrap();
+        let store = StateBackendKind::Utxo(store);
+
+        assert!(check_configured_genesis(&store, Some(actual)).is_ok());
+        assert!(check_configured_genesis(&store, Some([0x22; 32])).is_err());
+    }
 
     #[tokio::test]
     async fn boot_requires_downloaded_proofs_only_for_digest_state() {

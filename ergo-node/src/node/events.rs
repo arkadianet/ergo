@@ -743,6 +743,7 @@ fn inject_local_full_block(
             | HeaderProcessError::EpochContextIncomplete { .. }
             | HeaderProcessError::EpochHeaderMissing { .. }
             | HeaderProcessError::CheckpointMismatch { .. }
+            | HeaderProcessError::GenesisIdMismatch { .. }
             | HeaderProcessError::Validation(_)),
         ) => {
             return Err(SubmitError {
