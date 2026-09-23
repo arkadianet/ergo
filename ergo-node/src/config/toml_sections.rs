@@ -262,6 +262,10 @@ pub(super) struct TomlMempool {
 pub(super) struct TomlChain {
     /// Private devnet genesis cost cap; forbidden on public networks.
     pub(super) devnet_max_block_cost: Option<u32>,
+    /// Private devnet wire magic (four bytes), replacing the built-in
+    /// `[7, 7, 7, 7]`, so several devnets can coexist or one can join
+    /// another private network's magic; forbidden on public networks.
+    pub(super) devnet_magic: Option<[u8; 4]>,
     /// Override the network's default script-validation checkpoint
     /// height. Use 0 to disable.
     pub(super) script_validation_checkpoint_height: Option<u32>,

@@ -33,6 +33,9 @@ infrastructure.
 
 ### Added
 
+- `[chain] devnet_magic = [..]`: override the private devnet's P2P wire
+  magic (default `[7, 7, 7, 7]`) so several devnets can coexist or one can
+  join another private network; rejected for mainnet and testnet.
 - Include measured `cost` in Scala-compatible unconfirmed transaction JSON,
   with `null` when unknown. Confirmed transaction JSON is unchanged.
 - UTXO sync no longer waits for historical ADProofs that peers may not retain.

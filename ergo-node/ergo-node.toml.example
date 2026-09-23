@@ -95,6 +95,11 @@ download_window = 384
 # cache_bytes = 1073741824
 
 [chain]
+# Devnet only (`network = "devnet"`): replace the private chain's P2P wire
+# magic [7, 7, 7, 7] so several devnets can coexist or one can join another
+# private network. Rejected for mainnet and testnet.
+# devnet_magic = [7, 7, 7, 7]
+
 # Mainnet default script-validation checkpoint is embedded. Set height = 0
 # to fully validate scripts from genesis.
 # script_validation_checkpoint_height = 1231454
