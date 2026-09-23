@@ -20,7 +20,7 @@
 //   verbatim, never via Number().
 import { api, getJson } from './api-client.js';
 import { makeTable, copyBtn } from './table.js';
-import { erg, num, bytes, dur, truncMiddle } from './format.js';
+import { erg, num, bytes, dur, truncMiddle, blockTime } from './format.js';
 import { minerNode, pkToAddress, fetchOwnPk, poolLabel } from './miners.js';
 import { fetchTokenMeta, tokenName, tokenAmt, decimalize, amt, saneDecimals } from './token-meta.js';
 
@@ -384,7 +384,7 @@ async function renderHome(mySeq) {
         render: (b) => link(`block/${b.header_id}`, num(b.height)),
         sort: (b) => b.height,
       },
-      { key: 'age', label: 'Age', width: 80, align: 'right', render: (b) => dur(Math.max(0, Math.floor((Date.now() - b.ts_unix_ms) / 1000))), sort: (b) => -b.ts_unix_ms },
+      { key: 'age', label: 'Mined', width: 116, align: 'right', render: (b) => blockTime(b.ts_unix_ms), sort: (b) => -b.ts_unix_ms },
       { key: 'txs', label: 'Txs', width: 60, align: 'right', sort: (b) => b.txs },
       { key: 'size', label: 'Size', width: 80, align: 'right', render: (b) => bytes(b.size_bytes), sort: (b) => b.size_bytes },
       {
@@ -912,14 +912,15 @@ export function mount(el2) {
     <div class="pg-head">
       <div>
         <h1 class="pg-title">Explorer</h1>
-        <span class="pg-count micro-label">chain + extra-index lookup</span>
+        <p class="pg-description">Follow blocks, transactions and assets through your node's local chain.</p>
       </div>
     </div>
     <form class="ex-omni" data-omni>
       <input class="input ex-omni__input" type="search" spellcheck="false" autocomplete="off"
-             placeholder="height · block / tx / box / token id · address    ( / to focus )" aria-label="search the chain" />
+             placeholder="Block height, transaction ID or address" aria-label="search the chain" aria-describedby="explorer-search-help" />
       <button class="btn btn--primary" type="submit">Search</button>
     </form>
+    <p class="search-help" id="explorer-search-help">Also accepts block, box and token IDs. Press <kbd>/</kbd> from any page to search.</p>
     <div class="ex-status micro-label" data-status role="status" aria-live="polite"></div>
     <div class="ex-body" data-body></div>`;
   body = root.querySelector('[data-body]');

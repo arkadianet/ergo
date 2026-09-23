@@ -44,6 +44,7 @@ let lastInfoAt = 0;
 // different section is not blocked (the names differ).
 let slowInFlight = null;
 let fastInFlight = false;
+let lastStatusAt = 0;
 
 function setConn(ok) {
   const dot = document.getElementById('conn-dot');
@@ -54,12 +55,18 @@ function setConn(ok) {
     // would read as activity where there is none.
     dot.classList.toggle('is-live', ok);
   }
-  if (state) state.textContent = ok ? 'Live' : 'Unreachable';
+  if (ok) lastStatusAt = Date.now();
+  if (state) state.textContent = ok ? 'API connected' : 'API unreachable';
+  const banner = document.getElementById('connection-banner');
+  if (banner) banner.hidden = ok;
+  tickClock();
 }
 
 function tickClock() {
   const el = document.getElementById('clock');
-  if (el) el.textContent = new Date().toLocaleTimeString();
+  if (el) el.textContent = lastStatusAt
+    ? `Updated ${Math.max(0, Math.floor((Date.now() - lastStatusAt) / 1000))}s ago`
+    : 'Waiting for first response';
 }
 
 async function fast() {
@@ -79,6 +86,7 @@ async function fast() {
     } catch {
       // getJson normally resolves null; keep cached info and mark unreachable.
       setConn(false);
+      renderers[current]?.onFast?.({ status: null, info: cachedInfo, reachable: false });
       return;
     }
     if (needInfo) {
@@ -90,7 +98,7 @@ async function fast() {
     const infoForRender = cachedInfo || info;
     if (net && infoForRender) net.textContent = `${infoForRender.network ?? ''} · v${infoForRender.version ?? ''}`;
     const r = current && renderers[current];
-    if (r && r.onFast) r.onFast({ status, info: infoForRender });
+    if (r && r.onFast) r.onFast({ status, info: infoForRender, reachable: !!status });
   } finally {
     fastInFlight = false;
   }
@@ -120,13 +128,23 @@ function show(s, tail) {
   const prev = current && renderers[current];
   if (prev && prev.onHide) prev.onHide();
   current = s;
+  const side = document.querySelector('.side');
+  const navToggle = document.getElementById('nav-toggle');
+  if (side && navToggle) {
+    // A selected mobile link will be hidden; move focus back to the menu.
+    if (side.classList.contains('side--open') && matchMedia('(max-width: 760px)').matches && side.contains(document.activeElement)) navToggle.focus();
+    side.classList.remove('side--open');
+    navToggle.setAttribute('aria-expanded', 'false');
+  }
   if (!mounted.has(s)) {
     r.mount(document.getElementById(`section-${s}`));
     mounted.add(s);
   }
   if (r.onShow) r.onShow();
   if (r.onRoute) r.onRoute(tail || '');
+  window.scrollTo({ top: 0, behavior: 'instant' });
   slow(); // immediate first paint for the entered section
+  fast(); // don't show an old status when switching sections
 }
 
 // Asked by the router before leaving `prev`; a section may veto (return false).
@@ -145,6 +163,23 @@ function boot() {
     document.getElementById('auth-dialog'),
   );
   applyPrefs();
+  document.querySelector('.skip-link')?.addEventListener('click', (event) => {
+    event.preventDefault();
+    document.getElementById('main-content').focus();
+    document.getElementById('main-content').scrollIntoView({ block: 'start' });
+  });
+  const navToggle = document.getElementById('nav-toggle');
+  navToggle?.addEventListener('click', () => {
+    const expanded = document.querySelector('.side').classList.toggle('side--open');
+    navToggle.setAttribute('aria-expanded', String(expanded));
+  });
+  const search = () => {
+    const r = renderers[current];
+    if (r?.isBusy?.() || document.querySelector('dialog[open]')) return;
+    if (current !== 'explorer') location.hash = 'explorer';
+    setTimeout(() => { if (current === 'explorer') explorer.focusSearch(); }, 0);
+  };
+  document.getElementById('global-search')?.addEventListener('click', search);
   startRouter(SECTIONS, show, beforeLeave);
   // "/" from anywhere jumps to the explorer omnibox (GitHub-style). Ignored
   // while typing in a field or while a dialog is open, so it never swallows a
@@ -152,7 +187,7 @@ function boot() {
   document.addEventListener('keydown', (e) => {
     if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return;
     const t = e.target;
-    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
     if (document.querySelector('dialog[open]')) return;
     // Never initiate navigation away from a busy section: on the wallet
     // mnemonic gate, '/' would raise the leave-confirm where Enter (the
@@ -160,9 +195,7 @@ function boot() {
     const r = renderers[current];
     if (r && r.isBusy && r.isBusy()) return;
     e.preventDefault();
-    if (current !== 'explorer') location.hash = 'explorer';
-    // Focus after the router has painted the section (hashchange is async).
-    setTimeout(() => explorer.focusSearch(), 0);
+    search();
   });
   fast();
   setInterval(fast, STATUS_REFRESH_MS);

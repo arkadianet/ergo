@@ -14,6 +14,7 @@ const HTTP_FALLBACK_MS = 30_000;
 let lastFullAt = 0;
 let refreshTimer = null;
 let refreshing = false;
+let lastPeers = [];
 
 const peersWs = createChannelSub({
   id: 'peers-panel',
@@ -27,7 +28,7 @@ const peersWs = createChannelSub({
 
 const dirColor = (d) => (d === 'outbound' ? 'var(--blue)' : 'var(--purple)');
 const stateColor = (s) =>
-  s === 'connected' ? 'var(--green)' : s === 'handshaking' ? 'var(--yellow)' : 'var(--tx3)';
+  s === 'connected' || s === 'active' ? 'var(--green)' : s === 'handshaking' ? 'var(--yellow)' : 'var(--tx3)';
 
 function span(text, color) {
   const s = document.createElement('span');
@@ -55,14 +56,14 @@ function heightNode(p) {
 
 const COLS = [
   { key: 'addr', label: 'Address', width: 150, sort: (r) => r.addr },
-  { key: 'dir', label: 'Dir', width: 40, render: dirNode, sort: (r) => r.direction },
+  { key: 'dir', label: 'Direction', width: 64, render: dirNode, sort: (r) => r.direction },
   { key: 'state', label: 'State', width: 78, render: stateNode, sort: (r) => r.state },
   { key: 'height', label: 'Height', width: 84, align: 'right', render: heightNode, sort: (r) => r.peer_height ?? -1 },
-  { key: 'in', label: 'In', width: 58, align: 'right', render: (r) => bytes(r.bytes_in), sort: (r) => r.bytes_in ?? -1 },
-  { key: 'out', label: 'Out', width: 58, align: 'right', render: (r) => bytes(r.bytes_out), sort: (r) => r.bytes_out ?? -1 },
+  { key: 'in', label: 'Received', width: 68, align: 'right', render: (r) => bytes(r.bytes_in), sort: (r) => r.bytes_in ?? -1 },
+  { key: 'out', label: 'Sent', width: 58, align: 'right', render: (r) => bytes(r.bytes_out), sort: (r) => r.bytes_out ?? -1 },
   { key: 'score', label: 'Score', width: 48, align: 'right', sort: (r) => r.score },
   { key: 'agent', label: 'Agent', sort: (r) => r.agent || '' },
-  { key: 'conn', label: 'Conn', width: 56, align: 'right', render: (r) => dur(r.connected_seconds), sort: (r) => r.connected_seconds },
+  { key: 'conn', label: 'Connected', width: 80, align: 'right', render: (r) => dur(r.connected_seconds), sort: (r) => r.connected_seconds },
 ];
 
 function kv(label, value) {
@@ -120,16 +121,48 @@ export function mount(el) {
     <div class="pg-head">
       <div>
         <h1 class="pg-title">Peers</h1>
+        <p class="pg-description">The connections keeping your node in touch with the network.</p>
         <span class="pg-count micro-label" data-count></span>
       </div>
+      <button class="btn btn--ghost" type="button" data-refresh>Refresh peers</button>
     </div>
+    <div class="banner banner--warn" data-error role="status" hidden></div>
     <div class="comp" data-comp></div>
+    <div class="filter-bar">
+      <label class="filter-bar__search">Find a peer<input class="input" type="search" data-search placeholder="Address, client or node name" autocomplete="off"></label>
+      <label>Direction<select class="select" data-direction><option value="all">All connections</option><option value="outbound">Outbound</option><option value="inbound">Inbound</option></select></label>
+      <button class="btn btn--ghost" type="button" data-clear hidden>Clear filters</button>
+    </div>
+    <div class="list-meta"><span data-results role="status">Loading peer connections…</span><span data-updated></span></div>
     <div data-table></div>`;
   table = makeTable(el.querySelector('[data-table]'), COLS, {
     rowKey: (r) => r.addr,
     renderDetail,
     initialSort: { key: 'conn', dir: -1 },
+    label: 'Network peers',
+    emptyMessage: () => lastPeers.length ? 'No peers match these filters. Try another address or connection direction.' : 'No peer connections yet. The node will keep looking for peers.',
   });
+  el.querySelector('[data-search]').addEventListener('input', applyFilters);
+  el.querySelector('[data-direction]').addEventListener('change', applyFilters);
+  el.querySelector('[data-clear]').addEventListener('click', () => {
+    el.querySelector('[data-search]').value = '';
+    el.querySelector('[data-direction]').value = 'all';
+    el.querySelector('[data-search]').focus();
+    applyFilters();
+  });
+  el.querySelector('[data-refresh]').addEventListener('click', fullRefresh);
+}
+
+function applyFilters() {
+  const query = root.querySelector('[data-search]').value.trim().toLowerCase();
+  const direction = root.querySelector('[data-direction]').value;
+  const filtered = lastPeers.filter((p) =>
+    (direction === 'all' || p.direction === direction) &&
+    [p.addr, p.agent, p.node_name].some((v) => String(v || '').toLowerCase().includes(query)),
+  );
+  root.querySelector('[data-clear]').hidden = !query && direction === 'all';
+  root.querySelector('[data-results]').textContent = `${filtered.length} of ${lastPeers.length} peers`;
+  table.update(filtered);
 }
 
 function bar(segments) {
@@ -160,12 +193,16 @@ function renderComp(peers) {
   const total = peers.length || 1;
   const out = peers.filter((p) => p.direction === 'outbound').length;
   const inn = peers.filter((p) => p.direction === 'inbound').length;
-  const conn = peers.filter((p) => p.state === 'connected').length;
+  const conn = peers.filter((p) => p.state === 'connected' || p.state === 'active').length;
   const hs = peers.filter((p) => p.state === 'handshaking').length;
   const other = peers.length - conn - hs;
 
   // direction
   const dirBody = document.createElement('div');
+  const outValue = document.createElement('div');
+  outValue.className = 'comp__value';
+  outValue.textContent = num(out);
+  dirBody.append(outValue);
   dirBody.append(
     bar([
       { frac: out / total, color: 'var(--blue)' },
@@ -179,6 +216,10 @@ function renderComp(peers) {
 
   // state
   const stBody = document.createElement('div');
+  const activeValue = document.createElement('div');
+  activeValue.className = 'comp__value';
+  activeValue.textContent = num(conn);
+  stBody.append(activeValue);
   stBody.append(
     bar([
       { frac: conn / total, color: 'var(--green)' },
@@ -192,7 +233,7 @@ function renderComp(peers) {
   stBody.append(sl);
 
   // agents
-  const counts = {};
+  const counts = Object.create(null);
   for (const p of peers) {
     const a = (p.agent || 'unknown').split('/').slice(0, 2).join('/');
     counts[a] = (counts[a] || 0) + 1;
@@ -213,7 +254,7 @@ function renderComp(peers) {
       agBody.append(r);
     });
 
-  host.append(compCell('Direction', dirBody), compCell('State', stBody), compCell('Agents', agBody));
+  host.append(compCell('Outbound connections', dirBody), compCell('Active connections', stBody), compCell('Connected clients', agBody));
 }
 
 function scheduleRefresh(delayMs) {
@@ -227,16 +268,30 @@ function scheduleRefresh(delayMs) {
 async function fullRefresh() {
   if (!root || refreshing) return;
   refreshing = true;
+  const refresh = root.querySelector('[data-refresh]');
+  refresh.disabled = true;
+  refresh.textContent = 'Refreshing…';
   try {
     const [peers, status] = await Promise.all([api.peers(), api.status()]);
     if (status) ourHeight = status.best_header_height ?? null;
-    const list = Array.isArray(peers) ? peers : [];
-    root.querySelector('[data-count]').textContent = `${list.length} connected`;
+    const error = root.querySelector('[data-error]');
+    if (!Array.isArray(peers)) {
+      error.textContent = 'Could not refresh peers. Showing the last available data; use Refresh peers to try again.';
+      error.hidden = false;
+      return;
+    }
+    error.hidden = true;
+    const list = peers;
+    lastPeers = list;
+    root.querySelector('[data-count]').textContent = `${list.length} peers · ${list.filter((p) => p.state === 'active' || p.state === 'connected').length} active`;
     renderComp(list);
-    table.update(list);
+    applyFilters();
     lastFullAt = Date.now();
+    root.querySelector('[data-updated]').textContent = `Updated ${new Date(lastFullAt).toLocaleTimeString()}`;
   } finally {
     refreshing = false;
+    refresh.disabled = false;
+    refresh.textContent = 'Refresh peers';
   }
 }
 

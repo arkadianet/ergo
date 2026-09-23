@@ -230,6 +230,7 @@ export function mount(el) {
     <div class="pg-head">
       <div>
         <h1 class="pg-title">Voting</h1>
+        <p class="pg-description">Inspect protocol parameters and manage your node's voting targets.</p>
         <span class="pg-count micro-label" data-meta></span>
       </div>
     </div>
@@ -270,7 +271,7 @@ export function mount(el) {
     <div class="vt-history">
       <div class="pg-head">
         <div>
-          <h1 class="pg-title">Parameter history</h1>
+          <h2 class="pg-title">Parameter history</h2>
           <span class="pg-count micro-label" data-hist-meta></span>
         </div>
       </div>

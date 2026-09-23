@@ -81,6 +81,7 @@ export function mount(el_) {
     <div class="pg-head">
       <div>
         <h1 class="pg-title">Wallet</h1>
+        <p class="pg-description">Balances, receiving addresses and payments managed by your node.</p>
       </div>
     </div>
     <div class="ov-prompt banner banner--info" data-wallet-prompt hidden></div>

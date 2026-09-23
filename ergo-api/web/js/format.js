@@ -52,6 +52,13 @@ export function num(n) {
   return n == null ? '—' : Number(n).toLocaleString('en-US');
 }
 
+// Historical blocks are easier to place by date than by thousands of days.
+export function blockTime(timestamp, now = Date.now()) {
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return '—';
+  const seconds = Math.max(0, Math.floor((now - timestamp) / 1000));
+  return seconds < 86400 ? `${dur(seconds)} ago` : new Date(timestamp).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
 // Coarse duration from seconds: "42s" / "6m 4s" / "3h 12m" / "6d 4h".
 export function dur(s) {
   if (s == null) return '—';
