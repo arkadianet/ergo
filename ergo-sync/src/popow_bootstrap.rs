@@ -21,15 +21,17 @@
 //!   (`NipopowSettings.scala:10`).
 //! - m / k constants: `ErgoHistoryUtils.scala:29-34` (m=6, k=10).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
-use ergo_crypto::difficulty::DifficultyParams;
+use ergo_crypto::difficulty::{previous_heights_for_recalculation, DifficultyParams};
 use ergo_p2p::peer::PeerId;
 use ergo_p2p::types::{P2P_NIPOPOW_PROOF_K, P2P_NIPOPOW_PROOF_M};
-use ergo_ser::header::Header;
+use ergo_ser::difficulty::encode_compact_bits;
+use ergo_ser::header::{serialize_header, Header};
 use ergo_ser::popow_proof::NipopowProof;
 use ergo_validation::popow::{NipopowVerificationResult, NipopowVerifier};
+use num_bigint::BigUint;
 
 /// State of the NiPoPoW bootstrap discovery + verification loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +80,106 @@ pub fn validate_bootstrap_response_profile(
     true
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopowBootstrapDifficultyError {
+    DuplicateProofHeight { height: u32 },
+    MissingContext { height: u32 },
+    InvalidHeader { height: u32 },
+    ParentIdMismatch { height: u32 },
+    NonIncreasingTimestamp { height: u32 },
+    InitialDifficultyMismatch { height: u32 },
+    ConsensusDifficultyMismatch { height: u32 },
+    InvalidEpochLength,
+}
+
+pub fn validate_bootstrap_difficulty_context(
+    proof: &NipopowProof,
+    params: &DifficultyParams,
+) -> Result<(), PopowBootstrapDifficultyError> {
+    let headers = proof
+        .prefix
+        .iter()
+        .map(|entry| &entry.header)
+        .chain(std::iter::once(&proof.suffix_head.header))
+        .chain(proof.suffix_tail.iter());
+    let mut context = BTreeMap::<u32, &Header>::new();
+    for header in headers {
+        if context.insert(header.height, header).is_some() {
+            return Err(PopowBootstrapDifficultyError::DuplicateProofHeight {
+                height: header.height,
+            });
+        }
+    }
+
+    let genesis = context
+        .get(&1)
+        .ok_or(PopowBootstrapDifficultyError::MissingContext { height: 1 })?;
+    let expected_initial_nbits =
+        encode_compact_bits(&BigUint::from_bytes_be(&params.initial_difficulty));
+    if genesis.n_bits != expected_initial_nbits {
+        return Err(PopowBootstrapDifficultyError::InitialDifficultyMismatch {
+            height: genesis.height,
+        });
+    }
+
+    let epoch_length = params.eip37_epoch_length.unwrap_or(params.epoch_length);
+    if epoch_length == 0 {
+        return Err(PopowBootstrapDifficultyError::InvalidEpochLength);
+    }
+
+    for header in std::iter::once(&proof.suffix_head.header).chain(proof.suffix_tail.iter()) {
+        if header.height == 1 {
+            continue;
+        }
+        let parent_height = header
+            .height
+            .checked_sub(1)
+            .filter(|height| *height > 0)
+            .ok_or(PopowBootstrapDifficultyError::MissingContext {
+                height: header.height,
+            })?;
+        let parent =
+            context
+                .get(&parent_height)
+                .ok_or(PopowBootstrapDifficultyError::MissingContext {
+                    height: parent_height,
+                })?;
+        let (_bytes, parent_id) =
+            serialize_header(parent).map_err(|_| PopowBootstrapDifficultyError::InvalidHeader {
+                height: parent.height,
+            })?;
+        if *header.parent_id.as_bytes() != *parent_id.as_bytes() {
+            return Err(PopowBootstrapDifficultyError::ParentIdMismatch {
+                height: header.height,
+            });
+        }
+        if header.timestamp <= parent.timestamp {
+            return Err(PopowBootstrapDifficultyError::NonIncreasingTimestamp {
+                height: header.height,
+            });
+        }
+
+        let required_heights = previous_heights_for_recalculation(header.height, epoch_length);
+        let mut epoch_headers = Vec::with_capacity(required_heights.len());
+        for height in required_heights {
+            if height == 0 {
+                continue;
+            }
+            let context_header = context
+                .get(&height)
+                .ok_or(PopowBootstrapDifficultyError::MissingContext { height })?;
+            epoch_headers.push((*context_header).clone());
+        }
+        ergo_crypto::pow::verify_header_difficulty(header, &epoch_headers, params).map_err(
+            |_| PopowBootstrapDifficultyError::ConsensusDifficultyMismatch {
+                height: header.height,
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
 /// State machine for the NiPoPoW bootstrap consume side.
 ///
 /// All methods take `&mut self` — this reducer is owned by the
@@ -91,6 +193,7 @@ pub struct PopowBootstrap {
     quorum: u32,
     expected_m: u32,
     expected_k: u32,
+    difficulty_params: DifficultyParams,
     verifier: NipopowVerifier,
     /// Peers we've already sent `GetNipopowProof` to during the
     /// current bootstrap. Cleared per-peer on disconnect via
@@ -130,6 +233,7 @@ impl PopowBootstrap {
             quorum,
             expected_m: P2P_NIPOPOW_PROOF_M as u32,
             expected_k: P2P_NIPOPOW_PROOF_K as u32,
+            difficulty_params: chain_config.clone(),
             verifier: NipopowVerifier::new(genesis_id_opt, chain_config),
             requested_peers: BTreeSet::new(),
             seen_providers: BTreeSet::new(),
@@ -204,6 +308,9 @@ impl PopowBootstrap {
         proof: NipopowProof,
     ) -> Option<NipopowVerificationResult> {
         if !validate_bootstrap_response_profile(&proof, self.expected_m, self.expected_k) {
+            return None;
+        }
+        if validate_bootstrap_difficulty_context(&proof, &self.difficulty_params).is_err() {
             return None;
         }
         // `BTreeSet::insert` returns false when the peer was already present:
@@ -345,6 +452,8 @@ pub fn check_proof_against_checkpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::OnceLock;
+
     use ergo_primitives::digest::ModifierId;
     use ergo_primitives::reader::VlqReader;
     use ergo_ser::header::read_header;
@@ -365,6 +474,81 @@ mod tests {
     fn header_id_of(h: &Header) -> [u8; 32] {
         let (_bytes, id) = ergo_ser::header::serialize_header(h).unwrap();
         *id.as_bytes()
+    }
+
+    #[derive(serde::Deserialize)]
+    struct HeaderRow {
+        height: u32,
+        bytes: String,
+    }
+
+    static MAINNET_HEADERS: OnceLock<Vec<Header>> = OnceLock::new();
+
+    fn mainnet_headers() -> &'static [Header] {
+        MAINNET_HEADERS.get_or_init(|| {
+            let raw = include_str!("../../test-vectors/mainnet/headers_1_2000.json");
+            let rows: Vec<HeaderRow> = serde_json::from_str(raw).unwrap();
+            rows.into_iter()
+                .enumerate()
+                .map(|(index, row)| {
+                    assert_eq!(row.height as usize, index + 1);
+                    let bytes = hex::decode(row.bytes).unwrap();
+                    read_header(&mut VlqReader::new(&bytes)).unwrap()
+                })
+                .collect()
+        })
+    }
+
+    fn header_at(height: u32) -> &'static Header {
+        &mainnet_headers()[(height - 1) as usize]
+    }
+
+    fn difficulty_popow_hdr(header: Header, interlink_header: Option<&Header>) -> PoPowHeader {
+        if header.height == 1 {
+            return build_popow_header(header, vec![], &[]).unwrap();
+        }
+        let interlink = interlink_header.expect("non-genesis PoPowHeader requires interlinks");
+        let links = vec![ModifierId::from_bytes(header_id_of(interlink))];
+        let fields = pack_interlinks(&links);
+        build_popow_header(header, links, &fields).unwrap()
+    }
+
+    fn difficulty_proof() -> NipopowProof {
+        let genesis = header_at(1);
+        NipopowProof {
+            m: P2P_NIPOPOW_PROOF_M as u32,
+            k: P2P_NIPOPOW_PROOF_K as u32,
+            prefix: vec![difficulty_popow_hdr(genesis.clone(), None)],
+            suffix_head: difficulty_popow_hdr(header_at(2).clone(), Some(genesis)),
+            suffix_tail: (3..=11).map(|height| header_at(height).clone()).collect(),
+            continuous: true,
+        }
+    }
+
+    fn boundary_proof() -> NipopowProof {
+        let mut prefix_heights = vec![1];
+        prefix_heights.extend((1..=8).map(|epoch| epoch * 128));
+        prefix_heights.push(1151);
+        let mut previous = None;
+        let prefix = prefix_heights
+            .into_iter()
+            .map(|height| {
+                let entry =
+                    difficulty_popow_hdr(header_at(height).clone(), previous.map(header_at));
+                previous = Some(height);
+                entry
+            })
+            .collect();
+        NipopowProof {
+            m: P2P_NIPOPOW_PROOF_M as u32,
+            k: P2P_NIPOPOW_PROOF_K as u32,
+            prefix,
+            suffix_head: difficulty_popow_hdr(header_at(1152).clone(), Some(header_at(1151))),
+            suffix_tail: (1153..=1161)
+                .map(|height| header_at(height).clone())
+                .collect(),
+            continuous: true,
+        }
     }
 
     fn popow_hdr(h: Header) -> PoPowHeader {
@@ -525,6 +709,124 @@ mod tests {
         assert_eq!(b.expected_k, P2P_NIPOPOW_PROOF_K as u32);
         assert_eq!(b.expected_m, 6);
         assert_eq!(b.expected_k, 10);
+    }
+
+    #[test]
+    fn real_mainnet_h1_through_h11_context_validates() {
+        let proof = difficulty_proof();
+        assert_eq!(proof.prefix[0].header.height, 1);
+        assert_eq!(proof.suffix_head.header.height, 2);
+        assert_eq!(proof.suffix_tail.last().unwrap().height, 11);
+        assert!(
+            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()).is_ok()
+        );
+    }
+
+    #[test]
+    fn committed_scala_mainnet_proof_context_validates() {
+        let bytes = include_bytes!("../../test-vectors/mainnet/nipopow/proof_m6_k10.scala.bin");
+        let proof = ergo_ser::popow_proof::deserialize_nipopow_proof(bytes).unwrap();
+        assert!(validate_bootstrap_response_profile(&proof, 6, 10));
+        assert!(
+            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()).is_ok()
+        );
+    }
+
+    #[test]
+    fn mutated_suffix_nbits_rejects() {
+        let mut proof = difficulty_proof();
+        proof.suffix_tail.last_mut().unwrap().n_bits ^= 1;
+        assert_eq!(
+            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()),
+            Err(PopowBootstrapDifficultyError::ConsensusDifficultyMismatch { height: 11 })
+        );
+    }
+
+    #[test]
+    fn mutated_suffix_parent_rejects() {
+        let mut proof = difficulty_proof();
+        proof.suffix_tail.last_mut().unwrap().parent_id = ModifierId::from_bytes([0xee; 32]);
+        assert_eq!(
+            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()),
+            Err(PopowBootstrapDifficultyError::ParentIdMismatch { height: 11 })
+        );
+    }
+
+    #[test]
+    fn non_increasing_suffix_timestamp_rejects() {
+        let mut proof = difficulty_proof();
+        proof.suffix_tail.last_mut().unwrap().timestamp = header_at(10).timestamp;
+        assert_eq!(
+            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()),
+            Err(PopowBootstrapDifficultyError::NonIncreasingTimestamp { height: 11 })
+        );
+    }
+
+    #[test]
+    fn mutated_genesis_nbits_rejects() {
+        let mut proof = difficulty_proof();
+        proof.prefix[0].header.n_bits ^= 1;
+        assert_eq!(
+            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()),
+            Err(PopowBootstrapDifficultyError::InitialDifficultyMismatch { height: 1 })
+        );
+    }
+
+    #[test]
+    fn missing_required_boundary_context_fails_closed() {
+        let mut proof = boundary_proof();
+        assert!(validate_bootstrap_response_profile(&proof, 6, 10));
+        assert!(
+            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()).is_ok()
+        );
+        let index = proof
+            .prefix
+            .iter()
+            .position(|entry| entry.header.height == 1024)
+            .unwrap();
+        proof.prefix.remove(index);
+        assert_eq!(
+            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()),
+            Err(PopowBootstrapDifficultyError::MissingContext { height: 1024 })
+        );
+    }
+
+    #[test]
+    fn duplicate_and_conflicting_proof_heights_reject() {
+        let mut duplicate = difficulty_proof();
+        duplicate
+            .suffix_tail
+            .push(duplicate.suffix_tail.last().unwrap().clone());
+        assert_eq!(
+            validate_bootstrap_difficulty_context(&duplicate, &DifficultyParams::mainnet()),
+            Err(PopowBootstrapDifficultyError::DuplicateProofHeight { height: 11 })
+        );
+
+        let mut conflicting = difficulty_proof();
+        let mut header = conflicting.suffix_tail.last().unwrap().clone();
+        header.n_bits ^= 1;
+        conflicting.suffix_tail.push(header);
+        assert_eq!(
+            validate_bootstrap_difficulty_context(&conflicting, &DifficultyParams::mainnet()),
+            Err(PopowBootstrapDifficultyError::DuplicateProofHeight { height: 11 })
+        );
+    }
+
+    #[test]
+    fn missing_direct_parent_context_does_not_consume_provider() {
+        let mut bootstrap = PopowBootstrap::new(1, None, DifficultyParams::mainnet());
+        bootstrap.mark_requested(peer(1), Instant::now());
+        let mut incomplete = difficulty_proof();
+        incomplete.prefix.clear();
+        assert!(validate_bootstrap_response_profile(&incomplete, 6, 10));
+        assert!(bootstrap.on_proof_received(peer(1), incomplete).is_none());
+        assert_eq!(bootstrap.provider_count(), 0);
+        assert_eq!(bootstrap.proofs_processed(), 0);
+        assert!(matches!(
+            bootstrap.on_proof_received(peer(1), difficulty_proof()),
+            Some(NipopowVerificationResult::BetterChain { .. })
+        ));
+        assert_eq!(bootstrap.provider_count(), 1);
     }
 
     // ----- happy path -----
