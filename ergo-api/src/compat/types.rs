@@ -34,6 +34,24 @@ pub use ergo_rest_json::types::{
     ScalaPowSolutions, ScalaSpendingProof, ScalaTransaction, ScalaTransactionInput,
 };
 
+/// Mempool-only envelope. Unknown cost is present as JSON null; confirmed
+/// transaction encoders continue to use `ScalaTransaction` without this field.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScalaUnconfirmedTransaction {
+    #[serde(flatten)]
+    pub transaction: ScalaTransaction,
+    pub cost: Option<u64>,
+}
+
+impl From<ScalaTransaction> for ScalaUnconfirmedTransaction {
+    fn from(transaction: ScalaTransaction) -> Self {
+        Self {
+            transaction,
+            cost: None,
+        }
+    }
+}
+
 /// `/info` response. Field order matches the Scala node's emission so
 /// hand-eyeballed diffs against captured fixtures stay readable; serde
 /// preserves struct field order in JSON output.

@@ -16,6 +16,26 @@ infrastructure.
 
 ## [Unreleased]
 
+### Fixed
+
+- Bound each peer's outbound queue to 16 MiB of retained payload allocations
+  and framing, with a separate 2,048-message limit. Interrupt writes on
+  overflow or disconnect, and close connections after a 30-second write timeout.
+- Apply IP bans to every registered connection from that IP, including other
+  ports and pending handshakes; clean up all corresponding live runtimes.
+- Floor `/transactions/getFee` recommendations at the configured minimum relay
+  fee instead of using the minimum box-value parameter.
+- Decline mempool transactions carrying the configured re-emission token in
+  outputs before script execution. Reward distributions that burn the token
+  remain eligible; block validation rules are unchanged.
+- Require an unlocked wallet and verify change-address signing ownership from
+  the active master key before persisting a change address.
+
+### Added
+
+- Include measured `cost` in Scala-compatible unconfirmed transaction JSON,
+  with `null` when unknown. Confirmed transaction JSON is unchanged.
+
 ## [0.8.0] - 2026-09-21
 
 JIT-cost conformance release. The node's script costing was proven row by row
