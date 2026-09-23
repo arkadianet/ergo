@@ -12126,6 +12126,33 @@ fn value_to_typed_sigma_inline_box_surfaces_opaque_bytes() {
 }
 
 #[test]
+fn sbox_constant_rejects_trailing_bytes() {
+    let bytes = build_box(
+        1_000_000,
+        &ser_box_tree(),
+        100,
+        &[],
+        &reg_none(),
+        &[0xAB; 32],
+        7,
+    );
+    assert!(sigma_to_value(&SigmaType::SBox, &SigmaValue::OpaqueBoxBytes(bytes.clone())).is_ok());
+    for trailing_count in [1, 3] {
+        let mut padded = bytes.clone();
+        padded.extend(vec![0xAA; trailing_count]);
+        let error = sigma_to_value(&SigmaType::SBox, &SigmaValue::OpaqueBoxBytes(padded))
+            .expect_err("SBox materialization must consume the entire buffer");
+        match error {
+            EvalError::TypeError { expected, got } => {
+                assert_eq!(expected, "valid SBox constant");
+                assert_eq!(got, format!("box has {trailing_count} trailing byte(s)"));
+            }
+            other => panic!("expected TypeError, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn value_to_typed_sigma_resolves_self_box_via_context() {
     // serialize(SELF): the SelfBox carrier resolves through the
     // ReductionContext to the concrete box and yields the same

@@ -594,6 +594,12 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
                     expected: "valid SBox constant",
                     got: format!("box deser error: {e}"),
                 })?;
+            if !r.is_empty() {
+                return Err(EvalError::TypeError {
+                    expected: "valid SBox constant",
+                    got: format!("box has {} trailing byte(s)", r.remaining()),
+                });
+            }
             // Scala `ErgoBox.sigmaSerializer.parse` retains the exact input
             // slice as `_bytes`, and `bytes`/`id` derive from it
             // (`ErgoBox.scala:73,87-91,214-227`) — NOT from a re-serialization.
