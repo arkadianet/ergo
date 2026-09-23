@@ -127,6 +127,12 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 # See `lifecycle.WORK`: `MATRIX_WORK` moves the whole run, resolved once.
 WORK = Path(os.environ.get('MATRIX_WORK', HERE / '.work')).resolve()
+# ...and PINNED, absolute, in the environment before anything changes
+# directory: `__main__` chdirs to ROOT and only then imports `lifecycle`
+# (and re-execs per-scenario children with `cwd=ROOT`), each of which
+# would otherwise resolve a relative value against a different base.
+if 'MATRIX_WORK' in os.environ:
+    os.environ['MATRIX_WORK'] = str(WORK)
 CAMPAIGN_WORK = WORK / 'campaign'
 CONF = CAMPAIGN_WORK / 'conf'
 
@@ -1571,6 +1577,34 @@ def _self_test():
             env=dict(os.environ, MATRIX_WORK=tmp),
             capture_output=True, text=True, check=True).stdout.split()
         assert out[3] == str(Path(tmp).resolve() / 'findings' / 'x.json'), out
+    # ----- step A (5): the SAME work dir after `main`'s chdir -----
+    #
+    # `campaign.py` is loaded (and resolves `MATRIX_WORK`) in the launch
+    # directory, then `__main__` changes to the checkout root and imports
+    # `lifecycle` lazily, which resolved the same relative value against
+    # the ROOT: launched from `scripts/devnet-matrix`, the campaign's
+    # evidence and the nodes' pid files and logs went to two different
+    # directories, and so did every re-exec'd child (`cwd=ROOT`). The
+    # probe replays main's order: load in HERE, chdir, lazy import, and
+    # a child started from ROOT.
+    chdir_probe = (
+        'import os, subprocess, sys; sys.path.insert(0, %r);'
+        'import campaign; os.chdir(campaign.ROOT);'
+        'import lifecycle, smoke;'
+        'child = subprocess.run([sys.executable, "-c", "import os;'
+        ' print(os.environ[\'MATRIX_WORK\'])"], capture_output=True,'
+        ' text=True, cwd=str(campaign.ROOT)).stdout.strip();'
+        'print(campaign.WORK, lifecycle.WORK, smoke.WORK,'
+        ' os.environ["MATRIX_WORK"], child)'
+    ) % str(HERE)
+    out = subprocess.run(
+        [sys.executable, '-c', chdir_probe], cwd=str(HERE),
+        env=dict(os.environ, MATRIX_WORK='.work-selftest-chdir'),
+        capture_output=True, text=True).stdout.split()
+    assert out and len(set(out)) == 1 and \
+        out[0] == str(HERE / '.work-selftest-chdir'), (
+            'one absolute work dir before and after the chdir, in this '
+            'process and its children', out)
 
     # The port bands are the controller's, and must never collide with a
     # production node or with the smoke recipe's own defaults.

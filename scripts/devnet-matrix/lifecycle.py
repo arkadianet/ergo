@@ -37,6 +37,11 @@ HERE = ROOT / 'scripts/devnet-matrix'
 # Resolved ONCE, here: a relative value means the directory it was given
 # in, and every later `relative_to(ROOT)` needs an absolute path.
 WORK = Path(os.environ.get('MATRIX_WORK', HERE / '.work')).resolve()
+# Pinned back into the environment, absolute, so a later chdir (this
+# module's own `__main__`, the campaign's) or a child process cannot
+# resolve the same relative value against another directory.
+if 'MATRIX_WORK' in os.environ:
+    os.environ['MATRIX_WORK'] = str(WORK)
 
 # Which nodes this process drives, and on which ports. The smoke recipe
 # keeps the two-node defaults it has always had (Scala 19560/19580, Rust
