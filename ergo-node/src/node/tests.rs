@@ -530,6 +530,80 @@ fn request_unknown_type_id_returns_no_action() {
     assert!(actions.is_empty(), "expected no actions, got {:?}", actions);
 }
 
+#[test]
+fn unknown_inv_type_is_rejected_before_request_registration() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let peer = test_peer();
+    let id = mid(1);
+    let payload = message::serialize_inv(&InvData {
+        type_id: 100,
+        ids: vec![id],
+    })
+    .unwrap();
+
+    let actions = handle_message(
+        &mut state,
+        peer,
+        message::CODE_INV,
+        &payload,
+        Instant::now(),
+    );
+
+    assert!(actions.iter().any(|action| matches!(
+        action,
+        Action::Penalize {
+            peer: penalized_peer,
+            penalty: Penalty::Misbehavior,
+        } if *penalized_peer == peer
+    )));
+    assert_eq!(
+        state.coordinator.delivery().status(&id),
+        ergo_p2p::delivery::ModifierStatus::Unknown
+    );
+    assert!(!actions
+        .iter()
+        .any(|action| matches!(action, Action::SendToPeer { .. })));
+}
+
+#[test]
+fn unknown_modifier_type_is_rejected_before_delivery_mutation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let peer = test_peer();
+    let id = mid(2);
+    let now = Instant::now();
+    assert_eq!(
+        state
+            .coordinator
+            .delivery_mut()
+            .request(peer, 100, &[id], now),
+        vec![id]
+    );
+    let payload = message::serialize_modifiers(&ergo_p2p::types::ModifiersData {
+        type_id: 100,
+        modifiers: vec![(id, vec![1, 2, 3])],
+    })
+    .unwrap();
+
+    let actions = handle_message(&mut state, peer, message::CODE_MODIFIER, &payload, now);
+
+    assert!(actions.iter().any(|action| matches!(
+        action,
+        Action::Penalize {
+            peer: penalized_peer,
+            penalty: Penalty::Misbehavior,
+        } if *penalized_peer == peer
+    )));
+    assert_eq!(
+        state.coordinator.delivery().status(&id),
+        ergo_p2p::delivery::ModifierStatus::Requested
+    );
+    assert!(!actions
+        .iter()
+        .any(|action| matches!(action, Action::PersistSection { .. })));
+}
+
 // ----- idle-peer progress gating (#247 item 9) -----
 
 /// Register a handshaked, registry-backed peer so `evict_timed_out` and
@@ -3511,6 +3585,69 @@ fn byte_throttle_over_cap_non_modifier_frame_drops_and_penalizes() {
         )),
         "an over-cap non-delivery frame must still be dropped and penalized: {actions:?}",
     );
+}
+
+#[test]
+fn coalesced_over_throttle_header_is_penalized_without_validation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let peer = test_peer();
+    let now = Instant::now();
+    let _rx = connect_test_peer(&mut state, peer, now);
+    let rejected_id = mid(1);
+    let admitted_id = mid(2);
+    let rejected_payload = message::serialize_modifiers(&ergo_p2p::types::ModifiersData {
+        type_id: ModifierTypeId::Header.as_byte(),
+        modifiers: vec![(rejected_id, vec![0u8; 1024])],
+    })
+    .unwrap();
+    let admitted_payload = message::serialize_modifiers(&ergo_p2p::types::ModifiersData {
+        type_id: ModifierTypeId::Header.as_byte(),
+        modifiers: vec![(admitted_id, vec![0u8; 1])],
+    })
+    .unwrap();
+    let admitted_frame_bytes = (admitted_payload.len() + 9) as u64;
+    fill_byte_window_leaving(&mut state, peer, now, admitted_frame_bytes + 2);
+    assert_eq!(
+        state.coordinator.delivery_mut().request(
+            peer,
+            ModifierTypeId::Header.as_byte(),
+            &[admitted_id],
+            now
+        ),
+        vec![admitted_id]
+    );
+
+    let rejected_event_payload =
+        crate::peer_loop::MeteredPayload::for_test(rejected_payload, &state.event_byte_budget);
+    let admitted_event_payload =
+        crate::peer_loop::MeteredPayload::for_test(admitted_payload, &state.event_byte_budget);
+    super::events::handle_event_batch(
+        &mut state,
+        vec![
+            PeerEvent::Message {
+                peer,
+                code: message::CODE_MODIFIER,
+                payload: rejected_event_payload,
+            },
+            PeerEvent::Message {
+                peer,
+                code: message::CODE_MODIFIER,
+                payload: admitted_event_payload,
+            },
+        ],
+    );
+
+    assert_eq!(state.sections_received_total, 1);
+    assert_eq!(
+        state.coordinator.delivery().status(&rejected_id),
+        ergo_p2p::delivery::ModifierStatus::Unknown
+    );
+    assert_eq!(
+        state.coordinator.delivery().status(&admitted_id),
+        ergo_p2p::delivery::ModifierStatus::Received
+    );
+    assert_eq!(state.peer_manager.get(&peer).unwrap().score.raw_score(), 10);
 }
 
 // ----- duplicate inbound drop (issue #293) -----
