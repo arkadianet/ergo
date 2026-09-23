@@ -298,6 +298,18 @@ impl InputBlocksRuntime {
             staged_bytes: self.processor.staged_bytes() as u64,
             waitlist: self.processor.waitlist_len() as u32,
             deferred_triggers: self.processor.deferred_triggers() as u32,
+            retained_trees: self
+                .processor
+                .retained_trees()
+                .into_iter()
+                .map(|t| ergo_api::types::ApiRetainedTree {
+                    ordering_id: hex::encode(t.ordering_id),
+                    height: t.height,
+                    tree: t.tree,
+                    forks: t.forks as u32,
+                    records: t.records as u32,
+                })
+                .collect(),
             drops: {
                 let mut drops: Vec<ergo_api::types::ApiDropCount> = self
                     .counters

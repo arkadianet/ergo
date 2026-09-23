@@ -616,6 +616,7 @@ mod tests {
                 reason: "AlreadyKnown".to_string(),
                 count: 5,
             }],
+            retained_trees: Vec::new(),
         });
 
         publisher.publish(parts);

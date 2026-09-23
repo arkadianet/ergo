@@ -1802,6 +1802,14 @@ components:
           format: int32
           description: Competing forks retained under the best ordering block.
           minimum: 0
+        retained_trees:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiRetainedTree'
+          description: |-
+            State retained under EVERY ordering id, not only the best one
+            (`forks` above answers for the best ordering block alone, so a tree
+            left under an abandoned ordering block was otherwise invisible).
         staged_bytes:
           type: integer
           format: int64
@@ -2349,6 +2357,40 @@ components:
           type: integer
           format: int32
           minimum: 0
+    ApiRetainedTree:
+      type: object
+      description: One entry of [`ApiInputBlocksStatus::retained_trees`].
+      required:
+      - ordering_id
+      - tree
+      - forks
+      - records
+      properties:
+        forks:
+          type: integer
+          format: int32
+          description: Competing forks in that tree (0 without one).
+          minimum: 0
+        height:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: Its height, when the processor knows it.
+          minimum: 0
+        ordering_id:
+          type: string
+          description: Hex id of the ordering block the state sits under.
+        records:
+          type: integer
+          format: int32
+          description: Input-block records filed under it.
+          minimum: 0
+        tree:
+          type: boolean
+          description: |-
+            Whether an input-block tree is kept for it, as opposed to records
+            that outlive their tree inside the pruning window.
     ApiSetVotesRequest:
       type: object
       description: |-

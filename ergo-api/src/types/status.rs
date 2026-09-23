@@ -222,6 +222,27 @@ pub struct ApiInputBlocksStatus {
     /// Per-reason drop counters, keyed by `DropReason::name()`, name-
     /// ordered. Only reasons that have fired at least once appear.
     pub drops: Vec<ApiDropCount>,
+    /// State retained under EVERY ordering id, not only the best one
+    /// (`forks` above answers for the best ordering block alone, so a tree
+    /// left under an abandoned ordering block was otherwise invisible).
+    #[serde(default)]
+    pub retained_trees: Vec<ApiRetainedTree>,
+}
+
+/// One entry of [`ApiInputBlocksStatus::retained_trees`].
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, ToSchema)]
+pub struct ApiRetainedTree {
+    /// Hex id of the ordering block the state sits under.
+    pub ordering_id: String,
+    /// Its height, when the processor knows it.
+    pub height: Option<u32>,
+    /// Whether an input-block tree is kept for it, as opposed to records
+    /// that outlive their tree inside the pruning window.
+    pub tree: bool,
+    /// Competing forks in that tree (0 without one).
+    pub forks: u32,
+    /// Input-block records filed under it.
+    pub records: u32,
 }
 
 /// One `(reason, count)` entry of [`ApiInputBlocksStatus::drops`].

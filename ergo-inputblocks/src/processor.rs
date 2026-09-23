@@ -639,6 +639,21 @@ struct HeldSelection {
     recovery: bool,
 }
 
+/// State retained under one ordering id (see [`Processor::retained_trees`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedTree {
+    /// The ordering block the state sits under.
+    pub ordering_id: OrderingId,
+    /// Its height, when known.
+    pub height: Option<u32>,
+    /// Whether an input-block TREE is kept for it (not only records).
+    pub tree: bool,
+    /// Competing forks in that tree (0 without one).
+    pub forks: usize,
+    /// Input-block records filed under it.
+    pub records: usize,
+}
+
 /// The single-writer state machine (spec 7.1–7.6).
 pub struct Processor {
     bounds: Bounds,
@@ -3823,6 +3838,38 @@ impl Processor {
     /// Number of competing forks retained for `ordering_id`.
     pub fn forks(&self, ordering_id: &OrderingId) -> usize {
         self.trees.get(ordering_id).map_or(0, |t| t.forks.len())
+    }
+
+    /// Every ordering id the processor still holds state under, not only
+    /// the current tip: `forks` answers for one id, so a tree left behind
+    /// under an abandoned ordering block was invisible from outside.
+    /// Trees first, in insertion order, then ids that hold only records
+    /// (records outlive their tree inside the pruning window, spec 2.5).
+    pub fn retained_trees(&self) -> Vec<RetainedTree> {
+        let mut out: Vec<RetainedTree> = self
+            .trees
+            .iter()
+            .map(|(oid, tree)| RetainedTree {
+                ordering_id: *oid,
+                height: self.tree_heights.get(oid).copied(),
+                tree: true,
+                forks: tree.forks.len(),
+                records: 0,
+            })
+            .collect();
+        for record in self.records.values() {
+            match out.iter_mut().find(|t| t.ordering_id == record.ordering_id) {
+                Some(entry) => entry.records += 1,
+                None => out.push(RetainedTree {
+                    ordering_id: record.ordering_id,
+                    height: Some(record.height),
+                    tree: false,
+                    forks: 0,
+                    records: 1,
+                }),
+            }
+        }
+        out
     }
 
     /// Bytes currently held in staging slots (spec 7.4).

@@ -678,6 +678,46 @@ fn read_slot_serves_a_losing_forks_block_after_a_fork_switch() {
     );
 }
 
+/// Campaign fix round 3, item 5: `/api/v1/status.input_blocks.forks`
+/// counts the CURRENT ordering tip's tree only, so a tree retained under
+/// any other ordering id — an abandoned one after a reorg — was
+/// invisible. `retained_trees` lists every ordering id with state.
+#[test]
+fn api_status_lists_trees_under_every_ordering_id() {
+    let mut rt = runtime();
+    let ts_ctx = ts::TestCtx::at(0);
+    let tip = [0u8; 32];
+    let other = [7u8; 32];
+    rt.processor_mut().set_best_ordering(Some(tip), 1);
+    ts::announce_and_apply(
+        rt.processor_mut(),
+        &ts_ctx,
+        &ts::announcement(tip, 1, 7, None),
+        0,
+    );
+    ts::announce_and_apply(
+        rt.processor_mut(),
+        &ts_ctx,
+        &ts::announcement(other, 1, 9, None),
+        0,
+    );
+
+    let status = rt.api_status();
+    let listed: Vec<(String, bool, u32, u32)> = status
+        .retained_trees
+        .iter()
+        .map(|t| (t.ordering_id.clone(), t.tree, t.forks, t.records))
+        .collect();
+    assert!(
+        listed.contains(&(hex::encode(other), true, 1, 1)),
+        "the non-tip ordering id must be visible: {listed:?}"
+    );
+    assert!(
+        listed.contains(&(hex::encode(tip), true, 1, 1)),
+        "{listed:?}"
+    );
+}
+
 /// Fix-round-1, finding 3: `transaction_ids` survive body-cache eviction
 /// (`Processor::transaction_refs`), while `transactions` honestly shrinks
 /// (`Processor::bodies` skips evicted entries, mirroring Scala's
