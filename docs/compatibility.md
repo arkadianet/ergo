@@ -163,11 +163,13 @@ Be aware of these before depending on the node.
   Archive (`blocks_to_keep = -1`) and headers-only Mode 6
   (`blocks_to_keep = 0`) never seed one. Rollbacks whose replay window
   would reach below the sentinel are refused rather than half-applied.
-- **Mode 4 (pruned + UTXO bootstrap)** — builds on Mode 3 (landed) plus
-  the Mode 2 snapshot bootstrap; the composed lifecycle is landed and tested
-  (a real UTXO-snapshot install through boot, plus NiPoPoW+UTXO composition
-  in both orders — `ergo-node/tests/it/mode4_acceptance.rs`), with a live
-  multi-peer soak still outstanding.
+- **Mode 4 (pruned + UTXO bootstrap)** ? builds on Mode 3 (landed) plus
+  the Mode 2 snapshot bootstrap. Tests cover a real snapshot install through
+  boot and both NiPoPoW/UTXO orderings: proof-first composes; snapshot-first
+  rejects the later proof and preserves state
+  (`ergo-node/tests/it/mode4_acceptance.rs`). End-to-end deferred snapshot
+  installation through real header catch-up inside `run_inner` and a live
+  multi-peer soak remain outstanding.
 - **Mode 5 (digest verifier)** — the storage schema, atomic-commit layer,
   and AD-proof apply seam exist; the node boots, survives the handshake,
   sync-info, and API seams, and syncs headers from live peers (the

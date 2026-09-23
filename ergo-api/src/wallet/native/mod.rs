@@ -555,6 +555,7 @@ pub(crate) async fn change_address_get(
     request_body = dto::SetChangeAddressRequest,
     responses(
         (status = 200, description = "Change address set"),
+        (status = 409, description = "wallet_locked", body = error::NativeWalletError),
         (status = 400, description = "Malformed body", body = error::NativeWalletError),
         (status = 422, description = "Address is not a tracked P2PK", body = error::NativeWalletError),
     ),

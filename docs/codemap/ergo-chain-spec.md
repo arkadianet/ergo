@@ -40,4 +40,4 @@
 - **Hardcoded-hex soundness.** The private `parse_*_hex` helpers `.expect()` on decode failure — a malformed literal is a compile-baked panic, acceptable because the inputs are constant source strings, not runtime data.
 
 ## Notes on doc accuracy
-The `ARCHITECTURE.md` crate-layering section describes this crate accurately as of the current source: the field list (difficulty/voting/monetary/reemission/block-timing/bootstrap/genesis), the L2 layer placement, the dependency posture, and the "only site that branches on `Network`; downstream takes narrow views" charter all match `src/lib.rs`. No stale or wrong claims found.
+The `ARCHITECTURE.md` crate-layering section places this crate in L2 and summarizes its role as network parameters. Detailed fields and the network-selection contract are documented in `ergo-chain-spec/src/lib.rs`; workspace dependencies are declared in `ergo-chain-spec/Cargo.toml`.

@@ -89,7 +89,7 @@ json; json.load(open('test-vectors/ergo-crypto/batch-merkle/fixtures.json'))"`.
 
 ## Oracle test
 
-`ergo-validation/tests/batch_merkle_oracle.rs` consumes these
+`ergo-validation/tests/it/batch_merkle_oracle.rs` consumes these
 fixtures. The test runs in default `cargo test`, no network, no
 feature flag.
 
@@ -131,7 +131,7 @@ These fixtures:
 `ExtractInterlinksProofs.scala` extends this corpus with PoPow-shape
 fixtures whose leaves go through `packInterlinks` + `kvToLeaf` (not
 just synthetic 1-byte leaves). The companion oracle
-`ergo-validation/tests/interlinks_proof_oracle.rs` constructs a
+`ergo-validation/tests/it/interlinks_proof_oracle.rs` constructs a
 `PoPowHeader` from each and drives the production
 `check_popow_header_interlinks_proof` path. Coverage in
 `popow_interlinks.json`:
@@ -161,7 +161,7 @@ cross-referenced against tracked extension corpora at test runtime:
 | `mainnet_h1500000_interlinks` | `test-vectors/mainnet/extensions_1500000.json` |
 
 The `assert_provenance` helper in
-`ergo-validation/tests/interlinks_proof_oracle.rs` reads the
+`ergo-validation/tests/it/interlinks_proof_oracle.rs` reads the
 matching extension entry, unpacks the interlinks kv-fields (key
 prefix `0x01`) through the dup-count run encoding, and asserts the
 result is byte-identical to the fixture's `interlinks` array. A

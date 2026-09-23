@@ -71,8 +71,8 @@ Two surfaces need explicit feature flags to compile and run; the default
 
 ```bash
 # Cost-trace recording in ergo-sigma (CI runs exactly these two tests).
-cargo test -p ergo-sigma --features cost-trace --test cost_trace_smoke
-cargo test -p ergo-sigma --features cost-trace --test traced_untraced_parity
+cargo test -p ergo-sigma --features cost-trace --test it cost_trace_smoke
+cargo test -p ergo-sigma --features cost-trace --test it traced_untraced_parity
 
 # Diagnostics-feature triage tests. CI compiles these only (--no-run) because
 # they need external state (mainnet captures, captured block JSON, a running
@@ -94,7 +94,7 @@ This checks wire-decoder invariants across all `ergo-ser` surfaces (no panics,
 encode–decode fixed point) and enforces that every generator produces adversarial
 inputs at the expected rate (≥ 80 % of the declared vocabulary). An invariant
 violation or a generator falling below the coverage threshold fails CI. The
-harness unit tests (`tests/smoke.rs`, `tests/selftest.rs`) are exercised by
+harness unit tests (`tests/it/smoke.rs`, `tests/it/selftest.rs`) are exercised by
 the standard `cargo test --workspace` run above and do not need a Scala oracle.
 
 ### Test profiles

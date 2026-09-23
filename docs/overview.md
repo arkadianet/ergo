@@ -166,8 +166,8 @@ Some feature-gated surfaces require explicit invocation:
 
 ```bash
 # Cost-trace recording in ergo-sigma (compile + run; CI does the same).
-cargo test -p ergo-sigma --features cost-trace --test cost_trace_smoke
-cargo test -p ergo-sigma --features cost-trace --test traced_untraced_parity
+cargo test -p ergo-sigma --features cost-trace --test it cost_trace_smoke
+cargo test -p ergo-sigma --features cost-trace --test it traced_untraced_parity
 
 # Diagnostics-feature triage tests are compile-only in CI (need external state).
 cargo test --no-run -p ergo-validation --features diagnostics
@@ -336,8 +336,10 @@ finished:
 
 - **Mode 4 (pruned + UTXO bootstrap)** — the composed lifecycle is landed and
   tested (`ergo-node/tests/it/mode4_acceptance.rs`: a real UTXO-snapshot
-  install through boot, plus NiPoPoW+UTXO composition in both orders); the
-  remaining item is a live multi-peer soak.
+  install through boot, plus both NiPoPoW/UTXO orderings: proof-first
+  composes; snapshot-first rejects the later proof and preserves state). The
+  remaining items are end-to-end deferred snapshot installation through real
+  header catch-up inside `run_inner` and a live multi-peer soak.
 - **Mode 5 (digest verifier) hardening** — boots end-to-end through the digest
   apply path; remaining: external Scala ADProof-corpus parity, genesis-block
   body validation, intermediate voted-params epoch continuity, bounded history

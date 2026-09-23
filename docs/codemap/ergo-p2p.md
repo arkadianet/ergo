@@ -66,4 +66,4 @@
 - **Charter boundary.** This crate owns transport, wire codecs, and per-peer accounting only — no chain logic, no fork choice, no validation. `compare_sync_info` is an explicit height-based *preliminary* classifier; real cumulative-difficulty fork choice lives in `ergo-sync`/`ergo-state`. The block-section id recipe lives in `ergo_ser::modifier_id`, not here.
 
 ## Notes on doc accuracy
-The `ARCHITECTURE.md` crate-layering section describes this crate accurately versus the current source: the L2 capability placement, the dependency posture (only `ergo-primitives` + `ergo-ser`), the "knows nothing about chain logic / `ergo-sync` drives p2p as a passive transport" charter, and the feature list (framing, handshake, typed messages, per-peer state machine, peer manager, redb address book, block-section assembly, modifier-delivery tracking) all match. No stale or wrong claims found.
+The `ARCHITECTURE.md` crate-layering section places this crate in L2 and summarizes its role as P2P transport. Detailed transport responsibilities are documented in `ergo-p2p/src/lib.rs`; workspace dependencies are declared in `ergo-p2p/Cargo.toml`.

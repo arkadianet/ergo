@@ -582,6 +582,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/NativeWalletError'
+        '409':
+          description: wallet_locked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
         '422':
           description: Address is not a tracked P2PK
           content:

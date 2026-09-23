@@ -160,7 +160,7 @@ No ledger rows are closed by the extractor migration.
 ## Legacy aggregate fixture
 
 `mainnet_700000_700001.json` retains the original five successfully extracted
-transactions and is consumed by `ergo-validation/tests/cost_total_oracle.rs`.
+transactions and is consumed by `ergo-validation/tests/it/cost_total_oracle.rs`.
 It has aggregate costs only, a partial preheader, empty context headers, and
 resolves boxes from `test-vectors/mainnet/input_boxes_700000_700010.json`.
 That test checks reconstructed box IDs before validating transactions.

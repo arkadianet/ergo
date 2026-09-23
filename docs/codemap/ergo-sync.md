@@ -23,7 +23,7 @@ consumes those actions — validating + persisting headers and blocks against
 - `src/coordinator/mod.rs` — pure, I/O-free decision engine. Owns `DeliveryTracker` / `AssemblyTracker` / `SyncState` bookkeeping, request scheduling (per-peer caps, bucketed multi-peer distribution, HOL hedging, timeout/disconnect re-requests), fork-choice classification, and the `ChainView` trait + its production impls. Also hosts the standalone `verify_section_modifier_id` parity check used by the ergo-node messaging layer.
 - `src/executor/mod.rs` — stateful action consumer + pipeline driver. Owns `ProtocolParams`, the rolling header caches (`last_headers`, `block_context_headers`, in-memory `header_index`), the orphan-header buffer, and startup hydration/recovery. Runs the single-header and rayon-batched header paths, the sequential block-apply drain, and full-chain reorg/rollback.
 - `src/header_proc.rs` — two-phase header processing: parallel parse + PoW (`pre_validate_header` → `PreValidatedHeader`) then sequential chain-linkage + difficulty + persist (`finalize_header`). `process_header_cfg` is the combined single-shot path.
-- `src/block_proc.rs` — full-block pipeline: load header+sections, deserialize, build `BlockValidationContext`, run `validate_full_block_parallel`, apply to state. `process_block` dispatches to UTXO (`process_block_utxo`, `block_proc/utxo.rs`) and digest (`process_block_digest`) backends; also runs the epoch-boundary voting recompute on extension blocks. UTXO blocks regenerate ADProofs locally and retain them only inside the 114,688-block suffix window; digest blocks require the shipped section.
+- `src/block_proc.rs` — full-block pipeline: load header+sections, deserialize, build `BlockValidationContext`, run `validate_full_block_parallel`, apply to state. `process_block` dispatches to UTXO (`process_block_utxo`, `block_proc/utxo.rs`) and digest (`process_block_digest`) backends; also runs the epoch-boundary voting recompute on extension blocks. UTXO blocks regenerate ADProofs locally and insert generated sections only inside the 114,688-block suffix window measured from the best known header (this adds no eviction of previously stored proofs); digest blocks require the shipped section.
 - `src/popow_bootstrap.rs` — NiPoPoW bootstrap consume-side reducer (`PopowBootstrap`): tracks per-peer proof requests, feeds inbound proofs to `NipopowVerifier`, reports quorum + best proof, terminal after `mark_applied`. Active only on a fresh store with `nipopow_bootstrap = true`.
 - `src/snapshot_bootstrap.rs` — Mode 2 (UTXO-snapshot) discovery + chunk-assembly reducers. `SnapshotBootstrap` applies Scala's quorum manifest selection; `ChunkAssembly` tracks per-subtree chunk requests/timeouts; `verify_manifest_against_state_root` is the trust check against the header's committed `state_root`.
 - `src/perf.rs` — per-tick header/block pipeline counters (`HeaderPerfCounters`, `BlockPerfCounters`) drained by the node heartbeat. Telemetry only.
@@ -64,7 +64,9 @@ consumes those actions — validating + persisting headers and blocks against
   waits for a downloaded ADProofs section: `process_block_utxo` regenerates the
   proof from the parent tree, verifies its hash against `adProofsRoot`, and
   retains a type-104 section only when the height is inside the 114,688-block
-  suffix window (Scala `adProofsSuffixLength`), so near-tip full-block
+  suffix window measured from the best known header (Scala
+  `adProofsSuffixLength`). This is an insertion gate, not eviction of
+  previously stored proofs, so near-tip full-block
   responses carry proofs. Digest nodes keep `requires_proofs` set and verify
   the shipped section instead (`src/block_proc/utxo.rs:33`, `:241-256`;
   `src/coordinator/mod.rs:344`; see

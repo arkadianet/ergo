@@ -19,8 +19,8 @@ the native `/api/v1/script/*` surface)
 
 ## Start here
 - `src/lib.rs:1` — the crate charter + module map (`:1259`) + public
-  re-exports (`:1300`); the deviation ledger (D-T* typer, D-E* emit,
-  D-C* tree/compile) inside the doc comment is the single source of truth for
+  re-exports (`:1300`); the deviation ledger (`D-T*` typer, `D-E*` emit,
+  `D-C*` tree/compile) inside the doc comment is the single source of truth for
   every known parity gap and its Scala citation.
 - `src/tree/mod.rs:60` — `graph_build`, the oracle-pinned nine-pass ordering
   (cast fold → isProven fusion → fold → dead-val prune → v0 gate → lower →
