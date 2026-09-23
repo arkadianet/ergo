@@ -61,9 +61,12 @@ DEFAULT_REST = {'scala': 19580, 'rust': 19581, 'scala2': 19582,
 # a candidate whose declared address shares this node's own external
 # address as one reachable only through the UPnP gateway, and with no
 # gateway it returns `None` — so no outbound connection is ever
-# attempted. On loopback that is every peer. The M3 campaign therefore
-# gives each node its own 127.x address; the smoke keeps 127.0.0.1
-# everywhere, which is correct for it because only the Rust node dials.
+# attempted. On loopback that is every peer, and scorex's
+# `allowLocal = false` default refuses the rest. The campaign therefore
+# moves its Scala FOLLOWERS to their own 127.x addresses with
+# `allowLocal = true` (`campaign.CAMPAIGN_P2P_HOST`); the smoke keeps
+# 127.0.0.1 everywhere, which is correct for it because it runs one Scala
+# node and only the Rust node dials.
 #
 # REST is NOT moved: the harness talks to 127.0.0.1:<rest port> for every
 # node, and nothing about these bindings changes that.

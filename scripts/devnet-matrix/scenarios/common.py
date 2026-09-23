@@ -75,11 +75,12 @@ def _wait_for_peer_count(ctx, node, wanted, budget=180.0):
 def seed_second_miner(ctx, campaign, lifecycle, nodes=('scala2',)):
     """Give miner 2 the chain by COPYING miner 1's data directory.
 
-    The reference node cannot hand it over. Two Scala nodes on one host
-    never complete a mutual connection here — `getPeerAddress` refuses to
-    resolve a same-address peer without a UPnP gateway, and giving each
-    its own 127.x address gets the dial attempted but not established —
-    so a second miner brought up cold sits at genesis indefinitely and,
+    The reference node cannot hand it over in time. Two Scala MINERS on
+    one host never connect here — `getPeerAddress` refuses to resolve a
+    same-address peer without a UPnP gateway, and `allowLocal = false`
+    refuses a loopback one (only the follower roles set it; see
+    `campaign.CAMPAIGN_P2P_HOST`) — so a second miner brought up cold
+    sits at genesis indefinitely and,
     with `offlineGeneration = false`, never mines at all. Two runs were
     lost to that, each reporting "no fork switch observed", which was a
     true statement about a scenario that had not run.

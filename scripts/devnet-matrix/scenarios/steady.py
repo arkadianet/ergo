@@ -15,11 +15,11 @@ from . import common
 
 NODES = ('scala', 'rust')
 # `--reference-follower` may ADD a Scala follower to the base pair. It is
-# never started cold: two Scala nodes on one host cannot dial each other
-# (`getPeerAddress` resolves a same-address peer through a UPnP gateway
-# that does not exist), so one brought up cold sits at genesis for the
-# whole window and its lag is a measurement of nothing. It is seeded from
-# the miner's data directory instead, exactly as `reconstruct_rate` does.
+# never started cold: it would have to sync the whole chain from the
+# miner inside the window, and its lag would then measure that sync. It
+# is seeded from the miner's data directory instead, exactly as
+# `reconstruct_rate` does, and then peers with the miner directly (its
+# own loopback address plus `allowLocal`, `campaign.CAMPAIGN_P2P_HOST`).
 START_NODES = ('scala', 'rust')
 # The Scala nodes this scenario brings up ITSELF, by seeding them from
 # the miner's data directory. Every node outside `START_NODES` has to be

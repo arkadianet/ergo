@@ -92,24 +92,36 @@ def _band(kind, defaults):
 CAMPAIGN_P2P = _band('P2P', DEFAULT_CAMPAIGN_P2P)
 CAMPAIGN_REST = _band('REST', DEFAULT_CAMPAIGN_REST)
 
-# Every node listens on 127.0.0.1; only the ports differ.
+# The miner and the Rust follower listen on 127.0.0.1; `scala2` and
+# `scala3` each get their own loopback address. REST stays on 127.0.0.1.
 #
-# A detour worth recording, because the obvious fix is wrong here. Two
-# Scala nodes on ONE address can never dial each other —
-# `NetworkController.getPeerAddress` resolves a candidate whose declared
-# address shares this node's own external address through the UPnP
-# gateway, and with no gateway returns `None`. Giving each node its own
-# 127.x address fixes that, and breaks something worse: the Rust
-# follower then stops dialling the second miner at all, and a follower
-# that holds one of two miners is no use to a two-miner scenario.
+# A Scala follower has to peer DIRECTLY with the Scala miner. Neither
+# implementation relays a remote input block (Scala
+# `ErgoNodeViewSynchronizer.scala:2309-2310` sends only locally mined
+# ones; Rust matches it, `processor.rs:1482`), so a follower whose only
+# peer is the Rust node never holds an input block, and every decision
+# it logs is the "prev input block not found" download. Scorex puts two
+# gates in front of a Scala node dialling a Scala node on one host, and
+# both have to be cleared (follower-peering-investigation.md §3, an
+# experiment on stock 62c10315):
 #
-# It does not matter, because the second miner is SEEDED from the
-# first's data directory (`common.seed_second_miner`) rather than
-# synced over the network, so Scala-to-Scala peering is not needed. The
-# follower's per-IP admission limit is raised in the scenarios that run
-# three nodes, and nowhere else.
-CAMPAIGN_P2P_HOST = {'scala': '127.0.0.1', 'scala2': '127.0.0.1',
-                     'rust': '127.0.0.1', 'scala3': '127.0.0.1'}
+#   1. `NetworkController.getPeerAddress` resolves a peer on the node's
+#      OWN declared IP through a UPnP gateway that does not exist, and
+#      silently gets `None` — so the follower needs a different address;
+#   2. `connectTo` refuses every loopback peer unless
+#      `scorex.network.allowLocal = true` — which `FOLLOWER_EXTRA` sets.
+#
+# Distinct addresses alone did not peer; with `allowLocal` they peered
+# in ~21 s. The miner stays on 127.0.0.1 and gets no `allowLocal`: the
+# followers dial it (inbound is not filtered for locality), and in
+# `fork`/`rollback`, where `scala2` is the SECOND MINER, the two miners
+# still cannot dial each other, which keeps the topology those
+# scenarios measure. The second node is still SEEDED from the miner's
+# data directory (`common.seed_second_miner`). All 127.x addresses are
+# one /16 to the Rust follower, so its per-IP and per-/16 admission
+# limits are raised to fit the node set (`admission_overrides`).
+CAMPAIGN_P2P_HOST = {'scala': '127.0.0.1', 'scala2': '127.0.0.2',
+                     'rust': '127.0.0.1', 'scala3': '127.0.0.3'}
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -142,6 +154,8 @@ CONF = CAMPAIGN_WORK / 'conf'
 FOLLOWER_EXTRA = (
     'ergo.node.mining = false\n'
     'ergo.node.offlineGeneration = false\n'
+    # Lets the follower dial the miner on loopback; see CAMPAIGN_P2P_HOST.
+    'scorex.network.allowLocal = true\n'
 )
 
 # The order `--scenario all` runs them in: cheapest and most diagnostic
@@ -1136,8 +1150,10 @@ def build_manifests(by_node):
 def admission_overrides(nodes, overrides):
     """Raise the follower's per-IP admission limit to fit the node set.
 
-    Every Scala node shares 127.0.0.1, and the limit gates outbound dial
-    SELECTION as well as inbound admission, so a follower left at the
+    Every 127.x address is one /16 to the follower, and a Scala node's
+    outbound socket comes from 127.0.0.1 whatever address it listens on.
+    The limit gates outbound dial SELECTION as well as inbound
+    admission, so a follower left at the
     default holds exactly ONE of them and a multi-Scala scenario
     measures nothing. It was a per-scenario constant, which is wrong the
     moment `--reference-follower` adds a node at RUNTIME: the resolved
@@ -1349,10 +1365,11 @@ def _self_test():
     rendered = render_rust_config(template, Path('/tmp/x/rust'),
                                   ['scala', 'scala2', 'rust'])
     assert 'data_dir = "/tmp/x/rust"' in rendered, rendered
-    # Each node on its own loopback address, REST on 127.0.0.1 for all.
+    # Rust and the miner on 127.0.0.1, `scala2` on its own loopback
+    # address (CAMPAIGN_P2P_HOST), REST on 127.0.0.1 for all.
     assert 'bind_addr = "127.0.0.1:19572"' in rendered, rendered
     assert 'bind = "127.0.0.1:19592"' in rendered, rendered
-    assert ('known = ["127.0.0.1:19570", "127.0.0.1:19571"]' in rendered), rendered
+    assert ('known = ["127.0.0.1:19570", "127.0.0.2:19571"]' in rendered), rendered
     assert 'target_outbound = 2' in rendered, rendered
     # Untouched keys survive verbatim, and nothing is duplicated.
     assert 'allow_local = true' in rendered, rendered
@@ -1380,7 +1397,7 @@ def _self_test():
     overlay = scala_override('fork', 'scala2', ['scala', 'scala2', 'rust'],
                              Path('/tmp/x/scala2'))
     assert 'include file(' in overlay and 'scala-miner2.conf")' in overlay, overlay
-    assert 'bindAddress = "127.0.0.1:19571"' in overlay, overlay
+    assert 'bindAddress = "127.0.0.2:19571"' in overlay, overlay
     assert 'restApi.bindAddress = "127.0.0.1:19591"' in overlay, overlay
     assert '"127.0.0.1:19570", "127.0.0.1:19572"' in overlay, overlay
     # Every scenario that runs three nodes on one address has to raise
@@ -1412,6 +1429,52 @@ def _self_test():
         if (s, k) == ('peers', 'per_ip_limit')) == 1
     assert '19571' not in overlay.split('knownPeers')[1], \
         'a node must not be listed as its own peer'
+
+    # ----- a Scala follower peers DIRECTLY with the Scala miner -----
+    #
+    # Neither implementation relays a REMOTE input block (Scala
+    # `ErgoNodeViewSynchronizer.scala:2309-2310`, Rust `processor.rs:1482`),
+    # so a Scala follower whose only peer is the Rust node never holds an
+    # input block. Every stock decision was then the synchronizer's
+    # "prev input block not found" download (80 of 81 in Task 2, 15 of
+    # 15 in the `both` validation). Scorex applies two gates to a Scala
+    # node dialling a Scala node on one host
+    # (follower-peering-investigation.md §3, experiment-confirmed): a
+    # peer on the node's OWN declared IP resolves through a UPnP gateway
+    # that does not exist, and `allowLocal = false` refuses every
+    # loopback peer. A follower therefore gets its own loopback address
+    # and `allowLocal`. The miner and Rust stay on 127.0.0.1.
+    assert CAMPAIGN_P2P_HOST['scala'] == '127.0.0.1', CAMPAIGN_P2P_HOST
+    assert CAMPAIGN_P2P_HOST['rust'] == '127.0.0.1', CAMPAIGN_P2P_HOST
+    assert CAMPAIGN_P2P_HOST['scala2'] == '127.0.0.2', CAMPAIGN_P2P_HOST
+    assert CAMPAIGN_P2P_HOST['scala3'] == '127.0.0.3', CAMPAIGN_P2P_HOST
+    import lifecycle as _lc
+    _roles_both = _lc.roles_for_nodes(
+        resolve_roles('reconstruct_rate', 'both'))
+    for _node in ('scala2', 'scala3'):
+        _fo = scala_override(
+            'reconstruct_rate', _node, ['scala', 'scala2', 'scala3', 'rust'],
+            Path(f'/tmp/x/{_node}'),
+            extra=scala_extra_for(_node, _roles_both))
+        _host = CAMPAIGN_P2P_HOST[_node]
+        assert f'bindAddress = "{_host}:' in _fo, _fo
+        assert f'declaredAddress = "{_host}:' in _fo, _fo
+        assert 'scorex.network.allowLocal = true' in _fo, (
+            'a follower that may not dial loopback never reaches the miner',
+            _fo)
+        # The miner is in its known peers, at the miner's own address.
+        assert f'"127.0.0.1:{CAMPAIGN_P2P["scala"]}"' in \
+            _fo.split('knownPeers')[1].splitlines()[0], _fo
+    # A MINER role gets no `allowLocal`: in `fork`/`rollback` `scala2` is
+    # the second miner, and letting the two miners dial each other would
+    # change the topology those scenarios measure.
+    _roles_fork = _lc.roles_for_nodes(SCENARIO_ROLES['fork'])
+    for _node in ('scala', 'scala2'):
+        assert 'allowLocal' not in scala_extra_for(_node, _roles_fork), _node
+    # `localOnly` is read by no Scala source at 62c10315, so a recipe that
+    # carries it states a guard that does not exist.
+    for _conf in ('scala-node.conf', 'scala-miner2.conf'):
+        assert 'localOnly' not in (HERE / _conf).read_text(), _conf
 
     # ----- M4: a THIRD port block, for a run beside a live campaign -----
     #

@@ -45,8 +45,8 @@ SEEDED_NODES = ('scala2',)   # the second MINER, seeded the same way
 # it wait for a peer-driven sync that never completes here.
 SCALA2_EXTRA = 'ergo.node.offlineGeneration = true\n'
 
-# Three nodes share 127.0.0.1, and the follower's per-IP admission limit
-# is 1 — it gates outbound dial SELECTION as well as inbound admission,
+# Three nodes on one loopback /16 (and Scala's outbound sockets all come
+# from 127.0.0.1), and the follower's per-IP admission limit is 1 — it gates outbound dial SELECTION as well as inbound admission,
 # so without this it holds exactly one of the two Scala nodes and the
 # scenario measures nothing. Raised only here; `flood`, which does test
 # admission, keeps the default.

@@ -37,21 +37,27 @@ SCALA2_EXTRA = (
 )
 
 # The reference follower is SEEDED from the miner's data directory
-# rather than started cold with the others. Started cold it sat at
-# genesis for the whole window and logged no decision at all — two Scala
-# nodes cannot dial each other on one host (`getPeerAddress` resolves a
-# same-address peer through a UPnP gateway that does not exist), so its
-# only possible source is the Rust follower, and it does not ask. With
-# the chain already on disk it processes the ordering announcements the
-# follower relays, which is where both log lines are emitted.
+# rather than started cold with the others, so the window measures
+# reconstruction and not a from-genesis sync. It then peers with the
+# MINER directly. That is the whole point: neither implementation relays
+# a remote input block (Scala `ErgoNodeViewSynchronizer.scala:2309-2310`),
+# so a Scala follower reached only through the Rust node never holds
+# one. Every decision it logged was the synchronizer's "prev input block
+# not found" download: 80 of 81 in Task 2, and 15 of 15 in the fix round 1
+# `both` validation. Scorex applies two gates to a Scala-to-Scala dial on
+# one host. `getPeerAddress` resolves a peer on the node's own declared
+# IP through a UPnP gateway that does not exist, and `allowLocal = false`
+# refuses every loopback peer. Each follower therefore gets its own
+# loopback address plus `allowLocal = true` (`campaign.CAMPAIGN_P2P_HOST`,
+# `campaign.FOLLOWER_EXTRA`).
 START_NODES = ('scala', 'rust')
 # Seeded from the miner's directory rather than started cold; see above.
 # `scala3` is `--reference-follower both`'s second slot and is skipped
 # when it is not in the running node set.
 SEEDED_NODES = ('scala2', 'scala3')
 
-# Three nodes share 127.0.0.1, and the follower's per-IP admission limit
-# is 1 — it gates outbound dial SELECTION as well as inbound admission,
+# Three nodes on one loopback /16 (and Scala's outbound sockets all come
+# from 127.0.0.1), and the follower's per-IP admission limit is 1 — it gates outbound dial SELECTION as well as inbound admission,
 # so without this it holds exactly one of the two Scala nodes and the
 # scenario measures nothing. Raised only here; `flood`, which does test
 # admission, keeps the default.
