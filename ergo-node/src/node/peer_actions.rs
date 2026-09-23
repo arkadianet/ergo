@@ -350,6 +350,10 @@ pub(super) fn flush_actions(state: &mut NodeState, actions: Vec<Action>) {
 
 pub(super) fn penalize_peer(state: &mut NodeState, peer: PeerId, penalty: Penalty, now: Instant) {
     let outcome = state.peer_manager.penalize(&peer, penalty, now);
+    if state.peer_manager.is_banned(&peer, now) {
+        cleanup_banned_ip(state, peer.ip(), now);
+        return;
+    }
     let removed_from_manager = state.peer_manager.get(&peer).is_none();
     if outcome != PenaltyOutcome::Banned && !removed_from_manager {
         return;
@@ -370,6 +374,27 @@ pub(super) fn penalize_peer(state: &mut NodeState, peer: PeerId, penalty: Penalt
     );
     cleanup_disconnected_peer(state, &peer);
     flush_actions(state, recovery_actions);
+}
+
+pub(super) fn cleanup_banned_ip(state: &mut NodeState, ip: std::net::IpAddr, now: Instant) {
+    let peers: Vec<_> = state
+        .registry
+        .peers
+        .keys()
+        .filter(|peer| peer.ip() == ip)
+        .copied()
+        .collect();
+    let mut actions = Vec::new();
+    for peer in peers {
+        actions.extend(state.executor.on_peer_disconnected(
+            &peer,
+            &mut state.coordinator,
+            &state.peer_manager,
+            now,
+        ));
+        cleanup_disconnected_peer(state, &peer);
+    }
+    flush_actions(state, actions);
 }
 
 pub(super) fn cleanup_disconnected_peer(state: &mut NodeState, peer: &PeerId) {

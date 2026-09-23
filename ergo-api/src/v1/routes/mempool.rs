@@ -517,8 +517,8 @@ fn render_by(state: &V1State, matched: HashSet<String>, q: &ByQuery, scope: Stri
     render_mempool_page(rows, Order::Weight, limit, q.cursor.as_deref(), scope)
 }
 
-fn matched_ids(txs: Vec<ergo_rest_json::types::ScalaTransaction>) -> HashSet<String> {
-    txs.into_iter().map(|t| t.id).collect()
+fn matched_ids(txs: Vec<crate::compat::types::ScalaUnconfirmedTransaction>) -> HashSet<String> {
+    txs.into_iter().map(|t| t.transaction.id).collect()
 }
 
 /// `GET /api/v1/mempool/by-address/{address}` — pooled txs paying a P2PK/P2S

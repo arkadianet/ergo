@@ -421,6 +421,10 @@ pub(crate) async fn update_change_address(
     address: String,
     reply: oneshot::Sender<Result<(), WalletAdminError>>,
 ) {
+    if ctx.storage.read().unlocked().is_none() {
+        let _ = reply.send(Err(WalletAdminError::Locked));
+        return;
+    }
     // Decode address → pubkey; reject if not a valid P2PK address for
     // this node's network (the same keys are tracked on every network,
     // so without the prefix check a testnet address would pass the
@@ -432,16 +436,43 @@ pub(crate) async fn update_change_address(
             return;
         }
     };
-    // Check that the decoded pubkey is in the wallet's tracked set.
-    let is_tracked = {
-        let s = ctx.state.read();
-        s.cached_pubkeys()
-            .values()
-            .any(|tracked| tracked == &pubkey)
-    };
-    if !is_tracked {
-        let _ = reply.send(Err(WalletAdminError::ChangeAddressUntracked));
-        return;
+    // Tracking is not proof of ownership. Derive the recorded path with the
+    // active master key and compare its public key before persisting anything.
+    let owned = (|| -> Result<bool, WalletAdminError> {
+        let storage = ctx.storage.read();
+        let unlocked = storage.unlocked().ok_or(WalletAdminError::Locked)?;
+        let txn = ctx
+            .db
+            .begin_read()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let reader = ergo_state::wallet::reader::WalletReader::new(&txn);
+        let tracked = reader
+            .tracked_pubkeys_with_paths()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        for (_, pk, path) in tracked {
+            if pk == pubkey {
+                let path = ergo_wallet::derivation::DerivationPath::from_components(path);
+                let derived = unlocked
+                    .master
+                    .derive_pubkey_at_path(&path)
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+                if derived == pubkey {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    })();
+    match owned {
+        Ok(true) => {}
+        Ok(false) => {
+            let _ = reply.send(Err(WalletAdminError::ChangeAddressUntracked));
+            return;
+        }
+        Err(e) => {
+            let _ = reply.send(Err(e));
+            return;
+        }
     }
     // Persist to WALLET_CHANGE_ADDRESS.
     let result: Result<(), WalletAdminError> = (|| -> Result<(), WalletAdminError> {

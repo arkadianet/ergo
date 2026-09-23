@@ -247,7 +247,7 @@ times it.
 | `sort_policy` | string | `"cost"` | Pool priority ordering: `"cost"`, `"size"`, or `"min"`. An unknown value is rejected at load. CLI flag: `--mempool-sort`. |
 | `max_pool_size` | usize | `1000` | Maximum transaction count. Must be at least 1. |
 | `max_pool_bytes` | usize | `67108864` (64 MiB) | Maximum total pool size in bytes. Must be at least 1. |
-| `min_relay_fee_nano_erg` | u64 | `1000000` | Minimum relay fee in nanoERG. |
+| `min_relay_fee_nano_erg` | u64 | `1000000` | Minimum relay fee in nanoERG; also the floor for `/transactions/getFee`. |
 | `max_tx_size_bytes` | usize | `98304` (96 KiB) | Maximum single-transaction size. Must be at least 1. |
 | `max_tx_cost` | u64 | `4900000` | Maximum single-transaction cost (matches the Scala mainnet override). Must be at least 1. |
 | `ibd_gate_block_lag` | u32 | `10` | Block-lag threshold that gates mempool admission while the node is still catching up during initial sync. |

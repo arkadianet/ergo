@@ -8,6 +8,8 @@
 //! api_bridge.rs's full import environment so this is a pure
 //! relocation — no visibility changes needed.
 
+#[cfg(test)]
+mod mempool_tests;
 mod pool_fee_stats;
 
 use super::*;
@@ -23,6 +25,8 @@ pub struct ScalaCompatStatic {
     pub network: String,
     pub launch_time_unix_ms: u64,
     pub rest_api_url: Option<String>,
+    /// The same configured admission floor used by the mempool.
+    pub min_relay_fee_nano_erg: u64,
 }
 
 /// Implements `ergo_api::NodeChainQuery` against the snapshot handle and
@@ -536,35 +540,41 @@ impl NodeChainQuery for ScalaCompatBridge {
         &self,
         offset: u32,
         limit: u32,
-    ) -> Vec<ergo_api::compat::types::ScalaTransaction> {
+    ) -> Vec<ergo_api::compat::types::ScalaUnconfirmedTransaction> {
         let snap = self.handle.load();
+        let costs = pool_costs(&snap);
         snap.pool_full_txs
             .iter()
             .skip(offset as usize)
             .take(limit as usize)
-            .filter_map(|(_, bytes)| pool_bytes_to_scala_tx(bytes))
+            .filter_map(|(_, bytes)| pool_bytes_to_scala_tx(bytes, &costs))
             .collect()
     }
 
-    fn pool_tx_by_id(&self, tx_id_hex: &str) -> Option<ergo_api::compat::types::ScalaTransaction> {
+    fn pool_tx_by_id(
+        &self,
+        tx_id_hex: &str,
+    ) -> Option<ergo_api::compat::types::ScalaUnconfirmedTransaction> {
         let target_bytes: [u8; 32] = hex::decode(tx_id_hex).ok()?.try_into().ok()?;
         let snap = self.handle.load();
+        let costs = pool_costs(&snap);
         snap.pool_full_txs
             .iter()
             .find(|(id, _)| id.as_bytes() == &target_bytes)
-            .and_then(|(_, bytes)| pool_bytes_to_scala_tx(bytes))
+            .and_then(|(_, bytes)| pool_bytes_to_scala_tx(bytes, &costs))
     }
 
     fn pool_txs_by_ids(
         &self,
         tx_ids_hex: &[String],
-    ) -> Vec<ergo_api::compat::types::ScalaTransaction> {
+    ) -> Vec<ergo_api::compat::types::ScalaUnconfirmedTransaction> {
         // Single snapshot load for the whole batch so all ids
         // resolve against the same point-in-time pool view. A
         // composed-via-self.pool_tx_by_id variant would reload the
         // snapshot per id — fine for correctness but could mix
         // snapshot versions across entries in one response.
         let snap = self.handle.load();
+        let costs = pool_costs(&snap);
         tx_ids_hex
             .iter()
             .filter_map(|id_hex| {
@@ -572,7 +582,7 @@ impl NodeChainQuery for ScalaCompatBridge {
                 snap.pool_full_txs
                     .iter()
                     .find(|(id, _)| id.as_bytes() == &target_bytes)
-                    .and_then(|(_, bytes)| pool_bytes_to_scala_tx(bytes))
+                    .and_then(|(_, bytes)| pool_bytes_to_scala_tx(bytes, &costs))
             })
             .collect()
     }
@@ -580,7 +590,7 @@ impl NodeChainQuery for ScalaCompatBridge {
     fn pool_txs_by_ergo_tree(
         &self,
         tree_bytes: &[u8],
-    ) -> Vec<ergo_api::compat::types::ScalaTransaction> {
+    ) -> Vec<ergo_api::compat::types::ScalaUnconfirmedTransaction> {
         // Single snapshot load — every pool tx scanned against the
         // same point-in-time view. Match is byte-equality between
         // the request's canonical ergoTree wire form and each
@@ -588,6 +598,7 @@ impl NodeChainQuery for ScalaCompatBridge {
         // skipped (same flatMap(getById) lossy-skip semantics
         // `pool_txs_by_ids` uses for malformed pool entries).
         let snap = self.handle.load();
+        let costs = pool_costs(&snap);
         snap.pool_full_txs
             .iter()
             .filter_map(|(_, bytes)| {
@@ -597,7 +608,9 @@ impl NodeChainQuery for ScalaCompatBridge {
                     .iter()
                     .any(|out| out.ergo_tree_bytes() == tree_bytes);
                 if matches {
-                    crate::api_bridge::compat::encode_transaction(&tx).ok()
+                    crate::api_bridge::compat::encode_transaction(&tx)
+                        .ok()
+                        .map(|tx| with_pool_cost(tx, &costs))
                 } else {
                     None
                 }
@@ -608,15 +621,18 @@ impl NodeChainQuery for ScalaCompatBridge {
     fn pool_txs_by_box_id(
         &self,
         box_id: &[u8; 32],
-    ) -> Vec<ergo_api::compat::types::ScalaTransaction> {
+    ) -> Vec<ergo_api::compat::types::ScalaUnconfirmedTransaction> {
         let snap = self.handle.load();
+        let costs = pool_costs(&snap);
         snap.pool_full_txs
             .iter()
             .filter_map(|(_, bytes)| {
                 let tx = parse_pool_tx(bytes)?;
                 let matches = tx.inputs.iter().any(|inp| inp.box_id.as_bytes() == box_id);
                 if matches {
-                    crate::api_bridge::compat::encode_transaction(&tx).ok()
+                    crate::api_bridge::compat::encode_transaction(&tx)
+                        .ok()
+                        .map(|tx| with_pool_cost(tx, &costs))
                 } else {
                     None
                 }
@@ -627,8 +643,9 @@ impl NodeChainQuery for ScalaCompatBridge {
     fn pool_txs_by_token_id(
         &self,
         token_id: &[u8; 32],
-    ) -> Vec<ergo_api::compat::types::ScalaTransaction> {
+    ) -> Vec<ergo_api::compat::types::ScalaUnconfirmedTransaction> {
         let snap = self.handle.load();
+        let costs = pool_costs(&snap);
         snap.pool_full_txs
             .iter()
             .filter_map(|(_, bytes)| {
@@ -638,7 +655,9 @@ impl NodeChainQuery for ScalaCompatBridge {
                     .iter()
                     .any(|out| out.tokens.iter().any(|t| t.token_id.as_bytes() == token_id));
                 if matches {
-                    crate::api_bridge::compat::encode_transaction(&tx).ok()
+                    crate::api_bridge::compat::encode_transaction(&tx)
+                        .ok()
+                        .map(|tx| with_pool_cost(tx, &costs))
                 } else {
                     None
                 }
@@ -678,12 +697,11 @@ impl NodeChainQuery for ScalaCompatBridge {
     }
 
     fn pool_recommended_fee(&self, wait_time_minutes: u32, tx_size_bytes: u32) -> u64 {
+        let floor = self.static_cfg.min_relay_fee_nano_erg;
         if tx_size_bytes == 0 {
-            return 0;
+            return floor;
         }
         let snap = self.handle.load();
-        let min_fee_per_byte = snap.active_params.min_value_per_byte.max(0) as u64;
-        let floor = min_fee_per_byte.saturating_mul(tx_size_bytes as u64);
         let ranked = pool_fee_stats::rank_pool_by_fee_per_byte(&snap.pool_full_txs);
         if ranked.is_empty() {
             return floor;
@@ -693,7 +711,7 @@ impl NodeChainQuery for ScalaCompatBridge {
         // `target_ms`. The ranking is descending by fee/byte, so the
         // tx whose estimated wait first exceeds `target_ms` defines
         // the threshold — bid one above its fee/byte to displace it.
-        let mut threshold_fee_per_byte: u64 = min_fee_per_byte;
+        let mut threshold_fee_per_byte: u64 = 0;
         for (rank, entry) in ranked.iter().enumerate() {
             let wait_ms = pool_fee_stats::estimate_wait_ms_from_rank(rank as u64);
             if wait_ms <= target_ms {
@@ -732,7 +750,7 @@ impl NodeChainQuery for ScalaCompatBridge {
     fn pool_txs_by_registers(
         &self,
         registers: &std::collections::BTreeMap<String, String>,
-    ) -> Vec<ergo_api::compat::types::ScalaTransaction> {
+    ) -> Vec<ergo_api::compat::types::ScalaUnconfirmedTransaction> {
         // Parse the request map once: (R-index 0..=5, expected bytes).
         // If any name fails to resolve to R4..R9 or any value fails
         // hex-decode, return an empty result — bridge can't honour an
@@ -757,6 +775,7 @@ impl NodeChainQuery for ScalaCompatBridge {
         }
 
         let snap = self.handle.load();
+        let costs = pool_costs(&snap);
         snap.pool_full_txs
             .iter()
             .filter_map(|(_, bytes)| {
@@ -772,7 +791,9 @@ impl NodeChainQuery for ScalaCompatBridge {
                     })
                 });
                 if matches {
-                    crate::api_bridge::compat::encode_transaction(&tx).ok()
+                    crate::api_bridge::compat::encode_transaction(&tx)
+                        .ok()
+                        .map(|tx| with_pool_cost(tx, &costs))
                 } else {
                     None
                 }
@@ -937,10 +958,15 @@ impl NodeChainQuery for ScalaCompatBridge {
 /// fail to round-trip — keeps the live-node surface lossy-skip
 /// matching Scala's `flatMap(getById)` semantics rather than
 /// surfacing 500 on a single bad entry.
-fn pool_bytes_to_scala_tx(bytes: &[u8]) -> Option<ergo_api::compat::types::ScalaTransaction> {
+fn pool_bytes_to_scala_tx(
+    bytes: &[u8],
+    costs: &std::collections::HashMap<&str, u64>,
+) -> Option<ergo_api::compat::types::ScalaUnconfirmedTransaction> {
     let mut r = ergo_primitives::reader::VlqReader::new(bytes);
     let tx = ergo_ser::transaction::read_transaction(&mut r).ok()?;
-    crate::api_bridge::compat::encode_transaction(&tx).ok()
+    crate::api_bridge::compat::encode_transaction(&tx)
+        .ok()
+        .map(|tx| with_pool_cost(tx, costs))
 }
 
 /// Parse a pool tx's wire bytes into the internal `Transaction`
@@ -1082,6 +1108,24 @@ pub(super) fn encode_scala_output_from_raw(
         hex::encode(parsed.transaction_id.as_bytes()),
         parsed.index,
     )
+}
+
+// Build once per response from the SAME snapshot as the transaction bytes.
+// This avoids quadratic scans when returning a full mempool page.
+fn pool_costs(snap: &crate::snapshot::NodeSnapshot) -> std::collections::HashMap<&str, u64> {
+    snap.mempool_transactions
+        .transactions
+        .iter()
+        .map(|tx| (tx.tx_id.as_str(), tx.validation_cost_units))
+        .collect()
+}
+
+fn with_pool_cost(
+    transaction: ergo_api::compat::types::ScalaTransaction,
+    costs: &std::collections::HashMap<&str, u64>,
+) -> ergo_api::compat::types::ScalaUnconfirmedTransaction {
+    let cost = costs.get(transaction.id.as_str()).copied();
+    ergo_api::compat::types::ScalaUnconfirmedTransaction { transaction, cost }
 }
 
 #[cfg(test)]

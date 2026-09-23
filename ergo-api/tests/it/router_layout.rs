@@ -8,6 +8,7 @@
 //! The test drives the router through `tower::ServiceExt::oneshot`, no
 //! TCP listener, no async runtime contention with `serve`.
 
+use ergo_api::compat::types::ScalaUnconfirmedTransaction;
 use std::sync::Arc;
 
 use axum::body::{to_bytes, Body};
@@ -294,16 +295,19 @@ impl NodeChainQuery for StubCompat {
         tx_id_hex == "aa".repeat(32)
     }
 
-    fn pool_txs_paged(&self, offset: u32, limit: u32) -> Vec<ScalaTransaction> {
+    fn pool_txs_paged(&self, offset: u32, limit: u32) -> Vec<ScalaUnconfirmedTransaction> {
         // Stub pool of 3 dummy txs with distinguishable ids. Slice
         // by offset+limit so paging is exercised.
-        let pool: Vec<ScalaTransaction> = (0..3)
-            .map(|i| ScalaTransaction {
-                id: format!("{:02x}", i).repeat(32),
-                inputs: vec![],
-                data_inputs: vec![],
-                outputs: vec![],
-                size: 100 + i as u32,
+        let pool: Vec<ScalaUnconfirmedTransaction> = (0..3)
+            .map(|i| {
+                ScalaTransaction {
+                    id: format!("{:02x}", i).repeat(32),
+                    inputs: vec![],
+                    data_inputs: vec![],
+                    outputs: vec![],
+                    size: 100 + i as u32,
+                }
+                .into()
             })
             .collect();
         pool.into_iter()
@@ -312,21 +316,24 @@ impl NodeChainQuery for StubCompat {
             .collect()
     }
 
-    fn pool_tx_by_id(&self, tx_id_hex: &str) -> Option<ScalaTransaction> {
+    fn pool_tx_by_id(&self, tx_id_hex: &str) -> Option<ScalaUnconfirmedTransaction> {
         if tx_id_hex == "00".repeat(32) {
-            Some(ScalaTransaction {
-                id: tx_id_hex.into(),
-                inputs: vec![],
-                data_inputs: vec![],
-                outputs: vec![],
-                size: 99,
-            })
+            Some(
+                ScalaTransaction {
+                    id: tx_id_hex.into(),
+                    inputs: vec![],
+                    data_inputs: vec![],
+                    outputs: vec![],
+                    size: 99,
+                }
+                .into(),
+            )
         } else {
             None
         }
     }
 
-    fn pool_txs_by_ids(&self, tx_ids_hex: &[String]) -> Vec<ScalaTransaction> {
+    fn pool_txs_by_ids(&self, tx_ids_hex: &[String]) -> Vec<ScalaUnconfirmedTransaction> {
         // Resolve only ids that match `pool_tx_by_id`. Unresolved
         // ids silently skipped — Scala `flatMap(getById)` parity.
         tx_ids_hex
@@ -339,7 +346,7 @@ impl NodeChainQuery for StubCompat {
         3
     }
 
-    fn pool_txs_by_ergo_tree(&self, tree_bytes: &[u8]) -> Vec<ScalaTransaction> {
+    fn pool_txs_by_ergo_tree(&self, tree_bytes: &[u8]) -> Vec<ScalaUnconfirmedTransaction> {
         // Stub: a magic 2-byte ergoTree `0xab 0xcd` resolves to one
         // canned tx; anything else returns an empty array. Pins the
         // route-handler hex-parsing + body-shape contract without
@@ -351,13 +358,14 @@ impl NodeChainQuery for StubCompat {
                 data_inputs: vec![],
                 outputs: vec![],
                 size: 42,
-            }]
+            }
+            .into()]
         } else {
             Vec::new()
         }
     }
 
-    fn pool_txs_by_box_id(&self, box_id: &[u8; 32]) -> Vec<ScalaTransaction> {
+    fn pool_txs_by_box_id(&self, box_id: &[u8; 32]) -> Vec<ScalaUnconfirmedTransaction> {
         if box_id == &[0xAA; 32] {
             vec![ScalaTransaction {
                 id: "02".repeat(32),
@@ -365,13 +373,14 @@ impl NodeChainQuery for StubCompat {
                 data_inputs: vec![],
                 outputs: vec![],
                 size: 43,
-            }]
+            }
+            .into()]
         } else {
             Vec::new()
         }
     }
 
-    fn pool_txs_by_token_id(&self, token_id: &[u8; 32]) -> Vec<ScalaTransaction> {
+    fn pool_txs_by_token_id(&self, token_id: &[u8; 32]) -> Vec<ScalaUnconfirmedTransaction> {
         if token_id == &[0xBB; 32] {
             vec![ScalaTransaction {
                 id: "03".repeat(32),
@@ -379,7 +388,8 @@ impl NodeChainQuery for StubCompat {
                 data_inputs: vec![],
                 outputs: vec![],
                 size: 44,
-            }]
+            }
+            .into()]
         } else {
             Vec::new()
         }
@@ -388,7 +398,7 @@ impl NodeChainQuery for StubCompat {
     fn pool_txs_by_registers(
         &self,
         registers: &std::collections::BTreeMap<String, String>,
-    ) -> Vec<ScalaTransaction> {
+    ) -> Vec<ScalaUnconfirmedTransaction> {
         // Magic match: a single entry `R4 -> "0e20" + 32 0xCC bytes`
         // (a typical SBoolean-tagged Const register value) resolves
         // to one canned tx.
@@ -400,7 +410,8 @@ impl NodeChainQuery for StubCompat {
                 data_inputs: vec![],
                 outputs: vec![],
                 size: 45,
-            }]
+            }
+            .into()]
         } else {
             Vec::new()
         }
@@ -1328,6 +1339,7 @@ async fn pool_unconfirmed_paged_returns_full_txs() {
         assert!(entry.get("outputs").is_some());
         assert!(entry.get("dataInputs").is_some());
         assert!(entry.get("size").is_some());
+        assert!(entry.get("cost").unwrap().is_null());
     }
 }
 
@@ -1361,6 +1373,7 @@ async fn pool_unconfirmed_by_tx_id_200_when_present() {
         v.get("id").and_then(|x| x.as_str()),
         Some("00".repeat(32).as_str()),
     );
+    assert!(v.get("cost").unwrap().is_null());
 }
 
 #[tokio::test]
@@ -1491,6 +1504,7 @@ async fn pool_unconfirmed_by_ergo_tree_accepts_unquoted_hex() {
     let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
     let arr: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(arr.len(), 1);
+    assert!(arr[0].get("cost").unwrap().is_null());
 }
 
 /// Non-string JSON (number / array / object / bool / null) must NOT

@@ -122,6 +122,9 @@ pub(crate) fn classify(
                 None
             },
         ),
+        ValidationErr::ReemissionPolicy => {
+            (RejectReason::ValidationFailed { kind: err.clone() }, None)
+        }
         ValidationErr::Other(_) => (RejectReason::ValidationFailed { kind: err.clone() }, None),
     }
 }

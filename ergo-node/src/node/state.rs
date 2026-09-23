@@ -36,7 +36,7 @@ use super::wallet_bridge;
 
 pub(crate) struct PeerRuntime {
     pub(super) sync_version: SyncVersion,
-    pub(super) outbound_tx: mpsc::Sender<MessageFrame>,
+    pub(super) outbound_tx: crate::peer_loop::outbound::Sender,
 }
 
 pub(crate) struct PeerRegistry {

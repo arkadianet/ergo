@@ -248,7 +248,7 @@ fn penalty_ban_cleans_registry_peer() {
         .peer_manager
         .complete_handshake(&peer, state.our_handshake.peer_spec.clone(), None, now)
         .unwrap();
-    let (tx, _rx) = mpsc::channel(1);
+    let (tx, _rx) = crate::peer_loop::outbound::channel(1);
     state.registry.peers.insert(
         peer,
         PeerRuntime {
@@ -540,14 +540,14 @@ fn connect_test_peer(
     state: &mut NodeState,
     peer: SocketAddr,
     now: Instant,
-) -> mpsc::Receiver<ergo_p2p::framing::MessageFrame> {
+) -> crate::peer_loop::outbound::Receiver {
     state.peer_manager.register_outbound(peer, now).unwrap();
     state.peer_manager.mark_tcp_connected(&peer);
     state
         .peer_manager
         .complete_handshake(&peer, state.our_handshake.peer_spec.clone(), None, now)
         .unwrap();
-    let (tx, rx) = mpsc::channel(64);
+    let (tx, rx) = crate::peer_loop::outbound::channel(64);
     state.registry.peers.insert(
         peer,
         PeerRuntime {
@@ -3016,7 +3016,7 @@ fn handshake_complete_digest_backend_sends_sync_info_without_panic() {
 
     // Register the peer with an outbound channel we can drain, mirroring
     // the `state.registry.peers.insert` the handshake arm performs.
-    let (tx, mut rx) = mpsc::channel::<ergo_p2p::framing::MessageFrame>(4);
+    let (tx, mut rx) = crate::peer_loop::outbound::channel(4);
     state.registry.peers.insert(
         peer,
         PeerRuntime {
@@ -3200,8 +3200,8 @@ fn memory_sample_digest_backend_emits_zeroed_arena_row() {
 fn register_connected_peer(
     state: &mut NodeState,
     peer: ergo_p2p::peer::PeerId,
-) -> tokio::sync::mpsc::Receiver<ergo_p2p::framing::MessageFrame> {
-    let (tx, rx) = mpsc::channel(8);
+) -> crate::peer_loop::outbound::Receiver {
+    let (tx, rx) = crate::peer_loop::outbound::channel(8);
     state.registry.peers.insert(
         peer,
         super::state::PeerRuntime {
@@ -3532,7 +3532,7 @@ async fn handshake_complete_for_registered_address_keeps_existing_runtime() {
     let peer = test_peer();
 
     // The incumbent runtime, whose channel must survive the duplicate.
-    let (tx, mut rx) = mpsc::channel::<ergo_p2p::framing::MessageFrame>(4);
+    let (tx, mut rx) = crate::peer_loop::outbound::channel(4);
     state.registry.peers.insert(
         peer,
         PeerRuntime {
@@ -3718,4 +3718,47 @@ fn popow_proof_matching_checkpoint_reaches_the_verifier() {
         1,
         "the proof must have reached the reducer"
     );
+}
+
+#[test]
+fn ip_ban_cleans_all_ports_and_pending_handshakes_but_keeps_other_ips() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("bans.redb"));
+    state.peer_manager = PeerManager::new_with_limits(
+        0,
+        ergo_p2p::peer_manager::PeerLimits {
+            per_ip_limit: 4,
+            per_subnet_limit: 8,
+            ..Default::default()
+        },
+    );
+    let now = Instant::now();
+    let a: SocketAddr = "127.0.0.1:1001".parse().unwrap();
+    let b: SocketAddr = "127.0.0.1:1002".parse().unwrap();
+    let pending: SocketAddr = "127.0.0.1:1003".parse().unwrap();
+    let other: SocketAddr = "127.0.0.2:1001".parse().unwrap();
+    let mut rx_a = connect_test_peer(&mut state, a, now);
+    let mut rx_b = connect_test_peer(&mut state, b, now);
+    let mut rx_other = connect_test_peer(&mut state, other, now);
+    state.peer_manager.register_inbound(pending, now).unwrap();
+    let mut t = now;
+    for _ in 0..40 {
+        t += ergo_p2p::peer::SAFE_INTERVAL;
+        super::peer_actions::penalize_peer(&mut state, a, Penalty::Spam, t);
+        if state.peer_manager.is_banned(&a, t) {
+            break;
+        }
+    }
+    assert!(state.peer_manager.is_banned(&b, t));
+    assert!(state.peer_manager.get(&a).is_none());
+    assert!(state.peer_manager.get(&b).is_none());
+    assert!(state.peer_manager.get(&pending).is_none());
+    assert!(rx_a.is_closed() && rx_b.is_closed());
+    assert!(rx_a.try_recv().is_err() && rx_b.try_recv().is_err());
+    assert!(state.peer_manager.get(&other).is_some());
+    assert!(send_to_peer(&state, &other, 1, Vec::new()));
+    assert_eq!(rx_other.try_recv().unwrap().code, 1);
+    // Repeated cleanup with the original socket already absent is harmless.
+    super::peer_actions::penalize_peer(&mut state, a, Penalty::Spam, t);
+    assert!(state.registry.peers.contains_key(&other));
 }
