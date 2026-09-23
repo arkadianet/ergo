@@ -375,9 +375,28 @@ def _run_against_scala_follower(ctx, target):
     # flood window is read against (no adversary line can appear there).
     before = evaluate_root_flood(
         lines[:log_from], [], ROOT_FLOOD_CAPS, octets)
+    phase_blocks = {}
+    for _height, (_t, phase) in sampler.first_seen[target].items():
+        phase_blocks[phase] = phase_blocks.get(phase, 0) + 1
+    flood_blocks = phase_blocks.get('flood', 0) + phase_blocks.get('drain', 0)
     ctx.note('root_flood_baseline_before', {
-        k: before[k] for k in ('honest_roots', 'honest_roots_landed',
-                               'honest_penalties')})
+        **{k: before[k] for k in (
+            'honest_roots', 'honest_roots_landed', 'honest_penalties',
+            'honest_misbehaviour_penalties',
+            'honest_misbehaviour_after_double_application')},
+        'blocks_applied_before': phase_blocks.get('before', 0),
+        'blocks_applied_during_flood_and_drain': flood_blocks,
+        # Misbehaviour/spam penalties against the honest miner that no
+        # double application explains, per applied block, before vs during.
+        # Reported beside each other rather than failed on: the peered
+        # STOCK follower logs them with no adversary at all
+        # (`.work-m4p-f13-steady`: 8 stock / 4 F13 in 60 blocks).
+        'unexplained_honest_penalties_per_block': {
+            'before': round(before['honest_misbehaviour_penalties']
+                            / max(1, phase_blocks.get('before', 0)), 3),
+            'flood': round(verdict['honest_misbehaviour_penalties']
+                           / max(1, flood_blocks), 3)},
+    })
 
     delays = sampler.apply_delays()
     latencies = {}
@@ -431,9 +450,8 @@ def _run_against_scala_follower(ctx, target):
         ctx.note('store_absent', 'this build publishes no pendingInputAnnouncements '
                                  '(stock): caps and replay are not applicable, '
                                  'the honest-root counts are the stock comparison')
-    if verdict['honest_misbehaviour_penalties'] or verdict['honest_blacklisted']:
-        ctx.fail('an honest peer was penalised for misbehaviour or blacklisted '
-                 'during the flood',
+    if verdict['honest_blacklisted']:
+        ctx.fail('an honest peer was blacklisted during the flood',
                  {'penalties': verdict['honest_penalties'],
                   'blacklisted': verdict['honest_blacklisted']})
     if not miner_connected:
