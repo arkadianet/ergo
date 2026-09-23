@@ -17,7 +17,6 @@ use ergo_ser::modifier_id::ExpectedSections;
 use ergo_state::{ChainStateRead, HeaderSectionStore};
 use ergo_sync::coordinator::Action;
 use ergo_sync::header_proc::HeaderProcessError;
-use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::anchor_map::parse_rest_url;
@@ -400,7 +399,8 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
 
             let sync_version = SyncVersion::for_peer(&peer_spec.version);
             // 2048: enough for burst of 400 headers × 2 section requests + SyncInfo
-            let (outbound_tx, outbound_rx) = mpsc::channel(2048);
+            let (outbound_tx, outbound_rx) =
+                peer_loop::outbound::channel(peer_loop::outbound::MAX_MESSAGES);
 
             // Hand the per-peer byte counters to the I/O task so it can
             // record post-handshake framed bytes. complete_handshake just

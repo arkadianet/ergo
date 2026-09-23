@@ -248,7 +248,7 @@ fn penalty_ban_cleans_registry_peer() {
         .peer_manager
         .complete_handshake(&peer, state.our_handshake.peer_spec.clone(), None, now)
         .unwrap();
-    let (tx, _rx) = mpsc::channel(1);
+    let (tx, _rx) = crate::peer_loop::outbound::channel(1);
     state.registry.peers.insert(
         peer,
         PeerRuntime {
@@ -540,14 +540,14 @@ fn connect_test_peer(
     state: &mut NodeState,
     peer: SocketAddr,
     now: Instant,
-) -> mpsc::Receiver<ergo_p2p::framing::MessageFrame> {
+) -> crate::peer_loop::outbound::Receiver {
     state.peer_manager.register_outbound(peer, now).unwrap();
     state.peer_manager.mark_tcp_connected(&peer);
     state
         .peer_manager
         .complete_handshake(&peer, state.our_handshake.peer_spec.clone(), None, now)
         .unwrap();
-    let (tx, rx) = mpsc::channel(64);
+    let (tx, rx) = crate::peer_loop::outbound::channel(64);
     state.registry.peers.insert(
         peer,
         PeerRuntime {
@@ -3016,7 +3016,7 @@ fn handshake_complete_digest_backend_sends_sync_info_without_panic() {
 
     // Register the peer with an outbound channel we can drain, mirroring
     // the `state.registry.peers.insert` the handshake arm performs.
-    let (tx, mut rx) = mpsc::channel::<ergo_p2p::framing::MessageFrame>(4);
+    let (tx, mut rx) = crate::peer_loop::outbound::channel(4);
     state.registry.peers.insert(
         peer,
         PeerRuntime {
@@ -3200,8 +3200,8 @@ fn memory_sample_digest_backend_emits_zeroed_arena_row() {
 fn register_connected_peer(
     state: &mut NodeState,
     peer: ergo_p2p::peer::PeerId,
-) -> tokio::sync::mpsc::Receiver<ergo_p2p::framing::MessageFrame> {
-    let (tx, rx) = mpsc::channel(8);
+) -> crate::peer_loop::outbound::Receiver {
+    let (tx, rx) = crate::peer_loop::outbound::channel(8);
     state.registry.peers.insert(
         peer,
         super::state::PeerRuntime {
@@ -3532,7 +3532,7 @@ async fn handshake_complete_for_registered_address_keeps_existing_runtime() {
     let peer = test_peer();
 
     // The incumbent runtime, whose channel must survive the duplicate.
-    let (tx, mut rx) = mpsc::channel::<ergo_p2p::framing::MessageFrame>(4);
+    let (tx, mut rx) = crate::peer_loop::outbound::channel(4);
     state.registry.peers.insert(
         peer,
         PeerRuntime {
@@ -3719,3 +3719,4 @@ fn popow_proof_matching_checkpoint_reaches_the_verifier() {
         "the proof must have reached the reducer"
     );
 }
+
