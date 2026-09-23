@@ -487,10 +487,10 @@ fn drive_popow_bootstrap(state: &mut NodeState, now: Instant) {
     use ergo_validation::popow::NipopowVerificationResult;
 
     // Activity gate: the reducer stays active while the store is
-    // still in Dense mode (no proof applied yet). We deliberately do
-    // NOT gate on `best_header_height == 0` — normal header sync can
-    // race ahead between boot and quorum-met, but apply_popow_proof
-    // only refuses to run after the mode flips to PoPowSparse.
+    // still in Dense mode (no proof applied yet). The store's
+    // fresh-only precondition rejects a Dense store whose header tip
+    // is nonzero; that refusal is handled below without changing the
+    // existing header tables.
     let store_is_dense = matches!(
         state.store.chain_state_meta().header_availability,
         ergo_state::chain::HeaderAvailability::Dense
@@ -1405,9 +1405,14 @@ fn maybe_emit_gauges(state: &mut NodeState, now: Instant) {
 #[cfg(test)]
 mod tests {
     use super::{install_reconstructed_snapshot, resolve_install_anchor, InstallAnchor};
+    use ergo_primitives::reader::VlqReader;
+    use ergo_ser::header::read_header;
+    use ergo_ser::popow_proof::NipopowProof;
     use ergo_state::store::StateStore;
     use ergo_state::test_helpers::nipopow_proof_dense_from_2;
     use ergo_sync::snapshot_bootstrap::BootstrapState;
+    use ergo_validation::popow::algos::{build_popow_header, pack_interlinks, update_interlinks};
+    use ergo_validation::popow::proof::check_popow_header_interlinks_proof;
 
     // ----- helpers -----
 
@@ -1434,6 +1439,51 @@ mod tests {
     /// `dense_from_height` the fixture proof commits.
     const PROOF_DENSE_FROM_HEIGHT: u32 = 2;
 
+    fn production_profile_popow_proof() -> NipopowProof {
+        let rows: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../test-vectors/mainnet/headers_1_2000.json"
+        ))
+        .unwrap();
+        let headers: Vec<_> = rows
+            .iter()
+            .take(11)
+            .map(|row| {
+                let bytes = hex::decode(row["bytes"].as_str().unwrap()).unwrap();
+                read_header(&mut VlqReader::new(&bytes)).unwrap()
+            })
+            .collect();
+        assert_eq!(headers.len(), 11);
+        for (index, header) in headers.iter().enumerate() {
+            assert_eq!(header.height, index as u32 + 1);
+        }
+
+        let mut interlinks = Vec::new();
+        let mut popow_headers = Vec::with_capacity(headers.len());
+        for (index, header) in headers.iter().enumerate() {
+            if index > 0 {
+                interlinks = update_interlinks(&headers[index - 1], &interlinks).unwrap();
+            }
+            let extension_fields = pack_interlinks(&interlinks);
+            popow_headers.push(
+                build_popow_header(header.clone(), interlinks.clone(), &extension_fields).unwrap(),
+            );
+        }
+        assert_eq!(popow_headers[0].interlinks_proof, vec![0u8; 8]);
+        for popow_header in popow_headers.iter().skip(1) {
+            assert!(!popow_header.interlinks.is_empty());
+            assert!(check_popow_header_interlinks_proof(popow_header));
+        }
+
+        NipopowProof {
+            m: ergo_p2p::types::P2P_NIPOPOW_PROOF_M as u32,
+            k: ergo_p2p::types::P2P_NIPOPOW_PROOF_K as u32,
+            prefix: vec![popow_headers[0].clone()],
+            suffix_head: popow_headers[1].clone(),
+            suffix_tail: headers[2..].to_vec(),
+            continuous: true,
+        }
+    }
+
     // ----- happy path -----
 
     #[test]
@@ -1456,6 +1506,42 @@ mod tests {
         let now = base + ergo_p2p::peer::INACTIVE_TIMEOUT + std::time::Duration::from_secs(100);
         super::handle_sync_tick_at(&mut state, now);
         assert_eq!(state.peer_manager.peer_count(), 0);
+    }
+
+    #[test]
+    fn sync_tick_refuses_popow_apply_after_dense_header_tip_advances() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        let seeded = ergo_state::test_helpers::seed_dense_mainnet_headers(&mut store, 1).unwrap();
+        let (tip_height, tip_id) = *seeded.last().unwrap();
+        let mut state = crate::node::tests::make_state_with_store(store);
+
+        let proof = production_profile_popow_proof();
+        let mut popow = ergo_sync::popow_bootstrap::PopowBootstrap::new(
+            1,
+            None,
+            ergo_chain_spec::DifficultyParams::mainnet(),
+        );
+        let peer: ergo_p2p::peer::PeerId = "127.0.0.1:19001".parse().unwrap();
+        let now = std::time::Instant::now();
+        popow.mark_requested(peer, now);
+        assert!(popow.on_proof_received(peer, proof).is_some());
+        assert!(popow.quorum_reached());
+        state.popow_bootstrap = Some(popow);
+
+        super::drive_popow_bootstrap(&mut state, now);
+
+        let store = state.store.as_utxo().unwrap();
+        assert_eq!(store.chain_state().best_header_height, tip_height);
+        assert_eq!(store.chain_state().best_header_id, tip_id);
+        assert!(matches!(
+            store.chain_state().header_availability,
+            ergo_state::chain::HeaderAvailability::Dense
+        ));
+        assert!(matches!(
+            state.popow_bootstrap.as_ref().unwrap().state(),
+            ergo_sync::popow_bootstrap::PopowBootstrapState::Applied
+        ));
     }
 
     #[test]

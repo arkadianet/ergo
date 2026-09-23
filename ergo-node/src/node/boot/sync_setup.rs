@@ -502,8 +502,8 @@ pub(super) fn setup(
             crate::node::identity::NipopowResumeState::PartialHeaderSync => {
                 // The reducer's PopowBootstrap::new contract is
                 // fresh-only, and `apply_popow_proof` returns
-                // `ApplyPopowProofWrongMode` on a non-fresh
-                // store. Resuming Mode 4 from partial header
+                // `ApplyPopowProofNotFresh` on a Dense store with
+                // an existing header tip. Resuming Mode 4 from partial header
                 // progress needs new machinery on the reducer +
                 // apply path. Until that lands, refuse to boot
                 // rather than arm a reducer whose proof apply
