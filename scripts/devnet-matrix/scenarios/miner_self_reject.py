@@ -21,7 +21,8 @@ spec §7a moving together —
                                matches `AutolykosSolution`, not the wrapped
                                `SolutionFound`, so the sender waits forever)
   pow_failures                 `Invalid input block` — the race itself
-  input_blocks_applied         input blocks the node actually applied
+  input_blocks_applied         input blocks that passed the generator's PoW
+                               check and were sent to the node view
   input_blocks_on_winning_chain  of those, the ones that reached the best
                                input chain
 
@@ -73,9 +74,24 @@ PHRASES = {
     'generator_processed': 'processed solution',
 }
 
-# `Input-block <id> mined @ height <h>!`
-APPLIED = re.compile(r'input-block ([0-9a-f]{64}) mined @ height (\d+)',
-                     re.IGNORECASE)
+# An input block the generator passed its PoW check and sent to the node
+# view, logged at two sites that name the same block:
+#
+#   CandidateGenerator.scala:275  `Input-block <id> mined @ height <h>!`
+#                                 (62c10315 only; F11's retained-work
+#                                 rewrite of `InputSolutionFound` drops it)
+#   CandidateGenerator.scala:87   `New input block <id> w. nonce <n>`
+#                                 (`sendInputToNodeView`, in every build)
+#
+# A block is counted once by its id, whichever site logged it. When both
+# sites log, their id sets must be the same, because at 62c10315 the
+# first line is always followed by the second.
+APPLIED_SITES = {
+    'mined_at_height': re.compile(
+        r'input-block ([0-9a-f]{64}) mined @ height (\d+)', re.IGNORECASE),
+    'sent_to_node_view': re.compile(
+        r'new input block ([0-9a-f]{64}) w\. nonce', re.IGNORECASE),
+}
 
 
 def count(lines):
@@ -86,17 +102,26 @@ def count(lines):
     exists to expose, a submission with no reply.
     """
     out = {key: 0 for key in PHRASES}
-    out['input_blocks_applied'] = 0
     applied_ids = []
+    site_ids = {site: set() for site in APPLIED_SITES}
     for line in lines:
         low = line.lower()
         for key, phrase in PHRASES.items():
             if phrase in low:
                 out[key] += 1
-        match = APPLIED.search(low)
-        if match:
-            out['input_blocks_applied'] += 1
-            applied_ids.append(match.group(1))
+        for site, pattern in APPLIED_SITES.items():
+            match = pattern.search(low)
+            if match:
+                site_ids[site].add(match.group(1))
+                if match.group(1) not in applied_ids:
+                    applied_ids.append(match.group(1))
+    out['input_blocks_applied'] = len(applied_ids)
+    out['applied_site_counts'] = {site: len(ids)
+                                  for site, ids in site_ids.items()}
+    logging_sites = [ids for ids in site_ids.values() if ids]
+    out['applied_sites_disagree'] = (
+        len(logging_sites) > 1
+        and any(ids != logging_sites[0] for ids in logging_sites[1:]))
     out['submissions'] = out['submissions_input'] + out['submissions_ordering']
     out['replies'] = out['replies_success'] + out['replies_error']
     # Both PoW-failure sites have to keep logging: one WARN and two

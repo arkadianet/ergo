@@ -2119,6 +2119,10 @@ def _self_test():
     _log = [
         'INFO Found solution for input block, sending it for validation',
         'INFO Input-block ' + 'ab' * 32 + ' mined @ height 7!',
+        # The send to the node view that follows it at 62c10315
+        # (`sendInputToNodeView`, CandidateGenerator.scala:87). Both
+        # lines name ONE block, which must be counted once.
+        'INFO New input block ' + 'ab' * 32 + ' w. nonce 91',
         'INFO Processed solution x with the result Success(())',
         'INFO Solution accepted',
         'INFO Found solution for input block, sending it for validation',
@@ -2172,6 +2176,32 @@ def _self_test():
     assert _warn_gone['pow_failure_sites_disagree'] is True, _warn_gone
     assert _counts['distinct_applied_input_blocks'] == 1, _counts
     assert _counts['applied_input_block_ids'] == ['ab' * 32], _counts
+    # ----- the patched miner's log line -----
+    #
+    # F11 (`matrix/F11-candidate-retained-work`) rewrote the
+    # `InputSolutionFound` arm and dropped `Input-block <id> mined @
+    # height <h>!`. Only `sendInputToNodeView`'s `New input block <id> w.
+    # nonce <n>` is left, and at 62c10315 that line sits at the same call.
+    # Matching the stock line alone made the F11 proof run report
+    # `input_blocks_applied 0` and `on_winning_chain 0`, although the same
+    # window held about 3 020 applied input blocks.
+    assert _counts['input_blocks_applied'] == 1, (
+        'the stock pair of lines is ONE block', _counts)
+    _f11 = _msr.count([
+        'INFO Found solution for input block, sending it for validation',
+        'INFO New input block ' + 'cd' * 32 + ' w. nonce 22',
+        'INFO Solution accepted'])
+    assert _f11['input_blocks_applied'] == 1, _f11
+    assert _f11['applied_input_block_ids'] == ['cd' * 32], _f11
+    assert _f11['applied_sites_disagree'] is False, (
+        'a build that logs only the send site is not disagreement', _f11)
+    # Both sites logging different blocks means the two lines no longer
+    # mark the same call, and the evidence has to say so.
+    _split = _msr.count([
+        'INFO Input-block ' + 'ab' * 32 + ' mined @ height 7!',
+        'INFO New input block ' + 'cd' * 32 + ' w. nonce 22'])
+    assert _split['applied_sites_disagree'] is True, _split
+    assert _counts['applied_sites_disagree'] is False, _counts
     # An empty window is UNKNOWN, not a run with no submissions.
     assert 'UNKNOWN, not zero' in _msr.count([])['unmatched']
     # The result line renders, names the build, and carries every
