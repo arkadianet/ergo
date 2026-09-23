@@ -1073,3 +1073,64 @@ async fn init_twice_returns_wallet_exists() {
         "expected WalletExists, got {err:?}",
     );
 }
+
+#[tokio::test]
+async fn change_address_requires_unlocked_owned_key_and_preserves_persisted_value() {
+    use ergo_state::wallet::tables::{
+        tracked_pubkey_key, WALLET_CHANGE_ADDRESS, WALLET_TRACKED_PUBKEYS,
+    };
+    use redb::ReadableTable;
+    let (admin, db, _dir) = spawn_writer(Arc::new(StubTxSubmitter));
+    admin.init("pw".into(), String::new(), 24).await.unwrap();
+    admin.unlock("pw".into()).await.unwrap();
+    let address = admin.addresses().await.unwrap().0[0].clone();
+    admin.update_change_address(address.clone()).await.unwrap();
+    let read_change = || {
+        db.begin_read()
+            .unwrap()
+            .open_table(WALLET_CHANGE_ADDRESS)
+            .unwrap()
+            .get(())
+            .unwrap()
+            .unwrap()
+            .value()
+    };
+    let original = read_change();
+    admin.lock().await.unwrap();
+    assert!(matches!(
+        admin.update_change_address(address.clone()).await,
+        Err(WalletAdminError::Locked)
+    ));
+    assert_eq!(read_change(), original);
+    admin.unlock("pw".into()).await.unwrap();
+    // Track a foreign key at the root path. It must not become a change
+    // destination just because a database row claims it is ours.
+    let foreign: [u8; 33] =
+        hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+            .unwrap()
+            .try_into()
+            .unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(WALLET_TRACKED_PUBKEYS).unwrap();
+        let existing = table.iter().unwrap().next().unwrap().unwrap().1.value();
+        // Reuse valid metadata: the foreign key cannot derive at that path.
+        table
+            .insert(tracked_pubkey_key(999, &foreign), existing)
+            .unwrap();
+    }
+    txn.commit().unwrap();
+    admin.lock().await.unwrap();
+    admin.unlock("pw".into()).await.unwrap();
+    let foreign_address = ergo_wallet::address::pubkey_to_p2pk_address(
+        &foreign,
+        ergo_ser::address::NetworkPrefix::Mainnet,
+    )
+    .unwrap();
+    assert!(matches!(
+        admin.update_change_address(foreign_address).await,
+        Err(WalletAdminError::ChangeAddressUntracked)
+    ));
+    assert_eq!(read_change(), original);
+    admin.update_change_address(address).await.unwrap();
+}
