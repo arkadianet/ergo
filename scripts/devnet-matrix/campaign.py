@@ -1898,6 +1898,25 @@ def _self_test_round_2():
     finally:
         sys.modules['smoke'] = real
 
+    # steady: a payment submitted to the miner moments before a reading,
+    # and PROVEN to reach the follower afterwards, is relay lag at that
+    # instant; one that never arrives is still a disagreement.
+    def pb(h, ordering, rp, sp, read_at):
+        return {'height': h, 'input_chain_txids': set(), 'ordering_txids': set(ordering),
+                'rust_pool': set(rp), 'scala_pool': set(sp), 'read_at': read_at}
+    lag = common.evaluate_pool_agreement(
+        [pb(25, [], [], ['p'], 1000.0), pb(26, ['p'], [], [], 1030.0)],
+        submitted_at={'p': 998.0})
+    assert lag['unexplained_total'] == 0 and lag['blocks'][0]['propagating'] == ['p'], lag
+    never = common.evaluate_pool_agreement(
+        [pb(25, [], [], ['q'], 1000.0), pb(26, [], [], [], 1030.0)],
+        submitted_at={'q': 998.0})
+    assert never['unexplained_total'] == 1, 'a payment that never arrives is not lag'
+    stale = common.evaluate_pool_agreement(
+        [pb(25, [], [], ['r'], 1000.0), pb(26, ['r'], [], [], 1030.0)],
+        submitted_at={'r': 1000.0 - common.PROPAGATION_SECONDS - 1})
+    assert stale['unexplained_total'] == 1, 'the window is bounded'
+
     # evict: delivery is the NODE's receipt, and a fallback is caused by
     # the adversary only when it rebuilds a poisoned tree.
     stdout = ('[wrong_body] pushed id=' + 'a' * 64 + ' ordering=' + 'o' * 64 + '\n'

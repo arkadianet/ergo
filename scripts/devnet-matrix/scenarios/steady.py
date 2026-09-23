@@ -33,6 +33,9 @@ def _pump(ctx, address, sent):
             continue
         if status == 200 and txid:
             sent.append(txid)
+            # When, so a payment still relaying at the next reading can
+            # be told apart from a real pool disagreement.
+            ctx.evidence.setdefault('_submitted_at', {})[txid] = time.time()
     return sent
 
 
@@ -77,6 +80,7 @@ def _observe_window(ctx, blocks, address):
                     block = api('scala', f'/blocks/{hid}')
                     ordering_txids |= {
                         t['id'] for t in block['blockTransactions']['transactions']}
+                read_at = time.time()
                 rust_pool = {t['id'] for t in api('rust', '/transactions/unconfirmed')}
                 scala_pool = {t['id'] for t in api('scala', '/transactions/unconfirmed')}
             except (Unavailable, KeyError, TypeError) as error:
@@ -86,6 +90,7 @@ def _observe_window(ctx, blocks, address):
                 'height': scanned, 'ordering_block': header,
                 'input_chain_txids': applied, 'ordering_txids': ordering_txids,
                 'rust_pool': rust_pool, 'scala_pool': scala_pool,
+                'read_at': read_at,
             })
             _pump(ctx, address, sent)
         # AFTER the advance has been consumed, not before it is noticed.
@@ -175,12 +180,16 @@ def run(ctx):
     # end-of-run comparison assertion 6 makes is one instant, and a
     # disagreement both pools have forgotten by block 60 is invisible
     # to it.
+    submitted_at = ctx.evidence.pop('_submitted_at', {})
     agreement = common.evaluate_pool_agreement(
-        readable, smoke.d1_refusals_from_log())
+        readable, smoke.d1_refusals_from_log(), submitted_at=submitted_at)
     ctx.note('pool_agreement_per_block', {
         'blocks': len(agreement['blocks']),
         'unexplained_total': agreement['unexplained_total'],
         'unexplained_txids': agreement['unexplained_txids'],
+        'propagating_at_the_reading': sum(len(b['propagating'])
+                                          for b in agreement['blocks']),
+        'propagation_window_seconds': common.PROPAGATION_SECONDS,
         'blocks_with_residue': [b for b in agreement['blocks']
                                 if b['only_in_scala'] or b['only_in_rust']][:20],
     })

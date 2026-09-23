@@ -814,7 +814,14 @@ class WindowWalker:
         return out
 
 
-def evaluate_pool_agreement(blocks, d1_refusals=()):
+# How recently a payment may have been submitted to the miner for its
+# absence from the follower's pool at one reading to be relay lag rather
+# than a disagreement. The harness submits payments immediately after
+# reading a block, so the next block can land before the relay does.
+PROPAGATION_SECONDS = 30.0
+
+
+def evaluate_pool_agreement(blocks, d1_refusals=(), submitted_at=None):
     """Per-ordering-block pool agreement, with every residue attributed.
 
     The end-of-run comparison assertion 6 makes is one instant. A
@@ -827,25 +834,41 @@ def evaluate_pool_agreement(blocks, d1_refusals=()):
     D1 refusal, or an F6 omission (in the applied input chain, not in
     the ordering block). Anything else is UNEXPLAINED and fails.
     """
+    submitted_at = submitted_at or {}
     per_block, unexplained_total = [], []
-    for block in blocks:
+    for i, block in enumerate(blocks):
         rust_pool = set(block['rust_pool'])
         scala_pool = set(block['scala_pool'])
         only_scala = scala_pool - rust_pool
         only_rust = rust_pool - scala_pool
         applied = set(block['input_chain_txids'])
         ordering = set(block['ordering_txids'])
-        d1, f6, unexplained = [], [], []
+        # Where each residue ended up LATER: in Rust's pool or confirmed.
+        arrived_later = set()
+        for other in blocks[i + 1:]:
+            arrived_later |= set(other['rust_pool']) | set(other['ordering_txids'])
+        d1, f6, propagating, unexplained = [], [], [], []
         for txid in sorted(only_scala):
+            sent = submitted_at.get(txid)
+            read_at = block.get('read_at')
             if txid in d1_refusals:
                 d1.append(txid)
             elif txid in applied and txid not in ordering:
                 f6.append(txid)
+            elif (sent is not None and read_at is not None
+                  and 0 <= read_at - sent <= PROPAGATION_SECONDS
+                  and txid in arrived_later):
+                # Submitted to the miner moments before this reading, and
+                # PROVEN to have reached the follower (its pool, or a
+                # block it applied) afterwards: relay lag at one instant.
+                # Both conditions are required — a fresh payment that
+                # never arrives stays unexplained.
+                propagating.append(txid)
             else:
                 unexplained.append(txid)
         entry = {'height': block.get('height'), 'only_in_scala': len(only_scala),
                  'only_in_rust': sorted(only_rust), 'd1': d1, 'f6': f6,
-                 'unexplained': unexplained}
+                 'propagating': propagating, 'unexplained': unexplained}
         per_block.append(entry)
         # Residue Rust holds and Scala does not cannot be explained by
         # D1 or F6 at all — those only ever leave transactions in
