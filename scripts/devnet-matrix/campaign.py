@@ -113,8 +113,8 @@ CAMPAIGN_P2P_HOST = {'scala': '127.0.0.1', 'scala2': '127.0.0.1',
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-# See `lifecycle.WORK`: `MATRIX_WORK` moves the whole run.
-WORK = Path(os.environ.get('MATRIX_WORK', HERE / '.work'))
+# See `lifecycle.WORK`: `MATRIX_WORK` moves the whole run, resolved once.
+WORK = Path(os.environ.get('MATRIX_WORK', HERE / '.work')).resolve()
 CAMPAIGN_WORK = WORK / 'campaign'
 CONF = CAMPAIGN_WORK / 'conf'
 
@@ -1478,6 +1478,35 @@ def _self_test():
         env={k: v for k, v in os.environ.items() if k != 'MATRIX_WORK'},
         capture_output=True, text=True, check=True).stdout.split()
     assert out[0] == str(HERE / '.work'), out
+    # A RELATIVE `MATRIX_WORK` (`cd scripts/devnet-matrix;
+    # MATRIX_WORK=.work-m4-f11 python3 campaign.py …`, the launch shape
+    # proof-F11.md records) is resolved against the directory it was
+    # given in, ONCE, at load. Left relative, the first
+    # `path.relative_to(ROOT)` (a mismatch artifact written during
+    # `fund_miner`) raised ValueError and aborted the run before any
+    # devnet state existed. A work directory OUTSIDE the checkout (a
+    # tempdir) is shown as an absolute path instead of raising.
+    rel_probe = (
+        'import sys; sys.path.insert(0, %r);'
+        'import lifecycle, campaign, smoke;'
+        'print(lifecycle.WORK, smoke.WORK, campaign.WORK,'
+        ' smoke.display_path(smoke.FINDINGS / "x.json"))'
+    ) % str(HERE)
+    rel_env = dict(os.environ, MATRIX_WORK='.work-selftest-relative')
+    out = subprocess.run(
+        [sys.executable, '-c', rel_probe], cwd=str(HERE), env=rel_env,
+        capture_output=True, text=True).stdout.split()
+    assert out and out[0] == str(HERE / '.work-selftest-relative'), (
+        'a relative MATRIX_WORK must be absolute once loaded', out)
+    assert out[0] == out[1] == out[2], out
+    assert out[3] == ('scripts/devnet-matrix/.work-selftest-relative/'
+                      'findings/x.json'), out
+    with tempfile.TemporaryDirectory() as tmp:
+        out = subprocess.run(
+            [sys.executable, '-c', rel_probe],
+            env=dict(os.environ, MATRIX_WORK=tmp),
+            capture_output=True, text=True, check=True).stdout.split()
+        assert out[3] == str(Path(tmp).resolve() / 'findings' / 'x.json'), out
 
     # The port bands are the controller's, and must never collide with a
     # production node or with the smoke recipe's own defaults.

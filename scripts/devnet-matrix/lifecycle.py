@@ -33,7 +33,9 @@ HERE = ROOT / 'scripts/devnet-matrix'
 # `stop` then kills the second run's nodes — and they append to one
 # `scala.log` and one `agreement-series.jsonl`, which is the evidence
 # each of them is measured from.
-WORK = Path(os.environ.get('MATRIX_WORK', HERE / '.work'))
+# Resolved ONCE, here: a relative value means the directory it was given
+# in, and every later `relative_to(ROOT)` needs an absolute path.
+WORK = Path(os.environ.get('MATRIX_WORK', HERE / '.work')).resolve()
 
 # Which nodes this process drives, and on which ports. The smoke recipe
 # keeps the two-node defaults it has always had (Scala 19560/19580, Rust

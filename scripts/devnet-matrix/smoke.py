@@ -66,6 +66,21 @@ API_KEY = lifecycle.API_KEY
 # human PROMOTES land under `test-vectors/weak-blocks/findings/`.
 FINDINGS = WORK / 'findings'
 
+
+def display_path(path):
+    """`path` relative to the checkout when it lies inside it, else absolute.
+
+    Evidence names its files relative to the repository root. A
+    `MATRIX_WORK` outside the checkout (a tempdir, another disk) is a
+    legitimate place to run from, so it is named in full rather than
+    raising `ValueError` in the middle of a run.
+    """
+    path = Path(path).resolve()
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
 # `/api/v1/peers` reports the peer's handshake protocol version. Input
 # blocks are gated on >= 6.5.0 on the Scala side, so anything lower means
 # the two nodes would never exchange them.
@@ -321,7 +336,7 @@ def write_mismatch_artifact(assertion, message, evidence, at=None, context=None,
     if context:
         body.update(context)
     path.write_text(json.dumps(body, indent=2) + '\n')
-    return str(path.relative_to(ROOT))
+    return display_path(path)
 
 
 def ids_in(value, limit=20):
@@ -2599,7 +2614,7 @@ def finalize_agreement(run, evidence):
         'evaluated_over': 'every sample taken in the run',
         'total_samples': len(run.series),
         'unavailable_samples': run.unavailable_samples,
-        'series_file': str(run.series_path.relative_to(ROOT)),
+        'series_file': display_path(run.series_path),
         'max_propagation_lag_seconds': max(lags) if lags else None,
         **tip,
     }
@@ -3795,7 +3810,7 @@ def main():
               f'{bool(poolm.get("scala_corpus_unavailable"))} '
               f'max_height_gap={run.max_height_gap} '
               f'failures={len(run.failures)} '
-              f'evidence={output.relative_to(ROOT)}', flush=True)
+              f'evidence={display_path(output)}', flush=True)
     raise SystemExit(0 if not run.failures else 1)
 
 
