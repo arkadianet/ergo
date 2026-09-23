@@ -155,9 +155,7 @@ def run(ctx):
     # budget — attempt 2 never reconnected and never converged. Its data
     # directory is untouched, so it resumes on the public branch it was
     # following, which is exactly the branch that has to be unwound.
-    lifecycle.stop(('rust',))
-    lifecycle.spawn('rust')
-    ctx.run.started('rust')
+    common.restart_follower(ctx, campaign, lifecycle)
     ctx.note('follower_restarted_at_rejoin', True)
     # Recorded, not raised. The two miners cannot peer with each other,
     # so the second one's only peer is the follower, and requiring that
@@ -195,8 +193,13 @@ def run(ctx):
                  {'rust': api('rust', '/info'), 'scala2': api('scala2', '/info')})
 
     # ----- what the follower reported -----
+    # The follower was RESTARTED at the rejoin, so its feed is a new
+    # process's and `events_watermark` (taken before the restart) is not
+    # a position in it. See `common.follower_events_since`.
     events = common.rust_events(ctx)
-    reorgs = [e for e in common.events_after(events, events_watermark)
+    ctx.note('event_watermark_before_restart', events_watermark)
+    reorgs = [e for e in common.follower_events_since(events, events_watermark,
+                                                      restarted=True)
               if e['kind'] == 'reorg']
     ctx.note('reorg_events', reorgs)
     if not reorgs:
@@ -225,31 +228,40 @@ def run(ctx):
     # input-block tip — with the abandoned trees still retained — passed
     # both. Each property is now asserted on its own terms.
     dropped = set(deepest.get('droppedHeaderIds') or [])
-    chain = api_retry('rust', '/blocks/bestInputChain', ctx.run.deadline,
-                      what='the follower input chain after the reorg')
-    best = api_retry('rust', '/blocks/bestInputBlock', ctx.run.deadline,
-                     what='the follower best input block after the reorg')
-    info = api_retry('rust', '/info', ctx.run.deadline,
-                     what='the follower info after the reorg')
-    status = (api_retry('rust', '/api/v1/status', ctx.run.deadline,
-                        what='the follower status after the reorg')
-              .get('input_blocks') or {})
+    # The miner's own chain for the SAME ordering block, so a chain the
+    # node has relabelled cannot vouch for its own tip. The two nodes move
+    # on independently, so the reading is retried (bounded) until both
+    # name the same ordering block or the follower's tip is cleared;
+    # failing that the comparison is reported as not made, never skipped.
+    miner_chain, attempts = None, 0
+    compare_deadline = min(ctx.run.deadline, time.monotonic() + 60)
+    while True:
+        attempts += 1
+        chain = api_retry('rust', '/blocks/bestInputChain', ctx.run.deadline,
+                          what='the follower input chain after the reorg')
+        best = api_retry('rust', '/blocks/bestInputBlock', ctx.run.deadline,
+                         what='the follower best input block after the reorg')
+        info = api_retry('rust', '/info', ctx.run.deadline,
+                         what='the follower info after the reorg')
+        status = (api_retry('rust', '/api/v1/status', ctx.run.deadline,
+                            what='the follower status after the reorg')
+                  .get('input_blocks') or {})
+        try:
+            miner = api('scala2', '/blocks/bestInputChain') or {}
+        except Unavailable:
+            miner = {}
+        if miner.get('bestOrdering') and miner.get('bestOrdering') == chain.get('bestOrdering'):
+            miner_chain = miner.get('bestInputBlocks') or []
+        if (miner_chain is not None or not info.get('bestInputBlock')
+                or time.monotonic() >= compare_deadline):
+            break
+        ctx.run.idle(1)
     ctx.note('after_reorg', {'best_input_chain': chain, 'best_input_block': best,
                              'info_best_input_block': info.get('bestInputBlock')})
     ctx.note('input_blocks_status_after_reorg', status)
-
-    # The miner's own chain for the same ordering block, so a chain the
-    # node has relabelled cannot vouch for its own tip.
-    miner_chain = None
-    try:
-        miner = api('scala2', '/blocks/bestInputChain') or {}
-        if miner.get('bestOrdering') == chain.get('bestOrdering'):
-            miner_chain = miner.get('bestInputBlocks') or []
-    except Unavailable:
-        miner_chain = None
     ctx.note('miner_chain_for_comparison',
              {'available': miner_chain is not None,
-              'length': len(miner_chain or [])})
+              'length': len(miner_chain or []), 'readings': attempts})
 
     verdict = common.evaluate_post_reorg_state(
         chain, info, status, dropped, miner_chain=miner_chain)

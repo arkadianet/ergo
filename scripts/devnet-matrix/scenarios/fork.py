@@ -162,53 +162,24 @@ def run(ctx):
         'scala2': len(comparison['scala2_switches']),
         'rust_sample': comparison['rust_switches'][:20],
     })
-    # Resets to the empty chain: expected inside the restart this
-    # scenario performs, unexplained anywhere else.
+    # Resets to the empty chain are expected inside the restart this
+    # scenario performs and unexplained anywhere else; a PASS needs a
+    # GENUINE switch, which a reset is not. The rule is
+    # `common.judge_fork_switches`, so a probe can drive it.
     restart_window = range(max(0, samples_before_seed - 5),
                            samples_after_seed + common.LATER_CONFIRMATION_SAMPLES)
-    caused, uncaused = [], []
-    for reset in comparison['resets_to_the_empty_chain']:
-        (caused if reset['index'] in restart_window else uncaused).append(reset)
+    judged = common.judge_fork_switches(comparison, restart_window)
     ctx.note('resets_to_the_empty_chain', {
-        'during_the_seed_restart': len(caused),
-        'elsewhere': len(uncaused),
+        'during_the_seed_restart': len(judged['resets_caused']),
+        'elsewhere': len(judged['resets_uncaused']),
         'restart_sample_window': [restart_window.start, restart_window.stop],
-        'sample': uncaused[:5],
+        'sample': judged['resets_uncaused'][:5],
     })
-    if uncaused:
-        ctx.fail(f'{len(uncaused)} times the follower emptied its input chain '
-                 'outside the restart this scenario performs — no miner publishes '
-                 'an empty chain, so that is a chain nobody has',
-                 {'sample': uncaused[:5]})
-
-    if comparison['switches_matching_no_reference']:
-        bad = comparison['switches_matching_no_reference']
-        ctx.fail(f'{len(bad)} fork switches produced a chain matching no miner: '
-                 'the blocks applied and rolled back do not correspond to any '
-                 'reference chain under the same ordering block',
-                 {'sample': bad[:5]})
-
-    # A PASS REQUIRES an observed switch. `forks > 1` proves the follower
-    # retained a competing tree, which is the precondition; it does not
-    # prove anything about switching between them, and a run that
-    # sampled no switch has not judged the switch property at all.
-    if not comparison['rust_switches']:
-        ctx.note('result_qualifier', 'NOT ESTABLISHED')
-        peak = max(fork_counts) if fork_counts else None
-        ctx.fail('no input-chain fork switch was observed on Rust, so the switch '
-                 'property was never judged — NOT ESTABLISHED, not a pass. '
-                 + (f'A second tree WAS retained ({len(fork_samples)} samples at '
-                    f'forks={peak}), so the follower had something to switch '
-                    'between and did not.'
-                    if fork_samples else
-                    f'`forks` never exceeded 1 (peak {peak} over '
-                    f'{len(fork_counts)} readings), so the two miners never '
-                    'produced competing trees under one ordering block in this '
-                    'window at all.'),
-                 {'fork_count_samples': len(fork_counts),
-                  'max_forks': max(fork_counts) if fork_counts else None,
-                  'scala_switches': len(comparison['scala_switches']),
-                  'scala2_switches': len(comparison['scala2_switches'])})
+    ctx.note('genuine_fork_switches', judged['genuine_switches'])
+    if judged['qualifier']:
+        ctx.note('result_qualifier', judged['qualifier'])
+    for message, evidence in judged['failures']:
+        ctx.fail(message, evidence)
     # Rolled-back blocks a miner still holds are TELEMETRY here, not a
     # verdict. The two miners cannot peer with each other, so each keeps
     # its own competing fork indefinitely and every switch the follower

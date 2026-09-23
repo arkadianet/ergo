@@ -44,6 +44,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 # The node set and its ports have to be decided BEFORE `lifecycle` is
@@ -281,6 +282,8 @@ class Context:
         # inputs Rust could not find in its own UTXO set. Counted per
         # scenario, with the input block and the node's state captured.
         self.utxo_validation_failures = []
+        # The live drain (`UtxoWatch`), started with the nodes.
+        self.utxo_watch = None
 
     def fail(self, message, evidence=None, ids=None):
         self.divergences.append({'scenario': self.scenario, 'message': message,
@@ -340,9 +343,14 @@ def capture_utxo_validation_failure(ctx, line):
                 captured['utxo'][candidate] = answer
             elif answer and not isinstance(answer, str):
                 # `answer` is the string `unavailable: ...` when the
-                # route could not be read. Treating that as a successful
-                # lookup let a later candidate id overwrite the block we
-                # had actually captured.
+                # route could not be read, and that is not a lookup. And
+                # the FIRST id that resolves is the input block: a later
+                # candidate that also resolves is recorded beside it,
+                # never over it — overwriting is how the captured block
+                # used to be replaced by whatever id the line named last.
+                if captured['input_block'] is not None:
+                    captured.setdefault('also_resolved', []).append(candidate)
+                    continue
                 captured['input_block'] = {'id': candidate, 'txids': answer}
                 try:
                     captured['input_block']['bodies'] = smoke.api(
@@ -359,19 +367,88 @@ def capture_utxo_validation_failure(ctx, line):
     return captured
 
 
-def drain_utxo_watch(ctx, seen):
-    """Capture any NEW watch-item line since the last call.
+class UtxoWatch:
+    """The watch item, drained LIVE for the whole scenario.
 
-    Called from the scenario's own polling loops, so the state is read
-    while the condition is live rather than at finalization.
+    Draining only from the scenario loops that remembered to call it left
+    every other phase — flood delivery, lifecycle restarts, the waits
+    between them — with no live capture, and a line seen first at
+    finalization has no state behind it. This runs on its own thread from
+    the moment the nodes start until they stop, reading the follower's
+    log INCREMENTALLY (from a byte offset, so a 16 MB log is not re-read
+    every poll) and capturing each new line's state as it appears.
+
+    `scan()` is the whole mechanism and is called directly by the probe;
+    the thread only calls it on a cadence.
     """
-    import smoke
-    for line in smoke.rust_log_lines(UTXO_WATCH_PHRASE, limit=2000):
-        if line in seen:
-            continue
-        seen.add(line)
-        capture_utxo_validation_failure(ctx, line)
-    return seen
+
+    def __init__(self, ctx, log_path=None, interval=2.0):
+        self.ctx = ctx
+        self.log_path = Path(log_path) if log_path else WORK / 'rust.log'
+        self.interval = interval
+        self.offset = 0
+        self.partial = ''
+        self.seen = set()
+        self.scans = 0
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = None
+
+    def scan(self):
+        import smoke
+        with self._lock:
+            self.scans += 1
+            try:
+                size = self.log_path.stat().st_size
+            except OSError:
+                return []
+            if size < self.offset:
+                # Truncated or replaced: start again from the top.
+                self.offset, self.partial = 0, ''
+            with self.log_path.open('rb') as handle:
+                handle.seek(self.offset)
+                chunk = handle.read()
+            self.offset += len(chunk)
+            text = self.partial + chunk.decode('utf-8', errors='replace')
+            lines = text.split('\n')
+            self.partial = lines.pop()  # an unterminated last line waits
+            captured = []
+            for line in lines:
+                line = smoke.strip_ansi(line)
+                if UTXO_WATCH_PHRASE not in line or line in self.seen:
+                    continue
+                self.seen.add(line)
+                captured.append(capture_utxo_validation_failure(self.ctx, line))
+            return captured
+
+    def start(self):
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        return self
+
+    def _loop(self):
+        while not self._stop.is_set():
+            try:
+                self.scan()
+            except Exception as error:  # noqa: BLE001 — recorded, watch continues
+                self.ctx.evidence.setdefault('utxo_watch_errors', []).append(
+                    f'{type(error).__name__}: {error}')
+            self._stop.wait(self.interval)
+
+    def stop(self):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=30)
+            self._thread = None
+        self.scan()  # one last pass while the nodes are still up
+        return self
+
+
+def drain_utxo_watch(ctx, seen=None):
+    """Drain the watch now, from a scenario loop. The live thread does the
+    same on its own cadence; this only makes the capture prompter."""
+    watch = getattr(ctx, 'utxo_watch', None)
+    return watch.scan() if watch is not None else []
 
 
 def scan_utxo_validation_failures(ctx):
@@ -384,7 +461,7 @@ def scan_utxo_validation_failures(ctx):
     import smoke
     captured_lines = {h['line'] for h in ctx.utxo_validation_failures}
     late = []
-    for line in smoke.rust_log_lines(UTXO_WATCH_PHRASE, limit=2000):
+    for line in smoke.rust_log_lines(UTXO_WATCH_PHRASE, limit=200000):
         if line in captured_lines:
             continue
         late.append({'line': line, 'ids': smoke.ids_in(line),
@@ -687,6 +764,7 @@ def run_scenario(name, args):
         for node in started:
             run.started(node)
         run.start_sampling()
+        ctx.utxo_watch = UtxoWatch(ctx).start()
         scenario.run(ctx)
     except smoke.Unavailable as error:
         ctx.fail(f'an observation the scenario needs was unavailable: {error}')
@@ -711,6 +789,9 @@ def run_scenario(name, args):
         try:
             try:
                 run.stop_sampling()
+                if getattr(ctx, 'utxo_watch', None) is not None:
+                    ctx.utxo_watch.stop()
+                    evidence['utxo_watch_scans'] = ctx.utxo_watch.scans
                 smoke.check_sampler(run, evidence)
                 scan_utxo_validation_failures(ctx)
                 evidence['divergences'] = ctx.divergences
@@ -1057,26 +1138,18 @@ def _self_test():
     # apparent 100 % rate, and filtering by sequence cannot tell that
     # from a window that genuinely had no fallbacks.
     class FakeCollector(common.EventCollector):
+        """Replaces ONLY the network read. `poll` — the gap detection and
+        retention under test — is the production method."""
+
         def __init__(self, pages):
             super().__init__(ctx=None)
             self.pages = list(pages)
 
-        def poll(self):
-            page = self.pages.pop(0) if self.pages else []
-            self.polls += 1
-            numbered = [e for e in page if e.get('seq') is not None]
-            if numbered:
-                lowest = min(e['seq'] for e in numbered)
-                if self.highest_seen and lowest > self.highest_seen + 1:
-                    self.gaps.append({'after_seq': self.highest_seen,
-                                      'next_available_seq': lowest,
-                                      'lost': lowest - self.highest_seen - 1})
-            for event in page:
-                if event.get('seq') is None:
-                    continue
-                self.events[event['seq']] = event
-                self.highest_seen = max(self.highest_seen, event['seq'])
-            return self
+        def _fetch_page(self):
+            return self.pages.pop(0) if self.pages else []
+
+    assert 'poll' not in FakeCollector.__dict__, \
+        'the probe must drive the production poll, not a copy of it'
 
     def ev(seq, kind):
         return {'seq': seq, 'kind': kind}
@@ -1157,17 +1230,22 @@ def _self_test():
 
     # The peak sampler keeps the MAXIMUM across its window, and a key the
     # route never published stays None rather than becoming zero.
-    sampler = common.PeakSampler(('waitlist', 'forks', 'staged_bytes'))
-    for reading in ({'waitlist': 3, 'forks': 1},
-                    {'waitlist': 9, 'forks': 2},
-                    {'waitlist': 1, 'forks': 1}):
-        for key in sampler.keys:
-            value = reading.get(key)
-            if value is None:
-                continue
-            current = sampler.peaks[key]
-            sampler.peaks[key] = value if current is None else max(current, value)
-        sampler.samples += 1
+    class ScriptedSampler(common.PeakSampler):
+        """Replaces ONLY the status read; `_observe` is production."""
+
+        def __init__(self, readings):
+            super().__init__(('waitlist', 'forks', 'staged_bytes'))
+            self.readings = list(readings)
+
+        def _read_status(self):
+            return self.readings.pop(0)
+
+    assert '_observe' not in ScriptedSampler.__dict__
+    sampler = ScriptedSampler(({'waitlist': 3, 'forks': 1},
+                               {'waitlist': 9, 'forks': 2},
+                               {'waitlist': 1, 'forks': 1}))
+    for _ in range(3):
+        sampler._observe()
     assert sampler.peaks['waitlist'] == 9, sampler.peaks
     assert sampler.peaks['staged_bytes'] is None, \
         'a counter the route never published is UNKNOWN, not zero'
@@ -1476,12 +1554,13 @@ def _self_test():
     finally:
         CAMPAIGN_WORK = real_work
 
-    import inspect
-
     # ----- finding 6: an exception may not persist a PASS -----
     #
-    # Through the PRODUCTION rule, not a copy of it: codex's r2 note was
-    # that the self-test duplicated the logic it claimed to check.
+    # Through the PRODUCTION rule and the PRODUCTION driver: codex's r2
+    # note was that the self-test duplicated the logic it claimed to
+    # check, and the previous replacement only grepped the driver's
+    # source. `run_scenario` itself is driven here, with fake node
+    # modules, and made to fail at each point codex named.
     for aborted, failures, not_measured, expected in (
             (None, [], None, 'PASS'),
             (None, [{'message': 'x'}], None, 'FAIL'),
@@ -1491,24 +1570,358 @@ def _self_test():
             ('RuntimeError: boom', [{'message': 'x'}], 'y', 'ABORTED')):
         got = verdict_for(aborted, failures, not_measured)
         assert got == expected, (aborted, failures, not_measured, got, expected)
-    driver = inspect.getsource(run_scenario)
-    assert 'verdict_for(aborted, run.failures' in driver, \
-        'the driver must call the shared rule, not restate it'
-    # Node shutdown is UNCONDITIONAL and the verdict is decided AFTER it,
-    # so a shutdown that fails cannot leave a saved PASS behind.
-    assert driver.index('lifecycle.stop()') < driver.index("evidence['result']"), \
-        'shutdown must run before the verdict is decided'
-    assert "shutdown_error and aborted is None" in driver, \
-        'a failed shutdown has to abort the run'
-    assert driver.index('finally:\n            # UNCONDITIONAL') < driver.index(
-        "evidence['result']"), 'the shutdown finally must enclose the verdict path'
-    assert "record_attempt(name, evidence)" in driver, \
-        'every attempt has to be recorded, pass or fail'
-    # Item 10: an attempt's evidence must name files only IT wrote.
-    assert "f'-{attempt}'" in driver and "f'{name}-{attempt}-agreement-series" in driver, \
-        'series and logs have to be per attempt, not per scenario'
+    _self_test_driver()
+    _self_test_round_2()
 
     print('campaign self-test OK: rendering, ports and the scenario set')
+
+
+def _fake_node_modules(work, calls, stop_raises=False, findings_raise=False):
+    """A `lifecycle` and a `smoke` that start nothing and record what the
+    driver asked of them — the driver under test is the real one."""
+    import types
+
+    import smoke as real_smoke
+
+    lifecycle = types.ModuleType('lifecycle')
+    lifecycle.SCALA_APP_VERSION = 'fake'
+    lifecycle.node_binary = lambda: '/fake/ergo-node'
+    lifecycle.classpath_file = lambda: Path('/fake/classpath')
+
+    def start(names):
+        calls.append(('start', tuple(names)))
+        for name in names:
+            (work / f'{name}.log').write_text(f'{name} log of this attempt\n')
+
+    def stop(names=None):
+        calls.append(('stop', names))
+        if stop_raises:
+            raise RuntimeError('a node would not stop')
+
+    lifecycle.start, lifecycle.stop = start, stop
+
+    smoke = types.ModuleType('smoke')
+    smoke.Unavailable = real_smoke.Unavailable
+    smoke.strip_ansi = real_smoke.strip_ansi
+    smoke.ids_in = real_smoke.ids_in
+    smoke.rust_log_lines = lambda match, limit=40: []
+    smoke.check_sampler = lambda run, evidence: None
+
+    def write_findings(run, evidence):
+        if findings_raise:
+            raise OSError('the findings directory is not writable')
+        return []
+
+    smoke.write_findings = write_findings
+
+    class Run:
+        def __init__(self, deadline):
+            self.deadline = deadline
+            self.failures, self.findings = [], []
+            self.series_path = work / 'agreement-series.jsonl'
+            self.samples = self.unavailable_samples = self.max_height_gap = 0
+            self.peer_states, self.penalty_observations = set(), []
+
+        def started(self, node):
+            pass
+
+        def start_sampling(self):
+            self.series_path.write_text('{"sample": "of this attempt"}\n')
+
+        def stop_sampling(self):
+            pass
+
+        def totals(self):
+            return {}
+
+        def fail(self, assertion, message, evidence=None, ids=None):
+            self.failures.append({'assertion': assertion, 'message': message})
+
+    smoke.Run = Run
+    return lifecycle, smoke
+
+
+def _drive(name, scenario_run, tmp, **faults):
+    """Run the REAL `run_scenario` once against fake node modules."""
+    import types
+
+    from scenarios import SCENARIOS
+    global CAMPAIGN_WORK, CONF, WORK
+    saved = (CAMPAIGN_WORK, CONF, WORK)
+    CAMPAIGN_WORK, CONF, WORK = tmp / 'campaign', tmp / 'campaign' / 'conf', tmp / 'work'
+    WORK.mkdir(parents=True, exist_ok=True)
+    calls = []
+    fake_lifecycle, fake_smoke = _fake_node_modules(WORK, calls, **faults)
+    module = types.ModuleType(f'fake_{name}')
+    module.__doc__ = 'A probe scenario.'
+    module.NODES = SCENARIO_NODES[name]
+    module.run = scenario_run
+    real_modules = {k: sys.modules.get(k) for k in ('lifecycle', 'smoke')}
+    real_scenario = SCENARIOS[name]
+    sys.modules['lifecycle'], sys.modules['smoke'] = fake_lifecycle, fake_smoke
+    SCENARIOS[name] = module
+    raised = None
+    try:
+        args = types.SimpleNamespace(attempt=check_attempt_cap(name), fresh=False,
+                                     timeout=5, ordering_blocks=None)
+        try:
+            evidence = run_scenario(name, args)
+        except BaseException as error:  # noqa: BLE001 — the probe inspects it
+            raised = error
+            evidence = json.loads((CAMPAIGN_WORK / f'{name}.json').read_text())
+        return evidence, calls, raised, read_attempts()
+    finally:
+        SCENARIOS[name] = real_scenario
+        for key, value in real_modules.items():
+            if value is None:
+                sys.modules.pop(key, None)
+            else:
+                sys.modules[key] = value
+        CAMPAIGN_WORK, CONF, WORK = saved
+
+
+def _self_test_driver():
+    """Findings 6 and 10, through the production driver."""
+    import tempfile
+
+    def stopped(calls):
+        return any(c[0] == 'stop' and c[1] is None for c in calls)
+
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        # A clean run passes, and stops its nodes.
+        evidence, calls, raised, _ = _drive('steady', lambda ctx: None, tmp / 'clean')
+        assert raised is None and evidence['result'] == 'PASS', evidence['result']
+        assert stopped(calls), calls
+
+        # Evidence collection throws AFTER the scenario body succeeded —
+        # the shape codex named: it used to bypass node shutdown and
+        # leave a saved PASS. ABORTED, and the nodes are stopped.
+        evidence, calls, raised, history = _drive(
+            'steady', lambda ctx: None, tmp / 'save', findings_raise=True)
+        assert evidence['result'] == 'ABORTED', evidence['result']
+        assert 'findings directory' in (evidence['aborted'] or ''), evidence['aborted']
+        assert stopped(calls), 'a failure in evidence collection must not skip shutdown'
+        assert history['steady'][-1]['result'] == 'ABORTED', history
+
+        # Shutdown itself fails after a clean scenario body: ABORTED,
+        # never PASS.
+        evidence, calls, raised, _ = _drive(
+            'steady', lambda ctx: None, tmp / 'stop', stop_raises=True)
+        assert evidence['result'] == 'ABORTED', evidence['result']
+        assert 'would not stop' in evidence['shutdown_error'], evidence
+
+        # The scenario body throws: ABORTED, nodes stopped, re-raised.
+        def boom(ctx):
+            raise RuntimeError('rust did not become ready')
+        evidence, calls, raised, _ = _drive('steady', boom, tmp / 'boom')
+        assert isinstance(raised, RuntimeError), raised
+        assert evidence['result'] == 'ABORTED', evidence['result']
+        assert stopped(calls), calls
+
+        # Finding 10: two attempts of one scenario, and each attempt's
+        # verdict file names logs and a series that IT wrote and that
+        # the later attempt did not replace.
+        _drive('fork', lambda ctx: None, tmp / 'two')
+        _, _, _, history = _drive('fork', lambda ctx: None, tmp / 'two')
+        entries = history['fork']
+        assert [e['attempt'] for e in entries] == [1, 2], entries
+        named = []
+        for entry in entries:
+            kept = json.loads(Path(entry['evidence']).read_text())
+            files = list(kept['logs'].values()) + [kept['series_file']]
+            for path in files:
+                assert Path(path).exists(), (entry['attempt'], path)
+                assert f"-{entry['attempt']}" in Path(path).name, (entry, path)
+            named.append(set(files))
+        assert not (named[0] & named[1]), \
+            'an attempt must never name evidence another attempt wrote'
+
+
+def _self_test_round_2():
+    """Round 2's probes, each through the production code path."""
+    import tempfile
+    import types
+
+    from scenarios import common
+    import smoke as real_smoke
+
+    def rs(o, rust, s1=(), s2=()):
+        return {'ordering': o, 'rust_chain': list(rust), 'scala_chain': list(s1),
+                'scala2_chain': list(s2), 'scala_ordering': o, 'scala2_ordering': o}
+
+    # fork: a run whose ONLY switch is the follower restart's reset has
+    # not observed a fork switch.
+    reset_only = common.compare_fork_switches(
+        [rs('O1', ['a'], ['a'], ['b']), rs('O1', [], ['a'], ['b'])])
+    judged = common.judge_fork_switches(reset_only, range(0, 50))
+    assert judged['genuine_switches'] == 0, judged
+    assert judged['qualifier'] == 'NOT ESTABLISHED', judged
+    assert any('no genuine' in m for m, _ in judged['failures']), judged
+    # ...and the reset itself, inside the restart window, is not a failure.
+    assert judged['resets_caused'] and not judged['resets_uncaused'], judged
+    across = common.compare_fork_switches(
+        [rs('O1', ['m1b', 'm1a'], ['m1b', 'm1a'], ['m2b', 'm2a']),
+         rs('O1', ['m2b', 'm2a'], ['m1b', 'm1a'], ['m2b', 'm2a'])])
+    judged = common.judge_fork_switches(across, range(0))
+    assert judged['failures'] == [] and judged['genuine_switches'] == 1, judged
+    elsewhere = common.judge_fork_switches(reset_only, range(100, 200))
+    assert any('outside the restart' in m for m, _ in elsewhere['failures']), elsewhere
+
+    # steady: a block that landed in the same reading as the one before
+    # it closed a tree nobody sampled — unread, not an empty chain.
+    walker = common.WindowWalker(10)
+    walker.note_chain({'t'})
+    assert walker.observe(12) == [(11, {'t'}), (12, None)]
+    walker.note_chain(set())
+    assert walker.observe(13) == [(13, set())], 'an EMPTY reading is a reading'
+
+    # rollback: a reorg the RESTARTED follower emitted is not hidden by a
+    # watermark from the process before the restart.
+    events = [{'seq': s, 'kind': k} for s, k in
+              ((1, 'peerConnected'), (2, 'blockApplied'), (3, 'reorg'))]
+    assert common.events_after(events, 400) == [], 'the old filter hid it'
+    assert [e['kind'] for e in common.follower_events_since(events, 400, True)
+            if e['kind'] == 'reorg'] == ['reorg']
+    assert common.follower_events_since(events, 2, False) == [events[2]]
+
+    # rollback: a stale tip relabelled with the new ordering id, with no
+    # miner chain to compare against, is unknown — not a pass.
+    stale = common.evaluate_post_reorg_state(
+        chain={'bestOrdering': 'new', 'bestInputBlocks': ['staletip']},
+        info={'bestInputBlock': 'staletip', 'bestFullHeaderId': 'new'},
+        status={'forks': 1, 'waitlist': 0, 'staged_bytes': 0, 'deferred_triggers': 0},
+        dropped={'old'}, miner_chain=None)
+    assert [p['what'] for p in stale['problems']] == [
+        'tip_not_compared_against_a_miner_chain'], stale
+    cleared = common.evaluate_post_reorg_state(
+        chain={'bestOrdering': 'new', 'bestInputBlocks': []},
+        info={'bestInputBlock': '', 'bestFullHeaderId': 'new'},
+        status={'forks': 0, 'waitlist': 0, 'staged_bytes': 0, 'deferred_triggers': 0},
+        dropped={'old'}, miner_chain=None)
+    assert cleared['problems'] == [], 'a CLEARED tip needs no miner chain'
+
+    # rollback/fork/reconstruct_rate: restarting the follower clears the
+    # dial backoff its address book persisted, BEFORE it starts again.
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        (root / 'rust').mkdir()
+        (root / 'rust' / 'peers.redb').write_text('persisted backoff')
+        (root / 'rust' / 'chain.redb').write_text('the chain')
+        calls, notes = [], {}
+        fake = types.SimpleNamespace(
+            stop=lambda names=None: calls.append(('stop', names)),
+            spawn=lambda name: calls.append(
+                ('spawn', name, (root / 'rust' / 'peers.redb').exists())))
+        ctx = types.SimpleNamespace(
+            data_root=root, run=types.SimpleNamespace(started=lambda n: None),
+            note=lambda k, v: notes.__setitem__(k, v))
+        common.restart_follower(ctx, sys.modules[__name__], fake)
+        assert calls == [('stop', ('rust',)), ('spawn', 'rust', False)], calls
+        assert (root / 'rust' / 'chain.redb').exists(), 'only the address book goes'
+
+    # reconstruct_rate: 96 outcomes for 100 blocks FAILS when all 100
+    # were announced; blocks the follower was provably never announced
+    # are attributed, not excused wholesale; an unread height is missing.
+    blocks = {h: f'H{h}' for h in range(1, 101)}
+    outcomes = [{'kind': 'ordering_reconstructed', 'headerId': f'H{h}', 'height': h}
+                for h in range(1, 97)]
+    everything = set(blocks.values())
+    assert len(common.reconcile_outcomes(blocks, outcomes, announced=everything)
+               ['missing']) == 4
+    partly = common.reconcile_outcomes(
+        blocks, outcomes, announced={f'H{h}' for h in range(1, 99)})
+    assert [m['height'] for m in partly['missing']] == [97, 98], partly['missing']
+    assert [m['height'] for m in partly['not_announced']] == [99, 100], partly
+    assert len(common.reconcile_outcomes(blocks, outcomes)['missing']) == 4, \
+        'with no announcement evidence nothing is attributed'
+    unread = common.reconcile_outcomes({}, [], announced=set(), unread_heights=[7])
+    assert unread['missing'] == [{'height': 7, 'header': None,
+                                  'why': 'the reference could not be read at this height'}]
+    assert common.announced_headers('nothing relevant\n') is None, \
+        'a log without the TRACE line is no evidence, not "never announced"'
+    line = f"x {common.ANNOUNCEMENT_LINE} block={'ab' * 32} payload=00"
+    assert common.announced_headers(line) == {'ab' * 32}
+
+    # UTXO watch: the FIRST resolving id is the input block; a later
+    # candidate is recorded beside it, never over it; an `unavailable`
+    # string is not a lookup.
+    def fake_smoke(api):
+        return types.SimpleNamespace(
+            ids_in=lambda line: ['a' * 64, 'b' * 64, 'c' * 64],
+            Unavailable=real_smoke.Unavailable, api=api,
+            strip_ansi=real_smoke.strip_ansi,
+            announcement_hex_for=lambda ids, window: {},
+            rust_log_window=lambda t: [])
+
+    def resolves(node, route):
+        if route.startswith('/blocks/' + 'a' * 64) or route.startswith('/blocks/' + 'c' * 64):
+            return ['tx']
+        if route.startswith('/blocks/' + 'b' * 64):
+            raise real_smoke.Unavailable('route down')
+        return None
+
+    real = sys.modules['smoke']
+    sys.modules['smoke'] = fake_smoke(resolves)
+    try:
+        probe_ctx = types.SimpleNamespace(
+            utxo_validation_failures=[], evidence={},
+            run=types.SimpleNamespace(fail=lambda *a, **k: None))
+        got = capture_utxo_validation_failure(probe_ctx, 'input box not found in UTXO set')
+        assert got['input_block']['id'] == 'a' * 64, got['input_block']
+        assert got['also_resolved'] == ['c' * 64], got
+
+        # ...and it is drained LIVE, by the watch thread, with no
+        # scenario loop calling anything — the flood-delivery shape.
+        with tempfile.TemporaryDirectory() as raw:
+            log = Path(raw) / 'rust.log'
+            log.write_text('boot\n')
+            watch = UtxoWatch(probe_ctx, log_path=log, interval=0.05).start()
+            with log.open('a') as handle:
+                handle.write('\x1b[2mERROR ValidationFailed: input box not found '
+                             'in UTXO set\x1b[0m\n')
+            for _ in range(100):
+                if len(probe_ctx.utxo_validation_failures) >= 2:
+                    break
+                time.sleep(0.05)
+            # Captured by the THREAD, before `stop()`'s final pass could
+            # have done it.
+            assert len(probe_ctx.utxo_validation_failures) == 2, \
+                'the live watch must capture the line while the nodes run'
+            watch.stop()
+            live = probe_ctx.utxo_validation_failures[-1]
+            assert live['input_block']['id'] == 'a' * 64, live
+            assert live.get('state_captured') is not False, live
+            # The same line is captured once, however often it is scanned.
+            watch.scan()
+            assert len(probe_ctx.utxo_validation_failures) == 2
+    finally:
+        sys.modules['smoke'] = real
+
+    # evict: delivery is the NODE's receipt, and a fallback is caused by
+    # the adversary only when it rebuilds a poisoned tree.
+    stdout = ('[wrong_body] pushed id=' + 'a' * 64 + ' ordering=' + 'o' * 64 + '\n'
+              '[wrong_body] pushed id=' + 'b' * 64 + ' ordering=relayed\n'
+              '[wrong_body] relayed 0, pushed 2 ...\n')
+    pushed = common.parse_pushed_bodies(stdout)
+    assert pushed == [{'id': 'a' * 64, 'ordering': 'o' * 64},
+                      {'id': 'b' * 64, 'ordering': None}], pushed
+    receipts = common.wrong_body_receipts(
+        [f"DEBUG {common.BODIES_RECEIVED_LINE} peer=127.211.0.1:40000 block={'a' * 64}",
+         f"DEBUG {common.BODIES_RECEIVED_LINE} peer=127.0.0.1:19570 block={'b' * 64}"],
+        '127.211.0.1', ['a' * 64, 'b' * 64])
+    assert list(receipts) == ['a' * 64], 'a body from ANOTHER peer is not delivery'
+    fallbacks = [{'kind': 'ordering_reconstruct_fallback', 'detail': 'root_mismatch',
+                  'headerId': 'H'},
+                 {'kind': 'ordering_reconstruct_fallback', 'detail': 'root_mismatch',
+                  'headerId': 'N'}]
+    attributed = common.attribute_wrong_body_fallbacks(
+        pushed[:1], fallbacks, parent_of={'H': 'o' * 64, 'N': 'elsewhere'})
+    assert [a['fallback']['headerId'] for a in attributed] == ['H'], attributed
+    # The previous rule compared the fallback's ORDERING id with pushed
+    # INPUT-block ids and could never attribute anything.
+    assert [f for f in fallbacks if f['headerId'] in {p['id'] for p in pushed}] == []
+
 
 
 def main():

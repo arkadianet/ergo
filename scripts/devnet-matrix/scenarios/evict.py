@@ -25,10 +25,20 @@ answers the resulting body requests (code 105) with transactions the
 announcement does not commit to. The rebuilt transactions root then
 cannot match the header's.
 
-What has to hold: a fallback fires with a mismatch reason, and the block
-the node applies at that height is the block the miner has. A fallback
-that lands anywhere else is the wrong fallback, and that judgement is
-smoke.py's `evaluate_mismatch_recovery`, not a local re-derivation.
+What has to hold, in order:
+
+  * DELIVERY — the node's own `input_blocks: bodies received` line
+    (dispatch.rs, code-104 arm) names the adversary's source address and
+    an id it pushed. What the adversary says it sent is not delivery.
+  * CAUSALITY — a Merkle-mismatch fallback counts only when it rebuilds
+    the ordering block that closes a tree a delivered body was pushed
+    under (`common.attribute_wrong_body_fallbacks`). A natural mismatch
+    establishes nothing.
+  * RECOVERY — whatever it fell back to is the miner's block at that
+    height (smoke.py's `evaluate_mismatch_recovery`).
+
+Delivered with no attributable fallback is NOT ESTABLISHED, with the
+code path that stops a wrong body before assembly cited in the evidence.
 """
 import subprocess
 import time
@@ -154,6 +164,9 @@ def run(ctx):
             stdout, _ = adversary.communicate()
         ctx.note('adversary', {'returncode': adversary.returncode,
                                'stdout': (stdout or '')[-4000:]})
+        # The whole output, for the delivery check: the pushed ids are
+        # the evidence, and a tail can cut them off.
+        ctx.evidence['adversary']['stdout_full'] = stdout or ''
     collector.poll()
 
     ctx.note('window', {'start_height': start, 'target': target,
@@ -170,25 +183,26 @@ def run(ctx):
                  'of this window are incomplete',
                  {'collection': collector.summary(watermark)})
 
-    # DELIVERY must be PROVEN, not assumed. Recording what the adversary
-    # said about itself is not delivery, and "some mismatch fallback
-    # happened" is not causality — the campaign has observed natural
-    # `root_mismatch` fallbacks elsewhere, so an unrelated one could
-    # have satisfied the exercise requirement.
-    stdout = ((ctx.evidence.get('adversary') or {}).get('stdout') or '')
-    pushed_ids = [line.split('id=', 1)[1].strip()
-                  for line in stdout.splitlines() if 'pushed id=' in line]
+    # DELIVERY must be PROVEN, not assumed, and CAUSALITY attributed.
+    # What the adversary says it sent is not delivery: the node's own
+    # `bodies received` line (dispatch.rs, code-104 arm) naming the
+    # adversary's source address and a pushed id is. And "some mismatch
+    # fallback happened" is not causality — the campaign has recorded
+    # natural `root_mismatch` fallbacks elsewhere.
+    stdout = ((ctx.evidence.get('adversary') or {}).get('stdout_full') or '')
+    pushed = common.parse_pushed_bodies(stdout)
     summary = [line for line in stdout.splitlines() if 'rest polls=' in line]
+    receipt_lines = smoke.rust_log_lines(common.BODIES_RECEIVED_LINE, limit=200000)
+    receipts = common.wrong_body_receipts(
+        receipt_lines, ADVERSARY_SOURCE, [b['id'] for b in pushed])
     ctx.note('adversary_delivery', {
-        'wrong_bodies_pushed': len(pushed_ids),
-        'ids': pushed_ids[:20],
+        'wrong_bodies_pushed': len(pushed),
+        'pushed_sample': pushed[:10],
         'last_summary': summary[-1] if summary else None,
+        'receipts_logged_by_the_node': len(receipts),
+        'receipt_sample': [lines[0] for lines in list(receipts.values())[:5]],
+        'bodies_received_lines_from_any_peer': len(receipt_lines),
     })
-    reached_node = [line for line in
-                    smoke.rust_log_lines(ADVERSARY_SOURCE, limit=20000)
-                    if ADVERSARY_SOURCE in line]
-    ctx.note('adversary_seen_by_the_node', {'log_lines': len(reached_node),
-                                            'sample': reached_node[:5]})
 
     window = collector.window(watermark)
     ordering = [e for e in window if e['kind'].startswith('ordering_')]
@@ -206,68 +220,94 @@ def run(ctx):
         'skipped_reasons': smoke._tally(e.get('detail') for e in skipped),
     })
 
-    # Where the wrong bodies were stopped, if they were. A body that is
-    # rejected against the announced transactions digest before assembly
-    # can never reach the rebuild — which would mean the fallback is
-    # UNREACHABLE by this route rather than merely unobserved, and the
-    # evidence has to be able to tell those apart.
-    drops = ctx.run.totals()
-    digest_drops = {r: c for r, c in drops.items()
-                    if 'Digest' in r or 'Mismatch' in r}
+    # What the node did with each delivered body, from its own log: a
+    # body placed nowhere leaves no effect at all, a refused one leaves a
+    # `dropped` line naming the block.
+    dropped_for_pushed = {}
+    for line in smoke.rust_log_lines('input_blocks: dropped', limit=200000):
+        for body_id in receipts:
+            if body_id in line:
+                dropped_for_pushed.setdefault(body_id, []).append(line)
     ctx.note('where_the_wrong_bodies_went', {
-        'drop_totals': drops,
-        'digest_related_drops': digest_drops,
-        'reading': 'a wrong body refused against the announced transactions '
-                   'digest never reaches assembly, so no root mismatch can '
-                   'follow from it — that is the port checking the digest '
-                   'first, not the fallback being unobservable',
+        'delivered': len(receipts),
+        'delivered_then_dropped': {k: v[:2] for k, v in
+                                   list(dropped_for_pushed.items())[:5]},
+        'delivered_with_no_processor_effect': len(set(receipts) - set(dropped_for_pushed)),
+        'drop_totals': ctx.run.totals(),
     })
 
-    # (1) DELIVERY. Did a wrong body reach the node at all?
-    delivered = [line for line in reached_node
-                 if 'input_blocks' in line or 'InputBlockTransactions' in line]
-    ctx.note('delivery_evidence', {
-        'wrong_bodies_pushed': len(pushed_ids),
-        'node_log_lines_naming_the_adversary': len(reached_node),
-        'node_log_lines_about_input_blocks_from_it': len(delivered),
-        'sample': delivered[:5],
-    })
-    if not pushed_ids:
+    # (1) DELIVERY.
+    if not pushed:
         ctx.fail('the adversary pushed no wrong body at all, so nothing was '
                  'delivered and no fallback could be attributed to it — the '
                  'eviction lever was not applied',
                  {'adversary_summary': summary[-1] if summary else None,
                   'adversary_stdout': stdout[-2000:]})
+    elif not receipts:
+        ctx.fail(f'the adversary pushed {len(pushed)} wrong bodies and the node '
+                 'logged receipt of NONE of them from its address, so delivery '
+                 'is not established',
+                 {'pushed_sample': pushed[:5],
+                  'bodies_received_lines_from_any_peer': len(receipt_lines)})
 
-    # (2) CAUSALITY. A mismatch fallback only counts if it names a block
-    # whose input chain we poisoned. The campaign has recorded natural
-    # `root_mismatch` fallbacks in reconstruct_rate, so "a mismatch
-    # happened" proves nothing about this adversary.
-    poisoned = set(pushed_ids)
-    attributed = [e for e in mismatch
-                  if (e.get('headerId') or e.get('header_id')) in poisoned
-                  or poisoned & set(smoke.ids_in(e))]
+    # (2) CAUSALITY, by the ORDERING block that closes a poisoned tree.
+    parent_of = {}
+    for event in mismatch:
+        header = event.get('headerId') or event.get('header_id')
+        try:
+            parent_of[header] = (api('scala', f'/blocks/{header}/header') or {}).get('parentId')
+        except Unavailable:
+            parent_of[header] = None
+    delivered = [b for b in pushed if b['id'] in receipts]
+    attributed = common.attribute_wrong_body_fallbacks(delivered, mismatch, parent_of)
     ctx.note('fallback_attribution', {
         'mismatch_fallbacks': len(mismatch),
-        'attributable_to_a_pushed_body': len(attributed),
+        'attributable_to_a_delivered_body': len(attributed),
         'attributed': attributed[:5],
-        'note': 'a mismatch fallback naming no poisoned id is a NATURAL one and '
-                'does not establish that the adversary forced anything',
+        'note': 'a mismatch fallback whose parent is not a tree a delivered body '
+                'was pushed under is a NATURAL one and establishes nothing',
     })
 
-    if not attributed:
-        ctx.fail('no ordering block fell back with a Merkle-mismatch reason '
-                 'attributable to a body this adversary pushed, so the fallback '
-                 'path was not forced by it — '
+    if receipts and not attributed:
+        # Delivered, and no fallback followed. That is the design, and
+        # the evidence says why: the processor places a delivered body
+        # only at a position whose ANNOUNCED weak id it matches
+        # (`ergo-inputblocks/src/processor.rs::on_bodies`, the staging
+        # loop filtering `st.weak_ids` by `b.weak_id`), and a block is
+        # admitted only when the ordered selection's Merkle root over the
+        # full transaction ids equals the announced digest
+        # (`search_staging`, `merkle_tree_root(&refs) == expected`). A body
+        # whose weak id was not announced is placed nowhere; one that
+        # collided on the 6-byte weak id would still carry a different
+        # transaction id and fail the digest. Nothing a peer can send
+        # without the spending key reaches assembly, so the fallback is
+        # NOT ESTABLISHED by this lever — not unobserved, unreachable.
+        ctx.note('result_qualifier', 'NOT ESTABLISHED')
+        ctx.fail('NOT ESTABLISHED: the adversary\'s wrong bodies WERE delivered '
+                 f'({len(receipts)} receipts logged by the node from '
+                 f'{ADVERSARY_SOURCE}) and no mismatch fallback followed from any '
+                 'of them, because a wrong body cannot reach assembly: bodies '
+                 'are placed only at positions whose announced weak id they '
+                 'match (processor.rs on_bodies) and admitted only through the '
+                 'full-transaction-id digest (processor.rs search_staging). '
                  + (f'{len(mismatch)} unattributed mismatch fallback(s) occurred '
-                    'naturally and do not count'
-                    if mismatch else 'no mismatch fallback occurred at all'),
-                 {'fallbacks': len(fallbacks), 'reconstructions': len(reconstructions),
-                  'skipped': len(skipped),
-                  'wrong_bodies_pushed': len(pushed_ids),
-                  'digest_related_drops': digest_drops,
-                  'adversary_summary': summary[-1] if summary else None,
-                  'rust_log': smoke.rust_log_lines('input_blocks')})
+                    'naturally and do not count.' if mismatch else
+                    'No mismatch fallback occurred at all.'),
+                 {'receipts': len(receipts),
+                  'delivered_with_no_processor_effect':
+                      len(set(receipts) - set(dropped_for_pushed)),
+                  'fallbacks': len(fallbacks), 'reconstructions': len(reconstructions),
+                  'code_path': [
+                      'ergo-node/src/node/input_blocks/dispatch.rs handle(): code 104 '
+                      'is fed to the processor whether or not it was solicited',
+                      'ergo-inputblocks/src/processor.rs on_bodies(): placement by '
+                      'announced weak id',
+                      'ergo-inputblocks/src/processor.rs search_staging(): Merkle '
+                      'root over tx ids must equal the announced digest'],
+                  'lever_that_would_work': 'the same transaction id with a different '
+                      'valid witness (re-signed with the spending key) whose witness '
+                      'id also matches the announced 3-byte weak-id half — a '
+                      'key-holding, ~2^24-signature grind, not a peer'})
 
     # Whatever it fell back to has to be the miner's block at that height.
     heights = [e.get('height') for e in ordering if e.get('height') is not None]

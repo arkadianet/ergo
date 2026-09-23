@@ -109,13 +109,8 @@ def seed_second_miner(ctx, campaign, lifecycle):
     lifecycle.init_wallet('scala2')
     # The follower has been dialling miner 2 since it started, and miner
     # 2 was not there — so it is several failures into an exponential
-    # dial backoff (30 s, 2 min, 10 min, …) that outlasts the scenario.
-    # Restarting it clears that: it comes back with no backoff state and
-    # dials both miners at once. Its data directory is untouched, so it
-    # resumes on the chain it already had.
-    lifecycle.stop(('rust',))
-    lifecycle.spawn('rust')
-    ctx.run.started('rust')
+    # dial backoff that outlasts the scenario. See `restart_follower`.
+    restart_follower(ctx, campaign, lifecycle)
     # Reported, never raised: a seed that came up but did not peer is a
     # scenario that cannot run, and the evidence has to say which of the
     # two it was rather than dying with a stack trace that says neither.
@@ -151,6 +146,48 @@ def seed_second_miner(ctx, campaign, lifecycle):
         ctx.fail('the second miner did not come up on the copied chain, so the '
                  'scenario has no second miner', {'heights': heights})
     return heights
+
+
+def restart_follower(ctx, campaign, lifecycle):
+    """Restart the follower with its dial state CLEARED.
+
+    A restart alone does not clear it. The address book persists each
+    peer's `last_failure` and backoff across restarts
+    (`ergo-node/src/node/boot/peers.rs::setup` restores them BEFORE the
+    configured known peers are seeded, precisely so they survive), so a
+    follower that failed to reach an absent miner comes back still
+    backing off from it. Round 2's rollback attempt 1 is that shape: the
+    seed restarted the follower, it restored `peers=2`, never dialled
+    the second miner again, and the scenario had one peer throughout.
+
+    The chain database is untouched, so the follower resumes on the
+    chain it already had; only `peers.redb` goes. Returns the paths
+    removed.
+    """
+    lifecycle.stop(('rust',))
+    removed = campaign.purge_address_book(ctx.data_root)
+    lifecycle.spawn('rust')
+    ctx.run.started('rust')
+    ctx.note('follower_restart_purged', removed)
+    return removed
+
+
+def follower_events_since(events, watermark, restarted):
+    """The follower's events after `watermark`, across a restart.
+
+    The event feed is an in-memory ring whose `seq` starts again at 1 in
+    every process (`ergo-node/src/node/event_feed.rs`). A watermark taken
+    from the process that was running BEFORE a restart therefore names a
+    sequence number the new process may never reach, and filtering the
+    new feed by it hides exactly the events the restart was performed to
+    provoke: rollback's reorg was emitted during the restarted
+    follower's catch-up and filtered out by the old watermark, and the
+    scenario reported "switched branches without emitting a reorg".
+
+    With `restarted`, everything the NEW process reports is after the
+    watermark by construction.
+    """
+    return list(events) if restarted else events_after(events, watermark)
 
 
 def rust_events(ctx):
@@ -217,14 +254,19 @@ class EventCollector:
         self.polls = 0
         self.failed_polls = 0
 
+    def _fetch_page(self):
+        """One read of the feed. The ONLY part a probe replaces: the
+        gap detection and retention below are what the self-test has to
+        exercise, so they are never re-implemented by a fake."""
+        return (api(self.node, '/api/v1/events') or {}).get('events') or []
+
     def poll(self):
         try:
-            feed = api(self.node, '/api/v1/events')
+            page = self._fetch_page()
         except Unavailable:
             self.failed_polls += 1
             return self
         self.polls += 1
-        page = feed.get('events') or []
         numbered = [e for e in page if e.get('seq') is not None]
         if numbered:
             lowest = min(e['seq'] for e in numbered)
@@ -607,6 +649,60 @@ def compare_fork_switches(series):
     }
 
 
+def judge_fork_switches(comparison, restart_window):
+    """The `fork` scenario's verdict over `compare_fork_switches`' output.
+
+    Pure, so the gate itself can be driven by a probe. Three rules:
+
+    * a reset to the empty chain OUTSIDE the restart the scenario
+      performs fails — no miner publishes an empty chain;
+    * a non-reset switch that is not a transition between two chains a
+      reference published fails;
+    * a PASS requires at least one GENUINE switch — a non-empty chain
+      replaced by a different non-empty chain. A reset is not a switch
+      between competing histories, and counting it as one let a run whose
+      only "switch" was the scenario's own follower restart satisfy the
+      gate (round 2's attempt 1 had exactly that shape: one switch, and
+      it was the reset at sample 9).
+
+    Returns `{'failures': [(message, evidence), ...], 'genuine_switches',
+    'resets_caused', 'resets_uncaused', 'qualifier'}`.
+    """
+    resets = comparison['resets_to_the_empty_chain']
+    reset_indices = {r['index'] for r in resets}
+    caused = [r for r in resets if r['index'] in restart_window]
+    uncaused = [r for r in resets if r['index'] not in restart_window]
+    genuine = [s for s in comparison['rust_switches'] if s['index'] not in reset_indices]
+    failures, qualifier = [], None
+    if uncaused:
+        failures.append((
+            f'{len(uncaused)} times the follower emptied its input chain outside '
+            'the restart this scenario performs — no miner publishes an empty '
+            'chain, so that is a chain nobody has', {'sample': uncaused[:5]}))
+    unmatched = comparison['switches_matching_no_reference']
+    if unmatched:
+        failures.append((
+            f'{len(unmatched)} fork switches produced a chain matching no miner: '
+            'the chain the follower left or the one it landed on is not a chain '
+            'any reference published under the same ordering block',
+            {'sample': unmatched[:5]}))
+    if not genuine:
+        qualifier = 'NOT ESTABLISHED'
+        failures.append((
+            'no genuine input-chain fork switch (one non-empty chain replaced by '
+            'another) was observed on Rust, so the switch property was never '
+            'judged — NOT ESTABLISHED, not a pass'
+            + (f'; the {len(resets)} reset(s) to the empty chain are restarts, '
+               'not switches' if resets else ''),
+            {'rust_switches': len(comparison['rust_switches']),
+             'resets_to_the_empty_chain': len(resets),
+             'scala_switches': len(comparison['scala_switches']),
+             'scala2_switches': len(comparison['scala2_switches'])}))
+    return {'failures': failures, 'genuine_switches': len(genuine),
+            'resets_caused': caused, 'resets_uncaused': uncaused,
+            'qualifier': qualifier}
+
+
 def chain_members_scala_never_had(series):
     """Blocks on Rust's input chain that NO reference node ever published.
 
@@ -691,8 +787,9 @@ class WindowWalker:
 
     def __init__(self, start_height):
         self.scanned = start_height
-        self.snapshot = set()
-        self._pending = set()
+        # None = no chain reading has been taken since the last block
+        # landed. Distinct from an EMPTY reading, which is an observation.
+        self.snapshot = None
 
     def note_chain(self, txids):
         """A chain reading taken while the height has not yet advanced."""
@@ -700,16 +797,20 @@ class WindowWalker:
 
     def observe(self, height):
         """Heights that have landed, each paired with the snapshot it
-        closes. Returns `[(height, snapshot), ...]`, oldest first."""
+        closes. Returns `[(height, snapshot), ...]`, oldest first.
+
+        The FIRST block of a run of advances closes the snapshot we were
+        holding. Any further block in the same reading closed a tree
+        nobody sampled, and gets `None` — NOT an empty set. An empty set
+        reads as "the chain was empty, nothing was dropped", which is a
+        false zero; `None` makes the caller count the block as unread.
+        """
         out = []
         while self.scanned < height:
             self.scanned += 1
-            # The FIRST block of a run of advances closes the snapshot we
-            # were holding; any further blocks in the same reading closed
-            # trees we never sampled, and get an empty one rather than a
-            # borrowed one.
-            out.append((self.scanned, set(self.snapshot)))
-            self.snapshot = set()
+            out.append((self.scanned,
+                        None if self.snapshot is None else set(self.snapshot)))
+            self.snapshot = None
         return out
 
 
@@ -879,9 +980,16 @@ def evaluate_post_reorg_state(chain, info, status, dropped, miner_chain=None,
     if tip is not None:
         if tip not in listed:
             problems.append({'what': 'tip_not_on_the_published_chain', 'tip': tip})
-        elif miner_chain is not None and tip not in set(miner_chain):
-            # The node's own list can be relabelled; the miner's cannot
-            # be relabelled BY the node.
+        elif miner_chain is None:
+            # The node's own list can be relabelled, so it cannot vouch
+            # for its own tip. With no miner chain for the same ordering
+            # block to compare against, a stale tip relabelled with the
+            # new id is indistinguishable from a current one — unknown,
+            # which is not a pass.
+            problems.append({'what': 'tip_not_compared_against_a_miner_chain',
+                             'tip': tip})
+        elif tip not in set(miner_chain):
+            # The miner's list cannot be relabelled BY the node.
             problems.append({'what': 'tip_not_on_any_miner_chain_for_this_block',
                              'tip': tip})
 
@@ -900,7 +1008,7 @@ def evaluate_post_reorg_state(chain, info, status, dropped, miner_chain=None,
                          'compared_against_a_miner_chain': miner_chain is not None}}
 
 
-def reconcile_outcomes(ordering_blocks, events):
+def reconcile_outcomes(ordering_blocks, events, announced=None, unread_heights=()):
     """Every ordering block in the window must have exactly one outcome.
 
     By IDENTITY, not by count. `ordering_blocks` maps height -> header
@@ -908,6 +1016,23 @@ def reconcile_outcomes(ordering_blocks, events):
     outcome is a decision the node made and did not report, which is
     exactly the undercount `ordering_reconstruct_skipped` was added to
     close — 96 outcomes for 100 blocks was recorded and not failed.
+
+    ONE shape of "no outcome" is not a missing report, and it is
+    attributed only on positive evidence: a block whose ordering
+    announcement never reached the follower at all. The node asks for an
+    announced ordering block only when it does not already hold the
+    header (`ergo-node/src/node/input_blocks/dispatch.rs::handle_ordering_inv`
+    filters known headers), so a header that arrives first by ordinary
+    sync is downloaded in full and no reconstruct-or-download decision
+    is ever made. `announced` is the set of header ids the follower's log
+    shows an ordering announcement for; a block NOT in it is
+    `not_announced` (telemetry, and reported in the rate's denominator),
+    a block in it with no outcome is `missing`. `announced=None` — no
+    evidence either way — attributes nothing, so every outcome-less
+    block stays `missing`.
+
+    A height the reference could not be read for is `missing` too: a
+    block the window cannot name cannot be shown to have been reported.
     """
     kinds = ('ordering_reconstructed', 'ordering_reconstruct_fallback',
              'ordering_reconstruct_skipped')
@@ -920,20 +1045,122 @@ def reconcile_outcomes(ordering_blocks, events):
             by_header.setdefault(header, []).append(event['kind'])
         if event.get('height') is not None:
             by_height.setdefault(event['height'], []).append(event['kind'])
-    missing, duplicated = [], []
+    missing, duplicated, not_announced = [], [], []
+    for height in sorted(unread_heights):
+        missing.append({'height': height, 'header': None,
+                        'why': 'the reference could not be read at this height'})
     for height, header in sorted(ordering_blocks.items()):
         outcomes = by_header.get(header) or by_height.get(height) or []
         if not outcomes:
-            missing.append({'height': height, 'header': header})
+            if announced is not None and header not in announced:
+                not_announced.append({'height': height, 'header': header})
+            else:
+                missing.append({'height': height, 'header': header})
         elif len(outcomes) > 1:
             duplicated.append({'height': height, 'header': header,
                                'outcomes': outcomes})
-    return {'blocks': len(ordering_blocks),
-            'with_an_outcome': len(ordering_blocks) - len(missing),
+    blocks = len(ordering_blocks) + len(unread_heights)
+    return {'blocks': blocks,
+            'with_an_outcome': blocks - len(missing) - len(not_announced),
             'missing': missing, 'duplicated': duplicated,
+            'not_announced': not_announced,
+            'announcement_evidence': announced is not None,
             'unmatched_events': sum(
                 1 for e in events if e.get('kind') in kinds
                 and (e.get('headerId') or e.get('header_id')) not in by_header)}
+
+
+ANNOUNCEMENT_LINE = 'input_blocks: raw announcement payload'
+
+
+def announced_headers(log_text):
+    """Header ids the follower logged an announcement payload for.
+
+    `dispatch.rs::log_announcement_payload` writes one TRACE line per
+    received announcement (input-block AND ordering-block, keyed by the
+    announced id). Returns `None` when the log carries no such line at
+    all: that is a log without the evidence (the TRACE target switched
+    off), not a follower that was never announced anything, and treating
+    it as the latter would excuse every missing outcome.
+    """
+    ids, any_line = set(), False
+    for line in log_text.splitlines():
+        if ANNOUNCEMENT_LINE not in line:
+            continue
+        any_line = True
+        marker = 'block='
+        i = line.find(marker)
+        if i >= 0:
+            ids.add(line[i + len(marker):i + len(marker) + 64])
+    return ids if any_line else None
+
+
+# ----- evict: delivery and causality (pure, self-tested) -----
+
+BODIES_RECEIVED_LINE = 'input_blocks: bodies received'
+
+
+def parse_pushed_bodies(stdout):
+    """`[{'id', 'ordering'}]` from the adversary's `pushed id=… ordering=…`
+    lines. `ordering` is the best ordering block the id sat under when it
+    was pushed, or None when the adversary could not say."""
+    out = []
+    for line in stdout.splitlines():
+        if '[wrong_body] pushed id=' not in line:
+            continue
+        fields = dict(part.split('=', 1) for part in line.split() if '=' in part)
+        ordering = fields.get('ordering')
+        out.append({'id': fields.get('id'),
+                    'ordering': None if ordering in (None, 'none', 'relayed')
+                    else ordering})
+    return out
+
+
+def wrong_body_receipts(log_lines, source_ip, pushed_ids):
+    """The node's OWN receipt of a pushed body: a `bodies received` line
+    from the adversary's source address naming a pushed id. What the
+    adversary says it sent is not delivery; this is.
+
+    Returns `{id: [line, ...]}` for every pushed id the node logged.
+    """
+    wanted = set(pushed_ids)
+    out = {}
+    for line in log_lines:
+        if BODIES_RECEIVED_LINE not in line or f'peer={source_ip}:' not in line:
+            continue
+        i = line.find('block=')
+        if i < 0:
+            continue
+        block = line[i + 6:i + 6 + 64]
+        if block in wanted:
+            out.setdefault(block, []).append(line)
+    return out
+
+
+def attribute_wrong_body_fallbacks(pushed, fallbacks, parent_of):
+    """Mismatch fallbacks CAUSED by a poisoned tree, and nothing else.
+
+    A pushed body is for an INPUT block; a fallback names the ORDERING
+    block being rebuilt. The rebuild of ordering block H assembles the
+    input chain that sat under H's PARENT, so a fallback is attributable
+    only when `parent_of[H]` is an ordering block some delivered body was
+    pushed under. Matching the fallback's header id against the pushed
+    input-block ids — the previous rule — can never match, so it could
+    only ever report "not forced"; a natural mismatch under an unpoisoned
+    tree is never attributed.
+    """
+    poisoned_trees = {}
+    for body in pushed:
+        if body.get('ordering'):
+            poisoned_trees.setdefault(body['ordering'], []).append(body['id'])
+    out = []
+    for event in fallbacks:
+        header = event.get('headerId') or event.get('header_id')
+        parent = parent_of.get(header)
+        if parent in poisoned_trees:
+            out.append({'fallback': event, 'parent': parent,
+                        'poisoned_input_blocks': poisoned_trees[parent][:10]})
+    return out
 
 
 # ----- §7.4 bounds -----
@@ -963,10 +1190,15 @@ class PeakSampler:
         self._thread = None
         self._pid = None
 
+    def _read_status(self):
+        """One read of the §7.4 counters — the only part a probe replaces."""
+        import campaign
+        return campaign.input_block_status()
+
     def _observe(self):
         import campaign
         try:
-            status = campaign.input_block_status()
+            status = self._read_status()
         except Unavailable:
             self.unavailable += 1
             return

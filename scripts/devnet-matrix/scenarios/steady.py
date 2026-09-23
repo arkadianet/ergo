@@ -62,6 +62,13 @@ def _observe_window(ctx, blocks, address):
             ctx.run.idle(1)
             continue
         for scanned, applied in walker.observe(height):
+            if applied is None:
+                # Landed in the same reading as the block before it, so
+                # the tree it closed was never sampled. Unread, not zero.
+                observations.append({'height': scanned,
+                                     'unread': 'no chain snapshot was taken '
+                                               'before this block landed'})
+                continue
             try:
                 ids = api('scala', f'/blocks/at/{scanned}') or []
                 ordering_txids = set()

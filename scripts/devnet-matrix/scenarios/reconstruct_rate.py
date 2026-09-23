@@ -151,8 +151,29 @@ def _pump(ctx, address, sent):
     return sent
 
 
+def _follower_peered_with_miner(ctx):
+    """Assertion 1's question, for the two nodes that exist yet.
+
+    `smoke.assertion_1_peering` asks EVERY configured node, and the
+    reference follower is not started until the seed — so called first,
+    as it was, it failed every attempt with "scala2 /peers/connected
+    stayed unavailable" before anything had been measured.
+    """
+    deadline = min(ctx.run.deadline, time.monotonic() + 120)
+    peers = api_retry('rust', '/api/v1/peers', deadline, what='rust /api/v1/peers')
+    scala_peer = next((p for p in peers
+                       if p.get('addr', '').endswith(str(lifecycle.P2P['scala']))),
+                      None)
+    ctx.note('1_peering_follower_miner', {'scala_peer_seen_by_rust': scala_peer})
+    if scala_peer is None:
+        ctx.fail('Rust does not list the Scala miner as a peer')
+    elif smoke.parse_version(scala_peer.get('version')) < smoke.REQUIRED_PEER_VERSION:
+        ctx.fail(f'the Scala miner speaks {scala_peer.get("version")!r}, below the '
+                 'input-block protocol version')
+
+
 def run(ctx):
-    smoke.assertion_1_peering(ctx.run, ctx.evidence)
+    _follower_peered_with_miner(ctx)
     blocks = ctx.args.ordering_blocks or ORDERING_BLOCKS
 
     # The window must be FUNDED, or a reconstruction succeeds on a
@@ -195,6 +216,21 @@ def run(ctx):
         if reached >= target:
             break
         ctx.run.idle(0.5)
+    # The miner reaching the target is not the follower having decided
+    # the target block: breaking out and reading once left the LAST
+    # block's outcome uncollected (height 116 in round 2's attempt 1).
+    # Keep polling, bounded, until the follower has applied it.
+    settle_deadline = min(ctx.run.deadline, time.monotonic() + 90)
+    while time.monotonic() < settle_deadline:
+        collector.poll()
+        try:
+            if (api('rust', '/info') or {}).get('fullHeight', 0) >= reached:
+                ctx.run.idle(3)
+                collector.poll()
+                break
+        except Unavailable:
+            pass
+        ctx.run.idle(1)
     collector.poll()
     ctx.note('reconstruct_rate_window', {
         'start_height': start, 'target': target, 'reached': reached,
@@ -218,7 +254,7 @@ def run(ctx):
     fallback = [e for e in window if e['kind'] == 'ordering_reconstruct_fallback']
     skipped = [e for e in window if e['kind'] == 'ordering_reconstruct_skipped']
     decided = len(reconstructed) + len(fallback) + len(skipped)
-    ctx.note('rust', {
+    ctx.note('rust_outcomes', {
         'ordering_reconstructed': len(reconstructed),
         'ordering_reconstruct_fallback': len(fallback),
         'ordering_reconstruct_skipped': len(skipped),
@@ -234,19 +270,40 @@ def run(ctx):
             for e in reconstructed),
         'ordering_blocks_in_window': reached - start,
     })
+    # Deferred to after reconciliation: the blocks the follower was never
+    # announced were downloaded in full without a decision, and a rate
+    # that silently dropped them from its denominator would overstate
+    # reconstruction.
     # Every ordering block in the window must have produced exactly one
     # outcome, matched BY IDENTITY. Counting was not enough: 96 outcomes
     # for 100 blocks was recorded and not failed.
-    heights = {}
+    heights, unread_heights = {}, []
     for height in range(start + 1, reached + 1):
         try:
             ids = api('scala', f'/blocks/at/{height}') or []
         except Unavailable:
-            continue
+            ids = []
         if ids:
             heights[height] = ids[0]
-    reconciliation = common.reconcile_outcomes(heights, window)
+        else:
+            # Skipping it, as before, removed the block from the window
+            # without a word; it is now counted as unreported.
+            unread_heights.append(height)
+    # Which ordering blocks were ANNOUNCED to the follower at all, from
+    # its own log — the evidence `reconcile_outcomes` needs before it
+    # will attribute a missing outcome to ordinary sync.
+    try:
+        rust_log = smoke.strip_ansi((smoke.WORK / 'rust.log').read_text(errors='replace'))
+    except OSError:
+        rust_log = ''
+    announced = common.announced_headers(rust_log)
+    reconciliation = common.reconcile_outcomes(heights, window, announced=announced,
+                                               unread_heights=unread_heights)
     ctx.note('outcome_reconciliation', reconciliation)
+    if announced is None:
+        ctx.fail('the follower log carries no announcement lines, so a block with no '
+                 'outcome cannot be told apart from one that was never announced',
+                 {'trace_target': 'ergo_node::node::input_blocks::announcements'})
     if reconciliation['missing']:
         ctx.fail(f"{len(reconciliation['missing'])} of {reconciliation['blocks']} "
                  'ordering blocks in the window produced NO reconstruct-or-download '
@@ -254,6 +311,11 @@ def run(ctx):
                  'fully report',
                  {'missing': reconciliation['missing'][:20]},
                  ids=[m['header'] for m in reconciliation['missing'][:5]])
+    not_announced = len(reconciliation['not_announced'])
+    ctx.evidence['rust_outcomes']['not_announced_downloaded_by_ordinary_sync'] = not_announced
+    ctx.evidence['rust_outcomes']['reconstructed_over_all_blocks'] = (
+        round(len(reconstructed) / (decided + not_announced), 4)
+        if decided + not_announced else None)
     if reconciliation['duplicated']:
         ctx.fail(f"{len(reconciliation['duplicated'])} ordering blocks reported more "
                  'than one outcome', {'duplicated': reconciliation['duplicated'][:10]})
