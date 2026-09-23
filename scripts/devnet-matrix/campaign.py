@@ -1846,6 +1846,13 @@ def _self_test():
         'penalized, penalty: NonDeliveryPenalty',
         'INFO org.ergoplatform.network.peer.PeerManager - /127.0.0.1:19600 '
         'penalized, penalty: MisbehaviorPenalty',
+        # STOCK behaviour, seen in every peered run with no flood at all:
+        # a block applied twice is declared permanently invalid and its
+        # sender penalised. Attributed, not charged to the flood.
+        'org.ergoplatform.validation.MalformedModifierError: Double '
+        'application of a modifier is prohibited. cc already applied',
+        'INFO org.ergoplatform.network.peer.PeerManager - /127.0.0.1:19600 '
+        'penalized, penalty: MisbehaviorPenalty',
     ]
     # Samples: (log line count at the sample, store size, store bytes).
     _samples = [{'lines': 0, 'size': 0, 'bytes': 0},
@@ -1860,8 +1867,9 @@ def _self_test():
     assert _ev['honest_roots_landed_while_saturated'] == 0, _ev
     assert _ev['peak_size'] == 256 and _ev['caps_held'], _ev
     assert _ev['honest_penalties'] == {'NonDeliveryPenalty': 1,
-                                       'MisbehaviorPenalty': 1}, _ev
+                                       'MisbehaviorPenalty': 2}, _ev
     assert _ev['honest_misbehaviour_penalties'] == 1, _ev
+    assert _ev['honest_misbehaviour_after_double_application'] == 1, _ev
     assert _ev['adversary_penalties'] == 1, _ev
     _over = _flood_eval.evaluate_root_flood(
         _lines, _samples + [{'lines': 8, 'size': 257, 'bytes': 1}],

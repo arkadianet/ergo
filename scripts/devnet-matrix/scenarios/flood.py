@@ -123,6 +123,12 @@ _VALID_LINE = re.compile(r'Processing valid sub-block (?P<id>[0-9a-f]+)')
 _PENALTY_LINE = re.compile(
     r'/(?P<host>[0-9.]+):\d+ penalized, penalty: (?P<kind>\w+)')
 _BLACKLIST_LINE = re.compile(r'/(?P<host>[0-9.]+):\d+ blacklisted')
+# The stock cause of a misbehaviour penalty against the honest miner in
+# a peered run with no adversary: a block the holder already applied is
+# re-applied, declared permanently invalid, and its sender penalised
+# (`.work-m4p-f12f05`: 18 stock / 16 patched in 100 blocks, no flood).
+_DOUBLE_APPLICATION = 'double application of a modifier is prohibited'
+DOUBLE_APPLICATION_LOOKBACK = 150
 
 
 def _adversary_host(host, adversary_octets):
@@ -154,7 +160,12 @@ def evaluate_root_flood(lines, samples, caps, adversary_octets):
     saturated_at = caps['maxEntries'] * SATURATED_SHARE
     honest, adversary, landed = {}, 0, set()
     penalties_honest, penalties_adversary, blacklisted_honest = {}, 0, []
+    unexplained, after_double = 0, 0
+    last_double = None
     for index, line in enumerate(lines):
+        if _DOUBLE_APPLICATION in line.lower():
+            last_double = index
+            continue
         root = _ROOT_LINE.search(line)
         if root:
             if _adversary_host(root['host'], adversary_octets):
@@ -173,6 +184,13 @@ def evaluate_root_flood(lines, samples, caps, adversary_octets):
             else:
                 penalties_honest[penalty['kind']] = \
                     penalties_honest.get(penalty['kind'], 0) + 1
+                if penalty['kind'] != 'NonDeliveryPenalty':
+                    if (last_double is not None and index - last_double
+                            <= DOUBLE_APPLICATION_LOOKBACK):
+                        after_double += 1
+                        last_double = None
+                    else:
+                        unexplained += 1
             continue
         banned = _BLACKLIST_LINE.search(line)
         if banned and not _adversary_host(banned['host'], adversary_octets):
@@ -199,12 +217,13 @@ def evaluate_root_flood(lines, samples, caps, adversary_octets):
                       and (peak_bytes or 0) <= caps['maxBytes']),
         'honest_penalties': penalties_honest,
         # A NonDeliveryPenalty against the honest miner is STOCK behaviour
-        # (the peered stock follower logs it without any flood); what the
-        # flood must never cause is a misbehaviour verdict against it,
-        # which is what a failed replay of a held announcement gives its
-        # sender.
-        'honest_misbehaviour_penalties': sum(
-            v for k, v in penalties_honest.items() if k != 'NonDeliveryPenalty'),
+        # (the peered stock follower logs it without any flood), and so is
+        # a misbehaviour penalty that follows a double application; what
+        # the flood must never cause is any OTHER misbehaviour verdict
+        # against an honest peer — which is what a failed replay of a
+        # held announcement gives its sender.
+        'honest_misbehaviour_penalties': unexplained,
+        'honest_misbehaviour_after_double_application': after_double,
         'honest_blacklisted': blacklisted_honest[:10],
         'adversary_penalties': penalties_adversary,
     }
