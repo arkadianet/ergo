@@ -35,12 +35,12 @@ description = "F12+F5: the holder reconstructs under parentId in the order the m
 
 [builds.F14]
 work_dir = ".work-F14"
-ergo_ref = "matrix/F13-F14-follower-sync"
+ergo_ref = "matrix/F14-waitlist-graph-walk"
 description = "F14: applyDisconnected becomes a graph walk that consumes attached waitlist entries"
 
 [builds.F13]
 work_dir = ".work-F13"
-ergo_ref = "matrix/F13-F14-follower-sync"
+ergo_ref = "matrix/F13-pending-root-announcements"
 description = "F13: a bounded untrusted pending store for the root announcement, replayed through the +1 validation path"
 
 [builds.F04]
@@ -50,7 +50,7 @@ description = "F4/F4b/F4c: every announced field bound to its extension leaf, on
 
 [builds.F11]
 work_dir = ".work-F11"
-ergo_ref = "matrix/F11-candidate-race"
+ergo_ref = "matrix/F11-candidate-retained-work"
 description = "F11: a bounded ring of recent candidates, retained work separated from active work, and a reply on every submission"
 
 [builds.all]
