@@ -72,6 +72,21 @@ def _wait_for_peer_count(ctx, node, wanted, budget=180.0):
     return count
 
 
+def drop_copied_peer_db(target):
+    """Remove the peer database a seeded Scala node copied from the miner.
+
+    Scala's PeerManager seeds from `scorex.network.knownPeers` ONLY when
+    its database is empty (`PeerManager.scala:24-33` at 62c10315). The
+    miner's database holds the peers the MINER knows, which never
+    includes the miner itself, so a follower that kept the copy never
+    learned the miner's address and dialled the Rust node alone. Gossip
+    cannot fill that gap, because PeerManager refuses local addresses
+    from peers (`:53`, `:67`). With the database gone, the node's own
+    rendered `knownPeers` (every other node) is what it starts from.
+    """
+    shutil.rmtree(target / 'peers', ignore_errors=True)
+
+
 def seed_second_miner(ctx, campaign, lifecycle, nodes=('scala2',)):
     """Give miner 2 the chain by COPYING miner 1's data directory.
 
@@ -113,6 +128,7 @@ def seed_second_miner(ctx, campaign, lifecycle, nodes=('scala2',)):
         shutil.rmtree(target, ignore_errors=True)
         shutil.copytree(source, target)
         shutil.rmtree(target / 'wallet', ignore_errors=True)
+        drop_copied_peer_db(target)
         targets.append(target)
     campaign.ensure_data_dirs(ctx.data_root, list(nodes))
     lifecycle.spawn('scala')

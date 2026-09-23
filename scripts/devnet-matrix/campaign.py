@@ -2151,6 +2151,32 @@ def _self_test():
     assert _seed.index('purge_address_book') < _seed.index("spawn('rust')"), \
         'the purge belongs between the stop and the respawn'
 
+    # ----- a seeded Scala node must not inherit the miner's peer DB -----
+    #
+    # Measured on the first run with the followers on their own loopback
+    # addresses: `seed_second_miner` copies the miner's data directory,
+    # `peers/` included, and Scala's PeerManager seeds from
+    # `scorex.network.knownPeers` ONLY when that database is empty
+    # (PeerManager.scala:24-33). The copy held one peer (the Rust node),
+    # so the follower logged "1 peers read from the database", never
+    # learned the miner's address, and dialled Rust alone. Gossip cannot
+    # fill the gap: PeerManager refuses local addresses from peers
+    # (:53, :67).
+    with tempfile.TemporaryDirectory() as _tmp:
+        _seeded = Path(_tmp) / 'scala2'
+        (_seeded / 'peers').mkdir(parents=True)
+        (_seeded / 'peers' / 'x.ldb').write_bytes(b'the miner\'s peers')
+        (_seeded / 'history').mkdir()
+        _common.drop_copied_peer_db(_seeded)
+        assert not (_seeded / 'peers').exists(), 'the copied peer DB must go'
+        assert (_seeded / 'history').exists(), 'the chain must stay'
+        _common.drop_copied_peer_db(_seeded)   # idempotent
+    _seed_src = inspect.getsource(_common.seed_second_miner)
+    assert 'drop_copied_peer_db(target)' in _seed_src, (
+        'every seeded node needs the miner\'s peer DB removed')
+    assert _seed_src.index('drop_copied_peer_db(target)') > \
+        _seed_src.index('copytree'), 'the drop belongs after the copy'
+
     # ----- fix round 1 (codex review-2): seed, THEN assert peering ---
     #
     # `--reference-follower` deliberately leaves its node out of
