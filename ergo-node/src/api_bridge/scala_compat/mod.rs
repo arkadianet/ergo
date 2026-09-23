@@ -23,6 +23,8 @@ pub struct ScalaCompatStatic {
     pub network: String,
     pub launch_time_unix_ms: u64,
     pub rest_api_url: Option<String>,
+    /// The same configured admission floor used by the mempool.
+    pub min_relay_fee_nano_erg: u64,
 }
 
 /// Implements `ergo_api::NodeChainQuery` against the snapshot handle and
@@ -678,12 +680,11 @@ impl NodeChainQuery for ScalaCompatBridge {
     }
 
     fn pool_recommended_fee(&self, wait_time_minutes: u32, tx_size_bytes: u32) -> u64 {
+        let floor = self.static_cfg.min_relay_fee_nano_erg;
         if tx_size_bytes == 0 {
-            return 0;
+            return floor;
         }
         let snap = self.handle.load();
-        let min_fee_per_byte = snap.active_params.min_value_per_byte.max(0) as u64;
-        let floor = min_fee_per_byte.saturating_mul(tx_size_bytes as u64);
         let ranked = pool_fee_stats::rank_pool_by_fee_per_byte(&snap.pool_full_txs);
         if ranked.is_empty() {
             return floor;
@@ -693,7 +694,7 @@ impl NodeChainQuery for ScalaCompatBridge {
         // `target_ms`. The ranking is descending by fee/byte, so the
         // tx whose estimated wait first exceeds `target_ms` defines
         // the threshold — bid one above its fee/byte to displace it.
-        let mut threshold_fee_per_byte: u64 = min_fee_per_byte;
+        let mut threshold_fee_per_byte: u64 = 0;
         for (rank, entry) in ranked.iter().enumerate() {
             let wait_ms = pool_fee_stats::estimate_wait_ms_from_rank(rank as u64);
             if wait_ms <= target_ms {
