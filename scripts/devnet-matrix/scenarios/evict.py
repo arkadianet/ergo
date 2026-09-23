@@ -1,4 +1,4 @@
-"""The reconstruction fallback, forced by a peer that serves wrong bodies.
+"""A peer that serves wrong bodies, and why it cannot force the fallback.
 
 Three earlier attempts tried to starve the follower of input-block
 bodies through configuration and failed, for a reason worth keeping:
@@ -25,20 +25,14 @@ answers the resulting body requests (code 105) with transactions the
 announcement does not commit to. The rebuilt transactions root then
 cannot match the header's.
 
-What has to hold, in order:
-
-  * DELIVERY — the node's own `input_blocks: bodies received` line
-    (dispatch.rs, code-104 arm) names the adversary's source address and
-    an id it pushed. What the adversary says it sent is not delivery.
-  * CAUSALITY — a Merkle-mismatch fallback counts only when it rebuilds
-    the ordering block that closes a tree a delivered body was pushed
-    under (`common.attribute_wrong_body_fallbacks`). A natural mismatch
-    establishes nothing.
-  * RECOVERY — whatever it fell back to is the miner's block at that
-    height (smoke.py's `evaluate_mismatch_recovery`).
-
-Delivered with no attributable fallback is NOT ESTABLISHED, with the
-code path that stops a wrong body before assembly cited in the evidence.
+What it establishes: DELIVERY — the node's own `input_blocks: bodies
+received` line (dispatch.rs, code-104 arm) names the adversary's source
+address and an id it pushed. It does NOT establish the fallback: the
+fallback is not peer-forceable by design (`common.EVICT_DESIGN_PROPERTY`,
+citing processor.rs `on_bodies` and `search_staging`), so no mismatch is
+ever attributed to the adversary and the verdict is NOT ESTABLISHED.
+Any natural fallback in the window is still checked for recovery against
+the miner (smoke.py's `evaluate_mismatch_recovery`).
 """
 import subprocess
 import time
@@ -183,12 +177,10 @@ def run(ctx):
                  'of this window are incomplete',
                  {'collection': collector.summary(watermark)})
 
-    # DELIVERY must be PROVEN, not assumed, and CAUSALITY attributed.
-    # What the adversary says it sent is not delivery: the node's own
-    # `bodies received` line (dispatch.rs, code-104 arm) naming the
-    # adversary's source address and a pushed id is. And "some mismatch
-    # fallback happened" is not causality — the campaign has recorded
-    # natural `root_mismatch` fallbacks elsewhere.
+    # DELIVERY must be PROVEN, not assumed. What the adversary says it
+    # sent is not delivery: the node's own `bodies received` line
+    # (dispatch.rs, code-104 arm) naming the adversary's source address
+    # and a pushed id is.
     stdout = ((ctx.evidence.get('adversary') or {}).get('stdout_full') or '')
     pushed = common.parse_pushed_bodies(stdout)
     summary = [line for line in stdout.splitlines() if 'rest polls=' in line]
@@ -236,78 +228,22 @@ def run(ctx):
         'drop_totals': ctx.run.totals(),
     })
 
-    # (1) DELIVERY.
-    if not pushed:
-        ctx.fail('the adversary pushed no wrong body at all, so nothing was '
-                 'delivered and no fallback could be attributed to it — the '
-                 'eviction lever was not applied',
-                 {'adversary_summary': summary[-1] if summary else None,
-                  'adversary_stdout': stdout[-2000:]})
-    elif not receipts:
-        ctx.fail(f'the adversary pushed {len(pushed)} wrong bodies and the node '
-                 'logged receipt of NONE of them from its address, so delivery '
-                 'is not established',
-                 {'pushed_sample': pushed[:5],
-                  'bodies_received_lines_from_any_peer': len(receipt_lines)})
-
-    # (2) CAUSALITY, by the ORDERING block that closes a poisoned tree.
-    parent_of = {}
-    for event in mismatch:
-        header = event.get('headerId') or event.get('header_id')
-        try:
-            parent_of[header] = (api('scala', f'/blocks/{header}/header') or {}).get('parentId')
-        except Unavailable:
-            parent_of[header] = None
-    delivered = [b for b in pushed if b['id'] in receipts]
-    attributed = common.attribute_wrong_body_fallbacks(delivered, mismatch, parent_of)
-    ctx.note('fallback_attribution', {
-        'mismatch_fallbacks': len(mismatch),
-        'attributable_to_a_delivered_body': len(attributed),
-        'attributed': attributed[:5],
-        'note': 'a mismatch fallback whose parent is not a tree a delivered body '
-                'was pushed under is a NATURAL one and establishes nothing',
-    })
-
-    if receipts and not attributed:
-        # Delivered, and no fallback followed. That is the design, and
-        # the evidence says why: the processor places a delivered body
-        # only at a position whose ANNOUNCED weak id it matches
-        # (`ergo-inputblocks/src/processor.rs::on_bodies`, the staging
-        # loop filtering `st.weak_ids` by `b.weak_id`), and a block is
-        # admitted only when the ordered selection's Merkle root over the
-        # full transaction ids equals the announced digest
-        # (`search_staging`, `merkle_tree_root(&refs) == expected`). A body
-        # whose weak id was not announced is placed nowhere; one that
-        # collided on the 6-byte weak id would still carry a different
-        # transaction id and fail the digest. Nothing a peer can send
-        # without the spending key reaches assembly, so the fallback is
-        # NOT ESTABLISHED by this lever — not unobserved, unreachable.
-        ctx.note('result_qualifier', 'NOT ESTABLISHED')
-        ctx.fail('NOT ESTABLISHED: the adversary\'s wrong bodies WERE delivered '
-                 f'({len(receipts)} receipts logged by the node from '
-                 f'{ADVERSARY_SOURCE}) and no mismatch fallback followed from any '
-                 'of them, because a wrong body cannot reach assembly: bodies '
-                 'are placed only at positions whose announced weak id they '
-                 'match (processor.rs on_bodies) and admitted only through the '
-                 'full-transaction-id digest (processor.rs search_staging). '
-                 + (f'{len(mismatch)} unattributed mismatch fallback(s) occurred '
-                    'naturally and do not count.' if mismatch else
-                    'No mismatch fallback occurred at all.'),
-                 {'receipts': len(receipts),
-                  'delivered_with_no_processor_effect':
-                      len(set(receipts) - set(dropped_for_pushed)),
-                  'fallbacks': len(fallbacks), 'reconstructions': len(reconstructions),
-                  'code_path': [
-                      'ergo-node/src/node/input_blocks/dispatch.rs handle(): code 104 '
-                      'is fed to the processor whether or not it was solicited',
-                      'ergo-inputblocks/src/processor.rs on_bodies(): placement by '
-                      'announced weak id',
-                      'ergo-inputblocks/src/processor.rs search_staging(): Merkle '
-                      'root over tx ids must equal the announced digest'],
-                  'lever_that_would_work': 'the same transaction id with a different '
-                      'valid witness (re-signed with the spending key) whose witness '
-                      'id also matches the announced 3-byte weak-id half — a '
-                      'key-holding, ~2^24-signature grind, not a peer'})
+    # DELIVERY is proven from the node's receipts; CAUSALITY is never
+    # claimed — the fallback is not peer-forceable by design
+    # (`common.EVICT_DESIGN_PROPERTY`), so every mismatch fallback in the
+    # window is natural and the verdict is NOT ESTABLISHED once delivery
+    # holds. `common.evict_verdict` is the whole rule.
+    failures, verdict_notes = common.evict_verdict(pushed, receipts, mismatch)
+    ctx.note('evict_verdict', verdict_notes)
+    ctx.note('result_qualifier', 'NOT ESTABLISHED')
+    for message, evidence in failures:
+        ctx.fail(message, {**evidence,
+                           'delivered_with_no_processor_effect':
+                               len(set(receipts) - set(dropped_for_pushed)),
+                           'receipt_sample': [lines[0] for lines in
+                                              list(receipts.values())[:3]],
+                           'fallbacks': len(fallbacks),
+                           'reconstructions': len(reconstructions)})
 
     # Whatever it fell back to has to be the miner's block at that height.
     heights = [e.get('height') for e in ordering if e.get('height') is not None]

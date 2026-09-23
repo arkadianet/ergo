@@ -297,8 +297,19 @@ def run(ctx):
     except OSError:
         rust_log = ''
     announced = common.announced_headers(rust_log)
+    # The best-chain headers just outside the window: the watermark can
+    # straddle the block before `start`, and the settle loop can collect
+    # the block after `reached`. Anything else is unmatched.
+    adjacent = set()
+    for height in (start, reached + 1, reached + 2):
+        try:
+            ids = api('scala', f'/blocks/at/{height}') or []
+        except Unavailable:
+            ids = []
+        adjacent |= set(ids[:1])
     reconciliation = common.reconcile_outcomes(heights, window, announced=announced,
-                                               unread_heights=unread_heights)
+                                               unread_heights=unread_heights,
+                                               adjacent_headers=adjacent)
     ctx.note('outcome_reconciliation', reconciliation)
     if announced is None:
         ctx.fail('the follower log carries no announcement lines, so a block with no '
@@ -316,6 +327,11 @@ def run(ctx):
     ctx.evidence['rust_outcomes']['reconstructed_over_all_blocks'] = (
         round(len(reconstructed) / (decided + not_announced), 4)
         if decided + not_announced else None)
+    if reconciliation['unmatched']:
+        ctx.fail(f"{len(reconciliation['unmatched'])} reconstruct-or-download outcomes "
+                 'name a header that is not a block of this window (matched by '
+                 'identity, never by height)',
+                 {'unmatched': reconciliation['unmatched'][:20]})
     if reconciliation['duplicated']:
         ctx.fail(f"{len(reconciliation['duplicated'])} ordering blocks reported more "
                  'than one outcome', {'duplicated': reconciliation['duplicated'][:10]})

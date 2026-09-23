@@ -961,7 +961,7 @@ def evaluate_f6(blocks):
 
 
 def evaluate_post_reorg_state(chain, info, status, dropped, miner_chain=None,
-                              expectations=None):
+                              expectations=None, on_chain=None):
     """Did the follower actually clear and prune after a reorg?
 
     Three separate questions, because hanging all of them off "is
@@ -977,10 +977,19 @@ def evaluate_post_reorg_state(chain, info, status, dropped, miner_chain=None,
       reference chain for the same ordering id is available) on that
       too, so a tip from an abandoned tree cannot be excused by the
       node's own relabelled list;
-    * **the abandoned trees are gone** — the retained-state counters are
-      at or under what a node holding only the surviving branch should
-      have, and a counter the route does not publish is unknown rather
-      than zero.
+    * **the abandoned trees are gone** — OBSERVED, not inferred: every
+      entry of `status.retained_trees` (one per ordering id the node
+      still holds state under) that keeps a TREE must be under an
+      ordering id on the node's best chain (`on_chain`) and not under a
+      dropped one. The counters alone could not establish this — `forks`
+      is computed for the current ordering tip only
+      (`ergo-node/src/node/input_blocks/runtime.rs::api_status`), so a
+      completed tree under an abandoned id was invisible while every
+      counter passed. Records without a tree under a dropped id are
+      reported, not failed: records outlive their tree for
+      `prune_threshold` ordering blocks by design (Scala `prune()`, spec
+      2.5). The remaining counters are still checked, and a counter or
+      list the route does not publish is unknown rather than zero.
 
     Pure: returns `{'problems': [...], 'observed': {...}}`.
     """
@@ -1016,6 +1025,26 @@ def evaluate_post_reorg_state(chain, info, status, dropped, miner_chain=None,
             problems.append({'what': 'tip_not_on_any_miner_chain_for_this_block',
                              'tip': tip})
 
+    trees = status.get('retained_trees')
+    abandoned_records = []
+    if trees is None:
+        problems.append({'what': 'counter_not_published', 'counter': 'retained_trees'})
+    else:
+        for entry in trees:
+            oid = entry.get('ordering_id')
+            off_chain = oid in dropped or (on_chain is not None and oid not in on_chain)
+            if not off_chain:
+                continue
+            if entry.get('tree') or entry.get('forks'):
+                problems.append({'what': 'tree_retained_under_an_off_chain_ordering_id',
+                                 'ordering_id': oid, 'entry': entry,
+                                 'dropped': oid in dropped})
+            elif entry.get('records'):
+                abandoned_records.append(entry)
+        if on_chain is None and trees:
+            problems.append({'what': 'retained_trees_not_compared_against_the_best_chain',
+                             'ordering_ids': [t.get('ordering_id') for t in trees]})
+
     retained = {}
     for key, ceiling in expectations.items():
         value = status.get(key)
@@ -1028,52 +1057,62 @@ def evaluate_post_reorg_state(chain, info, status, dropped, miner_chain=None,
     return {'problems': problems,
             'observed': {'bestOrdering': best_ordering, 'tip': tip,
                          'chain_length': len(listed), 'retained': retained,
-                         'compared_against_a_miner_chain': miner_chain is not None}}
+                         'compared_against_a_miner_chain': miner_chain is not None,
+                         'retained_trees': trees,
+                         'records_under_off_chain_ordering_ids': abandoned_records}}
 
 
-def reconcile_outcomes(ordering_blocks, events, announced=None, unread_heights=()):
+def reconcile_outcomes(ordering_blocks, events, announced=None, unread_heights=(),
+                       adjacent_headers=()):
     """Every ordering block in the window must have exactly one outcome.
 
-    By IDENTITY, not by count. `ordering_blocks` maps height -> header
-    id; `events` is the collected `ordering_*` stream. A block with no
-    outcome is a decision the node made and did not report, which is
-    exactly the undercount `ordering_reconstruct_skipped` was added to
-    close — 96 outcomes for 100 blocks was recorded and not failed.
+    By HEADER IDENTITY only. `ordering_blocks` maps height -> header id;
+    `events` is the collected `ordering_*` stream. Height is never used
+    to match: an outcome for a DIFFERENT header at the expected height
+    used to satisfy the block (codex's r3 probe: `missing=[]`,
+    `with_an_outcome=1`), which let a decision about some other block
+    stand in for the one that was never reported.
 
-    ONE shape of "no outcome" is not a missing report, and it is
-    attributed only on positive evidence: a block whose ordering
-    announcement never reached the follower at all. The node asks for an
-    announced ordering block only when it does not already hold the
-    header (`ergo-node/src/node/input_blocks/dispatch.rs::handle_ordering_inv`
-    filters known headers), so a header that arrives first by ordinary
-    sync is downloaded in full and no reconstruct-or-download decision
-    is ever made. `announced` is the set of header ids the follower's log
-    shows an ordering announcement for; a block NOT in it is
-    `not_announced` (telemetry, and reported in the rate's denominator),
-    a block in it with no outcome is `missing`. `announced=None` — no
-    evidence either way — attributes nothing, so every outcome-less
-    block stays `missing`.
-
-    A height the reference could not be read for is `missing` too: a
-    block the window cannot name cannot be shown to have been reported.
+    * `missing` — a window block with no outcome naming it. A block NOT
+      in `announced` (the header ids the follower's log shows an
+      announcement for) is `not_announced` instead: the node asks for an
+      announced ordering block only when it does not hold the header
+      (`ergo-node/src/node/input_blocks/dispatch.rs::handle_ordering_inv`),
+      so a header that arrives first by ordinary sync is downloaded
+      without a decision. `announced=None` attributes nothing.
+    * `unmatched` — an outcome naming a header that is not a window
+      block and not one of `adjacent_headers` (the best-chain headers
+      just outside the window, which a watermark can legitimately
+      straddle), or naming no header at all. Checked against the
+      window's own header ids and the announcement set, never against an
+      index built from the same events. Each is also marked with whether
+      that header was ever announced. It FAILS.
+    * A height the reference could not be read for is `missing`.
     """
     kinds = ('ordering_reconstructed', 'ordering_reconstruct_fallback',
              'ordering_reconstruct_skipped')
-    by_header, by_height = {}, {}
+    window_headers = set(ordering_blocks.values())
+    adjacent = set(adjacent_headers)
+    by_header, unmatched, adjacent_outcomes = {}, [], 0
     for event in events:
         if event.get('kind') not in kinds:
             continue
         header = event.get('headerId') or event.get('header_id')
-        if header:
+        if header in window_headers:
             by_header.setdefault(header, []).append(event['kind'])
-        if event.get('height') is not None:
-            by_height.setdefault(event['height'], []).append(event['kind'])
+        elif header in adjacent:
+            adjacent_outcomes += 1
+        else:
+            unmatched.append({'kind': event['kind'], 'header': header,
+                              'height': event.get('height'),
+                              'announced': (None if announced is None
+                                            else header in announced)})
     missing, duplicated, not_announced = [], [], []
     for height in sorted(unread_heights):
         missing.append({'height': height, 'header': None,
                         'why': 'the reference could not be read at this height'})
     for height, header in sorted(ordering_blocks.items()):
-        outcomes = by_header.get(header) or by_height.get(height) or []
+        outcomes = by_header.get(header) or []
         if not outcomes:
             if announced is not None and header not in announced:
                 not_announced.append({'height': height, 'header': header})
@@ -1084,13 +1123,13 @@ def reconcile_outcomes(ordering_blocks, events, announced=None, unread_heights=(
                                'outcomes': outcomes})
     blocks = len(ordering_blocks) + len(unread_heights)
     return {'blocks': blocks,
-            'with_an_outcome': blocks - len(missing) - len(not_announced),
+            'with_an_outcome': sum(1 for h in window_headers if by_header.get(h)),
             'missing': missing, 'duplicated': duplicated,
             'not_announced': not_announced,
             'announcement_evidence': announced is not None,
-            'unmatched_events': sum(
-                1 for e in events if e.get('kind') in kinds
-                and (e.get('headerId') or e.get('header_id')) not in by_header)}
+            'unmatched': unmatched,
+            'unmatched_events': len(unmatched),
+            'outcomes_for_adjacent_blocks': adjacent_outcomes}
 
 
 ANNOUNCEMENT_LINE = 'input_blocks: raw announcement payload'
@@ -1160,30 +1199,50 @@ def wrong_body_receipts(log_lines, source_ip, pushed_ids):
     return out
 
 
-def attribute_wrong_body_fallbacks(pushed, fallbacks, parent_of):
-    """Mismatch fallbacks CAUSED by a poisoned tree, and nothing else.
+EVICT_DESIGN_PROPERTY = (
+    'the reconstruction fallback is NOT peer-forceable by design: a delivered '
+    'code-104 body is placed only at a staging position whose ANNOUNCED weak id '
+    'it matches (ergo-inputblocks/src/processor.rs::on_bodies), and a block is '
+    'admitted only when the Merkle root over the selection\'s full transaction '
+    'ids equals the announced digest (processor.rs::search_staging). A wrong '
+    'body is placed nowhere, or fails the digest, and never reaches assembly; '
+    'the only body that would pass both and still change the rebuilt root is '
+    'the same transaction re-signed with a different valid witness whose '
+    'witness id also matches the 3-byte weak-id half, which needs the '
+    'spending key, not a peer')
 
-    A pushed body is for an INPUT block; a fallback names the ORDERING
-    block being rebuilt. The rebuild of ordering block H assembles the
-    input chain that sat under H's PARENT, so a fallback is attributable
-    only when `parent_of[H]` is an ordering block some delivered body was
-    pushed under. Matching the fallback's header id against the pushed
-    input-block ids — the previous rule — can never match, so it could
-    only ever report "not forced"; a natural mismatch under an unpoisoned
-    tree is never attributed.
+
+def evict_verdict(pushed, receipts, mismatch_fallbacks):
+    """The `evict` verdict. Pure, and it NEVER attributes a fallback to the
+    adversary.
+
+    Round 2 attributed any mismatch fallback under the ordering parent a
+    body was pushed under, without proving that body entered the rebuild,
+    so a NATURAL mismatch after an ignored decoy read as adversary-caused
+    and bypassed the NOT ESTABLISHED gate. Given the design property
+    (`EVICT_DESIGN_PROPERTY`), no fallback can be the adversary's: every
+    mismatch fallback in the window is reported as natural.
+
+    Returns `(failures, notes)`; `failures` is `[(message, evidence)]`.
     """
-    poisoned_trees = {}
-    for body in pushed:
-        if body.get('ordering'):
-            poisoned_trees.setdefault(body['ordering'], []).append(body['id'])
-    out = []
-    for event in fallbacks:
-        header = event.get('headerId') or event.get('header_id')
-        parent = parent_of.get(header)
-        if parent in poisoned_trees:
-            out.append({'fallback': event, 'parent': parent,
-                        'poisoned_input_blocks': poisoned_trees[parent][:10]})
-    return out
+    notes = {'wrong_bodies_pushed': len(pushed),
+             'receipts_logged_by_the_node': len(receipts),
+             'mismatch_fallbacks_all_natural': len(mismatch_fallbacks),
+             'design_property': EVICT_DESIGN_PROPERTY}
+    if not pushed:
+        return ([('the adversary pushed no wrong body at all, so the lever was not '
+                  'applied', notes)], notes)
+    if not receipts:
+        return ([(f'the adversary pushed {len(pushed)} wrong bodies and the node '
+                  'logged receipt of none of them from its address, so delivery '
+                  'is not established', notes)], notes)
+    return ([('NOT ESTABLISHED: the adversary\'s wrong bodies WERE delivered '
+              f'({len(receipts)} receipts logged by the node) and cannot cause the '
+              'fallback — ' + EVICT_DESIGN_PROPERTY + '. '
+              + (f'{len(mismatch_fallbacks)} mismatch fallback(s) in the window are '
+                 'natural and are not attributed to the adversary.'
+                 if mismatch_fallbacks else 'No mismatch fallback occurred.'),
+              notes)], notes)
 
 
 # ----- §7.4 bounds -----

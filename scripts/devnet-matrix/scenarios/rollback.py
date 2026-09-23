@@ -263,8 +263,29 @@ def run(ctx):
              {'available': miner_chain is not None,
               'length': len(miner_chain or []), 'readings': attempts})
 
+    # The follower's own best chain around every height it still holds
+    # state for, so a tree under an ordering id OFF that chain is caught
+    # whether or not the reorg event listed it as dropped.
+    on_chain, unread_heights = set(), []
+    heights = {t.get('height') for t in (status.get('retained_trees') or [])
+               if t.get('height') is not None}
+    heights |= {info.get('fullHeight')} if info.get('fullHeight') else set()
+    for height in sorted({h + d for h in heights for d in (-1, 0, 1) if h + d > 0}):
+        try:
+            ids = api('rust', f'/blocks/at/{height}') or []
+        except Unavailable:
+            unread_heights.append(height)
+            continue
+        if ids:
+            on_chain.add(ids[0])
+    ctx.note('best_chain_ids_compared', {'count': len(on_chain),
+                                         'unread_heights': unread_heights})
+    if unread_heights:
+        ctx.fail('the follower best chain could not be read at every height a '
+                 'retained tree sits at, so tree pruning cannot be judged',
+                 {'heights': unread_heights})
     verdict = common.evaluate_post_reorg_state(
-        chain, info, status, dropped, miner_chain=miner_chain)
+        chain, info, status, dropped, miner_chain=miner_chain, on_chain=on_chain)
     ctx.note('post_reorg_state', verdict['observed'])
     ctx.note('post_reorg_problems', verdict['problems'])
     for problem in verdict['problems']:

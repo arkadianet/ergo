@@ -696,6 +696,39 @@ def verdict_for(aborted, failures, not_measured=None):
     return 'PASS'
 
 
+def persist_verdict(name, evidence, aborted, failures, save):
+    """Write the verdict LAST.
+
+    ABORTED goes to disk first; the attempt is recorded; only then is the
+    real verdict written, as the final step. Any exception in between
+    leaves ABORTED on disk. Previously DONE/PASS was saved BEFORE the
+    attempt was recorded, and codex's r3 probe — the attempt recording
+    raising after a clean run — left the persisted verdict at DONE/PASS.
+    """
+    verdict = verdict_for(aborted, failures, evidence.get('not_measured'))
+    finished = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    evidence.update({'status': 'FINALIZING', 'result': 'ABORTED',
+                     'aborted': aborted or 'the verdict was not persisted',
+                     'verdict_pending': verdict, 'finished': finished})
+    save()
+    final = {k: v for k, v in evidence.items() if k != 'verdict_pending'}
+    final.update({'status': 'DONE', 'result': verdict, 'aborted': aborted})
+    try:
+        record_attempt(name, final)
+    except BaseException as error:  # noqa: BLE001 — recorded, then re-raised
+        evidence['aborted'] = (f'the attempt could not be recorded: '
+                               f'{type(error).__name__}: {error}')
+        try:
+            save()
+        except BaseException:  # noqa: BLE001 — ABORTED is already on disk
+            pass
+        raise
+    evidence.clear()
+    evidence.update(final)
+    save()
+    return verdict
+
+
 def run_scenario(name, args):
     import lifecycle
     import smoke
@@ -835,14 +868,7 @@ def run_scenario(name, args):
         evidence['shutdown_error'] = shutdown_error
         if shutdown_error and aborted is None:
             aborted = f'node shutdown failed: {shutdown_error}'
-        evidence['aborted'] = aborted
-        evidence['result'] = verdict_for(aborted, run.failures,
-                                         evidence.get('not_measured'))
-        evidence['finished'] = datetime.datetime.now(
-            datetime.timezone.utc).isoformat()
-        evidence['status'] = 'DONE'
-        save()
-        record_attempt(name, evidence)
+        persist_verdict(name, evidence, aborted, run.failures, save)
     return evidence
 
 
@@ -1402,7 +1428,7 @@ def _self_test():
         chain={'bestOrdering': 'new', 'bestInputBlocks': []},
         info={'bestInputBlock': '', 'bestFullHeaderId': 'new'},
         status={'forks': 0, 'waitlist': 0, 'staged_bytes': 0,
-                'deferred_triggers': 0},
+                'deferred_triggers': 0, 'retained_trees': []},
         dropped={'old1'}, miner_chain=[])
     assert clean['problems'] == [], clean
     unpublished = common.evaluate_post_reorg_state(
@@ -1790,14 +1816,16 @@ def _self_test_round_2():
     stale = common.evaluate_post_reorg_state(
         chain={'bestOrdering': 'new', 'bestInputBlocks': ['staletip']},
         info={'bestInputBlock': 'staletip', 'bestFullHeaderId': 'new'},
-        status={'forks': 1, 'waitlist': 0, 'staged_bytes': 0, 'deferred_triggers': 0},
+        status={'forks': 1, 'waitlist': 0, 'staged_bytes': 0, 'deferred_triggers': 0,
+                'retained_trees': []},
         dropped={'old'}, miner_chain=None)
     assert [p['what'] for p in stale['problems']] == [
         'tip_not_compared_against_a_miner_chain'], stale
     cleared = common.evaluate_post_reorg_state(
         chain={'bestOrdering': 'new', 'bestInputBlocks': []},
         info={'bestInputBlock': '', 'bestFullHeaderId': 'new'},
-        status={'forks': 0, 'waitlist': 0, 'staged_bytes': 0, 'deferred_triggers': 0},
+        status={'forks': 0, 'waitlist': 0, 'staged_bytes': 0, 'deferred_triggers': 0,
+                'retained_trees': []},
         dropped={'old'}, miner_chain=None)
     assert cleared['problems'] == [], 'a CLEARED tip needs no miner chain'
 
@@ -1930,17 +1958,114 @@ def _self_test_round_2():
          f"DEBUG {common.BODIES_RECEIVED_LINE} peer=127.0.0.1:19570 block={'b' * 64}"],
         '127.211.0.1', ['a' * 64, 'b' * 64])
     assert list(receipts) == ['a' * 64], 'a body from ANOTHER peer is not delivery'
-    fallbacks = [{'kind': 'ordering_reconstruct_fallback', 'detail': 'root_mismatch',
-                  'headerId': 'H'},
-                 {'kind': 'ordering_reconstruct_fallback', 'detail': 'root_mismatch',
-                  'headerId': 'N'}]
-    attributed = common.attribute_wrong_body_fallbacks(
-        pushed[:1], fallbacks, parent_of={'H': 'o' * 64, 'N': 'elsewhere'})
-    assert [a['fallback']['headerId'] for a in attributed] == ['H'], attributed
-    # The previous rule compared the fallback's ORDERING id with pushed
-    # INPUT-block ids and could never attribute anything.
-    assert [f for f in fallbacks if f['headerId'] in {p['id'] for p in pushed}] == []
+    # EVICT (r3): nothing is ever attributed to the adversary. A NATURAL
+    # mismatch after an ignored decoy — even under the very ordering
+    # parent a body was pushed under — leaves the verdict NOT ESTABLISHED.
+    natural = [{'kind': 'ordering_reconstruct_fallback', 'detail': 'root_mismatch',
+                'headerId': 'H'}]
+    assert not hasattr(common, 'attribute_wrong_body_fallbacks'), \
+        'the parent-based attribution must not come back'
+    failures, notes = common.evict_verdict(pushed[:1], receipts, natural)
+    assert len(failures) == 1 and failures[0][0].startswith('NOT ESTABLISHED'), failures
+    assert 'not attributed to the adversary' in failures[0][0], failures
+    assert notes['mismatch_fallbacks_all_natural'] == 1, notes
+    assert 'search_staging' in failures[0][0] and 'on_bodies' in failures[0][0]
+    # No delivery -> a plain failure, not NOT ESTABLISHED.
+    undelivered, _ = common.evict_verdict(pushed[:1], {}, natural)
+    assert 'delivery is not established' in undelivered[0][0], undelivered
+    nothing, _ = common.evict_verdict([], {}, [])
+    assert 'pushed no wrong body' in nothing[0][0], nothing
 
+    _self_test_round_3()
+
+
+def _self_test_round_3():
+    """Codex's r3 probes, through the production code."""
+    import tempfile
+
+    from scenarios import common
+
+    # (5) a completed tree kept under an ABANDONED ordering id, every
+    # counter clean. `forks` answers for the current tip only, so only
+    # the per-ordering `retained_trees` list can show it.
+    clean_counters = {'forks': 0, 'waitlist': 0, 'staged_bytes': 0,
+                      'deferred_triggers': 0}
+    base = dict(chain={'bestOrdering': 'new', 'bestInputBlocks': []},
+                info={'bestInputBlock': '', 'bestFullHeaderId': 'new'},
+                dropped={'old'}, miner_chain=[])
+    kept = common.evaluate_post_reorg_state(
+        status={**clean_counters, 'retained_trees': [
+            {'ordering_id': 'old', 'height': 8, 'tree': True, 'forks': 1, 'records': 4}]},
+        on_chain={'new'}, **base)
+    assert [p['what'] for p in kept['problems']] == [
+        'tree_retained_under_an_off_chain_ordering_id'], kept['problems']
+    # Off the best chain but NOT in the reorg's dropped list: still caught.
+    side = common.evaluate_post_reorg_state(
+        status={**clean_counters, 'retained_trees': [
+            {'ordering_id': 'side', 'height': 9, 'tree': True, 'forks': 1, 'records': 1}]},
+        on_chain={'new'}, **base)
+    assert side['problems'][0]['what'] == 'tree_retained_under_an_off_chain_ordering_id'
+    # A tree under the surviving chain, and records (no tree) under the
+    # dropped id inside the pruning window, are fine — the latter reported.
+    fine = common.evaluate_post_reorg_state(
+        status={**clean_counters, 'retained_trees': [
+            {'ordering_id': 'new', 'height': 10, 'tree': True, 'forks': 1, 'records': 2},
+            {'ordering_id': 'old', 'height': 8, 'tree': False, 'forks': 0, 'records': 4}]},
+        on_chain={'new'}, **base)
+    assert fine['problems'] == [], fine['problems']
+    assert len(fine['observed']['records_under_off_chain_ordering_ids']) == 1
+    # A route that does not publish the list is unknown, not clean.
+    unpublished = common.evaluate_post_reorg_state(
+        status=dict(clean_counters), on_chain={'new'}, **base)
+    assert {'what': 'counter_not_published', 'counter': 'retained_trees'} in \
+        unpublished['problems'], unpublished['problems']
+
+    # (6) codex's injection: attempt recording raises after a clean run.
+    # The persisted verdict must be ABORTED, and the nodes stopped.
+    real_record = globals()['record_attempt']
+
+    def failing_record(name, evidence):
+        raise OSError('attempts.json is not writable')
+
+    globals()['record_attempt'] = failing_record
+    try:
+        with tempfile.TemporaryDirectory() as raw:
+            evidence, calls, raised, _ = _drive('steady', lambda ctx: None, Path(raw))
+    finally:
+        globals()['record_attempt'] = real_record
+    assert isinstance(raised, OSError), raised
+    assert evidence['result'] == 'ABORTED', (evidence['status'], evidence['result'])
+    assert evidence['status'] != 'DONE', evidence['status']
+    assert 'could not be recorded' in evidence['aborted'], evidence['aborted']
+    assert any(c[0] == 'stop' and c[1] is None for c in calls), calls
+    # ...and without the fault the real verdict is the LAST thing written.
+    with tempfile.TemporaryDirectory() as raw:
+        evidence, _, raised, history = _drive('steady', lambda ctx: None, Path(raw))
+    assert raised is None and (evidence['status'], evidence['result']) == ('DONE', 'PASS')
+    assert 'verdict_pending' not in evidence
+    assert history['steady'][-1]['result'] == 'PASS', history
+
+    # (7) codex's probe: an outcome for a DIFFERENT header at the expected
+    # height is unmatched, and the block is missing.
+    wrong = common.reconcile_outcomes({30: 'H30'}, [
+        {'kind': 'ordering_reconstructed', 'headerId': 'OTHER', 'height': 30}],
+        announced={'H30'})
+    assert [m['header'] for m in wrong['missing']] == ['H30'], wrong
+    assert wrong['with_an_outcome'] == 0, wrong
+    assert wrong['unmatched_events'] == 1 and wrong['unmatched'][0]['header'] == 'OTHER'
+    assert wrong['unmatched'][0]['announced'] is False, \
+        'checked against the announcement set, not the events themselves'
+    # An outcome with no header at all is unmatched too.
+    anon = common.reconcile_outcomes({30: 'H30'}, [
+        {'kind': 'ordering_reconstructed', 'headerId': 'H30', 'height': 30},
+        {'kind': 'ordering_reconstruct_skipped', 'height': 31}], announced={'H30'})
+    assert anon['missing'] == [] and anon['unmatched_events'] == 1, anon
+    # The block just outside the window is not unmatched.
+    edge = common.reconcile_outcomes({30: 'H30'}, [
+        {'kind': 'ordering_reconstructed', 'headerId': 'H30', 'height': 30},
+        {'kind': 'ordering_reconstructed', 'headerId': 'H29', 'height': 29}],
+        announced={'H30', 'H29'}, adjacent_headers={'H29'})
+    assert edge['unmatched'] == [] and edge['outcomes_for_adjacent_blocks'] == 1, edge
 
 
 def main():
