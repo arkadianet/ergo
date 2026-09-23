@@ -568,16 +568,26 @@ async fn input_block_wrong_body(ctx: &Ctx, seconds: u64) -> bool {
                 return false;
             }
         };
+    // Built once, and checked once: a decoy that does not serialize would
+    // be skipped for every id and the run would report "pushed 0" with
+    // nothing to say why — which is what two campaign attempts did.
+    let decoy = decoy_transaction();
+    let decoy_frame_for = |id: [u8; 32]| -> Result<Vec<u8>, String> {
+        let payload = serialize_input_block_txs(&InputBlockTxs {
+            input_block_id: id,
+            transactions: vec![decoy.clone()],
+        })
+        .map_err(|e| format!("decoy body does not serialize: {e:?}"))?;
+        Ok(full_frame(&ctx.magic, CODE_INPUT_BLOCK_TXS, &payload))
+    };
     let deadline = Instant::now() + Duration::from_secs(seconds);
-    let (mut relayed, mut answered, mut requests, mut pushed) = (0u32, 0u32, 0u32, 0u32);
+    let mut tally = WrongBodyTally::default();
     let mut last_report = Instant::now();
     // Input block ids we have already pushed a wrong body for.
     let mut served: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
     let mut last_poll = Instant::now()
         .checked_sub(Duration::from_secs(60))
         .unwrap_or_else(Instant::now);
-    let (mut polls, mut ids_seen, mut last_body_len) = (0u32, 0u32, 0usize);
-    let mut poll_error: Option<String> = None;
     while Instant::now() < deadline {
         // The follower does not relay input-block announcements to this
         // peer — two runs saw zero — so waiting to be told an id never
@@ -585,55 +595,63 @@ async fn input_block_wrong_body(ctx: &Ctx, seconds: u64) -> bool {
         // body can be pushed for them unsolicited.
         if last_poll.elapsed() >= Duration::from_secs(1) {
             last_poll = Instant::now();
-            polls += 1;
+            tally.polls += 1;
             match api_get(&ctx.api, "/blocks/bestInputChain").await {
-                Err(e) => {
-                    if poll_error.is_none() {
-                        poll_error = Some(format!("{e}"));
-                    }
-                }
+                Err(e) => tally.note_problem(format!("{e}")),
                 Ok((_, body)) => {
-                    last_body_len = body.len();
-                    let ids = json_hex_ids(&body);
-                    ids_seen += ids.len() as u32;
-                    if ids.is_empty() && poll_error.is_none() {
-                        // Keep a snippet: "no ids" and "the request
-                        // failed" are different answers, and the first
-                        // two runs could not tell which had happened.
-                        poll_error = Some(format!(
-                            "no ids in {} bytes: {}",
-                            body.len(),
-                            body.chars()
-                                .rev()
-                                .take(160)
-                                .collect::<String>()
-                                .chars()
-                                .rev()
-                                .collect::<String>()
-                        ));
+                    tally.last_body_len = body.len();
+                    // `bestOrdering` is a 64-hex string too, and it is NOT
+                    // an input block: pushing a body for it only ever
+                    // produced an `UnknownBlock` drop. It is kept as the
+                    // tree the pushed ids sit under, so the campaign can
+                    // attribute a fallback to the ordering block that
+                    // closes that tree.
+                    let ordering = json_hex_field(&body, "bestOrdering");
+                    let ids: Vec<[u8; 32]> = json_hex_ids(&body)
+                        .into_iter()
+                        .filter(|id| Some(*id) != ordering)
+                        .collect();
+                    tally.ids_seen += ids.len() as u32;
+                    if ids.is_empty() {
+                        // "No ids" and "the request failed" are different
+                        // answers; keep a snippet of the former.
+                        let tail: String = body
+                            .chars()
+                            .rev()
+                            .take(160)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
+                        tally.note_problem(format!("no ids in {} bytes: {tail}", body.len()));
                     }
                     for id in ids {
-                        if !served.insert(id) {
+                        if served.contains(&id) {
                             continue;
                         }
-                        let Some(tx) = decoy_transaction() else {
-                            continue;
+                        let frame = match decoy_frame_for(id) {
+                            Ok(f) => f,
+                            Err(problem) => {
+                                tally.note_problem(problem);
+                                continue;
+                            }
                         };
-                        let Ok(payload) = serialize_input_block_txs(&InputBlockTxs {
-                            input_block_id: id,
-                            transactions: vec![tx],
-                        }) else {
-                            continue;
-                        };
-                        let frame = full_frame(&ctx.magic, CODE_INPUT_BLOCK_TXS, &payload);
                         if conn.stream.write_all(&frame).await.is_err() {
+                            tally.note_problem("the follower closed the connection".into());
                             break;
                         }
-                        pushed += 1;
-                        // The ids we pushed a wrong body FOR, so the
-                        // campaign can attribute a mismatch fallback to
-                        // one of them rather than to a natural mismatch.
-                        println!("[wrong_body] pushed id={}", hex::encode(id));
+                        served.insert(id);
+                        tally.pushed += 1;
+                        // The ids we pushed a wrong body FOR, and the tree
+                        // they sit under, so the campaign can prove
+                        // delivery against the node's own receipt line and
+                        // attribute a mismatch fallback to one of them
+                        // rather than to a natural mismatch.
+                        println!(
+                            "[wrong_body] pushed id={} ordering={}",
+                            hex::encode(id),
+                            ordering.map(hex::encode).unwrap_or_else(|| "none".into())
+                        );
                     }
                 }
             }
@@ -649,57 +667,57 @@ async fn input_block_wrong_body(ctx: &Ctx, seconds: u64) -> bool {
             continue;
         };
         match code {
-            // An announcement the follower relayed to us. Two things:
-            // echo it back, which is what would make us a peer it asks
-            // for the bodies; and PUSH a wrong body for it unsolicited,
-            // because the follower asks the block's original announcer
-            // and the echo arrives second (`AlreadyKnown`), so waiting
-            // to be asked may never happen.
+            // An announcement the follower relayed to us: echo it back,
+            // which is what would make us a peer it asks for the bodies,
+            // and push a wrong body for it unsolicited, because the
+            // follower asks the block's original announcer and the echo
+            // arrives second (`AlreadyKnown`).
             CODE_INPUT_BLOCK => {
                 let frame = full_frame(&ctx.magic, CODE_INPUT_BLOCK, &payload);
                 if conn.stream.write_all(&frame).await.is_err() {
                     break;
                 }
-                relayed += 1;
+                tally.relayed += 1;
                 if let Some(id) = announced_input_block_id(&payload) {
-                    if let Some(tx) = decoy_transaction() {
-                        if let Ok(body) = serialize_input_block_txs(&InputBlockTxs {
-                            input_block_id: id,
-                            transactions: vec![tx],
-                        }) {
-                            let frame = full_frame(&ctx.magic, CODE_INPUT_BLOCK_TXS, &body);
-                            if conn.stream.write_all(&frame).await.is_err() {
-                                break;
+                    if served.insert(id) {
+                        match decoy_frame_for(id) {
+                            Ok(frame) => {
+                                if conn.stream.write_all(&frame).await.is_err() {
+                                    break;
+                                }
+                                tally.pushed += 1;
+                                println!(
+                                    "[wrong_body] pushed id={} ordering=relayed",
+                                    hex::encode(id)
+                                );
                             }
-                            pushed += 1;
+                            Err(problem) => tally.note_problem(problem),
                         }
                     }
                 }
             }
             // The request we exist to answer badly.
             CODE_INPUT_BLOCK_TXS_REQUEST => {
-                requests += 1;
+                tally.requests += 1;
                 let Ok(request) = deserialize_input_block_txs_request(&payload) else {
                     continue;
                 };
                 // A body list that does NOT correspond to the requested
-                // weak ids: one syntactically valid transaction whose
-                // own weak id is nothing anybody asked for. The node's
-                // digest check over the announced ids cannot match it.
-                let Some(tx) = decoy_transaction() else {
-                    continue;
-                };
-                let Ok(body) = serialize_input_block_txs(&InputBlockTxs {
-                    input_block_id: request.input_block_id,
-                    transactions: vec![tx],
-                }) else {
-                    continue;
-                };
-                let frame = full_frame(&ctx.magic, CODE_INPUT_BLOCK_TXS, &body);
-                if conn.stream.write_all(&frame).await.is_err() {
-                    break;
+                // weak ids: one transaction whose own weak id is nothing
+                // anybody asked for.
+                match decoy_frame_for(request.input_block_id) {
+                    Ok(frame) => {
+                        if conn.stream.write_all(&frame).await.is_err() {
+                            break;
+                        }
+                        tally.answered += 1;
+                        println!(
+                            "[wrong_body] answered id={}",
+                            hex::encode(request.input_block_id)
+                        );
+                    }
+                    Err(problem) => tally.note_problem(problem),
                 }
-                answered += 1;
             }
             _ => {}
         }
@@ -708,29 +726,11 @@ async fn input_block_wrong_body(ctx: &Ctx, seconds: u64) -> bool {
         // the harness and the campaign saw only the banner.
         if last_report.elapsed() >= Duration::from_secs(10) {
             last_report = Instant::now();
-            report(
-                relayed,
-                pushed,
-                requests,
-                answered,
-                polls,
-                ids_seen,
-                last_body_len,
-                &poll_error,
-            );
+            tally.report();
         }
     }
-    report(
-        relayed,
-        pushed,
-        requests,
-        answered,
-        polls,
-        ids_seen,
-        last_body_len,
-        &poll_error,
-    );
-    let ok = answered > 0 || pushed > 0;
+    tally.report();
+    let ok = tally.answered > 0 || tally.pushed > 0;
     println!(
         "{} input_block_wrong_body: mismatched bodies were delivered to the follower",
         if ok { "PASS" } else { "FAIL" }
@@ -740,26 +740,55 @@ async fn input_block_wrong_body(ctx: &Ctx, seconds: u64) -> bool {
     ok
 }
 
-#[allow(clippy::too_many_arguments)]
-fn report(
+/// What `input_block_wrong_body` did, reported as it goes.
+#[derive(Default)]
+struct WrongBodyTally {
     relayed: u32,
     pushed: u32,
     requests: u32,
     answered: u32,
     polls: u32,
     ids_seen: u32,
-    body_len: usize,
-    poll_error: &Option<String>,
-) {
-    use std::io::Write;
-    println!(
-        "[wrong_body] relayed {relayed}, pushed {pushed} unsolicited wrong bodies, \
-         saw {requests} body requests, answered {answered}; \
-         rest polls={polls} ids_seen={ids_seen} last_body={body_len}B \
-         first_problem={}",
-        poll_error.as_deref().unwrap_or("none")
-    );
-    let _ = std::io::stdout().flush();
+    last_body_len: usize,
+    /// The FIRST problem hit, kept so "the request failed", "there were
+    /// no ids" and "the body would not serialize" stop looking alike.
+    first_problem: Option<String>,
+}
+
+impl WrongBodyTally {
+    fn note_problem(&mut self, problem: String) {
+        if self.first_problem.is_none() {
+            self.first_problem = Some(problem);
+        }
+    }
+
+    fn report(&self) {
+        use std::io::Write;
+        println!(
+            "[wrong_body] relayed {}, pushed {} unsolicited wrong bodies, \
+             saw {} body requests, answered {}; \
+             rest polls={} ids_seen={} last_body={}B first_problem={}",
+            self.relayed,
+            self.pushed,
+            self.requests,
+            self.answered,
+            self.polls,
+            self.ids_seen,
+            self.last_body_len,
+            self.first_problem.as_deref().unwrap_or("none")
+        );
+        let _ = std::io::stdout().flush();
+    }
+}
+
+/// The 32-byte hex value of one string field, e.g. `"bestOrdering":"…"`.
+fn json_hex_field(body: &str, key: &str) -> Option<[u8; 32]> {
+    let needle = format!("\"{key}\":");
+    let i = body.find(&needle)? + needle.len();
+    let rest = body[i..].trim_start().strip_prefix('"')?;
+    let end = rest.find('"')?;
+    let v = hex::decode(&rest[..end]).ok()?;
+    <[u8; 32]>::try_from(v.as_slice()).ok()
 }
 
 /// Every 64-hex id in a JSON body, in order of appearance.
@@ -791,18 +820,17 @@ fn announced_input_block_id(payload: &[u8]) -> Option<[u8; 32]> {
     Some(*id.as_bytes())
 }
 
-/// One syntactically valid transaction that commits to nothing the
-/// follower asked for. Built by round-tripping an empty-input, empty-
-/// output shell through the serializer, so the node parses it and then
-/// finds its weak id does not answer the request.
-fn decoy_transaction() -> Option<ergo_ser::transaction::Transaction> {
-    use ergo_ser::transaction::read_transaction;
-    // inputs = 0, data inputs = 0, outputs = 0 — the shortest frame the
-    // codec accepts. Parsed rather than constructed so the example does
-    // not have to track the struct's private shape.
-    let bytes = [0u8, 0u8, 0u8];
-    let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
-    read_transaction(&mut r).ok()
+/// One transaction that commits to nothing the follower asked for: no
+/// inputs, no data inputs, no outputs. Constructed rather than parsed —
+/// the previous version parsed three bytes where the codec needs four
+/// (input, data-input, token-table and output counts), so it returned
+/// `None` on every call and the adversary pushed nothing at all.
+fn decoy_transaction() -> ergo_ser::transaction::Transaction {
+    ergo_ser::transaction::Transaction {
+        inputs: Vec::new(),
+        data_inputs: Vec::new(),
+        output_candidates: Vec::new(),
+    }
 }
 
 /// X coordinate of the secp256k1 generator.
