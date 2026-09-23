@@ -111,6 +111,7 @@ ROOT_FLOOD_CAPS = {'maxEntries': 256, 'maxBytes': 4 * 1024 * 1024,
 ROOT_FLOOD = {'hosts': 10, 'per_host': 40, 'waves': 12, 'interval_ms': 20_000,
               'first_octet': 100}
 BLOCKS_BEFORE_ROOT_FLOOD = 4
+ROOT_FLOOD_PAYMENTS_PER_BLOCK = 3
 BLOCKS_AFTER_ROOT_FLOOD = 3
 # A sample at or above this share of the entry cap counts as SATURATED.
 SATURATED_SHARE = 0.9
@@ -246,8 +247,13 @@ class _FollowerSampler:
     system, so a follower wedged by its store answers late or not at all.
     """
 
-    def __init__(self, target, miner):
+    def __init__(self, target, miner, on_new_miner_height=None):
         self.target, self.miner = target, miner
+        # Called (in this thread) whenever the miner's height rises, so the
+        # workload keeps pace with the chain while the main thread is
+        # blocked on the adversary.
+        self.on_new_miner_height = on_new_miner_height
+        self.workload_errors = []
         self.samples, self.first_seen = [], {target: {}, miner: {}}
         self.phase = 'before'
         self._stop = threading.Event()
@@ -285,7 +291,13 @@ class _FollowerSampler:
                 height = info.get('fullHeight')
                 sample[f'{node}_height'] = height
                 if height is not None:
+                    new = height not in self.first_seen[node]
                     self.first_seen[node].setdefault(height, (now, self.phase))
+                    if new and node == self.miner and self.on_new_miner_height:
+                        try:
+                            self.on_new_miner_height()
+                        except Exception as error:  # recorded, never fatal
+                            self.workload_errors.append(repr(error))
             self.samples.append(sample)
             self._stop.wait(ROOT_FLOOD_SAMPLE_SECONDS)
 
@@ -312,7 +324,22 @@ def _run_against_scala_follower(ctx, target):
                                      f'{lifecycle.P2P[target]}',
                               'plan': ROOT_FLOOD, 'caps': ROOT_FLOOD_CAPS})
 
-    sampler = _FollowerSampler(target, 'scala').start()
+    # A WORKLOAD, as in `steady`: honest root (+2) announcements only
+    # exist while the follower has not yet applied the miner's newest
+    # ordering block, and an unfunded chain's coinbase-only blocks are
+    # applied at once — the first F13 run saw 0 honest roots in 12
+    # flooded blocks against 18 in the 3 before.
+    balance, address = common.fund_miner(ctx, 'scala')
+    ctx.note('funding', {'balance_nano': balance, 'address': address})
+    sent, refused = [], []
+
+    def pump():
+        if balance and address:
+            common.pump_payments(ctx, address, sent, 'scala',
+                                 ROOT_FLOOD_PAYMENTS_PER_BLOCK,
+                                 rejected=refused)
+
+    sampler = _FollowerSampler(target, 'scala', pump).start()
     common.wait_ordering_blocks(ctx, BLOCKS_BEFORE_ROOT_FLOOD, 'pre_flood')
     height_before = api_retry(target, '/info', ctx.run.deadline,
                               what='the target follower height').get('fullHeight')
@@ -351,6 +378,15 @@ def _run_against_scala_follower(ctx, target):
     sampler.phase = 'after'
     common.wait_ordering_blocks(ctx, BLOCKS_AFTER_ROOT_FLOOD, 'post_flood')
     sampler.stop()
+    ctx.note('workload', {'funded_balance_nano': balance,
+                          'payments_submitted': len(sent),
+                          'payments_refused': len(refused),
+                          'refusals': refused[:10],
+                          'errors': sampler.workload_errors[:10]})
+    if not balance:
+        ctx.fail('the miner was never funded, so the flooded blocks carried no '
+                 'workload and honest root announcements are not representative',
+                 {'balance_nano': balance})
 
     lines = common._scala_log_lines(target)
     window = lines[log_from:log_to]

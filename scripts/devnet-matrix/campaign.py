@@ -1876,6 +1876,16 @@ def _self_test():
         {'maxEntries': 256, 'maxBytes': 4194304},
         adversary_octets=range(100, 220))
     assert not _over['caps_held'], _over
+    # Honest ROOT announcements (+2) only exist while the follower has not
+    # yet applied the miner's newest ordering block. An unfunded chain
+    # applies coinbase-only blocks at once, and the first F13 flood run
+    # (`.work-m4p-f13-flood`) saw 0 honest roots in 12 flooded blocks:
+    # the scenario funds the miner and keeps payments in flight so the
+    # blocks carry work, as `steady` does.
+    import inspect as _insp_fl
+    _src_fl = _insp_fl.getsource(_flood_eval._run_against_scala_follower)
+    assert 'common.fund_miner(' in _src_fl and 'pump_payments' in \
+        _insp_fl.getsource(_flood_eval), 'the root flood must carry a workload'
 
     # Resolving roles must NOT import `lifecycle`. `lifecycle.P2P` /
     # `REST` are read from the environment at import and `smoke.URLS` is
