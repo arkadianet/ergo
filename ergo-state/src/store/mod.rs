@@ -482,6 +482,7 @@ mod backfill;
 mod dry_run;
 #[cfg(test)]
 mod dry_run_bench;
+mod lazy_prover;
 /// Test-only re-export of the canonical proof producer, used by
 /// the digest-mode apply seam's producer/consumer interop test and
 /// the `test-helpers` ADProofs-derivation seam. Production code never
@@ -743,33 +744,24 @@ pub struct StateStore {
     /// prune seams, the `rollback_to` depth guard, and the tx-diff LCA
     /// walk caps.
     rollback_window: u32,
-    /// UTXO-mode `adProofsRoot` validation strategy (issue #264).
-    /// Defaults to [`AdProofsApplyPolicy::Regenerate`] (legacy);
-    /// production boot wires [`AdProofsApplyPolicy::VerifyShipped`]
-    /// alongside coordinator `requires_proofs` so catch-up verifies
-    /// shipped sections at O(block size) instead of hydrating the
-    /// entire arena per block.
+    /// UTXO proof validation defaults to local generation with on-demand
+    /// node reads, independent of historical proof availability on peers.
     ad_proofs_apply_policy: AdProofsApplyPolicy,
 }
 
-/// How UTXO-mode block application validates a block's declared
-/// `adProofsRoot` (issue #264). Boot selects per deployment shape;
-/// the default preserves legacy behavior.
+/// How UTXO-mode block application validates the declared proof commitment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdProofsApplyPolicy {
-    /// Regenerate proof bytes from the block's transactions against a
-    /// fully hydrated copy of the parent AVL tree, then compare hashes.
-    /// Correct but O(tree size) time and heap PER BLOCK — prohibitive
-    /// on archival-scale trees during catch-up (multi-GB anon RSS,
-    /// minutes-to-hours per block near tip).
+    /// Generate proofs locally, expanding only the affected AVL paths,
+    /// then compare the proof hash with the header commitment.
     Regenerate,
     /// Verify the SHIPPED ADProofs section at O(block size): the bytes
     /// must hash to `adProofsRoot`, and replaying the block's net box
     /// changes through them must carry the parent state root exactly to
     /// `stateRoot`. A missing section surfaces as data availability
-    /// (`BlockProcessError::AdProofsUnavailable`), never regeneration —
-    /// matching Scala, where a UTXO node cannot apply a block whose
-    /// ADProofs have not arrived.
+    /// (`BlockProcessError::AdProofsUnavailable`). This opt-in policy
+    /// requires peers that retain the relevant proofs; production UTXO
+    /// sync uses local generation instead, matching Scala UtxoState.
     VerifyShipped,
 }
 
@@ -2819,9 +2811,8 @@ impl StateStore {
     /// Regenerate the ADProofs bytes for `transactions` applied at the
     /// current tip — the validator-side twin of [`Self::candidate_dry_run`].
     ///
-    /// Same canonical op stream (data-input lookups in transaction order,
-    /// then removes, then inserts — see `store/dry_run.rs`), same prover
-    /// hydration, same self-check: the generated proof must verifier-replay
+    /// Uses the canonical operation stream with on-demand node reads.
+    /// The generated proof must verifier-replay
     /// from the parent root to the claimed post-root. Returns
     /// `(post_state_root, raw_proof_bytes)`; the caller hashes the proof
     /// bytes and compares against the header's declared `adProofsRoot`
@@ -2840,7 +2831,7 @@ impl StateStore {
             .collect();
         let parent_root = self.tree.root_digest();
         let (new_root, proof_bytes) =
-            dry_run::apply_change_set_via_prover(&self.tree, &to_lookup, &to_remove, &to_insert)?;
+            lazy_prover::prove(&self.tree, &to_lookup, &to_remove, &to_insert)?;
         dry_run::self_check_candidate_proof(
             &parent_root,
             &to_lookup,
@@ -2859,10 +2850,9 @@ impl StateStore {
     /// the shipped proof payload must hash to `header.ad_proofs_root`
     /// and the block's net box changes, replayed through it, must carry
     /// the parent state root exactly to `header.state_root`.
-    /// Unlike [`Self::regenerate_ad_proofs`] this never materializes the
-    /// AVL arena into the prover graph, so it is safe to run per applied
-    /// block during catch-up (issue #264: regeneration is O(tree size)
-    /// time + heap per block).
+    /// This explicit policy avoids arena reads but depends on a downloaded
+    /// proof. Production UTXO sync instead uses local generation, which
+    /// expands only the affected paths and works without historical proofs.
     ///
     /// `proof_bytes` is the PARSED AVL batch-proof payload (no section
     /// framing — the caller strips `header_id ‖ len` via

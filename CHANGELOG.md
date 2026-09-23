@@ -35,6 +35,10 @@ infrastructure.
 
 - Include measured `cost` in Scala-compatible unconfirmed transaction JSON,
   with `null` when unknown. Confirmed transaction JSON is unchanged.
+- UTXO sync no longer waits for historical ADProofs that peers may not retain.
+  Generate and verify proofs locally using on-demand AVL reads instead of
+  rebuilding the entire prover tree per block. Script validation and header
+  commitments remain enforced; digest mode still downloads proofs.
 
 ## [0.8.0] - 2026-09-21
 

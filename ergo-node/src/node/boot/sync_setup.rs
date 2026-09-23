@@ -101,20 +101,8 @@ pub(super) fn setup(
             .block_timing
             .header_freshness_threshold_ms(),
     );
-    // Modes 1/2/3 (UTXO) and Mode 5 (digest-verifier): block application
-    // consumes the ADProofs section — Scala `stateType.requireProofs` is
-    // true for both. UTXO-mode validation verifies the SHIPPED section
-    // against the declared roots at O(block size) (issue #264 fast
-    // path); coordinator `requires_proofs` makes delivery request the
-    // section alongside txs+extension and keeps assembly from signaling
-    // the block complete until it lands. Mode 6 (headers-only) never
-    // applies blocks, so it stays on the two-section path.
-    if !headers_only {
+    if !headers_only && matches!(store, ergo_state::StateBackendKind::Digest(_)) {
         coordinator.set_requires_proofs(true);
-        if let ergo_state::StateBackendKind::Utxo(utxo_store) = store {
-            utxo_store
-                .set_ad_proofs_apply_policy(ergo_state::store::AdProofsApplyPolicy::VerifyShipped);
-        }
     }
     // Operator escape hatch (sibling of ERGO_BAN_HEADERS): force the
     // headers-chain-synced latch at boot so block downloads start even
@@ -553,4 +541,55 @@ pub(super) fn setup(
         last_seen_active_params,
         last_seen_validation_settings,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    use ergo_state::store::StateStore;
+    use ergo_state::{DigestStateStore, StateBackendKind};
+
+    #[tokio::test]
+    async fn boot_requires_downloaded_proofs_only_for_digest_state() {
+        for state_type in ["utxo", "digest"] {
+            let dir = tempfile::tempdir().unwrap();
+            let config_path = dir.path().join("node.toml");
+            std::fs::write(&config_path, format!(
+                "[node]\nstate_type = \"{state_type}\"\n[chain]\nscript_validation_checkpoint_height = 0\n[indexer]\nenabled = false\n[api.security]\napi_key_hash = \"{}\"\n",
+                "42".repeat(32),
+            )).unwrap();
+            let cli = crate::config::Cli::parse_from([
+                "ergo-node",
+                "--config",
+                config_path.to_str().unwrap(),
+                "--data-dir",
+                dir.path().to_str().unwrap(),
+            ]);
+            let config = NodeConfig::load(cli).unwrap();
+            let path = dir.path().join("state.redb");
+            let mut store = if state_type == "utxo" {
+                StateBackendKind::Utxo(StateStore::open(&path).unwrap())
+            } else {
+                StateBackendKind::Digest(
+                    DigestStateStore::open(
+                        &path,
+                        ergo_validation::scala_launch(),
+                        config.chain_spec.voting,
+                        ergo_chain_spec::GenesisParams::for_network(config.chain_spec.network)
+                            .state_digest,
+                    )
+                    .unwrap(),
+                )
+            };
+            let setup = setup(&config, &mut store, 0).unwrap();
+            assert_eq!(setup.coordinator.requires_proofs(), state_type == "digest");
+            if let Some(utxo) = store.as_utxo() {
+                assert_eq!(
+                    utxo.ad_proofs_apply_policy(),
+                    ergo_state::store::AdProofsApplyPolicy::Regenerate
+                );
+            }
+        }
+    }
 }
