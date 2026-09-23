@@ -859,6 +859,44 @@ fn version_too_old_frees_slot_and_bans() {
 }
 
 #[test]
+fn version_ban_removes_other_ports_and_pending_handshakes() {
+    let mut mgr = PeerManager::new_with_limits(
+        1,
+        PeerLimits {
+            per_ip_limit: 4,
+            per_subnet_limit: 8,
+            ..Default::default()
+        },
+    );
+    let now = Instant::now();
+    let a = addr(10, 0, 0, 1, 9030);
+    let sibling = addr(10, 0, 0, 1, 9031);
+    let pending = addr(10, 0, 0, 1, 9032);
+    let other = addr(10, 0, 1, 1, 9030);
+    for peer in [a, sibling, other] {
+        mgr.register_inbound(peer, now).unwrap();
+        mgr.mark_tcp_connected(&peer);
+    }
+    mgr.complete_handshake(&sibling, spec(), None, now).unwrap();
+    mgr.complete_handshake(&other, spec(), None, now).unwrap();
+    mgr.register_inbound(pending, now).unwrap();
+    let old = PeerSpec {
+        version: crate::handshake::Version {
+            major: 3,
+            minor: 0,
+            patch: 0,
+        },
+        ..spec()
+    };
+    assert!(mgr.complete_handshake(&a, old, None, now).is_err());
+    for peer in [a, sibling, pending] {
+        assert!(mgr.get(&peer).is_none());
+        assert!(mgr.is_banned(&peer, now));
+    }
+    assert!(mgr.get(&other).is_some());
+}
+
+#[test]
 fn select_peer_excluding_skips_excluded() {
     let mut mgr = PeerManager::new(1);
     let now = Instant::now();

@@ -3720,3 +3720,45 @@ fn popow_proof_matching_checkpoint_reaches_the_verifier() {
     );
 }
 
+#[test]
+fn ip_ban_cleans_all_ports_and_pending_handshakes_but_keeps_other_ips() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("bans.redb"));
+    state.peer_manager = PeerManager::new_with_limits(
+        0,
+        ergo_p2p::peer_manager::PeerLimits {
+            per_ip_limit: 4,
+            per_subnet_limit: 8,
+            ..Default::default()
+        },
+    );
+    let now = Instant::now();
+    let a: SocketAddr = "127.0.0.1:1001".parse().unwrap();
+    let b: SocketAddr = "127.0.0.1:1002".parse().unwrap();
+    let pending: SocketAddr = "127.0.0.1:1003".parse().unwrap();
+    let other: SocketAddr = "127.0.0.2:1001".parse().unwrap();
+    let mut rx_a = connect_test_peer(&mut state, a, now);
+    let mut rx_b = connect_test_peer(&mut state, b, now);
+    let mut rx_other = connect_test_peer(&mut state, other, now);
+    state.peer_manager.register_inbound(pending, now).unwrap();
+    let mut t = now;
+    for _ in 0..40 {
+        t += ergo_p2p::peer::SAFE_INTERVAL;
+        super::peer_actions::penalize_peer(&mut state, a, Penalty::Spam, t);
+        if state.peer_manager.is_banned(&a, t) {
+            break;
+        }
+    }
+    assert!(state.peer_manager.is_banned(&b, t));
+    assert!(state.peer_manager.get(&a).is_none());
+    assert!(state.peer_manager.get(&b).is_none());
+    assert!(state.peer_manager.get(&pending).is_none());
+    assert!(rx_a.is_closed() && rx_b.is_closed());
+    assert!(rx_a.try_recv().is_err() && rx_b.try_recv().is_err());
+    assert!(state.peer_manager.get(&other).is_some());
+    assert!(send_to_peer(&state, &other, 1, Vec::new()));
+    assert_eq!(rx_other.try_recv().unwrap().code, 1);
+    // Repeated cleanup with the original socket already absent is harmless.
+    super::peer_actions::penalize_peer(&mut state, a, Penalty::Spam, t);
+    assert!(state.registry.peers.contains_key(&other));
+}

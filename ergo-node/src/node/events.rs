@@ -363,6 +363,9 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
                     }
                 }
                 Err(e) => {
+                    if state.peer_manager.is_banned(&addr, now) {
+                        super::peer_actions::cleanup_banned_ip(state, addr.ip(), now);
+                    }
                     // After the TcpConnected fix, `UnknownPeer` here
                     // means the peer was evicted between TCP-up and
                     // handshake-bytes-done — typically a stalled
