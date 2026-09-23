@@ -563,8 +563,9 @@ paths:
       tags:
       - wallet
       summary: |-
-        `PUT /api/v1/wallet/change-address` — set the change address. The address
-        must be a tracked P2PK for this network (not unlock-gated).
+        `PUT /api/v1/wallet/change-address` — set the change address. Requires an
+        unlocked wallet (409 `wallet_locked`) whose master key owns the recorded
+        path for the address; the address must be a tracked P2PK for this network.
       operationId: change_address_put
       requestBody:
         content:
@@ -577,6 +578,12 @@ paths:
           description: Change address set
         '400':
           description: Malformed body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+        '409':
+          description: wallet_locked
           content:
             application/json:
               schema:

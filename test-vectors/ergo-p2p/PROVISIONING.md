@@ -22,7 +22,7 @@ must match.
 
 The fixtures above are **full frames** (magic + code + length + checksum
 + payload). The Rust oracle test at
-[`ergo-p2p/tests/wire_vectors_oracle.rs`](../../ergo-p2p/tests/wire_vectors_oracle.rs)
+[`ergo-p2p/tests/it/wire_vectors_oracle.rs`](../../ergo-p2p/tests/it/wire_vectors_oracle.rs)
 decodes them through the framing layer first, validates the
 checksum, hands the payload to the per-message deserializer, then
 re-serializes + re-frames and asserts byte-identical roundtrip.

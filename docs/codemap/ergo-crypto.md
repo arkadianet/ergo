@@ -51,7 +51,7 @@ no AVL+ state, no wire codecs — those live elsewhere.
 - `BatchProofEntry` / `IndexedBatchProof` (struct/type alias) + `merkle_proof_by_indices` (fn) — compact multi-leaf proof, in-memory form pairing with `ergo_ser::batch_merkle_proof::BatchMerkleProof` — `src/merkle/mod.rs:212` / `:231` / `:255`
 
 ## Invariants & contracts
-- **PoW equation parity is byte-exact with Scala.** v1 EC equation and v2 hit pipeline match `AutolykosPowScheme`; pinned by the mainnet corpus (`tests/pow_mainnet.rs`) and the sigmastate v6.0.2 `powHit` KAT (`src/autolykos/v2.rs` tests).
+- **PoW equation parity is byte-exact with Scala.** v1 EC equation and v2 hit pipeline match `AutolykosPowScheme`; pinned by the mainnet corpus (`tests/it/pow_mainnet.rs`) and the sigmastate v6.0.2 `powHit` KAT (`src/autolykos/v2.rs` tests).
 - **No version-by-height enforcement in `verify_pow_solution`.** Dispatch is purely on the solution variant (coupled to `header.version` at parse time), mirroring Scala which has no version-vs-height check — rejecting more would be the chain-split direction (`src/pow.rs:36-40`, oracle test at `src/pow.rs:173`).
 - **Autolykos N growth is Scala-faithful integer math.** `calc_n` uses `n = n / 100 * 105` per period (not `n * 105 / 100`); v1 always returns NBase (`src/autolykos/common.rs:49-64`).
 - **`gen_indexes_k` is the k-prefix of k=32 `gen_indexes`** for all `2 <= k <= 32` (shared 35-byte extended hash + sliding window); the 32-index path anchors the smaller-k powHit path.

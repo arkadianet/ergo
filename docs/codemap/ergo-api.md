@@ -30,8 +30,8 @@
 - `src/types.rs` — node-native wire DTOs (`Api*`, `SubmitError`/`SubmitMode`, `RawTransactionBytes`, difficulty series) with `utoipa::ToSchema` for the RUST API OpenAPI spec.
 - `src/compat/` — Scala API surface mounted at bare paths.
   - `compat/traits.rs` — `NodeChainQuery` live-read trait + `UtxoBoxBytes` envelope.
-  - `compat/types.rs` — `ScalaInfo` / `Parameters` + re-exports of the shared `ergo-rest-json` Scala DTOs.
-  - `compat/handlers.rs` — `/info`, `/blocks/*`, `/utxo/*`, `/peers/*`, `/transactions/unconfirmed/*` GET handlers.
+  - `compat/types.rs` — `ScalaInfo` / `Parameters` + re-exports of the shared `ergo-rest-json` Scala DTOs; `ScalaUnconfirmedTransaction` adds a measured `cost` (null when unknown) to the Scala transaction shape for unconfirmed responses only.
+  - `compat/handlers.rs` — `/info`, `/blocks/*`, `/utxo/*`, `/peers/*`, `/transactions/unconfirmed/*` GET handlers, plus `/transactions/getFee`; the production `ScalaCompatBridge` applies the configured minimum relay fee floor.
   - `compat/blocks.rs` — `POST /blocks` (sendMinedBlock) handler.
   - `compat/transactions.rs` — `POST /transactions[/bytes][/check[Bytes]]` submit/check handlers.
 - `src/blockchain.rs` + `src/blockchain/*` — the optional `/blockchain/*` extra-index parity surface. `blockchain.rs` holds `BlockchainState`, `enforce_status_gate` middleware, `indexed_height_handler`, the error envelopes, and paging/sort parsing (`resolve_page`, `parse_sort_direction`, `MAX_ITEMS = 16384`). Submodules: `balance`, `blocks`, `boxes`, `byaddress`, `byergotree`, `bytemplate`, `range`, `storage_rent`, `tokens`, `transactions`, `unspent_byaddress`.

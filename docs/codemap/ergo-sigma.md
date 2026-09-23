@@ -58,7 +58,8 @@ admission and block validation call to check whether an input may be spent.
   - `box_context.rs` — Extract* (amount, id, bytes, script, registers,
     creationInfo), GetVar.
   - `arithmetic.rs`, `comparison.rs`, `boolean.rs`, `cast.rs`, `binding.rs`
-    (ValDef/ValUse/BlockValue/If/FuncValue/FuncApply/Tuple/SelectField),
+    (ValDef/ValUse/BlockValue/If/FuncValue/FuncApply/Tuple/SelectField —
+    arity-2 pairs only),
     `constants.rs` (HEIGHT/SELF/INPUTS/OUTPUTS/MinerPubkey/GroupGenerator/…),
     `option.rs`, `errors.rs` (reject-only arms for deprecated/internal/
     non-executable opcodes).
@@ -103,6 +104,8 @@ admission and block validation call to check whether an input may be spent.
   `activated_script_version`); `minimal`/`minimal_v6` constructors,
   `require_method_version` soft-fork gate — `src/evaluator/types.rs:201`
 - `EvalBox` / `EvalHeader` (structs) — evaluator box and header projections;
+  both carry the reference's identity basis (retained wire slice for
+  data-deserialized values, canonical serialization for context values);
   `EvalHeader::from_header` resolves v1/v2 PoW solution fields —
   `src/evaluator/types.rs:14`, `:80`
 - `EvalError` (enum) — typed evaluation failures, incl. `JitCostOverflow`,
@@ -163,6 +166,17 @@ admission and block validation call to check whether an input may be spent.
   from `BigInt`, and the only sanctioned cross-representation arm is
   `Tokens ↔ CollGeneric` of `(Coll[Byte], Long)` pairs)
   (`src/evaluator/types.rs:485-572`).
+- **Box/header identity is keyed to the retained wire slice.** An `SBox` or
+  `SHeader` materialized from the data serializer keeps the exact input bytes
+  (`EvalBox.raw_bytes`, `EvalHeader.id = blake2b256(slice)`, and an SBox id
+  hashing the retained slice), matching Scala `ErgoBox._bytes` /
+  `ErgoHeader.serializedId`; trailing bytes after an SBox are rejected, and
+  `Global.serialize(SBox)` emits the canonical re-serialization instead
+  (`src/evaluator/helpers/serialize.rs:588-674`,
+  `src/evaluator/opcodes/box_context.rs:285`).
+- **`SelectField` matches `Tuple2` only.** A non-pair `STuple` value
+  materializes as the raw `Coll` and is rejected, mirroring Scala's
+  `SelectField.eval` (`src/evaluator/opcodes/binding.rs:283-300`).
 - **Depth bound.** Recursion is capped at `MAX_EVAL_DEPTH = 110`
   (`DepthLimitExceeded`) — `src/evaluator/dispatch.rs:430-432`,
   `src/evaluator/types.rs:693`.

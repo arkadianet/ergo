@@ -2,7 +2,7 @@
 
 79 real, deployed ErgoScript sources (`.es`), vendored verbatim from the
 developer's `~/coding/reference` checkouts. This is the M1 parser's long-tail
-acceptance corpus: `ergo-compiler/tests/corpus_smoke.rs` parses every file with
+acceptance corpus: `ergo-compiler/tests/it/corpus_smoke.rs` parses every file with
 `ergo_compiler::parse(src, tree_version = 3)` and asserts the accept/reject
 verdict (and, on reject, the exact 1-based `line:col`) equals the committed
 `verdicts.json`.
@@ -80,7 +80,7 @@ Refresh `verdicts.json` from the live JVM oracle (needs `scala-cli` on PATH and,
 first run, network to resolve `sigma-state:6.0.2` from Maven Central):
 
 ```bash
-cargo test -p ergo-compiler --test corpus_smoke -- --ignored --nocapture
+cargo test -p ergo-compiler --test it corpus_smoke -- --ignored --nocapture
 ```
 
 `corpus_live_oracle_parity` spawns the oracle, re-derives every verdict, and

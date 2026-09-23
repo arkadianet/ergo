@@ -131,7 +131,7 @@ bytes pinned in this directory came from the run preserved at
 sigma-state's prover draws fresh secp256k1 randomness on every invocation
 (see `reference/sigmastate-interpreter/.../DLogProtocol.scala:68-72`,
 `CryptoConstants.scala:35-37`, `ProverInterpreter.scala:298,326,342,397`).
-The SHA-256 pins in `ergo-wallet/tests/proving_scala_oracle.rs::SIGNATURE_DIGESTS`
+The SHA-256 pins in `ergo-wallet/tests/it/proving_scala_oracle.rs::SIGNATURE_DIGESTS`
 lock the exact captured bytes; without those pins, the verifier would
 accept any future valid Scala proof for the same proposition and silently
 shift coverage off the pinned bytes.
@@ -150,7 +150,7 @@ sbt 'interpreterJVM / Test / testOnly sigmastate.crypto.SigningResidualsSpec'
 
 # 3. Paste the new Signature: hex into vectors 9–11's signature_hex
 # 4. Recompute SHA-256 of each and update SIGNATURE_DIGESTS in
-#    ergo-wallet/tests/proving_scala_oracle.rs
+#    ergo-wallet/tests/it/proving_scala_oracle.rs
 # 5. Add a new transcript file under extract-tools/scala-signing-harness/captured/
 ```
 

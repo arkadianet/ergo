@@ -194,7 +194,7 @@ hand-computed offsets).
   (§2), landed first exactly as specified. Both sides key off it.
 - `ergo_compiler::compile_with_source_map(env, source, tree_version, network)
   -> (CompileResult, SourceMap)` — additive; `compile` is untouched and the
-  bytes are identical (pinned by `tests/source_map.rs`).
+  bytes are identical (pinned by `tests/it/source_map.rs`).
 - `SourceMap { offset(id), node_count(), tags(), aligns_with(walk) }` — the
   consumer alignment check (§2) is per-node opcode tags, not just a count.
 

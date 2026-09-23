@@ -149,6 +149,12 @@ ergo-validation, ergo-state, gf2_192
   context-sensitive scripts could self-verify against the synthetic pre-header
   yet fail the chain's real context (`src/proving/prover.rs:90-106`). Cost
   enforcement is NOT done here — the bridge self-verify is authoritative.
+- **Change-address ownership.** The persisted change address must be owned by
+  the active master key: both the unlock-time boot check and the node's
+  update path re-derive the recorded path and reject a mismatch
+  (`ChangeAddressUntracked`), so the wallet never signs for an address it
+  cannot prove possession of (`ergo-node/src/node/wallet_bridge/commands/admin.rs:419`,
+  `ergo-node/src/wallet_boot.rs:128`).
 - **Secret-material hygiene.** Master keys, leaf scalars, derived AES keys,
   and commitment randomness `r` are `Zeroize`/`ZeroizeOnDrop`; `Debug` impls
   on `ExtendedSecretKey*`, `UnlockedSecret`, and `OwnCommitment` redact the
