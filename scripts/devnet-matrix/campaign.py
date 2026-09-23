@@ -2067,6 +2067,20 @@ def _self_test():
         if _saved_env_bin is not None:
             os.environ['RUST_NODE'] = _saved_env_bin
 
+    # ----- proofs step B: a seeded node AT GENESIS is up, not missing -----
+    #
+    # `steady` and `restart` seed their reference followers before the
+    # first block, where every Scala node answers `/info` with
+    # `fullHeight: null`. The seed check read that null as "did not come
+    # up" and failed `.work-m4p-f14-steady` although both followers ran,
+    # peered and logged 60 blocks. Only a node that did not ANSWER is
+    # missing.
+    from scenarios import common as _cs
+    assert _cs.seeded_nodes_missing(
+        {'scala2': None, 'scala3': 0}, unavailable=()) == [], 'genesis is up'
+    assert _cs.seeded_nodes_missing(
+        {'scala2': None, 'scala3': 7}, unavailable=('scala2',)) == ['scala2']
+
     # ----- proofs step A (3): the funding wait follows the chain -----
     #
     # `fund_miner` waited a FIXED 900 s. The coinbase is spendable only

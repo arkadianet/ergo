@@ -88,6 +88,16 @@ def drop_copied_peer_db(target):
     shutil.rmtree(target / 'peers', ignore_errors=True)
 
 
+def seeded_nodes_missing(heights, unavailable):
+    """The seeded nodes that did not come up: the ones that did not ANSWER.
+
+    A node at genesis answers `/info` with `fullHeight: null`, and
+    `steady`/`restart` seed before the first block, so a null height is
+    a node that is up on an empty chain, not a missing one.
+    """
+    return [node for node in heights if node in set(unavailable)]
+
+
 def seed_second_miner(ctx, campaign, lifecycle, nodes=('scala2',)):
     """Give miner 2 the chain by COPYING miner 1's data directory.
 
@@ -171,20 +181,23 @@ def seed_second_miner(ctx, campaign, lifecycle, nodes=('scala2',)):
     # decides whether it ran, and the scenario checks that itself.
     connected = _wait_for_peer_count(ctx, 'rust', 1 + len(nodes))
     ctx.note('follower_peers_after_seed', connected)
-    heights = {}
+    heights, unavailable = {}, []
     for node in ('scala', *nodes):
         try:
             heights[node] = (api(node, '/info') or {}).get('fullHeight')
         except Unavailable:
             heights[node] = None
+            unavailable.append(node)
     ctx.note('second_miner_seeded', {
         'copied_from': str(source), 'to': [str(t) for t in targets],
         'wallet_copied': False,
         'heights_after_seed': heights,
+        'unavailable_after_seed': unavailable,
         'why': 'the reference node cannot hand the chain to a second Scala '
                'node on this host; see the docstring',
     })
-    missing = [n for n in nodes if heights.get(n) is None]
+    missing = seeded_nodes_missing({n: heights.get(n) for n in nodes},
+                                   unavailable)
     if missing:
         ctx.fail(f'{", ".join(missing)} did not come up on the copied chain, so '
                  'the scenario is missing a node it was told to run',
