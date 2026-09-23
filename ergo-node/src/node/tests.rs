@@ -3596,8 +3596,9 @@ const POPOW_GENESIS_HEX: &str = "01000000000000000000000000000000000000000000000
 const POPOW_HEIGHT_2_HEX: &str = "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b828b0f6a0e6cb98ed4649c6e4cc00599ae78755324c79a8cec51e94ecca339d7a3a11a92de9c0ba1e95068f39bc1e08afa4ca23dff16de135fac64d0cf7dd1ab6291b70477f591ee8efb8a962d36ddbe3ac57591e39fe45ffb8c51c4939e41980387d9cfe9ba2d6b46bcba6f750f5be67d89679e921b78c277c5546a08cdb0955376fa0ea271e30601176502000000033c46c7fd7085638bf4bc902badb4e5a1942d3251d92d0eddd6fbe5d57e91553703df646d7f6138aede718a2a4f1a76d4125750e8ab496b7a8a25292d07e14cbadb0000000a03d0d0191b06164a2e86a170f0d8ac96cffa2e3312f2f5b0b1c3b1e082b9a0cd";
 
 fn popow_proof_frame() -> Vec<u8> {
+    use ergo_primitives::digest::ModifierId;
     use ergo_primitives::reader::VlqReader;
-    use ergo_ser::header::read_header;
+    use ergo_ser::header::{read_header, Header};
     use ergo_ser::popow_header::PoPowHeader;
     use ergo_ser::popow_proof::NipopowProof;
 
@@ -3605,10 +3606,17 @@ fn popow_proof_frame() -> Vec<u8> {
         let raw = hex::decode(hex_str).unwrap();
         read_header(&mut VlqReader::new(&raw)).unwrap()
     };
-    let popow_hdr = |h| PoPowHeader {
-        header: h,
-        interlinks: vec![],
-        interlinks_proof: vec![],
+    let popow_hdr = |h: Header| -> PoPowHeader {
+        if h.height == 1 {
+            return PoPowHeader {
+                header: h,
+                interlinks: vec![],
+                interlinks_proof: vec![0u8; 8],
+            };
+        }
+        let links = vec![ModifierId::from_bytes([0x11; 32])];
+        let fields = ergo_validation::popow::algos::pack_interlinks(&links);
+        ergo_validation::popow::algos::build_popow_header(h, links, &fields).unwrap()
     };
     let proof = NipopowProof {
         m: 6,

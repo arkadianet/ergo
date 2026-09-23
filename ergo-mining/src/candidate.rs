@@ -39,7 +39,7 @@ use ergo_ser::ergo_box::ErgoBox;
 use ergo_ser::header::{read_header, serialize_header_without_pow, Header};
 use ergo_ser::transaction::{bytes_to_sign, write_transaction, Transaction};
 use ergo_validation::active_params::active_params_to_extension_fields;
-use ergo_validation::popow::algos::unpack_interlinks;
+use ergo_validation::popow::algos::{is_genesis, unpack_interlinks};
 use ergo_validation::voting::validation_settings::validation_settings_update_to_extension_fields;
 use ergo_validation::{
     compute_epoch_votes, compute_next_params, validate_transaction_parsed,
@@ -373,7 +373,7 @@ pub fn generate_candidate<V: CandidateStateView>(
         // extension is malformed or missing them. Fail the build with a typed error
         // here rather than panicking the engine task downstream (`update_interlinks`
         // asserts a non-empty interlinks vector for a non-genesis header).
-        if *parent_header.parent_id.as_bytes() != [0u8; 32] && parent_interlinks.is_empty() {
+        if !is_genesis(&parent_header) && parent_interlinks.is_empty() {
             return Err(MiningError::Decode {
                 op: "parent_interlinks",
                 reason: "non-genesis parent extension carries no interlinks fields".into(),
