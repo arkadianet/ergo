@@ -127,6 +127,8 @@ def run(ctx):
                                'short_by': max(0, start + blocks - reached),
                                'blocks_accounted': len(readable),
                                'blocks_unread': unread,
+                               'why_unread': {o['height']: o['unread']
+                                              for o in observations if 'unread' in o},
                                'payments_submitted': len(sent)})
     if reached < start + blocks:
         ctx.fail(f'the miner produced {reached - start} of the {blocks} ordering '
