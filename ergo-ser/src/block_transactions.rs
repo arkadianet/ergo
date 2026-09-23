@@ -228,6 +228,18 @@ pub fn read_block_transactions_with_group_elements(
         for tx_idx in 0..count {
             let tx = read_transaction(r)
                 .map_err(|e| ReadError::InvalidData(format!("tx[{tx_idx}]: {e}")))?;
+            if !r.is_trusted() {
+                if tx.inputs.is_empty() {
+                    return Err(ReadError::InvalidData(format!(
+                        "tx[{tx_idx}]: transaction has no inputs"
+                    )));
+                }
+                if tx.output_candidates.is_empty() {
+                    return Err(ReadError::InvalidData(format!(
+                        "tx[{tx_idx}]: transaction has no outputs"
+                    )));
+                }
+            }
             transactions.push(tx);
             per_tx_group_elements.push(r.take_group_elements());
         }
@@ -337,6 +349,91 @@ mod tests {
         assert_eq!(decoded, bt);
     }
 
+    #[test]
+    fn read_block_transactions_rejects_populated_empty_transaction_section_at_first_tx() {
+        let count: usize = 2_000_000;
+        let empty_tx = Transaction {
+            inputs: vec![],
+            data_inputs: vec![],
+            output_candidates: vec![],
+        };
+        let mut tx_writer = VlqWriter::new();
+        write_transaction(&mut tx_writer, &empty_tx).unwrap();
+        let tx_bytes = tx_writer.result();
+        assert_eq!(tx_bytes.as_slice(), &[0, 0, 0, 0]);
+
+        let mut w = VlqWriter::new();
+        w.put_bytes(&[0x77; 32]);
+        w.put_u32(count as u32);
+        let mut bytes = w.result();
+        let first_tx_start = bytes.len();
+        bytes.resize(first_tx_start + count * tx_bytes.len(), 0);
+
+        let mut r = VlqReader::new(&bytes);
+        let err = read_block_transactions(&mut r).expect_err("empty transaction section");
+        assert!(format!("{err}").contains("tx[0]: transaction has no inputs"));
+        assert_eq!(r.position(), first_tx_start + tx_bytes.len());
+        assert_eq!(r.remaining(), (count - 1) * tx_bytes.len());
+    }
+
+    #[test]
+    fn read_block_transactions_rejects_untrusted_no_input_transaction() {
+        let bt = BlockTransactions {
+            header_id: ModifierId::from_bytes([0x55; 32]),
+            transactions: vec![Transaction {
+                inputs: vec![],
+                data_inputs: vec![],
+                output_candidates: vec![make_candidate(1_000_000)],
+            }],
+        };
+        let mut w = VlqWriter::new();
+        write_block_transactions(&mut w, &bt).unwrap();
+        let data = w.result();
+        let mut r = VlqReader::new(&data);
+        let err = read_block_transactions(&mut r).expect_err("no-input transaction");
+        assert!(format!("{err}").contains("transaction has no inputs"));
+    }
+
+    #[test]
+    fn read_block_transactions_rejects_untrusted_no_output_transaction() {
+        let mut tx = make_tx(0xAA);
+        tx.output_candidates.clear();
+        let bt = BlockTransactions {
+            header_id: ModifierId::from_bytes([0x56; 32]),
+            transactions: vec![tx],
+        };
+        let mut w = VlqWriter::new();
+        write_block_transactions(&mut w, &bt).unwrap();
+        let data = w.result();
+        let mut r = VlqReader::new(&data);
+        let err = read_block_transactions(&mut r).expect_err("no-output transaction");
+        assert!(format!("{err}").contains("transaction has no outputs"));
+    }
+
+    #[test]
+    fn read_stored_block_transactions_accepts_structurally_parseable_empty_transactions() {
+        let mut no_output = make_tx(0xBB);
+        no_output.output_candidates.clear();
+        let no_input = Transaction {
+            inputs: vec![],
+            data_inputs: vec![],
+            output_candidates: vec![make_candidate(1_000_000)],
+        };
+        let empty = Transaction {
+            inputs: vec![],
+            data_inputs: vec![],
+            output_candidates: vec![],
+        };
+        let bt = BlockTransactions {
+            header_id: ModifierId::from_bytes([0x57; 32]),
+            transactions: vec![empty, no_input, no_output],
+        };
+        let mut w = VlqWriter::new();
+        write_block_transactions(&mut w, &bt).unwrap();
+        let decoded = read_stored_block_transactions(&w.result()).unwrap();
+        assert_eq!(decoded, bt);
+    }
+
     /// Pin Scala-canonical v2 wire format for the new
     /// `write_block_transactions_with_version`. The v2+ shape
     /// inserts a `MAX_TRANSACTIONS_IN_BLOCK + block_version` u32
@@ -428,7 +525,10 @@ mod tests {
         let tree_bytes = hex::decode(tree_hex).unwrap();
         let tree = read_ergo_tree(&mut VlqReader::new(&tree_bytes)).unwrap();
         let tx = Transaction {
-            inputs: vec![],
+            inputs: vec![Input {
+                box_id: make_box_id(0x12),
+                spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+            }],
             data_inputs: vec![],
             output_candidates: vec![ErgoBoxCandidate::from_trusted_raw_parts(
                 1,
