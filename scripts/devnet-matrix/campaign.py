@@ -1215,6 +1215,7 @@ def run_scenario(name, args):
             'git_sha': subprocess.check_output(
                 ['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
             'binary': lifecycle.node_binary(),
+            'binary_provenance': lifecycle.node_binary_provenance(),
         },
         'scala': {'classpath': str(lifecycle.classpath_file('scala')),
                   'pinned_app_version': lifecycle.scala_app_version('scala')},
@@ -1911,6 +1912,53 @@ def _self_test():
     else:
         raise AssertionError(
             'evidence may not describe a classpath the node did not run')
+
+    # ----- proofs step A (2): never a Rust binary from somewhere else -----
+    #
+    # With `RUST_NODE` unset the node binary came from `cargo metadata`'s
+    # target directory, which on this host is the GLOBAL shared cache: a
+    # build from another worktree and another day, launched silently
+    # while the evidence named this checkout's commit. Only RUST_NODE or
+    # THIS checkout's own release build may be started.
+    import lifecycle as _lc_bin
+    _saved_root_bin = _lc_bin.ROOT
+    _saved_env_bin = os.environ.pop('RUST_NODE', None)
+    try:
+        with tempfile.TemporaryDirectory() as _tmp_bin:
+            _lc_bin.ROOT = Path(_tmp_bin)
+            try:
+                _lc_bin.node_binary()
+            except SystemExit as _refused:
+                assert 'RUST_NODE' in str(_refused), _refused
+            else:
+                raise AssertionError(
+                    'a checkout with no release build must refuse to start '
+                    'a Rust node, not resolve one elsewhere')
+            _local_bin = Path(_tmp_bin) / 'target' / 'release' / 'ergo-node'
+            _local_bin.parent.mkdir(parents=True)
+            _local_bin.write_text('#!/bin/sh\n')
+            _local_bin.chmod(0o755)
+            assert _lc_bin.node_binary() == str(_local_bin), \
+                _lc_bin.node_binary()
+            _prov = _lc_bin.node_binary_provenance()
+            assert _prov['source'] == 'worktree release build', _prov
+            assert _prov['path'] == str(_local_bin), _prov
+            assert len(_prov['sha256']) == 64, _prov
+            # An explicit RUST_NODE wins, and must name a real executable.
+            os.environ['RUST_NODE'] = str(Path(_tmp_bin) / 'nowhere')
+            try:
+                _lc_bin.node_binary()
+            except SystemExit as _refused:
+                assert 'nowhere' in str(_refused), _refused
+            else:
+                raise AssertionError('RUST_NODE naming no file must refuse')
+            os.environ['RUST_NODE'] = str(_local_bin)
+            assert _lc_bin.node_binary_provenance()['source'] == 'RUST_NODE'
+    finally:
+        _lc_bin.ROOT = _saved_root_bin
+        os.environ.pop('RUST_NODE', None)
+        if _saved_env_bin is not None:
+            os.environ['RUST_NODE'] = _saved_env_bin
 
     # ----- M4: the reconstruction accounting -----
     import inspect

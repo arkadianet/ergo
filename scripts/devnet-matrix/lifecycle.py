@@ -6,6 +6,7 @@ internal CPU miner; the Rust node only follows. Ports are private to this
 recipe (Scala 19560/19580, Rust 19561/19581) and never overlap the
 `devnet-mixed` recipe or any long-running node on this host.
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -265,29 +266,60 @@ def stop(names=None):
         config_path.unlink(missing_ok=True)
 
 
-def _workspace_node_binary() -> str:
-    """Path to the built `ergo-node` in this checkout's cargo target directory."""
-    metadata = subprocess.run(
-        ['cargo', 'metadata', '--no-deps', '--format-version', '1'],
-        cwd=ROOT, capture_output=True, text=True, check=True,
-    )
-    target = json.loads(metadata.stdout)['target_directory']
-    # Release first: the input-block processor's throughput is what the
-    # +-2 height window and the reconstruction rate are measured against,
-    # and a debug build is not a measurement of the shipped node.
-    for profile in ('release', 'debug'):
-        candidate = Path(target) / profile / 'ergo-node'
-        if candidate.exists():
-            return str(candidate)
-    raise SystemExit(
-        f'ergo-node not built under {target}; run '
-        '`cargo build --release -p ergo-node` or set RUST_NODE to the binary path'
-    )
+def _worktree_release_binary() -> Path:
+    """This checkout's own release build of `ergo-node`.
+
+    Not `cargo metadata`'s target directory: on a host whose cargo config
+    shares one target directory across checkouts, that resolves to
+    whichever worktree built last, and a run then measures a binary whose
+    source is not the commit its evidence names. Release only: the
+    input-block processor's throughput is what the +-2 height window and
+    the reconstruction rate are measured against, and a debug build is
+    not a measurement of the shipped node.
+    """
+    return ROOT / 'target' / 'release' / 'ergo-node'
+
+
+def _executable(path: Path) -> bool:
+    return path.is_file() and os.access(path, os.X_OK)
 
 
 def node_binary() -> str:
-    """The Rust binary this recipe will launch (release preferred)."""
-    return os.environ.get('RUST_NODE') or _workspace_node_binary()
+    """The Rust binary this recipe will launch, or a refusal.
+
+    `RUST_NODE` when set (and it must name an executable), otherwise this
+    checkout's release build. Nothing else is ever started.
+    """
+    explicit = os.environ.get('RUST_NODE')
+    if explicit:
+        if not _executable(Path(explicit)):
+            raise SystemExit(f'RUST_NODE={explicit} is not an executable file')
+        return explicit
+    local = _worktree_release_binary()
+    if _executable(local):
+        return str(local)
+    raise SystemExit(
+        f'no Rust node to start: RUST_NODE is unset and {local} does not exist. '
+        f'Build this checkout (`CARGO_TARGET_DIR={ROOT / "target"} cargo build '
+        '--release -p ergo-node`) or set RUST_NODE to the binary path; a '
+        'binary from another target directory is never picked up silently')
+
+
+def node_binary_provenance() -> dict:
+    """Which binary a run launched, where it came from, and its hash."""
+    path = Path(node_binary())
+    digest = hashlib.sha256()
+    with path.open('rb') as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b''):
+            digest.update(chunk)
+    return {
+        'path': str(path),
+        'source': 'RUST_NODE' if os.environ.get('RUST_NODE')
+                  else 'worktree release build',
+        'sha256': digest.hexdigest(),
+        'mtime': time.strftime('%Y-%m-%dT%H:%M:%S%z',
+                               time.localtime(path.stat().st_mtime)),
+    }
 
 
 def _command(name):
