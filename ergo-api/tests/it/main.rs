@@ -68,3 +68,5 @@ mod wallet_stubs;
 mod wallet_ui_auth_scope;
 mod wallet_ui_headers;
 mod wallet_ui_two_step_unlock;
+
+mod optional_api_key;

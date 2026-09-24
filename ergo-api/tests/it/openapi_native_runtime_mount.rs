@@ -856,7 +856,7 @@ async fn runtime_mount_submit_wired_mounts_submit_and_check() {
 }
 
 #[tokio::test]
-async fn runtime_mount_admin_wired_mounts_unauthed_shutdown_202() {
+async fn runtime_mount_admin_wired_unconfigured_shutdown_denied() {
     let app = router_with_mempool(ctx(None), Some(admin()));
     assert_all_gets_mounted(&app).await;
     for path in SUBMIT_ROUTES {
@@ -866,14 +866,14 @@ async fn runtime_mount_admin_wired_mounts_unauthed_shutdown_202() {
             "submit/check mount unconditionally; 409 submit_disabled without a bridge",
         );
     }
-    // Admin wired, no security gate: shutdown accepts unauthenticated.
+    // Admin wiring never bypasses the missing-key gate.
     let (status, body) = post(&app, SHUTDOWN_ROUTE, None).await;
     assert_eq!(
         status,
-        StatusCode::ACCEPTED,
-        "shutdown 202 when admin wired, no security"
+        StatusCode::FORBIDDEN,
+        "shutdown stays closed without a configured key"
     );
-    assert_eq!(body, "shutdown_requested");
+    assert!(body.contains("api-key-not-configured"));
 }
 
 #[tokio::test]

@@ -177,7 +177,7 @@ pub(crate) struct CandidateQuery {
 /// (longpoll semantics preserved). Bare `WorkMessageJson` (reused verbatim —
 /// already snake_case + Scala-parity). `503 candidate_unavailable` when no
 /// candidate can be built. This CLOSES the finding-3 gap: the flat compat
-/// `/mining/candidate` mounts ungated; this v1 path is api_key-gated.
+/// Both `/mining/candidate` and this v1 path require a configured API key.
 #[utoipa::path(
     get, path = "/api/v1/mining/candidate", tag = "mining",
     params(("longpoll" = Option<String>, Query, description = "getblocktemplate-style longpoll id — block until the candidate changes from this msg")),

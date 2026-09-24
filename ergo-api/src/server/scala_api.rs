@@ -66,13 +66,10 @@ pub(super) fn admin_router(
             axum::routing::any(crate::auth::unknown_gated_subpath),
         )
         .with_state(admin);
-    match security {
-        Some(security) => routes.route_layer(axum::middleware::from_fn_with_state(
-            security,
-            crate::auth::require_api_key,
-        )),
-        None => routes,
-    }
+    routes.route_layer(axum::middleware::from_fn_with_state(
+        security,
+        crate::auth::require_api_key,
+    ))
 }
 
 pub(super) fn auxiliary_router(
@@ -94,13 +91,10 @@ pub(super) fn auxiliary_router(
         // Scala leaves these open, but our own v1 design doc flagged that
         // as drift to close, not parity to keep.
         let mined = crate::mining::mining_router(mining);
-        let mined = match &security {
-            Some(security) => mined.route_layer(axum::middleware::from_fn_with_state(
-                security.clone(),
-                crate::auth::require_api_key,
-            )),
-            None => mined,
-        };
+        let mined = mined.route_layer(axum::middleware::from_fn_with_state(
+            security.clone(),
+            crate::auth::require_api_key,
+        ));
         router = router.merge(mined);
         operations.extend(
             documented

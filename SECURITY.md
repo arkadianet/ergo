@@ -68,9 +68,11 @@ public_bind = true` is also set — the node refuses to start and prints
 why. Loopback binds (`127.0.0.1`, `[::1]`) need no flag.
 
 The loader default is loopback; the shipped ready-to-use
-`ergo-node/ergo-node.toml` explicitly sets `[api] disabled = true` and
-contains no credential, so the API is not started until the operator
-enables it and supplies a generated hash.
+`ergo-node/ergo-node.toml` and example both enable the API without a
+credential. Dashboard, swagger and public REST work immediately. Privileged
+routes stay closed until an operator configures `[api.security] api_key_hash`.
+Operators upgrading the bundled file directly lose its old `hello` key;
+privileged calls with that key fail until they configure their own hash.
 
 ```toml
 [api]
@@ -87,44 +89,49 @@ For remote operator access, the recommended deployment is to keep the
 bind on loopback and front it with an authenticated reverse proxy, rather
 than setting `public_bind = true`.
 
-### `api_key` gates three route families: `/wallet/*`, `/node/shutdown`, `/mining/*`
+### Privileged routes fail closed
 
-Authentication uses an `api_key` HTTP header. The configured
-`[api.security] api_key_hash` is the lowercase Base16 of
-`Blake2b256(secret)`; the node hashes the incoming header bytes the same
-way and compares in constant time, returning HTTP `403` on any mismatch.
-Exactly three route families sit behind the gate — the wallet JSON API,
-the node shutdown control, and the mining surface — as the table below
-spells out; everything else is unauthenticated by design.
-This header name, hash, and rejection envelope match the Scala reference
-node.
+Authentication uses the `api_key` HTTP header and a constant-time comparison
+with the configured lowercase Base16 `Blake2b256(secret)` hash. A missing or
+wrong client key retains the Scala-compatible `403 invalid.api-key` response.
+With no configured hash, privileged routes return a distinct
+`403 api-key-not-configured` and setup guidance. The v1 tier gate uses its
+`401 unauthorized` envelope with the same guidance. Loopback does not bypass
+either gate.
 
-`api_key_hash` is **mandatory whenever the API server is enabled** — the
-node will not start without it. The only way to omit it is `[api]
-disabled = true`.
+The API distinguishes public routes from privileged routes:
 
-The auth gate covers exactly two route families:
-
-| Gated (require `api_key`) | Unauthenticated |
+| Privileged (require a configured hash and valid `api_key`) | Public (no key required) |
 |---|---|
-| `/wallet/*` (the wallet JSON API) | All read routes (`/info`, `/blocks/*`, `/peers/*`, `/utxo/*`, `/blockchain/*`, `/api/v1/*` reads) |
-| `POST /node/shutdown` and `POST /api/v1/node/shutdown` | Transaction/block submission (`POST /transactions*`, `POST /blocks`, `POST /api/v1/mempool/{submit,check}`) |
-| `/mining/*` — candidate, **solution submission**, reward address/pubkey (hardening over Scala, which leaves these open) | `/utils/*`, `/metrics`, the dashboard, and `/wallet/ui*` |
+| `/wallet/*`, `/scan/*`, `/api/v1/wallet/*` | Dashboard `/`, `/wallet/ui*` redirects, swagger |
+| `POST /node/shutdown`, `POST /api/v1/node/shutdown`, `POST /peers/connect`, `POST /api/v1/votes` | Read REST, including `GET /api/v1/votes`, `/info`, `/blocks/*`, `/peers/*`, `/blockchain/*` |
+| `/mining/*` (candidate, solution, reward address/public key) | Transaction submission/checks: `POST /transactions`, `/transactions/bytes`, `/transactions/check`, `/transactions/checkBytes`, `/api/v1/mempool/{submit,check}`; `POST /blocks` |
+| v1 Operator/Admin routes (node config, network controls, mining controls, operator votes, scans, account management/PSBT, watch writes, private-key export, webhooks); script compute when configured to require a key | Public v1 queries including watch-only account reads, `/emission/*`, `/utils/*`, `/metrics` |
 
-This narrow gate is **deliberate Scala parity**, with one deliberate
-divergence: the Scala reference node leaves `/mining/*` unauthenticated,
-but this node gates it (solution submission drives the block pipeline and
-the reward routes expose the miner payout identity). The consequence of
-the remaining open surface is that when `public_bind = true` is set on a
-routable interface, transaction and block submission, and `/metrics`, are
-all publicly callable. The config-load error string spells this out before
-you can bring the node up on a non-loopback address. Keep `/metrics` on
+The whole wallet, scan and node prefixes are gated, including unknown subpaths;
+other unmatched paths return `404`. Public means no API-key authentication;
+normal validation, subsystem availability and admission policies still apply.
+
+Transaction submission is public in Scala (`TransactionsApiRoute.scala:174-209`).
+This node also keeps block submission public by policy; Scala gates it
+(`BlocksApiRoute.scala:127`). This node gates all four mining routes above;
+Scala leaves those four open (`MiningApiRoute.scala:45,77,86,98`).
+
+
+Use [the configuration guide](docs/configuration.md#security-notes-for-the-api) to
+generate a random secret; set its hash under `[api.security]` and restart.
+Neither template ships a key.
+
+`local_reverse_proxy = true` withdraws loopback trust for rate limits, Admin
+posture and transaction budgets. It does **not** authenticate clients or unlock
+privileged routes. Configure authentication and per-client limits at the proxy.
+The Host guard remains active on loopback: a DNS-rebinding browser can send an
+`api_key` header under its same-origin hostname, so header spelling alone is no
+defense. Keep the Host allowlist narrow and use a secret key.
+
+On a routable interface, `public_bind = true` makes public reads, transaction
+and block submission, and metrics network-callable. Keep `/metrics` on
 loopback or behind an authenticated proxy.
-
-> Note: enabling a non-loopback bind currently produces no runtime warning
-> log once `public_bind = true` is accepted — the only operator-facing
-> signal is the config-load rejection you must clear to enable it. Treat
-> the act of setting `public_bind = true` as the warning.
 
 ### The wallet UI is a thin client; the browser never holds keys
 

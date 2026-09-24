@@ -1,15 +1,13 @@
 //! HTTP server: axum router, handlers, asset serving.
 //!
-//! Local-only by default. The caller chooses the bind address; binding
-//! beyond loopback requires `[api] public_bind = true` plus
-//! `[api.security].api_key_hash` at the config layer. `/wallet/*` and
-//! `/node/shutdown` are auth-gated by `require_api_key` middleware
-//! whenever a `Some(ApiSecurity)` reaches `router_with_mempool_and_
-//! wallet_and_security`; the rest of the surface stays unauthenticated.
+//! Local-only by default. Binding beyond loopback requires
+//! `[api] public_bind = true`. Privileged routes always carry the shared
+//! API-key gate: a configured hash checks the client key, while an absent
+//! hash denies access with setup guidance. Public routes remain open.
 //!
 //! Entry points come in two tiers. The positional convenience builders
 //! (`serve_on`, `serve`, `router`, `router_with_wallet`) hardwire a
-//! `NoopMempoolView`/`NoopWalletAdmin` and no auth gate — they let tests
+//! `NoopMempoolView`/`NoopWalletAdmin` with privileged routes closed — they let tests
 //! stand up a router without assembling a full `ServerCtx`. Production
 //! goes through the explicit builder
 //! (`serve_on_with_mempool_and_wallet_and_security` /
@@ -218,7 +216,7 @@ pub fn serve_on(
 /// callers that don't need the overlay.
 ///
 /// Wallet routes are backed by a [`crate::wallet::NoopWalletAdmin`] and
-/// the auth gate is `None`. For production, use
+/// privileged routes are closed (`security = None`). For production, use
 /// [`serve_on_with_mempool_and_wallet_and_security`] directly.
 pub fn serve_on_with_mempool(
     ctx: ServerCtx,
@@ -226,7 +224,7 @@ pub fn serve_on_with_mempool(
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     admin: Option<Arc<dyn NodeAdmin>>,
 ) -> JoinHandle<()> {
-    // Test entry point: no wallet, no auth. Production uses
+    // Test entry point: no wallet, privileged routes closed. Production uses
     // [`serve_on_with_mempool_and_wallet_and_security`] directly.
     serve_on_with_mempool_and_wallet_and_security(
         ctx,
@@ -241,13 +239,8 @@ pub fn serve_on_with_mempool(
 /// Full-featured server entry point: mempool overlay + `NodeAdmin` +
 /// `WalletAdmin` + explicit `Option<Arc<ApiSecurity>>`.
 ///
-/// Production `ergo-node` passes `Some(operator_security)` so
-/// `/wallet/*` and the two `/node/shutdown` aliases are gated by the
-/// configured `api_key_hash`. Tests that don't exercise the auth gate
-/// pass `None` and document the choice at the call site — no
-/// convenience wrapper exists that hides the parameter, by design:
-/// it would re-introduce the "did production remember to enable auth?"
-/// footgun.
+/// Production passes `Some(operator_security)` when a hash is configured,
+/// or `None` to keep privileged routes closed. Public routes stay available.
 pub fn serve_on_with_mempool_and_wallet_and_security(
     ctx: ServerCtx,
     listener: tokio::net::TcpListener,

@@ -667,32 +667,14 @@ impl NodeConfig {
             Some(addr)
         };
 
-        // [api.security] — always required when the API server is enabled,
-        // matching Scala `ErgoApp.scala:40-43` `require(apiKeyHash.isDefined,
-        // "API key hash must be set")`. Generate a RANDOM secret first
-        // (never a guessable word) and hash it, e.g.:
-        //   secret=$(openssl rand -hex 32)
-        //   printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1
-        // Validated here so a malformed value exits the node with a clear
-        // shell message rather than silently disabling the gate downstream.
-        let api_key_hash = if api_bind.is_some() {
-            let raw = toml_cfg
-                .api
-                .security
-                .as_ref()
-                .and_then(|s| s.api_key_hash.as_deref())
-                .ok_or_else(|| {
-                    "[api.security] api_key_hash is required when the API is enabled. \
-                     Set it to the lowercase Base16 of Blake2b256(<your-secret>). Generate \
-                     a RANDOM secret first — never a guessable word — save it, then hash \
-                     it, e.g.: `secret=$(openssl rand -hex 32); printf '%s' \"$secret\" | \
-                     b2sum -l 256 | cut -d' ' -f1` (or without openssl: `secret=$(head -c \
-                     32 /dev/urandom | xxd -p -c 256); printf '%s' \"$secret\" | b2sum -l \
-                     256 | cut -d' ' -f1`). \
-                     Disable the API server entirely with [api] disabled = true if you \
-                     have no operator surface to expose."
-                        .to_string()
-                })?;
+        // An absent hash keeps public routes available and privileged routes closed.
+        // Validate every supplied hash before passing it to the API wiring.
+        let api_key_hash = if let Some(raw) = toml_cfg
+            .api
+            .security
+            .as_ref()
+            .and_then(|s| s.api_key_hash.as_deref())
+        {
             if raw.len() != 64 {
                 return Err(format!(
                     "[api.security] api_key_hash must be 64 lowercase hex chars (got {})",
@@ -710,7 +692,7 @@ impl NodeConfig {
                         .to_string(),
                 );
             }
-            Some(raw.to_string())
+            api_bind.map(|_| raw.to_string())
         } else {
             None
         };
