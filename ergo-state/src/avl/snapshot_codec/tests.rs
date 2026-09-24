@@ -594,6 +594,32 @@ fn reconstruct_round_trips_shallow_tree_at_mainnet_depth() {
 }
 
 #[test]
+fn reconstruct_rejects_manifest_height_that_disagrees_with_graph() {
+    let tree = populated_tree(3);
+    let server = SnapshotServer::build(&tree, 100, MAINNET_MANIFEST_DEPTH).unwrap();
+    let mut manifest = server.manifest_bytes.clone();
+    manifest[0] = manifest[0].wrapping_add(1);
+
+    let err = reconstruct_tree(&manifest, &chunks_map_from_server(&server)).unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("computed graph height") && msg.contains("manifest-declared tree height"),
+        "declared/graph height mismatch must be rejected; got: {msg}",
+    );
+}
+
+#[test]
+fn manifest_tree_height_parser_rejects_short_manifests() {
+    let tree = populated_tree(3);
+    let server = SnapshotServer::build(&tree, 100, MAINNET_MANIFEST_DEPTH).unwrap();
+    assert_eq!(
+        manifest_tree_height(&server.manifest_bytes).unwrap(),
+        tree.tree_height(),
+    );
+    assert!(manifest_tree_height(&[0]).is_err());
+}
+
+#[test]
 fn reconstruct_round_trips_tree_with_chunks() {
     // Force chunks by using manifest_depth=1. The tree's top
     // subtree fits in one or two nodes of manifest body; chunks
