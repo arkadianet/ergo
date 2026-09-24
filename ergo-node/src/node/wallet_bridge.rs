@@ -781,20 +781,6 @@ pub trait ChainStateAccessor: Send + Sync {
     ) -> Result<Option<ergo_state::wallet::scan::RescanBlock>, ergo_state::store::StateError> {
         Ok(self.read_block_at(height))
     }
-    /// True when `read_block_at` can return real block data. Distinct from
-    /// `is_pruned()` (which gates `/wallet/restore`) — this gates
-    /// `/wallet/rescan`. When false, rescan is refused before touching any
-    /// wallet state, preventing the destructive clear-then-skip sequence.
-    fn read_block_at_supported(&self) -> bool {
-        let Ok(tip) = self.try_tip_height() else {
-            return false;
-        };
-        if tip < 1 {
-            return false;
-        }
-        matches!(self.try_read_block_at(1), Ok(Some(_)))
-    }
-
     /// Build the blockchain state context needed for signing: last ≤10
     /// applied headers + candidate pre-header + previous state digest.
     /// Returns `Err` if the chain tip is below 10 blocks (still syncing).
@@ -898,10 +884,12 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
     }
 
     fn try_tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
-        self.reader
-            .committed_tip()?
-            .map(|(h, _)| h)
-            .ok_or(ergo_state::store::StateError::NoCommittedState)
+        // Read the live committed full-block tip on every call. A node that boots
+        // below EIP-27 activation and syncs past it must update the candidate
+        // height (tip + 1) used for reserved balances and signing. This is the
+        // same chain_state_meta source used by the block validator.
+        // An unstarted chain has height 0; only actual read failures are errors.
+        Ok(self.reader.committed_tip()?.map_or(0, |(h, _)| h))
     }
 
     fn is_pruned(&self) -> bool {
@@ -1271,6 +1259,9 @@ pub async fn run_wallet_writer(
     let unlock_limiter = commands::admin::AttemptLimiter::new();
     let check_limiter = commands::admin::AttemptLimiter::new();
     while let Some(cmd) = rx.recv().await {
+        let Some(cmd) = scan_guard::gate(cmd, &db) else {
+            continue;
+        };
         match cmd {
             WalletCommand::Status { reply } => commands::admin::status(&ctx, reply).await,
             WalletCommand::Init {
@@ -1439,6 +1430,7 @@ pub async fn run_wallet_writer(
 // `commands::WriterContext` plus the per-command params +
 // reply oneshot.
 mod commands;
+mod scan_guard;
 
 mod support;
 #[cfg(test)]
@@ -1493,6 +1485,32 @@ mod scan_invalidation_tests {
             flag_set(&db),
             "a registry load failure must set WALLET_SCAN_INVALIDATED for rescan"
         );
+    }
+
+    #[test]
+    fn chain_tip_no_committed_chain_returns_zero() {
+        let (_d, db) = temp_db();
+        let accessor = ChainStateAccessorImpl::new(db, false, None);
+        use tracing_subscriber::prelude::*;
+        struct WarnCounter(Arc<std::sync::atomic::AtomicUsize>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnCounter {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == tracing::Level::WARN {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
+        let warnings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(WarnCounter(warnings.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            assert_eq!(accessor.try_tip_height().unwrap(), 0);
+            assert_eq!(accessor.tip_height(), 0);
+        });
+        assert_eq!(warnings.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[test]

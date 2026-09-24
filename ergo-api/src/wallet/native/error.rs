@@ -65,6 +65,7 @@ pub(crate) fn map_err(e: WalletAdminError) -> NativeErr {
         E::WalletExists => (StatusCode::CONFLICT, "wallet_exists"),
         E::DerivationPathExists => (StatusCode::CONFLICT, "derivation_path_exists"),
         E::AddressNotTracked => (StatusCode::NOT_FOUND, "address_not_found"),
+        E::ScanInvalidated => (StatusCode::CONFLICT, "scan_invalidated"),
         E::RescanUnavailable(_) => (StatusCode::CONFLICT, "rescan_unavailable"),
         E::SensitiveOpDisabled => (StatusCode::FORBIDDEN, "sensitive_op_disabled"),
         E::AcknowledgementRequired => (StatusCode::BAD_REQUEST, "acknowledgement_required"),
@@ -97,6 +98,7 @@ pub(crate) fn map_err(e: WalletAdminError) -> NativeErr {
         | E::InsufficientFunds(d)
         | E::ReemissionSpendNotAllowed(d)
         | E::TokenBurnNotAllowed(d) => Some(d.clone()),
+        E::ScanInvalidated => Some(e.to_string()),
         _ => None,
     };
     native_err(status, reason, detail)
@@ -169,5 +171,22 @@ mod tests {
         .unwrap();
         assert!(body.get("detail").is_none());
         assert_eq!(body["reason"], "box_not_found");
+    }
+
+    #[test]
+    fn wallet_scan_invalidated_maps_to_conflict_with_recovery_detail() {
+        let (status, axum::Json(body)) = map_err(crate::wallet::WalletAdminError::ScanInvalidated);
+        assert_eq!(status, StatusCode::CONFLICT);
+        let body = serde_json::to_value(body).unwrap();
+        assert_eq!(body["reason"], "scan_invalidated");
+        assert!(body["detail"].as_str().unwrap().contains("fromHeight=0"));
+    }
+
+    #[test]
+    fn rescan_preflight_unavailable_maps_to_conflict() {
+        let (status, _) = map_err(crate::wallet::WalletAdminError::RescanUnavailable(
+            "chain block-read history is unavailable before height 1".to_string(),
+        ));
+        assert_eq!(status, StatusCode::CONFLICT);
     }
 }
