@@ -456,6 +456,7 @@ pub(super) fn process_block_utxo(
     )
     .map_err(ergo_validation::block::BlockValidationError::Header)?;
     // The target epoch extension is validated before its parameters price transactions.
+    let rule_306_max_block_size = ProtocolParams::from_active(store.active_params()).max_block_size;
     let active_for_this_block =
         ProtocolParams::for_block(store.active_params(), voted_params_row.as_ref());
     let params = &active_for_this_block;
@@ -463,6 +464,7 @@ pub(super) fn process_block_utxo(
         parent: &parent_checked,
         utxo: store,
         params,
+        rule_306_max_block_size,
         voting_length,
         votes_unknown_rule_disabled,
         parent_extension: parent_extension.as_ref(),

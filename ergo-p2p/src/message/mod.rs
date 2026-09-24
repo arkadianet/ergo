@@ -12,7 +12,7 @@ use ergo_primitives::writer::VlqWriter;
 use thiserror::Error;
 
 use crate::handshake::HandshakeError;
-use crate::types::{InvData, ModifiersData, NipopowProofData, SnapshotsInfo};
+use crate::types::{InvData, ModifierTypeId, ModifiersData, NipopowProofData, SnapshotsInfo};
 
 // ---- Message codes [protocol, verified against Scala source] ----
 
@@ -33,18 +33,17 @@ pub const CODE_GET_NIPOPOW_PROOF: u8 = 90;
 pub const CODE_NIPOPOW_PROOF: u8 = 91;
 
 const MAX_INV_OBJECTS: usize = 400;
+const MAX_MODIFIERS: usize = 400;
 const MODIFIER_ID_SIZE: usize = 32;
 const MAX_MODIFIER_MESSAGE_SIZE: usize = 2_048_576;
 const MAX_MODIFIER_WITH_RESERVE: usize = MAX_MODIFIER_MESSAGE_SIZE * 4;
 
 /// Smallest possible on-wire size of one `Modifiers` entry: a 32-byte
-/// modifier id plus the ≥1-byte VLQ length prefix of its payload. `count`
-/// is a VLQ that `get_u32_exact` bounds only to i32::MAX, so the up-front
-/// `Vec::with_capacity` is capped at `remaining / MIN_MODIFIER_ENTRY_BYTES`
-/// — the most entries the payload can physically hold. The per-entry size
-/// accounting below still enforces `MAX_MODIFIER_WITH_RESERVE`; this only
-/// stops a tiny packet claiming `count = i32::MAX` from reserving ~120 GiB
-/// before the first entry is read.
+/// modifier id plus the ≥1-byte VLQ length prefix of its payload. The
+/// semantic count cap is applied before allocation, and the up-front
+/// `Vec::with_capacity` is additionally capped at
+/// `remaining / MIN_MODIFIER_ENTRY_BYTES`. The per-entry size accounting below
+/// still enforces `MAX_MODIFIER_WITH_RESERVE`.
 const MIN_MODIFIER_ENTRY_BYTES: usize = MODIFIER_ID_SIZE + 1;
 
 /// Smallest on-wire size of one `SnapshotsInfo` entry: a ≥1-byte zig-zag VLQ
@@ -59,6 +58,10 @@ pub enum MessageError {
     EmptyInv,
     #[error("too many inv objects: {0} (max {MAX_INV_OBJECTS})")]
     TooManyInv(usize),
+    #[error("too many modifiers: {0} (max {MAX_MODIFIERS})")]
+    TooManyModifiers(usize),
+    #[error("unknown modifier type: {0}")]
+    UnknownModifierType(u8),
     #[error("empty modifiers list")]
     EmptyModifiers,
     #[error("modifier message too large: {0} bytes")]
@@ -168,9 +171,15 @@ pub fn serialize_modifiers(data: &ModifiersData) -> Result<Vec<u8>, MessageError
 pub fn deserialize_modifiers(payload: &[u8]) -> Result<ModifiersData, MessageError> {
     let mut r = VlqReader::new(payload);
     let type_id = r.get_u8()?;
+    if ModifierTypeId::from_byte(type_id).is_none() {
+        return Err(MessageError::UnknownModifierType(type_id));
+    }
     let count = r.get_u32_exact()? as usize;
     if count == 0 {
         return Err(MessageError::EmptyModifiers);
+    }
+    if count > MAX_MODIFIERS {
+        return Err(MessageError::TooManyModifiers(count));
     }
 
     let header_len = 5;

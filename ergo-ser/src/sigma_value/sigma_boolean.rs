@@ -5,7 +5,7 @@ use ergo_primitives::group_element::{canonical_encoding, read_group_element};
 use ergo_primitives::reader::{ReadError, VlqReader};
 use ergo_primitives::writer::VlqWriter;
 
-use super::SigmaBoolean;
+use super::{is_valid_cthreshold_shape, SigmaBoolean};
 use crate::error::WriteError;
 
 // SigmaPropCodes from sigmastate-interpreter (SigmaPropCodes.scala).
@@ -65,10 +65,15 @@ pub fn write_sigma_boolean(w: &mut VlqWriter, sb: &SigmaBoolean) -> Result<(), W
             }
         }
         SigmaBoolean::Cthreshold { k, children } => {
-            check_children_len(children.len(), "Cthreshold")?;
+            let n = children.len();
+            if !is_valid_cthreshold_shape(*k, n) {
+                return Err(WriteError::InvalidData(format!(
+                    "Cthreshold invariant requires 0 <= k <= n <= 255: k={k}, n={n}"
+                )));
+            }
             w.put_u8(SIGMA_THRESHOLD);
             w.put_u16(*k);
-            w.put_u16(children.len() as u16);
+            w.put_u16(n as u16);
             for child in children {
                 write_sigma_boolean(w, child)?;
             }
@@ -130,6 +135,11 @@ pub(super) fn read_sigma_boolean_at_depth(
             // Scala: k = r.getUShort(), n = r.getUShort()
             let k = r.get_u16()?;
             let count = r.get_u16()? as usize;
+            if !r.is_trusted() && !is_valid_cthreshold_shape(k, count) {
+                return Err(ReadError::InvalidData(format!(
+                    "Cthreshold invariant requires 0 <= k <= n <= 255: k={k}, n={count}"
+                )));
+            }
             let mut children = Vec::with_capacity(count);
             for _ in 0..count {
                 children.push(read_sigma_boolean_at_depth(r, next)?);
@@ -324,6 +334,90 @@ mod tests {
         // 40 expr + 40 sigma = 80 < 110 → accepted.
         let ok = body(40, 40);
         assert!(crate::opcode::parse_body(&mut VlqReader::new(&ok), 0).is_ok());
+    }
+
+    fn cthreshold_bytes(k: u16, n: u16) -> Vec<u8> {
+        let mut w = VlqWriter::new();
+        w.put_u8(SIGMA_THRESHOLD);
+        w.put_u16(k);
+        w.put_u16(n);
+        for _ in 0..n {
+            w.put_u8(TRIVIAL_PROP_TRUE);
+        }
+        w.result()
+    }
+
+    #[test]
+    fn write_sigma_boolean_rejects_invalid_cthreshold_shapes() {
+        for (k, n) in [(2u16, 1usize), (256, 1), (0, 256), (256, 256)] {
+            let mut w = VlqWriter::new();
+            let result = write_sigma_boolean(
+                &mut w,
+                &SigmaBoolean::Cthreshold {
+                    k,
+                    children: vec![SigmaBoolean::TrivialProp(true); n],
+                },
+            );
+            assert!(result.is_err(), "k={k}, n={n} must be rejected");
+        }
+    }
+
+    #[test]
+    fn write_sigma_boolean_accepts_cthreshold_boundaries() {
+        for (k, n) in [(0u16, 0usize), (1, 1), (255, 255)] {
+            let mut w = VlqWriter::new();
+            let result = write_sigma_boolean(
+                &mut w,
+                &SigmaBoolean::Cthreshold {
+                    k,
+                    children: vec![SigmaBoolean::TrivialProp(true); n],
+                },
+            );
+            assert!(result.is_ok(), "k={k}, n={n} must be accepted");
+        }
+    }
+
+    #[test]
+    fn untrusted_cthreshold_reader_rejects_invalid_shapes() {
+        for (k, n) in [(3u16, 2u16), (0, 256)] {
+            let bytes = cthreshold_bytes(k, n);
+            let mut r = VlqReader::new(&bytes);
+            let err = read_value(&mut r, &SigmaType::SSigmaProp).unwrap_err();
+            assert!(
+                matches!(&err, ReadError::InvalidData(_)),
+                "k={k}, n={n} returned {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn trusted_cthreshold_reader_preserves_malformed_values() {
+        for (k, n) in [(3u16, 2u16), (0, 256)] {
+            let bytes = cthreshold_bytes(k, n);
+            let mut r = VlqReader::new(&bytes).trusted();
+            let decoded = read_value(&mut r, &SigmaType::SSigmaProp).unwrap();
+            match decoded {
+                SigmaValue::SigmaProp(SigmaBoolean::Cthreshold {
+                    k: decoded_k,
+                    children,
+                }) => {
+                    assert_eq!(decoded_k, k);
+                    assert_eq!(children.len(), n as usize);
+                }
+                other => panic!("unexpected decoded value: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn valid_cthreshold_boundaries_roundtrip() {
+        for (k, n) in [(0u16, 0usize), (1, 1), (255, 255)] {
+            let sb = SigmaBoolean::Cthreshold {
+                k,
+                children: vec![SigmaBoolean::TrivialProp(true); n],
+            };
+            roundtrip_value(&SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb));
+        }
     }
 
     #[test]

@@ -1570,7 +1570,10 @@ mod tests {
             let proof = production_profile_popow_proof();
             let popow = state.popow_bootstrap.as_mut().unwrap();
             popow.mark_requested(peer, now);
-            popow.on_proof_received(peer, proof.clone()).unwrap();
+            assert!(matches!(
+                popow.on_proof_received(peer, proof.clone()),
+                ergo_sync::popow_bootstrap::PopowProofOutcome::Verified(_)
+            ));
             super::handle_sync_tick_at(&mut state, now);
             assert_eq!(
                 sync_info_count(&mut rx),
@@ -1580,7 +1583,10 @@ mod tests {
             let other = "127.0.0.1:19002".parse().unwrap();
             let popow = state.popow_bootstrap.as_mut().unwrap();
             popow.mark_requested(other, now);
-            popow.on_proof_received(other, proof).unwrap();
+            assert!(matches!(
+                popow.on_proof_received(other, proof),
+                ergo_sync::popow_bootstrap::PopowProofOutcome::Verified(_)
+            ));
 
             super::handle_sync_tick_at(&mut state, now);
             assert_eq!(
@@ -1698,7 +1704,10 @@ mod tests {
         let peer: ergo_p2p::peer::PeerId = "127.0.0.1:19001".parse().unwrap();
         let now = std::time::Instant::now();
         popow.mark_requested(peer, now);
-        assert!(popow.on_proof_received(peer, proof).is_some());
+        assert!(matches!(
+            popow.on_proof_received(peer, proof),
+            ergo_sync::popow_bootstrap::PopowProofOutcome::Verified(_)
+        ));
         assert!(popow.quorum_reached());
         state.popow_bootstrap = Some(popow);
         assert!(!crate::node::sync_helpers::popow_blocks_sync_info(&state));

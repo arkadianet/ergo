@@ -194,6 +194,7 @@ pub struct SyncExecutor {
     /// `script_validation_checkpoint` above: this one binds one header id on
     /// the header chain (Scala `hdrCheckpoint`) and skips nothing.
     header_checkpoint: Option<header_proc::HeaderCheckpoint>,
+    genesis_id: Option<[u8; 32]>,
     /// EIP-27 re-emission rule inputs for this node's network, plumbed
     /// through to `validate_full_block_parallel` via `process_block` so
     /// every block transaction is checked against the re-emission burning
@@ -253,6 +254,7 @@ impl SyncExecutor {
             recovery_done: false,
             script_validation_checkpoint: None,
             header_checkpoint: None,
+            genesis_id: None,
             reemission: None,
             header_perf: HeaderPerfCounters::default(),
             block_perf: BlockPerfCounters::default(),
@@ -291,6 +293,16 @@ impl SyncExecutor {
     /// install) so they can enforce the same anchor.
     pub fn header_checkpoint(&self) -> Option<header_proc::HeaderCheckpoint> {
         self.header_checkpoint
+    }
+
+    /// Set the configured first mined header id.
+    pub fn set_genesis_id(&mut self, genesis_id: Option<[u8; 32]>) {
+        self.genesis_id = genesis_id;
+    }
+
+    /// Return the configured first mined header id, if any.
+    pub fn genesis_id(&self) -> Option<[u8; 32]> {
+        self.genesis_id
     }
 
     /// Set the EIP-27 re-emission rule inputs. `Some` enables the
@@ -409,9 +421,18 @@ impl SyncExecutor {
         wallet_wiring: Option<ergo_state::wallet::WalletWiring<'_>>,
     ) -> Vec<Action> {
         match action {
-            Action::ValidateHeader { peer, header_bytes } => {
-                self.handle_validate_header(peer, &header_bytes, store, coordinator, now)
-            }
+            Action::ValidateHeader {
+                peer,
+                modifier_id,
+                header_bytes,
+            } => self.handle_validate_header(
+                peer,
+                &modifier_id,
+                &header_bytes,
+                store,
+                coordinator,
+                now,
+            ),
             Action::AssembleBlock { header_id } => {
                 self.handle_assemble_block(&header_id, store, coordinator, wallet_wiring)
             }
@@ -456,8 +477,13 @@ impl SyncExecutor {
         let mut headers_to_validate = Vec::new();
         let mut remaining = VecDeque::new();
         for action in actions {
-            if let Action::ValidateHeader { peer, header_bytes } = action {
-                headers_to_validate.push((peer, header_bytes));
+            if let Action::ValidateHeader {
+                peer,
+                modifier_id,
+                header_bytes,
+            } = action
+            {
+                headers_to_validate.push((peer, modifier_id, header_bytes));
             } else {
                 remaining.push_back(action);
             }

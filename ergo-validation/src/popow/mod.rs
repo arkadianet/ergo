@@ -26,8 +26,8 @@ pub mod proof;
 pub mod verifier;
 
 pub use algos::{
-    best_arg, best_arg_from_levels, lowest_common_ancestor, max_level_of, update_interlinks,
-    GENESIS_LEVEL,
+    best_arg, best_arg_from_levels, is_genesis, lowest_common_ancestor, max_level_of,
+    update_interlinks, GENESIS_LEVEL,
 };
 pub use merkle::verify_batch_merkle_proof;
 pub use proof::NipopowProofExt;

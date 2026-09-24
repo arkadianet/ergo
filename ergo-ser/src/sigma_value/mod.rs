@@ -73,6 +73,12 @@ pub enum SigmaBoolean {
     },
 }
 
+pub const MAX_CTHRESHOLD_CHILDREN: usize = 255;
+
+pub fn is_valid_cthreshold_shape(k: u16, n: usize) -> bool {
+    usize::from(k) <= n && n <= MAX_CTHRESHOLD_CHILDREN
+}
+
 /// On-chain AVL+ tree handle: the authenticated digest plus the tree's
 /// mutability flags and key/value shape.
 #[derive(Debug, Clone, PartialEq, Eq)]

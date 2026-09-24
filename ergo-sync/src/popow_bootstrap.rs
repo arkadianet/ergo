@@ -27,6 +27,7 @@ use std::time::Instant;
 
 use ergo_crypto::difficulty::DifficultyParams;
 use ergo_p2p::peer::PeerId;
+use ergo_p2p::types::{P2P_NIPOPOW_PROOF_K, P2P_NIPOPOW_PROOF_M};
 use ergo_ser::header::Header;
 use ergo_ser::popow_proof::NipopowProof;
 use ergo_validation::popow::{NipopowVerificationResult, NipopowVerifier};
@@ -47,6 +48,96 @@ pub enum PopowBootstrapState {
     Abandoned { reason: String },
 }
 
+/// Why an inbound proof was rejected before NiPoPoW verification.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PopowProofRejection {
+    /// The minimum superchain length differs from the request.
+    #[error("wrong proof m: expected {expected}, got {actual}")]
+    WrongM { expected: u32, actual: u32 },
+    /// The declared suffix length differs from the request.
+    #[error("wrong proof k: expected {expected}, got {actual}")]
+    WrongK { expected: u32, actual: u32 },
+    /// Bootstrap requires a continuous proof.
+    #[error("bootstrap proof is not continuous")]
+    NonContinuous,
+    /// The suffix head and tail do not contain exactly the requested k headers.
+    #[error("wrong suffix length: expected {expected} headers, got one head and {tail_len} tail headers")]
+    WrongSuffixLength { expected: u32, tail_len: usize },
+    /// Adjacent suffix headers must have consecutive, non-overflowing heights.
+    #[error("non-contiguous suffix heights: {previous} followed by {actual}")]
+    NonContiguousSuffix { previous: u32, actual: u32 },
+}
+
+/// Outcome of receiving a proof from a bootstrap provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PopowProofOutcome {
+    /// The proof reached the verifier; its result may still require a penalty.
+    Verified(NipopowVerificationResult),
+    /// This peer already answered, regardless of its first proof's validity.
+    Duplicate,
+    /// The first response failed a bootstrap check and requires a penalty.
+    Rejected(PopowProofRejection),
+    /// Bootstrap already finished (applied or abandoned); the proof is dropped
+    /// without verification or penalty.
+    Ignored,
+}
+
+/// Validate the response profile for the requested bootstrap parameters.
+///
+/// Production requests use m=6 and k=10 (`ErgoHistoryUtils.scala:29-34`).
+/// Proofs must be continuous (`PopowProcessor.scala:109-118`) and contain
+/// exactly k suffix headers with consecutive heights (head plus k-1 tail
+/// headers, `NipopowProverWithDbAlgs.scala:76-83`).
+///
+/// Returns the profile mismatch as a rejection reason. This does not perform
+/// the cryptographic and chain checks owned by [`NipopowVerifier`].
+pub fn validate_bootstrap_response_profile(
+    proof: &NipopowProof,
+    expected_m: u32,
+    expected_k: u32,
+) -> Result<(), PopowProofRejection> {
+    if proof.m != expected_m {
+        return Err(PopowProofRejection::WrongM {
+            expected: expected_m,
+            actual: proof.m,
+        });
+    }
+    if proof.k != expected_k {
+        return Err(PopowProofRejection::WrongK {
+            expected: expected_k,
+            actual: proof.k,
+        });
+    }
+    if !proof.continuous {
+        return Err(PopowProofRejection::NonContinuous);
+    }
+
+    let suffix_len = proof
+        .suffix_tail
+        .len()
+        .checked_add(1)
+        .and_then(|len| u32::try_from(len).ok());
+    if suffix_len != Some(expected_k) {
+        return Err(PopowProofRejection::WrongSuffixLength {
+            expected: expected_k,
+            tail_len: proof.suffix_tail.len(),
+        });
+    }
+
+    let mut previous_height = proof.suffix_head.header.height;
+    for header in &proof.suffix_tail {
+        if previous_height.checked_add(1) != Some(header.height) {
+            return Err(PopowProofRejection::NonContiguousSuffix {
+                previous: previous_height,
+                actual: header.height,
+            });
+        }
+        previous_height = header.height;
+    }
+
+    Ok(())
+}
+
 /// State machine for the NiPoPoW bootstrap consume side.
 ///
 /// All methods take `&mut self` — this reducer is owned by the
@@ -58,6 +149,8 @@ pub struct PopowBootstrap {
     /// returns `true`. Mainnet default = 2
     /// (`NipopowSettings.scala::p2p_nipopows`).
     quorum: u32,
+    expected_m: u32,
+    expected_k: u32,
     verifier: NipopowVerifier,
     /// Peers we've already sent `GetNipopowProof` to during the
     /// current bootstrap. Cleared per-peer on disconnect via
@@ -95,6 +188,8 @@ impl PopowBootstrap {
         Self {
             state: PopowBootstrapState::Idle,
             quorum,
+            expected_m: P2P_NIPOPOW_PROOF_M as u32,
+            expected_k: P2P_NIPOPOW_PROOF_K as u32,
             verifier: NipopowVerifier::new(genesis_id_opt, chain_config),
             requested_peers: BTreeSet::new(),
             seen_providers: BTreeSet::new(),
@@ -163,14 +258,15 @@ impl PopowBootstrap {
         self.requested_peers.remove(&peer);
     }
 
-    /// Hand an inbound proof to the verifier. Returns `Some(result)` with
-    /// the verification outcome so the caller can act on it (e.g., penalize
-    /// on `ValidationError` or `WrongGenesis`), or `None` when the proof is
-    /// dropped before the verifier because bootstrap is terminal or `peer`
-    /// already contributed one.
+    /// Record an inbound proof's provider, check the bootstrap response profile,
+    /// and hand matching proofs to the verifier. Returns [`PopowProofOutcome`]
+    /// so the caller can distinguish a rejection requiring a penalty from a
+    /// duplicate and act on the verifier's result. Once bootstrap is terminal
+    /// (applied or abandoned), proofs are [`PopowProofOutcome::Ignored`].
     ///
-    /// Per-peer dedup (Scala `ErgoNodeViewSynchronizer.scala:1066`): a peer
-    /// may contribute at most one proof to the verifier. Without it the
+    /// Per-peer dedup (Scala `ErgoNodeViewSynchronizer.scala:1082-1093`): a peer
+    /// is recorded as having answered before validation, even when rejected,
+    /// and may contribute at most one proof to the verifier. Without it the
     /// quorum (`proofs_processed >= quorum`) could be satisfied by a single
     /// peer sending `quorum` proofs — a Sybil/eclipse bypass. The duplicate
     /// is dropped with no penalty, matching Scala.
@@ -178,18 +274,19 @@ impl PopowBootstrap {
     /// If the verifier returns `BetterChain` or `NoBetterChain` AND
     /// the running counter has reached the quorum threshold, the
     /// reducer transitions to [`PopowBootstrapState::BestSelected`].
-    pub fn on_proof_received(
-        &mut self,
-        peer: PeerId,
-        proof: NipopowProof,
-    ) -> Option<NipopowVerificationResult> {
+    pub fn on_proof_received(&mut self, peer: PeerId, proof: NipopowProof) -> PopowProofOutcome {
         if self.is_terminal() {
-            return None;
+            return PopowProofOutcome::Ignored;
         }
         // `BTreeSet::insert` returns false when the peer was already present:
-        // it has already contributed its one counted proof, so drop this one.
+        // it has already answered, so drop this proof regardless of validity.
         if !self.seen_providers.insert(peer) {
-            return None;
+            return PopowProofOutcome::Duplicate;
+        }
+        if let Err(reason) =
+            validate_bootstrap_response_profile(&proof, self.expected_m, self.expected_k)
+        {
+            return PopowProofOutcome::Rejected(reason);
         }
         let result = self.verifier.process(proof);
         if matches!(result, NipopowVerificationResult::BetterChain { .. }) {
@@ -204,7 +301,7 @@ impl PopowBootstrap {
         {
             self.state = PopowBootstrapState::BestSelected;
         }
-        Some(result)
+        PopowProofOutcome::Verified(result)
     }
 
     /// `true` once the reducer has seen at least `quorum` valid
@@ -333,9 +430,11 @@ pub fn check_proof_against_checkpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ergo_primitives::digest::ModifierId;
     use ergo_primitives::reader::VlqReader;
     use ergo_ser::header::read_header;
     use ergo_ser::popow_header::PoPowHeader;
+    use ergo_validation::popow::algos::{build_popow_header, pack_interlinks};
 
     // ----- helpers -----
 
@@ -354,24 +453,26 @@ mod tests {
     }
 
     fn popow_hdr(h: Header) -> PoPowHeader {
-        PoPowHeader {
-            header: h,
-            interlinks: vec![],
-            interlinks_proof: vec![],
+        if h.height == 1 {
+            return PoPowHeader {
+                header: h,
+                interlinks: vec![],
+                interlinks_proof: vec![0u8; 8],
+            };
         }
+        let links = vec![ModifierId::from_bytes(header_id_of(&header(GENESIS_HEX)))];
+        let fields = pack_interlinks(&links);
+        build_popow_header(h, links, &fields).unwrap()
     }
 
     fn valid_proof() -> NipopowProof {
         NipopowProof {
-            m: 6,
-            k: 10,
+            m: P2P_NIPOPOW_PROOF_M as u32,
+            k: 1,
             prefix: vec![popow_hdr(header(GENESIS_HEX))],
             suffix_head: popow_hdr(header(HEIGHT_2_HEX)),
             suffix_tail: vec![],
-            // continuous=false so the difficulty-headers check is
-            // skipped — this is a structural test, not a chain-shape
-            // validation.
-            continuous: false,
+            continuous: true,
         }
     }
 
@@ -380,10 +481,42 @@ mod tests {
     }
 
     fn fresh_bootstrap(quorum: u32) -> PopowBootstrap {
-        PopowBootstrap::new(quorum, None, DifficultyParams::mainnet())
+        let mut bootstrap = PopowBootstrap::new(quorum, None, DifficultyParams::mainnet());
+        bootstrap.expected_k = 1;
+        bootstrap
     }
 
     // ----- happy path -----
+
+    #[test]
+    fn response_profile_accepts_continuous_h1_to_h2_fixture() {
+        assert_eq!(
+            validate_bootstrap_response_profile(&valid_proof(), P2P_NIPOPOW_PROOF_M as u32, 1),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn response_profile_accepts_contiguous_suffix_heights() {
+        let mut proof = valid_proof();
+        proof.k = 2;
+        let mut tail = header(HEIGHT_2_HEX);
+        tail.height = 3;
+        proof.suffix_tail.push(tail);
+        assert_eq!(
+            validate_bootstrap_response_profile(&proof, P2P_NIPOPOW_PROOF_M as u32, 2),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn production_defaults_use_p2p_popow_profile() {
+        let b = PopowBootstrap::new(2, None, DifficultyParams::mainnet());
+        assert_eq!(b.expected_m, P2P_NIPOPOW_PROOF_M as u32);
+        assert_eq!(b.expected_k, P2P_NIPOPOW_PROOF_K as u32);
+        assert_eq!(b.expected_m, 6);
+        assert_eq!(b.expected_k, 10);
+    }
 
     #[test]
     fn idle_state_on_construction() {
@@ -416,7 +549,7 @@ mod tests {
         let r1 = b.on_proof_received(peer(1), valid_proof());
         assert!(matches!(
             r1,
-            Some(NipopowVerificationResult::BetterChain { .. })
+            PopowProofOutcome::Verified(NipopowVerificationResult::BetterChain { .. })
         ));
         // After 1 valid proof, quorum not yet met (need 2).
         assert!(!b.quorum_reached());
@@ -514,7 +647,10 @@ mod tests {
         b.mark_requested(peer(2), Instant::now());
         let r = b.on_proof_received(peer(2), valid_proof());
         assert!(
-            matches!(r, Some(NipopowVerificationResult::BetterChain { .. })),
+            matches!(
+                r,
+                PopowProofOutcome::Verified(NipopowVerificationResult::BetterChain { .. })
+            ),
             "a fresh provider's proof re-selects after a rejection: {r:?}",
         );
         assert!(b.quorum_reached(), "bootstrap must still be able to finish");
@@ -527,10 +663,16 @@ mod tests {
     fn bootstrap_abandoned_preserves_reason_and_stops_work() {
         let mut b = fresh_bootstrap(1);
         b.mark_requested(peer(1), Instant::now());
-        b.on_proof_received(peer(1), valid_proof()).unwrap();
+        assert!(matches!(
+            b.on_proof_received(peer(1), valid_proof()),
+            PopowProofOutcome::Verified(_)
+        ));
         b.mark_abandoned("store is not fresh".into());
         b.mark_requested(peer(2), Instant::now());
-        assert!(b.on_proof_received(peer(2), valid_proof()).is_none());
+        assert_eq!(
+            b.on_proof_received(peer(2), valid_proof()),
+            PopowProofOutcome::Ignored
+        );
         assert!(b.reject_best_proof().is_none());
         assert!(b.pending_request_peers(&[peer(2)]).is_empty());
         assert!(!b.is_active(true));
@@ -543,7 +685,154 @@ mod tests {
         );
     }
 
-    /// Scala parity (ErgoNodeViewSynchronizer.scala:1066 + PopowProcessor
+    #[test]
+    fn proof_wrong_profile_rejected_and_provider_recorded() {
+        let mut b = fresh_bootstrap(1);
+        b.mark_requested(peer(1), Instant::now());
+        let mut proof = valid_proof();
+        proof.m = 5;
+
+        assert_eq!(
+            b.on_proof_received(peer(1), proof),
+            PopowProofOutcome::Rejected(PopowProofRejection::WrongM {
+                expected: 6,
+                actual: 5,
+            })
+        );
+        assert_eq!(b.provider_count(), 1);
+        assert_eq!(b.proofs_processed(), 0);
+        assert!(b.best_proof().is_none());
+        assert_eq!(b.state(), PopowBootstrapState::Requesting);
+        assert!(!b.quorum_reached());
+
+        // A rejection leaves other providers able to complete bootstrap.
+        assert!(matches!(
+            b.on_proof_received(peer(2), valid_proof()),
+            PopowProofOutcome::Verified(NipopowVerificationResult::BetterChain { .. })
+        ));
+        assert_eq!(b.provider_count(), 2);
+        assert_eq!(b.proofs_processed(), 1);
+        assert!(b.quorum_reached());
+    }
+
+    #[test]
+    fn proof_rejected_provider_retries_are_duplicates() {
+        let mut b = fresh_bootstrap(1);
+        b.mark_requested(peer(1), Instant::now());
+        let mut proof = valid_proof();
+        proof.m = 5;
+        assert!(matches!(
+            b.on_proof_received(peer(1), proof.clone()),
+            PopowProofOutcome::Rejected(_)
+        ));
+
+        for retry in [proof, valid_proof()] {
+            assert_eq!(
+                b.on_proof_received(peer(1), retry),
+                PopowProofOutcome::Duplicate
+            );
+            assert_eq!(b.provider_count(), 1);
+            assert_eq!(b.proofs_processed(), 0);
+            assert!(!b.quorum_reached());
+        }
+    }
+
+    #[test]
+    fn response_profile_suffix_height_overflow_returns_reason() {
+        let mut proof = valid_proof();
+        proof.k = 2;
+        proof.suffix_head.header.height = u32::MAX;
+        let mut tail = header(HEIGHT_2_HEX);
+        tail.height = 0;
+        proof.suffix_tail.push(tail);
+        assert_eq!(
+            validate_bootstrap_response_profile(&proof, P2P_NIPOPOW_PROOF_M as u32, 2),
+            Err(PopowProofRejection::NonContiguousSuffix {
+                previous: u32::MAX,
+                actual: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn response_profile_wrong_m_returns_reason() {
+        let mut proof = valid_proof();
+        proof.m = 5;
+        assert_eq!(
+            validate_bootstrap_response_profile(&proof, P2P_NIPOPOW_PROOF_M as u32, 1),
+            Err(PopowProofRejection::WrongM {
+                expected: 6,
+                actual: 5
+            })
+        );
+    }
+
+    #[test]
+    fn response_profile_wrong_k_returns_reason() {
+        let mut proof = valid_proof();
+        proof.k = 2;
+        assert_eq!(
+            validate_bootstrap_response_profile(&proof, P2P_NIPOPOW_PROOF_M as u32, 1),
+            Err(PopowProofRejection::WrongK {
+                expected: 1,
+                actual: 2
+            })
+        );
+    }
+
+    #[test]
+    fn response_profile_non_continuous_proof_returns_reason() {
+        let mut proof = valid_proof();
+        proof.continuous = false;
+        assert_eq!(
+            validate_bootstrap_response_profile(&proof, P2P_NIPOPOW_PROOF_M as u32, 1),
+            Err(PopowProofRejection::NonContinuous)
+        );
+    }
+
+    #[test]
+    fn response_profile_short_suffix_returns_reason() {
+        let mut proof = valid_proof();
+        proof.k = 2;
+        assert_eq!(
+            validate_bootstrap_response_profile(&proof, P2P_NIPOPOW_PROOF_M as u32, 2),
+            Err(PopowProofRejection::WrongSuffixLength {
+                expected: 2,
+                tail_len: 0
+            })
+        );
+    }
+
+    #[test]
+    fn response_profile_oversized_suffix_returns_reason() {
+        let mut proof = valid_proof();
+        proof.suffix_tail.push(header(HEIGHT_2_HEX));
+        assert_eq!(
+            validate_bootstrap_response_profile(&proof, P2P_NIPOPOW_PROOF_M as u32, 1),
+            Err(PopowProofRejection::WrongSuffixLength {
+                expected: 1,
+                tail_len: 1
+            })
+        );
+    }
+
+    #[test]
+    fn response_profile_suffix_height_gap_returns_reason() {
+        let mut proof = valid_proof();
+        proof.k = 2;
+        let mut tail = header(HEIGHT_2_HEX);
+        tail.height = 4;
+        proof.suffix_tail.push(tail);
+        assert_eq!(
+            validate_bootstrap_response_profile(&proof, P2P_NIPOPOW_PROOF_M as u32, 2),
+            Err(PopowProofRejection::NonContiguousSuffix {
+                previous: 2,
+                actual: 4
+            })
+        );
+    }
+
+    /// Scala parity (ErgoNodeViewSynchronizer.scala:1082-1093 + PopowProcessor
     /// .scala:141): a peer may contribute at most one proof to the verifier.
     /// A second proof from the same peer is dropped before the verifier and
     /// does not bump `proofs_processed`, so one peer can never reach quorum.
@@ -555,13 +844,17 @@ mod tests {
         let r1 = b.on_proof_received(peer(1), valid_proof());
         assert!(matches!(
             r1,
-            Some(NipopowVerificationResult::BetterChain { .. })
+            PopowProofOutcome::Verified(NipopowVerificationResult::BetterChain { .. })
         ));
         assert_eq!(b.proofs_processed(), 1);
 
         // Same peer again: dropped before the verifier, no penalty.
         let r2 = b.on_proof_received(peer(1), valid_proof());
-        assert!(r2.is_none(), "duplicate peer proof must be dropped");
+        assert_eq!(
+            r2,
+            PopowProofOutcome::Duplicate,
+            "duplicate peer proof must be dropped"
+        );
         assert_eq!(
             b.proofs_processed(),
             1,
@@ -589,7 +882,7 @@ mod tests {
         let r = b.on_proof_received(peer(2), valid_proof());
         assert!(matches!(
             r,
-            Some(
+            PopowProofOutcome::Verified(
                 NipopowVerificationResult::BetterChain { .. }
                     | NipopowVerificationResult::NoBetterChain { .. }
             )
@@ -606,7 +899,10 @@ mod tests {
         let _ = b.on_proof_received(peer(1), valid_proof());
         let _ = b.reject_best_proof();
         assert!(
-            b.on_proof_received(peer(1), valid_proof()).is_none(),
+            matches!(
+                b.on_proof_received(peer(1), valid_proof()),
+                PopowProofOutcome::Duplicate
+            ),
             "a rejected provider must not get a second proof counted",
         );
     }
