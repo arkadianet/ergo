@@ -131,6 +131,11 @@ pub(super) fn map_wallet_err(e: WalletAdminError) -> Response {
             "the address is not tracked by this wallet",
             "derive or import the address before using it".into(),
         ),
+        E::ScanInvalidated => (
+            Reason::StateUnavailable,
+            "wallet scan invalidated",
+            E::ScanInvalidated.to_string(),
+        ),
         E::RescanUnavailable(d) => (
             Reason::RouteUnavailable,
             "rescan is not available on this backend",
@@ -556,4 +561,29 @@ pub fn accounts_router(
         ));
 
     t0.merge(t1).merge(t2).with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ----- error paths -----
+
+    #[tokio::test]
+    async fn wallet_scan_invalidated_maps_to_unavailable_with_recovery_detail() {
+        let response = map_wallet_err(WalletAdminError::ScanInvalidated);
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["reason"], "state_unavailable");
+        assert!(body["error"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("fromHeight=0"));
+    }
 }

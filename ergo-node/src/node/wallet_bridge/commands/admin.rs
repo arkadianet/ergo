@@ -103,22 +103,9 @@ pub(crate) async fn status(
     } else {
         String::new()
     };
-    let error = {
-        match ctx.db.begin_read() {
-            Ok(read_txn) => {
-                let invalidated = read_txn
-                    .open_table(ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED)
-                    .ok()
-                    .and_then(|t| t.get(()).ok().flatten().map(|g| g.value()))
-                    .unwrap_or(false);
-                if invalidated {
-                    "scan_invalidated".to_string()
-                } else {
-                    String::new()
-                }
-            }
-            Err(_) => String::new(),
-        }
+    let error = match super::super::scan_guard::require_valid_scan(ctx.db) {
+        Ok(()) => String::new(),
+        Err(e) => e.to_string(),
     };
     let resp = WalletStatus {
         is_initialized: !matches!(
@@ -207,9 +194,6 @@ pub(crate) async fn restore(
     let _ = reply.send(result);
 }
 
-// redb::Error is large (~160 B); the background-rescan closures
-// can't avoid surfacing it as their `Err` type, so silence the
-// `result_large_err` lint at the handler scope.
 fn rescan_chain_preflight(chain: &dyn ChainStateAccessor) -> Result<u32, WalletAdminError> {
     if chain.is_pruned() {
         return Err(WalletAdminError::RestorePruningUnsupported);
@@ -228,20 +212,34 @@ fn rescan_chain_preflight(chain: &dyn ChainStateAccessor) -> Result<u32, WalletA
     let tip_block = chain
         .try_read_block_at(tip)
         .map_err(|e| WalletAdminError::Internal(format!("chain block read failed: {e}")))?;
-    if first.is_none() || tip_block.is_none() {
+    if first.is_none() {
         return Err(WalletAdminError::RescanUnavailable(
-            "chain block-read history is unavailable before height 1".to_string(),
+            "chain block-read history is unavailable at height 1".to_string(),
         ));
+    }
+    if tip_block.is_none() {
+        return Err(WalletAdminError::RescanUnavailable(format!(
+            "chain tip block is unavailable at height {tip}"
+        )));
     }
     Ok(tip)
 }
 
+// redb::Error is large (~160 B); the background-rescan closures
+// can't avoid surfacing it as their `Err` type, so silence the
+// `result_large_err` lint at the handler scope.
 #[allow(clippy::result_large_err)]
 pub(crate) async fn rescan(
     ctx: &WriterContext<'_>,
     from_height: u32,
     reply: oneshot::Sender<Result<(), WalletAdminError>>,
 ) {
+    if from_height > 0 {
+        if let Err(e) = super::super::scan_guard::require_valid_scan(ctx.db) {
+            let _ = reply.send(Err(e));
+            return;
+        }
+    }
     let tip_h = match rescan_chain_preflight(ctx.chain.as_ref()) {
         Ok(tip) => tip,
         Err(e) => {
@@ -346,7 +344,12 @@ pub(crate) async fn rescan(
             is_cancelled,
             scan_matcher_dyn,
         ) {
-            tracing::error!("background rescan failed: {e}");
+            tracing::error!(
+                error = %e,
+                from_height = start_h,
+                tip_height = tip_h,
+                "background rescan failed; run a full rescan (fromHeight=0)"
+            );
         }
         crate::wallet_boot::RESCAN_IN_PROGRESS.store(false, Ordering::SeqCst);
         // Resume live scan apply (no-op if it was never set).
@@ -1015,24 +1018,7 @@ pub(crate) async fn native_status(
                 .scan_height()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?
                 .unwrap_or(0);
-            // A never-written table (`TableDoesNotExist`) is the legitimate default
-            // (false / unset); any OTHER storage fault is surfaced as `internal`
-            // rather than silently reported as a healthy wallet.
-            let scan_invalidated = match read_txn
-                .open_table(ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED)
-            {
-                Ok(t) => t
-                    .get(())
-                    .map_err(|e| WalletAdminError::Internal(format!("scan_invalidated read: {e}")))?
-                    .map(|g| g.value())
-                    .unwrap_or(false),
-                Err(redb::TableError::TableDoesNotExist(_)) => false,
-                Err(e) => {
-                    return Err(WalletAdminError::Internal(format!(
-                        "scan_invalidated table: {e}"
-                    )))
-                }
-            };
+            let scan_invalidated = super::super::scan_guard::scan_invalidated(&read_txn)?;
             // changeAddress is persisted PUBLIC metadata — surfaced regardless of
             // lock state (it must not disappear when locked); `null` only
             // when unset. Read the stored pubkey + render to the network address.
@@ -1073,6 +1059,10 @@ pub(crate) async fn native_status(
             } else if ctx.chain.is_pruned() {
                 RescanStateDto::Unavailable {
                     detail: "node is pruned; block replay unavailable".to_string(),
+                }
+            } else if scan_invalidated {
+                RescanStateDto::Required {
+                    detail: WalletAdminError::ScanInvalidated.to_string(),
                 }
             } else {
                 RescanStateDto::Idle
@@ -1531,6 +1521,8 @@ mod rescan_preflight_tests {
     use ergo_state::store::StateError;
     use ergo_state::wallet::scan::RescanBlock;
 
+    // ----- helpers -----
+
     struct HeightOneChain;
 
     impl ChainStateAccessor for HeightOneChain {
@@ -1598,17 +1590,19 @@ mod rescan_preflight_tests {
         }
     }
 
+    // ----- happy path -----
+
     #[test]
-    fn native_rescan_capability_probes_height_one() {
+    fn rescan_preflight_height_one_succeeds() {
         let chain = HeightOneChain;
-        assert!(chain.read_block_at_supported());
         assert_eq!(rescan_chain_preflight(&chain).unwrap(), 1);
     }
+
+    // ----- error paths -----
 
     #[test]
     fn missing_height_one_is_refused_before_rebuild() {
         let chain = MissingHeightOneChain;
-        assert!(!chain.read_block_at_supported());
         assert!(matches!(
             rescan_chain_preflight(&chain),
             Err(WalletAdminError::RescanUnavailable(_))
@@ -1621,6 +1615,42 @@ mod rescan_preflight_tests {
         assert!(matches!(
             rescan_chain_preflight(&chain),
             Err(WalletAdminError::Internal(message)) if message.contains("chain tip read failed")
+        ));
+    }
+
+    #[test]
+    fn rescan_preflight_no_committed_chain_returns_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let db =
+            std::sync::Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+        let chain = crate::node::wallet_bridge::ChainStateAccessorImpl::new(db, false, None);
+        assert!(matches!(
+            rescan_chain_preflight(&chain),
+            Err(WalletAdminError::RescanUnavailable(message)) if message.contains("before height 1")
+        ));
+    }
+
+    #[test]
+    fn rescan_preflight_missing_tip_block_reports_tip_height() {
+        struct MissingTipChain;
+        impl ChainStateAccessor for MissingTipChain {
+            fn wallet_scan_height(&self) -> u32 {
+                0
+            }
+            fn tip_height(&self) -> u32 {
+                10
+            }
+            fn is_pruned(&self) -> bool {
+                false
+            }
+            fn read_block_at(&self, height: u32) -> Option<RescanBlock> {
+                HeightOneChain.read_block_at(height)
+            }
+        }
+        assert!(matches!(
+            rescan_chain_preflight(&MissingTipChain),
+            Err(WalletAdminError::RescanUnavailable(message))
+                if message == "chain tip block is unavailable at height 10"
         ));
     }
 }
