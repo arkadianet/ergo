@@ -120,6 +120,7 @@ struct Store {
     calls: AtomicUsize,
     scan_calls: AtomicUsize,
 }
+
 impl NodeChainQuery for Store {
     fn full_block_by_id(&self, _id: &str) -> Option<ergo_rest_json::types::ScalaFullBlock> {
         None
@@ -146,6 +147,7 @@ impl NodeChainQuery for Store {
         Vec::new()
     }
 }
+
 struct Submit;
 #[async_trait::async_trait]
 impl NodeSubmit for Submit {
@@ -166,6 +168,7 @@ impl NodeSubmit for Submit {
         Ok(format!("{:064x}", 42))
     }
 }
+
 fn config() -> BlockingReadsConfig {
     BlockingReadsConfig {
         point_permits: 1,
@@ -174,6 +177,7 @@ fn config() -> BlockingReadsConfig {
         run_timeout: Duration::from_secs(2),
     }
 }
+
 fn app(store: Arc<Store>, cfg: BlockingReadsConfig, panic_status: bool) -> Router {
     let state = V1State {
         blocking: BlockingReads::new(cfg).unwrap(),
@@ -193,6 +197,7 @@ fn app(store: Arc<Store>, cfg: BlockingReadsConfig, panic_status: bool) -> Route
         ergo_api::v1::Governor::new(Default::default()).unwrap(),
     )
 }
+
 async fn request(app: Router, uri: &str, body: Option<Body>) -> Response {
     let mut req = Request::builder()
         .method(if body.is_some() { "POST" } else { "GET" })
@@ -204,15 +209,18 @@ async fn request(app: Router, uri: &str, body: Option<Body>) -> Response {
         .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1234))));
     app.oneshot(req).await.unwrap()
 }
+
 async fn reason(response: Response, status: StatusCode, reason: &str) {
     assert_eq!(response.status(), status);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"]["reason"], reason);
 }
+
 fn header_path() -> String {
     format!("/api/v1/chain/headers/{HEIGHT:064x}")
 }
+
 const BLOCKS: &str = "/api/v1/chain/blocks?limit=1";
 
 // ----- happy path -----
@@ -239,6 +247,7 @@ async fn chain_header_by_id_slow_store_read_does_not_block_runtime() {
         "heartbeat was blocked by the read"
     );
 }
+
 #[tokio::test]
 async fn chain_blocks_list_reads_tip_without_calling_status() {
     assert_eq!(
@@ -252,6 +261,7 @@ async fn chain_blocks_list_reads_tip_without_calling_status() {
         StatusCode::OK
     );
 }
+
 #[tokio::test]
 async fn chain_blocks_by_ids_slow_body_does_not_hold_read_permit() {
     let router = app(Arc::new(Store::default()), config(), false);
@@ -293,6 +303,7 @@ async fn chain_blocks_list_saturated_scan_lane_is_overloaded_503() {
     reason(response, StatusCode::SERVICE_UNAVAILABLE, "overloaded").await;
     assert_eq!(first.await.unwrap().status(), StatusCode::OK);
 }
+
 #[tokio::test]
 async fn chain_blocks_list_timed_out_read_is_timeout_504_and_keeps_permit() {
     let store = Arc::new(Store {
@@ -319,9 +330,24 @@ async fn chain_blocks_list_timed_out_read_is_timeout_504_and_keeps_permit() {
         "overloaded",
     )
     .await;
-    tokio::time::sleep(Duration::from_millis(220)).await;
-    assert_eq!(request(router, BLOCKS, None).await.status(), StatusCode::OK);
+    // The detached read still owns the permit; it frees the lane only when its
+    // 200 ms of work returns. Poll with a generous deadline rather than one
+    // fixed sleep, which flakes on slow CI runners.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = request(router.clone(), BLOCKS, None).await.status();
+        if status == StatusCode::OK {
+            break;
+        }
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the timed-out read never released its permit"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
+
 async fn saturated_request(uri: &str, body: Option<Body>) -> Response {
     let barrier = Arc::new(std::sync::Barrier::new(2));
     let store = Arc::new(Store {
@@ -338,6 +364,7 @@ async fn saturated_request(uri: &str, body: Option<Body>) -> Response {
     assert_eq!(first.await.unwrap().status(), StatusCode::OK);
     response
 }
+
 #[tokio::test]
 async fn transactions_submit_not_blocked_by_saturated_read_pool() {
     assert_eq!(
@@ -347,6 +374,7 @@ async fn transactions_submit_not_blocked_by_saturated_read_pool() {
         StatusCode::OK
     );
 }
+
 #[tokio::test]
 async fn chain_header_by_id_not_blocked_by_saturated_scan_lane() {
     reason(
@@ -356,6 +384,7 @@ async fn chain_header_by_id_not_blocked_by_saturated_scan_lane() {
     )
     .await;
 }
+
 #[tokio::test]
 async fn chain_header_by_id_malformed_id_takes_no_permit() {
     let store = Arc::new(Store {
