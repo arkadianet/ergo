@@ -518,7 +518,8 @@ pub use wallet_tx_bridge::{
     OwnedBlockTxData,
 };
 pub(crate) use wallet_tx_bridge::{
-    build_scan_match_records, build_wallet_block_txs_checked, build_wallet_block_txs_from_sections,
+    block_txs_for_wallet_at_height_in_read_txn, build_scan_match_records,
+    build_wallet_block_txs_checked, build_wallet_block_txs_from_sections,
 };
 
 // (StateMeta lives in store/meta.rs.)
@@ -543,6 +544,7 @@ struct UtxoMutation<'a> {
     /// on the pipeline path. Either way, chain + wallet commit
     /// together.
     wallet_payload: Option<&'a WalletApplyPayload>,
+    wallet_apply_generation: u64,
 }
 
 /// Owned wallet-apply payload built at block-apply time on the main
@@ -555,6 +557,7 @@ struct UtxoMutation<'a> {
 /// `PersistJob` without lifetime or Send/Sync friction.
 #[derive(Clone)]
 pub struct WalletApplyPayload {
+    pub apply_generation: u64,
     pub tracked_p2pk_trees: std::collections::BTreeSet<Vec<u8>>,
     pub cached_pubkeys: std::collections::BTreeMap<u64, [u8; 33]>,
     pub block_txs_owned: Vec<OwnedBlockTxData>,
@@ -574,6 +577,7 @@ pub struct WalletApplyPayload {
     /// derived from `scan_matches.is_empty()`: a registered scan still needs
     /// phase-2 spend transitions on a block that produced no new matches.
     pub has_registered_scans: bool,
+    pub allow_non_contiguous_wallet: bool,
 }
 
 impl WalletApplyPayload {
@@ -1494,21 +1498,6 @@ impl StateStore {
     /// [`crate::reader::ChainStoreReader`] for the exact contract.
     pub fn reader_handle(&self) -> crate::reader::ChainStoreReader {
         crate::reader::ChainStoreReader::new(self.db.clone())
-    }
-
-    /// Resolve the wallet's EIP-3 first-address pubkey as the miner reward
-    /// key. Narrow read seam for the mining subsystem (which holds `&StateStore`
-    /// but should not touch redb / wallet-table plumbing directly). A failure
-    /// to even open a read transaction maps to `Corrupt` — consistent with the
-    /// resolver's rule that only true table absence/emptiness is `Pending`.
-    /// See [`crate::wallet::reader::WalletReader::resolve_eip3_reward_key`].
-    pub fn resolve_eip3_reward_key(&self) -> crate::wallet::reader::RewardKeyResolution {
-        match self.db.begin_read() {
-            Ok(read_txn) => {
-                crate::wallet::reader::WalletReader::new(&read_txn).resolve_eip3_reward_key()
-            }
-            Err(_) => crate::wallet::reader::RewardKeyResolution::Corrupt,
-        }
     }
 
     /// Active protocol parameters for the given height: the row in
@@ -3604,6 +3593,7 @@ impl StateStore {
     /// and returns `CommitDurability::PendingJob(seq)` so the caller pins
     /// the block's nodes until that job commits. Otherwise it falls back to
     /// a synchronous write transaction and returns `Durable`.
+    #[allow(clippy::too_many_arguments)]
     fn persist_apply(
         &mut self,
         height: u32,
@@ -3612,6 +3602,7 @@ impl StateStore {
         undo_and_emission: (&UndoEntry, &emission::EmissionTransition),
         voted_params_row: Option<ergo_validation::ActiveProtocolParameters>,
         wallet_payload: Option<&WalletApplyPayload>,
+        wallet_apply_generation: u64,
     ) -> Result<crate::avl::arena::CommitDurability, StateError> {
         let (undo, emission) = undo_and_emission;
         // Defensive: voted_params_row should be `Some` iff this is an
@@ -3742,6 +3733,7 @@ impl StateStore {
                 parent_header_id,
                 voted_params_row,
                 wallet_payload: wallet_payload_owned,
+                wallet_apply_generation,
             };
 
             if height.is_multiple_of(1000) || height <= 5 {
@@ -4090,11 +4082,13 @@ mod tests {
         scan_matches: Vec<ScanMatchRecord>,
     ) -> WalletApplyPayload {
         WalletApplyPayload {
+            apply_generation: crate::wallet::wallet_apply_generation(),
             tracked_p2pk_trees: trees,
             has_registered_scans: !scan_matches.is_empty(),
             cached_pubkeys: pubkeys,
             block_txs_owned: Vec::new(),
             scan_matches,
+            allow_non_contiguous_wallet: false,
         }
     }
 

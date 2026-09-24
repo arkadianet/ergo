@@ -319,6 +319,83 @@ pub enum WalletCommand {
     },
 }
 
+fn reject_wallet_reply<T>(reply: oneshot::Sender<Result<T, WalletAdminError>>) {
+    let _ = reply.send(Err(WalletAdminError::RescanUnavailable(
+        "wallet recovery required: run rescan before using wallet operations".to_string(),
+    )));
+}
+
+impl WalletCommand {
+    fn is_rescan_control(&self) -> bool {
+        matches!(
+            self,
+            Self::Status { .. }
+                | Self::NativeStatus { .. }
+                | Self::Lock { .. }
+                | Self::Rescan { .. }
+        )
+    }
+
+    fn reject_during_rescan(self) {
+        macro_rules! reject {
+            ($($variant:ident),+ $(,)?) => {
+                match self {
+                    $(Self::$variant { reply, .. } => reject_wallet_reply(reply),)+
+                }
+            };
+        }
+        reject!(
+            Status,
+            Init,
+            Restore,
+            Unlock,
+            Lock,
+            Check,
+            Rescan,
+            UpdateChangeAddress,
+            Balances,
+            BalancesWithUnconfirmed,
+            NativeBalance,
+            NativeStatus,
+            NativeAddresses,
+            NativeBoxes,
+            NativeBoxById,
+            NativeTransactions,
+            NativeTransactionById,
+            NativeSelectBoxes,
+            NativeBuildTransaction,
+            NativeSignTransaction,
+            NativeSendTransaction,
+            Addresses,
+            Boxes,
+            BoxesUnspent,
+            Transactions,
+            TransactionById,
+            TransactionsByScanId,
+            PaymentSend,
+            RetrieveRewards,
+            TransactionGenerate,
+            TransactionGenerateUnsigned,
+            TransactionSign,
+            TransactionSend,
+            BoxesCollect,
+            GenerateCommitments,
+            ExtractHints,
+            DeriveKey,
+            DeriveNextKey,
+            GetPrivateKey,
+            RegisterScan,
+            DeregisterScan,
+            ListScans,
+            ScanUnspentBoxes,
+            ScanSpentBoxes,
+            ScanStopTracking,
+            ScanAddBox,
+            ScanP2sRule,
+        );
+    }
+}
+
 /// `WalletAdmin` impl backed by a command channel. Constructed by
 /// `Node::run` and handed to `ergo-api`'s router builder.
 pub struct NodeWalletAdmin {
@@ -327,6 +404,11 @@ pub struct NodeWalletAdmin {
 
 impl NodeWalletAdmin {
     pub fn new(tx: mpsc::Sender<WalletCommand>) -> Self {
+        crate::wallet_boot::begin_wallet_session();
+        Self { tx }
+    }
+
+    pub(super) fn with_session(tx: mpsc::Sender<WalletCommand>) -> Self {
         Self { tx }
     }
 
@@ -334,6 +416,40 @@ impl NodeWalletAdmin {
     where
         F: FnOnce(oneshot::Sender<Result<R, WalletAdminError>>) -> WalletCommand,
     {
+        self.send_cmd_with_policy(build, false).await
+    }
+
+    async fn send_rescan_cmd<R, F>(&self, build: F) -> Result<R, WalletAdminError>
+    where
+        F: FnOnce(oneshot::Sender<Result<R, WalletAdminError>>) -> WalletCommand,
+    {
+        self.send_cmd_with_policy(build, true).await
+    }
+
+    async fn send_control_cmd<R, F>(&self, build: F) -> Result<R, WalletAdminError>
+    where
+        F: FnOnce(oneshot::Sender<Result<R, WalletAdminError>>) -> WalletCommand,
+    {
+        self.send_cmd_with_policy(build, true).await
+    }
+
+    async fn send_cmd_with_policy<R, F>(
+        &self,
+        build: F,
+        allow_during_rescan: bool,
+    ) -> Result<R, WalletAdminError>
+    where
+        F: FnOnce(oneshot::Sender<Result<R, WalletAdminError>>) -> WalletCommand,
+    {
+        if !allow_during_rescan
+            && (crate::wallet_boot::RESCAN_FAIL_CLOSED.load(Ordering::SeqCst)
+                || crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst)
+                || ergo_state::wallet::wallet_apply_fenced())
+        {
+            return Err(WalletAdminError::RescanUnavailable(
+                "wallet recovery required: run rescan before using wallet operations".to_string(),
+            ));
+        }
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(build(reply_tx))
@@ -348,7 +464,8 @@ impl NodeWalletAdmin {
 #[async_trait]
 impl WalletAdmin for NodeWalletAdmin {
     async fn status(&self) -> Result<WalletStatus, WalletAdminError> {
-        self.send_cmd(|reply| WalletCommand::Status { reply }).await
+        self.send_control_cmd(|reply| WalletCommand::Status { reply })
+            .await
     }
 
     async fn init(
@@ -389,7 +506,8 @@ impl WalletAdmin for NodeWalletAdmin {
     }
 
     async fn lock(&self) -> Result<(), WalletAdminError> {
-        self.send_cmd(|reply| WalletCommand::Lock { reply }).await
+        self.send_control_cmd(|reply| WalletCommand::Lock { reply })
+            .await
     }
 
     async fn check(
@@ -406,7 +524,7 @@ impl WalletAdmin for NodeWalletAdmin {
     }
 
     async fn rescan(&self, from_height: u32) -> Result<(), WalletAdminError> {
-        self.send_cmd(move |reply| WalletCommand::Rescan { from_height, reply })
+        self.send_rescan_cmd(move |reply| WalletCommand::Rescan { from_height, reply })
             .await
     }
 
@@ -439,7 +557,7 @@ impl WalletAdmin for NodeWalletAdmin {
     async fn native_status(
         &self,
     ) -> Result<ergo_api::wallet::native::dto::WalletStatusDto, WalletAdminError> {
-        self.send_cmd(|reply| WalletCommand::NativeStatus { reply })
+        self.send_control_cmd(|reply| WalletCommand::NativeStatus { reply })
             .await
     }
 
@@ -882,9 +1000,9 @@ pub(crate) fn map_chain_error(error: ChainStateError) -> WalletAdminError {
 ///   use the `ChainStoreReader` to read from committed state without
 ///   acquiring the action-loop's mutable `StateStore`.
 pub struct ChainStateAccessorImpl {
-    db: Arc<redb::Database>,
     /// Lock-free reader for chain state (headers, UTXO, active params).
     reader: ergo_state::reader::ChainStoreReader,
+    wallet_store: Arc<dyn ergo_state::wallet::WalletStore>,
     is_pruned: bool,
     /// EIP-27 re-emission rules (mainnet) or `None` (testnet). See
     /// [`ChainStateAccessor::reemission_rules`].
@@ -893,14 +1011,14 @@ pub struct ChainStateAccessorImpl {
 
 impl ChainStateAccessorImpl {
     pub fn new(
-        db: Arc<redb::Database>,
+        reader: ergo_state::reader::ChainStoreReader,
+        wallet_store: Arc<dyn ergo_state::wallet::WalletStore>,
         is_pruned: bool,
         reemission: Option<ergo_validation::ReemissionRuleInputs>,
     ) -> Self {
-        let reader = ergo_state::reader::ChainStoreReader::new_from_db(db.clone());
         Self {
-            db,
             reader,
+            wallet_store,
             is_pruned,
             reemission,
         }
@@ -909,9 +1027,15 @@ impl ChainStateAccessorImpl {
 
 impl ChainStateAccessor for ChainStateAccessorImpl {
     fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
-        let read_txn = self.db.begin_read()?;
-        let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-        Ok(reader.scan_height()?.unwrap_or(0))
+        let read = self
+            .wallet_store
+            .read()
+            .map_err(ergo_state::store::StateError::from)?;
+        Ok(read
+            .scan_cursor()
+            .map_err(ergo_state::store::StateError::from)?
+            .map(|cursor| cursor.height)
+            .unwrap_or(0))
     }
 
     fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
@@ -937,10 +1061,9 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
         Option<ergo_state::wallet::scan::RescanBlock>,
         ergo_state::wallet::scan::RescanReadError,
     > {
-        use ergo_state::store::block_txs_for_wallet_at_height;
         use ergo_state::wallet::scan::{OwnedBlockOutput, RescanBlock, RescanTx};
 
-        let (block_id, owned) = match block_txs_for_wallet_at_height(&self.db, height)? {
+        let (block_id, owned) = match self.reader.wallet_block_txs_at_height(height)? {
             Some(pair) => pair,
             None => return Ok(None),
         };
@@ -1027,17 +1150,15 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
 /// single delayed apply per admin operation.
 pub struct WalletStateHook {
     pub wallet: Arc<RwLock<ergo_wallet::state::WalletState>>,
-    /// Shared redb handle — used to read the registered scans for block-apply
-    /// matching (the scans live in redb, not `WalletState`).
-    pub db: Arc<redb::Database>,
+    /// Shared wallet store used for block-apply matching and invalidation.
     pub store: Arc<dyn ergo_state::wallet::WalletStore>,
 }
 
 impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
     fn tracked_p2pk_trees(&self) -> std::collections::BTreeSet<Vec<u8>> {
-        // Skip during rescan: the live apply hook returns empty so chain-apply
-        // doesn't interfere with the background rescan writing the same tables.
-        if crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst) {
+        // Full rescans and fail-closed fences suppress wallet payloads;
+        // partial rescans leave live wallet apply enabled.
+        if ergo_state::wallet::wallet_apply_fenced() {
             return std::collections::BTreeSet::new();
         }
         let state = self.wallet.read();
@@ -1045,11 +1166,32 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
     }
 
     fn cached_pubkeys(&self) -> std::collections::BTreeMap<u64, [u8; 33]> {
-        if crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst) {
+        if ergo_state::wallet::wallet_apply_fenced() {
             return std::collections::BTreeMap::new();
         }
         let state = self.wallet.read();
         state.cached_pubkeys().clone()
+    }
+
+    fn wallet_state_snapshot(
+        &self,
+    ) -> (
+        std::collections::BTreeSet<Vec<u8>>,
+        std::collections::BTreeMap<u64, [u8; 33]>,
+    ) {
+        if ergo_state::wallet::wallet_apply_fenced() {
+            return (Default::default(), Default::default());
+        }
+        let state = self.wallet.read();
+        (
+            state.tracked_p2pk_trees().clone(),
+            state.cached_pubkeys().clone(),
+        )
+    }
+
+    fn allow_non_contiguous_wallet_apply(&self) -> bool {
+        crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst)
+            && !ergo_state::wallet::wallet_apply_fenced()
     }
 
     fn registered_scan_count(&self) -> usize {
@@ -1057,7 +1199,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
         // tables: the rebuild clears and repopulates WALLET_SCAN_* block by
         // block, so a concurrent live write would race it (miss a spend
         // against the cleared reverse index, or stale that index). Mirrors
-        // how the pubkey path skips during RESCAN_IN_PROGRESS. A PARTIAL
+        // how the pubkey path is fenced by wallet_apply_fenced(). A PARTIAL
         // rescan does not set this flag, so live scan tracking continues
         // across it (scans have no range-rewind rebuild).
         if crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst) {
@@ -1069,13 +1211,13 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
         // skips scan work for this block (logged) rather than aborting chain apply.
         let count = self
             .store
-            .begin_read()
+            .read()
             .and_then(|read| read.registered_scan_count());
         match count {
             Ok(n) => n,
             Err(e) => {
                 tracing::error!(error = %e, "scan apply: wallet store scan count read failed; skipping this block");
-                mark_scan_invalidated(&self.db);
+                mark_scan_invalidated(self.store.as_ref());
                 0
             }
         }
@@ -1096,44 +1238,53 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
                 .collect(),
             Err(e) => {
                 tracing::error!(error = %e, "scan apply: registry load failed; no matches this block");
-                mark_scan_invalidated(&self.db);
+                mark_scan_invalidated(self.store.as_ref());
                 vec![Vec::new(); boxes.len()]
             }
         }
     }
 }
 
-/// Best-effort: flip `WALLET_SCAN_INVALIDATED` after a scan-registry read
-/// failure silently dropped a block's matches, so `/wallet/status` surfaces
-/// `scan_invalidated` and the operator runs a `/wallet/rescan` (the contract
-/// that clears it). "Best-effort": the same redb fault that broke the read may
-/// also break this write, in which case it's only logged; a recoverable failure
-/// (e.g. one corrupt `WALLET_SCANS` row) does get flagged.
-///
-/// Deliberately reuses the wallet-wide flag rather than adding a scan-specific
-/// one: a registry read failure during apply is a corruption/IO-class event
-/// whose recovery contract is already a full rescan, so pausing all wallet apply
-/// (`apply_block_to_wallet` no-ops while set) is the correct fail-closed posture
-/// — an availability cost on an exceptional path, not a correctness risk. Runs
-/// during payload build (no chain write txn is open on this thread yet), so the
-/// short write txn here can't deadlock — at worst it briefly waits on an
-/// in-flight persist-pipeline write.
-fn mark_scan_invalidated(db: &redb::Database) {
-    if let Err(e) = try_mark_scan_invalidated(db) {
-        tracing::error!(error = %e, "scan apply: failed to set scan-invalidated flag after a registry read failure");
+/// Flip `WALLET_SCAN_INVALIDATED` after a scan-registry read failure so
+/// `/wallet/status` surfaces the condition and the operator can rescan. The
+/// process guards are latched before the write attempt, regardless of whether
+/// the durable flag write succeeds; the flag remains the recovery signal.
+fn mark_scan_invalidated(store: &dyn ergo_state::wallet::WalletStore) {
+    const RETRIES: usize = 3;
+    crate::wallet_boot::latch_rescan_fail_closed();
+    let mut last_error = None;
+    for attempt in 0..RETRIES {
+        match try_mark_scan_invalidated(store) {
+            Ok(()) => return,
+            Err(error) => {
+                last_error = Some(error);
+                if attempt + 1 < RETRIES {
+                    std::thread::yield_now();
+                }
+            }
+        }
+    }
+    if let Some(error) = last_error {
+        tracing::error!(error = %error, "scan apply: failed to set scan-invalidated flag after a registry read failure; terminating fail-closed");
+        abort_on_invalidation_failure(&error);
     }
 }
 
-#[allow(clippy::result_large_err)] // redb::Error shape is fixed upstream
-fn try_mark_scan_invalidated(db: &redb::Database) -> Result<(), redb::Error> {
-    // Quick-repair commit (see ergo_state::begin_write_qr): a single
-    // non-quick-repair commit can force an O(file-size) repair on the next
-    // unclean restart, so route this production write through the helper.
-    let w = ergo_state::begin_write_qr(db)?;
-    w.open_table(ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED)?
-        .insert((), true)?;
-    w.commit()?;
-    Ok(())
+#[cfg(not(test))]
+fn abort_on_invalidation_failure(error: &ergo_state::wallet::WalletStoreError) -> ! {
+    tracing::error!(error = %error, "wallet scan invalidation persistence failed; aborting process");
+    std::process::abort()
+}
+
+#[cfg(test)]
+fn abort_on_invalidation_failure(error: &ergo_state::wallet::WalletStoreError) -> ! {
+    panic!("wallet scan invalidation persistence failed: {error}")
+}
+
+fn try_mark_scan_invalidated(
+    store: &dyn ergo_state::wallet::WalletStore,
+) -> Result<(), ergo_state::wallet::WalletStoreError> {
+    store.persist_scan_invalidation(true)
 }
 
 /// Network + operator-flag + EIP-27 config supplied at boot.
@@ -1162,31 +1313,55 @@ pub struct WriterConfig {
 }
 
 /// Writer-task loop. Runs in a dedicated tokio task; receives commands and
-/// dispatches against owned `storage` + `state` + `db` + `chain` accessor.
-/// Each command's reply is sent back via its oneshot.
-#[allow(clippy::result_large_err)] // redb::Error is large; closures in rescan dispatch can't avoid it
+/// dispatches against owned `storage` + `state` + wallet store + `chain`
+/// accessor. Each command's reply is sent back via its oneshot.
 #[allow(clippy::too_many_arguments)] // task spawn-point: owned deps unpacked straight into WriterContext
 pub async fn run_wallet_writer(
-    mut rx: mpsc::Receiver<WalletCommand>,
+    rx: mpsc::Receiver<WalletCommand>,
     storage: Arc<RwLock<SecretStorage>>,
     state: Arc<RwLock<WalletState>>,
-    db: Arc<redb::Database>,
+    store: Arc<dyn ergo_state::wallet::WalletStore>,
     chain: Arc<dyn ChainStateAccessor>,
     cfg: WriterConfig,
     submit_handle: Arc<dyn TxSubmitter>,
     mempool: Arc<dyn ergo_api::MempoolView>,
 ) {
-    let store: Arc<dyn ergo_state::wallet::WalletStore> =
-        Arc::new(ergo_state::wallet::RedbWalletStore::new(db.clone()));
+    let session_id = crate::wallet_boot::wallet_session_id();
+    run_wallet_writer_with_session(
+        rx,
+        storage,
+        state,
+        store,
+        chain,
+        cfg,
+        submit_handle,
+        mempool,
+        session_id,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_wallet_writer_with_session(
+    mut rx: mpsc::Receiver<WalletCommand>,
+    storage: Arc<RwLock<SecretStorage>>,
+    state: Arc<RwLock<WalletState>>,
+    store: Arc<dyn ergo_state::wallet::WalletStore>,
+    chain: Arc<dyn ChainStateAccessor>,
+    cfg: WriterConfig,
+    submit_handle: Arc<dyn TxSubmitter>,
+    mempool: Arc<dyn ergo_api::MempoolView>,
+    wallet_session_id: u64,
+) {
     let ctx = commands::WriterContext {
         storage: &storage,
         state: &state,
-        db: &db,
         store: &store,
         chain: &chain,
         cfg: &cfg,
         submit_handle: &submit_handle,
         mempool: &mempool,
+        wallet_session_id,
     };
     // Sensitive-op failed-attempt budgets, owned by this loop (the single
     // choke point every wallet surface funnels through). See
@@ -1194,6 +1369,14 @@ pub async fn run_wallet_writer(
     let unlock_limiter = commands::admin::AttemptLimiter::new();
     let check_limiter = commands::admin::AttemptLimiter::new();
     while let Some(cmd) = rx.recv().await {
+        if !cmd.is_rescan_control()
+            && (crate::wallet_boot::RESCAN_FAIL_CLOSED.load(Ordering::SeqCst)
+                || crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst)
+                || ergo_state::wallet::wallet_apply_fenced())
+        {
+            cmd.reject_during_rescan();
+            continue;
+        }
         match cmd {
             WalletCommand::Status { reply } => commands::admin::status(&ctx, reply).await,
             WalletCommand::Init {
@@ -1365,9 +1548,152 @@ mod commands;
 
 mod support;
 #[cfg(test)]
+mod command_fencing_tests {
+    use super::*;
+    use ergo_api::wallet::WalletAdmin;
+    use ergo_state::wallet::{WalletRead, WalletStore, WalletStoreError, WalletWrite};
+    use tokio::sync::Mutex;
+
+    static GUARD: Mutex<()> = Mutex::const_new(());
+
+    #[tokio::test]
+    async fn normal_commands_are_fenced_but_rescan_is_allowed() {
+        let _guard = GUARD.lock().await;
+        crate::wallet_boot::latch_rescan_fail_closed();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let admin = NodeWalletAdmin::new(tx);
+        let normal = admin.balances().await;
+        let queued = rx.try_recv();
+        assert!(matches!(
+            normal,
+            Err(WalletAdminError::RescanUnavailable(_))
+        ));
+        assert!(queued.is_err());
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let admin = NodeWalletAdmin::new(tx);
+        let rescan = tokio::spawn(async move { admin.rescan(0).await });
+        drop(rx);
+        let rescan = rescan.await.unwrap();
+        assert!(!matches!(
+            rescan,
+            Err(WalletAdminError::RescanUnavailable(_))
+        ));
+        crate::wallet_boot::clear_rescan_guards();
+    }
+
+    #[tokio::test]
+    async fn normal_commands_are_fenced_during_rescan() {
+        let _guard = GUARD.lock().await;
+        crate::wallet_boot::clear_rescan_guards();
+        crate::wallet_boot::RESCAN_IN_PROGRESS.store(true, Ordering::SeqCst);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let admin = NodeWalletAdmin::new(tx);
+        let result = admin.balances().await;
+        assert!(matches!(
+            result,
+            Err(WalletAdminError::RescanUnavailable(_))
+        ));
+        assert!(rx.try_recv().is_err());
+        crate::wallet_boot::clear_rescan_guards();
+    }
+
+    #[tokio::test]
+    async fn control_commands_bypass_pre_enqueue_fence() {
+        let _guard = GUARD.lock().await;
+        crate::wallet_boot::latch_rescan_fail_closed();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let admin = NodeWalletAdmin::new(tx);
+        let status = tokio::spawn(async move { admin.status().await });
+        match rx.recv().await.unwrap() {
+            WalletCommand::Status { reply } => {
+                let _ = reply.send(Err(WalletAdminError::Internal(
+                    "status reached".to_string(),
+                )));
+            }
+            _ => panic!("unexpected command"),
+        }
+        assert!(matches!(
+            status.await.unwrap(),
+            Err(WalletAdminError::Internal(message)) if message == "status reached"
+        ));
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let admin = NodeWalletAdmin::new(tx);
+        let lock = tokio::spawn(async move { admin.lock().await });
+        match rx.recv().await.unwrap() {
+            WalletCommand::Lock { reply } => {
+                let _ = reply.send(Err(WalletAdminError::Internal("lock reached".to_string())));
+            }
+            _ => panic!("unexpected command"),
+        }
+        assert!(matches!(
+            lock.await.unwrap(),
+            Err(WalletAdminError::Internal(message)) if message == "lock reached"
+        ));
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let admin = NodeWalletAdmin::new(tx);
+        let native_status = tokio::spawn(async move { admin.native_status().await });
+        match rx.recv().await.unwrap() {
+            WalletCommand::NativeStatus { reply } => {
+                let _ = reply.send(Err(WalletAdminError::Internal(
+                    "native status reached".to_string(),
+                )));
+            }
+            _ => panic!("unexpected command"),
+        }
+        assert!(matches!(
+            native_status.await.unwrap(),
+            Err(WalletAdminError::Internal(message)) if message == "native status reached"
+        ));
+        crate::wallet_boot::clear_rescan_guards();
+    }
+
+    #[tokio::test]
+    async fn queued_non_control_command_is_rejected_by_execution_fence() {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        WalletCommand::Balances { reply: reply_tx }.reject_during_rescan();
+        assert!(matches!(
+            reply_rx.await.unwrap(),
+            Err(WalletAdminError::RescanUnavailable(_))
+        ));
+    }
+
+    struct FailingInvalidationStore;
+
+    impl WalletStore for FailingInvalidationStore {
+        fn begin_read(&self) -> Result<Box<dyn WalletRead>, WalletStoreError> {
+            panic!("read is not used by this test")
+        }
+
+        fn begin_write(&self) -> Result<Box<dyn WalletWrite>, WalletStoreError> {
+            Err(WalletStoreError::Decode("injected".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn invalidation_write_failure_latches_fail_closed_guards() {
+        let _guard = GUARD.lock().await;
+        crate::wallet_boot::clear_rescan_guards();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::mark_scan_invalidated(&FailingInvalidationStore)
+        }));
+        assert!(result.is_err());
+        assert!(crate::wallet_boot::RESCAN_FAIL_CLOSED.load(Ordering::SeqCst));
+        assert!(crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst));
+        assert!(crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst));
+        crate::wallet_boot::clear_rescan_guards();
+    }
+}
+
+#[cfg(test)]
 mod scan_invalidation_tests {
     use super::*;
     use ergo_state::wallet::tables::{WALLET_SCANS, WALLET_SCAN_INVALIDATED};
+    use std::sync::Mutex;
+
+    static INVALIDATION_GUARD: Mutex<()> = Mutex::new(());
 
     fn temp_db() -> (tempfile::TempDir, Arc<redb::Database>) {
         let dir = tempfile::tempdir().unwrap();
@@ -1385,14 +1711,49 @@ mod scan_invalidation_tests {
 
     #[test]
     fn mark_scan_invalidated_sets_the_flag() {
+        let _guard = INVALIDATION_GUARD
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        crate::wallet_boot::clear_rescan_guards();
         let (_d, db) = temp_db();
         assert!(!flag_set(&db), "flag starts clear");
-        mark_scan_invalidated(&db);
+        let store: Arc<dyn ergo_state::wallet::WalletStore> =
+            Arc::new(ergo_state::wallet::RedbWalletStore::new(db.clone()));
+        mark_scan_invalidated(store.as_ref());
         assert!(flag_set(&db), "flag set after mark");
+        assert!(crate::wallet_boot::RESCAN_FAIL_CLOSED.load(Ordering::SeqCst));
+        assert!(crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst));
+        assert!(crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst));
+        crate::wallet_boot::clear_rescan_guards();
+    }
+
+    #[test]
+    fn wallet_state_hook_snapshots_trees_and_pubkeys_together() {
+        let _guard = INVALIDATION_GUARD
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        crate::wallet_boot::clear_rescan_guards();
+        let state = Arc::new(RwLock::new(ergo_wallet::state::WalletState::empty(false)));
+        state
+            .write()
+            .insert_tracked_pubkey(0, [2; 33], ergo_ser::address::NetworkPrefix::Mainnet)
+            .unwrap();
+        let (_dir, db) = temp_db();
+        let hook = WalletStateHook {
+            wallet: state,
+            store: Arc::new(ergo_state::wallet::RedbWalletStore::new(db)),
+        };
+        let (trees, pubkeys) = ergo_state::wallet::WalletApplyHook::wallet_state_snapshot(&hook);
+        assert!(!trees.is_empty());
+        assert!(!pubkeys.is_empty());
     }
 
     #[test]
     fn match_boxes_registry_load_failure_invalidates_for_rescan() {
+        let _guard = INVALIDATION_GUARD
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        crate::wallet_boot::clear_rescan_guards();
         let (_d, db) = temp_db();
         // A corrupt WALLET_SCANS row (not valid Scan JSON) makes load_registry
         // fail when match_boxes loads it for the block.
@@ -1404,10 +1765,11 @@ mod scan_invalidation_tests {
                 .unwrap();
             w.commit().unwrap();
         }
+        let store: Arc<dyn ergo_state::wallet::WalletStore> =
+            Arc::new(ergo_state::wallet::RedbWalletStore::new(db.clone()));
         let hook = WalletStateHook {
             wallet: Arc::new(RwLock::new(ergo_wallet::state::WalletState::empty(false))),
-            db: db.clone(),
-            store: Arc::new(ergo_state::wallet::RedbWalletStore::new(db.clone())),
+            store,
         };
         // match_boxes loads the registry first (regardless of the box slice), so
         // the corrupt row trips the Err branch even with no boxes.
@@ -1417,5 +1779,6 @@ mod scan_invalidation_tests {
             flag_set(&db),
             "a registry load failure must set WALLET_SCAN_INVALIDATED for rescan"
         );
+        crate::wallet_boot::clear_rescan_guards();
     }
 }

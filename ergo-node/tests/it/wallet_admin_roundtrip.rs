@@ -10,6 +10,8 @@ use ergo_api::wallet::WalletAdminError;
 use ergo_node::node::wallet_bridge::{
     run_wallet_writer, ChainStateAccessor, NodeWalletAdmin, TxSubmitter, WriterConfig,
 };
+use ergo_state::wallet::tables::WALLET_SCANS;
+use ergo_state::wallet::{RedbWalletStore, WalletStore};
 
 struct StubChainAccessor;
 
@@ -254,14 +256,13 @@ fn spawn_writer_with_chain(
     (NodeWalletAdmin::new(tx), db_seed, dir)
 }
 
-static RESCAN_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static WALLET_ADMIN_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
 async fn rescan_runs_in_background_and_reports_durable_failure() {
+    let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
     use ergo_api::wallet::native::dto::RescanStateDto;
     use std::time::{Duration, Instant};
-
-    let _rescan_guard = RESCAN_TEST_LOCK.lock().await;
 
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -281,22 +282,21 @@ async fn rescan_runs_in_background_and_reports_durable_failure() {
 
     let running = tokio::time::timeout(Duration::from_secs(1), admin.native_status())
         .await
-        .expect("status must not wait for the rebuild")
-        .expect("status must succeed");
+        .expect("native status must remain available during rescan")
+        .expect("native status must succeed during rescan");
     assert!(matches!(
         running.rescan,
         RescanStateDto::Running { from_height: 0 }
     ));
 
     release_tx.send(()).unwrap();
+    let store = RedbWalletStore::new(db.clone());
     let deadline = Instant::now() + Duration::from_secs(2);
     let failed = loop {
-        let status = tokio::time::timeout(Duration::from_millis(100), admin.native_status())
-            .await
-            .expect("status timeout")
-            .expect("status must succeed");
-        if let RescanStateDto::Failed { height, .. } = status.rescan.clone() {
-            break (height, status);
+        let read = store.read().unwrap();
+        let state = read.rescan_state().unwrap();
+        if let ergo_state::wallet::RescanState::Failed { height, .. } = state {
+            break height;
         }
         assert!(
             Instant::now() < deadline,
@@ -304,30 +304,36 @@ async fn rescan_runs_in_background_and_reports_durable_failure() {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
-    assert_eq!(failed.0, 1);
-    assert!(matches!(failed.1.rescan, RescanStateDto::Failed { .. }));
-
-    let read = db.begin_read().unwrap();
-    let invalidated = read
-        .open_table(ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED)
-        .unwrap()
-        .get(())
-        .unwrap()
-        .map(|row| row.value())
-        .unwrap_or(false);
-    assert!(invalidated);
-    while ergo_node::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst) {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    assert_eq!(failed, 1);
+    let read = store.read().unwrap();
+    assert!(matches!(
+        read.rescan_state().unwrap(),
+        ergo_state::wallet::RescanState::Failed { height: 1, .. }
+    ));
+    assert!(read.scan_invalidated().unwrap());
+    assert!(ergo_node::wallet_boot::RESCAN_FAIL_CLOSED.load(Ordering::SeqCst));
+    assert!(ergo_node::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst));
+    assert!(ergo_node::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst));
+    ergo_node::wallet_boot::RESCAN_FAIL_CLOSED.store(false, Ordering::SeqCst);
+    ergo_node::wallet_boot::RESCAN_IN_PROGRESS.store(false, Ordering::SeqCst);
+    ergo_node::wallet_boot::RESCAN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+    ergo_node::wallet_boot::RESCAN_TASK_ACTIVE.store(false, Ordering::SeqCst);
+    ergo_node::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
 }
 
 #[tokio::test]
 async fn rescan_on_genesis_tip_is_accepted() {
+    let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
     use std::time::Duration;
 
-    let _rescan_guard = RESCAN_TEST_LOCK.lock().await;
-    let (admin, _db, _dir) =
+    let (admin, db, _dir) =
         spawn_writer_with_chain(Arc::new(StubChainAccessor), Arc::new(StubTxSubmitter));
+    let store = RedbWalletStore::new(db);
+    let mut write = store.begin_write().unwrap();
+    write
+        .replace_scan_box(&[11], [2; 32], 1, 0, Vec::new())
+        .unwrap();
+    write.commit().unwrap();
     tokio::time::timeout(Duration::from_secs(1), admin.rescan(0))
         .await
         .expect("tip-zero rescan must be accepted")
@@ -335,8 +341,8 @@ async fn rescan_on_genesis_tip_is_accepted() {
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             if matches!(
-                admin.native_status().await.expect("status").rescan,
-                ergo_api::wallet::native::dto::RescanStateDto::Idle
+                store.read().unwrap().rescan_state().unwrap(),
+                ergo_state::wallet::RescanState::Idle
             ) {
                 break;
             }
@@ -348,6 +354,57 @@ async fn rescan_on_genesis_tip_is_accepted() {
     while ergo_node::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    assert!(store.read().unwrap().scan_boxes(11).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn corrupt_scan_registry_is_discarded_before_empty_full_rescan() {
+    let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
+    use std::time::Duration;
+
+    ergo_node::wallet_boot::RESCAN_FAIL_CLOSED.store(false, Ordering::SeqCst);
+    ergo_node::wallet_boot::RESCAN_IN_PROGRESS.store(false, Ordering::SeqCst);
+    ergo_node::wallet_boot::RESCAN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+    ergo_node::wallet_boot::RESCAN_TASK_ACTIVE.store(false, Ordering::SeqCst);
+    ergo_node::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
+    let (admin, db, _dir) =
+        spawn_writer_with_chain(Arc::new(StubChainAccessor), Arc::new(StubTxSubmitter));
+    {
+        let txn = db.begin_write().unwrap();
+        txn.open_table(WALLET_SCANS)
+            .unwrap()
+            .insert(11u16, vec![0xFF, 0x00])
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    tokio::time::timeout(Duration::from_secs(1), admin.rescan(0))
+        .await
+        .expect("corrupt-registry recovery rescan must be accepted")
+        .expect("corrupt-registry recovery rescan must start");
+
+    let store = RedbWalletStore::new(db);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let read = store.read().unwrap();
+            if matches!(
+                read.rescan_state().unwrap(),
+                ergo_state::wallet::RescanState::Idle
+            ) && !read.scan_invalidated().unwrap()
+                && read.registered_scan_count().unwrap() == 0
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("corrupt-registry recovery rescan must finish");
+    ergo_node::wallet_boot::RESCAN_FAIL_CLOSED.store(false, Ordering::SeqCst);
+    ergo_node::wallet_boot::RESCAN_IN_PROGRESS.store(false, Ordering::SeqCst);
+    ergo_node::wallet_boot::RESCAN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+    ergo_node::wallet_boot::RESCAN_TASK_ACTIVE.store(false, Ordering::SeqCst);
+    ergo_node::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
 }
 
 /// `send.signed` idempotency (codex P0-4): a tx whose id is already a confirmed
@@ -355,6 +412,7 @@ async fn rescan_on_genesis_tip_is_accepted() {
 /// The rejecting submitter proves no submit occurs (else the response would error).
 #[tokio::test]
 async fn native_send_signed_known_tx_short_circuits() {
+    let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
     use ergo_api::wallet::native::dto::{SendTxRequest, TxRepr};
     use ergo_state::wallet::tables::{wallet_tx_key, WALLET_TXS};
     use ergo_state::wallet::types::WalletTransaction;
@@ -404,6 +462,7 @@ async fn native_send_signed_known_tx_short_circuits() {
 /// submit reason is an idempotent `accepted:true` (never a 5xx on a re-seen tx).
 #[tokio::test]
 async fn native_send_signed_duplicate_is_idempotent_accept() {
+    let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
     use ergo_api::wallet::native::dto::{SendTxRequest, TxRepr};
 
     let (signed_bytes, tx_id) = minimal_signed_tx();
@@ -426,6 +485,7 @@ async fn native_send_signed_duplicate_is_idempotent_accept() {
 /// client error carrying the typed reason — never an opaque 5xx.
 #[tokio::test]
 async fn native_send_signed_real_rejection_is_error() {
+    let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
     use ergo_api::wallet::native::dto::{SendTxRequest, TxRepr};
 
     let (signed_bytes, _tx_id) = minimal_signed_tx();
@@ -449,6 +509,7 @@ async fn native_send_signed_real_rejection_is_error() {
 /// (`bad_request` 400), NOT a server fault (500) from the txId helper (workflow P1).
 #[tokio::test]
 async fn native_send_signed_malformed_bytes_is_bad_request() {
+    let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
     use ergo_api::wallet::native::dto::{SendTxRequest, TxRepr};
 
     let (admin, _db, _dir) = spawn_writer(Arc::new(RejectingSubmitter {
@@ -471,6 +532,7 @@ async fn native_send_signed_malformed_bytes_is_bad_request() {
 /// own secrets): locked → `wallet_locked`.
 #[tokio::test]
 async fn native_send_intent_locked_rejects() {
+    let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
     use ergo_api::wallet::native::dto::{InputSource, OutputIntent, SendTxRequest, TxIntent};
 
     let (admin, _db, _dir) = spawn_writer(Arc::new(StubTxSubmitter));
@@ -505,6 +567,7 @@ async fn native_send_intent_locked_rejects() {
 
 #[tokio::test]
 async fn admin_init_status_roundtrip() {
+    let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
     let (tx, rx) = tokio::sync::mpsc::channel(32);
     let dir = tempfile::tempdir().unwrap();
 
@@ -567,6 +630,7 @@ async fn admin_init_status_roundtrip() {
 
 #[tokio::test]
 async fn get_private_key_gated_by_expose_flag_false() {
+    let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
     // With `WriterConfig.expose_private_keys = false`, the route
     // returns `Forbidden` before touching wallet state — so the test
     // doesn't need an initialized wallet to drive the gate.
@@ -628,6 +692,7 @@ async fn get_private_key_gated_by_expose_flag_false() {
 /// address). This test fails if that ever happens.
 #[tokio::test]
 async fn generate_unsigned_emits_canonical_p2pk_recipient_tree() {
+    let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
     use ergo_state::wallet::tables::WALLET_BOXES;
     use ergo_state::wallet::types::{BoxProvenance, BoxStatus, WalletBox};
 
@@ -743,6 +808,7 @@ async fn generate_unsigned_emits_canonical_p2pk_recipient_tree() {
 /// at candidate height `tip+1`.
 #[tokio::test]
 async fn native_balance_reserves_eip27_reward_box_tokens() {
+    let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
     use ergo_state::wallet::tables::WALLET_BOXES;
     use ergo_state::wallet::types::{BoxProvenance, BoxStatus, WalletBox};
 
@@ -857,6 +923,7 @@ async fn native_balance_reserves_eip27_reward_box_tokens() {
 /// kept, and `allowReemissionSpend=false` is fail-closed.
 #[tokio::test]
 async fn native_select_boxes_burn_aware_dry_run() {
+    let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
     use ergo_api::wallet::native::dto::{BoxSelectRequest, InputSource, SelectTarget};
     use ergo_state::wallet::tables::WALLET_BOXES;
     use ergo_state::wallet::types::{BoxProvenance, BoxStatus, WalletBox};
@@ -1035,6 +1102,7 @@ async fn native_select_boxes_burn_aware_dry_run() {
 /// paging), single-box lookup (present + absent), and empty transactions.
 #[tokio::test]
 async fn native_reads_status_boxes_and_lookup() {
+    let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
     use ergo_api::wallet::native::dto::NetworkDto;
     use ergo_state::wallet::tables::WALLET_BOXES;
     use ergo_state::wallet::types::{BoxProvenance, BoxStatus, WalletBox};
@@ -1137,6 +1205,7 @@ async fn native_reads_status_boxes_and_lookup() {
 /// surface it even while the wallet is LOCKED (it is `null` only when unset).
 #[tokio::test]
 async fn native_status_shows_change_address_while_locked() {
+    let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
     use ergo_state::wallet::tables::WALLET_CHANGE_ADDRESS;
 
     let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -1202,6 +1271,7 @@ async fn native_status_shows_change_address_while_locked() {
 /// guard returns `WalletExists` rather than persisting a second secret file.
 #[tokio::test]
 async fn init_twice_returns_wallet_exists() {
+    let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
     let (tx, rx) = tokio::sync::mpsc::channel(32);
     let dir = tempfile::tempdir().unwrap();
     let storage = Arc::new(parking_lot::RwLock::new(
@@ -1243,6 +1313,7 @@ async fn init_twice_returns_wallet_exists() {
 
 #[tokio::test]
 async fn change_address_requires_unlocked_owned_key_and_preserves_persisted_value() {
+    let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
     use ergo_state::wallet::tables::{
         tracked_pubkey_key, WALLET_CHANGE_ADDRESS, WALLET_TRACKED_PUBKEYS,
     };

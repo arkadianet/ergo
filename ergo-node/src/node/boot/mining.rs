@@ -28,6 +28,7 @@ pub(super) fn build_subsystem(
     config: &NodeConfig,
     voting_targets_slot: &std::sync::Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
     mining_submit_tx: &tokio::sync::mpsc::Sender<crate::mining_bridge::MiningRequest>,
+    wallet_store: Option<std::sync::Arc<dyn ergo_state::wallet::WalletStore>>,
 ) -> Result<MiningSubsystem, NodeError> {
     if !config.mining_config.enabled {
         return Ok(MiningSubsystem {
@@ -38,7 +39,10 @@ pub(super) fn build_subsystem(
     // Reward-key source: an operator-configured pubkey if present, else
     // resolve the wallet's EIP-3 first-address key lazily at candidate
     // time (Scala parity). Malformed configured hex still fails fast here.
-    let reward_key = match config.mining_config.miner_public_key_hex.as_ref() {
+    let (reward_key, pinned_pk): (
+        std::sync::Arc<dyn ergo_mining::RewardKeySource>,
+        Option<[u8; 33]>,
+    ) = match config.mining_config.miner_public_key_hex.as_ref() {
         Some(pk_hex) => {
             let pk_bytes = hex::decode(pk_hex).map_err(|e| -> NodeError {
                 format!("[mining] miner_public_key_hex hex decode: {e}").into()
@@ -50,9 +54,35 @@ pub(super) fn build_subsystem(
                 )
                 .into()
             })?;
-            ergo_mining::handle::RewardKeySource::Pinned(miner_pk)
+            (
+                std::sync::Arc::new(ergo_mining::PinnedRewardKeySource::new(miner_pk)),
+                Some(miner_pk),
+            )
         }
-        None => ergo_mining::handle::RewardKeySource::Wallet,
+        None => {
+            let store = wallet_store.ok_or_else(|| {
+                "[mining] enabled without miner_public_key_hex requires embedded wallet state"
+                    .to_string()
+            })?;
+            let reward_store = store.clone();
+            let source = ergo_mining::WalletRewardKeySource::new(move || {
+                let Ok(read) = reward_store.read() else {
+                    return ergo_mining::RewardKeyResolution::Corrupt;
+                };
+                match read.resolve_reward_key() {
+                    Ok(ergo_state::wallet::RewardKeyResolution::Ready(key)) => {
+                        ergo_mining::RewardKeyResolution::Ready(key)
+                    }
+                    Ok(ergo_state::wallet::RewardKeyResolution::Pending) => {
+                        ergo_mining::RewardKeyResolution::Pending
+                    }
+                    Ok(ergo_state::wallet::RewardKeyResolution::Corrupt) | Err(_) => {
+                        ergo_mining::RewardKeyResolution::Corrupt
+                    }
+                }
+            });
+            (std::sync::Arc::new(source), None)
+        }
     };
     let handle = ergo_mining::handle::MiningHandle::with_reward_key(
         reward_key,
@@ -89,13 +119,10 @@ pub(super) fn build_subsystem(
     let bridge =
         crate::mining_bridge::MiningBridge::new(mining_submit_tx.clone(), network_prefix, serve_rx)
             .into_dyn();
-    match reward_key {
-        ergo_mining::handle::RewardKeySource::Pinned(pk) => {
-            info!(pk = %hex::encode(pk), "mining subsystem enabled (configured reward key); /mining/* routes live");
-        }
-        ergo_mining::handle::RewardKeySource::Wallet => {
-            info!("mining subsystem enabled (wallet-resolved reward key); /mining/* routes live");
-        }
+    if let Some(pk) = pinned_pk {
+        info!(pk = %hex::encode(pk), "mining subsystem enabled (configured reward key); /mining/* routes live");
+    } else {
+        info!("mining subsystem enabled (wallet-resolved reward key); /mining/* routes live");
     }
     Ok(MiningSubsystem {
         handle: Some(handle),

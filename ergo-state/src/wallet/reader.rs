@@ -42,7 +42,7 @@ const EIP3_FIRST_ADDRESS_PATH: [u32; 5] = [44 | 0x8000_0000, 429 | 0x8000_0000, 
 
 /// Outcome of resolving the wallet's EIP-3 first-address pubkey for use as
 /// the miner reward key. Three states, kept distinct end-to-end
-/// (ergo-state → ergo-mining → ergo-api) so the API can map them to the
+/// (wallet store → mining source → ergo-api) so the API can map them to the
 /// right transport:
 /// - `Ready` → 200 with the key,
 /// - `Pending` → 503 (wallet tracking not initialized yet; retry),
@@ -133,6 +133,27 @@ impl<'tx> WalletReader<'tx> {
             height,
             header_id: Some(header_id),
         }))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub fn chain_index_header(&self, height: u32) -> Result<Option<[u8; 32]>, redb::Error> {
+        let table = match self.txn.open_table(crate::store::CHAIN_INDEX) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let Some(bytes) = table.get(height as u64)? else {
+            return Ok(None);
+        };
+        if bytes.value().len() != 32 {
+            return Err(redb::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "chain index header row is not 32 bytes",
+            )));
+        }
+        let mut header_id = [0u8; 32];
+        header_id.copy_from_slice(bytes.value());
+        Ok(Some(header_id))
     }
 
     /// All wallet boxes (any status). Returns an owned `Vec<WalletBox>`
@@ -479,6 +500,25 @@ impl<'tx> crate::wallet::hydration::HydrationSource for WalletReader<'tx> {
     fn change_address_pubkey(&self) -> Option<[u8; 33]> {
         let tbl = self.txn.open_table(WALLET_CHANGE_ADDRESS).ok()?;
         tbl.get(()).ok().flatten().map(|g| g.value())
+    }
+}
+
+impl crate::wallet::hydration::HydrationSource for dyn crate::wallet::WalletRead + '_ {
+    fn tracked_pubkeys(&self) -> Box<dyn Iterator<Item = (u64, [u8; 33])> + '_> {
+        Box::new(
+            self.tracked_pubkeys_with_paths()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(index, pubkey, _)| (index, pubkey)),
+        )
+    }
+
+    fn visible_pubkeys(&self) -> Box<dyn Iterator<Item = (u32, [u8; 33])> + '_> {
+        Box::new(self.visible_pubkeys().unwrap_or_default().into_iter())
+    }
+
+    fn change_address_pubkey(&self) -> Option<[u8; 33]> {
+        self.change_address_pubkey().ok().flatten()
     }
 }
 

@@ -42,98 +42,34 @@ pub(crate) fn render_derivation_path(components: &[u32]) -> String {
 /// except the hidden master (path_idx == 0, derivation_path == []).
 /// Matches `wallet_boot.rs`'s equivalent rebuild step.
 pub(crate) fn persist_tracked_pubkey(
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     path_idx: u64,
     pubkey: &[u8; 33],
     meta: &ergo_state::wallet::types::TrackedPubkeyMeta,
     new_derivation_head: Option<u64>,
 ) -> Result<(), WalletAdminError> {
-    use ergo_state::wallet::tables::{
-        tracked_pubkey_key, WALLET_TRACKED_PUBKEYS, WALLET_VISIBLE_ADDRESSES,
-    };
-    use redb::ReadableTable;
-
-    let meta_bytes = bincode::serialize(meta)
-        .map_err(|e| WalletAdminError::Internal(format!("bincode TrackedPubkeyMeta: {e}")))?;
-
-    let write_txn = db
+    let mut write = store
         .begin_write()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-    {
-        // Insert the new tracked pubkey.
-        let mut tracked = write_txn
-            .open_table(WALLET_TRACKED_PUBKEYS)
-            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        tracked
-            .insert(tracked_pubkey_key(path_idx, pubkey), meta_bytes)
-            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-
-        // Rebuild WALLET_VISIBLE_ADDRESSES from all tracked entries (skip
-        // hidden master: path_idx 0 with empty derivation_path).
-        // We clear first, then reinsert all visible entries. The table is
-        // small (typically < 1000 keys), so a full rebuild is safe.
-        let all_tracked: Vec<(u64, [u8; 33], Vec<u32>)> = {
-            let mut rows = Vec::new();
-            for entry in tracked
-                .iter()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-            {
-                let (k, v) = entry.map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-                let key_bytes: [u8; 41] = k.value();
-                let (idx, pk) = ergo_state::wallet::tables::parse_tracked_pubkey_key(&key_bytes);
-                let row_meta: ergo_state::wallet::types::TrackedPubkeyMeta =
-                    bincode::deserialize(v.value().as_slice()).map_err(|e| {
-                        WalletAdminError::Internal(format!("bincode TrackedPubkeyMeta read: {e}"))
-                    })?;
-                rows.push((idx, pk, row_meta.derivation_path));
-            }
-            rows
-        };
-
-        let mut visible = write_txn
-            .open_table(WALLET_VISIBLE_ADDRESSES)
-            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-
-        // Clear all existing visible entries.
-        let existing_keys: Vec<u32> = visible
-            .iter()
-            .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-            .map(|entry| entry.map(|(k, _)| k.value()))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e: redb::StorageError| WalletAdminError::Internal(e.to_string()))?;
-        for key in existing_keys {
-            visible
-                .remove(key)
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        }
-
-        // Reinsert all visible (non-hidden-master) entries.
-        // Hidden master: path_idx == 0 with empty derivation_path (matches boot logic).
-        let mut visible_idx = 0u32;
-        for (idx, pk, path) in &all_tracked {
-            let is_hidden_master = *idx == 0 && path.is_empty();
-            if !is_hidden_master {
-                visible
-                    .insert(visible_idx, *pk)
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-                visible_idx += 1;
-            }
-        }
-
-        if let Some(new_head) = new_derivation_head {
-            use ergo_state::wallet::tables::WALLET_DERIVATION_HEAD;
-            let mut head_tbl = write_txn
-                .open_table(WALLET_DERIVATION_HEAD)
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            head_tbl
-                .insert((), new_head)
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        }
-    }
-    write_txn
-        .commit()
+    write
+        .insert_tracked_pubkey(path_idx, *pubkey, meta)
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-    Ok(())
+    write
+        .rebuild_visible_addresses()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    if let Some(head) = new_derivation_head {
+        write
+            .set_derivation_head(head)
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    }
+    write
+        .set_scan_invalidated(true)
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    ergo_state::wallet::advance_wallet_apply_generation();
+    ergo_state::wallet::fence_wallet_apply();
+    write
+        .commit()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))
 }
 
 /// `POST /wallet/deriveKey` writer-task implementation.
@@ -141,7 +77,7 @@ pub(crate) async fn derive_key_impl(
     request: &ergo_api::wallet::admin_advanced::DeriveKeyRequest,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     state: &RwLock<ergo_wallet::state::WalletState>,
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
     network: ergo_ser::address::NetworkPrefix,
 ) -> Result<ergo_api::wallet::admin_advanced::DeriveKeyResponse, WalletAdminError> {
@@ -162,11 +98,10 @@ pub(crate) async fn derive_key_impl(
             })?;
 
     // Dedup: compare against every existing tracked path via tracked_pubkeys_with_paths.
-    let read_txn = db
-        .begin_read()
+    let read = store
+        .read()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-    let wallet_reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-    let existing: Vec<(u64, [u8; 33], Vec<u32>)> = wallet_reader
+    let existing: Vec<(u64, [u8; 33], Vec<u32>)> = read
         .tracked_pubkeys_with_paths()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
 
@@ -192,7 +127,7 @@ pub(crate) async fn derive_key_impl(
         .derive_pubkey_at_path(&path)
         .map_err(|e| WalletAdminError::Internal(format!("deriveKey: derivation failed: {e}")))?;
 
-    drop(read_txn);
+    drop(read);
 
     // Build metadata.
     let meta = ergo_state::wallet::types::TrackedPubkeyMeta {
@@ -204,7 +139,7 @@ pub(crate) async fn derive_key_impl(
     };
 
     // Persist atomically (WALLET_TRACKED_PUBKEYS + WALLET_VISIBLE_ADDRESSES).
-    persist_tracked_pubkey(db, next_idx, &pubkey, &meta, None)?;
+    persist_tracked_pubkey(store, next_idx, &pubkey, &meta, None)?;
     drop(storage_guard);
 
     // Update in-memory WalletState.
@@ -232,12 +167,11 @@ pub(crate) async fn derive_key_impl(
 pub(crate) async fn derive_next_key_impl(
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     state: &RwLock<ergo_wallet::state::WalletState>,
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
     network: ergo_ser::address::NetworkPrefix,
 ) -> Result<ergo_api::wallet::admin_advanced::DeriveNextKeyResponse, WalletAdminError> {
     use ergo_api::wallet::admin_advanced::DeriveNextKeyResponse;
-    use ergo_state::wallet::tables::WALLET_DERIVATION_HEAD;
     use ergo_wallet::derivation::{DerivationPath, HARDENED_OFFSET};
 
     // Require unlocked.
@@ -245,20 +179,11 @@ pub(crate) async fn derive_next_key_impl(
     let unlocked = storage_guard.unlocked().ok_or(WalletAdminError::Locked)?;
 
     // Read WALLET_DERIVATION_HEAD singleton (default 0 if missing).
-    let head: u64 = {
-        let read_txn = db
-            .begin_read()
-            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        match read_txn.open_table(WALLET_DERIVATION_HEAD) {
-            Ok(tbl) => tbl
-                .get(())
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-                .map(|g| g.value())
-                .unwrap_or(0),
-            Err(redb::TableError::TableDoesNotExist(_)) => 0,
-            Err(e) => return Err(WalletAdminError::Internal(e.to_string())),
-        }
-    };
+    let head: u64 = store
+        .read()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+        .derivation_head()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
 
     let new_head = head + 1;
 
@@ -275,11 +200,10 @@ pub(crate) async fn derive_next_key_impl(
     let path_str = render_derivation_path(&path_components);
 
     // Dedup check (same as derive_key).
-    let read_txn = db
-        .begin_read()
+    let read = store
+        .read()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-    let wallet_reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-    let existing: Vec<(u64, [u8; 33], Vec<u32>)> = wallet_reader
+    let existing: Vec<(u64, [u8; 33], Vec<u32>)> = read
         .tracked_pubkeys_with_paths()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
     for (_, _, existing_path) in &existing {
@@ -300,7 +224,7 @@ pub(crate) async fn derive_next_key_impl(
         WalletAdminError::Internal(format!("deriveNextKey: derivation failed: {e}"))
     })?;
 
-    drop(read_txn);
+    drop(read);
 
     let meta = ergo_state::wallet::types::TrackedPubkeyMeta {
         derivation_path: path.components().to_vec(),
@@ -312,7 +236,7 @@ pub(crate) async fn derive_next_key_impl(
 
     // Persist WALLET_TRACKED_PUBKEYS + WALLET_VISIBLE_ADDRESSES, shared with
     // derive_key_impl so the two paths can never drift on this logic.
-    persist_tracked_pubkey(db, next_idx, &pubkey, &meta, Some(new_head))?;
+    persist_tracked_pubkey(store, next_idx, &pubkey, &meta, Some(new_head))?;
     drop(storage_guard);
 
     // Update in-memory WalletState.
@@ -341,7 +265,7 @@ pub(crate) async fn derive_next_key_impl(
 pub(crate) async fn get_private_key_impl(
     request: &ergo_api::wallet::admin_advanced::GetPrivateKeyRequest,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     cfg: &WriterConfig,
 ) -> Result<ergo_api::wallet::admin_advanced::GetPrivateKeyResponse, WalletAdminError> {
     use ergo_api::wallet::admin_advanced::GetPrivateKeyResponse;
@@ -364,11 +288,10 @@ pub(crate) async fn get_private_key_impl(
         })?;
 
     // Look up derivation path for this pubkey in WALLET_TRACKED_PUBKEYS.
-    let read_txn = db
-        .begin_read()
+    let read = store
+        .read()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-    let wallet_reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-    let tracked = wallet_reader
+    let tracked = read
         .tracked_pubkeys_with_paths()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
 
@@ -395,4 +318,38 @@ pub(crate) async fn get_private_key_impl(
     let w = hex::encode(scalar_bytes);
 
     Ok(GetPrivateKeyResponse { w })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ergo_state::wallet::{RedbWalletStore, WalletStore};
+    use std::sync::{Arc, Mutex};
+
+    static TEST_GUARD: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn tracked_key_mutation_advances_generation_and_invalidates() {
+        let _guard = TEST_GUARD.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+        let store = RedbWalletStore::new(db);
+        let was_fenced = ergo_state::wallet::wallet_apply_fenced();
+        let before = ergo_state::wallet::wallet_apply_generation();
+        let pubkey = [7u8; 33];
+        let meta = ergo_state::wallet::types::TrackedPubkeyMeta {
+            derivation_path: vec![44, 0],
+            derivation_path_label: String::new(),
+            added_at_height: 0,
+        };
+
+        persist_tracked_pubkey(&store, 0, &pubkey, &meta, Some(1)).unwrap();
+
+        assert!(ergo_state::wallet::wallet_apply_generation() > before);
+        assert!(store.read().unwrap().scan_invalidated().unwrap());
+        if !was_fenced {
+            ergo_state::wallet::unfence_wallet_apply();
+        }
+        store.persist_scan_invalidation(false).unwrap();
+    }
 }

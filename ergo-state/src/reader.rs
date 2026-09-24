@@ -124,6 +124,21 @@ impl ChainStoreReader {
         committed_tip_in(&read_txn)
     }
 
+    /// Reads the wallet rescan block at `height` from one committed snapshot.
+    #[allow(clippy::type_complexity)]
+    pub fn wallet_block_txs_at_height(
+        &self,
+        height: u32,
+    ) -> Result<
+        Option<([u8; 32], Vec<crate::store::OwnedBlockTxData>)>,
+        crate::wallet::scan::RescanReadError,
+    > {
+        let read_txn = self.db.begin_read().map_err(|error| {
+            crate::wallet::scan::RescanReadError::from_state(height, error.into())
+        })?;
+        crate::store::block_txs_for_wallet_at_height_in_read_txn(&read_txn, height)
+    }
+
     /// Every header id known at a given height — best chain plus any
     /// validated orphans. Backs the Scala-compat `/blocks/at/{h}`
     /// route. First entry (when non-empty) is always the best-chain

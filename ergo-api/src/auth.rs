@@ -134,16 +134,16 @@ pub async fn require_api_key(
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    let Some(header_val) = req.headers().get(API_KEY_HEADER) else {
+    if !request_is_authorized(&sec, &req) {
         return reject_invalid();
-    };
-    // Single api-key scheme: delegate the Blake2b-256 + constant-time hex
-    // compare to `ApiSecurity::verify` (shared with the v1 tier gate).
-    if sec.verify(header_val.as_bytes()) {
-        next.run(req).await
-    } else {
-        reject_invalid()
     }
+    next.run(req).await
+}
+
+pub(crate) fn request_is_authorized(sec: &ApiSecurity, req: &Request<Body>) -> bool {
+    req.headers()
+        .get(API_KEY_HEADER)
+        .is_some_and(|header_val| sec.verify(header_val.as_bytes()))
 }
 
 /// Post-auth catch-all for unknown subpaths under a gated prefix
@@ -162,7 +162,7 @@ pub(crate) async fn unknown_gated_subpath() -> StatusCode {
     StatusCode::NOT_FOUND
 }
 
-fn reject_invalid() -> Response {
+pub(crate) fn reject_invalid() -> Response {
     (
         StatusCode::FORBIDDEN,
         Json(json!({

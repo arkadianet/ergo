@@ -53,6 +53,14 @@ pub trait WalletApplyHook: Send + Sync {
     /// checks if it's in this map's values).
     fn cached_pubkeys(&self) -> BTreeMap<u64, [u8; 33]>;
 
+    fn wallet_state_snapshot(&self) -> (BTreeSet<Vec<u8>>, BTreeMap<u64, [u8; 33]>) {
+        (self.tracked_p2pk_trees(), self.cached_pubkeys())
+    }
+
+    fn allow_non_contiguous_wallet_apply(&self) -> bool {
+        false
+    }
+
     /// Number of registered `/scan/*` scans. The apply path skips ALL scan
     /// matching when this is 0 (the common case, especially during IBD before
     /// any scan exists), so it must be cheap. Defaults to 0 so non-scan hook

@@ -171,6 +171,7 @@ pub enum Reason {
     AcknowledgementRequired,
     SecretNotRecoverable,
     ChangeAddressUntracked,
+    WalletMoved,
 
     // ----- caps / rate (429 / 413) -----
     RateLimited,
@@ -276,6 +277,8 @@ impl Reason {
             IndexerDisabled | IndexerSyncing | IndexerHalted | SubmitDisabled
             | MempoolViewDisabled | RealtimeDisabled | WebhooksDisabled | SnapshotDisabled
             | MiningDisabled | SensitiveOpDisabled | AlreadyBlacklisted => StatusCode::CONFLICT,
+
+            WalletMoved => StatusCode::GONE,
 
             // 501 — built-without / not-configured
             CompilerUnavailable | OracleUnavailable => StatusCode::NOT_IMPLEMENTED,
@@ -538,6 +541,7 @@ mod tests {
             (AcknowledgementRequired, "acknowledgement_required", cf),
             (SecretNotRecoverable, "secret_not_recoverable", cf),
             (ChangeAddressUntracked, "change_address_untracked", cf),
+            (WalletMoved, "wallet_moved", StatusCode::GONE),
             // caps / rate
             (RateLimited, "rate_limited", rl),
             (LimitExceeded, "limit_exceeded", rl),
@@ -608,11 +612,11 @@ mod tests {
     }
 
     #[test]
-    fn contract_covers_exactly_one_hundred_thirteen_reasons_no_duplicates() {
+    fn contract_covers_exactly_one_hundred_fourteen_reasons_no_duplicates() {
         use std::collections::BTreeSet;
         let rows = contract();
-        assert_eq!(rows.len(), 113, "expected 113 canonical reasons");
+        assert_eq!(rows.len(), 114, "expected 114 canonical reasons");
         let wires: BTreeSet<&str> = rows.iter().map(|(_, w, _)| *w).collect();
-        assert_eq!(wires.len(), 113, "wire strings must be unique");
+        assert_eq!(wires.len(), 114, "wire strings must be unique");
     }
 }

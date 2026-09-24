@@ -726,6 +726,14 @@ pub fn router_with_security(
     admin: Arc<dyn WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
 ) -> axum::Router {
+    router_with_security_and_moved(admin, security, None)
+}
+
+pub(crate) fn router_with_security_and_moved(
+    admin: Arc<dyn WalletAdmin>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+    daemon_address: Option<&str>,
+) -> axum::Router {
     use axum::routing::{any, get, post};
     let r = axum::Router::new()
         .route("/api/v1/wallet/status", get(status))
@@ -760,11 +768,25 @@ pub fn router_with_security(
             any(crate::auth::unknown_gated_subpath),
         )
         .with_state(admin);
-    match security {
-        Some(sec) => r.route_layer(axum::middleware::from_fn_with_state(
+    match (security, daemon_address) {
+        (Some(sec), Some(address)) => r.route_layer(axum::middleware::from_fn_with_state(
+            super::WalletMovedGuard {
+                daemon_address: Arc::from(address),
+                security: Some(sec),
+            },
+            super::wallet_moved_guard,
+        )),
+        (None, Some(address)) => r.route_layer(axum::middleware::from_fn_with_state(
+            super::WalletMovedGuard {
+                daemon_address: Arc::from(address),
+                security: None,
+            },
+            super::wallet_moved_guard,
+        )),
+        (Some(sec), None) => r.route_layer(axum::middleware::from_fn_with_state(
             sec,
             crate::auth::require_api_key,
         )),
-        None => r,
+        (None, None) => r,
     }
 }

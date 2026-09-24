@@ -412,7 +412,14 @@ pub fn block_txs_for_wallet_at_height(
     let read_txn = db
         .begin_read()
         .map_err(|e| RescanReadError::from_state(height, e.into()))?;
+    block_txs_for_wallet_at_height_in_read_txn(&read_txn, height)
+}
 
+#[allow(clippy::type_complexity)]
+pub(crate) fn block_txs_for_wallet_at_height_in_read_txn(
+    read_txn: &redb::ReadTransaction,
+    height: u32,
+) -> Result<Option<([u8; 32], Vec<OwnedBlockTxData>)>, RescanReadError> {
     // Read from CHAIN_INDEX (full-block applied chain).
     let chain_table = match read_txn.open_table(CHAIN_INDEX) {
         Ok(t) => t,
@@ -444,7 +451,7 @@ pub fn block_txs_for_wallet_at_height(
     // header_id and the block txs are read from one consistent snapshot — a
     // reorg between two separate transactions could pair the height with a
     // different block's transactions.
-    match build_wallet_block_txs_from_read_txn_classified(&read_txn, &header_id) {
+    match build_wallet_block_txs_from_read_txn_classified(read_txn, &header_id) {
         Ok(WalletBlockSections::Found(txs)) => Ok(Some((header_id, txs))),
         Ok(WalletBlockSections::MissingBlockTransactions) => Ok(None),
         Ok(WalletBlockSections::MissingHeader) => Err(RescanReadError::Corrupt {

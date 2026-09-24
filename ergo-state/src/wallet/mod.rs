@@ -21,11 +21,86 @@ pub mod store;
 pub mod tables;
 pub mod types;
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::{Duration, Instant};
 
 use redb::Database;
 
 use crate::store::{StateError, CHAIN_INDEX};
+
+static CHAIN_APPLY_FINALIZATION_LOCK: RwLock<()> = RwLock::new(());
+
+pub fn chain_apply_read_guard() -> RwLockReadGuard<'static, ()> {
+    CHAIN_APPLY_FINALIZATION_LOCK
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub fn chain_apply_write_guard() -> RwLockWriteGuard<'static, ()> {
+    CHAIN_APPLY_FINALIZATION_LOCK
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+static WALLET_APPLY_FENCED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static WALLET_FINALIZATION_IN_PROGRESS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static WALLET_FINALIZATION_OWNER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static WALLET_APPLY_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+pub(crate) static WALLET_APPLY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub fn wallet_apply_generation() -> u64 {
+    WALLET_APPLY_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn advance_wallet_apply_generation() -> u64 {
+    WALLET_APPLY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
+pub fn wallet_apply_fenced() -> bool {
+    WALLET_APPLY_FENCED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn fence_wallet_apply() {
+    WALLET_APPLY_FENCED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn unfence_wallet_apply() {
+    WALLET_APPLY_FENCED.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn wallet_finalization_in_progress() -> bool {
+    WALLET_FINALIZATION_IN_PROGRESS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn wallet_finalization_owned() -> bool {
+    WALLET_FINALIZATION_OWNER.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn set_wallet_finalization_in_progress(in_progress: bool) {
+    WALLET_FINALIZATION_IN_PROGRESS.store(in_progress, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn set_wallet_finalization_owned(owned: bool) {
+    WALLET_FINALIZATION_OWNER.store(owned, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub const WALLET_FINALIZATION_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub fn wait_for_wallet_finalization(timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while wallet_finalization_in_progress() {
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(1).min(deadline.saturating_duration_since(now)));
+    }
+    true
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalletScanCursor {
@@ -157,7 +232,9 @@ pub use store::{
     RedbWalletStore, RescanState, ScanRegistrySnapshot, StoredScan, WalletRead, WalletStore,
     WalletStoreError, WalletWrite,
 };
-pub use types::{Balance, BoxProvenance, BoxStatus, WalletBox, WalletTransaction};
+pub use types::{
+    Balance, BoxProvenance, BoxStatus, ScanTrackedBox, ScanTxRecord, WalletBox, WalletTransaction,
+};
 
 /// Bundle of wallet-side dependencies threaded through the chain-
 /// apply / chain-rollback paths. Carries the apply hook (snapshot of
@@ -174,6 +251,16 @@ pub struct WalletWiring<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn chain_apply_finalization_lock_blocks_opposite_guards() {
+        let read = chain_apply_read_guard();
+        assert!(CHAIN_APPLY_FINALIZATION_LOCK.try_write().is_err());
+        drop(read);
+        let write = chain_apply_write_guard();
+        assert!(CHAIN_APPLY_FINALIZATION_LOCK.try_read().is_err());
+        drop(write);
+    }
+
     #[test]
     fn migrate_schema_fills_legacy_cursor_from_applied_chain() {
         let dir = tempfile::tempdir().unwrap();

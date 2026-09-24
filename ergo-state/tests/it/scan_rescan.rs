@@ -172,6 +172,7 @@ fn full_rescan_from_zero_replays_applied_blocks_without_genesis_row() {
         None,
     )
     .unwrap();
+    ergo_state::wallet::set_wallet_finalization_in_progress(false);
 
     let read = db.begin_read().unwrap();
     let cursor = WalletReader::new(&read).scan_cursor().unwrap().unwrap();
@@ -230,6 +231,7 @@ fn full_rescan_rebuilds_scan_tables_with_create_and_spend() {
         Some(&matcher),
     )
     .unwrap();
+    ergo_state::wallet::set_wallet_finalization_in_progress(false);
 
     // A is tracked by scan 11, created at h=1, then Spent at h=2.
     let a = read_tracked(&db, 11, 0xA1).expect("scan 11 tracks box A after rescan");
@@ -318,6 +320,7 @@ fn full_rescan_clears_stale_scan_rows_before_rebuilding() {
         Some(&matcher),
     )
     .unwrap();
+    ergo_state::wallet::set_wallet_finalization_in_progress(false);
 
     assert!(
         read_tracked(&db, 11, 0xCC).is_none(),
@@ -362,6 +365,7 @@ fn rescan_without_a_matcher_leaves_scan_tables_untouched() {
         None,
     )
     .unwrap();
+    ergo_state::wallet::set_wallet_finalization_in_progress(false);
 
     assert!(
         scan_txs(&db).is_empty(),
