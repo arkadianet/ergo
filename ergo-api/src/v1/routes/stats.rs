@@ -32,6 +32,7 @@ use super::extract::V1Query;
 use super::tokens::scan_token_holders;
 use super::transactions::fee_from_hex_values;
 use super::{parse_id32, V1State};
+use crate::v1::blocking::ReadLane;
 use crate::v1::cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page};
 use crate::v1::error::{v1_error, Reason, V1Error};
 use ergo_indexer_types::TokenId;
@@ -202,12 +203,14 @@ pub struct SupplyPoint {
     responses(
         (status = 200, description = "Supply series (timestamps null without a chain reader)", body = SeriesPage<SupplyPoint>),
         (status = 400, description = "Invalid resolution/cursor", body = V1Error),
-        (status = 503, description = "Emission schedule not wired on this node", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 503, description = "Emission schedule not wired on this node; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn supply(State(state): State<V1State>, V1Query(q): V1Query<SeriesQuery>) -> Response {
     let emission = match state.emission() {
-        Ok(e) => e,
+        Ok(e) => e.clone(),
         Err(e) => return *e,
     };
     let interval_ms = state.read.info().target_block_interval_ms;
@@ -217,30 +220,36 @@ pub async fn supply(State(state): State<V1State>, V1Query(q): V1Query<SeriesQuer
         Ok(w) => w,
         Err(e) => return *e,
     };
-    // Timestamps for the emitted heights (best-effort — supply math never
-    // needs them, so an absent chain reader just yields null timestamps).
-    let ts = timestamps_for(
-        &state,
-        window.heights.first().copied(),
-        window.heights.last().copied(),
-    );
-    let items: Vec<SupplyPoint> = window
-        .heights
-        .iter()
-        .map(|&h| {
-            let info = emission.emission_info_at(h);
-            let t = ts.as_ref().and_then(|m| m.get(&h).copied());
-            SupplyPoint {
-                height: h,
-                timestamp_unix_ms: t,
-                timestamp_iso: t.map(unix_ms_to_iso),
-                emitted: info.total_coins_issued.to_string(),
-                remaining: info.total_remain_coins.to_string(),
-                block_reward: info.miner_reward.to_string(),
-            }
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Scan, move || {
+            // Timestamps for the emitted heights (best-effort — supply math never
+            // needs them, so an absent chain reader just yields null timestamps).
+            let ts = timestamps_for(
+                &state,
+                window.heights.first().copied(),
+                window.heights.last().copied(),
+            );
+            let items: Vec<SupplyPoint> = window
+                .heights
+                .iter()
+                .map(|&h| {
+                    let info = emission.emission_info_at(h);
+                    let t = ts.as_ref().and_then(|m| m.get(&h).copied());
+                    SupplyPoint {
+                        height: h,
+                        timestamp_unix_ms: t,
+                        timestamp_iso: t.map(unix_ms_to_iso),
+                        emitted: info.total_coins_issued.to_string(),
+                        remaining: info.total_remain_coins.to_string(),
+                        block_reward: info.miner_reward.to_string(),
+                    }
+                })
+                .collect();
+            series_response(items, &window)
         })
-        .collect();
-    series_response(items, &window)
+        .await
 }
 
 /// Best-effort `height -> timestamp` map over `[from, to]` via `chain_slice`.
@@ -390,7 +399,9 @@ pub struct DifficultyPoint {
     responses(
         (status = 200, description = "Difficulty series with derived hashrate", body = SeriesPage<DifficultyPoint>),
         (status = 400, description = "Invalid resolution/cursor", body = V1Error),
-        (status = 503, description = "Chain reader unavailable", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 503, description = "Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn difficulty(
@@ -398,7 +409,7 @@ pub async fn difficulty(
     V1Query(q): V1Query<SeriesQuery>,
 ) -> Response {
     let chain = match state.chain() {
-        Ok(c) => c,
+        Ok(c) => c.clone(),
         Err(e) => return *e,
     };
     let interval_ms = state.read.info().target_block_interval_ms;
@@ -409,35 +420,42 @@ pub async fn difficulty(
         Ok(w) => w,
         Err(e) => return *e,
     };
-    let (Some(&first), Some(&last)) = (window.heights.first(), window.heights.last()) else {
-        return series_response(Vec::<DifficultyPoint>::new(), &window);
-    };
-    let by_height: std::collections::HashMap<u32, _> = chain
-        .chain_slice(first, last)
-        .into_iter()
-        .map(|h| (h.height, h))
-        .collect();
-    let items: Vec<DifficultyPoint> = window
-        .heights
-        .iter()
-        .filter_map(|h| by_height.get(h))
-        .map(|h| {
-            let hashrate = h
-                .difficulty
-                .parse::<u128>()
-                .map(|d| (d / interval_s).to_string())
-                .unwrap_or_else(|_| "0".to_string());
-            DifficultyPoint {
-                height: h.height,
-                timestamp_unix_ms: h.timestamp,
-                timestamp_iso: unix_ms_to_iso(h.timestamp),
-                n_bits: h.n_bits,
-                difficulty: h.difficulty.clone(),
-                hashrate,
-            }
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Scan, move || {
+            let (Some(&first), Some(&last)) = (window.heights.first(), window.heights.last())
+            else {
+                return series_response(Vec::<DifficultyPoint>::new(), &window);
+            };
+            let by_height: std::collections::HashMap<u32, _> = chain
+                .chain_slice(first, last)
+                .into_iter()
+                .map(|h| (h.height, h))
+                .collect();
+            let items: Vec<DifficultyPoint> = window
+                .heights
+                .iter()
+                .filter_map(|h| by_height.get(h))
+                .map(|h| {
+                    let hashrate = h
+                        .difficulty
+                        .parse::<u128>()
+                        .map(|d| (d / interval_s).to_string())
+                        .unwrap_or_else(|_| "0".to_string());
+                    DifficultyPoint {
+                        height: h.height,
+                        timestamp_unix_ms: h.timestamp,
+                        timestamp_iso: unix_ms_to_iso(h.timestamp),
+                        n_bits: h.n_bits,
+                        difficulty: h.difficulty.clone(),
+                        hashrate,
+                    }
+                })
+                .collect();
+            series_response(items, &window)
         })
-        .collect();
-    series_response(items, &window)
+        .await
 }
 
 // ----- stats/fees (B4) ----------------------------------------------------
@@ -471,12 +489,14 @@ pub struct FeesPoint {
     responses(
         (status = 200, description = "Per-block fee statistics series", body = SeriesPage<FeesPoint>),
         (status = 400, description = "Invalid resolution/cursor", body = V1Error),
-        (status = 503, description = "Chain reader unavailable", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 503, description = "Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn fees(State(state): State<V1State>, V1Query(q): V1Query<SeriesQuery>) -> Response {
     let chain = match state.chain() {
-        Ok(c) => c,
+        Ok(c) => c.clone(),
         Err(e) => return *e,
     };
     let interval_ms = state.read.info().target_block_interval_ms;
@@ -485,47 +505,55 @@ pub async fn fees(State(state): State<V1State>, V1Query(q): V1Query<SeriesQuery>
         Ok(w) => w,
         Err(e) => return *e,
     };
-    let (Some(&first), Some(&last)) = (window.heights.first(), window.heights.last()) else {
-        return series_response(Vec::<FeesPoint>::new(), &window);
-    };
-    let headers: std::collections::HashMap<u32, (String, u64)> = chain
-        .chain_slice(first, last)
-        .into_iter()
-        .map(|h| (h.height, (h.id, h.timestamp)))
-        .collect();
-    let items: Vec<FeesPoint> = window
-        .heights
-        .iter()
-        .filter_map(|h| headers.get(h).map(|hdr| (*h, hdr)))
-        .filter_map(|(height, (header_id, timestamp))| {
-            let bt = chain.block_transactions_by_id(header_id)?;
-            let mut per_byte: Vec<u64> = Vec::with_capacity(bt.transactions.len());
-            let mut total_fee: u128 = 0;
-            for tx in &bt.transactions {
-                let fee =
-                    fee_from_hex_values(tx.outputs.iter().map(|o| (o.ergo_tree.as_str(), o.value)));
-                if fee == 0 {
-                    continue;
-                }
-                total_fee = total_fee.saturating_add(u128::from(fee));
-                let size = u64::from(tx.size.max(1));
-                per_byte.push(fee / size);
-            }
-            per_byte.sort_unstable();
-            Some(FeesPoint {
-                height,
-                timestamp_unix_ms: *timestamp,
-                timestamp_iso: unix_ms_to_iso(*timestamp),
-                tx_count: bt.transactions.len() as u32,
-                total_fee: total_fee.to_string(),
-                fee_per_byte_p10: percentile(&per_byte, 10).to_string(),
-                fee_per_byte_median: percentile(&per_byte, 50).to_string(),
-                fee_per_byte_p90: percentile(&per_byte, 90).to_string(),
-                min_fee: per_byte.first().copied().unwrap_or(0).to_string(),
-            })
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Scan, move || {
+            let (Some(&first), Some(&last)) = (window.heights.first(), window.heights.last())
+            else {
+                return series_response(Vec::<FeesPoint>::new(), &window);
+            };
+            let headers: std::collections::HashMap<u32, (String, u64)> = chain
+                .chain_slice(first, last)
+                .into_iter()
+                .map(|h| (h.height, (h.id, h.timestamp)))
+                .collect();
+            let items: Vec<FeesPoint> = window
+                .heights
+                .iter()
+                .filter_map(|h| headers.get(h).map(|hdr| (*h, hdr)))
+                .filter_map(|(height, (header_id, timestamp))| {
+                    let bt = chain.block_transactions_by_id(header_id)?;
+                    let mut per_byte: Vec<u64> = Vec::with_capacity(bt.transactions.len());
+                    let mut total_fee: u128 = 0;
+                    for tx in &bt.transactions {
+                        let fee = fee_from_hex_values(
+                            tx.outputs.iter().map(|o| (o.ergo_tree.as_str(), o.value)),
+                        );
+                        if fee == 0 {
+                            continue;
+                        }
+                        total_fee = total_fee.saturating_add(u128::from(fee));
+                        let size = u64::from(tx.size.max(1));
+                        per_byte.push(fee / size);
+                    }
+                    per_byte.sort_unstable();
+                    Some(FeesPoint {
+                        height,
+                        timestamp_unix_ms: *timestamp,
+                        timestamp_iso: unix_ms_to_iso(*timestamp),
+                        tx_count: bt.transactions.len() as u32,
+                        total_fee: total_fee.to_string(),
+                        fee_per_byte_p10: percentile(&per_byte, 10).to_string(),
+                        fee_per_byte_median: percentile(&per_byte, 50).to_string(),
+                        fee_per_byte_p90: percentile(&per_byte, 90).to_string(),
+                        min_fee: per_byte.first().copied().unwrap_or(0).to_string(),
+                    })
+                })
+                .collect();
+            series_response(items, &window)
         })
-        .collect();
-    series_response(items, &window)
+        .await
 }
 
 /// Nearest-rank percentile of a pre-sorted slice (`0` on empty).
@@ -659,12 +687,14 @@ pub struct HolderMetrics {
         (status = 400, description = "Missing/malformed token_id, or invalid cursor", body = V1Error),
         (status = 404, description = "No token with that id", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
-        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn holders(State(state): State<V1State>, V1Query(q): V1Query<HoldersQuery>) -> Response {
     let idx = match state.indexer() {
-        Ok(i) => i,
+        Ok(i) => i.clone(),
         Err(e) => return *e,
     };
     let Some(token_hex) = q.token_id else {
@@ -682,72 +712,80 @@ pub async fn holders(State(state): State<V1State>, V1Query(q): V1Query<HoldersQu
         );
     };
     let tid = TokenId::from_bytes(raw);
-    if idx.token_by_id(&tid).is_none() {
-        return v1_error(
-            Reason::TokenNotFound,
-            "no token with that id",
-            "the id is well-formed but unknown to this node",
-        );
-    }
-    let start = match super::offset_from_cursor(q.cursor.as_deref()) {
-        Ok(o) => o,
-        Err(e) => return *e,
-    };
+    let start = super::offset_from_cursor(q.cursor.as_deref());
     let limit = clamp_limit(q.limit, HOLDERS_DEFAULT_LIMIT, HOLDERS_MAX_LIMIT);
     let include_metrics = q.include_metrics.unwrap_or(true);
 
-    let scan = scan_token_holders(idx.as_ref(), &tid, state.network);
-    let total = scan.circulating.max(1);
-    let mut items: Vec<HolderRow> = scan
-        .holders
-        .iter()
-        .skip(start as usize)
-        .take(limit as usize + 1)
-        .map(|(address, amount)| HolderRow {
-            address: address.clone(),
-            amount: amount.to_string(),
-            share_pct: pct(*amount, total),
-        })
-        .collect();
-    let has_more = items.len() as u32 > limit;
-    if has_more {
-        items.truncate(limit as usize);
-    }
-    let next_cursor = has_more.then(|| {
-        encode_cursor(&super::OffsetCursor {
-            off: start.saturating_add(limit),
-        })
-    });
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Scan, move || {
+            if idx.token_by_id(&tid).is_none() {
+                return v1_error(
+                    Reason::TokenNotFound,
+                    "no token with that id",
+                    "the id is well-formed but unknown to this node",
+                );
+            }
+            // A missing token takes precedence over a malformed cursor.
+            let start = match start {
+                Ok(o) => o,
+                Err(e) => return *e,
+            };
+            let scan = scan_token_holders(idx.as_ref(), &tid, state.network);
+            let total = scan.circulating.max(1);
+            let mut items: Vec<HolderRow> = scan
+                .holders
+                .iter()
+                .skip(start as usize)
+                .take(limit as usize + 1)
+                .map(|(address, amount)| HolderRow {
+                    address: address.clone(),
+                    amount: amount.to_string(),
+                    share_pct: pct(*amount, total),
+                })
+                .collect();
+            let has_more = items.len() as u32 > limit;
+            if has_more {
+                items.truncate(limit as usize);
+            }
+            let next_cursor = has_more.then(|| {
+                encode_cursor(&super::OffsetCursor {
+                    off: start.saturating_add(limit),
+                })
+            });
 
-    let metrics = if include_metrics {
-        let top10: u128 = scan.holders.iter().take(10).map(|(_, a)| *a).sum();
-        HolderMetrics {
-            holder_count: scan.holders.len() as u64,
-            top10_share_pct: pct(top10, total),
-            gini: gini(&scan.holders),
-            total_amount: scan.circulating.to_string(),
-            scan_capped: scan.capped,
-        }
-    } else {
-        HolderMetrics {
-            holder_count: scan.holders.len() as u64,
-            top10_share_pct: "0".to_string(),
-            gini: "0".to_string(),
-            total_amount: scan.circulating.to_string(),
-            scan_capped: scan.capped,
-        }
-    };
+            let metrics = if include_metrics {
+                let top10: u128 = scan.holders.iter().take(10).map(|(_, a)| *a).sum();
+                HolderMetrics {
+                    holder_count: scan.holders.len() as u64,
+                    top10_share_pct: pct(top10, total),
+                    gini: gini(&scan.holders),
+                    total_amount: scan.circulating.to_string(),
+                    scan_capped: scan.capped,
+                }
+            } else {
+                HolderMetrics {
+                    holder_count: scan.holders.len() as u64,
+                    top10_share_pct: "0".to_string(),
+                    gini: "0".to_string(),
+                    total_amount: scan.circulating.to_string(),
+                    scan_capped: scan.capped,
+                }
+            };
 
-    Json(CollectionMeta {
-        items,
-        page: Page {
-            limit,
-            next_cursor,
-            has_more,
-        },
-        meta: metrics,
-    })
-    .into_response()
+            Json(CollectionMeta {
+                items,
+                page: Page {
+                    limit,
+                    next_cursor,
+                    has_more,
+                },
+                meta: metrics,
+            })
+            .into_response()
+        })
+        .await
 }
 
 /// `amount / total` as a 1-decimal percentage string.

@@ -362,6 +362,7 @@ fn app(deps: Deps) -> Router {
         e
     });
     let state = V1State {
+        blocking: ergo_api::v1::BlockingReads::new(Default::default()).unwrap(),
         read,
         chain,
         indexer: None,

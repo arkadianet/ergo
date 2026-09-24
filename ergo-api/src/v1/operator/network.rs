@@ -17,7 +17,7 @@ use axum::{
 use serde::Serialize;
 use serde_json::json;
 
-use super::{offset_collection, ListQuery, OperatorState};
+use super::{keyed_collection, ListQuery, OperatorState};
 use crate::types::{ApiPeer, ApiPeerState};
 use crate::v1::error::{v1_error, Reason, V1Error};
 use crate::v1::routes::dto::Collection;
@@ -36,7 +36,7 @@ const NET_MAX_LIMIT: u32 = 500;
     get, path = "/api/v1/network/peers", tag = "network",
     params(
         ("limit" = Option<u32>, Query, description = "Page size (default 256, cap 1024)"),
-        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+        ("cursor" = Option<String>, Query, description = "Opaque stable keyset cursor from this list; resumes after the last address in byte-wise order"),
     ),
     responses(
         (status = 200, description = "Every tracked peer (any state)", body = Collection<ApiPeer>),
@@ -44,7 +44,14 @@ const NET_MAX_LIMIT: u32 = 500;
     ),
 )]
 pub(crate) async fn peers(State(s): State<OperatorState>, Query(q): Query<ListQuery>) -> Response {
-    offset_collection(s.read.peers(), &q, PEERS_DEFAULT_LIMIT, PEERS_MAX_LIMIT)
+    keyed_collection(
+        s.read.peers(),
+        "peers",
+        |p| &p.addr,
+        &q,
+        PEERS_DEFAULT_LIMIT,
+        PEERS_MAX_LIMIT,
+    )
 }
 
 /// `GET /api/v1/network/connected` — T0. Server-side filter of the same
@@ -54,7 +61,7 @@ pub(crate) async fn peers(State(s): State<OperatorState>, Query(q): Query<ListQu
     get, path = "/api/v1/network/connected", tag = "network",
     params(
         ("limit" = Option<u32>, Query, description = "Page size (default 256, cap 1024)"),
-        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+        ("cursor" = Option<String>, Query, description = "Opaque stable keyset cursor from this list; resumes after the last address in byte-wise order"),
     ),
     responses(
         (status = 200, description = "Handshake-complete peers only", body = Collection<ApiPeer>),
@@ -71,7 +78,14 @@ pub(crate) async fn connected(
         .into_iter()
         .filter(|p| p.state == ApiPeerState::Active)
         .collect();
-    offset_collection(active, &q, PEERS_DEFAULT_LIMIT, PEERS_MAX_LIMIT)
+    keyed_collection(
+        active,
+        "connected",
+        |p| &p.addr,
+        &q,
+        PEERS_DEFAULT_LIMIT,
+        PEERS_MAX_LIMIT,
+    )
 }
 
 /// One blacklisted-peer entry. `addr` is the clean canonical
@@ -99,7 +113,7 @@ fn clean_blacklist_addr(raw: &str) -> String {
     get, path = "/api/v1/network/blacklisted", tag = "network",
     params(
         ("limit" = Option<u32>, Query, description = "Page size (default 100, cap 500)"),
-        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+        ("cursor" = Option<String>, Query, description = "Opaque stable keyset cursor from this list; resumes after the last address in byte-wise order"),
     ),
     responses(
         (status = 200, description = "Blacklisted peer addresses", body = Collection<BlacklistedPeer>),
@@ -123,7 +137,14 @@ pub(crate) async fn blacklisted(
             addr: clean_blacklist_addr(a),
         })
         .collect();
-    offset_collection(items, &q, NET_DEFAULT_LIMIT, NET_MAX_LIMIT)
+    keyed_collection(
+        items,
+        "blacklisted",
+        |p| &p.addr,
+        &q,
+        NET_DEFAULT_LIMIT,
+        NET_MAX_LIMIT,
+    )
 }
 
 /// One per-peer sync-info entry. `peer_height` (not bare `height`)
@@ -142,7 +163,7 @@ pub(crate) struct SyncInfoEntry {
     get, path = "/api/v1/network/sync-info", tag = "network",
     params(
         ("limit" = Option<u32>, Query, description = "Page size (default 100, cap 500)"),
-        ("cursor" = Option<String>, Query, description = "Opaque page cursor from a prior response"),
+        ("cursor" = Option<String>, Query, description = "Opaque stable keyset cursor from this list; resumes after the last address in byte-wise order"),
     ),
     responses(
         (status = 200, description = "Per-peer sync status", body = Collection<SyncInfoEntry>),
@@ -167,7 +188,14 @@ pub(crate) async fn sync_info(
             status: e.status.to_lowercase(),
         })
         .collect();
-    offset_collection(items, &q, NET_DEFAULT_LIMIT, NET_MAX_LIMIT)
+    keyed_collection(
+        items,
+        "sync_info",
+        |p| &p.addr,
+        &q,
+        NET_DEFAULT_LIMIT,
+        NET_MAX_LIMIT,
+    )
 }
 
 /// The `network/track-info` aggregate counters. Bare object, not a

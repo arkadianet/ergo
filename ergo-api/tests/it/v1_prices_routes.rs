@@ -456,6 +456,7 @@ fn over_limit_read(candidate: &IndexedBoxDto) -> Vec<ScriptedPage> {
 fn app(indexer: Option<Arc<dyn IndexerQuery>>) -> Router {
     let mempool: Arc<dyn MempoolView> = Arc::new(NoopMempoolView::new());
     let state = V1State {
+        blocking: ergo_api::v1::BlockingReads::new(Default::default()).unwrap(),
         read: Arc::new(StubRead),
         chain: None,
         indexer,

@@ -10,7 +10,7 @@ publish    = false
 [dependencies]
 axum               = { workspace = true, features = ["ws"] }
 tower-http         = { workspace = true, features = ["trace"] }
-tokio              = { workspace = true, features = ["rt", "macros", "net", "sync"] }
+tokio              = { workspace = true, features = ["rt", "macros", "net", "sync", "time"] }
 serde              = { workspace = true, features = ["derive"] }
 serde_json         = { workspace = true }
 hex                = { workspace = true }
