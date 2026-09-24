@@ -63,7 +63,10 @@ pub(super) enum BridgeError {
 
 fn is_store_corruption(e: &StateError) -> bool {
     match e {
-        StateError::DbCorruption { .. } | StateError::Serialization(_) => true,
+        StateError::DbCorruption { .. }
+        | StateError::Serialization(_)
+        | StateError::VotedParamsRowCorrupt { .. }
+        | StateError::VotedParamsParseFailed { .. } => true,
         StateError::Db(e) => matches!(e.as_ref(), redb::Error::Corrupted(_)),
         StateError::StorageError(e) => matches!(e.as_ref(), redb::StorageError::Corrupted(_)),
         StateError::TableError(e) => matches!(

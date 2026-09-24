@@ -87,9 +87,10 @@ pub async fn token_by_id(State(state): State<V1State>, Path(token_hex): Path<Str
     state
         .blocking
         .clone()
-        .run(ReadLane::Point, move || match idx.token_by_id(&tid) {
-            Some(t) => Json(token_from_dto(&t)).into_response(),
-            None => token_not_found(),
+        .run(ReadLane::Point, move || match idx.try_token_by_id(&tid) {
+            Err(error) => super::indexer_read_failed(error),
+            Ok(Some(t)) => Json(token_from_dto(&t)).into_response(),
+            Ok(None) => token_not_found(),
         })
         .await
 }
@@ -303,8 +304,10 @@ pub async fn token_stats(State(state): State<V1State>, Path(token_hex): Path<Str
         .blocking
         .clone()
         .run(ReadLane::Scan, move || {
-            let Some(token) = idx.token_by_id(&tid) else {
-                return token_not_found();
+            let token = match idx.try_token_by_id(&tid) {
+                Ok(Some(token)) => token,
+                Ok(None) => return token_not_found(),
+                Err(error) => return super::indexer_read_failed(error),
             };
             let scan = scan_token_holders(idx.as_ref(), &tid, state.network);
             let stats = V1TokenStats {

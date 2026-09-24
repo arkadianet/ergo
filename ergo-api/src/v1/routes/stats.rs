@@ -27,11 +27,13 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use super::chain::chain_read_failed;
 use super::dto::{unix_ms_to_iso, CollectionMeta, V1MempoolDepthPoint};
 use super::extract::V1Query;
 use super::tokens::scan_token_holders;
 use super::transactions::fee_from_hex_values;
 use super::{parse_id32, V1State};
+use crate::compat::ChainReadError;
 use crate::v1::blocking::ReadLane;
 use crate::v1::cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page};
 use crate::v1::error::{v1_error, Reason, V1Error};
@@ -204,7 +206,7 @@ pub struct SupplyPoint {
         (status = 200, description = "Supply series (timestamps null without a chain reader)", body = SeriesPage<SupplyPoint>),
         (status = 400, description = "Invalid resolution/cursor", body = V1Error),
         (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
-        (status = 503, description = "Emission schedule not wired on this node; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 503, description = "Emission schedule not wired on this node; chain_reader_unavailable on a failed header read; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
         (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
@@ -224,13 +226,15 @@ pub async fn supply(State(state): State<V1State>, V1Query(q): V1Query<SeriesQuer
         .blocking
         .clone()
         .run(ReadLane::Scan, move || {
-            // Timestamps for the emitted heights (best-effort — supply math never
-            // needs them, so an absent chain reader just yields null timestamps).
-            let ts = timestamps_for(
+            // Supply math needs no chain reader; an absent reader yields null timestamps.
+            let ts = match timestamps_for(
                 &state,
                 window.heights.first().copied(),
                 window.heights.last().copied(),
-            );
+            ) {
+                Ok(ts) => ts,
+                Err(error) => return chain_read_failed(error),
+            };
             let items: Vec<SupplyPoint> = window
                 .heights
                 .iter()
@@ -252,23 +256,22 @@ pub async fn supply(State(state): State<V1State>, V1Query(q): V1Query<SeriesQuer
         .await
 }
 
-/// Best-effort `height -> timestamp` map over `[from, to]` via `chain_slice`.
-/// `None` when there is no chain reader (supply degrades to null timestamps
-/// rather than fail — the emission math stands on its own).
+/// Optional timestamps: an absent reader leaves emission math usable, but a failed read fails the request.
 fn timestamps_for(
     state: &V1State,
     from: Option<u32>,
     to: Option<u32>,
-) -> Option<std::collections::HashMap<u32, u64>> {
-    let (from, to) = (from?, to?);
-    let chain = state.chain.as_ref()?;
-    Some(
+) -> Result<Option<std::collections::HashMap<u32, u64>>, ChainReadError> {
+    let (Some(from), Some(to), Some(chain)) = (from, to, state.chain.as_ref()) else {
+        return Ok(None);
+    };
+    Ok(Some(
         chain
-            .chain_slice(from, to)
+            .try_chain_slice(from, to)?
             .into_iter()
             .map(|h| (h.height, h.timestamp))
             .collect(),
-    )
+    ))
 }
 
 // ----- stats/emission-schedule (B2) ---------------------------------------
@@ -428,8 +431,11 @@ pub async fn difficulty(
             else {
                 return series_response(Vec::<DifficultyPoint>::new(), &window);
             };
-            let by_height: std::collections::HashMap<u32, _> = chain
-                .chain_slice(first, last)
+            let by_height: std::collections::HashMap<u32, _> =
+                match chain.try_chain_slice(first, last) {
+                    Ok(headers) => headers,
+                    Err(error) => return chain_read_failed(error),
+                }
                 .into_iter()
                 .map(|h| (h.height, h))
                 .collect();
@@ -513,17 +519,22 @@ pub async fn fees(State(state): State<V1State>, V1Query(q): V1Query<SeriesQuery>
             else {
                 return series_response(Vec::<FeesPoint>::new(), &window);
             };
-            let headers: std::collections::HashMap<u32, (String, u64)> = chain
-                .chain_slice(first, last)
+            let headers: std::collections::HashMap<u32, (String, u64)> =
+                match chain.try_chain_slice(first, last) {
+                    Ok(headers) => headers,
+                    Err(error) => return chain_read_failed(error),
+                }
                 .into_iter()
                 .map(|h| (h.height, (h.id, h.timestamp)))
                 .collect();
-            let items: Vec<FeesPoint> = window
+            let items: Result<Vec<FeesPoint>, ChainReadError> = window
                 .heights
                 .iter()
                 .filter_map(|h| headers.get(h).map(|hdr| (*h, hdr)))
-                .filter_map(|(height, (header_id, timestamp))| {
-                    let bt = chain.block_transactions_by_id(header_id)?;
+                .map(|(height, (header_id, timestamp))| {
+                    let Some(bt) = chain.try_block_transactions_by_id(header_id)? else {
+                        return Ok(None);
+                    };
                     let mut per_byte: Vec<u64> = Vec::with_capacity(bt.transactions.len());
                     let mut total_fee: u128 = 0;
                     for tx in &bt.transactions {
@@ -538,7 +549,7 @@ pub async fn fees(State(state): State<V1State>, V1Query(q): V1Query<SeriesQuery>
                         per_byte.push(fee / size);
                     }
                     per_byte.sort_unstable();
-                    Some(FeesPoint {
+                    Ok(Some(FeesPoint {
                         height,
                         timestamp_unix_ms: *timestamp,
                         timestamp_iso: unix_ms_to_iso(*timestamp),
@@ -548,10 +559,14 @@ pub async fn fees(State(state): State<V1State>, V1Query(q): V1Query<SeriesQuery>
                         fee_per_byte_median: percentile(&per_byte, 50).to_string(),
                         fee_per_byte_p90: percentile(&per_byte, 90).to_string(),
                         min_fee: per_byte.first().copied().unwrap_or(0).to_string(),
-                    })
+                    }))
                 })
+                .filter_map(Result::transpose)
                 .collect();
-            series_response(items, &window)
+            match items {
+                Ok(items) => series_response(items, &window),
+                Err(error) => chain_read_failed(error),
+            }
         })
         .await
 }
@@ -720,7 +735,10 @@ pub async fn holders(State(state): State<V1State>, V1Query(q): V1Query<HoldersQu
         .blocking
         .clone()
         .run(ReadLane::Scan, move || {
-            if idx.token_by_id(&tid).is_none() {
+            if match idx.try_token_by_id(&tid) {
+                Ok(token) => token.is_none(),
+                Err(error) => return super::indexer_read_failed(error),
+            } {
                 return v1_error(
                     Reason::TokenNotFound,
                     "no token with that id",

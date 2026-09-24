@@ -36,7 +36,7 @@ fn block_unserialisable(detail: String) -> Response {
     )
 }
 
-fn chain_read_failed(error: ChainReadError) -> Response {
+pub(crate) fn chain_read_failed(error: ChainReadError) -> Response {
     match error {
         ChainReadError::Unavailable(_) => v1_error(
             Reason::ChainReaderUnavailable,

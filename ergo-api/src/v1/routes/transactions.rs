@@ -318,7 +318,10 @@ fn unconfirmed_tx(
         .iter()
         .map(|input| {
             let box_id_hex = hex::encode(input.box_id.as_bytes());
-            if let Some(b) = indexer.box_by_id(&input.box_id) {
+            if let Some(b) = indexer.try_box_by_id(&input.box_id).map_err(|error| {
+                tracing::warn!(%error, "v1 indexer input read failed");
+                "the indexer store could not be read".to_string()
+            })? {
                 let resp = build_indexed_box_response(network, &b)?;
                 Ok(v1box_from_indexed(
                     resp,

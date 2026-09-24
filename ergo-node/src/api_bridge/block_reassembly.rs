@@ -58,6 +58,22 @@ pub(super) fn load_headers_in_range(
     out
 }
 
+/// Load the same range as the compat reader, failing the whole range on a store or decode error.
+pub(super) fn try_load_headers_in_range(
+    reader: &ChainStoreReader,
+    lo: u32,
+    hi: u32,
+) -> Result<Vec<ScalaHeader>, BridgeError> {
+    let entries = reader.scan_header_chain_range(lo, hi)?;
+    let mut out = Vec::with_capacity(entries.len());
+    for (_, header_id) in entries {
+        if let Some(header) = load_and_encode_header(reader, &header_id)? {
+            out.push(header);
+        }
+    }
+    Ok(out)
+}
+
 pub(super) fn load_and_encode_header(
     reader: &ChainStoreReader,
     header_id: &[u8; 32],

@@ -4278,7 +4278,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: 'Emission schedule not wired on this node; overloaded (Retry-After: 1) or shutting_down'
+          description: 'Emission schedule not wired on this node; chain_reader_unavailable on a failed header read; overloaded (Retry-After: 1) or shutting_down'
           content:
             application/json:
               schema:

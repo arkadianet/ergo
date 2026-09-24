@@ -44,6 +44,11 @@ pub trait NodeChainQuery: Send + Sync {
         crate::types::ApiVotesHistory::default()
     }
 
+    /// Fallible [`Self::votes_history`] for callers that must distinguish read failures from empty history.
+    fn try_votes_history(&self) -> Result<crate::types::ApiVotesHistory, ChainReadError> {
+        Ok(self.votes_history())
+    }
+
     /// `/blocks/at/{height}` — header IDs at a given height.
     ///
     /// Scala's `history.headerIdsAtHeight(h)` returns `Seq[ModifierId]`,
@@ -222,6 +227,28 @@ pub trait NodeChainQuery: Send + Sync {
         modifier_id_hex: &str,
     ) -> Result<Option<ScalaBlockSection>, ChainReadError> {
         Ok(self.modifier_by_id(modifier_id_hex))
+    }
+
+    /// Fallible [`Self::nipopow_header_at_height`]; a clean miss means header or extension data is absent.
+    fn try_nipopow_header_at_height(
+        &self,
+        height: u32,
+    ) -> Result<Option<ScalaPopowHeader>, ChainReadError> {
+        Ok(self.nipopow_header_at_height(height))
+    }
+
+    /// Fallible [`Self::last_headers`] that fails the entire range on a read error.
+    fn try_last_headers(&self, count: u32) -> Result<Vec<ScalaHeader>, ChainReadError> {
+        Ok(self.last_headers(count))
+    }
+
+    /// Fallible [`Self::chain_slice`] with the same bounds and ordering; read failures fail the range.
+    fn try_chain_slice(
+        &self,
+        from_height: u32,
+        to_height: u32,
+    ) -> Result<Vec<ScalaHeader>, ChainReadError> {
+        Ok(self.chain_slice(from_height, to_height))
     }
 
     /// `/blocks/lastHeaders/{count}` — last `count` headers from the

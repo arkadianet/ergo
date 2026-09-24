@@ -196,6 +196,20 @@ impl NodeChainQuery for ScalaCompatBridge {
         }
     }
 
+    fn try_votes_history(&self) -> Result<ergo_api::types::ApiVotesHistory, ChainReadError> {
+        let current_height = self.handle.load().tip.best_full_block.height;
+        let epoch_length = match self.static_cfg.network.as_str() {
+            "mainnet" => ergo_chain_spec::VotingParams::mainnet().voting_length,
+            "testnet" => ergo_chain_spec::VotingParams::testnet().voting_length,
+            _ => 0,
+        };
+        let rows = self.store_reader.voted_params_history().map_err(|e| {
+            warn!(handler = "try_votes_history", error = %e, "v1 store read failed");
+            ChainReadError::from(super::error::BridgeError::from(e))
+        })?;
+        Ok(build_votes_history(&rows, epoch_length, current_height))
+    }
+
     fn header_ids_at_height(&self, height: u32) -> Vec<String> {
         self.try_header_ids_at_height(height).unwrap_or_default()
     }
@@ -303,6 +317,20 @@ impl NodeChainQuery for ScalaCompatBridge {
                 None
             }
         }
+    }
+
+    fn try_nipopow_header_at_height(
+        &self,
+        height: u32,
+    ) -> Result<Option<ergo_rest_json::types::ScalaPopowHeader>, ChainReadError> {
+        let ph = self.store_reader.popow_header_at_height(height).map_err(|e| {
+            warn!(handler = "try_nipopow_header_at_height", height, error = %e, "v1 store read failed");
+            ChainReadError::from(super::error::BridgeError::from(e))
+        })?;
+        ph.as_ref()
+            .map(super::nipopow::encode_popow_header)
+            .transpose()
+            .map_err(ChainReadError::from)
     }
 
     fn nipopow_proof(
@@ -429,6 +457,49 @@ impl NodeChainQuery for ScalaCompatBridge {
             raw_lo.max(cap_lo).max(1)
         };
         load_headers_in_range(&self.store_reader, lo, top)
+    }
+
+    fn try_last_headers(&self, count: u32) -> Result<Vec<ScalaHeader>, ChainReadError> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let tip = self.handle.load().tip.best_header.height;
+        let lo = tip.saturating_sub(count - 1).max(1);
+        super::block_reassembly::try_load_headers_in_range(&self.store_reader, lo, tip)
+            .map_err(ChainReadError::from)
+    }
+
+    fn try_chain_slice(
+        &self,
+        from_height: u32,
+        to_height: u32,
+    ) -> Result<Vec<ScalaHeader>, ChainReadError> {
+        let tip = self.handle.load().tip.best_header.height;
+        if tip == 0 {
+            return Ok(Vec::new());
+        }
+        let top = match self
+            .store_reader
+            .get_header_id_at_height(to_height)
+            .map_err(|e| ChainReadError::from(super::error::BridgeError::from(e)))?
+        {
+            Some(_) => to_height,
+            None => tip,
+        };
+        if top == 0 {
+            return Ok(Vec::new());
+        }
+        // Preserve chain_slice's exclusive lower bound and trailing-header cap.
+        const MAX_HEADERS: u32 = 16_384;
+        let lo = if top <= from_height.saturating_add(1) {
+            top
+        } else {
+            let raw_lo = from_height.saturating_add(1);
+            let cap_lo = top.saturating_sub(MAX_HEADERS - 1);
+            raw_lo.max(cap_lo).max(1)
+        };
+        super::block_reassembly::try_load_headers_in_range(&self.store_reader, lo, top)
+            .map_err(ChainReadError::from)
     }
 
     fn peers_all(&self) -> Vec<ScalaPeer> {
