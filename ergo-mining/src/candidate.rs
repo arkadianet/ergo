@@ -458,6 +458,7 @@ pub fn generate_candidate<V: CandidateStateView>(
                     last_headers: last_headers.as_slice(),
                     rules: TxValidationRules {
                         reemission: reemission_rules,
+                        soft_fields_allowed: true,
                     },
                 };
                 validate_transaction_parsed(
@@ -620,6 +621,7 @@ pub fn generate_candidate<V: CandidateStateView>(
                             last_headers: last_headers.as_slice(),
                             rules: TxValidationRules {
                                 reemission: reemission_rules,
+                                soft_fields_allowed: true,
                             },
                         };
                         validate_transaction_parsed(
@@ -736,7 +738,13 @@ pub fn generate_candidate<V: CandidateStateView>(
         .iter()
         .map(|(k, v)| (k.as_slice(), v.as_slice()))
         .collect();
-    let extension_root_bytes = extension_root(&extension_field_refs);
+    // Unlike a parsed `Extension`, these keys are `Vec<u8>`; every
+    // producer feeds two-byte keys, but nothing in the type says so.
+    let extension_root_bytes = extension_root(&extension_field_refs).ok_or_else(|| {
+        MiningError::InvalidConfig(
+            "extension field key exceeds the 255-byte leaf-prefix bound".into(),
+        )
+    })?;
     timings.roots = phase_start.elapsed();
 
     // 13. Assemble header with placeholder solution.

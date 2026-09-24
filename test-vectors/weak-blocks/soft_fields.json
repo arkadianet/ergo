@@ -1,0 +1,140 @@
+{
+  "cases": [
+    {
+      "name": "minerpk_size",
+      "tree_hex": "1b0c010400d192b1db650afe7300",
+      "soft_fields_allowed": true,
+      "outcome": "Ok",
+      "error_class": "",
+      "cost": 75
+    },
+    {
+      "name": "minerpk_size",
+      "tree_hex": "1b0c010400d192b1db650afe7300",
+      "soft_fields_allowed": false,
+      "outcome": "SoftFieldAccess",
+      "error_class": "SoftFieldAccessException",
+      "cost": null
+    },
+    {
+      "name": "preheader_minerpk",
+      "tree_hex": "1b06010101d17300",
+      "soft_fields_allowed": true,
+      "outcome": "Ok",
+      "error_class": "",
+      "cost": 16
+    },
+    {
+      "name": "preheader_minerpk",
+      "tree_hex": "1b06010101d17300",
+      "soft_fields_allowed": false,
+      "outcome": "Ok",
+      "error_class": "",
+      "cost": 16
+    },
+    {
+      "name": "preheader_minerpk_read",
+      "tree_hex": "1b12010442d193b1db0702db6906db6503fe7300",
+      "soft_fields_allowed": true,
+      "outcome": "Ok",
+      "error_class": "",
+      "cost": 321
+    },
+    {
+      "name": "preheader_minerpk_read",
+      "tree_hex": "1b12010442d193b1db0702db6906db6503fe7300",
+      "soft_fields_allowed": false,
+      "outcome": "SoftFieldAccess",
+      "error_class": "SoftFieldAccessException",
+      "cost": null
+    },
+    {
+      "name": "preheader_timestamp",
+      "tree_hex": "1b0e010500d192db6903db6503fe7300",
+      "soft_fields_allowed": true,
+      "outcome": "Ok",
+      "error_class": "",
+      "cost": 70
+    },
+    {
+      "name": "preheader_timestamp",
+      "tree_hex": "1b0e010500d192db6903db6503fe7300",
+      "soft_fields_allowed": false,
+      "outcome": "SoftFieldAccess",
+      "error_class": "SoftFieldAccessException",
+      "cost": null
+    },
+    {
+      "name": "preheader_votes",
+      "tree_hex": "1b0f010406d193b1db6907db6503fe7300",
+      "soft_fields_allowed": true,
+      "outcome": "Ok",
+      "error_class": "",
+      "cost": 67
+    },
+    {
+      "name": "preheader_votes",
+      "tree_hex": "1b0f010406d193b1db6907db6503fe7300",
+      "soft_fields_allowed": false,
+      "outcome": "SoftFieldAccess",
+      "error_class": "SoftFieldAccessException",
+      "cost": null
+    },
+    {
+      "name": "preheader_height",
+      "tree_hex": "1b0e010400d192db6905db6503fe7300",
+      "soft_fields_allowed": true,
+      "outcome": "Ok",
+      "error_class": "",
+      "cost": 70
+    },
+    {
+      "name": "preheader_height",
+      "tree_hex": "1b0e010400d192db6905db6503fe7300",
+      "soft_fields_allowed": false,
+      "outcome": "Ok",
+      "error_class": "",
+      "cost": 70
+    },
+    {
+      "name": "height_only",
+      "tree_hex": "1b08010400d192a37300",
+      "soft_fields_allowed": true,
+      "outcome": "Ok",
+      "error_class": "",
+      "cost": 62
+    },
+    {
+      "name": "height_only",
+      "tree_hex": "1b08010400d192a37300",
+      "soft_fields_allowed": false,
+      "outcome": "Ok",
+      "error_class": "",
+      "cost": 62
+    },
+    {
+      "name": "headers_id",
+      "tree_hex": "1b0c010400d192b1db6502fe7300",
+      "soft_fields_allowed": true,
+      "outcome": "Ok",
+      "error_class": "",
+      "cost": 70
+    },
+    {
+      "name": "headers_id",
+      "tree_hex": "1b0c010400d192b1db6502fe7300",
+      "soft_fields_allowed": false,
+      "outcome": "Ok",
+      "error_class": "",
+      "cost": 70
+    }
+  ],
+  "manifest": {
+    "ergo_commit": "31a8de804f7328704f2753a1cf151dda8f64689f",
+    "sigma_commit": "368a860be033af94aa14895381f42099b3646db6",
+    "sigma_version": "6.0.5-22-368a860b-SNAPSHOT",
+    "generator": "scripts/jvm_weak_blocks_oracle/WeakBlocksOracle.scala",
+    "generator_sha256": "78f540673a2c86016a55b9b668d5d48206d9fc51063f829d38f1af2374f7e082",
+    "timestamp": "2026-09-21T07:22:31.632505+00:00"
+  }
+}

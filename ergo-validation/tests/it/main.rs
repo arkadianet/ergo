@@ -30,6 +30,7 @@ mod rejection_parity;
 mod santa_nipopow_chain;
 mod scala_full_block_pow_verify;
 mod scala_rejection_parity;
+mod soft_fields_oracle;
 mod tree_version_oracle_parity;
 mod tx_triage_700000;
 mod tx_validation_corpus;

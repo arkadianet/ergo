@@ -74,6 +74,7 @@ fn emission_contract_all_895_verified() {
             pre_header_n_bits: 0,
             pre_header_votes: [0u8; 3],
             input_extensions: &[],
+            soft_fields_allowed: true,
         };
 
         match verify_spending_proof_with_context(&ergo_tree, &proof_bytes, &bts, &ctx) {
@@ -151,6 +152,7 @@ fn emission_contract_negative_wrong_miner() {
         pre_header_n_bits: 0,
         pre_header_votes: [0u8; 3],
         input_extensions: &[],
+        soft_fields_allowed: true,
     };
 
     let result = verify_spending_proof_with_context(&ergo_tree, &proof_bytes, &bts, &ctx);

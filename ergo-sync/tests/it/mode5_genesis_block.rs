@@ -178,7 +178,7 @@ fn compute_transactions_root(tx: &Transaction) -> [u8; 32] {
 
 /// `extension_root` for an empty extension.
 fn compute_extension_root() -> [u8; 32] {
-    ergo_crypto::merkle::extension_root(&[])
+    ergo_crypto::merkle::extension_root(&[]).expect("no fields, no keys")
 }
 
 /// Synthesize a parseable block-1 header pinned to the supplied roots.

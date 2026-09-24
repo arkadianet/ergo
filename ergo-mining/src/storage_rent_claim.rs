@@ -361,6 +361,7 @@ pub fn build_budget_bounded_rent_claim(
                 last_headers,
                 rules: TxValidationRules {
                     reemission: reemission_rules,
+                    soft_fields_allowed: true,
                 },
             };
             validate_transaction_parsed(

@@ -1,0 +1,30 @@
+{
+  "cases": [
+    {
+      "name": "two_byte_key_32_byte_value",
+      "key_hex": "0300",
+      "value_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "leaf_digest_hex": "8e0524f2aba1b468c99a39257d7b8e6ef6e3bfc39941a8d42e2b1ce4997b1396"
+    },
+    {
+      "name": "prev_input_block_id_key",
+      "key_hex": "0302",
+      "value_hex": "8888888888888888888888888888888888888888888888888888888888888888",
+      "leaf_digest_hex": "43a60ce537a80263a6e07d93844d4039c8431b0cc589b8452aa7c601fca58e4a"
+    },
+    {
+      "name": "interlinks_style_key",
+      "key_hex": "0100",
+      "value_hex": "010203",
+      "leaf_digest_hex": "e3e7f6201b3d95fdb2d84ead9b3227f20e76dc06b98344856aec384086df4dc1"
+    }
+  ],
+  "manifest": {
+    "ergo_commit": "31a8de804f7328704f2753a1cf151dda8f64689f",
+    "sigma_commit": "368a860be033af94aa14895381f42099b3646db6",
+    "sigma_version": "6.0.5-22-368a860b-SNAPSHOT",
+    "generator": "scripts/jvm_weak_blocks_oracle/WeakBlocksOracle.scala",
+    "generator_sha256": "f74fd0d39669eba888c3db0a2b76890195bf86d46340f47de88cfc1c5fd8c9e0",
+    "timestamp": "2026-09-21T06:47:31.621954+00:00"
+  }
+}

@@ -1,0 +1,630 @@
+{
+  "pure_cases": [
+    {
+      "name": "nbits33810432_n2_target_minus_1",
+      "n_bits": 33810432,
+      "multiplier": 2,
+      "hit": "115792089237316195423570985008687907852837564279074904382605163141518161493",
+      "input_target": "231584178474632390847141970017375815705675128558149808765210326283036322988",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits33810432_n2_target",
+      "n_bits": 33810432,
+      "multiplier": 2,
+      "hit": "115792089237316195423570985008687907852837564279074904382605163141518161494",
+      "input_target": "231584178474632390847141970017375815705675128558149808765210326283036322988",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits33810432_n2_input_target_minus_1",
+      "n_bits": 33810432,
+      "multiplier": 2,
+      "hit": "231584178474632390847141970017375815705675128558149808765210326283036322987",
+      "input_target": "231584178474632390847141970017375815705675128558149808765210326283036322988",
+      "verifier_accepts": true,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits33810432_n2_input_target",
+      "n_bits": 33810432,
+      "multiplier": 2,
+      "hit": "231584178474632390847141970017375815705675128558149808765210326283036322988",
+      "input_target": "231584178474632390847141970017375815705675128558149808765210326283036322988",
+      "verifier_accepts": false,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits33810432_n2_input_target_plus_1",
+      "n_bits": 33810432,
+      "multiplier": 2,
+      "hit": "231584178474632390847141970017375815705675128558149808765210326283036322989",
+      "input_target": "231584178474632390847141970017375815705675128558149808765210326283036322988",
+      "verifier_accepts": false,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits33810432_n30_target_minus_1",
+      "n_bits": 33810432,
+      "multiplier": 30,
+      "hit": "115792089237316195423570985008687907852837564279074904382605163141518161493",
+      "input_target": "3473762677119485862707129550260637235585126928372247131478154894245544844820",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits33810432_n30_target",
+      "n_bits": 33810432,
+      "multiplier": 30,
+      "hit": "115792089237316195423570985008687907852837564279074904382605163141518161494",
+      "input_target": "3473762677119485862707129550260637235585126928372247131478154894245544844820",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits33810432_n30_input_target_minus_1",
+      "n_bits": 33810432,
+      "multiplier": 30,
+      "hit": "3473762677119485862707129550260637235585126928372247131478154894245544844819",
+      "input_target": "3473762677119485862707129550260637235585126928372247131478154894245544844820",
+      "verifier_accepts": true,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits33810432_n30_input_target",
+      "n_bits": 33810432,
+      "multiplier": 30,
+      "hit": "3473762677119485862707129550260637235585126928372247131478154894245544844820",
+      "input_target": "3473762677119485862707129550260637235585126928372247131478154894245544844820",
+      "verifier_accepts": false,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits33810432_n30_input_target_plus_1",
+      "n_bits": 33810432,
+      "multiplier": 30,
+      "hit": "3473762677119485862707129550260637235585126928372247131478154894245544844821",
+      "input_target": "3473762677119485862707129550260637235585126928372247131478154894245544844820",
+      "verifier_accepts": false,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits33810432_n64_target_minus_1",
+      "n_bits": 33810432,
+      "multiplier": 64,
+      "hit": "115792089237316195423570985008687907852837564279074904382605163141518161493",
+      "input_target": "7410693711188236507108543040556026102581604113860793880486730441057162335616",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits33810432_n64_target",
+      "n_bits": 33810432,
+      "multiplier": 64,
+      "hit": "115792089237316195423570985008687907852837564279074904382605163141518161494",
+      "input_target": "7410693711188236507108543040556026102581604113860793880486730441057162335616",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits33810432_n64_input_target_minus_1",
+      "n_bits": 33810432,
+      "multiplier": 64,
+      "hit": "7410693711188236507108543040556026102581604113860793880486730441057162335615",
+      "input_target": "7410693711188236507108543040556026102581604113860793880486730441057162335616",
+      "verifier_accepts": true,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits33810432_n64_input_target",
+      "n_bits": 33810432,
+      "multiplier": 64,
+      "hit": "7410693711188236507108543040556026102581604113860793880486730441057162335616",
+      "input_target": "7410693711188236507108543040556026102581604113860793880486730441057162335616",
+      "verifier_accepts": false,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits33810432_n64_input_target_plus_1",
+      "n_bits": 33810432,
+      "multiplier": 64,
+      "hit": "7410693711188236507108543040556026102581604113860793880486730441057162335617",
+      "input_target": "7410693711188236507108543040556026102581604113860793880486730441057162335616",
+      "verifier_accepts": false,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits33810432_n2048_target_minus_1",
+      "n_bits": 33810432,
+      "multiplier": 2048,
+      "hit": "115792089237316195423570985008687907852837564279074904382605163141518161493",
+      "input_target": "237142198758023568227473377297792835282611331643545404175575374113829194739712",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits33810432_n2048_target",
+      "n_bits": 33810432,
+      "multiplier": 2048,
+      "hit": "115792089237316195423570985008687907852837564279074904382605163141518161494",
+      "input_target": "237142198758023568227473377297792835282611331643545404175575374113829194739712",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits33810432_n2048_input_target_minus_1",
+      "n_bits": 33810432,
+      "multiplier": 2048,
+      "hit": "237142198758023568227473377297792835282611331643545404175575374113829194739711",
+      "input_target": "237142198758023568227473377297792835282611331643545404175575374113829194739712",
+      "verifier_accepts": true,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits33810432_n2048_input_target",
+      "n_bits": 33810432,
+      "multiplier": 2048,
+      "hit": "237142198758023568227473377297792835282611331643545404175575374113829194739712",
+      "input_target": "237142198758023568227473377297792835282611331643545404175575374113829194739712",
+      "verifier_accepts": false,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits33810432_n2048_input_target_plus_1",
+      "n_bits": 33810432,
+      "multiplier": 2048,
+      "hit": "237142198758023568227473377297792835282611331643545404175575374113829194739713",
+      "input_target": "237142198758023568227473377297792835282611331643545404175575374113829194739712",
+      "verifier_accepts": false,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits51380224_n2_target_minus_1",
+      "n_bits": 51380224,
+      "multiplier": 2,
+      "hit": "110427941548649020598956093796432407238805355338168053038220561162489090",
+      "input_target": "220855883097298041197912187592864814477610710676336106076441122324978182",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits51380224_n2_target",
+      "n_bits": 51380224,
+      "multiplier": 2,
+      "hit": "110427941548649020598956093796432407238805355338168053038220561162489091",
+      "input_target": "220855883097298041197912187592864814477610710676336106076441122324978182",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits51380224_n2_input_target_minus_1",
+      "n_bits": 51380224,
+      "multiplier": 2,
+      "hit": "220855883097298041197912187592864814477610710676336106076441122324978181",
+      "input_target": "220855883097298041197912187592864814477610710676336106076441122324978182",
+      "verifier_accepts": true,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits51380224_n2_input_target",
+      "n_bits": 51380224,
+      "multiplier": 2,
+      "hit": "220855883097298041197912187592864814477610710676336106076441122324978182",
+      "input_target": "220855883097298041197912187592864814477610710676336106076441122324978182",
+      "verifier_accepts": false,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits51380224_n2_input_target_plus_1",
+      "n_bits": 51380224,
+      "multiplier": 2,
+      "hit": "220855883097298041197912187592864814477610710676336106076441122324978183",
+      "input_target": "220855883097298041197912187592864814477610710676336106076441122324978182",
+      "verifier_accepts": false,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits51380224_n30_target_minus_1",
+      "n_bits": 51380224,
+      "multiplier": 30,
+      "hit": "110427941548649020598956093796432407238805355338168053038220561162489090",
+      "input_target": "3312838246459470617968682813892972217164160660145041591146616834874672730",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits51380224_n30_target",
+      "n_bits": 51380224,
+      "multiplier": 30,
+      "hit": "110427941548649020598956093796432407238805355338168053038220561162489091",
+      "input_target": "3312838246459470617968682813892972217164160660145041591146616834874672730",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits51380224_n30_input_target_minus_1",
+      "n_bits": 51380224,
+      "multiplier": 30,
+      "hit": "3312838246459470617968682813892972217164160660145041591146616834874672729",
+      "input_target": "3312838246459470617968682813892972217164160660145041591146616834874672730",
+      "verifier_accepts": true,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits51380224_n30_input_target",
+      "n_bits": 51380224,
+      "multiplier": 30,
+      "hit": "3312838246459470617968682813892972217164160660145041591146616834874672730",
+      "input_target": "3312838246459470617968682813892972217164160660145041591146616834874672730",
+      "verifier_accepts": false,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits51380224_n30_input_target_plus_1",
+      "n_bits": 51380224,
+      "multiplier": 30,
+      "hit": "3312838246459470617968682813892972217164160660145041591146616834874672731",
+      "input_target": "3312838246459470617968682813892972217164160660145041591146616834874672730",
+      "verifier_accepts": false,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits51380224_n64_target_minus_1",
+      "n_bits": 51380224,
+      "multiplier": 64,
+      "hit": "110427941548649020598956093796432407238805355338168053038220561162489090",
+      "input_target": "7067388259113537318333190002971674063283542741642755394446115914399301824",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits51380224_n64_target",
+      "n_bits": 51380224,
+      "multiplier": 64,
+      "hit": "110427941548649020598956093796432407238805355338168053038220561162489091",
+      "input_target": "7067388259113537318333190002971674063283542741642755394446115914399301824",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits51380224_n64_input_target_minus_1",
+      "n_bits": 51380224,
+      "multiplier": 64,
+      "hit": "7067388259113537318333190002971674063283542741642755394446115914399301823",
+      "input_target": "7067388259113537318333190002971674063283542741642755394446115914399301824",
+      "verifier_accepts": true,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits51380224_n64_input_target",
+      "n_bits": 51380224,
+      "multiplier": 64,
+      "hit": "7067388259113537318333190002971674063283542741642755394446115914399301824",
+      "input_target": "7067388259113537318333190002971674063283542741642755394446115914399301824",
+      "verifier_accepts": false,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits51380224_n64_input_target_plus_1",
+      "n_bits": 51380224,
+      "multiplier": 64,
+      "hit": "7067388259113537318333190002971674063283542741642755394446115914399301825",
+      "input_target": "7067388259113537318333190002971674063283542741642755394446115914399301824",
+      "verifier_accepts": false,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits51380224_n2048_target_minus_1",
+      "n_bits": 51380224,
+      "multiplier": 2048,
+      "hit": "110427941548649020598956093796432407238805355338168053038220561162489090",
+      "input_target": "226156424291633194186662080095093570025073367732568172622275709260777658368",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits51380224_n2048_target",
+      "n_bits": 51380224,
+      "multiplier": 2048,
+      "hit": "110427941548649020598956093796432407238805355338168053038220561162489091",
+      "input_target": "226156424291633194186662080095093570025073367732568172622275709260777658368",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits51380224_n2048_input_target_minus_1",
+      "n_bits": 51380224,
+      "multiplier": 2048,
+      "hit": "226156424291633194186662080095093570025073367732568172622275709260777658367",
+      "input_target": "226156424291633194186662080095093570025073367732568172622275709260777658368",
+      "verifier_accepts": true,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits51380224_n2048_input_target",
+      "n_bits": 51380224,
+      "multiplier": 2048,
+      "hit": "226156424291633194186662080095093570025073367732568172622275709260777658368",
+      "input_target": "226156424291633194186662080095093570025073367732568172622275709260777658368",
+      "verifier_accepts": false,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits51380224_n2048_input_target_plus_1",
+      "n_bits": 51380224,
+      "multiplier": 2048,
+      "hit": "226156424291633194186662080095093570025073367732568172622275709260777658369",
+      "input_target": "226156424291633194186662080095093570025073367732568172622275709260777658368",
+      "verifier_accepts": false,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits85769881_n2_target_minus_1",
+      "n_bits": 85769881,
+      "multiplier": 2,
+      "hit": "937915981984500660942051469737471482296105419527162820601289084461",
+      "input_target": "1875831963969001321884102939474942964592210839054325641202578168924",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits85769881_n2_target",
+      "n_bits": 85769881,
+      "multiplier": 2,
+      "hit": "937915981984500660942051469737471482296105419527162820601289084462",
+      "input_target": "1875831963969001321884102939474942964592210839054325641202578168924",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits85769881_n2_input_target_minus_1",
+      "n_bits": 85769881,
+      "multiplier": 2,
+      "hit": "1875831963969001321884102939474942964592210839054325641202578168923",
+      "input_target": "1875831963969001321884102939474942964592210839054325641202578168924",
+      "verifier_accepts": true,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits85769881_n2_input_target",
+      "n_bits": 85769881,
+      "multiplier": 2,
+      "hit": "1875831963969001321884102939474942964592210839054325641202578168924",
+      "input_target": "1875831963969001321884102939474942964592210839054325641202578168924",
+      "verifier_accepts": false,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits85769881_n2_input_target_plus_1",
+      "n_bits": 85769881,
+      "multiplier": 2,
+      "hit": "1875831963969001321884102939474942964592210839054325641202578168925",
+      "input_target": "1875831963969001321884102939474942964592210839054325641202578168924",
+      "verifier_accepts": false,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits85769881_n30_target_minus_1",
+      "n_bits": 85769881,
+      "multiplier": 30,
+      "hit": "937915981984500660942051469737471482296105419527162820601289084461",
+      "input_target": "28137479459535019828261544092124144468883162585814884618038672533860",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits85769881_n30_target",
+      "n_bits": 85769881,
+      "multiplier": 30,
+      "hit": "937915981984500660942051469737471482296105419527162820601289084462",
+      "input_target": "28137479459535019828261544092124144468883162585814884618038672533860",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits85769881_n30_input_target_minus_1",
+      "n_bits": 85769881,
+      "multiplier": 30,
+      "hit": "28137479459535019828261544092124144468883162585814884618038672533859",
+      "input_target": "28137479459535019828261544092124144468883162585814884618038672533860",
+      "verifier_accepts": true,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits85769881_n30_input_target",
+      "n_bits": 85769881,
+      "multiplier": 30,
+      "hit": "28137479459535019828261544092124144468883162585814884618038672533860",
+      "input_target": "28137479459535019828261544092124144468883162585814884618038672533860",
+      "verifier_accepts": false,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits85769881_n30_input_target_plus_1",
+      "n_bits": 85769881,
+      "multiplier": 30,
+      "hit": "28137479459535019828261544092124144468883162585814884618038672533861",
+      "input_target": "28137479459535019828261544092124144468883162585814884618038672533860",
+      "verifier_accepts": false,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits85769881_n64_target_minus_1",
+      "n_bits": 85769881,
+      "multiplier": 64,
+      "hit": "937915981984500660942051469737471482296105419527162820601289084461",
+      "input_target": "60026622847008042300291294063198174866950746849738420518482501405568",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits85769881_n64_target",
+      "n_bits": 85769881,
+      "multiplier": 64,
+      "hit": "937915981984500660942051469737471482296105419527162820601289084462",
+      "input_target": "60026622847008042300291294063198174866950746849738420518482501405568",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits85769881_n64_input_target_minus_1",
+      "n_bits": 85769881,
+      "multiplier": 64,
+      "hit": "60026622847008042300291294063198174866950746849738420518482501405567",
+      "input_target": "60026622847008042300291294063198174866950746849738420518482501405568",
+      "verifier_accepts": true,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits85769881_n64_input_target",
+      "n_bits": 85769881,
+      "multiplier": 64,
+      "hit": "60026622847008042300291294063198174866950746849738420518482501405568",
+      "input_target": "60026622847008042300291294063198174866950746849738420518482501405568",
+      "verifier_accepts": false,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits85769881_n64_input_target_plus_1",
+      "n_bits": 85769881,
+      "multiplier": 64,
+      "hit": "60026622847008042300291294063198174866950746849738420518482501405569",
+      "input_target": "60026622847008042300291294063198174866950746849738420518482501405568",
+      "verifier_accepts": false,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits85769881_n2048_target_minus_1",
+      "n_bits": 85769881,
+      "multiplier": 2048,
+      "hit": "937915981984500660942051469737471482296105419527162820601289084461",
+      "input_target": "1920851931104257353609321410022341595742423899191629456591440044978176",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits85769881_n2048_target",
+      "n_bits": 85769881,
+      "multiplier": 2048,
+      "hit": "937915981984500660942051469737471482296105419527162820601289084462",
+      "input_target": "1920851931104257353609321410022341595742423899191629456591440044978176",
+      "verifier_accepts": true,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": true
+    },
+    {
+      "name": "nbits85769881_n2048_input_target_minus_1",
+      "n_bits": 85769881,
+      "multiplier": 2048,
+      "hit": "1920851931104257353609321410022341595742423899191629456591440044978175",
+      "input_target": "1920851931104257353609321410022341595742423899191629456591440044978176",
+      "verifier_accepts": true,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits85769881_n2048_input_target",
+      "n_bits": 85769881,
+      "multiplier": 2048,
+      "hit": "1920851931104257353609321410022341595742423899191629456591440044978176",
+      "input_target": "1920851931104257353609321410022341595742423899191629456591440044978176",
+      "verifier_accepts": false,
+      "miner_classifies_input": true,
+      "miner_classifies_ordering": false
+    },
+    {
+      "name": "nbits85769881_n2048_input_target_plus_1",
+      "n_bits": 85769881,
+      "multiplier": 2048,
+      "hit": "1920851931104257353609321410022341595742423899191629456591440044978177",
+      "input_target": "1920851931104257353609321410022341595742423899191629456591440044978176",
+      "verifier_accepts": false,
+      "miner_classifies_input": false,
+      "miner_classifies_ordering": false
+    }
+  ],
+  "header_cases": [
+    {
+      "name": "real_ordering_solution",
+      "header_hex": "0211111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222444444444444444444444444444444444444444444444444444444444444444433333333333333333333333333333333333333333333333333333333333333333380d095ffbc31555555555555555555555555555555555555555555555555555555555555555501020000b9600000000003f01d6b9018ab421dd410404cb869072065522bf85734008f105cf385a023a80f0000000000000000",
+      "hit": "53263153806980836288224647675902452309049845688001562964940810907897674773593",
+      "multiplier": 30,
+      "input_pow_valid": true,
+      "ordering_pow_valid": true
+    },
+    {
+      "name": "real_input_solution",
+      "header_hex": "0211111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222444444444444444444444444444444444444444444444444444444444444444433333333333333333333333333333333333333333333333333333333333333333380d095ffbc31555555555555555555555555555555555555555555555555555555555555555501020000b9600000000003f01d6b9018ab421dd410404cb869072065522bf85734008f105cf385a023a80f00000000000007d0",
+      "hit": "70542593212075886733742519012979865657550543626631561920689876062118429420882",
+      "multiplier": 30,
+      "input_pow_valid": true,
+      "ordering_pow_valid": false
+    }
+  ],
+  "manifest": {
+    "ergo_commit": "31a8de804f7328704f2753a1cf151dda8f64689f",
+    "sigma_commit": "368a860be033af94aa14895381f42099b3646db6",
+    "sigma_version": "6.0.5-22-368a860b-SNAPSHOT",
+    "generator": "scripts/jvm_weak_blocks_oracle/WeakBlocksOracle.scala",
+    "generator_sha256": "4de7e4539d8f9687bfcbcf1f59c75595f944b10d271de1b2562b42bebc0b5f25",
+    "timestamp": "2026-09-21T06:41:46.247034+00:00"
+  }
+}

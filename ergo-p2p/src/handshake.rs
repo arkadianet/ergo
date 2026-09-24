@@ -45,6 +45,14 @@ impl Version {
         minor: 0,
         patch: 13,
     };
+    /// Scala `Version.SubblocksVersion = 6.5.0`: peers at or above it speak
+    /// the input-block messages. Not advertised by this node unless input
+    /// blocks are enabled (Plan 2).
+    pub const SUBBLOCKS: Self = Self {
+        major: 6,
+        minor: 5,
+        patch: 0,
+    };
     /// Reference-node default `scorex.network.appVersion`.
     ///
     /// Scala keeps named constants here for activation milestones, then wires
@@ -728,6 +736,7 @@ mod tests {
         assert!(Version::EIP37_FORK < Version::JIT_SOFT_FORK);
         assert!(Version::JIT_SOFT_FORK < Version::NIPOPOW);
         assert!(Version::NIPOPOW < Version::CURRENT);
+        assert!(Version::NIPOPOW < Version::SUBBLOCKS);
     }
 
     #[test]

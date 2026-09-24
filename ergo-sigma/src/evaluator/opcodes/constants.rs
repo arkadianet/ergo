@@ -87,6 +87,11 @@ pub(in crate::evaluator) fn eval_miner_pubkey(
     cost: &mut CostAccumulator,
 ) -> Result<Value, EvalError> {
     add_cost(cost, 0xAC)?;
+    // Scala CContext.minerPubKey throws SoftFieldAccessException on access,
+    // i.e. after the opcode's own cost has been charged.
+    if !ctx.soft_fields_allowed {
+        return Err(EvalError::SoftFieldAccess("minerPubKey"));
+    }
     Ok(Value::CollBytes(ctx.miner_pubkey.to_vec()))
 }
 

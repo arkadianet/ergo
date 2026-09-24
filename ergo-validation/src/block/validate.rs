@@ -179,14 +179,7 @@ pub fn validate_full_block_with_costs(
     if header.version >= 2 {
         witness_data = txs
             .iter()
-            .map(|tx| {
-                let mut all_proofs = Vec::new();
-                for input in &tx.inputs {
-                    all_proofs.extend_from_slice(&input.spending_proof.proof);
-                }
-                let hash = ergo_crypto::autolykos::common::blake2b256(&all_proofs);
-                hash[1..].to_vec() // 31 bytes: drop first byte
-            })
+            .map(|tx| ergo_ser::weak_id::witness_id(tx).to_vec())
             .collect();
         let refs: Vec<&[u8]> = witness_data.iter().map(|w| w.as_slice()).collect();
         witness_refs = Some(refs);
@@ -208,7 +201,8 @@ pub fn validate_full_block_with_costs(
         .iter()
         .map(|f| (f.key.as_slice(), f.value.as_slice()))
         .collect();
-    let computed_ext_root = extension_root(&ext_fields);
+    let computed_ext_root = extension_root(&ext_fields)
+        .expect("ExtensionField::key is [u8; 2], inside the 255-byte leaf-prefix bound");
     if computed_ext_root != *header.extension_root.as_bytes() {
         return Err(BlockValidationError::ExtensionRootMismatch {
             expected: *header.extension_root.as_bytes(),
@@ -332,6 +326,7 @@ pub fn validate_full_block_with_costs(
             // `validateStateful`), so it covers every caller uniformly.
             rules: crate::tx::TxValidationRules {
                 reemission: ctx.reemission,
+                soft_fields_allowed: true,
             },
         };
         let checked = validate_transaction_parsed(
@@ -507,7 +502,8 @@ fn validate_full_block_parallel_impl(
         .iter()
         .map(|f| (f.key.as_slice(), f.value.as_slice()))
         .collect();
-    let computed_ext_root = extension_root(&ext_fields);
+    let computed_ext_root = extension_root(&ext_fields)
+        .expect("ExtensionField::key is [u8; 2], inside the 255-byte leaf-prefix bound");
     if computed_ext_root != *header.extension_root.as_bytes() {
         return Err(BlockValidationError::ExtensionRootMismatch {
             expected: *header.extension_root.as_bytes(),
@@ -631,7 +627,10 @@ fn validate_full_block_parallel_impl(
                     params,
                     cost: &mut cost,
                     last_headers: raw_headers_ref,
-                    rules: crate::tx::TxValidationRules { reemission },
+                    rules: crate::tx::TxValidationRules {
+                        reemission,
+                        soft_fields_allowed: true,
+                    },
                 };
                 // Pre-collected points (from the block deserialize) skip the
                 // per-tx re-parse; borrowed (not cloned) and indexed here.

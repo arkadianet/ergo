@@ -115,6 +115,7 @@ fn box_equality_self_vs_inputs_0() {
         pre_header_n_bits: 0,
         pre_header_votes: [0u8; 3],
         input_extensions: &[],
+        soft_fields_allowed: true,
     };
     // SELF == INPUTS(0) — same underlying box
     let self_val = Value::SelfBox;
@@ -163,6 +164,7 @@ fn box_equality_in_tuple() {
         pre_header_n_bits: 0,
         pre_header_votes: [0u8; 3],
         input_extensions: &[],
+        soft_fields_allowed: true,
     };
     // (SELF, 42) == (INPUTS(0), 42) — nested box in tuple
     let l = Value::Tuple(vec![Value::SelfBox, Value::Int(42)]);
@@ -210,6 +212,7 @@ fn box_equality_in_option() {
         pre_header_n_bits: 0,
         pre_header_votes: [0u8; 3],
         input_extensions: &[],
+        soft_fields_allowed: true,
     };
     // Some(SELF) == Some(INPUTS(0))
     let l = Value::Opt(Some(Box::new(Value::SelfBox)));
@@ -271,6 +274,7 @@ fn box_collection_vs_derived_tuple() {
         pre_header_n_bits: 0,
         pre_header_votes: [0u8; 3],
         input_extensions: &[],
+        soft_fields_allowed: true,
     };
     // Left: BoxCollection(Inputs) — the raw INPUTS carrier
     let inputs_coll = Value::BoxCollection(BoxSource::Inputs);
@@ -350,6 +354,7 @@ fn coll_box_eq_cost_uses_per_item() {
         pre_header_n_bits: 0,
         pre_header_votes: [0u8; 3],
         input_extensions: &[],
+        soft_fields_allowed: true,
     };
     // BoxCollection(Inputs) with 2 boxes
     // Expected cost: MatchType(1) + PerItem(base=15, perChunk=5, chunk=1, n=2)
@@ -1625,6 +1630,7 @@ fn ctx_with_self_box(b: &EvalBox) -> ReductionContext<'_> {
         pre_header_n_bits: 0,
         pre_header_votes: [0u8; 3],
         input_extensions: &[],
+        soft_fields_allowed: true,
     }
 }
 
@@ -9510,6 +9516,7 @@ fn coll_updated_inputs_updated_self_succeeds_via_eval() {
         pre_header_n_bits: 0,
         pre_header_votes: [0u8; 3],
         input_extensions: &[],
+        soft_fields_allowed: true,
     };
     let expr = coll_updated_via_method_call(op_inputs(), const_int(0), op_self());
     let v = eval_to_value(&expr, &ctx, &[])
@@ -9562,6 +9569,7 @@ fn coll_updated_inputs_rejects_int_element_via_eval() {
         pre_header_n_bits: 0,
         pre_header_votes: [0u8; 3],
         input_extensions: &[],
+        soft_fields_allowed: true,
     };
     let expr = coll_updated_via_method_call(op_inputs(), const_int(0), const_int(99));
     let err = match eval_to_value(&expr, &ctx, &[]) {
@@ -13019,4 +13027,184 @@ fn value_trace_records_every_evaluated_node_by_preorder_id() {
     // Nothing is recorded once taken.
     assert_eq!(run_eval(&expr), Value::Int(3));
     assert!(crate::value_trace::take().is_none());
+}
+
+// ----- soft-field access gate (error paths) -----
+
+/// Builds a zero-arg `0xDB PropertyCall` on the CONTEXT receiver, the
+/// wire form the compiler emits for `CONTEXT.preHeader.<field>`.
+fn context_property_call(type_id: u8, method_id: u8) -> Expr {
+    op(
+        0xDB,
+        Payload::MethodCall {
+            type_id,
+            method_id,
+            obj: Box::new(op(0xFE, Payload::Zero)),
+            args: vec![],
+            type_args: vec![],
+        },
+    )
+}
+
+#[test]
+fn miner_pubkey_opcode_with_soft_fields_disallowed_errors() {
+    let mut ctx = ReductionContext::minimal(100, 0);
+    ctx.soft_fields_allowed = false;
+    let expr = op(0xAC, Payload::Zero); // MinerPubkey
+    let err = eval_to_value(&expr, &ctx, &[]).unwrap_err();
+    assert!(
+        matches!(err, EvalError::SoftFieldAccess("minerPubKey")),
+        "{err}"
+    );
+}
+
+#[test]
+fn miner_pubkey_opcode_with_soft_fields_allowed_returns_bytes() {
+    let ctx = ReductionContext::minimal(100, 0);
+    let expr = op(0xAC, Payload::Zero);
+    assert!(
+        matches!(eval_to_value(&expr, &ctx, &[]).unwrap(), Value::CollBytes(b) if b.len() == 33)
+    );
+}
+
+#[test]
+fn context_miner_pubkey_method_with_soft_fields_disallowed_errors() {
+    let mut ctx = ReductionContext::minimal(100, 0);
+    ctx.soft_fields_allowed = false;
+    let err = eval_to_value(&context_property_call(101, 10), &ctx, &[]).unwrap_err();
+    assert!(
+        matches!(err, EvalError::SoftFieldAccess("minerPubKey")),
+        "{err}"
+    );
+}
+
+#[test]
+fn pre_header_timestamp_with_soft_fields_disallowed_errors() {
+    let mut ctx = ReductionContext::minimal(100, 0);
+    ctx.soft_fields_allowed = false;
+    let err = eval_to_value(&context_property_call(105, 3), &ctx, &[]).unwrap_err();
+    assert!(
+        matches!(err, EvalError::SoftFieldAccess("timestamp")),
+        "{err}"
+    );
+}
+
+#[test]
+fn pre_header_miner_pk_with_soft_fields_disallowed_errors() {
+    let mut ctx = ReductionContext::minimal(100, 0);
+    ctx.soft_fields_allowed = false;
+    let err = eval_to_value(&context_property_call(105, 6), &ctx, &[]).unwrap_err();
+    assert!(
+        matches!(err, EvalError::SoftFieldAccess("minerPk")),
+        "{err}"
+    );
+}
+
+#[test]
+fn pre_header_votes_with_soft_fields_disallowed_errors() {
+    let mut ctx = ReductionContext::minimal(100, 0);
+    ctx.soft_fields_allowed = false;
+    let err = eval_to_value(&context_property_call(105, 7), &ctx, &[]).unwrap_err();
+    assert!(matches!(err, EvalError::SoftFieldAccess("votes")), "{err}");
+}
+
+/// `SPreHeader.height` is not a soft field: it stays readable with the
+/// gate closed (Scala `softMethodIds` = {3, 6, 7} only).
+#[test]
+fn pre_header_height_with_soft_fields_disallowed_is_ok() {
+    let mut ctx = ReductionContext::minimal(100, 0);
+    ctx.soft_fields_allowed = false;
+    assert_eq!(
+        eval_to_value(&context_property_call(105, 5), &ctx, &[]).unwrap(),
+        Value::Int(100)
+    );
+}
+
+/// The v6 `0xDC MethodCall` wire form routes through the same shared
+/// no-arg table, so the gate must fire there too.
+#[test]
+fn pre_header_timestamp_via_method_call_with_soft_fields_disallowed_errors() {
+    let mut ctx = ReductionContext::minimal(100, 0);
+    ctx.soft_fields_allowed = false;
+    let expr = op(
+        0xDC,
+        Payload::MethodCall {
+            type_id: 105,
+            method_id: 3,
+            obj: Box::new(op(0xFE, Payload::Zero)),
+            args: vec![],
+            type_args: vec![],
+        },
+    );
+    let err = eval_to_value(&expr, &ctx, &[]).unwrap_err();
+    assert!(
+        matches!(err, EvalError::SoftFieldAccess("timestamp")),
+        "{err}"
+    );
+}
+
+// Rejection-cost ordering vs the pinned Scala fork (sigmastate
+// `context-refactoring` @368a860b, `MethodCall.eval` in
+// data/shared/src/main/scala/sigma/ast/values.scala): the `softMethodIds`
+// check runs after `argsBuf` is built but BEFORE
+// `E.addFixedCost(fixed, method.opDesc)`, so a rejected SPreHeader soft
+// method leaves its own 10-unit method cost UNCHARGED. `minerPubKey` is
+// the opposite: Scala throws inside `CContext.minerPubKey`, i.e. after the
+// call's fixed cost is charged. Both are pinned here because they are the
+// only observable difference between an allowed and a rejected evaluation
+// besides the error itself.
+fn total_cost_of(expr: &Expr, ctx: &ReductionContext<'_>) -> (u64, Option<EvalError>) {
+    let mut env = Env::new();
+    let mut depth = 0usize;
+    let mut cost = CostAccumulator::recording_only();
+    let mut trace = None;
+    let res = eval_expr(expr, ctx, &[], &mut env, &mut depth, &mut cost, &mut trace);
+    (cost.total().value(), res.err())
+}
+
+#[test]
+fn rejected_pre_header_timestamp_leaves_its_method_cost_uncharged() {
+    let expr = context_property_call(105, 3);
+    let allowed = ReductionContext::minimal(100, 0);
+    let mut denied = ReductionContext::minimal(100, 0);
+    denied.soft_fields_allowed = false;
+
+    let (ok_total, ok_err) = total_cost_of(&expr, &allowed);
+    assert!(ok_err.is_none(), "{ok_err:?}");
+    let (err_total, err) = total_cost_of(&expr, &denied);
+    assert!(
+        matches!(err, Some(EvalError::SoftFieldAccess("timestamp"))),
+        "{err:?}"
+    );
+    assert_eq!(
+        ok_total - err_total,
+        super::opcodes::property_call::COST_PRE_HEADER_TIMESTAMP,
+        "Scala checks softMethodIds BEFORE addFixedCost: the rejected call \
+         must not charge COST_PRE_HEADER_TIMESTAMP (allowed={ok_total}, \
+         rejected={err_total})"
+    );
+}
+
+#[test]
+fn rejected_context_miner_pub_key_still_charges_its_method_cost() {
+    let expr = context_property_call(101, 10);
+    let allowed = ReductionContext::minimal(100, 0);
+    let mut denied = ReductionContext::minimal(100, 0);
+    denied.soft_fields_allowed = false;
+
+    let (ok_total, ok_err) = total_cost_of(&expr, &allowed);
+    assert!(ok_err.is_none(), "{ok_err:?}");
+    let (err_total, err) = total_cost_of(&expr, &denied);
+    assert!(
+        matches!(err, Some(EvalError::SoftFieldAccess("minerPubKey"))),
+        "{err:?}"
+    );
+    assert_eq!(
+        err_total, ok_total,
+        "Scala CContext.minerPubKey throws AFTER the call cost is charged"
+    );
+    assert!(
+        err_total >= super::opcodes::property_call::COST_CONTEXT_MINER_PUB_KEY,
+        "rejected total {err_total} must include COST_CONTEXT_MINER_PUB_KEY"
+    );
 }

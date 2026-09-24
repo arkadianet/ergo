@@ -52,6 +52,7 @@ pub fn revalidate_pooled<V: Validator>(
         last_headers: tip_ctx.last_headers,
         rules: TxValidationRules {
             reemission: tip_ctx.reemission,
+            soft_fields_allowed: true,
         },
     };
     let verdict = validator

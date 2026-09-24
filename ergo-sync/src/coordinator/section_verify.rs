@@ -102,7 +102,11 @@ pub fn verify_section_modifier_id(
                 .iter()
                 .map(|f| (f.key.as_slice(), f.value.as_slice()))
                 .collect();
-            let root = ergo_crypto::merkle::extension_root(&kv);
+            // `ExtensionField::key` is `[u8; 2]`, so the leaf prefix
+            // always fits; this path parses untrusted bytes, so surface a
+            // rejection rather than assert.
+            let root = ergo_crypto::merkle::extension_root(&kv)
+                .ok_or_else(|| "Extension key exceeds the 255-byte leaf prefix".to_string())?;
             vec![compute_section_id(
                 TYPE_EXTENSION,
                 ext.header_id.as_bytes(),

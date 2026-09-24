@@ -1,6 +1,7 @@
 mod boxes_roundtrip;
 mod ergotrees_roundtrip;
 mod headers_roundtrip;
+mod input_block_scala_oracle;
 mod nipopow_scala_oracle;
 mod roundtrip_triage;
 mod sbigint_cap_oracle;

@@ -747,7 +747,7 @@ fn reconstruct_extension_bytes(
         .iter()
         .map(|f| (f.key.as_slice(), f.value.as_slice()))
         .collect();
-    let computed_root = extension_root(&field_refs);
+    let computed_root = extension_root(&field_refs).expect("extension keys are 2 bytes");
     if &computed_root != header.extension_root.as_bytes() {
         return Err(format!(
             "extension_root GATE FAILED\n  computed: {}\n  expected: {}",

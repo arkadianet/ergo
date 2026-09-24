@@ -338,6 +338,7 @@ fn verify(bytes: &[u8], output: &mut Value) -> Result<()> {
         }),
         activated_script_version: req.activated_version,
         ergo_tree_version: tree.version,
+        soft_fields_allowed: true,
     };
     ensure!(
         !rent,

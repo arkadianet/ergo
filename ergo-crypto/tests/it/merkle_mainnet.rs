@@ -163,7 +163,7 @@ fn verify_extension_root(block: &BlockVector, _header: &Header) {
         .iter()
         .map(|(k, v)| (k.as_slice(), v.as_slice()))
         .collect();
-    let computed = extension_root(&field_refs);
+    let computed = extension_root(&field_refs).expect("mainnet extension keys are 2 bytes");
     let expected = hex::decode(&ext.digest).unwrap();
     assert_eq!(
         computed,

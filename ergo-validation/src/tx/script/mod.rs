@@ -71,6 +71,12 @@ pub(crate) fn classify_verify_error(
         VerifySpendingError::Eval(EvalError::JitCostOverflow(je)) => {
             ValidationError::JitCostOverflow(je.to_string())
         }
+        VerifySpendingError::Eval(EvalError::SoftFieldAccess(field)) => {
+            ValidationError::SoftFieldAccess {
+                index: input_index,
+                field,
+            }
+        }
         other => ValidationError::ScriptError {
             index: input_index,
             reason: other.to_string(),
@@ -265,6 +271,7 @@ pub(crate) fn validate_scripts_at_index(
             // isV3OrLaterErgoTreeVersion on this for the v6 SHeader data
             // serialization gate.
             ergo_tree_version: ergo_tree.version,
+            soft_fields_allowed: cx.rules.soft_fields_allowed,
         };
 
         let verified = verify_spending_proof_with_context_and_cost(

@@ -497,7 +497,8 @@ fn replay(fixture: Fixture) {
                         .iter()
                         .map(|f| (f.key.as_slice(), f.value.as_slice()))
                         .collect::<Vec<_>>()
-                ),
+                )
+                .expect("extension keys are 2 bytes"),
                 *block.header.header().extension_root.as_bytes()
             );
         }

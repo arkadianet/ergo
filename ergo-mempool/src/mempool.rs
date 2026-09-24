@@ -925,6 +925,7 @@ impl Mempool {
             last_headers: tip_ctx.last_headers,
             rules: TxValidationRules {
                 reemission: tip_ctx.reemission,
+                soft_fields_allowed: true,
             },
         };
         let res = validator.validate(c_bytes, &overlay_view, &committed_view, &mut tx_cx);

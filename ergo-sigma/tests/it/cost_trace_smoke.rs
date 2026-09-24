@@ -61,6 +61,7 @@ fn trace_captures_opcode_costs() {
         pre_header_n_bits: 0,
         pre_header_votes: [0u8; 3],
         input_extensions: &[],
+        soft_fields_allowed: true,
     };
 
     cost_trace::enable();
@@ -168,6 +169,7 @@ fn trace_pins_method_indexof_cumulative_total() {
         pre_header_n_bits: 0,
         pre_header_votes: [0u8; 3],
         input_extensions: &[],
+        soft_fields_allowed: true,
     };
 
     cost_trace::enable();

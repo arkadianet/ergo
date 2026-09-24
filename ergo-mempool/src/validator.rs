@@ -302,7 +302,13 @@ fn map_validation_error(err: ValidationError) -> ValidationErr {
         // (Scala surfaces it from `validateStateful`), so it shares the
         // monetary admission bucket.
         | E::ReemissionRulesViolated(_) => ValidationErr::MonetaryFailed,
-        E::ScriptError { .. } | E::ProofFailed { .. } => ValidationErr::ScriptFailed,
+        // Mempool admission always runs with soft_fields_allowed: true
+        // (see TxValidationRules doc), so this arm is unreachable in
+        // practice today; bucketed alongside ScriptError/ProofFailed for
+        // when Plan 2 mining classification starts routing it here.
+        E::ScriptError { .. } | E::ProofFailed { .. } | E::SoftFieldAccess { .. } => {
+            ValidationErr::ScriptFailed
+        }
         E::CostExceeded { .. } => ValidationErr::CostExceeded,
         // JitCost arithmetic overflow is structurally distinct from a
         // limit hit (see ValidationError::JitCostOverflow doc), but the
