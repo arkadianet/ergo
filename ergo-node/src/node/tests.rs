@@ -3846,6 +3846,57 @@ fn popow_proof_wrong_profile_penalizes_peer_and_records_response() {
     }
 }
 
+// ----- error paths -----
+
+#[test]
+fn popow_proof_difficulty_error_penalizes_and_logs_reason() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    state_with_popow_bootstrap(&mut state);
+    let frame = popow_proof_frame();
+    let body = message::deserialize_nipopow_proof(&frame).unwrap();
+    let mut proof = ergo_ser::popow_proof::deserialize_nipopow_proof(&body).unwrap();
+    proof.suffix_tail.last_mut().unwrap().n_bits ^= 1;
+    let body = ergo_ser::popow_proof::serialize_nipopow_proof(&proof).unwrap();
+    let frame = message::serialize_nipopow_proof(&body).unwrap();
+    let log_path = tmp.path().join("difficulty.log");
+    let log_file = std::fs::File::create(&log_path).unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || log_file.try_clone().unwrap())
+        .finish();
+    let peer = test_peer();
+    let actions = tracing::subscriber::with_default(subscriber, || {
+        handle_message(
+            &mut state,
+            peer,
+            message::CODE_NIPOPOW_PROOF,
+            &frame,
+            Instant::now(),
+        )
+    });
+    assert!(matches!(actions.as_slice(),
+        [Action::Penalize { peer: p, penalty: Penalty::Misbehavior }] if *p == peer));
+    let log = std::fs::read_to_string(log_path).unwrap();
+    assert!(log.contains("bootstrap proof rejected"), "{log}");
+    assert!(
+        log.contains("consensus difficulty mismatch at height 11"),
+        "{log}"
+    );
+    let popow = state.popow_bootstrap.as_ref().unwrap();
+    assert_eq!(popow.provider_count(), 1);
+    assert_eq!(popow.proofs_processed(), 0);
+    assert!(popow.best_proof().is_none());
+    let retry = handle_message(
+        &mut state,
+        peer,
+        message::CODE_NIPOPOW_PROOF,
+        &frame,
+        Instant::now(),
+    );
+    assert!(retry.is_empty());
+}
+
 #[test]
 fn popow_proof_violating_checkpoint_penalizes_peer_and_never_reaches_verifier() {
     // A forged proof carrying a different header at the operator's anchor

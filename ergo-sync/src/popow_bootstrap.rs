@@ -24,12 +24,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
-use ergo_crypto::difficulty::{previous_heights_for_recalculation, DifficultyParams};
+use ergo_crypto::difficulty::{
+    epoch_length_for_height, previous_heights_for_recalculation, DifficultyParams,
+};
 use ergo_p2p::peer::PeerId;
 use ergo_p2p::types::{P2P_NIPOPOW_PROOF_K, P2P_NIPOPOW_PROOF_M};
 use ergo_ser::difficulty::encode_compact_bits;
 use ergo_ser::header::{serialize_header, Header};
 use ergo_ser::popow_proof::NipopowProof;
+use ergo_validation::popow::proof::heights_for_next_recalculation;
 use ergo_validation::popow::{NipopowVerificationResult, NipopowVerifier};
 use num_bigint::BigUint;
 
@@ -65,6 +68,9 @@ pub enum PopowProofRejection {
     /// Adjacent suffix headers must have consecutive, non-overflowing heights.
     #[error("non-contiguous suffix heights: {previous} followed by {actual}")]
     NonContiguousSuffix { previous: u32, actual: u32 },
+    /// The proof failed bootstrap difficulty-context validation.
+    #[error("invalid bootstrap difficulty context: {0}")]
+    Difficulty(#[from] PopowBootstrapDifficultyError),
 }
 
 /// Outcome of receiving a proof from a bootstrap provider.
@@ -134,18 +140,62 @@ pub fn validate_bootstrap_response_profile(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why the bootstrap proof cannot supply a valid difficulty context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PopowBootstrapDifficultyError {
-    DuplicateProofHeight { height: u32 },
-    MissingContext { height: u32 },
-    InvalidHeader { height: u32 },
-    ParentIdMismatch { height: u32 },
-    NonIncreasingTimestamp { height: u32 },
-    InitialDifficultyMismatch { height: u32 },
-    ConsensusDifficultyMismatch { height: u32 },
+    /// Multiple proof headers have the same height.
+    #[error("duplicate proof height {height}")]
+    DuplicateProofHeight {
+        /// Height of the offending or missing header.
+        height: u32,
+    },
+    /// A required context header is absent.
+    #[error("missing difficulty context at height {height}")]
+    MissingContext {
+        /// Height of the offending or missing header.
+        height: u32,
+    },
+    /// A context header cannot be serialized.
+    #[error("invalid context header at height {height}")]
+    InvalidHeader {
+        /// Height of the offending or missing header.
+        height: u32,
+    },
+    /// A suffix-tail header does not link to its predecessor.
+    #[error("suffix parent ID mismatch at height {height}")]
+    ParentIdMismatch {
+        /// Height of the offending or missing header.
+        height: u32,
+    },
+    /// A suffix-tail timestamp does not follow its predecessor.
+    #[error("non-increasing suffix timestamp at height {height}")]
+    NonIncreasingTimestamp {
+        /// Height of the offending or missing header.
+        height: u32,
+    },
+    /// The genesis header differs from the configured initial difficulty.
+    #[error("initial difficulty mismatch at height {height}")]
+    InitialDifficultyMismatch {
+        /// Height of the offending or missing header.
+        height: u32,
+    },
+    /// A suffix-tail header differs from its computed difficulty.
+    #[error("consensus difficulty mismatch at height {height}")]
+    ConsensusDifficultyMismatch {
+        /// Height of the offending or missing header.
+        height: u32,
+    },
+    /// Difficulty epochs must contain at least one block.
+    #[error("difficulty epoch length must be nonzero")]
     InvalidEpochLength,
 }
 
+/// Require Scala's continuous-proof recalculation heights and validate the
+/// dense suffix where its historical difficulty context is available.
+///
+/// The suffix head may connect through interlinks without its direct parent
+/// (`NipopowProof.scala:82-104,128-145`). No parent or difficulty check is
+/// imposed on that sparse-prefix boundary.
 pub fn validate_bootstrap_difficulty_context(
     proof: &NipopowProof,
     params: &DifficultyParams,
@@ -181,7 +231,23 @@ pub fn validate_bootstrap_difficulty_context(
         return Err(PopowBootstrapDifficultyError::InvalidEpochLength);
     }
 
-    for header in std::iter::once(&proof.suffix_head.header).chain(proof.suffix_tail.iter()) {
+    // Scala NipopowProof.scala:82-104 requires only the heights for the
+    // next recalculation that precede the suffix head. In particular H-1
+    // need not be present (NipopowProverWithDbAlgs.scala:93-112).
+    if proof.continuous {
+        let head_height = proof.suffix_head.header.height;
+        for height in
+            heights_for_next_recalculation(head_height, epoch_length, params.use_last_epochs)
+        {
+            if height > 0 && height < head_height && !context.contains_key(&height) {
+                return Err(PopowBootstrapDifficultyError::MissingContext { height });
+            }
+        }
+    }
+
+    // Only the tail has mandatory direct-parent connections
+    // (Scala NipopowProof.scala:143-145).
+    for header in &proof.suffix_tail {
         if header.height == 1 {
             continue;
         }
@@ -213,17 +279,22 @@ pub fn validate_bootstrap_difficulty_context(
             });
         }
 
-        let required_heights = previous_heights_for_recalculation(header.height, epoch_length);
-        let mut epoch_headers = Vec::with_capacity(required_heights.len());
-        for height in required_heights {
-            if height == 0 {
-                continue;
-            }
-            let context_header = context
-                .get(&height)
-                .ok_or(PopowBootstrapDifficultyError::MissingContext { height })?;
-            epoch_headers.push((*context_header).clone());
+        let header_epoch_length = epoch_length_for_height(header.height, params);
+        if header_epoch_length == 0 {
+            return Err(PopowBootstrapDifficultyError::InvalidEpochLength);
         }
+        let required_heights =
+            previous_heights_for_recalculation(header.height, header_epoch_length);
+        let epoch_headers: Option<Vec<Header>> = required_heights
+            .into_iter()
+            .filter(|height| *height > 0)
+            .map(|height| context.get(&height).map(|header| (*header).clone()))
+            .collect();
+        // Historical difficulty validation cannot add membership requirements
+        // beyond Scala's next-recalculation window, including before EIP-37.
+        let Some(epoch_headers) = epoch_headers else {
+            continue;
+        };
         ergo_crypto::pow::verify_header_difficulty(header, &epoch_headers, params).map_err(
             |_| PopowBootstrapDifficultyError::ConsensusDifficultyMismatch {
                 height: header.height,
@@ -368,8 +439,8 @@ impl PopowBootstrap {
         {
             return PopowProofOutcome::Rejected(reason);
         }
-        if validate_bootstrap_difficulty_context(&proof, &self.difficulty_params).is_err() {
-            return PopowProofOutcome::Duplicate;
+        if let Err(error) = validate_bootstrap_difficulty_context(&proof, &self.difficulty_params) {
+            return PopowProofOutcome::Rejected(PopowProofRejection::Difficulty(error));
         }
         let result = self.verifier.process(proof);
         if matches!(result, NipopowVerificationResult::BetterChain { .. }) {
@@ -505,6 +576,7 @@ pub fn check_proof_against_checkpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ergo_validation::popow::NipopowProofExt;
     use std::sync::OnceLock;
 
     use ergo_primitives::digest::ModifierId;
@@ -641,6 +713,17 @@ mod tests {
     // ----- happy path -----
 
     #[test]
+    fn real_mainnet_h1_through_h11_context_validates() {
+        let proof = difficulty_proof();
+        assert_eq!(proof.prefix[0].header.height, 1);
+        assert_eq!(proof.suffix_head.header.height, 2);
+        assert_eq!(proof.suffix_tail.last().unwrap().height, 11);
+        assert!(
+            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()).is_ok()
+        );
+    }
+
+    #[test]
     fn response_profile_accepts_continuous_h1_to_h2_fixture() {
         assert_eq!(
             validate_bootstrap_response_profile(&valid_proof(), P2P_NIPOPOW_PROOF_M as u32, 1),
@@ -669,126 +752,6 @@ mod tests {
         assert_eq!(b.expected_m, 6);
         assert_eq!(b.expected_k, 10);
     }
-
-    #[test]
-    fn real_mainnet_h1_through_h11_context_validates() {
-        let proof = difficulty_proof();
-        assert_eq!(proof.prefix[0].header.height, 1);
-        assert_eq!(proof.suffix_head.header.height, 2);
-        assert_eq!(proof.suffix_tail.last().unwrap().height, 11);
-        assert!(
-            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()).is_ok()
-        );
-    }
-
-    #[test]
-    fn committed_scala_mainnet_proof_context_validates() {
-        let bytes = include_bytes!("../../test-vectors/mainnet/nipopow/proof_m6_k10.scala.bin");
-        let proof = ergo_ser::popow_proof::deserialize_nipopow_proof(bytes).unwrap();
-        assert!(validate_bootstrap_response_profile(&proof, 6, 10));
-        assert!(
-            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()).is_ok()
-        );
-    }
-
-    #[test]
-    fn mutated_suffix_nbits_rejects() {
-        let mut proof = difficulty_proof();
-        proof.suffix_tail.last_mut().unwrap().n_bits ^= 1;
-        assert_eq!(
-            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()),
-            Err(PopowBootstrapDifficultyError::ConsensusDifficultyMismatch { height: 11 })
-        );
-    }
-
-    #[test]
-    fn mutated_suffix_parent_rejects() {
-        let mut proof = difficulty_proof();
-        proof.suffix_tail.last_mut().unwrap().parent_id = ModifierId::from_bytes([0xee; 32]);
-        assert_eq!(
-            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()),
-            Err(PopowBootstrapDifficultyError::ParentIdMismatch { height: 11 })
-        );
-    }
-
-    #[test]
-    fn non_increasing_suffix_timestamp_rejects() {
-        let mut proof = difficulty_proof();
-        proof.suffix_tail.last_mut().unwrap().timestamp = header_at(10).timestamp;
-        assert_eq!(
-            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()),
-            Err(PopowBootstrapDifficultyError::NonIncreasingTimestamp { height: 11 })
-        );
-    }
-
-    #[test]
-    fn mutated_genesis_nbits_rejects() {
-        let mut proof = difficulty_proof();
-        proof.prefix[0].header.n_bits ^= 1;
-        assert_eq!(
-            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()),
-            Err(PopowBootstrapDifficultyError::InitialDifficultyMismatch { height: 1 })
-        );
-    }
-
-    #[test]
-    fn missing_required_boundary_context_fails_closed() {
-        let mut proof = boundary_proof();
-        assert!(validate_bootstrap_response_profile(&proof, 6, 10));
-        assert!(
-            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()).is_ok()
-        );
-        let index = proof
-            .prefix
-            .iter()
-            .position(|entry| entry.header.height == 1024)
-            .unwrap();
-        proof.prefix.remove(index);
-        assert_eq!(
-            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()),
-            Err(PopowBootstrapDifficultyError::MissingContext { height: 1024 })
-        );
-    }
-
-    #[test]
-    fn duplicate_and_conflicting_proof_heights_reject() {
-        let mut duplicate = difficulty_proof();
-        duplicate
-            .suffix_tail
-            .push(duplicate.suffix_tail.last().unwrap().clone());
-        assert_eq!(
-            validate_bootstrap_difficulty_context(&duplicate, &DifficultyParams::mainnet()),
-            Err(PopowBootstrapDifficultyError::DuplicateProofHeight { height: 11 })
-        );
-
-        let mut conflicting = difficulty_proof();
-        let mut header = conflicting.suffix_tail.last().unwrap().clone();
-        header.n_bits ^= 1;
-        conflicting.suffix_tail.push(header);
-        assert_eq!(
-            validate_bootstrap_difficulty_context(&conflicting, &DifficultyParams::mainnet()),
-            Err(PopowBootstrapDifficultyError::DuplicateProofHeight { height: 11 })
-        );
-    }
-
-    #[test]
-    fn missing_direct_parent_context_does_not_consume_provider() {
-        let mut bootstrap = PopowBootstrap::new(1, None, DifficultyParams::mainnet());
-        bootstrap.mark_requested(peer(1), Instant::now());
-        let mut incomplete = difficulty_proof();
-        incomplete.prefix.clear();
-        assert!(validate_bootstrap_response_profile(&incomplete, 6, 10));
-        assert!(bootstrap.on_proof_received(peer(1), incomplete).is_none());
-        assert_eq!(bootstrap.provider_count(), 0);
-        assert_eq!(bootstrap.proofs_processed(), 0);
-        assert!(matches!(
-            bootstrap.on_proof_received(peer(1), difficulty_proof()),
-            Some(NipopowVerificationResult::BetterChain { .. })
-        ));
-        assert_eq!(bootstrap.provider_count(), 1);
-    }
-
-    // ----- happy path -----
 
     #[test]
     fn idle_state_on_construction() {
@@ -930,6 +893,120 @@ mod tests {
     }
 
     // ----- error paths -----
+
+    #[test]
+    fn difficulty_error_first_response_rejected_with_reason() {
+        let mut bootstrap = PopowBootstrap::new(1, None, DifficultyParams::mainnet());
+        bootstrap.mark_requested(peer(1), Instant::now());
+        let mut proof = difficulty_proof();
+        proof.suffix_tail.last_mut().unwrap().n_bits ^= 1;
+        let reason = PopowProofRejection::Difficulty(
+            PopowBootstrapDifficultyError::ConsensusDifficultyMismatch { height: 11 },
+        );
+        assert_eq!(
+            bootstrap.on_proof_received(peer(1), proof.clone()),
+            PopowProofOutcome::Rejected(reason.clone()),
+        );
+        assert_eq!(
+            reason.to_string(),
+            "invalid bootstrap difficulty context: consensus difficulty mismatch at height 11"
+        );
+        assert_eq!(bootstrap.provider_count(), 1);
+        assert_eq!(bootstrap.proofs_processed(), 0);
+        assert!(bootstrap.best_proof().is_none());
+        assert!(!bootstrap.quorum_reached());
+        for retry in [proof, difficulty_proof()] {
+            assert_eq!(
+                bootstrap.on_proof_received(peer(1), retry),
+                PopowProofOutcome::Duplicate
+            );
+        }
+        assert!(matches!(
+            bootstrap.on_proof_received(peer(2), difficulty_proof()),
+            PopowProofOutcome::Verified(NipopowVerificationResult::BetterChain { .. })
+        ));
+        assert!(bootstrap.quorum_reached());
+    }
+
+    #[test]
+    fn mutated_suffix_nbits_rejects() {
+        let mut proof = difficulty_proof();
+        proof.suffix_tail.last_mut().unwrap().n_bits ^= 1;
+        assert_eq!(
+            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()),
+            Err(PopowBootstrapDifficultyError::ConsensusDifficultyMismatch { height: 11 })
+        );
+    }
+
+    #[test]
+    fn mutated_suffix_parent_rejects() {
+        let mut proof = difficulty_proof();
+        proof.suffix_tail.last_mut().unwrap().parent_id = ModifierId::from_bytes([0xee; 32]);
+        assert_eq!(
+            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()),
+            Err(PopowBootstrapDifficultyError::ParentIdMismatch { height: 11 })
+        );
+    }
+
+    #[test]
+    fn non_increasing_suffix_timestamp_rejects() {
+        let mut proof = difficulty_proof();
+        proof.suffix_tail.last_mut().unwrap().timestamp = header_at(10).timestamp;
+        assert_eq!(
+            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()),
+            Err(PopowBootstrapDifficultyError::NonIncreasingTimestamp { height: 11 })
+        );
+    }
+
+    #[test]
+    fn mutated_genesis_nbits_rejects() {
+        let mut proof = difficulty_proof();
+        proof.prefix[0].header.n_bits ^= 1;
+        assert_eq!(
+            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()),
+            Err(PopowBootstrapDifficultyError::InitialDifficultyMismatch { height: 1 })
+        );
+    }
+
+    #[test]
+    fn missing_required_boundary_context_fails_closed() {
+        let mut proof = boundary_proof();
+        assert!(validate_bootstrap_response_profile(&proof, 6, 10).is_ok());
+        assert!(
+            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()).is_ok()
+        );
+        let index = proof
+            .prefix
+            .iter()
+            .position(|entry| entry.header.height == 1024)
+            .unwrap();
+        proof.prefix.remove(index);
+        assert_eq!(
+            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()),
+            Err(PopowBootstrapDifficultyError::MissingContext { height: 1024 })
+        );
+    }
+
+    #[test]
+    fn duplicate_and_conflicting_proof_heights_reject() {
+        let mut duplicate = difficulty_proof();
+        duplicate
+            .suffix_tail
+            .push(duplicate.suffix_tail.last().unwrap().clone());
+        assert_eq!(
+            validate_bootstrap_difficulty_context(&duplicate, &DifficultyParams::mainnet()),
+            Err(PopowBootstrapDifficultyError::DuplicateProofHeight { height: 11 })
+        );
+
+        let mut conflicting = difficulty_proof();
+        let mut header = conflicting.suffix_tail.last().unwrap().clone();
+        header.n_bits ^= 1;
+        conflicting.suffix_tail.push(header);
+        assert_eq!(
+            validate_bootstrap_difficulty_context(&conflicting, &DifficultyParams::mainnet()),
+            Err(PopowBootstrapDifficultyError::DuplicateProofHeight { height: 11 })
+        );
+    }
 
     #[test]
     fn proof_wrong_profile_rejected_and_provider_recorded() {
@@ -1188,6 +1265,75 @@ mod tests {
                 crate::header_proc::HeaderProcessError::CheckpointMismatch { height: 1, .. }
             ),
             "expected CheckpointMismatch at height 1, got {err:?}"
+        );
+    }
+    // ----- oracle parity -----
+
+    #[test]
+    fn committed_scala_mainnet_proof_context_validates() {
+        let bytes = include_bytes!("../../test-vectors/mainnet/nipopow/proof_m6_k10.scala.bin");
+        let proof = ergo_ser::popow_proof::deserialize_nipopow_proof(bytes).unwrap();
+        assert!(validate_bootstrap_response_profile(&proof, 6, 10).is_ok());
+        assert!(
+            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()).is_ok()
+        );
+    }
+
+    #[test]
+    fn scala_proof_without_suffix_head_parent_accepted() {
+        let bytes = include_bytes!("../../test-vectors/mainnet/nipopow/proof_m6_k10.scala.bin");
+        let mut proof = ergo_ser::popow_proof::deserialize_nipopow_proof(bytes).unwrap();
+        let parent_height = proof.suffix_head.header.height - 1;
+        // Fixture H=1821890: H-1 is not a recalculation height. Scala permits
+        // the remaining interlink connection (NipopowProof.scala:128-145).
+        assert_eq!(parent_height, 1_821_889);
+        let before = proof.prefix.len();
+        proof
+            .prefix
+            .retain(|entry| entry.header.height != parent_height);
+        assert_eq!(proof.prefix.len(), before - 1);
+        let params = DifficultyParams::mainnet();
+        assert!(proof.has_valid_difficulty_headers(&params));
+        assert!(proof.has_valid_connections(&params));
+        assert_eq!(
+            validate_bootstrap_difficulty_context(&proof, &params),
+            Ok(())
+        );
+        let mut bootstrap = PopowBootstrap::new(1, None, params);
+        bootstrap.mark_requested(peer(1), Instant::now());
+        assert!(matches!(
+            bootstrap.on_proof_received(peer(1), proof),
+            PopowProofOutcome::Verified(NipopowVerificationResult::BetterChain { total_proofs: 1 })
+        ));
+        assert!(bootstrap.quorum_reached());
+    }
+
+    #[test]
+    fn difficulty_context_non_boundary_missing_recalculation_height_rejected() {
+        let mut proof = boundary_proof();
+        // Move the head off the epoch boundary. Scala still requires 1024
+        // for the *next* recalculation (NipopowProof.scala:89-100).
+        proof.suffix_head.header = header_at(1153).clone();
+        proof.suffix_tail = (1154..=1162)
+            .map(|height| header_at(height).clone())
+            .collect();
+        proof.prefix.push(difficulty_popow_hdr(
+            header_at(1152).clone(),
+            Some(header_at(1151)),
+        ));
+        assert_eq!(
+            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()),
+            Ok(())
+        );
+        proof.prefix.retain(|entry| entry.header.height != 128);
+        assert_eq!(
+            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()),
+            Ok(())
+        );
+        proof.prefix.retain(|entry| entry.header.height != 1024);
+        assert_eq!(
+            validate_bootstrap_difficulty_context(&proof, &DifficultyParams::mainnet()),
+            Err(PopowBootstrapDifficultyError::MissingContext { height: 1024 })
         );
     }
 }
