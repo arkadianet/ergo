@@ -19,7 +19,7 @@
 //! * [`address`] — base58 P2PK / P2SH / P2S address encoding.
 //! * [`autolykos`] — Autolykos v2 PoW solution wire form.
 //! * [`difficulty`] — `nBits` compact-bits encoding shared with Bitcoin.
-//! * [`weak_id`] / [`input_block`] — weak-blocks wire objects: BIP-152-style
+//! * [`weak_id`] / [`input_block`] — Matrix (input blocks) wire objects: BIP-152-style
 //!   weak transaction ids and the P2P input-block / ordering-block
 //!   announcement codecs.
 //!

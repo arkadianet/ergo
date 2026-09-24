@@ -25,7 +25,7 @@
 //! * [`validator`] — `ErgoValidator` adapter that wires the pool's
 //!   admission steps onto `ergo_validation::tx::validate_transaction`.
 //! * [`input_blocks`] — provisional input-block chain APIs (Matrix
-//!   / weak-blocks): `InputBlockOverlay`, `apply_input_block_txs`
+//!   (input blocks)): `InputBlockOverlay`, `apply_input_block_txs`
 //!   (Scala `removeWithDoubleSpends`), `restore_input_block_txs`
 //!   (Scala `put`), and weak-id pool lookup.
 //! * [`types`] — shared types: `MempoolConfig`, `MempoolAction`,

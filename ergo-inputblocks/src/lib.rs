@@ -1,6 +1,6 @@
-//! Input-block (a.k.a. "sub-block" / "weak block") processor and policy
-//! for the Ergo Rust node. Implements the `weak-blocks` spec's
-//! announcement validity rules (PoW against the multiplied target, the
+//! Matrix (input blocks) processor and policy for the Ergo Rust node
+//! (input blocks were earlier called "sub-blocks"). Implements the Matrix
+//! spec's announcement validity rules (PoW against the multiplied target, the
 //! extension proof reducing to and binding the header's extension root,
 //! nBits agreement) as pure functions over the wire types `ergo-ser`
 //! already codecs, plus per-ordering-block input chains and forks
