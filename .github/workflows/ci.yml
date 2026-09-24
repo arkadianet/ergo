@@ -158,6 +158,13 @@ jobs:
       - name: cargo test (cost-trace feature)
         run: cargo test -p ergo-sigma --features cost-trace --test it -- cost_trace_smoke traced_untraced_parity
 
+      # Same gap, other crate: `ergo-inputblocks`'s ported
+      # `InputBlockProcessorSpecification` corpus is
+      # `#![cfg(feature = "test-support")]`, so the nextest runs above
+      # compile it away entirely and the whole corpus silently never runs.
+      - name: cargo test (input-block processor corpus)
+        run: cargo test -p ergo-inputblocks --features test-support --test it
+
       # Doctest coverage lives on the fastest runner only — every other leg
       # already exercises the same crates via nextest above.
       - name: doc tests (ubuntu only)

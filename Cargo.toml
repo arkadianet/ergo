@@ -15,6 +15,7 @@ members = [
     "ergo-node",
     "ergo-mempool",
     "ergo-mining",
+    "ergo-inputblocks",
     "ergo-indexer-types",
     "ergo-indexer",
     "ergo-api",
@@ -43,6 +44,7 @@ ergo-p2p           = { path = "ergo-p2p" }
 ergo-sync          = { path = "ergo-sync" }
 ergo-mempool       = { path = "ergo-mempool" }
 ergo-mining        = { path = "ergo-mining" }
+ergo-inputblocks   = { path = "ergo-inputblocks" }
 ergo-indexer-types = { path = "ergo-indexer-types" }
 ergo-indexer       = { path = "ergo-indexer" }
 ergo-api           = { path = "ergo-api" }

@@ -17,6 +17,7 @@ mod divergence_b_oracle_parity;
 mod epoch_boundary_extension_oracle;
 mod full_block_validation;
 mod header_validation;
+mod input_block_validation_oracle;
 mod interlinks_packing_mainnet_corpus;
 mod interlinks_proof_oracle;
 mod negative_validation;

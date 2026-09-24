@@ -13,7 +13,7 @@ OUT = ROOT / 'test-vectors/weak-blocks'
 # Every name here must have a dispatch case in WeakBlocksOracle.main: an
 # unknown name makes the oracle exit non-zero, and `check=True` then aborts
 # the whole run, so a stale name silently starves every later vector.
-VECTORS = ['announcement', 'ordering_announcement', 'messages', 'weak_ids', 'pow', 'extension_leaf', 'soft_fields']
+VECTORS = ['announcement', 'ordering_announcement', 'messages', 'weak_ids', 'pow', 'extension_leaf', 'extension_proof', 'soft_fields', 'input_block_validation']
 
 
 def main():
@@ -22,17 +22,32 @@ def main():
     oracle = HERE / 'WeakBlocksOracle.scala'
     OUT.mkdir(parents=True, exist_ok=True)
     for name in names:
-        classpath_file = '.work/test-classpath' if name == 'input_block_validation' else '.work/classpath'
-        classpath = (HERE / classpath_file).read_text().strip()
+        # ONE oracle source, so ONE classpath: `WeakBlocksOracle.scala` is a
+        # single compilation unit and `input_block_validation` pulls in ergo's
+        # Test-scope helpers, which means the whole file only compiles against
+        # `.work/test-classpath`. That classpath is a superset of the Runtime
+        # one, so every subcommand runs on it. `.work/classpath` is still
+        # exported by provision.py as the Runtime-scope record and for the
+        # README's smoke test, but no vector is generated from it.
+        classpath = (HERE / '.work/test-classpath').read_text().strip()
+        # The Test-scope helpers read `src/test/resources/application.conf` by a
+        # RELATIVE path (`ErgoNodeTestConstants.initSettings`), so the JVM's
+        # working directory has to be the pinned ergo checkout for the vectors
+        # that touch them.
+        cwd = str(HERE / '.work/source') if name == 'input_block_validation' else None
         result = subprocess.run(['scala-cli', '--skip-cli-updates', 'run', str(oracle), '--server=false',
                                  '--scala', '2.12.20', '--classpath', classpath, '--', name],
-                                text=True, stdout=subprocess.PIPE, check=True).stdout
+                                text=True, stdout=subprocess.PIPE, check=True, cwd=cwd).stdout
         # logback initialization banner (and scala-cli's outdated-version nag) land on
         # stdout ahead of the JSON payload, and can themselves contain '{' (log pattern
         # strings), so anchor on the line that is exactly the JSON object's opening
         # brace rather than the first '{' anywhere in the output.
         lines = result.splitlines()
-        json_start = next(i for i, line in enumerate(lines) if line.strip() == '{')
+        # Anchor on an UNINDENTED lone '{' (the payload is printed with
+        # `Json.spaces2`, so only its outer brace sits at column 0) and take the
+        # LAST one: test-scope vectors log a pretty-printed ErgoLikeContext on
+        # stdout ahead of the payload, whose nested braces would otherwise match.
+        json_start = max(i for i, line in enumerate(lines) if line == '{')
         doc = json.loads('\n'.join(lines[json_start:]))
         doc['manifest'] = {
             'ergo_commit': manifest['ergo_commit'], 'sigma_commit': manifest['sigma_commit'],

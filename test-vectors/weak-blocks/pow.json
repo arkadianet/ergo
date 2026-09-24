@@ -624,7 +624,7 @@
     "sigma_commit": "368a860be033af94aa14895381f42099b3646db6",
     "sigma_version": "6.0.5-22-368a860b-SNAPSHOT",
     "generator": "scripts/jvm_weak_blocks_oracle/WeakBlocksOracle.scala",
-    "generator_sha256": "4de7e4539d8f9687bfcbcf1f59c75595f944b10d271de1b2562b42bebc0b5f25",
-    "timestamp": "2026-09-21T06:41:46.247034+00:00"
+    "generator_sha256": "c9e6f7fa172a14a31f2868fd92b2fb49b62193cee05968b3830c9bebb5dc101c",
+    "timestamp": "2026-09-21T08:00:44.380523+00:00"
   }
 }

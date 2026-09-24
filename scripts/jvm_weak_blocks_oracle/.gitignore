@@ -1,1 +1,4 @@
 .work/
+# logback file appender of the pinned ergo build: the harness JVM writes it
+# into whatever directory gen.py launches from.
+ergo.log

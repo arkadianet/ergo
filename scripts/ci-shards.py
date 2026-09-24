@@ -38,13 +38,16 @@ GROUPS = {
             "ergo-compiler", "ergo-sigma",
         ),
         # The last shard is the lightest and also runs the platform clippy.
-        ("ergo-validation", "ergo-ser", "ergo-mempool", "ergo-crypto", "ergo-mining", "ergo-p2p"),
+        (
+            "ergo-validation", "ergo-ser", "ergo-mempool", "ergo-crypto", "ergo-mining",
+            "ergo-inputblocks", "ergo-p2p",
+        ),
     ),
     "macOS": (
         (
             "ergo-node --lib", "ergo-node --bin ergo-node", "ergo-state",
             "ergo-chain-spec", "ergo-primitives", "ergo-indexer-types",
-            "ergo-mining", "ergo-p2p", "ergo-sigma", "ergo-compiler",
+            "ergo-mining", "ergo-inputblocks", "ergo-p2p", "ergo-sigma", "ergo-compiler",
             "ergo-wallet",
         ),
         (

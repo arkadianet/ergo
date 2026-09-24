@@ -51,8 +51,10 @@ and record that this workaround was used.
 ## Outputs
 
 - `.work/classpath` — one line, the ergo build's `Runtime / fullClasspath`.
-- `.work/test-classpath` — one line, the ergo build's `Test / fullClasspath`
-  (for harness programs that use ergo's test helpers).
+  Kept as the Runtime-scope record and used by the smoke test below; **no
+  vector is generated from it** (see below).
+- `.work/test-classpath` — one line, the ergo build's `Test / fullClasspath`.
+  `gen.py` runs **every** subcommand on this one.
 - `.work/manifest.json` — `{ "ergo_commit", "sigma_commit", "sigma_version",
   "sigma_artifacts" }`, where `sigma_artifacts` maps each published sigma-state
   jar's filename to its SHA-256, so a stale or mismatched local publish is
@@ -76,6 +78,22 @@ python3 scripts/jvm_weak_blocks_oracle/gen.py
 ```
 
 (`gen.py` is added by Task 2 of this port.)
+
+### Why every vector runs on the Test classpath
+
+`WeakBlocksOracle.scala` is a single compilation unit, and the
+`input_block_validation` subcommand (Task 9) builds its fixture from ergo's own
+Test-scope helpers — `ValidBlocksGenerators`, `ErgoCoreTestConstants`,
+`ErgoNodeTestConstants`. The file therefore only compiles against
+`.work/test-classpath`, so `gen.py` uses that classpath for all subcommands
+rather than splitting the harness across two source files. The Test classpath
+is a superset of the Runtime one, so this changes nothing about what the
+runtime-scope vectors observe (verified: regenerating them after the switch
+changes only their manifest lines).
+
+`input_block_validation` additionally runs with the working directory set to
+`.work/source`, because `ErgoNodeTestConstants.initSettings` reads
+`src/test/resources/application.conf` by a relative path.
 
 ## Moving the pins
 

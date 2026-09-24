@@ -207,6 +207,64 @@ object WeakBlocksOracle {
     }.asJson)
   }
 
+  // ── extension_proof: extension-proof/field-binding vectors for F4/F4b ──
+  // Documents that Scala's `InputBlockFields.inputBlockFieldsProof.valid(header.extensionRoot)`
+  // only checks that the proof *reduces* to the header's extension root — a
+  // proof whose leaves don't match the announced fields is still accepted
+  // as long as it reduces to that root (F4b; `fields_unbound` below).
+  // A prior hypothesis (F4) held that Scala's `valid` also accepts an
+  // *empty* proof against any root; measuring it here shows that is NOT
+  // the case (scrypto 3.0.0's `BatchMerkleProof.valid` reduces an empty
+  // proof to an empty sequence, which never satisfies its `size == 1`
+  // check, so `empty_proof` below is Scala-`false`). The real F4-shaped
+  // divergence is in the Rust `ergo-validation::popow::merkle::verify_batch_merkle_proof`
+  // (from M0), which *does* special-case empty-indices/empty-proofs as
+  // trivially valid against any root — the opposite direction from the
+  // original hypothesis; see `ergo-inputblocks/tests/it/announcement_oracle.rs`.
+  // `ergo-inputblocks::announcement::verify_field_binding` closes F4b (and
+  // is why an empty proof is rejected regardless of what the Rust reducer
+  // says) under `AnnouncementPolicy::default()` (`strict_field_binding = true`).
+  def extensionProofCases(): Json = {
+    val zero = Digest32 @@ fill(32, 0)
+    def ann(prev: Option[Array[Byte]], txs: Seq[ErgoTransaction], proofOverride: Option[scorex.crypto.authds.merkle.BatchMerkleProof[Digest32]] = None, hdr: Header = fixedHeader): InputBlockAnnouncement = {
+      val f = fields(prev, txs, zero)
+      val ext = InputBlockFields.toExtensionFields(prev, f.transactionsDigest, f.prevTransactionsDigest)
+      val h = hdr.copy(extensionRoot = ext.digest) // header commits to exactly these fields
+      InputBlockAnnouncement(1, h, new InputBlockFields(prev, f.transactionsDigest, f.prevTransactionsDigest, proofOverride.getOrElse(f.inputBlockFieldsProof)), None)
+    }
+    val good = ann(Some(fill(32, 0x88)), Seq(tx1, tx2))
+    val goodNoPrev = ann(None, Seq(tx1))
+    val empty = ann(Some(fill(32, 0x88)), Seq(tx1), Some(scorex.crypto.authds.merkle.BatchMerkleProof(Seq.empty, Seq.empty)(Algos.hash)))
+    // proof built over a different digest but announced fields unchanged -> reduces to a different root
+    val wrongRoot = { val a = ann(Some(fill(32, 0x88)), Seq(tx1)); a.copy(header = a.header.copy(extensionRoot = Digest32 @@ fill(32, 0x01))) }
+    // proof for the fields of txs (tx1) but announced digest for (tx1, tx2): Scala accepts (F4), binding rejects
+    val unbound = { val real = ann(Some(fill(32, 0x88)), Seq(tx1)); val other = fields(Some(fill(32, 0x88)), Seq(tx1, tx2), zero)
+      real.copy(inputBlockFields = new InputBlockFields(Some(fill(32, 0x88)), other.transactionsDigest, other.prevTransactionsDigest, real.merkleProof)) }
+    // expected_binding_verdict: the *field-binding* check alone (proof
+    // leaves vs the announced InputBlockFields), independent of the
+    // header's extension root — that root/reduction check is
+    // `scala_ext_valid` above, checked separately. A binding-consistent
+    // proof/fields pair (e.g. `wrong_root`, which corrupts only the
+    // header) is still expected `true` here even though the header's
+    // root check fails; only `empty_proof` (no leaves) and
+    // `fields_unbound` (leaves for different fields than announced) are
+    // expected `false`.
+    def expectedBindingVerdict(a: InputBlockAnnouncement): Boolean = {
+      import scorex.crypto.authds.LeafData
+      import scorex.crypto.authds.merkle.Leaf
+      val want = InputBlockFields.toExtensionFields(a.inputBlockFields.prevInputBlockId, a.inputBlockFields.transactionsDigest, a.inputBlockFields.prevTransactionsDigest)
+        .fields.map { case (k, v) => hex(Leaf[Digest32](LeafData @@ Extension.kvToLeaf((k, v)))(Algos.hash).hash) }.sorted
+      val proved = a.merkleProof.indices.map(kv => hex(kv._2)).sorted
+      proved.nonEmpty && proved == want
+    }
+    val cases = Seq(("good_with_prev", good), ("good_no_prev", goodNoPrev), ("empty_proof", empty), ("wrong_root", wrongRoot), ("fields_unbound", unbound)).map { case (name, a) =>
+      Json.obj("name" -> name.asJson, "bytes_hex" -> hex(InputBlockAnnouncement.serializer.toBytes(a)).asJson,
+        "scala_ext_valid" -> a.merkleProof.valid(a.header.extensionRoot).asJson,
+        "expected_binding_verdict" -> expectedBindingVerdict(a).asJson)
+    }
+    Json.obj("cases" -> cases.asJson)
+  }
+
   // ── soft_fields: Scala `softFieldsAllowed` parity for the Rust evaluator gate ──
   // Task 6 (ergo-sigma) added ReductionContext.soft_fields_allowed + the typed
   // EvalError::SoftFieldAccess. This function is the oracle evidence Task 7
@@ -240,8 +298,14 @@ object WeakBlocksOracle {
   // `ErgoCompilerHelpers.compileSourceV6` (test-scope in the ergo source tree;
   // reimplemented here directly against the runtime-classpath `SigmaCompiler`
   // so this harness needs only `.work/classpath`, not the test classpath).
+  private def compileSourceV5(source: String, treeVersion: Byte): ErgoTree =
+    compileSourceAt(2.toByte, source, treeVersion)
+
   private def compileSourceV6(source: String, treeVersion: Byte): ErgoTree =
-    VersionContext.withVersions(3.toByte, treeVersion) {
+    compileSourceAt(3.toByte, source, treeVersion)
+
+  private def compileSourceAt(scriptVersion: Byte, source: String, treeVersion: Byte): ErgoTree =
+    VersionContext.withVersions(scriptVersion, treeVersion) {
       val compiler = new SigmaCompiler(16.toByte)
       val header = ErgoTree.defaultHeaderWithVersion(treeVersion)
       compiler.compile(Map.empty, source)(new CompiletimeIRContext) match {
@@ -326,6 +390,205 @@ object WeakBlocksOracle {
     Json.obj("cases" -> cases.asJson)
   }
 
+
+  // ── input_block_validation: Scala `UtxoState.applyInputBlock` outcomes ──
+  // Builds a real UTXO state (three fixture boxes from
+  // `InputBlockProcessorSpecification` plus spendable filler boxes), advances it
+  // by real full blocks so `stateContext.lastHeaders` is non-empty (spec 6.4
+  // needs a real pre-header), and records the verdict + cost of
+  // `us.applyInputBlock(txs, previousTxs, header)` for each scenario.
+  //
+  // Runs against `.work/test-classpath` (ergo's Test scope) with the working
+  // directory set to `.work/source`, because `ErgoNodeTestConstants.initSettings`
+  // reads the relative path `src/test/resources/application.conf`.
+  def inputBlockValidationCases(): Json = {
+    import org.ergoplatform.DataInput
+    import org.ergoplatform.modifiers.ErgoFullBlock
+    import org.ergoplatform.nodeView.state.{BoxHolder, ErgoStateContext, UtxoState}
+    import org.ergoplatform.settings.Parameters
+    import org.ergoplatform.utils.ErgoCoreTestConstants.parameters
+    import org.ergoplatform.utils.ErgoNodeTestConstants.settings
+    import org.ergoplatform.utils.generators.ValidBlocksGenerators
+    import org.ergoplatform.wallet.boxes.ErgoBoxSerializer
+    import scorex.crypto.authds.ADKey
+    import scala.collection.JavaConverters._
+
+    val trueTree = ErgoTree.fromProposition(TrueProp)
+    val emptyProof = ProverResult(Array.emptyByteArray, ContextExtension.empty)
+
+    def box(v: Long, tree: ErgoTree, tag: String, idx: Short): ErgoBox = new ErgoBox(
+      value = v, ergoTree = tree, additionalTokens = Colls.emptyColl,
+      additionalRegisters = Map.empty, transactionId = bytesToId(Algos.hash(tag)),
+      index = idx, creationHeight = 0)
+
+    // The three fixture boxes of InputBlockProcessorSpecification, verbatim.
+    val eb1 = box(1000000000L, trueTree, "dummyTx", 0)
+    val eb2 = box(1000000000L, compileSourceV5("CONTEXT.minerPubKey.size >= 0", 0), "dummyTx2", 1)
+    val eb3 = box(1000000000L, trueTree, "dummyTx3", 2)
+    // Filler boxes: spent by the full blocks that advance the state, so eb1..eb3
+    // stay unspent and available to the input-block scenarios.
+    val fillers = (0 until 3).map(i => box(1000000000L, trueTree, s"filler$i", i.toShort))
+
+    val bh = BoxHolder(Seq(eb1, eb2, eb3) ++ fillers)
+    var us: UtxoState = ValidBlocksGenerators.createUtxoState(bh, parameters)
+
+    def spend(in: ErgoBox, outValue: Long, dataInputs: IndexedSeq[DataInput] = IndexedSeq.empty): ErgoTransaction =
+      ErgoTransaction(
+        IndexedSeq(Input(in.id, emptyProof)),
+        dataInputs,
+        IndexedSeq(new ErgoBoxCandidate(outValue, trueTree, 0)))
+
+    // Advance the state by three real full blocks (each spends one filler box).
+    // The LAST of them also creates the spec-6.4 context-sensitive boxes: their
+    // scripts have to name the height and the preceding header id of the block
+    // B that ends up as the state's tip, and both are known at the moment B is
+    // built (B.height = parent.height + 1, and B's parent becomes
+    // `lastHeaders(1)` once B is applied). Splicing the fixture's own values in
+    // keeps the vector self-consistent instead of assuming a height.
+    var parentOpt: Option[ErgoFullBlock] = None
+    var blockTxs: Seq[ErgoTransaction] = Seq.empty
+    var utxo: Seq[ErgoBox] = bh.boxes.values.toSeq
+    var sensitiveOutputs: IndexedSeq[ErgoBox] = IndexedSeq.empty
+    fillers.zipWithIndex.foreach { case (f, i) =>
+      val tx =
+        if (i < fillers.size - 1) spend(f, f.value)
+        else {
+          val bHeight = parentOpt.map(_.header.height).getOrElse(0) + 1
+          val prevHeaderId = parentOpt.get.header.id.toString
+          val share = f.value / 4
+          val sensitive = Seq(
+            compileSourceV5(s"HEIGHT == $bHeight", 0),
+            compileSourceV5(s"""CONTEXT.headers(0).id == fromBase16("$prevHeaderId")""", 0),
+            compileSourceV5(s"CONTEXT.preHeader.height == $bHeight", 0))
+          ErgoTransaction(
+            IndexedSeq(Input(f.id, emptyProof)),
+            IndexedSeq.empty,
+            sensitive.map(t => new ErgoBoxCandidate(share, t, 0)).toIndexedSeq :+
+              new ErgoBoxCandidate(f.value - 3 * share, trueTree, 0))
+        }
+      val fb = ValidBlocksGenerators.validFullBlock(parentOpt, us, Seq(tx))
+      us = us.applyModifier(fb, None)(_ => ()).get
+      parentOpt = Some(fb)
+      blockTxs = blockTxs ++ Seq(tx)
+      utxo = utxo.filterNot(b => tx.inputs.exists(i2 => java.util.Arrays.equals(i2.boxId, b.id))) ++ tx.outputs
+      if (i == fillers.size - 1) sensitiveOutputs = tx.outputs.take(3)
+    }
+    val tipHeader = parentOpt.get.header
+    utxo.foreach(b => require(us.boxById(b.id).isDefined, s"tracked box ${hex(b.id)} not in state"))
+    // The splice above is only correct if the state context really is the one
+    // spec 6.4 describes; assert it rather than trusting the arithmetic.
+    require(us.stateContext.lastHeaders.head.height == tipHeader.height,
+      "lastHeaders.head is not the tip header")
+    require(us.stateContext.lastHeaders(1).id == tipHeader.parentId,
+      "lastHeaders(1) is not the header before the tip")
+
+    // Scenario transactions.
+    val txA = spend(eb1, eb1.value)                        // spends eb1
+    val txB = spend(txA.outputs.head, txA.outputs.head.value) // spends txA's output
+    val txC = spend(eb2, eb2.value)                        // class II: reads CONTEXT.minerPubKey
+    val txD = ErgoTransaction(                             // spends eb3, data-input = txA's output
+      IndexedSeq(Input(eb3.id, emptyProof)),
+      IndexedSeq(DataInput(txA.outputs.head.id)),
+      IndexedSeq(new ErgoBoxCandidate(eb3.value, trueTree, 0)))
+    val txE = spend(eb3, eb3.value)                        // a second independent normal tx
+    val txADup = spend(eb1, eb1.value - 1)                 // different tx, same input as txA
+    val missingBoxId: ADKey = ADKey @@ (Algos.hash("no such box"): Array[Byte])
+    val txMissing = ErgoTransaction(
+      IndexedSeq(Input(missingBoxId, emptyProof)),
+      IndexedSeq(new ErgoBoxCandidate(1000000L, trueTree, 0)))
+
+    // `cost_limit_rejected` needs maxBlockCost lowered on the state context. The
+    // fixture API has no public way to swap parameters on a live UtxoState
+    // (`persistentProver` is protected, `stateContext` is read from the store),
+    // so we build a sibling UtxoState over the *same* prover/store with an
+    // overridden `stateContext`. Reflection is only used to read the protected
+    // `persistentProver` accessor; nothing is mutated.
+    def withBlockCost(base: UtxoState, cost: Int): UtxoState = {
+      val m = classOf[UtxoState].getMethod("persistentProver")
+      m.setAccessible(true)
+      val pp = m.invoke(base).asInstanceOf[scorex.crypto.authds.avltree.batch.PersistentBatchAVLProver[Digest32, org.ergoplatform.settings.Algos.HF]]
+      new UtxoState(pp, base.version, base.store, settings) {
+        override def stateContext: ErgoStateContext = {
+          val sc = base.stateContext
+          new ErgoStateContext(sc.lastHeaders, sc.lastExtensionOpt, sc.genesisStateDigest,
+            sc.currentParameters.withBlockCost(cost), sc.validationSettings, sc.votingData)(sc.chainSettings)
+        }
+      }
+    }
+
+    def spendSensitive(idx: Int): ErgoTransaction = {
+      val b = sensitiveOutputs(idx)
+      spend(b, b.value)
+    }
+
+    val scenarios: Seq[(String, Seq[ErgoTransaction], Seq[ErgoTransaction], UtxoState)] = Seq(
+      ("normal_tx_ok", Seq(txA), Seq.empty, us),
+      ("class2_tx_rejected", Seq(txC), Seq.empty, us),
+      ("chained_in_block_ok", Seq(txA, txB), Seq.empty, us),
+      ("out_of_order_rejected", Seq(txB, txA), Seq.empty, us),
+      ("data_input_forward_ok", Seq(txD, txA), Seq.empty, us),
+      ("double_spend_current_rejected", Seq(txA, txADup), Seq.empty, us),
+      ("double_spend_previous_rejected", Seq(txA), Seq(txA), us),
+      ("spend_previous_output_ok", Seq(txB), Seq(txA), us),
+      ("missing_utxo_rejected", Seq(txMissing), Seq.empty, us),
+      ("cost_limit_rejected", Seq(txA), Seq.empty, withBlockCost(us, 1000)),
+      // Each of txA/txE costs 12105 on its own, so both clear a 20000 limit
+      // individually while their sum (24210) does not: this is the only
+      // scenario that reaches the *cumulative* block-budget check rather than
+      // the per-transaction one.
+      ("cumulative_cost_limit_rejected", Seq(txA, txE), Seq.empty, withBlockCost(us, 20000)),
+      // Spec 6.4 context pins: each box script reads one field of the state
+      // context that the port has to map exactly. `HEIGHT` and
+      // `CONTEXT.preHeader.height` must be B.height (not B.height + 1), and
+      // `CONTEXT.headers(0)` must be `lastHeaders.drop(1).head`, i.e. the
+      // header before B. A wrong mapping makes these reject.
+      ("height_sensitive_ok", Seq(spendSensitive(0)), Seq.empty, us),
+      ("headers_sensitive_ok", Seq(spendSensitive(1)), Seq.empty, us),
+      ("preheader_height_sensitive_ok", Seq(spendSensitive(2)), Seq.empty, us))
+
+    // Scala wraps a SoftFieldAccessException thrown inside script evaluation into
+    // a generic `MalformedModifierError("Scripts ... should pass verification")`,
+    // so `error_class` alone cannot tell a soft-field rejection from any other
+    // script failure. This discriminator is Scala-derived rather than asserted by
+    // hand: a transaction whose first input validates under `softFieldsAllowed =
+    // true` and fails under `false` was rejected *because of* a soft field.
+    def softFieldSensitive(state: UtxoState, tx: ErgoTransaction): Boolean = {
+      val sc = state.stateContext
+      def run(allowed: Boolean) =
+        try state.validateWithCost(tx, sc, sc.currentParameters.maxBlockCost, None, allowed)
+        catch { case NonFatal(t) => scala.util.Failure(t) }
+      run(true).isSuccess && run(false).isFailure
+    }
+
+    val cases = scenarios.map { case (name, txs, prev, state) =>
+      val sc = state.stateContext
+      val (outcome, errClass, errMsg, cost) =
+        try {
+          state.applyInputBlock(txs, prev, tipHeader) match {
+            case scala.util.Success(c) => ("Ok", "", "", Some(c))
+            case scala.util.Failure(t) => ("Failure", t.getClass.getSimpleName, String.valueOf(t.getMessage), None)
+          }
+        } catch {
+          case NonFatal(t) => ("Failure", t.getClass.getSimpleName, String.valueOf(t.getMessage), None)
+        }
+      Json.obj(
+        "name" -> name.asJson,
+        "state_root_before" -> hex(state.rootDigest).asJson,
+        "block_txs_hex" -> blockTxs.map(t => hex(ErgoTransactionSerializer.toBytes(t))).asJson,
+        "last_headers_hex" -> sc.lastHeaders.map(h => hex(HeaderSerializer.toBytes(h))).asJson,
+        "current_parameters" -> sc.currentParameters.parametersTable.map { case (k, v) => k.toInt.toString -> v }.asJson,
+        "utxo_boxes_hex" -> utxo.map(b => hex(ErgoBoxSerializer.toBytes(b))).asJson,
+        "previous_tx_hex" -> prev.map(t => hex(ErgoTransactionSerializer.toBytes(t))).asJson,
+        "tx_hex" -> txs.map(t => hex(ErgoTransactionSerializer.toBytes(t))).asJson,
+        "outcome" -> outcome.asJson,
+        "error_class" -> errClass.asJson,
+        "error_message" -> errMsg.asJson,
+        "soft_field_sensitive" -> txs.exists(t => softFieldSensitive(state, t)).asJson,
+        "cost" -> cost.asJson)
+    }
+    Json.obj("cases" -> cases.asJson)
+  }
+
   def main(args: Array[String]): Unit = {
     val out = args(0) match {
       case "announcement" => announcementCases()
@@ -334,7 +597,9 @@ object WeakBlocksOracle {
       case "weak_ids" => weakIdCases()
       case "pow" => powCases()
       case "extension_leaf" => extensionLeafCases()
+      case "extension_proof" => extensionProofCases()
       case "soft_fields" => softFieldCases()
+      case "input_block_validation" => inputBlockValidationCases()
       case other => sys.error(s"unknown vector $other")
     }
     println(out.spaces2)
