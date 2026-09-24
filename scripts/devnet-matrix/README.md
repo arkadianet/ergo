@@ -341,7 +341,8 @@ there with the reason rather than silently downgraded.
   reconstruction accounting and waitlist, and `restart_recovery`: seconds
   from respawn to the miner's tip and the pending store's replay burst in
   the 30 s after the first post-restart apply. `rust` (the default) is
-  the M3 scenario.
+  the M3 scenario. `--ordering-blocks` sets the funded pre-kill window
+  and `--post-ordering-blocks` the post-kill one (default 5).
 * Every agreement-series sample carries each Scala node's
   `/info.pendingInputAnnouncements` (`pending`), and every evidence file
   summarises it per node (`pending_store`: peak entries and bytes, and

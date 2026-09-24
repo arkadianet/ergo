@@ -331,7 +331,8 @@ FLOOD_MODES = ('hit-and-run', 'held')
 
 
 def check_scenario_knobs(scenario, reference_follower=None,
-                         restart_victim='rust', flood_mode='hit-and-run'):
+                         restart_victim='rust', flood_mode='hit-and-run',
+                         post_ordering_blocks=None):
     """Refuse a scenario knob the scenario would silently ignore.
 
     Pure, so `--self-test` pins it. A run that accepted
@@ -351,6 +352,12 @@ def check_scenario_knobs(scenario, reference_follower=None,
             raise SystemExit(
                 '--restart-victim scala-followers needs a Scala follower to '
                 'kill; add --reference-follower stock|patched|both')
+    if post_ordering_blocks is not None:
+        if scenario != 'restart':
+            raise SystemExit(
+                f'--post-ordering-blocks applies to restart only, not {scenario}')
+        if post_ordering_blocks < 1:
+            raise SystemExit('--post-ordering-blocks must be at least 1')
     if flood_mode != 'hit-and-run':
         if scenario != 'flood':
             raise SystemExit(
@@ -1299,6 +1306,7 @@ def run_scenario(name, args):
         'base_build': getattr(args, 'base_build', 'stock'),
         'restart_victim': getattr(args, 'restart_victim', 'rust'),
         'flood_mode': getattr(args, 'flood_mode', 'hit-and-run'),
+        'post_ordering_blocks': getattr(args, 'post_ordering_blocks', None),
         # The IDENTITY of every Scala build this run used, per role
         # (spec §7a "build identity"): source commit, sigma jars and the
         # sha256 of the compiled class output the node was launched
@@ -3672,13 +3680,22 @@ def _self_test_remeasure():
     check_scenario_knobs('restart', 'patched', 'scala-followers')
     check_scenario_knobs('flood', 'patched', flood_mode='held')
     check_scenario_knobs('flood', 'stock', flood_mode='held')
+    check_scenario_knobs('restart', 'both', 'scala-followers',
+                         post_ordering_blocks=10)
+    _post = types.SimpleNamespace(args=types.SimpleNamespace(
+        post_ordering_blocks=None))
+    assert restart.post_restart_blocks(_post) == restart.BLOCKS_AFTER_RESTART
+    _post.args.post_ordering_blocks = 10
+    assert restart.post_restart_blocks(_post) == 10
     for _bad, _why in (
             (('restart', None, 'scala-followers'), 'needs a Scala follower'),
             (('steady', 'both', 'scala-followers'), 'applies to restart only'),
             (('flood', None, 'rust', 'held'), 'ROOT flood'),
             (('steady', 'both', 'rust', 'held'), 'applies to flood only'),
             (('restart', 'both', 'miner'), '--restart-victim must be'),
-            (('flood', 'stock', 'rust', 'sometimes'), '--flood-mode must be')):
+            (('flood', 'stock', 'rust', 'sometimes'), '--flood-mode must be'),
+            (('steady', None, 'rust', 'hit-and-run', 10), 'restart only'),
+            (('restart', None, 'rust', 'hit-and-run', 0), 'at least 1')):
         try:
             check_scenario_knobs(*_bad)
         except SystemExit as error:
@@ -3715,13 +3732,15 @@ def _self_test_remeasure():
     _args = types.SimpleNamespace(
         timeout=60, build='F13', base_build='base', reference_follower='both',
         restart_victim='scala-followers', flood_mode='held', fresh=True,
-        force_attempt=False)
+        force_attempt=False, post_ordering_blocks=10)
     _restart = child_argv('restart', _args)
     assert _restart[_restart.index('--base-build') + 1] == 'base', _restart
     assert _restart[_restart.index('--build') + 1] == 'F13', _restart
     assert '--restart-victim' in _restart and '--flood-mode' not in _restart
+    assert _restart[_restart.index('--post-ordering-blocks') + 1] == '10'
     _flood = child_argv('flood', _args)
     assert '--flood-mode' in _flood and '--restart-victim' not in _flood, _flood
+    assert '--post-ordering-blocks' not in _flood, _flood
     _steady = child_argv('steady', _args)
     assert '--flood-mode' not in _steady and '--restart-victim' not in _steady
     assert '--base-build' in _steady and '--fresh' in _steady, _steady
@@ -4455,6 +4474,8 @@ def child_argv(name, args):
                if args.reference_follower else [])
             + (['--restart-victim', args.restart_victim]
                if name == 'restart' else [])
+            + (['--post-ordering-blocks', str(args.post_ordering_blocks)]
+               if name == 'restart' and args.post_ordering_blocks else [])
             + (['--flood-mode', args.flood_mode]
                if name == 'flood' else [])
             + (['--fresh'] if args.fresh else [])
@@ -4490,6 +4511,9 @@ def main():
                         help='restart only: SIGKILL the Rust follower (default) '
                              'or every Scala reference follower at once '
                              '(needs --reference-follower)')
+    parser.add_argument('--post-ordering-blocks', type=int, default=None,
+                        help='restart only: funded ordering blocks observed '
+                             'after convergence (default 5)')
     parser.add_argument('--flood-mode', default='hit-and-run',
                         choices=FLOOD_MODES,
                         help='flood against a Scala follower only: fresh hosts '
@@ -4514,7 +4538,8 @@ def main():
     # whose child process checks it.
     if args.scenario != 'all':
         check_scenario_knobs(args.scenario, args.reference_follower,
-                             args.restart_victim, args.flood_mode)
+                             args.restart_victim, args.flood_mode,
+                             args.post_ordering_blocks)
 
     sys.path.insert(0, str(HERE))
     # Refused HERE rather than at the first spawn: an unknown build must

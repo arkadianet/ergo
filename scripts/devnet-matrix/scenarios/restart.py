@@ -65,6 +65,16 @@ def lag_after(series, since_epoch_s):
     return dict(out, since_epoch_s=since_epoch_s, samples=len(after))
 
 
+def post_restart_blocks(ctx):
+    """The funded post-kill window: `--post-ordering-blocks`, else 5.
+
+    The re-measure plan wants at least 10 funded blocks after the kill
+    (REVIEW-2563 §3.4), so a restart's post-kill lag has a window of its
+    own rather than the convergence race alone.
+    """
+    return getattr(ctx.args, 'post_ordering_blocks', None) or BLOCKS_AFTER_RESTART
+
+
 def victims_for(restart_victim, running):
     """The nodes one restart kills. Pure.
 
@@ -214,7 +224,7 @@ def run(ctx):
                  f'{restart_height}', {'converged_at_height': converged_at_height})
 
     # The post-kill window, carrying the same workload.
-    common.wait_ordering_blocks(ctx, BLOCKS_AFTER_RESTART, 'post_restart',
+    common.wait_ordering_blocks(ctx, post_restart_blocks(ctx), 'post_restart',
                                 on_block=pump)
     ctx.note('workload', {'funded_balance_nano': balance,
                           'pre_restart_ordering_blocks': pre_blocks,
@@ -389,7 +399,7 @@ def _run_scala_victims(ctx, campaign, lifecycle):
                      f'the {CONVERGENCE_ORDERING_BLOCKS}-block budget from '
                      f'{restart_height}', {'converged_at_height': converged[node]})
 
-    common.wait_ordering_blocks(ctx, BLOCKS_AFTER_RESTART, 'post_restart',
+    common.wait_ordering_blocks(ctx, post_restart_blocks(ctx), 'post_restart',
                                 on_block=pump)
     ctx.note('workload', {'funded_balance_nano': balance,
                           'pre_restart_ordering_blocks': pre_blocks,
